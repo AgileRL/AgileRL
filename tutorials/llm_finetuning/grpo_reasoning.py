@@ -1,6 +1,5 @@
 import re
 
-from accelerate import Accelerator
 from datasets import load_dataset
 from peft import LoraConfig
 from torch.utils.data import Dataset
@@ -104,9 +103,6 @@ def main():
     tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
 
-    # Convert the HuggingFace dataset into a Gymnasium environment
-    accelerator = Accelerator()
-
     # Define the conversation template
     conversation_template = [
         {
@@ -128,7 +124,6 @@ def main():
         reward_fn=combined_rewards,
         conversation_template=conversation_template,
         data_batch_size_per_gpu=10,
-        accelerator=accelerator,
         return_raw_completions=USE_VLLM,  # This is necessary for vLLM to work
         max_context_length=MAX_CONTEXT_LENGTH,
     )
@@ -159,7 +154,6 @@ def main():
         batch_size=16,
         max_model_len=MAX_CONTEXT_LENGTH,
         group_size=8,
-        accelerator=accelerator,
         use_vllm=USE_VLLM,
         vllm_config=VLLMConfig(sleep_mode=True, max_num_seqs=4),
     )
@@ -171,7 +165,6 @@ def main():
         save_elite=True,
         elite_path="checkpoints",
         max_reward=2.0,
-        accelerator=accelerator,
         num_epochs=1,
     )
 

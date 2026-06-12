@@ -10,7 +10,6 @@ from agilerl.typing import PreferencePrompts
 
 if TYPE_CHECKING:
     import torch
-    from accelerate import Accelerator
     from datasets import Dataset
     from transformers import AutoTokenizer
 
@@ -24,7 +23,6 @@ class PreferenceGym(IterablePromptBatchGym):
         test_dataset: Dataset,
         tokenizer: AutoTokenizer,
         data_batch_size_per_gpu: int = 8,
-        accelerator: Accelerator | None = None,
         max_context_length: int | None = None,
         min_completion_length: int | None = None,
         seed: int = 42,
@@ -37,7 +35,6 @@ class PreferenceGym(IterablePromptBatchGym):
             data_batch_size_per_gpu=data_batch_size_per_gpu,
             max_context_length=max_context_length,
             min_completion_length=min_completion_length,
-            accelerator=accelerator,
             seed=seed,
         )
         assert {"prompt", "chosen", "rejected"}.issubset(

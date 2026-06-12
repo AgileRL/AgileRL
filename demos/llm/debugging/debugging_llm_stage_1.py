@@ -19,7 +19,7 @@ from tiny_model import TinyDigitTokenizer, build_tiny_actor_network
 from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE
 from agilerl.training import train_llm
 from agilerl.training.train_llm import finetune_llm_multiturn
-from agilerl.utils.llm_utils import create_llm_accelerator, masked_whiten
+from agilerl.utils.llm_utils import masked_whiten
 from agilerl.utils.probe_envs_llm import ConditionalTargetEnv
 from agilerl.utils.utils import create_population
 
@@ -121,7 +121,6 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
     if agent_dbg.get("torch_compiler") is not None:
         agent_kw["torch_compiler"] = agent_dbg["torch_compiler"]
 
-    accelerator = create_llm_accelerator()
     torch.manual_seed(seed)
     tokenizer = TinyDigitTokenizer()
 
@@ -138,7 +137,6 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
         net_config=None,
         INIT_HP=init_hp,
         population_size=1,
-        accelerator=accelerator,
         tokenizer=tokenizer,
         model_name=None,
         actor_network=build_tiny_actor_network(
@@ -193,7 +191,6 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
             wb=False,
             save_elite=False,
             verbose=True,
-            accelerator=accelerator,
             env_factory=env_factory,
         )
     finally:

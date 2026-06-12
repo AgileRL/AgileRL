@@ -95,9 +95,7 @@ class PPO(RLAlgorithm):
     :type recurrent: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
-    :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
-    :param wrap: Wrap models for distributed training upon creation, defaults to True
+    :param wrap: Retained for API compatibility; has no effect, defaults to True
     :type wrap: bool, optional
     :param bptt_sequence_type: Type of sequence for BPTT learning, defaults to BPTTSequenceType.CHUNKED
     :type bptt_sequence_type: BPTTSequenceType, optional
@@ -134,7 +132,6 @@ class PPO(RLAlgorithm):
         rollout_buffer_config: dict[str, Any] | None = None,
         recurrent: bool = False,
         device: str = "cpu",
-        accelerator: Any | None = None,
         wrap: bool = True,
         bptt_sequence_type: BPTTSequenceType = BPTTSequenceType.CHUNKED,
         max_seq_len: int | None = None,
@@ -147,7 +144,6 @@ class PPO(RLAlgorithm):
             index=index,
             hp_config=hp_config,
             device=device,
-            accelerator=accelerator,
             normalize_images=normalize_images,
             name="PPO",
         )
@@ -337,9 +333,6 @@ class PPO(RLAlgorithm):
             self.create_rollout_buffer()
             # Need to register a mutation hook that does this after every mutation (e.g. the batch size, sequence length, etc. have changed)
             self.register_mutation_hook(self.create_rollout_buffer)
-
-        if self.accelerator is not None and wrap:
-            self.wrap_models()
 
         # Register network groups for mutations
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
@@ -792,10 +785,7 @@ class PPO(RLAlgorithm):
 
                     # actor + critic loss backprop
                     self.optimizer.zero_grad()
-                    if self.accelerator is not None:
-                        self.accelerator.backward(loss)
-                    else:
-                        loss.backward()
+                    loss.backward()
 
                     # Clip gradients
                     clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
@@ -902,10 +892,7 @@ class PPO(RLAlgorithm):
                     approx_kl_divs.append(approx_kl)
 
                 self.optimizer.zero_grad()
-                if self.accelerator is not None:
-                    self.accelerator.backward(loss)
-                else:
-                    loss.backward()
+                loss.backward()
 
                 clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
                 clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
@@ -1050,10 +1037,7 @@ class PPO(RLAlgorithm):
                 )
 
                 self.optimizer.zero_grad()
-                if self.accelerator is not None:
-                    self.accelerator.backward(loss)
-                else:
-                    loss.backward()
+                loss.backward()
 
                 clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
                 clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)

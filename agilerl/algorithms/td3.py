@@ -80,9 +80,7 @@ class TD3(RLAlgorithm):
     :type share_encoders: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
-    :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
-    :param wrap: Wrap models for distributed training upon creation, defaults to True
+    :param wrap: Retained for API compatibility; has no effect, defaults to True
     :type wrap: bool, optional
     """
 
@@ -114,7 +112,6 @@ class TD3(RLAlgorithm):
         critic_networks: list[EvolvableModule] | None = None,
         share_encoders: bool = False,
         device: str = "cpu",
-        accelerator: Any | None = None,
         wrap: bool = True,
     ) -> None:
         super().__init__(
@@ -123,7 +120,6 @@ class TD3(RLAlgorithm):
             index=index,
             hp_config=hp_config,
             device=device,
-            accelerator=accelerator,
             normalize_images=normalize_images,
             name="TD3",
         )
@@ -336,9 +332,6 @@ class TD3(RLAlgorithm):
             lr=self.lr_critic,
         )
 
-        if self.accelerator is not None and wrap:
-            self.wrap_models()
-
         self.criterion = nn.MSELoss()
 
         # Register network groups for actor and critics
@@ -517,11 +510,7 @@ class TD3(RLAlgorithm):
         # Critic loss backprop
         self.critic_1_optimizer.zero_grad()
         self.critic_2_optimizer.zero_grad()
-        if self.accelerator is not None:
-            self.accelerator.backward(critic_loss)
-        else:
-            critic_loss.backward()
-
+        critic_loss.backward()
         self.critic_1_optimizer.step()
         self.critic_2_optimizer.step()
 
@@ -535,11 +524,7 @@ class TD3(RLAlgorithm):
 
             # Actor loss backprop
             self.actor_optimizer.zero_grad()
-            if self.accelerator is not None:
-                self.accelerator.backward(actor_loss)
-            else:
-                actor_loss.backward()
-
+            actor_loss.backward()
             self.actor_optimizer.step()
 
             # Soft update for both critic targets

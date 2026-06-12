@@ -95,11 +95,9 @@ class IPPO(MultiAgentRLAlgorithm):
     :type action_batch_size: int, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
-    :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
     :param torch_compiler: The torch compile mode 'default', 'reduce-overhead' or 'max-autotune', defaults to None
     :type torch_compiler: str, optional
-    :param wrap: Wrap models for distributed training upon creation, defaults to True
+    :param wrap: Retained for API compatibility; has no effect, defaults to True
     :type wrap: bool, optional
     """
 
@@ -132,7 +130,6 @@ class IPPO(MultiAgentRLAlgorithm):
         critic_networks: ModuleDict | None = None,
         action_batch_size: int | None = None,
         device: str = "cpu",
-        accelerator: Any | None = None,
         torch_compiler: str | None = None,
         wrap: bool = True,
     ) -> None:
@@ -143,7 +140,6 @@ class IPPO(MultiAgentRLAlgorithm):
             agent_ids=agent_ids,
             hp_config=hp_config,
             device=device,
-            accelerator=accelerator,
             torch_compiler=torch_compiler,
             normalize_images=normalize_images,
             placeholder_value=None,
@@ -338,9 +334,7 @@ class IPPO(MultiAgentRLAlgorithm):
             lr=self.lr,
         )
 
-        if self.accelerator is not None and wrap:
-            self.wrap_models()
-        elif self.torch_compiler:
+        if self.torch_compiler:
             if (
                 any(
                     actor.output_activation == "GumbelSoftmax"
@@ -811,19 +805,12 @@ class IPPO(MultiAgentRLAlgorithm):
 
                     # loss backprop
                     actor_optimizer.zero_grad()
-                    if self.accelerator is not None:
-                        self.accelerator.backward(actor_loss)
-                    else:
-                        actor_loss.backward()
-
+                    actor_loss.backward()
                     clip_grad_norm_(actor.parameters(), self.max_grad_norm)
                     actor_optimizer.step()
 
                     critic_optimizer.zero_grad()
-                    if self.accelerator is not None:
-                        self.accelerator.backward(critic_loss)
-                    else:
-                        critic_loss.backward()
+                    critic_loss.backward()
                     clip_grad_norm_(critic.parameters(), self.max_grad_norm)
                     critic_optimizer.step()
 

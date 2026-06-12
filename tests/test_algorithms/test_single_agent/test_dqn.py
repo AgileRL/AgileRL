@@ -3,8 +3,6 @@ import copy
 import numpy as np
 import pytest
 import torch
-from accelerate import Accelerator
-from accelerate.optimizer import AcceleratedOptimizer
 from torch import nn, optim
 
 from agilerl.algorithms.dqn import DQN
@@ -59,21 +57,17 @@ class TestDQNInit:
             ("multidiscrete_space", EvolvableMLP),
         ],
     )
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     def test_default_construction(
         self,
         observation_space,
         encoder_cls,
-        accelerator_flag,
         discrete_space,
         request,
     ):
-        accelerator = Accelerator() if accelerator_flag else None
         action_space = discrete_space
         observation_space = request.getfixturevalue(observation_space)
-        dqn = DQN(observation_space, action_space, accelerator=accelerator)
+        dqn = DQN(observation_space, action_space)
 
-        expected_device = accelerator.device if accelerator else "cpu"
         assert dqn.observation_space == observation_space
         assert dqn.action_space == action_space
         assert dqn.batch_size == 64
@@ -82,8 +76,7 @@ class TestDQNInit:
         assert dqn.gamma == 0.99
         assert dqn.tau == 0.001
         assert dqn.mut is None
-        assert dqn.device == expected_device
-        assert dqn.accelerator == accelerator
+        assert dqn.device == "cpu"
         assert dqn.index == 0
         assert dqn.scores == []
         assert dqn.fitness == []
@@ -91,8 +84,7 @@ class TestDQNInit:
         assert dqn.double is False
         assert isinstance(dqn.actor.encoder, encoder_cls)
         assert isinstance(dqn.actor_target.encoder, encoder_cls)
-        expected_opt_cls = AcceleratedOptimizer if accelerator else optim.Adam
-        assert isinstance(dqn.optimizer.optimizer, expected_opt_cls)
+        assert isinstance(dqn.optimizer.optimizer, optim.Adam)
         assert isinstance(dqn.criterion, nn.MSELoss)
         dqn.clean_up()
 
@@ -132,7 +124,6 @@ class TestDQNInit:
         assert dqn.tau == 0.001
         assert dqn.mut is None
         assert dqn.device == "cpu"
-        assert dqn.accelerator is None
         assert dqn.index == 0
         assert dqn.scores == []
         assert dqn.fitness == []
@@ -186,7 +177,6 @@ class TestDQNInit:
         assert dqn.tau == 0.001
         assert dqn.mut is None
         assert dqn.device == "cpu"
-        assert dqn.accelerator is None
         assert dqn.index == 0
         assert dqn.scores == []
         assert dqn.fitness == []
@@ -276,9 +266,7 @@ class TestDQNGetAction:
         dqn.clean_up()
 
     def test_respects_action_mask(self, vector_space, discrete_space):
-        accelerator = Accelerator()
-
-        dqn = DQN(vector_space, discrete_space, accelerator=accelerator)
+        dqn = DQN(vector_space, discrete_space)
         state = get_sample_from_space(vector_space)
 
         action_mask = np.array([0, 1])
@@ -304,8 +292,7 @@ class TestDQNGetAction:
         dqn.clean_up()
 
     def test_vectorized_action_mask(self, vector_space, discrete_space):
-        accelerator = Accelerator()
-        dqn = DQN(vector_space, discrete_space, accelerator=accelerator)
+        dqn = DQN(vector_space, discrete_space)
         state = get_sample_from_space(vector_space, batch_size=2)
 
         action_mask = np.array([[0, 1], [1, 0]])
@@ -352,17 +339,14 @@ class TestDQNLearn:
             "dict_space",
         ],
     )
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("double", [False, True])
     def test_updates_actor_from_experiences(
         self,
         observation_space,
-        accelerator_flag,
         double,
         discrete_space,
         request,
     ):
-        accelerator = Accelerator() if accelerator_flag else None
         action_space = discrete_space
         observation_space = request.getfixturevalue(observation_space)
         batch_size = 64
@@ -371,16 +355,14 @@ class TestDQNLearn:
             observation_space,
             action_space,
             batch_size=batch_size,
-            accelerator=accelerator,
             double=double,
         )
 
-        device = accelerator.device if accelerator else "cpu"
         experiences = get_experiences_batch(
             observation_space,
             action_space,
             batch_size,
-            device,
+            "cpu",
         )
 
         actor = dqn.actor
@@ -409,7 +391,6 @@ class TestDQNSoftUpdate:
         double = False
         actor_network = None
         device = "cpu"
-        accelerator = None
         wrap = True
 
         dqn = DQN(
@@ -425,7 +406,6 @@ class TestDQNSoftUpdate:
             double=double,
             actor_network=actor_network,
             device=device,
-            accelerator=accelerator,
             wrap=wrap,
         )
 
@@ -483,7 +463,6 @@ class TestDQNClone:
         assert clone_agent.tau == dqn.tau
         assert clone_agent.mut == dqn.mut
         assert clone_agent.device == dqn.device
-        assert clone_agent.accelerator == dqn.accelerator
         assert_state_dicts_equal(clone_agent.actor.state_dict(), dqn.actor.state_dict())
         assert_state_dicts_equal(
             clone_agent.optimizer.state_dict(),
@@ -494,56 +473,6 @@ class TestDQNClone:
         assert clone_agent.scores == dqn.scores
         assert clone_agent.tensor_attribute == dqn.tensor_attribute
         assert clone_agent.tensor_test == dqn.tensor_test
-        dqn.clean_up()
-        clone_agent.clean_up()
-
-        accelerator = Accelerator()
-        dqn = DQN(vector_space, discrete_space, accelerator=accelerator)
-        clone_agent = dqn.clone()
-
-        assert clone_agent.observation_space == dqn.observation_space
-        assert clone_agent.action_space == dqn.action_space
-        assert clone_agent.batch_size == dqn.batch_size
-        assert clone_agent.lr == dqn.lr
-        assert clone_agent.learn_step == dqn.learn_step
-        assert clone_agent.gamma == dqn.gamma
-        assert clone_agent.tau == dqn.tau
-        assert clone_agent.mut == dqn.mut
-        assert clone_agent.device == dqn.device
-        assert clone_agent.accelerator == dqn.accelerator
-        assert_state_dicts_equal(clone_agent.actor.state_dict(), dqn.actor.state_dict())
-        assert_state_dicts_equal(
-            clone_agent.optimizer.state_dict(),
-            dqn.optimizer.state_dict(),
-        )
-        assert clone_agent.fitness == dqn.fitness
-        assert clone_agent.steps == dqn.steps
-        assert clone_agent.scores == dqn.scores
-        dqn.clean_up()
-        clone_agent.clean_up()
-
-        accelerator = Accelerator()
-        dqn = DQN(vector_space, discrete_space, accelerator=accelerator, wrap=False)
-        clone_agent = dqn.clone(wrap=False)
-
-        assert clone_agent.observation_space == dqn.observation_space
-        assert clone_agent.action_space == dqn.action_space
-        assert clone_agent.batch_size == dqn.batch_size
-        assert clone_agent.lr == dqn.lr
-        assert clone_agent.learn_step == dqn.learn_step
-        assert clone_agent.gamma == dqn.gamma
-        assert clone_agent.tau == dqn.tau
-        assert clone_agent.mut == dqn.mut
-        assert clone_agent.device == dqn.device
-        assert clone_agent.accelerator == dqn.accelerator
-        assert_state_dicts_equal(clone_agent.actor.state_dict(), dqn.actor.state_dict())
-        assert_state_dicts_equal(
-            clone_agent.optimizer.state_dict(),
-            dqn.optimizer.state_dict(),
-        )
-        assert clone_agent.fitness == dqn.fitness
-        assert clone_agent.steps == dqn.steps
-        assert clone_agent.scores == dqn.scores
         dqn.clean_up()
         clone_agent.clean_up()
 
@@ -585,7 +514,6 @@ class TestDQNClone:
         assert clone_agent.tau == dqn.tau
         assert clone_agent.mut == dqn.mut
         assert clone_agent.device == dqn.device
-        assert clone_agent.accelerator == dqn.accelerator
         assert_state_dicts_equal(clone_agent.actor.state_dict(), dqn.actor.state_dict())
         assert_state_dicts_equal(
             clone_agent.optimizer.state_dict(),

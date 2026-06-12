@@ -2,34 +2,29 @@ import copy
 import gc
 import tempfile
 from unittest import mock
-from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 import torch
 
 pytest.importorskip("transformers", reason="LLM tests require transformers.")
-from accelerate import Accelerator
-from accelerate.optimizer import AcceleratedOptimizer
-from accelerate.state import AcceleratorState
 from datasets import Dataset
 from peft import LoraConfig
 from transformers import AutoTokenizer
 
 from agilerl.algorithms.core.base import (
     EvolvableAlgorithm,
-    LLMAlgorithm,
     OptimizerWrapper,
 )
 from agilerl.algorithms.dpo import DPO
 from agilerl.llm_envs import PreferenceGym
+from agilerl.utils.distributed import FSDPConfig, resolve_device
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.test_algorithms.test_llms.test_grpo import create_module
 
 
 def make_preference_gym(
     num_samples: int,
-    accelerator: Accelerator | None,
     tokenizer: AutoTokenizer,
     data_batch_size_per_gpu: int = 8,
 ):
@@ -52,7 +47,6 @@ def make_preference_gym(
         test_dataset=test_dataset,
         tokenizer=tokenizer,
         data_batch_size_per_gpu=data_batch_size_per_gpu,
-        accelerator=accelerator,
     )
 
 
@@ -62,9 +56,9 @@ def preference_dataset_factory():
 
 
 def generate_dpo(
-    accelerator_factory,
+    dist_mode_factory,
     model_factory,
-    accelerator_mode,
+    dist_mode,
     vocab_size,
     input_size,
     max_tokens,
@@ -76,9 +70,8 @@ def generate_dpo(
 ):
     gc.collect()
     torch.cuda.empty_cache()
-    AcceleratorState._reset_state(True)
 
-    accelerator = accelerator_factory(accelerator_mode)
+    dist_mode_factory(dist_mode)
     if pretrained_model_name_or_path is not None:
         actor = model_factory(pretrained_model_name_or_path)
         target_modules = [
@@ -111,7 +104,7 @@ def generate_dpo(
         pad_token_id=vocab_size - 1,
         pad_token="<pad>",
         lora_config=lora_config,
-        accelerator=accelerator,
+        fsdp_config=FSDPConfig() if dist_mode == "fsdp2" else None,
         device="cuda" if torch.cuda.is_available() else "cpu",
         use_separate_reference_adapter=use_separate_reference_adapter,
         micro_batch_size_per_gpu=micro_batch_size_per_gpu,
@@ -147,7 +140,6 @@ def _make_cpu_dpo_for_branch_tests(**kwargs):
         ),
         "batch_size": 4,
         "micro_batch_size_per_gpu": 2,
-        "accelerator": None,
         "wrap": False,
         "gradient_checkpointing": False,
         "device": "cpu",
@@ -163,7 +155,7 @@ def _make_cpu_dpo_for_branch_tests(**kwargs):
 class TestDPOInit:
     @pytest.mark.parametrize(
         (
-            "accelerator_mode",
+            "dist_mode",
             "pretrained_model_name_or_path",
             "from_name",
             "use_separate_reference_adapter",
@@ -178,7 +170,7 @@ class TestDPOInit:
                 False,
                 id="model-name",
             ),
-            pytest.param("ddp", None, False, False, id="accelerated"),
+            pytest.param("dist", None, False, False, id="distributed"),
         ],
     )
     @pytest.mark.gpu
@@ -188,11 +180,10 @@ class TestDPOInit:
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
     def test_init_dpo(
         self,
-        distributed_env,
         dpo_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
-        accelerator_mode,
+        dist_mode,
         use_separate_reference_adapter,
         pretrained_model_name_or_path,
         vocab_size,
@@ -202,9 +193,9 @@ class TestDPOInit:
         from_name,
     ):
         dpo = dpo_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            accelerator_mode,
+            dist_mode,
             vocab_size,
             input_size,
             max_tokens,
@@ -220,14 +211,9 @@ class TestDPOInit:
         assert dpo.update_epochs == 1
         assert dpo.temperature == 1
         assert dpo.calc_position_embeddings
-        assert dpo.device == (
-            dpo.accelerator.device
-            if torch.cuda.is_available() and dpo.accelerator is not None
-            else "cuda"
-            if torch.cuda.is_available()
-            else "mps"
-            if torch.backends.mps.is_available()
-            else "cpu"
+        assert dpo.distributed == (dist_mode is not None)
+        assert dpo.device == resolve_device(
+            "cuda" if torch.cuda.is_available() else "cpu"
         )
         assert dpo.index == 0
         assert dpo.scores == []
@@ -236,12 +222,8 @@ class TestDPOInit:
         assert isinstance(dpo.actor, torch.nn.Module)
         assert isinstance(dpo.optimizer, OptimizerWrapper)
         assert dpo.optimizer.optimizer_cls is torch.optim.AdamW
-        if accelerator_mode is not None:
-            assert isinstance(dpo.optimizer.optimizer, AcceleratedOptimizer)
-        else:
-            assert isinstance(dpo.optimizer.optimizer, torch.optim.AdamW)
+        assert isinstance(dpo.optimizer.optimizer, torch.optim.AdamW)
         dpo.clean_up()
-        AcceleratorState._reset_state(True)
 
     @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
     @pytest.mark.parametrize("vocab_size", [100])
@@ -261,13 +243,10 @@ class TestDPOInit:
                 model_name=None,
                 pad_token_id=vocab_size - 1,
                 pad_token="<pad>",
-                accelerator=None,
                 device="cuda" if torch.cuda.is_available() else "cpu",
                 use_separate_reference_adapter=use_separate_reference_adapter,
                 micro_batch_size_per_gpu=micro_batch_size_per_gpu,
             )
-
-        AcceleratorState._reset_state(True)
 
 
 class TestDPOGetAction:
@@ -279,7 +258,7 @@ class TestDPOGetAction:
 
 
 class TestDPOLearn:
-    @pytest.mark.parametrize("accelerator_mode", ["ddp"])
+    @pytest.mark.parametrize("dist_mode", ["dist"])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
     @pytest.mark.parametrize("vocab_size", [100])
     @pytest.mark.parametrize("input_size", [10])
@@ -296,11 +275,10 @@ class TestDPOLearn:
     @pytest.mark.parametrize("use_liger_loss", [False, True])
     def test_dpo_learn(
         self,
-        distributed_env,
         dpo_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
-        accelerator_mode,
+        dist_mode,
         use_separate_reference_adapter,
         pretrained_model_name_or_path,
         vocab_size,
@@ -311,9 +289,9 @@ class TestDPOLearn:
         use_liger_loss,
     ):
         dpo = dpo_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            accelerator_mode,
+            dist_mode,
             vocab_size,
             input_size,
             max_tokens,
@@ -350,7 +328,6 @@ class TestDPOLearn:
             test_dataset=test_dataset,
             tokenizer=tokenizer,
             data_batch_size_per_gpu=data_batch_size,
-            accelerator=dpo.accelerator,
         )
         for name, param in dpo.actor.named_parameters():
             if ("lora_A" in name or "lora_B" in name) and param is not None:
@@ -383,11 +360,10 @@ class TestDPOLearn:
             pre_learn_actor_state_dict[untouched_param_name],
         )
         dpo.clean_up()
-        AcceleratorState._reset_state(True)
 
 
 class TestDPOTest:
-    @pytest.mark.parametrize("accelerator_mode", ["ddp"])
+    @pytest.mark.parametrize("dist_mode", ["dist"])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
     @pytest.mark.parametrize("vocab_size", [100])
     @pytest.mark.parametrize("input_size", [10])
@@ -403,11 +379,10 @@ class TestDPOTest:
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
     def test_dpo_test(
         self,
-        distributed_env,
         dpo_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
-        accelerator_mode,
+        dist_mode,
         use_separate_reference_adapter,
         pretrained_model_name_or_path,
         vocab_size,
@@ -417,9 +392,9 @@ class TestDPOTest:
         micro_batch_size_per_gpu,
     ):
         dpo = dpo_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            accelerator_mode,
+            dist_mode,
             vocab_size,
             input_size,
             max_tokens,
@@ -454,12 +429,10 @@ class TestDPOTest:
             test_dataset=test_dataset,
             tokenizer=tokenizer,
             data_batch_size_per_gpu=data_batch_size,
-            accelerator=dpo.accelerator,
         )
         fitness = dpo.test(env)
         assert isinstance(fitness, np.ndarray)
         dpo.clean_up()
-        AcceleratorState._reset_state(True)
 
 
 class TestDPOLigerUnavailableBehaviour:
@@ -468,7 +441,7 @@ class TestDPOLigerUnavailableBehaviour:
         self,
         monkeypatch,
         dpo_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
         assertion_mode,
     ):
@@ -483,9 +456,9 @@ class TestDPOLigerUnavailableBehaviour:
                 match=r"use_liger_loss=True requested.*Falling back to standard loss\.",
             ):
                 dpo = dpo_factory(
-                    accelerator_factory=accelerator_factory,
+                    dist_mode_factory=dist_mode_factory,
                     model_factory=model_factory,
-                    accelerator_mode=None,
+                    dist_mode=None,
                     vocab_size=30,
                     input_size=5,
                     max_tokens=10,
@@ -498,9 +471,9 @@ class TestDPOLigerUnavailableBehaviour:
             assert dpo.use_liger_loss is False
         else:
             dpo = dpo_factory(
-                accelerator_factory=accelerator_factory,
+                dist_mode_factory=dist_mode_factory,
                 model_factory=model_factory,
-                accelerator_mode=None,
+                dist_mode=None,
                 vocab_size=30,
                 input_size=5,
                 max_tokens=10,
@@ -524,7 +497,6 @@ class TestDPOLigerUnavailableBehaviour:
                 )
 
         dpo.clean_up()
-        AcceleratorState._reset_state(True)
 
 
 class TestDPOLoad:
@@ -534,7 +506,7 @@ class TestDPOLoad:
 
 
 class TestDPOCleanUp:
-    @pytest.mark.parametrize("accelerator_mode", [None])
+    @pytest.mark.parametrize("dist_mode", [None])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
     @pytest.mark.parametrize("vocab_size", [100])
     @pytest.mark.parametrize("input_size", [10])
@@ -546,11 +518,10 @@ class TestDPOCleanUp:
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
     def test_dpo_clean_up(
         self,
-        distributed_env,
         dpo_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
-        accelerator_mode,
+        dist_mode,
         use_separate_reference_adapter,
         pretrained_model_name_or_path,
         vocab_size,
@@ -559,9 +530,9 @@ class TestDPOCleanUp:
         micro_batch_size_per_gpu,
     ):
         dpo = dpo_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            accelerator_mode,
+            dist_mode,
             vocab_size,
             input_size,
             max_tokens,
@@ -576,7 +547,7 @@ class TestDPOCleanUp:
 
 
 class TestDPOSaveLoadCheckpoint:
-    @pytest.mark.parametrize("accelerator_mode", [None])
+    @pytest.mark.parametrize("dist_mode", [None])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
     @pytest.mark.parametrize("vocab_size", [100])
     @pytest.mark.parametrize("input_size", [10])
@@ -590,11 +561,10 @@ class TestDPOSaveLoadCheckpoint:
     @pytest.mark.parametrize("lora_only", [False, True])
     def test_dpo_save_load_checkpoint(
         self,
-        distributed_env,
         dpo_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
-        accelerator_mode,
+        dist_mode,
         use_separate_reference_adapter,
         vocab_size,
         input_size,
@@ -604,9 +574,9 @@ class TestDPOSaveLoadCheckpoint:
         lora_only,
     ):
         dpo = dpo_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            accelerator_mode,
+            dist_mode,
             vocab_size,
             input_size,
             max_tokens,
@@ -614,7 +584,6 @@ class TestDPOSaveLoadCheckpoint:
             pretrained_model_name_or_path,
             micro_batch_size_per_gpu,
         )
-        accelerator = accelerator_factory(accelerator_mode)
         with tempfile.TemporaryDirectory() as tmpdir:
             dpo.save_checkpoint(tmpdir, lora_only=lora_only)
             new_dpo = DPO(
@@ -622,7 +591,6 @@ class TestDPOSaveLoadCheckpoint:
                 pad_token_id=vocab_size - 1,
                 pad_token="<pad>",
                 device="cuda" if torch.cuda.is_available() else "cpu",
-                accelerator=accelerator,
                 use_separate_reference_adapter=use_separate_reference_adapter,
                 lora_config=copy.deepcopy(dpo.lora_config),
                 # Match the saved agent's setting so the constructor doesn't
@@ -668,7 +636,7 @@ class TestDPOSaveLoadCheckpoint:
                         getattr(new_dpo, attr).lora_dropout
                         == getattr(dpo, attr).lora_dropout
                     )
-                elif attr in ("accelerator", "lr_scheduler"):
+                elif attr == "lr_scheduler":
                     assert (
                         getattr(new_dpo, attr).__class__.__name__
                         == getattr(dpo, attr).__class__.__name__
@@ -684,7 +652,7 @@ class TestDPOSaveLoadCheckpoint:
 
 
 class TestDPORecompile:
-    @pytest.mark.parametrize("accelerator_mode", [None])
+    @pytest.mark.parametrize("dist_mode", [None])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False])
     @pytest.mark.parametrize("vocab_size", [100])
     @pytest.mark.parametrize("input_size", [10])
@@ -696,11 +664,10 @@ class TestDPORecompile:
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
     def test_dpo_exception_on_recompile(
         self,
-        distributed_env,
         dpo_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
-        accelerator_mode,
+        dist_mode,
         use_separate_reference_adapter,
         pretrained_model_name_or_path,
         vocab_size,
@@ -709,9 +676,9 @@ class TestDPORecompile:
         micro_batch_size_per_gpu,
     ):
         dpo = dpo_factory(
-            accelerator_factory,
+            dist_mode_factory,
             model_factory,
-            accelerator_mode,
+            dist_mode,
             vocab_size,
             input_size,
             max_tokens,
@@ -725,7 +692,7 @@ class TestDPORecompile:
 
 class TestDPONoLLMDependencies:
     def test_dpo_no_llm_dependencies(
-        self, dpo_factory, model_factory, accelerator_factory
+        self, dpo_factory, model_factory, dist_mode_factory
     ):
         with (
             mock.patch("agilerl.algorithms.core.base.HAS_LLM_DEPENDENCIES", False),
@@ -735,9 +702,9 @@ class TestDPONoLLMDependencies:
             ),
         ):
             dpo_factory(
-                accelerator_factory=accelerator_factory,
+                dist_mode_factory=dist_mode_factory,
                 model_factory=model_factory,
-                accelerator_mode=None,
+                dist_mode=None,
                 vocab_size=30,
                 input_size=5,
                 max_tokens=10,
@@ -746,7 +713,6 @@ class TestDPONoLLMDependencies:
                 micro_batch_size_per_gpu=None,
                 from_name=False,
             )
-        AcceleratorState._reset_state(True)
 
 
 class TestDPOGetLogprobs:

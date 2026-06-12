@@ -4,7 +4,6 @@ import dill
 import numpy as np
 import pytest
 import torch
-from accelerate import Accelerator
 from gymnasium import spaces
 from torch import optim
 from torch._dynamo.eval_frame import OptimizedModule
@@ -250,9 +249,6 @@ class DummyRLAlgorithm(RLAlgorithm):
             NetworkGroup(eval_network=self.dummy_actor, policy=True),
         )
 
-        if self.accelerator is not None:
-            self.wrap_models()
-
     def get_action(self, *args, **kwargs):
         return
 
@@ -457,9 +453,7 @@ class DummyMARLAlgorithm(MultiAgentRLAlgorithm):
             NetworkGroup(eval_network=self.dummy_actors, policy=True),
         )
 
-        if self.accelerator is not None:
-            self.wrap_models()
-        elif self.torch_compiler:
+        if self.torch_compiler:
             self.recompile()
 
         self.rollout_buffer = "dummy"
@@ -736,57 +730,6 @@ class TestMultiAgentRLAlgorithmRecompile:
         torch._dynamo.reset()
 
 
-class TestMultiAgentRLAlgorithmUnwrapModels:
-    @pytest.mark.parametrize("compile_mode", [None, "default"])
-    def test_unwrap_models_multi_agent(
-        self, compile_mode, ma_vector_space, ma_discrete_space
-    ):
-        accelerator = Accelerator()
-        agent = DummyMARLAlgorithm(
-            ma_vector_space,
-            ma_discrete_space,
-            index=0,
-            agent_ids=["agent_0", "agent_1", "other_agent_0"],
-            accelerator=accelerator,
-            torch_compiler=compile_mode,
-        )
-
-        agent.unwrap_models()
-
-        for actor in agent.dummy_actors.values():
-            assert isinstance(actor, torch.nn.Module)
-
-        # Reset torch compilation state if compilation was used
-        if compile_mode is not None:
-            torch._dynamo.reset()
-
-
-class TestRLAlgorithmUnwrapModels:
-    def test_unwrap_models_single_agent(self, vector_space, discrete_space):
-        accelerator = Accelerator()
-        agent = DummyRLAlgorithm(
-            vector_space,
-            discrete_space,
-            index=0,
-            accelerator=accelerator,
-        )
-        agent.unwrap_models()
-        assert isinstance(agent.dummy_actor, torch.nn.Module)
-
-    def test_unwrap_models_raises_without_accelerator(
-        self, vector_space, discrete_space
-    ):
-        """AttributeError is raised when unwrap_models is called without an accelerator."""
-        agent = DummyRLAlgorithm(
-            vector_space,
-            discrete_space,
-            index=0,
-        )
-        assert agent.accelerator is None
-        with pytest.raises(AttributeError, match="No accelerator has been set"):
-            agent.unwrap_models()
-
-
 class TestRLAlgorithmLoadCheckpoint:
     @pytest.mark.parametrize("with_hp_config", [False, True])
     @pytest.mark.parametrize(
@@ -970,7 +913,6 @@ class TestMultiAgentRLAlgorithmLoadCheckpoint:
             ("ma_dict_space", EvolvableMultiInput),
         ],
     )
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("compile_mode", [None])
     def test_save_load_checkpoint_multi_agent(
         self,
@@ -979,11 +921,9 @@ class TestMultiAgentRLAlgorithmLoadCheckpoint:
         observation_spaces,
         encoder_cls,
         ma_discrete_space,
-        accelerator_flag,
         compile_mode,
         request,
     ):
-        accelerator = Accelerator() if accelerator_flag else None
         # Initialize the dummy multi-agent
         obs_spaces = request.getfixturevalue(observation_spaces)
         agent_ids = ["agent_0", "agent_1", "agent_2"]
@@ -999,7 +939,6 @@ class TestMultiAgentRLAlgorithmLoadCheckpoint:
             agent_ids=agent_ids,
             index=0,
             hp_config=hp_config,
-            accelerator=accelerator,
             torch_compiler=compile_mode,
         )
 
@@ -1028,7 +967,6 @@ class TestMultiAgentRLAlgorithmLoadCheckpoint:
             agent_ids=agent_ids,
             index=1,  # Different index to verify it gets overwritten
             hp_config=hp_config,
-            accelerator=accelerator,
             torch_compiler=compile_mode,
         )
 
@@ -1037,7 +975,7 @@ class TestMultiAgentRLAlgorithmLoadCheckpoint:
 
         # Check if properties and weights are loaded correctly
         for agent_id in agent.agent_ids:
-            if compile_mode is not None and accelerator is None:
+            if compile_mode is not None:
                 assert isinstance(new_agent.dummy_actors[agent_id], OptimizedModule)
             else:
                 assert isinstance(new_agent.dummy_actors[agent_id], encoder_cls)
@@ -1301,7 +1239,6 @@ class TestMultiAgentRLAlgorithmLoad:
         ],
     )
     @pytest.mark.parametrize("action_spaces", ["ma_vector_space", "ma_discrete_space"])
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("compile_mode", [None])
     def test_load_from_pretrained_multi_agent(
         self,
@@ -1311,11 +1248,9 @@ class TestMultiAgentRLAlgorithmLoad:
         observation_spaces,
         encoder_cls,
         action_spaces,
-        accelerator_flag,
         compile_mode,
         request,
     ):
-        accelerator = Accelerator() if accelerator_flag else None
         # Initialize the dummy multi-agent
         obs_spaces = request.getfixturevalue(observation_spaces)
         act_spaces = request.getfixturevalue(action_spaces)
@@ -1331,7 +1266,6 @@ class TestMultiAgentRLAlgorithmLoad:
             agent_ids=agent_ids,
             index=0,
             hp_config=hp_config,
-            accelerator=accelerator,
             torch_compiler=compile_mode,
         )
 
@@ -1343,7 +1277,6 @@ class TestMultiAgentRLAlgorithmLoad:
         new_agent = DummyMARLAlgorithm.load(
             checkpoint_path,
             device=device,
-            accelerator=accelerator,
         )
 
         # Check if properties and weights are loaded correctly
@@ -1358,7 +1291,7 @@ class TestMultiAgentRLAlgorithmLoad:
             )
 
         for agent_id in agent.agent_ids:
-            if compile_mode is not None and accelerator is None:
+            if compile_mode is not None:
                 assert isinstance(new_agent.dummy_actors[agent_id], OptimizedModule)
             else:
                 assert isinstance(new_agent.dummy_actors[agent_id], encoder_cls)

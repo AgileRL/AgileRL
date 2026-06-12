@@ -6,11 +6,11 @@ use the demo script instead::
 
     python demos/llm/demo_llm_finetuning.py dpo --help
 
-To run (single GPU, no accelerate):
-    python benchmarking/benchmarking_dpo.py
+To run (single GPU):
+    python benchmarking/benchmarking_llm_preference.py
 
-To run with accelerate (multi-GPU, torch-native DDP):
-    accelerate launch benchmarking/benchmarking_dpo.py
+To run multi-GPU (torch-native distributed):
+    torchrun --nproc_per_node N benchmarking/benchmarking_llm_preference.py
 """
 
 from agilerl import HAS_LLM_DEPENDENCIES
@@ -37,7 +37,6 @@ from agilerl.training.train_llm import finetune_llm_preference
 from agilerl.llm_envs import PreferenceGym
 from agilerl.utils.llm_utils import (
     compare_responses,
-    create_llm_accelerator,
     sample_eval_prompts,
 )
 
@@ -72,18 +71,12 @@ def main(init_hp: dict, mut_p: dict, save_path: str = "outputs") -> None:
     tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
 
-    try:
-        accelerator = create_llm_accelerator()
-    except Exception:
-        accelerator = None
-
     print("Setting up PreferenceGym environment...")
     env = PreferenceGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
         data_batch_size_per_gpu=init_hp["BATCH_SIZE"],
-        accelerator=accelerator,
         max_context_length=init_hp.get("MAX_CONTEXT_LENGTH"),
     )
 
@@ -104,8 +97,6 @@ def main(init_hp: dict, mut_p: dict, save_path: str = "outputs") -> None:
             nll_alpha=init_hp.get("NLL_ALPHA", 1.0),
             update_epochs=init_hp["UPDATE_EPOCHS"],
             lora_config=lora_config,
-            accelerator=accelerator,
-            gradient_checkpointing=accelerator is not None,
             use_liger_loss=init_hp.get("USE_LIGER_LOSS", False),
         )
         for _ in range(init_hp["POP_SIZE"])
@@ -128,7 +119,6 @@ def main(init_hp: dict, mut_p: dict, save_path: str = "outputs") -> None:
             rl_hp=mut_p["RL_HP_MUT"],
             mutation_sd=mut_p["MUT_SD"],
             rand_seed=mut_p["RAND_SEED"],
-            accelerator=accelerator,
         )
     else:
         tournament = None
@@ -153,7 +143,6 @@ def main(init_hp: dict, mut_p: dict, save_path: str = "outputs") -> None:
         wandb_entity=init_hp.get("WANDB_ENTITY"),
         wandb_run_name=init_hp.get("WANDB_RUN_NAME"),
         evaluation_interval=init_hp.get("EVALUATION_INTERVAL", 200),
-        accelerator=accelerator,
         max_steps=max_steps,
     )
 

@@ -25,8 +25,8 @@ import traceback
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from _pytest.outcomes import Skipped
-from accelerate.state import AcceleratorState
 from torch._inductor.utils import fresh_cache
 
 from tests.utils import force_gpu_memory_release, wait_for_gpu_memory_to_clear
@@ -58,8 +58,6 @@ def setup_test_env_vars():
     # Let vLLM select a compatible backend for the installed version/platform.
     os.environ.pop("VLLM_ATTENTION_BACKEND", None)
     os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
-    if not torch.cuda.is_available():
-        os.environ.setdefault("ACCELERATE_USE_CPU", "true")
     os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 
@@ -98,7 +96,8 @@ def cleanup_after_test(test_name):
 
     torch._dynamo.reset()
     force_gpu_memory_release()
-    AcceleratorState._reset_state(True)
+    if dist.is_available() and dist.is_initialized():
+        dist.destroy_process_group()
 
 
 def import_module_from_path(module_path):
@@ -139,10 +138,18 @@ def resolve_fixtures(fixture_names, test_module, test_name):
         if name == "distributed_env":
             setup_distributed_env()
             fixtures[name] = None
-        elif name == "accelerator_factory":
-            from tests.test_algorithms.conftest import generate_accelerator
+        elif name == "dist_mode_factory":
+            from tests.test_algorithms.conftest import generate_distributed_mode
 
-            fixtures[name] = generate_accelerator
+            def _dist_mode_factory(mode):
+                # Mirror the pytest fixture: distributed modes lazily pull in
+                # the ``distributed_env`` rendezvous env vars, single-device
+                # mode leaves the environment untouched.
+                if mode is not None:
+                    setup_distributed_env()
+                return generate_distributed_mode(mode)
+
+            fixtures[name] = _dist_mode_factory
         elif name == "model_factory":
             from tests.test_algorithms.test_llms.conftest import generate_model
 

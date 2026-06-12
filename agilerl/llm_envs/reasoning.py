@@ -12,7 +12,6 @@ from agilerl.llm_envs.base import HuggingFaceGym, apply_chat_template
 from agilerl.typing import ReasoningPrompts
 
 if TYPE_CHECKING:
-    from accelerate import Accelerator
     from datasets import Dataset
     from transformers import AutoTokenizer
 
@@ -28,7 +27,6 @@ class ReasoningGym(HuggingFaceGym):
         reward_fn: Callable[[str, str, str], float],
         conversation_template: list[dict[str, str]],
         data_batch_size_per_gpu: int = 8,
-        accelerator: Accelerator | None = None,
         return_raw_completions: bool = False,
         max_context_length: int | None = None,
         seed: int = 42,
@@ -48,7 +46,6 @@ class ReasoningGym(HuggingFaceGym):
             data_batch_size_per_gpu=data_batch_size_per_gpu,
             max_context_length=max_context_length,
             min_completion_length=0,
-            accelerator=accelerator,
             seed=seed,
         )
         self.reward_fn = reward_fn

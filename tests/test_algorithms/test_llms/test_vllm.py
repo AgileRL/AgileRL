@@ -66,9 +66,8 @@ class TestREINFORCETest:
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
     def test_vllm_methods(
         self,
-        distributed_env,
         reinforce_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
         vocab_size,
         input_size,
@@ -76,11 +75,10 @@ class TestREINFORCETest:
         pretrained_model_name_or_path,
         micro_batch_size_per_gpu,
     ):
-        del distributed_env
         rf = reinforce_factory(
-            accelerator_factory=accelerator_factory,
+            dist_mode_factory=dist_mode_factory,
             model_factory=model_factory,
-            accelerator_mode=None,
+            dist_mode=None,
             vocab_size=vocab_size,
             input_size=input_size,
             max_tokens=max_tokens,

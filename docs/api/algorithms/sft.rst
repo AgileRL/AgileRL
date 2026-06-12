@@ -23,7 +23,6 @@ Example
 
   from agilerl.algorithms.sft import SFT
   from agilerl.llm_envs import SFTGym
-  from accelerate import Accelerator
   from datasets import load_dataset
   from peft import LoraConfig
   from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -36,9 +35,6 @@ Example
   )
   tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B")
 
-  # Instantiate an accelerator object for distributed training
-  accelerator = Accelerator()
-
   # Load the dataset into an SFTGym environment
   raw_dataset = load_dataset("HumanLLMs/Human-Like-DPO-Dataset", split="train").shuffle(seed=42)
   train_test_split = raw_dataset.train_test_split(test_size=0.1)
@@ -50,7 +46,6 @@ Example
     tokenizer=tokenizer,
     data_batch_size_per_gpu=16,
     response_column="chosen",
-    accelerator=accelerator,
   )
 
   # Configure LoRA adapters
@@ -74,7 +69,6 @@ Example
     lora_config=lora_config,
     seed=42,
     reduce_memory_peak=True,
-    accelerator=accelerator,
   )
 
 Training an SFT agent
@@ -91,7 +85,6 @@ To train an SFT agent on a single SFT gym environment, use the :ref:`finetune_ll
     env=env,
     init_hp={"BATCH_SIZE": 32, "UPDATE_EPOCHS": 1},
     checkpoint_steps=250,
-    accelerator=accelerator,
   )
 
 Saving and Loading Agents

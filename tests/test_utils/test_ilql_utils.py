@@ -1,7 +1,6 @@
 import os
 
-import accelerate
-
+from agilerl.utils.distributed import get_world_size, resolve_device
 from agilerl.utils.ilql_utils import (
     add_system_configs,
     convert_path,
@@ -29,12 +28,12 @@ class TestConvertPath:
 
 def test_add_system_configs():
     config = {}
-    accelerator = accelerate.Accelerator()
-    config = add_system_configs(config, accelerator)
+    system = add_system_configs(config)
 
-    assert config["device"] == str(accelerator.device)
-    assert config["num_processes"] == accelerator.num_processes
-    assert config["use_fp16"] == (accelerator.mixed_precision != "no")
+    assert config["system"] is system
+    assert system["device"] == resolve_device()
+    assert system["num_processes"] == get_world_size()
+    assert system["use_fp16"] is False
 
 
 class TestToBin:

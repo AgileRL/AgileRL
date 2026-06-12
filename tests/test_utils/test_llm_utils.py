@@ -12,16 +12,22 @@ pytest.importorskip("datasets", reason="LLM dependencies not installed")
 from datasets import Dataset as Datasets
 from torch import nn
 from transformers import AutoTokenizer
-from accelerate.state import AcceleratorState
-from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from tests import TINY_LLM_FIXTURE_PATH
+from agilerl.utils.distributed import (
+    FSDPConfig,
+    barrier,
+    broadcast_object_list,
+    get_world_size,
+    is_distributed,
+    is_main_process,
+    resolve_device,
+    shard_dataloader_kwargs,
+)
 from agilerl.utils.llm_utils import (
     PreferenceGym,
     ReasoningGym,
-    create_llm_accelerator,
     gather_full_params,
-    get_llm_accelerator,
     get_model_name_or_path,
     get_state_dict,
     is_fsdp_sharded,
@@ -281,15 +287,6 @@ def dummy_chat_template_fn(q, a, tokenizer):
     }
 
 
-@pytest.fixture(scope="function")
-def accelerator_factory():
-    def generate_accelerator(use_accelerator):
-        AcceleratorState._reset_state(True)
-        return Accelerator() if use_accelerator else None
-
-    return generate_accelerator
-
-
 @pytest.fixture
 def reasoning_dataset(num_samples):
     train_dataset = DummyReasoningDataset(int(num_samples * 0.8))
@@ -306,13 +303,10 @@ def preference_dataset(num_samples):
 
 class TestReasoningGymInit:
     @pytest.mark.parametrize("num_samples", [200])
-    @pytest.mark.parametrize("use_accelerator", [True, False])
     def test_reasoning_gym_init(
         self,
         reasoning_dataset,
-        accelerator_factory,
         num_samples,
-        use_accelerator,
     ):
         train_dataset, test_dataset = reasoning_dataset
         tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
@@ -324,7 +318,6 @@ class TestReasoningGymInit:
             reward_fn=dummy_reward_fn,
             conversation_template=DUMMY_CONVERSATION_TEMPLATE,
             data_batch_size_per_gpu=data_batch_size,
-            accelerator=accelerator_factory(use_accelerator),
         )
         assert env.name == "dummy_dataset"
         assert callable(env.reward_fn)
@@ -936,100 +929,49 @@ def test_llm_utils_fallback_types_when_no_llm_dependencies():
             sys.modules.pop("agilerl.utils.llm_utils", None)
 
 
-class TestCreateLlmAccelerator:
-    def test_create_llm_accelerator_no_gpus_returns_none(self):
-        with patch("torch.cuda.device_count", return_value=0):
-            result = create_llm_accelerator()
-        assert result is None
+class TestDistributedHelpersSingleDevice:
+    """Single-device behaviour of the torch-native distributed helpers.
 
-    def test_create_llm_accelerator_rejects_deepspeed_plugin(self):
-        with pytest.raises(ValueError, match="DeepSpeed support has been removed"):
-            create_llm_accelerator(deepspeed_plugin=MagicMock(name="ds_plugin"))
+    No process group exists in this test session, so every helper should
+    take its no-op / passthrough branch.
+    """
 
-    def test_create_llm_accelerator_returns_plain_accelerator(self):
-        AcceleratorState._reset_state(True)
-        plain_accelerator = MagicMock(spec=Accelerator)
-        plain_accelerator.state = MagicMock()
-        plain_accelerator.state.fsdp_plugin = None
-        mock_ctor = MagicMock(return_value=plain_accelerator)
-        with (
-            patch("torch.cuda.device_count", return_value=1),
-            patch.dict(create_llm_accelerator.__globals__, {"Accelerator": mock_ctor}),
-        ):
-            result = create_llm_accelerator()
-        assert result is plain_accelerator
-        mock_ctor.assert_called_once_with()
+    def test_is_distributed_false_without_process_group(self):
+        assert is_distributed() is False
 
-    def test_create_llm_accelerator_passes_fsdp_plugin_and_grad_accumulation(self):
-        AcceleratorState._reset_state(True)
-        fsdp_plugin = MagicMock(name="fsdp_plugin", fsdp_version=2)
-        accelerator = MagicMock(spec=Accelerator)
-        accelerator.state = MagicMock()
-        accelerator.state.fsdp_plugin = fsdp_plugin
-        mock_ctor = MagicMock(return_value=accelerator)
-        with (
-            patch("torch.cuda.device_count", return_value=1),
-            patch.dict(create_llm_accelerator.__globals__, {"Accelerator": mock_ctor}),
-        ):
-            result = create_llm_accelerator(
-                fsdp_plugin=fsdp_plugin, gradient_accumulation_steps=4
-            )
-        assert result is accelerator
-        mock_ctor.assert_called_once_with(
-            fsdp_plugin=fsdp_plugin, gradient_accumulation_steps=4
-        )
+    def test_get_world_size_is_one(self):
+        assert get_world_size() == 1
 
-    def test_create_llm_accelerator_rejects_fsdp1(self):
-        AcceleratorState._reset_state(True)
-        accelerator = MagicMock(spec=Accelerator)
-        accelerator.state = MagicMock()
-        accelerator.state.fsdp_plugin = MagicMock(fsdp_version=1)
-        mock_ctor = MagicMock(return_value=accelerator)
-        with (
-            patch("torch.cuda.device_count", return_value=1),
-            patch.dict(create_llm_accelerator.__globals__, {"Accelerator": mock_ctor}),
-            pytest.raises(ValueError, match="only supports FSDP2"),
-        ):
-            create_llm_accelerator()
+    def test_is_main_process_true(self):
+        assert is_main_process() is True
+
+    def test_barrier_is_a_noop(self):
+        barrier()  # must not raise or block
+
+    def test_broadcast_object_list_passthrough(self):
+        objects = [{"seed": 42}, "payload"]
+        out = broadcast_object_list(objects)
+        assert out is objects
+        assert out == [{"seed": 42}, "payload"]
+
+    def test_resolve_device_returns_requested_on_cpu_only_host(self):
+        if torch.cuda.is_available():
+            pytest.skip("Requested-device passthrough only applies without CUDA.")
+        assert resolve_device("cpu") == "cpu"
+
+    def test_shard_dataloader_kwargs_plain_shuffle_when_not_distributed(self):
+        dataset = list(range(8))
+        assert shard_dataloader_kwargs(dataset, shuffle=True) == {"shuffle": True}
+        assert shard_dataloader_kwargs(dataset, shuffle=False) == {"shuffle": False}
 
 
-class TestGetLlmAccelerator:
-    def test_get_llm_accelerator_none_base_returns_none(self):
-        assert get_llm_accelerator(None, idx=0) is None
-        assert get_llm_accelerator(None, idx=3) is None
-
-    def test_get_llm_accelerator_returns_base_for_first_index(self):
-        base = MagicMock(spec=Accelerator)
-        assert get_llm_accelerator(base, idx=0) is base
-
-    def test_get_llm_accelerator_creates_new_plain_accelerator_for_nonzero_index(self):
-        base = MagicMock(spec=Accelerator)
-        base.state = MagicMock()
-        base.state.deepspeed_plugin = None
-        fresh = MagicMock(spec=Accelerator)
-        mock_ctor = MagicMock(return_value=fresh)
-        with patch.dict(get_llm_accelerator.__globals__, {"Accelerator": mock_ctor}):
-            out = get_llm_accelerator(base, idx=1)
-        assert out is fresh
-        mock_ctor.assert_called_once_with()
-
-    def test_get_llm_accelerator_creates_new_plain_accelerator_with_plugin_for_nonzero_index(
-        self,
-    ):
-        base = MagicMock(spec=Accelerator)
-        plugin = object()
-        base.state = MagicMock()
-        base.state.deepspeed_plugin = plugin
-        fresh = MagicMock(spec=Accelerator)
-        mock_ctor = MagicMock(return_value=fresh)
-        with patch.dict(get_llm_accelerator.__globals__, {"Accelerator": mock_ctor}):
-            out = get_llm_accelerator(base, idx=2)
-        assert out is fresh
-        mock_ctor.assert_called_once_with()
-
-    def test_get_llm_accelerator_negative_index_raises(self):
-        with pytest.raises(ValueError, match="must be non-negative"):
-            get_llm_accelerator(None, idx=-1)
+class TestFSDPConfigDefaults:
+    def test_defaults(self):
+        config = FSDPConfig()
+        assert config.reshard_after_forward is True
+        assert config.cpu_offload is False
+        assert config.param_dtype is None
+        assert config.reduce_dtype is None
 
 
 def test_normalize_reasoning_prompt_batch_stacked_dict_to_per_sample_list():
@@ -1277,7 +1219,7 @@ class TestCreateModelFromNameOrPathValueHead:
             out = llm_utils_module.create_model_from_name_or_path(
                 "some/model",
                 add_value_head=True,
-                use_accelerator=False,
+                use_distributed=False,
             )
         assert out is sentinel_model
         # Default model_config is built when not supplied; verify the loader saw

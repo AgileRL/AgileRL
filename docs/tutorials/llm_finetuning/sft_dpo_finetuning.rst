@@ -78,7 +78,6 @@ The first block of code applies the model's tokenizer to the dataset, and create
         tokenizer=tokenizer,
         data_batch_size_per_gpu=16,
         response_column="chosen",
-        accelerator=accelerator,
     )
 
 The next block of code configures the LoRA adapter and instantiates the SFT agent.
@@ -101,7 +100,6 @@ The next block of code configures the LoRA adapter and instantiates the SFT agen
         lr=5e-5,
         update_epochs=1,
         lora_config=lora_config,
-        accelerator=accelerator,
     )
 
 If you want more detail on LoRA and how it works, see `this blog post <https://thinkingmachines.ai/blog/lora/>`_ that gives a theoretical and empirical overview of how LoRA can achieve the same results as full fine-tuning, but with a much smaller number of parameters.

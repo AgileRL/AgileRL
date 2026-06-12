@@ -49,9 +49,7 @@ class NeuralTS(RLAlgorithm):
     :type actor_network: EvolvableModule, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
-    :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
-    :param wrap: Wrap models for distributed training upon creation, defaults to True
+    :param wrap: Retained for API compatibility; has no effect, defaults to True
     :type wrap: bool, optional
     """
 
@@ -72,7 +70,6 @@ class NeuralTS(RLAlgorithm):
         mut: str | None = None,
         actor_network: EvolvableModule | None = None,
         device: str = "cpu",
-        accelerator: Any | None = None,
         wrap: bool = True,
     ) -> None:
         super().__init__(
@@ -81,7 +78,6 @@ class NeuralTS(RLAlgorithm):
             index=index,
             hp_config=hp_config,
             device=device,
-            accelerator=accelerator,
             normalize_images=normalize_images,
             name="NeuralTS",
         )
@@ -153,9 +149,6 @@ class NeuralTS(RLAlgorithm):
             )
 
         self.optimizer = OptimizerWrapper(optim.Adam, networks=self.actor, lr=self.lr)
-
-        if self.accelerator is not None and wrap:
-            self.wrap_models()
 
         # Initialize network layers
         self.actor.init_weights_gaussian(std_coeff=4, output_coeff=2)
@@ -283,11 +276,7 @@ class NeuralTS(RLAlgorithm):
             ** 2
         )
         self.optimizer.zero_grad()
-        if self.accelerator is not None:
-            self.accelerator.backward(loss)
-        else:
-            loss.backward()
-
+        loss.backward()
         self.optimizer.step()
 
         return loss.item()

@@ -14,7 +14,6 @@ from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
 from agilerl.utils.llm_utils import calculate_k3_kl
 
 if TYPE_CHECKING:
-    from accelerate import Accelerator
     from peft import LoraConfig
 
     from agilerl.llm_envs import ReasoningGym
@@ -40,6 +39,7 @@ from agilerl.utils.algo_utils import (
     get_experiences_samples,
     stack_and_pad_experiences,
 )
+from agilerl.utils.distributed import FSDPConfig, resolve_device
 from agilerl.utils.llm_utils import (
     ReasoningGym,
     build_completion_mask,
@@ -99,7 +99,7 @@ class GRPO(LLMAlgorithm):
     :type calc_position_embeddings: bool, optional
     :param micro_batch_size_per_gpu: If specified, gradient_accumulation_steps will be
         calculated to achieve the target batch_size. If None, uses the
-        accelerator's gradient_accumulation_steps, defaults to None
+        gradient_accumulation_steps argument, defaults to None
     :type micro_batch_size_per_gpu: int, optional
     :param max_output_tokens: Max number of answer tokens, defaults to None
     :type max_output_tokens: int, optional
@@ -116,8 +116,10 @@ class GRPO(LLMAlgorithm):
     :type cosine_lr_schedule_config: CosineLRScheduleConfig, optional
     :param use_memory_efficient_params: Use memory efficient params.
     :type use_memory_efficient_params: bool
-    :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
+    :param gradient_accumulation_steps: Micro-batches to accumulate per optimizer step, defaults to 1
+    :type gradient_accumulation_steps: int, optional
+    :param fsdp_config: FSDP2 sharding settings for distributed runs, defaults to None
+    :type fsdp_config: FSDPConfig | None, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
@@ -213,7 +215,8 @@ class GRPO(LLMAlgorithm):
         hf_generate_chunk_size: int | None = None,
         lora_config: LoraConfig | None = None,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
-        accelerator: Accelerator | None = None,
+        gradient_accumulation_steps: int = 1,
+        fsdp_config: FSDPConfig | None = None,
         device: str = "cpu",
         wrap: bool = True,
         clone: bool = False,
@@ -235,17 +238,7 @@ class GRPO(LLMAlgorithm):
         use_fused_linear_logprobs: bool = False,
         cast_logprobs_to_fp32: bool = True,
     ) -> None:
-        resolved_device = (
-            f"cuda:{accelerator.process_index}"
-            if accelerator is not None
-            else (
-                "cuda"
-                if torch.cuda.is_available()
-                else "mps"
-                if torch.backends.mps.is_available()
-                else "cpu"
-            )
-        )
+        resolved_device = resolve_device(device)
         super().__init__(
             index=index,
             batch_size=batch_size,
@@ -270,7 +263,8 @@ class GRPO(LLMAlgorithm):
             wrap=wrap,
             hp_config=hp_config,
             device=resolved_device,
-            accelerator=accelerator,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            fsdp_config=fsdp_config,
             name="GRPO",
             gradient_checkpointing=gradient_checkpointing,
             torch_compiler=torch_compiler,

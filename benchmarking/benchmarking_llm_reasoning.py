@@ -17,7 +17,8 @@ from transformers import AutoTokenizer
 
 from agilerl.training.train_llm import finetune_llm_reasoning
 from agilerl.utils.algo_utils import VLLMConfig
-from agilerl.utils.llm_utils import ReasoningGym, create_llm_accelerator
+from agilerl.utils.distributed import resolve_device
+from agilerl.utils.llm_utils import ReasoningGym
 from agilerl.utils.utils import create_population
 
 MODEL_PATH = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -112,7 +113,6 @@ def main(init_hp, mut_p):
         {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
     ]
 
-    accelerator = create_llm_accelerator()
     env = ReasoningGym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
@@ -120,7 +120,6 @@ def main(init_hp, mut_p):
         reward_fn=combined_rewards,
         conversation_template=conversation_template,
         data_batch_size_per_gpu=init_hp["BATCH_SIZE"],
-        accelerator=accelerator,
         max_context_length=init_hp["MAX_MODEL_LEN"],
     )
 
@@ -147,7 +146,6 @@ def main(init_hp, mut_p):
         INIT_HP=init_hp,
         hp_config=hp_config,
         population_size=init_hp["POP_SIZE"],
-        accelerator=accelerator,
         tokenizer=tokenizer,
         model_name=MODEL_PATH,
         vllm_config=vllm_config,
@@ -168,7 +166,7 @@ def main(init_hp, mut_p):
         rl_hp=mut_p.get("RL_HP_MUT", 0.0),
         mutation_sd=mut_p.get("MUT_SD", 0.0),
         rand_seed=mut_p.get("RAND_SEED", 42),
-        device=accelerator.device,
+        device=resolve_device(),
     )
 
     finetune_llm_reasoning(
@@ -183,11 +181,8 @@ def main(init_hp, mut_p):
         evo_steps=4,
         mutation=mutations,
         tournament=tournament,
-        accelerator=accelerator,
         verbose=True,
     )
-    if accelerator is not None:
-        accelerator.end_training()
 
 
 if __name__ == "__main__":

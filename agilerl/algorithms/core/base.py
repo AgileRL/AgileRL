@@ -22,8 +22,6 @@ from typing import (
 import dill
 import numpy as np
 import torch
-from accelerate import Accelerator
-from accelerate.utils import broadcast_object_list, set_seed
 from gymnasium import spaces
 from tensordict import TensorDict
 from torch._dynamo import OptimizedModule
@@ -84,6 +82,19 @@ from agilerl.utils.algo_utils import (
     recursive_check_module_attrs,
     stack_and_pad_experiences,
     stack_experiences,
+)
+from agilerl.utils.distributed import (
+    FSDPConfig,
+    apply_fsdp2,
+    barrier,
+    broadcast_object_list,
+    get_local_rank,
+    get_rank,
+    get_world_size,
+    init_distributed,
+    is_main_process,
+    set_seed,
+    sync_grads,
 )
 from agilerl.utils.evolvable_networks import (
     compile_model,
@@ -171,15 +182,13 @@ def get_checkpoint_dict(
 ) -> dict[str, Any]:
     """Return a dictionary of the agent's attributes to save in a checkpoint.
 
-    Note: Accelerator is always excluded from the checkpoint as it cannot be serialized.
-
     :param agent: The agent to save.
     :type agent: EvolvableAlgorithm
     :param omit_actor_info: Whether to remove the 'actor' attribute prior to saving.
-        To be used when saving LoRA weights only or when using Deepspeed.
+        To be used when saving LoRA weights only.
     :type omit_actor_info: bool, optional
     :param omit_optimizer_info: Whether to remove the 'optimizer' attribute prior to saving.
-        To be used when saving LoRA weights only or when using Deepspeed.
+        To be used when saving LoRA weights only.
     :type omit_optimizer_info: bool, optional
     :return: A dictionary of the agent's attributes.
     :rtype: dict[str, Any]
@@ -188,7 +197,6 @@ def get_checkpoint_dict(
 
     attribute_dict = EvolvableAlgorithm.inspect_attributes(agent)
     attribute_dict["agilerl_version"] = version("agilerl")
-    attribute_dict.pop("accelerator", None)
     attribute_dict.pop("rollout_buffer", None)
 
     # NOTE: this feels messy, refactor this to be more elegant
@@ -253,8 +261,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
     :type hp_config: HyperparameterConfig | None, optional
     :param device: Device to run the algorithm on, defaults to "cpu".
     :type device: str | torch.device, optional
-    :param accelerator: Accelerator object for distributed computing, defaults to None.
-    :type accelerator: Accelerator | None, optional
     :param torch_compiler: The torch compiler mode to use, defaults to None.
     :type torch_compiler: Any | None, optional
     :param name: Name of the algorithm, defaults to the class name.
@@ -266,7 +272,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         index: int,
         hp_config: HyperparameterConfig | None = None,
         device: str | torch.device = "cpu",
-        accelerator: Accelerator | None = None,
         torch_compiler: Any | None = None,
         name: str | None = None,
     ) -> None:
@@ -274,10 +279,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         assert isinstance(index, int), "Agent index must be an integer."
         assert isinstance(device, (str, torch.device)), "Device must be a string."
         assert isinstance(name, (type(None), str)), "Name must be a string."
-        assert isinstance(
-            accelerator,
-            (type(None), Accelerator),
-        ), "Accelerator must be an instance of Accelerator."
         if torch_compiler:
             assert torch_compiler in [
                 "default",
@@ -287,8 +288,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                 "Choose between torch compiler modes: default, reduce-overhead, max-autotune or None"
             )
 
-        self.accelerator = accelerator
-        self.device = device if self.accelerator is None else self.accelerator.device
+        self.device = device
         self.torch_compiler = torch_compiler
         self.algo = name if name is not None else self.__class__.__name__
 
@@ -626,30 +626,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
                 hp_spec.dtype = dtype
 
-    def _wrap_attr(self, attr: EvolvableAttributeType) -> EvolvableAttributeType:
-        """Wrap the model with the accelerator.
-
-        :param attr: The attribute to wrap.
-        :type attr: EvolvableAttributeType
-
-        :return: The wrapped attribute.
-        :rtype: EvolvableAttributeType
-        """
-        if isinstance(attr, OptimizerWrapper):
-            if isinstance(attr.optimizer, dict):
-                wrapped_opt = {
-                    agent_id: self.accelerator.prepare(opt)
-                    for agent_id, opt in attr.optimizer.items()
-                }
-            else:
-                wrapped_opt = self.accelerator.prepare(attr.optimizer)
-
-            attr.optimizer = wrapped_opt
-            return attr
-
-        # Only wrap the model if its part of the computation graph
-        return self.accelerator.prepare(attr) if attr.state_dict() else attr
-
     def _reinit_opt_from_config(
         self,
         config: OptimizerConfig,
@@ -671,10 +647,9 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                 if isinstance(config.lr, tuple)
                 else getattr(self, config.lr)
             )
-            self.accelerator, self.lr_scheduler = LLMAlgorithm.update_lr(
+            self.lr_scheduler = LLMAlgorithm.update_lr(
                 optimizer,
                 lr=lr,
-                accelerator=self.accelerator,
                 scheduler_config=self.cosine_lr_schedule_config,
             )
         else:
@@ -780,7 +755,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :return: Experiences on the device
         :rtype: tuple[torch.Tensor[float], ...]
         """
-        device = self.device if self.accelerator is None else self.accelerator.device
+        device = self.device
         on_device = []
         for exp in experiences:
             if isinstance(exp, dict):
@@ -826,40 +801,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
         return evolvable_attrs
 
-    def wrap_models(self) -> None:
-        """Wrap the models in the algorithm with the accelerator."""
-        if self.accelerator is None:
-            return
-
-        for attr in self.evolvable_attributes():
-            obj = getattr(self, attr)
-            if isinstance(obj, dict):
-                wrapped_obj = {
-                    agent_id: self._wrap_attr(opt) for agent_id, opt in obj.items()
-                }
-            else:
-                wrapped_obj = self._wrap_attr(obj)
-
-            setattr(self, attr, wrapped_obj)
-
-    def unwrap_models(self) -> None:
-        """Unwraps the models in the algorithm from the accelerator."""
-        if self.accelerator is None:
-            msg = "No accelerator has been set for the algorithm."
-            raise AttributeError(msg)
-
-        for attr in self.evolvable_attributes(networks_only=True):
-            obj = getattr(self, attr)
-            if isinstance(obj, dict):
-                unwrapped_obj = {
-                    agent_id: self.accelerator.unwrap_model(opt)
-                    for agent_id, opt in obj.items()
-                }
-            else:
-                unwrapped_obj = self.accelerator.unwrap_model(obj)
-
-            setattr(self, attr, unwrapped_obj)
-
     def clone(
         self,
         index: int | None = None,
@@ -869,7 +810,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
         :param index: The index of the clone, defaults to None
         :type index: int | None, optional
-        :param wrap: If True, wrap the models in the clone with the accelerator, defaults to False
+        :param wrap: Retained for API compatibility; cloning prepares the
+            model the same way regardless, defaults to True
         :type wrap: bool, optional
 
         :return: A clone of the algorithm
@@ -880,9 +822,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         input_args["wrap"] = wrap
 
         clone = type(self)(**input_args)
-
-        if self.accelerator is not None:
-            self.unwrap_models()
 
         # Clone evolvable modules
         cloned_modules = {}
@@ -914,10 +853,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             opt.load_state_dict(orig_optimizer.state_dict())
             setattr(clone, opt_config.name, opt)
 
-        # Prepare with accelerator / compiler if necessary
-        if self.accelerator is not None and wrap:
-            clone.wrap_models()
-        elif self.torch_compiler:
+        # Compile if necessary
+        if self.torch_compiler:
             torch.set_float32_matmul_precision("high")
             clone.recompile()
 
@@ -1056,10 +993,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                 value = value.to(getattr(self, attribute).device)
             setattr(self, attribute, value)
 
-        # Wrap models / compile if necessary
-        if self.accelerator is not None:
-            self.wrap_models()
-        elif self.torch_compiler:
+        # Compile if necessary
+        if self.torch_compiler:
             torch.set_float32_matmul_precision("high")
             self.recompile()
 
@@ -1068,7 +1003,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         cls,
         path: str,
         device: DeviceType = "cpu",
-        accelerator: Accelerator | None = None,
     ) -> Self:
         """Load an algorithm from a checkpoint.
 
@@ -1076,8 +1010,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :type path: string
         :param device: Device to load the algorithm on, defaults to 'cpu'
         :type device: str, optional
-        :param accelerator: Accelerator object for distributed computing, defaults to None
-        :type accelerator: Accelerator | None, optional
 
         :return: An instance of the algorithm
         :rtype: RLAlgorithm
@@ -1140,8 +1072,9 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                 module = module_cls(**init_dict)
                 loaded_modules[name] = module
 
-        # Reconstruct the algorithm
-        checkpoint["accelerator"] = accelerator
+        # Reconstruct the algorithm ("accelerator" appears in checkpoints
+        # saved by versions that trained with HF Accelerate)
+        checkpoint.pop("accelerator", None)
         checkpoint["device"] = device
         class_init_dict = filter_init_dict(checkpoint, cls)
         self = cls(**class_init_dict)
@@ -1230,10 +1163,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                 value = value.to(getattr(self, attribute).device)
             setattr(self, attribute, value)
 
-        # Wrap models / compile if necessary
-        if accelerator is not None:
-            self.wrap_models()
-        elif self.torch_compiler:
+        # Compile if necessary
+        if self.torch_compiler:
             torch.set_float32_matmul_precision("high")
             self.recompile()
 
@@ -1271,8 +1202,6 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
     :type learn_step: int, optional
     :param device: Device to run the algorithm on, defaults to "cpu".
     :type device: str | torch.device, optional
-    :param accelerator: Accelerator object for distributed computing, defaults to None.
-    :type accelerator: Accelerator | None, optional
     :param normalize_images: If True, normalize images, defaults to True.
     :type normalize_images: bool, optional
     :param name: Name of the algorithm, defaults to the class name.
@@ -1286,13 +1215,12 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
         index: int,
         hp_config: HyperparameterConfig | None = None,
         device: str | torch.device = "cpu",
-        accelerator: Accelerator | None = None,
         torch_compiler: Any | None = None,
         normalize_images: bool = True,
         name: str | None = None,
     ) -> None:
 
-        super().__init__(index, hp_config, device, accelerator, torch_compiler, name)
+        super().__init__(index, hp_config, device, torch_compiler, name)
 
         check_supported_space(observation_space)
         check_supported_space(action_space)
@@ -1334,8 +1262,6 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
     :type learn_step: int, optional
     :param device: Device to run the algorithm on, defaults to "cpu"
     :type device: str, optional
-    :param accelerator: Accelerator object for distributed computing, defaults to None
-    :type accelerator: Accelerator | None, optional
     :param torch_compiler: The torch compiler mode to use, defaults to None
     :type torch_compiler: Any | None, optional
     :param normalize_images: If True, normalize images, defaults to True
@@ -1362,14 +1288,13 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         agent_ids: Iterable[int] | None = None,
         hp_config: HyperparameterConfig | None = None,
         device: str | torch.device = "cpu",
-        accelerator: Accelerator | None = None,
         torch_compiler: Any | None = None,
         normalize_images: bool = True,
         placeholder_value: Any | None = -1,
         name: str | None = None,
     ) -> None:
 
-        super().__init__(index, hp_config, device, accelerator, torch_compiler, name)
+        super().__init__(index, hp_config, device, torch_compiler, name)
 
         assert type(observation_spaces) is type(action_spaces), (
             "Observation spaces and action spaces must be the same type. "
@@ -1995,8 +1920,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     :type wrap: bool
     :param device: The device to run the algorithm on.
     :type device: str | torch.device
-    :param accelerator: The accelerator to use.
-    :type accelerator: Accelerator | None
     :param name: The name of the algorithm.
     :type name: str | None
     :param model_config: The configuration for the model.
@@ -2058,7 +1981,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         use_memory_efficient_params: bool = True,
         wrap: bool = True,
         device: str | torch.device = "cpu",
-        accelerator: Accelerator | None = None,
+        gradient_accumulation_steps: int = 1,
+        fsdp_config: FSDPConfig | None = None,
         name: str | None = None,
         model_config: dict[str, Any] | PretrainedConfigProtocol | None = None,
         gradient_checkpointing: bool = True,
@@ -2136,8 +2060,17 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             )
             vllm_config = None
 
-        super().__init__(index, hp_config, device, accelerator, torch_compiler, name)
-        self._validate_distributed_backend()
+        super().__init__(index, hp_config, device, torch_compiler, name)
+        self.distributed = init_distributed()
+        self.fsdp_config = fsdp_config
+        if fsdp_config is not None and not self.distributed:
+            msg = (
+                "fsdp_config requires distributed training. Launch with "
+                "torchrun (or have your orchestration layer set the "
+                "rendezvous env vars) so the process group can initialise."
+            )
+            raise ValueError(msg)
+        self._requested_gradient_accumulation_steps = int(gradient_accumulation_steps)
         self.gradient_checkpointing = gradient_checkpointing
         self.use_liger_loss = use_liger_loss
         self.reference_update_tracker = 0  # Updated every time the reference policy is updated which is updated each time we pass through the train dataset
@@ -2160,10 +2093,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.lr_critic = lr_critic
         self._micro_batch_count = 0
 
-        if self.accelerator is not None:
-            if self.accelerator.num_processes > 1:
-                seed = broadcast_object_list([seed], from_process=0)[0]
-            seed += self.accelerator.process_index
+        if self.distributed:
+            if get_world_size() > 1:
+                seed = broadcast_object_list([seed])[0]
+            seed += get_rank()
             set_seed(seed)
 
         self.lora_config = lora_config
@@ -2205,31 +2138,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or tuple[torch.Tensor[float], ...]
         """
         return cast("TorchObsType", observation)
-
-    def _validate_distributed_backend(self) -> None:
-        """Reject unsupported distributed backends on the attached accelerator.
-
-        AgileRL LLM training runs on torch-native backends only: single
-        process, DDP (the default under ``accelerate launch``), or FSDP2.
-        """
-        if self.accelerator is None:
-            return
-        if getattr(self.accelerator.state, "deepspeed_plugin", None) is not None:
-            msg = (
-                "DeepSpeed support has been removed from AgileRL. Launch with a "
-                "plain accelerate config for multi-GPU DDP training (the "
-                "recommended mode for LoRA fine-tuning), or configure FSDP2 "
-                "(`fsdp_version: 2`) to shard large models."
-            )
-            raise ValueError(msg)
-        fsdp_plugin = getattr(self.accelerator.state, "fsdp_plugin", None)
-        if fsdp_plugin is not None and getattr(fsdp_plugin, "fsdp_version", 1) != 2:
-            msg = (
-                "AgileRL only supports FSDP2. Set `fsdp_version: 2` in your "
-                "accelerate FSDP config (or pass "
-                "FullyShardedDataParallelPlugin(fsdp_version=2))."
-            )
-            raise ValueError(msg)
 
     def _warn_separate_reference_adapter_deprecation(self) -> None:
         """Warn once per process about the pending adapter-mode deprecation."""
@@ -2312,8 +2220,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 model_ref.save_pretrained(
                     save_directory=path,
                     selected_adapters=self.selected_adapters,
-                    is_main_process=self.accelerator is None
-                    or self.accelerator.is_main_process,
+                    is_main_process=is_main_process(),
                 )
         else:
             # Full-model checkpoint: gather (FSDP2-aware) and inject the
@@ -2348,7 +2255,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         # Persist non-model attributes to ``attributes.pt``.
         # In distributed runs only the main process writes the file.
-        if self.accelerator is None or self.accelerator.is_main_process:
+        if is_main_process():
             checkpoint_path = Path(path) / "attributes.pt"
             checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
             torch.save(
@@ -2357,8 +2264,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 pickle_module=dill,
             )
 
-        if self.accelerator is not None:
-            self.accelerator.wait_for_everyone()
+        barrier()
 
     def load_checkpoint(
         self,
@@ -2641,7 +2547,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         cls,
         path: str,
         device: DeviceType = "cpu",
-        accelerator: Accelerator | None = None,
     ) -> None:
         msg = (
             "The load class method is not supported for this algorithm class. "
@@ -2661,64 +2566,48 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         )
 
     def wrap_models(self) -> None:
-        """Wrap the actor, optimizer and LR scheduler with the accelerator.
+        """Prepare the actor for training.
 
-        The model and optimizer are passed to ``prepare`` together so backends
-        that swap parameters in place (e.g. FSDP2) can remap the optimizer's
-        parameter groups.
+        Data-parallel runs need no wrapper at all: trainable gradients are
+        LoRA-sized and are averaged explicitly in :meth:`_backward_pass`.
+        When an :class:`~agilerl.utils.distributed.FSDPConfig` is set, the
+        actor is sharded with FSDP2 — parameters are swapped to DTensors in
+        place, so the optimizer (and LR scheduler) are rebuilt afterwards.
         """
-        if self.accelerator is not None:
-            assert self.optimizer is not None, (
-                "Optimizer is set to None, please check that the optimizer is correctly defined."
-            )
+        assert self.actor is not None, (
+            "Actor is set to None, please check that the actor is defined."
+        )
+        if self.distributed and self.fsdp_config is not None:
             self._restore_adapter_trainability(["actor", "critic"])
-
-            self.actor, optimizer, self.lr_scheduler = self.accelerator.prepare(
-                self.actor,
-                self.optimizer.optimizer,
-                self.lr_scheduler,
-            )
-            # Point the wrapper at the prepared (Accelerated) optimizer.
-            # ``optimizer_cls`` stays as the underlying class (AdamW) so
-            # checkpoints record the real optimizer type.
-            self.optimizer.optimizer = optimizer
-            if self.gradient_checkpointing:
-                self._get_unwrapped_actor().gradient_checkpointing_enable(
-                    gradient_checkpointing_kwargs={"use_reentrant": False},
+            self.actor = apply_fsdp2(self.actor, self.fsdp_config)
+            self._rebuild_optimizer_after_load()
+            self.lr_scheduler = (
+                create_warmup_cosine_scheduler(
+                    self.optimizer.optimizer,
+                    self.cosine_lr_schedule_config,
+                    1e-8,
+                    self.lr,
                 )
-        else:
-            assert self.actor is not None, (
-                "Actor is set to None, please check that the actor is defined."
+                if self.cosine_lr_schedule_config is not None
+                else None
             )
-            self.actor = self.actor.to(self.device)
-            if self.gradient_checkpointing:
-                self.actor.gradient_checkpointing_enable(
-                    gradient_checkpointing_kwargs={"use_reentrant": False},
-                )
+        if self.gradient_checkpointing:
+            self.actor.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False},
+            )
 
     def clean_up(self) -> None:
         """Clean up the algorithm."""
-        if self.accelerator is not None:
-            (
-                self.actor,
-                self.optimizer,
-                self.lr_scheduler,
-            ) = self.accelerator.free_memory(
-                self.actor,
-                self.optimizer,
-                self.lr_scheduler,
-            )
-            self.accelerator.wait_for_everyone()
-        else:
-            (
-                self.actor,
-                self.optimizer,
-                self.lr_scheduler,
-            ) = (
-                None,
-                None,
-                None,
-            )
+        (
+            self.actor,
+            self.optimizer,
+            self.lr_scheduler,
+        ) = (
+            None,
+            None,
+            None,
+        )
+        barrier()
         if hasattr(self, "llm") and self.llm is not None:
             del self.llm
         gc.collect()
@@ -2735,7 +2624,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         :param index: The index of the clone, defaults to None
         :type index: int | None, optional
-        :param wrap: If True, wrap the models in the clone with the accelerator, defaults to False
+        :param wrap: Retained for API compatibility; cloning prepares the
+            model the same way regardless, defaults to True
         :type wrap: bool, optional
 
         :return: A clone of the algorithm
@@ -2751,8 +2641,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         clone.wrap_models()
         self._restore_clone_optimizer_and_scheduler(clone)
-        if self.accelerator is not None:
-            self.accelerator.wait_for_everyone()
+        barrier()
 
         return clone
 
@@ -2769,9 +2658,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         input_args["wrap"] = False
         input_args["clone"] = True
         input_args["actor_network"] = self._clone_actor_network()
-        input_args["accelerator"] = (
-            Accelerator() if self.accelerator is not None else None
-        )
         return type(self)(**input_args)
 
     def _clone_actor_network(self) -> PreTrainedModelProtocol:
@@ -2799,7 +2685,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def _copy_clone_attributes(self, clone: Self) -> Self:
         """Copy non-network attributes while preserving clone runtime members.
 
-        Keeps clone-owned accelerator/scheduler (and vLLM handles when used)
+        Keeps clone-owned scheduler (and vLLM handles when used)
         intact while copying remaining algorithm attributes.
 
         :param clone: Clone instance to mutate.
@@ -2807,7 +2693,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :return: Updated clone instance.
         :rtype: Self
         """
-        accelerator = clone.accelerator
         cloned_lr_scheduler = clone.lr_scheduler
         original_lr_scheduler = self.lr_scheduler
 
@@ -2820,7 +2705,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             self.llm = None
 
         clone = EvolvableAlgorithm.copy_attributes(self, clone)
-        clone.accelerator = accelerator
         clone.lr_scheduler = cloned_lr_scheduler
         self.lr_scheduler = original_lr_scheduler
 
@@ -2847,22 +2731,19 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def update_lr(
         optimizer: torch.optim.Optimizer,
         lr: float | tuple[float, float],
-        accelerator: Accelerator | None = None,
         scheduler_config: CosineLRScheduleConfig | None = None,
-    ) -> tuple[Accelerator | None, SequentialLR | None]:
+    ) -> SequentialLR | None:
         """Update the learning rate of the optimizer.
 
         :param optimizer: Optimizer
         :type optimizer: Optimizer
         :param lr: Learning rate value, or actor/critic pair.
         :type lr: float | tuple[float, float]
-        :param accelerator: Accelerator
-        :type accelerator: Accelerator | None
         :param scheduler_config: Scheduler configuration
         :type scheduler_config: CosineLRScheduleConfig | None
 
-        :return: Tuple of accelerator and scheduler
-        :rtype: tuple[Accelerator | None, SequentialLR | None]
+        :return: A fresh warmup scheduler when ``scheduler_config`` is set.
+        :rtype: SequentialLR | None
         """
         if isinstance(lr, tuple):
             lr_actor, lr_critic = lr
@@ -2884,12 +2765,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             for param_group in optimizer.param_groups:
                 param_group["lr"] = lr
 
-        scheduler = (
+        return (
             create_warmup_cosine_scheduler(optimizer, scheduler_config, 1e-8, lr)
             if scheduler_config is not None
             else None
         )
-        return accelerator, scheduler
 
     def set_reference_policy(self, reference_update_tracker: int) -> None:
         """Update the reference policy when the reference policy update tracker is greater than the current reference policy update tracker.
@@ -2901,8 +2781,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             "Reference policy update tracker should be greater than or equal to the current reference policy update tracker."
         )
         if reference_update_tracker > self.reference_update_tracker:
-            if self.accelerator is not None:
-                self.accelerator.wait_for_everyone()
+            barrier()
             if self.use_separate_reference_adapter:
                 self._copy_adapter_weights(
                     source_adapter="actor", target_adapter="reference"
@@ -2920,8 +2799,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     peft_model=peft_model,
                     adapter_name="actor",
                 )
-                if self.accelerator is not None:
-                    self.accelerator.wait_for_everyone()
+                barrier()
                 self.use_adapter("actor")
             self.reference_update_tracker += 1
 
@@ -3097,7 +2975,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             base_model = create_model_from_name_or_path(
                 self.pretrained_model_name_or_path,
                 add_value_head=self.use_value_head,
-                use_accelerator=self.accelerator is not None,
+                use_distributed=self.distributed,
             )
 
         if add_adapters:
@@ -3162,7 +3040,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         patch_lora_for_fused_forward(self.actor)
 
         if self.torch_compiler:
-            if self.accelerator is not None:
+            if self.distributed:
                 warnings.warn(
                     "torch_compiler is not yet supported for distributed LLM "
                     "training; compilation skipped for this run.",
@@ -3178,10 +3056,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     self.gradient_checkpointing = False
                 self.actor = compile_model(self.actor, self.torch_compiler)
 
-        if self.accelerator is None:
-            # Accelerated runs move the model in ``accelerator.prepare``;
-            # plain runs move it here so optimizer params land on-device.
-            self.actor = self.actor.to(self.device)
+        # FSDP2 shards in wrap_models after this; data-parallel and plain
+        # runs train the on-device model directly.
+        self.actor = self.actor.to(self.device)
 
         self.optimizer = OptimizerWrapper(
             AdamW,
@@ -3228,12 +3105,13 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
     @contextmanager
     def _amp_ctx(self):
-        """Yield a ``torch.amp.autocast`` context when running without an accelerator.
+        """Yield a ``torch.amp.autocast`` context on single-device CUDA runs.
 
-        When an ``Accelerator`` is present it already manages mixed-precision
-        via its own autocast wrapper, so this is a no-op in that case.
+        Distributed runs train the model in its native (bf16) dtype — with an
+        FSDP2 mixed-precision policy when configured — so this is a no-op
+        there.
         """
-        if self.accelerator is not None:
+        if self.distributed:
             yield
         else:
             device_type = torch.device(self.device).type
@@ -3600,14 +3478,20 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         if accumulation_steps > 1:
             loss = loss / accumulation_steps
 
-        if self.accelerator is not None:
-            self.accelerator.backward(loss)
-        else:
-            loss.backward()
+        loss.backward()
 
         self._micro_batch_count += 1
         if self._micro_batch_count % accumulation_steps != 0:
             return
+
+        if self.distributed and self.fsdp_config is None:
+            # Data-parallel without a wrapper: average the (LoRA-sized)
+            # trainable gradients across ranks at the step boundary.
+            sync_grads(
+                param
+                for group in self.optimizer.optimizer.param_groups
+                for param in group["params"]
+            )
 
         if self.max_grad_norm is not None:
             for group in self.optimizer.optimizer.param_groups:
@@ -3623,11 +3507,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def _peft_model(self) -> Any:
         """The PeftModel managing LoRA adapters.
 
-        The actor is unwrapped from accelerate wrappers first — DDP does not
-        forward attribute access to the wrapped module. When
-        ``use_value_head=True`` the PeftModel lives inside the value-head
-        wrapper at ``actor.pretrained_model``; otherwise the unwrapped actor
-        itself is the PeftModel.
+        When ``use_value_head=True`` the PeftModel lives inside the
+        value-head wrapper at ``actor.pretrained_model``; otherwise the
+        actor itself is the PeftModel.
         """
         actor = self._get_unwrapped_actor()
         if self.use_value_head:
@@ -3639,10 +3521,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         PEFT's set_adapter() sets requires_grad=False on all non-active adapter
         weights. Distributed data-parallel backends register gradient hooks at
-        accelerator.prepare() time based on the requires_grad snapshot at
-        that moment. If set_adapter() later toggles requires_grad=False on params
-        that the backend registered hooks for, those hooks never fire and
-        gradient synchronization stalls - the optimizer sees zero gradients.
+        training start based on the requires_grad snapshot at that moment.
+        If set_adapter() later toggles requires_grad=False on params the
+        gradient-sync step expects to reduce, those params silently stop
+        training - the optimizer sees zero gradients.
 
         :param selected_adapters: LoRA adapter names whose params should be trainable.
         :type selected_adapters: list[str]
@@ -3669,8 +3551,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """Sync the trained model weights into the colocated vLLM engine."""
         if self._vllm_moved:
             return
-        if self.accelerator is not None:
-            self.accelerator.wait_for_everyone()
+        barrier()
         model_ref = self._get_unwrapped_actor()
         peft_ref = model_ref.pretrained_model if self.use_value_head else model_ref
         peft_ref.set_adapter("actor")
@@ -3838,8 +3719,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             for max_output_token in all_max_output_tokens
         ]
 
-        if self.accelerator is not None:
-            self.accelerator.wait_for_everyone()
+        barrier()
 
         all_outputs = self.llm.generate(
             all_token_prompts,
@@ -4044,43 +3924,31 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """Derive per-process batch sizes and gradient accumulation steps.
 
         ``batch_size`` is the global batch size per optimizer step. Each
-        process consumes ``batch_size / num_processes`` samples, split into
+        process consumes ``batch_size / world_size`` samples, split into
         micro-batches of ``micro_batch_size_per_gpu`` with gradients
         accumulated across them (see :meth:`_backward_pass`).
 
-        When ``micro_batch_size_per_gpu`` is not given, it is derived from the
-        accelerator's ``gradient_accumulation_steps`` (configured via the
-        accelerate config / ``Accelerator(gradient_accumulation_steps=...)``).
-        When it is given, the accumulation steps are derived from it instead.
-
-        Without an accelerator there is no gradient accumulation: each
-        micro-batch is its own optimizer step (matching prior behaviour).
+        When ``micro_batch_size_per_gpu`` is not given, it is derived from
+        the ``gradient_accumulation_steps`` constructor argument; when it is
+        given, the accumulation steps are derived from it instead.
         """
-        if self.accelerator is None:
-            self.batch_size_per_process = batch_size
-            if micro_batch_size_per_gpu is not None:
-                self.micro_batch_size_per_gpu = int(micro_batch_size_per_gpu)
-            else:
-                self.micro_batch_size_per_gpu = batch_size
-            self.gradient_accumulation_steps = 1
-            return
-
-        if batch_size % self.accelerator.num_processes != 0:
-            msg = f"Batch size ({batch_size}) must be divisible by the number of processes ({self.accelerator.num_processes})."
+        world_size = get_world_size()
+        if batch_size % world_size != 0:
+            msg = f"Batch size ({batch_size}) must be divisible by the number of processes ({world_size})."
             raise ValueError(
                 msg,
             )
 
-        self.batch_size_per_process = int(batch_size / self.accelerator.num_processes)
+        self.batch_size_per_process = int(batch_size / world_size)
 
         if micro_batch_size_per_gpu is None:
-            gradient_accumulation_steps = int(
-                getattr(self.accelerator, "gradient_accumulation_steps", 1) or 1
+            gradient_accumulation_steps = max(
+                self._requested_gradient_accumulation_steps, 1
             )
             if self.batch_size_per_process % gradient_accumulation_steps != 0:
                 msg = (
-                    f"Batch size ({batch_size}) must be divisible by the product of the number of processes ({self.accelerator.num_processes}) and gradient accumulation steps ({gradient_accumulation_steps})."
-                    " Gradient accumulation steps can be configured via the accelerate config or Accelerator(gradient_accumulation_steps=...)."
+                    f"Batch size ({batch_size}) must be divisible by the product of the number of processes ({world_size}) and gradient accumulation steps ({gradient_accumulation_steps})."
+                    " Gradient accumulation steps can be configured via the gradient_accumulation_steps constructor argument."
                 )
                 raise ValueError(
                     msg,
@@ -4100,12 +3968,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             raise ValueError(msg)
 
         self.micro_batch_size_per_gpu = int(micro_batch_size_per_gpu)
-        if (
-            batch_size
-            % (self.micro_batch_size_per_gpu * self.accelerator.num_processes)
-            != 0
-        ):
-            msg = f"When specifying micro_batch_size_per_gpu, batch_size ({batch_size}) must be divisible by the product of the number of processes ({self.accelerator.num_processes}) and micro_batch_size_per_gpu ({self.micro_batch_size_per_gpu})."
+        if batch_size % (self.micro_batch_size_per_gpu * world_size) != 0:
+            msg = f"When specifying micro_batch_size_per_gpu, batch_size ({batch_size}) must be divisible by the product of the number of processes ({world_size}) and micro_batch_size_per_gpu ({self.micro_batch_size_per_gpu})."
             raise ValueError(
                 msg,
             )
@@ -4120,7 +3984,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         Iterates over ``evolvable_attributes`` and compiles each one.
         Skipped for distributed runs, matching :meth:`_initialize_actors`.
         """
-        if self.torch_compiler is None or self.accelerator is not None:
+        if self.torch_compiler is None or self.distributed:
             return
         for name, obj in self.evolvable_attributes(networks_only=True).items():
             setattr(self, name, compile_model(obj, self.torch_compiler))
@@ -4161,8 +4025,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             elif "actor" in name or "critic" in name:
                 param.requires_grad = True
 
-        if self.accelerator is not None:
-            self.accelerator.wait_for_everyone()
+        barrier()
 
     def _copy_adapter_weights(self, source_adapter: str, target_adapter: str) -> None:
         """Copy LoRA weights from source adapter to target adapter."""
@@ -4483,8 +4346,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if "reference" in name:
                 param.requires_grad = False
 
-        if self.accelerator is not None:
-            self.accelerator.wait_for_everyone()
+        barrier()
 
     @staticmethod
     def _pad_adapter_state_to_live_shape(
@@ -4552,15 +4414,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 stacklevel=2,
             )
             self.vllm_config = VLLMConfig()
-        num_processes = (
-            self.accelerator.num_processes if self.accelerator is not None else 1
-        )
-        process_index = (
-            self.accelerator.process_index if self.accelerator is not None else 0
-        )
-        local_process_index = (
-            self.accelerator.local_process_index if self.accelerator is not None else 0
-        )
+        num_processes = get_world_size()
+        process_index = get_rank()
+        local_process_index = get_local_rank()
         if num_processes % self.vllm_config.tensor_parallel_size != 0:
             msg = f"Tensor parallel size {self.vllm_config.tensor_parallel_size} must be a multiple of the number of processes {num_processes}."
             raise ValueError(
@@ -4584,7 +4440,19 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 ],
             )
 
-        # vLLM requires the environment variables to be set for distributed training.
+        # vLLM (external_launcher backend) reads the rendezvous env vars
+        # during init. In a real distributed run the launcher already set
+        # them; on a single device we synthesise them for vLLM only and
+        # remove them again afterwards, so a later ``init_distributed()``
+        # in this process doesn't mistake them for a launcher environment.
+        rendezvous_vars = (
+            "RANK",
+            "LOCAL_RANK",
+            "WORLD_SIZE",
+            "MASTER_ADDR",
+            "MASTER_PORT",
+        )
+        synthesised_vars = [var for var in rendezvous_vars if var not in os.environ]
         os.environ["RANK"] = str(process_index)
         os.environ["LOCAL_RANK"] = str(local_process_index)
         os.environ["WORLD_SIZE"] = str(num_processes)
@@ -4629,12 +4497,14 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 )
                 raise ValueError(msg) from err
             raise
+        finally:
+            for var in synthesised_vars:
+                os.environ.pop(var, None)
 
         if self.vllm_config.sleep_mode:
             self.llm.sleep(level=2)
 
-        if self.accelerator is not None:
-            self.accelerator.wait_for_everyone()
+        barrier()
 
     def _get_lm_head_parent(self) -> tuple[Any, str]:
         """Locate the parent module owning ``lm_head`` (or ``embed_out``).
@@ -4695,18 +4565,14 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             setattr(model, attr, original)
 
     def _get_unwrapped_actor(self) -> Any:
-        """Return actor unwrapped from Accelerate wrappers (e.g. DDP)."""
-        return (
-            self.accelerator.unwrap_model(self.actor)
-            if self.accelerator is not None
-            else self.actor
-        )
+        """Return the actor (data-parallel runs use no wrapper; FSDP2 swaps
+        parameters in place).
+        """
+        return self.actor
 
     def _prepare_vllm_for_training(self) -> None:
         """Prepare vLLM for learning."""
-        if self._vllm_awake and (
-            self.accelerator is None or self.accelerator.is_main_process
-        ):
+        if self._vllm_awake and is_main_process():
             torch.cuda.empty_cache()
             self.llm.sleep(level=2)
             self._vllm_awake = False
@@ -4715,9 +4581,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             self._vllm_moved = False
 
     def _prepare_vllm_for_generation(self) -> None:
-        if not self._vllm_awake and (
-            self.accelerator is None or self.accelerator.is_main_process
-        ):
+        if not self._vllm_awake and is_main_process():
             torch.cuda.empty_cache()
             self.llm.wake_up()
             self._vllm_awake = True

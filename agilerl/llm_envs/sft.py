@@ -9,7 +9,6 @@ from agilerl.typing import SFTPrompts
 
 if TYPE_CHECKING:
     import torch
-    from accelerate import Accelerator
     from datasets import Dataset
     from transformers import AutoTokenizer
 
@@ -24,7 +23,6 @@ class SFTGym(IterablePromptBatchGym):
         tokenizer: AutoTokenizer,
         data_batch_size_per_gpu: int = 8,
         response_column: str = "target",
-        accelerator: Accelerator | None = None,
         max_context_length: int | None = None,
         seed: int = 42,
     ) -> None:
@@ -44,7 +42,6 @@ class SFTGym(IterablePromptBatchGym):
             data_batch_size_per_gpu=data_batch_size_per_gpu,
             max_context_length=max_context_length,
             min_completion_length=None,
-            accelerator=accelerator,
             seed=seed,
         )
 

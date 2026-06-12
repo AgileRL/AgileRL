@@ -26,7 +26,6 @@ Dependencies
     import re
     import torch
     import yaml
-    from accelerate import Accelerator
     from datasets import load_dataset
     from peft import LoraConfig, get_peft_model
     from torch.utils.data import Dataset
@@ -223,9 +222,6 @@ and then instantiate the ``ReasoningGym`` object which converts a Hugging Face d
             {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
         ]
 
-        # Define accelerators for distributed training
-        accelerator = Accelerator()
-
         # Convert the HuggingFace dataset into a Gymnasium environment
         env = ReasoningGym(
             train_dataset=train_dataset,
@@ -234,7 +230,6 @@ and then instantiate the ``ReasoningGym`` object which converts a Hugging Face d
             reward_fn=combined_rewards,
             conversation_template=conversation_template,
             data_batch_size_per_gpu=10,
-            accelerator=accelerator,
             return_raw_completions=True, # This is necessary for vLLM to work
         )
 
@@ -249,8 +244,9 @@ for the GRPO hyperparameters and the mutation parameters.
 An important part of training an LLM to display reasoning behavaiour is distributed training. They are
 called *Large* Language Models for a reason, and are often too large to train on a single GPU. If you want
 to train a larger, more powerful model, then this becomes even more infeasible. Instead, we can leverage
-distributed training, to share the workload across multiple devices and speed up training. To enable distributed
-training in this tutorial, we use accelerate (torch-native DDP).
+distributed training, to share the workload across multiple devices and speed up training. AgileRL's LLM
+algorithms use native ``torch.distributed``: when the script is launched with ``torchrun`` the constructor
+initialises the process group automatically, so the same code runs on one GPU or many.
 
 .. code-block:: python
 
@@ -285,7 +281,6 @@ training in this tutorial, we use accelerate (torch-native DDP).
         INIT_HP=init_hp,
         hp_config=hp_config,
         population_size=init_hp["POP_SIZE"],
-        accelerator=accelerator,
         algo_kwargs=algo_kwargs,
     )
 
@@ -351,58 +346,42 @@ The simplest way to train an AgileRL agent is to use the :meth:`finetune_llm_rea
         evo_steps=10,
         mutation=mutations,
         tournament=tournament,
-        accelerator=accelerator,
         verbose=True,
         num_epochs=1
     )
 
-Configuring Accelerate
-----------------------
-To generate an accelerate file, run the command ``accelerate config`` in your terminal, following the instructions
-on screen to outline the details of the compute you intend to use for your finetuning. For LoRA fine-tuning the
-default multi-GPU (DDP) setup is the recommended choice: only the small adapter gradients are synchronized
-between devices, and the base model weights stay whole on each rank (which colocated vLLM generation requires).
-The accelerate config handles the details of the distribution and the GRPO class handles how the accelerator
-is used during training. You can then launch a training run using ``accelerate`` with the following command:
+Launching distributed training
+------------------------------
+To train across multiple GPUs, launch the training script with ``torchrun``:
 
 .. code-block:: bash
 
-    accelerate launch path/to/training_script
+    torchrun --nproc_per_node 4 path/to/training_script
 
-Alternatively, you can avoid ``accelerate config`` by defining your own accelerate config file and pass
-it as an argument to ``accelerate launch``:
+``torchrun`` sets the standard rendezvous environment variables and the LLM algorithm
+constructors call ``init_distributed()`` automatically — no launcher config files and no
+changes to the script are needed. For LoRA fine-tuning, plain data parallelism is the
+recommended choice: only the small adapter gradients are synchronized between devices,
+and the base model weights stay whole on each rank (which colocated vLLM generation requires).
 
-.. code-block:: bash
+Gradient clipping is configured via the ``max_grad_norm`` argument to the algorithm,
+and gradient accumulation via the ``gradient_accumulation_steps`` argument (or
+``micro_batch_size_per_gpu``), passed through ``algo_kwargs``. For models too large to
+train unsharded, shard the actor with PyTorch FSDP2 by passing an
+:class:`~agilerl.utils.distributed.FSDPConfig`:
 
-    accelerate launch --config_file path/to/accelerate-config.yaml path/to/training_script
+.. code-block:: python
 
-Example config file (see ``configs/accelerate/grpo_accelerate_config.yaml``):
+    from agilerl.utils.distributed import FSDPConfig
 
-.. code-block:: yaml
-
-    compute_environment: LOCAL_MACHINE
-    debug: false
-    gradient_accumulation_steps: 2
-    distributed_type: MULTI_GPU
-    downcast_bf16: no
-    enable_cpu_affinity: false
-    machine_rank: 0
-    main_training_function: main
-    mixed_precision: bf16
-    num_machines: 4
-    num_processes: 1
-    rdzv_backend: static
-    same_network: true
-    tpu_env: []
-    tpu_use_cluster: false
-    tpu_use_sudo: false
-    use_cpu: false
-
-For models too large to train unsharded, AgileRL supports PyTorch FSDP2
-(``fsdp_version: 2``) — see ``configs/accelerate/fsdp2_accelerate_config.yaml``.
-Gradient clipping is configured via the ``max_grad_norm`` argument to the
-algorithm, and gradient accumulation via ``gradient_accumulation_steps`` in the
-accelerate config (or the ``micro_batch_size_per_gpu`` argument).
+    algo_kwargs = {
+        ...,
+        "gradient_accumulation_steps": 2,
+        "fsdp_config": FSDPConfig(
+            reshard_after_forward=True,  # ZeRO-3-like memory profile
+            cpu_offload=False,
+        ),
+    }
 
 
 Using a Custom Training Loop
@@ -415,15 +394,16 @@ function and is an example of how we might choose to make use of a population of
 
     .. code-block:: python
 
-        from agilerl.utils.utils import aggregate_metrics_across_gpus
-        from agilerl.training.train_llm import tournament_selection_and_mutation
+        from agilerl.utils.utils import (
+            aggregate_metrics_across_gpus,
+            tournament_selection_and_mutation,
+        )
+        from agilerl.utils.distributed import barrier, is_main_process
         from tqdm import trange
         import numpy as np
         import torch
-        from accelerate import Accelerator
 
-        accelerator = Accelerator()
-        if accelerator is None or accelerator.is_main_process:
+        if is_main_process():
             print("\nTraining...")
 
         bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
@@ -452,13 +432,18 @@ function and is an example of how we might choose to make use of a population of
                     action_masks,
                     rewards,
                 )
-                loss, kl = agent.learn(experiences)
-                metrics = [loss, kl, rewards, completion_lengths]
+                learn_metrics = agent.learn(experiences)
+                metrics = [
+                    learn_metrics["mean_loss"],
+                    learn_metrics["mean_kl"],
+                    rewards,
+                    completion_lengths,
+                ]
                 if max_reward is not None:
                     accuracy = (rewards == max_reward).sum() / len(rewards.flatten())
                     metrics.append(accuracy)
                 agg_metrics = [
-                    aggregate_metrics_across_gpus(accelerator, metric) for metric in metrics
+                    aggregate_metrics_across_gpus(metric) for metric in metrics
                 ]
                 prompts = next_prompts
                 agg_test_metrics = None
@@ -471,10 +456,10 @@ function and is an example of how we might choose to make use of a population of
                         )
                         test_metrics.append(test_accuracy)
                     agg_test_metrics = [
-                        aggregate_metrics_across_gpus(accelerator, metric)
+                        aggregate_metrics_across_gpus(metric)
                         for metric in test_metrics
                     ]
-                    if verbose and (accelerator is None or accelerator.is_main_process):
+                    if verbose and is_main_process():
                         fitness = [str(round(agent.fitness[-1], 2)) for agent in pop]
                         avg_fitness = [
                             "%.2f" % np.mean(agent.fitness[-5:]) for agent in pop
@@ -496,7 +481,7 @@ function and is an example of how we might choose to make use of a population of
                             """,
                             end="\r",
                         )
-                if accelerator is None or accelerator.is_main_process:
+                if is_main_process():
                     metrics_dict = {
                         "Train/Loss": agg_metrics[0],
                         "Train/KL-divergence": agg_metrics[1],
@@ -518,8 +503,7 @@ function and is an example of how we might choose to make use of a population of
                     agent.scores.append(mean_scores)
                     total_steps += effective_data_batch_size
 
-            if accelerator is not None:
-                accelerator.wait_for_everyone()
+            barrier()
             if tournament and mutation is not None:
                 if (i + 1) % evo_steps == 0:
                     pop = tournament_selection_and_mutation(
@@ -527,7 +511,6 @@ function and is an example of how we might choose to make use of a population of
                         tournament=tournament,
                         mutation=mutations,
                         env_name=env.name,
-                        accelerator=None,  # Set as None for LLM finetuning as it does not require the same accelerator handling as standard RL models
                         language_model=True,
                         elite_path=elite_path,
                         save_elite=save_elite

@@ -15,7 +15,6 @@ from transformers import AutoTokenizer
 from agilerl.algorithms import LLMPPO, LLMREINFORCE, GRPO, CISPO, GSPO
 from agilerl.training.train_llm import finetune_llm_multiturn
 from agilerl.utils.algo_utils import VLLMConfig
-from agilerl.utils.llm_utils import create_llm_accelerator
 from agilerl.utils.utils import create_population
 from agilerl.llm_envs import (
     TokenObservationWrapper,
@@ -65,8 +64,6 @@ def main(
             max_output_tokens=init_hp.get("MAX_OUTPUT_TOKENS", None),
         )
 
-    accelerator = create_llm_accelerator()
-
     pop_size = init_hp.get("POP_SIZE", 1)
     vllm_sleep = pop_size == 1
 
@@ -85,7 +82,6 @@ def main(
         net_config=None,
         INIT_HP=init_hp,
         population_size=pop_size,
-        accelerator=accelerator,
         tokenizer=tokenizer,
         model_name=model_name,
         vllm_config=vllm_config,
@@ -109,11 +105,8 @@ def main(
         max_reward=1.0,
         verbose=True,
         max_steps=300_000,
-        accelerator=accelerator,
         env_factory=env_factory,
     )
-    if accelerator is not None:
-        accelerator.end_training()
 
 
 if __name__ == "__main__":

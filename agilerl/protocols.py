@@ -27,7 +27,6 @@ from typing import (
 
 import numpy as np
 import torch
-from accelerate import Accelerator
 from torch.optim.optimizer import Optimizer
 
 NumpyObsType = np.ndarray | dict[str, np.ndarray] | tuple[np.ndarray, ...]
@@ -339,7 +338,6 @@ class EvolvableAlgorithmProtocol(Protocol):
     """
 
     device: str | torch.device
-    accelerator: Accelerator
     registry: MutationRegistryProtocol
     mut: str | None
     index: int
@@ -348,24 +346,13 @@ class EvolvableAlgorithmProtocol(Protocol):
     steps: list[int]
     torch_compiler: str | None
 
-    def unwrap_models(self) -> None:
-        pass
-
-    def wrap_models(self) -> None:
-        pass
-
     def load(
         self: type[EvolvableAlgorithm],
         path: str,
     ) -> EvolvableAlgorithm:
         pass
 
-    def load_checkpoint(
-        self,
-        path: str,
-        device: str,
-        accelerator: Accelerator | None,
-    ) -> None:
+    def load_checkpoint(self, path: str) -> None:
         pass
 
     def save_checkpoint(self, path: str) -> None:

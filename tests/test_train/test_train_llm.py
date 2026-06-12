@@ -3,7 +3,6 @@ from unittest.mock import ANY, MagicMock, Mock, call, patch
 import numpy as np
 import pytest
 import torch
-from accelerate import Accelerator
 
 pytest.importorskip("transformers", reason="LLM dependencies not installed")
 pytest.importorskip("peft", reason="LLM tests require peft.")
@@ -113,8 +112,7 @@ def _make_multiturn_env_factory(*, turn_boundaries_len: int = 3):
 
 
 class TestFinetuneLlmReasoning:
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    def test_finetune_llm_reasoning_basic_training_loop(self, use_accelerator):
+    def test_finetune_llm_reasoning_basic_training_loop(self):
         """Test the basic training loop in finetune_llm_reasoning."""
         # Create mock agent
         mock_agent = MagicMock(spec=GRPO)
@@ -154,7 +152,6 @@ class TestFinetuneLlmReasoning:
                 env=mock_env,
                 evaluation_interval=2,
                 max_reward=2.0,
-                accelerator=Accelerator() if use_accelerator else None,
             )
             assert mock_env.reset.call_count == 1
             assert mock_env.reset.call_args == call(reset_dataloaders=True)
@@ -163,20 +160,9 @@ class TestFinetuneLlmReasoning:
             assert mock_agent.learn.call_count == 6
             expected_agg_calls = 36
             assert mock_agg.call_count == expected_agg_calls
-            if not use_accelerator:
-                assert all(
-                    call_args.args[0] is None for call_args in mock_agg.call_args_list
-                )
             assert mock_agent.test.call_count == 3  # Should be called at step 2
 
-    @pytest.mark.parametrize(
-        "use_accelerator",
-        [
-            True,
-            # False
-        ],
-    )
-    def test_finetune_llm_reasoning_with_wandb_and_checkpoints(self, use_accelerator):
+    def test_finetune_llm_reasoning_with_wandb_and_checkpoints(self):
         """Test finetune_llm_reasoning with wandb logging and checkpointing enabled."""
         # Create mock agent
         mock_agent = MagicMock(spec=GRPO)
@@ -229,7 +215,6 @@ class TestFinetuneLlmReasoning:
                 wb=True,
                 wandb_api_key="fake_key",
                 evaluation_interval=3,
-                accelerator=None if use_accelerator else Accelerator(),
                 max_reward=2.0,
                 checkpoint_steps=6,
             )
@@ -244,8 +229,7 @@ class TestFinetuneLlmReasoning:
             # Verify evaluation was called at the right intervals (steps 3)
             assert mock_agent.test.call_count == 2
 
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    def test_finetune_llm_reasoning_evolvable_training_loop(self, use_accelerator):
+    def test_finetune_llm_reasoning_evolvable_training_loop(self):
         """Test the basic training loop in finetune_llm_reasoning."""
         # Create mock agent
         mock_agent = MagicMock(spec=GRPO)
@@ -296,7 +280,6 @@ class TestFinetuneLlmReasoning:
                 evaluation_interval=2,
                 max_reward=2.0,
                 evo_steps=1,
-                accelerator=Accelerator() if use_accelerator else None,
                 tournament=Mock(),
                 mutation=mutation,
             )
@@ -307,10 +290,6 @@ class TestFinetuneLlmReasoning:
             assert mock_agent.learn.call_count == 6
             expected_agg_calls = 36
             assert mock_agg.call_count == expected_agg_calls
-            if not use_accelerator:
-                assert all(
-                    call_args.args[0] is None for call_args in mock_agg.call_args_list
-                )
             assert mock_agent.test.call_count == 3  # Should be called at step 2
             assert (
                 mock_tournament_selection_and_mutation.call_count == 6
@@ -331,7 +310,6 @@ class TestFinetuneLlmReasoning:
                 ],
                 env=MagicMock(),
                 evo_steps=None,
-                accelerator=None,
                 tournament=MagicMock(),
                 mutation=MagicMock(),
             )
@@ -355,7 +333,6 @@ class TestFinetuneLlmReasoning:
                 ],
                 env=MagicMock(),
                 evo_steps=None,
-                accelerator=None,
                 tournament=MagicMock(),
                 mutation=MagicMock(),
             )
@@ -465,7 +442,6 @@ class TestFinetuneLlmReasoning:
                 evaluation_interval=2,
                 max_reward=2.0,
                 evo_steps=1,
-                accelerator=None,
                 num_epochs=2,
                 checkpoint_steps=3,
             )
@@ -521,7 +497,6 @@ class TestFinetuneLlmReasoning:
                 evaluation_interval=2,
                 max_reward=2.0,
                 evo_steps=1,
-                accelerator=None,
                 num_epochs=2,
                 checkpoint_steps=3,
             )
@@ -543,7 +518,6 @@ class TestFinetuneLlmReasoning:
                 pop=[mock_agent],
                 env=MagicMock(),
                 evaluation_interval=2,
-                accelerator=None,
             )
 
     def test_finetune_llm_reasoning_csv_logging_without_wandb(self, tmp_path):
@@ -586,7 +560,6 @@ class TestFinetuneLlmReasoning:
                 env=mock_env,
                 evaluation_interval=2,
                 max_reward=2.0,
-                accelerator=None,
                 elite_path=str(tmp_path),
                 wb=False,
                 log_csv=True,
@@ -639,7 +612,6 @@ class TestFinetuneLlmReasoning:
                 env=mock_env,
                 evaluation_interval=2,
                 max_reward=2.0,
-                accelerator=None,
                 elite_path=str(tmp_path),
                 wb=True,
                 wandb_api_key="fake_key",
@@ -691,7 +663,6 @@ class TestFinetuneLlmReasoning:
                 env=mock_env,
                 evaluation_interval=100,
                 max_reward=2.0,
-                accelerator=None,
                 elite_path=str(tmp_path),
                 wb=False,
                 log_csv=True,
@@ -755,7 +726,6 @@ class TestFinetuneLlmReasoning:
                 max_steps=2,
                 evaluation_interval=100,
                 verbose=False,
-                accelerator=None,
             )
 
         assert env_fn.call_count == 2
@@ -806,7 +776,6 @@ class TestFinetuneLlmReasoning:
                 env=mock_env,
                 evaluation_interval=2,
                 max_reward=None,
-                accelerator=None,
                 elite_path=str(tmp_path),
                 wb=False,
                 log_csv=True,
@@ -818,8 +787,7 @@ class TestFinetuneLlmReasoning:
 
 
 class TestFinetuneLlmPreference:
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    def test_finetune_llm_preference_basic_training_loop(self, use_accelerator):
+    def test_finetune_llm_preference_basic_training_loop(self):
         """Test the basic training loop in finetune_llm."""
         # Create mock agent
         mock_agent = MagicMock(spec=DPO)
@@ -864,7 +832,6 @@ class TestFinetuneLlmPreference:
                 pop=[mock_agent],
                 env=mock_env,
                 evaluation_interval=2,
-                accelerator=Accelerator() if use_accelerator else None,
             )
             assert mock_env.reset.call_count == 1
             assert mock_env.reset.call_args == call(reset_dataloaders=True)
@@ -873,17 +840,9 @@ class TestFinetuneLlmPreference:
             assert mock_agent.learn.call_count == 6
             expected_agg_calls = 21
             assert mock_agg.call_count == expected_agg_calls
-            if not use_accelerator:
-                assert all(
-                    call_args.args[0] is None for call_args in mock_agg.call_args_list
-                )
             assert mock_agent.test.call_count == 3  # Should be called at step 2
 
-    @pytest.mark.parametrize(
-        "use_accelerator",
-        [True, False],
-    )
-    def test_finetune_llm_preference_with_wandb_and_checkpoints(self, use_accelerator):
+    def test_finetune_llm_preference_with_wandb_and_checkpoints(self):
         """Test finetune_llm with wandb logging and checkpointing enabled."""
         # Create mock agent
         mock_agent = MagicMock(spec=DPO)
@@ -941,7 +900,6 @@ class TestFinetuneLlmPreference:
                 wb=True,
                 wandb_api_key="fake_key",
                 evaluation_interval=3,
-                accelerator=Accelerator() if use_accelerator else None,
                 checkpoint_steps=6,
             )
 
@@ -955,8 +913,7 @@ class TestFinetuneLlmPreference:
             # Verify evaluation was called at the right intervals (steps 3)
             assert mock_agent.test.call_count == 2
 
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    def test_finetune_llm_preference_evolvable_training_loop(self, use_accelerator):
+    def test_finetune_llm_preference_evolvable_training_loop(self):
         """Test the basic training loop in finetune_llm."""
         # Create mock agent
         mock_agent = MagicMock(spec=DPO)
@@ -1014,7 +971,6 @@ class TestFinetuneLlmPreference:
                 env=mock_env,
                 evaluation_interval=2,
                 evo_steps=1,
-                accelerator=Accelerator() if use_accelerator else None,
                 tournament=Mock(),
                 mutation=mutation,
             )
@@ -1024,10 +980,6 @@ class TestFinetuneLlmPreference:
             assert mock_agent.learn.call_count == 6
             expected_agg_calls = 21
             assert mock_agg.call_count == expected_agg_calls
-            if not use_accelerator:
-                assert all(
-                    call_args.args[0] is None for call_args in mock_agg.call_args_list
-                )
             assert mock_agent.test.call_count == 3  # Should be called at step 2
             assert (
                 mock_tournament_selection_and_mutation.call_count == 6
@@ -1149,7 +1101,6 @@ class TestFinetuneLlmPreference:
                 env=mock_env,
                 evaluation_interval=2,
                 evo_steps=1,
-                accelerator=None,
                 num_epochs=2,
                 checkpoint_steps=3,
             )
@@ -1171,7 +1122,6 @@ class TestFinetuneLlmPreference:
                 pop=[mock_agent],
                 env=MagicMock(),
                 evaluation_interval=2,
-                accelerator=None,
             )
 
     def test_finetune_llm_preference_env_fn_uses_distinct_env_instances(self):
@@ -1227,7 +1177,6 @@ class TestFinetuneLlmPreference:
                 max_steps=2,
                 evaluation_interval=100,
                 verbose=False,
-                accelerator=None,
             )
 
         assert env_fn.call_count == 2
@@ -1279,7 +1228,6 @@ class TestFinetuneLlmPreference:
                 pop=[mock_agent],
                 env=mock_env,
                 evaluation_interval=2,
-                accelerator=None,
                 elite_path=str(tmp_path),
                 wb=False,
                 log_csv=True,
@@ -1337,7 +1285,6 @@ class TestFinetuneLlmPreference:
                 pop=[mock_agent],
                 env=mock_env,
                 evaluation_interval=100,
-                accelerator=None,
                 elite_path=str(tmp_path),
                 wb=False,
                 log_csv=True,
@@ -1348,8 +1295,7 @@ class TestFinetuneLlmPreference:
 
 
 class TestFinetuneLlmSft:
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    def test_finetune_llm_sft_basic_training_loop(self, use_accelerator):
+    def test_finetune_llm_sft_basic_training_loop(self):
         """Test the basic training loop in finetune_llm_sft."""
         mock_agent = MagicMock(spec=SFT)
         mock_agent.algo = "SFT"
@@ -1381,7 +1327,6 @@ class TestFinetuneLlmSft:
                 pop=[mock_agent],
                 env=mock_env,
                 evaluation_interval=2,
-                accelerator=None if use_accelerator else Accelerator(),
             )
             assert mock_env.reset.call_count == 1
             assert mock_env.reset.call_args == call(reset_dataloaders=True)
@@ -1389,8 +1334,7 @@ class TestFinetuneLlmSft:
             assert mock_agent.learn.call_count == 6
             assert mock_agent.test.call_count == 3
 
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    def test_finetune_llm_sft_with_wandb_and_checkpoints(self, use_accelerator):
+    def test_finetune_llm_sft_with_wandb_and_checkpoints(self):
         """Test finetune_llm_sft with wandb logging and checkpointing enabled."""
         mock_agent = MagicMock(spec=SFT)
         mock_agent.algo = "SFT"
@@ -1435,7 +1379,6 @@ class TestFinetuneLlmSft:
                 wb=True,
                 wandb_api_key="fake_key",
                 evaluation_interval=3,
-                accelerator=None if use_accelerator else Accelerator(),
                 checkpoint_steps=6,
             )
 
@@ -1444,8 +1387,7 @@ class TestFinetuneLlmSft:
             assert mock_save.call_count == 1
             assert mock_agent.test.call_count == 2
 
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    def test_finetune_llm_sft_evolvable_training_loop(self, use_accelerator):
+    def test_finetune_llm_sft_evolvable_training_loop(self):
         """Test the evolvable training loop in finetune_llm_sft."""
         mock_agent = MagicMock(spec=SFT)
         mock_agent.algo = "SFT"
@@ -1489,7 +1431,6 @@ class TestFinetuneLlmSft:
                 env=mock_env,
                 evaluation_interval=2,
                 evo_steps=1,
-                accelerator=None if use_accelerator else Accelerator(),
                 tournament=Mock(),
                 mutation=mutation,
             )
@@ -1578,7 +1519,6 @@ class TestFinetuneLlmSft:
                 env=mock_env,
                 evaluation_interval=2,
                 evo_steps=1,
-                accelerator=None,
                 num_epochs=2,
                 checkpoint_steps=3,
             )
@@ -1600,7 +1540,6 @@ class TestFinetuneLlmSft:
                 pop=[mock_agent],
                 env=MagicMock(),
                 evaluation_interval=2,
-                accelerator=None,
             )
 
     def test_finetune_llm_sft_evo_steps_not_set(self):
@@ -1613,7 +1552,6 @@ class TestFinetuneLlmSft:
                 pop=[MagicMock(spec=SFT)],
                 env=MagicMock(),
                 evo_steps=None,
-                accelerator=None,
                 tournament=MagicMock(),
                 mutation=MagicMock(),
             )
@@ -1649,13 +1587,12 @@ class TestFinetuneLlmSft:
             patch("agilerl.training.train_llm.save_llm_checkpoint"),
             patch(
                 "agilerl.training.train_llm.safe_aggregate_metrics",
-                side_effect=lambda _a, v: float(v),
+                side_effect=lambda v: float(v),
             ),
         ):
             finetune_llm_sft(
                 pop=[agent0, agent1],
                 env_fn=_mk_env,
-                accelerator=None,
                 max_steps=2,
                 evaluation_interval=100,
                 verbose=False,
@@ -1698,7 +1635,6 @@ class TestFinetuneLlmSft:
                 pop=[mock_agent],
                 env=mock_env,
                 evaluation_interval=2,
-                accelerator=None,
                 elite_path=str(tmp_path),
                 wb=False,
                 log_csv=True,
@@ -1748,7 +1684,6 @@ class TestFinetuneLlmSft:
                 pop=[mock_agent],
                 env=mock_env,
                 evaluation_interval=100,
-                accelerator=None,
                 elite_path=str(tmp_path),
                 wb=False,
                 log_csv=True,
@@ -1759,10 +1694,7 @@ class TestFinetuneLlmSft:
 
 class TestFinetuneLlmMultiturn:
     @pytest.mark.parametrize("agent_spec", [LLMPPO, LLMREINFORCE, GRPO])
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    def test_finetune_llm_multiturn_basic_training_loop(
-        self, agent_spec, use_accelerator
-    ):
+    def test_finetune_llm_multiturn_basic_training_loop(self, agent_spec):
         """Smoke: episode collection, learn with turn_ids, step accounting; no agent.test."""
         mock_agent = _make_multiturn_mock_agent(spec=agent_spec)
         mock_env = _make_multiturn_mock_env(turn_boundaries_len=3)
@@ -1790,7 +1722,6 @@ class TestFinetuneLlmMultiturn:
                 max_steps=max_steps,
                 evaluation_interval=100,
                 verbose=False,
-                accelerator=None if use_accelerator else Accelerator(),
             )
 
         assert mock_env.reset.call_count == num_outer * batch_size
@@ -1820,12 +1751,10 @@ class TestFinetuneLlmMultiturn:
                 env_factory=_make_multiturn_env_factory(turn_boundaries_len=3),
                 init_hp={"BATCH_SIZE": 3, "ALGO": "GRPO"},
                 max_steps=100,
-                accelerator=None,
                 verbose=False,
             )
 
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    def test_finetune_llm_multiturn_with_wandb_and_checkpoints(self, use_accelerator):
+    def test_finetune_llm_multiturn_with_wandb_and_checkpoints(self):
         mock_agent = _make_multiturn_mock_agent()
         mock_agent.registry = MagicMock()
         mock_agent.registry.hp_config = MagicMock()
@@ -1858,15 +1787,13 @@ class TestFinetuneLlmMultiturn:
                 wb=True,
                 wandb_api_key="fake_key",
                 checkpoint_steps=2,
-                accelerator=None if use_accelerator else Accelerator(),
             )
 
         mock_init_wandb.assert_called_once()
         assert mock_wandb.log.call_count >= 2
         assert mock_save.call_count >= 1
 
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    def test_finetune_llm_multiturn_evolvable_training_loop(self, use_accelerator):
+    def test_finetune_llm_multiturn_evolvable_training_loop(self):
         mock_agent = _make_multiturn_mock_agent()
         mock_env = _make_multiturn_mock_env(turn_boundaries_len=3)
         mutation = MagicMock()
@@ -1901,7 +1828,6 @@ class TestFinetuneLlmMultiturn:
                 evo_steps=1,
                 tournament=Mock(),
                 mutation=mutation,
-                accelerator=None if use_accelerator else Accelerator(),
             )
 
         assert mock_tourn.call_count == 3
@@ -1926,7 +1852,6 @@ class TestFinetuneLlmMultiturn:
                 evo_steps=None,
                 tournament=MagicMock(),
                 mutation=mutation,
-                accelerator=None,
             )
 
     def test_finetune_llm_multiturn_warns_when_evo_steps_without_tournament(self):
@@ -1941,7 +1866,6 @@ class TestFinetuneLlmMultiturn:
                 evo_steps=3,
                 tournament=None,
                 mutation=None,
-                accelerator=None,
                 verbose=False,
             )
 
@@ -1960,7 +1884,6 @@ class TestFinetuneLlmMultiturn:
                 max_turns=1,
                 init_hp={"BATCH_SIZE": 1, "ALGO": "DPO"},
                 max_steps=0,
-                accelerator=None,
                 verbose=False,
             )
 
@@ -1991,7 +1914,6 @@ class TestFinetuneLlmMultiturn:
                 max_steps=9,
                 evaluation_interval=1,
                 verbose=False,
-                accelerator=None,
             )
 
         assert mock_agent.test.call_count == 3
@@ -2024,7 +1946,6 @@ class TestFinetuneLlmMultiturn:
                 evaluation_interval=100,
                 max_reward=1.0,
                 verbose=False,
-                accelerator=None,
             )
 
         num_outer = 3
@@ -2058,7 +1979,6 @@ class TestFinetuneLlmMultiturn:
                 wb=True,
                 wandb_api_key="fake",
                 verbose=False,
-                accelerator=None,
             )
 
         init_kw = mock_init_wandb.call_args.kwargs["init_hyperparams"]
@@ -2104,7 +2024,6 @@ class TestFinetuneLlmMultiturn:
                 max_steps=3,
                 evaluation_interval=100,
                 verbose=False,
-                accelerator=None,
             )
 
     def test_finetune_llm_multiturn_breaks_turn_loop_when_terminated(self):
@@ -2137,7 +2056,6 @@ class TestFinetuneLlmMultiturn:
                 max_steps=3,
                 evaluation_interval=100,
                 verbose=False,
-                accelerator=None,
             )
 
         assert mock_agent.get_action.call_count == 1
@@ -2178,7 +2096,6 @@ class TestFinetuneLlmMultiturn:
                 wb=True,
                 wandb_api_key="fake",
                 verbose=True,
-                accelerator=None,
             )
 
         assert mock_pbar.write.call_count >= 2
@@ -2195,15 +2112,12 @@ class TestFinetuneLlmMultiturn:
         )
         assert acc_logged
 
-    def test_finetune_llm_multiturn_accelerator_syncs_after_test(self):
-        """Covers accelerator.wait_for_everyone() after distributed eval aggregation
-        that follows the ``agent.test`` call."""
+    def test_finetune_llm_multiturn_syncs_after_test(self):
+        """Covers the barrier() after distributed eval aggregation that
+        follows the ``agent.test`` call."""
         mock_agent = _make_multiturn_mock_agent()
         mock_agent.test.return_value = np.array(0.1, dtype=np.float32)
         mock_env = _make_multiturn_mock_env(turn_boundaries_len=3)
-        acc = MagicMock(spec=Accelerator)
-        acc.is_main_process = True
-        acc.wait_for_everyone = MagicMock()
 
         with (
             patch("agilerl.training.train_llm.trange"),
@@ -2216,6 +2130,7 @@ class TestFinetuneLlmMultiturn:
                 "agilerl.training.train_llm._distributed_world_size",
                 return_value=1,
             ),
+            patch("agilerl.training.train_llm.barrier") as mock_barrier,
         ):
             mock_stack.return_value = (torch.zeros(1, 8, dtype=torch.long),)
             mock_agg.return_value = 0.5
@@ -2227,10 +2142,9 @@ class TestFinetuneLlmMultiturn:
                 max_steps=3,
                 evaluation_interval=1,
                 verbose=False,
-                accelerator=acc,
             )
 
-        assert acc.wait_for_everyone.call_count >= 1
+        assert mock_barrier.call_count >= 1
         assert mock_agent.test.call_count >= 1
 
     def test_finetune_llm_multiturn_raises_when_group_size_not_divisible_by_batch_size(
@@ -2251,7 +2165,6 @@ class TestFinetuneLlmMultiturn:
                 env_factory=_make_multiturn_env_factory(),
                 init_hp={"BATCH_SIZE": 2, "BATCH_SIZE_PER_GPU": 2, "ALGO": "GRPO"},
                 max_steps=8,
-                accelerator=None,
                 wb=False,
                 verbose=False,
             )
@@ -2294,7 +2207,6 @@ class TestFinetuneLlmMultiturn:
                 init_hp={"BATCH_SIZE": 1, "ALGO": "LLMPPO"},
                 max_steps=100,
                 verbose=False,
-                accelerator=None,
                 max_wall_seconds=5.0,
             )
 
@@ -2460,20 +2372,21 @@ class TestSaveEliteCheckpoint:
             better = MagicMock()
             better.fitness = [3.0]
             elite_dir = str(tmp_path / "elite")
-            _save_elite_checkpoint([worse, better], True, elite_dir, None)
+            _save_elite_checkpoint([worse, better], True, elite_dir)
         save.assert_called_once_with(better, elite_dir)
 
-    def test_save_elite_checkpoint_waits_but_skips_non_main_process(self, tmp_path):
+    def test_save_elite_checkpoint_synchronises_ranks(self, tmp_path):
         from agilerl.training.train_llm import _save_elite_checkpoint
 
-        acc = MagicMock()
-        acc.is_main_process = False
-        with patch("agilerl.training.train_llm.save_llm_checkpoint") as save:
+        with (
+            patch("agilerl.training.train_llm.save_llm_checkpoint") as save,
+            patch("agilerl.training.train_llm.barrier") as mock_barrier,
+        ):
             agent = MagicMock()
             agent.fitness = [1.0]
-            _save_elite_checkpoint([agent], True, str(tmp_path / "elite"), acc)
-        acc.wait_for_everyone.assert_called_once()
-        save.assert_not_called()
+            _save_elite_checkpoint([agent], True, str(tmp_path / "elite"))
+        mock_barrier.assert_called_once()
+        save.assert_called_once()
 
 
 @pytest.mark.parametrize(
@@ -2514,7 +2427,6 @@ def test_finetune_llm_env_and_env_fn_mutually_exclusive(finetune_fn, agent_spec)
             env_fn=lambda: env,
             max_steps=0,
             verbose=False,
-            accelerator=None,
         )
 
 
@@ -2532,7 +2444,6 @@ def test_finetune_llm_requires_env_or_env_fn(finetune_fn):
             env_fn=None,
             max_steps=0,
             verbose=False,
-            accelerator=None,
         )
 
 
@@ -2580,7 +2491,6 @@ def test_finetune_llm_warns_on_shared_env_with_population(finetune_fn, agent_spe
             env=env,
             max_steps=0,
             verbose=False,
-            accelerator=None,
         )
 
 
@@ -2629,7 +2539,6 @@ def test_finetune_llm_checkpoint_triggering_non_divisible_steps(finetune_fn):
             checkpoint_steps=2,
             evaluation_interval=100,
             verbose=False,
-            accelerator=None,
         )
 
     assert mock_save.call_count == 3
@@ -2697,7 +2606,6 @@ def test_init_llm_wandb_passes_entity_and_run_name():
             effective_data_batch_size=8,
             wb=True,
             wandb_api_key="fake-key",
-            accelerator=None,
             wandb_entity="acme",
             wandb_run_name="run-1",
         )
@@ -2793,13 +2701,12 @@ def test_inner_loop_breaks_after_max_steps_first_agent(finetune_fn, agent_spec):
         ),
         patch(
             "agilerl.training.train_llm.safe_aggregate_metrics",
-            side_effect=lambda _a, v: float(v),
+            side_effect=lambda v: float(v),
         ),
     ):
         finetune_fn(
             pop=[agent0, agent1],
             env=env,
-            accelerator=None,
             max_steps=1,
             evaluation_interval=100,
             verbose=False,
@@ -2811,17 +2718,16 @@ def test_inner_loop_breaks_after_max_steps_first_agent(finetune_fn, agent_spec):
 def test_open_csv_log_and_log_row(tmp_path):
     from agilerl.training.train_llm import _log_csv_row, _open_csv_log
 
-    csv_file, writer = _open_csv_log(str(tmp_path), ["step"], None)
+    csv_file, writer = _open_csv_log(str(tmp_path), ["step"])
     assert csv_file is not None and writer is not None
-    _log_csv_row(writer, csv_file, {"step": 1}, None)
+    _log_csv_row(writer, csv_file, {"step": 1})
     csv_file.close()
 
-    non_main = MagicMock()
-    non_main.is_main_process = False
-    csv_file_none, writer_none = _open_csv_log(str(tmp_path), ["step"], non_main)
-    assert csv_file_none is None and writer_none is None
+    with patch("agilerl.training.train_llm.is_main_process", return_value=False):
+        csv_file_none, writer_none = _open_csv_log(str(tmp_path), ["step"])
+        assert csv_file_none is None and writer_none is None
 
-    writer_mock = MagicMock()
-    file_mock = MagicMock()
-    _log_csv_row(writer_mock, file_mock, {"step": 2}, non_main)
-    writer_mock.writerow.assert_not_called()
+        writer_mock = MagicMock()
+        file_mock = MagicMock()
+        _log_csv_row(writer_mock, file_mock, {"step": 2})
+        writer_mock.writerow.assert_not_called()

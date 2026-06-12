@@ -10,7 +10,6 @@ import torch.nn.functional as F
 from agilerl import HAS_LIGER_KERNEL
 
 if TYPE_CHECKING:
-    from accelerate import Accelerator
     from peft import LoraConfig
 
     from agilerl.llm_envs import PreferenceGym
@@ -20,6 +19,7 @@ from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.protocols import PreTrainedModelProtocol
 from agilerl.typing import ExperiencesType, LLMObsType
 from agilerl.utils.algo_utils import get_experiences_samples
+from agilerl.utils.distributed import FSDPConfig, resolve_device
 
 if HAS_LIGER_KERNEL:
     from agilerl.algorithms.core.llm_ops.fused_loss import _LigerDPOWithAlpha
@@ -63,8 +63,10 @@ class DPO(LLMAlgorithm):
     :type device: str, optional
     :param lora_config: Config for LoRA, defaults to None
     :type lora_config: LoraConfig, optional
-    :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
+    :param gradient_accumulation_steps: Micro-batches to accumulate per optimizer step, defaults to 1
+    :type gradient_accumulation_steps: int, optional
+    :param fsdp_config: FSDP2 sharding settings for distributed runs, defaults to None
+    :type fsdp_config: FSDPConfig | None, optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     :param clone: Flag to indicate if the instantiation is a cloning, defaults to False
@@ -108,7 +110,8 @@ class DPO(LLMAlgorithm):
         micro_batch_size_per_gpu: int | None = None,
         device: str = "cpu",
         lora_config: LoraConfig | None = None,
-        accelerator: Accelerator | None = None,
+        gradient_accumulation_steps: int = 1,
+        fsdp_config: FSDPConfig | None = None,
         wrap: bool = True,
         clone: bool = False,
         seed: int = 42,
@@ -119,17 +122,7 @@ class DPO(LLMAlgorithm):
         cast_logprobs_to_fp32: bool = True,
         use_separate_reference_adapter: bool = True,
     ) -> None:
-        resolved_device = (
-            f"cuda:{accelerator.process_index}"
-            if accelerator is not None
-            else (
-                "cuda"
-                if torch.cuda.is_available()
-                else "mps"
-                if torch.backends.mps.is_available()
-                else "cpu"
-            )
-        )
+        resolved_device = resolve_device(device)
         super().__init__(
             index=index,
             batch_size=batch_size,
@@ -150,7 +143,8 @@ class DPO(LLMAlgorithm):
             hp_config=hp_config,
             wrap=wrap,
             device=resolved_device,
-            accelerator=accelerator,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            fsdp_config=fsdp_config,
             name="DPO",
             gradient_checkpointing=gradient_checkpointing,
             torch_compiler=torch_compiler,

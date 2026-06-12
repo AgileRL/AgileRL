@@ -1,11 +1,8 @@
 import copy
-from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 import torch
-from accelerate import Accelerator
-from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
 from gymnasium.spaces import Box, Discrete
 from pettingzoo import ParallelEnv
@@ -123,43 +120,6 @@ class MultiAgentCNNCritic(nn.Module):
         return self.fc2(x)
 
 
-def _dummy_no_sync_context():
-    class DummyNoSync:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc_value, traceback):
-            pass
-
-    return DummyNoSync()
-
-
-def no_sync(_self):
-    return _dummy_no_sync_context()
-
-
-class DummyStochasticActor(StochasticActor):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-    def forward(self, *args, **kwargs):
-        return super().forward(*args, **kwargs)
-
-    def no_sync(self):
-        return _dummy_no_sync_context()
-
-
-class DummyValueNetwork(ValueNetwork):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-    def forward(self, *args, **kwargs):
-        return super().forward(*args, **kwargs)
-
-    def no_sync(self):
-        return _dummy_no_sync_context()
-
-
 @pytest.fixture(scope="function")
 def mlp_actor(observation_spaces, action_spaces, request):
     observation_spaces = request.getfixturevalue(observation_spaces)
@@ -190,63 +150,6 @@ def cnn_actor():
 @pytest.fixture(scope="function")
 def cnn_critic():
     return MultiAgentCNNCritic()
-
-
-@pytest.fixture(scope="module")
-def mocked_accelerator():
-    return MagicMock(spec=Accelerator)
-
-
-@pytest.fixture(scope="function")
-def accelerated_experiences(
-    batch_size,
-    observation_spaces,
-    action_spaces,
-    agent_ids,
-    device,
-    request,
-):
-    observation_spaces = request.getfixturevalue(observation_spaces)
-    action_spaces = request.getfixturevalue(action_spaces)
-    one_hot = all(isinstance(space, Discrete) for space in observation_spaces)
-    discrete_actions = all(isinstance(space, Discrete) for space in action_spaces)
-    state_size = (
-        observation_spaces[0].shape if not one_hot else (observation_spaces[0].n,)
-    )
-    action_size = 1 if discrete_actions else action_spaces[0].shape[0]
-    if one_hot:
-        states = {
-            agent: np.random.randint(0, state_size[0], (batch_size, 1))
-            for agent in agent_ids
-        }
-    else:
-        states = {
-            agent: np.random.randn(batch_size, *state_size) for agent in agent_ids
-        }
-
-    if discrete_actions:
-        actions = {
-            agent: np.random.randint(0, action_size, (batch_size,))
-            for agent in agent_ids
-        }
-    else:
-        actions = {
-            agent: np.random.randn(batch_size, action_size) for agent in agent_ids
-        }
-    log_probs = {agent: np.random.randn(batch_size, 1) for agent in agent_ids}
-    rewards = {agent: np.random.randn(batch_size, 1) for agent in agent_ids}
-    dones = {agent: np.random.randint(0, 2, (batch_size, 1)) for agent in agent_ids}
-    values = {agent: np.random.randn(batch_size, 1) for agent in agent_ids}
-    if one_hot:
-        next_state = {
-            agent: np.random.randint(0, state_size[0], (1,)) for agent in agent_ids
-        }
-    else:
-        next_state = {agent: np.random.randn(*state_size) for agent in agent_ids}
-
-    next_done = {agent: np.random.randint(0, 2, (1,)) for agent in agent_ids}
-
-    return states, actions, log_probs, rewards, dones, values, next_state, next_done
 
 
 @pytest.fixture(scope="function")
@@ -425,11 +328,9 @@ class TestIPPOInit:
             "ma_image_space",
         ],
     )
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("compile_mode", [None])
     def test_with_net_config(
         self,
-        accelerator_flag,
         observation_spaces,
         ma_discrete_space,
         device,
@@ -439,7 +340,6 @@ class TestIPPOInit:
         observation_spaces = request.getfixturevalue(observation_spaces)
         agent_ids = ["agent_0", "agent_1", "other_agent_0"]
         batch_size = 64
-        accelerator = Accelerator() if accelerator_flag else None
 
         net_config = {
             "encoder_config": get_default_encoder_config(observation_spaces[0]),
@@ -450,7 +350,6 @@ class TestIPPOInit:
             action_spaces=ma_discrete_space,
             agent_ids=agent_ids,
             net_config=net_config,
-            accelerator=accelerator,
             device=device,
             torch_compiler=compile_mode,
             target_kl=0.5,
@@ -467,14 +366,10 @@ class TestIPPOInit:
         assert ippo.target_kl == 0.5
 
         expected_actor_cls = (
-            OptimizedModule
-            if compile_mode is not None and accelerator is None
-            else StochasticActor
+            OptimizedModule if compile_mode is not None else StochasticActor
         )
         expected_critic_cls = (
-            OptimizedModule
-            if compile_mode is not None and accelerator is None
-            else ValueNetwork
+            OptimizedModule if compile_mode is not None else ValueNetwork
         )
         assert all(
             isinstance(actor, expected_actor_cls) for actor in ippo.actors.values()
@@ -483,7 +378,7 @@ class TestIPPOInit:
             isinstance(critic, expected_critic_cls) for critic in ippo.critics.values()
         )
 
-        expected_opt_cls = optim.Adam if accelerator is None else AcceleratedOptimizer
+        expected_opt_cls = optim.Adam
         assert all(
             isinstance(actor_optimizer, expected_opt_cls)
             for actor_optimizer in ippo.actor_optimizers.values()
@@ -497,7 +392,6 @@ class TestIPPOInit:
 
     # TODO: This will be deprecated in the future
     @pytest.mark.gpu
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("compile_mode", [None])
     @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
     @pytest.mark.parametrize("action_spaces", ["ma_discrete_space"])
@@ -507,14 +401,12 @@ class TestIPPOInit:
         mlp_critic,
         observation_spaces,
         action_spaces,
-        accelerator_flag,
         device,
         compile_mode,
         request,
     ):
         observation_spaces = request.getfixturevalue(observation_spaces)
         action_spaces = request.getfixturevalue(action_spaces)
-        accelerator = Accelerator() if accelerator_flag else None
         evo_actors = ModuleDict(
             {
                 "agent": MakeEvolvable(
@@ -551,10 +443,9 @@ class TestIPPOInit:
             actor_networks=evo_actors,
             critic_networks=evo_critics,
             device=device,
-            accelerator=accelerator,
             torch_compiler=compile_mode,
         )
-        if compile_mode is not None and accelerator is None:
+        if compile_mode is not None:
             assert all(
                 isinstance(actor, OptimizedModule) for actor in ippo.actors.values()
             )
@@ -576,24 +467,14 @@ class TestIPPOInit:
         assert ippo.scores == []
         assert ippo.fitness == []
         assert ippo.steps == [0]
-        if accelerator is None:
-            assert all(
-                isinstance(actor_optimizer, optim.Adam)
-                for actor_optimizer in ippo.actor_optimizers.values()
-            )
-            assert all(
-                isinstance(critic_optimizer, optim.Adam)
-                for critic_optimizer in ippo.critic_optimizers.values()
-            )
-        else:
-            assert all(
-                isinstance(actor_optimizer, AcceleratedOptimizer)
-                for actor_optimizer in ippo.actor_optimizers.values()
-            )
-            assert all(
-                isinstance(critic_optimizer, AcceleratedOptimizer)
-                for critic_optimizer in ippo.critic_optimizers.values()
-            )
+        assert all(
+            isinstance(actor_optimizer, optim.Adam)
+            for actor_optimizer in ippo.actor_optimizers.values()
+        )
+        assert all(
+            isinstance(critic_optimizer, optim.Adam)
+            for critic_optimizer in ippo.critic_optimizers.values()
+        )
         assert isinstance(ippo.criterion, nn.MSELoss)
 
     @pytest.mark.gpu
@@ -641,7 +522,6 @@ class TestIPPOInit:
 
     # TODO: This will be deprecated in the future
     @pytest.mark.gpu
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("compile_mode", [None, "default"])
     def test_with_cnn_networks(
         self,
@@ -649,11 +529,9 @@ class TestIPPOInit:
         cnn_critic,
         ma_image_space,
         ma_discrete_space,
-        accelerator_flag,
         device,
         compile_mode,
     ):
-        accelerator = Accelerator() if accelerator_flag else None
         evo_actors = ModuleDict(
             {
                 "agent": MakeEvolvable(
@@ -690,10 +568,9 @@ class TestIPPOInit:
             actor_networks=evo_actors,
             critic_networks=evo_critics,
             device=device,
-            accelerator=accelerator,
             torch_compiler=compile_mode,
         )
-        if compile_mode is not None and accelerator is None:
+        if compile_mode is not None:
             assert all(
                 isinstance(actor, OptimizedModule) for actor in ippo.actors.values()
             )
@@ -715,24 +592,14 @@ class TestIPPOInit:
         assert ippo.scores == []
         assert ippo.fitness == []
         assert ippo.steps == [0]
-        if accelerator is None:
-            assert all(
-                isinstance(actor_optimizer, optim.Adam)
-                for actor_optimizer in ippo.actor_optimizers.values()
-            )
-            assert all(
-                isinstance(critic_optimizer, optim.Adam)
-                for critic_optimizer in ippo.critic_optimizers.values()
-            )
-        else:
-            assert all(
-                isinstance(actor_optimizer, AcceleratedOptimizer)
-                for actor_optimizer in ippo.actor_optimizers.values()
-            )
-            assert all(
-                isinstance(critic_optimizer, AcceleratedOptimizer)
-                for critic_optimizer in ippo.critic_optimizers.values()
-            )
+        assert all(
+            isinstance(actor_optimizer, optim.Adam)
+            for actor_optimizer in ippo.actor_optimizers.values()
+        )
+        assert all(
+            isinstance(critic_optimizer, optim.Adam)
+            for critic_optimizer in ippo.critic_optimizers.values()
+        )
         assert isinstance(ippo.criterion, nn.MSELoss)
 
     @pytest.mark.gpu
@@ -743,7 +610,6 @@ class TestIPPOInit:
             ("ma_vector_space", "mlp"),
         ],
     )
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("compile_mode", [None, "default"])
     def test_with_evo_networks(
         self,
@@ -752,10 +618,8 @@ class TestIPPOInit:
         net,
         device,
         compile_mode,
-        accelerator_flag,
         request,
     ):
-        accelerator = Accelerator() if accelerator_flag else None
         observation_spaces = request.getfixturevalue(observation_spaces)
         net_config = get_default_encoder_config(observation_spaces[0])
 
@@ -814,18 +678,13 @@ class TestIPPOInit:
             critic_networks=evo_critics,
             device=device,
             torch_compiler=compile_mode,
-            accelerator=accelerator,
         )
 
         expected_actor_cls = (
-            OptimizedModule
-            if compile_mode is not None and accelerator is None
-            else StochasticActor
+            OptimizedModule if compile_mode is not None else StochasticActor
         )
         expected_critic_cls = (
-            OptimizedModule
-            if compile_mode is not None and accelerator is None
-            else ValueNetwork
+            OptimizedModule if compile_mode is not None else ValueNetwork
         )
         assert all(
             isinstance(actor, expected_actor_cls) for actor in ippo.actors.values()
@@ -834,7 +693,7 @@ class TestIPPOInit:
             isinstance(critic, expected_critic_cls) for critic in ippo.critics.values()
         )
 
-        expected_opt_cls = optim.Adam if accelerator is None else AcceleratedOptimizer
+        expected_opt_cls = optim.Adam
         assert all(
             isinstance(actor_optimizer, expected_opt_cls)
             for actor_optimizer in ippo.actor_optimizers.values()
@@ -1159,18 +1018,15 @@ class TestIPPOGetAction:
     )
     @pytest.mark.parametrize("action_batch_size", [None])
     @pytest.mark.parametrize("compile_mode", [None])
-    @pytest.mark.parametrize("accelerator_flag", [False])
     def test_get_action(
         self,
         observation_spaces,
         action_spaces,
         device,
         compile_mode,
-        accelerator_flag,
         action_batch_size,
         request,
     ):
-        accelerator = Accelerator() if accelerator_flag else None
         agent_ids = ["agent_0", "agent_1", "other_agent_0"]
         observation_spaces = request.getfixturevalue(observation_spaces)
         action_spaces = request.getfixturevalue(action_spaces)
@@ -1197,7 +1053,6 @@ class TestIPPOGetAction:
             agent_ids=agent_ids,
             device=device,
             torch_compiler=compile_mode,
-            accelerator=accelerator,
             action_batch_size=ippo_action_batch_size,
         )
         actions, log_probs, dist_entropy, state_values = ippo.get_action(
@@ -1218,27 +1073,25 @@ class TestIPPOGetAction:
 
     @pytest.mark.gpu
     @skip_torch_compile_on_windows_cpu
-    def test_get_action_batched_compile_and_accelerator_smoke(
+    def test_get_action_batched_compile_smoke(
         self,
         ma_vector_space,
         ma_discrete_space,
         device,
     ):
-        """Single-path check for stacked obs, torch.compile, and Accelerate (full grid removed for speed)."""
+        """Single-path check for stacked obs and torch.compile (full grid removed for speed)."""
         agent_ids = ["agent_0", "agent_1", "other_agent_0"]
         batch = 8
         state = {
             agent_id: np.stack([get_sample_from_space(sp)] * batch)
             for agent_id, sp in zip(agent_ids, ma_vector_space, strict=False)
         }
-        accelerator = Accelerator()
         ippo = IPPO(
             observation_spaces=ma_vector_space,
             action_spaces=ma_discrete_space,
             agent_ids=agent_ids,
             device=device,
             torch_compiler="default",
-            accelerator=accelerator,
             action_batch_size=batch,
         )
         actions, log_probs, _, _ = ippo.get_action(obs=state, infos=None)
@@ -1367,55 +1220,6 @@ class TestIPPOGetAction:
                 assert action in [1, 3]
         ippo.clean_up()
 
-    @pytest.mark.parametrize("compile_mode", [None, "default"])
-    def test_get_action_distributed(
-        self, compile_mode, ma_vector_space, ma_discrete_space
-    ):
-        accelerator = Accelerator()
-        agent_ids = ["agent_0", "agent_1", "other_agent_0"]
-        state = {
-            agent: np.random.randn(*ma_vector_space[idx].shape).astype(np.float32)
-            for idx, agent in enumerate(agent_ids)
-        }
-        ippo = IPPO(
-            observation_spaces=ma_vector_space,
-            action_spaces=ma_discrete_space,
-            agent_ids=agent_ids,
-            accelerator=accelerator,
-            torch_compiler=compile_mode,
-            net_config={
-                "encoder_config": {"hidden_size": [16, 16], "init_layers": False},
-                "head_config": {"hidden_size": [16], "init_layers": False},
-            },
-        )
-        new_actors = ModuleDict(
-            {
-                shared_id: DummyStochasticActor(
-                    observation_space=actor.observation_space,
-                    action_space=actor.action_space,
-                    device=actor.device,
-                    action_std_init=ippo.action_std_init,
-                    encoder_config={"hidden_size": [16, 16], "init_layers": False},
-                    head_config={"hidden_size": [16], "init_layers": False},
-                )
-                for shared_id, actor in ippo.actors.items()
-            },
-        )
-        ippo.actors = new_actors
-        actions, log_probs, dist_entropy, state_values = ippo.get_action(obs=state)
-
-        # Check returns are the proper format
-        assert isinstance(actions, dict)
-        assert isinstance(log_probs, dict)
-        assert isinstance(dist_entropy, dict)
-        assert isinstance(state_values, dict)
-
-        for agent_id in agent_ids:
-            assert agent_id in actions
-            assert agent_id in log_probs
-            assert agent_id in dist_entropy
-            assert agent_id in state_values
-
     def test_get_action_clips_inference_actions_for_box_spaces(self, ma_vector_space):
         action_spaces = [Box(-1, 1, (2,), dtype=np.float32) for _ in range(3)]
         ippo = IPPO(
@@ -1480,32 +1284,24 @@ class TestIPPOLearn:
     @pytest.mark.parametrize("agent_ids", [["agent_0", "agent_1", "other_agent_0"]])
     @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
     @pytest.mark.parametrize("action_spaces", ["ma_discrete_space"])
-    def test_learns_from_experiences_distributed(
+    def test_learns_from_experiences_cpu(
         self,
         observation_spaces,
         action_spaces,
         agent_ids,
-        accelerated_experiences,
+        experiences,
         compile_mode,
         batch_size,
         request,
     ):
         observation_spaces = request.getfixturevalue(observation_spaces)
         action_spaces = request.getfixturevalue(action_spaces)
-        accelerator = Accelerator(device_placement=False)
         ippo = IPPO(
             observation_spaces=observation_spaces,
             action_spaces=action_spaces,
             agent_ids=agent_ids,
-            accelerator=accelerator,
             torch_compiler=compile_mode,
         )
-
-        for shared_id in ippo.shared_agent_ids:
-            actor = ippo.actors[shared_id]
-            critic = ippo.critics[shared_id]
-            actor.no_sync = no_sync.__get__(actor)
-            critic.no_sync = no_sync.__get__(critic)
 
         actors = ippo.actors
         actors_pre_learn_sd = {
@@ -1520,7 +1316,7 @@ class TestIPPOLearn:
 
         for _ in range(2):
             ippo.scores.append(0)
-            loss = ippo.learn(accelerated_experiences)
+            loss = ippo.learn(experiences)
 
         assert isinstance(loss, dict)
         for agent_id in ippo.shared_agent_ids:
@@ -1915,11 +1711,9 @@ class TestIPPOTest:
 class TestIPPOClone:
     @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
     @pytest.mark.parametrize("compile_mode", [None])
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("wrap", [True, False])
     def test_clone_returns_identical_agent(
         self,
-        accelerator_flag,
         wrap,
         compile_mode,
         observation_spaces,
@@ -1946,7 +1740,6 @@ class TestIPPOClone:
         actor_networks = None
         critic_networks = None
         device = "cpu"
-        accelerator = Accelerator(device_placement=False) if accelerator_flag else None
 
         ippo = IPPO(
             observation_spaces,
@@ -1969,7 +1762,6 @@ class TestIPPOClone:
             actor_networks=actor_networks,
             critic_networks=critic_networks,
             device=device,
-            accelerator=accelerator,
             wrap=wrap,
             torch_compiler=compile_mode,
         )
@@ -2001,7 +1793,6 @@ class TestIPPOClone:
         assert clone_agent.target_kl == ippo.target_kl
         assert clone_agent.update_epochs == ippo.update_epochs
         assert clone_agent.device == ippo.device
-        assert clone_agent.accelerator == ippo.accelerator
 
         for shared_id in ippo.shared_agent_ids:
             actor = ippo.actors[shared_id]
@@ -2087,7 +1878,6 @@ class TestIPPOClone:
         assert clone_agent.gamma == ippo.gamma
         assert clone_agent.gae_lambda == ippo.gae_lambda
         assert clone_agent.device == ippo.device
-        assert clone_agent.accelerator == ippo.accelerator
 
         for shared_id in ippo.shared_agent_ids:
             actor = ippo.actors[shared_id]

@@ -696,5 +696,4 @@ Similarly to the off-policy alternative, the simplest way to train multi-agent o
             tournament=tournament,  # Tournament selection object
             mutation=mutations,  # Mutations object
             wb=False,  # Weights and Biases tracking
-            accelerator=accelerator,
         )

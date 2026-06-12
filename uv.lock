@@ -56,7 +56,6 @@ name = "agilerl"
 version = "2.7.0"
 source = { editable = "." }
 dependencies = [
-    { name = "accelerate" },
     { name = "dill" },
     { name = "fastrand" },
     { name = "flatten-dict" },
@@ -127,7 +126,6 @@ docs = [
 
 [package.metadata]
 requires-dist = [
-    { name = "accelerate", specifier = "~=1.7.0" },
     { name = "datasets", marker = "extra == 'all'", specifier = "==4.4.1" },
     { name = "datasets", marker = "extra == 'llm'", specifier = "==4.4.1" },
     { name = "dill", specifier = "~=0.3.7" },

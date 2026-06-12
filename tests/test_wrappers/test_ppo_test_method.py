@@ -39,7 +39,6 @@
 #         temperature=0.9,
 #         max_output_tokens=8,
 #         max_model_len=128,
-#         accelerator=None,
 #         vf_coef=0.5,
 #         gamma=0.99,
 #         gae_lambda=0.95,

@@ -88,11 +88,9 @@ class MATD3(MultiAgentRLAlgorithm):
     :type critic_networks: list[ModuleDict] | None, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
-    :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
     :param torch_compiler: The torch compile mode 'default', 'reduce-overhead' or 'max-autotune', defaults to None
     :type torch_compiler: str | None, optional
-    :param wrap: Wrap models for distributed training upon creation, defaults to True
+    :param wrap: Retained for API compatibility; has no effect, defaults to True
     :type wrap: bool, optional
     """
 
@@ -131,7 +129,6 @@ class MATD3(MultiAgentRLAlgorithm):
         actor_networks: ModuleDict | None = None,
         critic_networks: list[ModuleDict] | None = None,
         device: str = "cpu",
-        accelerator: Any | None = None,
         torch_compiler: str | None = None,
         wrap: bool = True,
     ) -> None:
@@ -142,7 +139,6 @@ class MATD3(MultiAgentRLAlgorithm):
             agent_ids=agent_ids,
             hp_config=hp_config,
             device=device,
-            accelerator=accelerator,
             normalize_images=normalize_images,
             torch_compiler=torch_compiler,
             name="MATD3",
@@ -460,9 +456,7 @@ class MATD3(MultiAgentRLAlgorithm):
             lr=lr_critic,
         )
 
-        if self.accelerator is not None and wrap:
-            self.wrap_models()
-        elif self.torch_compiler:
+        if self.torch_compiler:
             if (
                 any(
                     actor.output_activation == "GumbelSoftmax"
@@ -567,12 +561,8 @@ class MATD3(MultiAgentRLAlgorithm):
             actor = self.actors[group_id]
             actor.eval()
             grouped_obs = preprocessed_states[group_id]
-            if self.accelerator is not None:
-                with actor.no_sync(), torch.no_grad():
-                    actions = actor(grouped_obs)
-            else:
-                with torch.no_grad():
-                    actions = actor(grouped_obs)
+            with torch.no_grad():
+                actions = actor(grouped_obs)
             grouped_actions[group_id] = actions.cpu().numpy()
 
         action_dict = {}
@@ -827,36 +817,18 @@ class MATD3(MultiAgentRLAlgorithm):
         critic_1_optimizer = self.critic_1_optimizers[network_id]
         critic_2_optimizer = self.critic_2_optimizers[network_id]
 
-        if self.accelerator is not None:
-            with critic_1.no_sync():
-                q_value_1 = critic_1(states, stacked_actions)
-            with critic_2.no_sync():
-                q_value_2 = critic_2(states, stacked_actions)
-        else:
-            q_value_1 = critic_1(states, stacked_actions)
-            q_value_2 = critic_2(states, stacked_actions)
+        q_value_1 = critic_1(states, stacked_actions)
+        q_value_2 = critic_2(states, stacked_actions)
 
         with torch.no_grad():
-            if self.accelerator is not None:
-                with critic_target_1.no_sync():
-                    q_value_next_state_1 = critic_target_1(
-                        next_states,
-                        stacked_next_actions,
-                    )
-                with critic_target_2.no_sync():
-                    q_value_next_state_2 = critic_target_2(
-                        next_states,
-                        stacked_next_actions,
-                    )
-            else:
-                q_value_next_state_1 = critic_target_1(
-                    next_states,
-                    stacked_next_actions,
-                )
-                q_value_next_state_2 = critic_target_2(
-                    next_states,
-                    stacked_next_actions,
-                )
+            q_value_next_state_1 = critic_target_1(
+                next_states,
+                stacked_next_actions,
+            )
+            q_value_next_state_2 = critic_target_2(
+                next_states,
+                stacked_next_actions,
+            )
 
         q_value_next_state = torch.min(q_value_next_state_1, q_value_next_state_2)
 
@@ -882,22 +854,14 @@ class MATD3(MultiAgentRLAlgorithm):
         # critic loss backprop
         critic_1_optimizer.zero_grad()
         critic_2_optimizer.zero_grad()
-        if self.accelerator is not None:
-            self.accelerator.backward(critic_loss)
-        else:
-            critic_loss.backward()
-
+        critic_loss.backward()
         critic_1_optimizer.step()
         critic_2_optimizer.step()
 
         actor_loss = None
 
         # Calculate actions and actor loss
-        if self.accelerator is not None:
-            with actor.no_sync():
-                action = actor(states[agent_id])
-        else:
-            action = actor(states[agent_id])
+        action = actor(states[agent_id])
 
         detached_actions = copy.deepcopy(actions)
         detached_actions[agent_id] = action
@@ -909,18 +873,11 @@ class MATD3(MultiAgentRLAlgorithm):
                 [detached_actions[agent_key] for agent_key in self.agent_ids],
                 dim=1,
             )
-            if self.accelerator is not None:
-                with critic_1.no_sync():
-                    actor_loss = -critic_1(states, stacked_detached_actions).mean()
-            else:
-                actor_loss = -critic_1(states, stacked_detached_actions).mean()
+            actor_loss = -critic_1(states, stacked_detached_actions).mean()
 
             # actor loss backprop
             actor_optimizer.zero_grad()
-            if self.accelerator is not None:
-                self.accelerator.backward(actor_loss)
-            else:
-                actor_loss.backward()
+            actor_loss.backward()
             actor_optimizer.step()
 
         return actor_loss.item() if actor_loss is not None else None, critic_loss.item()

@@ -17,7 +17,6 @@ from transformers import AutoTokenizer
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.training.train_llm import finetune_llm_multiturn
 from agilerl.utils.algo_utils import VLLMConfig
-from agilerl.utils.llm_utils import create_llm_accelerator
 from agilerl.utils.utils import create_population, _normalize_algo_name
 from agilerl.llm_envs import TokenObservationWrapper
 
@@ -151,7 +150,6 @@ def main() -> None:
             max_output_tokens=init_hp.get("MAX_OUTPUT_TOKENS"),
         )
 
-    accelerator = create_llm_accelerator()
     use_vllm = bool(init_hp.get("USE_VLLM", True))
     vllm_config = (
         VLLMConfig(
@@ -169,34 +167,28 @@ def main() -> None:
         net_config=None,
         INIT_HP=init_hp,
         population_size=1,
-        accelerator=accelerator,
         tokenizer=tokenizer,
         model_name=args.model_path,
         vllm_config=vllm_config,
     )
     agent = pop[0]
 
-    try:
-        finetune_llm_multiturn(
-            pop=[agent],
-            max_turns=max_turns,
-            env_factory=env_factory,
-            init_hp=init_hp,
-            max_steps=args.max_steps,
-            save_elite=True,
-            elite_path=args.output_dir,
-            wb=args.wandb,
-            evo_steps=None,
-            tournament=None,
-            mutation=None,
-            evaluation_interval=args.evaluation_interval,
-            max_reward=1.0,
-            verbose=True,
-            accelerator=accelerator,
-        )
-    finally:
-        if accelerator is not None:
-            accelerator.end_training()
+    finetune_llm_multiturn(
+        pop=[agent],
+        max_turns=max_turns,
+        env_factory=env_factory,
+        init_hp=init_hp,
+        max_steps=args.max_steps,
+        save_elite=True,
+        elite_path=args.output_dir,
+        wb=args.wandb,
+        evo_steps=None,
+        tournament=None,
+        mutation=None,
+        evaluation_interval=args.evaluation_interval,
+        max_reward=1.0,
+        verbose=True,
+    )
 
 
 if __name__ == "__main__":

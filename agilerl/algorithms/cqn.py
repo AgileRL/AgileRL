@@ -48,9 +48,7 @@ class CQN(RLAlgorithm):
     :type actor_network: nn.Module, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
-    :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
-    :param wrap: Wrap models for distributed training upon creation, defaults to True
+    :param wrap: Retained for API compatibility; has no effect, defaults to True
     :type wrap: bool, optional
     """
 
@@ -71,7 +69,6 @@ class CQN(RLAlgorithm):
         mut: str | None = None,
         actor_network: EvolvableModule | None = None,
         device: str = "cpu",
-        accelerator: Any | None = None,
         wrap: bool = True,
     ) -> None:
 
@@ -81,7 +78,6 @@ class CQN(RLAlgorithm):
             index=index,
             hp_config=hp_config,
             device=device,
-            accelerator=accelerator,
             normalize_images=normalize_images,
             name="CQN",
         )
@@ -147,9 +143,6 @@ class CQN(RLAlgorithm):
             networks=self.actor,
             lr=self.lr,
         )
-
-        if self.accelerator is not None and wrap:
-            self.wrap_models()
 
         self.criterion = nn.MSELoss()
 
@@ -223,10 +216,6 @@ class CQN(RLAlgorithm):
         :rtype: float
         """
         states, actions, rewards, next_states, dones = experiences
-        if self.accelerator is not None:
-            actions = actions.to(self.accelerator.device)
-            rewards = rewards.to(self.accelerator.device)
-            dones = dones.to(self.accelerator.device)
 
         states = self.preprocess_observation(states)
         next_states = self.preprocess_observation(next_states)
@@ -251,11 +240,7 @@ class CQN(RLAlgorithm):
         loss = self.criterion(q_eval, q_target)
         q1_loss = cql1_loss + 0.5 * loss
         self.optimizer.zero_grad()
-        if self.accelerator is not None:
-            self.accelerator.backward(q1_loss)
-        else:
-            q1_loss.backward()
-
+        q1_loss.backward()
         clip_grad_norm_(self.actor.parameters(), 1)
         self.optimizer.step()
 

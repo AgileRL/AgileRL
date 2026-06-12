@@ -5,8 +5,6 @@ from typing import Any
 import gymnasium as gym
 import numpy as np
 import wandb
-from accelerate import Accelerator
-from torch.utils.data import DataLoader
 
 from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.components.data import ReplayDataset, Transition
@@ -51,7 +49,6 @@ def train_offline(
     elite_path: str | None = None,
     wb: bool = False,
     verbose: bool = True,
-    accelerator: Accelerator | None = None,
     minari_dataset_id: str | None = None,
     remote: bool = False,
     wandb_api_key: str | None = None,
@@ -107,8 +104,6 @@ def train_offline(
     :type wb: bool, optional
     :param verbose: Display training stats, defaults to True
     :type verbose: bool, optional
-    :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
     :param wandb_api_key: API key for Weights & Biases, defaults to None
     :type wandb_api_key: str, optional
     """
@@ -150,7 +145,6 @@ def train_offline(
             init_hyperparams=INIT_HP,
             mutation_hyperparams=MUT_P,
             wandb_api_key=wandb_api_key,
-            accelerator=accelerator,
         )
 
     save_path = (
@@ -163,15 +157,10 @@ def train_offline(
         )
     )
 
-    if accelerator is not None:
-        if accelerator.is_main_process:
-            print("Filling replay buffer with dataset...")
-        accelerator.wait_for_everyone()
-    else:
-        print("Filling replay buffer with dataset...")
+    print("Filling replay buffer with dataset...")
 
     if minari_dataset_id:
-        memory = minari_to_agile_buffer(minari_dataset_id, memory, accelerator, remote)
+        memory = minari_to_agile_buffer(minari_dataset_id, memory, remote)
 
     else:
         dataset_length = dataset["rewards"].shape[0]
@@ -200,29 +189,10 @@ def train_offline(
             transition.batch_size = [1]
             memory.add(transition)
 
-        if accelerator is not None:
-            if accelerator.is_main_process:
-                pass
-            accelerator.wait_for_everyone()
-        else:
-            pass
-
-    if accelerator is not None:
-        # Create dataloader from replay buffer
-        replay_dataset = ReplayDataset(memory, pop[0].batch_size)
-        replay_dataloader = DataLoader(replay_dataset, batch_size=None)
-        replay_dataloader = accelerator.prepare(replay_dataloader)
-        sampler = Sampler(dataset=replay_dataset, dataloader=replay_dataloader)
-    else:
-        sampler = Sampler(memory=memory)
-
-    if accelerator is not None:
-        pass
-    else:
-        pass
+    sampler = Sampler(memory=memory)
 
     # Format progress bar
-    pbar = default_progress_bar(max_steps, accelerator)
+    pbar = default_progress_bar(max_steps)
 
     pop_loss = [[] for _ in pop]
     pop_fitnesses = []
@@ -231,14 +201,11 @@ def train_offline(
     checkpoint_count = 0
 
     # Pre-training mutation
-    if accelerator is None and mutation is not None:
+    if mutation is not None:
         pop = mutation.mutation(pop, pre_training_mut=True)
 
     # RL training loop
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
-
         for agent_idx, agent in enumerate(pop):  # Loop through population
             losses = []
             for _idx_step in range(evo_steps):
@@ -267,11 +234,7 @@ def train_offline(
 
         if wb:
             wandb_dict = {
-                "global_step": (
-                    total_steps * accelerator.state.num_processes
-                    if accelerator is not None and accelerator.is_main_process
-                    else total_steps
-                ),
+                "global_step": total_steps,
                 "eval/mean_fitness": np.mean(fitnesses),
                 "eval/best_fitness": np.max(fitnesses),
             }
@@ -283,13 +246,7 @@ def train_offline(
 
             wandb_dict.update(agent_loss_dict)
 
-            if accelerator is not None:
-                accelerator.wait_for_everyone()
-                if accelerator.is_main_process:
-                    wandb.log(wandb_dict)
-                accelerator.wait_for_everyone()
-            else:
-                wandb.log(wandb_dict)
+            wandb.log(wandb_dict)
 
         # Update step counter
         for agent in pop:
@@ -316,7 +273,6 @@ def train_offline(
                 algo=algo,
                 elite_path=elite_path,
                 save_elite=save_elite,
-                accelerator=accelerator,
             )
 
         if verbose:
@@ -347,18 +303,11 @@ def train_offline(
                     population=pop,
                     save_path=save_path,
                     overwrite_checkpoints=overwrite_checkpoints,
-                    accelerator=accelerator,
                 )
                 checkpoint_count += 1
 
     if wb:
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
-            if accelerator.is_main_process:
-                wandb.finish()
-            accelerator.wait_for_everyone()
-        else:
-            wandb.finish()
+        wandb.finish()
 
     pbar.close()
     return pop, pop_fitnesses

@@ -6,7 +6,8 @@ from importlib.util import find_spec
 import numpy as np
 import pytest
 import torch
-from accelerate.state import AcceleratorState
+import torch.distributed as dist
+
 from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 
 from tests.utils import (
@@ -42,7 +43,8 @@ def cleanup_after_test(request):
 
     torch._dynamo.reset()
     force_gpu_memory_release()
-    AcceleratorState._reset_state(True)
+    if dist.is_available() and dist.is_initialized():
+        dist.destroy_process_group()
 
 
 @pytest.fixture(autouse=True)

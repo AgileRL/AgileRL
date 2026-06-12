@@ -4,8 +4,6 @@ import importlib
 import sys
 import pytest
 import torch
-from accelerate import Accelerator
-from accelerate.state import AcceleratorState
 
 pytest.importorskip("datasets", reason="LLM dependencies not installed")
 
@@ -108,15 +106,6 @@ class DummyReasoningDataset(Dataset):
         return {"question": self.questions[index], "answer": self.answers[index]}
 
 
-@pytest.fixture(scope="function")
-def accelerator_factory():
-    def generate_accelerator(use_accelerator: bool):
-        AcceleratorState._reset_state(True)
-        return Accelerator() if use_accelerator else None
-
-    return generate_accelerator
-
-
 @pytest.fixture
 def preference_dataset(num_samples):
     train_dataset = DummyPreferenceDataset(int(num_samples * 0.8))
@@ -140,13 +129,10 @@ def reasoning_dataset(num_samples):
 
 class TestReasoningGymInit:
     @pytest.mark.parametrize("num_samples", [200])
-    @pytest.mark.parametrize("use_accelerator", [True, False])
     def test_reasoning_gym_init(
         self,
         reasoning_dataset,
-        accelerator_factory,
         num_samples,
-        use_accelerator,
     ):
         train_dataset, test_dataset = reasoning_dataset
         tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
@@ -158,7 +144,6 @@ class TestReasoningGymInit:
             reward_fn=dummy_reward_fn,
             conversation_template=DUMMY_CONVERSATION_TEMPLATE,
             data_batch_size_per_gpu=data_batch_size,
-            accelerator=accelerator_factory(use_accelerator),
         )
         assert env.name == "dummy_dataset"
         assert callable(env.reward_fn)
@@ -552,13 +537,10 @@ class TestReasoningGymEvalMode:
 
 
 class TestPreferenceGymInit:
-    @pytest.mark.parametrize("use_accelerator", [True, False])
     @pytest.mark.parametrize("num_samples", [20])
     def test_preference_gym_init(
         self,
         preference_dataset,
-        accelerator_factory,
-        use_accelerator,
         num_samples,
     ):
         train_dataset, test_dataset = preference_dataset
@@ -569,7 +551,6 @@ class TestPreferenceGymInit:
             test_dataset=test_dataset,
             tokenizer=tokenizer,
             data_batch_size_per_gpu=data_batch_size,
-            accelerator=accelerator_factory(use_accelerator),
         )
         assert isinstance(env, IterablePromptBatchGym)
         assert env.name == "dummy_dataset"
@@ -681,13 +662,10 @@ class TestPreferenceGymInit:
 
 
 class TestPreferenceGymStep:
-    @pytest.mark.parametrize("use_accelerator", [True, False])
     @pytest.mark.parametrize("num_samples", [20])
     def test_preference_gym_step(
         self,
         preference_dataset,
-        accelerator_factory,
-        use_accelerator,
         num_samples,
     ):
         train_dataset, test_dataset = preference_dataset
@@ -698,7 +676,6 @@ class TestPreferenceGymStep:
             test_dataset=test_dataset,
             tokenizer=tokenizer,
             data_batch_size_per_gpu=data_batch_size,
-            accelerator=accelerator_factory(use_accelerator),
         )
         prompts = env.step()
         assert isinstance(prompts, dict)
@@ -734,13 +711,10 @@ class TestPreferenceGymStep:
 
 
 class TestPreferenceGymReset:
-    @pytest.mark.parametrize("use_accelerator", [True, False])
     @pytest.mark.parametrize("num_samples", [20])
     def test_preference_gym_reset(
         self,
         preference_dataset,
-        accelerator_factory,
-        use_accelerator,
         num_samples,
     ):
         train_dataset, test_dataset = preference_dataset
@@ -751,7 +725,6 @@ class TestPreferenceGymReset:
             test_dataset=test_dataset,
             tokenizer=tokenizer,
             data_batch_size_per_gpu=data_batch_size,
-            accelerator=accelerator_factory(use_accelerator),
         )
         prompts = env.reset()
         assert isinstance(prompts, dict)
@@ -785,13 +758,10 @@ class TestPreferenceGymReset:
         assert isinstance(prompts["rejected_attention_mask"], torch.Tensor)
         assert env.reset_called
 
-    @pytest.mark.parametrize("use_accelerator", [True, False])
     @pytest.mark.parametrize("num_samples", [20])
     def test_preference_gym_reset_reset_dataloaders_warning(
         self,
         preference_dataset,
-        accelerator_factory,
-        use_accelerator,
         num_samples,
     ):
         train_dataset, test_dataset = preference_dataset
@@ -802,7 +772,6 @@ class TestPreferenceGymReset:
             test_dataset=test_dataset,
             tokenizer=tokenizer,
             data_batch_size_per_gpu=data_batch_size,
-            accelerator=accelerator_factory(use_accelerator),
         )
         env.reset()
         env.step()
@@ -844,13 +813,10 @@ class TestPreferenceGymReset:
         assert isinstance(prompts["rejected_attention_mask"], torch.Tensor)
         assert env.reset_called
 
-    @pytest.mark.parametrize("use_accelerator", [True, False])
     @pytest.mark.parametrize("num_samples", [20])
     def test_preference_gym_reset_reset_called_warning(
         self,
         preference_dataset,
-        accelerator_factory,
-        use_accelerator,
         num_samples,
     ):
         train_dataset, test_dataset = preference_dataset
@@ -861,7 +827,6 @@ class TestPreferenceGymReset:
             test_dataset=test_dataset,
             tokenizer=tokenizer,
             data_batch_size_per_gpu=data_batch_size,
-            accelerator=accelerator_factory(use_accelerator),
         )
         with pytest.warns(
             UserWarning,
@@ -902,13 +867,10 @@ class TestPreferenceGymReset:
         assert env.reset_called
 
     @pytest.mark.parametrize("num_samples", [20])
-    @pytest.mark.parametrize("use_accelerator", [True, False])
     def test_preference_gym_reset_num_epochs(
         self,
         preference_dataset,
         num_samples,
-        accelerator_factory,
-        use_accelerator,
     ):
         train_dataset, test_dataset = preference_dataset
         tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
@@ -918,7 +880,6 @@ class TestPreferenceGymReset:
             test_dataset=test_dataset,
             tokenizer=tokenizer,
             data_batch_size_per_gpu=data_batch_size,
-            accelerator=accelerator_factory(use_accelerator),
         )
         while env.num_epochs == 0:
             env.step()
@@ -962,13 +923,10 @@ class TestPreferenceGymCreateCollateFn:
 
 
 class TestSFTGymInit:
-    @pytest.mark.parametrize("use_accelerator", [True, False])
     @pytest.mark.parametrize("num_samples", [20])
     def test_sft_gym_init(
         self,
         sft_dataset,
-        accelerator_factory,
-        use_accelerator,
         num_samples,
     ):
         train_dataset, test_dataset = sft_dataset
@@ -979,7 +937,6 @@ class TestSFTGymInit:
             test_dataset=test_dataset,
             tokenizer=tokenizer,
             data_batch_size_per_gpu=data_batch_size,
-            accelerator=accelerator_factory(use_accelerator),
         )
         assert isinstance(env, IterablePromptBatchGym)
         assert env.name == "dummy_sft_dataset"
@@ -1046,13 +1003,10 @@ class TestSFTGymInit:
 
 class TestSFTGymStep:
     @pytest.mark.parametrize("num_samples", [20])
-    @pytest.mark.parametrize("use_accelerator", [True, False])
     def test_sft_gym_num_epochs_increment(
         self,
         sft_dataset,
         num_samples,
-        accelerator_factory,
-        use_accelerator,
     ):
         train_dataset, test_dataset = sft_dataset
         tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
@@ -1061,7 +1015,6 @@ class TestSFTGymStep:
             test_dataset=test_dataset,
             tokenizer=tokenizer,
             data_batch_size_per_gpu=1,
-            accelerator=accelerator_factory(use_accelerator),
         )
         while env.num_epochs == 0:
             env.step()
@@ -1069,13 +1022,10 @@ class TestSFTGymStep:
 
 
 class TestSFTGymReset:
-    @pytest.mark.parametrize("use_accelerator", [True, False])
     @pytest.mark.parametrize("num_samples", [20])
     def test_sft_gym_step_and_reset(
         self,
         sft_dataset,
-        accelerator_factory,
-        use_accelerator,
         num_samples,
     ):
         train_dataset, test_dataset = sft_dataset
@@ -1086,7 +1036,6 @@ class TestSFTGymReset:
             test_dataset=test_dataset,
             tokenizer=tokenizer,
             data_batch_size_per_gpu=data_batch_size,
-            accelerator=accelerator_factory(use_accelerator),
         )
         batch = env.step()
         assert set(batch.keys()) == {
@@ -1109,13 +1058,10 @@ class TestSFTGymReset:
         assert env.reset_called
         assert len(batch2["prompt"]) == data_batch_size
 
-    @pytest.mark.parametrize("use_accelerator", [True, False])
     @pytest.mark.parametrize("num_samples", [20])
     def test_sft_gym_reset_warnings_match_iterable_base(
         self,
         sft_dataset,
-        accelerator_factory,
-        use_accelerator,
         num_samples,
     ):
         train_dataset, test_dataset = sft_dataset
@@ -1125,7 +1071,6 @@ class TestSFTGymReset:
             test_dataset=test_dataset,
             tokenizer=tokenizer,
             data_batch_size_per_gpu=1,
-            accelerator=accelerator_factory(use_accelerator),
         )
         env.reset()
         env.step()

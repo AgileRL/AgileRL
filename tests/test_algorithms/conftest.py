@@ -1,54 +1,70 @@
 import gc
 import os
-import torch
+
 import pytest
-from accelerate.state import AcceleratorState
-from accelerate import Accelerator
+import torch
+import torch.distributed as dist
+
+from agilerl.utils.distributed import init_distributed, is_distributed
 
 
-def generate_accelerator(mode, gradient_accumulation_steps=None):
-    """Build an ``Accelerator`` for LLM algorithm tests.
+def generate_distributed_mode(mode):
+    """Initialise ``torch.distributed`` for LLM algorithm tests.
 
-    :param mode: ``None`` (no accelerator), ``"ddp"`` (plain torch-native
-        accelerator; DDP under multi-process launch, single-process here) or
-        ``"fsdp2"`` (FSDP2 sharding via ``fully_shard``, world size 1).
-    :param gradient_accumulation_steps: Optional accumulation steps to
-        configure on the accelerator.
+    :param mode: ``None`` (single device, no process group), ``"dist"``
+        (single-process ``torch.distributed`` rendezvous via the
+        ``distributed_env`` fixture's env vars; gloo on CPU, nccl on CUDA)
+        or ``"fsdp2"`` (same process group at world size 1; tests
+        additionally pass ``FSDPConfig()`` to the algorithm).
 
-    Accelerated modes need CUDA. Setting ``AGILERL_TEST_CPU_ACCELERATOR=1``
-    lets the ``"ddp"`` mode run on a CPU-only machine (gloo backend) for
+    Distributed modes need CUDA. Setting ``AGILERL_TEST_CPU_DISTRIBUTED=1``
+    lets the ``"dist"`` mode run on a CPU-only machine (gloo backend) for
     local debugging; ``"fsdp2"`` always requires CUDA.
+
+    :return: ``True`` when a process group is active.
     """
     if mode is not None and not torch.cuda.is_available():
-        cpu_ddp_ok = (
-            mode == "ddp" and os.environ.get("AGILERL_TEST_CPU_ACCELERATOR") == "1"
+        cpu_dist_ok = (
+            mode == "dist" and os.environ.get("AGILERL_TEST_CPU_DISTRIBUTED") == "1"
         )
-        if not cpu_ddp_ok:
-            pytest.skip("Accelerated LLM tests require CUDA support.")
+        if not cpu_dist_ok:
+            pytest.skip("Distributed LLM tests require CUDA support.")
 
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-    AcceleratorState._reset_state(True)
 
     if mode is None:
-        return None
+        return False
 
-    kwargs = {}
-    if gradient_accumulation_steps is not None:
-        kwargs["gradient_accumulation_steps"] = gradient_accumulation_steps
-
-    if mode == "fsdp2":
-        from accelerate import FullyShardedDataParallelPlugin
-
-        os.environ["ACCELERATE_USE_FSDP"] = "true"
-        kwargs["fsdp_plugin"] = FullyShardedDataParallelPlugin(fsdp_version=2)
-    else:
-        os.environ.pop("ACCELERATE_USE_FSDP", None)
-
-    return Accelerator(**kwargs)
+    initialised = init_distributed()
+    assert initialised, (
+        "Distributed mode requires the `distributed_env` fixture to set the "
+        "rendezvous env vars (RANK/WORLD_SIZE/MASTER_ADDR/MASTER_PORT)."
+    )
+    return True
 
 
 @pytest.fixture(scope="function")
-def accelerator_factory():
-    return generate_accelerator
+def dist_mode_factory(request):
+    """Factory fixture wrapping :func:`generate_distributed_mode`.
+
+    Distributed modes lazily pull in the ``distributed_env`` fixture so the
+    rendezvous env vars are only set (and restored) when a process group is
+    actually wanted — single-device (``None``) variants must not see them,
+    otherwise the algorithm's own ``init_distributed()`` call would create a
+    process group. Destroys the process group on teardown when this
+    fixture's factory call initialised it, so distributed state never leaks
+    to the next test.
+    """
+    pre_existing = is_distributed()
+
+    def _factory(mode):
+        if mode is not None:
+            request.getfixturevalue("distributed_env")
+        return generate_distributed_mode(mode)
+
+    yield _factory
+
+    if not pre_existing and dist.is_available() and dist.is_initialized():
+        dist.destroy_process_group()

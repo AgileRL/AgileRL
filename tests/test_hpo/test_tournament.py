@@ -1,7 +1,6 @@
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
-from accelerate import Accelerator
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import CQN, DDPG, DQN, MADDPG, MATD3, PPO, TD3, RainbowDQN
@@ -292,10 +291,9 @@ class TestTournamentSelectionSelect:
     @pytest.mark.skipif(
         not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed"
     )
-    @pytest.mark.parametrize("use_accelerator", [True, False])
     @pytest.mark.parametrize("elitism", [True, False])
-    @pytest.mark.parametrize("num_processes", [1, 2])
-    def test_language_model_tournament(self, use_accelerator, elitism, num_processes):
+    @pytest.mark.parametrize("distributed", [False, True])
+    def test_language_model_tournament(self, elitism, distributed):
         tournament_selection = TournamentSelection(3, elitism, 4, 2)
         population_size = 4
 
@@ -326,16 +324,6 @@ class TestTournamentSelectionSelect:
             vocab_size=100,
             device="cpu",
         )
-        accelerator = MagicMock(spec=Accelerator)
-        accelerator.is_main_process = True
-        accelerator.wait_for_everyone = MagicMock()
-        accelerator.state = MagicMock()
-        accelerator.state.deepspeed_plugin = None
-        accelerator.state.fsdp_plugin = None
-        accelerator.free_memory = lambda *args: args
-        accelerator.unwrap_model = lambda arg: arg
-        accelerator.num_processes = num_processes
-
         population = [
             GRPO(
                 actor_network=clone_llm(actor_network),
@@ -366,21 +354,16 @@ class TestTournamentSelectionSelect:
                     lora_dropout=0.05,
                 ),
                 cosine_lr_schedule_config=None,
-                accelerator=None,
                 device="cpu",
             )
             for idx in range(init_hp.get("POP_SIZE"))
         ]
-        for agent in population:
-            if use_accelerator:
-                agent.accelerator = accelerator
 
         for agent in population:
             # Create a mock clone that returns a new mock agent
             def mock_clone(new_idx, wrap=False, _agent=agent):
                 mock_agent = MagicMock()
                 mock_agent.index = new_idx
-                mock_agent.accelerator = accelerator
                 mock_agent.clean_up = MagicMock()
                 mock_agent.fitness = _agent.fitness
                 return mock_agent
@@ -392,8 +375,11 @@ class TestTournamentSelectionSelect:
         population[2].fitness = [7, 8, 9]
         population[3].fitness = [10, 11, 12]
 
-        # Call the select method
-        elite, new_population = tournament_selection.select(population)
+        # Call the select method. The distributed case exercises the
+        # broadcast/barrier code path; the underlying collectives no-op
+        # because no process group is initialised.
+        with patch("agilerl.hpo.tournament.is_distributed", return_value=distributed):
+            elite, new_population = tournament_selection.select(population)
 
         # Check if the elite agent is the best agent in the population
         assert elite.fitness == [10, 11, 12]
@@ -440,7 +426,6 @@ class TestTournamentSelectionSelect:
                 lora_dropout=0.05,
             ),
             cosine_lr_schedule_config=None,
-            accelerator=None,
             device="cpu",
         )
         # Simulate a different LLM algorithm label to guard against string checks.

@@ -138,8 +138,6 @@ class TestEvolvableAlgorithmProtocol:
     )
     def test_evolvable_algorithm_protocol_methods_executed(self, algo_cls, obs, act):
         inst = algo_cls(obs, act)
-        EvolvableAlgorithmProtocol.unwrap_models(inst)
-        EvolvableAlgorithmProtocol.wrap_models(inst)
         _ = EvolvableAlgorithmProtocol.get_action(inst, obs.sample())
         _ = EvolvableAlgorithmProtocol.evolvable_attributes(inst)
         _ = EvolvableAlgorithmProtocol.evolvable_attributes(inst, networks_only=True)
@@ -168,9 +166,7 @@ class TestEvolvableAlgorithmProtocol:
     ):
         inst = algo_cls(obs, act)
         EvolvableAlgorithmProtocol.save_checkpoint(inst, str(tmp_path / "ckpt.pt"))
-        EvolvableAlgorithmProtocol.load_checkpoint(
-            inst, str(tmp_path / "ckpt.pt"), "cpu", None
-        )
+        EvolvableAlgorithmProtocol.load_checkpoint(inst, str(tmp_path / "ckpt.pt"))
         _ = EvolvableAlgorithmProtocol.load(algo_cls, str(tmp_path / "ckpt.pt"))
         exp = (
             (

@@ -1,6 +1,5 @@
 import pytest
 import torch
-from accelerate import Accelerator
 from tensordict import TensorDict
 from torch.utils.data import DataLoader
 
@@ -203,8 +202,6 @@ class TestSamplerSampleStandard:
 class TestSamplerSampleDistributed:
     # Call sample_distributed() method with valid batch_size
     def test_sample_distributed_with_valid_batch_size(self):
-        accelerator = Accelerator()
-
         memory_size = 100
         batch_size = 3
 
@@ -212,7 +209,6 @@ class TestSamplerSampleDistributed:
         replay_dataset = ReplayDataset(buffer, batch_size=batch_size)
 
         replay_dataloader = DataLoader(replay_dataset, batch_size=None)
-        replay_dataloader = accelerator.prepare(replay_dataloader)
         sampler = Sampler(
             dataset=replay_dataset,
             dataloader=replay_dataloader,

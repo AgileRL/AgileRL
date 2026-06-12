@@ -39,7 +39,6 @@ Dependencies
 
     import re
     import torch
-    from accelerate import Accelerator
     from datasets import load_dataset
     from peft import LoraConfig
     from torch.utils.data import Dataset
@@ -203,7 +202,6 @@ and then instantiate the ``ReasoningGym`` object which converts a Hugging Face d
             reward_fn=combined_rewards,
             conversation_template=conversation_template,
             data_batch_size_per_gpu=16,
-            accelerator=accelerator,
             return_raw_completions=True, # This is necessary for vLLM to work
         )
 
@@ -217,8 +215,9 @@ An important part of training an LLM to display reasoning behaviour is distribut
 called *Large* Language Models for a reason, and unless you are a very lucky individual, you may not
 have enough capacity on your individual computer to train even a 'small' LLM. If you want to train a
 larger, more powerful model, then this becomes even more infeasible. Instead, we can leverage distributed
-training, to share the workload across multiple devices and speed up training. To enable distributed
-training in this tutorial, we use accelerate (torch-native DDP).
+training, to share the workload across multiple devices and speed up training. AgileRL's LLM algorithms
+use native ``torch.distributed``: when the script is launched with ``torchrun`` the constructor initialises
+the process group automatically, so the same code runs on one GPU or many.
 
 .. code-block:: python
 
@@ -229,7 +228,6 @@ training in this tutorial, we use accelerate (torch-native DDP).
         max_output_tokens=1024,
         batch_size=4,
         group_size=12,
-        accelerator=Accelerator(),
         use_vllm=True,
         vllm_config=VLLMConfig(
             sleep_mode=True,
@@ -254,57 +252,48 @@ checkpoints of the trained agent that can be used later for inference. It also u
         elite_path="path/to/model/directory",
         max_reward=2.0,
         evo_steps=10,
-        accelerator=Accelerator(),
         num_epochs=1
     )
 
-Configuring Accelerate
-----------------------
-To generate an accelerate file, run the command ``accelerate config`` in your terminal, following the instructions
-on screen to outline the details of the compute you intend to use for your finetuning. For LoRA fine-tuning the
-default multi-GPU (DDP) setup is the recommended choice: only the small adapter gradients are synchronized
-between devices, and the base model weights stay whole on each rank (which colocated vLLM generation requires).
-The accelerate config handles the details of the distribution and the GRPO class handles how the accelerator
-is used during training. You can then launch a training run using ``accelerate`` with the following command:
+Launching distributed training
+------------------------------
+To train across multiple GPUs, launch the training script with ``torchrun``:
 
 .. code-block:: bash
 
-    accelerate launch path/to/training_script
+    torchrun --nproc_per_node 4 path/to/training_script
 
-Alternatively, you can avoid ``accelerate config`` by defining your own accelerate config file and pass
-it as an argument to ``accelerate launch``:
+``torchrun`` sets the standard rendezvous environment variables and the LLM algorithm
+constructors call ``init_distributed()`` automatically — no launcher config files and no
+changes to the script are needed. For LoRA fine-tuning, plain data parallelism is the
+recommended choice: only the small adapter gradients are synchronized between devices,
+and the base model weights stay whole on each rank (which colocated vLLM generation requires).
 
-.. code-block:: bash
+Gradient clipping is configured via the ``max_grad_norm`` argument to the algorithm,
+and gradient accumulation via the ``gradient_accumulation_steps`` argument (or
+``micro_batch_size_per_gpu``):
 
-    accelerate launch --config_file path/to/accelerate-config.yaml path/to/training_script
+.. code-block:: python
 
-Example config file (see ``configs/accelerate/grpo_accelerate_config.yaml``):
+    agent = GRPO(
+        ...,
+        gradient_accumulation_steps=2,
+    )
 
-.. code-block:: yaml
+For models too large to train unsharded, shard the actor with PyTorch FSDP2 by passing
+an :class:`~agilerl.utils.distributed.FSDPConfig`:
 
-    compute_environment: LOCAL_MACHINE
-    debug: false
-    gradient_accumulation_steps: 2
-    distributed_type: MULTI_GPU
-    downcast_bf16: no
-    enable_cpu_affinity: false
-    machine_rank: 0
-    main_training_function: main
-    mixed_precision: bf16
-    num_machines: 4
-    num_processes: 1
-    rdzv_backend: static
-    same_network: true
-    tpu_env: []
-    tpu_use_cluster: false
-    tpu_use_sudo: false
-    use_cpu: false
+.. code-block:: python
 
-For models too large to train unsharded, AgileRL supports PyTorch FSDP2
-(``fsdp_version: 2``) — see ``configs/accelerate/fsdp2_accelerate_config.yaml``.
-Gradient clipping is configured via the ``max_grad_norm`` argument to the
-algorithm, and gradient accumulation via ``gradient_accumulation_steps`` in the
-accelerate config (or the ``micro_batch_size_per_gpu`` argument).
+    from agilerl.utils.distributed import FSDPConfig
+
+    agent = GRPO(
+        ...,
+        fsdp_config=FSDPConfig(
+            reshard_after_forward=True,  # ZeRO-3-like memory profile
+            cpu_offload=False,
+        ),
+    )
 
 Using a custom training loop
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -317,19 +306,20 @@ function and is an example of how we might choose to train our agent to exhibit 
     .. code-block:: python
 
         from tqdm import trange
-        import torch.distributed as dist
-        from agilerl.utils.utils import gather_tensor, aggregate_metrics_across_gpus
+        from agilerl.utils.utils import aggregate_metrics_across_gpus
+        from agilerl.utils.distributed import is_main_process
 
         evaluation_interval = 5
+        checkpoint_interval = 50
         max_reward = 2.0
         checkpoint_path="path/to/model/directory"
 
-        if agent.accelerator.is_main_process:
+        if is_main_process():
             print("\nTraining...")
 
         bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
         max_steps = len(env) // env.data_batch_size
-        if agent.accelerator.is_main_process:
+        if is_main_process():
             pbar = trange(
                 max_steps,
                 unit="step",
@@ -349,14 +339,14 @@ function and is an example of how we might choose to train our agent to exhibit 
                 action_masks,
                 rewards,
             )
-            loss, kl = agent.learn(experiences)
-            metrics = [loss, kl, rewards]
+            learn_metrics = agent.learn(experiences)
+            metrics = [learn_metrics["mean_loss"], learn_metrics["mean_kl"], rewards]
             if max_reward is not None:
                 accuracy = (rewards == max_reward).sum() / len(rewards.squeeze())
                 metrics.append(accuracy)
-            agg_metrics = [aggregate_metrics_across_gpus(agent.accelerator, metric) for metric in metrics]
+            agg_metrics = [aggregate_metrics_across_gpus(metric) for metric in metrics]
             prompts = next_prompts
-            if agent.accelerator.is_main_process:
+            if is_main_process():
                 metrics = {
                             "Loss": (agg_metrics[0]),
                             "KL-divergence": (agg_metrics[1]),
@@ -382,12 +372,8 @@ function and is an example of how we might choose to train our agent to exhibit 
                     and checkpoint_interval is not None
                     and (i + 1) % checkpoint_interval == 0
                 ):
-                    if agent.accelerator is not None:
-                        unwrapped_model = agent.accelerator.unwrap_model(agent.actor)
-                        agent.save_checkpoint(checkpoint_path)
-                        print(f"Saved checkpoint {save_path}")
-                    else:
-                        agent.save_checkpoint(checkpoint_path)
+                    agent.save_checkpoint(checkpoint_path)
+                    print(f"Saved checkpoint {checkpoint_path}")
 
 
 Loading a Trained Agent for Inference

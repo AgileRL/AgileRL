@@ -10,7 +10,6 @@ from contextlib import contextmanager
 from typing import Any
 
 import torch
-from accelerate import Accelerator
 from torch import nn
 
 from agilerl import HAS_LLM_DEPENDENCIES
@@ -186,8 +185,9 @@ def gather_full_params(model: nn.Module) -> Generator[None, None, None]:
             isinstance(module, FullyShardedDataParallel) for module in model.modules()
         ):
             msg = (
-                "Legacy FSDP1 wrapping detected. AgileRL only supports FSDP2; "
-                "set `fsdp_version: 2` in your accelerate FSDP config."
+                "Legacy FSDP1 wrapping detected. AgileRL only supports FSDP2 "
+                "(torch.distributed.fsdp.fully_shard); shard the model with "
+                "agilerl.utils.distributed.apply_fsdp2 instead."
             )
             raise NotImplementedError(msg)
         yield
@@ -264,7 +264,7 @@ def create_model_from_name_or_path(
     model_name_or_path: str,
     model_config: dict[str, Any] | None = None,
     add_value_head: bool = False,
-    use_accelerator: bool = False,
+    use_distributed: bool = False,
 ) -> PreTrainedModel:
     """Create a model from a name or path.
 
@@ -274,14 +274,15 @@ def create_model_from_name_or_path(
     :type model_config: dict[str, Any ] | None
     :param use_value_head: Flag to indicate if a value head should be added to the model, defaults to False
     :type use_value_head: bool, optional
-    :param use_accelerator: Flag to indicate if the model should be created with the accelerator, defaults to False
-    :type use_accelerator: bool, optional
+    :param use_distributed: Whether the model is created for a distributed
+        run, defaults to False
+    :type use_distributed: bool, optional
     :return: The created model.
     :rtype: PreTrainedModel
     """
     if model_config is None:
         model_config = {
-            "torch_dtype": torch.bfloat16 if not use_accelerator else torch.float16,
+            "torch_dtype": torch.bfloat16 if not use_distributed else torch.float16,
             "attn_implementation": "sdpa",
         }
     if add_value_head:
@@ -390,104 +391,6 @@ def pool_by_turns(
             )
             raise ValueError(msg)
     return turn_values
-
-
-def create_llm_accelerator(
-    *,
-    fsdp_plugin: Any | None = None,
-    gradient_accumulation_steps: int | None = None,
-    deepspeed_plugin: Any | None = None,
-) -> Accelerator | None:
-    """Create an :class:`Accelerator` for LLM training.
-
-    * **0 GPUs** — returns ``None`` (the ``accelerator=None`` code-path
-      in :class:`~agilerl.algorithms.core.base.LLMAlgorithm` handles
-      CPU-only training).
-    * Default — returns ``Accelerator()``: single-process on one GPU, or
-      torch-native DDP when launched with ``accelerate launch
-      --num_processes N``. This is the recommended mode for LoRA
-      fine-tuning (only adapter gradients are synchronized; base weights
-      stay whole on each rank, which colocated vLLM weight-sharing
-      requires).
-    * When ``fsdp_plugin`` is provided (or configured via ``accelerate
-      launch``), parameters are sharded with PyTorch FSDP2 — for models
-      too large to fit unsharded. Requires ``fsdp_version=2``.
-
-    :param fsdp_plugin: Optional ``accelerate.FullyShardedDataParallelPlugin``
-        with ``fsdp_version=2`` for sharded training.
-    :type fsdp_plugin: Any | None
-    :param gradient_accumulation_steps: Optional number of micro-batches to
-        accumulate before each optimizer step.
-    :type gradient_accumulation_steps: int | None
-    :param deepspeed_plugin: Removed. DeepSpeed is no longer supported;
-        passing this raises ``ValueError``.
-    :type deepspeed_plugin: Any | None
-    :return: A configured ``Accelerator``, or ``None`` when no GPU is
-        available.
-    """
-    if deepspeed_plugin is not None:
-        msg = (
-            "DeepSpeed support has been removed from AgileRL. Multi-GPU LLM "
-            "training now uses torch-native DDP by default (just drop the "
-            "deepspeed_plugin argument), or PyTorch FSDP2 via fsdp_plugin= "
-            "for sharded training."
-        )
-        raise ValueError(msg)
-
-    num_gpus = torch.cuda.device_count()
-
-    if num_gpus == 0:
-        logger.info("No GPUs detected — returning None (CPU-only path).")
-        return None
-
-    kwargs: dict[str, Any] = {}
-    if fsdp_plugin is not None:
-        kwargs["fsdp_plugin"] = fsdp_plugin
-    if gradient_accumulation_steps is not None:
-        kwargs["gradient_accumulation_steps"] = gradient_accumulation_steps
-    accelerator = Accelerator(**kwargs)
-
-    fsdp_state_plugin = getattr(accelerator.state, "fsdp_plugin", None)
-    if fsdp_state_plugin is not None:
-        fsdp_version = getattr(fsdp_state_plugin, "fsdp_version", 1)
-        if fsdp_version != 2:
-            msg = (
-                "AgileRL only supports FSDP2. Set `fsdp_version: 2` in your "
-                "accelerate FSDP config (or pass "
-                "FullyShardedDataParallelPlugin(fsdp_version=2))."
-            )
-            raise ValueError(msg)
-    return accelerator
-
-
-def get_llm_accelerator(
-    base_accelerator: Accelerator | None,
-    idx: int,
-) -> Accelerator | None:
-    """Return a per-agent accelerator from a base accelerator.
-
-    ``idx == 0`` reuses ``base_accelerator``. For additional agents this helper
-    creates a fresh ``Accelerator`` instance so each LLM algorithm owns an
-    independent accelerator/engine reference.
-
-    :param base_accelerator: Accelerator passed into population creation.
-    :type base_accelerator: Accelerator | None
-    :param idx: Agent index in the population.
-    :type idx: int
-    :return: Accelerator for the specific agent, or ``None``.
-    :rtype: Accelerator | None
-    """
-    if idx < 0:
-        msg = f"Population index must be non-negative, got {idx}."
-        raise ValueError(msg)
-
-    if base_accelerator is None:
-        return None
-
-    if idx == 0:
-        return base_accelerator
-
-    return Accelerator()
 
 
 def move_params_to_gpu(unwrapped_model: torch.nn.Module, device: torch.device) -> None:
