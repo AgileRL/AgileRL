@@ -362,6 +362,43 @@ class TestTokenObservationWrapperChatTemplateBoundary:
         w.tokenizer = _ChatTemplateRecordingTokenizer(_render_drops_content)
         assert w._chat_template_boundary_ids("F") is None
 
+    def test_returns_none_when_render_is_not_a_string(self) -> None:
+        # Some tokenizers tokenize regardless of ``tokenize=False`` and hand
+        # back ids; we can only slice a string render, so fall back.
+        w = _bare_wrapper()
+        w.apply_chat_template = True
+        w.tokenizer = _ChatTemplateRecordingTokenizer(_render_returns_ids)
+        assert w._chat_template_boundary_ids("F") is None
+
+    def test_returns_none_when_boundary_text_is_empty(self) -> None:
+        # Render ends exactly at the placeholder -> nothing after it to
+        # tokenize as the boundary, so fall back.
+        w = _bare_wrapper()
+        w.apply_chat_template = True
+        w.tokenizer = _ChatTemplateRecordingTokenizer(_render_ends_at_placeholder)
+        assert w._chat_template_boundary_ids("F") is None
+
+    def test_returns_none_when_boundary_encodes_to_no_tokens(self) -> None:
+        # A tokenizer that maps the boundary text to zero ids gives us
+        # nothing to append, so fall back.
+        w = _bare_wrapper()
+        w.apply_chat_template = True
+        w.tokenizer = _EmptyEncodeTokenizer(_render_chatml)
+        assert w._chat_template_boundary_ids("F") is None
+
+    def test_tokenize_feedback_prefers_chat_template_boundary(self) -> None:
+        # With a working (Gemma-style) template, _tokenize_feedback must
+        # return the template-derived boundary — not the hard-coded ChatML
+        # fallback markers.
+        w = _bare_wrapper()
+        w.apply_chat_template = True
+        w.tokenizer = _ChatTemplateRecordingTokenizer(_render_gemma_chat)
+        out = w._tokenize_feedback("FEEDBACK")
+        decoded = "".join(chr(int(x)) for x in out[0].tolist())
+        assert decoded.startswith("<end_of_turn>\n<start_of_turn>user\n")
+        assert decoded.endswith("<start_of_turn>model\n")
+        assert "<|im_start|>" not in decoded  # ChatML fallback not used
+
     def test_full_tokenize_feedback_falls_back_to_chatml(self) -> None:
         # If the chat-template path returns None (no apply_chat_template at
         # all on the tokenizer), _tokenize_feedback falls back to ChatML so
@@ -416,6 +453,18 @@ def _render_drops_content(messages, add_generation_prompt: bool) -> str:
     return body
 
 
+def _render_returns_ids(messages, add_generation_prompt: bool):
+    """Renderer that tokenizes despite ``tokenize=False`` — non-str render."""
+    del add_generation_prompt
+    return [ord(c) for m in messages for c in m["content"]]
+
+
+def _render_ends_at_placeholder(messages, add_generation_prompt: bool) -> str:
+    """Render whose last bytes are the placeholder — empty boundary text."""
+    del add_generation_prompt
+    return "prefix" + messages[1]["content"]
+
+
 class _ChatTemplateRecordingTokenizer:
     """Tokenizer that delegates rendering to a passed-in callable."""
 
@@ -443,6 +492,14 @@ class _ChatTemplateRecordingTokenizer:
     def decode(self, ids: list[int], skip_special_tokens: bool = True) -> str:
         del skip_special_tokens
         return "".join(chr(int(x)) for x in ids)
+
+
+class _EmptyEncodeTokenizer(_ChatTemplateRecordingTokenizer):
+    """Renders fine but encodes every string to zero token ids."""
+
+    def encode(self, s: str, add_special_tokens: bool = True) -> list[int]:
+        del s, add_special_tokens
+        return []
 
 
 class _ChrTokenizerWithChatTemplateBroken(_ChrTokenizer):
@@ -598,6 +655,79 @@ class TestSyncMultiTurnVecEnvStep:
         assert created[0].step_shapes == [(1, 3)]
         assert created[1].step_shapes == [(1, 3)]
 
+    def test_sync_vec_env_step_raises_on_sampling_logps_count_mismatch(self) -> None:
+        vec_env = SyncMultiTurnVecEnv(
+            env_factory=lambda: _SyncStubEnv(),
+            batch_size=1,
+            group_size=2,
+        )
+        _ = vec_env.reset(seed=0)
+        with pytest.raises(
+            RuntimeError,
+            match="Number of sampling logprobs does not match number of active",
+        ):
+            vec_env.step(
+                [
+                    torch.ones(1, 5, dtype=torch.long),
+                    torch.ones(1, 5, dtype=torch.long),
+                ],
+                sampling_logps=[torch.tensor([-0.1, -0.2])],  # 1 != 2 active
+            )
+
+    def test_sync_vec_env_step_accumulates_sampling_logps_per_trajectory(self) -> None:
+        """Each turn's vLLM sampling logprobs append onto that trajectory's
+        ``Trajectory.sampling_logps``; ``None`` rows (nothing captured) are
+        skipped. ``get_trajectories`` concatenates across turns and keeps a
+        per-trajectory ``None`` for rows that never captured any."""
+        vec = SyncMultiTurnVecEnv(
+            env_factory=lambda: _StepVariantEnv(done_after_step=False),
+            batch_size=1,
+            group_size=2,
+        )
+        _ = vec.reset(seed=0)
+        completions = [
+            torch.ones(1, 4, dtype=torch.long),
+            torch.ones(1, 4, dtype=torch.long),
+        ]
+        _ = vec.step(completions, sampling_logps=[torch.tensor([-0.1, -0.2]), None])
+        _ = vec.step(completions, sampling_logps=[torch.tensor([-0.3]), None])
+        assert len(vec.trajectories[0].sampling_logps) == 2
+        assert vec.trajectories[1].sampling_logps == []
+
+        *_parts, sampling = vec.get_trajectories()
+        assert sampling is not None
+        assert torch.equal(sampling[0], torch.tensor([-0.1, -0.2, -0.3]))
+        assert sampling[1] is None
+
+    def test_sync_vec_env_sampling_logps_collapse_to_none_when_uncaptured(
+        self,
+    ) -> None:
+        """Without captured logprobs the rollout-wide entry is a single
+        ``None`` (not a list of ``None``s), and a reset clears any logprobs
+        accumulated in a previous rollout."""
+        vec = SyncMultiTurnVecEnv(
+            env_factory=lambda: _StepVariantEnv(done_after_step=False),
+            batch_size=1,
+            group_size=2,
+        )
+        _ = vec.reset(seed=0)
+        completions = [
+            torch.ones(1, 4, dtype=torch.long),
+            torch.ones(1, 4, dtype=torch.long),
+        ]
+        # sampling_logps omitted entirely -> nothing accumulates.
+        _ = vec.step(completions)
+        *_parts, sampling = vec.get_trajectories()
+        assert sampling is None
+
+        # Captured logprobs from one rollout must not leak past a reset.
+        _ = vec.step(completions, sampling_logps=[torch.tensor([-0.5]), None])
+        assert len(vec.trajectories[0].sampling_logps) == 1
+        _ = vec.reset(seed=1)
+        assert vec.trajectories[0].sampling_logps == []
+        *_parts, sampling = vec.get_trajectories()
+        assert sampling is None
+
 
 class TestSyncMultiTurnVecEnvClose:
     def test_sync_vec_env_close_calls_underlying_env_close_once(self) -> None:
@@ -686,6 +816,42 @@ class _ChatTokenizer:
     def decode(self, ids: list[int], skip_special_tokens: bool = True) -> str:
         del skip_special_tokens
         return "|".join(str(int(x)) for x in ids)
+
+
+class _NestedChatTokenizer(_ChatTokenizer):
+    """Chat tokenizer whose ``apply_chat_template`` returns batched (nested)
+    token-id lists — ``{"input_ids": [[...]]}`` — as some tokenizers do."""
+
+    def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=True):
+        out = super().apply_chat_template(
+            messages,
+            tokenize=tokenize,
+            add_generation_prompt=add_generation_prompt,
+        )
+        if tokenize:
+            return {
+                "input_ids": [out["input_ids"]],
+                "attention_mask": [out["attention_mask"]],
+            }
+        return out
+
+
+class TestTokenObservationWrapperTokenizeInitialPrompt:
+    def test_initial_prompt_unwraps_batched_token_id_lists(self) -> None:
+        """Tokenizers returning ``[[ids]]`` (batch dim) and ``[ids]`` (flat)
+        from ``apply_chat_template`` must produce identical ``(1, T)``
+        tensors."""
+        flat_ids = _ChatTokenizer().apply_chat_template(
+            [{"role": "user", "content": "hi"}]
+        )["input_ids"]
+
+        w = _bare_wrapper()
+        w.apply_chat_template = True
+        w.tokenizer = _NestedChatTokenizer()
+        out = w._tokenize_initial_prompt("hi")
+        assert out["input_ids"].shape == (1, len(flat_ids))
+        assert out["input_ids"][0].tolist() == flat_ids
+        assert torch.equal(out["attention_mask"], torch.ones_like(out["input_ids"]))
 
 
 class _SeedlessResetEnv:

@@ -516,6 +516,26 @@ class TestPPOInit:
         ppo = _cpu_llmppo(liger_token_chunk_size=256)
         assert ppo.liger_token_chunk_size == 256
 
+    def test_init_action_granularity_deprecated_warns_and_overrides(self):
+        """The legacy ``action_granularity`` kwarg warns and is carried over
+        into ``advantage_granularity``."""
+        with pytest.warns(DeprecationWarning, match="action_granularity is deprecated"):
+            ppo = _cpu_llmppo(action_granularity="turn")
+        assert ppo.advantage_granularity == "turn"
+
+    @pytest.mark.parametrize("is_level", ["turn", "trajectory"])
+    def test_init_liger_non_token_is_level_warns_memory_unbounded(
+        self, monkeypatch, is_level
+    ):
+        """Liger + an explicit non-token IS level is permitted but not
+        memory-bounded; the constructor emits the canonical warning once via
+        the base helper."""
+        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
+        monkeypatch.setattr("agilerl.algorithms.ppo_llm.HAS_LIGER_KERNEL", True)
+        with pytest.warns(UserWarning, match="NOT memory-bounded"):
+            ppo = _cpu_llmppo(use_liger_loss=True, importance_sampling_level=is_level)
+        assert ppo._ppo_liger_mem_warned is True
+
     def test_init_turn_value_reduction_must_be_valid(self):
         actor = create_module(10, 8, 100, "cpu")
         lora = LoraConfig(
@@ -1313,6 +1333,46 @@ class TestPPOLossLiger:
         assert call_kwargs["full_turn_mask"] is not None
         assert call_kwargs["max_turns"] == 2
 
+    def test_trajectory_is_level_pools_advantages_to_per_sample_scalar(self) -> None:
+        """An explicit trajectory IS level pools the per-token advantages to a
+        masked per-completion mean ``(B, 1)`` for the Liger Function (and emits
+        the canonical not-memory-bounded warning at loss time)."""
+        ppo = _cpu_llmppo(beta=0.0, importance_sampling_level="trajectory")
+        B, T = 2, 5
+        ids = torch.randint(1, 50, (B, T), dtype=torch.long)
+        mask = torch.tensor(
+            [[1.0, 1.0, 1.0, 0.0], [1.0, 1.0, 1.0, 1.0]], dtype=torch.float32
+        )
+        zeros = torch.zeros(B, T - 1)
+        adv = torch.tensor([[1.0, 3.0, 5.0, 100.0], [2.0, 4.0, 6.0, 8.0]])
+        turn_ids = torch.zeros(B, T - 1, dtype=torch.long)
+        fake_aux = tuple(torch.tensor(0.0) for _ in range(4))
+
+        with (
+            patch("agilerl.algorithms.ppo_llm.HAS_LIGER_KERNEL", True),
+            patch("agilerl.algorithms.ppo_llm.apply_fused_policy_loss") as mock_fn,
+            pytest.warns(UserWarning, match="NOT memory-bounded"),
+        ):
+            mock_fn.return_value = (torch.tensor(0.5, requires_grad=True), fake_aux)
+            ppo._ppo_loss_liger(
+                ids,
+                mask,
+                zeros,
+                zeros,
+                zeros,
+                adv,
+                zeros,
+                turn_ids,
+                "token",
+            )
+
+        call = mock_fn.call_args
+        # Masked means: row 0 -> (1 + 3 + 5) / 3 = 3; row 1 -> 20 / 4 = 5.
+        assert torch.allclose(call.args[5], torch.tensor([[3.0], [5.0]]), atol=1e-6)
+        assert call.args[12] == "trajectory"
+        # Trajectory pooling needs no per-turn scatter.
+        assert call.kwargs["turn_ids"] is None
+
 
 class TestPPOLearnWithLiger:
     """Cover the ``if self.use_liger_loss:`` branch inside ``learn()``.
@@ -1369,11 +1429,50 @@ class TestPPOLearnWithLiger:
         assert learn_out["mean_kl"] == pytest.approx(0.1, rel=1e-6)
         assert learn_out["mean_vf_loss"] == pytest.approx(0.5, rel=1e-6)
 
+    def test_learn_liger_with_sampling_logps_warns_and_uses_standard_path(
+        self, monkeypatch
+    ):
+        """use_liger_loss=True + captured vLLM logprobs: the fused kernel
+        cannot apply the per-token reweight, so learn() warns once and routes
+        the minibatch through the standard PyTorch path instead."""
+        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
+        monkeypatch.setattr("agilerl.algorithms.ppo_llm.HAS_LIGER_KERNEL", True)
+        ppo = _cpu_llmppo(lr_actor=0.05, update_epochs=1, use_liger_loss=True)
+        ppo._ppo_loss_liger = MagicMock(
+            side_effect=AssertionError("fused path should not run")
+        )
+
+        vocab, inp, mtok = 100, 10, 8
+        seq_len = inp + mtok
+        completions = [torch.randint(0, vocab, (1, seq_len))]
+        action_masks = [torch.ones(1, seq_len - 1, dtype=torch.bool)]
+        turn_ids = torch.tensor(
+            [[-1] * (inp - 1) + [0] * (mtok // 2) + [1] * (mtok - mtok // 2)],
+            dtype=torch.long,
+        )[:, : seq_len - 1]
+        rewards = torch.tensor([[0.5, -0.5]], dtype=torch.float32)
+        n_act = int(action_masks[0].sum())
+        sampling_logps = [torch.full((n_act,), -3.0, dtype=torch.float32)]
+
+        with pytest.warns(
+            UserWarning,
+            match="incompatible with the vLLM sampling-mismatch correction",
+        ):
+            metrics = ppo.learn(
+                (completions, action_masks, rewards),
+                turn_ids=turn_ids,
+                sampling_logps=sampling_logps,
+            )
+        ppo._ppo_loss_liger.assert_not_called()
+        assert ppo._is_correction_liger_warned is True
+        assert "vllm_is_delta_mean" in metrics
+        assert torch.isfinite(torch.tensor(metrics["mean_loss"]))
+
 
 class TestPPOVllmISCorrection:
     """vLLM sampling-mismatch (truncated-IS) correction wiring, token level."""
 
-    @pytest.mark.parametrize("is_level", ["token", "turn", "sequence"])
+    @pytest.mark.parametrize("is_level", ["token", "turn", "trajectory"])
     def test_learn_emits_vllm_is_metrics_and_reweights(self, is_level):
         ppo = _cpu_llmppo(
             importance_sampling_level=is_level, lr_actor=0.05, update_epochs=1

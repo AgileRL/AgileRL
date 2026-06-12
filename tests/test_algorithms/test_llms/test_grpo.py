@@ -552,6 +552,11 @@ class _GrpoLossStub:
     _resolve_advantage_granularity = GRPO._resolve_advantage_granularity
     _align_sampling_logprobs = GRPO._align_sampling_logprobs
     _sampling_mismatch_metrics = GRPO._sampling_mismatch_metrics
+    _aligned_sampling_logprobs_and_metrics = GRPO._aligned_sampling_logprobs_and_metrics
+    _assert_batch_divisible_by_group = GRPO._assert_batch_divisible_by_group
+    _turn_broadcast_advantages = GRPO._turn_broadcast_advantages
+    _trajectory_advantages = GRPO._trajectory_advantages
+    _whiten_advantages = GRPO._whiten_advantages
 
 
 def _build_branch_experiences(
@@ -1163,6 +1168,54 @@ class TestGRPOInit:
     def test_init_grpo_cispo_warns_when_beta_nonzero(self):
         with pytest.warns(UserWarning, match="CISPO is typically used with beta=0"):
             grpo = _make_cpu_grpo_for_branch_tests(loss_type="cispo", beta=0.1)
+        grpo.clean_up()
+
+    def test_init_gspo_overrides_non_trajectory_is_level_with_warning(self):
+        """loss_type='gspo' is trajectory-level by definition: an explicit
+        non-trajectory importance_sampling_level is overridden with a warning."""
+        with pytest.warns(
+            UserWarning, match="loss_type='gspo' implies trajectory-level"
+        ):
+            grpo = _make_cpu_grpo_for_branch_tests(
+                loss_type="gspo", importance_sampling_level="token"
+            )
+        assert grpo.importance_sampling_level == "trajectory"
+        grpo.clean_up()
+
+    @pytest.mark.parametrize("is_level", [None, "trajectory"])
+    def test_init_gspo_no_override_warning_when_level_unset_or_trajectory(
+        self, is_level
+    ):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            grpo = _make_cpu_grpo_for_branch_tests(
+                loss_type="gspo", importance_sampling_level=is_level
+            )
+        assert not any("implies trajectory-level" in str(w.message) for w in caught)
+        assert grpo.importance_sampling_level == "trajectory"
+        grpo.clean_up()
+
+    @pytest.mark.parametrize(
+        "loss_type,is_level,expected_supported",
+        [
+            ("grpo", None, True),  # token level -> fused kernel
+            ("grpo", "turn", False),  # no fused turn mode
+            ("gspo", None, True),  # trajectory-level grpo objective
+            ("cispo", None, True),  # cispo @ token
+            ("cispo", "trajectory", False),  # cispo only fused at token level
+        ],
+    )
+    def test_init_liger_level_supported_flag(
+        self, loss_type, is_level, expected_supported
+    ):
+        """``_liger_level_supported`` routes ``_loss``: only token/trajectory
+        GRPO and token-level CISPO have a fused Liger kernel."""
+        grpo = _make_cpu_grpo_for_branch_tests(
+            loss_type=loss_type,
+            importance_sampling_level=is_level,
+            beta=0.0,
+        )
+        assert grpo._liger_level_supported is expected_supported
         grpo.clean_up()
 
     @pytest.mark.gpu
@@ -1853,7 +1906,7 @@ class TestGRPOLigerLossDispatch:
         "loss_type,expected_liger_loss_type,expected_is_level,expected_eps_high",
         [
             ("cispo", "cispo", "token", "clip_coef_max"),
-            ("gspo", "grpo", "sequence", "clip_coef_max - 1.0"),
+            ("gspo", "grpo", "trajectory", "clip_coef_max - 1.0"),
         ],
     )
     def test_liger_loss_dispatches_per_loss_type(
@@ -1957,6 +2010,82 @@ class TestGRPOLigerLossDispatch:
         assert adv_per_token.shape == (1,)  # batch(1) * n_act(1)
         assert torch.isfinite(loss)
 
+    def test_token_level_per_token_advantages_flattened(self) -> None:
+        """``advantage_granularity='turn'`` broadcasts per-turn advantages to a
+        per-token ``(batch, n_act)`` tensor upstream; the token-flatten Liger
+        path must reshape it to ``(batch * n_act,)`` alongside the hidden
+        states (and not broadcast it like the per-trajectory shapes)."""
+        grpo = _make_cpu_grpo_for_branch_tests(loss_type="grpo", beta=0.0)
+        fake_lm_head = nn.Linear(8, 16, bias=True)
+        fake_loss = torch.tensor(0.5, requires_grad=True)
+        fake_aux = (torch.tensor(0.1), torch.tensor(0.0))
+
+        with (
+            patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
+            patch.object(grpo, "_get_lm_head", return_value=fake_lm_head),
+            patch.object(grpo, "_patch_lm_head_to_identity", nullcontext),
+            patch.object(grpo, "actor", new=MagicMock(wraps=grpo.actor)),
+            patch("agilerl.algorithms.grpo.LigerFusedLinearGRPOFunction") as mock_fn,
+            patch.object(
+                LLMAlgorithm, "select_adapter", lambda self, name: nullcontext()
+            ),
+        ):
+            mock_fn.apply.return_value = (fake_loss, fake_aux)
+            fake_output = MagicMock()
+            fake_output.logits = torch.randn(2, 3, 8, requires_grad=True)
+            grpo.actor.side_effect = lambda **kwargs: fake_output
+
+            per_token_adv = torch.tensor([[0.1, 0.2], [0.3, 0.4]], dtype=torch.float32)
+            grpo._liger_loss(
+                batch_ids=torch.ones((2, 3), dtype=torch.long),
+                action_mask=torch.ones((2, 2), dtype=torch.bool),
+                advantages=per_token_adv,
+                old_log_probs=torch.zeros((2, 2), dtype=torch.float32),
+                reference_log_probs=torch.zeros((2, 2), dtype=torch.float32),
+            )
+
+        call_args = mock_fn.apply.call_args.args
+        # Token-flattened layout: hidden (B*T, 1, H), targets/mask (B*T, 1).
+        assert call_args[0].shape == (4, 1, 8)
+        assert call_args[2].shape == (4, 1)
+        assert call_args[3].shape == (4, 1)
+        # Advantages flattened row-major, exactly the per-token values.
+        # ``.cpu()``: ``_liger_loss`` moves tensors to the agent's device,
+        # which is CUDA on a GPU host.
+        assert torch.allclose(
+            call_args[4].cpu(), torch.tensor([0.1, 0.2, 0.3, 0.4]), atol=1e-7
+        )
+
+    def test_token_level_unexpected_advantage_shape_raises(self) -> None:
+        """A per-token advantage whose token dim disagrees with ``n_act`` is
+        unmappable to the flattened layout and must be rejected."""
+        grpo = _make_cpu_grpo_for_branch_tests(loss_type="grpo", beta=0.0)
+        fake_lm_head = nn.Linear(8, 16, bias=True)
+
+        with (
+            patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
+            patch.object(grpo, "_get_lm_head", return_value=fake_lm_head),
+            patch.object(grpo, "_patch_lm_head_to_identity", nullcontext),
+            patch.object(grpo, "actor", new=MagicMock(wraps=grpo.actor)),
+            patch("agilerl.algorithms.grpo.LigerFusedLinearGRPOFunction") as mock_fn,
+            patch.object(
+                LLMAlgorithm, "select_adapter", lambda self, name: nullcontext()
+            ),
+        ):
+            fake_output = MagicMock()
+            fake_output.logits = torch.randn(2, 3, 8, requires_grad=True)
+            grpo.actor.side_effect = lambda **kwargs: fake_output
+
+            with pytest.raises(ValueError, match="Unexpected advantage shape"):
+                grpo._liger_loss(
+                    batch_ids=torch.ones((2, 3), dtype=torch.long),
+                    action_mask=torch.ones((2, 2), dtype=torch.bool),
+                    advantages=torch.zeros((2, 3), dtype=torch.float32),
+                    old_log_probs=torch.zeros((2, 2), dtype=torch.float32),
+                    reference_log_probs=torch.zeros((2, 2), dtype=torch.float32),
+                )
+            mock_fn.apply.assert_not_called()
+
 
 class _CtxFreeActor(nn.Module):
     """A context-independent "model": ``hidden = embed(input_ids)``.
@@ -2011,7 +2140,7 @@ class TestGRPOLigerSequencePacking:
 
     @pytest.mark.parametrize(
         "loss_type,expected_level",
-        [("grpo", "token"), ("cispo", "token"), ("gspo", "sequence")],
+        [("grpo", "token"), ("cispo", "token"), ("gspo", "trajectory")],
     )
     def test_packed_liger_matches_padded(self, loss_type, expected_level):
         grpo = _make_cpu_grpo_for_branch_tests(loss_type=loss_type, beta=0.0)
@@ -2631,15 +2760,6 @@ class TestGRPOCalculateAdvantage:
         expected = (rewards - rewards.mean(dim=1, keepdim=True)).flatten().unsqueeze(1)
         assert torch.equal(calculated_advantage, expected)
 
-    def test_calculate_advantage_group_size_one_is_finite(self):
-        stub = _GrpoMathStub(group_size=1, adv_norm="mean_std")
-        rewards = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32)
-        calculated_advantage = stub._calculate_advantage(rewards)
-        assert calculated_advantage.isfinite().all()
-        assert torch.allclose(
-            calculated_advantage, torch.zeros_like(calculated_advantage)
-        )
-
 
 class TestGRPOGrpoLossStandard:
     def test_grpo_loss_standard_kl_advantage_shaping_path(self):
@@ -2695,7 +2815,7 @@ class TestGRPOGspoLoss:
     def test_gspo_memory_efficient_pipeline_matches_naive(self):
         """End-to-end GSPO memory-efficient path: Stage-1 fused log-probs
         (vocab-chunked, gradient-checkpointed lm_head) feeding the
-        sequence-level Stage-2 loss must match computing log-probs from
+        trajectory-level Stage-2 loss must match computing log-probs from
         materialized ``(B, T, V)`` logits — in both loss value and the
         gradient back to the policy hidden states. This is the path GSPO
         uses with ``use_liger_loss=False`` (the fused-linear-logprob path is
@@ -2771,7 +2891,7 @@ class TestGRPOGspoLoss:
 
 class TestGRPOTurnLevel:
     """Turn-level (pool-per-turn) importance sampling + advantages for the
-    GRPO family. Turn-level sits between token and sequence (GSPO) on the IS
+    GRPO family. Turn-level sits between token and trajectory (GSPO) on the IS
     axis: pool the per-token log-ratio over each turn's tokens.
     """
 
@@ -2801,7 +2921,7 @@ class TestGRPOTurnLevel:
         assert torch.allclose(out * mask, token_log_ratio * mask, atol=1e-6)
 
     def test_log_importance_weights_turn_collapses_to_sequence(self):
-        """A single turn covering the whole completion == sequence-level."""
+        """A single turn covering the whole completion == trajectory-level."""
         stub = self._stub()
         torch.manual_seed(1)
         B, T = 4, 7
@@ -2809,7 +2929,7 @@ class TestGRPOTurnLevel:
         mask = torch.ones(B, T)
         mask[1, 4:] = 0
         turn_one = torch.zeros(B, T, dtype=torch.long)
-        seq = stub._log_importance_weights(token_log_ratio, mask, None, "sequence")
+        seq = stub._log_importance_weights(token_log_ratio, mask, None, "trajectory")
         turn = stub._log_importance_weights(token_log_ratio, mask, turn_one, "turn")
         assert torch.allclose(turn * mask, seq * mask, atol=1e-6)
 
@@ -2929,10 +3049,10 @@ class TestGRPOAdvantageGranularityDecoupling:
         [
             ("auto", "token", "trajectory"),
             ("auto", "turn", "turn"),
-            ("auto", "sequence", "trajectory"),
+            ("auto", "trajectory", "trajectory"),
             ("trajectory", "turn", "trajectory"),  # decoupled
             ("turn", "token", "turn"),  # decoupled
-            ("turn", "sequence", "turn"),
+            ("turn", "trajectory", "turn"),
             ("trajectory", "token", "trajectory"),
         ],
     )
@@ -2944,12 +3064,12 @@ class TestGRPOAdvantageGranularityDecoupling:
 
     @pytest.mark.parametrize(
         "is_level,adv_shape",
-        [("token", "turn"), ("sequence", "turn"), ("turn", "trajectory")],
+        [("token", "turn"), ("trajectory", "turn"), ("turn", "trajectory")],
     )
     def test_decoupled_advantage_is_combos_run(self, is_level, adv_shape):
         """Any (advantage granularity, IS level) pairing produces a finite
         loss — the surrogate broadcasts a per-turn (B,T) or per-trajectory
-        (B,1) advantage against a token/turn/sequence-pooled ratio."""
+        (B,1) advantage against a token/turn/trajectory-pooled ratio."""
         stub = self._stub("auto", is_level)
         torch.manual_seed(0)
         B, T = 4, 6
@@ -2978,6 +3098,190 @@ class TestGRPOAdvantageGranularityDecoupling:
         """GRPO has no token-level advantage; the constructor must reject it."""
         with pytest.raises(ValueError, match="advantage_granularity"):
             _make_cpu_grpo_for_branch_tests(advantage_granularity="token")
+
+
+def _adv_stub(group_size: int = 2, adv_norm: str = "mean_only"):
+    """Loss stub configured for the advantage-branch helpers extracted from
+    ``learn`` (``_turn_broadcast_advantages`` / ``_trajectory_advantages``).
+    ``mean_only`` keeps the hand-traced expectations integer-clean."""
+    return _GrpoLossStub(
+        clip_coef_min=0.8,
+        clip_coef_max=1.2,
+        beta=0.0,
+        use_kl_advantage_shaping=False,
+        group_size=group_size,
+        adv_norm=adv_norm,
+    )
+
+
+class TestGRPOTurnBroadcastAdvantages:
+    """``_turn_broadcast_advantages``: per-turn group-relative advantages
+    gathered onto token positions via ``turn_ids`` and masked to actions."""
+
+    def test_broadcasts_per_turn_advantages_to_tokens(self):
+        stub = _adv_stub()
+        # One group of 2 trajectories, 2 turns. mean_only group-centering:
+        # turn 0 rewards [1, 3] -> [-1, 1]; turn 1 rewards [2, 0] -> [1, -1].
+        rewards = torch.tensor([[1.0, 2.0], [3.0, 0.0]])
+        turn_ids = torch.tensor([[0, 0, 1, -1], [0, 1, 1, -1]])
+        action_masks = torch.tensor(
+            [[True, True, True, False], [True, True, True, False]]
+        )
+        out = stub._turn_broadcast_advantages(rewards, turn_ids, action_masks, 2)
+        expected = torch.tensor([[-1.0, -1.0, 1.0, 0.0], [1.0, -1.0, -1.0, 0.0]])
+        assert torch.allclose(out, expected, atol=1e-6)
+
+    def test_flat_rewards_are_reshaped_per_sample(self):
+        """Flat rewards (one row per (sample, turn)) reshape to (B, turns)."""
+        stub = _adv_stub()
+        rewards = torch.tensor([1.0, 2.0, 3.0, 0.0])  # -> [[1, 2], [3, 0]]
+        turn_ids = torch.tensor([[0, 0, 1, -1], [0, 1, 1, -1]])
+        action_masks = torch.tensor(
+            [[True, True, True, False], [True, True, True, False]]
+        )
+        out = stub._turn_broadcast_advantages(rewards, turn_ids, action_masks, 2)
+        expected = torch.tensor([[-1.0, -1.0, 1.0, 0.0], [1.0, -1.0, -1.0, 0.0]])
+        assert torch.allclose(out, expected, atol=1e-6)
+
+    def test_raises_when_turn_ids_exceed_reward_turns(self):
+        stub = _adv_stub()
+        rewards = torch.tensor([[1.0, 2.0], [3.0, 0.0]])  # 2 reward turns
+        turn_ids = torch.tensor([[0, 1, 2, -1], [0, 1, 1, -1]])  # turn 2!
+        action_masks = torch.ones(2, 4, dtype=torch.bool)
+        with pytest.raises(ValueError, match="turn_ids reference a turn index beyond"):
+            stub._turn_broadcast_advantages(rewards, turn_ids, action_masks, 2)
+
+    def test_raises_when_batch_not_divisible_by_group_size(self):
+        stub = _adv_stub(group_size=2)
+        rewards = torch.tensor([[1.0], [2.0], [3.0]])
+        turn_ids = torch.zeros(3, 2, dtype=torch.long)
+        action_masks = torch.ones(3, 2, dtype=torch.bool)
+        with pytest.raises(
+            ValueError, match=r"Batch size \(3\) must be divisible by group_size \(2\)"
+        ):
+            stub._turn_broadcast_advantages(rewards, turn_ids, action_masks, 3)
+
+
+class TestGRPOTrajectoryAdvantages:
+    """``_trajectory_advantages``: collapse per-turn rewards to episode
+    returns, then per-trajectory group-relative advantage ``(B, 1)``."""
+
+    def test_collapses_per_turn_rewards_to_episode_returns(self):
+        stub = _adv_stub()
+        completion_ids = torch.zeros(2, 5, dtype=torch.long)
+        # Per-turn rewards sum to [3, 6]; mean_only centering -> [-1.5, 1.5].
+        rewards = torch.tensor([[1.0, 2.0], [2.0, 4.0]])
+        out = stub._trajectory_advantages(rewards, 2, completion_ids)
+        assert torch.allclose(out, torch.tensor([[-1.5], [1.5]]), atol=1e-6)
+
+    def test_accepts_flat_per_trajectory_rewards(self):
+        stub = _adv_stub()
+        completion_ids = torch.zeros(2, 5, dtype=torch.long)
+        out = stub._trajectory_advantages(torch.tensor([1.0, 5.0]), 2, completion_ids)
+        assert torch.allclose(out, torch.tensor([[-2.0], [2.0]]), atol=1e-6)
+
+    def test_raises_when_rewards_do_not_collapse_to_one_per_trajectory(self):
+        stub = _adv_stub()
+        completion_ids = torch.zeros(2, 5, dtype=torch.long)
+        with pytest.raises(
+            ValueError, match="Rewards must provide one scalar per trajectory"
+        ):
+            stub._trajectory_advantages(
+                torch.tensor([1.0, 2.0, 3.0]), 2, completion_ids
+            )
+
+    def test_raises_when_batch_not_divisible_by_group_size(self):
+        stub = _adv_stub(group_size=2)
+        completion_ids = torch.zeros(3, 5, dtype=torch.long)
+        with pytest.raises(
+            ValueError, match=r"Batch size \(3\) must be divisible by group_size \(2\)"
+        ):
+            stub._trajectory_advantages(
+                torch.tensor([1.0, 2.0, 3.0]), 3, completion_ids
+            )
+
+
+class TestGRPOWhitenAdvantages:
+    """``_whiten_advantages``: shape-aware whitening over (B, 1) per-trajectory
+    and (B, T-1) per-token advantages, with active-sample masking and a
+    <=1-active guard (variance undefined)."""
+
+    @staticmethod
+    def _stub():
+        return _adv_stub()
+
+    def test_per_trajectory_whitens_across_samples(self):
+        stub = self._stub()
+        adv = torch.tensor([[1.0], [2.0], [3.0], [4.0]])
+        action_masks = torch.ones(4, 3, dtype=torch.bool)
+        out = stub._whiten_advantages(adv, action_masks, None)
+        # masked_whiten: (v - mean) * rsqrt(unbiased_var + 1e-8);
+        # mean = 2.5, var([1, 2, 3, 4]) = 5/3.
+        flat = adv.reshape(-1)
+        expected = (flat - flat.mean()) * torch.rsqrt(flat.var() + 1e-8)
+        assert out.shape == (4, 1)
+        assert torch.allclose(out, expected.reshape(4, 1), atol=1e-5)
+        assert torch.allclose(
+            out.reshape(-1),
+            torch.tensor([-1.161895, -0.387298, 0.387298, 1.161895]),
+            atol=1e-4,
+        )
+
+    def test_per_trajectory_active_mask_keeps_inactive_rows_untouched(self):
+        stub = self._stub()
+        adv = torch.tensor([[1.0], [2.0], [3.0], [100.0]])
+        action_masks = torch.ones(4, 3, dtype=torch.bool)
+        active = torch.tensor([True, True, True, False])
+        out = stub._whiten_advantages(adv, action_masks, active)
+        # Stats from the active rows only: mean([1, 2, 3]) = 2, var = 1 ->
+        # active rows become [-1, 0, 1]; the filtered row keeps its raw value.
+        assert torch.allclose(
+            out, torch.tensor([[-1.0], [0.0], [1.0], [100.0]]), atol=1e-4
+        )
+
+    def test_per_trajectory_all_false_active_mask_falls_back_to_all_samples(self):
+        stub = self._stub()
+        adv = torch.tensor([[1.0], [2.0], [3.0], [4.0]])
+        action_masks = torch.ones(4, 3, dtype=torch.bool)
+        none_active = torch.zeros(4, dtype=torch.bool)
+        out = stub._whiten_advantages(adv, action_masks, none_active)
+        baseline = stub._whiten_advantages(adv, action_masks, None)
+        assert torch.allclose(out, baseline, atol=1e-7)
+
+    def test_per_token_whitens_over_action_positions_only(self):
+        stub = self._stub()
+        adv = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, -7.0]])
+        action_masks = torch.tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 0.0]])
+        out = stub._whiten_advantages(adv, action_masks, None)
+        # Stats over the 5 action tokens [1..5]: mean = 3, unbiased var = 2.5.
+        scale = torch.rsqrt(torch.tensor(2.5) + 1e-8)
+        expected = (adv - 3.0) * scale
+        expected[1, 2] = -7.0  # non-action position keeps its raw value
+        assert out.shape == adv.shape
+        assert torch.allclose(out, expected, atol=1e-5)
+
+    def test_per_token_active_mask_restricts_rows(self):
+        stub = self._stub()
+        adv = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        action_masks = torch.ones(2, 3)
+        active = torch.tensor([True, False])
+        out = stub._whiten_advantages(adv, action_masks, active)
+        # Stats from row 0 only ([1, 2, 3]: mean 2, var 1); row 1 untouched.
+        assert torch.allclose(out[0], torch.tensor([-1.0, 0.0, 1.0]), atol=1e-4)
+        assert torch.allclose(out[1], adv[1], atol=1e-7)
+
+    def test_single_active_value_guard_returns_unchanged(self):
+        stub = self._stub()
+        action_masks = torch.ones(2, 3, dtype=torch.bool)
+        adv = torch.tensor([[5.0], [7.0]])
+        active = torch.tensor([True, False])
+        out = stub._whiten_advantages(adv, action_masks, active)
+        assert torch.equal(out, adv)
+        # Same guard on the per-token shape: one action token in total.
+        adv_tok = torch.tensor([[5.0, 0.0]])
+        single_mask = torch.tensor([[1.0, 0.0]])
+        out_tok = stub._whiten_advantages(adv_tok, single_mask, None)
+        assert torch.equal(out_tok, adv_tok)
 
 
 class TestGRPOCispoLoss:
@@ -5436,3 +5740,116 @@ class TestGRPOVLLMSamplingCorrection:
         assert n_skipped == 1
         assert torch.allclose(aligned[0], old[0])
         assert torch.allclose(aligned[1], torch.tensor([-0.1, -0.2]), atol=1e-7)
+
+    def test_aligned_and_metrics_none_path(self):
+        """No captured logprobs -> (None, {}) and no metrics computed."""
+        stub = self._stub()
+        masks = torch.ones(2, 3, dtype=torch.bool)
+        old = torch.zeros(2, 3)
+        assert stub._aligned_sampling_logprobs_and_metrics(None, masks, old) == (
+            None,
+            {},
+        )
+        assert stub._aligned_sampling_logprobs_and_metrics([], masks, old) == (
+            None,
+            {},
+        )
+
+    def test_aligned_and_metrics_full_match_no_skip_metric(self):
+        """All rows align: metrics computed, no rows-skipped key, no warning."""
+        stub = self._stub(vllm_importance_sampling_cap=2.0)
+        masks = torch.ones(1, 3, dtype=torch.bool)
+        old = torch.full((1, 3), -1.0)
+        flat = [torch.full((3,), -1.5)]
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            aligned, metrics = stub._aligned_sampling_logprobs_and_metrics(
+                flat, masks, old
+            )
+        assert torch.allclose(aligned, torch.full((1, 3), -1.5), atol=1e-7)
+        # log-diff is 0.5 on every token: delta = 0.5, ratio = e^0.5 (< cap).
+        assert metrics["vllm_is_delta_mean"] == pytest.approx(0.5, rel=1e-6)
+        assert metrics["vllm_is_ratio_mean"] == pytest.approx(
+            torch.exp(torch.tensor(0.5)).item(), rel=1e-6
+        )
+        assert metrics["vllm_is_frac_clamped"] == pytest.approx(0.0)
+        assert "vllm_is_rows_skipped" not in metrics
+        assert not any("token-count mismatch" in str(w.message) for w in caught)
+
+    def test_aligned_and_metrics_skipped_rows_warns_and_sets_metric(self):
+        """A row whose captured token count disagrees with the action mask is
+        skipped (ratio 1 fallback), counted in the metrics, and warned once."""
+        stub = self._stub(vllm_importance_sampling_cap=2.0)
+        masks = torch.ones(2, 2, dtype=torch.bool)
+        old = torch.tensor([[-1.0, -1.0], [-2.0, -2.0]])
+        # Row 0 aligns; row 1 has 1 logprob for 2 action tokens -> skipped.
+        flat = [torch.full((2,), -1.5), torch.tensor([-0.5])]
+        with pytest.warns(UserWarning, match="1/2 rows had a token-count mismatch"):
+            aligned, metrics = stub._aligned_sampling_logprobs_and_metrics(
+                flat, masks, old
+            )
+        assert torch.allclose(aligned[0], torch.full((2,), -1.5), atol=1e-7)
+        assert torch.allclose(aligned[1], old[1], atol=1e-7)  # ratio-1 fallback
+        assert metrics["vllm_is_rows_skipped"] == pytest.approx(1.0)
+        # Row 0 contributes |log-diff| 0.5 per token, row 1 contributes 0.
+        assert metrics["vllm_is_delta_mean"] == pytest.approx(0.25, rel=1e-6)
+
+    def test_learn_liger_with_sampling_logps_warns_and_uses_standard_path(
+        self, monkeypatch
+    ):
+        """use_liger_loss=True + captured vLLM logprobs: the fused kernel
+        cannot apply the per-token reweight, so ``_loss`` warns once and runs
+        the standard path (which still yields finite metrics)."""
+        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
+        monkeypatch.setattr("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True)
+        grpo = _make_cpu_grpo_for_branch_tests(
+            group_size=2, update_epochs=1, use_liger_loss=True
+        )
+        assert grpo.use_liger_loss is True
+        completion_ids, action_masks = _build_branch_experiences(batch_size=2)
+        rewards = torch.tensor([1.0, -1.0], dtype=torch.float32)
+        n_act = int(action_masks[0].sum())
+        sampling_logps = [
+            torch.full((n_act,), -3.0, dtype=torch.float32) for _ in range(2)
+        ]
+
+        # Stub the heavy forwards (like the other CPU learn-branch tests):
+        # ``_loss`` itself runs for real, so the Liger-vs-correction routing
+        # (warn once, fall through to the standard ``_loss_fn``) is exercised.
+        def fake_fused_forward(ids, batch_size):
+            shape = (ids.shape[0], ids.shape[1] - 1)
+            zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
+            return zeros, zeros, None
+
+        def fake_get_logprobs(ids, batch_size, use_reference=False, eval_mode=False):
+            # ``device=ids.device``: on a GPU host learn() runs on CUDA and the
+            # stubbed logprobs must live with the other loss inputs.
+            return torch.zeros(
+                ids.shape[0],
+                ids.shape[1] - 1,
+                device=ids.device,
+                requires_grad=True,
+            )
+
+        with (
+            patch.object(
+                grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward
+            ),
+            patch.object(grpo, "_get_logprobs", side_effect=fake_get_logprobs),
+            patch.object(grpo, "_backward_pass", return_value=None),
+            patch.object(grpo, "_liger_loss") as mock_liger_loss,
+            pytest.warns(
+                UserWarning,
+                match="incompatible with the vLLM sampling-mismatch correction",
+            ),
+        ):
+            metrics = grpo.learn(
+                (completion_ids, action_masks, rewards),
+                sampling_logps=sampling_logps,
+            )
+        # The fused kernel was bypassed in favour of the standard path.
+        mock_liger_loss.assert_not_called()
+        assert grpo._is_correction_liger_warned is True
+        assert "vllm_is_delta_mean" in metrics
+        assert torch.isfinite(torch.tensor(metrics["mean_loss"]))
+        grpo.clean_up()

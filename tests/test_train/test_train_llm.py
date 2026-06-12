@@ -2478,6 +2478,36 @@ class TestNormalizeLearnMetrics:
             _normalize_learn_metrics(agent, (1.0, 0.5, 0.2), mode="reasoning")
 
 
+class TestGrpoSamplingKwargs:
+    """``_grpo_sampling_kwargs`` threads vLLM sampling logprobs into
+    ``learn()`` only for the RL LLM agents (GRPO family / LLMPPO /
+    LLMREINFORCE) and only when some were actually captured."""
+
+    @pytest.mark.parametrize("agent_spec", [GRPO, LLMPPO, LLMREINFORCE])
+    def test_threads_sampling_logps_for_rl_agents_when_present(self, agent_spec):
+        from agilerl.training.train_llm import _grpo_sampling_kwargs
+
+        agent = MagicMock(spec=agent_spec)
+        sampling_logps = [torch.tensor([-0.1, -0.2])]
+        kwargs = _grpo_sampling_kwargs(agent, sampling_logps, present=True)
+        assert kwargs == {"sampling_logps": sampling_logps}
+        assert kwargs["sampling_logps"] is sampling_logps
+
+    def test_returns_empty_when_nothing_captured(self):
+        from agilerl.training.train_llm import _grpo_sampling_kwargs
+
+        agent = MagicMock(spec=GRPO)
+        assert _grpo_sampling_kwargs(agent, None, present=False) == {}
+
+    @pytest.mark.parametrize("agent_spec", [DPO, SFT])
+    def test_returns_empty_for_non_rl_agents_even_when_present(self, agent_spec):
+        from agilerl.training.train_llm import _grpo_sampling_kwargs
+
+        agent = MagicMock(spec=agent_spec)
+        sampling_logps = [torch.tensor([-0.1])]
+        assert _grpo_sampling_kwargs(agent, sampling_logps, present=True) == {}
+
+
 class TestSaveEliteCheckpoint:
     def test_save_elite_checkpoint_picks_best_agent(self, tmp_path):
         from agilerl.training.train_llm import _save_elite_checkpoint

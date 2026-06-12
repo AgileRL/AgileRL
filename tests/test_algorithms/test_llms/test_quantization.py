@@ -1,7 +1,9 @@
 """Unit tests for the LLM memory-optimization plumbing (quantization +
 activation offload) through LLMAlgorithm + VLLMConfig.
 
-Pure-Python tests: no real model load, no CUDA. Validates that:
+Most tests are pure-Python: no real model load, no CUDA. The ``gpu``-marked
+classes at the bottom are the exception — they load the tiny fixture for real
+and verify quantization actually happened. Validates that:
   * `create_model_from_name_or_path` forwards a ``model_config`` (incl. a
     ``quantization_config``) into transformers' ``from_pretrained`` while
     still applying the SDPA + dtype defaults.
@@ -35,7 +37,9 @@ pytest.importorskip(
     reason="quantization tests require bitsandbytes (linux-only optional dep).",
 )
 
+import bitsandbytes as bnb  # noqa: E402
 import torch  # noqa: E402
+from peft import LoraConfig  # noqa: E402
 from transformers import BitsAndBytesConfig  # noqa: E402
 
 from agilerl.utils.algo_utils import VLLMConfig  # noqa: E402
@@ -60,7 +64,9 @@ from agilerl.utils.llm_utils import (  # noqa: E402
     resolve_vllm_max_lora_rank,
 )
 from agilerl.algorithms.core.base import LLMAlgorithm  # noqa: E402
+from agilerl.algorithms.reinforce_llm import REINFORCE  # noqa: E402
 from agilerl.utils.utils import _prepare_llm_algo_kwargs  # noqa: E402
+from tests import TINY_LLM_FIXTURE_PATH  # noqa: E402
 
 
 class TestCreateModelFromNameOrPath:
@@ -796,4 +802,152 @@ class TestAdaptLoraConfigForClippableLinear:
                 scoped, "model.vision_tower.encoder.layers.0.self_attn.q_proj.linear"
             )
             is None
+        )
+
+
+def _require_bf16_cuda() -> None:
+    """Skip when no bf16-capable CUDA device is usable.
+
+    The shipped presets quantize with bf16 compute/storage, so pre-Ampere
+    GPUs are out of scope rather than a failure. Mirrors the guarded probe in
+    ``tests/test_algorithms/test_llms/conftest.py`` (``is_bf16_supported``
+    raises when the driver is loaded but no device is visible).
+    """
+    if not torch.cuda.is_available() or torch.cuda.device_count() == 0:
+        pytest.skip("bnb preset tests need a CUDA device.")
+    try:
+        bf16 = torch.cuda.is_bf16_supported()
+    except RuntimeError:
+        bf16 = False
+    if not bf16:
+        pytest.skip("bnb preset tests need a bf16-capable CUDA device.")
+
+
+def _assert_finite_logits_forward(model: torch.nn.Module, vocab_size: int) -> None:
+    device = next(model.parameters()).device
+    input_ids = torch.randint(0, vocab_size, (2, 8), device=device)
+    with torch.inference_mode():
+        logits = model(input_ids=input_ids).logits
+    assert logits.shape == (2, 8, vocab_size)
+    assert torch.isfinite(logits.float()).all()
+
+
+@pytest.mark.gpu
+class TestQuantizedModelLoadOnGpu:
+    """Real bnb loads of the tiny fixture: quantization must actually happen.
+
+    The wiring tests above only check that configs are *forwarded*; these load
+    the checkpoint with each preset and assert the linear projections were
+    really replaced by bnb modules, the packed weights live on GPU, and the
+    quantized model still produces finite logits.
+    """
+
+    _PROJECTIONS = (
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+    )
+
+    @staticmethod
+    def _load(preset):
+        return create_model_from_name_or_path(
+            TINY_LLM_FIXTURE_PATH,
+            model_config={"quantization_config": build_bnb_quantization_config(preset)},
+        )
+
+    def test_nf4_preset_quantizes_projections(self):
+        _require_bf16_cuda()
+        model = self._load("nf4")
+
+        quantized_leaves = {
+            name.rsplit(".", 1)[-1]
+            for name, mod in model.named_modules()
+            if isinstance(mod, bnb.nn.Linear4bit)
+        }
+        assert quantized_leaves.issuperset(self._PROJECTIONS)
+
+        q_proj = model.model.layers[0].self_attn.q_proj
+        assert isinstance(q_proj.weight, bnb.nn.Params4bit)
+        assert q_proj.weight.quant_state is not None
+        assert q_proj.weight.device.type == "cuda"
+        # Packed 4-bit storage holds fewer stored elements than logical weights.
+        assert q_proj.weight.numel() < q_proj.in_features * q_proj.out_features
+
+        # lm_head stays dense: the fused logprob paths run it unquantized.
+        assert not isinstance(model.lm_head, bnb.nn.Linear4bit)
+        _assert_finite_logits_forward(model, model.config.vocab_size)
+
+    def test_int8_preset_quantizes_projections(self):
+        _require_bf16_cuda()
+        model = self._load("int8")
+
+        quantized_leaves = {
+            name.rsplit(".", 1)[-1]
+            for name, mod in model.named_modules()
+            if isinstance(mod, bnb.nn.Linear8bitLt)
+        }
+        assert quantized_leaves.issuperset(self._PROJECTIONS)
+
+        q_proj = model.model.layers[0].self_attn.q_proj
+        assert q_proj.weight.dtype == torch.int8
+        assert q_proj.weight.device.type == "cuda"
+
+        assert not isinstance(model.lm_head, bnb.nn.Linear8bitLt)
+        _assert_finite_logits_forward(model, model.config.vocab_size)
+
+
+@pytest.mark.gpu
+class TestReinforceQuantizedInit:
+    """Algorithm-level nf4 (the decoupled-trainer QLoRA path, no vLLM)."""
+
+    def test_nf4_base_with_lora_adapters_and_dense_lm_head(self):
+        _require_bf16_cuda()
+        agent = REINFORCE(
+            model_name=TINY_LLM_FIXTURE_PATH,
+            pad_token_id=151643,
+            pad_token="<|endoftext|>",
+            lora_config=LoraConfig(
+                r=4,
+                lora_alpha=16,
+                target_modules=["q_proj", "v_proj"],
+                task_type="CAUSAL_LM",
+                lora_dropout=0.0,
+            ),
+            quantization_config=build_bnb_quantization_config("nf4"),
+            device="cuda",
+            batch_size=2,
+            micro_batch_size_per_gpu=1,
+            max_output_tokens=8,
+            max_model_len=32,
+            use_liger_loss=False,
+            wrap=False,
+        )
+
+        # __init__ forces lm_head into the bnb skip list (fused logprob paths
+        # run the head matmul outside the quantized forward).
+        assert "lm_head" in agent.quantization_config.llm_int8_skip_modules
+        assert type(agent._get_lm_head()).__name__ not in (
+            "Linear4bit",
+            "Linear8bitLt",
+        )
+
+        # The PEFT-wrapped actor sits on a genuinely 4-bit base. NB: the actor
+        # is a DummyEvolvable, whose ``modules()`` is the EvolvableModule
+        # registry API, not torch's recursive walk — use ``named_modules()``.
+        assert any(
+            isinstance(m, bnb.nn.Linear4bit) for _, m in agent.actor.named_modules()
+        )
+        # ... with LoRA adapters attached to the quantized projections.
+        lora_param_names = [
+            name for name, _ in agent.actor.named_parameters() if "lora_A" in name
+        ]
+        assert lora_param_names
+        assert all("q_proj" in name or "v_proj" in name for name in lora_param_names)
+
+        _assert_finite_logits_forward(
+            agent.actor, agent._get_unwrapped_actor().config.vocab_size
         )

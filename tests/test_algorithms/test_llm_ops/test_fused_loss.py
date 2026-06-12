@@ -27,10 +27,14 @@ from liger_kernel.chunked_loss.fused_linear_preference import (
     LigerFusedLinearPreferenceBase,
 )
 from agilerl.algorithms.core.llm_ops.fused_loss import (
+    apply_fused_policy_loss,
+    flatten_tokens_for_fused_loss,
     llm_policy_loss_fn,
+    resolve_token_chunk_size,
     LigerFusedLinearPolicyLossFunction,
     _LigerDPOWithAlpha,
 )
+from agilerl.utils.llm_utils import DEFAULT_LIGER_TOKEN_CHUNK
 
 
 def test_no_liger_fused_module_raises_import_error(monkeypatch):
@@ -362,6 +366,40 @@ class TestLlmPpoLossFn:
         )
         assert metrics[1].item() > 0.0  # clipfrac
 
+    def test_token_mode_rejects_stray_turn_ids(self) -> None:
+        """The level is authoritative: turn_ids alongside the (default)
+        token level almost certainly means the caller wanted turn pooling,
+        and per-turn advantages would silently mis-broadcast — fail loudly."""
+        torch.manual_seed(5)
+        log_probs = torch.log_softmax(torch.randn(2, 4, 16), dim=-1)
+        with pytest.raises(ValueError, match="importance_sampling_level='turn'"):
+            llm_policy_loss_fn(
+                log_probs=log_probs,
+                selected_token_ids=torch.randint(0, 16, (2, 4)),
+                attention_mask=torch.ones(2, 4),
+                advantages=torch.randn(2, 4) * 0.1,
+                full_attention_mask=torch.ones(2, 4),
+                old_per_token_logps=torch.randn(2, 4) * 0.05,
+                turn_ids=torch.tensor([[0, 0, 1, 1], [0, 1, 1, 1]]),
+                # importance_sampling_level defaults to "token"
+            )
+
+    def test_unknown_importance_sampling_level_raises(self) -> None:
+        """An unrecognized level name (e.g. the pre-rename "sequence") must
+        raise rather than silently fall through to some default pooling."""
+        torch.manual_seed(6)
+        log_probs = torch.log_softmax(torch.randn(2, 4, 16), dim=-1)
+        with pytest.raises(ValueError, match="Unknown importance_sampling_level"):
+            llm_policy_loss_fn(
+                log_probs=log_probs,
+                selected_token_ids=torch.randint(0, 16, (2, 4)),
+                attention_mask=torch.ones(2, 4),
+                advantages=torch.randn(2, 1) * 0.1,
+                full_attention_mask=torch.ones(2, 4),
+                old_per_token_logps=torch.randn(2, 4) * 0.05,
+                importance_sampling_level="sequence",
+            )
+
 
 def _unfused_turn_reference(
     log_probs: torch.Tensor,
@@ -628,6 +666,143 @@ class TestLlmPpoLossFnTurnMode:
             )
 
 
+def _unfused_trajectory_reference(
+    log_probs: torch.Tensor,
+    target_ids: torch.Tensor,
+    mask: torch.Tensor,
+    traj_advantages: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    ref_log_probs: torch.Tensor | None,
+    epsilon: float,
+    beta: float,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """PyTorch reference for GSPO-style trajectory-level pooling.
+
+    Length-normalized mean of token log-ratios over each completion's
+    action tokens, clip + max-formula on the per-trajectory ratio,
+    mean over active (>= 1 action token) trajectories. KL stays
+    token-level (matches the fused convention).
+    """
+    per_token_logps = log_probs.gather(dim=-1, index=target_ids.unsqueeze(-1)).squeeze(
+        -1
+    )
+    token_log_ratio = per_token_logps - old_log_probs
+    mask_f = mask.float()
+    seq_count = mask_f.sum(dim=-1, keepdim=True)  # (B, 1)
+    seq_log_ratio = (token_log_ratio * mask_f).sum(
+        dim=-1, keepdim=True
+    ) / seq_count.clamp(min=1.0)
+    seq_mask = (seq_count > 0).float()
+
+    ratio = torch.exp(seq_log_ratio)
+    clipped = torch.clamp(ratio, 1 - epsilon, 1 + epsilon)
+    pg_seq = torch.max(-traj_advantages * ratio, -traj_advantages * clipped)
+    seq_denom = seq_mask.sum().clamp(min=1.0)
+    loss = (pg_seq * seq_mask).sum() / seq_denom
+
+    if ref_log_probs is not None:
+        kl_div = (
+            torch.exp(ref_log_probs - per_token_logps)
+            - (ref_log_probs - per_token_logps)
+            - 1.0
+        )
+        token_denom = mask_f.sum().clamp(min=1.0)
+        if beta != 0.0:
+            loss = loss + beta * ((kl_div * mask_f).sum() / token_denom)
+        kl_metric = float(((kl_div * mask_f).sum() / token_denom).item())
+    else:
+        kl_metric = 0.0
+
+    return loss, {
+        "kl": kl_metric,
+        "clipfrac": float(
+            (((ratio != clipped).float() * seq_mask).sum() / seq_denom).item()
+        ),
+        "pg_loss": float(((pg_seq * seq_mask).sum() / seq_denom).item()),
+    }
+
+
+class TestLlmPpoLossFnTrajectoryMode:
+    """Trajectory mode (GSPO) must length-normalize token log-ratios over
+    the whole completion, clip at the trajectory level, and normalize by
+    the number of active trajectories — matching the unfused reference —
+    while preserving the chunk-accumulation invariant."""
+
+    @staticmethod
+    def _build_inputs(B: int, T: int, V: int, seed: int):
+        torch.manual_seed(seed)
+        log_probs = torch.log_softmax(torch.randn(B, T, V), dim=-1)
+        target_ids = torch.randint(0, V, (B, T))
+        mask = torch.ones(B, T, dtype=torch.float)
+        mask[1, -2:] = 0.0  # partially masked completion
+        mask[-1, :] = 0.0  # fully inactive trajectory (no action tokens)
+        adv = torch.randn(B, 1) * 0.1  # per-trajectory advantages
+        old_lp = torch.randn(B, T) * 0.05
+        ref_lp = torch.randn(B, T) * 0.05
+        return log_probs, target_ids, mask, adv, old_lp, ref_lp
+
+    def test_matches_unfused_gspo_reference_with_kl(self) -> None:
+        B, T, V = 4, 6, 32
+        log_probs, ids, mask, adv, old_lp, ref_lp = self._build_inputs(B, T, V, seed=20)
+        eps, beta = 0.2, 0.01
+
+        ref_loss, ref_m = _unfused_trajectory_reference(
+            log_probs, ids, mask, adv, old_lp, ref_lp, eps, beta
+        )
+        fused_loss, metrics = llm_policy_loss_fn(
+            log_probs=log_probs,
+            selected_token_ids=ids,
+            attention_mask=mask,
+            advantages=adv,
+            full_attention_mask=mask,
+            ref_per_token_logps=ref_lp,
+            old_per_token_logps=old_lp,
+            epsilon_low=eps,
+            epsilon_high=eps,
+            beta=beta,
+            importance_sampling_level="trajectory",
+        )
+        assert torch.allclose(fused_loss, ref_loss, rtol=1e-6, atol=1e-6)
+        assert metrics[0].item() == pytest.approx(ref_m["kl"], rel=1e-6, abs=1e-6)
+        assert metrics[1].item() == pytest.approx(ref_m["clipfrac"], abs=1e-6)
+        assert metrics[2].item() == pytest.approx(ref_m["pg_loss"], rel=1e-6, abs=1e-6)
+
+    def test_chunk_accumulation_recovers_global_loss_trajectory_mode(self) -> None:
+        """Splitting along B and summing chunk losses must equal the
+        single-shot trajectory-mode loss — the active-trajectory denominator
+        comes from the GLOBAL ``full_attention_mask``, so chunks containing
+        inactive rows contribute zero rather than skewing the mean."""
+        B, T, V = 6, 6, 32
+        log_probs, ids, mask, adv, old_lp, ref_lp = self._build_inputs(B, T, V, seed=21)
+
+        single, _ = llm_policy_loss_fn(
+            log_probs=log_probs,
+            selected_token_ids=ids,
+            attention_mask=mask,
+            advantages=adv,
+            full_attention_mask=mask,
+            ref_per_token_logps=ref_lp,
+            old_per_token_logps=old_lp,
+            beta=0.01,
+            importance_sampling_level="trajectory",
+        )
+        chunked_total = torch.zeros((), dtype=single.dtype)
+        for s, e in [(0, 2), (2, 4), (4, 6)]:
+            chunk_loss, _ = llm_policy_loss_fn(
+                log_probs=log_probs[s:e],
+                selected_token_ids=ids[s:e],
+                attention_mask=mask[s:e],
+                advantages=adv[s:e],
+                full_attention_mask=mask,  # global active-trajectory denom
+                ref_per_token_logps=ref_lp[s:e],
+                old_per_token_logps=old_lp[s:e],
+                beta=0.01,
+                importance_sampling_level="trajectory",
+            )
+            chunked_total = chunked_total + chunk_loss
+        assert torch.allclose(single, chunked_total, rtol=1e-5, atol=1e-5)
+
+
 class TestLigerFusedLinearPolicyLossFunction:
     """Drive the autograd Function on tiny shapes and assert it matches the
     unfused reference for both forward loss and backward gradient flow."""
@@ -787,6 +962,204 @@ class TestLigerFusedLinearPolicyLossFunction:
         assert bias.grad.shape == bias.shape
         # With random advantages the bias gradient should be non-zero.
         assert bias.grad.abs().sum() > 0
+
+    def test_temperature_scaling_matches_unfused_reference(self) -> None:
+        """``temperature != 1.0`` must divide the per-chunk logits before the
+        log-softmax — verified against the unfused reference computed on the
+        temperature-scaled logits (and distinct from the unscaled loss)."""
+        B, T, V, H = 2, 4, 16, 8
+        hidden, weight, ids, mask, adv, old_lp, ref_lp = self._build_inputs(
+            B, T, V, H, with_ref=True
+        )
+        temperature = 2.0
+        loss, _ = LigerFusedLinearPolicyLossFunction.apply(
+            hidden,
+            weight,
+            ids,
+            mask,
+            adv,
+            None,  # bias
+            ref_lp,
+            old_lp,
+            0.01,  # beta
+            0.2,
+            0.2,  # epsilon_low, epsilon_high
+            temperature,
+            False,  # compiled
+            1,  # chunk_size
+            None,
+            None,
+            None,  # turn_ids, full_turn_mask, max_turns
+        )
+
+        def _reference(temp: float) -> torch.Tensor:
+            logits = (hidden @ weight.t()) / temp
+            log_probs = torch.log_softmax(logits.float(), dim=-1)
+            ref_loss, _ = llm_policy_loss_fn(
+                log_probs=log_probs,
+                selected_token_ids=ids,
+                attention_mask=mask,
+                advantages=adv,
+                full_attention_mask=mask,
+                ref_per_token_logps=ref_lp,
+                old_per_token_logps=old_lp,
+                beta=0.01,
+            )
+            return ref_loss
+
+        assert torch.allclose(loss, _reference(temperature), rtol=1e-4, atol=1e-4)
+        # The branch is not a no-op: the scaled loss differs from unscaled.
+        assert not torch.allclose(loss, _reference(1.0), rtol=1e-4, atol=1e-4)
+
+
+class TestFusedLossHelpers:
+    """Pure-helper coverage: token chunk-size resolution and the
+    ``(B, T, ...) -> (B*T, 1, ...)`` token flattening reshape."""
+
+    def test_resolve_token_chunk_size_explicit_and_default(self) -> None:
+        assert resolve_token_chunk_size(512) == 512
+        assert resolve_token_chunk_size(None) == DEFAULT_LIGER_TOKEN_CHUNK
+
+    def test_flatten_tokens_for_fused_loss_shapes_and_layout(self) -> None:
+        B, T, H = 2, 3, 4
+        hidden = torch.arange(B * T * H, dtype=torch.float32).reshape(B, T, H)
+        ids = torch.arange(B * T).reshape(B, T)
+        mask = torch.ones(B, T)
+        old_lp = torch.randn(B, T)
+        ref_lp = torch.randn(B, T)
+
+        h_flat, ids_flat, mask_flat, old_flat, ref_flat = flatten_tokens_for_fused_loss(
+            hidden, ids, mask, old_lp, ref_lp
+        )
+        assert h_flat.shape == (B * T, 1, H)
+        assert h_flat.is_contiguous()
+        assert ids_flat.shape == (B * T, 1)
+        assert mask_flat.shape == (B * T, 1)
+        assert old_flat.shape == (B * T, 1)
+        assert ref_flat.shape == (B * T, 1)
+        # Row-major flattening: token (b, t) lands at flat row b * T + t.
+        assert torch.equal(h_flat[1 * T + 2, 0], hidden[1, 2])
+        assert torch.equal(ids_flat.reshape(B, T), ids)
+        assert torch.equal(old_flat.reshape(B, T), old_lp)
+
+    def test_flatten_tokens_for_fused_loss_none_logprobs_stay_none(self) -> None:
+        B, T, H = 2, 3, 4
+        hidden = torch.randn(B, T, H)
+        ids = torch.zeros(B, T, dtype=torch.long)
+        mask = torch.ones(B, T)
+        _, _, _, old_flat, ref_flat = flatten_tokens_for_fused_loss(
+            hidden, ids, mask, None, None
+        )
+        assert old_flat is None
+        assert ref_flat is None
+
+
+class TestApplyFusedPolicyLoss:
+    """The dispatch wrapper must produce the same loss/metrics as the
+    unfused reference whichever path it takes — token-flattened (token
+    level) or one-sequence-per-chunk batch (turn/trajectory levels)."""
+
+    @staticmethod
+    def _build_inputs(B, T, V, H, seed=0):
+        torch.manual_seed(seed)
+        hidden = torch.randn(B, T, H, dtype=torch.float32, requires_grad=True)
+        weight = (torch.randn(V, H, dtype=torch.float32) * 0.02).requires_grad_(True)
+        ids = torch.randint(0, V, (B, T))
+        mask = torch.ones(B, T, dtype=torch.float32)
+        mask[0, -1] = 0.0
+        old_lp = torch.randn(B, T, dtype=torch.float32) * 0.05
+        ref_lp = torch.randn(B, T, dtype=torch.float32) * 0.05
+        return hidden, weight, ids, mask, old_lp, ref_lp
+
+    def test_token_level_flattened_path_matches_unfused_reference(self) -> None:
+        """Token level flattens to ``(B*T, 1, H)`` and chunks over tokens;
+        the global token-count denominator makes the result exact vs the
+        single-shot reference. ``token_chunk_size=3`` forces several chunks
+        so the accumulation really runs."""
+        B, T, V, H = 2, 5, 32, 8
+        hidden, weight, ids, mask, old_lp, ref_lp = self._build_inputs(B, T, V, H)
+        adv = torch.randn(B, T) * 0.1
+
+        loss, metrics = apply_fused_policy_loss(
+            policy_hidden=hidden,
+            lm_head_weight=weight,
+            lm_head_bias=None,
+            target_ids=ids,
+            attention_mask=mask,
+            advantages=adv,
+            ref_per_token_logps=ref_lp,
+            old_per_token_logps=old_lp,
+            beta=0.01,
+            epsilon_low=0.2,
+            epsilon_high=0.2,
+            temperature=1.0,
+            importance_sampling_level="token",
+            token_chunk_size=3,
+        )
+
+        log_probs = torch.log_softmax((hidden @ weight.t()).float(), dim=-1)
+        ref_loss, ref_metrics = llm_policy_loss_fn(
+            log_probs=log_probs,
+            selected_token_ids=ids,
+            attention_mask=mask,
+            advantages=adv,
+            full_attention_mask=mask,
+            ref_per_token_logps=ref_lp,
+            old_per_token_logps=old_lp,
+            beta=0.01,
+        )
+        assert torch.allclose(loss, ref_loss, rtol=1e-4, atol=1e-4)
+        for got, want in zip(metrics, ref_metrics, strict=True):
+            assert got.item() == pytest.approx(want.item(), rel=1e-4, abs=1e-5)
+
+        loss.backward()
+        assert hidden.grad is not None
+        assert hidden.grad.shape == hidden.shape
+        assert weight.grad is not None
+        assert weight.grad.abs().sum() > 0
+
+    def test_trajectory_level_batch_path_matches_unfused_reference(self) -> None:
+        """Trajectory pooling couples a completion's tokens, so the wrapper
+        must keep the batch path (one sequence per chunk) — and still match
+        the single-shot trajectory-mode reference."""
+        B, T, V, H = 3, 4, 16, 8
+        hidden, weight, ids, mask, old_lp, ref_lp = self._build_inputs(
+            B, T, V, H, seed=1
+        )
+        adv = torch.randn(B, 1) * 0.1
+
+        loss, _ = apply_fused_policy_loss(
+            policy_hidden=hidden,
+            lm_head_weight=weight,
+            lm_head_bias=None,
+            target_ids=ids,
+            attention_mask=mask,
+            advantages=adv,
+            ref_per_token_logps=ref_lp,
+            old_per_token_logps=old_lp,
+            beta=0.01,
+            epsilon_low=0.2,
+            epsilon_high=0.2,
+            temperature=1.0,
+            importance_sampling_level="trajectory",
+        )
+
+        log_probs = torch.log_softmax((hidden @ weight.t()).float(), dim=-1)
+        ref_loss, _ = llm_policy_loss_fn(
+            log_probs=log_probs,
+            selected_token_ids=ids,
+            attention_mask=mask,
+            advantages=adv,
+            full_attention_mask=mask,
+            ref_per_token_logps=ref_lp,
+            old_per_token_logps=old_lp,
+            beta=0.01,
+            importance_sampling_level="trajectory",
+        )
+        assert torch.allclose(loss, ref_loss, rtol=1e-4, atol=1e-4)
+        loss.backward()
+        assert hidden.grad is not None
+        assert weight.grad is not None
 
 
 class TestLigerDPOWithAlphaBackward:
