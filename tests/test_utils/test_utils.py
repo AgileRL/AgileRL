@@ -1094,7 +1094,7 @@ class TestGatherTensor:
             gathered = gather_tensor(input_tensor)
 
         mock_all_gather.assert_called_once()
-        assert torch.equal(gathered, torch.cat([input_tensor, input_tensor]))
+        assert torch.equal(gathered.cpu(), torch.cat([input_tensor, input_tensor]))
 
     def test_distributed_stacks_scalar_tensors(self):
         """Zero-dim tensors are stacked rather than concatenated"""
@@ -1111,7 +1111,7 @@ class TestGatherTensor:
             gathered = gather_tensor(torch.tensor(5.0))
 
         assert gathered.shape == (3,)
-        assert torch.equal(gathered, torch.tensor([5.0, 5.0, 5.0]))
+        assert torch.equal(gathered.cpu(), torch.tensor([5.0, 5.0, 5.0]))
 
 
 class TestAggregateMetricsAcrossGpus:
