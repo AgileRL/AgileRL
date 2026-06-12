@@ -664,7 +664,12 @@ class TestSFTSaveLoadCheckpoint:
                 pad_token_id=vocab_size - 1,
                 pad_token="<pad>",
                 device="cuda" if torch.cuda.is_available() else "cpu",
+                lora_config=copy.deepcopy(sft.lora_config),
                 accelerator=accelerator,
+                # Match the saved agent's setting so the constructor doesn't
+                # mutate ``lora_config`` differently (``use_liger_loss=True``
+                # adds ``exclude_modules=["lm_head"]``).
+                use_liger_loss=sft.use_liger_loss,
             )
             new_sft.load_checkpoint(tmpdir)
 
@@ -699,7 +704,16 @@ class TestSFTSaveLoadCheckpoint:
                     assert getattr(sft, attr) is not None
                     old_targets = set(getattr(sft, attr).target_modules)
                     new_targets = set(getattr(new_sft, attr).target_modules)
-                    assert old_targets.issubset(new_targets)
+                    assert old_targets == new_targets
+                    assert getattr(new_sft, attr).r == getattr(sft, attr).r
+                    assert (
+                        getattr(new_sft, attr).lora_alpha
+                        == getattr(sft, attr).lora_alpha
+                    )
+                    assert (
+                        getattr(new_sft, attr).lora_dropout
+                        == getattr(sft, attr).lora_dropout
+                    )
                 elif not isinstance(getattr(sft, attr), torch.Tensor):
                     assert getattr(new_sft, attr) == getattr(sft, attr), (
                         f"Attribute {attr} is not equal"
