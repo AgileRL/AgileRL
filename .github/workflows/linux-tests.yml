@@ -45,6 +45,17 @@ jobs:
 
         steps:
             - uses: actions/checkout@v4
+
+            # TEMPORARY: the gh-t4-runner nodes still run the R535 driver (CUDA
+            # 12.2 max), which torch's cu13 wheels refuse. The forward-compat
+            # package ships a 580-series user-mode libcuda that bridges to the
+            # old kernel driver (supported: T4 is a datacenter GPU, R535 is LTS).
+            # Remove once the node pool is recreated with gpu-driver-version=latest.
+            - name: CUDA forward-compat shim (runner driver is R535, wheels are cu13)
+              run: |
+                  apt-get update && apt-get install -y --no-install-recommends cuda-compat-13-0
+                  echo "LD_LIBRARY_PATH=/usr/local/cuda/compat${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" >> "$GITHUB_ENV"
+
             - uses: astral-sh/setup-uv@v7
               with:
                   enable-cache: true
