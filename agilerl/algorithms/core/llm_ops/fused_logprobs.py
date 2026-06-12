@@ -13,29 +13,6 @@ from typing import Any
 
 import torch
 
-# Target byte budget for one transient fp32 ``(chunk_rows, V)`` logits slab.
-# ``chunk_rows`` is derived so the slab stays near this size, trading
-# kernel-launch count against peak memory.
-_FUSED_LOGPROBS_WORKSPACE_BYTES = 256 * 1024 * 1024
-
-
-def _resolve_fused_logprobs_chunk_rows(vocab_size: int) -> int:
-    """Vocab-aware row count for the fused-linear-logprob workspace.
-
-    Sizes ``chunk_rows`` so the transient fp32 ``(chunk_rows, vocab)`` logits
-    slab stays near :data:`_FUSED_LOGPROBS_WORKSPACE_BYTES`: large-vocab models
-    (e.g. gemma's 262k) get fewer rows per chunk, small-vocab models more. This
-    is the default used when the ``fused_logprobs_chunk_rows`` constructor
-    kwarg is left ``None``.
-
-    :param vocab_size: lm_head vocabulary dimension ``V``.
-    :type vocab_size: int
-    :return: rows of the flattened ``(B*T)`` workspace per chunk (128..4096).
-    :rtype: int
-    """
-    rows = _FUSED_LOGPROBS_WORKSPACE_BYTES // max(1, int(vocab_size) * 4)
-    return int(min(max(rows, 128), 4096))
-
 
 def _fused_logprob_chunk(
     h_chunk: torch.Tensor,
@@ -48,7 +25,7 @@ def _fused_logprob_chunk(
     """Per-token logprobs for one flat ``(chunk_rows, H)`` slab of hidden states.
 
     Functional (no in-place ops) so it is safe under both ``torch.compile`` and
-    the autograd recompute in :class:`_FusedLinearLogProbsFunction`. The
+    the autograd recompute in :class:`FusedLinearLogProbsFunction`. The
     max-shift used elsewhere for stability is folded into ``logsumexp`` (which
     is already numerically stable), keeping the body fusion-friendly.
 
@@ -79,27 +56,9 @@ def _fused_logprob_chunk(
     return selected - log_z
 
 
-# Lazily-compiled variant of :func:`_fused_logprob_chunk`. ``torch.compile``
-# fuses the matmul + log-softmax reduction into Triton kernels (the same chunked
-# GRPO log-softmax idea used by other fine-tuning stacks), which is both faster and lower-peak
-# than eager. Compilation is attempted on first CUDA use; any failure (no
-# triton, unsupported backend, CPU/MPS) falls back to eager permanently.
-# Call :func:`disable_fused_logprob_compile` to force the eager path.
-# State held in a dict so the dispatch can mutate it without ``global``:
-# ``fn`` caches the compiled callable, ``disabled`` latches eager fallback.
+# torch.compile cache for ``_fused_logprob_chunk`` (CUDA-only; any failure
+# latches ``disabled`` and the eager path is used for the rest of the process).
 _FUSED_LOGPROB_COMPILE_STATE: dict[str, Any] = {"fn": None, "disabled": False}
-
-
-def disable_fused_logprob_compile() -> None:
-    """Force the eager fused-logprob path for the rest of the process.
-
-    Compilation (and this latch) is process-global — the compiled kernel is
-    shared by every agent in the process — so the escape hatch is a module
-    function rather than a per-algorithm argument. Use it if the compiled
-    kernel misbehaves on a particular torch/triton combination; compilation
-    failures themselves already fall back to eager automatically.
-    """
-    _FUSED_LOGPROB_COMPILE_STATE["disabled"] = True
 
 
 def _fused_logprob_chunk_dispatch(
@@ -133,7 +92,7 @@ def _fused_logprob_chunk_dispatch(
         return _fused_logprob_chunk(*args)
 
 
-def _fused_linear_logprobs_chunked(
+def fused_linear_logprobs_chunked(
     hidden: torch.Tensor,
     lm_head_weight: torch.Tensor,
     lm_head_bias: torch.Tensor | None,
@@ -149,7 +108,7 @@ def _fused_linear_logprobs_chunked(
     ``(chunk_rows, V)`` per iteration; the full ``(B, T, V)`` slab is never
     built. Shared forward implementation backing both the no-grad static
     method :meth:`LLMAlgorithm._logprobs_from_hidden_fused` and the
-    autograd-aware :class:`_FusedLinearLogProbsFunction`. Must be called under
+    autograd-aware :class:`FusedLinearLogProbsFunction`. Must be called under
     ``no_grad``/``inference_mode`` (it writes results in place).
 
     :param hidden: ``(B, T, H)`` last-hidden-state.
@@ -192,7 +151,7 @@ def _fused_linear_logprobs_chunked(
     return out.reshape(B, T)
 
 
-class _FusedLinearLogProbsFunction(torch.autograd.Function):
+class FusedLinearLogProbsFunction(torch.autograd.Function):
     """Gradient-checkpointed per-token logprobs over a chunked lm_head matmul.
 
     The forward computes per-token logprobs chunk-by-chunk under ``no_grad``
@@ -205,7 +164,7 @@ class _FusedLinearLogProbsFunction(torch.autograd.Function):
     Only ``(B, T, H)`` hidden states (saved for the recompute) are held across
     forward/backward, which the surrounding policy graph keeps alive anyway.
 
-    Numerically the forward matches :func:`_fused_linear_logprobs_chunked`; the
+    Numerically the forward matches :func:`fused_linear_logprobs_chunked`; the
     backward yields the exact ``log_softmax`` gradient ``onehot(target) -
     softmax`` (the max-shift used for stability cancels in the derivative).
     """
@@ -222,7 +181,7 @@ class _FusedLinearLogProbsFunction(torch.autograd.Function):
         chunk_rows: int,
     ) -> torch.Tensor:
         with torch.no_grad():
-            logps = _fused_linear_logprobs_chunked(
+            logps = fused_linear_logprobs_chunked(
                 hidden,
                 lm_head_weight,
                 lm_head_bias,

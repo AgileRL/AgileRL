@@ -849,9 +849,6 @@ def create_population(
                 vllm_importance_sampling_correction=INIT_HP.get(
                     "VLLM_IMPORTANCE_SAMPLING_CORRECTION", True
                 ),
-                vllm_importance_sampling_apply=INIT_HP.get(
-                    "VLLM_IMPORTANCE_SAMPLING_APPLY", True
-                ),
                 vllm_importance_sampling_cap=INIT_HP.get(
                     "VLLM_IMPORTANCE_SAMPLING_CAP", 2.0
                 ),

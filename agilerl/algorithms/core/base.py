@@ -40,9 +40,8 @@ from agilerl import HAS_DEEPSPEED, HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES, HAS_V
 if HAS_LIGER_KERNEL:
     from liger_kernel.transformers import _apply_liger_kernel_to_instance
 from agilerl.algorithms.core.llm_ops.fused_logprobs import (
-    _fused_linear_logprobs_chunked,
-    _FusedLinearLogProbsFunction,
-    _resolve_fused_logprobs_chunk_rows,
+    FusedLinearLogProbsFunction,
+    fused_linear_logprobs_chunked,
 )
 from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
 from agilerl.algorithms.core.registry import (
@@ -2013,15 +2012,10 @@ def _vllm_sampled_token_logprobs(output: Any) -> list[float]:
         return [0.0] * len(token_ids)
     out: list[float] = []
     for tok, lp_dict in zip(token_ids, logprobs, strict=False):
-        val = 0.0
-        if lp_dict is not None:
-            entry = lp_dict.get(tok)
-            if entry is not None:
-                cand = float(entry.logprob)
-                # Accept only finite logprobs (rejects NaN and ±inf).
-                if np.isfinite(cand):
-                    val = cand
-        out.append(val)
+        entry = lp_dict.get(tok) if lp_dict else None
+        val = float(entry.logprob) if entry is not None else 0.0
+        # Only finite logprobs count (rejects NaN and ±inf).
+        out.append(val if np.isfinite(val) else 0.0)
     return out
 
 
@@ -2151,7 +2145,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         fused_logprobs_chunk_rows: int | None = None,
         liger_token_chunk_size: int = 2048,
         vllm_importance_sampling_correction: bool = True,
-        vllm_importance_sampling_apply: bool = True,
         vllm_importance_sampling_cap: float = 2.0,
     ) -> None:
         if not HAS_LLM_DEPENDENCIES:
@@ -2309,7 +2302,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.use_separate_reference_adapter = use_separate_reference_adapter
         self.cast_logprobs_to_fp32 = cast_logprobs_to_fp32
         # Per-chunk row count for the fused-linear-logprob workspace. ``None``
-        # uses the vocab-aware heuristic (_resolve_fused_logprobs_chunk_rows);
+        # uses a vocab-aware ~256 MB-workspace heuristic;
         # set explicitly to trade kernel-launch count vs ``rows * vocab`` peak.
         self.fused_logprobs_chunk_rows = fused_logprobs_chunk_rows
         # vLLM sampling-mismatch correction (truncated importance sampling).
@@ -2317,27 +2310,16 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         # recomputed ``old_log_probs`` as the behaviour policy; the two differ
         # because of engine/precision/LoRA/quantisation kernel differences even
         # when weights are shared. ``correction`` opts in to capturing vLLM's
-        # per-token sampling logprobs and logging the divergence; ``apply``
-        # additionally multiplies the per-token loss by the (detached, clamped)
-        # ratio ``clamp(exp(old - sampling), max=cap)``. Set ``apply=False`` to
-        # measure the mismatch without changing the loss.
         if vllm_importance_sampling_cap <= 0:
             msg = "vllm_importance_sampling_cap must be > 0."
             raise ValueError(msg)
         self.vllm_importance_sampling_correction = bool(
             vllm_importance_sampling_correction
         )
-        self.vllm_importance_sampling_apply = bool(vllm_importance_sampling_apply)
         self.vllm_importance_sampling_cap = float(vllm_importance_sampling_cap)
-        # NB: do not auto-disable the correction when ``use_vllm=False``. A
-        # decoupled (e.g. Ray async) rollout still draws samples from a separate
-        # vLLM engine while ``use_vllm`` is False on the trainer, so the
-        # sampling mismatch is real and the correction must stay honoured.
-        # Warn-once flag for the Liger + vLLM sampling-mismatch incompatibility
-        # (the fused kernel cannot apply a per-token importance weight).
+        # Kept on even when use_vllm=False: decoupled rollouts still sample
+        # from a separate vLLM engine.
         self._is_correction_liger_warned = False
-        # Tokens per chunk for the Liger fused-loss path: trades kernel-launch
-        # count against the per-chunk activation footprint.
         if liger_token_chunk_size <= 0:
             msg = (
                 f"liger_token_chunk_size must be a positive int, "
@@ -2370,16 +2352,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self._vllm_lora_loaded = False
         self._vllm_lora_staging_dir: Path | None = None
         self._vllm_rollout_lora_request: Any | None = None
-        # Colocated vLLM ⇒ zero-copy base-weight sharing is the ONLY supported
-        # path: the trainer aliases vLLM's base (quantized or dense) instead of
-        # loading its own copy. The legacy two-copy path has been removed, so an
-        # unshareable colocated config is a hard error rather than a silent
-        # fallback. ``sleep_mode`` is NOT a sharing gate — it only toggles the
-        # KV-freeing sleep cycle; the shared base is resident either way (so
-        # colocated populations, which disable sleep, are not blocked). The
-        # in-memory ``actor_network`` check is deferred to
-        # ``_initialize_colocated_vllm_and_actors``. ``_vllm_standby`` is set when
-        # the standby patch is applied in ``_configure_vllm``.
+        # Colocated vLLM always shares its base with the trainer (the two-copy
+        # path was removed); an unshareable colocated config is a hard error.
         ws_requested = (
             getattr(self.vllm_config, "weight_sharing", None)
             if self.vllm_config is not None
@@ -3296,21 +3270,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             )
 
     @staticmethod
-    def _reject_peft_model(*, context: str) -> None:
-        """Raise for user-supplied ``PeftModel`` inputs.
-
-        AgileRL attaches and manages its own LoRA adapters on an immutable base
-        model; it never merges foreign adapters into base weights.
-        """
-        msg = (
-            f"{context}: a PeftModel was passed, but AgileRL manages its own "
-            "LoRA adapters on an immutable base model. Pass the base model "
-            "instead (merge your adapters first via PEFT's merge_and_unload() "
-            "if you want to keep their effect)."
-        )
-        raise ValueError(msg)
-
-    @staticmethod
     def _position_ids_from_mask(mask: torch.Tensor) -> torch.Tensor:
         """Left-padding-safe ``position_ids`` from an attention mask.
 
@@ -3348,44 +3307,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         )
         lm_head = self._get_lm_head()
         return fused_fn, lm_head.weight, lm_head.bias
-
-    def _per_token_logprobs(
-        self,
-        hidden: torch.Tensor,
-        lm_head_weight: torch.Tensor,
-        lm_head_bias: torch.Tensor | None,
-        targets: torch.Tensor,
-        fused_fn: Callable,
-    ) -> torch.Tensor:
-        """Per-token target logprobs from hidden states via the fused matmul.
-
-        Drops the trailing hidden position (``hidden[:, :-1]``) so position ``i``
-        predicts token ``i + 1``; ``targets`` is the caller-shifted target ids.
-        Threads the instance's temperature / fp32-cast / chunk-row settings into
-        the resolved fused fn.
-
-        :param hidden: ``(B, T, H)`` last-hidden-state (full; sliced internally).
-        :type hidden: torch.Tensor
-        :param lm_head_weight: ``(V, H)``.
-        :type lm_head_weight: torch.Tensor
-        :param lm_head_bias: ``(V,)`` or ``None``.
-        :type lm_head_bias: torch.Tensor | None
-        :param targets: ``(B, T-1)`` already-shifted target token ids.
-        :type targets: torch.Tensor
-        :param fused_fn: fused logprob fn from :meth:`_fused_logprob_fn_and_head`.
-        :type fused_fn: Callable
-        :return: ``(B, T-1)`` per-token logprobs in ``hidden.dtype``.
-        :rtype: torch.Tensor
-        """
-        return fused_fn(
-            hidden[:, :-1],
-            lm_head_weight,
-            lm_head_bias,
-            targets,
-            temperature=self.temperature,
-            cast_to_fp32=self.cast_logprobs_to_fp32,
-            _chunk_rows=self.fused_logprobs_chunk_rows,
-        )
 
     def _warn_liger_non_token_is(
         self,
@@ -3708,11 +3629,23 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         if add_adapters:
             if isinstance(base_model, PeftModelProtocol):
-                self._reject_peft_model(context="actor_network")
+                msg = (
+                    "actor_network: a PeftModel was passed, but AgileRL manages its "
+                    "own LoRA adapters on an immutable base model. Pass the "
+                    "base model instead (merge your adapters first via PEFT's "
+                    "merge_and_unload() if you want to keep their effect)."
+                )
+                raise ValueError(msg)
             if self.use_value_head and isinstance(
                 getattr(base_model, "pretrained_model", None), PeftModelProtocol
             ):
-                self._reject_peft_model(context="actor_network.pretrained_model")
+                msg = (
+                    "actor_network.pretrained_model: a PeftModel was passed, but AgileRL manages its "
+                    "own LoRA adapters on an immutable base model. Pass the "
+                    "base model instead (merge your adapters first via PEFT's "
+                    "merge_and_unload() if you want to keep their effect)."
+                )
+                raise ValueError(msg)
 
             peft_target = (
                 base_model.pretrained_model if self.use_value_head else base_model
@@ -3729,12 +3662,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 or getattr(peft_target, "is_quantized", False)
             )
             if self._weight_sharing:
-                # The shared base aliases vLLM's tensors and is frozen. Stock
-                # kbit-prep would upcast non-Params4bit weights to fp32 —
-                # allocating large transient copies (OOM at high
-                # gpu_memory_utilization) and un-aliasing the base. Use the
-                # no-upcast variant for both quantized and dense shared bases:
-                # freeze + enable gradient checkpointing, keep the base shared.
+                # No-upcast kbit prep: stock prep would fp32-copy weights and
+                # un-alias the shared base.
                 peft_target = prepare_shared_base_for_kbit_training(
                     peft_target,
                     use_gradient_checkpointing=self.gradient_checkpointing,
@@ -3793,11 +3722,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     if hasattr(peft_target, "base_model")
                     else peft_target
                 )
-                # Idempotency guard: skip when the model was already patched —
-                # either by us (sentinel) or upstream (e.g. a caller that loaded
-                # it via AutoLigerKernelForCausalLM, whose swapped-in modules
-                # come from the liger_kernel package). Double-patching stacks
-                # monkey-patches with undefined behavior.
+                # Skip if already patched (by us or upstream) — double-patching
+                # is undefined behavior.
                 already_patched = getattr(
                     inner_model, "_agilerl_liger_patched", False
                 ) or any(
@@ -3957,7 +3883,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             else [(s, min(s + batch_size, total)) for s in range(0, total, batch_size)]
         )
 
-        # Fused-linear-logprob path (the only path); see _per_token_logprobs.
         fused_fn, lm_head_weight, lm_head_bias = self._fused_logprob_fn_and_head()
 
         def _process_chunk(
@@ -3990,12 +3915,14 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 value = None
             del output
 
-            chunk_lp = self._per_token_logprobs(
-                first,
+            chunk_lp = fused_fn(
+                first[:, :-1],
                 lm_head_weight,
                 lm_head_bias,
                 fused_ids[start:end, 1:],
-                fused_fn,
+                temperature=self.temperature,
+                cast_to_fp32=self.cast_logprobs_to_fp32,
+                _chunk_rows=self.fused_logprobs_chunk_rows,
             )
             del first
 
@@ -4081,11 +4008,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         if attention_mask is None:
             attention_mask = ids != self.pad_token_id
 
-        # Padding-free packed path (gradient forward only, mirroring
-        # _get_logprobs). The no-grad old/reference pass stays padded, so the
-        # only packed-vs-padded gap is the tiny varlen-vs-padded numerical
-        # difference on the current policy. _packing_mode() returns None (→
-        # padded) on unsupported backends.
+        # Packed path for the gradient forward only; no-grad passes stay padded.
         if torch.is_grad_enabled() and self._packing_mode() is not None:
             return self._fused_packed_forward(ids, attention_mask)
 
@@ -4163,16 +4086,18 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             hidden = output.logits
             value = None
 
-        # Actor log-probs from row 0 (actor adapter): _per_token_logprobs
+        # Actor log-probs from row 0 (actor adapter): the fused matmul
         # consumes the (1, N, H) hidden + (1, N-1) next-token targets exactly as
         # the padded path does; unpack scatters back to the (B, T-1) frame and
         # drops the cross-segment boundary prediction.
-        packed_lp = self._per_token_logprobs(
-            hidden[:1],
+        packed_lp = fused_fn(
+            hidden[:1][:, :-1],
             lm_head_weight,
             lm_head_bias,
             packed.input_ids[:, 1:],
-            fused_fn,
+            temperature=self.temperature,
+            cast_to_fp32=self.cast_logprobs_to_fp32,
+            _chunk_rows=self.fused_logprobs_chunk_rows,
         )
         log_probs = unpack_logprobs(packed_lp, packed)
 
@@ -4345,7 +4270,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :return: Log probabilities of the completion IDs.
         :rtype: torch.Tensor
         """
-        # Fused-linear-logprob path (the only path); see _per_token_logprobs.
         grad_enabled = torch.is_grad_enabled()
         with self.select_adapter("reference" if use_reference else "actor"):
             self.actor.train(mode=not eval_mode)
@@ -4375,19 +4299,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     packed = pack_padded_batch(batch_ids, batch_attention_mask)
 
                 if packed is not None:
-                    # Padding-free: flatten real tokens into one row and hand the
-                    # model only the per-sequence ``position_ids`` (which restart
-                    # at 0 per segment) with ``attention_mask=None``. Transformers'
-                    # mask creation then detects the packed format from those
-                    # position_ids (``find_packed_sequence_indices``) and AND-composes
-                    # a block-diagonal ("same segment") constraint onto each layer's
-                    # native mask: FA2 → ``cu_seqlens`` (+ per-layer ``window_size``)
-                    # varlen; flex → a sparse block-diagonal BlockMask (+ window on
-                    # sliding layers). This keeps tokens from attending across
-                    # sequences *and* preserves sliding-window attention per layer,
-                    # so packing is correct for SWA models (e.g. gemma), not just
-                    # full-attention ones. (Verified: the composed mask is exactly
-                    # block-diagonal ∧ causal ∧ window.)
+                    # Per-sequence position_ids (no mask): transformers detects
+                    # the packed format and keeps sequences attention-isolated
+                    # per layer (sliding-window safe).
                     batch_model_kwargs = {
                         "input_ids": packed.input_ids,
                         "position_ids": packed.position_ids,
@@ -4413,24 +4327,28 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 first = output[0] if isinstance(output, tuple) else output.logits
 
                 if packed is not None:
-                    packed_lp = self._per_token_logprobs(
-                        first,
+                    packed_lp = fused_fn(
+                        first[:, :-1],
                         lm_head_weight,
                         lm_head_bias,
                         packed.input_ids[:, 1:],
-                        fused_fn,
+                        temperature=self.temperature,
+                        cast_to_fp32=self.cast_logprobs_to_fp32,
+                        _chunk_rows=self.fused_logprobs_chunk_rows,
                     )
                     # Map back to the dense (mb, T-1) frame so the loss path is
                     # unchanged; cross-segment boundary predictions are dropped.
                     # unpack_logprobs reshapes the packed logprobs internally.
                     log_prob = unpack_logprobs(packed_lp, packed)
                 else:
-                    log_prob = self._per_token_logprobs(
-                        first,
+                    log_prob = fused_fn(
+                        first[:, :-1],
                         lm_head_weight,
                         lm_head_bias,
                         batch_ids[:, 1:],
-                        fused_fn,
+                        temperature=self.temperature,
+                        cast_to_fp32=self.cast_logprobs_to_fp32,
+                        _chunk_rows=self.fused_logprobs_chunk_rows,
                     )
 
                 first = None
@@ -4988,14 +4906,18 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :param _chunk_rows: rows of the flattened ``(B*T)`` workspace per
             iteration; trades launch count vs ``_chunk_rows * V`` peak. When
             ``None`` (default) it is resolved from the vocab size via
-            :func:`_resolve_fused_logprobs_chunk_rows`.
+            a ~256 MB fp32 workspace heuristic.
         :type _chunk_rows: int | None, optional
         :return: ``(B, T)`` per-token logprobs in ``hidden.dtype``.
         :rtype: torch.Tensor
         """
         if _chunk_rows is None:
-            _chunk_rows = _resolve_fused_logprobs_chunk_rows(lm_head_weight.shape[0])
-        return _fused_linear_logprobs_chunked(
+            # ~256 MB fp32 logits workspace: fewer rows per chunk at large vocab.
+            workspace_bytes = 256 * 1024 * 1024
+            _chunk_rows = min(
+                max(workspace_bytes // max(1, lm_head_weight.shape[0] * 4), 128), 4096
+            )
+        return fused_linear_logprobs_chunked(
             hidden,
             lm_head_weight,
             lm_head_bias,
@@ -5017,7 +4939,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     ) -> torch.Tensor:
         """Gradient-aware version of :meth:`_logprobs_from_hidden_fused`.
 
-        Routes through :class:`_FusedLinearLogProbsFunction` so the per-token
+        Routes through :class:`FusedLinearLogProbsFunction` so the per-token
         logprobs are differentiable w.r.t. ``hidden`` (and ``lm_head_weight`` /
         bias when they require grad) while never materializing the full
         ``(B, T, V)`` logits tensor in the forward *or* backward pass — the
@@ -5041,14 +4963,18 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :type cast_to_fp32: bool, optional
         :param _chunk_rows: rows of the flattened ``(B*T)`` workspace per chunk.
             When ``None`` (default) it is resolved from the vocab size via
-            :func:`_resolve_fused_logprobs_chunk_rows`.
+            a ~256 MB fp32 workspace heuristic.
         :type _chunk_rows: int | None, optional
         :return: ``(B, T)`` per-token logprobs in ``hidden.dtype``.
         :rtype: torch.Tensor
         """
         if _chunk_rows is None:
-            _chunk_rows = _resolve_fused_logprobs_chunk_rows(lm_head_weight.shape[0])
-        return _FusedLinearLogProbsFunction.apply(
+            # ~256 MB fp32 logits workspace: fewer rows per chunk at large vocab.
+            workspace_bytes = 256 * 1024 * 1024
+            _chunk_rows = min(
+                max(workspace_bytes // max(1, lm_head_weight.shape[0] * 4), 128), 4096
+            )
+        return FusedLinearLogProbsFunction.apply(
             hidden,
             lm_head_weight,
             lm_head_bias,
@@ -5527,10 +5453,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 )
 
         if self._weight_sharing:
-            # Leave the engine awake: the shared HF trainer is built from the
-            # live vLLM weights next, and the caller sleeps vLLM (standby) only
-            # after the trainer has aliased the base. See
-            # ``_initialize_colocated_vllm_and_actors``.
+            # Stay awake: the trainer aliases the live weights first; the
+            # caller sleeps the engine afterwards.
             self._vllm_awake = True
         elif self.vllm_config.sleep_mode:
             self._sleep_vllm_after_init()

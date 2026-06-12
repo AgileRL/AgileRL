@@ -524,7 +524,6 @@ class _GrpoLossStub:
         group_size: int = 2,
         adv_norm: str = "mean_std",
         advantage_granularity: str = "auto",
-        vllm_importance_sampling_apply: bool = True,
         vllm_importance_sampling_cap: float = 2.0,
         device: str = "cpu",
     ) -> None:
@@ -536,7 +535,6 @@ class _GrpoLossStub:
         self.group_size = group_size
         self.adv_norm = adv_norm
         self.advantage_granularity = advantage_granularity
-        self.vllm_importance_sampling_apply = vllm_importance_sampling_apply
         self.vllm_importance_sampling_cap = vllm_importance_sampling_cap
         self.device = device
 
@@ -5613,32 +5611,6 @@ class TestGRPOVLLMSamplingCorrection:
             level="token",
             objective="grpo",
             sampling_log_probs=old.clone(),
-        )
-        assert torch.allclose(base, corr, atol=1e-7)
-
-    def test_apply_false_is_noop_on_loss(self):
-        """apply=False measures but never mutates the loss."""
-        stub = self._stub(vllm_importance_sampling_apply=False)
-        torch.manual_seed(1)
-        mask = torch.ones(2, 3)
-        log_probs = torch.randn(2, 3)
-        old = log_probs - 0.1
-        ref = log_probs.clone()
-        adv = torch.tensor([[1.0], [-1.0]])
-        sampling = old - 0.4  # non-trivial mismatch
-        base, _ = stub._compute_policy_loss(
-            mask, log_probs, old, ref, adv, None, level="token", objective="grpo"
-        )
-        corr, _ = stub._compute_policy_loss(
-            mask,
-            log_probs,
-            old,
-            ref,
-            adv,
-            None,
-            level="token",
-            objective="grpo",
-            sampling_log_probs=sampling,
         )
         assert torch.allclose(base, corr, atol=1e-7)
 

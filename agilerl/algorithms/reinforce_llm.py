@@ -217,7 +217,6 @@ class REINFORCE(LLMAlgorithm):
         lora_target_scope: str | None = None,
         liger_token_chunk_size: int = 2048,
         vllm_importance_sampling_correction: bool = True,
-        vllm_importance_sampling_apply: bool = True,
         vllm_importance_sampling_cap: float = 2.0,
     ) -> None:
 
@@ -262,7 +261,6 @@ class REINFORCE(LLMAlgorithm):
             lora_target_scope=lora_target_scope,
             liger_token_chunk_size=liger_token_chunk_size,
             vllm_importance_sampling_correction=vllm_importance_sampling_correction,
-            vllm_importance_sampling_apply=vllm_importance_sampling_apply,
             vllm_importance_sampling_cap=vllm_importance_sampling_cap,
         )
         assert isinstance(batch_size, int), "Batch size must be an integer."
@@ -659,10 +657,7 @@ class REINFORCE(LLMAlgorithm):
                     # correct for the rollout being drawn from vLLM rather than
                     # the trainer policy.
                     loss_weight = None
-                    if (
-                        batch_sampling_log_probs is not None
-                        and self.vllm_importance_sampling_apply
-                    ):
+                    if batch_sampling_log_probs is not None:
                         with torch.no_grad():
                             mask_f = batch_action_mask.to(token_log_ratio.dtype)
                             loss_weight = torch.exp(

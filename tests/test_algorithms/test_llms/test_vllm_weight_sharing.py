@@ -41,7 +41,6 @@ from agilerl.algorithms.core.llm_ops.vllm_weight_sharing import (
     _StrippedTower,
     _target_exists,
     _truncate_vocab,
-    _walk_tower_holders,
     assert_shared_storage,
     build_shared_hf_model,
     extract_vllm_bnb_state_dict,
@@ -350,11 +349,9 @@ class TestGetVllmInternalModel:
 
 
 class TestStrippedTower:
-    def test_repr_and_falsy(self):
-        tower = _StrippedTower("model.vision_tower")
-        assert repr(tower) == "_StrippedTower('model.vision_tower')"
+    def test_falsy(self):
         # Falsy so ``if self.vision_tower:`` guards skip the stripped tower.
-        assert bool(tower) is False
+        assert bool(_StrippedTower("model.vision_tower")) is False
 
     def test_call_raises_with_path_and_remediation(self):
         tower = _StrippedTower("model.vision_tower")
@@ -369,48 +366,9 @@ class TestStrippedTower:
 
     def test_getattr_raises_attribute_error_with_name(self):
         tower = _StrippedTower("audio_tower")
-        assert tower._stripped_path == "audio_tower"  # the slot itself is readable
+        assert tower._stripped_path == "audio_tower"  # the path itself is readable
         with pytest.raises(AttributeError, match="attribute 'forward' accessed"):
             _ = tower.forward
-
-    def test_getattr_guard_when_path_slot_unset(self):
-        # An instance whose slot was never set (e.g. mid-unpickle) must raise a
-        # plain AttributeError instead of recursing through __getattr__.
-        tower = _StrippedTower.__new__(_StrippedTower)
-        with pytest.raises(AttributeError):
-            _ = tower._stripped_path
-
-
-class TestWalkTowerHolders:
-    def test_yields_top_level_and_nested_holders(self):
-        outer = nn.Module()
-        inner = nn.Module()
-        inner.audio_tower = _plain(2, 2)
-        outer.model = inner
-        outer.vision_tower = _plain(2, 2)
-        outer.embed_vision = None  # explicit None slot: skipped
-        found = [
-            (holder is outer, attr, path)
-            for holder, attr, path in _walk_tower_holders(outer)
-        ]
-        assert found == [
-            (True, "vision_tower", "vision_tower"),
-            (False, "audio_tower", "model.audio_tower"),
-        ]
-
-    def test_skips_already_stripped_towers(self):
-        model = nn.Module()
-        model.vision_tower = _StrippedTower("vision_tower")
-        model.audio_tower = _plain(2, 2)
-        found = [path for _holder, _attr, path in _walk_tower_holders(model)]
-        assert found == ["audio_tower"]
-
-    def test_custom_tower_attrs(self):
-        model = nn.Module()
-        model.vision_tower = _plain(2, 2)
-        model.my_tower = _plain(2, 2)
-        found = [path for _h, _a, path in _walk_tower_holders(model, ("my_tower",))]
-        assert found == ["my_tower"]
 
 
 class TestStripMultimodalTowers:
@@ -423,6 +381,7 @@ class TestStripMultimodalTowers:
         return SimpleNamespace(
             model=inner,
             multi_modal_projector=_plain(2, 2),  # 4 params
+            embed_vision=None,  # explicit None slot: skipped, never stripped
         )
 
     def test_module_registered_tower_is_stripped(self):

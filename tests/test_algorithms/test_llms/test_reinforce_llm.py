@@ -1325,7 +1325,6 @@ class TestREINFORCEVllmISCorrection:
         # exercise the capture/align/metrics/reweight path that the base class now
         # shares with GRPO.
         rf.vllm_importance_sampling_correction = True
-        rf.vllm_importance_sampling_apply = True
         rf.vllm_importance_sampling_cap = 2.0
         vocab, inp, mtok = 100, 10, 8
         seq_len = inp + mtok

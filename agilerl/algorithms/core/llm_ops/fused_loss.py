@@ -145,9 +145,7 @@ def llm_policy_loss_fn(
 
     if importance_sampling_level == "token":
         if turn_ids is not None:
-            # The level is authoritative; a stray turn_ids almost certainly
-            # means the caller wanted turn pooling (and per-turn advantages
-            # would silently mis-broadcast here), so fail loudly.
+            # The level is authoritative; fail loudly on a stray turn_ids.
             msg = (
                 "turn_ids was provided but importance_sampling_level='token'; "
                 "pass importance_sampling_level='turn' for turn-level pooling."
@@ -313,14 +311,9 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
             turn_ids_chunk=None,
         ):
             # Liger 0.8.0 rewrote ``LigerFusedLinearPPOBase.chunk_forward`` as
-            # a selective per-token-logp kernel: it now requires
-            # ``selected_token_ids``, returns gathered ``(chunk, T)`` logps
-            # instead of the full ``(chunk, T, V)`` log_probs this loss
-            # consumes, and is built on a custom ``autograd.Function`` that
-            # does not compose with the ``torch.func.grad_and_value``
-            # transform used below. Inline the (numerically identical)
-            # 0.7.0 chunk_forward math instead: matmul + bias + temperature
-            # scaling + fp32 log-softmax.
+            # liger 0.8 made chunk_forward a selective-logp kernel that doesn't
+            # compose with the grad_and_value transform below; inline the
+            # numerically identical 0.7.0 math instead.
             logits = torch.matmul(input_chunk, weight_local.t())
             if bias_local is not None:
                 logits = logits + bias_local

@@ -55,13 +55,46 @@ generate completions). They are quantized independently:
      - Receives **only** the LoRA adapters each step; the base stays put
 
 When you train with QLoRA and a colocated vLLM rollout, the base model is
-quantized **once on each side** and never moved between them. Every training
-step only the small LoRA adapter weights are exported from the trainer and
-loaded into vLLM (see :class:`~agilerl.utils.algo_utils.VLLMConfig` with
-``enable_lora=True``, the default). The quantized base weights on both sides
-stay frozen in 4-bit — they are never dequantized, merged, or re-uploaded.
-This keeps the per-step sync cheap and avoids holding a second full-precision
-copy of the model anywhere.
+quantized **once** and the single copy is shared by both sides (see
+:ref:`zero_copy_weight_sharing` below). Every training step only the small
+LoRA adapter weights are exported from the trainer and loaded into vLLM (see
+:class:`~agilerl.utils.algo_utils.VLLMConfig` with ``enable_lora=True``, the
+default). The quantized base weights stay frozen in 4-bit — they are never
+dequantized, merged, or re-uploaded. This keeps the per-step sync cheap and
+avoids holding a second (let alone full-precision) copy of the model
+anywhere.
+
+.. _zero_copy_weight_sharing:
+
+Zero-copy weight sharing (colocated)
+------------------------------------
+
+When vLLM is colocated with the trainer on the same GPU, AgileRL does not
+hold two copies of the base model at all. vLLM loads (and, with
+``quantization="bitsandbytes"``, quantizes) the base once; the trainer's
+Hugging Face model is then built around the very same tensors — vLLM's weight
+tensors, and their bitsandbytes quantization state, are extracted by
+reference and grafted into an empty Hugging Face skeleton, so both sides
+alias identical GPU storage. The shared base is frozen and read-only on both
+sides; only the BF16 LoRA adapters (and, for PPO, a small trainer-only value
+head) differ per side. This works for both quantized and dense
+(BF16/FP16) bases, and happens automatically for colocated rollouts — there
+is nothing to configure.
+
+Two details make the shared base practical:
+
+* **Standby sleep.** vLLM's sleep mode is patched so the shared base stays
+  physically resident on the GPU across sleep/wake — only the KV cache (and
+  other recomputable allocations) is freed while the trainer steps. The base
+  never needs reloading, which is also what makes sleeping a
+  bitsandbytes-quantized engine safe (a 4-bit base cannot be reloaded in
+  place).
+* **Text-only sharing for multimodal bases.** Only the language model is
+  shared; RL rollouts are text-only. A multimodal base's unused vision/audio
+  towers can additionally be freed from GPU memory with
+  ``VLLMConfig(strip_multimodal_towers=True)`` (or a list of attribute names
+  for non-standard layouts) — checkpoints are unaffected, since only the LoRA
+  adapter is saved.
 
 Quantizing the trainer (bitsandbytes + QLoRA)
 ---------------------------------------------

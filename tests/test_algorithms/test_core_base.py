@@ -4814,11 +4814,6 @@ class TestLLMInitializeActors:
         ):
             LLMAlgorithm._initialize_actors(agent, peft_model, add_adapters=True)
 
-    def test_reject_peft_model_raises_with_guidance(self):
-        """_reject_peft_model tells the user to pass the base model instead."""
-        with pytest.raises(ValueError, match="Pass the base model"):
-            LLMAlgorithm._reject_peft_model(context="actor_network")
-
     def test_initialize_actors_with_separate_reference_adapter(self):
         agent = _make_llm_agent()
         agent.lora_config = MagicMock()

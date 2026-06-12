@@ -1481,7 +1481,6 @@ class TestPPOVllmISCorrection:
         # exercise the capture/align/metrics/reweight path (applied to the policy
         # surrogate via clipped_is_surrogate's loss_weight hook).
         ppo.vllm_importance_sampling_correction = True
-        ppo.vllm_importance_sampling_apply = True
         ppo.vllm_importance_sampling_cap = 2.0
         vocab, inp, mtok = 100, 10, 8
         seq_len = inp + mtok
@@ -1575,11 +1574,13 @@ class TestPPOSequencePacking:
         for b, length in enumerate(lengths):
             action_mask[b, : length - 1] = True
 
-        def fake_per_token_logprobs(h, weight, bias, targets, fn):
-            # Context-free per-token logprob: sum the next-token-shifted hidden
-            # features. Identical closed form padded or packed, so equivalence
-            # is entirely down to pack/unpack.
-            return h[:, :-1, :].sum(-1)
+        def fake_fused_fn(
+            h, weight, bias, targets, *, temperature, cast_to_fp32, _chunk_rows
+        ):
+            # Context-free per-token logprob over the (already next-token-
+            # shifted) hidden features. Identical closed form padded or packed,
+            # so equivalence is entirely down to pack/unpack.
+            return h.sum(-1)
 
         def run():
             with (
@@ -1587,11 +1588,10 @@ class TestPPOSequencePacking:
                 patch.object(ppo, "_amp_ctx", nullcontext),
                 patch.object(ppo, "_activation_offload_ctx", nullcontext),
                 patch.object(ppo, "_get_unwrapped_actor", return_value=actor),
-                patch.object(ppo, "_per_token_logprobs", fake_per_token_logprobs),
                 patch.object(
                     ppo,
                     "_fused_logprob_fn_and_head",
-                    return_value=(None, None, None),
+                    return_value=(fake_fused_fn, None, None),
                 ),
             ):
                 return ppo._fused_forward(

@@ -112,4 +112,3 @@ INIT_HP:
     # near-no-op (ratio ~1) when colocated and same-precision. CAP clamps the
     # ratio (defaults to 2.0 when unset).
     VLLM_IMPORTANCE_SAMPLING_CORRECTION: true
-    VLLM_IMPORTANCE_SAMPLING_APPLY: true
