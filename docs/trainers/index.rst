@@ -85,10 +85,21 @@ match the registered class name exactly.
      lr: 6.3e-4
      batch_size: 128
 
-Arena algorithm eligibility is validated by the manifest models in
-``agilerl-arena`` (``agilerl.arena.models``).
+.. _manifest_models_split:
 
-2. ``environment``
+Local training vs Arena manifest models
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Local validation uses :class:`~agilerl.models.manifest.TrainingManifest` and
+:data:`~agilerl.models.algo.ALGO_REGISTRY` to dispatch manifest fields to the appropriate Pydantic model.
+Arena submission uses the
+**separate** models shipped in the ``agilerl-arena`` package (:class:`~agilerl.arena.models.TrainingManifest` and
+:data:`~agilerl.arena.models.ARENA_REGISTRY`, containing the algorithms eligible for Arena training). Local training
+models can instantiate environments and tie into local training loops; Arena models are lightweight schemas for remote
+validation and serialization.
+
+
+1. ``environment``
 ^^^^^^^^^^^^^^^^^^
 
 Validated differently for local and Arena training. Locally, we validate against an appropriate model depending on the chosen

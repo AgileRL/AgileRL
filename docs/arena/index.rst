@@ -30,6 +30,11 @@ To use the Arena client, install the standalone package directly with lightweigh
    # or
    pip install "agilerl[arena]"
 
+``agilerl-arena`` does **not** depend on core ``agilerl`` (no PyTorch, Gymnasium,
+etc.). The reverse is also optional: you can install ``agilerl`` without Arena.
+When both are installed, they share the ``agilerl`` namespace — Arena modules
+live at ``agilerl.arena.*``.
+
 Authentication
 --------------
 

@@ -13,8 +13,10 @@ Prerequisites
 Installation
 ~~~~~~~~~~~~
 
-Arena can be accessed through the `agilerl-arena` package, which requires additional packages (``httpx``, ``rich``, etc.) that are not included in the
-base AgileRL installation. Install it directly for lightweight dependencies, or through the AgileRL extra:
+Arena is provided by the separate ``agilerl-arena`` distribution (``agilerl.arena.*``
+in the shared namespace). It pulls in lightweight client dependencies (``httpx``,
+``rich``, etc.) rather than core training stacks. Install it directly, or through
+the AgileRL extra:
 
 .. code-block:: bash
 
@@ -184,7 +186,7 @@ size of 8, Arena will train 4 agents on each of the nodes in parallel.
       .. code-block:: python
 
          result = client.submit_experiment(
-             manifest="docs/_static/examples/acrobot_ppo.yaml",
+             manifest="acrobot_ppo.yaml",
              resource_id="arena-medium",
              num_nodes=2,
              project="Acrobot Tutorial",
@@ -196,7 +198,7 @@ size of 8, Arena will train 4 agents on each of the nodes in parallel.
 
       .. code-block:: bash
 
-         arena experiments submit docs/_static/examples/acrobot_ppo.yaml \
+         arena experiments submit acrobot_ppo.yaml \
              --resource-id arena-medium \
              --num-nodes 2 \
              --project 'Acrobot Tutorial' \

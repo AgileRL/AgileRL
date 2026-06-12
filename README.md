@@ -322,7 +322,7 @@ This approach gives you the flexibility to swap in your own Gymnasium or Petting
 
 [Arena](https://arena.agilerl.com) is the RLOps platform from AgileRL. We provide tools to create and validate custom reinforcement learning environments on the platform and train RL agents on managed cloud infrastructure specifically tailored to RL workloads.
 
-AgileRL ships a **Python SDK** and a **CLI** for interacting with the platform through the `agilerl-arena` package. Install it directly, or via the AgileRL extra:
+AgileRL ships a **Python SDK** and a **CLI** for interacting with the platform through the [`agilerl-arena`](agilerl-arena/README.md) package. It is a **separate PyPI distribution** that contributes the `agilerl.arena` namespace. Install it directly, or via the AgileRL extra:
 
 ```bash
 pip install agilerl-arena
