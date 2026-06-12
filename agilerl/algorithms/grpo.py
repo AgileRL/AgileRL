@@ -625,7 +625,7 @@ class GRPO(LLMAlgorithm):
                                     self.pad_token_id,
                                 )
                             )
-            else:  # pragma: no cover - needs a live colocated vLLM engine
+            else:
                 self._prepare_vllm_for_generation()
                 (
                     completion_ids,

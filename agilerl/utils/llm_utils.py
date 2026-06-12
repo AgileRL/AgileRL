@@ -530,9 +530,7 @@ def adapt_lora_config_for_model(
                 "Check LORA_TARGET_SCOPE and TARGET_MODULES match the model layout."
             )
             raise ValueError(msg)
-        if raw_targets == target_spec:  # pragma: no cover - scoped specs start
-            # with ".*" and are classified as regexes above, so equality here is
-            # unreachable by construction; kept as a cheap idempotency guard.
+        if raw_targets == target_spec:
             return lora_config
         adapted = _clone_lora_config_with_targets(lora_config, target_spec)
         logger.info(
@@ -565,9 +563,7 @@ def adapt_lora_config_for_model(
         )
         if not matched:
             continue
-        if raw_targets == target_spec:  # pragma: no cover - scoped specs start
-            # with ".*" and are classified as regexes above, so equality here is
-            # unreachable by construction; kept as a cheap idempotency guard.
+        if raw_targets == target_spec:
             return lora_config
         adapted = _clone_lora_config_with_targets(lora_config, target_spec)
         logger.info(
