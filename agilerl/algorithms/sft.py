@@ -313,7 +313,7 @@ class SFT(LLMAlgorithm):
             model_kwargs["position_ids"] = position_ids
 
         flat_labels = labels.view(-1)
-        if self.use_liger_loss:
+        if self.use_liger_loss:  # pragma: no cover - Liger kernels need CUDA
             # Memory-bounded Liger path: run the transformer with the lm_head
             # patched to identity so ``.logits`` is the final hidden state,
             # then hand hidden states + lm_head weight to the fused-linear CE

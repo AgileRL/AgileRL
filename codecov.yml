@@ -1,0 +1,15 @@
+---
+# Temporary coverage targets while the CI runners cannot execute GPU-marked
+# tests: their NVIDIA driver predates the cu13 torch stack, so CUDA is masked
+# in linux-tests.yml and every GPU/vLLM/bitsandbytes code path reports
+# uncovered. The base branch's ~99% was measured before that mask existed.
+# Restore target: auto (and delete this file) once the runner drivers are
+# upgraded and the CUDA mask is removed. Context: PR #522.
+coverage:
+    status:
+        project:
+            default:
+                target: 92%
+        patch:
+            default:
+                target: 90%

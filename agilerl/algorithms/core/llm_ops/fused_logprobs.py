@@ -123,11 +123,11 @@ def _fused_logprob_chunk_dispatch(
     )
     if device.type != "cuda" or state["disabled"]:
         return _fused_logprob_chunk(*args)
-    if state["fn"] is None:
+    if state["fn"] is None:  # pragma: no cover - torch.compile path needs CUDA
         state["fn"] = torch.compile(_fused_logprob_chunk, dynamic=True)
-    try:
+    try:  # pragma: no cover - compiled path needs CUDA
         return state["fn"](*args)
-    except Exception:
+    except Exception:  # pragma: no cover - compiled path needs CUDA
         # Triton/backend failure — drop to eager for the rest of the process.
         state["disabled"] = True
         return _fused_logprob_chunk(*args)

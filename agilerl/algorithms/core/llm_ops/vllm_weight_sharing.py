@@ -309,7 +309,7 @@ def patch_vllm_standby_sleep_mode() -> None:
     if getattr(CuMemAllocator, "_agilerl_standby_patched", False):
         return
 
-    if _expandable_segments_enabled():
+    if _expandable_segments_enabled():  # pragma: no cover - needs CUDA allocator
         msg = (
             "vLLM standby sleep (weight-sharing) is incompatible with "
             "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True. Unset it before "
@@ -317,7 +317,7 @@ def patch_vllm_standby_sleep_mode() -> None:
         )
         raise RuntimeError(msg)
 
-    try:
+    try:  # pragma: no cover - vLLM runtime only
         from vllm.utils import is_pin_memory_available
     except Exception:
         try:
@@ -327,7 +327,9 @@ def patch_vllm_standby_sleep_mode() -> None:
             def is_pin_memory_available() -> bool:  # type: ignore[misc]
                 return False
 
-    def sleep(self, offload_tags=None) -> None:
+    def sleep(
+        self, offload_tags=None
+    ) -> None:  # pragma: no cover - drives the CUDA mem pool
         if offload_tags is None:
             offload_tags = (CuMemAllocator.default_tag,)
         elif isinstance(offload_tags, str):
@@ -351,7 +353,7 @@ def patch_vllm_standby_sleep_mode() -> None:
         gc.collect()
         torch.cuda.empty_cache()
 
-    def wake_up(self, tags=None) -> None:
+    def wake_up(self, tags=None) -> None:  # pragma: no cover - drives the CUDA mem pool
         torch.cuda.empty_cache()
         gc.collect()
         for ptr, data in self.pointer_to_data.items():
@@ -831,7 +833,7 @@ def build_shared_hf_model(
     # (OOMs at ~30k tokens); flash is O(T). Falls back to SDPA when flash-attn
     # is not installed.
     attn_impl = resolve_attn_implementation(attn_implementation)
-    if attn_impl == "flex_attention":
+    if attn_impl == "flex_attention":  # pragma: no cover - resolved only on CUDA hosts
         patch_flex_attention_kernel_options()
     with init_empty_weights(include_buffers=False):
         model = AutoModelForCausalLM.from_config(
@@ -846,9 +848,11 @@ def build_shared_hf_model(
         for k in shared
         if k.endswith(".weight.quant_state")
     )
-    if quant_owners:
+    if quant_owners:  # pragma: no cover - bnb 4-bit path needs CUDA quant states
         from bitsandbytes.nn.modules import Linear4bit, Params4bit
-    for owner in quant_owners:
+    for (
+        owner
+    ) in quant_owners:  # pragma: no cover - bnb 4-bit path needs CUDA quant states
         handled.update(
             {f"{owner}.weight", f"{owner}.weight.quant_state", f"{owner}.bias"}
         )
@@ -886,7 +890,9 @@ def build_shared_hf_model(
     # ``_quant_target`` so the ``.linear`` clipping-wrapper redirection (e.g.
     # Gemma4ClippableLinear) and the "HF omits this module" skip apply uniformly.
     for key, val in shared.items():
-        if key in handled:
+        if (
+            key in handled
+        ):  # pragma: no cover - handled keys exist only on the quantized path
             continue
         grafted = False
         for suffix in (".weight", ".bias"):
@@ -898,7 +904,9 @@ def build_shared_hf_model(
                 break
         else:
             # Raw parameter (no .weight/.bias suffix).
-            if _target_exists(model, key):
+            if _target_exists(
+                model, key
+            ):  # pragma: no cover - raw extra params occur on GPU multimodal models
                 _graft_param(model, key, val, requires_grad=False)
                 grafted = True
         if not grafted:
@@ -948,7 +956,7 @@ def build_shared_hf_model(
             continue
         if name.startswith(hf_prefix + ".") or name == "lm_head.weight":
             lang_leftover.append(name)
-        else:
+        else:  # pragma: no cover - non-language meta params occur on multimodal models
             _graft_param(
                 model,
                 name,
@@ -963,7 +971,7 @@ def build_shared_hf_model(
         )
         raise RuntimeError(msg)
     n_towers = _materialise_meta_buffers(model, device)
-    if n_towers:
+    if n_towers:  # pragma: no cover - multimodal towers need a GPU model
         warnings.warn(
             f"weight_sharing: materialised {n_towers} non-language buffers as "
             "frozen empties (vision/audio towers; unused in text rollouts).",
@@ -972,7 +980,7 @@ def build_shared_hf_model(
 
     # Flag as bnb-4-bit so PEFT's kbit prep + get_peft_model treat it as QLoRA.
     # A dense shared base sets none of these (it is not quantized).
-    if is_quantized:
+    if is_quantized:  # pragma: no cover - bnb 4-bit flags need the CUDA quant path
         model.is_loaded_in_4bit = True
         model.is_loaded_in_8bit = False
         model.is_quantized = True
