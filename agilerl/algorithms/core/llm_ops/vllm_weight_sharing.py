@@ -195,6 +195,12 @@ def patch_vllm_strip_multimodal_towers(
             n_params = sum(int(p.numel()) for p in sub.parameters())
         except Exception:
             n_params = 0
+        if isinstance(holder, torch.nn.Module):
+            # A registered child module can't be replaced by a non-Module via
+            # plain attribute assignment (``nn.Module.__setattr__`` raises
+            # TypeError); drop the registration first so the placeholder lands
+            # as a plain instance attribute.
+            holder._modules.pop(attr, None)
         setattr(holder, attr, _StrippedTower(full_path))
         freed[full_path] = n_params
 
