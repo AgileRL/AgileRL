@@ -29,7 +29,7 @@ try:
     )
 
     HAS_FSDP2 = True
-except ImportError:  # torch built without distributed support
+except ImportError:  # pragma: no cover -- torch built without distributed support
     CPUOffloadPolicy = None
     MixedPrecisionPolicy = None
     fully_shard = None

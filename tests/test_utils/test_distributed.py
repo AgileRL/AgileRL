@@ -81,6 +81,10 @@ class TestSingleDeviceNoOps:
         os.environ["LOCAL_RANK"] = "3"
         assert get_local_rank() == 3
 
+    def test_local_rank_fallback_zero_without_env_or_cuda(self):
+        with patch("torch.cuda.is_available", return_value=False):
+            assert get_local_rank() == 0
+
     def test_broadcast_object_list_passthrough(self):
         objects = [1, "two", {"three": 3}]
         assert broadcast_object_list(objects) is objects
@@ -110,6 +114,13 @@ class TestSingleDeviceNoOps:
             patch("torch.backends.mps.is_available", return_value=False),
         ):
             assert resolve_device(None) == "cpu"
+
+    def test_resolve_device_prefers_mps_over_cpu(self):
+        with (
+            patch("torch.cuda.is_available", return_value=False),
+            patch("torch.backends.mps.is_available", return_value=True),
+        ):
+            assert resolve_device(None) == "mps"
 
     def test_shard_dataloader_kwargs_single_device(self):
         assert shard_dataloader_kwargs(dataset=[1, 2, 3], shuffle=False) == {

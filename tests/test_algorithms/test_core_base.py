@@ -4663,3 +4663,94 @@ class TestLLMGenerateWithVllmColocateTP:
                 prompts, group_size=2, temperature=0.9
             )
         assert len(completion_ids) == 1
+
+
+class TestLLMShardedCheckpointBranches:
+    """FSDP2-sharded optimizer-state branches and load_checkpoint guards."""
+
+    def test_gathered_optimizer_state_dict_sharded_uses_dcp(self):
+        agent = _make_llm_agent()
+        agent.actor = _make_mock_peft_actor()
+        agent.optimizer = MagicMock()
+        get_mock = MagicMock(return_value={"state": {}})
+        with (
+            patch("agilerl.algorithms.core.base.is_fsdp_sharded", return_value=True),
+            patch(
+                "torch.distributed.checkpoint.state_dict.get_optimizer_state_dict",
+                get_mock,
+            ),
+        ):
+            out = agent._gathered_optimizer_state_dict()
+        get_mock.assert_called_once()
+        assert out == {"state": {}}
+        agent.optimizer.state_dict.assert_not_called()
+
+    def test_load_gathered_optimizer_state_dict_sharded_uses_dcp(self):
+        agent = _make_llm_agent()
+        agent.actor = _make_mock_peft_actor()
+        agent.optimizer = MagicMock()
+        set_mock = MagicMock()
+        with (
+            patch("agilerl.algorithms.core.base.is_fsdp_sharded", return_value=True),
+            patch(
+                "torch.distributed.checkpoint.state_dict.set_optimizer_state_dict",
+                set_mock,
+            ),
+        ):
+            agent._load_gathered_optimizer_state_dict({"state": {}})
+        set_mock.assert_called_once()
+        agent.optimizer.load_state_dict.assert_not_called()
+
+    def test_save_checkpoint_sharded_embeds_gathered_optimizer_state(self, tmp_path):
+        grpo = generate_tiny_grpo()
+        try:
+            with (
+                patch(
+                    "agilerl.algorithms.core.base.is_fsdp_sharded", return_value=True
+                ),
+                patch.object(
+                    grpo, "_gathered_optimizer_state_dict", return_value={"x": 1}
+                ),
+            ):
+                grpo.save_checkpoint(str(tmp_path), save_optimizer=True)
+            checkpoint = torch.load(
+                str(tmp_path / "attributes.pt"), weights_only=False, pickle_module=dill
+            )
+            assert checkpoint["network_info"]["optimizers"]["optimizer_state_dict"] == {
+                "x": 1
+            }
+        finally:
+            grpo.clean_up()
+
+    def test_load_checkpoint_registry_mismatch_raises(self, tmp_path):
+        grpo = generate_tiny_grpo()
+        try:
+            from agilerl.algorithms.core.registry import MutationRegistry
+
+            torch.save(
+                {"registry": MutationRegistry()},
+                str(tmp_path / "attributes.pt"),
+                pickle_module=dill,
+            )
+            with pytest.raises(
+                ValueError, match="does not match the algorithm's registry"
+            ):
+                grpo.load_checkpoint(str(tmp_path))
+        finally:
+            grpo.clean_up()
+
+    def test_load_checkpoint_without_actor_weights_raises(self, tmp_path):
+        grpo = generate_tiny_grpo()
+        try:
+            torch.save(
+                {
+                    "_lora_only": False,
+                    "network_info": {"modules": {}, "optimizers": {}},
+                },
+                str(tmp_path / "attributes.pt"),
+                pickle_module=dill,
+            )
+            with pytest.raises(ValueError, match="does not contain actor weights"):
+                grpo.load_checkpoint(str(tmp_path))
+        finally:
+            grpo.clean_up()

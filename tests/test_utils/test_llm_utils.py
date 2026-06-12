@@ -619,6 +619,12 @@ class TestShardingSeam:
     def test_is_fsdp_sharded_false_for_plain_module(self):
         assert is_fsdp_sharded(nn.Linear(4, 4)) is False
 
+    def test_is_fsdp_sharded_false_without_fsdp_build(self):
+        from agilerl.utils import llm_utils
+
+        with patch.object(llm_utils, "HAS_FSDP", False):
+            assert llm_utils.is_fsdp_sharded(nn.Linear(4, 4)) is False
+
     def test_load_full_state_dict_plain_module(self):
         source = nn.Linear(4, 4)
         target = nn.Linear(4, 4)

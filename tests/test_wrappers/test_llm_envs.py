@@ -2,6 +2,8 @@
 
 import importlib
 import sys
+from unittest.mock import MagicMock
+
 import pytest
 import torch
 
@@ -390,6 +392,31 @@ class TestReasoningGymResetDataloaders:
                         assert torch.equal(item1[key3], item2[key4])
             else:
                 assert first_data_point[key1] == first_data_point_reset[key1]
+
+    @pytest.mark.parametrize("num_samples", [200])
+    def test_reset_dataloaders_sets_distributed_sampler_epoch(
+        self, reasoning_dataset, num_samples
+    ):
+        """A sharded train dataloader gets its sampler epoch bumped on reset."""
+        train_dataset, test_dataset = reasoning_dataset
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+        env = ReasoningGym(
+            train_dataset=train_dataset,
+            test_dataset=test_dataset,
+            tokenizer=tokenizer,
+            reward_fn=dummy_reward_fn,
+            conversation_template=DUMMY_CONVERSATION_TEMPLATE,
+            data_batch_size_per_gpu=8,
+        )
+
+        class _ShardedLoader(list):
+            pass
+
+        loader = _ShardedLoader([{"question": "q", "answer": "a"}])
+        loader.sampler = MagicMock()
+        env.train_dataloader = loader
+        env._reset_dataloaders(reset_train=True, reset_test=False)
+        loader.sampler.set_epoch.assert_called_once_with(env.num_epochs)
 
 
 class TestReasoningGymLen:

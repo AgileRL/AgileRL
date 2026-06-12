@@ -19,7 +19,7 @@ try:
     from torch.distributed.fsdp import FSDPModule, FullyShardedDataParallel
 
     HAS_FSDP = True
-except ImportError:  # torch built without distributed support
+except ImportError:  # pragma: no cover -- torch built without distributed support
     FSDPModule = None
     FullyShardedDataParallel = None
     HAS_FSDP = False

@@ -1058,6 +1058,13 @@ class TestTournamentSelectionAndMutation:
 
 
 class TestGatherTensor:
+    def test_collective_device_cpu_without_cuda(self):
+        """The collective device falls back to CPU when CUDA is unavailable"""
+        from agilerl.utils.utils import _collective_device
+
+        with patch("torch.cuda.is_available", return_value=False):
+            assert _collective_device().type == "cpu"
+
     def test_with_tensor_input(self):
         """gather_tensor returns the (detached) input tensor on a single device"""
         input_tensor = torch.tensor([1, 2, 3])
