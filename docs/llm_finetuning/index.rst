@@ -64,3 +64,10 @@ This example demonstrates how to use the GRPO algorithm to fine-tune a LLM on a 
    fused_logprobs
    quantization
    llm_checkpoints
+
+.. note::
+
+   Internal development notes for the colocated vLLM sleep / weight-sharing
+   work live in ``docs/llm_finetuning/vllm_sleep_handoff.md`` (Markdown, not
+   built into this site); they are pending consolidation into the
+   :doc:`quantization` topic.

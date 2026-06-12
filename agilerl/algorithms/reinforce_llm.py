@@ -156,8 +156,8 @@ class REINFORCE(LLMAlgorithm):
     :type torch_compiler: str | None
     :param liger_token_chunk_size: Tokens per chunk for token-level Liger fused
         policy loss. ``None`` uses
-        :data:`~agilerl.utils.llm_utils.DEFAULT_LIGER_TOKEN_CHUNK` (2048).
-    :type liger_token_chunk_size: int | None, optional
+        defaults to 2048.
+    :type liger_token_chunk_size: int, optional
     :param use_sequence_packing: Opt in to padding-free sequence packing for the
         gradient forward pass. Only honoured under a FlashAttention-2 backend;
         otherwise inert.
@@ -215,7 +215,7 @@ class REINFORCE(LLMAlgorithm):
         activation_offload: bool = False,
         use_sequence_packing: bool = False,
         lora_target_scope: str | None = None,
-        liger_token_chunk_size: int | None = None,
+        liger_token_chunk_size: int = 2048,
         vllm_importance_sampling_correction: bool = True,
         vllm_importance_sampling_apply: bool = True,
         vllm_importance_sampling_cap: float = 2.0,

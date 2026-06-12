@@ -48,10 +48,6 @@ _BNB_QUANT_PRESETS = frozenset({"none", "int8", "nf4"})
 # submodule via regex (see https://github.com/huggingface/peft/issues/3129).
 _CLIPPABLE_LINEAR_WRAPPER_SUFFIX = "ClippableLinear"
 
-#: Default tokens-per-chunk for the token-flattened Liger fused-loss path,
-#: used when ``liger_token_chunk_size`` is not set on the algorithm.
-DEFAULT_LIGER_TOKEN_CHUNK = 2048
-
 
 def __getattr__(name: str) -> Any:
     """Lazy re-exports from ``llm_envs`` with a deprecation warning."""
@@ -195,11 +191,7 @@ def gather_if_zero3(
                 "is not installed."
             )
             raise ImportError(msg)
-        # Imported lazily (only ZeRO-3 needs it) so that importing this module —
-        # and therefore the whole ``agilerl`` package via the core import chain —
-        # never eagerly imports deepspeed. deepspeed probes CUDA at import time
-        # (get_device_capability), which raises on hosts with an old/mismatched
-        # driver (e.g. CI runners) and would abort test collection.
+        # Lazy: deepspeed is an optional dependency and only ZeRO-3 needs it.
         import deepspeed
 
         with deepspeed.zero.GatheredParameters(
@@ -320,7 +312,20 @@ def _is_peft_adaptable_linear(module: nn.Module) -> bool:
 
 
 def peft_target_key_matches(key: str, target_modules: str | list[str]) -> bool:
-    """Mirror PEFT 0.19 ``target_modules`` matching (``fullmatch`` or suffix list)."""
+    """Return ``True`` when a module key matches a PEFT ``target_modules`` spec.
+
+    Mirrors PEFT's own matching rules so AgileRL selects exactly the modules
+    PEFT would wrap: a string spec is a regex (``fullmatch``); a list matches
+    a key exactly or by ``.suffix``. Used to filter LoRA state dicts for vLLM
+    export consistently with how the adapters were attached.
+
+    :param key: Dotted module key (e.g. ``model.layers.0.self_attn.q_proj``).
+    :type key: str
+    :param target_modules: PEFT ``target_modules`` regex or suffix list.
+    :type target_modules: str | list[str]
+    :return: Whether the key matches.
+    :rtype: bool
+    """
     if isinstance(target_modules, str):
         return re.fullmatch(target_modules, key) is not None
     if key in target_modules:
@@ -354,7 +359,11 @@ def list_peft_matched_module_keys(
 
 
 def _looks_like_peft_target_regex(spec: str) -> bool:
-    """Heuristic: user already passed a PEFT ``target_modules`` regex."""
+    """Heuristic: the user passed a regex ``target_modules`` spec.
+
+    Needed by :func:`adapt_lora_config_for_model` to pass regex specs through
+    untouched instead of rewriting them like plain suffix names.
+    """
     return spec.startswith(".*") or r"\." in spec or "(" in spec
 
 
@@ -1699,10 +1708,6 @@ def calculate_k3_kl(log_p: torch.Tensor, log_q: torch.Tensor) -> torch.Tensor:
 # vLLM / CUDA capability helpers (benchmark CLI, colocated rollout)
 # ---------------------------------------------------------------------------
 
-#: Default rollout adapter name / id for colocated vLLM (``LoRARequest``).
-VLLM_ROLLOUT_LORA_NAME = "actor"
-VLLM_ROLLOUT_LORA_INT_ID = 1
-
 
 def resolve_vllm_max_lora_rank(
     vllm_max_lora_rank: int,
@@ -1807,8 +1812,8 @@ def build_vllm_rollout_lora_request(
     lora_path: str | Path,
     *,
     load_inplace: bool = False,
-    lora_name: str = VLLM_ROLLOUT_LORA_NAME,
-    lora_int_id: int = VLLM_ROLLOUT_LORA_INT_ID,
+    lora_name: str = "actor",
+    lora_int_id: int = 1,
 ) -> Any:
     """Build a vLLM :class:`~vllm.lora.request.LoRARequest` for rollout."""
     from vllm.lora.request import LoRARequest

@@ -41,25 +41,6 @@ def _is_main_process(accelerator: Accelerator | None) -> bool:
     return accelerator is None or accelerator.is_main_process
 
 
-def _grpo_sampling_kwargs(
-    agent: GRPO | LLMPPO | LLMREINFORCE | DPO | SFT,
-    sampling_logps: Any,
-    *,
-    present: bool,
-) -> dict[str, Any]:
-    """Return ``{"sampling_logps": ...}`` for the RL LLM agents, else ``{}``.
-
-    The vLLM sampling-mismatch correction is shared by the RL LLM agents
-    (GRPO family, LLMPPO, LLMREINFORCE); the logps are threaded into
-    ``learn()`` only when the agent is one of those and the caller-computed
-    ``present`` flag confirms some were captured. Harmless when an agent's
-    correction is disabled, since its ``get_action`` returns ``None`` then.
-    """
-    if isinstance(agent, (GRPO, LLMPPO, LLMREINFORCE)) and present:
-        return {"sampling_logps": sampling_logps}
-    return {}
-
-
 def _validate_llm_evolution_args(
     evo_steps: int | None,
     tournament: TournamentSelection | None,
@@ -743,8 +724,11 @@ def finetune_llm_reasoning(
                 rewards,
             )
 
-            learn_kwargs = _grpo_sampling_kwargs(
-                agent, sampling_logps, present=sampling_logps is not None
+            learn_kwargs = (
+                {"sampling_logps": sampling_logps}
+                if sampling_logps is not None
+                and isinstance(agent, (GRPO, LLMPPO, LLMREINFORCE))
+                else {}
             )
             learn_output = agent.learn(experiences, **learn_kwargs)
             metrics = _normalize_learn_metrics(
@@ -1439,15 +1423,10 @@ def finetune_llm_multiturn(
                 if isinstance(agent, (LLMREINFORCE, LLMPPO, GRPO))
                 else {}
             )
-            # The vLLM sampling-mismatch correction is a GRPO-family feature;
-            # pass the per-trajectory logprobs only when some were captured.
-            learn_kwargs.update(
-                _grpo_sampling_kwargs(
-                    agent,
-                    all_sampling_logps,
-                    present=all_sampling_logps is not None,
-                )
-            )
+            if all_sampling_logps is not None and isinstance(
+                agent, (GRPO, LLMPPO, LLMREINFORCE)
+            ):
+                learn_kwargs["sampling_logps"] = all_sampling_logps
             learn_output = agent.learn(experiences, **learn_kwargs)
             metrics = _normalize_learn_metrics(
                 agent=agent,

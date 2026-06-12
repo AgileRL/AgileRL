@@ -461,10 +461,9 @@ default `game:Sudoku-v0-hard` once generation is coherent.
   experimental reload commits `dfa966c6`→`7c3be726`). This was blocked for the
   agent by the permission guard — the user must run it.
 - Untracked files that SURVIVE the reset and carry the work forward:
-  `docs/llm_finetuning/vllm_sleep_handoff.md` (this file) and
-  `docs/llm_finetuning/boundary_test_block.py.keep` (validated boundary tests for
-  the kept chat-template fix — append to
-  `tests/test_wrappers/test_multiturn_wrappers.py`).
+  `docs/llm_finetuning/vllm_sleep_handoff.md` (this file). (The validated
+  chat-template boundary tests have since landed in
+  `tests/test_wrappers/test_multiturn_wrappers.py`.)
 
 ## Appendix B: repro_standby.py (full source — recreate if missing)
 

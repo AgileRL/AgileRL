@@ -1925,7 +1925,9 @@ class TestGRPOLigerLossDispatch:
             patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
             patch.object(grpo, "_get_lm_head", return_value=fake_lm_head),
             patch.object(grpo, "_patch_lm_head_to_identity", nullcontext),
-            patch.object(grpo, "actor", new=MagicMock(wraps=grpo.actor)),  # noqa: avoid touching the actor's forward
+            patch.object(
+                grpo, "actor", new=MagicMock(wraps=grpo.actor)
+            ),  # avoid touching the actor forward
             patch("agilerl.algorithms.grpo.LigerFusedLinearGRPOFunction") as mock_fn,
             patch.object(
                 LLMAlgorithm,
@@ -2575,9 +2577,7 @@ class TestGRPOMoveModelToVllm:
         assert adapter_dir.is_dir()
         assert (adapter_dir / "adapter_config.json").is_file()
         loaded_loras = grpo.llm.llm_engine.list_loras()
-        from agilerl.utils.llm_utils import VLLM_ROLLOUT_LORA_INT_ID
-
-        assert VLLM_ROLLOUT_LORA_INT_ID in loaded_loras
+        assert 1 in loaded_loras  # the fixed rollout LoRARequest id
         assert grpo._vllm_rollout_lora_request is not None
 
         grpo._vllm_moved = False

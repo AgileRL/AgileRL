@@ -283,7 +283,7 @@ class GRPO(LLMAlgorithm):
         quantization_config: BitsAndBytesConfig | None = None,
         activation_offload: bool = False,
         lora_target_scope: str | None = None,
-        liger_token_chunk_size: int | None = None,
+        liger_token_chunk_size: int = 2048,
         vllm_importance_sampling_correction: bool = True,
         vllm_importance_sampling_apply: bool = True,
         vllm_importance_sampling_cap: float = 2.0,
@@ -453,10 +453,6 @@ class GRPO(LLMAlgorithm):
         self.adv_clip_range = adv_clip_range
         self.filter_zero_adv = filter_zero_adv
         self.adv_filter_eps = adv_filter_eps
-        # ``liger_token_chunk_size`` (per-chunk token count for the Liger
-        # fused-loss path) is validated and stored by ``super().__init__`` above;
-        # ``None`` resolves to ``DEFAULT_LIGER_TOKEN_CHUNK`` (2048) via
-        # ``self._resolve_liger_token_chunk()``.
         if self.loss_type == "cispo" and self.beta != 0:
             warnings.warn(
                 "CISPO is typically used with beta=0; nonzero beta adds KL "
@@ -693,12 +689,6 @@ class GRPO(LLMAlgorithm):
             rewards = rewards.to(self.device).float()
             completion_ids = completion_ids.to(self.device)
             num_samples = completion_ids.shape[0]
-            # NOTE: the group-size divisibility check is deferred into the
-            # advantage branches below, so it runs *after* rewards-cardinality
-            # validation. That ordering makes a rewards/trajectory count
-            # mismatch report its own (more specific) error instead of the
-            # generic divisibility message.
-
             if turn_ids is not None:
                 turn_ids = turn_ids.to(self.device)
                 if turn_ids.shape[0] != num_samples:
@@ -708,9 +698,6 @@ class GRPO(LLMAlgorithm):
                     )
                     raise ValueError(msg)
 
-            # Advantage granularity (advantage_granularity) and IS / ratio-pooling
-            # level (importance_sampling_level) are independent. Resolve the
-            # advantage unit first; the IS level is applied later in the loss.
             if self._resolve_advantage_granularity() == "turn" and turn_ids is not None:
                 advantages = self._turn_broadcast_advantages(
                     rewards, turn_ids, action_masks, num_samples
@@ -720,9 +707,6 @@ class GRPO(LLMAlgorithm):
                     rewards, num_samples, completion_ids
                 )
 
-            # The IS ratio is pooled per turn only at turn level; token/trajectory
-            # ignore turn_ids. This is decoupled from the advantage granularity
-            # above — e.g. per-turn advantages may pair with token-level IS.
             is_turn_ids = turn_ids if self.importance_sampling_level == "turn" else None
 
             # Advantage post-processing (filter / whiten / clip) is
@@ -814,8 +798,7 @@ class GRPO(LLMAlgorithm):
         result = {
             metric: value / max(updates, 1) for metric, value in learn_metrics.items()
         }
-        # Sampling-mismatch metrics are computed once over the full batch, so
-        # they bypass the per-update averaging above.
+        # Batch-level metrics: not divided by the update count above.
         result.update(is_metrics)
         return result
 
@@ -1256,13 +1239,9 @@ class GRPO(LLMAlgorithm):
             )
             self._is_correction_liger_warned = True
         if self.use_liger_loss and not self._liger_level_supported:
-            # Non-token IS (turn-level, or trajectory-level CISPO) has no fused
-            # kernel and runs the standard path; emit the canonical
-            # not-memory-bounded warning (warn-once, shared with the
-            # constructor). Note this guards on the real ``_liger_level_supported``
-            # condition, not the routing fall-through above: token-level GRPO that
-            # only falls through for the vLLM correction is fully Liger-supported
-            # and must not be warned here.
+            # Warn once that this IS level has no fused kernel. Guard on the
+            # level itself, not the routing above — a vLLM-correction
+            # fall-through at token level must not warn.
             algo_name = (
                 "GSPO" if self.importance_sampling_level == "trajectory" else "GRPO"
             )
@@ -1319,10 +1298,8 @@ class GRPO(LLMAlgorithm):
         :return: ``(B, T)`` or ``(B, 1)`` log importance weights.
         :rtype: torch.Tensor
         """
-        # Token level is the identity; ``turn_ids=None`` at turn level degenerates
-        # to one trajectory-wide turn, so route it through trajectory pooling.
-        # Both reuse :func:`pool_log_ratio_by_level` (the same length-normalized
-        # geometric-mean pooling shared by the non-Liger surrogate helpers).
+        # Token level is the identity; turn level without turn_ids degenerates
+        # to trajectory-wide pooling (both via pool_log_ratio_by_level).
         if level == "token":
             return token_log_ratio
         if level == "trajectory" or turn_ids is None:
@@ -1411,12 +1388,8 @@ class GRPO(LLMAlgorithm):
                 ).clamp(max=self.vllm_importance_sampling_cap)
             loss = loss * is_ratio
         loss = self._reduce_masked_loss(loss, mask)
-        # Report the KL averaged over ACTION tokens only. ``kl`` is the k3
-        # estimator over the full (B, T) frame; at masked (pad/prompt/non-action)
-        # positions the policy and reference logprobs are meaningless and can
-        # diverge by tens of nats, and ``exp(diff)`` in k3 then explodes the
-        # naive ``kl.mean()`` to ~1e29. (The loss is already masked above; the
-        # advantage-shaping path masks too — this keeps the *metric* consistent.)
+        # Average the KL metric over action tokens only — masked positions have
+        # meaningless logprobs that explode the k3 estimator.
         return loss.mean(), masked_mean(kl, mask)
 
     def _grpo_loss_standard(
@@ -1581,16 +1554,11 @@ class GRPO(LLMAlgorithm):
             liger_loss_type = "grpo"
             epsilon_low = 1.0 - self.clip_coef_min
             epsilon_high = self.clip_coef_max - 1.0
-            # The GSPO (trajectory-level) not-memory-bounded warning is emitted
-            # once up front in ``__init__`` via ``_warn_liger_non_token_is``; no
-            # duplicate is needed here.
 
         batch_ids = batch_ids.to(self.device)
         mask = action_mask.to(self.device).contiguous()  # (B, seq_len-1)
-        # Normalise a trailing singleton ``(B, 1) -> (B,)`` for the kernel, but
-        # never squeeze a 1-D ``(B,)``: a single-sample minibatch arrives as
-        # ``(1,)`` and ``squeeze(-1)`` would collapse it to a 0-dim scalar,
-        # which the token-level shape detection below then rejects.
+        # Drop a trailing singleton dim only — squeezing a 1-D (1,) would
+        # collapse it to a scalar.
         adv = advantages.to(self.device).contiguous()
         if adv.dim() > 1 and adv.shape[-1] == 1:
             adv = adv.squeeze(-1)  # (B, 1) -> (B,)
@@ -1618,13 +1586,8 @@ class GRPO(LLMAlgorithm):
         packed = None
         if packing_mode is not None:
             packed = pack_padded_batch(batch_ids, attention_mask)
-            # Hand the model only the per-sequence ``position_ids`` (reset per
-            # segment) with ``attention_mask=None``: transformers detects the
-            # packed format and AND-composes a block-diagonal constraint onto
-            # each layer's native mask (FA2 → cu_seqlens + per-layer window_size;
-            # flex → sparse block-diagonal BlockMask + window on sliding layers).
-            # No token attends across sequences and sliding-window attention is
-            # preserved per layer, so packing is correct for SWA models too.
+            # Per-sequence position_ids (no mask): transformers detects the
+            # packed format and keeps sequences attention-isolated per layer.
             model_kwargs = {
                 "input_ids": packed.input_ids,
                 "position_ids": packed.position_ids,
@@ -1640,10 +1603,8 @@ class GRPO(LLMAlgorithm):
                 position_ids = attention_mask.long().cumsum(-1) - 1
                 position_ids.masked_fill_(attention_mask == 0, 1)
                 model_kwargs["position_ids"] = position_ids
-        # Identity-patch lm_head so the actor forward outputs the last hidden
-        # state (B, T, H) directly instead of materializing (B, T, V) logits
-        # only to discard them. lm_head_weight is passed separately to
-        # LigerFusedLinearGRPOFunction which handles the matmul and its grad.
+        # Identity-patch lm_head: the forward yields hidden states; the fused
+        # kernel handles the lm_head matmul itself.
         with (
             self._patch_lm_head_to_identity(),
             self.select_adapter("actor"),
@@ -1661,39 +1622,17 @@ class GRPO(LLMAlgorithm):
             policy_hidden = unpack_hidden_states(policy_hidden, packed)
         target_ids = batch_ids[:, 1:].contiguous()  # (B, seq_len-1)
 
-        # Token-chunk the fused-linear loss for token-level importance sampling
-        # (CISPO / GRPO). The upstream Liger function chunks dim 0 (the batch),
-        # so a single long trajectory (B=1) materialises the whole
-        # ``(seq_len, vocab)`` logits matrix in one chunk and OOMs at long
-        # context (gemma's vocab is 262k). Flattening ``(B, T, H) -> (B*T, 1, H)``
-        # makes it chunk *tokens* instead, bounding each chunk's logits to
-        # ``(chunk_tokens, vocab)``. This is exact for token-level IS with the
-        # global cispo/dapo normaliser (validated: bit-identical to the
-        # non-chunked loss). Sequence-level IS (GSPO) is not token-independent,
-        # so it keeps the batch path.
-        # Both importance-sampling levels feed the *same* fused kernel; only the
-        # input layout and the chunk granularity differ. The token level flattens
-        # ``(B, T, H) -> (B*T, 1, H)`` (and the matching ``(B, T) -> (B*T, 1)``
-        # tensors) so the kernel chunks over *tokens* — bounding each chunk's
-        # logits to ``(token_chunk_size, vocab)``; the non-token (trajectory/GSPO)
-        # path keeps the padded ``(B, T, ...)`` layout and chunks one whole
-        # sequence at a time. ``policy_arg`` / ``target_ids_arg`` / ``mask_arg`` /
-        # ``old_lp_arg`` / ``ref_lp_arg`` / ``adv_arg`` and ``chunk_size`` are the
-        # only positional args that vary; everything else is written once below.
+        # Token-level IS: flatten (B, T, H) -> (B*T, 1, H) so the fused kernel
+        # chunks over tokens, bounding each chunk's logits to
+        # (chunk_tokens, vocab) — exact for token-level IS. Trajectory-level
+        # (GSPO) couples a sequence's tokens, so it keeps the padded layout
+        # and chunks one sequence at a time.
         if importance_sampling_level == "token":
             batch, _seq_len, hidden_dim = policy_hidden.shape
             n_act = target_ids.shape[1]  # seq_len - 1
             n_tokens = batch * n_act
-            # ``adv`` arrives in one of three shapes depending on
-            # ``advantage_granularity`` upstream:
-            #   * ``(batch,)``           — trajectory-level (one scalar per
-            #     completion); broadcast to every action token.
-            #   * ``(batch, 1)``         — same, already a column vector.
-            #   * ``(batch, n_act)``     — already per-token (turn-level
-            #     ``advantage_granularity`` broadcasts the per-turn advantage to
-            #     tokens via ``turn_advantages.gather(1, turn_ids)``).
-            # Detect and flatten to ``(n_tokens,)`` for the token-flatten Liger
-            # call below.
+            # Flatten per-trajectory ((batch,) / (batch, 1)) or per-token
+            # ((batch, n_act)) advantages to (n_tokens,).
             if adv.ndim == 1 and adv.shape[0] == batch:
                 adv_arg = adv.unsqueeze(1).expand(batch, n_act).reshape(n_tokens)
             elif adv.ndim == 2 and adv.shape == (batch, 1):
@@ -1720,10 +1659,7 @@ class GRPO(LLMAlgorithm):
                 if reference_log_probs is not None
                 else None
             )
-            # Tokens per chunk: bounds the transient (chunk_tokens, vocab) logits.
-            # Prefers the constructor / INIT_HP value, defaulting to
-            # ``DEFAULT_LIGER_TOKEN_CHUNK`` (2048).
-            chunk_size = self._resolve_liger_token_chunk()
+            chunk_size = self.liger_token_chunk_size
         else:
             # Trajectory-level (GSPO): keep the padded layout and one-sequence-per-
             # chunk granularity (chunk_size=1 over the batch dim).

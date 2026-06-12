@@ -99,15 +99,6 @@ def _lora_config_from_init_hp(INIT_HP: dict[str, Any]) -> Any | None:
     )
 
 
-def _common_llm_init_hp(INIT_HP: dict[str, Any]) -> dict[str, Any]:
-    """Shared ``create_population`` kwargs for GRPO / LLMPPO / LLMREINFORCE."""
-    return {
-        "seed": INIT_HP.get("SEED", 42),
-        "use_liger_loss": INIT_HP.get("USE_LIGER_LOSS", False),
-        "cast_logprobs_to_fp32": INIT_HP.get("CAST_LOGPROBS_TO_FP32", True),
-    }
-
-
 def _prepare_llm_algo_kwargs(
     algo_kwargs: dict[str, Any],
     *,
@@ -832,7 +823,9 @@ def create_population(
                 # carries AgileRL's adapters — construct them via the clone
                 # path (reuse as-is) rather than re-attaching adapters.
                 clone=idx != 0 and act is not None,
-                **_common_llm_init_hp(INIT_HP),
+                seed=INIT_HP.get("SEED", 42),
+                use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
+                cast_logprobs_to_fp32=INIT_HP.get("CAST_LOGPROBS_TO_FP32", True),
                 use_kl_advantage_shaping=INIT_HP.get("USE_KL_ADVANTAGE_SHAPING", False),
                 adv_norm=INIT_HP.get("ADV_NORM", "mean_std"),
                 loss_type=INIT_HP.get("LOSS_TYPE", "grpo"),
@@ -921,9 +914,6 @@ def create_population(
                 accelerator=agent_accelerator,
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
-                # Agents after the first receive a clone_llm copy that already
-                # carries AgileRL's adapters — construct them via the clone
-                # path (reuse as-is) rather than re-attaching adapters.
                 clone=idx != 0 and act is not None,
                 seed=INIT_HP.get("SEED", 42),
                 use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
@@ -982,9 +972,6 @@ def create_population(
                 accelerator=agent_accelerator,
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
-                # Agents after the first receive a clone_llm copy that already
-                # carries AgileRL's adapters — construct them via the clone
-                # path (reuse as-is) rather than re-attaching adapters.
                 clone=idx != 0 and act is not None,
                 seed=INIT_HP.get("SEED", 42),
                 use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
@@ -1063,11 +1050,10 @@ def create_population(
                 accelerator=agent_accelerator,
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
-                # Agents after the first receive a clone_llm copy that already
-                # carries AgileRL's adapters — construct them via the clone
-                # path (reuse as-is) rather than re-attaching adapters.
                 clone=idx != 0 and act is not None,
-                **_common_llm_init_hp(INIT_HP),
+                seed=INIT_HP.get("SEED", 42),
+                use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
+                cast_logprobs_to_fp32=INIT_HP.get("CAST_LOGPROBS_TO_FP32", True),
             )
             if torch_compiler is not None:
                 kw.setdefault("torch_compiler", torch_compiler)
@@ -1143,11 +1129,10 @@ def create_population(
                 accelerator=agent_accelerator,
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
-                # Agents after the first receive a clone_llm copy that already
-                # carries AgileRL's adapters — construct them via the clone
-                # path (reuse as-is) rather than re-attaching adapters.
                 clone=idx != 0 and act is not None,
-                **_common_llm_init_hp(INIT_HP),
+                seed=INIT_HP.get("SEED", 42),
+                use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
+                cast_logprobs_to_fp32=INIT_HP.get("CAST_LOGPROBS_TO_FP32", True),
             )
             if torch_compiler is not None:
                 kw.setdefault("torch_compiler", torch_compiler)

@@ -30,11 +30,9 @@ from agilerl.algorithms.core.llm_ops.fused_loss import (
     apply_fused_policy_loss,
     flatten_tokens_for_fused_loss,
     llm_policy_loss_fn,
-    resolve_token_chunk_size,
     LigerFusedLinearPolicyLossFunction,
     _LigerDPOWithAlpha,
 )
-from agilerl.utils.llm_utils import DEFAULT_LIGER_TOKEN_CHUNK
 
 
 def test_no_liger_fused_module_raises_import_error(monkeypatch):
@@ -1015,10 +1013,6 @@ class TestLigerFusedLinearPolicyLossFunction:
 class TestFusedLossHelpers:
     """Pure-helper coverage: token chunk-size resolution and the
     ``(B, T, ...) -> (B*T, 1, ...)`` token flattening reshape."""
-
-    def test_resolve_token_chunk_size_explicit_and_default(self) -> None:
-        assert resolve_token_chunk_size(512) == 512
-        assert resolve_token_chunk_size(None) == DEFAULT_LIGER_TOKEN_CHUNK
 
     def test_flatten_tokens_for_fused_loss_shapes_and_layout(self) -> None:
         B, T, H = 2, 3, 4

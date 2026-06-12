@@ -177,8 +177,8 @@ class PPO(LLMAlgorithm):
     :type torch_compiler: str | None, optional
     :param liger_token_chunk_size: Tokens per chunk for token-level Liger fused
         policy loss. ``None`` uses
-        :data:`~agilerl.utils.llm_utils.DEFAULT_LIGER_TOKEN_CHUNK` (2048).
-    :type liger_token_chunk_size: int | None, optional
+        defaults to 2048.
+    :type liger_token_chunk_size: int, optional
     :param use_sequence_packing: Opt in to padding-free sequence packing for the
         gradient forward. The actor-critic value-head forward packs the actor
         and critic (which share identical ids) into a single block-diagonal
@@ -248,7 +248,7 @@ class PPO(LLMAlgorithm):
         activation_offload: bool = False,
         use_sequence_packing: bool = False,
         lora_target_scope: str | None = None,
-        liger_token_chunk_size: int | None = None,
+        liger_token_chunk_size: int = 2048,
         vllm_importance_sampling_correction: bool = True,
         vllm_importance_sampling_apply: bool = True,
         vllm_importance_sampling_cap: float = 2.0,
@@ -353,13 +353,8 @@ class PPO(LLMAlgorithm):
         # pooling, consistent with GRPO/GSPO).
         self.importance_sampling_level = importance_sampling_level
         self.advantage_granularity = advantage_granularity
-        # Warn once, up front, when Liger is paired with an explicit non-token
-        # IS level. It is permitted but not memory-bounded: turn-/trajectory-level
-        # pooling couples a unit's tokens, so the fused kernel processes one
-        # whole sequence per chunk and materializes a (seq_len, vocab) logits
-        # tensor per trajectory. (``"auto"`` resolves per batch, so it is
-        # covered by the loss-time warning instead.) The shared once-flag
-        # suppresses the duplicate loss-time warning.
+        # Warn once that Liger + an explicit non-token IS level is permitted
+        # but not memory-bounded ("auto" is covered at loss time instead).
         if self.use_liger_loss and self.importance_sampling_level in {
             "turn",
             "trajectory",
@@ -647,9 +642,6 @@ class PPO(LLMAlgorithm):
 
                     batch_mask_bool = batch_action_mask.bool()
 
-                    # Slice the aligned vLLM sampling logprobs for this
-                    # minibatch; ``None`` when the correction is off / no
-                    # logprobs were captured.
                     batch_sampling_log_probs = (
                         sampling_log_probs[minibatch_idxs]
                         if sampling_log_probs is not None
@@ -734,9 +726,6 @@ class PPO(LLMAlgorithm):
                                 * mask_f
                             ).clamp(max=self.vllm_importance_sampling_cap)
 
-                    # Policy surrogate at the resolved IS / ratio-pooling level
-                    # (token / turn / sequence), decoupled from the value-loss
-                    # granularity below.
                     pg_loss, clipfrac = self._ppo_policy_surrogate(
                         token_log_ratio,
                         batch_advantages,

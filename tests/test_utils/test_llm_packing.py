@@ -2,8 +2,9 @@
 
 These exercise the pure-tensor pack/unpack logic and the backend gate; they do
 not require vLLM/DeepSpeed/FlashAttention, so they run everywhere (including
-CPU/darwin CI). The attention-contamination guarantee itself is a property of
-the FlashAttention-varlen backend and is validated on GPU.
+CPU/darwin CI). The guarantee that no token attends across packed-sequence
+boundaries is a property of the FlashAttention-varlen backend and is
+validated on GPU.
 """
 
 import warnings

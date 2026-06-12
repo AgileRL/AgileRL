@@ -490,7 +490,7 @@ class TestPPOInit:
                 gradient_checkpointing=False,
             )
 
-    def test_init_liger_token_chunk_size_must_be_positive_or_none(self):
+    def test_init_liger_token_chunk_size_must_be_positive(self):
         actor = create_module(10, 8, 100, "cpu")
         lora = LoraConfig(
             r=4,
@@ -500,7 +500,7 @@ class TestPPOInit:
             modules_to_save=["summary"],
         )
         with pytest.raises(
-            ValueError, match="liger_token_chunk_size must be a positive int or None"
+            ValueError, match="liger_token_chunk_size must be a positive int"
         ):
             LLMPPO(
                 actor_network=actor,

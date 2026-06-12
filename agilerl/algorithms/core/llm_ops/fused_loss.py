@@ -39,7 +39,7 @@ from liger_kernel.chunked_loss.fused_linear_preference import (
     LigerFusedLinearPreferenceBase,
 )
 
-from agilerl.utils.llm_utils import DEFAULT_LIGER_TOKEN_CHUNK, calculate_k3_kl
+from agilerl.utils.llm_utils import calculate_k3_kl
 
 
 def llm_policy_loss_fn(
@@ -486,23 +486,6 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
         )
 
 
-def resolve_token_chunk_size(explicit: int | None) -> int:
-    """Resolve the tokens-per-chunk bound for the token-flattened Liger path.
-
-    Returns ``explicit`` when given (the constructor / INIT_HP / kwarg value),
-    otherwise :data:`~agilerl.utils.llm_utils.DEFAULT_LIGER_TOKEN_CHUNK`.
-    Shared by :func:`apply_fused_policy_loss` and GRPO's token-flattened loss
-    path so both resolve the bound identically.
-
-    :param explicit: Explicit tokens-per-chunk, or ``None`` for the default.
-    :type explicit: int | None
-    :return: Tokens-per-chunk bounding the transient ``(chunk_tokens, vocab)``
-        logits tensor in the token-flattened fused kernel.
-    :rtype: int
-    """
-    return explicit or DEFAULT_LIGER_TOKEN_CHUNK
-
-
 def flatten_tokens_for_fused_loss(
     policy_hidden: torch.Tensor,
     target_ids: torch.Tensor,
@@ -577,7 +560,7 @@ def apply_fused_policy_loss(
     turn_ids: torch.Tensor | None = None,
     full_turn_mask: torch.Tensor | None = None,
     max_turns: int | None = None,
-    token_chunk_size: int | None = None,
+    token_chunk_size: int = 2048,
 ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
     """Run :class:`LigerFusedLinearPolicyLossFunction`, bounded at token level.
 
@@ -587,8 +570,7 @@ def apply_fused_policy_loss(
     materializes only ``(token_chunk, vocab)`` logits in both the forward and
     backward, the same memory-bounding trick GRPO/CISPO use. The global
     token-count denominator is unchanged by flattening, so the result is exact.
-    ``token_chunk_size`` (kwarg) sets the tokens-per-chunk; ``None`` uses
-    :data:`~agilerl.utils.llm_utils.DEFAULT_LIGER_TOKEN_CHUNK`.
+    ``token_chunk_size`` sets the tokens-per-chunk.
 
     Turn- and trajectory-level pooling couple a turn/trajectory's tokens, so they
     cannot be token-chunked: a chunk would only see part of the pooled unit.
@@ -612,7 +594,6 @@ def apply_fused_policy_loss(
     if importance_sampling_level == "token":
         b, t_act, _ = policy_hidden.shape
         n_tokens = b * t_act
-        token_chunk_size = resolve_token_chunk_size(token_chunk_size)
         (
             hidden_flat,
             target_ids_flat,

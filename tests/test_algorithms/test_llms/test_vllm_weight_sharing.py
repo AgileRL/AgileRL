@@ -22,6 +22,7 @@ import pytest
 import torch
 import torch.nn as nn
 
+from agilerl.algorithms.core.llm_ops import vllm_weight_sharing as vws
 from agilerl.algorithms.core.llm_ops.vllm_weight_sharing import (
     _bnb_linear_kwargs,
     _expandable_segments_enabled,
@@ -834,8 +835,6 @@ class _CpuTorchProxy:
 
 @pytest.fixture
 def cpu_shared_device(monkeypatch):
-    import agilerl.algorithms.core.llm_ops.vllm_weight_sharing as vws
-
     monkeypatch.setattr(vws, "torch", _CpuTorchProxy())
 
 
@@ -1071,7 +1070,7 @@ def _alias_tree_from_shared(shared, config):
     for key, val in shared.items():
         if not key.endswith(".weight"):
             continue
-        *parents, _leaf = key.split(".")
+        parents = key.split(".")[:-1]
         cur = root
         for part in parents:
             nxt = getattr(cur, part, None)

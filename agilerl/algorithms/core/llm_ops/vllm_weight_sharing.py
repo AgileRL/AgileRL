@@ -445,6 +445,8 @@ def _truncate_vocab(weight: torch.Tensor, vocab_size: int) -> torch.Tensor:
     return weight
 
 
+# Sentinel distinguishing "attribute absent" from a stored None in
+# ``_navigate_safe`` lookups.
 _MISSING = object()
 
 

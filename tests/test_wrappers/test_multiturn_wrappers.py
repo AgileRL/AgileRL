@@ -582,7 +582,7 @@ class _SyncStubEnv:
 class TestSyncMultiTurnVecEnvReset:
     def test_sync_gem_vec_env_reset_seeds_per_batch_group(self) -> None:
         vec_env = SyncMultiTurnVecEnv(
-            env_factory=lambda: _SyncStubEnv(),
+            env_factory=_SyncStubEnv,
             batch_size=2,
             group_size=2,
         )
@@ -592,7 +592,7 @@ class TestSyncMultiTurnVecEnvReset:
 
     def test_sync_gem_vec_env_reset_with_none_seed(self) -> None:
         vec_env = SyncMultiTurnVecEnv(
-            env_factory=lambda: _SyncStubEnv(),
+            env_factory=_SyncStubEnv,
             batch_size=2,
             group_size=2,
         )
@@ -602,7 +602,7 @@ class TestSyncMultiTurnVecEnvReset:
 
     def test_sync_gem_vec_env_reset_reuses_existing_trajectories(self) -> None:
         vec_env = SyncMultiTurnVecEnv(
-            env_factory=lambda: _SyncStubEnv(),
+            env_factory=_SyncStubEnv,
             batch_size=2,
             group_size=2,
         )
@@ -617,7 +617,7 @@ class TestSyncMultiTurnVecEnvStep:
         self,
     ) -> None:
         vec_env = SyncMultiTurnVecEnv(
-            env_factory=lambda: _SyncStubEnv(),
+            env_factory=_SyncStubEnv,
             batch_size=1,
             group_size=2,
         )
@@ -657,7 +657,7 @@ class TestSyncMultiTurnVecEnvStep:
 
     def test_sync_vec_env_step_raises_on_sampling_logps_count_mismatch(self) -> None:
         vec_env = SyncMultiTurnVecEnv(
-            env_factory=lambda: _SyncStubEnv(),
+            env_factory=_SyncStubEnv,
             batch_size=1,
             group_size=2,
         )
@@ -755,13 +755,13 @@ class TestSyncMultiTurnVecEnvInit:
     def test_sync_vec_env_constructor_rejects_non_positive_sizes(self) -> None:
         with pytest.raises(ValueError, match="batch_size must be > 0"):
             _ = SyncMultiTurnVecEnv(
-                env_factory=lambda: _SyncStubEnv(),
+                env_factory=_SyncStubEnv,
                 batch_size=0,
                 group_size=1,
             )
         with pytest.raises(ValueError, match="group_size must be > 0"):
             _ = SyncMultiTurnVecEnv(
-                env_factory=lambda: _SyncStubEnv(),
+                env_factory=_SyncStubEnv,
                 batch_size=1,
                 group_size=0,
             )

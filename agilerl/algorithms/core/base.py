@@ -130,7 +130,6 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from safetensors.torch import load_file
 
     from agilerl.utils.llm_utils import (
-        DEFAULT_LIGER_TOKEN_CHUNK,
         adapt_lora_config_for_model,
         create_model_from_name_or_path,
         format_colocated_vllm_oom_hint,
@@ -2108,9 +2107,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     """
 
     _allowed_adapters = frozenset({"actor", "reference", "critic"})
-    # Adapter exported to vLLM for rollout — always the actor. Also used as the
-    # ``LoRARequest`` name, so it must match the llm_utils helper defaults
-    # (``VLLM_ROLLOUT_LORA_NAME``).
+    # Adapter exported to vLLM for rollout — always the actor (also the
+    # ``LoRARequest`` name the llm_utils helpers default to).
     _vllm_rollout_adapter = "actor"
 
     def __init__(
@@ -2151,7 +2149,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         use_sequence_packing: bool = False,
         lora_target_scope: str | None = None,
         fused_logprobs_chunk_rows: int | None = None,
-        liger_token_chunk_size: int | None = None,
+        liger_token_chunk_size: int = 2048,
         vllm_importance_sampling_correction: bool = True,
         vllm_importance_sampling_apply: bool = True,
         vllm_importance_sampling_cap: float = 2.0,
@@ -2338,13 +2336,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         # Warn-once flag for the Liger + vLLM sampling-mismatch incompatibility
         # (the fused kernel cannot apply a per-token importance weight).
         self._is_correction_liger_warned = False
-        # Per-call token chunk size for the Liger fused-loss path. ``None``
-        # resolves to DEFAULT_LIGER_TOKEN_CHUNK (see
-        # :meth:`_resolve_liger_token_chunk`); set explicitly to trade
-        # kernel-launch count vs the per-chunk activation footprint.
-        if liger_token_chunk_size is not None and liger_token_chunk_size <= 0:
+        # Tokens per chunk for the Liger fused-loss path: trades kernel-launch
+        # count against the per-chunk activation footprint.
+        if liger_token_chunk_size <= 0:
             msg = (
-                f"liger_token_chunk_size must be a positive int or None, "
+                f"liger_token_chunk_size must be a positive int, "
                 f"got {liger_token_chunk_size}."
             )
             raise ValueError(msg)
@@ -3545,14 +3541,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     stacklevel=2,
                 )
         return sampling_log_probs, is_metrics
-
-    def _resolve_liger_token_chunk(self) -> int:
-        """Token chunk size for the Liger fused-loss path.
-
-        Returns the constructor override (``liger_token_chunk_size``) when set,
-        otherwise :data:`~agilerl.utils.llm_utils.DEFAULT_LIGER_TOKEN_CHUNK`.
-        """
-        return self.liger_token_chunk_size or DEFAULT_LIGER_TOKEN_CHUNK
 
     def _setup_actors(
         self,

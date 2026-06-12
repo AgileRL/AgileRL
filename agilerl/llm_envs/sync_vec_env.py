@@ -22,10 +22,8 @@ class Trajectory:
     group_idx: int
     prompt: ReasoningPrompts
     done: bool
-    # Per-turn vLLM sampling logprobs (1-D, generated tokens only). Each call
-    # to ``SyncMultiTurnVecEnv.step`` appends that turn's tensor when the
-    # caller captured one; ``get_trajectories`` concatenates across turns.
-    # Stays empty unless sampling logprobs are passed to ``step``.
+    # Sampling logprobs from vLLM rollout, one 1-D tensor per turn;
+    # ``get_trajectories`` concatenates across turns.
     sampling_logps: list[torch.Tensor] = field(default_factory=list)
 
 
@@ -210,11 +208,9 @@ class SyncMultiTurnVecEnv:
 
         :param completion_ids: One completion tensor per active trajectory.
         :type completion_ids: list[torch.Tensor]
-        :param sampling_logps: Optional per-active-trajectory vLLM sampling
-            logprobs (1-D, generated tokens only) for this turn, parallel to
-            ``completion_ids``; individual entries may be ``None`` when a row
-            captured nothing. Accumulated per trajectory for the
-            sampling-mismatch correction; ignored when ``None``.
+        :param sampling_logps: Sampling logprobs from vLLM rollout for this
+            turn, parallel to ``completion_ids``; entries (or the whole list)
+            may be ``None`` when nothing was captured.
         :type sampling_logps: list[torch.Tensor | None] | None
         :return: Next active prompt dictionaries after stepping.
         :rtype: list[ReasoningPrompts] | None

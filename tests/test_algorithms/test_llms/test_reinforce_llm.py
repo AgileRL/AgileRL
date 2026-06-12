@@ -533,7 +533,7 @@ class TestREINFORCEInit:
                 gradient_checkpointing=False,
             )
 
-    def test_init_liger_token_chunk_size_must_be_positive_or_none(self):
+    def test_init_liger_token_chunk_size_must_be_positive(self):
         actor = create_dummy_actor(10, 8, 100, "cpu")
         lora = LoraConfig(
             r=4,
@@ -542,7 +542,7 @@ class TestREINFORCEInit:
             task_type="CAUSAL_LM",
         )
         with pytest.raises(
-            ValueError, match="liger_token_chunk_size must be a positive int or None"
+            ValueError, match="liger_token_chunk_size must be a positive int"
         ):
             REINFORCE(
                 actor_network=actor,
