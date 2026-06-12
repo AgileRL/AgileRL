@@ -37,7 +37,19 @@ def generate_distributed_mode(mode):
     if mode is None:
         return False
 
-    initialised = init_distributed()
+    # The ``distributed_env`` fixture probes a free port for MASTER_PORT,
+    # but another xdist worker can grab it before init_process_group binds
+    # its TCPStore (EADDRINUSE race) — re-probe and retry.
+    for attempt in range(5):
+        try:
+            initialised = init_distributed()
+            break
+        except RuntimeError as err:
+            if "address already in use" not in str(err).lower() or attempt == 4:
+                raise
+            from tests.conftest import get_free_port
+
+            os.environ["MASTER_PORT"] = str(get_free_port())
     assert initialised, (
         "Distributed mode requires the `distributed_env` fixture to set the "
         "rendezvous env vars (RANK/WORLD_SIZE/MASTER_ADDR/MASTER_PORT)."
