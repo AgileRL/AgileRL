@@ -530,8 +530,6 @@ def adapt_lora_config_for_model(
                 "Check LORA_TARGET_SCOPE and TARGET_MODULES match the model layout."
             )
             raise ValueError(msg)
-        if raw_targets == target_spec:
-            return lora_config
         adapted = _clone_lora_config_with_targets(lora_config, target_spec)
         logger.info(
             "Adapted LoRA target_modules via scoped regex (%s) (%d modules), e.g. %s",

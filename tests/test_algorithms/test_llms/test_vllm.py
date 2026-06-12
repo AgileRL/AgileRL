@@ -254,3 +254,83 @@ class TestREINFORCETest:
             )
 
         rf.clean_up()
+
+    @spawn_new_process_for_each_test
+    @pytest.mark.parametrize("vocab_size", [1000])
+    @pytest.mark.parametrize("input_size", [10])
+    @pytest.mark.parametrize("max_tokens", [20])
+    @pytest.mark.parametrize("pretrained_model_name_or_path", [TINY_LLM_FIXTURE_PATH])
+    def test_dense_generate_survives_sleep_wake(
+        self,
+        deepspeed_env,
+        reinforce_factory,
+        accelerator_factory,
+        model_factory,
+        vocab_size,
+        input_size,
+        max_tokens,
+        pretrained_model_name_or_path,
+    ):
+        """Dense (unquantized) counterpart of the quantized sleep/wake test.
+
+        The shared fp16 base must stay resident through standby sleep: greedy
+        decode of the same prompts has to be identical before sleep and after
+        wake. fp16 (not bf16) so the test also runs on pre-Ampere CI GPUs.
+        """
+        del deepspeed_env
+        rf = reinforce_factory(
+            accelerator_factory=accelerator_factory,
+            model_factory=model_factory,
+            config=None,
+            use_deepspeed_optimizer=False,
+            vocab_size=vocab_size,
+            input_size=input_size,
+            max_tokens=max_tokens,
+            use_vllm=True,
+            pretrained_model_name_or_path=pretrained_model_name_or_path,
+            micro_batch_size_per_gpu=None,
+            sleep_mode=True,
+            vllm_config_overrides={"dtype": "float16"},
+            share_base_from_vllm=True,
+            temperature=0.0,  # greedy → outputs comparable across sleep/wake
+        )
+
+        # Standby sleep is active and the engine was put to sleep after init.
+        assert rf._vllm_standby
+        assert not rf._vllm_awake
+
+        batch_size = 2
+        prompts = [
+            {
+                "input_ids": torch.randint(
+                    0, vocab_size, (1, input_size), device=rf.device
+                ),
+                "attention_mask": torch.ones(1, input_size, device=rf.device),
+                "text": "Write me a short story about a cat.",
+            }
+            for _ in range(batch_size)
+        ]
+
+        first_ids, first_masks, _ = rf.get_action(prompts, training=True)
+        assert rf._vllm_awake
+        assert_vllm_get_action_contract(
+            completion_ids=first_ids,
+            action_masks=first_masks,
+            batch_size=batch_size,
+            prompt_len=input_size,
+            pad_token_id=rf.pad_token_id,
+        )
+
+        # Standby sleep frees the KV cache but keeps the shared base resident.
+        rf._prepare_vllm_for_training()
+        assert not rf._vllm_awake
+
+        second_ids, _, _ = rf.get_action(prompts, training=True)
+        assert rf._vllm_awake
+        for first, second in zip(first_ids, second_ids, strict=True):
+            assert torch.equal(first, second), (
+                "greedy completions changed across sleep/wake — the dense "
+                "base did not survive standby sleep"
+            )
+
+        rf.clean_up()

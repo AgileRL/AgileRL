@@ -5825,3 +5825,82 @@ class TestGRPOVLLMSamplingCorrection:
         assert "vllm_is_delta_mean" in metrics
         assert torch.isfinite(torch.tensor(metrics["mean_loss"]))
         grpo.clean_up()
+
+
+class TestGRPOInitWarnings:
+    def test_init_action_granularity_deprecated_warns_and_overrides(self):
+        with pytest.warns(DeprecationWarning, match="action_granularity is deprecated"):
+            grpo = _make_cpu_grpo_for_branch_tests(action_granularity="turn")
+        assert grpo.advantage_granularity == "turn"
+        grpo.clean_up()
+
+    @pytest.mark.parametrize(
+        "level,algo_name", [("turn", "GRPO"), ("trajectory", "GSPO")]
+    )
+    def test_init_liger_non_token_level_warns_memory_unbounded(self, level, algo_name):
+        with (
+            patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True),
+            patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
+            pytest.warns(UserWarning, match="NOT memory-bounded"),
+        ):
+            grpo = _make_cpu_grpo_for_branch_tests(
+                use_liger_loss=True, importance_sampling_level=level
+            )
+        assert grpo._liger_non_token_warned
+        grpo.clean_up()
+
+
+class TestGRPOTurnAdvantageLearnPath:
+    def test_calculate_turn_advantage_indivisible_batch_raises(self):
+        stub = _GrpoMathStub(group_size=2, adv_norm="mean_std")
+        stub._calculate_turn_advantage = GRPO._calculate_turn_advantage.__get__(stub)
+        rewards = torch.ones(3, 2)  # 3 % 2 != 0
+        with pytest.raises(ValueError, match="must be divisible by"):
+            stub._calculate_turn_advantage(rewards)
+
+    def _stubbed_forwards(self, grpo):
+        def fake_fused_forward(ids, batch_size):
+            shape = (ids.shape[0], ids.shape[1] - 1)
+            zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
+            return zeros, zeros, None
+
+        def fake_get_logprobs(ids, batch_size, use_reference=False, eval_mode=False):
+            return torch.zeros(
+                ids.shape[0], ids.shape[1] - 1, device=ids.device, requires_grad=True
+            )
+
+        return (
+            patch.object(
+                grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward
+            ),
+            patch.object(grpo, "_get_logprobs", side_effect=fake_get_logprobs),
+            patch.object(grpo, "_backward_pass", return_value=None),
+        )
+
+    def test_learn_turn_ids_batch_mismatch_raises(self):
+        grpo = _make_cpu_grpo_for_branch_tests(group_size=2, update_epochs=1)
+        completion_ids, action_masks = _build_branch_experiences(batch_size=2)
+        rewards = torch.tensor([1.0, -1.0])
+        bad_turn_ids = torch.zeros(3, 9, dtype=torch.long)  # batch 3 != 2
+        p1, p2, p3 = self._stubbed_forwards(grpo)
+        with p1, p2, p3, pytest.raises(ValueError, match="must match"):
+            grpo.learn((completion_ids, action_masks, rewards), turn_ids=bad_turn_ids)
+        grpo.clean_up()
+
+    def test_learn_turn_advantage_path_end_to_end(self):
+        """Per-turn rewards + turn_ids route learn() through the turn-broadcast
+        advantage branch (and stack turn_ids into the minibatches)."""
+        grpo = _make_cpu_grpo_for_branch_tests(
+            group_size=2, update_epochs=1, advantage_granularity="turn"
+        )
+        completion_ids, action_masks = _build_branch_experiences(batch_size=2)
+        turn_rewards = torch.tensor([[1.0, 0.0], [0.0, 1.0]])  # (B, max_turns)
+        turn_ids = torch.zeros(2, 9, dtype=torch.long)
+        turn_ids[:, 5:] = 1
+        p1, p2, p3 = self._stubbed_forwards(grpo)
+        with p1, p2, p3:
+            metrics = grpo.learn(
+                (completion_ids, action_masks, turn_rewards), turn_ids=turn_ids
+            )
+        assert np.isfinite(metrics["mean_loss"])
+        grpo.clean_up()

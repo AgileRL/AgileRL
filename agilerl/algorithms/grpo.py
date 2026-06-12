@@ -1715,15 +1715,13 @@ class GRPO(LLMAlgorithm):
             # ((batch, n_act)) advantages to (n_tokens,).
             if adv.ndim == 1 and adv.shape[0] == batch:
                 adv_arg = adv.unsqueeze(1).expand(batch, n_act).reshape(n_tokens)
-            elif adv.ndim == 2 and adv.shape == (batch, 1):
-                adv_arg = adv.expand(batch, n_act).reshape(n_tokens)
             elif adv.ndim == 2 and adv.shape == (batch, n_act):
                 adv_arg = adv.reshape(n_tokens)
             else:
                 msg = (
                     f"Unexpected advantage shape {tuple(adv.shape)} for the "
-                    f"Liger token-level loss; expected (batch={batch},), "
-                    f"(batch, 1), or (batch, n_act={n_act}) — got "
+                    f"Liger token-level loss; expected (batch={batch},) "
+                    f"or (batch, n_act={n_act}) — got "
                     f"{tuple(adv.shape)}. Per-token shape comes from "
                     "advantage_granularity='turn'; trajectory shape from "
                     "advantage_granularity='trajectory'."
