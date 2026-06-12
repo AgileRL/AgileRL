@@ -66,7 +66,9 @@ def init_distributed(timeout_seconds: int = 1800) -> bool:
         return True
     if not distributed_env_present():
         return False
-    backend = "nccl" if torch.cuda.is_available() else "gloo"
+    # Compound backend so CPU tensors (object broadcasts, metric
+    # aggregation) go over gloo while CUDA tensors use nccl.
+    backend = "cpu:gloo,cuda:nccl" if torch.cuda.is_available() else "gloo"
     dist.init_process_group(
         backend=backend,
         timeout=datetime.timedelta(seconds=timeout_seconds),
