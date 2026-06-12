@@ -1,4 +1,5 @@
 import os
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -47,6 +48,11 @@ def _clean_dist_state():
 @pytest.fixture
 def world_size_one(_clean_dist_state):
     """A real single-process gloo process group."""
+    if sys.platform == "win32":
+        # Windows torch wheels ship gloo without the TCP transport used for
+        # collectives ("makeDeviceForHostname(): unsupported gloo device").
+        # These paths are exercised on the Linux/macOS CI runners.
+        pytest.skip("torch gloo process groups are unsupported on Windows wheels")
     os.environ.update(
         {
             "RANK": "0",
