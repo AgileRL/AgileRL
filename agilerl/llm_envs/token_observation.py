@@ -139,6 +139,10 @@ class TokenObservationWrapper:
             dtype=torch.long,
         )
 
+    # Sentinel assistant-turn content for ``_chat_template_boundary_ids``: it
+    # renders a throwaway conversation containing this marker, then slices the
+    # rendered string just after it to recover the template's turn-boundary
+    # text. Must never collide with anything a real template renders.
     _BOUNDARY_PLACEHOLDER = "__AGILERL_PRIOR_ASSISTANT_PLACEHOLDER_a8b2f__"
 
     def _chat_template_boundary_ids(

@@ -16,6 +16,7 @@ from agilerl.utils.llm_utils import calculate_k3_kl
 if TYPE_CHECKING:
     from accelerate import Accelerator
     from peft import LoraConfig
+    from transformers import BitsAndBytesConfig
 
     from agilerl.llm_envs import ReasoningGym
 
@@ -48,6 +49,7 @@ from agilerl.utils.llm_utils import (
     ReasoningGym,
     build_completion_mask,
     masked_mean,
+    masked_whiten,
     normalize_reasoning_prompt_batch,
     pool_log_ratio_by_level,
     prepare_prompt_hf_generate,
@@ -164,25 +166,27 @@ class GRPO(LLMAlgorithm):
         ``"gspo"``, or ``"cispo"``, defaults to ``"grpo"``. This selects the
         *objective*: ``"grpo"``/``"gspo"`` use the min-clip surrogate,
         ``"cispo"`` the clamped-weight x log-prob objective. ``"gspo"`` is
-        sugar for ``"grpo"`` at sequence level (it forces
-        ``importance_sampling_level="sequence"``).
+        sugar for ``"grpo"`` at trajectory level (it forces
+        ``importance_sampling_level="trajectory"``).
     :type loss_type: Literal["grpo", "gspo", "cispo"], optional
     :param importance_sampling_level: Granularity at which the importance
-        *ratio* is pooled before clipping/weighting, defaults to ``"token"``.
-        This is independent of ``advantage_granularity`` (the advantage axis).
+        *ratio* is pooled before clipping/weighting, defaults to ``None``
+        (resolves to ``"token"``; ``loss_type="gspo"`` forces ``"trajectory"``
+        and warns if a different level was requested explicitly). This is
+        independent of ``advantage_granularity`` (the advantage axis).
 
         * ``"token"`` — per-token ratio (standard GRPO / CISPO).
         * ``"turn"``  — pool the per-token log-ratio over each turn (length-
           normalized geometric mean) and clip/weight per turn. Requires
           ``turn_ids`` in :meth:`learn`.
-        * ``"sequence"`` — pool over the whole completion (GSPO).
+        * ``"trajectory"`` — pool over the whole completion (GSPO).
 
-        Turn- and sequence-level pooling couple a turn/sequence's tokens, so
+        Turn- and trajectory-level pooling couple a turn/trajectory's tokens, so
         they have no fused Liger kernel: they run on the standard PyTorch
         path, which is always memory-bounded (the fused-linear-logprob path is
         unconditional). Token level keeps the (faster, already-bounded) Liger
         path when ``use_liger_loss=True``.
-    :type importance_sampling_level: Literal["token", "turn", "sequence"], optional
+    :type importance_sampling_level: Literal["token", "turn", "trajectory"] | None, optional
     :param advantage_granularity: Unit at which the group-relative *advantage* is
         computed, independent of ``importance_sampling_level``. Defaults to
         ``"auto"``.
@@ -265,7 +269,7 @@ class GRPO(LLMAlgorithm):
         use_kl_advantage_shaping: bool = False,
         adv_norm: str = "mean_std",
         loss_type: Literal["grpo", "gspo", "cispo"] = "grpo",
-        importance_sampling_level: Literal["token", "turn", "sequence"] = "token",
+        importance_sampling_level: Literal["token", "turn", "trajectory"] | None = None,
         advantage_granularity: Literal["auto", "trajectory", "turn"] = "auto",
         action_granularity: Literal["auto", "trajectory", "turn"] | None = None,
         use_separate_reference_adapter: bool = True,
@@ -276,11 +280,11 @@ class GRPO(LLMAlgorithm):
         reduce_memory_peak: bool = False,
         cast_logprobs_to_fp32: bool = True,
         fused_logprobs_chunk_rows: int | None = None,
-        quantization_config: Any | None = None,
+        quantization_config: BitsAndBytesConfig | None = None,
         activation_offload: bool = False,
         lora_target_scope: str | None = None,
         liger_token_chunk_size: int | None = None,
-        vllm_importance_sampling_correction: bool = False,
+        vllm_importance_sampling_correction: bool = True,
         vllm_importance_sampling_apply: bool = True,
         vllm_importance_sampling_cap: float = 2.0,
         use_sequence_packing: bool = False,
@@ -412,7 +416,10 @@ class GRPO(LLMAlgorithm):
         if adv_filter_eps < 0:
             msg = "adv_filter_eps must be >= 0."
             raise ValueError(msg)
-        validate_importance_sampling_level(importance_sampling_level, allow_auto=False)
+        if importance_sampling_level is not None:
+            validate_importance_sampling_level(
+                importance_sampling_level, allow_auto=False
+            )
         if action_granularity is not None:
             warnings.warn(
                 "action_granularity is deprecated; use advantage_granularity.",
@@ -429,26 +436,18 @@ class GRPO(LLMAlgorithm):
             )
             raise ValueError(msg)
         self.loss_type = loss_type
-        # Three orthogonal axes back the GRPO family:
-        #   objective        : "grpo" (min-clip surrogate) or "cispo" (clamped-
-        #                      weight x logp)
-        #   importance_sampling_level : where the IS *ratio* is pooled before the
-        #                      clip/weight -- "token" (none), "turn" (per turn),
-        #                      "sequence" (whole completion, i.e. GSPO).
-        #   advantage_granularity : the unit the *advantage* is computed at --
-        #                      "trajectory" (one group-relative scalar per
-        #                      completion) or "turn" (group-relative per turn).
-        #                      Independent of the IS level. "auto" follows the IS
-        #                      level (turn IS -> turn advantage, else trajectory)
-        #                      to preserve the original coupled default.
-        # ``loss_type`` is the back-compat user knob: "gspo" is sugar for the
-        # grpo objective at sequence level.
-        self.objective = "cispo" if loss_type == "cispo" else "grpo"
         if loss_type == "gspo":
-            # GSPO is, by definition, grpo-objective at the sequence level.
-            self.importance_sampling_level = "sequence"
+            # GSPO is, by definition, the grpo objective at trajectory level.
+            if importance_sampling_level not in (None, "trajectory"):
+                warnings.warn(
+                    "loss_type='gspo' implies trajectory-level importance "
+                    "sampling; overriding importance_sampling_level="
+                    f"'{importance_sampling_level}' with 'trajectory'.",
+                    stacklevel=2,
+                )
+            self.importance_sampling_level = "trajectory"
         else:
-            self.importance_sampling_level = importance_sampling_level
+            self.importance_sampling_level = importance_sampling_level or "token"
         self.advantage_granularity = advantage_granularity
         self.whiten_advantages = whiten_advantages
         self.adv_clip_range = adv_clip_range
@@ -464,12 +463,12 @@ class GRPO(LLMAlgorithm):
                 "regularization to the objective.",
                 stacklevel=2,
             )
-        # Upstream Liger's GRPO kernel only knows token- and sequence-level
+        # Upstream Liger's GRPO kernel only knows token- and trajectory-level
         # importance sampling. Turn-level pooling couples a turn's tokens, so
         # it has no fused kernel -- it runs on the decoupled standard path
         # (always memory-bounded via the fused-linear-logprob path).
-        self._liger_unsupported_level = self.importance_sampling_level == "turn" or (
-            self.objective == "cispo" and self.importance_sampling_level != "token"
+        self._liger_level_supported = self.importance_sampling_level != "turn" and not (
+            loss_type == "cispo" and self.importance_sampling_level != "token"
         )
         # Warn once, up front, about the memory behaviour of Liger + non-token
         # IS. The combination is permitted; only token-level IS gets the
@@ -480,10 +479,10 @@ class GRPO(LLMAlgorithm):
         self._liger_non_token_warned = False
         if self.use_liger_loss and self.importance_sampling_level in {
             "turn",
-            "sequence",
+            "trajectory",
         }:
             algo_name = (
-                "GSPO" if self.importance_sampling_level == "sequence" else "GRPO"
+                "GSPO" if self.importance_sampling_level == "trajectory" else "GRPO"
             )
             self._warn_liger_non_token_is(self.importance_sampling_level, algo_name)
         if self.use_liger_loss and use_kl_advantage_shaping:
@@ -712,47 +711,16 @@ class GRPO(LLMAlgorithm):
             # Advantage granularity (advantage_granularity) and IS / ratio-pooling
             # level (importance_sampling_level) are independent. Resolve the
             # advantage unit first; the IS level is applied later in the loss.
-            adv_granularity = self._resolve_advantage_granularity()
-            use_turn_advantage = adv_granularity == "turn" and turn_ids is not None
-            if use_turn_advantage:
-                self._assert_batch_divisible_by_group(num_samples)
-                # Per-turn group-relative advantages, broadcast to tokens. A
-                # turn is the action unit: each turn's reward is normalized
-                # within its group, then assigned to every token of that turn.
-                turn_rewards = (
-                    rewards if rewards.dim() > 1 else rewards.reshape(num_samples, -1)
+            if self._resolve_advantage_granularity() == "turn" and turn_ids is not None:
+                advantages = self._turn_broadcast_advantages(
+                    rewards, turn_ids, action_masks, num_samples
                 )
-                turn_advantages = self._calculate_turn_advantage(turn_rewards).to(
-                    self.device
-                )
-                safe_turn_ids = turn_ids.clamp(min=0).to(torch.int64)
-                num_reward_turns = turn_advantages.shape[1]
-                if int(safe_turn_ids.max().item()) >= num_reward_turns:
-                    msg = (
-                        "turn_ids reference a turn index beyond the number of "
-                        f"reward turns ({num_reward_turns}); rewards and "
-                        "turn_ids are misaligned."
-                    )
-                    raise ValueError(msg)
-                advantages = turn_advantages.gather(1, safe_turn_ids)  # (B, T-1)
-                advantages = advantages * action_masks.to(advantages.dtype)
             else:
-                # Per-trajectory group-relative advantage. If callers pass
-                # per-turn rewards [batch, max_turns], collapse to episode returns.
-                if rewards.dim() > 1 and rewards.shape[0] == num_samples:
-                    rewards = rewards.sum(dim=1)
-                rewards = rewards.flatten()
-                if rewards.shape[0] != num_samples:
-                    msg = (
-                        "Rewards must provide one scalar per trajectory after "
-                        f"collapse: got rewards={tuple(rewards.shape)} and "
-                        f"completion_ids={tuple(completion_ids.shape)}."
-                    )
-                    raise ValueError(msg)
-                self._assert_batch_divisible_by_group(num_samples)
-                advantages = self._calculate_advantage(rewards).to(self.device)
+                advantages = self._trajectory_advantages(
+                    rewards, num_samples, completion_ids
+                )
 
-            # The IS ratio is pooled per turn only at turn level; token/sequence
+            # The IS ratio is pooled per turn only at turn level; token/trajectory
             # ignore turn_ids. This is decoupled from the advantage granularity
             # above — e.g. per-turn advantages may pair with token-level IS.
             is_turn_ids = turn_ids if self.importance_sampling_level == "turn" else None
@@ -800,29 +768,11 @@ class GRPO(LLMAlgorithm):
                     batch_size,
                 )
 
-            # Align the captured per-row vLLM sampling logprobs onto the
-            # (B, T-1) action frame (single-turn and multi-turn alike), then
-            # measure (and optionally correct) the vLLM-vs-trainer mismatch.
-            # Metrics are logged whenever logprobs were captured, independently
-            # of whether the correction is applied to the loss.
-            is_metrics: dict[str, float] = {}
-            sampling_log_probs, n_skipped = self._align_sampling_logprobs(
-                sampling_logps, action_masks, old_log_probs
-            )
-            if sampling_log_probs is not None:
-                is_metrics = self._sampling_mismatch_metrics(
-                    old_log_probs, sampling_log_probs, action_masks
+            sampling_log_probs, is_metrics = (
+                self._aligned_sampling_logprobs_and_metrics(
+                    sampling_logps, action_masks, old_log_probs
                 )
-                if n_skipped:
-                    is_metrics["vllm_is_rows_skipped"] = float(n_skipped)
-                    warnings.warn(
-                        f"{n_skipped}/{num_samples} rows had a token-count "
-                        "mismatch between captured vLLM logprobs and the action "
-                        "mask; their importance ratio defaults to 1 (no "
-                        "correction). Check rollout/trainer tokenisation if this "
-                        "is large.",
-                        stacklevel=2,
-                    )
+            )
 
             effective_num_samples = len(batch_idxs)
             if effective_num_samples == 0:
@@ -972,12 +922,6 @@ class GRPO(LLMAlgorithm):
                 f"group_size ({self.group_size}); got {numel} elements."
             )
             raise ValueError(msg)
-        if self.group_size == 1:
-            # A singleton group has no group-relative signal: the centered
-            # reward is identically zero and the (unbiased) std is undefined,
-            # so the advantage is zero by definition. Returning zeros avoids a
-            # 0/0 NaN without perturbing the group_size > 1 numerics.
-            return torch.zeros(numel, 1, dtype=rewards.dtype, device=rewards.device)
         rewards = rewards.view(-1, self.group_size)
         centered_rewards = rewards - rewards.mean(dim=1, keepdim=True)
         if self.adv_norm == "mean_only":
@@ -1016,12 +960,6 @@ class GRPO(LLMAlgorithm):
             )
             raise ValueError(msg)
         num_turns = rewards.shape[1]
-        if self.group_size == 1:
-            # Singleton group: no per-turn group-relative signal (see
-            # _calculate_advantage); the advantage is zero by definition.
-            return torch.zeros(
-                batch, num_turns, dtype=rewards.dtype, device=rewards.device
-            )
         grouped = rewards.view(-1, self.group_size, num_turns)
         centered = grouped - grouped.mean(dim=1, keepdim=True)
         if self.adv_norm == "mean_only":
@@ -1029,6 +967,85 @@ class GRPO(LLMAlgorithm):
         else:
             advantage = centered / (grouped.std(dim=1, keepdim=True) + eps)
         return advantage.reshape(batch, num_turns)
+
+    def _turn_broadcast_advantages(
+        self,
+        rewards: torch.Tensor,
+        turn_ids: torch.Tensor,
+        action_masks: torch.Tensor,
+        num_samples: int,
+    ) -> torch.Tensor:
+        """Per-turn group-relative advantages, broadcast to token positions.
+
+        A turn is the action unit: each turn's reward is normalized within its
+        group (:meth:`_calculate_turn_advantage`), then assigned to every token
+        of that turn via ``turn_ids`` and masked to action positions.
+
+        :param rewards: Per-turn rewards ``(B, max_turns)`` (or flat, reshaped).
+        :type rewards: torch.Tensor
+        :param turn_ids: ``(B, T-1)`` per-token turn indices (``-1`` = padding).
+        :type turn_ids: torch.Tensor
+        :param action_masks: ``(B, T-1)`` action-token mask.
+        :type action_masks: torch.Tensor
+        :param num_samples: Trajectory count in the batch.
+        :type num_samples: int
+        :return: ``(B, T-1)`` per-token advantages.
+        :rtype: torch.Tensor
+        :raises ValueError: If ``turn_ids`` reference more turns than rewards
+            provide, or the batch is not divisible by ``group_size``.
+        """
+        self._assert_batch_divisible_by_group(num_samples)
+        turn_rewards = (
+            rewards if rewards.dim() > 1 else rewards.reshape(num_samples, -1)
+        )
+        turn_advantages = self._calculate_turn_advantage(turn_rewards).to(self.device)
+        safe_turn_ids = turn_ids.clamp(min=0).to(torch.int64)
+        num_reward_turns = turn_advantages.shape[1]
+        if int(safe_turn_ids.max().item()) >= num_reward_turns:
+            msg = (
+                "turn_ids reference a turn index beyond the number of "
+                f"reward turns ({num_reward_turns}); rewards and "
+                "turn_ids are misaligned."
+            )
+            raise ValueError(msg)
+        advantages = turn_advantages.gather(1, safe_turn_ids)  # (B, T-1)
+        return advantages * action_masks.to(advantages.dtype)
+
+    def _trajectory_advantages(
+        self,
+        rewards: torch.Tensor,
+        num_samples: int,
+        completion_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """Per-trajectory group-relative advantage ``(B, 1)``.
+
+        Per-turn reward matrices ``(B, max_turns)`` are collapsed to episode
+        returns before the group-relative normalization
+        (:meth:`_calculate_advantage`).
+
+        :param rewards: Per-trajectory or per-turn rewards.
+        :type rewards: torch.Tensor
+        :param num_samples: Trajectory count in the batch.
+        :type num_samples: int
+        :param completion_ids: Completion ids, used only for error reporting.
+        :type completion_ids: torch.Tensor
+        :return: ``(B, 1)`` per-trajectory advantages.
+        :rtype: torch.Tensor
+        :raises ValueError: If rewards don't collapse to one scalar per
+            trajectory, or the batch is not divisible by ``group_size``.
+        """
+        if rewards.dim() > 1 and rewards.shape[0] == num_samples:
+            rewards = rewards.sum(dim=1)
+        rewards = rewards.flatten()
+        if rewards.shape[0] != num_samples:
+            msg = (
+                "Rewards must provide one scalar per trajectory after "
+                f"collapse: got rewards={tuple(rewards.shape)} and "
+                f"completion_ids={tuple(completion_ids.shape)}."
+            )
+            raise ValueError(msg)
+        self._assert_batch_divisible_by_group(num_samples)
+        return self._calculate_advantage(rewards).to(self.device)
 
     def _resolve_advantage_granularity(self) -> str:
         """Resolve the unit at which group-relative advantages are computed.
@@ -1070,23 +1087,24 @@ class GRPO(LLMAlgorithm):
         :rtype: torch.Tensor
         """
         if advantages.dim() <= 1 or advantages.shape[-1] == 1:
-            adv = advantages.squeeze(-1).clone()
-            if active_adv_mask is not None and active_adv_mask.any():
-                active = adv[active_adv_mask]
-                adv[active_adv_mask] = (active - active.mean()) / (
-                    active.std(unbiased=False) + 1e-8
-                )
-            else:
-                adv = (adv - adv.mean()) / (adv.std(unbiased=False) + 1e-8)
-            return adv.unsqueeze(-1)
-        mask_f = action_masks.to(advantages.dtype)
-        if active_adv_mask is not None:
-            mask_f = mask_f * active_adv_mask.unsqueeze(-1).to(advantages.dtype)
-        denom = mask_f.sum().clamp(min=1.0)
-        mean = (advantages * mask_f).sum() / denom
-        var = (((advantages - mean) ** 2) * mask_f).sum() / denom
-        whitened = (advantages - mean) / (var.sqrt() + 1e-8)
-        return torch.where(mask_f.bool(), whitened, advantages)
+            adv = advantages.reshape(-1)
+            mask = (
+                active_adv_mask
+                if active_adv_mask is not None and active_adv_mask.any()
+                else torch.ones_like(adv, dtype=torch.bool)
+            )
+        else:
+            adv = advantages
+            mask = action_masks.bool()
+            if active_adv_mask is not None:
+                mask = mask & active_adv_mask.unsqueeze(-1)
+        if mask.sum() <= 1:
+            # Fewer than two whitenable values: variance is undefined, leave
+            # the advantages untouched rather than dividing by ~0.
+            return advantages
+        whitened = masked_whiten(adv, mask.to(adv.dtype), shift_mean=True)
+        result = torch.where(mask, whitened, adv)
+        return result.reshape(advantages.shape)
 
     def _resolve_standard_loss_fn(
         self,
@@ -1096,11 +1114,11 @@ class GRPO(LLMAlgorithm):
     ]:
         """Resolve the active standard (non-Liger) loss function.
 
-        Dispatch is on the *objective* (``grpo`` min-clip vs ``cispo``
-        clamped-weight); the importance-sampling level (token/turn/sequence)
+        Dispatch is on ``loss_type`` (``grpo``/``gspo`` min-clip vs ``cispo``
+        clamped-weight); the importance-sampling level (token/turn/trajectory)
         is applied inside via ``self.importance_sampling_level``.
         """
-        if self.objective == "cispo":
+        if self.loss_type == "cispo":
             return self._cispo_loss
         return self._grpo_loss_standard
 
@@ -1164,7 +1182,7 @@ class GRPO(LLMAlgorithm):
         :param reference_log_probs: Full reference policy log probabilities.
         :type reference_log_probs: torch.Tensor
         :param turn_ids: Optional full ``(B, seq_len-1)`` turn indices used by
-            turn-level importance sampling; ``None`` for token/sequence levels.
+            turn-level importance sampling; ``None`` for token/trajectory levels.
         :type turn_ids: torch.Tensor | None
         :return: Mean loss and mean KL divergence.
         :rtype: tuple[torch.Tensor, torch.Tensor]
@@ -1210,12 +1228,12 @@ class GRPO(LLMAlgorithm):
         )
 
         # Upstream Liger's GRPO kernel can't express turn-level (or
-        # sequence-level CISPO) pooling, nor the per-token vLLM sampling-mismatch
+        # trajectory-level CISPO) pooling, nor the per-token vLLM sampling-mismatch
         # correction, so those cases run on the decoupled standard path, which is
         # always memory-bounded via the fused-linear-logprob path.
         if (
             self.use_liger_loss
-            and not self._liger_unsupported_level
+            and self._liger_level_supported
             and batch_sampling_log_probs is None
         ):
             return self._liger_loss(
@@ -1237,16 +1255,16 @@ class GRPO(LLMAlgorithm):
                 stacklevel=2,
             )
             self._is_correction_liger_warned = True
-        if self.use_liger_loss and self._liger_unsupported_level:
-            # Non-token IS (turn-level, or sequence-level CISPO) has no fused
+        if self.use_liger_loss and not self._liger_level_supported:
+            # Non-token IS (turn-level, or trajectory-level CISPO) has no fused
             # kernel and runs the standard path; emit the canonical
             # not-memory-bounded warning (warn-once, shared with the
-            # constructor). Note this guards on the real ``_liger_unsupported_level``
+            # constructor). Note this guards on the real ``_liger_level_supported``
             # condition, not the routing fall-through above: token-level GRPO that
             # only falls through for the vLLM correction is fully Liger-supported
             # and must not be warned here.
             algo_name = (
-                "GSPO" if self.importance_sampling_level == "sequence" else "GRPO"
+                "GSPO" if self.importance_sampling_level == "trajectory" else "GRPO"
             )
             self._warn_liger_non_token_is(self.importance_sampling_level, algo_name)
         batch_log_probs = self._get_logprobs(
@@ -1277,17 +1295,17 @@ class GRPO(LLMAlgorithm):
         Returns a ``(B, T)``-broadcastable log importance-weight tensor:
 
         * ``"token"``    → the per-token log-ratio unchanged ``(B, T)``.
-        * ``"sequence"`` → length-normalized masked mean over the whole
+        * ``"trajectory"`` → length-normalized masked mean over the whole
           completion ``(B, 1)`` (GSPO).
         * ``"turn"``     → length-normalized masked mean within each turn,
           scattered back to every token of that turn ``(B, T)``. Falls back to
-          the sequence-level mean when ``turn_ids`` is ``None`` (a single
-          turn is exactly sequence-level).
+          the trajectory-level mean when ``turn_ids`` is ``None`` (a single
+          turn is exactly trajectory-level).
 
         All three forms feed an identical downstream surrogate/clip; the only
         difference is the granularity at which the ratio is pooled. The
         per-turn pool is the same geometric-mean (length-normalized) form as
-        the sequence pool, just restricted to a turn's tokens.
+        the trajectory pool, just restricted to a turn's tokens.
 
         :param token_log_ratio: ``(B, T)`` per-token ``log pi_theta - log pi_old``.
         :type token_log_ratio: torch.Tensor
@@ -1296,20 +1314,20 @@ class GRPO(LLMAlgorithm):
         :param turn_ids: ``(B, T)`` turn index per token (``-1`` non-action) or
             ``None``.
         :type turn_ids: torch.Tensor | None
-        :param level: ``"token"`` / ``"turn"`` / ``"sequence"``.
+        :param level: ``"token"`` / ``"turn"`` / ``"trajectory"``.
         :type level: str
         :return: ``(B, T)`` or ``(B, 1)`` log importance weights.
         :rtype: torch.Tensor
         """
         # Token level is the identity; ``turn_ids=None`` at turn level degenerates
-        # to one sequence-wide turn, so route it through the sequence pooling.
+        # to one trajectory-wide turn, so route it through trajectory pooling.
         # Both reuse :func:`pool_log_ratio_by_level` (the same length-normalized
         # geometric-mean pooling shared by the non-Liger surrogate helpers).
         if level == "token":
             return token_log_ratio
-        if level == "sequence" or turn_ids is None:
+        if level == "trajectory" or turn_ids is None:
             log_importance_weights, _ = pool_log_ratio_by_level(
-                token_log_ratio, mask, None, "sequence"
+                token_log_ratio, mask, None, "trajectory"
             )
             return log_importance_weights
 
@@ -1337,7 +1355,7 @@ class GRPO(LLMAlgorithm):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Shared GRPO-family surrogate over any importance-sampling level.
 
-        The importance ratio is pooled to ``level`` (token/turn/sequence) via
+        The importance ratio is pooled to ``level`` (token/turn/trajectory) via
         :meth:`_log_importance_weights`; everything downstream — the clipped
         ``min`` surrogate (``objective="grpo"``) or the clamped-weight x
         log-prob objective (``objective="cispo"``), the optional KL term, and
@@ -1385,7 +1403,7 @@ class GRPO(LLMAlgorithm):
             # Truncated importance sampling: reweight each token by the
             # (detached, clamped) trainer/vLLM probability ratio to correct for
             # the rollout being drawn from vLLM rather than the trainer policy.
-            # Broadcasts cleanly over (B, 1) sequence-level losses.
+            # Broadcasts cleanly over (B, 1) trajectory-level losses.
             with torch.no_grad():
                 mask_f = mask.to(loss.dtype)
                 is_ratio = torch.exp(
@@ -1414,8 +1432,8 @@ class GRPO(LLMAlgorithm):
         """GRPO min-clip surrogate at ``self.importance_sampling_level``.
 
         With the default token level this is standard GRPO; with
-        ``importance_sampling_level="turn"`` / ``"sequence"`` the importance
-        ratio is pooled per turn / per sequence (the latter is GSPO).
+        ``importance_sampling_level="turn"`` / ``"trajectory"`` the importance
+        ratio is pooled per turn / per trajectory (the latter is GSPO).
 
         :param mask: Action-token mask.
         :type mask: torch.Tensor
@@ -1457,7 +1475,7 @@ class GRPO(LLMAlgorithm):
         turn_ids: torch.Tensor | None = None,
         sampling_log_probs: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Calculate GSPO sequence-level ratio clipped loss."""
+        """Calculate GSPO trajectory-level ratio clipped loss."""
         return self._compute_policy_loss(
             mask,
             log_probs,
@@ -1465,7 +1483,7 @@ class GRPO(LLMAlgorithm):
             reference_log_probs,
             advantages,
             turn_ids,
-            level="sequence",
+            level="trajectory",
             objective="grpo",
             sampling_log_probs=sampling_log_probs,
         )
@@ -1504,14 +1522,14 @@ class GRPO(LLMAlgorithm):
         """Calculate the loss using the Liger Triton-fused kernel.
 
         Dispatches to the appropriate Liger ``loss_type`` /
-        ``importance_sampling_level`` from the resolved ``self.objective`` and
+        ``importance_sampling_level`` from ``self.loss_type`` and
         ``self.importance_sampling_level``:
 
         * grpo  @ token    → ``loss_type="grpo"``,  ``importance_sampling_level="token"``
-        * grpo  @ sequence → ``loss_type="grpo"``,  ``importance_sampling_level="sequence"`` (GSPO)
+        * grpo  @ trajectory → ``loss_type="grpo"``,  ``importance_sampling_level="trajectory"`` (GSPO)
         * cispo @ token    → ``loss_type="cispo"``, ``importance_sampling_level="token"``
 
-        Turn-level (and sequence-level CISPO) never reach here — ``_loss``
+        Turn-level (and trajectory-level CISPO) never reach here — ``_loss``
         routes them to the standard PyTorch path because Liger's fused GRPO
         kernel has no turn mode.
 
@@ -1548,22 +1566,22 @@ class GRPO(LLMAlgorithm):
             )
             raise ImportError(msg)
 
-        # Resolve Liger API parameters from the resolved objective + level.
+        # Resolve Liger API parameters from the loss type + level.
         # ``_loss`` only routes here for Liger-supported combinations
-        # (grpo @ token/sequence, cispo @ token); turn-level never reaches this.
+        # (grpo @ token/trajectory, cispo @ token); turn-level never reaches this.
         importance_sampling_level = self.importance_sampling_level
-        if self.objective == "cispo":
+        if self.loss_type == "cispo":
             liger_loss_type = "cispo"
             importance_sampling_level = "token"
             # Liger CISPO clamps importance weights against an *absolute* upper
             # bound (epsilon_high = clip_coef_max), not an offset from 1.0.
             epsilon_low = 1.0 - self.clip_coef_min  # unused by Liger CISPO
             epsilon_high = self.clip_coef_max
-        else:  # "grpo" objective (token or sequence/GSPO level)
+        else:  # "grpo" objective (token or trajectory/GSPO level)
             liger_loss_type = "grpo"
             epsilon_low = 1.0 - self.clip_coef_min
             epsilon_high = self.clip_coef_max - 1.0
-            # The GSPO (sequence-level) not-memory-bounded warning is emitted
+            # The GSPO (trajectory-level) not-memory-bounded warning is emitted
             # once up front in ``__init__`` via ``_warn_liger_non_token_is``; no
             # duplicate is needed here.
 
@@ -1593,7 +1611,7 @@ class GRPO(LLMAlgorithm):
         # then scatter the resulting hidden states back onto the padded
         # ``(B, T, H)`` frame. The Liger kernel call below is then byte-for-byte
         # the padded path — only how ``policy_hidden`` is produced changes, so
-        # both token-level (grpo/cispo) and sequence-level (GSPO) benefit from
+        # both token-level (grpo/cispo) and trajectory-level (GSPO) benefit from
         # the cheaper forward. Dense backends return ``None`` here and fall back
         # to the padded forward, exactly as ``_get_logprobs`` does.
         packing_mode = self._packing_mode()
@@ -1657,7 +1675,7 @@ class GRPO(LLMAlgorithm):
         # input layout and the chunk granularity differ. The token level flattens
         # ``(B, T, H) -> (B*T, 1, H)`` (and the matching ``(B, T) -> (B*T, 1)``
         # tensors) so the kernel chunks over *tokens* — bounding each chunk's
-        # logits to ``(token_chunk_size, vocab)``; the non-token (sequence/GSPO)
+        # logits to ``(token_chunk_size, vocab)``; the non-token (trajectory/GSPO)
         # path keeps the padded ``(B, T, ...)`` layout and chunks one whole
         # sequence at a time. ``policy_arg`` / ``target_ids_arg`` / ``mask_arg`` /
         # ``old_lp_arg`` / ``ref_lp_arg`` / ``adv_arg`` and ``chunk_size`` are the
@@ -1707,7 +1725,7 @@ class GRPO(LLMAlgorithm):
             # ``DEFAULT_LIGER_TOKEN_CHUNK`` (2048).
             chunk_size = self._resolve_liger_token_chunk()
         else:
-            # Sequence-level (GSPO): keep the padded layout and one-sequence-per-
+            # Trajectory-level (GSPO): keep the padded layout and one-sequence-per-
             # chunk granularity (chunk_size=1 over the batch dim).
             policy_arg = policy_hidden
             target_ids_arg = target_ids

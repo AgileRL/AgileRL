@@ -908,7 +908,7 @@ def pool_by_turns(
 def validate_importance_sampling_level(level: str, *, allow_auto: bool) -> None:
     """Raise ``ValueError`` unless ``level`` is a recognised IS pooling level.
 
-    Valid levels are ``"token"``, ``"turn"`` and ``"sequence"``; ``"auto"`` is
+    Valid levels are ``"token"``, ``"turn"`` and ``"trajectory"``; ``"auto"`` is
     additionally accepted when ``allow_auto`` is ``True``.
 
     :param level: The importance-sampling pooling level to validate.
@@ -917,7 +917,7 @@ def validate_importance_sampling_level(level: str, *, allow_auto: bool) -> None:
     :type allow_auto: bool
     :raises ValueError: If ``level`` is not in the valid set.
     """
-    valid = {"token", "turn", "sequence"}
+    valid = {"token", "turn", "trajectory"}
     if allow_auto:
         valid.add("auto")
     if level not in valid:
@@ -934,7 +934,7 @@ def pool_log_ratio_by_level(
     level: str,
     num_turns: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Pool per-token log-ratios to a token/turn/sequence importance-sampling unit.
+    """Pool per-token log-ratios to a token/turn/trajectory importance-sampling unit.
 
     Returns the per-unit pooled log-ratio (the log importance weights) and the
     matching unit mask, mirroring the pooling used by :func:`clipped_is_surrogate`:
@@ -942,8 +942,8 @@ def pool_log_ratio_by_level(
     * ``"token"``    — identity: per-token log-ratio, ``action_mask`` as units.
     * ``"turn"``     — length-normalized mean of token log-ratios per turn
       (``turn_ids`` required); a turn is active when any of its tokens appear.
-    * ``"sequence"`` — length-normalized mean over the completion's action
-      tokens; the sequence is active when it has at least one action token.
+    * ``"trajectory"`` — length-normalized mean over the completion's action
+      tokens; the trajectory is active when it has at least one action token.
 
     Operates only on ``(B, T)`` tensors (no vocab axis), so it is memory-bounded.
 
@@ -954,7 +954,7 @@ def pool_log_ratio_by_level(
     :param turn_ids: ``(B, T)`` turn index per token (``-1`` non-action);
         required for the turn level.
     :type turn_ids: torch.Tensor | None
-    :param level: ``"token"`` / ``"turn"`` / ``"sequence"``.
+    :param level: ``"token"`` / ``"turn"`` / ``"trajectory"``.
     :type level: str
     :param num_turns: Number of turns for the turn level; inferred from
         ``turn_ids`` when ``None``.
@@ -971,10 +971,10 @@ def pool_log_ratio_by_level(
             raise ValueError(msg)
         if num_turns is None:
             num_turns = int(turn_ids.max().item()) + 1
-        # Pool only over action tokens, exactly like the sequence branch: a
+        # Pool only over action tokens, exactly like the trajectory branch: a
         # non-action token (``action_mask == 0``) belongs to no turn, so the
         # per-turn mean stays mask-aware and a single full-completion turn
-        # collapses to the sequence-level mean. Callers that already mark
+        # collapses to the trajectory-level mean. Callers that already mark
         # non-action tokens with ``turn_ids == -1`` are unaffected (no-op).
         effective_turn_ids = torch.where(
             action_mask.to(torch.bool),
@@ -994,7 +994,7 @@ def pool_log_ratio_by_level(
         )
         unit_mask = (turn_token_counts > 0).to(log_importance_weights.dtype)
         return log_importance_weights, unit_mask
-    if level == "sequence":
+    if level == "trajectory":
         mask_f = action_mask.to(token_log_ratio.dtype)
         count = mask_f.sum(dim=-1, keepdim=True)
         log_importance_weights = (token_log_ratio * mask_f).sum(
@@ -1004,7 +1004,7 @@ def pool_log_ratio_by_level(
         return log_importance_weights, unit_mask
     msg = (
         f"Unknown importance_sampling_level '{level}'. "
-        "Expected one of ['token', 'turn', 'sequence']."
+        "Expected one of ['token', 'turn', 'trajectory']."
     )
     raise ValueError(msg)
 
@@ -1061,7 +1061,7 @@ def clipped_is_surrogate(
     clip_coef: float,
     loss_weight: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Clipped PPO-style policy surrogate at a token/turn/sequence IS level.
+    """Clipped PPO-style policy surrogate at a token/turn/trajectory IS level.
 
     The importance ratio (and the advantage paired with it) is pooled to
     ``importance_sampling_level``:
@@ -1069,8 +1069,8 @@ def clipped_is_surrogate(
     * ``"token"``    — per-token ratio, clip per token.
     * ``"turn"``     — length-normalized mean of token log-ratios per turn,
       clip per turn (``turn_ids`` required).
-    * ``"sequence"`` — length-normalized mean over the whole completion, clip
-      per sequence.
+    * ``"trajectory"`` — length-normalized mean over the whole completion, clip
+      per trajectory.
 
     Thin composition of :func:`pool_log_ratio_by_level` (ratio + advantage
     pooling) and :func:`clipped_min_surrogate` (clip + min-surrogate). Shared by
@@ -1086,7 +1086,7 @@ def clipped_is_surrogate(
     :param turn_ids: ``(B, T)`` turn index per token (``-1`` non-action);
         required for turn level.
     :type turn_ids: torch.Tensor | None
-    :param importance_sampling_level: ``"token"`` / ``"turn"`` / ``"sequence"``.
+    :param importance_sampling_level: ``"token"`` / ``"turn"`` / ``"trajectory"``.
     :type importance_sampling_level: str
     :param clip_coef: Symmetric clip coefficient (clip to ``[1-c, 1+c]``).
     :type clip_coef: float
@@ -1107,7 +1107,7 @@ def clipped_is_surrogate(
     )
     # Pool the per-token vLLM-correction reweight to the same IS unit (identity
     # at token level; length-normalized mean over the unit's action tokens at
-    # turn/sequence level) so it multiplies the per-unit surrogate consistently.
+    # turn/trajectory level) so it multiplies the per-unit surrogate consistently.
     pooled_loss_weight = None
     if loss_weight is not None:
         pooled_loss_weight, _ = pool_log_ratio_by_level(
@@ -1207,6 +1207,47 @@ def cuda_tensor_bytes_in_module(module: torch.nn.Module) -> int:
         if tensor.is_cuda:
             total += tensor.numel() * tensor.element_size()
     return total
+
+
+def collect_trainable_param_stats(pop: Any) -> dict[str, Any]:
+    """Best-effort LoRA / trainable-param accounting for a population's first agent.
+
+    Recorded once at init so runs can be correlated against LoRA size.
+    Wrapped in a broad except: introspecting peft-wrapped accelerator-managed
+    models can fail in odd ways, and a logging-only field shouldn't fault training.
+
+    :param pop: Population of LLM algorithms; only ``pop[0]`` is inspected.
+    :type pop: PopulationType
+    :return: ``trainable_params`` / ``total_params`` / ``trainable_param_ratio``
+        fields, or an empty dict when the actor is missing or introspection fails.
+    :rtype: dict[str, Any]
+    """
+    out: dict[str, Any] = {}
+    try:
+        agent = pop[0]
+        actor = getattr(agent, "actor", None)
+        if actor is None:
+            return out
+        # Unwrap accelerate / peft / DDP layers if present.
+        inner = actor
+        for attr in ("module", "model"):
+            unwrapped = getattr(inner, attr, None)
+            if unwrapped is not None:
+                inner = unwrapped
+        total = 0
+        trainable = 0
+        for param in inner.parameters():
+            n = param.numel()
+            total += n
+            if param.requires_grad:
+                trainable += n
+        if total > 0:
+            out["trainable_params"] = trainable
+            out["total_params"] = total
+            out["trainable_param_ratio"] = trainable / total
+    except Exception:  # pragma: no cover — best-effort
+        pass
+    return out
 
 
 def offload_colocated_trainer_from_gpu(unwrapped_model: torch.nn.Module) -> int:

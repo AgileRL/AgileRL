@@ -130,7 +130,8 @@ def main(init_hp, mut_p):
         env_factory=env_factory,
         init_hp=init_hp,
         wb=True,
-        wb_level=os.environ.get("WANDB_LEVEL", "standard"),
+        # WANDB_API_KEY / WANDB_PROJECT / WANDB_ENTITY are the env vars wandb
+        # itself documents; pass them through rather than invent config keys.
         wandb_api_key=os.environ.get("WANDB_API_KEY"),
         wandb_project=os.environ.get("WANDB_PROJECT", "AgileRL"),
         wandb_entity=os.environ.get("WANDB_ENTITY"),
@@ -141,7 +142,6 @@ def main(init_hp, mut_p):
         max_reward=1.0,
         verbose=True,
         accelerator=accelerator,
-        debug_rollouts=init_hp.get("DEBUG_ROLLOUTS", 0),
     )
     if accelerator is not None:
         accelerator.end_training()

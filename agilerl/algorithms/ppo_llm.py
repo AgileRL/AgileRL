@@ -35,6 +35,7 @@ from agilerl.utils.algo_utils import (
     stack_and_pad_experiences,
 )
 from agilerl.utils.llm_utils import (
+    BitsAndBytesConfig,
     ReasoningGym,
     build_completion_mask,
     calculate_k3_kl,
@@ -148,17 +149,17 @@ class PPO(LLMAlgorithm):
     :param importance_sampling_level: IS / ratio-pooling level for the policy
         surrogate, orthogonal to the GAE advantage granularity
         (``advantage_granularity``). ``"token"`` clips per token; ``"turn"`` pools
-        the ratio (length-normalized mean) per turn; ``"sequence"`` pools over
+        the ratio (length-normalized mean) per turn; ``"trajectory"`` pools over
         the whole completion. The advantage paired with the ratio is pooled to
         the same bucket. ``"auto"`` (default) reproduces legacy behavior: the
         GAE granularity when ``turn_level_clip`` is set, else token. Token-level
         Liger is memory-bounded (the hidden states are token-flattened and
-        chunked, like GRPO/CISPO); turn- and sequence-level pooling couple a
+        chunked, like GRPO/CISPO); turn- and trajectory-level pooling couple a
         turn/sequence's tokens, so they cannot be token-chunked inside the
         fused kernel — set ``use_liger_loss=False`` there for bounded memory
         (the standard path is always fused-linear/bounded). Turn pooling uses
         the length-normalized mean of token log-ratios (GSPO-consistent).
-    :type importance_sampling_level: Literal["auto", "token", "turn", "sequence"], optional
+    :type importance_sampling_level: Literal["auto", "token", "turn", "trajectory"], optional
     :param advantage_granularity: PPO action granularity. ``"turn"`` enforces
         turn-level updates, ``"token"`` enforces token-level updates, and
         ``"auto"`` uses token-level only when all samples are single-turn.
@@ -231,7 +232,7 @@ class PPO(LLMAlgorithm):
         seed: int = 42,
         turn_level_clip: bool = True,
         importance_sampling_level: Literal[
-            "auto", "token", "turn", "sequence"
+            "auto", "token", "turn", "trajectory"
         ] = "auto",
         advantage_granularity: Literal["turn", "token", "auto"] = "auto",
         action_granularity: Literal["turn", "token", "auto"] | None = None,
@@ -243,12 +244,12 @@ class PPO(LLMAlgorithm):
         cast_logprobs_to_fp32: bool = True,
         fused_logprobs_chunk_rows: int | None = None,
         use_liger_loss: bool = False,
-        quantization_config: Any | None = None,
+        quantization_config: BitsAndBytesConfig | None = None,
         activation_offload: bool = False,
         use_sequence_packing: bool = False,
         lora_target_scope: str | None = None,
         liger_token_chunk_size: int | None = None,
-        vllm_importance_sampling_correction: bool = False,
+        vllm_importance_sampling_correction: bool = True,
         vllm_importance_sampling_apply: bool = True,
         vllm_importance_sampling_cap: float = 2.0,
     ) -> None:
@@ -348,12 +349,12 @@ class PPO(LLMAlgorithm):
         # GAE advantage granularity (``advantage_granularity``/``ppo_granularity``).
         # ``"auto"`` preserves legacy behavior: turn-level when the batch is
         # multi-turn and ``turn_level_clip`` is set, else token-level. Explicit
-        # ``token``/``turn``/``sequence`` override (length-normalized mean
+        # ``token``/``turn``/``trajectory`` override (length-normalized mean
         # pooling, consistent with GRPO/GSPO).
         self.importance_sampling_level = importance_sampling_level
         self.advantage_granularity = advantage_granularity
         # Warn once, up front, when Liger is paired with an explicit non-token
-        # IS level. It is permitted but not memory-bounded: turn-/sequence-level
+        # IS level. It is permitted but not memory-bounded: turn-/trajectory-level
         # pooling couples a unit's tokens, so the fused kernel processes one
         # whole sequence per chunk and materializes a (seq_len, vocab) logits
         # tensor per trajectory. (``"auto"`` resolves per batch, so it is
@@ -361,7 +362,7 @@ class PPO(LLMAlgorithm):
         # suppresses the duplicate loss-time warning.
         if self.use_liger_loss and self.importance_sampling_level in {
             "turn",
-            "sequence",
+            "trajectory",
         }:
             self._warn_liger_non_token_is(
                 self.importance_sampling_level,
@@ -609,29 +610,12 @@ class PPO(LLMAlgorithm):
                 )
             del token_rewards
 
-            # Align the captured per-row vLLM sampling logprobs onto the
-            # (B, T-1) action frame, then measure (and optionally correct) the
-            # vLLM-vs-trainer mismatch. Metrics are logged whenever logprobs
-            # were captured, independently of whether the correction is applied
-            # to the loss. The reweight applies only to the policy surrogate.
-            is_metrics: dict[str, float] = {}
-            sampling_log_probs, n_skipped = self._align_sampling_logprobs(
-                sampling_logps, action_masks, old_log_probs
-            )
-            if sampling_log_probs is not None:
-                is_metrics = self._sampling_mismatch_metrics(
-                    old_log_probs, sampling_log_probs, action_masks
+            # The reweight applies only to the policy surrogate.
+            sampling_log_probs, is_metrics = (
+                self._aligned_sampling_logprobs_and_metrics(
+                    sampling_logps, action_masks, old_log_probs
                 )
-                if n_skipped:
-                    is_metrics["vllm_is_rows_skipped"] = float(n_skipped)
-                    warnings.warn(
-                        f"{n_skipped}/{num_samples} rows had a token-count "
-                        "mismatch between captured vLLM logprobs and the action "
-                        "mask; their importance ratio defaults to 1 (no "
-                        "correction). Check rollout/trainer tokenisation if this "
-                        "is large.",
-                        stacklevel=2,
-                    )
+            )
 
             self.actor.train()
             for _epoch_idx in range(self.update_epochs):
@@ -846,11 +830,11 @@ class PPO(LLMAlgorithm):
 
         ``"auto"`` reproduces the legacy ``turn_level_clip`` behavior: pool at
         the GAE granularity (``ppo_granularity``) when ``turn_level_clip`` is
-        set, else token-level. Explicit ``token``/``turn``/``sequence`` override.
+        set, else token-level. Explicit ``token``/``turn``/``trajectory`` override.
 
         :param ppo_granularity: Resolved GAE advantage granularity (token/turn).
         :type ppo_granularity: str
-        :return: One of ``"token"``, ``"turn"``, ``"sequence"``.
+        :return: One of ``"token"``, ``"turn"``, ``"trajectory"``.
         :rtype: str
         """
         if self.importance_sampling_level == "auto":
@@ -870,7 +854,7 @@ class PPO(LLMAlgorithm):
 
         The importance ratio (and the advantage paired with it) is pooled to
         ``is_level`` — token (no pooling), turn (length-normalized mean per
-        turn), or sequence (mean over the whole completion). Returns
+        turn), or trajectory (mean over the whole completion). Returns
         ``(pg_loss, clipfrac)``; used by the non-Liger PPO path. Operates only
         on ``(B, T)`` tensors, so it is memory-bounded.
 
@@ -882,7 +866,7 @@ class PPO(LLMAlgorithm):
         :type action_mask: torch.Tensor
         :param turn_ids: ``(B, T)`` turn index per token (``-1`` non-action).
         :type turn_ids: torch.Tensor
-        :param is_level: ``"token"`` / ``"turn"`` / ``"sequence"``.
+        :param is_level: ``"token"`` / ``"turn"`` / ``"trajectory"``.
         :type is_level: str
         :param loss_weight: Optional ``(B, T)`` detached per-token weight (the
             truncated vLLM importance ratio) multiplied into the surrogate
@@ -1175,7 +1159,7 @@ class PPO(LLMAlgorithm):
             # per-token advantages by turn-mean to match the pooled ratio.
             adv_for_liger = pool_by_turns(advantages, turn_ids, max_turns)
             turn_ids_arg = turn_ids
-        elif is_level == "sequence":
+        elif is_level == "trajectory":
             mask_f = mask.to(advantages.dtype)
             adv_for_liger = (advantages * mask_f).sum(
                 dim=-1, keepdim=True

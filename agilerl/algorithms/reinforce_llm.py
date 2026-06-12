@@ -34,6 +34,7 @@ from agilerl.utils.algo_utils import (
     stack_and_pad_experiences,
 )
 from agilerl.utils.llm_utils import (
+    BitsAndBytesConfig,
     ReasoningGym,
     build_completion_mask,
     clipped_is_surrogate,
@@ -142,13 +143,13 @@ class REINFORCE(LLMAlgorithm):
     :param importance_sampling_level: IS / ratio-pooling level for the clipped
         surrogate, orthogonal to ``advantage_granularity``. ``"token"`` (default)
         clips per token; ``"turn"`` pools the ratio (length-normalized mean)
-        per turn (requires ``turn_ids`` in :meth:`learn`); ``"sequence"`` pools
+        per turn (requires ``turn_ids`` in :meth:`learn`); ``"trajectory"`` pools
         over the whole completion. The advantage is pooled to the same bucket.
         Token-level Liger is memory-bounded (token-flattened/chunked like
-        GRPO/CISPO); turn/sequence pooling couples a unit's tokens and cannot be
+        GRPO/CISPO); turn/trajectory pooling couples a unit's tokens and cannot be
         token-chunked, so set ``use_liger_loss=False`` there (the standard path
         is always memory-bounded via the fused-linear-logprob path).
-    :type importance_sampling_level: Literal["token", "turn", "sequence"], optional
+    :type importance_sampling_level: Literal["token", "turn", "trajectory"], optional
     :param gradient_checkpointing: Enable gradient checkpointing.
     :type gradient_checkpointing: bool
     :param torch_compiler: Torch compiler mode.
@@ -203,19 +204,19 @@ class REINFORCE(LLMAlgorithm):
         seed: int = 42,
         advantage_granularity: Literal["turn", "token", "auto"] = "auto",
         action_granularity: Literal["turn", "token", "auto"] | None = None,
-        importance_sampling_level: Literal["token", "turn", "sequence"] = "token",
+        importance_sampling_level: Literal["token", "turn", "trajectory"] = "token",
         gradient_checkpointing: bool = True,
         torch_compiler: str | None = None,
         reduce_memory_peak: bool = False,
         cast_logprobs_to_fp32: bool = True,
         fused_logprobs_chunk_rows: int | None = None,
         use_liger_loss: bool = False,
-        quantization_config: Any | None = None,
+        quantization_config: BitsAndBytesConfig | None = None,
         activation_offload: bool = False,
         use_sequence_packing: bool = False,
         lora_target_scope: str | None = None,
         liger_token_chunk_size: int | None = None,
-        vllm_importance_sampling_correction: bool = False,
+        vllm_importance_sampling_correction: bool = True,
         vllm_importance_sampling_apply: bool = True,
         vllm_importance_sampling_cap: float = 2.0,
     ) -> None:
@@ -311,17 +312,17 @@ class REINFORCE(LLMAlgorithm):
         # IS / ratio-pooling level for the clipped surrogate, orthogonal to the
         # ReBN advantage granularity (``advantage_granularity``). ``"token"`` (the
         # default) preserves the original token-level clip; ``"turn"`` /
-        # ``"sequence"`` pool the ratio (length-normalized mean) per turn /
+        # ``"trajectory"`` pool the ratio (length-normalized mean) per turn /
         # whole completion. Turn level requires ``turn_ids`` in ``learn``.
         self.importance_sampling_level = importance_sampling_level
         # Warn once, up front, when Liger is paired with a non-token IS level.
-        # It is permitted but not memory-bounded: turn-/sequence-level pooling
+        # It is permitted but not memory-bounded: turn-/trajectory-level pooling
         # couples a unit's tokens, so the fused kernel processes one whole
         # sequence per chunk and materializes a (seq_len, vocab) logits tensor
         # per trajectory. The shared once-flag suppresses the loss-time dup.
         if self.use_liger_loss and self.importance_sampling_level in {
             "turn",
-            "sequence",
+            "trajectory",
         }:
             self._warn_liger_non_token_is(
                 self.importance_sampling_level,
@@ -554,29 +555,11 @@ class REINFORCE(LLMAlgorithm):
                 )
             del token_rewards, token_penalised_rewards
 
-            # Align the captured per-row vLLM sampling logprobs onto the
-            # (B, T-1) action frame, then measure (and optionally correct) the
-            # vLLM-vs-trainer mismatch. Metrics are logged whenever logprobs
-            # were captured, independently of whether the correction is applied
-            # to the loss.
-            is_metrics: dict[str, float] = {}
-            sampling_log_probs, n_skipped = self._align_sampling_logprobs(
-                sampling_logps, action_masks, old_log_probs
-            )
-            if sampling_log_probs is not None:
-                is_metrics = self._sampling_mismatch_metrics(
-                    old_log_probs, sampling_log_probs, action_masks
+            sampling_log_probs, is_metrics = (
+                self._aligned_sampling_logprobs_and_metrics(
+                    sampling_logps, action_masks, old_log_probs
                 )
-                if n_skipped:
-                    is_metrics["vllm_is_rows_skipped"] = float(n_skipped)
-                    warnings.warn(
-                        f"{n_skipped}/{num_samples} rows had a token-count "
-                        "mismatch between captured vLLM logprobs and the action "
-                        "mask; their importance ratio defaults to 1 (no "
-                        "correction). Check rollout/trainer tokenisation if this "
-                        "is large.",
-                        stacklevel=2,
-                    )
+            )
 
             self.actor.train()
             for _epoch_idx in range(self.update_epochs):
@@ -786,7 +769,7 @@ class REINFORCE(LLMAlgorithm):
                 full_turn_mask[:, t] = (turn_ids == t).any(dim=1).float()
             advantages = pool_by_turns(advantages, turn_ids, max_turns).contiguous()
             turn_ids_arg = turn_ids
-        elif is_level == "sequence":
+        elif is_level == "trajectory":
             mask_f = mask.to(advantages.dtype)
             advantages = (
                 (advantages * mask_f).sum(dim=-1, keepdim=True)

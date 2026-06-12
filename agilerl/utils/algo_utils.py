@@ -1556,6 +1556,13 @@ class VLLMConfig:
         of attribute names strips those instead, for models that mount
         unwanted modalities elsewhere. Defaults to ``False``.
     :type strip_multimodal_towers: bool | list[str], optional
+    :param lora_staging_dir: Directory where the trained LoRA adapter is
+        exported for vLLM to (re)load each sync. ``None`` (default) uses a
+        fresh process-private temporary directory, removed on ``clean_up``.
+        Set explicitly when the rollout engine must read the adapter from a
+        known path (e.g. orchestrated/arena deployments); user-supplied
+        directories are created if missing and never deleted by AgileRL.
+    :type lora_staging_dir: str | None, optional
     """
 
     # Colocate mode parameters
@@ -1581,6 +1588,7 @@ class VLLMConfig:
     # See class docstring above. Required to avoid vLLM's memory-profiling
     # assertion when running multiple vLLM processes on a shared GPU.
     kv_cache_memory_bytes: int | None = None
+    lora_staging_dir: str | None = None
 
     def __post_init__(self) -> None:
         # ``weight_sharing`` semantics are enforced by the LLM algorithm at

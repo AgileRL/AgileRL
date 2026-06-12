@@ -836,9 +836,10 @@ def create_population(
                 use_kl_advantage_shaping=INIT_HP.get("USE_KL_ADVANTAGE_SHAPING", False),
                 adv_norm=INIT_HP.get("ADV_NORM", "mean_std"),
                 loss_type=INIT_HP.get("LOSS_TYPE", "grpo"),
-                importance_sampling_level=INIT_HP.get(
-                    "IMPORTANCE_SAMPLING_LEVEL", "token"
-                ),
+                # ``None`` (no config key) lets GRPO resolve the default per
+                # loss_type — "token", or "trajectory" for gspo — without
+                # tripping the explicit-override warning.
+                importance_sampling_level=INIT_HP.get("IMPORTANCE_SAMPLING_LEVEL"),
                 advantage_granularity=INIT_HP.get(
                     "ADVANTAGE_GRANULARITY", INIT_HP.get("ACTION_GRANULARITY", "auto")
                 ),
@@ -853,7 +854,7 @@ def create_population(
                     INIT_HP.get("ADVANTAGE_FILTER_EPS", 0.0),
                 ),
                 vllm_importance_sampling_correction=INIT_HP.get(
-                    "VLLM_IMPORTANCE_SAMPLING_CORRECTION", False
+                    "VLLM_IMPORTANCE_SAMPLING_CORRECTION", True
                 ),
                 vllm_importance_sampling_apply=INIT_HP.get(
                     "VLLM_IMPORTANCE_SAMPLING_APPLY", True
@@ -1294,74 +1295,6 @@ def tournament_selection_and_mutation(
         elite.save_checkpoint(f"{elite_save_path}.pt")
 
     return population
-
-
-# Ordered W&B logging tiers. Each tier strictly subsumes the previous one:
-#   off       — no W&B logging at all (master kill switch).
-#   essential — scalars only: loss, kl, reward, accuracy, completion_length, step.
-#   standard  — adds GPU memory snapshots, per-step timing breakdown, throughput,
-#               and quantization / LoRA / vLLM config fields recorded at init.
-#               All cheap scalars; this is the default.
-#   detailed  — adds histograms (per-sample completion length, episode rewards).
-#               Costs a host sync per histogram per step.
-#   debug     — adds prompt/completion sample tables every logged step.
-#               Tokenizer decode + storage growth → opt-in only.
-WB_LEVEL_OFF = "off"
-WB_LEVEL_ESSENTIAL = "essential"
-WB_LEVEL_STANDARD = "standard"
-WB_LEVEL_DETAILED = "detailed"
-WB_LEVEL_DEBUG = "debug"
-WB_LEVELS: tuple[str, ...] = (
-    WB_LEVEL_OFF,
-    WB_LEVEL_ESSENTIAL,
-    WB_LEVEL_STANDARD,
-    WB_LEVEL_DETAILED,
-    WB_LEVEL_DEBUG,
-)
-_WB_LEVEL_RANK: dict[str, int] = {name: idx for idx, name in enumerate(WB_LEVELS)}
-
-
-def normalize_wb_level(value: str | None, default: str = WB_LEVEL_STANDARD) -> str:
-    """Validate and canonicalize a W&B logging level string.
-
-    Falls back to ``default`` when ``value`` is ``None`` or empty. Raises
-    ``ValueError`` for anything that isn't one of :data:`WB_LEVELS`.
-    """
-    if value is None or value == "":
-        return default
-    candidate = value.strip().lower()
-    if candidate not in _WB_LEVEL_RANK:
-        msg = f"Unknown wb_level {value!r}. Expected one of: {', '.join(WB_LEVELS)}."
-        raise ValueError(msg)
-    return candidate
-
-
-def wb_level_at_least(level: str, threshold: str) -> bool:
-    """Return ``True`` if ``level`` is >= ``threshold`` in the tier ordering."""
-    return _WB_LEVEL_RANK[level] >= _WB_LEVEL_RANK[threshold]
-
-
-def gpu_memory_snapshot(prefix: str = "Sys") -> dict[str, float]:
-    """Snapshot current CUDA memory state as a flat dict of GiB scalars.
-
-    Returns an empty dict if CUDA is unavailable. ``torch.cuda.memory_allocated``
-    is essentially free (queries the caching allocator, no device sync); peak
-    stats are also cheap and reset by callers when they want a fresh window.
-    """
-    if not torch.cuda.is_available():
-        return {}
-    gib = 1024.0**3
-    return {
-        f"{prefix}/GPU Allocated GiB": torch.cuda.memory_allocated() / gib,
-        f"{prefix}/GPU Reserved GiB": torch.cuda.memory_reserved() / gib,
-        f"{prefix}/GPU Max Allocated GiB": torch.cuda.max_memory_allocated() / gib,
-    }
-
-
-def reset_gpu_memory_peak() -> None:
-    """Reset the CUDA peak-memory counter so the next snapshot is window-scoped."""
-    if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats()
 
 
 def init_wandb(

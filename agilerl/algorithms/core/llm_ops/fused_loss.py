@@ -63,7 +63,7 @@ def llm_policy_loss_fn(
     # catch-all is required to absorb them.
     **_unused: object,
 ) -> tuple[torch.Tensor, list[torch.Tensor]]:
-    """Per-chunk policy + KL loss at token / turn / sequence ratio granularity.
+    """Per-chunk policy + KL loss at token / turn / trajectory ratio granularity.
 
     :class:`LigerFusedLinearPolicyLossFunction` (below) wraps this fn
     behind a chunked forward+backward. ``importance_sampling_level`` selects
@@ -78,7 +78,7 @@ def llm_policy_loss_fn(
       ``full_turn_mask`` is the global ``(B, max_turns)`` mask (for the
       cross-chunk reduction denominator). KL stays token-level (matches
       unfused turn-PPO).
-    * ``"sequence"`` — token log-ratios are mean-pooled over the whole
+    * ``"trajectory"`` — token log-ratios are mean-pooled over the whole
       completion (GSPO). ``advantages`` is ``(chunk_B, 1)``.
 
     :param log_probs: ``(chunk_B, T, V)`` fp32 log-softmax of the chunk's
@@ -89,7 +89,7 @@ def llm_policy_loss_fn(
     :param attention_mask: ``(chunk_B, T)`` token-level action mask.
     :type attention_mask: torch.Tensor
     :param advantages: token mode ``(chunk_B, T)``; turn mode
-        ``(chunk_B, max_turns)``; sequence mode ``(chunk_B, 1)``.
+        ``(chunk_B, max_turns)``; trajectory mode ``(chunk_B, 1)``.
     :type advantages: torch.Tensor
     :param full_attention_mask: ``(B, T)`` global mask used as the
         token-level reduction denominator (KL, and the policy-loss in
@@ -116,7 +116,7 @@ def llm_policy_loss_fn(
     :param max_turns: Total turn buckets across the batch.
     :type max_turns: int | None
     :param importance_sampling_level: Ratio-pooling granularity —
-        ``"token"`` (default), ``"turn"`` or ``"sequence"``.
+        ``"token"`` (default), ``"turn"`` or ``"trajectory"``.
     :type importance_sampling_level: str
     :return: ``(chunk_loss, [kl, clipfrac, pg_loss, entropy])`` — first
         element backprops; metrics are detached scalars contributing to
@@ -194,9 +194,9 @@ def llm_policy_loss_fn(
         pg_unit_loss = torch.max(-advantages * ratio, -advantages * clipped_ratio)
         unit_mask = chunk_turn_mask
         unit_global_count = full_turn_mask.float().sum().clamp(min=1.0)
-    elif importance_sampling_level == "sequence":
-        # Sequence mode: length-normalized mean over all action tokens of the
-        # completion (GSPO). ``advantages`` is per-sequence ``(chunk_b, 1)``.
+    elif importance_sampling_level == "trajectory":
+        # Trajectory mode: length-normalized mean over all action tokens of the
+        # completion (GSPO). ``advantages`` is per-trajectory ``(chunk_b, 1)``.
         mask_f = attention_mask.to(token_log_ratio.dtype)
         seq_count = mask_f.sum(dim=-1, keepdim=True)  # (chunk_b, 1)
         seq_log_ratio = (token_log_ratio * mask_f).sum(
@@ -214,7 +214,7 @@ def llm_policy_loss_fn(
     else:
         msg = (
             f"Unknown importance_sampling_level '{importance_sampling_level}'. "
-            "Expected one of ['token', 'turn', 'sequence']."
+            "Expected one of ['token', 'turn', 'trajectory']."
         )
         raise ValueError(msg)
 
@@ -590,7 +590,7 @@ def apply_fused_policy_loss(
     ``token_chunk_size`` (kwarg) sets the tokens-per-chunk; ``None`` uses
     :data:`~agilerl.utils.llm_utils.DEFAULT_LIGER_TOKEN_CHUNK`.
 
-    Turn- and sequence-level pooling couple a turn/sequence's tokens, so they
+    Turn- and trajectory-level pooling couple a turn/trajectory's tokens, so they
     cannot be token-chunked: a chunk would only see part of the pooled unit.
     Those levels keep the batch path (one sequence per chunk), which holds a
     ``(seq_len, vocab)`` logits tensor per trajectory — not memory-bounded.
@@ -604,7 +604,7 @@ def apply_fused_policy_loss(
     :param attention_mask: ``(B, T_act)`` action-token mask.
     :type attention_mask: torch.Tensor
     :param advantages: token level ``(B, T_act)``; turn ``(B, max_turns)``;
-        sequence ``(B, 1)``.
+        trajectory ``(B, 1)``.
     :type advantages: torch.Tensor
     :return: ``(loss, aux)`` straight from the fused Function.
     :rtype: tuple[torch.Tensor, tuple[torch.Tensor, ...]]

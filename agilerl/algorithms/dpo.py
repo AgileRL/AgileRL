@@ -12,6 +12,7 @@ from agilerl import HAS_LIGER_KERNEL
 if TYPE_CHECKING:
     from accelerate import Accelerator
     from peft import LoraConfig
+    from transformers import BitsAndBytesConfig
 
     from agilerl.llm_envs import PreferenceGym
 
@@ -118,7 +119,7 @@ class DPO(LLMAlgorithm):
         reduce_memory_peak: bool = False,
         cast_logprobs_to_fp32: bool = True,
         use_separate_reference_adapter: bool = True,
-        quantization_config: Any | None = None,
+        quantization_config: BitsAndBytesConfig | None = None,
         activation_offload: bool = False,
         lora_target_scope: str | None = None,
     ) -> None:
