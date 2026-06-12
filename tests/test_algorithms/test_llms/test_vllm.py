@@ -175,8 +175,10 @@ class TestREINFORCETest:
             "bitsandbytes",
             reason="quantized vLLM test requires bitsandbytes (linux-only).",
         )
-        if not torch.cuda.is_bf16_supported():
-            pytest.skip("bnb nf4 preset uses bf16 compute; GPU lacks bf16.")
+        if not torch.cuda.is_bf16_supported(including_emulation=False):
+            # vLLM refuses bf16 below sm_80 (e.g. the T4 CI runners); torch's
+            # default check includes emulated bf16 and stays True there.
+            pytest.skip("bnb nf4 preset uses bf16 compute; GPU lacks native bf16.")
         from agilerl.utils.llm_utils import build_bnb_quantization_config
 
         del deepspeed_env
