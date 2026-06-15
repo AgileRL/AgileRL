@@ -154,13 +154,14 @@ class GRPO(LLMAlgorithm):
         uses DAPO-style batch normalisation for ``'cispo'`` rather than
         the per-sequence-then-batch normalisation of the standard path;
         numerical values will differ slightly but gradient direction is
-        equivalent. The benefit over the (already memory-bounded)
-        fused-linear-logprob standard path is scale-dependent: at small token
-        counts it is slower and uses more memory; the fused kernel caps
-        per-chunk memory, so it only pays off at large token counts (long
-        sequences / large batch). Liger model patches (fused RMSNorm/RoPE/
-        SwiGLU) are applied whenever ``liger-kernel`` is installed and are
-        independent of this flag.
+        equivalent. Benchmarked against AgileRL's (already memory-bounded)
+        fused-linear-logprob standard path at matched chunk size
+        (``fused_loss_chunk_rows`` == ``fused_logprobs_chunk_rows``), the GRPO/
+        CISPO fused-loss kernel shows no speedup (it is slower) and uses slightly
+        more memory — the upstream kernel underperforms the standard path for
+        this surrogate — which is why it stays off by default. Liger model
+        patches (fused RMSNorm/RoPE/SwiGLU) are applied whenever ``liger-kernel``
+        is installed and are independent of this flag.
     :type use_liger_loss: bool, optional
     :param use_kl_advantage_shaping: Apply KL-based shaping directly to token
         advantages before PPO clipping, defaults to False.
