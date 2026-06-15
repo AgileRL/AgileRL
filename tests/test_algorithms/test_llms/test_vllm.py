@@ -201,7 +201,7 @@ class TestREINFORCETest:
                 "quantization": "bitsandbytes",
                 "dtype": "bfloat16",
             },
-            share_base_from_vllm=True,
+            from_name=True,
             temperature=0.0,  # greedy → outputs comparable across sleep/wake
         )
 
@@ -288,7 +288,7 @@ class TestREINFORCETest:
             micro_batch_size_per_gpu=None,
             sleep_mode=True,
             vllm_config_overrides={"dtype": "float16"},
-            share_base_from_vllm=True,
+            from_name=True,
             temperature=0.0,  # greedy → outputs comparable across sleep/wake
         )
 

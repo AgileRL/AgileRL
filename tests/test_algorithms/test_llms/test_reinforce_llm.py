@@ -217,7 +217,6 @@ def generate_reinforce(
     use_memory_efficient_params=False,
     quantization_config=None,
     vllm_config_overrides=None,
-    share_base_from_vllm=False,
     temperature=1.0,
 ):
     lr_use = lr_eff if lr_eff is not None else lr
@@ -246,12 +245,12 @@ def generate_reinforce(
             sleep_mode=sleep_mode,
             **(vllm_config_overrides or {}),
         )
-        # With real zero-copy sharing the trainer base is extracted from
-        # vLLM's live weights, so no stand-in HF actor is needed (or wanted:
-        # loading one would double the fixture's GPU footprint for nothing).
+        # ``from_name`` loads the trainer base from the model name (real-engine
+        # tests), so no stand-in HF actor is built; otherwise (mocked engine)
+        # the dummy actor is the trainer base.
         actor = (
             None
-            if share_base_from_vllm
+            if from_name
             else model_factory(pretrained_model_name_or_path, add_value_head=False)
         )
     else:
@@ -286,11 +285,10 @@ def generate_reinforce(
         vllm_config = None
 
     # Colocated vLLM and the trainer each hold their own base. The mocked-engine
-    # tests (share_base_from_vllm=False) pass the dummy actor as the trainer
-    # base; ``_initialize_actors`` uses it directly when ``base_model`` is given.
-    # The real-engine tests (share_base_from_vllm=True) load the base from the
-    # model name. ``from_name`` likewise forces a load-from-name base.
-    share_from_name = from_name or (use_vllm and share_base_from_vllm)
+    # tests pass the dummy actor as the trainer base; ``_initialize_actors`` uses
+    # it directly when ``base_model`` is given. ``from_name`` loads the base from
+    # the model name instead (real-engine tests).
+    share_from_name = from_name
     reinforce_kwargs = dict(
         actor_network=actor if not share_from_name else None,
         model_name=pretrained_model_name_or_path if share_from_name else None,
