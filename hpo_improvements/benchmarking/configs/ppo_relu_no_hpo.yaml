@@ -6,13 +6,32 @@
 # PPO column for Gymnasium MuJoCo (CleanRL implementation).
 #
 # Mapping notes (paper -> AgileRL):
-#   num. envs = 1, num. steps = 2048  -> learn_step = 2048 (1 env x 2048 steps)
-#   num. minibatch = 32 over a 2048-step rollout -> batch_size = 2048/32 = 64
 #   width 64 / tanh / 2 hidden layers -> latent_dim 64, encoder [64], head [64]
-#   norm. adv. / norm. obs. / norm. reward / orthogonal init / lr annealing are
-#     handled internally by AgileRL's PPO and are not separate YAML knobs.
+#   Observation normalisation (norm. obs. in the paper) IS implemented: we wrap
+#     each PPO agent in AgileRL's RSNorm wrapper in benchmark.py before training,
+#     so observations are normalised to zero mean / unit variance via running
+#     statistics (per "ReLU to the Rescue", Jesson et al., 2024) -- there is no
+#     YAML knob for it; it is applied in code for PPO benchmarking runs.
 #   The environment `name` here is a placeholder; the benchmark script overrides
 #   it per selected environment.
+#
+# Scaling the paper's 1-env recipe to 16 parallel envs (CleanRL convention):
+#   The paper uses num. envs = 1, num. steps = 2048, num. minibatch = 32. In
+#   AgileRL, `learn_step` is the full rollout buffer (num_envs x per-env steps)
+#   and `batch_size` is the MINIBATCH size (PPO.learn() slices the flattened
+#   buffer into chunks of `batch_size`), so num. minibatches = learn_step/batch_size.
+#   To keep training faithful with 16 envs we hold the two quantities that define
+#   the regime constant:
+#     per-env rollout horizon 2048 -> learn_step = 16 x 2048 = 32768
+#       (controls GAE bias/variance and how on-policy the data is)
+#     num. minibatch = 32         -> batch_size = 32768/32 = 1024
+#   This is the standard CleanRL scaling (fix num_minibatches, let minibatch size
+#   grow with num_envs). Note it is NOT an exact equivalence: vs 1 env we do 16x
+#   fewer collect->update cycles over the same 6M-step budget, and each minibatch
+#   now averages 1024 transitions (16x less gradient noise) instead of 64. The
+#   only alternative is to instead fix the minibatch size (batch_size = 64,
+#   giving 512 minibatches/epoch), which preserves per-update gradient noise at
+#   the cost of much more compute per update; we keep the CleanRL convention.
 
 algorithm:
     name: PPO
@@ -31,28 +50,29 @@ algorithm:
     share_encoders: false
 
 environment:
-    name: Ant-v5
+    name: Ant-v4
     num_envs: 16
 
 network:
     latent_dim: 64
-    max_latent_dim: 256
+    max_latent_dim: 64
     arch: mlp
     encoder_config:
         hidden_size:
             - 64
         activation: Tanh
+        output_activation: Identity
         min_mlp_nodes: 64
-        max_mlp_nodes: 256
+        max_mlp_nodes: 65
         layer_norm: false
     head_config:
         hidden_size:
             - 64
         activation: Tanh
         min_hidden_layers: 1
-        max_hidden_layers: 3
+        max_hidden_layers: 2
         min_mlp_nodes: 64
-        max_mlp_nodes: 256
+        max_mlp_nodes: 65
         output_vanish: true
         layer_norm: false
 
@@ -64,6 +84,6 @@ training:
     max_steps: 6_000_000
     target_score:
     pop_size: 1
-    evo_steps: 32768
+    evo_steps: 163840
     eval_steps:
     eval_loop: 1

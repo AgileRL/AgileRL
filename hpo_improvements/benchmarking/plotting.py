@@ -1,8 +1,11 @@
 """Plotting helpers for the HPO benchmarking script.
 
-All figures carry a title, a grid, and labelled axes. The x-axis is always
-``global_steps / pop_size`` (per-agent environment interactions), per the
-benchmark specification.
+All figures share one house style: a full box (all four spines), a grid,
+default-style numeric ticks, bold titles and axis labels, and a top-right legend
+that lists only the reference lines (the main data curve is always blue and is
+deliberately left out of the legend). The x-axis is always
+``global_steps / pop_size`` (per-agent environment steps), per the benchmark
+specification. Text is in UK English.
 """
 
 from __future__ import annotations
@@ -25,10 +28,56 @@ if TYPE_CHECKING:
 GLOBAL_STEP_COL = "train/global_step"
 BEST_FITNESS_COL = "eval/best_fitness"
 
+# Shared figure styling. The main data curve is always blue; the random/expert
+# reference lines are red/green so they are easy to tell apart.
+X_LABEL = "Per-agent environment steps"
+MAIN_COLOR = "tab:blue"
+RANDOM_COLOR = "red"
+EXPERT_COLOR = "green"
+
 # Stratified-bootstrap replications for rliable interval estimates. A fixed
 # RandomState seed keeps the confidence intervals reproducible across re-plots.
 _BOOTSTRAP_REPS = 2000
 _BOOTSTRAP_SEED = 0
+
+
+def _finalize_axis(ax, *, legend_handles: list | None = None) -> None:
+    """Apply the shared house style to *ax*.
+
+    Restores a default matplotlib box (all four spines, default-width) and
+    default numeric ticks -- undoing rliable's despined style so rliable-drawn
+    panels match the plain ``fitness.png`` figures -- adds a grid, makes the
+    title and axis labels bold, and, when *legend_handles* are given, draws a
+    top-right legend from those handles only (the main blue curve is omitted).
+
+    :param ax: The axes to style.
+    :param legend_handles: Reference-line handles to list in the legend, or None
+        for no legend.
+    """
+    for spine in ax.spines.values():
+        spine.set_visible(True)
+        spine.set_position(("outward", 0))
+        spine.set_color("black")
+        spine.set_linewidth(0.8)
+    ax.tick_params(
+        axis="both",
+        which="both",
+        direction="out",
+        length=3.5,
+        width=0.8,
+        labelsize="medium",
+        top=False,
+        right=False,
+        left=True,
+        bottom=True,
+    )
+    ax.grid(True, alpha=0.3)
+    if ax.title.get_text():
+        ax.title.set_fontweight("bold")
+    ax.xaxis.label.set_fontweight("bold")
+    ax.yaxis.label.set_fontweight("bold")
+    if legend_handles:
+        ax.legend(handles=legend_handles, loc="upper right")
 
 
 def _per_agent_x(df: pd.DataFrame, pop_size: int) -> np.ndarray:
@@ -65,22 +114,24 @@ def plot_fitness(
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
 
-    ax1.plot(x, best, color="tab:blue")
-    ax1.set_title(f"{env_name} — Best fitness")
-    ax1.set_xlabel("global steps / pop size")
-    ax1.set_ylabel("Best fitness (episodic return)")
-    ax1.grid(True, alpha=0.3)
+    ax1.plot(x, best, color=MAIN_COLOR)
+    ax1.set_title(f"{env_name}: Best fitness")
+    ax1.set_xlabel(X_LABEL)
+    ax1.set_ylabel("Best fitness (mean episodic return)")
+    _finalize_axis(ax1)
 
-    ax2.plot(x, normalized, color="tab:green")
-    ax2.axhline(0.0, color="grey", linestyle="--", linewidth=0.8, label="random")
-    ax2.axhline(1.0, color="black", linestyle="--", linewidth=0.8, label="expert")
-    ax2.set_title(f"{env_name} — Best normalized fitness")
-    ax2.set_xlabel("global steps / pop size")
-    ax2.set_ylabel("Normalized fitness (0=random, 1=expert)")
-    ax2.grid(True, alpha=0.3)
-    ax2.legend(loc="best")
+    ax2.plot(x, normalized, color=MAIN_COLOR)
+    rnd = ax2.axhline(
+        0.0, color=RANDOM_COLOR, linestyle="--", linewidth=1.0, label="random"
+    )
+    exp = ax2.axhline(
+        1.0, color=EXPERT_COLOR, linestyle="--", linewidth=1.0, label="expert"
+    )
+    ax2.set_title(f"{env_name}: Best normalised fitness")
+    ax2.set_xlabel(X_LABEL)
+    ax2.set_ylabel("Best normalised fitness")
+    _finalize_axis(ax2, legend_handles=[rnd, exp])
 
-    fig.suptitle(f"{env_name}: fitness vs. environment interactions")
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
@@ -158,9 +209,9 @@ def plot_mutation_schedule(
     if not hp_names:
         # Nothing to plot; emit a placeholder so the artifact always exists.
         fig, ax = plt.subplots(figsize=(8, 5))
-        ax.set_title(f"{env_name} — no hyperparameter schedules logged")
-        ax.set_xlabel("global steps / pop size")
-        ax.grid(True, alpha=0.3)
+        ax.set_title(f"{env_name}: no hyperparameter schedules logged")
+        ax.set_xlabel(X_LABEL)
+        _finalize_axis(ax)
         fig.tight_layout()
         fig.savefig(out_path, dpi=150)
         plt.close(fig)
@@ -179,16 +230,15 @@ def plot_mutation_schedule(
             col = f"train/agent_{agent}/{hp}"
             if col in data.columns:
                 series[r] = data.iloc[r][col]
-        ax.plot(x, series, color="tab:purple", drawstyle="steps-post")
+        ax.plot(x, series, color=MAIN_COLOR, drawstyle="steps-post")
         ax.set_title(f"{hp}")
-        ax.set_xlabel("global steps / pop size")
+        ax.set_xlabel(X_LABEL)
         ax.set_ylabel(hp)
-        ax.grid(True, alpha=0.3)
+        _finalize_axis(ax)
 
     for ax in axes[n:]:
         ax.axis("off")
 
-    fig.suptitle(f"{env_name}: best-agent hyperparameter schedule")
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
@@ -310,39 +360,39 @@ def plot_fitness_over_seeds(
         pe_best,
         ci_best,
         algorithms=[algo_label],
+        colors={algo_label: MAIN_COLOR},
         ax=ax1,
         marker="",
-        xlabel="global steps / pop size",
-        ylabel="Best fitness (episodic return)",
+        xlabel=X_LABEL,
+        ylabel="IQM of the best fitness (mean episodic return)",
         labelsize="medium",
         ticklabelsize="medium",
     )
-    ax1.set_title(f"{env_name} — Best fitness")
-    ax1.grid(True, alpha=0.3)
-    ax1.legend(loc="best")
+    ax1.set_title(f"{env_name}: IQM of the best fitness")
+    _finalize_axis(ax1)
 
     rly_plot.plot_sample_efficiency_curve(
         grid,
         pe_norm,
         ci_norm,
         algorithms=[algo_label],
+        colors={algo_label: MAIN_COLOR},
         ax=ax2,
         marker="",
-        xlabel="global steps / pop size",
-        ylabel="Normalized fitness (0=random, 1=expert)",
+        xlabel=X_LABEL,
+        ylabel="IQM of the best normalised fitness",
         labelsize="medium",
         ticklabelsize="medium",
     )
-    ax2.axhline(0.0, color="grey", linestyle="--", linewidth=0.8, label="random")
-    ax2.axhline(1.0, color="black", linestyle="--", linewidth=0.8, label="expert")
-    ax2.set_title(f"{env_name} — Best normalized fitness")
-    ax2.grid(True, alpha=0.3)
-    ax2.legend(loc="best")
-
-    fig.suptitle(
-        f"{env_name}: per-seed fitness over {len(seed_curves)} seeds "
-        "(IQM + 95% stratified-bootstrap CI)"
+    rnd = ax2.axhline(
+        0.0, color=RANDOM_COLOR, linestyle="--", linewidth=1.0, label="random"
     )
+    exp = ax2.axhline(
+        1.0, color=EXPERT_COLOR, linestyle="--", linewidth=1.0, label="expert"
+    )
+    ax2.set_title(f"{env_name}: IQM of the best normalised fitness")
+    _finalize_axis(ax2, legend_handles=[rnd, exp])
+
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
@@ -390,8 +440,9 @@ def plot_aggregate(
     out_path: str,
     *,
     algo_label: str = "Algorithm",
+    suite_name: str = "Environment suite",
 ) -> None:
-    """Save the cross-environment aggregate of best normalized fitness.
+    """Save the cross-environment aggregate of best normalised fitness.
 
     The aggregate IQM is computed with rliable over **all tasks and all seeds**
     at each timestep (every ``(seed, env)`` pair is one sample), and the shaded
@@ -406,12 +457,13 @@ def plot_aggregate(
     :type out_path: str
     :param algo_label: Display label for the algorithm + HPO method.
     :type algo_label: str
+    :param suite_name: Human-readable environment-suite name (for the title).
+    :type suite_name: str
     """
     assembled = _aggregate_score_array(curves)
     if assembled is None:
         return
     grid, scores = assembled
-    n_runs, n_tasks, _ = scores.shape
 
     point, cis = _iqm_interval_estimates({algo_label: scores})
 
@@ -421,21 +473,22 @@ def plot_aggregate(
         point,
         cis,
         algorithms=[algo_label],
+        colors={algo_label: MAIN_COLOR},
         ax=ax,
         marker="",
-        xlabel="global steps / pop size",
-        ylabel="Best normalized fitness (IQM)",
+        xlabel=X_LABEL,
+        ylabel="IQM of the best normalised fitness",
         labelsize="medium",
         ticklabelsize="medium",
     )
-    ax.axhline(0.0, color="grey", linestyle="--", linewidth=0.8)
-    ax.axhline(1.0, color="black", linestyle="--", linewidth=0.8)
-    ax.set_title(
-        f"Aggregate normalized fitness — IQM over {n_tasks} tasks × {n_runs} seeds\n"
-        "(95% stratified-bootstrap CI)"
+    rnd = ax.axhline(
+        0.0, color=RANDOM_COLOR, linestyle="--", linewidth=1.0, label="random"
     )
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc="best")
+    exp = ax.axhline(
+        1.0, color=EXPERT_COLOR, linestyle="--", linewidth=1.0, label="expert"
+    )
+    ax.set_title(f"{suite_name}: IQM of the best normalised fitness")
+    _finalize_axis(ax, legend_handles=[rnd, exp])
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
@@ -446,8 +499,9 @@ def plot_performance_profile(
     out_path: str,
     *,
     algo_label: str = "Algorithm",
+    suite_name: str = "Environment suite",
 ) -> None:
-    """Save the rliable performance profile of final normalized fitness.
+    """Save the rliable performance profile of final normalised fitness.
 
     The score distribution (run-score profile) is built from the **last** value
     of the best normalized fitness of every ``(seed, env)`` pair, i.e. a
@@ -462,6 +516,8 @@ def plot_performance_profile(
     :type out_path: str
     :param algo_label: Display label for the algorithm + HPO method.
     :type algo_label: str
+    :param suite_name: Human-readable environment-suite name (for the title).
+    :type suite_name: str
     """
     assembled = _aggregate_score_array(curves)
     if assembled is None:
@@ -490,17 +546,19 @@ def plot_performance_profile(
         distributions,
         tau_list,
         performance_profile_cis=distribution_cis,
+        colors={algo_label: MAIN_COLOR},
         ax=ax,
-        xlabel=r"Normalized fitness ($\tau$)",
-        ylabel=r"Fraction of runs with score $> \tau$",
+        xlabel="Last best normalised fitness",
+        ylabel=r"Fraction of runs with $\tau_{run} > \tau$",
     )
-    ax.axvline(1.0, color="black", linestyle="--", linewidth=0.8, label="expert")
-    ax.set_title(
-        f"Performance profile — final normalized fitness "
-        f"({final.shape[1]} tasks × {final.shape[0]} seeds)"
+    rnd = ax.axvline(
+        0.0, color=RANDOM_COLOR, linestyle="--", linewidth=1.0, label="random"
     )
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc="best")
+    exp = ax.axvline(
+        1.0, color=EXPERT_COLOR, linestyle="--", linewidth=1.0, label="expert"
+    )
+    ax.set_title(f"{suite_name}: Performance profile")
+    _finalize_axis(ax, legend_handles=[rnd, exp])
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)

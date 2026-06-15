@@ -24,6 +24,7 @@ import argparse
 import copy
 import logging
 import os
+import re
 import sys
 from contextlib import contextmanager
 from datetime import datetime
@@ -48,21 +49,28 @@ import plotting  # noqa: E402
 import torch  # noqa: E402
 import yaml  # noqa: E402
 from registry import (  # noqa: E402
+    MPE_ENV_CONFIGS,
     allowed_envs,
+    env_config,
+    env_suite_name,
     normalization_scores,
     resolve_env_selection,
 )
 from reproducibility import seed_everything  # noqa: E402
 
-from agilerl.algorithms import DQN, PPO  # noqa: E402
+from agilerl.algorithms import DQN, IPPO, PPO  # noqa: E402
 from agilerl.models.env import GymEnvSpec  # noqa: E402
 from agilerl.models.manifest import TrainingManifest  # noqa: E402
 from agilerl.training.trainer import LocalTrainer  # noqa: E402
+from agilerl.wrappers.agent import RSNorm  # noqa: E402
 
 logger = logging.getLogger("hpo_benchmark")
 
 RESULTS_DIR = SCRIPT_DIR / "results"
 MAX_RENDER_STEPS = 3000
+# Number of greedy episodes to record for the multi-agent (MPE) render. MPE episodes
+# are short (~max_cycles steps), so a few are concatenated into one watchable clip.
+MAX_RENDER_EPISODES = 5
 
 # Filename of the rendered best-agent video, both on disk and on the W&B run.
 RENDER_FILENAME = "render.mp4"
@@ -80,6 +88,24 @@ def elite_filename(algo: str) -> str:
     return f"elite_{algo}.pt"
 
 
+def mutable_hp_names(manifest: dict[str, Any]) -> list[str]:
+    """Return the RL hyperparameters the manifest allows to be mutated.
+
+    These are exactly the keys of the ``mutation.rl_hp_selection`` block (the
+    per-hyperparameter search ranges); with no ``mutation`` block (the no-HPO
+    regime) the list is empty. The mutation-schedule plot is driven off this, so
+    only hyperparameters the run could actually mutate are charted.
+
+    :param manifest: Parsed YAML manifest dict.
+    :type manifest: dict[str, Any]
+    :return: Mutable RL-hyperparameter names, in manifest order.
+    :rtype: list[str]
+    """
+    mutation = manifest.get("mutation") or {}
+    rl_hp = mutation.get("rl_hp_selection") or {}
+    return list(rl_hp.keys())
+
+
 # --------------------------------------------------------------------------- #
 # EnvPool helpers
 # --------------------------------------------------------------------------- #
@@ -89,6 +115,16 @@ def _make_envpool_env(env_id: str, num_envs: int, seed: int) -> Any:
     EnvPool seeds at creation time; callers must **not** call
     ``env.reset(seed=...)`` afterwards.
 
+    EnvPool assigns sub-environment ``i`` the seed ``base + i``, so a run with
+    base seed ``s`` consumes the contiguous range ``[s, s + num_envs)``. Passing
+    consecutive run seeds (e.g. ``1, 2, 3``) straight through would therefore
+    make those ranges overlap by ``num_envs - 1`` (seeds ``1`` and ``2`` share
+    15 of 16 sub-environment seeds), so the per-seed runs would sample nearly
+    identical environment instantiations and the over-seeds variance would be
+    artificially small. To keep the ranges disjoint we scale the run seed by
+    ``num_envs`` before handing it to EnvPool: run seed ``s`` -> base
+    ``s * num_envs`` -> range ``[s * num_envs, (s + 1) * num_envs)``.
+
     Works for both MuJoCo (PPO) and Atari (DQN) suites. MuJoCo v5 observations
     are already flat 1-D vectors, so they are passed through
     :class:`gymnasium.wrappers.vector.FlattenObservation`. Atari observations
@@ -96,11 +132,12 @@ def _make_envpool_env(env_id: str, num_envs: int, seed: int) -> Any:
     their spatial structure for the CNN encoder, so flattening is skipped for
     any environment whose single observation is more than 1-D.
 
-    :param env_id: EnvPool environment id (e.g. ``"Ant-v5"`` or ``"Pong-v5"``).
+    :param env_id: EnvPool environment id (e.g. ``"Ant-v4"`` or ``"Pong-v5"``).
     :type env_id: str
     :param num_envs: Number of parallel environments.
     :type num_envs: int
-    :param seed: Seed applied at creation time for reproducibility.
+    :param seed: Run seed; scaled by ``num_envs`` to derive the EnvPool base
+        seed so per-seed runs use disjoint sub-environment seed ranges.
     :type seed: int
     :return: Vectorized EnvPool environment with Gymnasium API.
     :rtype: Any
@@ -117,7 +154,10 @@ def _make_envpool_env(env_id: str, num_envs: int, seed: int) -> Any:
     make_fn = (
         envpool.make_gymnasium if hasattr(envpool, "make_gymnasium") else envpool.make
     )
-    env = make_fn(env_id, num_envs=num_envs, seed=seed)
+    # Scale by num_envs so each run seed maps to a disjoint sub-environment seed
+    # range [seed * num_envs, (seed + 1) * num_envs); see the docstring above.
+    base_seed = seed * num_envs
+    env = make_fn(env_id, num_envs=num_envs, seed=base_seed)
     # Only flatten flat (vector) observations. Image observations such as
     # Atari's (4, 84, 84) frame stack must keep their spatial structure so the
     # CNN encoder can consume them.
@@ -177,6 +217,51 @@ class _EnvPoolLocalTrainer(LocalTrainer):
             )
         finally:
             cls._prebuilt_env = None
+
+
+def is_multi_agent_algo(algo: str) -> bool:
+    """Return whether *algo* is trained on the multi-agent (PettingZoo) path.
+
+    Single-agent suites (PPO/MuJoCo, DQN/Atari) build an EnvPool vector env that is
+    injected into the trainer; multi-agent suites (IPPO/MPE) instead let
+    :class:`LocalTrainer` build a PettingZoo vector env from the manifest's
+    ``PzEnvSpec``. This predicate is the single switch between those two paths.
+    """
+    return algo.upper() == "IPPO"
+
+
+def _build_trainer(
+    manifest: dict[str, Any], env_name: str, algo: str, seed: int, device: str
+) -> LocalTrainer:
+    """Build a ready-to-train trainer for one (environment, algorithm).
+
+    For single-agent algorithms this constructs an EnvPool vector env (seeded at
+    creation) and injects it into an :class:`_EnvPoolLocalTrainer`. For multi-agent
+    algorithms (IPPO) it bypasses EnvPool entirely and lets
+    :meth:`LocalTrainer.from_manifest` build the PettingZoo vector env from the
+    manifest's ``PzEnvSpec`` (whose custom entrypoint is the MPE adapter); the
+    manifest's ``environment.config`` / ``environment.path`` are prepared by the
+    caller (see :func:`run_training`).
+
+    :param manifest: Parsed manifest dict (already env-name-stamped).
+    :param env_name: Environment id for this run.
+    :param algo: Algorithm name.
+    :param seed: Run seed (used for the EnvPool base seed on the single-agent path).
+    :param device: Torch device string.
+    :return: A constructed (untrained) trainer.
+    :rtype: LocalTrainer
+    """
+    if is_multi_agent_algo(algo):
+        # PettingZoo path: the env is built from the manifest's PzEnvSpec, so no
+        # pre-built env is injected. seed_everything (called by run_training) plus
+        # the multi-agent loop's own env reset cover reproducibility.
+        return LocalTrainer.from_manifest(manifest, device=device)
+
+    num_envs = int(manifest.get("environment", {}).get("num_envs", 1) or 1)
+    envpool_env = _make_envpool_env(env_name, num_envs, seed)
+    return _EnvPoolLocalTrainer.from_manifest_with_env(
+        manifest, envpool_env, device=device
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -306,12 +391,63 @@ class _Tee:
             s.flush()
 
 
+# Matches CSI escape sequences (colours, cursor moves, line clears) plus the
+# lone ESC-prefixed shorthands tqdm/rich emit. Stripping these is what turns an
+# unreadable, control-code-riddled train.log into plain text.
+_ANSI_RE = re.compile(r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|[@-Z\\-_])")
+
+
+class _LogFileWriter:
+    """File wrapper that renders terminal output as plain, readable text.
+
+    Progress bars (tqdm) repaint a single line by emitting ANSI escapes and
+    carriage returns. Mirroring those raw into a file leaves it full of ``\\x1b``
+    control codes and overwritten fragments. This wrapper strips the escapes and
+    resolves ``\\r`` overwrites in a small line buffer, so each line lands in the
+    file only in its final rendered state -- exactly what you'd see on screen.
+    """
+
+    def __init__(self, file: Any) -> None:
+        self._file = file
+        self._line = ""
+
+    def write(self, data: str) -> int:
+        n = len(data)
+        data = _ANSI_RE.sub("", data).replace("\b", "")
+        for ch in data:
+            if ch == "\n":
+                self._file.write(self._line + "\n")
+                self._line = ""
+            elif ch == "\r":
+                # Carriage return: the next write overwrites this line.
+                self._line = ""
+            else:
+                self._line += ch
+        self._file.flush()
+        return n
+
+    def flush(self) -> None:
+        self._file.flush()
+
+    def close(self) -> None:
+        if self._line:
+            self._file.write(self._line + "\n")
+            self._line = ""
+        self._file.flush()
+
+
 @contextmanager
 def tee_to_file(path: Path):
-    """Mirror stdout/stderr and root logging to ``path`` for the duration."""
+    """Mirror stdout/stderr and root logging to ``path`` for the duration.
+
+    Output is sanitized on the way to disk (ANSI escapes stripped, ``\\r``
+    progress repaints collapsed) so the saved log is plain text, while the live
+    console stream keeps its original formatting.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     orig_out, orig_err = sys.stdout, sys.stderr
-    file = open(path, "w")
+    raw = open(path, "w")
+    file = _LogFileWriter(raw)
     file_handler = logging.StreamHandler(file)
     file_handler.setLevel(logging.INFO)
     root = logging.getLogger()
@@ -324,6 +460,7 @@ def tee_to_file(path: Path):
         sys.stdout, sys.stderr = orig_out, orig_err
         root.removeHandler(file_handler)
         file.close()
+        raw.close()
 
 
 # --------------------------------------------------------------------------- #
@@ -562,7 +699,7 @@ def download_run_files(
 # --------------------------------------------------------------------------- #
 # Loaders for the elite checkpoint, keyed by algorithm name. Rendering is only
 # wired up for the algorithms with a registered environment suite (registry.py).
-_RENDER_LOADERS = {"PPO": PPO.load, "DQN": DQN.load}
+_RENDER_LOADERS = {"PPO": PPO.load, "DQN": DQN.load, "IPPO": IPPO.load}
 
 
 def _ale_render_id(env_id: str) -> str:
@@ -624,7 +761,7 @@ def render_best_agent(
 
     :param elite_path: Path to the saved elite checkpoint.
     :type elite_path: Path
-    :param env_name: Environment id (EnvPool/Gymnasium, e.g. ``"Ant-v5"`` or ``"Pong-v5"``).
+    :param env_name: Environment id (EnvPool/Gymnasium, e.g. ``"Ant-v4"`` or ``"Pong-v5"``).
     :type env_name: str
     :param seed: Seed for the render env's first reset.
     :type seed: int
@@ -636,6 +773,18 @@ def render_best_agent(
     :type algo: str
     """
     is_atari = algo.upper() == "DQN"
+
+    # Pusher is unrenderable here: ``Pusher-v4`` is only supported on
+    # ``mujoco<3`` (its block is lighter than air on newer MuJoCo, so Gymnasium
+    # disabled the model -- https://github.com/Farama-Foundation/Gymnasium/issues/950),
+    # and this project runs mujoco>=3. EnvPool trains it fine and the elite
+    # checkpoint is still saved upstream of this call; only the video is skipped.
+    if not is_atari and env_name.split("-")[0] == "Pusher":
+        logger.info(
+            "Skipping render for %s: Pusher is only renderable on mujoco<3.",
+            env_name,
+        )
+        return
 
     # Headless MuJoCo rendering: export MUJOCO_GL=egl (GPU) or osmesa (CPU)
     # before running. We do not set it here because MuJoCo selects its GL
@@ -708,6 +857,92 @@ def render_best_agent(
 
         if frames:
             imageio.mimsave(str(out_path), frames, fps=30)
+            logger.info("Saved render: %s (%d frames)", out_path, len(frames))
+    except Exception as exc:
+        logger.exception("Rendering failed for %s: %s", env_name, exc)
+
+
+def render_best_multi_agent(
+    elite_path: Path,
+    env_name: str,
+    seed: int,
+    device: str,
+    out_path: Path,
+    algo: str,
+) -> None:
+    """Render greedy episodes of the saved IPPO elite on a cooperative MPE task.
+
+    The multi-agent counterpart of :func:`render_best_agent`: it rebuilds a single
+    (non-vectorized) ``mpe2`` parallel env with ``render_mode="rgb_array"`` using the
+    exact :data:`registry.MPE_ENV_CONFIGS` kwargs the agent trained on, loads the elite
+    IPPO population, and steps it with greedy actions, collecting one full-scene frame
+    per step. The per-agent dict action loop is agent-agnostic, so it handles both
+    homogeneous tasks (Spread/Reference) and the heterogeneous Speaker-Listener (whose
+    agents have different action spaces) without special-casing. Failures are logged but
+    never raised, so a missing render backend never aborts the benchmark.
+
+    :param elite_path: Path to the saved elite IPPO checkpoint.
+    :type elite_path: Path
+    :param env_name: MPE task id (e.g. ``"simple_spread_v3"``).
+    :type env_name: str
+    :param seed: Seed for the render env's first reset.
+    :type seed: int
+    :param device: Torch device.
+    :type device: str
+    :param out_path: Destination .mp4 path.
+    :type out_path: Path
+    :param algo: Algorithm name (selects the checkpoint loader; ``"IPPO"``).
+    :type algo: str
+    """
+    loader = _RENDER_LOADERS.get(algo.upper())
+    if loader is None:
+        logger.warning(
+            "Rendering not supported for algorithm '%s'; skipping %s.", algo, env_name
+        )
+        return
+
+    # MPE renders via pygame/SDL. On a display-less Linux host SDL aborts unless a
+    # driver is set; the dummy driver still produces rgb_array frames. macOS renders
+    # directly. Set before the first mpe2/pygame import in this process.
+    import os
+    import platform
+
+    if platform.system() != "Darwin" and not os.environ.get("DISPLAY"):
+        os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+
+    try:
+        import imageio
+        from mpe_adapter import make_mpe_parallel_env
+
+        agent = loader(str(elite_path), device=device)
+        agent.set_training_mode(False)
+
+        # Same construction as training (registry config), plus rgb_array rendering.
+        render_env = make_mpe_parallel_env(
+            render_mode="rgb_array", **MPE_ENV_CONFIGS[env_name]
+        )
+
+        frames: list[np.ndarray] = []
+        steps = 0
+        # A few episodes for a watchable clip (MPE episodes are short, ~max_cycles).
+        for episode in range(MAX_RENDER_EPISODES):
+            obs, info = render_env.reset(seed=seed + episode)
+            while render_env.agents and steps < MAX_RENDER_STEPS:
+                frame = render_env.render()
+                if frame is not None:
+                    frames.append(frame)
+                # Greedy per-agent actions; squeeze the (non-vectorized) batch dim and
+                # cast discrete actions to int (mirrors IPPO.test's non-vectorized path).
+                action, _, _, _ = agent.get_action(obs=obs, infos=info)
+                action = {
+                    a: int(np.asarray(act).reshape(-1)[0]) for a, act in action.items()
+                }
+                obs, _, term, trunc, info = render_env.step(action)
+                steps += 1
+        render_env.close()
+
+        if frames:
+            imageio.mimsave(str(out_path), frames, fps=15)
             logger.info("Saved render: %s (%d frames)", out_path, len(frames))
     except Exception as exc:
         logger.exception("Rendering failed for %s: %s", env_name, exc)
@@ -793,6 +1028,7 @@ def plot_seed_aggregates(
     curves: dict[str, list[tuple[np.ndarray, np.ndarray, np.ndarray]]],
     bench_dir: Path,
     algo_label: str,
+    suite_name: str,
 ) -> None:
     """Draw per-env over-seeds plots and the cross-env aggregate from seed curves.
 
@@ -805,6 +1041,8 @@ def plot_seed_aggregates(
         normalized_fitness)``, one entry per finished seed.
     :param bench_dir: Benchmark output directory (plots are written under it).
     :param algo_label: Display label for the algorithm + HPO method.
+    :param suite_name: Human-readable environment-suite name (aggregate and
+        performance-profile titles).
     """
     env_curves: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     for env_name, seed_curves in curves.items():
@@ -826,11 +1064,13 @@ def plot_seed_aggregates(
         env_curves,
         str(bench_dir / "aggregate_normalized_fitness.png"),
         algo_label=algo_label,
+        suite_name=suite_name,
     )
     plotting.plot_performance_profile(
         env_curves,
         str(bench_dir / "performance_profile.png"),
         algo_label=algo_label,
+        suite_name=suite_name,
     )
     logger.info("Saved aggregate plot across %d environments.", len(env_curves))
 
@@ -1007,18 +1247,48 @@ def run_training(
     # BrokenPipeError that would otherwise fail this run after logging succeeds.
     _silence_wandb_service_teardown()
 
+    multi_agent = is_multi_agent_algo(algo)
+
     manifest = copy.deepcopy(base_manifest)
     manifest["environment"]["name"] = env_name
     pop_size = int(manifest.get("training", {}).get("pop_size", 1) or 1)
 
-    # Fresh, reproducible agent. EnvPool is seeded at creation; do not call
-    # env.reset(seed=...) afterwards.
+    # Multi-agent (IPPO): the env is built from the manifest's PzEnvSpec via a custom
+    # adapter entrypoint (e.g. mpe_adapter), so point its `config` at the selected task
+    # (env_config resolves the per-env factory kwargs from the registry) and make the
+    # adapter importable from the spawned vec-env subprocesses (which do not inherit
+    # this process's sys.path) by pinning `path` to this benchmarking dir.
+    if multi_agent:
+        env_cfg = manifest["environment"]
+        env_cfg.setdefault("config", {})
+        env_cfg["config"].update(env_config(algo, env_name))
+        if not env_cfg.get("path"):
+            env_cfg["path"] = str(SCRIPT_DIR)
+
+    # Fresh, reproducible agent. On the single-agent path EnvPool is seeded at
+    # creation (do not call env.reset(seed=...) afterwards); on the multi-agent path
+    # the loop seeds the env at its first reset.
     seed_everything(seed)
-    num_envs = int(manifest.get("environment", {}).get("num_envs", 1) or 1)
-    envpool_env = _make_envpool_env(env_name, num_envs, seed)
-    trainer = _EnvPoolLocalTrainer.from_manifest_with_env(
-        manifest, envpool_env, device=device
-    )
+    trainer = _build_trainer(manifest, env_name, algo, seed, device)
+
+    # Observation normalization (PPO only). "ReLU to the Rescue" (Jesson et al.,
+    # 2024) normalizes observations to zero mean / unit variance -- in AgileRL
+    # this is the RSNorm agent wrapper, which keeps running mean/std statistics and
+    # normalizes the observation before both action selection and learning (its
+    # learn() has a dedicated PPO branch that normalizes the rollout buffer; the
+    # stale "off-policy only" warning in its docstring no longer holds). The
+    # wrapper is applied here, before trainer.train(), so the statistics are
+    # learned online over the course of training; constructing it rewires each
+    # agent's get_action/learn in place, and we also replace the population entries
+    # so the elite that gets checkpointed (and reloaded for rendering) carries its
+    # obs_rms stats -- PPO.load reconstructs the wrapper from the checkpoint, so the
+    # rendered/evaluated agent normalizes with the exact statistics it trained with.
+    #
+    # Restricted to PPO/MuJoCo: this is the continuous-control recipe from the
+    # paper. DQN/Atari observations are uint8 image stacks (handled by the CNN's
+    # own /255 scaling), so running-mean/std normalization is not applied there.
+    if algo.upper() == "PPO":
+        trainer.population = [RSNorm(agent) for agent in trainer.population]
 
     elite_path = out_dir / elite_filename(algo)
     log_path = out_dir / LOG_FILENAME
@@ -1064,10 +1334,9 @@ def run_training(
     best_agent.save_checkpoint(str(elite_path))
     logger.info("Saved best agent: %s", elite_path)
 
-    try:
-        hp_names = list(best_agent.registry.hp_config.names())
-    except Exception:
-        hp_names = None
+    # The mutation-schedule plot charts exactly the hyperparameters the YAML
+    # allows to be mutated (the mutation.rl_hp_selection keys).
+    hp_names = mutable_hp_names(manifest)
 
     # Close the (async) training env before spinning up a render env.
     try:
@@ -1075,9 +1344,13 @@ def run_training(
     except Exception:
         pass
 
+    # Render the best agent. The render path is split by suite: single-agent
+    # (PPO/MuJoCo, DQN/Atari) plays a Gymnasium env, while multi-agent (IPPO/MPE)
+    # plays a single non-vectorized PettingZoo env (render_best_multi_agent).
     render_path = out_dir / RENDER_FILENAME
     if render:
-        render_best_agent(elite_path, env_name, seed, device, render_path, algo)
+        render_fn = render_best_multi_agent if multi_agent else render_best_agent
+        render_fn(elite_path, env_name, seed, device, render_path, algo)
 
     # Upload the offline run (full history + summary + console) to W&B as a
     # synchronous, retried transfer. After this the run exists on the server with
@@ -1243,7 +1516,12 @@ def main(argv: list[str] | None = None) -> None:
                 )
 
     if curves:
-        plot_seed_aggregates(curves, bench_dir, f"{algo.upper()} ({base_name})")
+        plot_seed_aggregates(
+            curves,
+            bench_dir,
+            f"{algo.upper()} ({base_name})",
+            env_suite_name(algo),
+        )
     else:
         logger.warning("No environment produced plottable data.")
 

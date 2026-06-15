@@ -1,0 +1,100 @@
+---
+# PPO with HPO (population of 4, elitism, typical mutation probabilities).
+#
+# Base hyperparameters from "ReLU to the Rescue: Improve Your On-Policy Actor-Critic
+# with Positive Advantages" (Jesson et al., 2024), Table 3, Appendix D.1 -- the
+# PPO column for Gymnasium MuJoCo (CleanRL implementation).
+#
+# HPO additions over ppo_relu_no_hpo.yaml:
+#   pop_size = 4, elitism = true, tournament_size = 2
+#   mutation probabilities follow common AgileRL MLP/MuJoCo practice
+#   rl_hp_selection ranges are centred on the paper's base values
+
+algorithm:
+    name: PPO
+    batch_size: 1024
+    lr: 0.0003
+    learn_step: 32768
+    gamma: 0.99
+    gae_lambda: 0.95
+    action_std_init: 0.0
+    clip_coef: 0.2
+    ent_coef: 0.0
+    vf_coef: 0.5
+    max_grad_norm: 0.5
+    target_kl:
+    update_epochs: 10
+    share_encoders: false
+
+environment:
+    name: Ant-v4
+    num_envs: 16
+
+mutation:
+    probabilities:
+        no_mut: 0.4
+        arch_mut: 0.2
+        new_layer: 0.2
+        params_mut: 0.2
+        act_mut: 0.0
+        rl_hp_mut: 0.2
+    rl_hp_selection:
+        lr:
+            min: 0.00005
+            max: 0.001
+        batch_size:
+            min: 64
+            max: 2048
+        learn_step:
+            min: 4096
+            max: 65536
+        ent_coef:
+            min: 0.0
+            max: 0.05
+        update_epochs:
+            min: 4
+            max: 20
+        # gamma is a discount factor near 1.0, so the default multiplicative
+        # factors (1.2 / 0.8) are far too coarse. These gentle factors move
+        # gamma by ~+-0.005 per mutation (0.99 -> ~0.995 / ~0.985).
+        gamma:
+            min: 0.9
+            max: 0.999
+            grow_factor: 1.005
+            shrink_factor: 0.995
+    mutation_sd: 0.1
+    rand_seed: 42
+
+network:
+    latent_dim: 64
+    max_latent_dim: 256
+    arch: mlp
+    encoder_config:
+        hidden_size:
+            - 64
+        activation: Tanh
+        min_mlp_nodes: 64
+        max_mlp_nodes: 256
+        layer_norm: false
+    head_config:
+        hidden_size:
+            - 64
+        activation: Tanh
+        min_hidden_layers: 1
+        max_hidden_layers: 3
+        min_mlp_nodes: 64
+        max_mlp_nodes: 256
+        output_vanish: true
+        layer_norm: false
+
+tournament_selection:
+    tournament_size: 2
+    elitism: true
+
+training:
+    max_steps: 6_000_000
+    target_score:
+    pop_size: 4
+    evo_steps: 131072
+    eval_steps:
+    eval_loop: 1
