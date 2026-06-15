@@ -16,6 +16,7 @@ operate on plain module trees and are covered with fakes as well.
 
 from __future__ import annotations
 
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -1258,3 +1259,184 @@ class TestVllmConfigWeightSharingDeprecated:
                 quantization="bitsandbytes", sleep_mode=True, weight_sharing=False
             )
         assert not any("reload" in str(x.message) for x in rec)
+
+
+def _install_fake_cumem(monkeypatch):
+    """Install fake ``vllm.device_allocator.cumem`` / ``vllm.utils`` modules.
+
+    Lets ``patch_vllm_standby_sleep_mode`` run end-to-end on any host: the
+    patched ``sleep``/``wake_up`` drive a fake allocator whose map/unmap/memcpy
+    calls are recorded instead of hitting the CUDA driver.
+    """
+    import types as _types
+
+    calls = {"mapped": [], "unmapped": [], "copies": []}
+
+    class FakeCuMemAllocator:
+        default_tag = "kv"
+
+        def __init__(self):
+            self.pointer_to_data = {}
+
+    cumem = _types.ModuleType("vllm.device_allocator.cumem")
+    cumem.CuMemAllocator = FakeCuMemAllocator
+    cumem.create_and_map = calls["mapped"].append
+    cumem.unmap_and_release = calls["unmapped"].append
+    cumem.libcudart = SimpleNamespace(
+        cudaMemcpy=lambda dst, src, n: calls["copies"].append(n)
+    )
+    utils_mod = _types.ModuleType("vllm.utils")
+    utils_mod.is_pin_memory_available = lambda: False
+    pkg = _types.ModuleType("vllm")
+    alloc_pkg = _types.ModuleType("vllm.device_allocator")
+    monkeypatch.setitem(sys.modules, "vllm", pkg)
+    monkeypatch.setitem(sys.modules, "vllm.device_allocator", alloc_pkg)
+    monkeypatch.setitem(sys.modules, "vllm.device_allocator.cumem", cumem)
+    monkeypatch.setitem(sys.modules, "vllm.utils", utils_mod)
+    return FakeCuMemAllocator, calls
+
+
+class _FakeAllocData:
+    def __init__(self, tag, handle):
+        self.tag = tag
+        self.handle = handle
+        self.cpu_backup_tensor = None
+
+
+class TestStandbySleepMode:
+    def test_patch_sleeps_and_wakes_keeping_weights_resident(self, monkeypatch):
+        allocator_cls, calls = _install_fake_cumem(monkeypatch)
+        patch_vllm_standby_sleep_mode()
+        assert allocator_cls._agilerl_standby_patched
+
+        alloc = allocator_cls()
+        alloc.pointer_to_data = {
+            1: _FakeAllocData("weights", ("hw", 0)),
+            2: _FakeAllocData("kv", ("hkv", 64)),
+        }
+        alloc.sleep()
+        # Weights never unmapped; the KV allocation is backed up then released.
+        assert calls["unmapped"] == [("hkv", 64)]
+        kv = alloc.pointer_to_data[2]
+        assert kv.cpu_backup_tensor is not None
+        assert kv.cpu_backup_tensor.numel() == 64
+        assert calls["copies"] == [64]
+
+        alloc.wake_up()
+        assert calls["mapped"] == [("hkv", 64)]
+        assert calls["copies"] == [64, 64]  # restore memcpy
+        assert kv.cpu_backup_tensor is None
+
+    def test_patch_is_idempotent(self, monkeypatch):
+        allocator_cls, _ = _install_fake_cumem(monkeypatch)
+        patch_vllm_standby_sleep_mode()
+        first_sleep = allocator_cls.sleep
+        patch_vllm_standby_sleep_mode()
+        assert allocator_cls.sleep is first_sleep
+
+    def test_no_vllm_is_a_noop(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "vllm", None)
+        monkeypatch.setitem(sys.modules, "vllm.device_allocator", None)
+        monkeypatch.setitem(sys.modules, "vllm.device_allocator.cumem", None)
+        patch_vllm_standby_sleep_mode()  # must not raise
+
+    def test_expandable_segments_is_rejected(self, monkeypatch):
+        _install_fake_cumem(monkeypatch)
+        monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+        with pytest.raises(RuntimeError, match="expandable_segments"):
+            patch_vllm_standby_sleep_mode()
+
+    def test_pin_memory_probe_falls_back(self, monkeypatch):
+        # Both pin-memory util locations unimportable -> inner fallback (False).
+        allocator_cls, calls = _install_fake_cumem(monkeypatch)
+        monkeypatch.setitem(sys.modules, "vllm.utils", None)
+        monkeypatch.setitem(sys.modules, "vllm.utils.platform_utils", None)
+        patch_vllm_standby_sleep_mode()
+        alloc = allocator_cls()
+        alloc.pointer_to_data = {2: _FakeAllocData("kv", ("hkv", 8))}
+        alloc.sleep()
+        assert alloc.pointer_to_data[2].cpu_backup_tensor is not None
+
+    def test_sleep_string_tag_and_discard_path(self, monkeypatch):
+        allocator_cls, calls = _install_fake_cumem(monkeypatch)
+        patch_vllm_standby_sleep_mode()
+        alloc = allocator_cls()
+        alloc.pointer_to_data = {
+            2: _FakeAllocData("kv", ("hkv", 8)),
+            3: _FakeAllocData("scratch", ("hsc", 4)),
+        }
+        # String offload tag is normalized; "scratch" is NOT in the offload
+        # tags so it is released without a CPU backup (discard path).
+        alloc.sleep(offload_tags="kv")
+        assert alloc.pointer_to_data[2].cpu_backup_tensor is not None
+        assert alloc.pointer_to_data[3].cpu_backup_tensor is None
+        assert set(calls["unmapped"]) == {("hkv", 8), ("hsc", 4)}
+        # Wake with a tag filter only remaps the matching allocation.
+        alloc.wake_up(tags=("kv",))
+        assert calls["mapped"] == [("hkv", 8)]
+
+
+class _FakeQuantLlamaVllmInternal(nn.Module):
+    """Quantized variant of :class:`_FakeLlamaVllmInternal`: every projection
+    carries bnb-style shard offsets + per-shard quant-state stand-ins, so the
+    build's Linear4bit graft loop runs without CUDA quantization."""
+
+    packed_modules_mapping = _PACKED
+
+    def __init__(self, *, vocab=32, hidden=8, vocab_pad=4):
+        super().__init__()
+        root = nn.Module()
+        root.embed_tokens = _plain(vocab + vocab_pad, hidden)
+        layer = nn.Module()
+        attn = nn.Module()
+        attn.qkv_proj = _quant_linear(
+            [hidden, hidden // 2, hidden // 2], hidden, bias=True
+        )
+        attn.o_proj = _quant_linear([hidden], hidden, bias=True)
+        layer.self_attn = attn
+        mlp = nn.Module()
+        mlp.gate_up_proj = _quant_linear([hidden * 2, hidden * 2], hidden)
+        mlp.down_proj = _quant_linear([hidden], hidden * 2)
+        layer.mlp = mlp
+        layer.input_layernorm = _plain(hidden)
+        layer.post_attention_layernorm = _plain(hidden)
+        root.layers = nn.ModuleList([layer])
+        root.norm = _plain(hidden)
+        self.model = root
+
+
+@pytest.mark.usefixtures("cpu_shared_device")
+class TestBuildSharedHfModelQuantized:
+    def test_quant_build_grafts_shared_linear4bit(self):
+        bnb = pytest.importorskip(
+            "bitsandbytes", reason="quant graft test requires bitsandbytes."
+        )
+        internal = _FakeQuantLlamaVllmInternal()
+        llm = _wrap_llm(internal)
+        bnb_config = SimpleNamespace(
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_quant_storage="torch.uint8",
+        )
+        model = build_shared_hf_model(
+            llm,
+            _tiny_llama_config(tie=True),
+            torch.float16,
+            bnb_config,
+            attn_implementation="eager",
+        )
+        q = model.model.layers[0].self_attn.q_proj
+        assert isinstance(q, bnb.nn.Linear4bit)
+        assert isinstance(q.weight, bnb.nn.Params4bit)
+        # Zero-copy: the grafted q slice aliases the fused fake's storage.
+        fused = internal.model.layers[0].self_attn.qkv_proj.weight
+        assert q.weight.data_ptr() == fused.data_ptr()
+        # The per-shard quant-state stand-in rides along, and the fused bias
+        # (dense even on a quantized base) is split per shard.
+        assert q.weight.quant_state.shape == (8, 8)
+        assert q.bias is not None and q.bias.shape == (8,)
+        # .to is frozen so accelerate can't re-cast the shared 4-bit base.
+        assert q.to("cpu") is q
+        # QLoRA flags for PEFT's kbit prep.
+        assert model.is_loaded_in_4bit and model.is_quantized
+        assert model.quantization_method == "bitsandbytes"

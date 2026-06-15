@@ -5904,3 +5904,31 @@ class TestGRPOTurnAdvantageLearnPath:
             )
         assert np.isfinite(metrics["mean_loss"])
         grpo.clean_up()
+
+    def test_learn_liger_turn_level_falls_back_to_standard_path(self):
+        """Liger + turn-level IS has no fused kernel: learn() must warn and
+        run the standard path (turn_ids stacked into the minibatches)."""
+        with (
+            patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True),
+            patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
+            pytest.warns(UserWarning, match="NOT memory-bounded"),
+        ):
+            grpo = _make_cpu_grpo_for_branch_tests(
+                group_size=2,
+                update_epochs=1,
+                use_liger_loss=True,
+                importance_sampling_level="turn",
+                advantage_granularity="turn",
+            )
+        completion_ids, action_masks = _build_branch_experiences(batch_size=2)
+        turn_rewards = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+        turn_ids = torch.zeros(2, 9, dtype=torch.long)
+        turn_ids[:, 5:] = 1
+        p1, p2, p3 = self._stubbed_forwards(grpo)
+        with p1, p2, p3, patch.object(grpo, "_liger_loss") as mock_liger:
+            metrics = grpo.learn(
+                (completion_ids, action_masks, turn_rewards), turn_ids=turn_ids
+            )
+        mock_liger.assert_not_called()
+        assert np.isfinite(metrics["mean_loss"])
+        grpo.clean_up()
