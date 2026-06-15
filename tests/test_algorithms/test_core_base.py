@@ -4040,7 +4040,9 @@ class TestLLMSyncActorToVllm:
     def test_move_lora_to_vllm_waits_before_non_main_path_check(self, tmp_path):
         """Non-main ranks must wait for rank-0 export before dir existence check."""
         p = torch.nn.Parameter(torch.tensor([1.0]))
-        acc = _make_mock_accelerator(num_processes=2, is_main_process=False, process_index=1)
+        acc = _make_mock_accelerator(
+            num_processes=2, is_main_process=False, process_index=1
+        )
         agent = _make_llm_agent(accelerator=acc)
         peft_ref = MagicMock()
         peft_ref.parameters.return_value = [p]
