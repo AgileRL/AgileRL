@@ -16,47 +16,48 @@ from typing import Any, Literal
 
 import click
 
+from agilerl.arena.client import ArenaClient, ManifestInvoke
 from agilerl.arena.config import CommandConfig
 from agilerl.arena.exceptions import ArenaAPIError
 
 SetupKind = Literal["dockerSwarm", "helm"]
 
-_ENABLE_INVOKE: dict[str, Any] = {
+_ENABLE_INVOKE: ManifestInvoke = {
     "method": "POST",
     "path": "/api/cli/v1/on-prem/enable",
     "responseKind": "json",
     "params": [],
 }
 
-_LIST_CLASSES_INVOKE: dict[str, Any] = {
+_LIST_CLASSES_INVOKE: ManifestInvoke = {
     "method": "GET",
     "path": "/api/cli/v1/on-prem/classes/list",
     "responseKind": "json",
     "params": [],
 }
 
-_CREATE_CLASS_INVOKE: dict[str, Any] = {
+_CREATE_CLASS_INVOKE: ManifestInvoke = {
     "method": "POST",
     "path": "/api/cli/v1/on-prem/classes/create",
     "responseKind": "json",
     "params": [],
 }
 
-_BUNDLE_INVOKE: dict[str, Any] = {
+_BUNDLE_INVOKE: ManifestInvoke = {
     "method": "GET",
     "path": "/api/cli/v1/on-prem/classes/deployment-setup",
     "responseKind": "binary",
     "params": [],
 }
 
-_DELETE_CLASS_INVOKE: dict[str, Any] = {
+_DELETE_CLASS_INVOKE: ManifestInvoke = {
     "method": "DELETE",
     "path": "/api/cli/v1/on-prem/classes/delete",
     "responseKind": "json",
     "params": [],
 }
 
-_DISABLE_INVOKE: dict[str, Any] = {
+_DISABLE_INVOKE: ManifestInvoke = {
     "method": "POST",
     "path": "/api/cli/v1/on-prem/disable",
     "responseKind": "json",
@@ -88,7 +89,12 @@ def normalize_setup_type(setup_type: str) -> SetupKind:
     raise click.ClickException(msg)
 
 
-def _class_by_name(classes: Any, name: str) -> dict[str, Any] | None:
+def _class_by_name(classes: object, name: str) -> dict[str, Any] | None:
+    """Return the single resource class named *name*, or ``None`` if absent.
+
+    *classes* is the raw ``classes/list`` response, so it is typed ``object``
+    and validated to be a list here. Raises if the name is ambiguous.
+    """
     if not isinstance(classes, list):
         return None
     matches = [c for c in classes if isinstance(c, dict) and c.get("name") == name]
@@ -108,6 +114,11 @@ def _num_nodes_for_create(
     manager: str | None,
     workers: tuple[str, ...],
 ) -> int:
+    """Decide the node count when creating a class.
+
+    Prefers an existing class's ``num_nodes``, then an explicit ``--num-nodes``,
+    then a per-flavor default (1 for helm; manager + workers for dockerSwarm).
+    """
     if existing is not None:
         raw = existing.get("num_nodes")
         if isinstance(raw, int) and raw > 0:
@@ -121,11 +132,12 @@ def _num_nodes_for_create(
 
 
 def _ensure_class(
-    client: Any,
+    client: ArenaClient,
     *,
     name: str,
     num_nodes: int,
 ) -> dict[str, Any]:
+    """Return the existing resource class named *name*, creating it if needed."""
     listed = client._invoke_manifest_command(_LIST_CLASSES_INVOKE, {})
     existing = _class_by_name(listed, name)
     if existing is not None:
@@ -149,8 +161,9 @@ def _ensure_class(
 def resolve_bundle_root(extract_dir: Path) -> Path:
     """Find directory containing ``setup.sh`` after unzipping a deployment bundle.
 
-    Platform archives use root prefix ``arena-train/`` (see ``build_bundle``). Extracting
-    into a pre-created ``…/arena-train`` folder would nest ``arena-train/arena-train/``.
+    Bundles built by the Arena backend use the root prefix ``arena-train/``.
+    Extracting into a pre-created ``…/arena-train`` folder would nest
+    ``arena-train/arena-train/``.
     """
     for candidate in (extract_dir / "arena-train", extract_dir):
         if (candidate / "setup.sh").is_file():
@@ -163,12 +176,13 @@ def resolve_bundle_root(extract_dir: Path) -> Path:
 
 
 def _download_bundle(
-    client: Any,
+    client: ArenaClient,
     *,
     class_name: str,
     setup_type: SetupKind,
     dest_dir: Path,
 ) -> Path:
+    """Download and unzip the deployment bundle, returning its extracted root."""
     raw_b, _ctype, _disp = client._invoke_manifest_command(
         _BUNDLE_INVOKE,
         {
@@ -411,7 +425,7 @@ def _warn_ignored_swarm_flags(
     if ignored:
         click.echo(
             f"Note: helm install ignores {', '.join(ignored)} "
-            "(runs ./setup.sh locally; kubectl must reach your cluster).",
+            "(helm install runs locally; your kubectl context must reach the cluster).",
             err=True,
         )
 
@@ -490,7 +504,7 @@ def _run_docker_swarm_install(
 
 
 def _parse_helm_release_ids(bundle_root: Path) -> tuple[str, str]:
-    """Read ``clusterName`` from rendered chart values (same rules as ``setup.sh``)."""
+    """Read ``clusterName`` from rendered chart values (matching the bundle's setup.sh)."""
     values_file = bundle_root / "chart" / "values.yaml"
     if not values_file.is_file():
         msg = f"Helm bundle missing {values_file.name}; cannot determine release name."
@@ -599,7 +613,7 @@ def _run_docker_swarm_teardown(
         )
 
 
-def _delete_class_if_present(client: Any, name: str) -> None:
+def _delete_class_if_present(client: ArenaClient, name: str) -> None:
     listed = client._invoke_manifest_command(_LIST_CLASSES_INVOKE, {})
     if _class_by_name(listed, name) is None:
         click.echo(f"No Arena resource class {name!r}; skipping API delete.")
@@ -609,7 +623,7 @@ def _delete_class_if_present(client: Any, name: str) -> None:
 
 
 def run_on_prem_teardown(
-    client: Any,
+    client: ArenaClient,
     *,
     name: str,
     setup_type: str,
@@ -685,7 +699,7 @@ def _run_helm_install(bundle_root: Path) -> None:
 
 
 def run_on_prem_install(
-    client: Any,
+    client: ArenaClient,
     *,
     name: str,
     setup_type: str,
@@ -837,7 +851,7 @@ def build_install_command() -> click.Command:
         "--skip-enable",
         is_flag=True,
         default=False,
-        help="Skip POST /on-prem/enable when the provider is already enabled.",
+        help="Skip enabling the on-prem provider (use when it is already enabled).",
     )
     @click.option(
         "--wait-gateway-secs",
@@ -875,7 +889,7 @@ def build_install_command() -> click.Command:
         NVIDIA setup, swarm init/join, GPU node labels, and stack deploy on
         ``--manager`` and ``--workers`` via SSH.
 
-        **helm** — downloads the Helm chart bundle and runs ``./setup.sh`` on this
+        **helm** — downloads the Helm chart bundle and runs its setup on this
         machine; requires Helm 3.x and a configured ``kubectl`` context.
         """
         worker_hosts = tuple(h.strip() for h in workers.split(",") if h.strip())
@@ -959,7 +973,7 @@ def build_teardown_command() -> click.Command:
         "--disable-provider",
         is_flag=True,
         default=False,
-        help="Also POST /on-prem/disable after teardown.",
+        help="Also disable the on-prem provider after teardown.",
     )
     @click.option(
         "--leave-swarm",

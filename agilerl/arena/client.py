@@ -7,7 +7,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, TypedDict
 
 import httpx
 from typing_extensions import Self
@@ -45,6 +45,40 @@ from agilerl.utils.arena_utils import (
 logger = logging.getLogger(__name__)
 
 DATASET_CATEGORIES = frozenset({"sft", "preference", "reasoning"})
+
+
+# Functional syntax because ``in`` (a parameter's location) is a Python keyword
+# and can't be a class-statement field name.
+ManifestParamSpec = TypedDict(
+    "ManifestParamSpec",
+    {
+        "name": str,
+        "in": str,  # "query" | "body" | "client"
+        "type": str,  # "string" | "int" | "bool" | "json"
+        "required": bool,
+        "help": str,
+        "click": dict[str, Any],
+    },
+    total=False,
+)
+"""One on-prem command parameter as described by the server manifest.
+
+The server is the source of truth for these specs, so every field is optional
+here; the CLI validates required keys at runtime.
+"""
+
+
+class ManifestInvoke(TypedDict, total=False):
+    """The fixed call descriptor for an on-prem command (method, path, params).
+
+    Used both for the hardcoded invokes in ``cli_on_prem_install`` and for
+    command nodes parsed from the server capabilities manifest.
+    """
+
+    method: str
+    path: str
+    responseKind: str  # "json" | "binary"
+    params: list[ManifestParamSpec]
 
 
 @dataclass(slots=True)
@@ -1706,19 +1740,26 @@ class ArenaClient:
         return data
 
     def _validate_manifest_invoke(
-        self, invoke: Mapping[str, Any]
+        self, invoke: ManifestInvoke
     ) -> tuple[str, str, str, list[dict[str, Any]]]:
+        """Check an invoke descriptor and return ``(path, method, responseKind, params)``.
+
+        Guards against unsupported methods/paths so a malformed or untrusted
+        server manifest can't drive the client to an unexpected endpoint.
+        """
         path = invoke["path"]
         if not isinstance(path, str):
-            msg = "Manifest path must be a string."
+            msg = "The Arena server sent an invalid on-prem command."
             raise ArenaValidationError(
-                msg, cli_hint="Upgrade agilerl — malformed manifest."
+                msg,
+                cli_hint="Upgrade agilerl — the server sent an on-prem "
+                "configuration this version can't use.",
             )
         if not path.startswith(self._MANIFEST_ALLOWED_PATH_PREFIX):
-            msg = "Manifest command path is not allowlisted for this client."
+            msg = "This on-prem command isn't permitted by the CLI."
             raise ArenaValidationError(msg)
         if ".." in path.split("/"):
-            msg = "Invalid manifest path."
+            msg = "The Arena server sent an invalid on-prem command path."
             raise ArenaValidationError(msg)
 
         method = str(invoke["method"]).upper()
@@ -1754,6 +1795,11 @@ class ArenaClient:
         params_list: list[dict[str, Any]],
         parsed_args: Mapping[str, Any],
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """Split parsed CLI args into ``(query, body)`` per each param's ``in``.
+
+        Returns the query dict and the JSON body (``None`` when the command
+        takes no body). Raises if a required argument is missing.
+        """
         query: dict[str, Any] = {}
         body_obj: dict[str, Any] | None = None
 
@@ -1766,14 +1812,14 @@ class ArenaClient:
             required = bool(spec["required"])
             if key not in parsed_args:
                 if required:
-                    msg = f"Missing required manifest argument {key!r}."
+                    msg = f"Missing required argument {key!r}."
                     raise ArenaValidationError(msg)
                 continue
 
             val = parsed_args[key]
             if val is None:
                 if required:
-                    msg = f"Missing required manifest argument {key!r}."
+                    msg = f"Missing required argument {key!r}."
                     raise ArenaValidationError(msg)
                 continue
 
@@ -1800,10 +1846,15 @@ class ArenaClient:
 
     def _invoke_manifest_command(
         self,
-        invoke: Mapping[str, Any],
+        invoke: ManifestInvoke,
         parsed_args: Mapping[str, Any],
     ) -> Any:
-        """Dispatch a manifest invoke dict using already-parsed CLI kwargs."""
+        """Dispatch an on-prem command using already-parsed CLI kwargs.
+
+        Returns decoded JSON for ``responseKind == "json"`` invokes, or a
+        ``(bytes, content_type, content_disposition)`` tuple for ``"binary"``
+        ones (e.g. bundle downloads); hence the dynamic ``Any`` return.
+        """
         path, method, response_kind, params_list = self._validate_manifest_invoke(
             invoke
         )

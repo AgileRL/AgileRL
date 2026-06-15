@@ -12,6 +12,7 @@ from typing import Any
 
 import click
 
+from agilerl.arena.client import ManifestInvoke, ManifestParamSpec
 from agilerl.arena.config import (
     CommandConfig,
     _resolve_root_command_config,
@@ -135,7 +136,12 @@ def write_binary_atomic(dest: Path, data: bytes, *, force: bool = False) -> None
                 pass
 
 
-def _manifest_spec_to_click_option(spec: dict[str, Any]) -> Callable[[Any], Any]:
+def _manifest_spec_to_click_option(spec: ManifestParamSpec) -> Callable[[Any], Any]:
+    """Build the ``click.option`` decorator for a single manifest param spec.
+
+    Maps the manifest ``type``/``in`` to a Click option (flags for client-side
+    bools, ``--x/--no-x`` pairs for optional body bools, typed options otherwise).
+    """
     py_name = pythonize_manifest_param_name(spec["name"])
     opts = tuple(spec["click"]["option"])
     help_txt = spec.get("help") or ""
@@ -144,8 +150,12 @@ def _manifest_spec_to_click_option(spec: dict[str, Any]) -> Callable[[Any], Any]
     typ = spec["type"]
 
     if typ not in {"string", "int", "bool", "json"}:
-        msg = f"Unsupported manifest param type {typ!r}"
-        raise ArenaValidationError(msg, cli_hint="Upgrade the agilerl package.")
+        msg = f"Unsupported on-prem option type {typ!r}"
+        raise ArenaValidationError(
+            msg,
+            cli_hint="Upgrade agilerl — the server sent an on-prem "
+            "configuration this version can't use.",
+        )
 
     if in_ == "client" and typ == "bool":
         return click.option(
@@ -198,8 +208,15 @@ def _parse_json_cli_value(raw: str) -> Any:
 def build_manifest_click_command(
     name: str,
     help_txt: str | None,
-    invoke: dict[str, Any],
+    invoke: ManifestInvoke,
 ) -> click.Command:
+    """Turn one manifest command node into a runnable :class:`click.Command`.
+
+    Adds a Click option per declared param, wires a callback that calls the
+    server via :meth:`ArenaClient._invoke_manifest_command` (writing binary
+    responses to ``--output-path`` or echoing JSON), and attaches a
+    non-eager ``--help`` so connection flags parse first.
+    """
     param_specs = list(invoke.get("params") or [])
 
     def callback(config: CommandConfig, **kw: Any) -> None:
@@ -265,6 +282,11 @@ def build_manifest_click_command(
 
 
 def attach_manifest_tree(group: click.Group, node: dict[str, Any]) -> None:
+    """Recursively attach manifest ``group``/``command`` children onto *group*.
+
+    Nested groups recurse; command nodes become commands via
+    :func:`build_manifest_click_command`; unknown node types are skipped.
+    """
     for child in node.get("children") or []:
         typ = child.get("type")
         if typ == "group":

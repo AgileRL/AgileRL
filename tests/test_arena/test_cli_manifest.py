@@ -11,7 +11,9 @@ from click.testing import CliRunner
 
 from agilerl.arena.cli_manifest import (
     ArenaRootGroup,
+    _manifest_spec_to_click_option,
     build_manifest_click_command,
+    capabilities_show_on_prem_root,
     caps_allow_on_prem_at_root,
     pythonize_manifest_param_name,
     register_on_prem_manifest_group,
@@ -65,6 +67,29 @@ class TestCapsAllowOnPremAtRoot:
                 "cli": {"manifestSchemaVersion": 1, "root": {}},
             },
         )
+
+
+class TestCapabilitiesShowOnPremRoot:
+    @pytest.mark.parametrize(
+        ("caps", "expected"),
+        [
+            (None, None),  # capabilities unavailable
+            ({"enterprise": True}, True),
+            ({"enterprise": False, "features": {"onPremCli": False}}, False),
+        ],
+    )
+    def test_resolves_visibility_and_closes_client(
+        self, caps: dict[str, object] | None, expected: bool | None
+    ) -> None:
+        client_mock = MagicMock(spec=ArenaClient)
+        client_mock._get_cli_capabilities.return_value = caps
+        with patch(
+            "agilerl.arena.cli_manifest.build_client",
+            return_value=client_mock,
+        ):
+            result = capabilities_show_on_prem_root(_command_config())
+        assert result is expected
+        client_mock.close.assert_called_once()
 
 
 class TestPythonizeManifestParamName:
@@ -237,6 +262,19 @@ class TestWriteBinaryAtomic:
         dest = tmp_path / "out.bin"
         write_binary_atomic(dest, b"abc", force=False)
         assert dest.read_bytes() == b"abc"
+
+    def test_refuses_existing_without_force(self, tmp_path: Path) -> None:
+        dest = tmp_path / "out.bin"
+        dest.write_bytes(b"old")
+        with pytest.raises(click.ClickException, match="Refusing to overwrite"):
+            write_binary_atomic(dest, b"new", force=False)
+        assert dest.read_bytes() == b"old"
+
+    def test_force_overwrites(self, tmp_path: Path) -> None:
+        dest = tmp_path / "out.bin"
+        dest.write_bytes(b"old")
+        write_binary_atomic(dest, b"new", force=True)
+        assert dest.read_bytes() == b"new"
 
 
 class TestRegisterOnPremManifestGroup:
@@ -632,3 +670,272 @@ class TestOnPremInstall:
         ]
         assert len(delete_call) == 1
         assert delete_call[0][0][1] == {"name": "k8s-pool"}
+
+
+def _param_spec(
+    name: str = "x",
+    *,
+    in_: str = "query",
+    type_: str = "string",
+    required: bool = False,
+    option: list[str] | None = None,
+) -> dict[str, object]:
+    """Build a manifest param spec for option/partition tests."""
+    return {
+        "name": name,
+        "in": in_,
+        "type": type_,
+        "required": required,
+        "help": "h",
+        "click": {"option": option or [f"--{name}"]},
+    }
+
+
+class TestManifestSpecToClickOption:
+    @staticmethod
+    def _option(spec: dict[str, object]) -> click.Option:
+        decorator = _manifest_spec_to_click_option(spec)  # type: ignore[arg-type]
+
+        @decorator
+        def f(**_kw: object) -> None: ...
+
+        return f.__click_params__[0]  # type: ignore[attr-defined,no-any-return]
+
+    @pytest.mark.parametrize(
+        ("spec", "type_name"),
+        [
+            (_param_spec("count", type_="int"), "integer"),
+            (_param_spec("body", type_="json"), "text"),
+            (_param_spec("name", type_="string"), "text"),
+        ],
+    )
+    def test_scalar_types_map_to_click_types(
+        self, spec: dict[str, object], type_name: str
+    ) -> None:
+        assert self._option(spec).type.name == type_name
+
+    def test_client_bool_becomes_flag(self) -> None:
+        opt = self._option(_param_spec("verbose", in_="client", type_="bool"))
+        assert opt.is_flag is True
+
+    def test_optional_body_bool_becomes_toggle_pair(self) -> None:
+        opt = self._option(_param_spec("enabled", in_="body", type_="bool"))
+        assert opt.is_bool_flag is True
+        assert any("--no-enabled" in s for s in opt.secondary_opts)
+
+    def test_required_is_propagated(self) -> None:
+        assert self._option(_param_spec("name", required=True)).required is True
+
+    def test_unsupported_type_raises(self) -> None:
+        with pytest.raises(ArenaValidationError):
+            _manifest_spec_to_click_option(_param_spec("x", type_="float"))  # type: ignore[arg-type]
+
+
+class TestPartitionManifestArgs:
+    def test_splits_query_and_body(self, api_key_client: ArenaClient) -> None:
+        query, body = api_key_client._partition_manifest_args(
+            method="POST",
+            params_list=[
+                _param_spec("a", in_="query", required=True),
+                _param_spec("b", in_="body", required=True),
+            ],
+            parsed_args={"a": "x", "b": "y"},
+        )
+        assert query == {"a": "x"}
+        assert body == {"b": "y"}
+
+    def test_client_params_are_not_sent(self, api_key_client: ArenaClient) -> None:
+        query, body = api_key_client._partition_manifest_args(
+            method="POST",
+            params_list=[_param_spec("v", in_="client", type_="bool")],
+            parsed_args={"v": True},
+        )
+        assert query == {}
+        assert body is None
+
+    def test_missing_required_raises(self, api_key_client: ArenaClient) -> None:
+        with pytest.raises(ArenaValidationError, match="Missing required"):
+            api_key_client._partition_manifest_args(
+                method="POST",
+                params_list=[_param_spec("a", in_="query", required=True)],
+                parsed_args={},
+            )
+
+    @pytest.mark.parametrize(
+        ("method", "expected_query", "expected_body"),
+        [
+            ("GET", {"name": "p"}, None),
+            ("POST", {}, {"name": "p"}),
+        ],
+    )
+    def test_paramless_invoke_routed_by_method(
+        self,
+        api_key_client: ArenaClient,
+        method: str,
+        expected_query: dict[str, object],
+        expected_body: dict[str, object] | None,
+    ) -> None:
+        query, body = api_key_client._partition_manifest_args(
+            method=method,
+            params_list=[],
+            parsed_args={"name": "p"},
+        )
+        assert query == expected_query
+        assert body == expected_body
+
+
+class TestValidateManifestInvokeErrors:
+    @pytest.mark.parametrize(
+        "invoke",
+        [
+            {
+                "method": "OPTIONS",
+                "path": "/api/cli/v1/on-prem/x",
+                "responseKind": "json",
+            },
+            {"method": "GET", "path": "/api/cli/v1/on-prem/x", "responseKind": "text"},
+            {"method": "GET", "path": "/api/evil", "responseKind": "json"},
+            {
+                "method": "GET",
+                "path": "/api/cli/v1/on-prem/../x",
+                "responseKind": "json",
+            },
+            {
+                "method": "GET",
+                "path": "/api/cli/v1/on-prem/x",
+                "responseKind": "json",
+                "params": [{"name": "p", "in": "header", "type": "string"}],
+            },
+            {
+                "method": "GET",
+                "path": "/api/cli/v1/on-prem/x",
+                "responseKind": "json",
+                "params": [{"name": "p", "in": "query", "type": "float"}],
+            },
+        ],
+    )
+    def test_rejects_malformed_invoke(
+        self, api_key_client: ArenaClient, invoke: dict[str, object]
+    ) -> None:
+        with pytest.raises(ArenaValidationError):
+            api_key_client._validate_manifest_invoke(invoke)  # type: ignore[arg-type]
+
+
+class TestManifestCommandCallback:
+    def test_json_command_forwards_parsed_args(self) -> None:
+        invoke = {
+            "method": "POST",
+            "path": "/api/cli/v1/on-prem/classes/create",
+            "responseKind": "json",
+            "params": [_param_spec("name", in_="body", required=True)],
+        }
+        cmd = build_manifest_click_command("create", "help", invoke)
+        client = MagicMock(spec=ArenaClient)
+        client._invoke_manifest_command.return_value = {"id": 1}
+        ctx_mgr = MagicMock()
+        ctx_mgr.__enter__.return_value = client
+        ctx_mgr.__exit__.return_value = False
+
+        with patch("agilerl.arena.cli.arena_client", return_value=ctx_mgr):
+            result = CliRunner().invoke(cmd, ["--name", "pool"], obj=_command_config())
+
+        assert result.exit_code == 0
+        client._invoke_manifest_command.assert_called_once()
+        _invoke, parsed = client._invoke_manifest_command.call_args.args
+        assert parsed == {"name": "pool"}
+
+    def test_binary_command_writes_output_file(self, tmp_path: Path) -> None:
+        dest = tmp_path / "bundle.zip"
+        invoke = {
+            "method": "GET",
+            "path": "/api/cli/v1/on-prem/classes/deployment-setup",
+            "responseKind": "binary",
+            "params": [
+                _param_spec("name", in_="query", required=True),
+                _param_spec("outputPath", in_="client", option=["--output-path"]),
+            ],
+        }
+        cmd = build_manifest_click_command("download", "help", invoke)
+        client = MagicMock(spec=ArenaClient)
+        client._invoke_manifest_command.return_value = (
+            b"data",
+            "application/zip",
+            None,
+        )
+        ctx_mgr = MagicMock()
+        ctx_mgr.__enter__.return_value = client
+        ctx_mgr.__exit__.return_value = False
+
+        with patch("agilerl.arena.cli.arena_client", return_value=ctx_mgr):
+            result = CliRunner().invoke(
+                cmd,
+                ["--name", "pool", "--output-path", str(dest)],
+                obj=_command_config(),
+            )
+
+        assert result.exit_code == 0
+        assert dest.read_bytes() == b"data"
+
+
+def _invoke_on_prem_notice(caps: dict[str, object] | None) -> str:
+    """Render ``arena on-prem help`` for a given capabilities payload."""
+
+    @click.group()
+    def root() -> None:
+        """root"""
+
+    register_on_prem_manifest_group(root)
+    client_mock = MagicMock(spec=ArenaClient)
+    client_mock._get_cli_capabilities.return_value = caps
+
+    with patch(
+        "agilerl.arena.cli_manifest.build_client",
+        return_value=client_mock,
+    ):
+        result = CliRunner().invoke(root, ["on-prem", "help"], obj=_command_config())
+    assert result.exit_code == 0
+    return result.output
+
+
+class TestOnPremDynamicNotices:
+    @pytest.mark.parametrize(
+        ("caps", "expected"),
+        [
+            (None, "not available from this Arena server"),
+            ({"schemaVersion": 999}, "does not support on-prem CLI"),
+            (
+                {
+                    "schemaVersion": 1,
+                    "enterprise": False,
+                    "features": {"onPremCli": False},
+                },
+                "not enabled for your account",
+            ),
+            (
+                {"schemaVersion": 1, "enterprise": True, "cli": None},
+                "temporarily unavailable",
+            ),
+            (
+                {
+                    "schemaVersion": 1,
+                    "enterprise": True,
+                    "cli": {"manifestSchemaVersion": 1},
+                },
+                "too old",
+            ),
+            (
+                {
+                    "schemaVersion": 1,
+                    "enterprise": True,
+                    "cli": {"manifestSchemaVersion": 2},
+                },
+                "configuration from Arena is invalid",
+            ),
+        ],
+    )
+    def test_unavailable_capabilities_show_friendly_notice(
+        self, caps: dict[str, object] | None, expected: str
+    ) -> None:
+        output = _invoke_on_prem_notice(caps)
+        assert expected in output
+        assert "/api/" not in output  # no backend endpoints leak to users
