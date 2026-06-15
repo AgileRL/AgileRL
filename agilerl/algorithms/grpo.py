@@ -154,7 +154,13 @@ class GRPO(LLMAlgorithm):
         uses DAPO-style batch normalisation for ``'cispo'`` rather than
         the per-sequence-then-batch normalisation of the standard path;
         numerical values will differ slightly but gradient direction is
-        equivalent.
+        equivalent. The benefit over the (already memory-bounded)
+        fused-linear-logprob standard path is scale-dependent: at small token
+        counts it is slower and uses more memory; the fused kernel caps
+        per-chunk memory, so it only pays off at large token counts (long
+        sequences / large batch). Liger model patches (fused RMSNorm/RoPE/
+        SwiGLU) are applied whenever ``liger-kernel`` is installed and are
+        independent of this flag.
     :type use_liger_loss: bool, optional
     :param use_kl_advantage_shaping: Apply KL-based shaping directly to token
         advantages before PPO clipping, defaults to False.
@@ -1278,21 +1284,12 @@ class GRPO(LLMAlgorithm):
     def _use_liger_path(self, sampling_log_probs: torch.Tensor | None) -> bool:
         """Whether this minibatch can run the fused Liger kernel.
 
-        Warns (once) per fallback reason; fallbacks run on the standard path,
-        which is always memory-bounded via the fused-linear-logprob path.
+        The vLLM sampling-mismatch correction is fused into the kernel at
+        token-level IS (via ``vllm_is_ratio``); at turn/trajectory level the
+        per-token reweight can't be pooled into the surrogate, so the correction
+        falls back to the standard path. Warns (once) per fallback reason.
         """
         if not self.use_liger_loss:
-            return False
-        if sampling_log_probs is not None:
-            # The fused kernel cannot apply a per-token importance weight.
-            if not self._is_correction_liger_warned:
-                warnings.warn(
-                    "use_liger_loss=True is incompatible with the vLLM "
-                    "sampling-mismatch correction (the fused kernel cannot apply a "
-                    "per-token importance weight); using the standard PyTorch path.",
-                    stacklevel=2,
-                )
-                self._is_correction_liger_warned = True
             return False
         if not self._liger_level_supported:
             # Turn-level (and trajectory-level CISPO) pooling has no fused
@@ -1301,6 +1298,19 @@ class GRPO(LLMAlgorithm):
                 "GSPO" if self.importance_sampling_level == "trajectory" else "GRPO"
             )
             self._warn_liger_non_token_is(self.importance_sampling_level, algo_name)
+            return False
+        if sampling_log_probs is not None and self.importance_sampling_level != "token":
+            # The correction is a per-token reweight; non-token IS pools the loss
+            # before it can apply, so use the standard path there.
+            if not self._is_correction_liger_warned:
+                warnings.warn(
+                    "use_liger_loss=True fuses the vLLM sampling-mismatch "
+                    "correction only at token-level importance sampling; "
+                    f"importance_sampling_level='{self.importance_sampling_level}' "
+                    "uses the standard PyTorch path.",
+                    stacklevel=2,
+                )
+                self._is_correction_liger_warned = True
             return False
         return True
 
@@ -1327,6 +1337,7 @@ class GRPO(LLMAlgorithm):
                 advantages,
                 old_log_probs,
                 reference_log_probs,
+                sampling_log_probs=sampling_log_probs,
             )
         log_probs = self._get_logprobs(
             batch_ids,
@@ -1456,17 +1467,18 @@ class GRPO(LLMAlgorithm):
         else:
             clipped_ratio = ratio.clamp(self.clip_coef_min, self.clip_coef_max)
             loss = -torch.min(ratio * advantages, clipped_ratio * advantages)
-        if not self.use_kl_advantage_shaping:
-            loss = loss + self.beta * kl
         if sampling_log_probs is not None:
-            # Truncated IS: reweight by the detached, clamped trainer/vLLM
-            # probability ratio.
+            # Truncated IS: reweight the policy term by the detached, clamped
+            # trainer/vLLM probability ratio *before* the KL penalty, matching
+            # the fused Liger kernel so use_liger_loss is a pure perf toggle.
             with torch.no_grad():
                 mask_f = mask.to(loss.dtype)
                 is_ratio = torch.exp(
                     (old_log_probs - sampling_log_probs) * mask_f
                 ).clamp(max=self.vllm_importance_sampling_cap)
             loss = loss * is_ratio
+        if not self.use_kl_advantage_shaping:
+            loss = loss + self.beta * kl
         loss = self._reduce_masked_loss(loss, mask)
         # Average the KL metric over action tokens only — masked positions have
         # meaningless logprobs that explode the k3 estimator.
@@ -1571,6 +1583,7 @@ class GRPO(LLMAlgorithm):
         advantages: torch.Tensor,
         old_log_probs: torch.Tensor,
         reference_log_probs: torch.Tensor,
+        sampling_log_probs: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Calculate the loss using the Liger Triton-fused kernel.
 
@@ -1609,6 +1622,11 @@ class GRPO(LLMAlgorithm):
         :type old_log_probs: torch.Tensor
         :param reference_log_probs: Log probs from the reference policy (B, seq_len-1).
         :type reference_log_probs: torch.Tensor
+        :param sampling_log_probs: Optional ``(B, seq_len-1)`` vLLM sampling
+            logprobs. When present (token-level IS only), the truncated
+            importance-sampling ratio is fused into the kernel via
+            ``vllm_is_ratio``; ``None`` disables the correction.
+        :type sampling_log_probs: torch.Tensor | None
         :return: Mean loss and mean KL divergence (or clip-fraction when ``beta=0``).
         :rtype: tuple[torch.Tensor, torch.Tensor]
         """
@@ -1702,6 +1720,12 @@ class GRPO(LLMAlgorithm):
             policy_hidden = unpack_hidden_states(policy_hidden, packed)
         target_ids = batch_ids[:, 1:].contiguous()  # (B, seq_len-1)
 
+        # vLLM sampling-mismatch correction (token-level IS only): the detached,
+        # upper-clamped trainer/vLLM ratio is token-flattened to (n_tokens, 1)
+        # below and fused into the kernel. None for trajectory (GSPO), which
+        # routes the correction to the standard path via ``_use_liger_path``.
+        vllm_is_ratio_arg = None
+
         # Token-level IS: flatten (B, T, H) -> (B*T, 1, H) so the fused kernel
         # chunks over tokens, bounding each chunk's logits to
         # (chunk_tokens, vocab) — exact for token-level IS. Trajectory-level
@@ -1737,6 +1761,17 @@ class GRPO(LLMAlgorithm):
                 if reference_log_probs is not None
                 else None
             )
+            if sampling_log_probs is not None:
+                with torch.no_grad():
+                    mask_f = mask.to(old_log_probs.dtype)
+                    vllm_is_ratio_arg = (
+                        torch.exp(
+                            (old_log_probs - sampling_log_probs.to(self.device))
+                            * mask_f
+                        )
+                        .clamp(max=self.vllm_importance_sampling_cap)
+                        .reshape(n_tokens, 1)
+                    )
             chunk_size = self.liger_token_chunk_size
         else:
             # Trajectory-level (GSPO): keep the padded layout and one-sequence-per-
@@ -1773,7 +1808,7 @@ class GRPO(LLMAlgorithm):
             None,
             reference_log_probs is not None,  # use_ref_model
             chunk_size,
-            None,
+            vllm_is_ratio_arg,  # vllm_is_ratio (pos 24; liger-kernel >= 0.7.0)
         )
 
         kl = aux[0]

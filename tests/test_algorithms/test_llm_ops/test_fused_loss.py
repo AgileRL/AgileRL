@@ -269,6 +269,40 @@ class TestLlmPpoLossFn:
         # KL metric still reported.
         assert metrics[0].item() == pytest.approx(ref_m["kl"], rel=1e-6)
 
+    def test_vllm_is_ratio_identity_and_scaling(self) -> None:
+        """The fused vLLM correction multiplies the per-token policy loss:
+        a unit ratio is a no-op and a constant ratio ``c`` scales the loss by
+        ``c`` at ``beta=0`` (matching the standard path's reweight)."""
+        torch.manual_seed(3)
+        B, T, V = 2, 5, 48
+        log_probs = torch.log_softmax(torch.randn(B, T, V), dim=-1)
+        target_ids = torch.randint(0, V, (B, T))
+        mask = torch.ones(B, T, dtype=torch.float)
+        adv = torch.randn(B, T) * 0.2
+        old = torch.randn(B, T) * 0.05
+
+        def run(vllm_is_ratio):
+            loss, _ = llm_policy_loss_fn(
+                log_probs=log_probs,
+                selected_token_ids=target_ids,
+                attention_mask=mask,
+                advantages=adv,
+                full_attention_mask=mask,
+                old_per_token_logps=old,
+                epsilon_low=0.2,
+                epsilon_high=0.2,
+                beta=0.0,
+                vllm_is_ratio=vllm_is_ratio,
+            )
+            return loss
+
+        base = run(None)
+        ones = run(torch.ones(B, T))
+        c = 1.7
+        scaled = run(torch.full((B, T), c))
+        assert torch.allclose(ones, base, atol=1e-6)
+        assert torch.allclose(scaled, c * base, atol=1e-6)
+
     def test_chunk_accumulation_recovers_global_loss(self) -> None:
         """Splitting the batch and summing chunk losses must equal the
         single-shot loss — this is the invariant Liger's base class relies on

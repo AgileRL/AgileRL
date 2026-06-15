@@ -57,6 +57,7 @@ def llm_policy_loss_fn(
     full_turn_mask: torch.Tensor | None = None,
     max_turns: int | None = None,
     importance_sampling_level: str = "token",
+    vllm_is_ratio: torch.Tensor | None = None,
     # Liger's ``LigerFusedLinearPPOBase._compute_loss`` invokes the loss fn
     # with kwargs this fn does not consume (``ref_log_probs``, ``loss_type``,
     # ``max_completion_length``, ``sapo_temperature_pos``, ...), so a
@@ -118,6 +119,13 @@ def llm_policy_loss_fn(
     :param importance_sampling_level: Ratio-pooling granularity —
         ``"token"`` (default), ``"turn"`` or ``"trajectory"``.
     :type importance_sampling_level: str
+    :param vllm_is_ratio: Optional detached, upper-clamped per-token vLLM
+        sampling-mismatch ratio ``(chunk_B, T)`` (token mode only). When
+        provided, the per-token policy loss is multiplied by it *before* the KL
+        term, matching the standard PyTorch path. The per-token reweight cannot
+        be pooled into the turn/trajectory ratio, so it is honoured for token
+        mode only; ``None`` keeps the loss identical to the uncorrected path.
+    :type vllm_is_ratio: torch.Tensor | None
     :return: ``(chunk_loss, [kl, clipfrac, pg_loss, entropy])`` — first
         element backprops; metrics are detached scalars contributing to
         the global mean across chunks.
@@ -155,6 +163,11 @@ def llm_policy_loss_fn(
         ratio = torch.exp(token_log_ratio)
         clipped_ratio = torch.clamp(ratio, 1.0 - epsilon_low, 1.0 + epsilon_high)
         pg_unit_loss = torch.max(-advantages * ratio, -advantages * clipped_ratio)
+        if vllm_is_ratio is not None:
+            # Truncated importance sampling: reweight each token by the
+            # detached, upper-clamped trainer/vLLM probability ratio, applied to
+            # the policy term before the KL penalty (matches the standard path).
+            pg_unit_loss = pg_unit_loss * vllm_is_ratio
         unit_mask = attention_mask
         unit_global_count = token_global_count
     elif importance_sampling_level == "turn":
@@ -281,15 +294,18 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
         full_turn_mask=None,
         max_turns=None,
         importance_sampling_level="token",
+        vllm_is_ratio=None,
     ):
         """Chunked forward + backward.
 
         Mirrors the structure of
-        :meth:`LigerFusedLinearPPOBase.forward` but with one extra
-        chunked tensor (``turn_ids``) and a leaner static-arg list
-        (Liger's SAPO/CISPO/vllm-IS knobs aren't reachable from this
-        wrapper). When ``turn_ids`` is ``None`` this reduces to the
-        existing token-mode behavior.
+        :meth:`LigerFusedLinearPPOBase.forward` but with two extra
+        chunked tensors (``turn_ids`` and the optional ``vllm_is_ratio``)
+        and a leaner static-arg list (Liger's SAPO/CISPO knobs aren't
+        reachable from this wrapper). When ``turn_ids`` is ``None`` this
+        reduces to the existing token-mode behavior; ``vllm_is_ratio`` is the
+        detached, upper-clamped per-token vLLM sampling-mismatch ratio applied
+        to the per-token policy loss (token mode only), or ``None``.
         """
         loss_acc = torch.zeros((), device=_input.device, dtype=torch.float32)
         grad_weight = torch.zeros_like(weight)
@@ -309,6 +325,7 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
             ref_per_token_logps_chunk=None,
             old_per_token_logps_chunk=None,
             turn_ids_chunk=None,
+            vllm_is_ratio_chunk=None,
         ):
             # Liger 0.8.0 rewrote ``LigerFusedLinearPPOBase.chunk_forward`` as
             # liger 0.8 made chunk_forward a selective-logp kernel that doesn't
@@ -343,6 +360,7 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
                 full_turn_mask=full_turn_mask,
                 max_turns=max_turns,
                 importance_sampling_level=importance_sampling_level,
+                vllm_is_ratio=vllm_is_ratio_chunk,
             )
 
         def fused_fwd_bwd(
@@ -353,6 +371,7 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
             ref_per_token_logps_chunk,
             old_per_token_logps_chunk,
             turn_ids_chunk,
+            vllm_is_ratio_chunk,
         ):
             argnums = (0, 1, 5) if bias is not None else (0, 1)
             return torch.func.grad_and_value(
@@ -367,6 +386,7 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
                 ref_per_token_logps_chunk=ref_per_token_logps_chunk,
                 old_per_token_logps_chunk=old_per_token_logps_chunk,
                 turn_ids_chunk=turn_ids_chunk,
+                vllm_is_ratio_chunk=vllm_is_ratio_chunk,
             )
 
         if compiled:  # pragma: no cover -- requires torch.compile warmup
@@ -380,6 +400,7 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
             ref_per_token_logps_chunk,
             old_per_token_logps_chunk,
             turn_ids_chunk,
+            vllm_is_ratio_chunk,
         ):
             (
                 (chunk_grad_input, chunk_grad_weight, *chunk_grad_bias),
@@ -395,6 +416,7 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
                 ref_per_token_logps_chunk,
                 old_per_token_logps_chunk,
                 turn_ids_chunk,
+                vllm_is_ratio_chunk,
             )
             if grad_bias is not None:
                 grad_bias.add_(chunk_grad_bias[0])
@@ -433,8 +455,13 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
             if turn_ids is not None
             else [None] * chunks
         )
+        _vllm_chunks = (
+            torch.chunk(vllm_is_ratio, chunks=chunks, dim=0)
+            if vllm_is_ratio is not None
+            else [None] * chunks
+        )
 
-        for ic, idc, mc, ac, rc, oc, tc in zip(
+        for ic, idc, mc, ac, rc, oc, tc, vc in zip(
             _input_chunks,
             _ids_chunks,
             _mask_chunks,
@@ -442,9 +469,10 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
             _ref_chunks,
             _old_chunks,
             _turn_chunks,
+            _vllm_chunks,
             strict=True,
         ):
-            accumulate_chunk(ic, idc, mc, ac, rc, oc, tc)
+            accumulate_chunk(ic, idc, mc, ac, rc, oc, tc, vc)
 
         grad_input = torch.cat(grad_inputs, dim=0)
         ctx.save_for_backward(grad_input, grad_weight, grad_bias)
@@ -476,6 +504,7 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
             None,  # full_turn_mask
             None,  # max_turns
             None,  # importance_sampling_level
+            None,  # vllm_is_ratio
         )
 
 
@@ -554,6 +583,7 @@ def apply_fused_policy_loss(
     full_turn_mask: torch.Tensor | None = None,
     max_turns: int | None = None,
     token_chunk_size: int = 2048,
+    vllm_is_ratio: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
     """Run :class:`LigerFusedLinearPolicyLossFunction`, bounded at token level.
 
@@ -581,6 +611,12 @@ def apply_fused_policy_loss(
     :param advantages: token level ``(B, T_act)``; turn ``(B, max_turns)``;
         trajectory ``(B, 1)``.
     :type advantages: torch.Tensor
+    :param vllm_is_ratio: Optional detached, upper-clamped per-token vLLM
+        sampling-mismatch ratio ``(B, T_act)`` (token level only). Token-flattened
+        and multiplied into the per-token policy loss before the KL term. Turn /
+        trajectory pooling cannot express the per-token reweight, so it is ignored
+        there (callers fall back to the standard path for those levels).
+    :type vllm_is_ratio: torch.Tensor | None
     :return: ``(loss, aux)`` straight from the fused Function.
     :rtype: tuple[torch.Tensor, tuple[torch.Tensor, ...]]
     """
@@ -619,6 +655,10 @@ def apply_fused_policy_loss(
             None,  # full_turn_mask
             None,  # max_turns
             "token",
+            # vllm_is_ratio: token-flattened to match the loss layout above.
+            vllm_is_ratio.reshape(n_tokens, 1).contiguous()
+            if vllm_is_ratio is not None
+            else None,
         )
     return LigerFusedLinearPolicyLossFunction.apply(
         policy_hidden.contiguous(),
@@ -639,6 +679,7 @@ def apply_fused_policy_loss(
         full_turn_mask,
         max_turns,
         importance_sampling_level,
+        None,  # vllm_is_ratio (token level only)
     )
 
 

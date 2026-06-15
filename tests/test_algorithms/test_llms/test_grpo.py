@@ -5766,18 +5766,17 @@ class TestGRPOVLLMSamplingCorrection:
         # Row 0 contributes |log-diff| 0.5 per token, row 1 contributes 0.
         assert metrics["vllm_is_delta_mean"] == pytest.approx(0.25, rel=1e-6)
 
-    def test_learn_liger_with_sampling_logps_warns_and_uses_standard_path(
-        self, monkeypatch
-    ):
-        """use_liger_loss=True + captured vLLM logprobs: the fused kernel
-        cannot apply the per-token reweight, so ``_loss`` warns once and runs
-        the standard path (which still yields finite metrics)."""
+    def test_learn_liger_token_with_sampling_logps_uses_fused_kernel(self, monkeypatch):
+        """token-level use_liger_loss=True + captured vLLM logprobs: the
+        correction is fused into the kernel (``vllm_is_ratio``), so ``_loss``
+        keeps the Liger path and threads ``sampling_log_probs`` through —
+        no fallback warning."""
         monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
         monkeypatch.setattr("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True)
         grpo = _make_cpu_grpo_for_branch_tests(
             group_size=2, update_epochs=1, use_liger_loss=True
         )
-        assert grpo.use_liger_loss is True
+        assert grpo.importance_sampling_level == "token"
         completion_ids, action_masks = _build_branch_experiences(batch_size=2)
         rewards = torch.tensor([1.0, -1.0], dtype=torch.float32)
         n_act = int(action_masks[0].sum())
@@ -5785,17 +5784,68 @@ class TestGRPOVLLMSamplingCorrection:
             torch.full((n_act,), -3.0, dtype=torch.float32) for _ in range(2)
         ]
 
-        # Stub the heavy forwards (like the other CPU learn-branch tests):
-        # ``_loss`` itself runs for real, so the Liger-vs-correction routing
-        # (warn once, fall through to the standard ``_loss_fn``) is exercised.
+        def fake_fused_forward(ids, batch_size):
+            shape = (ids.shape[0], ids.shape[1] - 1)
+            zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
+            return zeros, zeros, None
+
+        with (
+            patch.object(
+                grpo, "_fused_forward_no_grad", side_effect=fake_fused_forward
+            ),
+            patch.object(grpo, "_backward_pass", return_value=None),
+            patch.object(
+                grpo,
+                "_liger_loss",
+                return_value=(
+                    torch.tensor(0.5, requires_grad=True),
+                    torch.tensor(0.1),
+                ),
+            ) as mock_liger_loss,
+            warnings.catch_warnings(record=True) as caught,
+        ):
+            warnings.simplefilter("always")
+            grpo.learn(
+                (completion_ids, action_masks, rewards),
+                sampling_logps=sampling_logps,
+            )
+        # Liger path taken, with the correction threaded into it.
+        mock_liger_loss.assert_called()
+        assert mock_liger_loss.call_args.kwargs["sampling_log_probs"] is not None
+        assert not any(
+            "token-level importance sampling" in str(w.message) for w in caught
+        )
+        assert grpo._is_correction_liger_warned is False
+        grpo.clean_up()
+
+    def test_learn_liger_nontoken_with_sampling_logps_warns_and_uses_standard_path(
+        self, monkeypatch
+    ):
+        """trajectory-level (GSPO) use_liger_loss=True + captured vLLM logprobs:
+        the per-token reweight can't be pooled into the sequence ratio, so the
+        correction warns once and runs the standard path (``_liger_loss`` not
+        called)."""
+        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
+        monkeypatch.setattr("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True)
+        grpo = _make_cpu_grpo_for_branch_tests(
+            group_size=2,
+            update_epochs=1,
+            use_liger_loss=True,
+            importance_sampling_level="trajectory",
+        )
+        completion_ids, action_masks = _build_branch_experiences(batch_size=2)
+        rewards = torch.tensor([1.0, -1.0], dtype=torch.float32)
+        n_act = int(action_masks[0].sum())
+        sampling_logps = [
+            torch.full((n_act,), -3.0, dtype=torch.float32) for _ in range(2)
+        ]
+
         def fake_fused_forward(ids, batch_size):
             shape = (ids.shape[0], ids.shape[1] - 1)
             zeros = torch.zeros(shape, dtype=torch.float32, device=ids.device)
             return zeros, zeros, None
 
         def fake_get_logprobs(ids, batch_size, use_reference=False, eval_mode=False):
-            # ``device=ids.device``: on a GPU host learn() runs on CUDA and the
-            # stubbed logprobs must live with the other loss inputs.
             return torch.zeros(
                 ids.shape[0],
                 ids.shape[1] - 1,
@@ -5812,7 +5862,7 @@ class TestGRPOVLLMSamplingCorrection:
             patch.object(grpo, "_liger_loss") as mock_liger_loss,
             pytest.warns(
                 UserWarning,
-                match="incompatible with the vLLM sampling-mismatch correction",
+                match="only at token-level importance sampling",
             ),
         ):
             metrics = grpo.learn(
@@ -5825,6 +5875,81 @@ class TestGRPOVLLMSamplingCorrection:
         assert "vllm_is_delta_mean" in metrics
         assert torch.isfinite(torch.tensor(metrics["mean_loss"]))
         grpo.clean_up()
+
+
+class TestGRPORealLigerVllmCorrection:
+    """Validate the *real* fused GRPO kernel's ``vllm_is_ratio`` semantics on
+    GPU, exercising the exact positional, token-flattened ``(n_tokens, 1)`` call
+    that :meth:`GRPO._liger_loss` makes (``vllm_is_ratio`` at positional index
+    24). CPU CI cannot import the Triton kernel; this guards the position-24
+    alignment against an unnoticed liger-kernel signature change.
+    """
+
+    _CONST_RATIO = 1.7
+
+    @pytest.mark.gpu
+    @pytest.mark.skipif(
+        not (HAS_LIGER_KERNEL and torch.cuda.is_available()),
+        reason="The real Liger Triton/CUDA kernel requires liger-kernel + a GPU.",
+    )
+    @pytest.mark.parametrize("loss_type", ["cispo", "grpo"])
+    def test_real_liger_kernel_vllm_is_ratio_gpu(self, loss_type):
+        """ratio==1 is a no-op and a constant ratio ``c`` scales the loss by
+        ``c`` at ``beta=0`` — the truncated-IS reweight the standard path also
+        applies, here proven through the installed fused kernel."""
+        from agilerl.algorithms.grpo import LigerFusedLinearGRPOFunction
+
+        torch.manual_seed(0)
+        device = "cuda"
+        n_tokens, hidden_dim, vocab = 12, 16, 64
+        epsilon_low = 0.2
+        epsilon_high = 1.2 if loss_type == "cispo" else 0.2
+        hidden = torch.randn(n_tokens, 1, hidden_dim, device=device)
+        weight = torch.randn(vocab, hidden_dim, device=device) * 0.02
+        bias = torch.randn(vocab, device=device) * 0.02
+        target_ids = torch.randint(0, vocab, (n_tokens, 1), device=device)
+        mask = torch.ones(n_tokens, 1, dtype=torch.bool, device=device)
+        adv = torch.randn(n_tokens, device=device)
+        old = torch.randn(n_tokens, 1, device=device) * 0.1
+
+        def run(vllm_is_ratio):
+            # Positional layout mirrors GRPO._liger_loss exactly (pos 24 ratio).
+            loss, _ = LigerFusedLinearGRPOFunction.apply(
+                hidden,
+                weight,
+                target_ids,
+                mask,
+                adv,
+                bias,
+                None,  # ref_per_token_logps
+                old,
+                None,  # ref_input
+                None,  # ref_weight
+                None,  # ref_bias
+                0.0,  # beta
+                epsilon_low,
+                epsilon_high,
+                loss_type,
+                None,  # max_completion_length
+                "token",
+                None,  # sapo_temperature_pos
+                None,  # sapo_temperature_neg
+                1.0,  # temperature
+                None,  # compiled
+                False,  # use_ref_model
+                1,  # chunk_size
+                vllm_is_ratio,
+            )
+            return loss.detach()
+
+        base = run(None)
+        ones = run(torch.ones(n_tokens, 1, device=device))
+        c = self._CONST_RATIO
+        scaled = run(torch.full((n_tokens, 1), float(c), device=device))
+
+        assert base.abs() > 1e-6
+        assert torch.allclose(ones, base, atol=1e-5, rtol=1e-4)
+        assert torch.allclose(scaled, c * base, atol=1e-5, rtol=1e-4)
 
 
 class TestGRPOInitWarnings:

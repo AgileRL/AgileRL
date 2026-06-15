@@ -1,4 +1,5 @@
 import gc
+import warnings
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -1273,15 +1274,63 @@ class TestREINFORCELearnWithLiger:
         assert learn_out["mean_kl"] == pytest.approx(0.05, rel=1e-6)
         assert learn_out["mean_pg_loss"] == pytest.approx(0.25, rel=1e-6)
 
-    def test_learn_liger_with_sampling_logps_warns_and_uses_standard_path(
-        self, monkeypatch
-    ):
-        """use_liger_loss=True + captured vLLM logprobs: the fused kernel
-        cannot apply the per-token reweight, so learn() warns once and routes
-        the minibatch through the standard PyTorch path instead."""
+    def test_learn_liger_token_with_sampling_logps_uses_fused_kernel(self, monkeypatch):
+        """token-level use_liger_loss=True + captured vLLM logprobs: the
+        correction is fused into the kernel (``vllm_is_ratio``), so learn()
+        keeps the fused path and threads ``sampling_log_probs`` through."""
         monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
         monkeypatch.setattr("agilerl.algorithms.reinforce_llm.HAS_LIGER_KERNEL", True)
         rf = _cpu_llmreinforce(lr=0.05, update_epochs=1, use_liger_loss=True)
+        assert rf.importance_sampling_level == "token"
+        rf._reinforce_loss_liger = MagicMock(
+            return_value=(
+                torch.tensor(0.5, requires_grad=True),
+                {"kl": 0.1, "entropy": 0.2, "pg_loss": 0.3},
+            )
+        )
+        rf._backward_pass = MagicMock(return_value=None)
+
+        vocab, inp, mtok = 100, 10, 8
+        seq_len = inp + mtok
+        completions = [torch.randint(0, vocab, (1, seq_len))]
+        action_masks = [torch.ones(1, seq_len - 1, dtype=torch.bool)]
+        turn_ids = torch.tensor(
+            [[-1] * (inp - 1) + [0] * (mtok // 2) + [1] * (mtok - mtok // 2)],
+            dtype=torch.long,
+        )[:, : seq_len - 1]
+        rewards = torch.tensor([[0.5, -0.5]], dtype=torch.float32)
+        n_act = int(action_masks[0].sum())
+        sampling_logps = [torch.full((n_act,), -3.0, dtype=torch.float32)]
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            rf.learn(
+                (completions, action_masks, rewards),
+                turn_ids=turn_ids,
+                sampling_logps=sampling_logps,
+            )
+        rf._reinforce_loss_liger.assert_called()
+        # sampling_log_probs threaded in as the final positional arg.
+        assert rf._reinforce_loss_liger.call_args.args[6] is not None
+        assert not any(
+            "token-level importance sampling" in str(w.message) for w in caught
+        )
+        assert rf._is_correction_liger_warned is False
+
+    def test_learn_liger_nontoken_with_sampling_logps_warns_and_uses_standard_path(
+        self, monkeypatch
+    ):
+        """turn-level use_liger_loss=True + captured vLLM logprobs: the per-token
+        reweight can't be pooled into the turn ratio, so learn() warns once and
+        routes the minibatch through the standard PyTorch path."""
+        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
+        monkeypatch.setattr("agilerl.algorithms.reinforce_llm.HAS_LIGER_KERNEL", True)
+        rf = _cpu_llmreinforce(
+            lr=0.05,
+            update_epochs=1,
+            use_liger_loss=True,
+            importance_sampling_level="turn",
+        )
         rf._reinforce_loss_liger = MagicMock(
             side_effect=AssertionError("fused path should not run")
         )
@@ -1300,7 +1349,7 @@ class TestREINFORCELearnWithLiger:
 
         with pytest.warns(
             UserWarning,
-            match="incompatible with the vLLM sampling-mismatch correction",
+            match="only at token-level importance sampling",
         ):
             metrics = rf.learn(
                 (completions, action_masks, rewards),

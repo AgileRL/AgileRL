@@ -593,29 +593,34 @@ class REINFORCE(LLMAlgorithm):
                         if sampling_log_probs is not None
                         else None
                     )
-                    # The Liger fused kernel cannot apply a per-token importance
-                    # weight, so the vLLM sampling-mismatch correction runs on
-                    # the standard PyTorch path (warn once, like GRPO).
+                    # The correction is fused into the Liger kernel at token-level
+                    # IS (via vllm_is_ratio); turn/trajectory pooling can't express
+                    # the per-token reweight, so those fall back to the standard
+                    # path (warn once, like GRPO).
+                    liger_corr_fallback = (
+                        batch_sampling_log_probs is not None
+                        and self.importance_sampling_level != "token"
+                    )
                     if (
                         self.use_liger_loss
-                        and batch_sampling_log_probs is not None
+                        and liger_corr_fallback
                         and not self._is_correction_liger_warned
                     ):
                         warnings.warn(
-                            "use_liger_loss=True is incompatible with the vLLM "
-                            "sampling-mismatch correction (the fused kernel cannot "
-                            "apply a per-token importance weight); using the "
-                            "standard PyTorch path.",
+                            "use_liger_loss=True fuses the vLLM sampling-mismatch "
+                            "correction only at token-level importance sampling; "
+                            "turn/trajectory pooling uses the standard PyTorch path.",
                             stacklevel=2,
                         )
                         self._is_correction_liger_warned = True
 
-                    if self.use_liger_loss and batch_sampling_log_probs is None:
+                    if self.use_liger_loss and not liger_corr_fallback:
                         # Liger fused clipped policy loss (no (B, T, V) logits
                         # saved for backward). KL stays a logging metric;
                         # REINFORCE folds it into the advantage upstream.
                         # Works for both granularities since per-turn ReBN
-                        # is already broadcast to per-token by the caller.
+                        # is already broadcast to per-token by the caller. The
+                        # token-level vLLM correction is fused in via vllm_is_ratio.
                         pg_loss, metrics = self._reinforce_loss_liger(
                             batch_ids,
                             batch_action_mask,
@@ -623,6 +628,7 @@ class REINFORCE(LLMAlgorithm):
                             batch_reference_log_probs,
                             batch_advantages,
                             batch_turn_ids,
+                            batch_sampling_log_probs,
                         )
                         self._backward_pass(pg_loss)
                         learn_metrics["mean_kl"] += metrics["kl"]
@@ -700,6 +706,7 @@ class REINFORCE(LLMAlgorithm):
         batch_reference_log_probs: torch.Tensor,
         batch_advantages: torch.Tensor,
         turn_ids: torch.Tensor | None = None,
+        sampling_log_probs: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """REINFORCE clipped policy loss via the fused-linear PPO Function.
 
@@ -771,6 +778,17 @@ class REINFORCE(LLMAlgorithm):
                 / mask_f.sum(dim=-1, keepdim=True).clamp(min=1.0)
             ).contiguous()  # (B, 1)
 
+        # Truncated importance sampling fused into the kernel (token level only):
+        # reweight each token's policy loss by the detached, clamped trainer/vLLM
+        # ratio. Non-token IS routes the correction to the standard path.
+        vllm_is_ratio = None
+        if sampling_log_probs is not None and is_level == "token":
+            with torch.no_grad():
+                ratio_mask = mask.to(old_log_probs.dtype)
+                vllm_is_ratio = torch.exp(
+                    (old_log_probs - sampling_log_probs.to(self.device)) * ratio_mask
+                ).clamp(max=self.vllm_importance_sampling_cap)
+
         # Identity-patch lm_head so the actor forward outputs the last hidden
         # state (B, T, H) directly instead of computing the full (B, T, V)
         # logits only to discard them. lm_head_weight is passed separately to
@@ -823,6 +841,7 @@ class REINFORCE(LLMAlgorithm):
             full_turn_mask=full_turn_mask,
             max_turns=max_turns,
             token_chunk_size=self.liger_token_chunk_size,
+            vllm_is_ratio=vllm_is_ratio,
         )
         # aux = [kl, clipfrac, pg_loss, entropy] scalars in fp32.
         metrics = {

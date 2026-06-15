@@ -645,27 +645,32 @@ class PPO(LLMAlgorithm):
                         if sampling_log_probs is not None
                         else None
                     )
-                    # The Liger fused kernel cannot apply a per-token importance
-                    # weight, so the vLLM sampling-mismatch correction runs on
-                    # the standard PyTorch path (warn once, like GRPO).
+                    # The correction is fused into the Liger kernel at token-level
+                    # IS (via vllm_is_ratio); turn/trajectory pooling can't express
+                    # the per-token reweight, so those fall back to the standard
+                    # path (warn once, like GRPO).
+                    liger_corr_fallback = (
+                        batch_sampling_log_probs is not None
+                        and self._resolve_is_level(ppo_granularity) != "token"
+                    )
                     if (
                         self.use_liger_loss
-                        and batch_sampling_log_probs is not None
+                        and liger_corr_fallback
                         and not self._is_correction_liger_warned
                     ):
                         warnings.warn(
-                            "use_liger_loss=True is incompatible with the vLLM "
-                            "sampling-mismatch correction (the fused kernel cannot "
-                            "apply a per-token importance weight); using the "
-                            "standard PyTorch path.",
+                            "use_liger_loss=True fuses the vLLM sampling-mismatch "
+                            "correction only at token-level importance sampling; "
+                            "turn/trajectory pooling uses the standard PyTorch path.",
                             stacklevel=2,
                         )
                         self._is_correction_liger_warned = True
 
-                    if self.use_liger_loss and batch_sampling_log_probs is None:
+                    if self.use_liger_loss and not liger_corr_fallback:
                         # Liger fused policy + KL (no (B, T, V) logits saved
                         # for backward) plus an unfused critic pass for the
-                        # value loss. See :meth:`_ppo_loss_liger`.
+                        # value loss. The token-level vLLM correction is fused
+                        # in via ``vllm_is_ratio``. See :meth:`_ppo_loss_liger`.
                         total_loss, metrics = self._ppo_loss_liger(
                             batch_ids,
                             batch_action_mask,
@@ -676,6 +681,7 @@ class PPO(LLMAlgorithm):
                             batch_old_values,
                             batch_turn_ids,
                             ppo_granularity,
+                            batch_sampling_log_probs,
                         )
                         self._backward_pass(total_loss)
                         clear_fused_adapter_routing(self._get_unwrapped_actor())
@@ -1062,6 +1068,7 @@ class PPO(LLMAlgorithm):
         batch_old_values: torch.Tensor,
         batch_turn_ids: torch.Tensor,
         ppo_granularity: str,
+        sampling_log_probs: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """PPO loss via the fused-linear PPO Function (token + turn modes).
 
@@ -1151,6 +1158,17 @@ class PPO(LLMAlgorithm):
         else:  # token
             adv_for_liger = advantages
 
+        # Truncated importance sampling fused into the kernel (token level only):
+        # reweight each token's policy loss by the detached, clamped trainer/vLLM
+        # ratio. Non-token IS routes the correction to the standard path.
+        vllm_is_ratio = None
+        if sampling_log_probs is not None and is_level == "token":
+            with torch.no_grad():
+                mask_f = mask.to(old_log_probs.dtype)
+                vllm_is_ratio = torch.exp(
+                    (old_log_probs - sampling_log_probs.to(self.device)) * mask_f
+                ).clamp(max=self.vllm_importance_sampling_cap)
+
         # ---- Actor pass (Liger fused policy + KL) ----
         # Identity-patch lm_head so the actor forward outputs the last hidden
         # state (B, T, H) directly instead of computing the full (B, T, V)
@@ -1193,6 +1211,7 @@ class PPO(LLMAlgorithm):
             full_turn_mask=full_turn_mask,
             max_turns=max_turns,
             token_chunk_size=self.liger_token_chunk_size,
+            vllm_is_ratio=vllm_is_ratio,
         )
         kl_metric = float(aux[0].item())
         clipfrac_metric = float(aux[1].item())
