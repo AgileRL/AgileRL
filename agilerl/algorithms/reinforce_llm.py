@@ -144,25 +144,22 @@ class REINFORCE(LLMAlgorithm):
     :type advantage_granularity: Literal["turn", "token", "auto"]
     :param importance_sampling_level: IS / ratio-pooling level for the clipped
         surrogate, orthogonal to ``advantage_granularity``. ``"token"`` (default)
-        clips per token; ``"turn"`` pools the ratio (length-normalized mean)
-        per turn (requires ``turn_ids`` in :meth:`learn`); ``"trajectory"`` pools
-        over the whole completion. The advantage is pooled to the same bucket.
-        Token-level Liger is memory-bounded (token-flattened/chunked like
-        GRPO/CISPO); turn/trajectory pooling couples a unit's tokens and cannot be
-        token-chunked, so set ``use_liger_loss=False`` there (the standard path
-        is always memory-bounded via the fused-linear-logprob path).
+        clips per token; ``"turn"`` pools the ratio (length-normalized mean) per
+        turn (requires ``turn_ids`` in :meth:`learn`); ``"trajectory"`` pools over
+        the whole completion; the advantage is pooled to the same bucket.
+        Turn/trajectory pooling cannot be token-chunked in the fused kernel, so
+        set ``use_liger_loss=False`` there (the standard path is always
+        memory-bounded).
     :type importance_sampling_level: Literal["token", "turn", "trajectory"], optional
     :param gradient_checkpointing: Enable gradient checkpointing.
     :type gradient_checkpointing: bool
     :param torch_compiler: Torch compiler mode.
     :type torch_compiler: str | None
     :param use_liger_loss: Use the Liger fused policy loss, defaults to ``False``
-        (requires ``liger-kernel``). **Recommended for REINFORCE.** It still uses
-        liger-kernel, but via AgileRL's ``LigerFusedLinearPolicyLossFunction``
-        (the same liger-based path as PPO — a subclass of liger's chunked-PPO
-        base with AgileRL's own loss math) rather than the upstream Liger GRPO
-        kernel. It benchmarks roughly memory-neutral with a mild speedup that
-        grows with sequence length, at token-level importance sampling. Separate
+        (requires ``liger-kernel``). **Recommended for REINFORCE**: via AgileRL's
+        ``LigerFusedLinearPolicyLossFunction`` (the same liger-based path as PPO,
+        not the upstream Liger GRPO kernel), it is roughly memory-neutral with a
+        mild speedup that grows with sequence length at token-level IS. Separate
         from the Liger *model* patches (fused RMSNorm/RoPE/SwiGLU), which apply
         whenever ``liger-kernel`` is installed.
     :type use_liger_loss: bool, optional

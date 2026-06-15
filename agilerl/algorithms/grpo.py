@@ -148,24 +148,14 @@ class GRPO(LLMAlgorithm):
     :type gradient_checkpointing: bool, optional
     :param torch_compiler: Torch compile mode (e.g. ``'default'``), defaults to None
     :type torch_compiler: str | None, optional
-    :param use_liger_loss: Use Liger kernel for memory-efficient loss
-        computation. Defaults to ``False``. Pass ``True`` to opt in
-        (requires ``liger-kernel`` to be installed; warns and falls back
-        to ``False`` otherwise). Supported for ``loss_type`` values
-        ``'grpo'``, ``'cispo'``, and ``'gspo'``. Note that the Liger path
-        uses DAPO-style batch normalisation for ``'cispo'`` rather than
-        the per-sequence-then-batch normalisation of the standard path;
-        numerical values will differ slightly but gradient direction is
-        equivalent. **Not recommended for GRPO/CISPO/GSPO**: benchmarked against
-        AgileRL's (already memory-bounded) fused-linear-logprob standard path at
-        matched chunk size (``fused_loss_chunk_rows`` == ``fused_logprobs_chunk_rows``),
-        the GRPO/CISPO fused-loss kernel shows no speedup (it is slower) and uses
-        slightly more memory — the upstream Liger GRPO kernel underperforms the
-        standard path for this surrogate — so leave it ``False`` here. (PPO/
-        REINFORCE route their ``use_liger_loss`` through a different, AgileRL
-        liger-based kernel where it does help — see their docs.) The Liger model patches (fused
-        RMSNorm/RoPE/SwiGLU) are applied whenever ``liger-kernel`` is installed
-        and are independent of this flag.
+    :param use_liger_loss: Use the Liger fused loss, defaults to ``False``
+        (requires ``liger-kernel``; warns and falls back otherwise). **Not
+        recommended for GRPO/CISPO/GSPO**: the upstream Liger GRPO kernel shows
+        no speedup over AgileRL's already memory-bounded standard path and uses
+        slightly more memory. PPO/REINFORCE route ``use_liger_loss`` through a
+        different AgileRL liger-based kernel where it *does* help (see their
+        docs). The Liger model patches (fused RMSNorm/RoPE/SwiGLU) apply whenever
+        ``liger-kernel`` is installed and are independent of this flag.
     :type use_liger_loss: bool, optional
     :param use_kl_advantage_shaping: Apply KL-based shaping directly to token
         advantages before PPO clipping, defaults to False.
@@ -192,11 +182,9 @@ class GRPO(LLMAlgorithm):
           ``turn_ids`` in :meth:`learn`.
         * ``"trajectory"`` — pool over the whole completion (GSPO).
 
-        Turn- and trajectory-level pooling couple a turn/trajectory's tokens, so
-        they have no fused Liger kernel: they run on the standard PyTorch
-        path, which is always memory-bounded (the fused-linear-logprob path is
-        unconditional). Token level keeps the (faster, already-bounded) Liger
-        path when ``use_liger_loss=True``.
+        Turn/trajectory pooling couples a unit's tokens, so it has no fused Liger
+        kernel and runs on the standard (always memory-bounded) path; only token
+        level can use the Liger path when ``use_liger_loss=True``.
     :type importance_sampling_level: Literal["token", "turn", "trajectory"] | None, optional
     :param advantage_granularity: Unit at which the group-relative *advantage* is
         computed, independent of ``importance_sampling_level``. Defaults to
@@ -208,13 +196,11 @@ class GRPO(LLMAlgorithm):
           within its group), broadcast to that turn's tokens. Requires
           ``turn_ids`` and per-turn rewards ``(batch, max_turns)`` in
           :meth:`learn`; falls back to trajectory if unavailable.
-        * ``"auto"`` — follow the IS level (turn when
-          ``importance_sampling_level="turn"``, else trajectory), preserving the
-          original coupled default.
+        * ``"auto"`` — follow the IS level (turn when it is ``"turn"``, else
+          trajectory).
 
-        There is no token-level advantage (group-relative needs a reward per
-        unit; tokens have none). Any advantage x IS combination is valid, e.g.
-        per-turn advantages with token-level clipping.
+        There is no token-level advantage (group-relative needs a per-unit
+        reward). Any advantage x IS combination is valid.
     :type advantage_granularity: Literal["auto", "trajectory", "turn"], optional
     :param use_separate_reference_adapter: Keep a dedicated ``reference`` LoRA
         adapter whose weights are frozen snapshots of the actor used for the
@@ -1676,15 +1662,11 @@ class GRPO(LLMAlgorithm):
         lm_head_bias = lm_head.bias
 
         attention_mask = (batch_ids != self.pad_token_id).long()
-        # Sequence packing (the same gate as the standard path): when a
-        # varlen/block-sparse backend is active, flatten the minibatch's real
-        # tokens into a single padding-free row for the transformer forward,
-        # then scatter the resulting hidden states back onto the padded
-        # ``(B, T, H)`` frame. The Liger kernel call below is then byte-for-byte
-        # the padded path — only how ``policy_hidden`` is produced changes, so
-        # both token-level (grpo/cispo) and trajectory-level (GSPO) benefit from
-        # the cheaper forward. Dense backends return ``None`` here and fall back
-        # to the padded forward, exactly as ``_get_logprobs`` does.
+        # Sequence packing (same gate as the standard path): on a varlen/block-
+        # sparse backend, flatten real tokens into a padding-free forward and
+        # scatter hidden states back onto the padded ``(B, T, H)`` frame so the
+        # Liger call below is byte-for-byte the padded path. Dense backends
+        # return ``None`` and fall back to the padded forward.
         packing_mode = self._packing_mode()
         packed = None
         if packing_mode is not None:
@@ -1815,7 +1797,7 @@ class GRPO(LLMAlgorithm):
             None,
             reference_log_probs is not None,  # use_ref_model
             chunk_size,
-            vllm_is_ratio_arg,  # vllm_is_ratio (pos 24; liger-kernel >= 0.7.0)
+            vllm_is_ratio_arg,
         )
 
         kl = aux[0]

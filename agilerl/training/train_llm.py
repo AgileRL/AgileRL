@@ -1291,17 +1291,6 @@ def finetune_llm_multiturn(
         init_hp["ALGO"] = pop[0].algo
 
     batch_size = init_hp.get("BATCH_SIZE", pop[0].batch_size)
-    # No batch_size/group_size divisibility constraint is required for GRPO. The
-    # rollout vec env (SyncMultiTurnVecEnv) maintains batch_size * group_size
-    # independent envs laid out group-contiguous (env_idx = batch_idx *
-    # group_size + group_idx), and GRPO.learn forms group-relative advantages by
-    # reshaping the flat batch with ``view(-1, group_size)``. The only invariant
-    # is that the sample count be a multiple of group_size, which
-    # batch_size * group_size satisfies by construction (GRPO.learn asserts it).
-    # Distributed runs keep whole groups per rank (each rank builds its own
-    # batch_size * group_size env; only metrics are gathered across ranks), so a
-    # group is never split. Hence any batch_size/group_size combination is valid
-    # (e.g. batch_size=2, group_size=5 -> two prompts, five completions each).
 
     env_name = init_hp.get("env_name", "gem_multiturn")
     data_increment = _distributed_world_size(accelerator)

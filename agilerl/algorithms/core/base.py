@@ -4457,13 +4457,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         peft_ref = self._get_peft_model_for_vllm_sync()
         peft_ref.set_adapter(self._vllm_rollout_adapter)
 
-        # Export the freshly-trained adapter to a fixed staging dir under a fixed
-        # id and refresh the single resident rollout slot in place. The trained
-        # weights actually reach generation because ``patch_vllm_lora_keep_resident``
-        # stops vLLM from zeroing the slot between forwards (see that function);
-        # ``load_inplace`` (2nd sync onward) makes vLLM re-read the updated weights
-        # from disk into the same slot. A fixed id avoids per-sync adapter/CUDA-graph
-        # accumulation that would otherwise grow GPU memory across iterations.
+        # Export to a fixed staging dir + id and refresh the resident rollout
+        # slot in place: ``load_inplace`` (2nd sync onward) re-reads the updated
+        # weights from disk, and the fixed id avoids per-sync CUDA-graph
+        # accumulation that would grow GPU memory across iterations.
         staging_dir = self._ensure_vllm_lora_staging_dir()
         is_main_process = self.accelerator is None or self.accelerator.is_main_process
         with gather_if_zero3(self.zero_stage, list(peft_ref.parameters())):
@@ -4671,11 +4668,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             all_stitch_prefixes = stitch_prefixes
             all_max_output_tokens = max_output_tokens
 
-        # Capture vLLM's per-token sampling logprobs when the caller asks
-        # (training rollouts with the mismatch correction on). Works for any
-        # group_size and for multi-turn (one call per turn); the per-completion
-        # flat logprobs are aligned to the action mask later. The windowed
-        # sliding-window stitch path reorders tokens, so it is excluded for now.
+        # The windowed stitch path reorders tokens, so sampling-logprob capture
+        # (for the vLLM mismatch correction) is excluded there.
         stitch_active = any(int(sp.shape[1]) > 0 for sp in stitch_prefixes)
         capture_sampling_logps = capture_sampling_logps and not stitch_active
         generation_kwargs = {
@@ -4772,12 +4766,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             for i in range(len(prompts))
         ]
 
-        # Per-completion generated-token logprobs as a flat list of 1-D tensors,
-        # in the same row order as ``completion_ids`` stacks (prompt-major,
-        # group-minor). Returned to the caller (not stashed), which either
-        # forwards it to the multi-turn env (accumulated per trajectory) or hands
-        # it to ``learn`` for alignment to the action mask. ``None`` when not
-        # capturing.
         sampling_logps: list[torch.Tensor | None] | None = (
             [
                 torch.tensor(lp, dtype=torch.float32, device=self.device)
@@ -5418,14 +5406,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 raise ValueError(msg) from err
             raise
 
-        # Colocated vLLM always serves LoRA (the trainer shares the base and
-        # syncs only the adapter). vLLM (V1) zeroes a LoRA slot on no-LoRA/dummy
-        # batches and never re-copies the adapter on the next LoRA forward, so
-        # the trained rollout adapter silently contributes nothing to
-        # generation. Keep the single persistent rollout adapter's slot
-        # resident; per-token application is still gated by vLLM's Punica index
-        # mapping. Must run after the in-process engine (and its LoRA layers)
-        # exist.
+        # Keep the persistent rollout-adapter slot resident (vLLM V1 otherwise
+        # zeroes it on dummy batches and never re-copies it, so the trained
+        # adapter would contribute nothing); see ``patch_vllm_lora_keep_resident``.
+        # Must run after the in-process engine (and its LoRA layers) exist.
         patched = patch_vllm_lora_keep_resident(self.llm)
         if (
             self.accelerator is None or self.accelerator.process_index == 0
@@ -5438,15 +5422,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         strip_towers = getattr(self.vllm_config, "strip_multimodal_towers", False)
         if strip_towers:
-            # Free GPU memory used by multimodal towers (vision/audio/connectors)
-            # for text-only RL training. Gemma-4-MM and similar multimodal bases
-            # otherwise keep ~1-3 GiB of SigLIP/USM encoder weights resident
-            # despite never being invoked on text-only rollouts. Must run after
-            # the engine is constructed (so vLLM's init memory profile already
-            # ran with the towers in place); checkpoints are unaffected because
-            # only the LoRA adapter is saved and the base is referenced by name.
-            # A list value supplies custom tower attribute names for models
-            # that mount unwanted modalities under non-standard attrs.
+            # Free unused vision/audio towers on multimodal bases (text-only RL
+            # never runs them); see ``patch_vllm_strip_multimodal_towers``.
             freed = patch_vllm_strip_multimodal_towers(
                 self.llm,
                 tower_attrs=strip_towers if isinstance(strip_towers, list) else None,

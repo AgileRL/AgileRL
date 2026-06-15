@@ -163,8 +163,13 @@ def patch_vllm_lora_keep_resident(llm: Any) -> int:
 
 
 def get_vllm_internal_model(llm: Any) -> nn.Module:
-    """Return the live ``nn.Module`` inside an in-process vLLM ``LLM``,
-    trying the attribute layouts of the known vLLM versions / engine cores.
+    """Return the live ``nn.Module`` inside an in-process vLLM ``LLM``.
+
+    The other colocated patches need to mutate vLLM's running model in place —
+    :func:`patch_vllm_lora_keep_resident` neutralizes ``reset_lora`` on its LoRA
+    layers and :func:`patch_vllm_strip_multimodal_towers` frees its tower
+    submodules. vLLM exposes no public accessor, so this walks the known
+    engine-core / executor attribute layouts to reach ``...model_runner.model``.
 
     :param llm: A constructed ``vllm.LLM`` instance.
     :type llm: Any

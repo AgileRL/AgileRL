@@ -149,18 +149,14 @@ class PPO(LLMAlgorithm):
         ``importance_sampling_level``.
     :type turn_level_clip: bool, optional
     :param importance_sampling_level: IS / ratio-pooling level for the policy
-        surrogate, orthogonal to the GAE advantage granularity
-        (``advantage_granularity``). ``"token"`` clips per token; ``"turn"`` pools
-        the ratio (length-normalized mean) per turn; ``"trajectory"`` pools over
-        the whole completion. The advantage paired with the ratio is pooled to
-        the same bucket. ``"auto"`` (default) reproduces legacy behavior: the
-        GAE granularity when ``turn_level_clip`` is set, else token. Token-level
-        Liger is memory-bounded (the hidden states are token-flattened and
-        chunked, like GRPO/CISPO); turn- and trajectory-level pooling couple a
-        turn/sequence's tokens, so they cannot be token-chunked inside the
-        fused kernel — set ``use_liger_loss=False`` there for bounded memory
-        (the standard path is always fused-linear/bounded). Turn pooling uses
-        the length-normalized mean of token log-ratios (GSPO-consistent).
+        surrogate, orthogonal to ``advantage_granularity``. ``"token"`` clips per
+        token; ``"turn"`` pools the ratio (length-normalized mean) per turn;
+        ``"trajectory"`` pools over the whole completion; the paired advantage is
+        pooled to the same bucket. ``"auto"`` (default) uses the GAE granularity
+        when ``turn_level_clip`` is set, else token. Turn/trajectory pooling
+        couples a unit's tokens and cannot be token-chunked in the fused kernel,
+        so set ``use_liger_loss=False`` there (the standard path is always
+        memory-bounded).
     :type importance_sampling_level: Literal["auto", "token", "turn", "trajectory"], optional
     :param advantage_granularity: PPO action granularity. ``"turn"`` enforces
         turn-level updates, ``"token"`` enforces token-level updates, and
@@ -178,14 +174,12 @@ class PPO(LLMAlgorithm):
     :param torch_compiler: Optional torch compile mode.
     :type torch_compiler: str | None, optional
     :param use_liger_loss: Use the Liger fused policy loss, defaults to ``False``
-        (requires ``liger-kernel``). **Recommended for PPO.** It still uses
-        liger-kernel, but via AgileRL's ``LigerFusedLinearPolicyLossFunction`` —
-        a subclass of liger's chunked-PPO base carrying AgileRL's own loss math —
-        rather than the upstream Liger GRPO kernel that GRPO/CISPO use. It
-        benchmarks roughly memory-neutral with a mild speedup that grows with
-        sequence length (~1.1x at long sequences), at token-level importance
-        sampling. Separate from the Liger *model* patches (fused
-        RMSNorm/RoPE/SwiGLU), which apply whenever ``liger-kernel`` is installed.
+        (requires ``liger-kernel``). **Recommended for PPO**: via AgileRL's
+        ``LigerFusedLinearPolicyLossFunction`` (not the upstream Liger GRPO
+        kernel), it is roughly memory-neutral with a mild speedup that grows with
+        sequence length (~1.1x at long sequences) at token-level IS. Separate
+        from the Liger *model* patches (fused RMSNorm/RoPE/SwiGLU), which apply
+        whenever ``liger-kernel`` is installed.
     :type use_liger_loss: bool, optional
     :param fused_loss_chunk_rows: Rows per ``(chunk_rows, vocab)`` logit tile in
         the token-level Liger fused policy loss. ``None`` (default) auto-tunes to
@@ -194,12 +188,10 @@ class PPO(LLMAlgorithm):
         override.
     :type fused_loss_chunk_rows: int | None, optional
     :param use_sequence_packing: Opt in to padding-free sequence packing for the
-        gradient forward. The actor-critic value-head forward packs the actor
-        and critic (which share identical ids) into a single block-diagonal
-        varlen / blockmask pass; only honoured under a FlashAttention-2 /
-        FlexAttention backend, otherwise inert. The no-grad reference/old-value
-        pass stays padded (so the packed-vs-padded gap is the tiny
-        varlen-vs-padded numerical difference on the current policy only).
+        gradient forward (actor and critic share ids and pack into one varlen /
+        blockmask pass). Only honoured under a FlashAttention-2 / FlexAttention
+        backend, otherwise inert; the no-grad reference/old-value pass stays
+        padded.
     :type use_sequence_packing: bool, optional
     """
 

@@ -327,10 +327,9 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
             turn_ids_chunk=None,
             vllm_is_ratio_chunk=None,
         ):
-            # Liger 0.8.0 rewrote ``LigerFusedLinearPPOBase.chunk_forward`` as
-            # liger 0.8 made chunk_forward a selective-logp kernel that doesn't
-            # compose with the grad_and_value transform below; inline the
-            # numerically identical 0.7.0 math instead.
+            # Liger 0.8.0 rewrote ``LigerFusedLinearPPOBase.chunk_forward`` into a
+            # selective-logp kernel that doesn't compose with the grad_and_value
+            # transform below, so inline the numerically identical 0.7.0 math.
             logits = torch.matmul(input_chunk, weight_local.t())
             if bias_local is not None:
                 logits = logits + bias_local
