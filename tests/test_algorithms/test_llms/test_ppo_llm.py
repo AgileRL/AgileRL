@@ -1334,6 +1334,42 @@ class TestPPOLossLiger:
         assert call_kwargs["full_turn_mask"] is not None
         assert call_kwargs["max_turns"] == 2
 
+    def test_token_mode_fuses_vllm_is_ratio(self) -> None:
+        """token-level IS with captured vLLM logprobs fuses the clamped
+        trainer/vLLM ratio into the kernel via the ``vllm_is_ratio`` kwarg."""
+        ppo = _cpu_llmppo(beta=0.0)
+        B, T = 2, 6
+        ids = torch.randint(1, 50, (B, T), dtype=torch.long)
+        mask = torch.ones(B, T - 1, dtype=torch.float32)
+        old_lp = torch.zeros(B, T - 1)
+        ref_lp = torch.zeros(B, T - 1)
+        returns = torch.zeros(B, T - 1)
+        adv = torch.randn(B, T - 1) * 0.1
+        old_values = torch.zeros(B, T - 1)
+        turn_ids = torch.zeros(B, T - 1, dtype=torch.long)
+        sampling = old_lp - 0.5  # non-trivial trainer/vLLM mismatch
+        fake_aux = tuple(torch.tensor(0.0) for _ in range(4))
+        with (
+            patch("agilerl.algorithms.ppo_llm.HAS_LIGER_KERNEL", True),
+            patch("agilerl.algorithms.ppo_llm.apply_fused_policy_loss") as mock_fn,
+        ):
+            mock_fn.return_value = (torch.tensor(0.5, requires_grad=True), fake_aux)
+            ppo._ppo_loss_liger(
+                ids,
+                mask,
+                old_lp,
+                ref_lp,
+                returns,
+                adv,
+                old_values,
+                turn_ids,
+                "token",
+                sampling_log_probs=sampling,
+            )
+        ratio = mock_fn.call_args.kwargs["vllm_is_ratio"]
+        assert ratio is not None
+        assert torch.all(ratio <= ppo.vllm_importance_sampling_cap)
+
     def test_trajectory_is_level_pools_advantages_to_per_sample_scalar(self) -> None:
         """An explicit trajectory IS level pools the per-token advantages to a
         masked per-completion mean ``(B, 1)`` for the Liger Function (and emits

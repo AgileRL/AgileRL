@@ -1141,6 +1141,10 @@ class TestGRPOInit:
                 {"adv_filter_eps": -1e-6},
                 "adv_filter_eps must be >= 0.",
             ),
+            (
+                {"group_size": 1},
+                "group_size must be >= 2 for GRPO-style group-relative",
+            ),
         ],
     )
     def test_init_grpo_new_validation_errors(self, extra_kwargs, expected_msg):
@@ -1964,6 +1968,42 @@ class TestGRPOLigerLossDispatch:
             assert positional[13] == grpo.clip_coef_max
         else:  # "clip_coef_max - 1.0"
             assert positional[13] == pytest.approx(grpo.clip_coef_max - 1.0)
+
+    def test_token_level_sampling_logps_fuse_vllm_is_ratio(self) -> None:
+        """token-level Liger + captured vLLM logprobs fuses the clamped
+        trainer/vLLM ratio into the kernel (``vllm_is_ratio`` arg, pos 24)."""
+        grpo = _make_cpu_grpo_for_branch_tests(loss_type="grpo", beta=0.0)
+        fake_lm_head = nn.Linear(8, 16, bias=True)
+        fake_aux = (torch.tensor(0.1), torch.tensor(0.0))
+        with (
+            patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),
+            patch.object(grpo, "_get_lm_head", return_value=fake_lm_head),
+            patch.object(grpo, "_patch_lm_head_to_identity", nullcontext),
+            patch.object(grpo, "actor", new=MagicMock(wraps=grpo.actor)),
+            patch("agilerl.algorithms.grpo.LigerFusedLinearGRPOFunction") as mock_fn,
+            patch.object(
+                LLMAlgorithm, "select_adapter", lambda self, name: nullcontext()
+            ),
+        ):
+            mock_fn.apply.return_value = (
+                torch.tensor(0.5, requires_grad=True),
+                fake_aux,
+            )
+            fake_output = MagicMock()
+            fake_output.logits = torch.randn(1, 2, 8, requires_grad=True)
+            grpo.actor.side_effect = lambda **kwargs: fake_output
+            grpo._liger_loss(
+                batch_ids=torch.ones((1, 2), dtype=torch.long),
+                action_mask=torch.ones((1, 1), dtype=torch.bool),
+                advantages=torch.ones((1,), dtype=torch.float32),
+                old_log_probs=torch.zeros((1, 1), dtype=torch.float32),
+                reference_log_probs=torch.zeros((1, 1), dtype=torch.float32),
+                sampling_log_probs=torch.full((1, 1), -0.5, dtype=torch.float32),
+            )
+        # vllm_is_ratio is the 24th positional arg (index 23): present, clamped.
+        ratio = mock_fn.apply.call_args.args[23]
+        assert ratio is not None
+        assert torch.all(ratio <= grpo.vllm_importance_sampling_cap)
 
     @pytest.mark.parametrize("loss_type", ["grpo", "cispo"])
     @pytest.mark.parametrize("adv_shape", [(1,), (1, 1)])

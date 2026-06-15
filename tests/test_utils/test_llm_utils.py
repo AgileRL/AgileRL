@@ -761,6 +761,13 @@ class TestGatherIfZero3:
         with gather_if_zero3(1, []):
             assert True
 
+    def test_gather_if_zero3_stage_three_without_deepspeed_raises(self):
+        """ZeRO-3 gathering requires deepspeed; raise a clear error when absent."""
+        with patch("agilerl.utils.llm_utils.HAS_DEEPSPEED", False):
+            with pytest.raises(ImportError, match="DeepSpeed is required for ZeRO"):
+                with gather_if_zero3(3, []):
+                    pass
+
 
 def test_get_state_dict():
     # ``get_state_dict`` unconditionally wraps ``model.state_dict()`` in
