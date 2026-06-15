@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import yaml
 
-from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl import HAS_ARENA_DEPENDENCIES, HAS_LLM_DEPENDENCIES
 from agilerl.models.algorithms.cqn import CQNSpec
 from agilerl.models.algorithms.ddpg import DDPGSpec
 from agilerl.models.algorithms.dqn import DQNSpec
@@ -42,6 +42,7 @@ from agilerl.models.networks import (
     MultiInputSpec,
     NetworkSpec,
     SimbaSpec,
+    StochasticActorSpec,
 )
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
 from agilerl.training.trainer import LocalTrainer, Trainer
@@ -50,6 +51,11 @@ if HAS_LLM_DEPENDENCIES:
     from agilerl.models.algorithms.dpo import DPOSpec
     from agilerl.models.algorithms.grpo import GRPOSpec
     from agilerl.models.env import LLMEnvSpec
+else:
+    # Placeholder names so ``@pytest.mark.parametrize`` decorators (evaluated at
+    # class-body load time) don't NameError when LLM deps are absent.  The tests
+    # using them are gated by ``@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES)``.
+    DPOSpec = GRPOSpec = LLMEnvSpec = None  # type: ignore[assignment, misc]
 
 # ---------------------------------------------------------------------------
 # Manifest loading helpers
@@ -693,6 +699,75 @@ class TestLocalTrainerMultiAgent:
         trainer = LocalTrainer.from_manifest(MADDPG_MANIFEST)
         assert isinstance(trainer.replay_buffer_spec, ReplayBufferSpec)
         assert trainer.replay_buffer_spec.max_size == 100_000
+
+
+# ============================================================================
+# TrainingManifest – Arena bridge helpers
+# ============================================================================
+
+requires_arena = pytest.mark.skipif(
+    not HAS_ARENA_DEPENDENCIES, reason="agilerl-arena is not installed"
+)
+
+if HAS_ARENA_DEPENDENCIES:
+    from agilerl.arena.models.env import EnvSpec as ArenaEnvSpec
+else:
+    ArenaEnvSpec = None  # type: ignore[misc, assignment]
+
+
+@requires_arena
+class TestTrainingManifestArenaBridge:
+    """``from_trainer_specs`` and ``to_arena_manifest``."""
+
+    def test_from_trainer_specs_builds_core_manifest(self):
+        ppo_spec = PPOSpec(
+            learn_step=128,
+            net_config=StochasticActorSpec(
+                encoder_config=MlpSpec(hidden_size=[64]),
+                head_config=MlpSpec(hidden_size=[64]),
+            ),
+        )
+        manifest = TrainingManifest.from_trainer_specs(
+            algorithm=ppo_spec,
+            environment=GymEnvSpec(name="CartPole-v1"),
+            training=TrainingSpec(max_steps=500),
+        )
+        assert isinstance(manifest.algorithm, PPOSpec)
+        assert manifest.algorithm.net_config is not None
+
+    def test_from_trainer_specs_accepts_arena_env_spec(self):
+        ppo_spec = PPOSpec(learn_step=128)
+        manifest = TrainingManifest.from_trainer_specs(
+            algorithm=ppo_spec,
+            environment=ArenaEnvSpec(name="CartPole-v1"),
+            training=TrainingSpec(max_steps=500),
+        )
+        assert manifest.environment["name"] == "CartPole-v1"
+        assert isinstance(manifest.algorithm, PPOSpec)
+
+    def test_to_arena_manifest_from_dict_payload(self):
+        data = {
+            "algorithm": {"name": "PPO", "learn_step": 128},
+            "environment": {"name": "CartPole-v1", "num_envs": 4},
+            "training": {"max_steps": 100, "evo_steps": 50, "pop_size": 2},
+            "network": {
+                "encoder_config": {"arch": "mlp", "hidden_size": [64]},
+                "head_config": {"arch": "mlp", "hidden_size": [64]},
+            },
+        }
+        submission = TrainingManifest.to_arena_manifest(data)
+        assert submission["algorithm"]["name"] == "PPO"
+        assert submission["network"]["encoder_config"]["hidden_size"] == [64]
+
+    def test_to_arena_manifest_from_core_manifest(self):
+        core = TrainingManifest.from_trainer_specs(
+            algorithm=PPOSpec(learn_step=64),
+            environment=ArenaEnvSpec(name="CartPole-v1"),
+            training=TrainingSpec(max_steps=200),
+        )
+        submission = TrainingManifest.to_arena_manifest(core)
+        assert submission["algorithm"]["name"] == "PPO"
+        assert submission["environment"]["name"] == "CartPole-v1"
 
 
 # ============================================================================

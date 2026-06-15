@@ -9,7 +9,7 @@ import yaml
 from pydantic import BaseModel, BeforeValidator, Field, PlainSerializer, model_validator
 from typing_extensions import Self
 
-from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl import HAS_ARENA_DEPENDENCIES, HAS_LLM_DEPENDENCIES, AgentType
 from agilerl.models.algo import (
     ALGO_REGISTRY,
     AlgoSpecT,
@@ -45,11 +45,21 @@ def _resolve_algorithm(data: dict[str, Any] | AlgoSpecT) -> AlgoSpecT:
     """
     if isinstance(data, AlgoSpecT):
         return data
-    if not isinstance(data, dict):
+    if isinstance(data, BaseModel):
+        # Foreign spec (e.g. an arena algorithm spec) — re-resolve via the core
+        # ``ALGO_REGISTRY`` using its serialized form and registered name.
+        payload = data.model_dump(
+            mode="json",
+            exclude_none=True,
+            exclude=_ALGO_NON_SERIALIZABLE_FIELDS,
+        )
+        payload["name"] = getattr(data, "name", None)
+    elif isinstance(data, dict):
+        payload = dict(data)
+    else:
         msg = f"Expected a dict or AlgorithmSpec, got {type(data).__name__}"
         raise TypeError(msg)
 
-    payload = dict(data)
     name = payload.pop("name", None)
     if name is None:
         msg = "Algorithm section must include a 'name' field, corresponding to the name of the algorithm class."
@@ -64,7 +74,7 @@ def _resolve_algorithm(data: dict[str, Any] | AlgoSpecT) -> AlgoSpecT:
     return entry.spec_cls(**payload)
 
 
-def _coerce_environment(data: Any) -> dict[str, Any]:
+def _coerce_environment(data: dict[str, Any] | BaseModel) -> dict[str, Any]:
     """Accept environment spec objects or raw dicts.
 
     If *data* is a Pydantic ``BaseModel`` (e.g. :class:`ArenaEnvSpec`,
@@ -101,8 +111,18 @@ def _resolve_network(data: Any) -> dict[str, Any]:
         return data.model_dump(mode="json")
     if isinstance(data, BaseModel):
         data_dict = data.model_dump()
-        if isinstance(data, NetworkSpec):
-            data_dict["encoder_config"]["arch"] = data.encoder_config.arch
+        encoder_config = getattr(data, "encoder_config", None)
+        encoder_dump = data_dict.get("encoder_config")
+        if encoder_config is not None and isinstance(encoder_dump, dict):
+            encoder_dump.setdefault("arch", encoder_config.arch)
+        head_config = getattr(data, "head_config", None)
+        head_dump = data_dict.get("head_config")
+        if (
+            head_config is not None
+            and isinstance(head_dump, dict)
+            and hasattr(head_config, "arch")
+        ):
+            head_dump.setdefault("arch", head_config.arch)
         return data_dict
 
     if isinstance(data, dict) and "pretrained_model_name_or_path" in data:
@@ -219,6 +239,103 @@ class TrainingManifest(BaseModel):
             raise ValueError(msg)
 
         return self
+
+    @staticmethod
+    def _network_from_algorithm(algorithm: AlgoSpecT) -> Any | None:
+        """Resolve the manifest ``network`` section from an algorithm spec."""
+        if algorithm.agent_type == AgentType.LLMAgent:
+            return FinetuningNetworkSpec(
+                pretrained_model_name_or_path=algorithm.pretrained_model_name_or_path,
+                max_context_length=algorithm.max_model_len,
+                lora_config=algorithm.lora_config,
+            )
+        return getattr(algorithm, "net_config", None)
+
+    @classmethod
+    def from_trainer_specs(
+        cls,
+        *,
+        algorithm: AlgoSpecT,
+        environment: BaseModel,
+        training: TrainingSpec,
+        mutation: MutationSpec | None = None,
+        replay_buffer: ReplayBufferSpec | None = None,
+        tournament_selection: TournamentSelectionSpec | None = None,
+    ) -> TrainingManifest:
+        """Build a validated core manifest from trainer component specs.
+
+        :param algorithm: Core algorithm spec or registered algorithm name dict.
+        :type algorithm: AlgoSpecT
+        :param environment: Environment spec instance held on the trainer.
+        :type environment: BaseModel
+        :param training: Training loop parameters.
+        :type training: TrainingSpec
+        :param mutation: Optional mutation spec.
+        :type mutation: MutationSpec | None
+        :param replay_buffer: Optional replay-buffer spec.
+        :type replay_buffer: ReplayBufferSpec | None
+        :param tournament_selection: Optional tournament-selection spec.
+        :type tournament_selection: TournamentSelectionSpec | None
+        :returns: A validated :class:`TrainingManifest`.
+        :rtype: TrainingManifest
+        """
+
+        def _coerce(value: Any, core_cls: type) -> Any:
+            """Dump foreign BaseModel inputs (e.g. arena specs) to plain dicts."""
+            if value is None or isinstance(value, core_cls):
+                return value
+            if isinstance(value, BaseModel):
+                return value.model_dump(mode="json", exclude_none=True)
+            return value
+
+        return cls(
+            algorithm=algorithm,
+            environment=environment,
+            training=_coerce(training, TrainingSpec),
+            network=cls._network_from_algorithm(algorithm),
+            mutation=_coerce(mutation, MutationSpec),
+            replay_buffer=_coerce(replay_buffer, ReplayBufferSpec),
+            tournament_selection=_coerce(tournament_selection, TournamentSelectionSpec),
+        )
+
+    @classmethod
+    def to_arena_manifest(
+        cls,
+        manifest: str | Path | dict[str, Any] | TrainingManifest,
+        *,
+        mode: Literal["json", "python"] = "json",
+    ) -> dict[str, Any]:
+        """Validate a manifest for Arena submission.
+
+        Accepts a core :class:`TrainingManifest`, a raw manifest dict, or a
+        YAML/JSON path.
+
+        :param manifest: Manifest source to validate for the Arena platform.
+        :type manifest: str | Path | dict[str, Any] | TrainingManifest
+        :param mode: ``"json"`` for the submission payload, ``"python"`` for the
+            validated arena manifest model.
+        :type mode: Literal["json", "python"]
+        :returns: Arena submission dict or validated arena manifest model.
+        :rtype: dict[str, Any] | Any
+        :raises ImportError: If ``agilerl-arena`` is not installed.
+        """
+        if not HAS_ARENA_DEPENDENCIES:
+            msg = (
+                "Arena dependencies are not installed. "
+                "Please install them using: pip install agilerl-arena"
+            )
+            raise ImportError(msg)
+
+        from agilerl.arena.models import TrainingManifest as ArenaManifest
+
+        if isinstance(manifest, cls):
+            data = manifest.model_dump(mode="json", exclude_none=True)
+        elif isinstance(manifest, dict):
+            data = manifest
+        else:
+            data = cls._load_yaml(manifest)
+
+        return ArenaManifest.get_validated(data, mode=mode)
 
     @staticmethod
     def _load_yaml(manifest: str | Path | dict[str, Any]) -> dict[str, Any]:

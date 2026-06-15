@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# How agilerl.arena becomes importable in each context:
+#   - Wheel install:  files merge physically into site-packages; no extra config.
+#   - Editable dev:   uv's editable workspace install + extend_path() in
+#                     agilerl/__init__.py cooperate via a sys.meta_path hook.
+#   - Test runner:    PYTHONPATH below is the belt-and-suspenders fallback so
+#                     pytest --import-mode=importlib finds arena even if the
+#                     editable hook hasn't fired yet (e.g. subprocess workers).
 arena_pkg_path="$PWD/agilerl-arena"
 
 run_pytest() {

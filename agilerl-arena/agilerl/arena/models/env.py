@@ -24,12 +24,12 @@ class EnvSpec(BaseModel):
     :type name: str
     :param num_envs: Number of environments to run in parallel
     :type num_envs: int
-    :param version: Version of the environment
-    :type version: str
+    :param version: Version of the environment. Defaults to the latest version.
+    :type version: str | None
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     name: str
     num_envs: int = Field(default=16, ge=1)
-    version: str = Field(default="v1")
+    version: str | None = Field(default=None)

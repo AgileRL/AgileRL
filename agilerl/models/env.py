@@ -849,20 +849,3 @@ class BanditEnvSpec(BaseModel):
             else self.targets
         )
         return BanditEnv(features=features, targets=targets)
-
-
-class ArenaEnvSpec(EnvSpec):
-    """Environment specification for Arena environments.
-
-    The specified environment name and version should correspond to a registered and
-    validated environment on Arena.
-
-    :param name: Name of the environment
-    :type name: str
-    :param num_envs: Number of environments to run in parallel
-    :type num_envs: int
-    :param version: Version of the environment
-    :type version: str
-    """
-
-    version: str = Field(default="latest")

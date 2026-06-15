@@ -1,3 +1,6 @@
+# Symlink for Pylance/Pyright type checking of namespace package
+agilerl/arena
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

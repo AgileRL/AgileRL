@@ -26,7 +26,6 @@ from agilerl.models import (
     ALGO_REGISTRY,
     DDPGSpec,
     DQNSpec,
-    ArenaEnvSpec,
     PPOSpec,
     TD3Spec,
     RLAlgorithmSpec,
@@ -45,6 +44,11 @@ from agilerl.utils.trainer_utils import (
     build_replay_buffer_from_spec,
     build_tournament_from_spec,
 )
+
+if HAS_ARENA_DEPENDENCIES:
+    from agilerl.arena.models.env import EnvSpec as ArenaEnvSpec
+else:
+    ArenaEnvSpec = None  # type: ignore[misc, assignment]
 
 requires_arena = pytest.mark.skipif(
     not HAS_ARENA_DEPENDENCIES, reason="agilerl-arena is not installed"
@@ -535,7 +539,7 @@ class TestArenaTrainerManifest:
 
         assert manifest["algorithm"]["name"] == "PPO"
         assert manifest["environment"]["name"] == "CartPole-v1"
-        assert "network" not in manifest
+        assert manifest.get("network") in (None, {})
 
     def test_string_based_manifest(self, mock_client, ppo_spec, training_spec):
         env_spec = ArenaEnvSpec(name="CartPole-v1")
@@ -782,6 +786,8 @@ class TestArenaTrainerFromManifest:
     """Tests for ArenaTrainer.from_manifest()."""
 
     def test_from_dict(self):
+        from agilerl.arena.models import DQNSpec as ArenaDQNSpec
+
         data = {
             "algorithm": {"name": "DQN", "learn_step": 1},
             "environment": {"name": "CartPole-v1", "num_envs": 4},
@@ -790,9 +796,79 @@ class TestArenaTrainerFromManifest:
         mock_client = MagicMock()
         trainer = ArenaTrainer.from_manifest(data, client=mock_client)
         assert isinstance(trainer, ArenaTrainer)
+        assert isinstance(trainer.algorithm_spec, ArenaDQNSpec)
         assert trainer.algorithm_spec.name == "DQN"
         assert trainer.env_spec.name == "CartPole-v1"
         assert trainer._client is mock_client
+
+    def test_from_manifest_train_round_trip(self, mock_client):
+        """``from_manifest(...).train()`` validates and submits an Arena manifest."""
+        from agilerl.arena.models import PPOSpec as ArenaPPOSpec
+
+        data = {
+            "algorithm": {"name": "PPO", "learn_step": 128},
+            "environment": {"name": "CartPole-v1", "num_envs": 4},
+            "training": {"max_steps": 100, "evo_steps": 50, "pop_size": 2},
+            "network": {
+                "encoder_config": {"arch": "mlp", "hidden_size": [64]},
+                "head_config": {"arch": "mlp", "hidden_size": [64]},
+            },
+        }
+        trainer = ArenaTrainer.from_manifest(data, client=mock_client)
+        assert isinstance(trainer.algorithm_spec, ArenaPPOSpec)
+
+        result = trainer.train()
+
+        mock_client.submit_experiment.assert_called_once()
+        submitted_manifest = mock_client.submit_experiment.call_args[0][0]
+        assert isinstance(submitted_manifest, dict)
+        assert submitted_manifest["algorithm"]["name"] == "PPO"
+        assert submitted_manifest["algorithm"]["learn_step"] == 128
+        assert submitted_manifest["environment"]["name"] == "CartPole-v1"
+        assert submitted_manifest["environment"]["num_envs"] == 4
+        assert submitted_manifest["training"]["max_steps"] == 100
+        assert submitted_manifest["training"]["pop_size"] == 2
+        assert submitted_manifest["network"]["encoder_config"]["hidden_size"] == [64]
+        assert submitted_manifest["network"]["head_config"]["hidden_size"] == [64]
+        assert "mutation" in submitted_manifest
+        assert "tournament_selection" in submitted_manifest
+        assert result["job_id"] == "test-123"
+
+    def test_from_yaml_manifest_train_round_trip(self, mock_client):
+        """YAML ``from_manifest(...).train()`` round-trips through arena validation."""
+        trainer = ArenaTrainer.from_manifest(
+            "configs/training/ppo/ppo.yaml", client=mock_client
+        )
+        result = trainer.train()
+
+        mock_client.submit_experiment.assert_called_once()
+        submitted_manifest = mock_client.submit_experiment.call_args[0][0]
+        assert submitted_manifest["algorithm"]["name"] == "PPO"
+        assert submitted_manifest["environment"]["name"] == "LunarLander-v3"
+        assert submitted_manifest["training"]["pop_size"] == 4
+        assert submitted_manifest["network"]["encoder_config"]["hidden_size"] == [64]
+        assert result["job_id"] == "test-123"
+
+    def test_core_specs_train_round_trip(self, mock_client, ppo_spec, training_spec):
+        """Direct construction with core specs still submits a valid Arena manifest."""
+        env_spec = ArenaEnvSpec(name="CartPole-v1", num_envs=8)
+        trainer = ArenaTrainer(
+            algorithm=ppo_spec,
+            environment=env_spec,
+            training=training_spec,
+            client=mock_client,
+        )
+
+        result = trainer.train()
+
+        mock_client.submit_experiment.assert_called_once()
+        submitted_manifest = mock_client.submit_experiment.call_args[0][0]
+        assert submitted_manifest["algorithm"]["name"] == "PPO"
+        assert submitted_manifest["algorithm"]["learn_step"] == 128
+        assert submitted_manifest["environment"]["num_envs"] == 8
+        assert submitted_manifest["training"]["max_steps"] == 500
+        assert submitted_manifest["network"]["encoder_config"]["hidden_size"] == [64]
+        assert result["job_id"] == "test-123"
 
     def test_from_yaml_file(self):
         mock_client = MagicMock()
