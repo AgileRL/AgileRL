@@ -154,14 +154,16 @@ class GRPO(LLMAlgorithm):
         uses DAPO-style batch normalisation for ``'cispo'`` rather than
         the per-sequence-then-batch normalisation of the standard path;
         numerical values will differ slightly but gradient direction is
-        equivalent. Benchmarked against AgileRL's (already memory-bounded)
-        fused-linear-logprob standard path at matched chunk size
-        (``fused_loss_chunk_rows`` == ``fused_logprobs_chunk_rows``), the GRPO/
-        CISPO fused-loss kernel shows no speedup (it is slower) and uses slightly
-        more memory — the upstream kernel underperforms the standard path for
-        this surrogate — which is why it stays off by default. Liger model
-        patches (fused RMSNorm/RoPE/SwiGLU) are applied whenever ``liger-kernel``
-        is installed and are independent of this flag.
+        equivalent. **Not recommended for GRPO/CISPO/GSPO**: benchmarked against
+        AgileRL's (already memory-bounded) fused-linear-logprob standard path at
+        matched chunk size (``fused_loss_chunk_rows`` == ``fused_logprobs_chunk_rows``),
+        the GRPO/CISPO fused-loss kernel shows no speedup (it is slower) and uses
+        slightly more memory — the upstream Liger GRPO kernel underperforms the
+        standard path for this surrogate — so leave it ``False`` here. (PPO/
+        REINFORCE use AgileRL's own fused kernel instead, where it does help —
+        see their ``use_liger_loss`` docs.) The Liger model patches (fused
+        RMSNorm/RoPE/SwiGLU) are applied whenever ``liger-kernel`` is installed
+        and are independent of this flag.
     :type use_liger_loss: bool, optional
     :param use_kl_advantage_shaping: Apply KL-based shaping directly to token
         advantages before PPO clipping, defaults to False.
