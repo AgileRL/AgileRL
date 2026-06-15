@@ -160,8 +160,8 @@ class GRPO(LLMAlgorithm):
         the GRPO/CISPO fused-loss kernel shows no speedup (it is slower) and uses
         slightly more memory — the upstream Liger GRPO kernel underperforms the
         standard path for this surrogate — so leave it ``False`` here. (PPO/
-        REINFORCE use AgileRL's own fused kernel instead, where it does help —
-        see their ``use_liger_loss`` docs.) The Liger model patches (fused
+        REINFORCE route their ``use_liger_loss`` through a different, AgileRL
+        liger-based kernel where it does help — see their docs.) The Liger model patches (fused
         RMSNorm/RoPE/SwiGLU) are applied whenever ``liger-kernel`` is installed
         and are independent of this flag.
     :type use_liger_loss: bool, optional

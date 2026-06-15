@@ -155,12 +155,14 @@ class REINFORCE(LLMAlgorithm):
     :param torch_compiler: Torch compiler mode.
     :type torch_compiler: str | None
     :param use_liger_loss: Use the Liger fused policy loss, defaults to ``False``
-        (requires ``liger-kernel``). **Recommended for REINFORCE**: it runs
-        AgileRL's own fused-linear kernel (the same path as PPO, not the upstream
-        GRPO kernel), which benchmarks roughly memory-neutral with a mild speedup
-        that grows with sequence length, at token-level importance sampling.
-        Independent of the Liger *model* patches (fused RMSNorm/RoPE/SwiGLU),
-        which apply whenever ``liger-kernel`` is installed.
+        (requires ``liger-kernel``). **Recommended for REINFORCE.** It still uses
+        liger-kernel, but via AgileRL's ``LigerFusedLinearPolicyLossFunction``
+        (the same liger-based path as PPO — a subclass of liger's chunked-PPO
+        base with AgileRL's own loss math) rather than the upstream Liger GRPO
+        kernel. It benchmarks roughly memory-neutral with a mild speedup that
+        grows with sequence length, at token-level importance sampling. Separate
+        from the Liger *model* patches (fused RMSNorm/RoPE/SwiGLU), which apply
+        whenever ``liger-kernel`` is installed.
     :type use_liger_loss: bool, optional
     :param fused_loss_chunk_rows: Rows per ``(chunk_rows, vocab)`` logit tile in
         the token-level Liger fused policy loss. ``None`` (default) auto-tunes to
