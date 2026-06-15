@@ -548,7 +548,13 @@ class TestOffloadColocatedTrainerFromGpu:
 
 
 class TestColocatedInitOrdering:
-    """Colocated vLLM always shares its base with the trainer (vLLM-first)."""
+    """Colocated vLLM and the trainer each hold their own base.
+
+    A fresh bnb trainer under sleep mode is built FIRST (then offloaded to CPU)
+    before vLLM starts, to avoid post-vLLM bnb CUDA-allocator segfaults; every
+    other case is CUDA-safe vLLM-first. There is no shared base, and a
+    user-supplied ``base_model`` is used directly by ``_initialize_actors``.
+    """
 
     @staticmethod
     def _stub_agent(**kwargs: object) -> LLMAlgorithm:
@@ -570,62 +576,85 @@ class TestColocatedInitOrdering:
         agent.use_vllm = kwargs.get("use_vllm", True)
         agent.vllm_config = kwargs.get("vllm_config", VLLMConfig(sleep_mode=True))
         agent.quantization_config = kwargs.get("quantization_config")
-        agent._weight_sharing = kwargs.get("weight_sharing", True)
         agent.accelerator = kwargs.get("accelerator")
         return agent
 
-    def test_colocated_shares_vllm_first_then_sleeps(self):
-        # vLLM loads first, the trainer aliases its base, then vLLM sleeps;
-        # ``_initialize_actors`` receives the shared base built from vLLM.
-        agent = self._stub_agent()
-        shared = object()
+    def test_trainer_first_for_fresh_bnb_trainer_under_sleep_mode(self):
+        # bnb trainer + sleep_mode + no base_model: the trainer is built first,
+        # offloaded to CPU, then vLLM starts. ``_initialize_actors`` builds the
+        # trainer's own base (base_model None).
+        agent = self._stub_agent(quantization_config=object())
+        assert agent._trainer_should_load_before_vllm(None) is True
         call_order: list[str] = []
 
-        def _vllm():
-            call_order.append("vllm")
-
-        def _build():
-            call_order.append("build")
-            return shared
-
         def _actors(base, _add):
-            call_order.append("actors" if base is shared else "actors_wrong")
-
-        def _sleep():
-            call_order.append("sleep")
+            call_order.append("actors" if base is None else "actors_wrong")
 
         with (
-            mock.patch.object(agent, "_configure_vllm", side_effect=_vllm),
             mock.patch.object(
-                agent, "_build_shared_base_from_vllm", side_effect=_build
+                agent, "_configure_vllm", side_effect=lambda: call_order.append("vllm")
             ),
             mock.patch.object(agent, "_initialize_actors", side_effect=_actors),
-            mock.patch.object(agent, "_sleep_vllm_after_init", side_effect=_sleep),
+            mock.patch.object(
+                agent,
+                "_offload_trainer_to_cpu_for_colocated_vllm",
+                side_effect=lambda: call_order.append("offload"),
+            ),
         ):
             agent._initialize_colocated_vllm_and_actors(None, True)
 
-        assert call_order == ["vllm", "build", "actors", "sleep"]
+        assert call_order == ["actors", "offload", "vllm"]
 
-    def test_colocated_no_sleep_still_shares_but_skips_sleep(self):
-        agent = self._stub_agent(vllm_config=VLLMConfig(sleep_mode=False))
+    def test_vllm_first_for_dense_trainer(self):
+        # No quantization_config: CUDA-safe vLLM-first. vLLM is configured
+        # before the trainer actors are built, and no CPU offload runs.
+        agent = self._stub_agent(quantization_config=None)
+        assert agent._trainer_should_load_before_vllm(None) is False
+        call_order: list[str] = []
+
+        with (
+            mock.patch.object(
+                agent, "_configure_vllm", side_effect=lambda: call_order.append("vllm")
+            ),
+            mock.patch.object(
+                agent,
+                "_initialize_actors",
+                side_effect=lambda base, _add: call_order.append("actors"),
+            ),
+            mock.patch.object(
+                agent, "_offload_trainer_to_cpu_for_colocated_vllm"
+            ) as offload,
+        ):
+            agent._initialize_colocated_vllm_and_actors(None, True)
+
+        assert call_order == ["vllm", "actors"]
+        offload.assert_not_called()
+
+    def test_vllm_first_when_sleep_mode_off(self):
+        # sleep_mode off disables the trainer-first ordering even with bnb.
+        agent = self._stub_agent(
+            vllm_config=VLLMConfig(sleep_mode=False), quantization_config=object()
+        )
+        assert agent._trainer_should_load_before_vllm(None) is False
+
+    def test_user_supplied_base_model_is_used_directly(self):
+        # A non-None base_model (clone / in-memory actor) skips the trainer-first
+        # ordering and is passed straight through to ``_initialize_actors``.
+        agent = self._stub_agent(quantization_config=object())
+        supplied = mock.MagicMock()
+        assert agent._trainer_should_load_before_vllm(supplied) is False
+
         with (
             mock.patch.object(agent, "_configure_vllm"),
-            mock.patch.object(
-                agent, "_build_shared_base_from_vllm", return_value=object()
-            ),
             mock.patch.object(agent, "_initialize_actors") as actors,
-            mock.patch.object(agent, "_sleep_vllm_after_init") as sleep,
+            mock.patch.object(
+                agent, "_offload_trainer_to_cpu_for_colocated_vllm"
+            ) as offload,
         ):
-            agent._initialize_colocated_vllm_and_actors(None, True)
-        actors.assert_called_once()
-        sleep.assert_not_called()
+            agent._initialize_colocated_vllm_and_actors(supplied, False)
 
-    def test_colocated_rejects_user_supplied_base_model(self):
-        # The base is built from vLLM's loaded weights, so an in-memory
-        # actor_network cannot be shared.
-        agent = self._stub_agent()
-        with pytest.raises(ValueError, match="user-supplied base_model"):
-            agent._initialize_colocated_vllm_and_actors(mock.MagicMock(), True)
+        actors.assert_called_once_with(supplied, False)
+        offload.assert_not_called()
 
 
 class TestAdaptLoraConfigForClippableLinear:

@@ -67,7 +67,9 @@ This example demonstrates how to use the GRPO algorithm to fine-tune a LLM on a 
 
 .. note::
 
-   Internal development notes for the colocated vLLM sleep / weight-sharing
-   work live in ``docs/llm_finetuning/vllm_sleep_handoff.md`` (Markdown, not
-   built into this site); they are pending consolidation into the
-   :doc:`quantization` topic.
+   The current colocated rollout design — vLLM native sleep/wake with each side
+   holding its own base — is documented under "Colocated rollout (native vLLM
+   sleep/wake)" in the :doc:`quantization` topic. ``vllm_sleep_handoff.md`` is a
+   historical record of the earlier standby-sleep + zero-copy weight-sharing
+   investigation that this superseded (kept for context; not built into this
+   site).

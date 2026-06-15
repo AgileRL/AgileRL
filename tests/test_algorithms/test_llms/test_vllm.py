@@ -163,13 +163,12 @@ class TestREINFORCETest:
         """End-to-end bnb quantization: load → quantize → generate → sleep →
         wake → generate.
 
-        vLLM loads the fixture with in-flight bitsandbytes quantization, the
-        trainer base is extracted zero-copy from the live engine weights (no
-        mock — ``_build_shared_base_from_vllm`` runs for real, including its
-        aliasing assertion), and standby sleep must keep the quantized base
-        resident: greedy decode of the same prompts has to be identical before
-        sleep and after wake. The legacy sleep path re-quantized bnb weights to
-        garbage on reload — token equality is the regression check for that.
+        vLLM loads the fixture with in-flight bitsandbytes quantization and the
+        trainer holds its own base (loaded from the model name). vLLM native
+        sleep/wake must round-trip the quantized base losslessly: greedy decode
+        of the same prompts has to be identical before sleep and after wake. An
+        earlier sleep path re-quantized bnb weights to garbage on reload — token
+        equality is the regression check for that.
         """
         bnb = pytest.importorskip(
             "bitsandbytes",
@@ -206,15 +205,13 @@ class TestREINFORCETest:
             temperature=0.0,  # greedy → outputs comparable across sleep/wake
         )
 
-        # The trainer base aliases vLLM's live weights (asserted during init),
-        # and those weights are genuinely 4-bit bnb modules. NB: the actor is a
+        # The trainer holds its own 4-bit bnb base. NB: the actor is a
         # DummyEvolvable, whose ``modules()`` is the EvolvableModule registry
         # API, not torch's recursive walk — use ``named_modules()``.
         assert any(
             isinstance(m, bnb.nn.Linear4bit) for _, m in rf.actor.named_modules()
         )
-        # Standby sleep is active and the engine was put to sleep after init.
-        assert rf._vllm_standby
+        # Sleep mode is active and the engine was put to sleep after init.
         assert not rf._vllm_awake
 
         # Build prompts once and reuse them verbatim for both generations.
@@ -240,8 +237,8 @@ class TestREINFORCETest:
             pad_token_id=rf.pad_token_id,
         )
 
-        # The algorithm's own pre-learn hook: standby sleep frees the KV cache
-        # but must leave the shared quantized base untouched.
+        # The algorithm's own pre-learn hook: native sleep frees the KV cache
+        # and backs the base up to host RAM; wake must restore it losslessly.
         rf._prepare_vllm_for_training()
         assert not rf._vllm_awake
 
@@ -250,7 +247,7 @@ class TestREINFORCETest:
         for first, second in zip(first_ids, second_ids, strict=True):
             assert torch.equal(first, second), (
                 "greedy completions changed across sleep/wake — the quantized "
-                "base did not survive standby sleep"
+                "base did not survive native sleep/wake"
             )
 
         rf.clean_up()
@@ -273,7 +270,7 @@ class TestREINFORCETest:
     ):
         """Dense (unquantized) counterpart of the quantized sleep/wake test.
 
-        The shared fp16 base must stay resident through standby sleep: greedy
+        vLLM native sleep/wake must round-trip the fp16 base losslessly: greedy
         decode of the same prompts has to be identical before sleep and after
         wake. fp16 (not bf16) so the test also runs on pre-Ampere CI GPUs.
         """
@@ -295,8 +292,7 @@ class TestREINFORCETest:
             temperature=0.0,  # greedy → outputs comparable across sleep/wake
         )
 
-        # Standby sleep is active and the engine was put to sleep after init.
-        assert rf._vllm_standby
+        # Sleep mode is active and the engine was put to sleep after init.
         assert not rf._vllm_awake
 
         batch_size = 2
@@ -321,7 +317,8 @@ class TestREINFORCETest:
             pad_token_id=rf.pad_token_id,
         )
 
-        # Standby sleep frees the KV cache but keeps the shared base resident.
+        # Native sleep frees the KV cache and backs the base up to host RAM;
+        # wake must restore it losslessly.
         rf._prepare_vllm_for_training()
         assert not rf._vllm_awake
 
@@ -330,7 +327,7 @@ class TestREINFORCETest:
         for first, second in zip(first_ids, second_ids, strict=True):
             assert torch.equal(first, second), (
                 "greedy completions changed across sleep/wake — the dense "
-                "base did not survive standby sleep"
+                "base did not survive native sleep/wake"
             )
 
         rf.clean_up()

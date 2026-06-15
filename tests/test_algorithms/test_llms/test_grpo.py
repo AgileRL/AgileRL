@@ -401,10 +401,13 @@ def generate_grpo(
             lora_dropout=0.05,
         )
         vllm_config = None
-    # Colocated vLLM builds the trainer base from vLLM's loaded weights, so it
-    # cannot take an in-memory actor_network — construct from the model name
-    # whenever sharing (use_vllm) or when from_name is requested.
-    share_from_name = from_name or use_vllm
+    # ``from_name`` builds the trainer base from the model name rather than an
+    # in-memory actor. Colocated vLLM and the trainer each hold their own base;
+    # these tests mock the vLLM engine (no real engine to load), so the dummy
+    # actor is passed as the trainer base — when ``base_model`` is non-None
+    # ``_initialize_actors`` uses it directly (the trainer-first ordering and
+    # any real base load are skipped). The vLLM engine is mocked by the caller.
+    share_from_name = from_name
     grpo_kwargs = dict(
         actor_network=actor if not share_from_name else None,
         model_name=pretrained_model_name_or_path if share_from_name else None,
@@ -428,15 +431,7 @@ def generate_grpo(
         micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         use_liger_loss=use_liger_loss,
     )
-    if use_vllm:
-        # Colocated vLLM builds the trainer base FROM vLLM. These tests mock the
-        # vLLM engine (no real model to extract), so stand the dummy actor in for
-        # the shared base. Real zero-copy sharing is covered by the
-        # weight-sharing unit tests.
-        with patch.object(GRPO, "_build_shared_base_from_vllm", return_value=actor):
-            grpo = GRPO(**grpo_kwargs)
-    else:
-        grpo = GRPO(**grpo_kwargs)
+    grpo = GRPO(**grpo_kwargs)
     return grpo
 
 
@@ -645,17 +640,14 @@ class TestGRPOInit:
         mock_instance = make_mock_vllm_instance(vllm.LLM)
         MockLLM.return_value = mock_instance
         actor = model_factory(TINY_LLM_FIXTURE_PATH)
-        # Colocated vLLM builds the trainer base FROM vLLM (mocked here): the
-        # tiny actor stands in for the shared base.
-        with (
-            patch.object(GRPO, "_build_shared_base_from_vllm", return_value=actor),
-            pytest.warns(
-                UserWarning, match="hf_generate_chunk_size.*ignored.*use_vllm=True"
-            ),
+        # Colocated vLLM and the trainer each hold their own base. The vLLM
+        # engine is mocked here; the tiny actor is passed as the trainer base
+        # (``_initialize_actors`` uses it directly when ``base_model`` is given).
+        with pytest.warns(
+            UserWarning, match="hf_generate_chunk_size.*ignored.*use_vllm=True"
         ):
             grpo = GRPO(
-                model_name=TINY_LLM_FIXTURE_PATH,
-                actor_network=None,
+                actor_network=actor,
                 pad_token_id=999,
                 pad_token="<pad>",
                 group_size=2,

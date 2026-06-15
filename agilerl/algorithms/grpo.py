@@ -124,9 +124,11 @@ class GRPO(LLMAlgorithm):
     :type lora_config: LoraConfig, optional
     :param cosine_lr_schedule_config: Config for cosine lr scheduling, defaults to None
     :type cosine_lr_schedule_config: CosineLRScheduleConfig, optional
-    :param use_memory_efficient_params: Deprecated and ignored. Colocated vLLM
-        shares its base with the trainer (one resident copy), so there is no
-        separate copy to shuttle CPU<->GPU. Kept for API compatibility.
+    :param use_memory_efficient_params: For colocated vLLM, offload the trainer's
+        own base to CPU during rollout (and bring it back for the training step)
+        so the rollout engine and the trainer never both hold a base on the GPU.
+        Defaults to True; inert without colocated vLLM, and disabled under
+        DeepSpeed ZeRO-3.
     :type use_memory_efficient_params: bool
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional

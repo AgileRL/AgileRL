@@ -134,9 +134,11 @@ class PPO(LLMAlgorithm):
     :type clone: bool, optional
     :param use_vllm: Whether to route generation through vLLM.
     :type use_vllm: bool, optional
-    :param use_memory_efficient_params: Deprecated and ignored. Colocated vLLM
-        shares its base with the trainer (one resident copy), so there is no
-        separate copy to shuttle CPU<->GPU. Kept for API compatibility.
+    :param use_memory_efficient_params: For colocated vLLM, offload the trainer's
+        own base to CPU during rollout (and bring it back for the training step)
+        so the rollout engine and the trainer never both hold a base on the GPU.
+        Defaults to True; inert without colocated vLLM, and disabled under
+        DeepSpeed ZeRO-3.
     :type use_memory_efficient_params: bool, optional
     :param vllm_config: vLLM runtime configuration.
     :type vllm_config: VLLMConfig | None, optional

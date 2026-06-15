@@ -285,10 +285,12 @@ def generate_reinforce(
         )
         vllm_config = None
 
-    # Colocated vLLM builds the trainer base from vLLM's loaded weights, so it
-    # cannot take an in-memory actor_network — construct from the model name
-    # whenever sharing (use_vllm) or when from_name is requested.
-    share_from_name = from_name or use_vllm
+    # Colocated vLLM and the trainer each hold their own base. The mocked-engine
+    # tests (share_base_from_vllm=False) pass the dummy actor as the trainer
+    # base; ``_initialize_actors`` uses it directly when ``base_model`` is given.
+    # The real-engine tests (share_base_from_vllm=True) load the base from the
+    # model name. ``from_name`` likewise forces a load-from-name base.
+    share_from_name = from_name or (use_vllm and share_base_from_vllm)
     reinforce_kwargs = dict(
         actor_network=actor if not share_from_name else None,
         model_name=pretrained_model_name_or_path if share_from_name else None,
@@ -315,18 +317,7 @@ def generate_reinforce(
         # regardless of liger-kernel availability.
         use_liger_loss=False,
     )
-    if use_vllm and not share_base_from_vllm:
-        # Colocated vLLM builds the trainer base FROM vLLM. These tests mock the
-        # vLLM engine (no real model to extract), so stand the dummy actor in for
-        # the shared base. Real zero-copy sharing is covered by the
-        # weight-sharing unit tests and the real-engine tests in test_vllm.py
-        # (share_base_from_vllm=True).
-        with patch.object(
-            REINFORCE, "_build_shared_base_from_vllm", return_value=actor
-        ):
-            reinforce = REINFORCE(**reinforce_kwargs)
-    else:
-        reinforce = REINFORCE(**reinforce_kwargs)
+    reinforce = REINFORCE(**reinforce_kwargs)
     return reinforce
 
 
@@ -388,29 +379,26 @@ class TestREINFORCEInit:
             target_modules=["lin"],
             task_type="CAUSAL_LM",
         )
-        # Colocated vLLM builds the trainer base FROM vLLM (mocked here): the
-        # dummy actor stands in for the shared base.
-        with patch.object(
-            REINFORCE, "_build_shared_base_from_vllm", return_value=actor
-        ):
-            rf = REINFORCE(
-                model_name="dummy/model",
-                actor_network=None,
-                pad_token_id=99,
-                pad_token="<pad>",
-                lora_config=lora,
-                use_vllm=True,
-                vllm_config=VLLMConfig(
-                    gpu_memory_utilization=0.2,
-                    max_num_seqs=1,
-                    sleep_mode=True,
-                ),
-                max_output_tokens=8,
-                max_model_len=32,
-                wrap=False,
-                gradient_checkpointing=False,
-                device="cpu",
-            )
+        # Colocated vLLM and the trainer each hold their own base. The vLLM
+        # engine is mocked here; the dummy actor is passed as the trainer base
+        # (``_initialize_actors`` uses it directly when ``base_model`` is given).
+        rf = REINFORCE(
+            actor_network=actor,
+            pad_token_id=99,
+            pad_token="<pad>",
+            lora_config=lora,
+            use_vllm=True,
+            vllm_config=VLLMConfig(
+                gpu_memory_utilization=0.2,
+                max_num_seqs=1,
+                sleep_mode=True,
+            ),
+            max_output_tokens=8,
+            max_model_len=32,
+            wrap=False,
+            gradient_checkpointing=False,
+            device="cpu",
+        )
         assert rf.use_vllm
         mock_instance.sleep.assert_called()
         rf.clean_up()
@@ -428,15 +416,12 @@ class TestREINFORCEInit:
             target_modules=["lin"],
             task_type="CAUSAL_LM",
         )
-        with (
-            patch.object(REINFORCE, "_build_shared_base_from_vllm", return_value=actor),
-            pytest.warns(
-                UserWarning, match="hf_generate_chunk_size.*ignored.*use_vllm=True"
-            ),
+        # The vLLM engine is mocked; the dummy actor is the trainer base.
+        with pytest.warns(
+            UserWarning, match="hf_generate_chunk_size.*ignored.*use_vllm=True"
         ):
             rf = REINFORCE(
-                model_name="dummy/model",
-                actor_network=None,
+                actor_network=actor,
                 pad_token_id=99,
                 pad_token="<pad>",
                 lora_config=lora,

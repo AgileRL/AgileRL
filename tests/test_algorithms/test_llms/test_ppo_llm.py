@@ -344,27 +344,26 @@ class TestPPOInit:
             task_type="CAUSAL_LM",
             modules_to_save=["summary"],
         )
-        # Colocated vLLM builds the trainer base FROM vLLM (mocked here): the
-        # dummy actor stands in for the shared base.
-        with patch.object(LLMPPO, "_build_shared_base_from_vllm", return_value=actor):
-            ppo = LLMPPO(
-                model_name="dummy/model",
-                actor_network=None,
-                pad_token_id=99,
-                pad_token="<pad>",
-                lora_config=lora,
-                use_vllm=True,
-                vllm_config=VLLMConfig(
-                    gpu_memory_utilization=0.2,
-                    max_num_seqs=1,
-                    sleep_mode=True,
-                ),
-                max_output_tokens=8,
-                max_model_len=32,
-                wrap=False,
-                gradient_checkpointing=False,
-                device="cpu",
-            )
+        # Colocated vLLM and the trainer each hold their own base. The vLLM
+        # engine is mocked here; the dummy actor is passed as the trainer base
+        # (``_initialize_actors`` uses it directly when ``base_model`` is given).
+        ppo = LLMPPO(
+            actor_network=actor,
+            pad_token_id=99,
+            pad_token="<pad>",
+            lora_config=lora,
+            use_vllm=True,
+            vllm_config=VLLMConfig(
+                gpu_memory_utilization=0.2,
+                max_num_seqs=1,
+                sleep_mode=True,
+            ),
+            max_output_tokens=8,
+            max_model_len=32,
+            wrap=False,
+            gradient_checkpointing=False,
+            device="cpu",
+        )
         assert ppo.use_vllm
         mock_instance.sleep.assert_called()
         ppo.clean_up()
@@ -381,15 +380,12 @@ class TestPPOInit:
             task_type="CAUSAL_LM",
             modules_to_save=["summary"],
         )
-        with (
-            patch.object(LLMPPO, "_build_shared_base_from_vllm", return_value=actor),
-            pytest.warns(
-                UserWarning, match="hf_generate_chunk_size.*ignored.*use_vllm=True"
-            ),
+        # The vLLM engine is mocked; the dummy actor is the trainer base.
+        with pytest.warns(
+            UserWarning, match="hf_generate_chunk_size.*ignored.*use_vllm=True"
         ):
             ppo = LLMPPO(
-                model_name="dummy/model",
-                actor_network=None,
+                actor_network=actor,
                 pad_token_id=99,
                 pad_token="<pad>",
                 lora_config=lora,

@@ -147,13 +147,9 @@ if TYPE_CHECKING or HAS_VLLM:
         patch_lora_for_fused_forward,
         set_fused_adapter_routing,
     )
-    from agilerl.algorithms.core.llm_ops.vllm_weight_sharing import (
-        assert_shared_storage,
-        build_shared_hf_model,
+    from agilerl.algorithms.core.llm_ops.vllm_colocate import (
         patch_vllm_lora_keep_resident,
-        patch_vllm_standby_sleep_mode,
         patch_vllm_strip_multimodal_towers,
-        prepare_shared_base_for_kbit_training,
     )
     from agilerl.utils.llm_utils import (
         align_deepspeed_lr,
@@ -163,6 +159,9 @@ if TYPE_CHECKING or HAS_VLLM:
         create_model_from_name_or_path,
         gather_if_zero3,
         get_model_name_or_path,
+        move_params_to_cpu,
+        move_params_to_gpu,
+        offload_colocated_trainer_from_gpu,
         save_peft_adapter_for_vllm_rollout,
         stitch_completion_after_windowed_vllm_generate,
     )
@@ -2193,11 +2192,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             )
             lora_config.exclude_modules = ["lm_head"]
 
-        # ``use_memory_efficient_params`` is deprecated and inert: colocated
-        # vLLM now shares its base with the trainer (one resident copy), so there
-        # is no separate trainer copy to shuttle CPU<->GPU. The arg is still
-        # accepted for API compatibility but has no effect.
-        use_memory_efficient_params = False
+        # ``use_memory_efficient_params`` offloads the trainer's own base to CPU
+        # during rollout (and brings it back for the training step) so the
+        # colocated rollout engine and the trainer never both hold a base on the
+        # GPU. It is meaningful only for colocated vLLM; inert otherwise.
+        if not use_vllm:
+            use_memory_efficient_params = False
 
         if vllm_config is not None and not use_vllm:
             warnings.warn(
@@ -2297,7 +2297,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.vllm_config = vllm_config
         self.max_grad_norm = max_grad_norm
         self.use_memory_efficient_params = use_memory_efficient_params
-        self.memory_efficient_params_context = nullcontext
+        self.memory_efficient_params_context = (
+            self._memory_efficient_params
+            if use_memory_efficient_params
+            else nullcontext
+        )
         self.wrap = wrap
         self.use_separate_reference_adapter = use_separate_reference_adapter
         self.cast_logprobs_to_fp32 = cast_logprobs_to_fp32
@@ -2352,32 +2356,24 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self._vllm_lora_loaded = False
         self._vllm_lora_staging_dir: Path | None = None
         self._vllm_rollout_lora_request: Any | None = None
-        # Colocated vLLM always shares its base with the trainer (the two-copy
-        # path was removed); an unshareable colocated config is a hard error.
-        ws_requested = (
-            getattr(self.vllm_config, "weight_sharing", None)
-            if self.vllm_config is not None
-            else None
-        )
-        self._weight_sharing = bool(self.use_vllm and self.vllm_config is not None)
-        self._vllm_standby = False
-        if self._weight_sharing:
+        # Colocated vLLM (use_vllm=True) runs the rollout engine and the HF
+        # trainer in one process. Each holds its OWN base: vLLM cycles its base
+        # CPU<->GPU via native sleep/wake (vLLM >= 0.22 round-trips dense and
+        # bnb 4-bit losslessly), and the trainer base is offloaded to CPU during
+        # rollout (use_memory_efficient_params) so the two never coexist on the
+        # GPU. Only LoRA adapters are synced to vLLM per rollout. The in-process
+        # external_launcher engine is single-GPU, so tensor parallelism is not
+        # available when colocated (use a non-colocated / async rollout for TP).
+        if self.use_vllm and self.vllm_config is not None:
             tp = getattr(self.vllm_config, "tensor_parallel_size", 1)
             if tp != 1:
                 msg = (
-                    "Colocated vLLM requires tensor_parallel_size==1 for "
-                    f"zero-copy base-weight sharing, got {tp}. Tensor-parallel "
-                    "rollout shards the base across workers and cannot be shared "
-                    "in-process; use an async / non-colocated rollout instead."
+                    "Colocated vLLM requires tensor_parallel_size==1 (the "
+                    f"in-process external_launcher engine is single-GPU), got "
+                    f"{tp}. Use a non-colocated / async rollout for "
+                    "tensor-parallel generation."
                 )
                 raise ValueError(msg)
-            if ws_requested is False:
-                warnings.warn(
-                    "VLLMConfig(weight_sharing=False) is deprecated for colocated "
-                    "vLLM: the non-shared two-copy path has been removed, so the "
-                    "base is always shared. Ignoring weight_sharing=False.",
-                    stacklevel=2,
-                )
         self.rng = np.random.RandomState(seed)
 
     def preprocess_observation(self, observation: ObservationType) -> TorchObsType:
@@ -3484,101 +3480,102 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         base_model: PreTrainedModelProtocol | None,
         add_adapters: bool = True,
     ) -> None:
-        """Initialize colocated vLLM + HF trainer via zero-copy weight-sharing.
+        """Initialize a colocated vLLM rollout engine + the HF/PEFT trainer.
 
-        Colocated vLLM always shares its base with the trainer (the legacy
-        two-copy path has been removed): vLLM loads first, the trainer aliases
-        its live (quantized or dense) weights, and standby sleep — when
-        ``sleep_mode`` is set — keeps the single shared base resident.
+        vLLM and the trainer each hold their OWN base (no zero-copy aliasing).
+        Across the rollout<->train cycle vLLM round-trips its base CPU<->GPU via
+        native sleep/wake (vLLM >= 0.22 restores both dense and bnb 4-bit
+        losslessly) and the trainer base is offloaded to CPU during rollout
+        (``use_memory_efficient_params``), so the two bases never coexist on the
+        GPU. Only LoRA adapters are synced to vLLM per rollout (see
+        :meth:`_move_lora_to_vllm`).
 
-        A clone (``add_adapters=False``) instead supplies a fully-built,
-        already-adapted ``base_model`` (a copy of the parent's trained actor),
-        which is reused as-is; vLLM still loads its own base for rollout.
+        **Init ordering is CUDA-safe.** A bitsandbytes trainer quantizes on the
+        GPU during ``from_pretrained``; starting vLLM first (even slept) can
+        leave the CUDA allocator in a state where the trainer's bnb device
+        copies segfault. So for a fresh bnb trainer under ``sleep_mode`` the
+        trainer is built first, offloaded to CPU, then vLLM starts. A dense
+        trainer (or ``sleep_mode`` off, or a clone) is CUDA-safe vLLM-first.
+
+        ``base_model`` is ``None`` for a fresh algorithm (the trainer base is
+        loaded from ``pretrained_model_name_or_path``) or a fully-built,
+        already-adapted actor copy for a clone (``add_adapters=False``), reused
+        as-is.
         """
-        if base_model is not None and add_adapters:
-            # A *fresh* algorithm with a user-supplied in-memory model: sharing
-            # builds the trainer base from vLLM's loaded weights (vLLM loads from
-            # disk), so an arbitrary in-memory model cannot be shared.
-            msg = (
-                "Colocated vLLM shares its base with the trainer (built from "
-                "vLLM's loaded weights), so a user-supplied base_model / "
-                "actor_network is not supported. Load the base from "
-                "pretrained_model_name_or_path, or use a non-colocated setup."
-            )
-            raise ValueError(msg)
-
-        if self.accelerator is None or self.accelerator.process_index == 0:
-            warnings.warn(
-                "colocated init: weight-sharing (vLLM-first; trainer aliases "
-                "vLLM's base, standby sleep keeps it resident)",
-                stacklevel=2,
-            )
-        # vLLM first (left awake by _configure_vllm). A fresh algo builds the
-        # trainer base (aliased) from vLLM's live weights; a clone reuses its
-        # already-built actor copy.
-        self._configure_vllm()
-        if base_model is None:
-            base_model = self._build_shared_base_from_vllm()
-        self._initialize_actors(base_model, add_adapters)
-        # Sleep vLLM (standby) when enabled: frees only the KV cache; the shared
-        # base stays resident, so there is nothing to reload on wake.
-        if self.vllm_config.sleep_mode:
-            self._sleep_vllm_after_init()
+        main = self.accelerator is None or self.accelerator.process_index == 0
+        if self._trainer_should_load_before_vllm(base_model):
+            if main:
+                warnings.warn(
+                    "colocated init: trainer-first order (bnb trainer + vLLM "
+                    "sleep mode); trainer built, offloaded to CPU, then vLLM "
+                    "starts. vLLM cycles its base via native sleep/wake.",
+                    stacklevel=2,
+                )
+            self._initialize_actors(base_model, add_adapters)
+            self._offload_trainer_to_cpu_for_colocated_vllm()
+            self._configure_vllm()
+        else:
+            if main:
+                warnings.warn(
+                    "colocated init: vLLM-first order (dense trainer or "
+                    "sleep_mode off); each side holds its own base, vLLM cycles "
+                    "via native sleep/wake, trainer offloaded during rollout.",
+                    stacklevel=2,
+                )
+            self._configure_vllm()
+            self._initialize_actors(base_model, add_adapters)
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
 
-    def _build_shared_base_from_vllm(self) -> PreTrainedModelProtocol:
-        """Build an HF base whose weights alias vLLM's loaded tensors.
+    def _trainer_should_load_before_vllm(
+        self,
+        base_model: PreTrainedModelProtocol | None,
+    ) -> bool:
+        """Whether the HF trainer must be built before colocated vLLM starts.
 
-        Loads the architecture config, then grafts vLLM's shared weights into an
-        empty HF skeleton so the trainer holds no separate base copy: for a
-        quantized base the ``Params4bit`` weights + ``QuantState`` objects, for a
-        dense base the bf16/fp16 ``Params``. With ``use_value_head`` the shared
-        causal LM is wrapped in ``AutoModelForCausalLMWithValueHead`` (the value
-        head is trainer-only, not aliased). The result is handed to
-        :meth:`_initialize_actors` as ``base_model`` and PEFT-wrapped there.
-
-        :return: An ``nn.Module`` aliasing vLLM's base, ready for PEFT wrapping.
-        :rtype: PreTrainedModelProtocol
+        bitsandbytes runs GPU quantization during ``from_pretrained``. Starting
+        vLLM first (even in sleep mode) can leave the CUDA allocator in a state
+        where subsequent device copies during the trainer's bnb load segfault,
+        so a fresh quantized trainer under sleep mode is loaded first.
         """
-        from transformers import AutoConfig
+        return (
+            self.use_vllm
+            and self.vllm_config is not None
+            and self.vllm_config.sleep_mode
+            and self.quantization_config is not None
+            and base_model is None
+        )
 
-        hf_config = AutoConfig.from_pretrained(self.pretrained_model_name_or_path)
-        bnb_config = self.quantization_config
-        if bnb_config is not None:
-            compute_dtype = getattr(
-                bnb_config, "bnb_4bit_compute_dtype", torch.bfloat16
+    def _offload_trainer_to_cpu_for_colocated_vllm(self) -> None:
+        """Move the HF trainer off the GPU before colocated vLLM ``LLM()`` init.
+
+        Trainer-side bitsandbytes quantization runs on the GPU during
+        ``from_pretrained`` even with ``device_map="cpu"``. Offloading after
+        load keeps the trainer-first ordering (which avoids post-vLLM bnb
+        segfaults) while freeing the GPU for vLLM startup (profile / compile /
+        CUDA-graph capture).
+        """
+        if not getattr(self, "actor", None):
+            warnings.warn(
+                "colocated init: trainer CPU offload skipped (actor not set)",
+                stacklevel=2,
             )
-            if not isinstance(compute_dtype, torch.dtype):
-                name = str(compute_dtype).removeprefix("torch.")
-                compute_dtype = getattr(torch, name, torch.bfloat16)
-        else:
-            # Dense base: shares vLLM's bf16/fp16 tensors; bf16 matches the
-            # rollout forward and the value head.
-            compute_dtype = torch.bfloat16
-        attn_impl = (
-            self.model_config.get("attn_implementation")
-            if isinstance(self.model_config, dict)
-            else None
+            return
+        main = self.accelerator is None or self.accelerator.process_index == 0
+        if main:
+            log_cuda_memory_snapshot("colocated init: before trainer CPU offload")
+        remaining_cuda_bytes = offload_colocated_trainer_from_gpu(
+            self._get_unwrapped_actor()
         )
-        shared_base = build_shared_hf_model(
-            self.llm,
-            hf_config,
-            compute_dtype,
-            bnb_config,
-            share_towers=getattr(self.vllm_config, "weight_sharing_multimodal", False),
-            attn_implementation=attn_impl,
-            add_value_head=self.use_value_head,
-        )
-        # Fail loudly if any base param was copied instead of aliased. For a
-        # value-head wrapper the inner causal LM carries the shared weights;
-        # assert against it (the wrapper prefixes module names with
-        # ``pretrained_model.``).
-        base_for_assert = (
-            shared_base.pretrained_model if self.use_value_head else shared_base
-        )
-        assert_shared_storage(self.llm, base_for_assert)
-        return shared_base
+        if main:
+            log_cuda_memory_snapshot("colocated init: after trainer CPU offload")
+            if remaining_cuda_bytes > 0:
+                warnings.warn(
+                    f"colocated init: trainer still has "
+                    f"{remaining_cuda_bytes / (1024**2):.2f} MiB on CUDA after "
+                    "offload",
+                    stacklevel=2,
+                )
 
     def _initialize_actors(
         self,
@@ -3661,15 +3658,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 or getattr(peft_target, "is_loaded_in_4bit", False)
                 or getattr(peft_target, "is_quantized", False)
             )
-            if self._weight_sharing:
-                # No-upcast kbit prep: stock prep would fp32-copy weights and
-                # un-alias the shared base.
-                peft_target = prepare_shared_base_for_kbit_training(
-                    peft_target,
-                    use_gradient_checkpointing=self.gradient_checkpointing,
-                    gradient_checkpointing_kwargs={"use_reentrant": False},
-                )
-            elif quantized_base:
+            if quantized_base:
                 peft_target = prepare_model_for_kbit_training(
                     peft_target,
                     use_gradient_checkpointing=self.gradient_checkpointing,
@@ -4457,14 +4446,13 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def _move_lora_to_vllm(self) -> None:
         """Export the actor LoRA adapter to disk and register it with vLLM.
 
-        Adapter-only sync (colocated vLLM always serves LoRA): the shared base
-        stays put inside vLLM and only the LoRA delta is synced per rollout via
+        Adapter-only sync (colocated vLLM always serves LoRA): vLLM keeps its
+        own base and only the LoRA delta is synced per rollout via
         ``llm_engine.add_lora``. Compatible with vLLM-side weight quantization
         (e.g. ``bitsandbytes`` for QLoRA rollouts).
 
-        **Does not touch base weights.** The base is resident in vLLM (the
-        standby sleep patch keeps weights GPU-resident across sleep/wake; only
-        the KV cache is freed), and the trainer aliases the same storage.
+        **Does not touch base weights.** vLLM owns its base across the
+        native sleep/wake cycle; the trainer holds (and offloads) its own.
         """
         peft_ref = self._get_peft_model_for_vllm_sync()
         peft_ref.set_adapter(self._vllm_rollout_adapter)
@@ -4543,9 +4531,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def _sync_actor_to_vllm(self) -> None:
         """Sync the trainer's actor LoRA adapter into the colocated vLLM engine.
 
-        Colocated vLLM shares the trainer's base and always serves LoRA via
+        Colocated vLLM keeps its own base and always serves LoRA via
         ``add_lora``, so only the adapter is synced — see
-        :meth:`_move_lora_to_vllm`. The base stays put.
+        :meth:`_move_lora_to_vllm`. The bases are not shared.
         Idempotent within a rollout cycle: gated by ``self._vllm_moved``, which
         the wake path clears.
         """
@@ -5415,12 +5403,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 f"max_model_len={self.max_model_len})",
                 stacklevel=2,
             )
-        if self._weight_sharing:
-            # Keep the bnb base resident across sleep/wake so the trainer can
-            # alias it: standby frees only the KV cache. Must patch before the
-            # engine (and its CuMemAllocator) is constructed.
-            patch_vllm_standby_sleep_mode()
-            self._vllm_standby = True
 
         try:
             self.llm = LLM(**llm_kwargs)
@@ -5482,11 +5464,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     stacklevel=2,
                 )
 
-        if self._weight_sharing:
-            # Stay awake: the trainer aliases the live weights first; the
-            # caller sleeps the engine afterwards.
-            self._vllm_awake = True
-        elif self.vllm_config.sleep_mode:
+        if self.vllm_config.sleep_mode:
+            # Native sleep: back the base up to CPU and free the KV cache, so
+            # the trainer's own base can use the GPU during the training step.
             self._sleep_vllm_after_init()
 
         if self.accelerator is not None:
@@ -5495,8 +5475,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def _sleep_vllm_after_init(self) -> None:
         """Put the colocated engine to sleep once after construction.
 
-        With ``weight_sharing`` (standby patch active) this frees only the KV
-        cache and keeps the shared base resident.
+        Native ``sleep(level=1)``: vLLM backs its base up to host RAM and frees
+        the KV cache; ``wake_up()`` restores the base (dense or bnb 4-bit).
         """
         self.llm.sleep(level=1)
         self._vllm_awake = False
@@ -5598,6 +5578,29 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             actor = actor.module
         return actor
 
+    @contextmanager
+    def _memory_efficient_params(self) -> None:
+        """Hold the trainer base on GPU only for the wrapped (training) block.
+
+        Used by the colocated path (``use_memory_efficient_params``): the
+        trainer's own base normally rests on CPU so the rollout engine owns the
+        GPU; this moves it onto the GPU for the forward/backward and back to CPU
+        afterwards, so the two bases never coexist on the GPU (no 2x-base peak).
+        Disabled under DeepSpeed ZeRO-3 (params are already sharded).
+        """
+        if self.zero_stage == 3:
+            warnings.warn(
+                "Memory efficient params is not yet compatible with DeepSpeed "
+                "ZeRO-3; memory efficient params will be disabled for this run.",
+                stacklevel=2,
+            )
+            yield
+            return
+        unwrapped_model = self._get_unwrapped_actor()
+        move_params_to_gpu(unwrapped_model, self.device)
+        yield
+        move_params_to_cpu(unwrapped_model)
+
     def _prepare_vllm_for_training(self) -> None:
         """Prepare vLLM for learning."""
         if self._vllm_awake and (
@@ -5611,6 +5614,16 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             self._vllm_moved = False
 
     def _prepare_vllm_for_generation(self) -> None:
+        if self.use_memory_efficient_params:
+            # Colocated: park the trainer's own base on CPU *before* waking vLLM
+            # so the rollout engine owns the GPU and the two bases never coexist
+            # on-device. The training step brings it back via
+            # ``memory_efficient_params_context``.
+            move_params_to_cpu(self._get_unwrapped_actor())
+            if self.accelerator is None or self.accelerator.is_main_process:
+                log_cuda_memory_snapshot(
+                    "trainer base offloaded to CPU (before vLLM wake)"
+                )
         if not self._vllm_awake and (
             self.accelerator is None or self.accelerator.is_main_process
         ):
@@ -5641,4 +5654,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     raise RuntimeError(msg) from err
                 raise
             self._vllm_awake = True
+            if self.accelerator is None or self.accelerator.is_main_process:
+                log_cuda_memory_snapshot("vLLM base restored on GPU (after wake)")
         self._sync_actor_to_vllm()
