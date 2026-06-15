@@ -51,7 +51,7 @@ def test_arena_registry_contains_algorithm(name: str) -> None:
 def test_env_spec_defaults() -> None:
     spec = EnvSpec(name="CartPole-v1")
     assert spec.num_envs == 16
-    assert spec.version == "v1"
+    assert spec.version is None
 
 
 def test_training_and_replay_buffer_aliases() -> None:
