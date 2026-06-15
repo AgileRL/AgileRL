@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 from click import ClickException
 
 from agilerl.arena.cli_on_prem_install import (
+    _run_docker_swarm_teardown,
     _ssh_connection_target,
     _swarm_script_env,
     _validate_tun0_conf,
     _validate_wireguard_bundle,
+    _verify_swarm_stack,
 )
 
 
@@ -92,3 +95,33 @@ wireguard:
         encoding="utf-8",
     )
     _validate_wireguard_bundle(root, "helm")
+
+
+def test_verify_swarm_stack_quotes_stack_name() -> None:
+    """A malicious stack name must not break out of the remote shell command."""
+    with patch("agilerl.arena.cli_on_prem_install._ssh_remote_command") as ssh_mock:
+        _verify_swarm_stack(
+            "manager-host",
+            "arena; rm -rf /",
+            ssh_user=None,
+            ssh_extra_opts=None,
+        )
+    remote_cmd = ssh_mock.call_args.args[1]
+    # The injected command is neutralized by shlex.quote (single-quoted, no bare ;).
+    assert "'arena; rm -rf /'" in remote_cmd
+    assert "; rm -rf / --format" not in remote_cmd
+
+
+def test_docker_swarm_teardown_quotes_stack_name() -> None:
+    """``docker stack rm`` must escape a caller-supplied stack name."""
+    with patch("agilerl.arena.cli_on_prem_install._ssh_remote_command") as ssh_mock:
+        _run_docker_swarm_teardown(
+            manager="manager-host",
+            workers=(),
+            stack_name="arena$(whoami)",
+            ssh_user=None,
+            ssh_extra_opts=None,
+            leave_swarm=False,
+        )
+    remote_cmd = ssh_mock.call_args.args[1]
+    assert remote_cmd == "sudo docker stack rm 'arena$(whoami)'"

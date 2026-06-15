@@ -366,7 +366,10 @@ def _verify_swarm_stack(
     ssh_extra_opts: str | None,
 ) -> None:
     click.echo(f"Verifying Docker stack {stack_name!r} on {manager}…")
-    remote_cmd = f"sudo docker stack services {stack_name} --format '{{{{.Name}}}}\\t{{{{.Replicas}}}}'"
+    remote_cmd = (
+        f"sudo docker stack services {shlex.quote(stack_name)} "
+        "--format '{{.Name}}\\t{{.Replicas}}'"
+    )
     _ssh_remote_command(
         manager,
         remote_cmd,
@@ -528,6 +531,12 @@ def _ssh_remote_command(
     ssh_user: str | None,
     ssh_extra_opts: str | None,
 ) -> None:
+    """Run *remote_cmd* on *host* (locally or over ssh).
+
+    ``remote_cmd`` is evaluated by a remote (or local) shell, so any
+    caller-supplied values interpolated into it MUST be escaped with
+    ``shlex.quote`` to avoid shell injection.
+    """
     host = host.strip()
     if _is_local_swarm_host(host):
         click.echo(f"  $ {remote_cmd}")
@@ -573,7 +582,7 @@ def _run_docker_swarm_teardown(
     click.echo(f"Removing Docker stack {stack_name!r} on {manager}…")
     _ssh_remote_command(
         manager,
-        f"sudo docker stack rm {stack_name}",
+        f"sudo docker stack rm {shlex.quote(stack_name)}",
         ssh_user=ssh_user,
         ssh_extra_opts=ssh_extra_opts,
     )

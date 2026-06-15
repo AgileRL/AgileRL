@@ -99,6 +99,21 @@ class TestGetCliCapabilities:
         with patch.object(api_key_client._http, "request", return_value=resp):
             assert api_key_client._get_cli_capabilities(force_refresh=True) is None
 
+    def test_uses_bounded_timeout(self, api_key_client: ArenaClient) -> None:
+        """Capability checks gate ``--help``; the request must not block on the
+        full request timeout when the API is slow."""
+        api_key_client._request_timeout = 30
+        resp = MagicMock()
+        resp.status_code = 404
+        with patch.object(
+            api_key_client._http, "request", return_value=resp
+        ) as req_mock:
+            api_key_client._get_cli_capabilities(force_refresh=True)
+        assert (
+            req_mock.call_args.kwargs["timeout"]
+            == ArenaClient._CAPABILITIES_TIMEOUT_SECS
+        )
+
     def test_schema_version_string_one_accepted(
         self, api_key_client: ArenaClient
     ) -> None:
@@ -507,6 +522,10 @@ class TestOnPremInstall:
 
         with (
             patch(
+                "agilerl.arena.cli_on_prem_install.shutil.which",
+                return_value="/usr/bin/ssh",
+            ),
+            patch(
                 "agilerl.arena.cli_on_prem_install._download_bundle",
                 return_value=Path("/tmp/fake-bundle"),
             ) as download_mock,
@@ -514,6 +533,7 @@ class TestOnPremInstall:
             patch(
                 "agilerl.arena.cli_on_prem_install._run_docker_swarm_install",
             ) as swarm_mock,
+            patch("agilerl.arena.cli_on_prem_install._verify_swarm_stack"),
         ):
             run_on_prem_install(
                 client,

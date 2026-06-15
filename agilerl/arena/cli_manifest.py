@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 
 CAPABILITIES_SCHEMA_VERSION = 1
 MANIFEST_SCHEMA_VERSION = 2
+_ON_PREM_HIDDEN_META_KEY = "agilerl.arena.on_prem_hidden"
+_ON_PREM_ENSURED_META_KEY = "agilerl.arena.on_prem_ensured"
 
 
 def handle_help_option(
@@ -95,8 +97,12 @@ class ArenaRootGroup(click.Group):
 
     @staticmethod
     def _hide_on_prem(ctx: click.Context) -> bool:
-        cfg = _resolve_root_command_config(ctx)
-        return capabilities_show_on_prem_root(cfg) is not True
+        cached = ctx.meta.get(_ON_PREM_HIDDEN_META_KEY)
+        if cached is None:
+            cfg = _resolve_root_command_config(ctx)
+            cached = capabilities_show_on_prem_root(cfg) is not True
+            ctx.meta[_ON_PREM_HIDDEN_META_KEY] = cached
+        return cached
 
 
 def pythonize_manifest_param_name(name: str) -> str:
@@ -307,6 +313,10 @@ class OnPremDynamicGroup(click.Group):
         self.add_command(help_cmd, name="help")
 
     def _ensure(self, ctx: click.Context) -> None:
+        if ctx.meta.get(_ON_PREM_ENSURED_META_KEY):
+            return
+        ctx.meta[_ON_PREM_ENSURED_META_KEY] = True
+
         config = ctx.find_root().obj
         if not isinstance(config, CommandConfig):
             msg = "Arena CLI internal error: missing CommandConfig on root context."

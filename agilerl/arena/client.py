@@ -95,6 +95,9 @@ class ArenaClient:
     CONFIG_FILE: ClassVar[Path] = CONFIG_DIR / "config.json"
 
     _CAPABILITIES_PATH: ClassVar[str] = "/api/cli/v1/capabilities"
+    # Capability checks gate `--help` rendering, so keep them snappy even when the
+    # API is slow/unreachable instead of blocking on the full request timeout.
+    _CAPABILITIES_TIMEOUT_SECS: ClassVar[float] = 5.0
     _MANIFEST_ALLOWED_PATH_PREFIX: ClassVar[str] = "/api/cli/v1/on-prem"
     _MANIFEST_ALLOWED_METHODS: ClassVar[frozenset[str]] = frozenset(
         {"GET", "POST", "PATCH", "DELETE"}
@@ -1652,7 +1655,7 @@ class ArenaClient:
                 "GET",
                 self._CAPABILITIES_PATH,
                 headers=headers,
-                timeout=self._request_timeout,
+                timeout=min(self._request_timeout, self._CAPABILITIES_TIMEOUT_SECS),
             )
         except httpx.HTTPError as exc:
             logger.warning(
