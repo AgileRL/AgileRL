@@ -3546,7 +3546,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             and base_model is None
         )
 
-    def _offload_trainer_to_cpu_for_colocated_vllm(self) -> None:
+    def _offload_trainer_to_cpu_for_colocated_vllm(self) -> None:  # pragma: no cover
         """Move the HF trainer off the GPU before colocated vLLM ``LLM()`` init.
 
         Trainer-side bitsandbytes quantization runs on the GPU during
@@ -5556,7 +5556,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         return actor
 
     @contextmanager
-    def _memory_efficient_params(self) -> None:
+    def _memory_efficient_params(self) -> None:  # pragma: no cover
         """Hold the trainer base on GPU only for the wrapped (training) block.
 
         Used by the colocated path (``use_memory_efficient_params``): the
@@ -5612,7 +5612,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             )
             try:
                 self.llm.wake_up()
-            except RuntimeError as err:
+            except RuntimeError as err:  # pragma: no cover
                 err_text = str(err).lower()
                 if "out of memory" in err_text or "cuda error" in err_text:
                     vcfg = self.vllm_config
