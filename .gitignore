@@ -158,3 +158,6 @@ wandb/
 # AI assistant instructions
 CLAUDE.md
 AGENTS.md
+
+# Simlink for type-checking
+agilerl/arena/
