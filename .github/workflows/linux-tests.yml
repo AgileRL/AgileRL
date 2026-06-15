@@ -45,40 +45,6 @@ jobs:
 
         steps:
             - uses: actions/checkout@v4
-
-            # TEMPORARY: the gh-t4-runner nodes still run the R535 driver (CUDA
-            # 12.2 max), which torch's cu13 wheels refuse. The forward-compat
-            # package ships a 580-series user-mode libcuda that bridges to the
-            # old kernel driver (supported: T4 is a datacenter GPU, R535 is LTS).
-            # Remove once the node pool is recreated with gpu-driver-version=latest.
-            # apt-get update is `|| true` because the in-cluster Ubuntu mirrors
-            # 404 (exit code is 0 anyway in most apt versions); the NVIDIA repo
-            # that hosts cuda-compat works, and the install line fails loudly if not.
-            - name: CUDA forward-compat shim (runner driver is R535, wheels are cu13)
-              run: |
-                  apt-get update || true
-                  apt-get install -y --no-install-recommends cuda-compat-13-0
-                  test -f /usr/local/cuda-13.0/compat/libcuda.so.1
-                  echo "compat libs: $(ls /usr/local/cuda-13.0/compat/)"
-                  echo "LD_LIBRARY_PATH=/usr/local/cuda-13.0/compat${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" >> "$GITHUB_ENV"
-
-            # Fail fast (before the ~20 min dependency install) if the compat
-            # libcuda is not actually the one the loader picks up in later steps.
-            - name: Verify CUDA driver API >= 13.0 via compat shim
-              run: |
-                  echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
-                  python3 - <<'PY'
-                  import ctypes
-                  lib = ctypes.CDLL("libcuda.so.1")
-                  v = ctypes.c_int()
-                  lib.cuDriverGetVersion(ctypes.byref(v))
-                  print(f"driver API version reported by loaded libcuda: {v.value}")
-                  assert v.value >= 13000, f"compat libcuda NOT in effect (got {v.value})"
-                  rc = lib.cuInit(0)
-                  print(f"cuInit(0) -> {rc}")
-                  assert rc == 0, f"cuInit failed with CUresult {rc}"
-                  PY
-
             - uses: astral-sh/setup-uv@v7
               with:
                   enable-cache: true
