@@ -4489,6 +4489,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 target_modules=self.lora_config.target_modules,
                 is_main_process=is_main_process,
             )
+        if self.accelerator is not None:
+            self.accelerator.wait_for_everyone()
         if not adapter_path.is_dir():
             msg = (
                 f"PEFT adapter export for {self._vllm_rollout_adapter!r} not found under "

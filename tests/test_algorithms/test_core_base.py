@@ -4037,6 +4037,41 @@ class TestLLMSyncActorToVllm:
         mock_save.assert_called_once()
         agent.llm.llm_engine.add_lora.assert_called_once()
 
+    def test_move_lora_to_vllm_waits_before_non_main_path_check(self, tmp_path):
+        """Non-main ranks must wait for rank-0 export before dir existence check."""
+        p = torch.nn.Parameter(torch.tensor([1.0]))
+        acc = _make_mock_accelerator(num_processes=2, is_main_process=False, process_index=1)
+        agent = _make_llm_agent(accelerator=acc)
+        peft_ref = MagicMock()
+        peft_ref.parameters.return_value = [p]
+        peft_ref.set_adapter = MagicMock()
+        acc.unwrap_model = MagicMock(return_value=peft_ref)
+        _setup_agent_for_vllm_lora_sync(agent)
+        agent._vllm_lora_staging_dir = tmp_path
+
+        def _fake_export(*_args, **_kwargs):
+            return tmp_path / "actor"
+
+        def _wait_and_materialize():
+            adapter_dir = tmp_path / "actor"
+            adapter_dir.mkdir(parents=True, exist_ok=True)
+            (adapter_dir / "adapter_config.json").write_text("{}")
+            (adapter_dir / "adapter_model.safetensors").write_bytes(b"")
+
+        acc.wait_for_everyone = MagicMock(side_effect=_wait_and_materialize)
+
+        with (
+            patch("agilerl.algorithms.core.base.gather_if_zero3"),
+            patch(
+                "agilerl.algorithms.core.base.save_peft_adapter_for_vllm_rollout",
+                side_effect=_fake_export,
+            ),
+        ):
+            agent._move_lora_to_vllm()
+
+        acc.wait_for_everyone.assert_called_once()
+        agent.llm.llm_engine.add_lora.assert_called_once()
+
 
 class TestMultiAgentPreprocessObservation:
     def test_preprocess_observation(self, vector_space):
