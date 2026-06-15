@@ -245,7 +245,7 @@ def build_manifest_click_command(
             force = bool(parsed.get("force"))
             if out_p:
                 write_binary_atomic(Path(os.fspath(out_p)), raw_b, force=force)
-                click.echo(f"Wrote {out_p}")
+                logger.info("Wrote %s", out_p)
             else:
                 click.echo(raw_b.decode("utf-8", errors="replace"))
             return

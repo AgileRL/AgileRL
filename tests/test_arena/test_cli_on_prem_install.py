@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import io
+import logging
 import os
+import subprocess
 import zipfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -15,6 +17,7 @@ from click.testing import CliRunner
 from agilerl.arena.client import ArenaClient
 from agilerl.arena.cli_on_prem_install import (
     _all_hosts,
+    _apply_verbosity,
     _class_by_name,
     _delete_class_if_present,
     _download_bundle,
@@ -22,6 +25,7 @@ from agilerl.arena.cli_on_prem_install import (
     _helm_uninstall,
     _num_nodes_for_create,
     _parse_helm_release_ids,
+    _report_stack_readiness,
     _run_docker_swarm_install,
     _run_docker_swarm_teardown,
     _run_helm_install,
@@ -31,6 +35,7 @@ from agilerl.arena.cli_on_prem_install import (
     _ssh_remote_command,
     _ssh_target_host,
     _ssh_target_port,
+    _StageFailed,
     _swarm_script_env,
     _validate_tun0_conf,
     _validate_wireguard_bundle,
@@ -148,6 +153,7 @@ wireguard:
 def test_verify_swarm_stack_quotes_stack_name() -> None:
     """A malicious stack name must not break out of the remote shell command."""
     with patch("agilerl.arena.cli_on_prem_install._ssh_remote_command") as ssh_mock:
+        ssh_mock.return_value = "svc\t1/1"  # parseable readiness output
         _verify_swarm_stack(
             "manager-host",
             "arena; rm -rf /",
@@ -279,34 +285,33 @@ def test_class_by_name_rejects_duplicates() -> None:
         _class_by_name(classes, "dup")
 
 
-def test_warn_ignored_swarm_flags_lists_set_flags(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _warn_ignored_swarm_flags(
-        manager="m",
-        workers=("w1",),
-        ssh_user="ubuntu",
-        ssh_extra_opts=None,
-        advertise_addr=None,
-    )
-    err = capsys.readouterr().err
-    assert "--manager" in err
-    assert "--workers" in err
-    assert "--ssh-user" in err
-    assert "--ssh-extra-opts" not in err
+def test_warn_ignored_swarm_flags_lists_set_flags() -> None:
+    with patch("agilerl.arena.cli_on_prem_install.logger") as log:
+        _warn_ignored_swarm_flags(
+            manager="m",
+            workers=("w1",),
+            ssh_user="ubuntu",
+            ssh_extra_opts=None,
+            advertise_addr=None,
+        )
+    log.warning.assert_called_once()
+    flags = log.warning.call_args.args[1]  # the "%s" list of ignored flags
+    assert "--manager" in flags
+    assert "--workers" in flags
+    assert "--ssh-user" in flags
+    assert "--ssh-extra-opts" not in flags
 
 
-def test_warn_ignored_swarm_flags_silent_when_none(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _warn_ignored_swarm_flags(
-        manager=None,
-        workers=(),
-        ssh_user=None,
-        ssh_extra_opts=None,
-        advertise_addr=None,
-    )
-    assert capsys.readouterr().err == ""
+def test_warn_ignored_swarm_flags_silent_when_none() -> None:
+    with patch("agilerl.arena.cli_on_prem_install.logger") as log:
+        _warn_ignored_swarm_flags(
+            manager=None,
+            workers=(),
+            ssh_user=None,
+            ssh_extra_opts=None,
+            advertise_addr=None,
+        )
+    log.warning.assert_not_called()
 
 
 # --------------------------------------------------------------------------- #
@@ -422,9 +427,7 @@ def test_helm_uninstall_invokes_cli() -> None:
     ]
 
 
-def test_helm_uninstall_tolerates_nonzero_exit(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+def test_helm_uninstall_tolerates_nonzero_exit() -> None:
     completed = MagicMock(returncode=1)
     with (
         patch(
@@ -435,9 +438,11 @@ def test_helm_uninstall_tolerates_nonzero_exit(
             "agilerl.arena.cli_on_prem_install.subprocess.run",
             return_value=completed,
         ),
+        patch("agilerl.arena.cli_on_prem_install.logger") as log,
     ):
         _helm_uninstall("rel", "ns")  # must not raise
-    assert "helm uninstall exited 1" in capsys.readouterr().err
+    log.warning.assert_called_once()
+    assert log.warning.call_args.args[1] == 1  # the exit code
 
 
 def test_helm_uninstall_requires_helm_on_path() -> None:
@@ -522,7 +527,7 @@ def test_run_script_missing_file_raises(tmp_path: Path) -> None:
 def test_run_script_invokes_runner_with_args(tmp_path: Path) -> None:
     script = tmp_path / "go.sh"
     script.write_text("#!/bin/sh\n", encoding="utf-8")
-    completed = MagicMock(returncode=0)
+    completed = MagicMock(returncode=0, stdout="")
     with (
         patch(
             "agilerl.arena.cli_on_prem_install._shell_runner",
@@ -541,9 +546,52 @@ def test_run_script_invokes_runner_with_args(tmp_path: Path) -> None:
         "a1",
         "a2",
     ]
-    assert run_mock.call_args.kwargs["check"] is True
+    # Quiet (default): capture stdout, leave stderr attached, don't raise on success.
+    assert run_mock.call_args.kwargs["check"] is False
+    assert run_mock.call_args.kwargs["stdout"] == subprocess.PIPE
     assert run_mock.call_args.kwargs["cwd"] == tmp_path
     assert run_mock.call_args.kwargs["env"] == {"K": "V"}
+
+
+def test_run_script_raises_stage_failed_with_captured_output(tmp_path: Path) -> None:
+    script = tmp_path / "go.sh"
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    completed = MagicMock(returncode=2, stdout="boom details")
+    with (
+        patch(
+            "agilerl.arena.cli_on_prem_install._shell_runner",
+            return_value="/bin/bash",
+        ),
+        patch(
+            "agilerl.arena.cli_on_prem_install.subprocess.run",
+            return_value=completed,
+        ),
+        pytest.raises(_StageFailed) as excinfo,
+    ):
+        _run_script(script, [], env={}, cwd=tmp_path)
+    assert excinfo.value.returncode == 2
+    assert excinfo.value.output == "boom details"
+
+
+def test_run_script_streams_live_when_verbose(tmp_path: Path) -> None:
+    script = tmp_path / "go.sh"
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    completed = MagicMock(returncode=0)
+    with (
+        patch(
+            "agilerl.arena.cli_on_prem_install._shell_runner",
+            return_value="/bin/bash",
+        ),
+        patch(
+            "agilerl.arena.cli_on_prem_install.subprocess.run",
+            return_value=completed,
+        ) as run_mock,
+        patch("agilerl.arena.cli_on_prem_install.logger") as log,
+    ):
+        log.isEnabledFor.return_value = True  # DEBUG / --verbose
+        _run_script(script, [], env={}, cwd=tmp_path)
+    # streaming => no stdout capture
+    assert "stdout" not in run_mock.call_args.kwargs
 
 
 def test_run_helm_install_runs_setup_script(tmp_path: Path) -> None:
@@ -718,3 +766,62 @@ def test_teardown_command_maps_flags() -> None:
     assert kwargs["delete_class"] is False  # --keep-class inverts
     assert kwargs["disable_provider"] is True
     assert kwargs["leave_swarm"] is True
+
+
+# --------------------------------------------------------------------------- #
+# Stage failures, readiness reporting, verbosity                              #
+# --------------------------------------------------------------------------- #
+
+
+def test_run_docker_swarm_install_reports_failing_stage() -> None:
+    with (
+        patch(
+            "agilerl.arena.cli_on_prem_install._run_script",
+            side_effect=_StageFailed("install-docker.sh", 1, "kaboom"),
+        ),
+        pytest.raises(ClickException) as excinfo,
+    ):
+        _run_docker_swarm_install(
+            Path("/tmp/bundle"),
+            manager="m",
+            workers=(),
+            ssh_user=None,
+            ssh_extra_opts=None,
+            advertise_addr=None,
+        )
+    message = str(excinfo.value)
+    assert "Stage 1/" in message
+    assert "Installing Docker Engine" in message  # human label, not the script name
+    assert "kaboom" in message  # captured output is surfaced
+
+
+def test_report_stack_readiness_warns_on_partial() -> None:
+    with patch("agilerl.arena.cli_on_prem_install.logger") as log:
+        _report_stack_readiness("arena", "arena_ray-head\t0/1\narena_ray-worker\t1/1")
+    log.warning.assert_called_once()
+    assert "arena_ray-head 0/1" in log.warning.call_args.args[2]
+
+
+def test_report_stack_readiness_ok_when_all_running() -> None:
+    with patch("agilerl.arena.cli_on_prem_install.logger") as log:
+        _report_stack_readiness("arena", "arena_ray-head\t1/1\narena_ray-worker\t2/2")
+    log.warning.assert_not_called()
+    log.info.assert_called_once()
+
+
+def test_report_stack_readiness_warns_when_no_output() -> None:
+    with patch("agilerl.arena.cli_on_prem_install.logger") as log:
+        _report_stack_readiness("arena", None)
+    log.warning.assert_called_once()
+
+
+def test_apply_verbosity_toggles_debug_level() -> None:
+    arena_logger = logging.getLogger("agilerl.arena")
+    original = arena_logger.level
+    try:
+        _apply_verbosity(verbose=False)
+        assert arena_logger.level == original  # unchanged
+        _apply_verbosity(verbose=True)
+        assert arena_logger.level == logging.DEBUG
+    finally:
+        arena_logger.setLevel(original)

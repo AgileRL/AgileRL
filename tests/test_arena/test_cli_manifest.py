@@ -154,6 +154,22 @@ class TestGetCliCapabilities:
 
 
 class TestInvokeManifestCommand:
+    def test_delete_class_sends_name_as_query_not_body(
+        self, api_key_client: ArenaClient
+    ) -> None:
+        """The classes/delete endpoint reads ``name`` from the query string."""
+        from agilerl.arena.cli_on_prem_install import _DELETE_CLASS_INVOKE
+
+        with patch.object(
+            api_key_client, "_request", return_value={"ok": True}
+        ) as mocked:
+            api_key_client._invoke_manifest_command(
+                _DELETE_CLASS_INVOKE, {"name": "pool"}
+            )
+        _args, kwargs = mocked.call_args
+        assert kwargs.get("params") == {"name": "pool"}
+        assert "json" not in kwargs  # must NOT be sent as a JSON body
+
     def test_rejects_non_allowlisted_path(self, api_key_client: ArenaClient) -> None:
         invoke = {
             "method": "GET",

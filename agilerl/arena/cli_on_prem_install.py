@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shlex
@@ -19,6 +20,8 @@ import click
 from agilerl.arena.client import ArenaClient, ManifestInvoke
 from agilerl.arena.config import CommandConfig
 from agilerl.arena.exceptions import ArenaAPIError
+
+logger = logging.getLogger(__name__)
 
 SetupKind = Literal["dockerSwarm", "helm"]
 
@@ -54,7 +57,10 @@ _DELETE_CLASS_INVOKE: ManifestInvoke = {
     "method": "DELETE",
     "path": "/api/cli/v1/on-prem/classes/delete",
     "responseKind": "json",
-    "params": [],
+    # The endpoint reads ``name`` from the query string, so declare it explicitly
+    # rather than relying on the method-based fallback (which routes DELETE
+    # payloads to the JSON body).
+    "params": [{"name": "name", "in": "query", "type": "string", "required": True}],
 }
 
 _DISABLE_INVOKE: ManifestInvoke = {
@@ -76,6 +82,41 @@ _DEFAULT_METADATA: dict[str, Any] = {
 _DEFAULT_GATEWAY_WAIT_HELM_SECS = 75
 # Swarm fresh-node install usually exceeds one gateway sync cycle.
 _DEFAULT_GATEWAY_WAIT_SWARM_SECS = 0
+
+
+class _StageFailed(Exception):
+    """A bundle script exited non-zero; carries its captured output for reporting."""
+
+    def __init__(self, script: str, returncode: int, output: str) -> None:
+        self.script = script
+        self.returncode = returncode
+        self.output = output
+        super().__init__(f"{script} exited {returncode}")
+
+
+def _stage_failure(
+    label: str,
+    host: str,
+    exc: _StageFailed,
+    *,
+    index: int | None = None,
+    total: int | None = None,
+) -> click.ClickException:
+    """Turn a :class:`_StageFailed` into a clean, stage-named ClickException."""
+    where = f"Stage {index}/{total} {label!r}" if index is not None else repr(label)
+    tail = exc.output.strip()
+    body = f"\n--- captured output ---\n{tail}" if tail else ""
+    return click.ClickException(
+        f"{where} failed on {host} (exit {exc.returncode}).{body}"
+    )
+
+
+def _apply_verbosity(*, verbose: bool) -> None:
+    """``--verbose`` raises the Arena logger to DEBUG so command traces and live
+    per-stage script output are shown instead of hidden.
+    """
+    if verbose:
+        logging.getLogger("agilerl.arena").setLevel(logging.DEBUG)
 
 
 def normalize_setup_type(setup_type: str) -> SetupKind:
@@ -141,10 +182,10 @@ def _ensure_class(
     listed = client._invoke_manifest_command(_LIST_CLASSES_INVOKE, {})
     existing = _class_by_name(listed, name)
     if existing is not None:
-        click.echo(f"Using existing resource class {name!r}.")
+        logger.info("Using existing resource class %r.", name)
         return existing
 
-    click.echo(f"Creating resource class {name!r} ({num_nodes} nodes)…")
+    logger.info("Creating resource class %r (%d nodes)…", name, num_nodes)
     body: dict[str, Any] = {
         "name": name,
         "num_nodes": num_nodes,
@@ -227,13 +268,30 @@ def _run_script(
     env: dict[str, str],
     cwd: Path,
 ) -> None:
+    """Run a bundle script, raising :class:`_StageFailed` on a non-zero exit.
+
+    Quiet by default: the script's stdout (its chatty progress) is captured and
+    surfaced only on failure. stderr stays attached so ``sudo`` prompts and real
+    errors remain visible/live. Run with ``--verbose`` (logger at DEBUG) to
+    stream everything as it happens.
+    """
     if not script.is_file():
         msg = f"Install bundle missing script {script.name} (re-download with arena on-prem install)."
         raise click.ClickException(msg)
     runner = _shell_runner()
     cmd = [runner, str(script.resolve()), *args]
-    click.echo(f"  $ {' '.join(cmd)}")
-    subprocess.run(cmd, check=True, cwd=cwd, env=env)
+    # markup disabled: paths/args in the transcript may contain Rich-special chars.
+    logger.debug("$ %s", " ".join(cmd), extra={"markup": False})
+    if logger.isEnabledFor(logging.DEBUG):
+        result = subprocess.run(cmd, check=False, cwd=cwd, env=env)
+        captured = ""
+    else:
+        result = subprocess.run(
+            cmd, check=False, cwd=cwd, env=env, stdout=subprocess.PIPE, text=True
+        )
+        captured = result.stdout or ""
+    if result.returncode != 0:
+        raise _StageFailed(script.name, result.returncode, captured)
 
 
 def _all_hosts(manager: str, workers: tuple[str, ...]) -> list[str]:
@@ -259,9 +317,10 @@ def _swarm_script_env(base: dict[str, str] | None = None) -> dict[str, str]:
 def _wait_for_gateway_peer_registration(seconds: int) -> None:
     if seconds <= 0:
         return
-    click.echo(
-        f"Waiting {seconds}s for Arena on-prem gateway to register the WireGuard peer "
-        "(automatic API sync; no manual gateway steps)…"
+    logger.info(
+        "Waiting %ds for Arena on-prem gateway to register the WireGuard peer "
+        "(automatic API sync; no manual gateway steps)…",
+        seconds,
     )
     time.sleep(seconds)
 
@@ -372,6 +431,35 @@ def _is_local_swarm_host(host: str) -> bool:
     return h == short or h == fqdn or h == fqdn.split(".", 1)[0]
 
 
+def _report_stack_readiness(stack_name: str, output: str | None) -> None:
+    r"""Log whether every service in *output* (``name\treplicas`` lines) is up."""
+    if not output or not output.strip():
+        logger.warning(
+            "Could not read service status for stack %r; check it manually with "
+            "'docker stack services %s'.",
+            stack_name,
+            stack_name,
+        )
+        return
+    not_ready: list[str] = []
+    for line in output.splitlines():
+        parts = line.split("\t") if "\t" in line else line.split()
+        if len(parts) < 2:
+            continue
+        name, replicas = parts[0], parts[1]
+        running, _, desired = replicas.partition("/")
+        if desired and running != desired:
+            not_ready.append(f"{name} {replicas}")
+    if not_ready:
+        logger.warning(
+            "Stack %r not fully up yet: %s (services may still be starting).",
+            stack_name,
+            ", ".join(not_ready),
+        )
+    else:
+        logger.info("Stack %r is up; all services running.", stack_name)
+
+
 def _verify_swarm_stack(
     manager: str,
     stack_name: str,
@@ -379,28 +467,32 @@ def _verify_swarm_stack(
     ssh_user: str | None,
     ssh_extra_opts: str | None,
 ) -> None:
-    click.echo(f"Verifying Docker stack {stack_name!r} on {manager}…")
+    logger.info("Verifying Docker stack %r on %s…", stack_name, manager)
     remote_cmd = (
         f"sudo docker stack services {shlex.quote(stack_name)} "
         "--format '{{.Name}}\\t{{.Replicas}}'"
     )
-    _ssh_remote_command(
+    output = _ssh_remote_command(
         manager,
         remote_cmd,
         ssh_user=ssh_user,
         ssh_extra_opts=ssh_extra_opts,
+        capture=True,
     )
+    _report_stack_readiness(stack_name, output)
 
 
 def _run_helm_post_install(bundle_root: Path) -> None:
     validate = bundle_root / "validate.sh"
     if validate.is_file():
-        click.echo("Running Helm post-install validation…")
-        _run_script(validate, [], env=os.environ.copy(), cwd=bundle_root)
+        logger.info("Running Helm post-install validation…")
+        try:
+            _run_script(validate, [], env=os.environ.copy(), cwd=bundle_root)
+        except _StageFailed as exc:
+            err = _stage_failure("Helm post-install validation", "local", exc)
+            raise err from exc
     else:
-        click.echo(
-            "Note: bundle has no validate.sh; check pods with kubectl.", err=True
-        )
+        logger.warning("Bundle has no validate.sh; check pods with kubectl.")
 
 
 def _warn_ignored_swarm_flags(
@@ -423,10 +515,10 @@ def _warn_ignored_swarm_flags(
     if advertise_addr:
         ignored.append("--advertise-addr")
     if ignored:
-        click.echo(
-            f"Note: helm install ignores {', '.join(ignored)} "
+        logger.warning(
+            "helm install ignores %s "
             "(helm install runs locally; your kubectl context must reach the cluster).",
-            err=True,
+            ", ".join(ignored),
         )
 
 
@@ -455,52 +547,40 @@ def _run_docker_swarm_install(
 
     hosts = _all_hosts(manager, workers)
     worker_only = [h for h in workers if h.strip() and h.strip() != manager.strip()]
-
-    click.echo("Running Docker Swarm install stages on cluster hosts…")
-    _run_script(
-        bundle_root / "install-docker.sh",
-        hosts,
-        env=env,
-        cwd=bundle_root,
-    )
-    _run_script(
-        bundle_root / "install-nvidia-driver.sh",
-        hosts,
-        env=env,
-        cwd=bundle_root,
-    )
-    _run_script(
-        bundle_root / "install-nvidia-container-toolkit.sh",
-        hosts,
-        env=env,
-        cwd=bundle_root,
-    )
-    _run_script(
-        bundle_root / "init-docker-swarm.sh",
-        [manager, adv],
-        env=env,
-        cwd=bundle_root,
-    )
-    if worker_only:
-        _run_script(
-            bundle_root / "join-docker-swarm.sh",
-            ["--tokens-file", str(tokens_file), *worker_only],
-            env=env,
-            cwd=bundle_root,
-        )
     label_hosts = [manager, *worker_only]
-    _run_script(
-        bundle_root / "label-docker-swarm-gpus.sh",
-        label_hosts,
-        env=env,
-        cwd=bundle_root,
-    )
-    _run_script(
-        bundle_root / "deploy-arena-stack.sh",
-        [manager],
-        env=env,
-        cwd=bundle_root,
-    )
+
+    # Ordered (label, script, args). The join stage only applies with workers.
+    stages: list[tuple[str, str, list[str]]] = [
+        ("Installing Docker Engine", "install-docker.sh", hosts),
+        ("Installing NVIDIA driver", "install-nvidia-driver.sh", hosts),
+        (
+            "Installing NVIDIA Container Toolkit",
+            "install-nvidia-container-toolkit.sh",
+            hosts,
+        ),
+        ("Initializing Docker Swarm", "init-docker-swarm.sh", [manager, adv]),
+    ]
+    if worker_only:
+        stages.append(
+            (
+                "Joining workers to the Swarm",
+                "join-docker-swarm.sh",
+                ["--tokens-file", str(tokens_file), *worker_only],
+            )
+        )
+    stages.append(("Labelling GPU nodes", "label-docker-swarm-gpus.sh", label_hosts))
+    stages.append(("Deploying Arena stack", "deploy-arena-stack.sh", [manager]))
+
+    total = len(stages)
+    logger.info("Installing cluster on %s (%d stages)…", manager, total)
+    for index, (label, script_name, script_args) in enumerate(stages, start=1):
+        logger.info("[%d/%d] %s", index, total, label)
+        try:
+            _run_script(
+                bundle_root / script_name, script_args, env=env, cwd=bundle_root
+            )
+        except _StageFailed as exc:
+            raise _stage_failure(label, manager, exc, index=index, total=total) from exc
 
 
 def _parse_helm_release_ids(bundle_root: Path) -> tuple[str, str]:
@@ -525,16 +605,15 @@ def _helm_uninstall(release: str, namespace: str) -> None:
     if not shutil.which("helm"):
         msg = "helm not found on PATH; install Helm 3.x or use --skip-cluster."
         raise click.ClickException(msg)
-    click.echo(f"Removing Helm release {release!r} (namespace {namespace})…")
+    logger.info("Removing Helm release %r (namespace %s)…", release, namespace)
     result = subprocess.run(
         ["helm", "uninstall", release, "--namespace", namespace],
         check=False,
     )
     if result.returncode != 0:
-        click.echo(
-            f"  helm uninstall exited {result.returncode} "
-            "(release may already be removed).",
-            err=True,
+        logger.warning(
+            "helm uninstall exited %d (release may already be removed).",
+            result.returncode,
         )
 
 
@@ -544,20 +623,31 @@ def _ssh_remote_command(
     *,
     ssh_user: str | None,
     ssh_extra_opts: str | None,
-) -> None:
+    capture: bool = False,
+) -> str | None:
     """Run *remote_cmd* on *host* (locally or over ssh).
 
     ``remote_cmd`` is evaluated by a remote (or local) shell, so any
     caller-supplied values interpolated into it MUST be escaped with
     ``shlex.quote`` to avoid shell injection.
+
+    With ``capture=True`` the command's stdout is captured and returned (stderr
+    stays attached); otherwise output streams to the terminal and ``None`` is
+    returned.
     """
     host = host.strip()
+    run_kwargs: dict[str, Any] = {"check": False}
+    if capture:
+        run_kwargs["stdout"] = subprocess.PIPE
+        run_kwargs["text"] = True
+
     if _is_local_swarm_host(host):
-        click.echo(f"  $ {remote_cmd}")
-        result = subprocess.run(["bash", "-lc", remote_cmd], check=False)
+        # markup disabled: the command transcript can contain Rich-special chars.
+        logger.debug("$ %s", remote_cmd, extra={"markup": False})
+        result = subprocess.run(["bash", "-lc", remote_cmd], **run_kwargs)
         if result.returncode != 0:
-            click.echo(f"  command exited {result.returncode}", err=True)
-        return
+            logger.warning("command exited %d", result.returncode)
+        return result.stdout if capture else None
 
     if not shutil.which("ssh"):
         msg = "ssh not found on PATH; required for dockerSwarm teardown."
@@ -578,10 +668,12 @@ def _ssh_remote_command(
         ssh_cmd.extend(shlex.split(ssh_extra_opts))
     ssh_cmd.append(_ssh_connection_target(host, ssh_user))
     ssh_cmd.append(remote_cmd)
-    click.echo(f"  $ {' '.join(ssh_cmd)}")
-    result = subprocess.run(ssh_cmd, check=False)
+    # markup disabled: ssh targets like [::1] would be parsed as Rich markup.
+    logger.debug("$ %s", " ".join(ssh_cmd), extra={"markup": False})
+    result = subprocess.run(ssh_cmd, **run_kwargs)
     if result.returncode != 0:
-        click.echo(f"  ssh exited {result.returncode}", err=True)
+        logger.warning("ssh exited %d", result.returncode)
+    return result.stdout if capture else None
 
 
 def _run_docker_swarm_teardown(
@@ -593,7 +685,7 @@ def _run_docker_swarm_teardown(
     ssh_extra_opts: str | None,
     leave_swarm: bool,
 ) -> None:
-    click.echo(f"Removing Docker stack {stack_name!r} on {manager}…")
+    logger.info("Removing Docker stack %r on %s…", stack_name, manager)
     _ssh_remote_command(
         manager,
         f"sudo docker stack rm {shlex.quote(stack_name)}",
@@ -603,7 +695,7 @@ def _run_docker_swarm_teardown(
     if not leave_swarm:
         return
     hosts = _all_hosts(manager, workers)
-    click.echo("Leaving Docker Swarm on cluster hosts…")
+    logger.info("Leaving Docker Swarm on cluster hosts…")
     for host in hosts:
         _ssh_remote_command(
             host,
@@ -616,9 +708,9 @@ def _run_docker_swarm_teardown(
 def _delete_class_if_present(client: ArenaClient, name: str) -> None:
     listed = client._invoke_manifest_command(_LIST_CLASSES_INVOKE, {})
     if _class_by_name(listed, name) is None:
-        click.echo(f"No Arena resource class {name!r}; skipping API delete.")
+        logger.info("No Arena resource class %r; skipping API delete.", name)
         return
-    click.echo(f"Deleting on-prem resource class {name!r} from Arena…")
+    logger.info("Deleting on-prem resource class %r from Arena…", name)
     client._invoke_manifest_command(_DELETE_CLASS_INVOKE, {"name": name})
 
 
@@ -675,10 +767,10 @@ def run_on_prem_teardown(
         _delete_class_if_present(client, name)
 
     if disable_provider:
-        click.echo("Disabling on-prem provider…")
+        logger.info("Disabling on-prem provider…")
         client._invoke_manifest_command(_DISABLE_INVOKE, {})
 
-    click.echo(f"On-prem teardown finished for class {name!r} ({kind}).")
+    logger.info("On-prem teardown finished for class %r (%s).", name, kind)
 
 
 def _run_helm_install(bundle_root: Path) -> None:
@@ -694,8 +786,12 @@ def _run_helm_install(bundle_root: Path) -> None:
             "helm not found on PATH; install Helm 3.x or use --setup-type dockerSwarm."
         )
         raise click.ClickException(msg)
-    click.echo("Running Helm setup (local kubectl context)…")
-    _run_script(setup, [], env=os.environ.copy(), cwd=bundle_root)
+    logger.info("Running Helm setup (local kubectl context)…")
+    try:
+        _run_script(setup, [], env=os.environ.copy(), cwd=bundle_root)
+    except _StageFailed as exc:
+        err = _stage_failure("Helm setup", "local", exc)
+        raise err from exc
 
 
 def run_on_prem_install(
@@ -736,7 +832,7 @@ def run_on_prem_install(
         )
 
     if not skip_enable:
-        click.echo("Enabling on-prem provider…")
+        logger.info("Enabling on-prem provider…")
         client._invoke_manifest_command(_ENABLE_INVOKE, {})
 
     listed = client._invoke_manifest_command(_LIST_CLASSES_INVOKE, {})
@@ -788,7 +884,7 @@ def run_on_prem_install(
             if not skip_verify:
                 _run_helm_post_install(bundle_root)
 
-    click.echo(f"On-prem install finished for class {name!r} ({kind}).")
+    logger.info("On-prem install finished for class %r (%s).", name, kind)
 
 
 def build_install_command() -> click.Command:
@@ -868,6 +964,13 @@ def build_install_command() -> click.Command:
         default=False,
         help="Skip post-install stack or Helm validation.",
     )
+    @click.option(
+        "-v",
+        "--verbose",
+        is_flag=True,
+        default=False,
+        help="Stream the full output of each install stage instead of hiding it on success.",
+    )
     @click.pass_obj
     def install_cmd(
         config: CommandConfig,
@@ -882,6 +985,7 @@ def build_install_command() -> click.Command:
         skip_enable: bool,
         wait_gateway_secs: int | None,
         skip_verify: bool,
+        verbose: bool,
     ) -> None:
         """Install an on-prem worker cluster for CLASS_NAME.
 
@@ -892,6 +996,7 @@ def build_install_command() -> click.Command:
         **helm** — downloads the Helm chart bundle and runs its setup on this
         machine; requires Helm 3.x and a configured ``kubectl`` context.
         """
+        _apply_verbosity(verbose=verbose)
         worker_hosts = tuple(h.strip() for h in workers.split(",") if h.strip())
 
         from agilerl.arena.cli import arena_client
@@ -981,6 +1086,13 @@ def build_teardown_command() -> click.Command:
         default=False,
         help="[dockerSwarm] After stack removal, run docker swarm leave --force on all hosts.",
     )
+    @click.option(
+        "-v",
+        "--verbose",
+        is_flag=True,
+        default=False,
+        help="Show the underlying commands and their full output.",
+    )
     @click.pass_obj
     def teardown_cmd(
         config: CommandConfig,
@@ -995,6 +1107,7 @@ def build_teardown_command() -> click.Command:
         keep_class: bool,
         disable_provider: bool,
         leave_swarm: bool,
+        verbose: bool,
     ) -> None:
         """Tear down an on-prem install for CLASS_NAME.
 
@@ -1006,6 +1119,7 @@ def build_teardown_command() -> click.Command:
         By default also deletes the Arena on-prem resource class; use ``--keep-class`` to
         leave the class registered. Use ``--skip-cluster`` for API-only cleanup.
         """
+        _apply_verbosity(verbose=verbose)
         from agilerl.arena.cli import arena_client
 
         with arena_client(config) as client:
