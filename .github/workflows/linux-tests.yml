@@ -86,7 +86,7 @@ jobs:
             # so we don't need a manual `coverage combine` step (which was
             # tripping over corrupted shards under the old two-phase setup).
             - name: Run tests
-              run: uv run pytest --exitfirst --cov=agilerl --cov-report=xml --durations=0 --durations-min=1.0
+              run: uv run pytest --exitfirst --cov=agilerl --cov-report=xml --cov-report=term-missing:skip-covered --durations=0 --durations-min=1.0
 
             - name: Upload coverage reports to Codecov
               uses: codecov/codecov-action@v3
