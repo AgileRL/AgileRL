@@ -4427,6 +4427,33 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         model_ref = self._get_unwrapped_actor()
         return model_ref.pretrained_model if self.use_value_head else model_ref
 
+    def _ensure_vllm_lora_staging_dir(self) -> Path:
+        """Resolve (once) the dir the rollout LoRA adapter is exported to.
+
+        Honours ``VLLMConfig.lora_staging_dir`` when set — e.g. a shared/NFS
+        path that a colocated Ray rollout worker reads the adapter from — by
+        creating it (parents included) and marking it non-temporary so
+        ``clean_up`` never deletes it. Otherwise falls back to a process-private
+        ``mkdtemp`` that ``clean_up`` removes. Idempotent: both the colocated
+        init (``_configure_vllm``) and every adapter sync (``_move_lora_to_vllm``)
+        call this, so the same directory is used throughout the agent's life.
+
+        :return: The resolved staging directory.
+        :rtype: pathlib.Path
+        """
+        if self._vllm_lora_staging_dir is None:
+            configured = getattr(self.vllm_config, "lora_staging_dir", None)
+            if configured is not None:
+                self._vllm_lora_staging_dir = Path(configured)
+                self._vllm_lora_staging_dir.mkdir(parents=True, exist_ok=True)
+                self._vllm_lora_staging_dir_is_temp = False
+            else:
+                self._vllm_lora_staging_dir = Path(
+                    tempfile.mkdtemp(prefix="agilerl_vllm_lora_")
+                )
+                self._vllm_lora_staging_dir_is_temp = True
+        return self._vllm_lora_staging_dir
+
     def _move_lora_to_vllm(self) -> None:
         """Export the actor LoRA adapter to disk and register it with vLLM.
 
@@ -4449,20 +4476,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         # ``load_inplace`` (2nd sync onward) makes vLLM re-read the updated weights
         # from disk into the same slot. A fixed id avoids per-sync adapter/CUDA-graph
         # accumulation that would otherwise grow GPU memory across iterations.
-        if self._vllm_lora_staging_dir is None:
-            configured = getattr(self.vllm_config, "lora_staging_dir", None)
-            if configured is not None:
-                # User-supplied staging dir (e.g. orchestrated deployments that
-                # must read the adapter from a known path): create, never delete.
-                self._vllm_lora_staging_dir = Path(configured)
-                self._vllm_lora_staging_dir.mkdir(parents=True, exist_ok=True)
-                self._vllm_lora_staging_dir_is_temp = False
-            else:
-                self._vllm_lora_staging_dir = Path(
-                    tempfile.mkdtemp(prefix="agilerl_vllm_lora_")
-                )
-                self._vllm_lora_staging_dir_is_temp = True
-        staging_dir = self._vllm_lora_staging_dir
+        staging_dir = self._ensure_vllm_lora_staging_dir()
         is_main_process = self.accelerator is None or self.accelerator.is_main_process
         with gather_if_zero3(self.zero_stage, list(peft_ref.parameters())):
             if self.lora_config is None:
@@ -5390,10 +5404,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             process_index=process_index,
             lora_rank=lora_rank,
         )
-        if self._vllm_lora_staging_dir is None:
-            self._vllm_lora_staging_dir = Path(
-                tempfile.mkdtemp(prefix="agilerl_vllm_lora_")
-            )
+        self._ensure_vllm_lora_staging_dir()
         if self.accelerator is None or self.accelerator.process_index == 0:
             warnings.warn(
                 f"colocated init: starting vLLM LLM() with "

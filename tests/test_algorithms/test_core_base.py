@@ -58,6 +58,7 @@ from __future__ import annotations
 import copy
 import inspect
 import re
+import shutil
 from unittest.mock import MagicMock, PropertyMock, patch
 import warnings
 from types import SimpleNamespace
@@ -3940,6 +3941,53 @@ def _setup_agent_for_vllm_lora_sync(agent):
     agent.llm.llm_engine.add_lora = MagicMock(return_value=True)
     agent.llm.reset_prefix_cache = MagicMock()
     return agent
+
+
+class TestEnsureVllmLoraStagingDir:
+    """``_ensure_vllm_lora_staging_dir`` resolves the rollout-adapter export
+    dir once, honouring a configured ``VLLMConfig.lora_staging_dir`` (e.g. an
+    NFS path for colocated Ray rollouts) and never deleting it."""
+
+    def _agent(self, lora_staging_dir):
+        agent = SimpleNamespace(
+            vllm_config=VLLMConfig(lora_staging_dir=lora_staging_dir),
+            _vllm_lora_staging_dir=None,
+        )
+        return agent
+
+    def test_uses_configured_dir_and_marks_persistent(self, tmp_path):
+        target = tmp_path / "nfs" / "agilerl_lora"  # not yet created
+        agent = self._agent(str(target))
+        resolved = LLMAlgorithm._ensure_vllm_lora_staging_dir(agent)
+        assert resolved == target
+        assert target.is_dir()  # created with parents
+        assert agent._vllm_lora_staging_dir_is_temp is False
+
+    def test_falls_back_to_tempdir_when_unset(self):
+        agent = self._agent(None)
+        resolved = LLMAlgorithm._ensure_vllm_lora_staging_dir(agent)
+        try:
+            assert resolved.is_dir()
+            assert agent._vllm_lora_staging_dir_is_temp is True
+        finally:
+            shutil.rmtree(resolved, ignore_errors=True)
+
+    def test_is_idempotent(self, tmp_path):
+        agent = self._agent(str(tmp_path / "lora"))
+        first = LLMAlgorithm._ensure_vllm_lora_staging_dir(agent)
+        second = LLMAlgorithm._ensure_vllm_lora_staging_dir(agent)
+        assert first is second
+
+    def test_cleanup_preserves_configured_dir(self, tmp_path):
+        """A configured (non-temp) staging dir survives ``clean_up``'s rmtree
+        guard; a temp one would be removed."""
+        target = tmp_path / "nfs_lora"
+        agent = self._agent(str(target))
+        LLMAlgorithm._ensure_vllm_lora_staging_dir(agent)
+        # Mirror clean_up's guard.
+        is_temp = getattr(agent, "_vllm_lora_staging_dir_is_temp", True)
+        assert is_temp is False
+        assert target.is_dir()
 
 
 class TestLLMSyncActorToVllm:
