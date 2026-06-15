@@ -154,10 +154,12 @@ class REINFORCE(LLMAlgorithm):
     :type gradient_checkpointing: bool
     :param torch_compiler: Torch compiler mode.
     :type torch_compiler: str | None
-    :param liger_token_chunk_size: Tokens per chunk for token-level Liger fused
-        policy loss. ``None`` uses
-        defaults to 2048.
-    :type liger_token_chunk_size: int, optional
+    :param fused_loss_chunk_rows: Rows per ``(chunk_rows, vocab)`` logit tile in
+        the token-level Liger fused policy loss. ``None`` (default) auto-tunes to
+        a ~256 MB fp32 logit workspace — the same heuristic as
+        ``fused_logprobs_chunk_rows`` on the standard path; pass an int to
+        override.
+    :type fused_loss_chunk_rows: int | None, optional
     :param use_sequence_packing: Opt in to padding-free sequence packing for the
         gradient forward pass. Only honoured under a FlashAttention-2 backend;
         otherwise inert.
@@ -215,7 +217,7 @@ class REINFORCE(LLMAlgorithm):
         activation_offload: bool = False,
         use_sequence_packing: bool = False,
         lora_target_scope: str | None = None,
-        liger_token_chunk_size: int = 2048,
+        fused_loss_chunk_rows: int | None = None,
         vllm_importance_sampling_correction: bool = True,
         vllm_importance_sampling_cap: float = 2.0,
     ) -> None:
@@ -259,7 +261,7 @@ class REINFORCE(LLMAlgorithm):
             activation_offload=activation_offload,
             use_sequence_packing=use_sequence_packing,
             lora_target_scope=lora_target_scope,
-            liger_token_chunk_size=liger_token_chunk_size,
+            fused_loss_chunk_rows=fused_loss_chunk_rows,
             vllm_importance_sampling_correction=vllm_importance_sampling_correction,
             vllm_importance_sampling_cap=vllm_importance_sampling_cap,
         )
@@ -840,7 +842,9 @@ class REINFORCE(LLMAlgorithm):
             turn_ids=turn_ids_arg,
             full_turn_mask=full_turn_mask,
             max_turns=max_turns,
-            token_chunk_size=self.liger_token_chunk_size,
+            token_chunk_size=self._resolve_fused_chunk_rows(
+                lm_head_weight.shape[0], self.fused_loss_chunk_rows
+            ),
             vllm_is_ratio=vllm_is_ratio,
         )
         # aux = [kl, clipfrac, pg_loss, entropy] scalars in fp32.

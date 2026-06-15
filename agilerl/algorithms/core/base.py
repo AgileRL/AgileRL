@@ -2143,7 +2143,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         use_sequence_packing: bool = False,
         lora_target_scope: str | None = None,
         fused_logprobs_chunk_rows: int | None = None,
-        liger_token_chunk_size: int = 2048,
+        fused_loss_chunk_rows: int | None = None,
         vllm_importance_sampling_correction: bool = True,
         vllm_importance_sampling_cap: float = 2.0,
     ) -> None:
@@ -2320,13 +2320,13 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         # Kept on even when use_vllm=False: decoupled rollouts still sample
         # from a separate vLLM engine.
         self._is_correction_liger_warned = False
-        if liger_token_chunk_size <= 0:
+        if fused_loss_chunk_rows is not None and fused_loss_chunk_rows <= 0:
             msg = (
-                f"liger_token_chunk_size must be a positive int, "
-                f"got {liger_token_chunk_size}."
+                f"fused_loss_chunk_rows must be a positive int or None, "
+                f"got {fused_loss_chunk_rows}."
             )
             raise ValueError(msg)
-        self.liger_token_chunk_size = liger_token_chunk_size
+        self.fused_loss_chunk_rows = fused_loss_chunk_rows
         # Warn-once flag for the canonical Liger + non-token importance-sampling
         # "not memory-bounded" warning (see :meth:`_warn_liger_non_token_is`).
         self._liger_non_token_warned = False
@@ -4863,6 +4863,29 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         return torch.cat(per_token_logps, dim=0)
 
     @staticmethod
+    def _resolve_fused_chunk_rows(vocab_size: int, explicit: int | None = None) -> int:
+        """Rows per fused ``(chunk_rows, vocab)`` logit tile.
+
+        Shared by the fused-linear-logprob (standard) path
+        (``fused_logprobs_chunk_rows``) and the Liger fused-loss path
+        (``fused_loss_chunk_rows``) so both bound their per-chunk logit
+        workspace identically. A positive ``explicit`` overrides; ``None``
+        auto-tunes to a ~256 MB fp32 logit workspace (fewer rows at larger
+        vocab), clamped to ``[128, 4096]``.
+
+        :param vocab_size: lm_head output dim (rows of the logit tile's V axis).
+        :type vocab_size: int
+        :param explicit: Explicit override, or ``None`` to auto-tune.
+        :type explicit: int | None
+        :return: Rows per chunk.
+        :rtype: int
+        """
+        if explicit is not None:
+            return explicit
+        workspace_bytes = 256 * 1024 * 1024
+        return min(max(workspace_bytes // max(1, vocab_size * 4), 128), 4096)
+
+    @staticmethod
     def _logprobs_from_hidden_fused(
         hidden: torch.Tensor,
         lm_head_weight: torch.Tensor,
@@ -4911,12 +4934,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :return: ``(B, T)`` per-token logprobs in ``hidden.dtype``.
         :rtype: torch.Tensor
         """
-        if _chunk_rows is None:
-            # ~256 MB fp32 logits workspace: fewer rows per chunk at large vocab.
-            workspace_bytes = 256 * 1024 * 1024
-            _chunk_rows = min(
-                max(workspace_bytes // max(1, lm_head_weight.shape[0] * 4), 128), 4096
-            )
+        _chunk_rows = LLMAlgorithm._resolve_fused_chunk_rows(
+            lm_head_weight.shape[0], _chunk_rows
+        )
         return fused_linear_logprobs_chunked(
             hidden,
             lm_head_weight,
@@ -4968,12 +4988,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :return: ``(B, T)`` per-token logprobs in ``hidden.dtype``.
         :rtype: torch.Tensor
         """
-        if _chunk_rows is None:
-            # ~256 MB fp32 logits workspace: fewer rows per chunk at large vocab.
-            workspace_bytes = 256 * 1024 * 1024
-            _chunk_rows = min(
-                max(workspace_bytes // max(1, lm_head_weight.shape[0] * 4), 128), 4096
-            )
+        _chunk_rows = LLMAlgorithm._resolve_fused_chunk_rows(
+            lm_head_weight.shape[0], _chunk_rows
+        )
         return FusedLinearLogProbsFunction.apply(
             hidden,
             lm_head_weight,

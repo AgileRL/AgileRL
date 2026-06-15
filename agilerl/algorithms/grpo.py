@@ -289,7 +289,7 @@ class GRPO(LLMAlgorithm):
         quantization_config: BitsAndBytesConfig | None = None,
         activation_offload: bool = False,
         lora_target_scope: str | None = None,
-        liger_token_chunk_size: int = 2048,
+        fused_loss_chunk_rows: int | None = None,
         vllm_importance_sampling_correction: bool = True,
         vllm_importance_sampling_cap: float = 2.0,
         use_sequence_packing: bool = False,
@@ -340,7 +340,7 @@ class GRPO(LLMAlgorithm):
             activation_offload=activation_offload,
             use_sequence_packing=use_sequence_packing,
             lora_target_scope=lora_target_scope,
-            liger_token_chunk_size=liger_token_chunk_size,
+            fused_loss_chunk_rows=fused_loss_chunk_rows,
             vllm_importance_sampling_correction=vllm_importance_sampling_correction,
             vllm_importance_sampling_cap=vllm_importance_sampling_cap,
         )
@@ -1772,7 +1772,9 @@ class GRPO(LLMAlgorithm):
                         .clamp(max=self.vllm_importance_sampling_cap)
                         .reshape(n_tokens, 1)
                     )
-            chunk_size = self.liger_token_chunk_size
+            chunk_size = self._resolve_fused_chunk_rows(
+                lm_head_weight.shape[0], self.fused_loss_chunk_rows
+            )
         else:
             # Trajectory-level (GSPO): keep the padded layout and one-sequence-per-
             # chunk granularity (chunk_size=1 over the batch dim).

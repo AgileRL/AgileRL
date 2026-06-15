@@ -491,7 +491,7 @@ class TestPPOInit:
                 gradient_checkpointing=False,
             )
 
-    def test_init_liger_token_chunk_size_must_be_positive(self):
+    def test_init_fused_loss_chunk_rows_must_be_positive(self):
         actor = create_module(10, 8, 100, "cpu")
         lora = LoraConfig(
             r=4,
@@ -501,21 +501,21 @@ class TestPPOInit:
             modules_to_save=["summary"],
         )
         with pytest.raises(
-            ValueError, match="liger_token_chunk_size must be a positive int"
+            ValueError, match="fused_loss_chunk_rows must be a positive int"
         ):
             LLMPPO(
                 actor_network=actor,
                 pad_token_id=99,
                 pad_token="<pad>",
                 lora_config=lora,
-                liger_token_chunk_size=0,
+                fused_loss_chunk_rows=0,
                 wrap=False,
                 gradient_checkpointing=False,
             )
 
-    def test_init_stores_liger_token_chunk_size(self):
-        ppo = _cpu_llmppo(liger_token_chunk_size=256)
-        assert ppo.liger_token_chunk_size == 256
+    def test_init_stores_fused_loss_chunk_rows(self):
+        ppo = _cpu_llmppo(fused_loss_chunk_rows=256)
+        assert ppo.fused_loss_chunk_rows == 256
 
     def test_init_action_granularity_deprecated_warns_and_overrides(self):
         """The legacy ``action_granularity`` kwarg warns and is carried over
@@ -1259,8 +1259,8 @@ class TestPPOLossLiger:
         # total_loss = fake_loss (0.5) + vf_loss (real, computed from values)
         assert isinstance(total_loss, torch.Tensor)
 
-    def test_token_mode_forwards_configured_liger_token_chunk_size(self) -> None:
-        ppo = _cpu_llmppo(liger_token_chunk_size=123)
+    def test_token_mode_forwards_configured_fused_loss_chunk_rows(self) -> None:
+        ppo = _cpu_llmppo(fused_loss_chunk_rows=123)
         B, T = 2, 5
         ids = torch.randint(1, 50, (B, T), dtype=torch.long)
         mask = torch.ones(B, T - 1, dtype=torch.float32)
