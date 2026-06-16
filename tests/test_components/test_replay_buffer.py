@@ -398,8 +398,8 @@ class TestReplayBufferAdaptiveSampling:
         assert sorted(idxs) == list(range(30))
 
     def test_large_buffer_uses_with_replacement(self, monkeypatch):
-        # Fill above _WITH_REPLACEMENT_MIN_SIZE (16384) so the buffer switches
-        # to with-replacement sampling.
+        # Fill above the with-replacement threshold (16384) so the buffer
+        # switches to with-replacement sampling.
         buf = ReplayBuffer(max_size=20000)
         self._fill(buf, 18000)
 

@@ -9,14 +9,6 @@ from agilerl.typing import ArrayOrTensor
 
 DataType = dict[str, ArrayOrTensor] | TensorDict
 
-# Buffer fill (`size`) at or above which `ReplayBuffer.sample` switches from
-# without-replacement (`torch.randperm`, O(size)) to with-replacement
-# (`torch.randint`, O(batch)) index sampling. Below this the O(size) shuffle is
-# cheap and we keep unique samples; above it the shuffle dominates while the
-# expected duplicate fraction of with-replacement (~ k / (2 * size)) stays under
-# ~1% for any typical batch size (e.g. 0.78% at batch 256). See `_sample_indices`.
-_WITH_REPLACEMENT_MIN_SIZE = 16384
-
 
 class ReplayBuffer:
     """A circular replay buffer for off-policy learning using a TensorDict as storage.
@@ -139,15 +131,9 @@ class ReplayBuffer:
         """Draw ``k`` storage indices in ``[0, size)``.
 
         Small buffers sample **without replacement** via ``torch.randperm`` (no
-        duplicate transitions within a minibatch). Once the current fill
-        (``self.size``, which grows as the buffer fills) reaches
-        ``_WITH_REPLACEMENT_MIN_SIZE`` we switch to **with replacement** - a single
-        O(``k``) ``torch.randint`` draw, which avoids ``randperm``'s O(``size``)
-        shuffle of the whole buffer. At that size the expected duplicate fraction
-        (~ ``k / (2 * size)``) is well under 1% for any typical batch, and
-        with-replacement is the standard for experience replay. The check uses the
-        live fill, not ``max_size``, since a partially-full buffer has a far higher
-        collision rate than its eventual capacity.
+        duplicate transitions within a minibatch). Once the buffer is large enough
+        we switch to **with replacement** - a single O(``k``) ``torch.randint``
+        draw, which avoids ``randperm``'s O(``size``) shuffle of the whole buffer.
 
         :param k: Number of indices to draw.
         :type k: int
@@ -157,7 +143,14 @@ class ReplayBuffer:
         if k <= 0:
             return torch.empty(0, dtype=torch.long)
 
-        if self.size >= _WITH_REPLACEMENT_MIN_SIZE:
+        # Switch to with-replacement sampling once the current fill reaches 16384.
+        # Below this the O(size) randperm shuffle is cheap (< ~30us) and keeps
+        # samples unique; above it the shuffle grows (~2ms at 1e6) while the
+        # expected duplicate fraction of with-replacement (~ k / (2 * size)) stays
+        # under 1% for any typical batch (0.78% at batch 256), and with-replacement
+        # is the standard for experience replay. Uses the live fill (not max_size)
+        # since a partially-full buffer collides far more than its eventual size.
+        if self.size >= 16384:
             return torch.randint(0, self.size, (k,))
 
         # Otherwise sample without replacement (no intra-batch duplicates).
