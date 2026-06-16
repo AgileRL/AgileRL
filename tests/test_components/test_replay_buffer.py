@@ -426,6 +426,11 @@ class TestReplayBufferAdaptiveSampling:
         self._fill(buf, 5)
         assert buf.sample(20).batch_size[0] == 5
 
+    def test_sample_zero_batch_returns_empty(self):
+        buf = ReplayBuffer(max_size=50)
+        self._fill(buf, 5)
+        assert buf.sample(0).batch_size[0] == 0
+
 
 class TestReplayBufferClear:
     def test_clear_buffer(self):
@@ -1011,6 +1016,23 @@ class TestPrioritizedReplayBufferUpdatePriorities:
             buffer.add(data)
         buffer.update_priorities(torch.tensor([0, 1]), torch.tensor([1e-10, 1e-10]))
         assert buffer.sum_tree[0] >= 1e-5**buffer.alpha
+
+    def test_update_priorities_empty_is_noop(self):
+        buffer = PrioritizedReplayBuffer(max_size=10, alpha=0.6)
+        for i in range(3):
+            data = TensorDict(
+                {
+                    "state": torch.tensor([i]),
+                    "action": torch.tensor([0]),
+                    "reward": torch.tensor([1.0]),
+                },
+            )
+            data = data.unsqueeze(0)
+            data.batch_size = [1]
+            buffer.add(data)
+        total_before = buffer.sum_tree.sum()
+        buffer.update_priorities(torch.tensor([], dtype=torch.long), torch.tensor([]))
+        assert buffer.sum_tree.sum() == total_before
 
 
 class TestPrioritizedReplayBufferSampleProportional:
