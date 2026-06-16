@@ -2,8 +2,9 @@
 
 These exercise the pure-tensor pack/unpack logic and the backend gate; they do
 not require vLLM/DeepSpeed/FlashAttention, so they run everywhere (including
-CPU/darwin CI). The attention-contamination guarantee itself is a property of
-the FlashAttention-varlen backend and is validated on GPU.
+CPU/darwin CI). The guarantee that no token attends across packed-sequence
+boundaries is a property of the FlashAttention-varlen backend and is
+validated on GPU.
 """
 
 import warnings
@@ -67,6 +68,13 @@ class TestPackPaddedBatch:
         assert packed.input_ids.squeeze(0).tolist() == [7, 8, 9, 5, 6]
         assert packed.position_ids.squeeze(0).tolist() == [0, 1, 2, 0, 1]
         assert packed.seq_lengths.tolist() == [3, 2]
+
+    def test_rejects_non_2d_input_ids(self):
+        ids, mask = _make_batch([3, 2])
+        with pytest.raises(ValueError, match=r"expects \(B, T\) input_ids"):
+            pack_padded_batch(ids[0], mask[0])  # (T,) — missing batch dim
+        with pytest.raises(ValueError, match=r"expects \(B, T\) input_ids"):
+            pack_padded_batch(ids.unsqueeze(0), mask.unsqueeze(0))  # (1, B, T)
 
 
 class TestUnpackLogprobs:

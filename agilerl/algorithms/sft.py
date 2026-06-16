@@ -16,11 +16,14 @@ from agilerl.typing import ExperiencesType, LLMObsType
 if TYPE_CHECKING:
     from accelerate import Accelerator
     from peft import LoraConfig
+    from transformers import BitsAndBytesConfig
 
     from agilerl.llm_envs import SFTGym
 
 if HAS_LIGER_KERNEL or TYPE_CHECKING:
-    from liger_kernel.transformers.cross_entropy import LigerCrossEntropyLoss
+    from liger_kernel.transformers.fused_linear_cross_entropy import (
+        LigerFusedLinearCrossEntropyLoss,
+    )
 
 
 class SFT(LLMAlgorithm):
@@ -124,7 +127,7 @@ class SFT(LLMAlgorithm):
         use_liger_loss: bool = False,
         reduce_memory_peak: bool = False,
         use_separate_reference_adapter: bool = False,
-        quantization_config: Any | None = None,
+        quantization_config: BitsAndBytesConfig | None = None,
         activation_offload: bool = False,
         lora_target_scope: str | None = None,
     ) -> None:
@@ -173,7 +176,10 @@ class SFT(LLMAlgorithm):
         self.update_epochs = update_epochs
 
         self.loss_fn = (
-            LigerCrossEntropyLoss(ignore_index=-100)
+            # Fused-linear (chunked) CE: takes hidden states + the lm_head
+            # weight and computes the loss in bounded (chunk, V) tiles — the
+            # full [B*L, V] logits tensor is never materialized.
+            LigerFusedLinearCrossEntropyLoss(ignore_index=-100)
             if self.use_liger_loss
             else F.cross_entropy
         )
@@ -306,11 +312,23 @@ class SFT(LLMAlgorithm):
             position_ids.masked_fill_(attention_mask == 0, 1)
             model_kwargs["position_ids"] = position_ids
 
+        flat_labels = labels.view(-1)
+        if self.use_liger_loss:
+            # Memory-bounded Liger path: run the transformer with the lm_head
+            # patched to identity so ``.logits`` is the final hidden state,
+            # then hand hidden states + lm_head weight to the fused-linear CE
+            # kernel (loss computed in bounded chunks, logits never built).
+            with self._patch_lm_head_to_identity():
+                hidden = self.actor.forward(**model_kwargs).logits  # [B, L, H]
+            shift_hidden = hidden[:, :-1, :].contiguous()  # [B, L-1, H]
+            flat_hidden = shift_hidden.view(-1, shift_hidden.size(-1))
+            lm_head = self._get_lm_head()
+            return self.loss_fn(lm_head.weight, flat_hidden, flat_labels, lm_head.bias)
+
         logits = self.actor.forward(**model_kwargs).logits  # [B, L, V]
         # Shift: predict token i+1 from hidden state i
         shift_logits = logits[:, :-1, :].contiguous()  # [B, L-1, V]
         flat_logits = shift_logits.view(-1, shift_logits.size(-1))
-        flat_labels = labels.view(-1)
         return self.loss_fn(flat_logits, flat_labels)
 
     def test(

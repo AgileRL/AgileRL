@@ -16,13 +16,10 @@ from agilerl.algorithms.core.llm_ops.fused_lora import (
     set_fused_adapter_routing,
     unpatch_lora_for_fused_forward,
 )
-from agilerl.algorithms.core.llm_ops.vllm_weight_sharing import (
-    assert_shared_storage,
-    build_shared_hf_model,
-    extract_vllm_bnb_state_dict,
+from agilerl.algorithms.core.llm_ops.vllm_colocate import (
     get_vllm_internal_model,
-    patch_vllm_standby_sleep_mode,
-    prepare_shared_base_for_kbit_training,
+    patch_vllm_lora_keep_resident,
+    patch_vllm_strip_multimodal_towers,
 )
 
 if HAS_LIGER_KERNEL:
@@ -43,15 +40,12 @@ __all__ = [
     "LigerFusedLinearPolicyLossFunction",
     "_LigerDPOWithAlpha",
     "apply_fused_policy_loss",
-    "assert_shared_storage",
-    "build_shared_hf_model",
     "clear_fused_adapter_routing",
-    "extract_vllm_bnb_state_dict",
     "get_vllm_internal_model",
     "llm_policy_loss_fn",
     "patch_lora_for_fused_forward",
-    "patch_vllm_standby_sleep_mode",
-    "prepare_shared_base_for_kbit_training",
+    "patch_vllm_lora_keep_resident",
+    "patch_vllm_strip_multimodal_towers",
     "set_fused_adapter_routing",
     "unpatch_lora_for_fused_forward",
 ]

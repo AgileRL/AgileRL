@@ -1353,6 +1353,58 @@ class TestPrepareLlmAlgoKwargs:
         )
         assert merged["reduce_memory_peak"] is True
 
+    def test_attn_implementation_injected_into_model_config(self):
+        """A non-"auto" ATTN_IMPLEMENTATION lands in model_config so the
+        algorithm's create_model treats it as authoritative."""
+        from agilerl.utils.utils import _prepare_llm_algo_kwargs
+
+        merged = _prepare_llm_algo_kwargs(
+            {},
+            tokenizer=None,
+            model_name="foo",
+            lora_config=None,
+            vllm_config=None,
+            INIT_HP=self._init_hp(ATTN_IMPLEMENTATION="flash_attention_2"),
+        )
+        assert merged["model_config"] == {"attn_implementation": "flash_attention_2"}
+
+    @pytest.mark.parametrize("attn_impl", ["auto", None])
+    def test_attn_implementation_auto_or_absent_leaves_model_config_alone(
+        self, attn_impl
+    ):
+        """ "auto" (or no key) must not create model_config — the algorithm's
+        auto-pick path stays in charge."""
+        from agilerl.utils.utils import _prepare_llm_algo_kwargs
+
+        init_hp = self._init_hp()
+        if attn_impl is not None:
+            init_hp["ATTN_IMPLEMENTATION"] = attn_impl
+        merged = _prepare_llm_algo_kwargs(
+            {},
+            tokenizer=None,
+            model_name="foo",
+            lora_config=None,
+            vllm_config=None,
+            INIT_HP=init_hp,
+        )
+        assert "model_config" not in merged
+
+    def test_attn_implementation_does_not_override_explicit_model_config(self):
+        """A caller-supplied model_config attn_implementation wins over the
+        INIT_HP value; sibling model_config keys are preserved."""
+        from agilerl.utils.utils import _prepare_llm_algo_kwargs
+
+        merged = _prepare_llm_algo_kwargs(
+            {"model_config": {"attn_implementation": "sdpa", "use_cache": False}},
+            tokenizer=None,
+            model_name="foo",
+            lora_config=None,
+            vllm_config=None,
+            INIT_HP=self._init_hp(ATTN_IMPLEMENTATION="flash_attention_2"),
+        )
+        assert merged["model_config"]["attn_implementation"] == "sdpa"
+        assert merged["model_config"]["use_cache"] is False
+
 
 class TestValidateLlmKwargs:
     def test_raises_when_pad_token_missing(self):

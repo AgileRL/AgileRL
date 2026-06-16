@@ -22,9 +22,13 @@ from agilerl.utils.llm_utils import (
 )
 from agilerl.utils.utils import create_population
 
-CONFIG_PATH = "configs/training/llm_finetuning/cispo_quant_bench.yaml"
-MODEL_PATH = "google/gemma-4-E4B-it"
-ENV_NAME = "game:Sudoku-v0-hard"
+# Overridable from the environment so a run can target a different model / env /
+# config without editing this file (e.g. a smaller model for a quick smoke run).
+CONFIG_PATH = os.environ.get(
+    "BENCH_CONFIG", "configs/training/llm_finetuning/cispo_quant_bench.yaml"
+)
+MODEL_PATH = os.environ.get("BENCH_MODEL", "google/gemma-4-E4B-it")
+ENV_NAME = os.environ.get("BENCH_ENV", "game:Sudoku-v0-hard")
 
 ALGO_REGISTRY = {
     "LLMPPO": LLMPPO,
@@ -88,11 +92,12 @@ def main(init_hp, mut_p):
 
     accelerator = create_llm_accelerator()
 
-    # Colocated vLLM rollout with zero-copy base-weight sharing (one base copy on
-    # the GPU; only LoRA adapters synced). vLLM mirrors the trainer's precision —
-    # bitsandbytes when the trainer quantizes, dense bf16 otherwise — and
-    # weight_sharing is left unset (auto): it engages whenever the colocated
-    # preconditions hold, for a quantized or dense base alike.
+    # Colocated vLLM rollout: vLLM and the trainer each hold their own base and
+    # the GPU is shared via vLLM native sleep/wake (the engine's base is backed
+    # up to host RAM on sleep and restored on wake; the trainer's base is
+    # offloaded to CPU during rollout). Only LoRA adapters are synced per
+    # rollout. vLLM mirrors the trainer's precision — bitsandbytes when the
+    # trainer quantizes, dense bf16 otherwise.
     use_vllm = bool(init_hp.get("USE_VLLM", True))
     vllm_config = (
         VLLMConfig(
@@ -130,7 +135,8 @@ def main(init_hp, mut_p):
         env_factory=env_factory,
         init_hp=init_hp,
         wb=True,
-        wb_level=os.environ.get("WANDB_LEVEL", "standard"),
+        # WANDB_API_KEY / WANDB_PROJECT / WANDB_ENTITY are the env vars wandb
+        # itself documents; pass them through rather than invent config keys.
         wandb_api_key=os.environ.get("WANDB_API_KEY"),
         wandb_project=os.environ.get("WANDB_PROJECT", "AgileRL"),
         wandb_entity=os.environ.get("WANDB_ENTITY"),
@@ -141,7 +147,6 @@ def main(init_hp, mut_p):
         max_reward=1.0,
         verbose=True,
         accelerator=accelerator,
-        debug_rollouts=init_hp.get("DEBUG_ROLLOUTS", 0),
     )
     if accelerator is not None:
         accelerator.end_training()

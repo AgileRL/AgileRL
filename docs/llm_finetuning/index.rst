@@ -64,3 +64,12 @@ This example demonstrates how to use the GRPO algorithm to fine-tune a LLM on a 
    fused_logprobs
    quantization
    llm_checkpoints
+
+.. note::
+
+   The current colocated rollout design — vLLM native sleep/wake with each side
+   holding its own base — is documented under "Colocated rollout (native vLLM
+   sleep/wake)" in the :doc:`quantization` topic. ``vllm_sleep_handoff.md`` is a
+   historical record of the earlier standby-sleep + zero-copy weight-sharing
+   investigation that this superseded (kept for context; not built into this
+   site).

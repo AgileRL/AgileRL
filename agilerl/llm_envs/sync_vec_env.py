@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -22,6 +22,9 @@ class Trajectory:
     group_idx: int
     prompt: ReasoningPrompts
     done: bool
+    # Sampling logprobs from vLLM rollout, one 1-D tensor per turn;
+    # ``get_trajectories`` concatenates across turns.
+    sampling_logps: list[torch.Tensor] = field(default_factory=list)
 
 
 class TrajectoryBuffer:
@@ -112,6 +115,7 @@ class TrajectoryBuffer:
         prompt_dict, _ = self.trajectories[env_idx].env.reset(seed=seed)
         self.trajectories[env_idx].prompt = prompt_dict
         self.trajectories[env_idx].done = False
+        self.trajectories[env_idx].sampling_logps.clear()
 
     def __getitem__(self, index: int) -> Trajectory:
         return self.trajectories[index]
@@ -159,11 +163,6 @@ class SyncMultiTurnVecEnv:
         self.batch_size = batch_size
         self.group_size = group_size
         self.trajectories = TrajectoryBuffer(batch_size, group_size)
-        # Per-trajectory accumulator of vLLM sampling logprobs, keyed by
-        # (batch_idx, group_idx). Each turn appends that turn's generated-token
-        # logprobs; get_trajectories concatenates them. Stays empty unless the
-        # caller passes sampling logprobs to step().
-        self._sampling_logps_buf: dict[tuple[int, int], list[torch.Tensor]] = {}
 
     def reset(
         self,
@@ -180,7 +179,6 @@ class SyncMultiTurnVecEnv:
         :rtype: list[ReasoningPrompts] | None
         """
         seed_base = seed
-        self._sampling_logps_buf = {}
         for batch_idx in range(self.batch_size):
             batch_seed = None if seed_base is None else seed_base + batch_idx
             for group_idx in range(self.group_size):
@@ -210,11 +208,9 @@ class SyncMultiTurnVecEnv:
 
         :param completion_ids: One completion tensor per active trajectory.
         :type completion_ids: list[torch.Tensor]
-        :param sampling_logps: Optional per-active-trajectory vLLM sampling
-            logprobs (1-D, generated tokens only) for this turn, parallel to
-            ``completion_ids``; individual entries may be ``None`` when a row
-            captured nothing. Accumulated per trajectory for the
-            sampling-mismatch correction; ignored when ``None``.
+        :param sampling_logps: Sampling logprobs from vLLM rollout for this
+            turn, parallel to ``completion_ids``; entries (or the whole list)
+            may be ``None`` when nothing was captured.
         :type sampling_logps: list[torch.Tensor | None] | None
         :return: Next active prompt dictionaries after stepping.
         :rtype: list[ReasoningPrompts] | None
@@ -235,9 +231,7 @@ class SyncMultiTurnVecEnv:
                 raise RuntimeError(msg)
             for traj, slp in zip(active, sampling_logps, strict=True):
                 if slp is not None:
-                    self._sampling_logps_buf.setdefault(
-                        (traj.batch_idx, traj.group_idx), []
-                    ).append(slp)
+                    traj.sampling_logps.append(slp)
         for traj, completion in zip(active, completion_ids, strict=False):
             full_completion = completion
             if full_completion.dim() == 1:
@@ -297,7 +291,7 @@ class SyncMultiTurnVecEnv:
             all_turn_ids.append(turn_ids)
             all_rewards.append(turn_rewards_t)
             batch_steps += len(getattr(traj.env, "turn_boundaries", []))
-            turns = self._sampling_logps_buf.get((traj.batch_idx, traj.group_idx))
+            turns = traj.sampling_logps
             all_sampling_logps.append(torch.cat(turns) if turns else None)
 
         return (
@@ -308,5 +302,9 @@ class SyncMultiTurnVecEnv:
             batch_steps,
             # Collapse to a single ``None`` when nothing was captured, so the
             # caller needs only an ``is not None`` check (no per-row re-scan).
-            all_sampling_logps if self._sampling_logps_buf else None,
+            (
+                all_sampling_logps
+                if any(logps is not None for logps in all_sampling_logps)
+                else None
+            ),
         )

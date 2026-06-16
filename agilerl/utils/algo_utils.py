@@ -1512,21 +1512,6 @@ class VLLMConfig:
     :param max_loras: Maximum number of LoRA adapters vLLM can hold concurrently.
         Defaults to 1 (actor rollout only).
     :type max_loras: int, optional
-    :param weight_sharing: **Deprecated and ignored.** Colocated vLLM now
-        *always* shares its base with the HF LoRA trainer (zero-copy: the trainer
-        aliases vLLM's already-loaded base — quantized or dense — instead of
-        loading its own copy, and only LoRA adapters are synced per step). The
-        legacy two-copy path was removed, so this flag has no effect; passing
-        ``False`` emits a deprecation warning. Retained for API compatibility;
-        defaults to None. A colocated config that *cannot* share
-        (``tensor_parallel_size > 1`` or a user-supplied in-memory base) now
-        raises rather than falling back.
-    :type weight_sharing: bool | None, optional
-    :param weight_sharing_multimodal: Reserved toggle to also share the
-        vision/audio towers of a multimodal base (not just the language model).
-        Not implemented yet — v1 shares the language model only, which is all RL
-        text rollouts need. Defaults to False.
-    :type weight_sharing_multimodal: bool, optional
     :param kv_cache_memory_bytes: Manually pin KV cache size in bytes instead of
         letting vLLM auto-size from ``gpu_memory_utilization``.  When set, vLLM
         uses this exact value for the KV cache and skips the auto-sizing path
@@ -1556,6 +1541,13 @@ class VLLMConfig:
         of attribute names strips those instead, for models that mount
         unwanted modalities elsewhere. Defaults to ``False``.
     :type strip_multimodal_towers: bool | list[str], optional
+    :param lora_staging_dir: Directory where the trained LoRA adapter is
+        exported for vLLM to (re)load each sync. ``None`` (default) uses a
+        fresh process-private temporary directory, removed on ``clean_up``.
+        Set explicitly when the rollout engine must read the adapter from a
+        known path (e.g. orchestrated/arena deployments); user-supplied
+        directories are created if missing and never deleted by AgileRL.
+    :type lora_staging_dir: str | None, optional
     """
 
     # Colocate mode parameters
@@ -1572,22 +1564,19 @@ class VLLMConfig:
     kv_cache_dtype: str | None = None
     max_lora_rank: int = 16
     max_loras: int = 1
-    weight_sharing: bool | None = None
     strip_multimodal_towers: bool | list[str] = False
-    weight_sharing_multimodal: bool = False
     stop_sequences: list[str] | None = None
     presence_penalty: float = 0.0
     frequency_penalty: float = 0.0
     # See class docstring above. Required to avoid vLLM's memory-profiling
     # assertion when running multiple vLLM processes on a shared GPU.
     kv_cache_memory_bytes: int | None = None
+    lora_staging_dir: str | None = None
 
     def __post_init__(self) -> None:
-        # ``weight_sharing`` semantics are enforced by the LLM algorithm at
-        # construction (colocated vLLM always shares; the non-shared path was
-        # removed). sleep_mode is not a sharing gate — it only toggles the
-        # KV-freeing sleep cycle — so nothing about weight_sharing is validated
-        # here.
+        # sleep_mode toggles the native vLLM sleep/wake cycle (base backed up to
+        # host RAM, KV freed) between rollout and training for a single colocated
+        # agent; it is not usable with a population on one device.
         if self.sleep_mode:
             warnings.warn(
                 "VLLM sleep mode cannot be used with populations of agents on a "

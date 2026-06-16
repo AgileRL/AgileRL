@@ -1,5 +1,20 @@
 # Handoff: colocated vLLM sleep mode for QLoRA RL (standby sleep + weight sharing)
 
+> **⚠️ SUPERSEDED (historical record).** The standby-sleep patch and the
+> zero-copy weight-sharing machinery described below were **removed**. They
+> existed because vLLM 0.21's native `sleep` could not restore a bitsandbytes
+> 4-bit base in place. **vLLM ≥ 0.22 fixed this**: native `sleep(level=1)` backs
+> the base up to host RAM and `wake_up()` restores it losslessly for *both*
+> dense and bnb 4-bit (verified with a poison-write round-trip repro and an
+> end-to-end colocated CISPO run). The colocated path is now simply: vLLM and the
+> trainer each keep their **own** base; vLLM cycles its base CPU↔GPU via native
+> sleep/wake; the trainer base is offloaded to CPU during rollout
+> (`use_memory_efficient_params`); a fresh bnb trainer is built **before** vLLM
+> (CUDA-safe ordering). See "Colocated rollout (native vLLM sleep/wake)" in
+> `docs/llm_finetuning/quantization.rst` for the current design. The rest of this
+> file is kept only as a record of why the old machinery existed and how the
+> investigation went.
+
 ## TL;DR
 
 Colocated training (HF/PEFT QLoRA trainer + vLLM rollout on one GPU) needs to free
@@ -461,10 +476,9 @@ default `game:Sudoku-v0-hard` once generation is coherent.
   experimental reload commits `dfa966c6`→`7c3be726`). This was blocked for the
   agent by the permission guard — the user must run it.
 - Untracked files that SURVIVE the reset and carry the work forward:
-  `docs/llm_finetuning/vllm_sleep_handoff.md` (this file) and
-  `docs/llm_finetuning/boundary_test_block.py.keep` (validated boundary tests for
-  the kept chat-template fix — append to
-  `tests/test_wrappers/test_multiturn_wrappers.py`).
+  `docs/llm_finetuning/vllm_sleep_handoff.md` (this file). (The validated
+  chat-template boundary tests have since landed in
+  `tests/test_wrappers/test_multiturn_wrappers.py`.)
 
 ## Appendix B: repro_standby.py (full source — recreate if missing)
 

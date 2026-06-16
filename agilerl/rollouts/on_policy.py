@@ -294,9 +294,6 @@ def collect_rollouts_llm(
             )
         else:
             action_result = agent.get_action(prompts, training=True)
-        # Per-active-trajectory vLLM sampling logprobs for this turn (populated
-        # only when the GRPO-family mismatch correction is on, else ``None``);
-        # forwarded to the env, which accumulates per trajectory across turns.
         prompts = env.step(action_result.completion_ids, action_result.sampling_logps)
 
     (

@@ -27,12 +27,12 @@ dependencies = [
     "packaging>=20.0",
     "pre-commit>=3.8.0",
     "pygame>=2.6.0",
-    "pymunk>=6.2.0",
-    "redis>=4.4.4",
+    "pymunk>=6.2,<7.3",
+    "redis>=4.4.4,<8.1.0",
     "SuperSuit>=3.9.0",
     "termcolor>=1.1.0",
     "torch>=2.11.0",
-    "tensordict==0.12.4",
+    "tensordict==0.13.0",
     "tqdm>=4.66.4",
     "wandb>=0.18.0",
 ]
@@ -44,23 +44,23 @@ box2d = [
 ]
 llm = [
     "bitsandbytes==0.49.2; sys_platform == 'linux'",
-    "datasets==4.4.1",
-    "deepspeed>=0.17.1; sys_platform == 'linux'",
-    "liger-kernel==0.7.0; sys_platform == 'linux'",
+    "datasets==5.0.0",
+    "deepspeed>=0.19.1; sys_platform == 'linux'",
+    "liger-kernel==0.8.0; sys_platform == 'linux'",
     "peft==0.19.1",
-    "transformers==5.9.0",
-    "vllm==0.21.0; sys_platform == 'linux'",
+    "transformers==5.11.0",
+    "vllm>=0.23; sys_platform == 'linux'",
 ]
 all = [
     "swig>=4.4.1; sys_platform != 'win32'",
     "gymnasium[box2d]>=1.0.0; sys_platform != 'win32'",
     "bitsandbytes==0.49.2; sys_platform == 'linux'",
-    "datasets==4.4.1",
-    "deepspeed>=0.17.1; sys_platform == 'linux'",
-    "liger-kernel==0.7.0; sys_platform == 'linux'",
+    "datasets==5.0.0",
+    "deepspeed>=0.19.1; sys_platform == 'linux'",
+    "liger-kernel==0.8.0; sys_platform == 'linux'",
     "peft==0.19.1",
-    "transformers==5.9.0",
-    "vllm==0.21.0; sys_platform == 'linux'",
+    "transformers==5.11.0",
+    "vllm>=0.23; sys_platform == 'linux'",
 ]
 
 [dependency-groups]

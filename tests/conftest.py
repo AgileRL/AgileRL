@@ -1,4 +1,5 @@
 import gc
+import itertools
 import os
 import shutil
 import socket
@@ -103,11 +104,10 @@ def pytest_collection_modifyitems(config, items):
          ``kv_cache_memory_bytes=32 * 1024 * 1024``, a vLLM worker reserves
          ~3.2 GiB and ``gpu`` (DeepSpeed) tests use ~0.5 GiB; the worst-case
          "4 vLLM workers + small DeepSpeed share" still fits in ~13 GiB.
-      2. **Port races.** Each worker's ``deepspeed_env`` fixture allocates a
-         free ``MASTER_PORT`` via the standard bind-to-port-0 / close /
-         return dance, which is TOCTOU. Above ~4 concurrent workers the
-         collision rate produces ``EADDRINUSE`` during
-         ``torch.distributed.init_process_group``.
+      2. **Port races.** Concurrent distributed inits race on MASTER_PORT;
+         ``get_free_port`` hands each xdist worker a disjoint port range to
+         avoid cross-worker ``EADDRINUSE``, and capping GPU-test concurrency
+         keeps simultaneous inits rare.
 
       ``vllm`` tests run in ``subprocess_runner.py``-spawned subprocesses, so
       worker-process state is reset between them. ``gpu`` tests run
@@ -471,7 +471,34 @@ dist_env = {
 }
 
 
+_port_counter = itertools.count()
+
+
 def get_free_port():
+    """Pick a MASTER_PORT that won't collide across xdist workers.
+
+    The classic bind-to-port-0 / close / reuse dance is TOCTOU-racy: two
+    workers can be handed the same ephemeral port and the loser dies with
+    EADDRINUSE inside ``init_process_group``. Carve a disjoint 300-port range
+    per xdist worker and walk it with a per-process counter, probing each
+    candidate; fall back to an OS-assigned port only if the whole range is
+    somehow occupied.
+    """
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "gw0")
+    try:
+        worker_num = int(worker.lstrip("gw"))
+    except ValueError:
+        worker_num = 0
+    base = 20000 + (worker_num % 100) * 300
+    for _ in range(300):
+        port = base + next(_port_counter) % 300
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                s.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+            return port
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]

@@ -139,6 +139,8 @@ class TokenObservationWrapper:
             dtype=torch.long,
         )
 
+    # Unique marker that ``_chat_template_boundary_ids`` slices on; must not
+    # collide with anything a real chat template renders.
     _BOUNDARY_PLACEHOLDER = "__AGILERL_PRIOR_ASSISTANT_PLACEHOLDER_a8b2f__"
 
     def _chat_template_boundary_ids(

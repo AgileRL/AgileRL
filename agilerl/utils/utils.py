@@ -99,15 +99,6 @@ def _lora_config_from_init_hp(INIT_HP: dict[str, Any]) -> Any | None:
     )
 
 
-def _common_llm_init_hp(INIT_HP: dict[str, Any]) -> dict[str, Any]:
-    """Shared ``create_population`` kwargs for GRPO / LLMPPO / LLMREINFORCE."""
-    return {
-        "seed": INIT_HP.get("SEED", 42),
-        "use_liger_loss": INIT_HP.get("USE_LIGER_LOSS", False),
-        "cast_logprobs_to_fp32": INIT_HP.get("CAST_LOGPROBS_TO_FP32", True),
-    }
-
-
 def _prepare_llm_algo_kwargs(
     algo_kwargs: dict[str, Any],
     *,
@@ -161,13 +152,14 @@ def _prepare_llm_algo_kwargs(
         )  # NOTE we should take a look into deepspeed auto batch-sizing
     # Plain passthroughs: (merged_key, init_hp_key, caster, present_when_truthy).
     # reduce_memory_peak/activation_offload fire on key membership (so an explicit
-    # False is honoured); lora_target_scope/liger_token_chunk_size fire only on a
-    # truthy value. liger_token_chunk_size cuts Liger backward peak memory.
+    # False is honoured); lora_target_scope/fused_loss_chunk_rows fire only on a
+    # truthy value. fused_loss_chunk_rows overrides the auto-tuned Liger fused-loss
+    # chunk (caps backward peak memory).
     _passthroughs = (
         ("reduce_memory_peak", "REDUCE_MEMORY_PEAK", bool, False),
         ("activation_offload", "ACTIVATION_OFFLOAD", bool, False),
         ("lora_target_scope", "LORA_TARGET_SCOPE", lambda v: v, True),
-        ("liger_token_chunk_size", "LIGER_TOKEN_CHUNK_SIZE", int, True),
+        ("fused_loss_chunk_rows", "FUSED_LOSS_CHUNK_ROWS", int, True),
     )
     for merged_key, init_hp_key, caster, present_when_truthy in _passthroughs:
         present = (
@@ -832,13 +824,16 @@ def create_population(
                 # carries AgileRL's adapters — construct them via the clone
                 # path (reuse as-is) rather than re-attaching adapters.
                 clone=idx != 0 and act is not None,
-                **_common_llm_init_hp(INIT_HP),
+                seed=INIT_HP.get("SEED", 42),
+                use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
+                cast_logprobs_to_fp32=INIT_HP.get("CAST_LOGPROBS_TO_FP32", True),
                 use_kl_advantage_shaping=INIT_HP.get("USE_KL_ADVANTAGE_SHAPING", False),
                 adv_norm=INIT_HP.get("ADV_NORM", "mean_std"),
                 loss_type=INIT_HP.get("LOSS_TYPE", "grpo"),
-                importance_sampling_level=INIT_HP.get(
-                    "IMPORTANCE_SAMPLING_LEVEL", "token"
-                ),
+                # ``None`` (no config key) lets GRPO resolve the default per
+                # loss_type — "token", or "trajectory" for gspo — without
+                # tripping the explicit-override warning.
+                importance_sampling_level=INIT_HP.get("IMPORTANCE_SAMPLING_LEVEL"),
                 advantage_granularity=INIT_HP.get(
                     "ADVANTAGE_GRANULARITY", INIT_HP.get("ACTION_GRANULARITY", "auto")
                 ),
@@ -853,10 +848,7 @@ def create_population(
                     INIT_HP.get("ADVANTAGE_FILTER_EPS", 0.0),
                 ),
                 vllm_importance_sampling_correction=INIT_HP.get(
-                    "VLLM_IMPORTANCE_SAMPLING_CORRECTION", False
-                ),
-                vllm_importance_sampling_apply=INIT_HP.get(
-                    "VLLM_IMPORTANCE_SAMPLING_APPLY", True
+                    "VLLM_IMPORTANCE_SAMPLING_CORRECTION", True
                 ),
                 vllm_importance_sampling_cap=INIT_HP.get(
                     "VLLM_IMPORTANCE_SAMPLING_CAP", 2.0
@@ -920,9 +912,6 @@ def create_population(
                 accelerator=agent_accelerator,
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
-                # Agents after the first receive a clone_llm copy that already
-                # carries AgileRL's adapters — construct them via the clone
-                # path (reuse as-is) rather than re-attaching adapters.
                 clone=idx != 0 and act is not None,
                 seed=INIT_HP.get("SEED", 42),
                 use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
@@ -981,9 +970,6 @@ def create_population(
                 accelerator=agent_accelerator,
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
-                # Agents after the first receive a clone_llm copy that already
-                # carries AgileRL's adapters — construct them via the clone
-                # path (reuse as-is) rather than re-attaching adapters.
                 clone=idx != 0 and act is not None,
                 seed=INIT_HP.get("SEED", 42),
                 use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
@@ -1062,11 +1048,10 @@ def create_population(
                 accelerator=agent_accelerator,
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
-                # Agents after the first receive a clone_llm copy that already
-                # carries AgileRL's adapters — construct them via the clone
-                # path (reuse as-is) rather than re-attaching adapters.
                 clone=idx != 0 and act is not None,
-                **_common_llm_init_hp(INIT_HP),
+                seed=INIT_HP.get("SEED", 42),
+                use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
+                cast_logprobs_to_fp32=INIT_HP.get("CAST_LOGPROBS_TO_FP32", True),
             )
             if torch_compiler is not None:
                 kw.setdefault("torch_compiler", torch_compiler)
@@ -1142,11 +1127,10 @@ def create_population(
                 accelerator=agent_accelerator,
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
-                # Agents after the first receive a clone_llm copy that already
-                # carries AgileRL's adapters — construct them via the clone
-                # path (reuse as-is) rather than re-attaching adapters.
                 clone=idx != 0 and act is not None,
-                **_common_llm_init_hp(INIT_HP),
+                seed=INIT_HP.get("SEED", 42),
+                use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
+                cast_logprobs_to_fp32=INIT_HP.get("CAST_LOGPROBS_TO_FP32", True),
             )
             if torch_compiler is not None:
                 kw.setdefault("torch_compiler", torch_compiler)
@@ -1294,74 +1278,6 @@ def tournament_selection_and_mutation(
         elite.save_checkpoint(f"{elite_save_path}.pt")
 
     return population
-
-
-# Ordered W&B logging tiers. Each tier strictly subsumes the previous one:
-#   off       — no W&B logging at all (master kill switch).
-#   essential — scalars only: loss, kl, reward, accuracy, completion_length, step.
-#   standard  — adds GPU memory snapshots, per-step timing breakdown, throughput,
-#               and quantization / LoRA / vLLM config fields recorded at init.
-#               All cheap scalars; this is the default.
-#   detailed  — adds histograms (per-sample completion length, episode rewards).
-#               Costs a host sync per histogram per step.
-#   debug     — adds prompt/completion sample tables every logged step.
-#               Tokenizer decode + storage growth → opt-in only.
-WB_LEVEL_OFF = "off"
-WB_LEVEL_ESSENTIAL = "essential"
-WB_LEVEL_STANDARD = "standard"
-WB_LEVEL_DETAILED = "detailed"
-WB_LEVEL_DEBUG = "debug"
-WB_LEVELS: tuple[str, ...] = (
-    WB_LEVEL_OFF,
-    WB_LEVEL_ESSENTIAL,
-    WB_LEVEL_STANDARD,
-    WB_LEVEL_DETAILED,
-    WB_LEVEL_DEBUG,
-)
-_WB_LEVEL_RANK: dict[str, int] = {name: idx for idx, name in enumerate(WB_LEVELS)}
-
-
-def normalize_wb_level(value: str | None, default: str = WB_LEVEL_STANDARD) -> str:
-    """Validate and canonicalize a W&B logging level string.
-
-    Falls back to ``default`` when ``value`` is ``None`` or empty. Raises
-    ``ValueError`` for anything that isn't one of :data:`WB_LEVELS`.
-    """
-    if value is None or value == "":
-        return default
-    candidate = value.strip().lower()
-    if candidate not in _WB_LEVEL_RANK:
-        msg = f"Unknown wb_level {value!r}. Expected one of: {', '.join(WB_LEVELS)}."
-        raise ValueError(msg)
-    return candidate
-
-
-def wb_level_at_least(level: str, threshold: str) -> bool:
-    """Return ``True`` if ``level`` is >= ``threshold`` in the tier ordering."""
-    return _WB_LEVEL_RANK[level] >= _WB_LEVEL_RANK[threshold]
-
-
-def gpu_memory_snapshot(prefix: str = "Sys") -> dict[str, float]:
-    """Snapshot current CUDA memory state as a flat dict of GiB scalars.
-
-    Returns an empty dict if CUDA is unavailable. ``torch.cuda.memory_allocated``
-    is essentially free (queries the caching allocator, no device sync); peak
-    stats are also cheap and reset by callers when they want a fresh window.
-    """
-    if not torch.cuda.is_available():
-        return {}
-    gib = 1024.0**3
-    return {
-        f"{prefix}/GPU Allocated GiB": torch.cuda.memory_allocated() / gib,
-        f"{prefix}/GPU Reserved GiB": torch.cuda.memory_reserved() / gib,
-        f"{prefix}/GPU Max Allocated GiB": torch.cuda.max_memory_allocated() / gib,
-    }
-
-
-def reset_gpu_memory_peak() -> None:
-    """Reset the CUDA peak-memory counter so the next snapshot is window-scoped."""
-    if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats()
 
 
 def init_wandb(

@@ -1,4 +1,5 @@
 import gc
+import warnings
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -214,6 +215,9 @@ def generate_reinforce(
     sleep_mode=False,
     from_name=False,
     use_memory_efficient_params=False,
+    quantization_config=None,
+    vllm_config_overrides=None,
+    temperature=1.0,
 ):
     lr_use = lr_eff if lr_eff is not None else lr
     gc.collect()
@@ -239,8 +243,16 @@ def generate_reinforce(
             kv_cache_memory_bytes=32 * 1024 * 1024,
             max_num_seqs=1,
             sleep_mode=sleep_mode,
+            **(vllm_config_overrides or {}),
         )
-        actor = model_factory(pretrained_model_name_or_path, add_value_head=False)
+        # ``from_name`` loads the trainer base from the model name (real-engine
+        # tests), so no stand-in HF actor is built; otherwise (mocked engine)
+        # the dummy actor is the trainer base.
+        actor = (
+            None
+            if from_name
+            else model_factory(pretrained_model_name_or_path, add_value_head=False)
+        )
     else:
         if pretrained_model_name_or_path is not None:
             actor = model_factory(pretrained_model_name_or_path, add_value_head=False)
@@ -272,10 +284,11 @@ def generate_reinforce(
         )
         vllm_config = None
 
-    # Colocated vLLM builds the trainer base from vLLM's loaded weights, so it
-    # cannot take an in-memory actor_network — construct from the model name
-    # whenever sharing (use_vllm) or when from_name is requested.
-    share_from_name = from_name or use_vllm
+    # Colocated vLLM and the trainer each hold their own base. The mocked-engine
+    # tests pass the dummy actor as the trainer base; ``_initialize_actors`` uses
+    # it directly when ``base_model`` is given. ``from_name`` loads the base from
+    # the model name instead (real-engine tests).
+    share_from_name = from_name
     reinforce_kwargs = dict(
         actor_network=actor if not share_from_name else None,
         model_name=pretrained_model_name_or_path if share_from_name else None,
@@ -296,21 +309,13 @@ def generate_reinforce(
         max_model_len=max_tokens + 5,
         micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         use_memory_efficient_params=use_memory_efficient_params,
+        quantization_config=quantization_config,
+        temperature=temperature,
         # Pin so the unfused learn() path is exercised by default
         # regardless of liger-kernel availability.
         use_liger_loss=False,
     )
-    if use_vllm:
-        # Colocated vLLM builds the trainer base FROM vLLM. These tests mock the
-        # vLLM engine (no real model to extract), so stand the dummy actor in for
-        # the shared base. Real zero-copy sharing is covered by the
-        # weight-sharing unit tests.
-        with patch.object(
-            REINFORCE, "_build_shared_base_from_vllm", return_value=actor
-        ):
-            reinforce = REINFORCE(**reinforce_kwargs)
-    else:
-        reinforce = REINFORCE(**reinforce_kwargs)
+    reinforce = REINFORCE(**reinforce_kwargs)
     return reinforce
 
 
@@ -372,29 +377,26 @@ class TestREINFORCEInit:
             target_modules=["lin"],
             task_type="CAUSAL_LM",
         )
-        # Colocated vLLM builds the trainer base FROM vLLM (mocked here): the
-        # dummy actor stands in for the shared base.
-        with patch.object(
-            REINFORCE, "_build_shared_base_from_vllm", return_value=actor
-        ):
-            rf = REINFORCE(
-                model_name="dummy/model",
-                actor_network=None,
-                pad_token_id=99,
-                pad_token="<pad>",
-                lora_config=lora,
-                use_vllm=True,
-                vllm_config=VLLMConfig(
-                    gpu_memory_utilization=0.2,
-                    max_num_seqs=1,
-                    sleep_mode=True,
-                ),
-                max_output_tokens=8,
-                max_model_len=32,
-                wrap=False,
-                gradient_checkpointing=False,
-                device="cpu",
-            )
+        # Colocated vLLM and the trainer each hold their own base. The vLLM
+        # engine is mocked here; the dummy actor is passed as the trainer base
+        # (``_initialize_actors`` uses it directly when ``base_model`` is given).
+        rf = REINFORCE(
+            actor_network=actor,
+            pad_token_id=99,
+            pad_token="<pad>",
+            lora_config=lora,
+            use_vllm=True,
+            vllm_config=VLLMConfig(
+                gpu_memory_utilization=0.2,
+                max_num_seqs=1,
+                sleep_mode=True,
+            ),
+            max_output_tokens=8,
+            max_model_len=32,
+            wrap=False,
+            gradient_checkpointing=False,
+            device="cpu",
+        )
         assert rf.use_vllm
         mock_instance.sleep.assert_called()
         rf.clean_up()
@@ -412,15 +414,12 @@ class TestREINFORCEInit:
             target_modules=["lin"],
             task_type="CAUSAL_LM",
         )
-        with (
-            patch.object(REINFORCE, "_build_shared_base_from_vllm", return_value=actor),
-            pytest.warns(
-                UserWarning, match="hf_generate_chunk_size.*ignored.*use_vllm=True"
-            ),
+        # The vLLM engine is mocked; the dummy actor is the trainer base.
+        with pytest.warns(
+            UserWarning, match="hf_generate_chunk_size.*ignored.*use_vllm=True"
         ):
             rf = REINFORCE(
-                model_name="dummy/model",
-                actor_network=None,
+                actor_network=actor,
                 pad_token_id=99,
                 pad_token="<pad>",
                 lora_config=lora,
@@ -518,7 +517,7 @@ class TestREINFORCEInit:
                 gradient_checkpointing=False,
             )
 
-    def test_init_liger_token_chunk_size_must_be_positive_or_none(self):
+    def test_init_fused_loss_chunk_rows_must_be_positive(self):
         actor = create_dummy_actor(10, 8, 100, "cpu")
         lora = LoraConfig(
             r=4,
@@ -527,21 +526,42 @@ class TestREINFORCEInit:
             task_type="CAUSAL_LM",
         )
         with pytest.raises(
-            ValueError, match="liger_token_chunk_size must be a positive int or None"
+            ValueError, match="fused_loss_chunk_rows must be a positive int"
         ):
             REINFORCE(
                 actor_network=actor,
                 pad_token_id=99,
                 pad_token="<pad>",
                 lora_config=lora,
-                liger_token_chunk_size=0,
+                fused_loss_chunk_rows=0,
                 wrap=False,
                 gradient_checkpointing=False,
             )
 
-    def test_init_stores_liger_token_chunk_size(self):
-        rf = _cpu_llmreinforce(liger_token_chunk_size=256)
-        assert rf.liger_token_chunk_size == 256
+    def test_init_stores_fused_loss_chunk_rows(self):
+        rf = _cpu_llmreinforce(fused_loss_chunk_rows=256)
+        assert rf.fused_loss_chunk_rows == 256
+
+    def test_init_action_granularity_deprecated_warns_and_overrides(self):
+        """The legacy ``action_granularity`` kwarg warns and is carried over
+        into ``advantage_granularity``."""
+        with pytest.warns(DeprecationWarning, match="action_granularity is deprecated"):
+            rf = _cpu_llmreinforce(action_granularity="turn")
+        assert rf.advantage_granularity == "turn"
+
+    @pytest.mark.parametrize("is_level", ["turn", "trajectory"])
+    def test_init_liger_non_token_is_level_warns_memory_unbounded(
+        self, monkeypatch, is_level
+    ):
+        """Liger + non-token IS is permitted but not memory-bounded; the
+        constructor emits the canonical warning once via the base helper."""
+        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
+        monkeypatch.setattr("agilerl.algorithms.reinforce_llm.HAS_LIGER_KERNEL", True)
+        with pytest.warns(UserWarning, match="NOT memory-bounded"):
+            rf = _cpu_llmreinforce(
+                use_liger_loss=True, importance_sampling_level=is_level
+            )
+        assert rf._reinforce_liger_mem_warned is True
 
     def test_init_clone_requires_pretrained_like_actor(self):
         with pytest.raises(AssertionError, match="PeftModelProtocol"):
@@ -1095,8 +1115,40 @@ class TestReinforceLossLiger:
         assert metrics["entropy"] == pytest.approx(0.35)
         assert loss is fake_loss
 
-    def test_forwards_configured_liger_token_chunk_size(self) -> None:
-        rf = _cpu_llmreinforce(liger_token_chunk_size=123)
+    def test_token_mode_fuses_vllm_is_ratio(self) -> None:
+        """token-level IS with captured vLLM logprobs fuses the clamped
+        trainer/vLLM ratio into the kernel via the ``vllm_is_ratio`` kwarg."""
+        rf = _cpu_llmreinforce(beta=0.0)
+        B, T = 2, 6
+        ids = torch.randint(1, 50, (B, T), dtype=torch.long)
+        mask = torch.ones(B, T - 1, dtype=torch.float32)
+        old_lp = torch.zeros(B, T - 1)
+        ref_lp = torch.zeros(B, T - 1)
+        adv = torch.randn(B, T - 1) * 0.1
+        sampling = old_lp - 0.5  # non-trivial trainer/vLLM mismatch
+        fake_aux = tuple(torch.tensor(0.0) for _ in range(4))
+        with (
+            patch("agilerl.algorithms.reinforce_llm.HAS_LIGER_KERNEL", True),
+            patch(
+                "agilerl.algorithms.reinforce_llm.apply_fused_policy_loss"
+            ) as mock_fn,
+        ):
+            mock_fn.return_value = (torch.tensor(0.5, requires_grad=True), fake_aux)
+            rf._reinforce_loss_liger(
+                ids,
+                mask,
+                old_lp,
+                ref_lp,
+                adv,
+                turn_ids=None,
+                sampling_log_probs=sampling,
+            )
+        ratio = mock_fn.call_args.kwargs["vllm_is_ratio"]
+        assert ratio is not None
+        assert torch.all(ratio <= rf.vllm_importance_sampling_cap)
+
+    def test_forwards_configured_fused_loss_chunk_rows(self) -> None:
+        rf = _cpu_llmreinforce(fused_loss_chunk_rows=123)
         B, T = 2, 5
         ids = torch.randint(1, 50, (B, T), dtype=torch.long)
         mask = torch.ones(B, T - 1, dtype=torch.float32)
@@ -1115,6 +1167,87 @@ class TestReinforceLossLiger:
             rf._reinforce_loss_liger(ids, mask, old_lp, ref_lp, adv)
 
         assert mock_apply.call_args.kwargs["token_chunk_size"] == 123
+
+    def test_turn_level_requires_turn_ids(self) -> None:
+        rf = _cpu_llmreinforce(importance_sampling_level="turn")
+        B, T = 2, 5
+        ids = torch.randint(1, 50, (B, T), dtype=torch.long)
+        mask = torch.ones(B, T - 1, dtype=torch.float32)
+        zeros = torch.zeros(B, T - 1)
+
+        with (
+            patch("agilerl.algorithms.reinforce_llm.HAS_LIGER_KERNEL", True),
+            # The non-token-IS memory notice fires before the turn_ids check.
+            pytest.warns(UserWarning, match="NOT memory-bounded"),
+            pytest.raises(
+                ValueError,
+                match=r"importance_sampling_level='turn' requires turn_ids",
+            ),
+        ):
+            rf._reinforce_loss_liger(ids, mask, zeros, zeros, zeros, turn_ids=None)
+
+    def test_turn_level_pools_advantages_and_passes_turn_args(self) -> None:
+        """Turn-level IS pools the per-token advantages per turn (mean) and
+        hands ``turn_ids`` / ``full_turn_mask`` / ``max_turns`` to the fused
+        Function."""
+        rf = _cpu_llmreinforce(importance_sampling_level="turn")
+        B, T = 2, 5
+        ids = torch.randint(1, 50, (B, T), dtype=torch.long)
+        mask = torch.ones(B, T - 1, dtype=torch.float32)
+        zeros = torch.zeros(B, T - 1)
+        adv = torch.tensor([[1.0, 3.0, 5.0, 7.0], [2.0, 4.0, 6.0, 8.0]])
+        turn_ids = torch.tensor([[0, 0, 1, 1], [0, 1, 1, 1]], dtype=torch.long)
+        fake_aux = tuple(torch.tensor(0.0) for _ in range(4))
+
+        with (
+            patch("agilerl.algorithms.reinforce_llm.HAS_LIGER_KERNEL", True),
+            patch(
+                "agilerl.algorithms.reinforce_llm.apply_fused_policy_loss"
+            ) as mock_apply,
+            pytest.warns(UserWarning, match="NOT memory-bounded"),
+        ):
+            mock_apply.return_value = (torch.tensor(0.4, requires_grad=True), fake_aux)
+            rf._reinforce_loss_liger(ids, mask, zeros, zeros, adv, turn_ids=turn_ids)
+
+        call = mock_apply.call_args
+        # Per-turn means: row 0 -> [mean(1, 3), mean(5, 7)]; row 1 ->
+        # [2, mean(4, 6, 8)].
+        assert torch.allclose(
+            call.args[5], torch.tensor([[2.0, 6.0], [2.0, 6.0]]), atol=1e-6
+        )
+        assert call.args[12] == "turn"
+        assert torch.equal(call.kwargs["turn_ids"], turn_ids)
+        assert torch.allclose(call.kwargs["full_turn_mask"], torch.ones(2, 2))
+        assert call.kwargs["max_turns"] == 2
+
+    def test_trajectory_level_pools_advantages_to_per_sample_scalar(self) -> None:
+        """Trajectory-level IS pools the per-token advantages to a masked
+        per-completion mean ``(B, 1)``."""
+        rf = _cpu_llmreinforce(importance_sampling_level="trajectory")
+        B, T = 2, 5
+        ids = torch.randint(1, 50, (B, T), dtype=torch.long)
+        mask = torch.tensor(
+            [[1.0, 1.0, 1.0, 0.0], [1.0, 1.0, 1.0, 1.0]], dtype=torch.float32
+        )
+        zeros = torch.zeros(B, T - 1)
+        adv = torch.tensor([[1.0, 3.0, 5.0, 100.0], [2.0, 4.0, 6.0, 8.0]])
+        fake_aux = tuple(torch.tensor(0.0) for _ in range(4))
+
+        with (
+            patch("agilerl.algorithms.reinforce_llm.HAS_LIGER_KERNEL", True),
+            patch(
+                "agilerl.algorithms.reinforce_llm.apply_fused_policy_loss"
+            ) as mock_apply,
+            pytest.warns(UserWarning, match="NOT memory-bounded"),
+        ):
+            mock_apply.return_value = (torch.tensor(0.4, requires_grad=True), fake_aux)
+            rf._reinforce_loss_liger(ids, mask, zeros, zeros, adv)
+
+        call = mock_apply.call_args
+        # Masked means: row 0 -> (1 + 3 + 5) / 3 = 3; row 1 -> 20 / 4 = 5.
+        assert torch.allclose(call.args[5], torch.tensor([[3.0], [5.0]]), atol=1e-6)
+        assert call.args[12] == "trajectory"
+        assert call.kwargs["turn_ids"] is None
 
 
 class TestREINFORCELearnWithLiger:
@@ -1156,11 +1289,98 @@ class TestREINFORCELearnWithLiger:
         assert learn_out["mean_kl"] == pytest.approx(0.05, rel=1e-6)
         assert learn_out["mean_pg_loss"] == pytest.approx(0.25, rel=1e-6)
 
+    def test_learn_liger_token_with_sampling_logps_uses_fused_kernel(self, monkeypatch):
+        """token-level use_liger_loss=True + captured vLLM logprobs: the
+        correction is fused into the kernel (``vllm_is_ratio``), so learn()
+        keeps the fused path and threads ``sampling_log_probs`` through."""
+        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
+        monkeypatch.setattr("agilerl.algorithms.reinforce_llm.HAS_LIGER_KERNEL", True)
+        rf = _cpu_llmreinforce(lr=0.05, update_epochs=1, use_liger_loss=True)
+        assert rf.importance_sampling_level == "token"
+        rf._reinforce_loss_liger = MagicMock(
+            return_value=(
+                torch.tensor(0.5, requires_grad=True),
+                {"kl": 0.1, "entropy": 0.2, "pg_loss": 0.3},
+            )
+        )
+        rf._backward_pass = MagicMock(return_value=None)
+
+        vocab, inp, mtok = 100, 10, 8
+        seq_len = inp + mtok
+        completions = [torch.randint(0, vocab, (1, seq_len))]
+        action_masks = [torch.ones(1, seq_len - 1, dtype=torch.bool)]
+        turn_ids = torch.tensor(
+            [[-1] * (inp - 1) + [0] * (mtok // 2) + [1] * (mtok - mtok // 2)],
+            dtype=torch.long,
+        )[:, : seq_len - 1]
+        rewards = torch.tensor([[0.5, -0.5]], dtype=torch.float32)
+        n_act = int(action_masks[0].sum())
+        sampling_logps = [torch.full((n_act,), -3.0, dtype=torch.float32)]
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            rf.learn(
+                (completions, action_masks, rewards),
+                turn_ids=turn_ids,
+                sampling_logps=sampling_logps,
+            )
+        rf._reinforce_loss_liger.assert_called()
+        # sampling_log_probs threaded in as the final positional arg.
+        assert rf._reinforce_loss_liger.call_args.args[6] is not None
+        assert not any(
+            "token-level importance sampling" in str(w.message) for w in caught
+        )
+        assert rf._is_correction_liger_warned is False
+
+    def test_learn_liger_nontoken_with_sampling_logps_warns_and_uses_standard_path(
+        self, monkeypatch
+    ):
+        """turn-level use_liger_loss=True + captured vLLM logprobs: the per-token
+        reweight can't be pooled into the turn ratio, so learn() warns once and
+        routes the minibatch through the standard PyTorch path."""
+        monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
+        monkeypatch.setattr("agilerl.algorithms.reinforce_llm.HAS_LIGER_KERNEL", True)
+        rf = _cpu_llmreinforce(
+            lr=0.05,
+            update_epochs=1,
+            use_liger_loss=True,
+            importance_sampling_level="turn",
+        )
+        rf._reinforce_loss_liger = MagicMock(
+            side_effect=AssertionError("fused path should not run")
+        )
+
+        vocab, inp, mtok = 100, 10, 8
+        seq_len = inp + mtok
+        completions = [torch.randint(0, vocab, (1, seq_len))]
+        action_masks = [torch.ones(1, seq_len - 1, dtype=torch.bool)]
+        turn_ids = torch.tensor(
+            [[-1] * (inp - 1) + [0] * (mtok // 2) + [1] * (mtok - mtok // 2)],
+            dtype=torch.long,
+        )[:, : seq_len - 1]
+        rewards = torch.tensor([[0.5, -0.5]], dtype=torch.float32)
+        n_act = int(action_masks[0].sum())
+        sampling_logps = [torch.full((n_act,), -3.0, dtype=torch.float32)]
+
+        with pytest.warns(
+            UserWarning,
+            match="only at token-level importance sampling",
+        ):
+            metrics = rf.learn(
+                (completions, action_masks, rewards),
+                turn_ids=turn_ids,
+                sampling_logps=sampling_logps,
+            )
+        rf._reinforce_loss_liger.assert_not_called()
+        assert rf._is_correction_liger_warned is True
+        assert "vllm_is_delta_mean" in metrics
+        assert torch.isfinite(torch.tensor(metrics["mean_loss"]))
+
 
 class TestREINFORCEVllmISCorrection:
     """vLLM sampling-mismatch (truncated-IS) correction wiring across IS levels."""
 
-    @pytest.mark.parametrize("is_level", ["token", "turn", "sequence"])
+    @pytest.mark.parametrize("is_level", ["token", "turn", "trajectory"])
     def test_learn_emits_vllm_is_metrics_and_reweights(self, is_level):
         rf = _cpu_llmreinforce(
             importance_sampling_level=is_level, lr=0.05, update_epochs=1
@@ -1169,7 +1389,6 @@ class TestREINFORCEVllmISCorrection:
         # exercise the capture/align/metrics/reweight path that the base class now
         # shares with GRPO.
         rf.vllm_importance_sampling_correction = True
-        rf.vllm_importance_sampling_apply = True
         rf.vllm_importance_sampling_cap = 2.0
         vocab, inp, mtok = 100, 10, 8
         seq_len = inp + mtok

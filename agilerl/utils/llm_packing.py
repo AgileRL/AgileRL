@@ -1,57 +1,24 @@
 """Padding-free sequence packing helpers for LLM RL training.
 
-A right-padded ``(B, T)`` batch wastes the model forward on pad tokens — the
-fraction wasted grows with the spread of completion lengths, which for RL is
-large. Packing flattens the real tokens of every sequence into a single
-``(1, N)`` row and hands the model the metadata it needs to keep sequences from
-attending across one another (per-sequence ``position_ids`` that restart at 0,
-plus ``cu_seqlens`` for a FlashAttention-varlen forward). The result is the same
-loss with no pad-token compute.
+A right-padded ``(B, T)`` batch wastes the model forward on pad tokens. Packing
+flattens every sequence's real tokens into a single ``(1, N)`` row with
+per-sequence ``position_ids`` (and ``cu_seqlens`` for FlashAttention-varlen), so
+the forward does no pad-token compute and yields the same loss. Transformers
+detects the packed layout from those ``position_ids`` and confines attention to
+each segment, so packing is correct for sliding-window models (e.g. gemma), not
+only full-attention ones.
 
-This module is deliberately backend-agnostic and pure-tensor: it produces the
-packed inputs and maps the packed result back onto the padded frame, so the
-rest of the loss path is unchanged. Three unpackers cover the consumers:
-:func:`unpack_logprobs` scatters packed per-token logprobs onto the
-``(B, T-1)`` next-token frame (the standard fused-logprob path),
-:func:`unpack_values` scatters packed per-token critic values onto that same
-``(B, T-1)`` frame (the PPO value-head path), and
-:func:`unpack_hidden_states` scatters the raw packed last-hidden-states onto
-the ``(B, T, H)`` frame (so a fused loss kernel such as Liger consumes them
-exactly as it would a padded forward's output).
-
-Both unpackers are the same scatter: for each original sequence *b* of real
-length ``L_b``, its real tokens occupy the contiguous flat span
-``cu[b] .. cu[b] + L_b`` and land left-aligned at row *b* of the output,
-leaving pad rows zero (the action mask discards them downstream). They differ
-only in how many tokens per segment are scattered and the output row width:
-logprobs map the ``L_b - 1`` within-sequence next-token predictions onto the
-``(B, T-1)`` frame, dropping the cross-segment boundary prediction (segment
-*b*'s last token "predicting" segment *b+1*'s first token) so no label leaks
-between sequences; hidden states map all ``L_b`` real tokens onto the
-``(B, T, H)`` frame (no boundary token to drop — the next-token shift is
-applied by the kernel on the padded frame). Both are differentiable; gradients
-flow back through ``index_select`` / ``index_put``.
-
-Crucially, the packed forward passes the model only the per-sequence
-``position_ids`` (with ``attention_mask=None``); it does **not** build an
-attention mask itself. Transformers' own mask creation detects the packed
-format from those ``position_ids``
-(:func:`transformers.masking_utils.find_packed_sequence_indices`) and
-AND-composes a block-diagonal ("same segment") constraint onto each layer's
-*native* mask. So sliding-window layers stay windowed and full layers stay full
-causal, each additionally confined to its own segment — packing is therefore
-correct for sliding-window models (e.g. gemma), not only full-attention ones.
+The module is backend-agnostic and pure-tensor: it builds the packed inputs and
+scatters the packed result back onto the padded frame. :func:`unpack_logprobs`,
+:func:`unpack_values`, and :func:`unpack_hidden_states` cover the consumers (the
+fused-logprob, PPO value-head, and fused-loss paths); all are differentiable.
 
 .. warning::
 
-   Packing only avoids cross-sequence attention on a backend where that composed
-   mask stays sparse: FlashAttention-2 varlen (``position_ids`` → ``cu_seqlens``
-   + per-layer ``window_size``, no mask) or FlexAttention (a sparse
-   block-diagonal ``BlockMask``, windowed on sliding layers). Dense backends
-   (SDPA/eager) would materialize a dense ``O(N^2)`` mask — correct but defeating
-   the memory win — so packing is not enabled there and falls back to padding.
-   Callers must gate packing on a supported backend; see
-   :meth:`LLMAlgorithm._packing_mode`.
+   Packing only saves memory on a backend where the block-diagonal mask stays
+   sparse: FlashAttention-2 varlen or FlexAttention. Dense backends (SDPA/eager)
+   would materialize an ``O(N^2)`` mask, so callers must gate packing on a
+   supported backend; see :meth:`LLMAlgorithm._packing_mode`.
 """
 
 from __future__ import annotations
