@@ -150,7 +150,7 @@ class PPO(LLMAlgorithm):
     :type turn_level_clip: bool, optional
     :param importance_sampling_level: IS / ratio-pooling level for the policy
         surrogate, orthogonal to ``advantage_granularity``. ``"token"`` clips per
-        token; ``"turn"`` pools the ratio (length-normalized mean) per turn;
+        token; ``"turn"`` pools the ratio per turn;
         ``"trajectory"`` pools over the whole completion; the paired advantage is
         pooled to the same bucket. ``"auto"`` (default) uses the GAE granularity
         when ``turn_level_clip`` is set, else token. Turn/trajectory pooling
@@ -162,6 +162,11 @@ class PPO(LLMAlgorithm):
         turn-level updates, ``"token"`` enforces token-level updates, and
         ``"auto"`` uses token-level only when all samples are single-turn.
     :type advantage_granularity: Literal["turn", "token", "auto"], optional
+    :param turn_ratio_pooling: Reduction used to pool per-token log-ratios when
+        turn-level importance sampling is active. ``"sum"`` yields a product
+        ratio per turn (nightly/paper-aligned), ``"mean"`` yields a
+        length-normalized geometric-mean ratio.
+    :type turn_ratio_pooling: Literal["sum", "mean"], optional
     :param turn_value_reduction: Aggregation used to map token critic values to
         turn values. ``"mean"`` reproduces existing behavior, ``"final_value"``
         uses the final action token value in each turn.
@@ -241,6 +246,7 @@ class PPO(LLMAlgorithm):
             "auto", "token", "turn", "trajectory"
         ] = "auto",
         advantage_granularity: Literal["turn", "token", "auto"] = "auto",
+        turn_ratio_pooling: Literal["sum", "mean"] = "sum",
         action_granularity: Literal["turn", "token", "auto"] | None = None,
         turn_value_reduction: Literal["mean", "final_value"] = "final_value",
         adv_whitening: bool = True,
@@ -345,6 +351,9 @@ class PPO(LLMAlgorithm):
             )
 
         validate_importance_sampling_level(importance_sampling_level, allow_auto=True)
+        if turn_ratio_pooling not in {"sum", "mean"}:
+            msg = "turn_ratio_pooling must be one of ['mean', 'sum']."
+            raise ValueError(msg)
         self.beta = beta
         self.vf_coef = vf_coef
         self.clip_coef = clip_coef
@@ -353,10 +362,12 @@ class PPO(LLMAlgorithm):
         # GAE advantage granularity (``advantage_granularity``/``ppo_granularity``).
         # ``"auto"`` preserves legacy behavior: turn-level when the batch is
         # multi-turn and ``turn_level_clip`` is set, else token-level. Explicit
-        # ``token``/``turn``/``trajectory`` override (length-normalized mean
-        # pooling, consistent with GRPO/GSPO).
+        # ``token``/``turn``/``trajectory`` override.
         self.importance_sampling_level = importance_sampling_level
         self.advantage_granularity = advantage_granularity
+        # Turn-level ratio pooling reduction (sum=product ratio, mean=geometric
+        # mean ratio) used by both the standard and Liger PPO policy losses.
+        self.turn_ratio_pooling = turn_ratio_pooling
         # Warn once that Liger + an explicit non-token IS level is permitted
         # but not memory-bounded ("auto" is covered at loss time instead).
         if self.use_liger_loss and self.importance_sampling_level in {
@@ -849,8 +860,9 @@ class PPO(LLMAlgorithm):
         """Clipped PPO policy surrogate at the given IS / ratio-pooling level.
 
         The importance ratio (and the advantage paired with it) is pooled to
-        ``is_level`` — token (no pooling), turn (length-normalized mean per
-        turn), or trajectory (mean over the whole completion). Returns
+        ``is_level`` — token (no pooling), turn (configured by
+        ``self.turn_ratio_pooling``), or trajectory (mean over the whole
+        completion). Returns
         ``(pg_loss, clipfrac)``; used by the non-Liger PPO path. Operates only
         on ``(B, T)`` tensors, so it is memory-bounded.
 
@@ -879,6 +891,7 @@ class PPO(LLMAlgorithm):
             is_level,
             self.clip_coef,
             loss_weight=loss_weight,
+            turn_reduction=self.turn_ratio_pooling,
         )
 
     def test(
@@ -1219,6 +1232,7 @@ class PPO(LLMAlgorithm):
             token_chunk_size=self._resolve_fused_chunk_rows(
                 lm_head_weight.shape[0], self.fused_loss_chunk_rows
             ),
+            turn_log_ratio_reduction=self.turn_ratio_pooling,
             vllm_is_ratio=vllm_is_ratio,
         )
         kl_metric = float(aux[0].item())

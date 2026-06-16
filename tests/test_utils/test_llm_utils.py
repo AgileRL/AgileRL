@@ -2318,6 +2318,17 @@ class TestPoolLogRatioByLevel:
         assert unit_mask.tolist() == [[1.0, 0.0]]
         assert weights[0, 1].item() == pytest.approx(0.0)
 
+    def test_turn_level_sum_reduction_matches_product_ratio_log_pooling(self):
+        tlr = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
+        mask = torch.ones(1, 4)
+        turn_ids = torch.tensor([[0, 0, 1, 1]])
+        weights, unit_mask = pool_log_ratio_by_level(
+            tlr, mask, turn_ids, "turn", turn_reduction="sum"
+        )
+        assert weights.shape == (1, 2)
+        assert weights[0].tolist() == pytest.approx([3.0, 7.0])
+        assert unit_mask.tolist() == [[1.0, 1.0]]
+
     def test_trajectory_level_masks_rows_without_action_tokens(self):
         tlr = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
         mask = torch.tensor([[1.0, 1.0], [0.0, 0.0]])

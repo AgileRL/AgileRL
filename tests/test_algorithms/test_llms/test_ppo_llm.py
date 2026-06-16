@@ -553,6 +553,30 @@ class TestPPOInit:
                 gradient_checkpointing=False,
             )
 
+    def test_init_turn_ratio_pooling_must_be_valid(self):
+        actor = create_module(10, 8, 100, "cpu")
+        lora = LoraConfig(
+            r=4,
+            lora_alpha=16,
+            target_modules=["lin"],
+            task_type="CAUSAL_LM",
+            modules_to_save=["summary"],
+        )
+        with pytest.raises(ValueError, match="turn_ratio_pooling"):
+            LLMPPO(
+                actor_network=actor,
+                pad_token_id=99,
+                pad_token="<pad>",
+                lora_config=lora,
+                turn_ratio_pooling="median",
+                wrap=False,
+                gradient_checkpointing=False,
+            )
+
+    def test_init_default_turn_ratio_pooling_is_sum(self):
+        ppo = _cpu_llmppo()
+        assert ppo.turn_ratio_pooling == "sum"
+
     def test_init_adv_whitening_must_be_boolean(self):
         actor = create_module(10, 8, 100, "cpu")
         lora = LoraConfig(
@@ -1384,6 +1408,7 @@ class TestPPOLossLiger:
         assert call_kwargs["turn_ids"] is not None
         assert call_kwargs["full_turn_mask"] is not None
         assert call_kwargs["max_turns"] == 2
+        assert call_kwargs["turn_log_ratio_reduction"] == "sum"
 
     def test_token_mode_fuses_vllm_is_ratio(self) -> None:
         """token-level IS with captured vLLM logprobs fuses the clamped
