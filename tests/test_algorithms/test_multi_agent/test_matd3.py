@@ -1655,6 +1655,61 @@ class TestMATD3Learn:
         assert set(loss.keys()) == set(matd3.shared_agent_ids)
         matd3.clean_up()
 
+    def test_grouped_metrics_keyed_by_shared_ids(self, ma_vector_space):
+        """Grouped MATD3 logs losses under group IDs, not raw agent IDs."""
+        agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+        batch_size = 8
+        matd3 = MATD3(
+            observation_spaces=ma_vector_space,
+            action_spaces=copy.deepcopy(ma_vector_space),
+            agent_ids=agent_ids,
+            device="cpu",
+        )
+        assert matd3.has_grouped_agents()
+        # Metric keys follow the shared networks, not the raw env agents
+        assert matd3.metrics.agent_ids == matd3.shared_agent_ids
+        assert matd3.metrics.agent_ids == ["agent", "other_agent"]
+
+        states = {
+            agent_id: torch.randn(batch_size, ma_vector_space[idx].shape[0])
+            for idx, agent_id in enumerate(agent_ids)
+        }
+        actions = {
+            agent_id: torch.randn(batch_size, ma_vector_space[idx].shape[0])
+            for idx, agent_id in enumerate(agent_ids)
+        }
+        rewards = {agent_id: torch.randn(batch_size, 1) for agent_id in agent_ids}
+        next_states = {
+            agent_id: torch.randn(batch_size, ma_vector_space[idx].shape[0])
+            for idx, agent_id in enumerate(agent_ids)
+        }
+        dones = {agent_id: torch.zeros(batch_size, 1) for agent_id in agent_ids}
+
+        # Run enough learn steps for the delayed actor update to fire
+        for _ in range(matd3.policy_freq):
+            matd3.learn(
+                {
+                    "obs": states,
+                    "action": actions,
+                    "reward": rewards,
+                    "next_obs": next_states,
+                    "done": dones,
+                }
+            )
+
+        # Losses are recorded per shared group, with no raw-agent keys leaking
+        critic_loss = matd3.metrics._additional_metrics["critic_loss"]
+        assert set(critic_loss.keys()) == set(matd3.shared_agent_ids)
+        assert "agent_0" not in critic_loss
+        # Each raw agent logs under its group, so the 2-agent "agent" group
+        # accumulates twice as many samples as the single "other_agent" agent
+        assert len(critic_loss["agent"]) == 2 * len(critic_loss["other_agent"])
+        assert all(
+            np.isfinite(matd3.metrics.get_mean("critic_loss", g))
+            for g in matd3.shared_agent_ids
+        )
+        matd3.clean_up()
+
     @pytest.mark.gpu
     @pytest.mark.parametrize(
         "observation_spaces",
