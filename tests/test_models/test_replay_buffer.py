@@ -11,7 +11,6 @@ import pytest
 from pydantic import ValidationError
 
 from agilerl.components.replay_buffer import (
-    MultiAgentReplayBuffer,
     MultiStepReplayBuffer,
     PrioritizedReplayBuffer,
     ReplayBuffer,
@@ -292,32 +291,34 @@ class TestInitBufferMultiAgent:
     def test_multi_agent_buffer_created(self):
         spec = ReplayBufferSpec()
         buf = spec.init_buffer(MADDPGSpec())
-        assert isinstance(buf, MultiAgentReplayBuffer)
+        assert isinstance(buf, ReplayBuffer)
 
     def test_multi_agent_ignores_n_step_flag(self):
-        """Even with ``n_step_buffer=True``, multi-agent always gets
-        ``MultiAgentReplayBuffer``."""
+        """Even with ``n_step_buffer=True``, multi-agent gets a plain
+        ``ReplayBuffer``."""
         spec = ReplayBufferSpec(n_step_buffer=True)
         buf = spec.init_buffer(MADDPGSpec())
-        assert isinstance(buf, MultiAgentReplayBuffer)
+        assert isinstance(buf, ReplayBuffer)
+        assert not isinstance(buf, MultiStepReplayBuffer)
 
     def test_multi_agent_ignores_per_flag(self):
-        """Even with ``per_buffer=True``, multi-agent always gets
-        ``MultiAgentReplayBuffer``."""
+        """Even with ``per_buffer=True``, multi-agent gets a plain
+        ``ReplayBuffer``."""
         spec = ReplayBufferSpec(per_buffer=True)
         buf = spec.init_buffer(MADDPGSpec())
-        assert isinstance(buf, MultiAgentReplayBuffer)
+        assert isinstance(buf, ReplayBuffer)
+        assert not isinstance(buf, PrioritizedReplayBuffer)
 
     def test_multi_agent_respects_max_size(self):
         spec = ReplayBufferSpec(max_size=10_000)
         buf = spec.init_buffer(MADDPGSpec())
-        assert isinstance(buf, MultiAgentReplayBuffer)
+        assert isinstance(buf, ReplayBuffer)
         assert buf.max_size == 10_000
 
     def test_multi_agent_device_forwarded(self):
         spec = ReplayBufferSpec()
         buf = spec.init_buffer(MADDPGSpec(), device="cpu")
-        assert isinstance(buf, MultiAgentReplayBuffer)
+        assert isinstance(buf, ReplayBuffer)
 
 
 # ============================================================================
@@ -349,4 +350,5 @@ class TestInitBufferFlagPriority:
     def test_multi_agent_overrides_all_flags(self):
         spec = ReplayBufferSpec(n_step_buffer=True, per_buffer=True)
         buf = spec.init_buffer(MADDPGSpec())
-        assert isinstance(buf, MultiAgentReplayBuffer)
+        assert isinstance(buf, ReplayBuffer)
+        assert not isinstance(buf, (MultiStepReplayBuffer, PrioritizedReplayBuffer))

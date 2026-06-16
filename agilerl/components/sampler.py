@@ -6,7 +6,6 @@ from tensordict import TensorDict
 from torch.utils.data import DataLoader
 
 from agilerl.components import (
-    MultiAgentReplayBuffer,
     MultiStepReplayBuffer,
     PrioritizedReplayBuffer,
     ReplayBuffer,
@@ -14,19 +13,14 @@ from agilerl.components import (
 from agilerl.components.data import ReplayDataset
 from agilerl.typing import ExperiencesType
 
-BufferType = (
-    ReplayBuffer
-    | MultiAgentReplayBuffer
-    | PrioritizedReplayBuffer
-    | MultiStepReplayBuffer
-)
+BufferType = ReplayBuffer | PrioritizedReplayBuffer | MultiStepReplayBuffer
 
 
 class Sampler:
     """Sampler class to handle both standard and distributed training.
 
     :param memory: Replay buffer memory, defaults to None
-    :type memory: ReplayBuffer | MultiAgentReplayBuffer | PrioritizedReplayBuffer | MultiStepReplayBuffer | None, optional
+    :type memory: ReplayBuffer | PrioritizedReplayBuffer | MultiStepReplayBuffer | None, optional
     :param dataset: Dataset for distributed sampling, defaults to None
     :type dataset: ReplayDataset | None, optional
     :param dataloader: DataLoader for distributed sampling, defaults to None
@@ -105,9 +99,9 @@ class Sampler:
                 self.sample = self.sample_n_step
 
             else:
-                if not isinstance(self.memory, (ReplayBuffer, MultiAgentReplayBuffer)):
+                if not isinstance(self.memory, ReplayBuffer):
                     warnings.warn(
-                        "Memory is not an agilerl ReplayBuffer or MultiAgentReplayBuffer.",
+                        "Memory is not an agilerl ReplayBuffer.",
                         stacklevel=2,
                     )
                 self.sample = self.sample_standard

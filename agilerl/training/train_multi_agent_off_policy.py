@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 
 from agilerl.algorithms import MADDPG, MATD3
 from agilerl.components.data import MultiAgentTransition, ReplayDataset
-from agilerl.components.replay_buffer import MultiAgentReplayBuffer
+from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -38,7 +38,7 @@ def train_multi_agent_off_policy(
     env_name: str,
     algo: str,
     pop: PopulationType,
-    memory: MultiAgentReplayBuffer,
+    memory: ReplayBuffer,
     sum_scores: bool = True,
     init_hp: InitDictType = None,
     mut_p: InitDictType = None,
@@ -75,7 +75,7 @@ def train_multi_agent_off_policy(
     :param pop: Population of agents
     :type pop: list[MADDPG | MATD3]
     :param memory: Experience Replay Buffer
-    :type memory: MultiAgentReplayBuffer
+    :type memory: ReplayBuffer
     :param sum_scores: Boolean flag indicating whether to sum sub-agents scores,
         typically True for co-operative environments, defaults to True
     :type sum_scores: bool, optional
