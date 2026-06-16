@@ -10,7 +10,6 @@ import shutil
 import socket
 import subprocess
 import tempfile
-import time
 import zipfile
 from pathlib import Path
 from typing import Any, Literal
@@ -77,11 +76,6 @@ _DEFAULT_METADATA: dict[str, Any] = {
         "memoryBytes": "64 GiB",
     },
 }
-
-# Helm deploy is fast; gateway daemon polls Arena API on an interval (default 15s).
-_DEFAULT_GATEWAY_WAIT_HELM_SECS = 75
-# Swarm fresh-node install usually exceeds one gateway sync cycle.
-_DEFAULT_GATEWAY_WAIT_SWARM_SECS = 0
 
 
 class _StageFailed(Exception):
@@ -312,17 +306,6 @@ def _swarm_script_env(base: dict[str, str] | None = None) -> dict[str, str]:
     env = dict(base if base is not None else os.environ)
     env.setdefault("DOCKER_REBOOT_ASSUME_YES", "1")
     return env
-
-
-def _wait_for_gateway_peer_registration(seconds: int) -> None:
-    if seconds <= 0:
-        return
-    logger.info(
-        "Waiting %ds for Arena on-prem gateway to register the WireGuard peer "
-        "(automatic API sync; no manual gateway steps)…",
-        seconds,
-    )
-    time.sleep(seconds)
 
 
 def _validate_tun0_conf(path: Path) -> None:
@@ -806,7 +789,6 @@ def run_on_prem_install(
     ssh_extra_opts: str | None = None,
     advertise_addr: str | None = None,
     num_nodes: int | None = None,
-    wait_gateway_secs: int | None = None,
     skip_verify: bool = False,
 ) -> None:
     """Enable on-prem, ensure class exists, download bundle, run install scripts."""
@@ -845,14 +827,6 @@ def run_on_prem_install(
         workers=workers,
     )
     _ensure_class(client, name=name, num_nodes=create_nodes)
-
-    if wait_gateway_secs is None:
-        wait_gateway_secs = (
-            _DEFAULT_GATEWAY_WAIT_HELM_SECS
-            if kind == "helm"
-            else _DEFAULT_GATEWAY_WAIT_SWARM_SECS
-        )
-    _wait_for_gateway_peer_registration(wait_gateway_secs)
 
     with tempfile.TemporaryDirectory(prefix="arena-on-prem-") as tmp:
         bundle_root = _download_bundle(
@@ -950,15 +924,6 @@ def build_install_command() -> click.Command:
         help="Skip enabling the on-prem provider (use when it is already enabled).",
     )
     @click.option(
-        "--wait-gateway-secs",
-        type=click.IntRange(0),
-        default=None,
-        help=(
-            "Seconds to wait after creating the class so the Arena gateway can register "
-            "the WireGuard peer. Default: 75 for helm, 0 for dockerSwarm."
-        ),
-    )
-    @click.option(
         "--skip-verify",
         is_flag=True,
         default=False,
@@ -983,7 +948,6 @@ def build_install_command() -> click.Command:
         ssh_extra_opts: str | None,
         advertise_addr: str | None,
         skip_enable: bool,
-        wait_gateway_secs: int | None,
         skip_verify: bool,
         verbose: bool,
     ) -> None:
@@ -1013,7 +977,6 @@ def build_install_command() -> click.Command:
                 ssh_user=ssh_user,
                 ssh_extra_opts=ssh_extra_opts,
                 advertise_addr=advertise_addr,
-                wait_gateway_secs=wait_gateway_secs,
                 skip_verify=skip_verify,
             )
 

@@ -622,9 +622,6 @@ class TestOnPremInstall:
                 return_value=Path("/tmp/fake-helm-bundle"),
             ),
             patch("agilerl.arena.cli_on_prem_install._validate_wireguard_bundle"),
-            patch(
-                "agilerl.arena.cli_on_prem_install._wait_for_gateway_peer_registration",
-            ),
             patch("agilerl.arena.cli_on_prem_install._run_helm_install") as helm_mock,
         ):
             run_on_prem_install(
