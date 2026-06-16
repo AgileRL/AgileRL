@@ -1,4 +1,9 @@
-"""Dynamic Click commands driven by ``GET /api/cli/v1/capabilities`` manifest."""
+"""Generic machinery for building Click commands from a server manifest node.
+
+Turns a manifest command/group tree (from ``GET /api/cli/v1/capabilities``) into
+runnable :class:`click.Command` objects. The on-prem capability gating that drives
+*which* manifest gets loaded lives in :mod:`agilerl.arena.on_prem.group`.
+"""
 
 from __future__ import annotations
 
@@ -7,26 +12,27 @@ import logging
 import os
 import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import click
 
 from agilerl.arena.client import ManifestInvoke, ManifestParamSpec
-from agilerl.arena.config import (
-    CommandConfig,
-    _resolve_root_command_config,
-    build_client,
-)
+from agilerl.arena.config import CommandConfig, arena_client
 from agilerl.arena.exceptions import ArenaValidationError
 from agilerl.arena.output import emit_result
 
 logger = logging.getLogger(__name__)
 
-CAPABILITIES_SCHEMA_VERSION = 1
-MANIFEST_SCHEMA_VERSION = 2
-_ON_PREM_HIDDEN_META_KEY = "agilerl.arena.on_prem_hidden"
-_ON_PREM_ENSURED_META_KEY = "agilerl.arena.on_prem_ensured"
+_ALLOWED_OPTION_TYPES = {"string", "int", "bool", "json"}
+# Manifest option type -> the Click parameter type to parse it with.
+_CLICK_OPTION_TYPES: dict[str, Any] = {
+    "json": str,
+    "int": int,
+    "bool": click.BOOL,
+    "string": str,
+}
 
 
 def handle_help_option(
@@ -34,80 +40,31 @@ def handle_help_option(
     param: click.Parameter,
     value: bool,
 ) -> None:
-    """For use with ``is_eager=False`` so connection flags parse before ``--help``."""
+    """For use with ``is_eager=False`` so connection flags parse before ``--help``.
+
+    :param ctx: The current Click context.
+    :type ctx: click.Context
+    :param param: The Click parameter this callback is attached to.
+    :type param: click.Parameter
+    :param value: Whether ``--help`` was passed.
+    :type value: bool
+    :returns: None
+    :rtype: None
+    """
     if not value or ctx.resilient_parsing:
         return
     click.echo(ctx.get_help(), color=ctx.color)
     ctx.exit()
 
 
-def _capabilities_fingerprint(caps: dict[str, Any] | None) -> str:
-    """Stable string for comparing capability payloads (detect upgrades / entitlement changes)."""
-    if caps is None:
-        return "__missing__"
-    return json.dumps(caps, sort_keys=True, separators=(",", ":"), default=str)
-
-
-def caps_allow_on_prem_at_root(caps: dict[str, Any]) -> bool:
-    """Whether capabilities warrant exposing ``arena on-prem`` at the CLI root.
-
-    Uses strict ``is True`` checks so stray truthy JSON values do not unlock the group.
-    """
-    if caps.get("enterprise") is True:
-        return True
-    features = caps.get("features")
-    if isinstance(features, dict) and features.get("onPremCli") is True:
-        return True
-    return False
-
-
-def capabilities_show_on_prem_root(config: CommandConfig) -> bool | None:
-    """Return whether ``arena on-prem`` should appear after fetching capabilities.
-
-    ``None`` means the capabilities document could not be loaded (no auth, **404**, bad JSON).
-    """
-    client = build_client(config)
-    try:
-        caps = client._get_cli_capabilities(force_refresh=True)
-    finally:
-        client.close()
-    if caps is None:
-        return None
-    return caps_allow_on_prem_at_root(caps)
-
-
-class ArenaRootGroup(click.Group):
-    """Arena CLI root: omit ``on-prem`` unless capabilities grant on-prem CLI access."""
-
-    _ON_PREM = "on-prem"
-
-    def list_commands(self, ctx: click.Context) -> list[str]:
-        cmds = super().list_commands(ctx)
-        if self._hide_on_prem(ctx):
-            cmds = [c for c in cmds if c != self._ON_PREM]
-        return sorted(cmds)
-
-    def get_command(
-        self,
-        ctx: click.Context,
-        cmd_name: str,
-    ) -> click.Command | click.Group | None:
-        if cmd_name == self._ON_PREM and self._hide_on_prem(ctx):
-            return None
-        return super().get_command(ctx, cmd_name)
-
-    @staticmethod
-    def _hide_on_prem(ctx: click.Context) -> bool:
-        cached = ctx.meta.get(_ON_PREM_HIDDEN_META_KEY)
-        if cached is None:
-            cfg = _resolve_root_command_config(ctx)
-            cached = capabilities_show_on_prem_root(cfg) is not True
-            ctx.meta[_ON_PREM_HIDDEN_META_KEY] = cached
-        return cached
-
-
 def pythonize_manifest_param_name(name: str) -> str:
-    """Map manifest ``name`` (camelCase or snake_case) to a valid Python identifier."""
+    """Map manifest ``name`` (camelCase or snake_case) to a valid Python identifier.
+
+    :param name: The manifest parameter name.
+    :type name: str
+    :returns: The snake_case Python identifier.
+    :rtype: str
+    """
     if name == "id":
         return "id"
     if "_" in name and not any(c.isupper() for c in name):
@@ -118,7 +75,18 @@ def pythonize_manifest_param_name(name: str) -> str:
 
 
 def write_binary_atomic(dest: Path, data: bytes, *, force: bool = False) -> None:
-    """Write *data* to *dest* via a temp file and ``os.replace``."""
+    """Write *data* to *dest* via a temp file and ``os.replace``.
+
+    :param dest: The destination file path (``~`` is expanded, path resolved).
+    :type dest: Path
+    :param data: The bytes to write.
+    :type data: bytes
+    :param force: If ``True``, overwrite an existing file.
+    :type force: bool
+    :returns: None
+    :rtype: None
+    :raises click.ClickException: If *dest* exists and *force* is ``False``.
+    """
     dest = dest.expanduser().resolve()
     if dest.exists() and not force:
         msg = f"Refusing to overwrite existing file {dest} (use --force)."
@@ -136,67 +104,128 @@ def write_binary_atomic(dest: Path, data: bytes, *, force: bool = False) -> None
                 pass
 
 
+def _option_help(spec: ManifestParamSpec) -> str:
+    """Return the help text for a param spec (empty string if unset).
+
+    :param spec: The manifest parameter spec.
+    :type spec: ManifestParamSpec
+    :returns: The help text, or ``""``.
+    :rtype: str
+    """
+    return spec.get("help") or ""
+
+
+def _client_flag_option(spec: ManifestParamSpec) -> Callable[[Any], Any]:
+    """Client-side boolean → a plain ``is_flag`` switch.
+
+    :param spec: The manifest parameter spec.
+    :type spec: ManifestParamSpec
+    :returns: A ``click.option`` decorator.
+    :rtype: Callable[[Any], Any]
+    """
+    return click.option(
+        *tuple(spec["click"]["option"]),
+        pythonize_manifest_param_name(spec["name"]),
+        is_flag=True,
+        default=False,
+        show_default=True,
+        help=_option_help(spec),
+    )
+
+
+def _body_bool_pair_option(spec: ManifestParamSpec) -> Callable[[Any], Any]:
+    """Optional body boolean → a ``--x/--no-x`` toggle defaulting to unset.
+
+    :param spec: The manifest parameter spec.
+    :type spec: ManifestParamSpec
+    :returns: A ``click.option`` decorator.
+    :rtype: Callable[[Any], Any]
+    """
+    flag = next(iter(spec["click"]["option"]))
+    pair = f"{flag}/--no-{flag.lstrip('-')}"
+    return click.option(
+        pair,
+        pythonize_manifest_param_name(spec["name"]),
+        default=None,
+        help=_option_help(spec),
+    )
+
+
+def _typed_option(spec: ManifestParamSpec) -> Callable[[Any], Any]:
+    """Any other param → a typed option (string/int/bool/json).
+
+    :param spec: The manifest parameter spec.
+    :type spec: ManifestParamSpec
+    :returns: A ``click.option`` decorator.
+    :rtype: Callable[[Any], Any]
+    """
+    return click.option(
+        *tuple(spec["click"]["option"]),
+        pythonize_manifest_param_name(spec["name"]),
+        type=_CLICK_OPTION_TYPES[spec["type"]],
+        required=bool(spec["required"]),
+        default=None,
+        show_default=False,
+        metavar=spec["click"].get("metavar"),
+        help=_option_help(spec),
+    )
+
+
+@dataclass(frozen=True)
+class _OptionRule:
+    """A predicate over a param spec and the Click-option builder it selects."""
+
+    match: Callable[[ManifestParamSpec], bool]
+    build: Callable[[ManifestParamSpec], Callable[[Any], Any]]
+
+
+_OPTION_RULES: tuple[_OptionRule, ...] = (
+    _OptionRule(
+        lambda spec: spec["in"] == "client" and spec["type"] == "bool",
+        _client_flag_option,
+    ),
+    _OptionRule(
+        lambda spec: (
+            spec["type"] == "bool" and spec["in"] == "body" and not spec["required"]
+        ),
+        _body_bool_pair_option,
+    ),
+)
+
+
 def _manifest_spec_to_click_option(spec: ManifestParamSpec) -> Callable[[Any], Any]:
     """Build the ``click.option`` decorator for a single manifest param spec.
 
-    Maps the manifest ``type``/``in`` to a Click option (flags for client-side
-    bools, ``--x/--no-x`` pairs for optional body bools, typed options otherwise).
-    """
-    py_name = pythonize_manifest_param_name(spec["name"])
-    opts = tuple(spec["click"]["option"])
-    help_txt = spec.get("help") or ""
-    required = bool(spec["required"])
-    in_ = spec["in"]
-    typ = spec["type"]
+    Validates the declared type, then dispatches to the first matching rule in
+    :data:`_OPTION_RULES`, falling back to a plain typed option.
 
-    if typ not in {"string", "int", "bool", "json"}:
-        msg = f"Unsupported on-prem option type {typ!r}"
+    :param spec: The manifest parameter spec.
+    :type spec: ManifestParamSpec
+    :returns: A ``click.option`` decorator for the parameter.
+    :rtype: Callable[[Any], Any]
+    :raises ArenaValidationError: If the declared option type is unsupported.
+    """
+    if spec["type"] not in _ALLOWED_OPTION_TYPES:
+        msg = f"Unsupported on-prem option type {spec['type']!r}"
         raise ArenaValidationError(
             msg,
             cli_hint="Upgrade agilerl — the server sent an on-prem "
             "configuration this version can't use.",
         )
-
-    if in_ == "client" and typ == "bool":
-        return click.option(
-            *opts,
-            py_name,
-            is_flag=True,
-            default=False,
-            show_default=True,
-            help=help_txt,
-        )
-
-    if typ == "json":
-        opt_type = str
-    elif typ == "int":
-        opt_type = int
-    elif typ == "bool":
-        opt_type = click.BOOL
-    else:
-        opt_type = str
-
-    if typ == "bool" and in_ == "body" and not required:
-        flag = opts[0]
-        suffix = flag.lstrip("-")
-        pair = f"{flag}/--no-{suffix}"
-        return click.option(pair, py_name, default=None, help=help_txt)
-
-    return click.option(
-        *opts,
-        py_name,
-        type=opt_type,
-        required=required,
-        default=None,
-        show_default=False,
-        metavar=spec["click"].get("metavar"),
-        help=help_txt,
-    )
+    for rule in _OPTION_RULES:
+        if rule.match(spec):
+            return rule.build(spec)
+    return _typed_option(spec)
 
 
 def _parse_json_cli_value(raw: str) -> Any:
-    import json
+    """Parse a JSON CLI value, or load JSON from a file when prefixed with ``@``.
 
+    :param raw: The raw option string; a leading ``@`` reads JSON from that path.
+    :type raw: str
+    :returns: The decoded JSON value.
+    :rtype: Any
+    """
     path_raw = raw.strip()
     if path_raw.startswith("@"):
         p = Path(path_raw[1:]).expanduser().resolve()
@@ -216,6 +245,15 @@ def build_manifest_click_command(
     server via :meth:`ArenaClient._invoke_manifest_command` (writing binary
     responses to ``--output-path`` or echoing JSON), and attaches a
     non-eager ``--help`` so connection flags parse first.
+
+    :param name: The command name.
+    :type name: str
+    :param help_txt: The command help text, or ``None``.
+    :type help_txt: str | None
+    :param invoke: The call descriptor (method, path, responseKind, params).
+    :type invoke: ManifestInvoke
+    :returns: The runnable Click command.
+    :rtype: click.Command
     """
     param_specs = list(invoke.get("params") or [])
 
@@ -232,8 +270,6 @@ def build_manifest_click_command(
             if spec["type"] == "json" and isinstance(val, str):
                 val = _parse_json_cli_value(val)
             parsed[spec["name"]] = val
-
-        from agilerl.arena.cli import arena_client
 
         with arena_client(config) as client:
             result = client._invoke_manifest_command(invoke, parsed)
@@ -286,6 +322,13 @@ def attach_manifest_tree(group: click.Group, node: dict[str, Any]) -> None:
 
     Nested groups recurse; command nodes become commands via
     :func:`build_manifest_click_command`; unknown node types are skipped.
+
+    :param group: The Click group to attach children onto.
+    :type group: click.Group
+    :param node: The manifest node whose ``children`` are attached.
+    :type node: dict[str, Any]
+    :returns: None
+    :rtype: None
     """
     for child in node.get("children") or []:
         typ = child.get("type")
@@ -306,119 +349,3 @@ def attach_manifest_tree(group: click.Group, node: dict[str, Any]) -> None:
             group.add_command(cmd, name=child["name"])
         else:
             logger.warning("Skipping unknown manifest node type %r", typ)
-
-
-class OnPremDynamicGroup(click.Group):
-    """Loads on-prem subcommands from capabilities after auth (lazy).
-
-    Refetches capabilities when you use this group so entitlement changes (e.g. enterprise
-    promotion) are reflected without restarting the CLI process.
-    """
-
-    def __init__(self) -> None:
-        super().__init__(
-            name="on-prem",
-            help=(
-                "Enterprise on-prem worker clusters (from Arena capabilities). "
-                "Quick start: install / teardown. See arena on-prem install --help."
-            ),
-        )
-        self._caps_fingerprint: str | None = None
-
-    def _register_notice(self, message: str) -> None:
-        @click.command("help")
-        @click.pass_context
-        def help_cmd(ctx: click.Context) -> None:
-            click.echo(message)
-            ctx.exit(0)
-
-        self.add_command(help_cmd, name="help")
-
-    def _ensure(self, ctx: click.Context) -> None:
-        if ctx.meta.get(_ON_PREM_ENSURED_META_KEY):
-            return
-        ctx.meta[_ON_PREM_ENSURED_META_KEY] = True
-
-        config = ctx.find_root().obj
-        if not isinstance(config, CommandConfig):
-            msg = "Arena CLI internal error: missing CommandConfig on root context."
-            raise click.ClickException(msg)
-
-        client = build_client(config)
-        try:
-            caps = client._get_cli_capabilities(force_refresh=True)
-        finally:
-            client.close()
-
-        fp = _capabilities_fingerprint(caps)
-        if fp == self._caps_fingerprint:
-            return
-
-        self.commands.clear()
-        self._caps_fingerprint = fp
-
-        if caps is None:
-            self._register_notice(
-                "On-prem commands are not available from this Arena server. "
-                "Contact your administrator or upgrade Arena.",
-            )
-            return
-
-        if caps.get("schemaVersion") != CAPABILITIES_SCHEMA_VERSION:
-            self._register_notice(
-                "This agilerl version does not support on-prem CLI from your "
-                "Arena server. Upgrade agilerl.",
-            )
-            return
-
-        if not caps_allow_on_prem_at_root(caps):
-            self._register_notice(
-                "On-prem CLI is not enabled for your account. "
-                "Run ``arena user profile`` to check your account, or contact "
-                "your administrator.",
-            )
-            return
-
-        cli = caps.get("cli")
-        if not isinstance(cli, dict):
-            self._register_notice(
-                "On-prem CLI is temporarily unavailable. "
-                "Try again later or contact your administrator.",
-            )
-            return
-
-        if cli.get("manifestSchemaVersion") != MANIFEST_SCHEMA_VERSION:
-            self._register_notice(
-                "This agilerl version is too old for on-prem CLI. Upgrade agilerl.",
-            )
-            return
-
-        root = cli.get("root")
-        if not isinstance(root, dict):
-            self._register_notice(
-                "On-prem CLI configuration from Arena is invalid. "
-                "Contact your administrator.",
-            )
-            return
-
-        attach_manifest_tree(self, root)
-        from agilerl.arena.cli_on_prem_install import register_on_prem_install
-
-        register_on_prem_install(self)
-
-    def list_commands(self, ctx: click.Context) -> list[str]:
-        self._ensure(ctx)
-        return sorted(self.commands.keys())
-
-    def get_command(
-        self,
-        ctx: click.Context,
-        cmd_name: str,
-    ) -> click.Command | click.Group | None:
-        self._ensure(ctx)
-        return super().get_command(ctx, cmd_name)
-
-
-def register_on_prem_manifest_group(app: click.Group) -> None:
-    """Attach the lazy ``on-prem`` command group to the Arena CLI root."""
-    app.add_command(OnPremDynamicGroup(), name="on-prem")

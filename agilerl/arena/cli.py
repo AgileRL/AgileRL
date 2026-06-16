@@ -1,43 +1,22 @@
 from __future__ import annotations
 
-from collections.abc import Generator
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import click
 
-from agilerl.arena.cli_manifest import (
-    ArenaRootGroup,
-    handle_help_option,
-    register_on_prem_manifest_group,
-)
-from agilerl.arena.client import ArenaClient
-from agilerl.arena.config import CommandConfig, build_client
+from agilerl.arena.cli_manifest import handle_help_option
+from agilerl.arena.config import CommandConfig, arena_client
 from agilerl.arena.exceptions import ArenaError
 from agilerl.arena.inference.cache import load_active_agent, save_active_agent
+from agilerl.arena.on_prem import ArenaRootGroup, register_on_prem_manifest_group
 from agilerl.arena.output import (
     emit_csv_preview,
     emit_result,
-    handle_error,
 )
 from agilerl.utils.arena_utils import sort_dataset_search_by_downloads
 
 ArenaError.enable_cli_mode()
-
-
-@contextmanager
-def arena_client(
-    config: CommandConfig,
-) -> Generator[ArenaClient, None, None]:
-    """Build an :class:`ArenaClient`, handle errors, and guarantee cleanup."""
-    client = build_client(config)
-    try:
-        yield client
-    except Exception as exc:
-        handle_error(exc)
-    finally:
-        client.close()
 
 
 @click.group(

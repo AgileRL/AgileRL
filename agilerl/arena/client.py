@@ -71,8 +71,8 @@ here; the CLI validates required keys at runtime.
 class ManifestInvoke(TypedDict, total=False):
     """The fixed call descriptor for an on-prem command (method, path, params).
 
-    Used both for the hardcoded invokes in ``cli_on_prem_install`` and for
-    command nodes parsed from the server capabilities manifest.
+    Used both for the hardcoded invokes in ``agilerl.arena.on_prem.endpoints``
+    and for command nodes parsed from the server capabilities manifest.
     """
 
     method: str
@@ -101,8 +101,7 @@ class _TokenStore:
 class ArenaClient:
     """Client for the Arena RLOps platform.
 
-    Handles authentication, environment management, and training job
-    submission.
+    Handles authentication, environment management, and training job submission.
 
     Authentication is resolved in priority order:
 
@@ -117,8 +116,15 @@ class ArenaClient:
     if you obtain one elsewhere.
 
     :param api_key: Bearer token material (profile PAT or OAuth access token). When set, device login is not required.
+    :type api_key: str | None
     :param request_timeout: Default timeout in seconds for API requests.
+    :type request_timeout: int
     :param upload_timeout: Timeout in seconds for file-upload requests.
+    :type upload_timeout: int
+    :param verbose: Whether to enable verbose logging.
+    :type verbose: bool
+    :returns: None
+    :rtype: None
     """
 
     # TODO: Remove this once we have a production URL
@@ -1890,6 +1896,8 @@ class ArenaClient:
         if handler is None and self._verbose:
             renderer = StreamRichRenderer(error_cls=error_cls)
             handler = renderer.handle_event
+
+        # Send the request and return an NDJsonStream
         resp = self._send(method, path, stream=True, timeout=timeout, **kwargs)
         return NDJsonStream(
             resp, handler=handler, renderer=renderer, error_cls=error_cls
