@@ -5575,8 +5575,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             return
         unwrapped_model = self._get_unwrapped_actor()
         move_params_to_gpu(unwrapped_model, self.device)
-        yield
-        move_params_to_cpu(unwrapped_model)
+        try:
+            yield
+        finally:
+            # Always move the base back on CPU on error
+            move_params_to_cpu(unwrapped_model)
 
     def _prepare_vllm_for_training(self) -> None:
         """Prepare vLLM for learning."""
