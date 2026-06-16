@@ -102,12 +102,29 @@ class SFT(LLMAlgorithm):
         tunes peak memory by token budget. ``None`` (default) auto-tunes to a
         ~256 MB fp32 tile. Ignored on the Liger path (it auto-sizes internally).
     :type fused_logprobs_chunk_rows: int | None, optional
+    :param reduce_memory_peak: Deprecated and ignored; previously hinted
+        peak-memory batching. Configure ``micro_batch_size_per_gpu`` instead.
+    :type reduce_memory_peak: bool, optional
     :param use_separate_reference_adapter: Also create a ``reference`` LoRA adapter
         alongside ``actor``. SFT does not itself use a reference policy, so this
         defaults to ``False``; enable it when you plan to save an SFT checkpoint
         that will be consumed by a downstream algorithm (e.g. DPO/GRPO) which
         expects a reference adapter. Defaults to False.
     :type use_separate_reference_adapter: bool, optional
+    :param quantization_config: Optional ``transformers.BitsAndBytesConfig`` for
+        loading the base model in 4-/8-bit (QLoRA). ``lm_head`` is kept
+        unquantized so the fused-linear-logprob path stays numerically exact.
+    :type quantization_config: BitsAndBytesConfig | None, optional
+    :param activation_offload: When ``True``, run the training forward inside
+        ``torch.autograd.graph.save_on_cpu`` so tensors saved for backward live
+        in pinned host RAM instead of GPU memory. Trades PCIe bandwidth for GPU
+        memory (the win grows with sequence length); a no-op during rollout /
+        reference forwards.
+    :type activation_offload: bool, optional
+    :param lora_target_scope: Optional PEFT LoRA path scope for multimodal models
+        (e.g. ``"language_model"``). Passed to
+        :func:`adapt_lora_config_for_model`.
+    :type lora_target_scope: str | None, optional
     """
 
     def __init__(

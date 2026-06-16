@@ -202,6 +202,10 @@ class GRPO(LLMAlgorithm):
         There is no token-level advantage (group-relative needs a per-unit
         reward). Any advantage x IS combination is valid.
     :type advantage_granularity: Literal["auto", "trajectory", "turn"], optional
+    :param action_granularity: Deprecated alias for ``advantage_granularity``;
+        when set it overrides ``advantage_granularity`` and emits a
+        ``DeprecationWarning``.
+    :type action_granularity: str | None, optional
     :param use_separate_reference_adapter: Keep a dedicated ``reference`` LoRA
         adapter whose weights are frozen snapshots of the actor used for the
         KL-divergence baseline. When ``False`` the reference log-probs are
@@ -221,6 +225,56 @@ class GRPO(LLMAlgorithm):
         ``filter_zero_adv``; samples with ``|advantage| <= eps`` are
         filtered out, defaults to 0.0.
     :type adv_filter_eps: float, optional
+    :param reduce_memory_peak: Deprecated and ignored; previously hinted
+        peak-memory batching. Configure ``micro_batch_size_per_gpu`` instead.
+    :type reduce_memory_peak: bool, optional
+    :param cast_logprobs_to_fp32: When ``True`` (default), run the per-token
+        log-prob reduction (``gather`` / ``logsumexp``) in fp32 before casting
+        back to the input dtype, for numerically stable log-probs. ``False`` runs
+        it in the input dtype, saving a little memory at the cost of a per-token
+        bf16 quantisation error that can bias importance-sampling ratios.
+    :type cast_logprobs_to_fp32: bool, optional
+    :param fused_logprobs_chunk_rows: Standard (non-Liger) path only. Rows
+        (tokens) per ``(chunk_rows, vocab)`` logit tile when computing per-token
+        log-probs via the fused-linear-logprob path. Peak logits memory is
+        ``O(chunk_rows * vocab)`` regardless of batch/sequence length. ``None``
+        (default) auto-tunes to a ~256 MB fp32 tile.
+    :type fused_logprobs_chunk_rows: int | None, optional
+    :param quantization_config: Optional ``transformers.BitsAndBytesConfig`` for
+        loading the base model in 4-/8-bit (QLoRA). ``lm_head`` is kept
+        unquantized so the fused-linear-logprob path stays numerically exact.
+    :type quantization_config: BitsAndBytesConfig | None, optional
+    :param activation_offload: When ``True``, run the training forward inside
+        ``torch.autograd.graph.save_on_cpu`` so tensors saved for backward live
+        in pinned host RAM instead of GPU memory. Trades PCIe bandwidth for GPU
+        memory (the win grows with sequence length); a no-op during rollout /
+        reference forwards.
+    :type activation_offload: bool, optional
+    :param lora_target_scope: Optional PEFT LoRA path scope for multimodal models
+        (e.g. ``"language_model"``). Passed to
+        :func:`adapt_lora_config_for_model`.
+    :type lora_target_scope: str | None, optional
+    :param fused_loss_chunk_rows: Rows per ``(chunk_rows, vocab)`` logit tile in
+        the token-level Liger fused policy loss. ``None`` (default) auto-tunes to
+        a ~256 MB fp32 logit workspace — the same heuristic as
+        ``fused_logprobs_chunk_rows`` on the standard path; pass an int to
+        override.
+    :type fused_loss_chunk_rows: int | None, optional
+    :param vllm_importance_sampling_correction: When ``True`` (default) and
+        ``use_vllm=True``, correct the rollout/trainer log-prob mismatch by
+        weighting each training token by ``clamp(exp(trainer - sampling),
+        max=vllm_importance_sampling_cap)``. Active only for training rollouts;
+        inert on the HuggingFace path and at eval.
+    :type vllm_importance_sampling_correction: bool, optional
+    :param vllm_importance_sampling_cap: Upper clamp on the vLLM
+        importance-sampling ratio (default ``2.0``), bounding the correction
+        weight to limit variance from outlier tokens. Must be > 0.
+    :type vllm_importance_sampling_cap: float, optional
+    :param use_sequence_packing: Opt in to padding-free sequence packing for the
+        gradient forward (sequences pack into one varlen / blockmask pass). Only
+        honoured under a FlashAttention-2 / FlexAttention backend, otherwise
+        inert; the no-grad reference/old-logprob pass stays padded.
+    :type use_sequence_packing: bool, optional
     """
 
     def __init__(
