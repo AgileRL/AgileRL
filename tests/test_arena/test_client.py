@@ -131,6 +131,12 @@ class TestArenaClientInit:
         assert client._request_timeout == 60
         assert client._upload_timeout == 300  # default
 
+    @patch("agilerl.arena.auth.KeycloakOpenID")
+    def test_base_url_env_override(self, _kc):
+        with patch.dict(os.environ, {"ARENA_BASE_URL": "https://arena.example.com/"}):
+            client = ArenaClient(api_key="k")
+        assert client._base_url == "https://arena.example.com"
+
 
 class TestArenaClientConfigure:
     def setup_method(self):
@@ -428,6 +434,28 @@ class TestRequest:
         assert token_client._tokens.access_token == "new_at"
         assert token_client._http.request.call_count == 2
 
+    def test_default_timeout_defers_to_client_default(self, api_key_client):
+        """timeout=None must not disable timeouts (httpx semantics)."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.is_success = True
+        mock_resp.headers = {"content-type": "application/json"}
+        mock_resp.json.return_value = {}
+
+        api_key_client._http.request = MagicMock(return_value=mock_resp)
+        api_key_client._request("GET", "/api/test")
+        timeout = api_key_client._http.request.call_args.kwargs["timeout"]
+        assert timeout is httpx.USE_CLIENT_DEFAULT
+
+    def test_explicit_timeout_is_forwarded(self, api_key_client):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.is_success = True
+
+        api_key_client._http.request = MagicMock(return_value=mock_resp)
+        api_key_client._send("GET", "/api/test", timeout=77)
+        assert api_key_client._http.request.call_args.kwargs["timeout"] == 77
+
     def test_401_after_retry_raises_auth_error(self, token_client):
         mock_resp = MagicMock()
         mock_resp.status_code = 401
@@ -639,7 +667,9 @@ class TestValidateEnvironment:
         assert call_args[0] == ("POST", "/api/cli/v1/environments/create-and-validate")
         file_tuple = call_args[1]["files"]["file"]
         assert file_tuple[0] == "my_env.tar.gz"
-        assert isinstance(file_tuple[1], bytes)
+        # Path sources are streamed from disk (open handle, closed after send)
+        assert not isinstance(file_tuple[1], bytes)
+        assert file_tuple[1].closed
         mock_stream.collect.assert_called_once()
         assert result == {"status": "ok"}
 
@@ -1350,10 +1380,10 @@ class TestPreviewExperimentMetricsCsv:
         call_kwargs = api_key_client._request_raw.call_args[1]
         params = call_kwargs["params"]
         assert ("project", "proj1") in params
-        # Note: params.extend(("metric", m)) adds "metric" and m as separate items
-        assert "metric" in params
-        assert "loss" in params
-        assert "reward" in params
+        # Each metric must be a ("metric", name) query pair, not flattened strings
+        assert ("metric", "loss") in params
+        assert ("metric", "reward") in params
+        assert all(isinstance(p, tuple) and len(p) == 2 for p in params)
 
 
 class TestListExperimentMetricNames:

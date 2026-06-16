@@ -244,13 +244,14 @@ class Trainer(ABC):
         raise NotImplementedError(msg)
 
     @abstractmethod
-    def train(self, *args: Any, **kwargs: Any) -> tuple[PopulationT, list[list[float]]]:
+    def train(self, *args: Any, **kwargs: Any) -> tuple[PopulationT, list[float]]:
         """Run the training loop.
 
-        :returns: A tuple of ``(population, fitness_history)`` where
+        :returns: A tuple of ``(population, fitnesses)`` where
             *population* is the final evolved population and
-            *fitness_history* is a list of per-generation fitness scores.
-        :rtype: tuple[PopulationT, list[list[float]]]
+            *fitnesses* contains each agent's fitness from the final
+            evaluation round.
+        :rtype: tuple[PopulationT, list[float]]
         """
         msg = "Trainer subclass must implement train method."
         raise NotImplementedError(msg)
@@ -487,7 +488,7 @@ class LocalTrainer(Trainer):
         overwrite_checkpoints: bool = False,
         wandb_api_key: str | None = None,
         wandb_kwargs: dict[str, Any] | None = None,
-    ) -> tuple[PopulationT, list[list[float]]]:
+    ) -> tuple[PopulationT, list[float]]:
         """Run a local training job given the passed configuration.
 
         :param verbose: If ``True``, print verbose output. Defaults to ``True``.
@@ -514,10 +515,11 @@ class LocalTrainer(Trainer):
         :param wandb_kwargs: The Weights & Biases keyword arguments. Defaults to ``None``.
         :type wandb_kwargs: dict[str, Any] | None
 
-        :returns: A tuple of ``(population, fitness_history)`` where
+        :returns: A tuple of ``(population, fitnesses)`` where
             *population* is the final evolved population and
-            *fitness_history* is a list of per-generation fitness scores.
-        :rtype: tuple[PopulationT, list[list[float]]]
+            *fitnesses* contains each agent's fitness from the final
+            evaluation round.
+        :rtype: tuple[PopulationT, list[float]]
         """
         manifest = self.to_manifest()
         evo_steps = (

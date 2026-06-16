@@ -134,7 +134,7 @@ if __name__ == "__main__":
     # TRAINING LOOP
     print("Training...")
     pbar = default_progress_bar(max_steps, accelerator=accelerator)
-    while np.less([agent.steps[-1] for agent in pop], max_steps).all():
+    while np.less([agent.steps for agent in pop], max_steps).all():
         if accelerator is not None:
             accelerator.wait_for_everyone()
         for agent in pop:  # Loop through population
@@ -144,7 +144,7 @@ if __name__ == "__main__":
                 # Learn according to agent's RL algorithm
                 agent.learn(experiences)
             total_steps += evo_steps
-            agent.steps[-1] += evo_steps
+            agent.steps += evo_steps
             pbar.update(evo_steps)
 
         # Evaluate population
@@ -160,7 +160,7 @@ if __name__ == "__main__":
         if accelerator.is_main_process:
             pbar.write(
                 f"--- Global steps {total_steps} ---\n"
-                f"Steps: {[agent.steps[-1] for agent in pop]}\n"
+                f"Steps: {[agent.steps for agent in pop]}\n"
                 f"Fitnesses: {[f'{fitness:.2f}' for fitness in fitnesses]}\n"
                 f"5 fitness avgs: {[f'{np.mean(agent.fitness[-5:]):.2f}' for agent in pop]}\n",
             )

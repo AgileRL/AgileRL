@@ -46,7 +46,7 @@ class CustomGymEnv:
             env.wrapper_trace.append(tag)
             return env
 
-        make_env = GymEnvSpec.constuct_custom_env_fn(
+        make_env = GymEnvSpec.construct_custom_env_fn(
             entrypoint="custom_gym_env:CustomGymEnv",
             path=str(tmp_path),
             config={"value": 12},
@@ -70,7 +70,7 @@ class CwdEnv:
         )
         monkeypatch.chdir(tmp_path)
 
-        make_env = GymEnvSpec.constuct_custom_env_fn(
+        make_env = GymEnvSpec.construct_custom_env_fn(
             entrypoint="cwd_env:CwdEnv",
             path=None,
             config={"value": 99},
@@ -79,12 +79,12 @@ class CwdEnv:
         assert env.value == 99
 
     def test_custom_env_with_invalid_entrypoint(self):
-        make_env = GymEnvSpec.constuct_custom_env_fn(entrypoint="invalid-entrypoint")
+        make_env = GymEnvSpec.construct_custom_env_fn(entrypoint="invalid-entrypoint")
         with pytest.raises(ValueError, match="Invalid entrypoint format"):
             make_env()
 
     def test_custom_env_with_missing_module(self):
-        make_env = GymEnvSpec.constuct_custom_env_fn(entrypoint="does_not_exist:Env")
+        make_env = GymEnvSpec.construct_custom_env_fn(entrypoint="does_not_exist:Env")
         with pytest.raises(ModuleNotFoundError, match="Could not resolve module"):
             make_env()
 
@@ -97,7 +97,7 @@ class OtherEnv:
     pass
 """,
         )
-        make_env = GymEnvSpec.constuct_custom_env_fn(
+        make_env = GymEnvSpec.construct_custom_env_fn(
             entrypoint="missing_target:WantedEnv",
             path=str(tmp_path),
         )

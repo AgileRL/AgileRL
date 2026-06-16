@@ -12,7 +12,12 @@ from typing import TYPE_CHECKING, Any
 
 from typing_extensions import Self
 
-from agilerl.arena.exceptions import _sanitize_detail
+from agilerl.arena.exceptions import (
+    ArenaAPIError,
+    ArenaError,
+    _sanitize_detail,
+    resolve_api_error_class,
+)
 
 if TYPE_CHECKING:
     import httpx
@@ -204,12 +209,15 @@ class NDJsonStream:
         *,
         handler: Callable[[StreamEvent], None] | None = None,
         renderer: Any | None = None,
+        error_cls: type[ArenaAPIError] | None = None,
     ) -> None:
         self._response: httpx.Response = response
         self._handler: Callable[[StreamEvent], None] | None = handler
         self._renderer = renderer
+        self._error_cls: type[ArenaAPIError] = error_cls or ArenaAPIError
 
         self._result: dict[str, Any] | None = None
+        self._error: ErrorEvent | None = None
         self._raw_chunks: list[str] = []
         self._consumed: bool = False
 
@@ -225,7 +233,10 @@ class NDJsonStream:
             for chunk in self._response.iter_text():
                 if not chunk:
                     continue
-                self._raw_chunks.append(chunk)
+                # Raw chunks are only needed as a fallback when the stream
+                # never yields a completed event; stop buffering once it has.
+                if self._result is None:
+                    self._raw_chunks.append(chunk)
                 buffer += chunk
                 while "\n" in buffer:
                     line, buffer = buffer.split("\n", 1)
@@ -253,12 +264,28 @@ class NDJsonStream:
 
         :returns: The final result dict.
         :rtype: dict[str, Any]
+        :raises ArenaAPIError: If the server reported a failure inside the
+            stream (the endpoint-specific subclass when one is registered).
         """
         # Consume all events
         for _ in self:
             pass
 
         self._close_renderer()
+
+        # Surface server-side failures instead of returning an empty result
+        if self._error is not None:
+            sdk_hint, cli_hint = ArenaError._generate_hints(
+                {"error": self._error.message, **self._error.extras},
+                self._error.extras,
+            )
+            error_cls = resolve_api_error_class(self._error_cls, self._error.message)
+            raise error_cls(
+                detail=self._error.message,
+                extras=self._error.extras,
+                sdk_hint=sdk_hint,
+                cli_hint=cli_hint,
+            )
 
         # If there is a result, return it
         if self._result is not None:
@@ -283,6 +310,15 @@ class NDJsonStream:
         :rtype: dict[str, Any] | None
         """
         return self._result
+
+    @property
+    def error(self) -> ErrorEvent | None:
+        """First server-side error event seen in the stream, if any.
+
+        :returns: The first :class:`ErrorEvent`, or ``None``.
+        :rtype: ErrorEvent | None
+        """
+        return self._error
 
     def close(self) -> None:
         """Close the renderer (if any) and the underlying HTTP response."""
@@ -324,3 +360,6 @@ class NDJsonStream:
             and event.detail
         ):
             self._result = event.detail
+            self._raw_chunks.clear()
+        elif isinstance(event, ErrorEvent) and self._error is None:
+            self._error = event

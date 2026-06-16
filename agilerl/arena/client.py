@@ -111,7 +111,7 @@ class ArenaClient:
         verbose: bool = True,
     ) -> None:
 
-        self._base_url = self.BASE_URL.rstrip("/")
+        self._base_url = (os.environ.get("ARENA_BASE_URL") or self.BASE_URL).rstrip("/")
         self._request_timeout = request_timeout
         self._upload_timeout = upload_timeout
 
@@ -664,12 +664,15 @@ class ArenaClient:
         )
         files = multipart_text_fields(data)
         files.update(upload_files)
-        resp: dict[str, Any] = self._request(
-            "POST",
-            "/api/cli/v1/datasets/create",
-            files=files,
-            timeout=self._upload_timeout,
-        )
+        try:
+            resp: dict[str, Any] = self._request(
+                "POST",
+                "/api/cli/v1/datasets/create",
+                files=files,
+                timeout=self._upload_timeout,
+            )
+        finally:
+            self._close_upload_files(upload_files)
         if resp and resp.get("is_ready", False) and resp.get("uploaded", False):
             logger.info("Dataset %s created successfully.", name)
 
@@ -809,12 +812,15 @@ class ArenaClient:
                 reward_file=reward_file,
                 completion=completion,
             )
-            return self._open_stream(
-                "POST",
-                "/api/cli/v1/experiments/jobs/submit",
-                files=files,
-                timeout=self._upload_timeout,
-            ).collect()
+            try:
+                return self._open_stream(
+                    "POST",
+                    "/api/cli/v1/experiments/jobs/submit",
+                    files=files,
+                    timeout=self._upload_timeout,
+                ).collect()
+            finally:
+                self._close_upload_files(files)
 
         payload: dict[str, Any] = {
             "manifest": validated,
@@ -943,8 +949,7 @@ class ArenaClient:
         if resolved_project is not None:
             params.append(("project", resolved_project))
         if metrics:
-            for m in metrics:
-                params.extend(("metric", m))
+            params.extend(("metric", m) for m in metrics)
         return self._request_raw(
             "GET",
             "/api/cli/v1/experiments/metrics",
@@ -1342,8 +1347,8 @@ class ArenaClient:
         do_rollouts: bool,
     ) -> NDJsonStream:
         """Upload, create, and validate an environment."""
-        # Resolve the environment source into bytes for upload
-        archive_name, archive_bytes = prepare_env_upload(source)
+        # Resolve the environment source into a streamable upload payload
+        archive_name, archive_payload = prepare_env_upload(source)
         data: dict[str, str] = {
             "name": name,
             "version": version,
@@ -1357,10 +1362,10 @@ class ArenaClient:
             data["description"] = description
 
         files: dict[str, tuple[str, Any, str]] = {
-            "file": (archive_name, archive_bytes, "application/gzip"),
+            "file": (archive_name, archive_payload, "application/gzip"),
         }
 
-        # Check env_config and resolve to bytes for upload
+        # Check env_config and resolve for upload
         if env_config is not None:
             files["env_config"] = prepare_file_upload(
                 env_config,
@@ -1370,7 +1375,7 @@ class ArenaClient:
         else:
             files["env_config"] = ("env_config.yaml", b"", "application/x-yaml")
 
-        # Check requirements and resolve to bytes for upload
+        # Check requirements and resolve for upload
         if requirements is not None:
             files["requirements"] = prepare_file_upload(
                 requirements,
@@ -1380,13 +1385,18 @@ class ArenaClient:
         else:
             files["requirements"] = ("requirements.txt", b"", "text/plain")
 
-        return self._open_stream(
-            "POST",
-            "/api/cli/v1/environments/create-and-validate",
-            data=data,
-            files=files,
-            timeout=self._upload_timeout,
-        )
+        try:
+            # The request body is fully sent by the time the stream is
+            # returned, so the upload handles can be closed afterwards.
+            return self._open_stream(
+                "POST",
+                "/api/cli/v1/environments/create-and-validate",
+                data=data,
+                files=files,
+                timeout=self._upload_timeout,
+            )
+        finally:
+            self._close_upload_files(files)
 
     def _try_restore_session(self) -> None:
         # Try to restore previously saved authentication credentials.
@@ -1456,16 +1466,20 @@ class ArenaClient:
         headers = dict(request_headers)
         headers.update(self._auth_headers())
 
+        # An explicit ``timeout=None`` would disable timeouts entirely in
+        # httpx; fall back to the client default (``request_timeout``).
+        request_timeout = timeout if timeout is not None else httpx.USE_CLIENT_DEFAULT
+
         # Send the request.
         try:
             if stream:
                 request = self._http.build_request(
-                    method, path, headers=headers, timeout=timeout, **kwargs
+                    method, path, headers=headers, timeout=request_timeout, **kwargs
                 )
                 resp = self._http.send(request, stream=True)
             else:
                 resp = self._http.request(
-                    method, path, headers=headers, timeout=timeout, **kwargs
+                    method, path, headers=headers, timeout=request_timeout, **kwargs
                 )
         except httpx.HTTPError as exc:
             raise ArenaAPIError(
@@ -1489,6 +1503,7 @@ class ArenaClient:
             self._tokens.refresh_token = tokens.get(
                 "refresh_token", self._tokens.refresh_token
             )
+            self._rewind_upload_files(kwargs.get("files"))
             return self._send(
                 method,
                 path,
@@ -1509,6 +1524,7 @@ class ArenaClient:
                     "API key rejected; falling back to stored OAuth credentials."
                 )
                 self._api_key = None
+                self._rewind_upload_files(kwargs.get("files"))
                 return self._send(
                     method,
                     path,
@@ -1542,6 +1558,24 @@ class ArenaClient:
             raise error_cls.from_response_body(raw, status_code=resp.status_code)
 
         return resp
+
+    @staticmethod
+    def _close_upload_files(files: dict[str, tuple] | None) -> None:
+        """Close any open file handles in an httpx multipart ``files`` dict."""
+        for value in (files or {}).values():
+            payload = value[1] if isinstance(value, tuple) and len(value) > 1 else None
+            close = getattr(payload, "close", None)
+            if callable(close):
+                close()
+
+    @staticmethod
+    def _rewind_upload_files(files: dict[str, tuple] | None) -> None:
+        """Rewind seekable upload payloads so a retried request resends them."""
+        for value in (files or {}).values():
+            payload = value[1] if isinstance(value, tuple) and len(value) > 1 else None
+            seek = getattr(payload, "seek", None)
+            if callable(seek):
+                seek(0)
 
     @staticmethod
     def _read_response_body(resp: httpx.Response, *, stream: bool) -> str:
@@ -1597,11 +1631,13 @@ class ArenaClient:
         **kwargs: Any,
     ) -> NDJsonStream:
         """Send a streaming request and return an :class:`NDJsonStream`."""
+        error_cls = self._ERROR_MAP.get(path, ArenaAPIError)
         handler = self._stream_handler
         renderer: StreamRichRenderer | None = None
         if handler is None and self._verbose:
-            error_cls = self._ERROR_MAP.get(path, ArenaAPIError)
             renderer = StreamRichRenderer(error_cls=error_cls)
             handler = renderer.handle_event
         resp = self._send(method, path, stream=True, timeout=timeout, **kwargs)
-        return NDJsonStream(resp, handler=handler, renderer=renderer)
+        return NDJsonStream(
+            resp, handler=handler, renderer=renderer, error_cls=error_cls
+        )

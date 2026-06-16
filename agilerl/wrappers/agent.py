@@ -696,41 +696,6 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
             "done": aligned_dones,
         }
 
-    def _insert_placeholder_actions(
-        self,
-        action_dict: dict[str, np.ndarray],
-        inactive_agents: dict[str, np.ndarray],
-    ) -> dict[str, np.ndarray]:
-        """Insert placeholder actions for inactive agents back into action dict."""
-        for agent_id, inactive_array in inactive_agents.items():
-            if agent_id not in action_dict:
-                continue
-
-            agent_action = action_dict[agent_id]
-            if agent_action is None:
-                continue
-
-            if len(agent_action.shape) == 1:
-                placeholder_shape = ()
-            else:
-                placeholder_shape = agent_action.shape[1:]
-
-            if np.issubdtype(agent_action.dtype, np.integer):
-                placeholder = np.zeros(placeholder_shape, dtype=agent_action.dtype)
-            else:
-                placeholder = np.full(
-                    placeholder_shape, np.nan, dtype=agent_action.dtype
-                )
-
-            action_dict[agent_id] = np.insert(
-                agent_action,
-                inactive_array,
-                placeholder,
-                axis=0,
-            )
-
-        return action_dict
-
     def get_action(
         self,
         obs: MARLObservationType,

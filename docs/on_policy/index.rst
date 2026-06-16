@@ -278,6 +278,7 @@ Alternatively, use a custom on-policy training loop:
         from agilerl.algorithms import PPO
         from agilerl.hpo.mutation import Mutations
         from agilerl.hpo.tournament import TournamentSelection
+        from agilerl.rollouts.on_policy import collect_rollouts
         from agilerl.utils.utils import make_vect_envs, default_progress_bar
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -356,76 +357,22 @@ Alternatively, use a custom on-policy training loop:
             for agent in pop:  # Loop through population
                 agent.set_training_mode(True)
 
-                obs, info = env.reset()  # Reset environment at start of episode
-                scores = np.zeros(num_envs)
                 completed_episode_scores = []
                 steps = 0
 
                 for _ in range(-(evo_steps // -agent.learn_step)):
+                    # Collect rollouts and save in the agent's rollout buffer
+                    episode_scores = collect_rollouts(agent, env)
 
-                    observations = []
-                    actions = []
-                    log_probs = []
-                    rewards = []
-                    dones = []
-                    values = []
+                    agent.learn()  # Learn from rollout buffer
 
-                    done = np.zeros(num_envs)
+                    # Update step counter and scores
+                    total_steps += agent.learn_step
+                    steps += agent.learn_step
+                    agent.steps += agent.learn_step
+                    completed_episode_scores += episode_scores
 
-                    learn_steps = 0
-                    for idx_step in range(-(agent.learn_step // -num_envs)):
-                        # Get next action from agent
-                        action, log_prob, _, value = agent.get_action(obs)
-
-                        # Clip to action space
-                        if isinstance(agent.action_space, spaces.Box):
-                            if agent.actor.squash_output:
-                                clipped_action = agent.actor.scale_action(action)
-                            else:
-                                clipped_action = np.clip(action, agent.action_space.low, agent.action_space.high)
-                        else:
-                            clipped_action = action
-
-                        # Act in environment
-                        next_obs, reward, terminated, truncated, info = env.step(clipped_action)
-                        next_done = np.logical_or(terminated, truncated).astype(np.int8)
-
-                        total_steps += num_envs
-                        steps += num_envs
-                        learn_steps += num_envs
-
-                        observations.append(obs)
-                        actions.append(action)
-                        log_probs.append(log_prob)
-                        rewards.append(reward)
-                        dones.append(dones)
-                        values.append(value)
-                        obs = next_obs
-                        done = next_done
-                        scores += np.array(reward)
-
-                        for idx, (d, t) in enumerate(zip(terminated, truncated)):
-                            if d or t:
-                                completed_episode_scores.append(scores[idx])
-                                agent.scores.append(scores[idx])
-                                scores[idx] = 0
-
-                    pbar.update(learn_steps // len(pop))
-
-                    experiences = (
-                        observations,
-                        actions,
-                        log_probs,
-                        rewards,
-                        dones,
-                        values,
-                        next_obs,
-                        next_done,
-                    )
-                    # Learn according to agent's RL algorithm
-                    agent.learn(experiences)
-
-                agent.steps += steps
+                pbar.update(steps // len(pop))
                 pop_episode_scores.append(completed_episode_scores)
 
             # Evaluate population
