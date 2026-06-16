@@ -920,9 +920,7 @@ class REINFORCE(LLMAlgorithm):
             "use_cache": False,
         }
         if self.calc_position_embeddings:
-            position_ids = attention_mask.long().cumsum(-1) - 1
-            position_ids.masked_fill_(attention_mask == 0, 1)
-            kwargs["position_ids"] = position_ids
+            kwargs["position_ids"] = self._position_ids_from_mask(attention_mask)
 
         with (
             self._patch_lm_head_to_identity(),

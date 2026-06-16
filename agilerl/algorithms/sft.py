@@ -309,9 +309,7 @@ class SFT(LLMAlgorithm):
             "use_cache": False,
         }
         if self.calc_position_embeddings:
-            position_ids = attention_mask.long().cumsum(-1) - 1
-            position_ids.masked_fill_(attention_mask == 0, 1)
-            model_kwargs["position_ids"] = position_ids
+            model_kwargs["position_ids"] = self._position_ids_from_mask(attention_mask)
 
         # Run the transformer with the lm_head patched to identity so
         # ``.logits`` is the final hidden state, then compute the loss from the
