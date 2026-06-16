@@ -314,7 +314,7 @@ class _PPOStub:
         advantage_granularity: str = "auto",
         clip_coef: float = 0.2,
         vf_coef: float = 0.5,
-        adv_whitening: bool = True,
+        whiten_advantages: bool = True,
     ):
         self.gamma = gamma
         self.gae_lambda = gae_lambda
@@ -322,7 +322,7 @@ class _PPOStub:
         self.advantage_granularity = advantage_granularity
         self.clip_coef = clip_coef
         self.vf_coef = vf_coef
-        self.adv_whitening = adv_whitening
+        self.whiten_advantages = whiten_advantages
 
     _compute_token_rewards = LLMPPO._compute_token_rewards
     _compute_gae_returns = LLMPPO._compute_gae_returns
@@ -553,7 +553,7 @@ class TestPPOInit:
                 gradient_checkpointing=False,
             )
 
-    def test_init_adv_whitening_must_be_boolean(self):
+    def test_init_whiten_advantages_must_be_boolean(self):
         actor = create_module(10, 8, 100, "cpu")
         lora = LoraConfig(
             r=4,
@@ -562,13 +562,13 @@ class TestPPOInit:
             task_type="CAUSAL_LM",
             modules_to_save=["summary"],
         )
-        with pytest.raises(TypeError, match="adv_whitening must be a boolean"):
+        with pytest.raises(TypeError, match="whiten_advantages must be a boolean"):
             LLMPPO(
                 actor_network=actor,
                 pad_token_id=99,
                 pad_token="<pad>",
                 lora_config=lora,
-                adv_whitening="yes",  # type: ignore[arg-type]
+                whiten_advantages="yes",  # type: ignore[arg-type]
                 wrap=False,
                 gradient_checkpointing=False,
             )
@@ -777,7 +777,7 @@ class TestPPOComputeGaeReturns:
         assert torch.allclose(returns, expected_returns)
 
     def test_compute_gae_returns_without_whitening_uses_raw_turn_advantages(self):
-        stub = _PPOStub(gamma=1.0, gae_lambda=1.0, adv_whitening=False)
+        stub = _PPOStub(gamma=1.0, gae_lambda=1.0, whiten_advantages=False)
         action_mask = torch.ones(1, 2, dtype=torch.bool)
         turn_ids = torch.tensor([[0, 1]])
         values = torch.tensor([[0.0, 0.0]])

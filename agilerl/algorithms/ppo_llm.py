@@ -166,9 +166,9 @@ class PPO(LLMAlgorithm):
         turn values. ``"mean"`` reproduces existing behavior, ``"final_value"``
         uses the final action token value in each turn.
     :type turn_value_reduction: str, optional
-    :param adv_whitening: Whether to whiten computed advantages before PPO
+    :param whiten_advantages: Whether to whiten computed advantages before PPO
         optimization.
-    :type adv_whitening: bool, optional
+    :type whiten_advantages: bool, optional
     :param gradient_checkpointing: Enable gradient checkpointing.
     :type gradient_checkpointing: bool, optional
     :param torch_compiler: Optional torch compile mode.
@@ -243,7 +243,7 @@ class PPO(LLMAlgorithm):
         advantage_granularity: Literal["turn", "token", "auto"] = "auto",
         action_granularity: Literal["turn", "token", "auto"] | None = None,
         turn_value_reduction: Literal["mean", "final_value"] = "final_value",
-        adv_whitening: bool = True,
+        whiten_advantages: bool = True,
         gradient_checkpointing: bool = True,
         torch_compiler: str | None = None,
         reduce_memory_peak: bool = False,
@@ -323,14 +323,14 @@ class PPO(LLMAlgorithm):
         self.min_p = min_p
         self._setup_advantage_options(
             turn_level_clip,
-            importance_sampling_level,
             advantage_granularity,
             action_granularity,
             turn_value_reduction,
-            adv_whitening,
+            whiten_advantages,
             gamma,
             gae_lambda,
         )
+        self._setup_objective(importance_sampling_level)
         self._setup_generation(
             max_output_tokens, min_output_tokens, max_model_len, hf_generate_chunk_size
         )
@@ -826,15 +826,14 @@ class PPO(LLMAlgorithm):
     def _setup_advantage_options(
         self,
         turn_level_clip: bool,
-        importance_sampling_level: str,
         advantage_granularity: str,
         action_granularity: str | None,
         turn_value_reduction: str,
-        adv_whitening: bool,
+        whiten_advantages: bool,
         gamma: float,
         gae_lambda: float,
     ) -> None:
-        """Validate and store the advantage / importance-sampling options."""
+        """Validate and store the GAE advantage options."""
         valid_action_granularities = {"turn", "token", "auto"}
         if action_granularity is not None:
             warnings.warn(
@@ -849,7 +848,6 @@ class PPO(LLMAlgorithm):
                 f"{sorted(valid_action_granularities)}."
             )
             raise ValueError(msg)
-        validate_importance_sampling_level(importance_sampling_level, allow_auto=True)
         valid_turn_value_reductions = {"mean", "final_value"}
         if turn_value_reduction not in valid_turn_value_reductions:
             msg = (
@@ -857,21 +855,25 @@ class PPO(LLMAlgorithm):
                 f"{sorted(valid_turn_value_reductions)}."
             )
             raise ValueError(msg)
-        if not isinstance(adv_whitening, bool):
-            msg = "adv_whitening must be a boolean."
+        if not isinstance(whiten_advantages, bool):
+            msg = "whiten_advantages must be a boolean."
             raise TypeError(msg)
         self.turn_level_clip = turn_level_clip
+        self.advantage_granularity = advantage_granularity
+        self.turn_value_reduction = turn_value_reduction
+        self.whiten_advantages = whiten_advantages
+        self.gamma = gamma
+        self.gae_lambda = gae_lambda
+
+    def _setup_objective(self, importance_sampling_level: str) -> None:
+        """Validate and resolve the importance-sampling level and Liger routing."""
+        validate_importance_sampling_level(importance_sampling_level, allow_auto=True)
         # IS / ratio-pooling level for the policy surrogate, orthogonal to the
         # GAE advantage granularity. ``"auto"`` preserves legacy behavior:
         # turn-level when the batch is multi-turn and ``turn_level_clip`` is set,
         # else token-level. Explicit ``token``/``turn``/``trajectory`` override
         # (length-normalized mean pooling, consistent with GRPO/GSPO).
         self.importance_sampling_level = importance_sampling_level
-        self.advantage_granularity = advantage_granularity
-        self.turn_value_reduction = turn_value_reduction
-        self.adv_whitening = adv_whitening
-        self.gamma = gamma
-        self.gae_lambda = gae_lambda
         # Warn once that Liger + an explicit non-token IS level is permitted
         # but not memory-bounded ("auto" is covered at loss time instead).
         if self.use_liger_loss and self.importance_sampling_level in {
@@ -895,12 +897,14 @@ class PPO(LLMAlgorithm):
         if max_output_tokens is None and max_model_len is None:
             msg = "Either max_output_tokens or max_model_len must be specified"
             raise ValueError(msg)
-        self.max_output_tokens = max_output_tokens
+        self.max_output_tokens = (
+            max_output_tokens if max_output_tokens is not None else max_model_len
+        )
         self.min_output_tokens = min_output_tokens
         self.max_model_len = (
             max_model_len if max_model_len is not None else max_output_tokens
         )
-        validate_llm_context_lengths(self.max_model_len, self.max_output_tokens)
+        validate_llm_context_lengths(self.max_model_len, max_output_tokens)
         self.hf_generate_chunk_size = int(
             1 if hf_generate_chunk_size is None else max(1, hf_generate_chunk_size)
         )
@@ -1058,7 +1062,7 @@ class PPO(LLMAlgorithm):
 
         turn_index = torch.arange(num_turns, device=turn_ids.device).view(1, 1, -1)
         turn_mask = (turn_ids.unsqueeze(-1) == turn_index).any(dim=1).float()
-        if self.adv_whitening:
+        if self.whiten_advantages:
             turn_advantages_for_pg = masked_whiten(turn_advantages, turn_mask)
         else:
             turn_advantages_for_pg = turn_advantages
@@ -1108,7 +1112,7 @@ class PPO(LLMAlgorithm):
             token_advantages[:, t] = last_gae * mask[:, t]
 
         token_returns = (token_advantages + values) * mask
-        if self.adv_whitening:
+        if self.whiten_advantages:
             token_advantages = masked_whiten(token_advantages, action_mask)
         return token_returns, token_advantages * mask
 

@@ -285,9 +285,8 @@ class REINFORCE(LLMAlgorithm):
         self.top_p = top_p
         self.top_k = top_k
         self.min_p = min_p
-        self._setup_advantage_options(
-            importance_sampling_level, advantage_granularity, action_granularity, gamma
-        )
+        self._setup_advantage_options(advantage_granularity, action_granularity, gamma)
+        self._setup_objective(importance_sampling_level)
         self._setup_generation(
             max_output_tokens, min_output_tokens, max_model_len, hf_generate_chunk_size
         )
@@ -731,12 +730,11 @@ class REINFORCE(LLMAlgorithm):
 
     def _setup_advantage_options(
         self,
-        importance_sampling_level: str,
         advantage_granularity: str,
         action_granularity: str | None,
         gamma: float,
     ) -> None:
-        """Validate and store the ReBN advantage / importance-sampling options."""
+        """Validate and store the ReBN advantage options."""
         valid_action_granularities = {"turn", "token", "auto"}
         if action_granularity is not None:
             warnings.warn(
@@ -751,15 +749,18 @@ class REINFORCE(LLMAlgorithm):
                 f"{sorted(valid_action_granularities)}."
             )
             raise ValueError(msg)
-        validate_importance_sampling_level(importance_sampling_level, allow_auto=False)
         self.advantage_granularity = advantage_granularity
+        self.gamma = gamma
+
+    def _setup_objective(self, importance_sampling_level: str) -> None:
+        """Validate and resolve the importance-sampling level and Liger routing."""
+        validate_importance_sampling_level(importance_sampling_level, allow_auto=False)
         # IS / ratio-pooling level for the clipped surrogate, orthogonal to the
         # ReBN advantage granularity (``advantage_granularity``). ``"token"`` (the
         # default) preserves the original token-level clip; ``"turn"`` /
         # ``"trajectory"`` pool the ratio (length-normalized mean) per turn /
         # whole completion. Turn level requires ``turn_ids`` in ``learn``.
         self.importance_sampling_level = importance_sampling_level
-        self.gamma = gamma
         # Warn once, up front, when Liger is paired with a non-token IS level.
         # It is permitted but not memory-bounded: turn-/trajectory-level pooling
         # couples a unit's tokens, so the fused kernel processes one whole
@@ -786,12 +787,14 @@ class REINFORCE(LLMAlgorithm):
         if max_output_tokens is None and max_model_len is None:
             msg = "Either max_output_tokens or max_model_len must be specified"
             raise ValueError(msg)
-        self.max_output_tokens = max_output_tokens
+        self.max_output_tokens = (
+            max_output_tokens if max_output_tokens is not None else max_model_len
+        )
         self.min_output_tokens = min_output_tokens
         self.max_model_len = (
             max_model_len if max_model_len is not None else max_output_tokens
         )
-        validate_llm_context_lengths(self.max_model_len, self.max_output_tokens)
+        validate_llm_context_lengths(self.max_model_len, max_output_tokens)
         self.hf_generate_chunk_size = int(
             1 if hf_generate_chunk_size is None else max(1, hf_generate_chunk_size)
         )
