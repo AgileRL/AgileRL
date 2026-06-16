@@ -369,6 +369,301 @@ class GRPO(LLMAlgorithm):
         if self.wrap:
             self.wrap_models()
 
+    def get_action(
+        self,
+        obs: LLMObsType,
+        training: bool = True,
+        repeat_prompts: bool = True,
+        *args: Any,
+        **kwargs: Any,
+    ) -> ActionResult:
+        """Return generated completions for each prompt (GRPO groups when training).
+
+        :param obs: List of HF-style prompt dicts (this implementation mutates them).
+        :type obs: LLMObsType
+        :param training: If ``True``, generate with training sampling settings.
+        :type training: bool
+        :param repeat_prompts: If ``True`` and ``training=True``, duplicate each
+            prompt ``self.group_size`` times (legacy GRPO grouped mode). If
+            ``False``, treat the batch as already expanded trajectories.
+        :type repeat_prompts: bool
+        :return: An :class:`ActionResult` of completion token IDs, per-sequence
+            action masks, and (when captured) per-completion vLLM sampling
+            logprobs for the mismatch correction.
+        :rtype: ActionResult
+        """
+        prompt_batch = normalize_reasoning_prompt_batch(obs)
+        group_size = self.group_size if training and repeat_prompts else 1
+        # Capture vLLM sampling logprobs only for training rollouts when the
+        # mismatch correction is enabled; ``None`` on the HF path / eval.
+        sampling_logps: list[torch.Tensor | None] | None = None
+        capture_sampling_logps = (
+            training and self.use_vllm and self.vllm_importance_sampling_correction
+        )
+        with self.select_adapter("actor"):
+            self.actor.eval()
+            if not self.use_vllm:
+                actor_module = self._get_unwrapped_actor()
+                try:
+                    actor_device = next(actor_module.parameters()).device
+                except StopIteration:
+                    actor_device = torch.device(self.device)
+                with torch.inference_mode(), self._amp_ctx():
+                    completion_ids = []
+                    completion_masks = []
+
+                    for start in range(
+                        0,
+                        len(prompt_batch),
+                        self.hf_generate_chunk_size,
+                    ):
+                        chunk = prompt_batch[
+                            start : start + self.hf_generate_chunk_size
+                        ]
+                        for prompt_dict in chunk:
+                            prompt = prepare_prompt_hf_generate(
+                                prompt_dict, actor_device
+                            )
+                            if training and group_size > 1:
+                                prompt["input_ids"] = prompt["input_ids"].repeat(
+                                    group_size,
+                                    1,
+                                )
+                                prompt["attention_mask"] = prompt[
+                                    "attention_mask"
+                                ].repeat(
+                                    group_size,
+                                    1,
+                                )
+                            stitch_ids = prompt.pop("stitch_prefix_ids", None)
+                            if (
+                                stitch_ids is not None
+                                and training
+                                and group_size > 1
+                                and stitch_ids.shape[0] == 1
+                            ):
+                                stitch_ids = stitch_ids.repeat(group_size, 1)
+                            initial_prompt_len = prompt.pop("initial_prompt_len", None)
+                            completion_id = self.actor.generate(
+                                **prompt,
+                                generation_config=self.generation_config,
+                            )
+                            completion_id, full_prompt_len = (
+                                stitch_completion_after_windowed_hf_generate(
+                                    completion_id,
+                                    stitch_ids,
+                                    initial_prompt_len,
+                                )
+                            )
+                            completion_ids.append(completion_id)
+                            completion_masks.append(
+                                build_completion_mask(
+                                    completion_id,
+                                    full_prompt_len,
+                                    self.pad_token_id,
+                                )
+                            )
+            else:
+                self._prepare_vllm_for_generation()
+                (
+                    completion_ids,
+                    completion_masks,
+                    sampling_logps,
+                ) = self._generate_with_vllm_colocate(
+                    prompt_batch,
+                    group_size,
+                    temperature=self.temperature
+                    if training
+                    else 0.01,  # Almost deterministic for evaluation
+                    capture_sampling_logps=capture_sampling_logps,
+                )
+
+        return ActionResult(completion_ids, completion_masks, sampling_logps)
+
+    def learn(
+        self,
+        experiences: ExperiencesType,
+        turn_ids: torch.Tensor | None = None,
+        sampling_logps: list[torch.Tensor | None] | None = None,
+    ) -> dict[str, float]:
+        """Update agent network parameters to learn from experiences.
+
+        :param experiences: ``(completion_ids, action_masks, rewards)`` stacked
+            batch. For ``importance_sampling_level="turn"`` with per-turn
+            rewards, ``rewards`` is ``(batch, max_turns)``; otherwise it is one
+            scalar per trajectory (per-turn rewards are summed to the episode
+            return).
+        :type experiences: ExperiencesType
+        :param sampling_logps: Optional per-row flat vLLM sampling logprobs (one
+            1-D tensor per trajectory, generated tokens only; concatenated
+            across turns for multi-turn) for the sampling-mismatch correction.
+            Parallel to the stacked ``completion_ids`` rows. ``None`` disables
+            the correction for this update.
+        :type sampling_logps: list[torch.Tensor | None] | None
+        :param turn_ids: Optional ``(batch, seq_len-1)`` turn index per action
+            token (``-1`` for non-action tokens), aligned with the action
+            mask. Consumed independently by the two turn-level features:
+            per-turn group-relative advantages (when ``advantage_granularity``
+            resolves to ``"turn"``, which needs per-turn rewards) and turn-level
+            importance-ratio pooling (when ``importance_sampling_level="turn"``).
+            Ignored when neither applies.
+        :type turn_ids: torch.Tensor | None
+        :return: Dict with keys ``mean_loss`` and ``mean_kl``, averaged over the update.
+        :rtype: dict[str, float]
+        """
+        gc.collect()
+        torch.cuda.empty_cache()
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+
+        self._prepare_vllm_for_training()
+
+        with self.memory_efficient_params_context():
+            completion_ids, action_masks, rewards, turn_ids = (
+                self._prepare_experience_batch(experiences, turn_ids)
+            )
+            num_samples = completion_ids.shape[0]
+
+            advantages, batch_idxs = self._calculate_advantages(
+                rewards, completion_ids, action_masks, turn_ids
+            )
+            if self.filter_zero_adv and batch_idxs.size == 0:
+                warnings.warn(
+                    "All samples were filtered by advantage threshold; skipping GRPO update.",
+                    stacklevel=2,
+                )
+                return {"mean_loss": 0.0, "mean_kl": 0.0}
+
+            learn_metrics = {
+                "mean_loss": 0.0,
+                "mean_kl": 0.0,
+            }
+            updates = 0
+            batch_size = (
+                min(num_samples, self.micro_batch_size_per_gpu)
+                if hasattr(self, "micro_batch_size_per_gpu")
+                else num_samples
+            )
+
+            with torch.no_grad():
+                reference_log_probs, old_log_probs, _ = self._fused_forward_no_grad(
+                    completion_ids,
+                    batch_size,
+                )
+
+            is_turn_ids = turn_ids if self.importance_sampling_level == "turn" else None
+            sampling_log_probs, is_metrics = (
+                self._aligned_sampling_logprobs_and_metrics(
+                    sampling_logps, action_masks, old_log_probs
+                )
+            )
+
+            effective_num_samples = len(batch_idxs)
+            if effective_num_samples == 0:
+                warnings.warn(
+                    "No active samples after filtering; skipping GRPO update.",
+                    stacklevel=2,
+                )
+                return {"mean_loss": 0.0, "mean_kl": 0.0}
+
+            # Ensure batch_size is not larger than the number of active samples
+            batch_size = min(batch_size, effective_num_samples)
+
+            for _ in range(self.update_epochs):
+                self.rng.shuffle(batch_idxs)
+                for start in range(0, effective_num_samples, batch_size):
+                    minibatch_idxs = batch_idxs[
+                        start : min((start + batch_size), effective_num_samples)
+                    ]
+                    if len(minibatch_idxs) == 0:
+                        continue
+                    loss, kl = self._loss(
+                        batch_size,
+                        minibatch_idxs,
+                        completion_ids,
+                        action_masks,
+                        advantages,
+                        old_log_probs,
+                        reference_log_probs,
+                        turn_ids=is_turn_ids,
+                        sampling_log_probs=sampling_log_probs,
+                    )
+                    if not loss.isfinite():
+                        msg = f"Loss is not finite: {loss}"
+                        raise ValueError(msg)
+                    self._backward_pass(loss)
+                    learn_metrics["mean_loss"] += loss.item()
+                    learn_metrics["mean_kl"] += kl.item()
+                    updates += 1
+        result = {
+            metric: value / max(updates, 1) for metric, value in learn_metrics.items()
+        }
+        # Batch-level metrics: not divided by the update count above.
+        result.update(is_metrics)
+        return result
+
+    def test(
+        self,
+        env: ReasoningGym | MultiTurnEnv,
+        loop: int = 1,
+        *args: Any,
+        **kwargs: Any,
+    ) -> np.ndarray:
+        """Return fitness (test) score of llm on test sub-set.
+
+        :param env: Dataset-style ``ReasoningGym`` environment or tokenized
+            multi-turn episode environment.
+        :type env: ReasoningGym | MultiTurnEnv
+        :param loop: Number of outer test iterations over ``reset`` / ``step``.
+        :type loop: int
+        :return: Concatenated reward tensor from the test loop.
+        :rtype: torch.Tensor
+        """
+        eval_context = getattr(env, "eval_mode", nullcontext)
+        with eval_context():
+            if isinstance(env, ReasoningGym):
+                prompts = env.reset()
+                rewards = []
+                for _ in range(loop):
+                    completion_ids = self.get_action(
+                        prompts, training=False
+                    ).completion_ids
+                    next_prompts, reward = env.step(completion_ids)
+                    prompts = next_prompts
+                    rewards.append(reward)
+                reward_tensor = torch.cat(rewards)
+            elif isinstance(env, MultiTurnEnv):
+                all_rewards: list[torch.Tensor] = []
+                for _ in range(loop):
+                    prompt_dict, _info = env.reset()
+                    terminated, truncated = False, False
+                    while not terminated and not truncated:
+                        completion_ids = self.get_action(
+                            [prompt_dict],
+                            training=False,
+                        ).completion_ids
+                        full = completion_ids[0]
+                        prompt_dict, reward, terminated, truncated, _info = env.step(
+                            full,
+                        )
+                        all_rewards.append(
+                            torch.tensor(
+                                [float(reward)],
+                                dtype=torch.float32,
+                                device=full.device,
+                            )
+                        )
+                reward_tensor = torch.cat(all_rewards)
+            else:
+                msg = (
+                    "env must be a ReasoningGym (or subclass) or "
+                    f"MultiTurnEnv; got {type(env).__name__}"
+                )
+                raise TypeError(msg)
+        mean_fit = torch.mean(reward_tensor).item()
+        self.fitness.append(mean_fit)
+        return np.array(mean_fit)
+
     def _validate_core_args(
         self,
         batch_size: int,
@@ -575,236 +870,6 @@ class GRPO(LLMAlgorithm):
             min_p=self.min_p,
         )
 
-    def get_action(
-        self,
-        obs: LLMObsType,
-        training: bool = True,
-        repeat_prompts: bool = True,
-        *args: Any,
-        **kwargs: Any,
-    ) -> ActionResult:
-        """Return generated completions for each prompt (GRPO groups when training).
-
-        :param obs: List of HF-style prompt dicts (this implementation mutates them).
-        :type obs: LLMObsType
-        :param training: If ``True``, generate with training sampling settings.
-        :type training: bool
-        :param repeat_prompts: If ``True`` and ``training=True``, duplicate each
-            prompt ``self.group_size`` times (legacy GRPO grouped mode). If
-            ``False``, treat the batch as already expanded trajectories.
-        :type repeat_prompts: bool
-        :return: An :class:`ActionResult` of completion token IDs, per-sequence
-            action masks, and (when captured) per-completion vLLM sampling
-            logprobs for the mismatch correction.
-        :rtype: ActionResult
-        """
-        prompt_batch = normalize_reasoning_prompt_batch(obs)
-        group_size = self.group_size if training and repeat_prompts else 1
-        # Capture vLLM sampling logprobs only for training rollouts when the
-        # mismatch correction is enabled; ``None`` on the HF path / eval.
-        sampling_logps: list[torch.Tensor | None] | None = None
-        capture_sampling_logps = (
-            training and self.use_vllm and self.vllm_importance_sampling_correction
-        )
-        with self.select_adapter("actor"):
-            self.actor.eval()
-            if not self.use_vllm:
-                actor_module = self._get_unwrapped_actor()
-                try:
-                    actor_device = next(actor_module.parameters()).device
-                except StopIteration:
-                    actor_device = torch.device(self.device)
-                with torch.inference_mode(), self._amp_ctx():
-                    completion_ids = []
-                    completion_masks = []
-
-                    for start in range(
-                        0,
-                        len(prompt_batch),
-                        self.hf_generate_chunk_size,
-                    ):
-                        chunk = prompt_batch[
-                            start : start + self.hf_generate_chunk_size
-                        ]
-                        for prompt_dict in chunk:
-                            prompt = prepare_prompt_hf_generate(
-                                prompt_dict, actor_device
-                            )
-                            if training and group_size > 1:
-                                prompt["input_ids"] = prompt["input_ids"].repeat(
-                                    group_size,
-                                    1,
-                                )
-                                prompt["attention_mask"] = prompt[
-                                    "attention_mask"
-                                ].repeat(
-                                    group_size,
-                                    1,
-                                )
-                            stitch_ids = prompt.pop("stitch_prefix_ids", None)
-                            if (
-                                stitch_ids is not None
-                                and training
-                                and group_size > 1
-                                and stitch_ids.shape[0] == 1
-                            ):
-                                stitch_ids = stitch_ids.repeat(group_size, 1)
-                            initial_prompt_len = prompt.pop("initial_prompt_len", None)
-                            completion_id = self.actor.generate(
-                                **prompt,
-                                generation_config=self.generation_config,
-                            )
-                            completion_id, full_prompt_len = (
-                                stitch_completion_after_windowed_hf_generate(
-                                    completion_id,
-                                    stitch_ids,
-                                    initial_prompt_len,
-                                )
-                            )
-                            completion_ids.append(completion_id)
-                            completion_masks.append(
-                                build_completion_mask(
-                                    completion_id,
-                                    full_prompt_len,
-                                    self.pad_token_id,
-                                )
-                            )
-            else:
-                self._prepare_vllm_for_generation()
-                (
-                    completion_ids,
-                    completion_masks,
-                    sampling_logps,
-                ) = self._generate_with_vllm_colocate(
-                    prompt_batch,
-                    group_size,
-                    temperature=self.temperature
-                    if training
-                    else 0.01,  # Almost deterministic for evaluation
-                    capture_sampling_logps=capture_sampling_logps,
-                )
-
-        return ActionResult(completion_ids, completion_masks, sampling_logps)
-
-    def learn(
-        self,
-        experiences: ExperiencesType,
-        turn_ids: torch.Tensor | None = None,
-        sampling_logps: list[torch.Tensor | None] | None = None,
-    ) -> dict[str, float]:
-        """Update agent network parameters to learn from experiences.
-
-        :param experiences: ``(completion_ids, action_masks, rewards)`` stacked
-            batch. For ``importance_sampling_level="turn"`` with per-turn
-            rewards, ``rewards`` is ``(batch, max_turns)``; otherwise it is one
-            scalar per trajectory (per-turn rewards are summed to the episode
-            return).
-        :type experiences: ExperiencesType
-        :param sampling_logps: Optional per-row flat vLLM sampling logprobs (one
-            1-D tensor per trajectory, generated tokens only; concatenated
-            across turns for multi-turn) for the sampling-mismatch correction.
-            Parallel to the stacked ``completion_ids`` rows. ``None`` disables
-            the correction for this update.
-        :type sampling_logps: list[torch.Tensor | None] | None
-        :param turn_ids: Optional ``(batch, seq_len-1)`` turn index per action
-            token (``-1`` for non-action tokens), aligned with the action
-            mask. Consumed independently by the two turn-level features:
-            per-turn group-relative advantages (when ``advantage_granularity``
-            resolves to ``"turn"``, which needs per-turn rewards) and turn-level
-            importance-ratio pooling (when ``importance_sampling_level="turn"``).
-            Ignored when neither applies.
-        :type turn_ids: torch.Tensor | None
-        :return: Dict with keys ``mean_loss`` and ``mean_kl``, averaged over the update.
-        :rtype: dict[str, float]
-        """
-        gc.collect()
-        torch.cuda.empty_cache()
-        if torch.backends.mps.is_available():
-            torch.mps.empty_cache()
-
-        self._prepare_vllm_for_training()
-
-        with self.memory_efficient_params_context():
-            completion_ids, action_masks, rewards, turn_ids = (
-                self._prepare_experience_batch(experiences, turn_ids)
-            )
-            num_samples = completion_ids.shape[0]
-
-            advantages, batch_idxs = self._calculate_advantages(
-                rewards, completion_ids, action_masks, turn_ids
-            )
-            if self.filter_zero_adv and batch_idxs.size == 0:
-                warnings.warn(
-                    "All samples were filtered by advantage threshold; skipping GRPO update.",
-                    stacklevel=2,
-                )
-                return {"mean_loss": 0.0, "mean_kl": 0.0}
-
-            learn_metrics = {
-                "mean_loss": 0.0,
-                "mean_kl": 0.0,
-            }
-            updates = 0
-            batch_size = (
-                min(num_samples, self.micro_batch_size_per_gpu)
-                if hasattr(self, "micro_batch_size_per_gpu")
-                else num_samples
-            )
-
-            with torch.no_grad():
-                reference_log_probs, old_log_probs, _ = self._fused_forward_no_grad(
-                    completion_ids,
-                    batch_size,
-                )
-
-            is_turn_ids, sampling_log_probs, is_metrics = self._calculate_is_inputs(
-                turn_ids, sampling_logps, action_masks, old_log_probs
-            )
-
-            effective_num_samples = len(batch_idxs)
-            if effective_num_samples == 0:
-                warnings.warn(
-                    "No active samples after filtering; skipping GRPO update.",
-                    stacklevel=2,
-                )
-                return {"mean_loss": 0.0, "mean_kl": 0.0}
-
-            # Ensure batch_size is not larger than the number of active samples
-            batch_size = min(batch_size, effective_num_samples)
-
-            for _ in range(self.update_epochs):
-                self.rng.shuffle(batch_idxs)
-                for start in range(0, effective_num_samples, batch_size):
-                    minibatch_idxs = batch_idxs[
-                        start : min((start + batch_size), effective_num_samples)
-                    ]
-                    if len(minibatch_idxs) == 0:
-                        continue
-                    loss, kl = self._loss(
-                        batch_size,
-                        minibatch_idxs,
-                        completion_ids,
-                        action_masks,
-                        advantages,
-                        old_log_probs,
-                        reference_log_probs,
-                        turn_ids=is_turn_ids,
-                        sampling_log_probs=sampling_log_probs,
-                    )
-                    if not loss.isfinite():
-                        msg = f"Loss is not finite: {loss}"
-                        raise ValueError(msg)
-                    self._backward_pass(loss)
-                    learn_metrics["mean_loss"] += loss.item()
-                    learn_metrics["mean_kl"] += kl.item()
-                    updates += 1
-        result = {
-            metric: value / max(updates, 1) for metric, value in learn_metrics.items()
-        }
-        # Batch-level metrics: not divided by the update count above.
-        result.update(is_metrics)
-        return result
-
     def _prepare_experience_batch(
         self,
         experiences: ExperiencesType,
@@ -868,86 +933,6 @@ class GRPO(LLMAlgorithm):
         if active_adv_mask is None:
             return advantages, np.arange(num_samples)
         return advantages, np.where(active_adv_mask.detach().cpu().numpy())[0]
-
-    def _calculate_is_inputs(
-        self,
-        turn_ids: torch.Tensor | None,
-        sampling_logps: list[torch.Tensor | None] | None,
-        action_masks: torch.Tensor,
-        old_log_probs: torch.Tensor,
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None, dict[str, float]]:
-        """Importance-sampling inputs for the update.
-
-        Returns the turn ids (only when ratios pool per turn), the aligned vLLM
-        sampling logprobs for the mismatch correction, and its batch metrics.
-        """
-        is_turn_ids = turn_ids if self.importance_sampling_level == "turn" else None
-        sampling_log_probs, is_metrics = self._aligned_sampling_logprobs_and_metrics(
-            sampling_logps, action_masks, old_log_probs
-        )
-        return is_turn_ids, sampling_log_probs, is_metrics
-
-    def test(
-        self,
-        env: ReasoningGym | MultiTurnEnv,
-        loop: int = 1,
-        *args: Any,
-        **kwargs: Any,
-    ) -> np.ndarray:
-        """Return fitness (test) score of llm on test sub-set.
-
-        :param env: Dataset-style ``ReasoningGym`` environment or tokenized
-            multi-turn episode environment.
-        :type env: ReasoningGym | MultiTurnEnv
-        :param loop: Number of outer test iterations over ``reset`` / ``step``.
-        :type loop: int
-        :return: Concatenated reward tensor from the test loop.
-        :rtype: torch.Tensor
-        """
-        eval_context = getattr(env, "eval_mode", nullcontext)
-        with eval_context():
-            if isinstance(env, ReasoningGym):
-                prompts = env.reset()
-                rewards = []
-                for _ in range(loop):
-                    completion_ids = self.get_action(
-                        prompts, training=False
-                    ).completion_ids
-                    next_prompts, reward = env.step(completion_ids)
-                    prompts = next_prompts
-                    rewards.append(reward)
-                reward_tensor = torch.cat(rewards)
-            elif isinstance(env, MultiTurnEnv):
-                all_rewards: list[torch.Tensor] = []
-                for _ in range(loop):
-                    prompt_dict, _info = env.reset()
-                    terminated, truncated = False, False
-                    while not terminated and not truncated:
-                        completion_ids = self.get_action(
-                            [prompt_dict],
-                            training=False,
-                        ).completion_ids
-                        full = completion_ids[0]
-                        prompt_dict, reward, terminated, truncated, _info = env.step(
-                            full,
-                        )
-                        all_rewards.append(
-                            torch.tensor(
-                                [float(reward)],
-                                dtype=torch.float32,
-                                device=full.device,
-                            )
-                        )
-                reward_tensor = torch.cat(all_rewards)
-            else:
-                msg = (
-                    "env must be a ReasoningGym (or subclass) or "
-                    f"MultiTurnEnv; got {type(env).__name__}"
-                )
-                raise TypeError(msg)
-        mean_fit = torch.mean(reward_tensor).item()
-        self.fitness.append(mean_fit)
-        return np.array(mean_fit)
 
     def _assert_batch_divisible_by_group(self, num_samples: int) -> None:
         """Require the trajectory batch to split evenly into GRPO groups.
@@ -1685,9 +1670,9 @@ class GRPO(LLMAlgorithm):
                 "use_cache": False,
             }
             if self.calc_position_embeddings:
-                position_ids = attention_mask.long().cumsum(-1) - 1
-                position_ids.masked_fill_(attention_mask == 0, 1)
-                model_kwargs["position_ids"] = position_ids
+                model_kwargs["position_ids"] = self._position_ids_from_mask(
+                    attention_mask
+                )
         # Identity-patch lm_head: the forward yields hidden states; the fused
         # kernel handles the lm_head matmul itself.
         with (

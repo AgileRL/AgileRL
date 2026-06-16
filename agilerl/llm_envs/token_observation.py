@@ -15,6 +15,10 @@ from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
 class TokenObservationWrapper:
     """Token-level observation wrapper for multi-turn environments."""
 
+    # Unique marker that ``_chat_template_boundary_ids`` slices on; must not
+    # collide with anything a real chat template renders.
+    _BOUNDARY_PLACEHOLDER = "__AGILERL_PRIOR_ASSISTANT_PLACEHOLDER_a8b2f__"
+
     def __init__(
         self,
         env: MultiTurnEnv,
@@ -138,10 +142,6 @@ class TokenObservationWrapper:
             [self.tokenizer.encode(turn_boundary)],
             dtype=torch.long,
         )
-
-    # Unique marker that ``_chat_template_boundary_ids`` slices on; must not
-    # collide with anything a real chat template renders.
-    _BOUNDARY_PLACEHOLDER = "__AGILERL_PRIOR_ASSISTANT_PLACEHOLDER_a8b2f__"
 
     def _chat_template_boundary_ids(
         self,

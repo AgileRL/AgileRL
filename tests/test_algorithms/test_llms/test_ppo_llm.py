@@ -314,7 +314,7 @@ class _PPOStub:
         advantage_granularity: str = "auto",
         clip_coef: float = 0.2,
         vf_coef: float = 0.5,
-        adv_whitening: bool = True,
+        whiten_advantages: bool = True,
     ):
         self.gamma = gamma
         self.gae_lambda = gae_lambda
@@ -322,7 +322,7 @@ class _PPOStub:
         self.advantage_granularity = advantage_granularity
         self.clip_coef = clip_coef
         self.vf_coef = vf_coef
-        self.adv_whitening = adv_whitening
+        self.whiten_advantages = whiten_advantages
 
     _compute_token_rewards = LLMPPO._compute_token_rewards
     _compute_gae_returns = LLMPPO._compute_gae_returns
@@ -577,7 +577,7 @@ class TestPPOInit:
         ppo = _cpu_llmppo()
         assert ppo.turn_ratio_pooling == "sum"
 
-    def test_init_adv_whitening_must_be_boolean(self):
+    def test_init_whiten_advantages_must_be_boolean(self):
         actor = create_module(10, 8, 100, "cpu")
         lora = LoraConfig(
             r=4,
@@ -586,13 +586,13 @@ class TestPPOInit:
             task_type="CAUSAL_LM",
             modules_to_save=["summary"],
         )
-        with pytest.raises(TypeError, match="adv_whitening must be a boolean"):
+        with pytest.raises(TypeError, match="whiten_advantages must be a boolean"):
             LLMPPO(
                 actor_network=actor,
                 pad_token_id=99,
                 pad_token="<pad>",
                 lora_config=lora,
-                adv_whitening="yes",  # type: ignore[arg-type]
+                whiten_advantages="yes",  # type: ignore[arg-type]
                 wrap=False,
                 gradient_checkpointing=False,
             )
@@ -801,7 +801,7 @@ class TestPPOComputeGaeReturns:
         assert torch.allclose(returns, expected_returns)
 
     def test_compute_gae_returns_without_whitening_uses_raw_turn_advantages(self):
-        stub = _PPOStub(gamma=1.0, gae_lambda=1.0, adv_whitening=False)
+        stub = _PPOStub(gamma=1.0, gae_lambda=1.0, whiten_advantages=False)
         action_mask = torch.ones(1, 2, dtype=torch.bool)
         turn_ids = torch.tensor([[0, 1]])
         values = torch.tensor([[0.0, 0.0]])
@@ -1788,3 +1788,78 @@ class TestPPOSequencePacking:
         assert torch.allclose(v_packed * am, v_padded * am, atol=1e-5)
         assert (lp_padded * am).abs().sum() > 0
         assert (v_padded * am).abs().sum() > 0
+
+
+class TestPPOSaveLoadValueHead:
+    """PPO differs from the non-critic LLM algos: it carries a value head
+    (``v_head`` Linear) that must survive a checkpoint round-trip."""
+
+    @staticmethod
+    def _build(model_factory):
+        actor = model_factory(TINY_LLM_FIXTURE_PATH, add_value_head=True)
+        return LLMPPO(
+            actor_network=actor,
+            lr_actor=1e-5,
+            lr_critic=1e-4,
+            pad_token_id=151664,
+            pad_token="<pad>",
+            device="cpu",
+            lora_config=LoraConfig(
+                r=8,
+                lora_alpha=16,
+                target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+                task_type="CAUSAL_LM",
+                lora_dropout=0.0,
+            ),
+            accelerator=None,
+            use_vllm=False,
+            wrap=False,
+            gradient_checkpointing=False,
+            max_output_tokens=8,
+            max_model_len=64,
+        )
+
+    def test_save_load_round_trips_value_head_and_actor_adapter(
+        self, tmp_path, model_factory
+    ):
+        """save_checkpoint -> load_checkpoint must restore the value head and the
+        actor LoRA adapter (and not crash on optimizer metadata)."""
+        ppo = self._build(model_factory)
+        unwrapped = ppo._get_unwrapped_actor()
+        # Make the value head + actor LoRA clearly non-default before saving.
+        for p in unwrapped.v_head.parameters():
+            p.data.normal_(0.0, 1.0)
+        actor_lora = [
+            (n, p)
+            for n, p in unwrapped.named_parameters()
+            if "lora" in n.lower() and "actor" in n.lower()
+        ]
+        assert actor_lora, "expected actor LoRA params"
+        for _, p in actor_lora:
+            p.data.normal_(0.0, 0.5)
+        saved_vhead = {
+            k: v.detach().clone() for k, v in unwrapped.v_head.state_dict().items()
+        }
+        alora_name = actor_lora[0][0]
+        alora_w = actor_lora[0][1].detach().clone()
+
+        ppo.save_checkpoint(str(tmp_path))
+
+        # A fresh agent (freshly-initialised value head) must come back identical
+        # after load — exercising the default save_optimizer=True path too.
+        new_ppo = self._build(model_factory)
+        new_ppo.load_checkpoint(str(tmp_path))
+        new_unwrapped = new_ppo._get_unwrapped_actor()
+
+        for k, v in saved_vhead.items():
+            assert torch.equal(
+                new_unwrapped.v_head.state_dict()[k].float(), v.float()
+            ), f"value-head weight {k} not restored"
+        assert torch.equal(
+            dict(new_unwrapped.named_parameters())[alora_name].detach().float(),
+            alora_w.float(),
+        ), "actor LoRA adapter not restored"
+
+        ppo.clean_up()
+        new_ppo.clean_up()
+        AcceleratorState._reset_state(True)

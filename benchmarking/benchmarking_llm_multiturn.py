@@ -22,13 +22,9 @@ from agilerl.utils.llm_utils import (
 )
 from agilerl.utils.utils import create_population
 
-# Overridable from the environment so a run can target a different model / env /
-# config without editing this file (e.g. a smaller model for a quick smoke run).
-CONFIG_PATH = os.environ.get(
-    "BENCH_CONFIG", "configs/training/llm_finetuning/cispo_quant_bench.yaml"
-)
-MODEL_PATH = os.environ.get("BENCH_MODEL", "google/gemma-4-E4B-it")
-ENV_NAME = os.environ.get("BENCH_ENV", "game:Sudoku-v0-hard")
+CONFIG_PATH = "configs/training/llm_finetuning/cispo_quant_bench.yaml"
+MODEL_PATH = "google/gemma-4-E4B-it"
+ENV_NAME = "game:Sudoku-v0-hard"
 
 ALGO_REGISTRY = {
     "LLMPPO": LLMPPO,

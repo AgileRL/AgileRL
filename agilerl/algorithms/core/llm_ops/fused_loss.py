@@ -706,7 +706,7 @@ def apply_fused_policy_loss(
     )
 
 
-class _LigerDPOWithAlpha(LigerFusedLinearPreferenceBase):
+class LigerDPOWithAlpha(LigerFusedLinearPreferenceBase):
     """Thin wrapper that exposes ``alpha`` for NLL scaling.
 
     ``LigerFusedLinearDPOFunction`` passes ``compute_nll_loss`` as a bool

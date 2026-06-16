@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 from agilerl import HAS_LIGER_KERNEL
 from agilerl.algorithms.core.base import LLMAlgorithm
@@ -89,11 +88,20 @@ class SFT(LLMAlgorithm):
     :param gradient_checkpointing: Use gradient checkpointing to trade compute for
         memory, defaults to True
     :type gradient_checkpointing: bool, optional
-    :param use_liger_loss: Use Liger kernel for memory-efficient cross-entropy loss
-        computation. Defaults to ``False``. Pass ``True`` to opt in
-        (requires ``liger-kernel`` to be installed; warns and falls back
-        to ``False`` otherwise).
+    :param use_liger_loss: Use the Liger fused-linear cross-entropy kernel,
+        defaults to ``False`` (requires ``liger-kernel``; warns and falls back
+        otherwise). Both this and the standard path are memory-bounded — the
+        full ``(B, L, V)`` logits are never materialized — so this is mainly a
+        speed/kernel choice. The Liger kernel auto-sizes its own chunk; the
+        standard path's chunk is set by ``fused_logprobs_chunk_rows``.
     :type use_liger_loss: bool, optional
+    :param fused_logprobs_chunk_rows: Standard-path (non-Liger) only. Rows
+        (tokens) per ``(chunk_rows, vocab)`` logit tile when computing the loss
+        from token-chunked fused-linear logprobs. Peak logits memory is
+        ``O(chunk_rows * vocab)`` regardless of batch/sequence length, so this
+        tunes peak memory by token budget. ``None`` (default) auto-tunes to a
+        ~256 MB fp32 tile. Ignored on the Liger path (it auto-sizes internally).
+    :type fused_logprobs_chunk_rows: int | None, optional
     :param use_separate_reference_adapter: Also create a ``reference`` LoRA adapter
         alongside ``actor``. SFT does not itself use a reference policy, so this
         defaults to ``False``; enable it when you plan to save an SFT checkpoint
@@ -125,6 +133,7 @@ class SFT(LLMAlgorithm):
         seed: int = 42,
         gradient_checkpointing: bool = True,
         use_liger_loss: bool = False,
+        fused_logprobs_chunk_rows: int | None = None,
         reduce_memory_peak: bool = False,
         use_separate_reference_adapter: bool = False,
         quantization_config: BitsAndBytesConfig | None = None,
@@ -153,6 +162,7 @@ class SFT(LLMAlgorithm):
             pad_token_id=pad_token_id,
             pad_token=pad_token,
             use_liger_loss=use_liger_loss,
+            fused_logprobs_chunk_rows=fused_logprobs_chunk_rows,
             lora_config=lora_config,
             use_separate_reference_adapter=use_separate_reference_adapter,
             model_name=model_name,
@@ -174,15 +184,6 @@ class SFT(LLMAlgorithm):
         self.temperature = 0
         self.use_vllm = False
         self.update_epochs = update_epochs
-
-        self.loss_fn = (
-            # Fused-linear (chunked) CE: takes hidden states + the lm_head
-            # weight and computes the loss in bounded (chunk, V) tiles — the
-            # full [B*L, V] logits tensor is never materialized.
-            LigerFusedLinearCrossEntropyLoss(ignore_index=-100)
-            if self.use_liger_loss
-            else F.cross_entropy
-        )
 
         self._initialize_actors(actor_network, not clone)
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
@@ -308,28 +309,40 @@ class SFT(LLMAlgorithm):
             "use_cache": False,
         }
         if self.calc_position_embeddings:
-            position_ids = attention_mask.long().cumsum(-1) - 1
-            position_ids.masked_fill_(attention_mask == 0, 1)
-            model_kwargs["position_ids"] = position_ids
+            model_kwargs["position_ids"] = self._position_ids_from_mask(attention_mask)
 
-        flat_labels = labels.view(-1)
+        # Run the transformer with the lm_head patched to identity so
+        # ``.logits`` is the final hidden state, then compute the loss from the
+        # hidden states + lm_head weight without ever materializing the full logits tensor.
+        with self._patch_lm_head_to_identity():
+            hidden = self.actor.forward(**model_kwargs).logits  # [B, L, H]
+        shift_hidden = hidden[:, :-1, :].contiguous()  # [B, L-1, H]
+
         if self.use_liger_loss:
-            # Memory-bounded Liger path: run the transformer with the lm_head
-            # patched to identity so ``.logits`` is the final hidden state,
-            # then hand hidden states + lm_head weight to the fused-linear CE
-            # kernel (loss computed in bounded chunks, logits never built).
-            with self._patch_lm_head_to_identity():
-                hidden = self.actor.forward(**model_kwargs).logits  # [B, L, H]
-            shift_hidden = hidden[:, :-1, :].contiguous()  # [B, L-1, H]
+            # Liger fused-linear CE: loss computed in bounded ``(chunk, V)`` tiles.
             flat_hidden = shift_hidden.view(-1, shift_hidden.size(-1))
             lm_head = self._get_lm_head()
-            return self.loss_fn(lm_head.weight, flat_hidden, flat_labels, lm_head.bias)
+            loss = LigerFusedLinearCrossEntropyLoss(ignore_index=-100)(
+                lm_head.weight, flat_hidden, labels.view(-1), lm_head.bias
+            )
 
-        logits = self.actor.forward(**model_kwargs).logits  # [B, L, V]
-        # Shift: predict token i+1 from hidden state i
-        shift_logits = logits[:, :-1, :].contiguous()  # [B, L-1, V]
-        flat_logits = shift_logits.view(-1, shift_logits.size(-1))
-        return self.loss_fn(flat_logits, flat_labels)
+        else:
+            # Standard path, also token-chunked: per-token target logprobs via the
+            # fused-linear-logprob kernel (bounded to ``(chunk_rows, V)``)
+            fused_fn, lm_head_weight, lm_head_bias = self._fused_logprob_fn_and_head()
+            ignore = labels == -100
+            logps = fused_fn(
+                shift_hidden,
+                lm_head_weight,
+                lm_head_bias,
+                labels.masked_fill(ignore, 0),  # safe gather index; masked out below
+                temperature=1.0,
+                cast_to_fp32=self.cast_logprobs_to_fp32,
+                _chunk_rows=self.fused_logprobs_chunk_rows,
+            )  # [B, L-1]
+            token_mask = (~ignore).to(logps.dtype)
+            loss = -(logps * token_mask).sum() / token_mask.sum().clamp_min(1.0)
+        return loss
 
     def test(
         self,

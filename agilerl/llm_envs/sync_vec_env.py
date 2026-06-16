@@ -15,15 +15,30 @@ if TYPE_CHECKING:
 
 @dataclass
 class Trajectory:
-    """State for one environment rollout within a synchronized vector batch."""
+    """State for one environment rollout within a synchronized vector batch.
+
+    :param env: The multi-turn environment this trajectory steps.
+    :type env: MultiTurnEnv
+    :param batch_idx: Index of the logical batch item this trajectory belongs to.
+    :type batch_idx: int
+    :param group_idx: Index of this trajectory within its group (the buffer holds
+        ``batch_size * group_size`` trajectories laid out group-contiguous).
+    :type group_idx: int
+    :param prompt: The current prompt the environment is rolling out.
+    :type prompt: ReasoningPrompts
+    :param done: Whether this rollout has terminated.
+    :type done: bool
+    :param sampling_logps: Per-token sampling logprobs from the vLLM rollout, one
+        1-D tensor per turn; ``get_trajectories`` concatenates them across turns.
+        Defaults to an empty list.
+    :type sampling_logps: list[torch.Tensor]
+    """
 
     env: MultiTurnEnv
     batch_idx: int
     group_idx: int
     prompt: ReasoningPrompts
     done: bool
-    # Sampling logprobs from vLLM rollout, one 1-D tensor per turn;
-    # ``get_trajectories`` concatenates across turns.
     sampling_logps: list[torch.Tensor] = field(default_factory=list)
 
 

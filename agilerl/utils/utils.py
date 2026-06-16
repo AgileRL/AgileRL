@@ -11,12 +11,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import tqdm
+import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
-import wandb
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import (
     CQN,
@@ -1035,7 +1035,7 @@ def create_population(
                 turn_ratio_pooling=INIT_HP.get("TURN_RATIO_POOLING", "sum"),
                 turn_level_clip=INIT_HP.get("TURN_LEVEL_CLIP", True),
                 turn_value_reduction=INIT_HP.get("TURN_VALUE_REDUCTION", "final_value"),
-                adv_whitening=INIT_HP.get("ADV_WHITENING", True),
+                whiten_advantages=INIT_HP.get("WHITEN_ADVANTAGES", True),
                 lr_actor=INIT_HP.get("LR_ACTOR", INIT_HP.get("LR", 5e-6)),
                 lr_critic=INIT_HP.get("LR_CRITIC"),
                 max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 1.0),

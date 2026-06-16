@@ -140,7 +140,7 @@ if TYPE_CHECKING or HAS_DEEPSPEED:
     from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 
 if TYPE_CHECKING or HAS_VLLM:
-    from vllm import LLM, SamplingParams
+    from vllm import LLM, CompletionOutput, SamplingParams
 
     from agilerl.algorithms.core.llm_ops.fused_lora import (
         BASE_ADAPTER_NAME,
@@ -1993,7 +1993,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         return group_outputs
 
 
-def _vllm_sampled_token_logprobs(output: Any) -> list[float]:
+def _vllm_sampled_token_logprobs(output: CompletionOutput) -> list[float]:
     """Per-token logprob of the *sampled* token from a vLLM ``CompletionOutput``.
 
     With ``SamplingParams(logprobs=0)`` vLLM returns, per generated position, a
@@ -2002,7 +2002,7 @@ def _vllm_sampled_token_logprobs(output: Any) -> list[float]:
     token, since the correction multiplies the loss by ``exp(old - sampling)``).
 
     :param output: A vLLM ``CompletionOutput`` (``token_ids`` + ``logprobs``).
-    :type output: Any
+    :type output: CompletionOutput
     :return: One sampled-token logprob per generated token.
     :rtype: list[float]
     """
@@ -2364,7 +2364,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         # rollout (use_memory_efficient_params) so the two never coexist on the
         # GPU. Only LoRA adapters are synced to vLLM per rollout. The in-process
         # external_launcher engine is single-GPU, so tensor parallelism is not
-        # available when colocated (use a non-colocated / async rollout for TP).
+        # yet available when colocated (use a non-colocated / async rollout for
+        # TP today). NOTE: colocated tensor-parallel support is planned.
         if self.use_vllm and self.vllm_config is not None:
             tp = getattr(self.vllm_config, "tensor_parallel_size", 1)
             if tp != 1:
@@ -2372,7 +2373,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     "Colocated vLLM requires tensor_parallel_size==1 (the "
                     f"in-process external_launcher engine is single-GPU), got "
                     f"{tp}. Use a non-colocated / async rollout for "
-                    "tensor-parallel generation."
+                    "tensor-parallel generation (colocated TP support is planned)."
                 )
                 raise ValueError(msg)
         self.rng = np.random.RandomState(seed)
@@ -2711,6 +2712,32 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         if "critic" in self.selected_adapters and overwrite_critic_adapter:
             # Always overwrite the critic
             self._copy_adapter_weights(source_adapter="actor", target_adapter="critic")
+
+        # The value head (PPO's ``v_head`` Linear) is a non-LoRA module saved
+        # alongside the adapters; the adapter load above never touches it.
+        if self.use_value_head:
+            self._restore_value_head(path)
+
+    def _restore_value_head(self, path: str) -> None:
+        """Restore the ``v_head`` weights saved next to the LoRA adapters.
+
+        ``AutoModelForCausalLMWithValueHead.save_pretrained`` writes the value
+        head into ``pytorch_model.bin`` (the ``v_head.*`` keys of its combined
+        state dict), but the LoRA-adapter load path never reads it back, so the
+        value head would otherwise stay at its fresh init after
+        :meth:`load_checkpoint`. Mirrors what ``from_pretrained`` does on
+        construction (``post_init``), for the load-into-existing-agent path.
+
+        :param path: Checkpoint directory written by :meth:`save_checkpoint`.
+        :type path: str
+        """
+        wrapper = self._get_unwrapped_actor()
+        loader = getattr(type(wrapper), "_maybe_load_resume_state_dict", None)
+        if loader is None or not hasattr(wrapper, "post_init"):
+            return
+        resume_sd = loader(path)
+        if resume_sd is not None and any(k.startswith("v_head.") for k in resume_sd):
+            wrapper.post_init(resume_sd)
 
     def _restore_checkpoint_attributes(self, checkpoint: dict[str, Any]) -> None:
         """Restore algorithm attributes from payload.
@@ -5566,8 +5593,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             return
         unwrapped_model = self._get_unwrapped_actor()
         move_params_to_gpu(unwrapped_model, self.device)
-        yield
-        move_params_to_cpu(unwrapped_model)
+        try:
+            yield
+        finally:
+            # Always move the base back on CPU on error
+            move_params_to_cpu(unwrapped_model)
 
     def _prepare_vllm_for_training(self) -> None:
         """Prepare vLLM for learning."""

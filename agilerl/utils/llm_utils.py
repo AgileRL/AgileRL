@@ -39,9 +39,7 @@ _DEPRECATED_LLM_ENV_NAMES = frozenset(
     ("apply_chat_template", "ReasoningGym", "PreferenceGym", "SFTGym"),
 )
 
-#: Named bitsandbytes quantization presets usable from YAML / ``INIT_HP``.
-#: ``"nf4"`` matches the QLoRA recipe (4-bit NF4, bf16 compute, double quant)
-#: with bf16 quant storage so DeepSpeed ZeRO-3 can shard the packed weights.
+# Named bitsandbytes quantization presets
 _BNB_QUANT_PRESETS = frozenset({"none", "int8", "nf4"})
 
 # Gemma 4 wraps projections in *ClippableLinear; PEFT must target the inner ``.linear``

@@ -38,9 +38,9 @@ to force the eager path.
 
 The chunk size (``chunk_rows`` of the flattened ``(B*T)`` workspace) is
 **vocab-aware**: it is sized so one fp32 ``(chunk_rows, V)`` slab stays near a
-fixed byte budget (large-vocab models get fewer rows per chunk, small-vocab
-models more). Override it with the ``fused_logprobs_chunk_rows`` constructor
-argument.
+fixed byte budget (~256 MB by default; large-vocab models get fewer rows per
+chunk, small-vocab models more). Override it with the
+``fused_logprobs_chunk_rows`` constructor argument.
 
 The Liger loss
 --------------

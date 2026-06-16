@@ -171,9 +171,9 @@ class PPO(LLMAlgorithm):
         turn values. ``"mean"`` reproduces existing behavior, ``"final_value"``
         uses the final action token value in each turn.
     :type turn_value_reduction: str, optional
-    :param adv_whitening: Whether to whiten computed advantages before PPO
+    :param whiten_advantages: Whether to whiten computed advantages before PPO
         optimization.
-    :type adv_whitening: bool, optional
+    :type whiten_advantages: bool, optional
     :param gradient_checkpointing: Enable gradient checkpointing.
     :type gradient_checkpointing: bool, optional
     :param torch_compiler: Optional torch compile mode.
@@ -249,7 +249,7 @@ class PPO(LLMAlgorithm):
         turn_ratio_pooling: Literal["sum", "mean"] = "sum",
         action_granularity: Literal["turn", "token", "auto"] | None = None,
         turn_value_reduction: Literal["mean", "final_value"] = "final_value",
-        adv_whitening: bool = True,
+        whiten_advantages: bool = True,
         gradient_checkpointing: bool = True,
         torch_compiler: str | None = None,
         reduce_memory_peak: bool = False,
@@ -309,125 +309,37 @@ class PPO(LLMAlgorithm):
             vllm_importance_sampling_correction=vllm_importance_sampling_correction,
             vllm_importance_sampling_cap=vllm_importance_sampling_cap,
         )
-        assert isinstance(batch_size, int), "Batch size must be an integer."
-        assert batch_size >= 1, "Batch size must be greater than or equal to one."
-        assert isinstance(lr_actor, float), "Actor learning rate must be a float."
-        assert lr_actor > 0, "Actor learning rate must be greater than zero."
-        assert isinstance(clip_coef, (float, int)), (
-            "Clipping coefficient must be a float."
+        self._validate_core_args(
+            batch_size, lr_actor, clip_coef, update_epochs, actor_network, clone
         )
-        assert clip_coef >= 0, (
-            "Clipping coefficient must be greater than or equal to zero."
-        )
-        assert isinstance(update_epochs, int), (
-            "Policy update epochs must be an integer."
-        )
-        assert update_epochs >= 1, (
-            "Policy update epochs must be greater than or equal to one."
-        )
-        valid_action_granularities = {"turn", "token", "auto"}
-        if action_granularity is not None:
-            warnings.warn(
-                "action_granularity is deprecated; use advantage_granularity.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            advantage_granularity = action_granularity
-        if advantage_granularity not in valid_action_granularities:
-            msg = (
-                "advantage_granularity must be one of "
-                f"{sorted(valid_action_granularities)}."
-            )
-            raise ValueError(msg)
-        if clone and actor_network is not None:
-            assert isinstance(
-                actor_network,
-                (PeftModelProtocol, PreTrainedModelProtocol),
-            ), "Actor network must be a PeftModelProtocol or PreTrainedModelProtocol"
-        if max_output_tokens is None and max_model_len is None:
-            msg = "Either max_output_tokens or max_model_len must be specified"
-            raise ValueError(
-                msg,
-            )
-
-        validate_importance_sampling_level(importance_sampling_level, allow_auto=True)
-        if turn_ratio_pooling not in {"sum", "mean"}:
-            msg = "turn_ratio_pooling must be one of ['mean', 'sum']."
-            raise ValueError(msg)
         self.beta = beta
         self.vf_coef = vf_coef
         self.clip_coef = clip_coef
-        self.turn_level_clip = turn_level_clip
-        # IS / ratio-pooling level for the policy surrogate, orthogonal to the
-        # GAE advantage granularity (``advantage_granularity``/``ppo_granularity``).
-        # ``"auto"`` preserves legacy behavior: turn-level when the batch is
-        # multi-turn and ``turn_level_clip`` is set, else token-level. Explicit
-        # ``token``/``turn``/``trajectory`` override.
-        self.importance_sampling_level = importance_sampling_level
-        self.advantage_granularity = advantage_granularity
-        # Turn-level ratio pooling reduction (sum=product ratio, mean=geometric
-        # mean ratio) used by both the standard and Liger PPO policy losses.
-        self.turn_ratio_pooling = turn_ratio_pooling
-        # Warn once that Liger + an explicit non-token IS level is permitted
-        # but not memory-bounded ("auto" is covered at loss time instead).
-        if self.use_liger_loss and self.importance_sampling_level in {
-            "turn",
-            "trajectory",
-        }:
-            self._warn_liger_non_token_is(
-                self.importance_sampling_level,
-                "PPO",
-                once_attr="_ppo_liger_mem_warned",
-            )
-        valid_turn_value_reductions = {"mean", "final_value"}
-        if turn_value_reduction not in valid_turn_value_reductions:
-            msg = (
-                "turn_value_reduction must be one of "
-                f"{sorted(valid_turn_value_reductions)}."
-            )
-            raise ValueError(msg)
-        if not isinstance(adv_whitening, bool):
-            msg = "adv_whitening must be a boolean."
-            raise TypeError(msg)
-        self.turn_value_reduction = turn_value_reduction
-        self.adv_whitening = adv_whitening
-        self.gamma = gamma
-        self.gae_lambda = gae_lambda
+        # Expose lr_actor explicitly (base stores it as ``self.lr``): the split
+        # LLM optimizer's lr_name is ``("lr_actor", "lr_critic")``, and the
+        # clone/checkpoint init_dict captures attributes by constructor-param
+        # name — both look up ``self.lr_actor``.
+        self.lr_actor = lr_actor
+        self.lr_critic = lr_critic if lr_critic is not None else lr_actor
         self.update_epochs = update_epochs
         self.temperature = temperature
         self.repetition_penalty = repetition_penalty
         self.top_p = top_p
         self.top_k = top_k
         self.min_p = min_p
-        self.max_output_tokens = max_output_tokens
-        self.min_output_tokens = min_output_tokens
-        self.max_model_len = (
-            max_model_len if max_model_len is not None else max_output_tokens
+        self._setup_advantage_options(
+            turn_level_clip,
+            advantage_granularity,
+            action_granularity,
+            turn_value_reduction,
+            whiten_advantages,
+            gamma,
+            gae_lambda,
         )
-        validate_llm_context_lengths(self.max_model_len, self.max_output_tokens)
-        self.hf_generate_chunk_size = int(
-            1 if hf_generate_chunk_size is None else max(1, hf_generate_chunk_size)
+        self._setup_objective(importance_sampling_level, turn_ratio_pooling)
+        self._setup_generation(
+            max_output_tokens, min_output_tokens, max_model_len, hf_generate_chunk_size
         )
-        if self.use_vllm and hf_generate_chunk_size is not None:
-            warnings.warn(
-                "hf_generate_chunk_size is only used for HuggingFace generation "
-                "(use_vllm=False) and will be ignored when use_vllm=True.",
-                stacklevel=2,
-            )
-        self.generation_config = GenerationConfig(
-            do_sample=True,
-            temperature=temperature,
-            max_length=self.max_model_len,
-            max_new_tokens=max_output_tokens,
-            min_new_tokens=min_output_tokens,
-            pad_token_id=pad_token_id,
-            repetition_penalty=repetition_penalty,
-            top_p=top_p,
-            top_k=top_k,
-            min_p=min_p,
-        )
-
-        self.lr_critic = lr_critic if lr_critic is not None else lr_actor
         self._setup_actors(actor_network, clone=clone)
 
         # Register network groups for mutations
@@ -817,6 +729,220 @@ class PPO(LLMAlgorithm):
         result.update(is_metrics)
         return result
 
+    def test(
+        self,
+        env: ReasoningGym | MultiTurnEnv,
+        loop: int = 1,
+    ) -> torch.Tensor:
+        """Return fitness (test) score tensor of llm on test sub-set.
+
+        ``ReasoningGym`` (and compatible dataset envs): ``reset`` returns a batch
+        of prompt dicts; each ``step`` accepts completion id tensors and returns
+        the next batch plus rewards. ``loop`` iterations advance the test
+        dataloader that many times.
+
+        :param env: A :class:`~agilerl.utils.llm_utils.ReasoningGym` or
+            :class:`~agilerl.llm_envs.TokenObservationWrapper`.
+        :type env: ReasoningGym | MultiTurnEnv
+        :param loop: Number of outer test iterations (dataloader passes or episodes).
+        :type loop: int
+        :return: Concatenated per-step rewards from the test loop.
+        :rtype: torch.Tensor
+        """
+        eval_context = getattr(env, "eval_mode", nullcontext)
+        with eval_context():
+            if isinstance(env, ReasoningGym):
+                prompts = env.reset()
+                rewards = []
+                for _ in range(loop):
+                    completion_ids = self.get_action(
+                        prompts, training=False
+                    ).completion_ids
+                    next_prompts, reward = env.step(completion_ids)
+                    prompts = next_prompts
+                    rewards.append(reward)
+                reward_tensor = torch.cat(rewards)
+            elif isinstance(env, MultiTurnEnv):
+                all_rewards: list[torch.Tensor] = []
+                for _ in range(loop):
+                    prompt_dict, _info = env.reset()
+                    terminated, truncated = False, False
+
+                    while not terminated and not truncated:
+                        completion_ids = self.get_action(
+                            [prompt_dict],
+                            training=False,
+                        ).completion_ids
+                        full = completion_ids[0]
+                        prompt_dict, reward, terminated, truncated, _step_info = (
+                            env.step(
+                                full,
+                            )
+                        )
+                        all_rewards.append(
+                            torch.tensor(
+                                [float(reward)],
+                                dtype=torch.float32,
+                                device=full.device,
+                            ),
+                        )
+                reward_tensor = torch.cat(all_rewards)
+            else:
+                msg = (
+                    "env must be a ReasoningGym (or subclass) or "
+                    f"MultiTurnEnv; got {type(env).__name__}"
+                )
+                raise TypeError(msg)
+        mean_fit = torch.mean(reward_tensor.float()).item()
+        self.fitness.append(mean_fit)
+        return np.array(mean_fit)
+
+    def _validate_core_args(
+        self,
+        batch_size: int,
+        lr: float,
+        clip_coef: float,
+        update_epochs: int,
+        actor_network: Any | None,
+        clone: bool,
+    ) -> None:
+        """Validate the core training arguments."""
+        assert isinstance(batch_size, int), "Batch size must be an integer."
+        assert batch_size >= 1, "Batch size must be greater than or equal to one."
+        assert isinstance(lr, float), "Actor learning rate must be a float."
+        assert lr > 0, "Actor learning rate must be greater than zero."
+        assert isinstance(clip_coef, (float, int)), (
+            "Clipping coefficient must be a float."
+        )
+        assert clip_coef >= 0, (
+            "Clipping coefficient must be greater than or equal to zero."
+        )
+        assert isinstance(update_epochs, int), (
+            "Policy update epochs must be an integer."
+        )
+        assert update_epochs >= 1, (
+            "Policy update epochs must be greater than or equal to one."
+        )
+        if clone and actor_network is not None:
+            assert isinstance(
+                actor_network,
+                (PeftModelProtocol, PreTrainedModelProtocol),
+            ), "Actor network must be a PeftModelProtocol or PreTrainedModelProtocol"
+
+    def _setup_advantage_options(
+        self,
+        turn_level_clip: bool,
+        advantage_granularity: str,
+        action_granularity: str | None,
+        turn_value_reduction: str,
+        whiten_advantages: bool,
+        gamma: float,
+        gae_lambda: float,
+    ) -> None:
+        """Validate and store the GAE advantage options."""
+        valid_action_granularities = {"turn", "token", "auto"}
+        if action_granularity is not None:
+            warnings.warn(
+                "action_granularity is deprecated; use advantage_granularity.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+            advantage_granularity = action_granularity
+        if advantage_granularity not in valid_action_granularities:
+            msg = (
+                "advantage_granularity must be one of "
+                f"{sorted(valid_action_granularities)}."
+            )
+            raise ValueError(msg)
+        valid_turn_value_reductions = {"mean", "final_value"}
+        if turn_value_reduction not in valid_turn_value_reductions:
+            msg = (
+                "turn_value_reduction must be one of "
+                f"{sorted(valid_turn_value_reductions)}."
+            )
+            raise ValueError(msg)
+        if not isinstance(whiten_advantages, bool):
+            msg = "whiten_advantages must be a boolean."
+            raise TypeError(msg)
+        self.turn_level_clip = turn_level_clip
+        self.advantage_granularity = advantage_granularity
+        self.turn_value_reduction = turn_value_reduction
+        self.whiten_advantages = whiten_advantages
+        self.gamma = gamma
+        self.gae_lambda = gae_lambda
+
+    def _setup_objective(
+        self,
+        importance_sampling_level: str,
+        turn_ratio_pooling: str,
+    ) -> None:
+        """Validate and resolve the importance-sampling level and Liger routing."""
+        validate_importance_sampling_level(importance_sampling_level, allow_auto=True)
+        if turn_ratio_pooling not in {"sum", "mean"}:
+            msg = "turn_ratio_pooling must be one of ['mean', 'sum']."
+            raise ValueError(msg)
+        # IS / ratio-pooling level for the policy surrogate, orthogonal to the
+        # GAE advantage granularity. ``"auto"`` preserves legacy behavior:
+        # turn-level when the batch is multi-turn and ``turn_level_clip`` is set,
+        # else token-level. Explicit ``token``/``turn``/``trajectory`` override
+        # (length-normalized mean pooling, consistent with GRPO/GSPO).
+        self.importance_sampling_level = importance_sampling_level
+        # Turn-level ratio pooling reduction (sum=product ratio, mean=geometric
+        # mean ratio) used by both the standard and Liger PPO policy losses.
+        self.turn_ratio_pooling = turn_ratio_pooling
+        # Warn once that Liger + an explicit non-token IS level is permitted
+        # but not memory-bounded ("auto" is covered at loss time instead).
+        if self.use_liger_loss and self.importance_sampling_level in {
+            "turn",
+            "trajectory",
+        }:
+            self._warn_liger_non_token_is(
+                self.importance_sampling_level,
+                "PPO",
+                once_attr="_ppo_liger_mem_warned",
+            )
+
+    def _setup_generation(
+        self,
+        max_output_tokens: int | None,
+        min_output_tokens: int | None,
+        max_model_len: int | None,
+        hf_generate_chunk_size: int | None,
+    ) -> None:
+        """Validate context lengths and build the HF generation config."""
+        if max_output_tokens is None and max_model_len is None:
+            msg = "Either max_output_tokens or max_model_len must be specified"
+            raise ValueError(msg)
+        self.max_output_tokens = (
+            max_output_tokens if max_output_tokens is not None else max_model_len
+        )
+        self.min_output_tokens = min_output_tokens
+        self.max_model_len = (
+            max_model_len if max_model_len is not None else max_output_tokens
+        )
+        validate_llm_context_lengths(self.max_model_len, max_output_tokens)
+        self.hf_generate_chunk_size = int(
+            1 if hf_generate_chunk_size is None else max(1, hf_generate_chunk_size)
+        )
+        if self.use_vllm and hf_generate_chunk_size is not None:
+            warnings.warn(
+                "hf_generate_chunk_size is only used for HuggingFace generation "
+                "(use_vllm=False) and will be ignored when use_vllm=True.",
+                stacklevel=3,
+            )
+        self.generation_config = GenerationConfig(
+            do_sample=True,
+            temperature=self.temperature,
+            max_length=self.max_model_len,
+            max_new_tokens=max_output_tokens,
+            min_new_tokens=min_output_tokens,
+            pad_token_id=self.pad_token_id,
+            repetition_penalty=self.repetition_penalty,
+            top_p=self.top_p,
+            top_k=self.top_k,
+            min_p=self.min_p,
+        )
+
     def _resolve_advantage_granularity(self, turn_ids: torch.Tensor) -> str:
         """Resolve effective PPO granularity for the current batch.
 
@@ -894,74 +1020,6 @@ class PPO(LLMAlgorithm):
             turn_reduction=self.turn_ratio_pooling,
         )
 
-    def test(
-        self,
-        env: ReasoningGym | MultiTurnEnv,
-        loop: int = 1,
-    ) -> torch.Tensor:
-        """Return fitness (test) score tensor of llm on test sub-set.
-
-        ``ReasoningGym`` (and compatible dataset envs): ``reset`` returns a batch
-        of prompt dicts; each ``step`` accepts completion id tensors and returns
-        the next batch plus rewards. ``loop`` iterations advance the test
-        dataloader that many times.
-
-        :param env: A :class:`~agilerl.utils.llm_utils.ReasoningGym` or
-            :class:`~agilerl.llm_envs.TokenObservationWrapper`.
-        :type env: ReasoningGym | MultiTurnEnv
-        :param loop: Number of outer test iterations (dataloader passes or episodes).
-        :type loop: int
-        :return: Concatenated per-step rewards from the test loop.
-        :rtype: torch.Tensor
-        """
-        eval_context = getattr(env, "eval_mode", nullcontext)
-        with eval_context():
-            if isinstance(env, ReasoningGym):
-                prompts = env.reset()
-                rewards = []
-                for _ in range(loop):
-                    completion_ids = self.get_action(
-                        prompts, training=False
-                    ).completion_ids
-                    next_prompts, reward = env.step(completion_ids)
-                    prompts = next_prompts
-                    rewards.append(reward)
-                reward_tensor = torch.cat(rewards)
-            elif isinstance(env, MultiTurnEnv):
-                all_rewards: list[torch.Tensor] = []
-                for _ in range(loop):
-                    prompt_dict, _info = env.reset()
-                    terminated, truncated = False, False
-
-                    while not terminated and not truncated:
-                        completion_ids = self.get_action(
-                            [prompt_dict],
-                            training=False,
-                        ).completion_ids
-                        full = completion_ids[0]
-                        prompt_dict, reward, terminated, truncated, _step_info = (
-                            env.step(
-                                full,
-                            )
-                        )
-                        all_rewards.append(
-                            torch.tensor(
-                                [float(reward)],
-                                dtype=torch.float32,
-                                device=full.device,
-                            ),
-                        )
-                reward_tensor = torch.cat(all_rewards)
-            else:
-                msg = (
-                    "env must be a ReasoningGym (or subclass) or "
-                    f"MultiTurnEnv; got {type(env).__name__}"
-                )
-                raise TypeError(msg)
-        mean_fit = torch.mean(reward_tensor.float()).item()
-        self.fitness.append(mean_fit)
-        return np.array(mean_fit)
-
     def _compute_gae_returns(
         self,
         rewards: torch.Tensor,
@@ -1022,7 +1080,7 @@ class PPO(LLMAlgorithm):
 
         turn_index = torch.arange(num_turns, device=turn_ids.device).view(1, 1, -1)
         turn_mask = (turn_ids.unsqueeze(-1) == turn_index).any(dim=1).float()
-        if self.adv_whitening:
+        if self.whiten_advantages:
             turn_advantages_for_pg = masked_whiten(turn_advantages, turn_mask)
         else:
             turn_advantages_for_pg = turn_advantages
@@ -1072,7 +1130,7 @@ class PPO(LLMAlgorithm):
             token_advantages[:, t] = last_gae * mask[:, t]
 
         token_returns = (token_advantages + values) * mask
-        if self.adv_whitening:
+        if self.whiten_advantages:
             token_advantages = masked_whiten(token_advantages, action_mask)
         return token_returns, token_advantages * mask
 
@@ -1145,9 +1203,7 @@ class PPO(LLMAlgorithm):
             "use_cache": False,
         }
         if self.calc_position_embeddings:
-            position_ids = attention_mask.long().cumsum(-1) - 1
-            position_ids.masked_fill_(attention_mask == 0, 1)
-            kwargs["position_ids"] = position_ids
+            kwargs["position_ids"] = self._position_ids_from_mask(attention_mask)
 
         # Resolve the IS / ratio-pooling level and pool advantages to match.
         is_level = self._resolve_is_level(ppo_granularity)
