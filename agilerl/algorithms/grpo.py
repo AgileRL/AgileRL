@@ -551,8 +551,11 @@ class GRPO(LLMAlgorithm):
                     batch_size,
                 )
 
-            is_turn_ids, sampling_log_probs, is_metrics = self._calculate_is_inputs(
-                turn_ids, sampling_logps, action_masks, old_log_probs
+            is_turn_ids = turn_ids if self.importance_sampling_level == "turn" else None
+            sampling_log_probs, is_metrics = (
+                self._aligned_sampling_logprobs_and_metrics(
+                    sampling_logps, action_masks, old_log_probs
+                )
             )
 
             effective_num_samples = len(batch_idxs)
@@ -930,24 +933,6 @@ class GRPO(LLMAlgorithm):
         if active_adv_mask is None:
             return advantages, np.arange(num_samples)
         return advantages, np.where(active_adv_mask.detach().cpu().numpy())[0]
-
-    def _calculate_is_inputs(
-        self,
-        turn_ids: torch.Tensor | None,
-        sampling_logps: list[torch.Tensor | None] | None,
-        action_masks: torch.Tensor,
-        old_log_probs: torch.Tensor,
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None, dict[str, float]]:
-        """Importance-sampling inputs for the update.
-
-        Returns the turn ids (only when ratios pool per turn), the aligned vLLM
-        sampling logprobs for the mismatch correction, and its batch metrics.
-        """
-        is_turn_ids = turn_ids if self.importance_sampling_level == "turn" else None
-        sampling_log_probs, is_metrics = self._aligned_sampling_logprobs_and_metrics(
-            sampling_logps, action_masks, old_log_probs
-        )
-        return is_turn_ids, sampling_log_probs, is_metrics
 
     def _assert_batch_divisible_by_group(self, num_samples: int) -> None:
         """Require the trajectory batch to split evenly into GRPO groups.
