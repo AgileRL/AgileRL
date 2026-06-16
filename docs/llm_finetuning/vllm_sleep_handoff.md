@@ -23,9 +23,10 @@ them back to the same device addresses. Crucially this now restores a
 
 Earlier vLLM could not do this for bnb: `level=1` didn't usefully reclaim the
 GPU and `level=2` re-quantized the bnb base into garbage on wake, so colocated
-QLoRA was not possible. Both are fixed in ≥ 0.22 (verified here with a
-poison-write round-trip repro and an end-to-end colocated CISPO run on vLLM
-0.22.1 and 0.23.0).
+QLoRA was not possible. Both are fixed in ≥ 0.22 (verified here by writing known
+sentinel values into the base weights and confirming they come back unchanged
+after a sleep/wake cycle, plus an end-to-end colocated CISPO run on vLLM 0.22.1
+and 0.23.0).
 
 That single capability is the whole design: **each side keeps its own base** (no
 shared tensors, no manual weight copying), and AgileRL just cycles vLLM's base
