@@ -44,7 +44,7 @@ box2d = [
     "gymnasium[box2d]~=1.0.0; sys_platform != 'win32'",
 ]
 llm = [
-    "datasets==4.4.1",
+    "datasets==5.0.0",
     "deepspeed~=0.17.1; sys_platform != 'win32'",
     "liger-kernel==0.7.0; sys_platform == 'linux'",
     "peft~=0.18.0",
@@ -55,7 +55,7 @@ llm = [
 all = [
     "swig~=4.4.1; sys_platform != 'win32'",
     "gymnasium[box2d]~=1.0.0; sys_platform != 'win32'",
-    "datasets==4.4.1",
+    "datasets==5.0.0",
     "deepspeed~=0.17.1; sys_platform != 'win32'",
     "liger-kernel==0.7.0; sys_platform == 'linux'",
     "peft~=0.18.0",

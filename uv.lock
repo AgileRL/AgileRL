@@ -130,8 +130,8 @@ docs = [
 [package.metadata]
 requires-dist = [
     { name = "accelerate", specifier = "~=1.7.0" },
-    { name = "datasets", marker = "extra == 'all'", specifier = "==4.4.1" },
-    { name = "datasets", marker = "extra == 'llm'", specifier = "==4.4.1" },
+    { name = "datasets", marker = "extra == 'all'", specifier = "==5.0.0" },
+    { name = "datasets", marker = "extra == 'llm'", specifier = "==5.0.0" },
     { name = "deepspeed", marker = "sys_platform != 'win32' and extra == 'all'", specifier = "~=0.17.1" },
     { name = "deepspeed", marker = "sys_platform != 'win32' and extra == 'llm'", specifier = "~=0.17.1" },
     { name = "dill", specifier = "~=0.3.7" },
@@ -1222,7 +1222,7 @@ wheels = [
 
 [[package]]
 name = "datasets"
-version = "4.4.1"
+version = "5.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "dill" },
@@ -1240,9 +1240,9 @@ dependencies = [
     { name = "tqdm" },
     { name = "xxhash" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/93/bf/0dae295d6d1ba0b1a200a9dd216838464b5bbd05da01407cb1330b377445/datasets-4.4.1.tar.gz", hash = "sha256:80322699aa8c0bbbdb7caa87906da689c3c2e29523cff698775c67f28fdab1fc", size = 585341, upload-time = "2025-11-05T16:00:38.162Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d9/85/ce4f780c32f7e36d71257f1c27e8ba898ebe379cb54f211f5f2013f2c219/datasets-5.0.0.tar.gz", hash = "sha256:83dbbbdb07a33b82192b8c419deb18739b138ee2ce1a322d55ce6b100954ec1a", size = 631708, upload-time = "2026-06-05T13:18:26.124Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3b/5e/6f8d874366788ad5d549e9ba258037d974dda6e004843be1bda794571701/datasets-4.4.1-py3-none-any.whl", hash = "sha256:c1163de5211e42546079ab355cc0250c7e6db16eb209ac5ac6252f801f596c44", size = 511591, upload-time = "2025-11-05T16:00:36.365Z" },
+    { url = "https://files.pythonhosted.org/packages/05/66/73034ad30b59f13439b75e620989dacba4c047256e358ba7c2e9ec98ea22/datasets-5.0.0-py3-none-any.whl", hash = "sha256:7dd34927a0fd7046e98aad5cb9430e699c373238a15befa7b9bf22b991a7fee6", size = 555084, upload-time = "2026-06-05T13:18:24.435Z" },
 ]
 
 [[package]]
