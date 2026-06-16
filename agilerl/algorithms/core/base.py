@@ -140,7 +140,7 @@ if TYPE_CHECKING or HAS_DEEPSPEED:
     from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 
 if TYPE_CHECKING or HAS_VLLM:
-    from vllm import LLM, SamplingParams
+    from vllm import LLM, CompletionOutput, SamplingParams
 
     from agilerl.algorithms.core.llm_ops.fused_lora import (
         clear_fused_adapter_routing,
@@ -1992,7 +1992,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         return group_outputs
 
 
-def _vllm_sampled_token_logprobs(output: Any) -> list[float]:
+def _vllm_sampled_token_logprobs(output: CompletionOutput) -> list[float]:
     """Per-token logprob of the *sampled* token from a vLLM ``CompletionOutput``.
 
     With ``SamplingParams(logprobs=0)`` vLLM returns, per generated position, a
@@ -2001,7 +2001,7 @@ def _vllm_sampled_token_logprobs(output: Any) -> list[float]:
     token, since the correction multiplies the loss by ``exp(old - sampling)``).
 
     :param output: A vLLM ``CompletionOutput`` (``token_ids`` + ``logprobs``).
-    :type output: Any
+    :type output: CompletionOutput
     :return: One sampled-token logprob per generated token.
     :rtype: list[float]
     """
