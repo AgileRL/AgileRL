@@ -7,12 +7,7 @@ import numpy as np
 class SegmentTree:
     """Create SegmentTree.
 
-    Backed by a contiguous NumPy array so that whole minibatches of leaves can be
-    read, written and queried in vectorised operations (see :meth:`get_batch`,
-    :meth:`update_batch` and :meth:`SumSegmentTree.retrieve_batch`). The scalar
-    ``__getitem__`` / ``__setitem__`` / :meth:`operate` API is preserved.
-
-    Adapted from the OpenAI baselines github repository:
+    Taken from OpenAI baselines github repository:
     https://github.com/openai/baselines/blob/master/baselines/common/segment_tree.py
 
     :param capacity: Capacity of segment tree
@@ -128,11 +123,7 @@ class SegmentTree:
         return self.tree[self.capacity + np.asarray(indices, dtype=np.intp)]
 
     def update_batch(self, indices: np.ndarray, values: np.ndarray) -> None:
-        """Set many leaves at once, then recompute affected ancestors level by level.
-
-        Equivalent to calling ``__setitem__`` for each ``(index, value)`` pair but
-        without the per-element Python tree climb: each tree level above the leaves
-        is recomputed in a single vectorised reduction over the unique touched nodes.
+        """Set many leaf values at once and update their ancestors.
 
         :param indices: Leaf indices in ``[0, capacity)``.
         :type indices: np.ndarray
@@ -146,9 +137,6 @@ class SegmentTree:
         leaf_pos = self.capacity + indices
         self.tree[leaf_pos] = np.asarray(values, dtype=self.tree.dtype)
 
-        # Walk up to the root (node 1), recomputing each touched internal node
-        # from its two children. Deduplicating keeps overlapping parents to one
-        # reduction per node per level.
         parents = np.unique(leaf_pos >> 1)
         while parents.size and parents[0] >= 1:
             self.tree[parents] = self._reduce(
@@ -208,11 +196,6 @@ class SumSegmentTree(SegmentTree):
 
     def retrieve_batch(self, upperbounds: np.ndarray) -> np.ndarray:
         """Vectorised :meth:`retrieve` for a whole batch of upper bounds.
-
-        All queries descend the tree in lockstep: at each of the ``log2(capacity)``
-        levels every query advances one node, so the cost is ``log2(capacity)``
-        vectorised steps regardless of batch size (vs. ``batch_size`` independent
-        Python descents).
 
         :param upperbounds: Upper bounds for cumulative sum, one per sample.
         :type upperbounds: np.ndarray

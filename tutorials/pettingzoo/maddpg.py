@@ -13,7 +13,7 @@ from tensordict import TensorDictBase
 
 from agilerl.algorithms.maddpg import MADDPG
 from agilerl.components.data import MultiAgentTransition
-from agilerl.components.replay_buffer import MultiAgentReplayBuffer
+from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.population import Population
 from agilerl.utils.utils import (
     default_progress_bar,
@@ -82,7 +82,7 @@ if __name__ == "__main__":
     )
 
     # Configure the multi-agent replay buffer
-    memory = MultiAgentReplayBuffer(
+    memory = ReplayBuffer(
         100_000,
         device=device,
     )

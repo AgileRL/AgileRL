@@ -19,7 +19,7 @@ if TYPE_CHECKING:
         RLAlgorithm,
     )
     from agilerl.algorithms.core.registry import HyperparameterConfig
-    from agilerl.components.replay_buffer import MultiAgentReplayBuffer, ReplayBuffer
+    from agilerl.components.replay_buffer import ReplayBuffer
     from agilerl.models.env import (
         BanditEnvSpec,
         GymEnvSpec,
@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 
     AlgoT = TypeVar("AlgoT", bound="RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm")
     EnvSpecT = GymEnvSpec | PzEnvSpec | OfflineEnvSpec | LLMEnvSpec | BanditEnvSpec
-    ReplayBufferT = ReplayBuffer | MultiAgentReplayBuffer
+    ReplayBufferT = ReplayBuffer
     PopulationT = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
 else:
     HyperparameterConfig = Any

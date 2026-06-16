@@ -13,7 +13,7 @@ from tensordict import TensorDictBase
 from agilerl.algorithms import MATD3
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components.data import MultiAgentTransition
-from agilerl.components.replay_buffer import MultiAgentReplayBuffer
+from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
@@ -93,7 +93,7 @@ if __name__ == "__main__":
     )
 
     # Configure the multi-agent replay buffer
-    memory = MultiAgentReplayBuffer(
+    memory = ReplayBuffer(
         max_size=100_000,
         device=device,
     )

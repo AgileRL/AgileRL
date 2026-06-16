@@ -131,7 +131,7 @@ See function docs: :func:`~agilerl.utils.probe_envs.check_policy_on_policy_with_
 
         import torch
         from agilerl.algorithms.maddpg import MADDPG
-        from agilerl.components.replay_buffer import MultiAgentReplayBuffer
+        from agilerl.components.replay_buffer import ReplayBuffer
         from agilerl.utils.probe_envs_ma import check_policy_q_learning_with_probe_env
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -153,7 +153,7 @@ See function docs: :func:`~agilerl.utils.probe_envs.check_policy_on_policy_with_
                 "net_config": {"head_config": {"hidden_size": [32, 32]}},
                 "batch_size": 256,
             }
-            memory = MultiAgentReplayBuffer(
+            memory = ReplayBuffer(
                 max_size=10_000,
                 device=device,
             )

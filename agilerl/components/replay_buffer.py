@@ -182,26 +182,6 @@ class ReplayBuffer:
         self.initialized = False
 
 
-class MultiAgentReplayBuffer(ReplayBuffer):
-    """A circular multi-agent replay buffer.
-
-    Behaviourally identical to :class:`ReplayBuffer`; it exists as a distinct
-    type so multi-agent algorithms (e.g. MADDPG, MATD3) and
-    :class:`~agilerl.components.sampler.Sampler` can dispatch on it. The nested
-    ``field -> agent_id -> tensor`` (and ``-> sub_td -> tensor`` for dict/tuple
-    observation spaces) layout used by multi-agent transitions is handled
-    transparently by the depth-agnostic :meth:`ReplayBuffer._normalize_dims`,
-    so no override is required.
-
-    :param max_size: Maximum number of transitions to store.
-    :type max_size: int
-    :param device: Device to store transitions on.
-    :type device: str | torch.device
-    :param dtype: Default floating-point dtype.
-    :type dtype: torch.dtype
-    """
-
-
 class MultiStepReplayBuffer(ReplayBuffer):
     """A circular replay buffer for n-step returns in off-policy learning.
 
@@ -477,9 +457,7 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         :param priorities: New priorities
         :type priorities: torch.Tensor
         """
-        # Vectorised: clamp, raise to alpha, and update both trees in a single
-        # batched pass instead of a per-element .item() sync + Python tree climb.
-        # float64 matches the original max(priority.item(), 1e-5) precision.
+        # float64 matches the original max(priority.item(), 1e-5) clamp precision.
         idx_np = torch.as_tensor(indices).flatten().cpu().numpy()
         if idx_np.size == 0:
             return

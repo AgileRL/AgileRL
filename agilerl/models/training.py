@@ -9,19 +9,13 @@ if TYPE_CHECKING:
     import torch
 
     from agilerl.components.replay_buffer import (
-        MultiAgentReplayBuffer,
         MultiStepReplayBuffer,
         PrioritizedReplayBuffer,
         ReplayBuffer,
     )
     from agilerl.models.algo import AlgoSpecT
 
-    BufferT = (
-        ReplayBuffer
-        | MultiStepReplayBuffer
-        | PrioritizedReplayBuffer
-        | MultiAgentReplayBuffer
-    )
+    BufferT = ReplayBuffer | MultiStepReplayBuffer | PrioritizedReplayBuffer
 
 
 class NStepBufferArgs(BaseModel):
@@ -79,7 +73,6 @@ class ReplayBufferSpec(BaseModel):
         # Import lazily to avoid heavy dependencies for Arena manifest validation
         from agilerl import AgentType
         from agilerl.components.replay_buffer import (
-            MultiAgentReplayBuffer,
             MultiStepReplayBuffer,
             PrioritizedReplayBuffer,
             ReplayBuffer,
@@ -111,7 +104,7 @@ class ReplayBufferSpec(BaseModel):
             else:
                 buffer_class = ReplayBuffer
         else:
-            buffer_class = MultiAgentReplayBuffer
+            buffer_class = ReplayBuffer
 
         return buffer_class(
             max_size=self.max_size,
