@@ -1,7 +1,8 @@
+import random
 from collections import deque
 
 import torch
-from tensordict import TensorDict, TensorDictBase, is_tensor_collection
+from tensordict import TensorDict
 
 from agilerl.components.segment_tree import MinSegmentTree, SumSegmentTree
 from agilerl.typing import ArrayOrTensor
@@ -59,7 +60,12 @@ class ReplayBuffer:
 
     @staticmethod
     def _normalize_dims(data: TensorDict, n: int) -> TensorDict:
-        """Normalize the dimensions of the data.
+        """Give every scalar ``(batch,)`` leaf a trailing feature dim ``(batch, 1)``.
+
+        Uses :meth:`~tensordict.TensorDict.apply`, which recurses to every leaf,
+        so a single implementation handles flat, dict-observation, and nested
+        multi-agent (``field -> agent_id -> tensor``) layouts uniformly -
+        higher-dimensional leaves (e.g. images) are left untouched.
 
         :param data: Data to normalize
         :type data: TensorDict
@@ -68,20 +74,7 @@ class ReplayBuffer:
         :return: Normalized data
         :rtype: TensorDict
         """
-        # Normalize the dimensions of the data
-        for key, item in data.items():
-            if is_tensor_collection(item):
-                item: TensorDictBase = item
-                for k, v in item.items():
-                    if v.ndim == 1:
-                        item[k] = v.reshape(n, 1)
-
-            elif item.ndim == 1:
-                item = item.reshape(n, 1)
-
-            data[key] = item
-
-        return data
+        return data.apply(lambda v: v.reshape(n, 1) if v.ndim == 1 else v)
 
     def _init(self, data: TensorDict) -> None:
         """Initialize the buffer given the passed data. For each key,
@@ -138,8 +131,12 @@ class ReplayBuffer:
         :return: TensorDict containing sampled experiences
         :rtype: TensorDict
         """
-        # Ensure samples are unique
-        indices = torch.randperm(self.size)[:batch_size]
+        # Draw unique indices in O(batch_size). torch.randperm(self.size) would
+        # allocate and shuffle a permutation of the *entire* buffer on every
+        # call - O(max_size) - whereas random.sample over a range selects k
+        # distinct indices without materialising it.
+        k = min(batch_size, self.size)
+        indices = torch.tensor(random.sample(range(self.size), k), dtype=torch.long)
         samples: TensorDict = self._storage[indices]
 
         if return_idx:
@@ -156,12 +153,15 @@ class ReplayBuffer:
 
 
 class MultiAgentReplayBuffer(ReplayBuffer):
-    """A circular multi-agent replay buffer that extends :class:`ReplayBuffer`.
+    """A circular multi-agent replay buffer.
 
-    Identical to the single-agent buffer except that :meth:`add` normalises
-    scalar leaf tensors two levels deep (``field -> agent_id -> tensor``)
-    instead of one, matching the nested TensorDict layout used by
-    multi-agent algorithms like MADDPG and MATD3.
+    Behaviourally identical to :class:`ReplayBuffer`; it exists as a distinct
+    type so multi-agent algorithms (e.g. MADDPG, MATD3) and
+    :class:`~agilerl.components.sampler.Sampler` can dispatch on it. The nested
+    ``field -> agent_id -> tensor`` (and ``-> sub_td -> tensor`` for dict/tuple
+    observation spaces) layout used by multi-agent transitions is handled
+    transparently by the depth-agnostic :meth:`ReplayBuffer._normalize_dims`,
+    so no override is required.
 
     :param max_size: Maximum number of transitions to store.
     :type max_size: int
@@ -170,37 +170,6 @@ class MultiAgentReplayBuffer(ReplayBuffer):
     :param dtype: Default floating-point dtype.
     :type dtype: torch.dtype
     """
-
-    @staticmethod
-    def _normalize_dims(data: TensorDict, n: int) -> TensorDict:
-        """Ensure every leaf tensor has at least 2 dimensions (batch + feature).
-
-        Walks two levels deep to handle the ``field -> agent_id -> tensor``
-        nesting that is standard in multi-agent transitions.
-
-        :param data: Data to normalize
-        :type data: TensorDict
-        :param n: Number of transitions
-        :type n: int
-        :return: Normalized data
-        :rtype: TensorDict
-        """
-        # Normalize the dimensions of the data
-        for key, item in data.items():
-            if is_tensor_collection(item):
-                item: TensorDictBase = item
-                for agent_key, agent_item in item.items():
-                    if is_tensor_collection(agent_item):
-                        agent_item: TensorDictBase = agent_item
-                        for k, v in agent_item.items():
-                            if v.ndim == 1:
-                                agent_item[k] = v.reshape(n, 1)
-                    elif agent_item.ndim == 1:
-                        item[agent_key] = agent_item.reshape(n, 1)
-                data[key] = item
-            elif item.ndim == 1:
-                data[key] = item.reshape(n, 1)
-        return data
 
 
 class MultiStepReplayBuffer(ReplayBuffer):
@@ -367,10 +336,15 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         # Add to replay buffer
         super().add(data)
 
-        # Add max priority for new entries
+        # Assign max priority to the new entries. priority_alpha is constant
+        # across the batch, so compute it once and write the leaves directly
+        # (self.max_priority is unchanged here, so _update_priority's max() and
+        # repeated power would be redundant work).
         n_transitions = data.shape[0]
-        for _i in range(n_transitions):
-            self._update_priority(self.tree_ptr, self.max_priority)
+        priority_alpha = self.max_priority**self.alpha
+        for _ in range(n_transitions):
+            self.sum_tree[self.tree_ptr] = priority_alpha
+            self.min_tree[self.tree_ptr] = priority_alpha
             self.tree_ptr = (self.tree_ptr + 1) % self.max_size
 
     def _update_priority(self, idx: int, priority: float) -> None:
@@ -427,23 +401,22 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         :return: Sampled indices
         :rtype: torch.Tensor
         """
-        indices = torch.zeros(batch_size, dtype=torch.int64)
-
         # Get the sum of all priorities and section length
         total_priority = self.sum_tree.sum()
         segment = total_priority / batch_size
 
-        # Sample from each segment
-        for i in range(batch_size):
-            a = segment * i
-            b = segment * (i + 1)
+        # Draw all uniforms in a single call (avoids a per-iteration tensor
+        # allocation + device sync), then walk the tree once per sample.
+        # retrieve() is an inherently sequential O(log capacity) descent, so the
+        # loop stays - but the only per-element Python work left is the descent.
+        # upperbound = u * (b - a) + a  with a = segment*i, b = segment*(i+1).
+        samples = torch.rand(batch_size).tolist()
+        indices = [
+            self.sum_tree.retrieve(segment * (i + samples[i]))
+            for i in range(batch_size)
+        ]
 
-            # Sample uniformly from segment and retrieve corresponding index
-            upperbound = torch.rand(1).item() * (b - a) + a
-            idx = self.sum_tree.retrieve(upperbound)
-            indices[i] = idx
-
-        return indices
+        return torch.tensor(indices, dtype=torch.int64)
 
     def _calculate_weights(self, indices: torch.Tensor, beta: float) -> torch.Tensor:
         """Calculate importance sampling weights for prioritized replay.
@@ -455,23 +428,22 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         :return: Weights for the sampled transitions
         :rtype: torch.Tensor
         """
-        # Create a tensor for weights
-        batch_size = len(indices)
-        weights = torch.zeros(batch_size, device=self.device)
+        # Total priority is loop-invariant - compute it once.
+        total_priority = self.sum_tree.sum()
 
-        # Find the min probability from the min tree
-        p_min = self.min_tree.min() / self.sum_tree.sum()
-
-        # Calculate the max weight value
+        # Find the min probability from the min tree and the corresponding
+        # (maximum) weight used to normalise.
+        p_min = self.min_tree.min() / total_priority
         max_weight = (p_min * self.size) ** -beta
 
-        # Calculate weights for each index
-        for i, idx in enumerate(indices):
-            p_sample = self.sum_tree[idx] / self.sum_tree.sum()
-            weight = (p_sample * self.size) ** -beta
-            weights[i] = weight / max_weight  # Normalize
-
-        return weights
+        # Gather the sampled priorities, then compute every weight in one
+        # vectorised op instead of a Python loop of scalar ** -beta calls.
+        priorities = torch.tensor(
+            [self.sum_tree[int(idx)] for idx in indices],
+            device=self.device,
+        )
+        p_samples = priorities / total_priority
+        return (p_samples * self.size).pow(-beta) / max_weight
 
     def update_priorities(
         self,
@@ -485,9 +457,17 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         :param priorities: New priorities
         :type priorities: torch.Tensor
         """
-        for idx, priority in zip(indices, priorities, strict=False):
-            # Handle small priorities
-            new_priority = max(priority.item(), 1e-5)
-
-            # Update the priority
-            self._update_priority(idx.item(), new_priority)
+        # Move indices/priorities to host once (clamping small priorities in a
+        # single vectorised op) instead of a per-element .item() device sync.
+        # float64 matches the original ``max(priority.item(), 1e-5)`` precision
+        # (widening float32 -> float64 is exact), so clamped values round
+        # identically to the previous implementation.
+        idx_list = torch.as_tensor(indices).flatten().tolist()
+        priority_list = (
+            torch.as_tensor(priorities, dtype=torch.float64)
+            .clamp_min(1e-5)
+            .flatten()
+            .tolist()
+        )
+        for idx, priority in zip(idx_list, priority_list, strict=False):
+            self._update_priority(idx, priority)

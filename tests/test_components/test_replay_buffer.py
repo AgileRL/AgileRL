@@ -983,10 +983,16 @@ class TestPrioritizedReplayBufferSampleProportional:
             counter = 0
 
             def mock_rand(size):
+                # _sample_proportional draws all uniforms in a single
+                # torch.rand(batch_size) call, so return a tensor of that length.
                 nonlocal counter
-                val = predetermined_values[counter % len(predetermined_values)]
-                counter += 1
-                return torch.tensor([val])
+                n = size if isinstance(size, int) else size[0]
+                vals = [
+                    predetermined_values[(counter + j) % len(predetermined_values)]
+                    for j in range(n)
+                ]
+                counter += n
+                return torch.tensor(vals)
 
             torch.rand = mock_rand
 
