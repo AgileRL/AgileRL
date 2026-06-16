@@ -1,8 +1,9 @@
-import random
+import math
 from collections import deque
 
+import numpy as np
 import torch
-from tensordict import TensorDict
+from tensordict import TensorDict, is_tensor_collection
 
 from agilerl.components.segment_tree import MinSegmentTree, SumSegmentTree
 from agilerl.typing import ArrayOrTensor
@@ -20,6 +21,11 @@ class ReplayBuffer:
     :param dtype: Data type for the tensors
     :type dtype: torch.dtype, optional
     """
+
+    # Tolerated probability of at least one duplicate within a sampled minibatch
+    # before `sample` switches from without-replacement to (faster)
+    # with-replacement index sampling. See `_sample_indices`.
+    collision_tolerance: float = 0.01
 
     def __init__(
         self,
@@ -62,9 +68,9 @@ class ReplayBuffer:
     def _normalize_dims(data: TensorDict, n: int) -> TensorDict:
         """Give every scalar ``(batch,)`` leaf a trailing feature dim ``(batch, 1)``.
 
-        Uses :meth:`~tensordict.TensorDict.apply`, which recurses to every leaf,
-        so a single implementation handles flat, dict-observation, and nested
-        multi-agent (``field -> agent_id -> tensor``) layouts uniformly -
+        Recurses in place into nested tensor collections, so a single
+        implementation handles flat, dict-observation, and nested multi-agent
+        (``field -> agent_id -> tensor``) layouts uniformly at any depth -
         higher-dimensional leaves (e.g. images) are left untouched.
 
         :param data: Data to normalize
@@ -74,7 +80,13 @@ class ReplayBuffer:
         :return: Normalized data
         :rtype: TensorDict
         """
-        return data.apply(lambda v: v.reshape(n, 1) if v.ndim == 1 else v)
+        for key, item in data.items():
+            if is_tensor_collection(item):
+                ReplayBuffer._normalize_dims(item, n)
+            elif item.ndim == 1:
+                data[key] = item.reshape(n, 1)
+
+        return data
 
     def _init(self, data: TensorDict) -> None:
         """Initialize the buffer given the passed data. For each key,
@@ -121,6 +133,38 @@ class ReplayBuffer:
         self._size = min(self._size + _n_transitions, self.max_size)
         self.counter += _n_transitions
 
+    def _sample_indices(self, k: int) -> torch.Tensor:
+        """Draw ``k`` storage indices in ``[0, size)``.
+
+        Small buffers sample **without replacement** via ``torch.randperm`` (no
+        duplicate transitions within a minibatch). Once the buffer is large
+        enough that the chance of any duplicate drops below
+        :attr:`collision_tolerance`, we switch to **with replacement** - a single
+        O(``k``) ``torch.randint`` draw, which avoids ``randperm``'s O(``size``)
+        shuffle of the whole buffer.
+
+        The crossover uses the birthday bound
+        ``P(>=1 duplicate) ~= 1 - exp(-k(k-1) / (2 * size))``; solving
+        ``P <= collision_tolerance`` gives
+        ``size >= k(k-1) / (-2 ln(1 - collision_tolerance))``.
+
+        :param k: Number of indices to draw.
+        :type k: int
+        :return: 1-D tensor of ``k`` indices.
+        :rtype: torch.Tensor
+        """
+        if k <= 0:
+            return torch.empty(0, dtype=torch.long)
+
+        denom = -2.0 * math.log1p(-self.collision_tolerance)
+        min_size_for_replacement = k * (k - 1) / denom if denom > 0 else math.inf
+        if self.size >= min_size_for_replacement:
+            # Duplicates are below tolerance: a single O(k) vectorised draw.
+            return torch.randint(0, self.size, (k,))
+
+        # Otherwise sample without replacement (no intra-batch duplicates).
+        return torch.randperm(self.size)[:k]
+
     def sample(self, batch_size: int, return_idx: bool = False) -> TensorDict:
         """Sample a batch of transitions.
 
@@ -131,12 +175,7 @@ class ReplayBuffer:
         :return: TensorDict containing sampled experiences
         :rtype: TensorDict
         """
-        # Draw unique indices in O(batch_size). torch.randperm(self.size) would
-        # allocate and shuffle a permutation of the *entire* buffer on every
-        # call - O(max_size) - whereas random.sample over a range selects k
-        # distinct indices without materialising it.
-        k = min(batch_size, self.size)
-        indices = torch.tensor(random.sample(range(self.size), k), dtype=torch.long)
+        indices = self._sample_indices(min(batch_size, self.size))
         samples: TensorDict = self._storage[indices]
 
         if return_idx:
@@ -336,16 +375,15 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         # Add to replay buffer
         super().add(data)
 
-        # Assign max priority to the new entries. priority_alpha is constant
-        # across the batch, so compute it once and write the leaves directly
-        # (self.max_priority is unchanged here, so _update_priority's max() and
-        # repeated power would be redundant work).
+        # Assign max priority to the new entries in one vectorised tree update
+        # (priority_alpha is constant across the batch).
         n_transitions = data.shape[0]
         priority_alpha = self.max_priority**self.alpha
-        for _ in range(n_transitions):
-            self.sum_tree[self.tree_ptr] = priority_alpha
-            self.min_tree[self.tree_ptr] = priority_alpha
-            self.tree_ptr = (self.tree_ptr + 1) % self.max_size
+        idxs = (self.tree_ptr + np.arange(n_transitions)) % self.max_size
+        values = np.full(n_transitions, priority_alpha, dtype=np.float64)
+        self.sum_tree.update_batch(idxs, values)
+        self.min_tree.update_batch(idxs, values)
+        self.tree_ptr = (self.tree_ptr + n_transitions) % self.max_size
 
     def _update_priority(self, idx: int, priority: float) -> None:
         """Update the priority of an experience in the buffer.
@@ -401,22 +439,16 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         :return: Sampled indices
         :rtype: torch.Tensor
         """
-        # Get the sum of all priorities and section length
+        # Stratified sampling: one uniform per segment, then a single vectorised
+        # descent of the sum-tree for the whole batch (no Python per-sample loop).
+        # upperbound_i = segment * (i + u_i),  u_i ~ U[0, 1).
         total_priority = self.sum_tree.sum()
         segment = total_priority / batch_size
+        u = torch.rand(batch_size).numpy()
+        upperbounds = (np.arange(batch_size) + u) * segment
+        indices = self.sum_tree.retrieve_batch(upperbounds)
 
-        # Draw all uniforms in a single call (avoids a per-iteration tensor
-        # allocation + device sync), then walk the tree once per sample.
-        # retrieve() is an inherently sequential O(log capacity) descent, so the
-        # loop stays - but the only per-element Python work left is the descent.
-        # upperbound = u * (b - a) + a  with a = segment*i, b = segment*(i+1).
-        samples = torch.rand(batch_size).tolist()
-        indices = [
-            self.sum_tree.retrieve(segment * (i + samples[i]))
-            for i in range(batch_size)
-        ]
-
-        return torch.tensor(indices, dtype=torch.int64)
+        return torch.as_tensor(indices, dtype=torch.int64)
 
     def _calculate_weights(self, indices: torch.Tensor, beta: float) -> torch.Tensor:
         """Calculate importance sampling weights for prioritized replay.
@@ -431,19 +463,16 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         # Total priority is loop-invariant - compute it once.
         total_priority = self.sum_tree.sum()
 
-        # Find the min probability from the min tree and the corresponding
-        # (maximum) weight used to normalise.
+        # Min probability -> maximum (normalising) weight.
         p_min = self.min_tree.min() / total_priority
         max_weight = (p_min * self.size) ** -beta
 
-        # Gather the sampled priorities, then compute every weight in one
-        # vectorised op instead of a Python loop of scalar ** -beta calls.
-        priorities = torch.tensor(
-            [self.sum_tree[int(idx)] for idx in indices],
-            device=self.device,
-        )
-        p_samples = priorities / total_priority
-        return (p_samples * self.size).pow(-beta) / max_weight
+        # Gather the sampled priorities and compute every weight in one
+        # vectorised numpy op (no Python per-element loop).
+        idx_np = torch.as_tensor(indices).flatten().cpu().numpy()
+        p_samples = self.sum_tree.get_batch(idx_np) / total_priority
+        weights = (p_samples * self.size) ** -beta / max_weight
+        return torch.as_tensor(weights, dtype=torch.float32, device=self.device)
 
     def update_priorities(
         self,
@@ -457,17 +486,21 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         :param priorities: New priorities
         :type priorities: torch.Tensor
         """
-        # Move indices/priorities to host once (clamping small priorities in a
-        # single vectorised op) instead of a per-element .item() device sync.
-        # float64 matches the original ``max(priority.item(), 1e-5)`` precision
-        # (widening float32 -> float64 is exact), so clamped values round
-        # identically to the previous implementation.
-        idx_list = torch.as_tensor(indices).flatten().tolist()
-        priority_list = (
+        # Vectorised: clamp, raise to alpha, and update both trees in a single
+        # batched pass instead of a per-element .item() sync + Python tree climb.
+        # float64 matches the original max(priority.item(), 1e-5) precision.
+        idx_np = torch.as_tensor(indices).flatten().cpu().numpy()
+        if idx_np.size == 0:
+            return
+
+        priorities = (
             torch.as_tensor(priorities, dtype=torch.float64)
             .clamp_min(1e-5)
             .flatten()
-            .tolist()
+            .cpu()
+            .numpy()
         )
-        for idx, priority in zip(idx_list, priority_list, strict=False):
-            self._update_priority(idx, priority)
+        priority_alpha = priorities**self.alpha
+        self.sum_tree.update_batch(idx_np, priority_alpha)
+        self.min_tree.update_batch(idx_np, priority_alpha)
+        self.max_priority = max(self.max_priority, float(priorities.max()))

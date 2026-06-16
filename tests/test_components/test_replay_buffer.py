@@ -368,6 +368,66 @@ class TestReplayBufferSample:
         assert all(0 <= idx < len(buffer) for idx in samples["idxs"])
 
 
+class TestReplayBufferAdaptiveSampling:
+    """`sample` draws without replacement for small buffers and switches to
+    (faster) with-replacement once duplicates become unlikely."""
+
+    @staticmethod
+    def _fill(buf: ReplayBuffer, n: int) -> None:
+        data = TensorDict(
+            {
+                "state": torch.arange(n).unsqueeze(1).float(),
+                "action": torch.zeros(n, 1),
+                "reward": torch.zeros(n, 1),
+            },
+            batch_size=[n],
+        )
+        buf.add(data)
+
+    def test_small_buffer_samples_without_replacement(self):
+        buf = ReplayBuffer(max_size=1000)
+        self._fill(buf, 200)
+        # default tolerance (1%): threshold for k=64 is ~2e5 >> 200 -> unique
+        idxs = buf.sample(64, return_idx=True)["idxs"].tolist()
+        assert len(set(idxs)) == len(idxs)
+
+    def test_sample_k_equals_size_is_a_permutation(self):
+        buf = ReplayBuffer(max_size=50)
+        self._fill(buf, 30)
+        idxs = buf.sample(30, return_idx=True)["idxs"].tolist()
+        assert sorted(idxs) == list(range(30))
+
+    def test_large_buffer_uses_with_replacement(self, monkeypatch):
+        buf = ReplayBuffer(max_size=1000)
+        self._fill(buf, 500)
+        # tolerance 0.5 -> threshold for k=8 is ~40 < 500, so use replacement
+        buf.collision_tolerance = 0.5
+
+        used: list[str] = []
+        real_randint, real_randperm = torch.randint, torch.randperm
+
+        def spy_randint(*args, **kwargs):
+            used.append("randint")
+            return real_randint(*args, **kwargs)
+
+        def spy_randperm(*args, **kwargs):
+            used.append("randperm")
+            return real_randperm(*args, **kwargs)
+
+        monkeypatch.setattr(torch, "randint", spy_randint)
+        monkeypatch.setattr(torch, "randperm", spy_randperm)
+
+        s = buf.sample(8, return_idx=True)
+        assert used == ["randint"]
+        assert s["idxs"].shape == (8,)
+        assert (s["idxs"] >= 0).all() and (s["idxs"] < buf.size).all()
+
+    def test_sample_more_than_size_returns_size(self):
+        buf = ReplayBuffer(max_size=50)
+        self._fill(buf, 5)
+        assert buf.sample(20).batch_size[0] == 5
+
+
 class TestReplayBufferClear:
     def test_clear_buffer(self):
         """Test clearing the buffer."""
