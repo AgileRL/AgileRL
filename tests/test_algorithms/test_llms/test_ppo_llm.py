@@ -1708,3 +1708,78 @@ class TestPPOSequencePacking:
         assert torch.allclose(v_packed * am, v_padded * am, atol=1e-5)
         assert (lp_padded * am).abs().sum() > 0
         assert (v_padded * am).abs().sum() > 0
+
+
+class TestPPOSaveLoadValueHead:
+    """PPO differs from the non-critic LLM algos: it carries a value head
+    (``v_head`` Linear) that must survive a checkpoint round-trip."""
+
+    @staticmethod
+    def _build(model_factory):
+        actor = model_factory(TINY_LLM_FIXTURE_PATH, add_value_head=True)
+        return LLMPPO(
+            actor_network=actor,
+            lr_actor=1e-5,
+            lr_critic=1e-4,
+            pad_token_id=151664,
+            pad_token="<pad>",
+            device="cpu",
+            lora_config=LoraConfig(
+                r=8,
+                lora_alpha=16,
+                target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+                task_type="CAUSAL_LM",
+                lora_dropout=0.0,
+            ),
+            accelerator=None,
+            use_vllm=False,
+            wrap=False,
+            gradient_checkpointing=False,
+            max_output_tokens=8,
+            max_model_len=64,
+        )
+
+    def test_save_load_round_trips_value_head_and_actor_adapter(
+        self, tmp_path, model_factory
+    ):
+        """save_checkpoint -> load_checkpoint must restore the value head and the
+        actor LoRA adapter (and not crash on optimizer metadata)."""
+        ppo = self._build(model_factory)
+        unwrapped = ppo._get_unwrapped_actor()
+        # Make the value head + actor LoRA clearly non-default before saving.
+        for p in unwrapped.v_head.parameters():
+            p.data.normal_(0.0, 1.0)
+        actor_lora = [
+            (n, p)
+            for n, p in unwrapped.named_parameters()
+            if "lora" in n.lower() and "actor" in n.lower()
+        ]
+        assert actor_lora, "expected actor LoRA params"
+        for _, p in actor_lora:
+            p.data.normal_(0.0, 0.5)
+        saved_vhead = {
+            k: v.detach().clone() for k, v in unwrapped.v_head.state_dict().items()
+        }
+        alora_name = actor_lora[0][0]
+        alora_w = actor_lora[0][1].detach().clone()
+
+        ppo.save_checkpoint(str(tmp_path))
+
+        # A fresh agent (freshly-initialised value head) must come back identical
+        # after load — exercising the default save_optimizer=True path too.
+        new_ppo = self._build(model_factory)
+        new_ppo.load_checkpoint(str(tmp_path))
+        new_unwrapped = new_ppo._get_unwrapped_actor()
+
+        for k, v in saved_vhead.items():
+            assert torch.equal(
+                new_unwrapped.v_head.state_dict()[k].float(), v.float()
+            ), f"value-head weight {k} not restored"
+        assert torch.equal(
+            dict(new_unwrapped.named_parameters())[alora_name].detach().float(),
+            alora_w.float(),
+        ), "actor LoRA adapter not restored"
+
+        ppo.clean_up()
+        new_ppo.clean_up()
+        AcceleratorState._reset_state(True)

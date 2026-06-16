@@ -309,6 +309,11 @@ class PPO(LLMAlgorithm):
         self.beta = beta
         self.vf_coef = vf_coef
         self.clip_coef = clip_coef
+        # Expose lr_actor explicitly (base stores it as ``self.lr``): the split
+        # LLM optimizer's lr_name is ``("lr_actor", "lr_critic")``, and the
+        # clone/checkpoint init_dict captures attributes by constructor-param
+        # name — both look up ``self.lr_actor``.
+        self.lr_actor = lr_actor
         self.lr_critic = lr_critic if lr_critic is not None else lr_actor
         self.update_epochs = update_epochs
         self.temperature = temperature

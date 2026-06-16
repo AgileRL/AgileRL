@@ -2711,6 +2711,32 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             # Always overwrite the critic
             self._copy_adapter_weights(source_adapter="actor", target_adapter="critic")
 
+        # The value head (PPO's ``v_head`` Linear) is a non-LoRA module saved
+        # alongside the adapters; the adapter load above never touches it.
+        if self.use_value_head:
+            self._restore_value_head(path)
+
+    def _restore_value_head(self, path: str) -> None:
+        """Restore the ``v_head`` weights saved next to the LoRA adapters.
+
+        ``AutoModelForCausalLMWithValueHead.save_pretrained`` writes the value
+        head into ``pytorch_model.bin`` (the ``v_head.*`` keys of its combined
+        state dict), but the LoRA-adapter load path never reads it back, so the
+        value head would otherwise stay at its fresh init after
+        :meth:`load_checkpoint`. Mirrors what ``from_pretrained`` does on
+        construction (``post_init``), for the load-into-existing-agent path.
+
+        :param path: Checkpoint directory written by :meth:`save_checkpoint`.
+        :type path: str
+        """
+        wrapper = self._get_unwrapped_actor()
+        loader = getattr(type(wrapper), "_maybe_load_resume_state_dict", None)
+        if loader is None or not hasattr(wrapper, "post_init"):
+            return
+        resume_sd = loader(path)
+        if resume_sd is not None and any(k.startswith("v_head.") for k in resume_sd):
+            wrapper.post_init(resume_sd)
+
     def _restore_checkpoint_attributes(self, checkpoint: dict[str, Any]) -> None:
         """Restore algorithm attributes from payload.
 
