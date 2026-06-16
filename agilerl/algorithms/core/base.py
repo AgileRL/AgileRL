@@ -2363,7 +2363,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         # rollout (use_memory_efficient_params) so the two never coexist on the
         # GPU. Only LoRA adapters are synced to vLLM per rollout. The in-process
         # external_launcher engine is single-GPU, so tensor parallelism is not
-        # available when colocated (use a non-colocated / async rollout for TP).
+        # yet available when colocated (use a non-colocated / async rollout for
+        # TP today). NOTE: colocated tensor-parallel support is planned.
         if self.use_vllm and self.vllm_config is not None:
             tp = getattr(self.vllm_config, "tensor_parallel_size", 1)
             if tp != 1:
@@ -2371,7 +2372,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     "Colocated vLLM requires tensor_parallel_size==1 (the "
                     f"in-process external_launcher engine is single-GPU), got "
                     f"{tp}. Use a non-colocated / async rollout for "
-                    "tensor-parallel generation."
+                    "tensor-parallel generation (colocated TP support is planned)."
                 )
                 raise ValueError(msg)
         self.rng = np.random.RandomState(seed)
