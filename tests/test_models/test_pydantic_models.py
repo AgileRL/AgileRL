@@ -397,13 +397,13 @@ class TestBanditEnvSpec:
 
 
 class TestGymEnvSpecNonCallable:
-    """Lines 120-121 in env.py: constuct_custom_env_fn with non-callable entrypoint."""
+    """Lines 120-121 in env.py: construct_custom_env_fn with non-callable entrypoint."""
 
     def test_non_callable_entrypoint(self):
         from agilerl.models.env import GymEnvSpec
 
         with patch("agilerl.models.env.resolve_entrypoint_target", return_value=42):
-            factory = GymEnvSpec.constuct_custom_env_fn("some:entry")
+            factory = GymEnvSpec.construct_custom_env_fn("some:entry")
             with pytest.raises(TypeError, match="resolved to non-callable"):
                 factory()
 
@@ -415,7 +415,7 @@ class TestPzEnvSpecNonCallable:
         from agilerl.models.env import PzEnvSpec
 
         with patch("agilerl.models.env.resolve_entrypoint_target", return_value=42):
-            factory = PzEnvSpec.constuct_custom_env_fn("some:entry")
+            factory = PzEnvSpec.construct_custom_env_fn("some:entry")
             with pytest.raises(TypeError, match="resolved to non-callable"):
                 factory()
 
@@ -502,6 +502,48 @@ class TestAlgoSpecClassVars:
         assert kwargs["max_reward"] == 1.0
         assert kwargs["checkpoint_steps"] == 100
 
+    def test_llm_spec_forwards_checkpoint_path(self):
+        from agilerl.models.algo import LLMAlgorithmSpec
+        from agilerl.models.training import TrainingSpec
+
+        spec = LLMAlgorithmSpec.__new__(LLMAlgorithmSpec)
+        object.__setattr__(spec, "__dict__", {"batch_size": 8, "hp_config": None})
+        training = TrainingSpec(checkpoint_path="/ckpts", evaluation_interval=10)
+        env_spec = MagicMock()
+        env_spec.max_reward = None
+        kwargs = spec.get_training_kwargs(training=training, env_spec=env_spec)
+        assert kwargs["checkpoint_path"] == "/ckpts"
+
+    def test_llm_spec_warns_on_unsupported_training_fields(self):
+        from agilerl.models.algo import LLMAlgorithmSpec
+        from agilerl.models.training import TrainingSpec
+
+        spec = LLMAlgorithmSpec.__new__(LLMAlgorithmSpec)
+        object.__setattr__(spec, "__dict__", {"batch_size": 8, "hp_config": None})
+        training = TrainingSpec(
+            target_score=200.0, eval_steps=100, evaluation_interval=10
+        )
+        env_spec = MagicMock()
+        env_spec.max_reward = None
+        with pytest.warns(UserWarning, match="target_score, eval_steps"):
+            kwargs = spec.get_training_kwargs(training=training, env_spec=env_spec)
+        assert "target_score" not in kwargs
+        assert "eval_steps" not in kwargs
+
+    def test_llm_spec_no_warning_for_default_training_fields(self, recwarn):
+        from agilerl.models.algo import LLMAlgorithmSpec
+        from agilerl.models.training import TrainingSpec
+
+        spec = LLMAlgorithmSpec.__new__(LLMAlgorithmSpec)
+        object.__setattr__(spec, "__dict__", {"batch_size": 8, "hp_config": None})
+        # Setting an unsupported field to its default (as the trainer does for
+        # overwrite_checkpoints) must not warn
+        training = TrainingSpec(evaluation_interval=10, overwrite_checkpoints=False)
+        env_spec = MagicMock()
+        env_spec.max_reward = None
+        spec.get_training_kwargs(training=training, env_spec=env_spec)
+        assert not any("not supported by LLM" in str(w.message) for w in recwarn.list)
+
     def test_offline_spec_dataset_path(self):
         """get_training_kwargs for offline algo with dataset_path."""
         from agilerl.models.algo import RLAlgorithmSpec, offline
@@ -556,8 +598,114 @@ class TestAlgoSpecClassVars:
         mock_algo.load_checkpoint.assert_called_once_with("/some/path")
 
 
+class TestBuildAlgorithmForwardsOnlySetFields:
+    """Unset spec fields must fall through to the algorithm's own defaults."""
+
+    def test_rl_spec_forwards_only_set_fields(self):
+        from agilerl.models.algo import RLAlgorithmSpec
+
+        spec = RLAlgorithmSpec(learn_step=2)
+        mock_algo_cls = MagicMock()
+        with patch.object(type(spec), "algo_class", return_value=mock_algo_cls):
+            spec.build_algorithm(
+                observation_space=MagicMock(),
+                action_space=MagicMock(),
+                index=0,
+            )
+        kwargs = mock_algo_cls.call_args.kwargs
+        assert kwargs["learn_step"] == 2
+        assert "gamma" not in kwargs
+        assert "batch_size" not in kwargs
+
+    def test_multi_agent_spec_forwards_only_set_fields(self):
+        from agilerl.models.algo import MultiAgentRLAlgorithmSpec
+
+        spec = MultiAgentRLAlgorithmSpec(gamma=0.9)
+        mock_algo_cls = MagicMock()
+        with patch.object(type(spec), "algo_class", return_value=mock_algo_cls):
+            spec.build_algorithm(
+                observation_spaces={"a": MagicMock()},
+                action_spaces={"a": MagicMock()},
+                index=0,
+            )
+        kwargs = mock_algo_cls.call_args.kwargs
+        assert kwargs["gamma"] == 0.9
+        assert "learn_step" not in kwargs
+        assert "batch_size" not in kwargs
+
+    def test_llm_spec_forwards_only_set_fields(self):
+        from agilerl.models.algorithms.grpo import GRPOSpec
+
+        spec = GRPOSpec(pretrained_model_name_or_path="gpt2", beta=0.05, group_size=4)
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.eos_token_id = 0
+        mock_tokenizer.eos_token = "<|endoftext|>"
+        mock_algo_cls = MagicMock()
+        with patch.object(type(spec), "algo_class", return_value=mock_algo_cls):
+            spec.build_algorithm(tokenizer=mock_tokenizer, index=0)
+        kwargs = mock_algo_cls.call_args.kwargs
+        assert kwargs["beta"] == 0.05
+        assert kwargs["model_name"] == "gpt2"
+        # GRPO's own defaults (e.g. lr=5e-7) must apply when unset
+        assert "lr" not in kwargs
+        assert "batch_size" not in kwargs
+
+    def test_spec_built_algorithm_matches_direct_construction(self):
+        import gymnasium as gym
+
+        from agilerl.algorithms import DQN
+        from agilerl.models.algorithms.dqn import DQNSpec
+
+        observation_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(4,))
+        action_space = gym.spaces.Discrete(2)
+        from_spec = DQNSpec().build_algorithm(
+            observation_space=observation_space,
+            action_space=action_space,
+            index=0,
+        )
+        direct = DQN(
+            observation_space=observation_space,
+            action_space=action_space,
+        )
+        assert from_spec.lr == direct.lr
+        assert from_spec.batch_size == direct.batch_size
+        assert from_spec.gamma == direct.gamma
+        assert from_spec.learn_step == direct.learn_step
+
+
 class TestLLMAlgorithmSpecBuild:
     """Lines 531-533, 554 in algo.py."""
+
+    def test_micro_batch_size_per_gpu_integer_split(self):
+        """Per-GPU micro batch is the integer per-process share, floored at 1."""
+        from agilerl.models.algorithms.grpo import GRPOSpec
+
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.eos_token_id = 0
+        mock_tokenizer.eos_token = "<|endoftext|>"
+        accelerator = MagicMock()
+        accelerator.num_processes = 2
+
+        spec = GRPOSpec(
+            pretrained_model_name_or_path="gpt2", group_size=4, batch_size=8
+        )
+        mock_algo_cls = MagicMock()
+        with patch.object(type(spec), "algo_class", return_value=mock_algo_cls):
+            spec.build_algorithm(
+                tokenizer=mock_tokenizer, index=0, accelerator=accelerator
+            )
+        assert mock_algo_cls.call_args.kwargs["micro_batch_size_per_gpu"] == 4
+
+        # Never fractional or zero when batch_size < num_processes
+        small = GRPOSpec(
+            pretrained_model_name_or_path="gpt2", group_size=4, batch_size=1
+        )
+        mock_algo_cls.reset_mock()
+        with patch.object(type(small), "algo_class", return_value=mock_algo_cls):
+            small.build_algorithm(
+                tokenizer=mock_tokenizer, index=0, accelerator=accelerator
+            )
+        assert mock_algo_cls.call_args.kwargs["micro_batch_size_per_gpu"] == 1
 
     def test_vllm_config_dict_coerced(self):
         """build_algorithm coerces dict vllm_config."""
@@ -679,6 +827,32 @@ class TestReplayBufferSpecNStep:
         algo = MagicMock(spec=[])  # no gamma attribute
         with pytest.raises(ValueError, match="Gamma must be specified"):
             spec.init_n_step_buffer(algo, device="cpu")
+
+    def test_init_buffer_per_with_n_step_builds_per_main_memory(self):
+        """Combined PER + n-step: main memory is PER, n-step is secondary."""
+        from agilerl.components.replay_buffer import (
+            MultiStepReplayBuffer,
+            PrioritizedReplayBuffer,
+        )
+        from agilerl.models.algorithms.rainbow_dqn import RainbowDQNSpec
+
+        spec = ReplayBufferSpec(per_buffer=True, n_step_buffer=True)
+        algo = RainbowDQNSpec(net_config=None)
+        memory = spec.init_buffer(algo, device="cpu")
+        n_step_memory = spec.init_n_step_buffer(algo, device="cpu")
+        assert isinstance(memory, PrioritizedReplayBuffer)
+        assert isinstance(n_step_memory, MultiStepReplayBuffer)
+
+    def test_init_buffer_n_step_only_builds_multi_step_main_memory(self):
+        """n-step without PER keeps the main memory as the n-step buffer."""
+        from agilerl.components.replay_buffer import MultiStepReplayBuffer
+        from agilerl.models.algorithms.rainbow_dqn import RainbowDQNSpec
+
+        spec = ReplayBufferSpec(n_step_buffer=True)
+        algo = RainbowDQNSpec(net_config=None)
+        memory = spec.init_buffer(algo, device="cpu")
+        assert isinstance(memory, MultiStepReplayBuffer)
+        assert spec.init_n_step_buffer(algo, device="cpu") is None
 
 
 class TestLLMPPOSpec:

@@ -726,10 +726,11 @@ class PPO(RLAlgorithm):
                     policy_loss + self.vf_coef * v_loss + self.ent_coef * entropy_loss
                 )
 
-                with torch.no_grad():
-                    log_ratio = log_probs - mb_log_probs
-                    approx_kl = ((ratio - 1) - log_ratio).mean().item()
-                    approx_kl_divs.append(approx_kl)
+                if self.target_kl is not None:
+                    with torch.no_grad():
+                        log_ratio = log_probs - mb_log_probs
+                        approx_kl = ((ratio - 1) - log_ratio).mean().item()
+                        approx_kl_divs.append(approx_kl)
 
                 self.optimizer.zero_grad()
                 if self.accelerator is not None:
@@ -742,10 +743,12 @@ class PPO(RLAlgorithm):
 
                 self.optimizer.step()
 
-                learn_metrics["loss"] += loss.item()
-                learn_metrics["policy_loss"] += policy_loss.item()
-                learn_metrics["value_loss"] += v_loss.item()
-                learn_metrics["entropy_loss"] += entropy_loss.item()
+                # Accumulate as tensors; a single device sync happens after
+                # the epoch loop instead of four per minibatch
+                learn_metrics["loss"] += loss.detach()
+                learn_metrics["policy_loss"] += policy_loss.detach()
+                learn_metrics["value_loss"] += v_loss.detach()
+                learn_metrics["entropy_loss"] += entropy_loss.detach()
 
             # Early stopping for the epoch if KL divergence target is exceeded
             if self.target_kl is not None and np.mean(approx_kl_divs) > self.target_kl:
@@ -753,7 +756,10 @@ class PPO(RLAlgorithm):
 
         # Log metrics
         divisor = num_samples * self.update_epochs
-        learn_metrics = {k: v / divisor for k, v in learn_metrics.items()}
+        learn_metrics = {
+            k: (v / divisor).item() if torch.is_tensor(v) else v / divisor
+            for k, v in learn_metrics.items()
+        }
         for key, value in learn_metrics.items():
             self.metrics.log(key, value)
 
@@ -881,11 +887,12 @@ class PPO(RLAlgorithm):
                 # Entropy loss
                 entropy_loss = -entropy
 
-                with torch.no_grad():
-                    log_ratio = new_log_probs - mb_old_log_probs
-                    approx_kl_divs_minibatch_timesteps.append(
-                        ((torch.exp(log_ratio) - 1) - log_ratio).mean().item(),
-                    )
+                if self.target_kl is not None:
+                    with torch.no_grad():
+                        log_ratio = new_log_probs - mb_old_log_probs
+                        approx_kl_divs_minibatch_timesteps.append(
+                            ((torch.exp(log_ratio) - 1) - log_ratio).mean().item(),
+                        )
 
                 loss = (
                     policy_loss
@@ -903,10 +910,12 @@ class PPO(RLAlgorithm):
                 clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
                 self.optimizer.step()
 
-                learn_metrics["loss"] += loss.item()
-                learn_metrics["policy_loss"] += policy_loss.item()
-                learn_metrics["value_loss"] += value_loss.item()
-                learn_metrics["entropy_loss"] += entropy_loss.item()
+                # Accumulate as tensors; a single device sync happens after
+                # the epoch loop instead of four per minibatch
+                learn_metrics["loss"] += loss.detach()
+                learn_metrics["policy_loss"] += policy_loss.detach()
+                learn_metrics["value_loss"] += value_loss.detach()
+                learn_metrics["entropy_loss"] += entropy_loss.detach()
                 num_minibatches_this_epoch += 1
 
                 if (
@@ -957,7 +966,10 @@ class PPO(RLAlgorithm):
 
         # Log metrics
         divisor = max(1e-8, total_minibatch_updates_total)
-        learn_metrics = {k: v / divisor for k, v in learn_metrics.items()}
+        learn_metrics = {
+            k: (v / divisor).item() if torch.is_tensor(v) else v / divisor
+            for k, v in learn_metrics.items()
+        }
         for key, value in learn_metrics.items():
             self.metrics.log(key, value)
 

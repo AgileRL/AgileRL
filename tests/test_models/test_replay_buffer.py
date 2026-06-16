@@ -326,13 +326,19 @@ class TestInitBufferMultiAgent:
 
 
 class TestInitBufferFlagPriority:
-    """When multiple flags are set, n_step takes precedence over per.
+    """When multiple flags are set, per takes precedence for the main memory
+    (the n-step buffer is built separately by ``init_n_step_buffer``).
     Standard is the fallback when neither is set."""
 
-    def test_n_step_takes_precedence_over_per(self):
+    def test_per_takes_precedence_over_n_step(self):
         spec = ReplayBufferSpec(n_step_buffer=True, per_buffer=True)
-        buf = spec.init_buffer(DQNSpec())
-        assert isinstance(buf, MultiStepReplayBuffer)
+        buf = spec.init_buffer(RainbowDQNSpec(net_config=None))
+        assert isinstance(buf, PrioritizedReplayBuffer)
+
+    def test_per_with_unsupported_algorithm_raises(self):
+        spec = ReplayBufferSpec(n_step_buffer=True, per_buffer=True)
+        with pytest.raises(ValueError, match="only supported for Rainbow"):
+            spec.init_buffer(DQNSpec())
 
     def test_standard_when_both_flags_false(self):
         spec = ReplayBufferSpec(n_step_buffer=False, per_buffer=False)

@@ -107,7 +107,7 @@ class GymEnvSpec(EnvSpec):
     sync: bool = Field(default=False)
 
     @staticmethod
-    def constuct_custom_env_fn(
+    def construct_custom_env_fn(
         entrypoint: str,
         path: str | None = None,
         config: dict[str, Any] | None = None,
@@ -147,7 +147,7 @@ class GymEnvSpec(EnvSpec):
         :rtype: gymnasium.Env
         """
         if self.entrypoint is not None:
-            return self.constuct_custom_env_fn(
+            return self.construct_custom_env_fn(
                 self.entrypoint,
                 self.path,
                 self.config,
@@ -167,7 +167,7 @@ class GymEnvSpec(EnvSpec):
         from agilerl.utils.utils import make_vect_envs
 
         if self.entrypoint is not None:
-            make_env = self.constuct_custom_env_fn(
+            make_env = self.construct_custom_env_fn(
                 self.entrypoint,
                 self.path,
                 self.config,
@@ -204,7 +204,7 @@ class PzEnvSpec(EnvSpec):
     wrappers: list[WrapperSpec] | None = Field(default=None)
 
     @staticmethod
-    def constuct_custom_env_fn(
+    def construct_custom_env_fn(
         entrypoint: str,
         path: str | None = None,
         config: dict[str, Any] | None = None,
@@ -246,7 +246,7 @@ class PzEnvSpec(EnvSpec):
         :rtype: ParallelEnv
         """
         if self.entrypoint is not None:
-            return self.constuct_custom_env_fn(
+            return self.construct_custom_env_fn(
                 self.entrypoint,
                 self.path,
                 self.config,
@@ -274,7 +274,7 @@ class PzEnvSpec(EnvSpec):
         from agilerl.utils.utils import make_multi_agent_vect_envs
 
         if self.entrypoint is not None:
-            make_env = self.constuct_custom_env_fn(
+            make_env = self.construct_custom_env_fn(
                 self.entrypoint,
                 self.path,
                 self.config,

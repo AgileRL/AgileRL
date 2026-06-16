@@ -351,7 +351,11 @@ def needs_image_transpose(observation_space: spaces.Space) -> bool:
 
 
 def transpose_image_space(space: spaces.Space) -> spaces.Space:
-    """Return a copy of *space* with all 3-D Box subspaces transposed to CHW.
+    """Return a copy of *space* with channels-last Box subspaces transposed to CHW.
+
+    Subspaces that are already channels-first (e.g. stacked frames with shape
+    ``(C, H, W)``) are left untouched, so mixed Dict/Tuple spaces only have
+    their channels-last leaves transposed.
 
     :param space: Space to transpose
     :type space: spaces.Space
@@ -359,6 +363,8 @@ def transpose_image_space(space: spaces.Space) -> spaces.Space:
     :rtype: spaces.Space
     """
     if isinstance(space, spaces.Box) and len(space.shape) == 3:
+        if not is_channels_last(space):
+            return space
         low = space.low.transpose(2, 0, 1)
         high = space.high.transpose(2, 0, 1)
         return spaces.Box(low=low, high=high, dtype=space.dtype)
@@ -379,7 +385,10 @@ def transpose_image_observation(
 ) -> NumpyObsType | torch.Tensor:
     """Transpose 3-D observations from HWC to CHW.
 
-    Supports both NumPy arrays and PyTorch tensors.
+    Supports both NumPy arrays and PyTorch tensors. Observations that already
+    match the channels-first layout the space leaf maps to (e.g. an
+    always-channels-first stacked-frames leaf inside a mixed Dict space) are
+    returned unchanged.
 
     :param observation: Observation
     :type observation: np.ndarray | torch.Tensor
@@ -389,16 +398,31 @@ def transpose_image_observation(
     :rtype: np.ndarray | torch.Tensor
     """
     if isinstance(original_space, spaces.Box) and len(original_space.shape) == 3:
+        # The channels-first layout this leaf should end up in
+        shape = tuple(original_space.shape)
+        target = (
+            (shape[2], shape[0], shape[1])
+            if is_channels_last(original_space)
+            else shape
+        )
         if isinstance(observation, torch.Tensor):
             ndim = observation.ndim
             if ndim == 3:
+                if tuple(observation.shape) == target:
+                    return observation
                 return observation.permute(2, 0, 1)
             if ndim == 4:
+                if tuple(observation.shape[1:]) == target:
+                    return observation
                 return observation.permute(0, 3, 1, 2)
         arr = np.asarray(observation)
         if arr.ndim == 3:
+            if tuple(arr.shape) == target:
+                return arr
             return arr.transpose(2, 0, 1)
         if arr.ndim == 4:
+            if tuple(arr.shape[1:]) == target:
+                return arr
             return arr.transpose(0, 3, 1, 2)
 
     if isinstance(original_space, spaces.Dict):

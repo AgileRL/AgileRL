@@ -89,17 +89,10 @@ class ReplayBufferSpec(BaseModel):
         buffer_args: dict[str, Any] = {}
         is_multi_agent = algo_spec.agent_type == AgentType.MultiAgent
         if not is_multi_agent:
-            if self.n_step_buffer:
-                if not hasattr(algo_spec, "gamma"):
-                    msg = "Gamma must be specified for N-step buffer"
-                    raise ValueError(msg)
-
-                n_step = self.n_step_buffer_args.n_step
-                n_step_args = {"n_step": n_step, "gamma": algo_spec.gamma}
-                buffer_args |= n_step_args
-                buffer_class = MultiStepReplayBuffer
-
-            elif self.per_buffer:
+            # PER takes precedence for the main memory: in combined
+            # PER + n-step setups the n-step buffer is a secondary buffer
+            # built by ``init_n_step_buffer``.
+            if self.per_buffer:
                 if not isinstance(algo_spec, RainbowDQNSpec):
                     msg = "PER buffer is only supported for Rainbow DQN"
                     raise ValueError(msg)
@@ -108,6 +101,16 @@ class ReplayBufferSpec(BaseModel):
                 per_args = {"alpha": alpha}
                 buffer_args |= per_args
                 buffer_class = PrioritizedReplayBuffer
+
+            elif self.n_step_buffer:
+                if not hasattr(algo_spec, "gamma"):
+                    msg = "Gamma must be specified for N-step buffer"
+                    raise ValueError(msg)
+
+                n_step = self.n_step_buffer_args.n_step
+                n_step_args = {"n_step": n_step, "gamma": algo_spec.gamma}
+                buffer_args |= n_step_args
+                buffer_class = MultiStepReplayBuffer
             else:
                 buffer_class = ReplayBuffer
         else:

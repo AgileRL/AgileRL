@@ -321,6 +321,37 @@ class TestFinetuneLlmReasoning:
             assert mock_save.call_count == 1
             assert mock_agent.test.call_count == 2
 
+    def test_finetune_llm_reasoning_periodic_checkpoints_use_checkpoint_path(self):
+        mock_agent = _mock_grpo_agent()
+
+        mock_env = MagicMock()
+        mock_env.__len__.return_value = 6
+        mock_env.reset.return_value = "initial_prompts"
+        mock_env.step.return_value = ("next_prompts", torch.tensor([2.0, 3.0]))
+        mock_env.data_batch_size_per_gpu = 1
+
+        with (
+            patch("agilerl.training.train_llm.default_progress_bar"),
+            patch("agilerl.training.train_llm.init_loggers") as mock_init_loggers,
+            patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_agg,
+            patch("agilerl.training.train_llm.save_llm_checkpoint") as mock_save,
+        ):
+            mock_init_loggers.return_value = []
+            mock_agg.return_value = 0.5
+
+            finetune_llm_reasoning(
+                pop=[mock_agent],
+                env=mock_env,
+                save_elite=False,
+                evaluation_interval=3,
+                accelerator=None,
+                checkpoint_steps=6,
+                checkpoint_path="/tmp/llm_ckpts",
+            )
+
+            assert mock_save.call_count == 1
+            assert mock_save.call_args.args == (mock_agent, "/tmp/llm_ckpts")
+
     @pytest.mark.parametrize("use_accelerator", [True, False])
     def test_finetune_llm_reasoning_evolvable_training_loop(self, use_accelerator):
         mock_agent = _mock_grpo_agent()

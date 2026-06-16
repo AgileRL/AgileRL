@@ -92,7 +92,6 @@ def _make_population(agents, **kwargs):
     """Build a Population via __new__ to bypass __init__ validation."""
     pop = Population.__new__(Population)
     pop._agents = agents
-    pop.sample_agent = agents[0]
     pop.min_evo_steps = kwargs.get("min_evo_steps", 10)
     pop.accelerator = kwargs.get("accelerator", None)
     pop.loggers = kwargs.get("loggers", [])
@@ -425,8 +424,7 @@ class TestPopulationInit:
 
         pop = Population(agents=[agent])
         assert pop._agents == [agent]
-        assert pop.sample_agent is agent
-        assert pop.min_evo_steps == 10
+        assert pop.min_evo_steps == 100
         assert pop.accelerator is None
         assert pop.loggers == []
         assert pop.last_fitnesses == []
@@ -505,6 +503,15 @@ class TestPopulationUpdate:
         pop.update([a2])
         assert pop.agents == [a2]
 
+    def test_update_refreshes_derived_views(self):
+        """No reference to a replaced agent (or its metrics) is retained."""
+        a1 = _make_mock_agent(index=0, additional_metrics=["loss"])
+        a2 = _make_mock_agent(index=1, additional_metrics=["loss", "entropy"])
+        pop = _make_population([a1])
+        pop.update([a2])
+        assert pop.additional_metric_names == ["loss", "entropy"]
+        assert all(vars(pop)[k] is not a1 for k in vars(pop))
+
 
 class TestPopulationIncrementEvoStep:
     def test_increment(self):
@@ -547,6 +554,17 @@ class TestPopulationShouldStop:
         a = _make_mock_agent(fitness=[100.0])
         pop = _make_population([a], min_evo_steps=5, evo_steps=10)
         assert pop.should_stop(1.0) is True
+
+    def test_should_stop_judges_last_10_fitnesses_only(self):
+        """Early bad fitness must not prevent stopping once recent runs pass."""
+        a = _make_mock_agent(fitness=[-1000.0] * 50 + [100.0] * 10)
+        pop = _make_population([a], min_evo_steps=5, evo_steps=10)
+        assert pop.should_stop(1.0) is True
+
+    def test_should_stop_false_when_recent_fitness_below_target(self):
+        a = _make_mock_agent(fitness=[100.0] * 50 + [-1000.0] * 10)
+        pop = _make_population([a], min_evo_steps=5, evo_steps=10)
+        assert pop.should_stop(1.0) is False
 
 
 class TestPopulationClearAndFinish:

@@ -23,6 +23,11 @@ class DummyVecEnv:
     same leading dimension (which is stripped before forwarding to the
     underlying environment).
 
+    Episodes auto-reset following the gymnasium >= 1.0 next-step convention
+    (matching :class:`gymnasium.vector.SyncVectorEnv`): the step after a
+    termination/truncation resets the environment and returns the reset
+    observation with zero reward and both done flags ``False``.
+
     :param env: The environment to wrap.
     :type env: gymnasium.Env
     """
@@ -36,6 +41,7 @@ class DummyVecEnv:
         self.action_space: spaces.Space = batch_space(env.action_space, 1)
         self.render_mode: str | None = getattr(env, "render_mode", None)
         self.spec = getattr(env, "spec", None)
+        self._autoreset = False
 
     def reset(
         self,
@@ -53,6 +59,7 @@ class DummyVecEnv:
         :rtype: tuple[np.ndarray, dict[str, Any]]
         """
         obs, info = self._env.reset(seed=seed, options=options)
+        self._autoreset = False
         return np.expand_dims(obs, axis=0), info
 
     def step(
@@ -60,17 +67,33 @@ class DummyVecEnv:
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
         """Take a step in the environment.
 
+        If the previous step ended the episode, the environment is reset
+        instead (next-step autoreset) and the reset observation is returned
+        with zero reward and ``False`` done flags.
+
         :param action: Batched action array (shape ``(1, ...)``).
         :type action: np.ndarray
         :returns: A tuple of ``(obs, reward, terminated, truncated, info)``
             with leading batch dimensions.
         :rtype: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]
         """
+        if self._autoreset:
+            obs, info = self._env.reset()
+            self._autoreset = False
+            return (
+                np.expand_dims(obs, axis=0),
+                np.array([0.0]),
+                np.array([False]),
+                np.array([False]),
+                info,
+            )
+
         scalar_action = action[0]
         if isinstance(self.single_action_space, spaces.Discrete):
             scalar_action = int(scalar_action)
 
         obs, reward, terminated, truncated, info = self._env.step(scalar_action)
+        self._autoreset = bool(terminated) or bool(truncated)
         return (
             np.expand_dims(obs, axis=0),
             np.array([reward]),

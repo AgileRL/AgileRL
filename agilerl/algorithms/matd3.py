@@ -519,6 +519,10 @@ class MATD3(MultiAgentRLAlgorithm):
             ),
         )
 
+        # Register metrics to keep track of during training
+        self.metrics.register("actor_loss")
+        self.metrics.register("critic_loss")
+
     def process_infos(
         self,
         infos: InfosDict | None = None,
@@ -943,7 +947,15 @@ class MATD3(MultiAgentRLAlgorithm):
                 actor_loss.backward()
             actor_optimizer.step()
 
-        return actor_loss.item() if actor_loss is not None else None, critic_loss.item()
+        actor_loss = actor_loss.item() if actor_loss is not None else None
+        critic_loss = critic_loss.item()
+
+        # Log metrics
+        if actor_loss is not None:
+            self.metrics.log("actor_loss", network_id, actor_loss)
+
+        self.metrics.log("critic_loss", network_id, critic_loss)
+        return actor_loss, critic_loss
 
     def soft_update(self, net: nn.Module, target: nn.Module) -> None:
         """Soft updates target network.
@@ -1067,5 +1079,5 @@ class MATD3(MultiAgentRLAlgorithm):
 
         mean_fit = np.mean(rewards, axis=0)
         mean_fit = mean_fit[0] if sum_scores else mean_fit
-        self.fitness.append(mean_fit)
+        self.metrics.add_fitness(mean_fit)
         return mean_fit

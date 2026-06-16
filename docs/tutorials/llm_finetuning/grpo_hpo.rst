@@ -406,7 +406,7 @@ function and is an example of how we might choose to make use of a population of
 
     .. code-block:: python
 
-        from agilerl.utils.utils import aggregate_metrics_across_gpus
+        from agilerl.utils.llm_utils import aggregate_metrics_across_gpus
         from agilerl.training.train_llm import tournament_selection_and_mutation
         from tqdm import trange
         import numpy as np

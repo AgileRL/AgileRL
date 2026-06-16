@@ -1143,6 +1143,11 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
         # Load other attributes
         checkpoint.pop("network_info")
+        # Pre-2.8 checkpoints stored ``steps`` as a cumulative list; coerce to
+        # the int expected by the metrics tracker.
+        if isinstance(checkpoint.get("steps"), (list, tuple)):
+            legacy_steps = checkpoint["steps"]
+            checkpoint["steps"] = int(legacy_steps[-1]) if len(legacy_steps) else 0
         for attribute, value in checkpoint.items():
             if isinstance(value, torch.Tensor) and isinstance(
                 getattr(self, attribute, None), torch.Tensor
@@ -1588,14 +1593,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
         # Track multi-agent metrics using the effective training IDs. In grouped
         # setups this corresponds to shared group IDs; otherwise raw agent IDs.
-        # FIXME: Temporary workaround to get correct agent IDs for MADDPG and MATD3
-        # while they dont support centralized policy execution.
-        agent_ids = (
-            self.agent_ids
-            if self.algo in ["MADDPG", "MATD3"]
-            else list(self.observation_space.keys())
-        )
-        self.metrics = MultiAgentMetrics(agent_ids)
+        self.metrics = MultiAgentMetrics(list(self.observation_space.keys()))
 
     def _registry_init(self) -> None:
         super()._registry_init()
@@ -1623,6 +1621,45 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         :rtype: bool
         """
         return len(self.shared_agent_ids) < len(self.agent_ids)
+
+    def add_scores(self, scores: list[float] | list[list[float]]) -> None:
+        """Add scores to the metrics, aggregating sub-agents into their groups.
+
+        Multi-agent training loops collect non-summed score rows with one
+        entry per environment agent. When agents share policies (grouped
+        setups) the metrics track group IDs instead, so each row is reduced
+        to the mean score per group before being recorded.
+
+        :param scores: List of scores (or per-agent score rows) to add.
+        :type scores: list[float] | list[list[float]]
+        """
+        is_nested = bool(scores) and isinstance(scores[0], (list, np.ndarray))
+        # Grouped setups track metrics under group IDs, so per-env-agent rows
+        # must be reduced to a per-group mean before being recorded.
+        is_grouped = (
+            is_nested
+            and self.has_grouped_agents()
+            and self.metrics.agent_ids == self.shared_agent_ids
+        )
+        if is_grouped:
+            # The only row shape these loops produce is one entry per raw env
+            # agent; anything else would mislabel group columns if passed
+            # through, so fail loudly rather than silently misrecord.
+            assert len(scores[0]) == len(self.agent_ids), (
+                "Grouped multi-agent scores expected one entry per agent "
+                f"({len(self.agent_ids)} agents: {self.agent_ids}), got rows of "
+                f"length {len(scores[0])}."
+            )
+            column = {aid: idx for idx, aid in enumerate(self.agent_ids)}
+            group_columns = [
+                [column[aid] for aid in self.grouped_agents[gid]]
+                for gid in self.shared_agent_ids
+            ]
+            scores = [
+                [float(np.mean([row[idx] for idx in cols])) for cols in group_columns]
+                for row in scores
+            ]
+        super().add_scores(scores)
 
     def get_setup(self) -> MultiAgentSetup:
         """Get the type of multi-agent setup, as determined by the observation spaces of the agents.

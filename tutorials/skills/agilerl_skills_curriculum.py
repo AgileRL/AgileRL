@@ -256,88 +256,91 @@ if __name__ == "__main__":
     total_steps = 0
     while np.less([agent.steps for agent in pop], max_steps).all():
         for agent in pop:  # Loop through population
-            state = env.reset()[0]  # Reset environment at start of episode
-            score = 0
+            agent.set_training_mode(True)
 
-            states = []
-            actions = []
-            log_probs = []
-            rewards = []
-            dones = []
-            values = []
+            for _ in range(-(evo_steps // -agent.learn_step)):
+                state = env.reset()[0]  # Reset environment at start of episode
+                score = 0
+                done = np.zeros(1)
 
-            done = np.zeros(1)
+                agent.rollout_buffer.reset()
+                for _ in range(agent.learn_step):
+                    obs = state  # Observation used to select the skill
 
-            for _ in range(500):
-                # Get next action from agent
-                action, log_prob, _, value = agent.get_action(state)
+                    # Get next action from agent
+                    action, log_prob, _, value = agent.get_action(obs)
 
-                # Internal loop to execute trained skill
-                skill_agent = trained_skills[action[0]]["agent"]
-                skill_duration = trained_skills[action[0]]["skill_duration"]
-                reward = 0
-                next_state, next_done = state, done
-                for _ in range(skill_duration):
-                    # If landed, do nothing
-                    if state[0][6] or state[0][7]:
-                        next_state, skill_reward, termination, truncation, _ = env.step(
-                            [0],
+                    # Internal loop to execute trained skill
+                    skill_agent = trained_skills[action[0]]["agent"]
+                    skill_duration = trained_skills[action[0]]["skill_duration"]
+                    reward = 0
+                    next_state, next_done = state, done
+                    for _ in range(skill_duration):
+                        # If landed, do nothing
+                        if state[0][6] or state[0][7]:
+                            next_state, skill_reward, termination, truncation, _ = (
+                                env.step(
+                                    [0],
+                                )
+                            )
+                        else:
+                            skill_action, _, _, _ = skill_agent.get_action(state)
+                            next_state, skill_reward, termination, truncation, _ = (
+                                env.step(
+                                    skill_action,
+                                )
+                            )  # Act in environment
+                        next_done = np.logical_or(termination, truncation).astype(
+                            np.int8
                         )
-                    else:
-                        skill_action, _, _, _ = skill_agent.get_action(state)
-                        next_state, skill_reward, termination, truncation, _ = env.step(
-                            skill_action,
-                        )  # Act in environment
-                    next_done = np.logical_or(termination, truncation).astype(np.int8)
-                    reward += skill_reward
-                    if np.any(termination) or np.any(truncation):
-                        break
+                        reward += skill_reward
+                        if np.any(termination) or np.any(truncation):
+                            break
+                        state = next_state
+                    score += reward
+
+                    # Save experience in the agent's rollout buffer
+                    agent.rollout_buffer.add(
+                        obs=obs,
+                        action=action,
+                        reward=np.atleast_1d(reward),
+                        done=np.atleast_1d(next_done),
+                        value=np.atleast_1d(value),
+                        log_prob=np.atleast_1d(log_prob),
+                        next_obs=next_state,
+                    )
+
                     state = next_state
                     done = next_done
-                score += reward
 
-                states.append(state)
-                actions.append(action)
-                log_probs.append(log_prob)
-                rewards.append(reward)
-                dones.append(done)
-                values.append(value)
+                agent.scores.append(score)
 
-            agent.scores.append(score)
-
-            # Learn according to agent's RL algorithm
-            agent.learn(
-                (
-                    states,
-                    actions,
-                    log_probs,
-                    rewards,
-                    dones,
-                    values,
-                    next_state,
-                    next_done,
-                ),
-            )
-
-            agent.steps += 500
-            total_steps += 500
-
-        if (agent.steps) % evo_steps == 0:
-            mean_scores = np.mean([agent.scores[-20:] for agent in pop], axis=1)
-            if use_wandb:
-                wandb.log(
-                    {
-                        "global_step": total_steps,
-                        "train/mean_score": np.mean(mean_scores),
-                    },
+                # Bootstrap the final state value and learn from the rollout buffer
+                _, _, _, last_value = agent.get_action(state)
+                agent.rollout_buffer.compute_returns_and_advantages(
+                    last_value=np.atleast_1d(last_value),
+                    last_done=np.atleast_1d(done),
                 )
-            print(
-                f"""
-                --- Global Steps {total_steps} ---
-                Score:\t\t{mean_scores}
-                """,
-                end="\r",
+                agent.learn()
+
+                agent.steps += agent.learn_step
+                total_steps += agent.learn_step
+
+        mean_scores = np.mean([agent.scores[-20:] for agent in pop], axis=1)
+        if use_wandb:
+            wandb.log(
+                {
+                    "global_step": total_steps,
+                    "train/mean_score": np.mean(mean_scores),
+                },
             )
+        print(
+            f"""
+            --- Global Steps {total_steps} ---
+            Score:\t\t{mean_scores}
+            """,
+            end="\r",
+        )
 
     wandb.finish()
     env.close()
