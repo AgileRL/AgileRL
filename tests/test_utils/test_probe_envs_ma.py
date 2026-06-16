@@ -6,7 +6,7 @@ import torch
 
 from agilerl.algorithms.ippo import IPPO
 from agilerl.algorithms.maddpg import MADDPG
-from agilerl.components.replay_buffer import MultiAgentReplayBuffer
+from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.utils.probe_envs_ma import (
     ConstantRewardContActionsEnv,
     ConstantRewardContActionsImageEnv,
@@ -629,7 +629,7 @@ class TestCheckPolicyQLearningWithProbeEnv:
             "net_config": {"encoder_config": {"hidden_size": [32, 32]}},
             "batch_size": 256,
         }
-        memory = MultiAgentReplayBuffer(
+        memory = ReplayBuffer(
             max_size=10000,
             device=device,
         )
@@ -657,7 +657,7 @@ class TestCheckPolicyQLearningWithProbeEnv:
             "net_config": {"encoder_config": {"hidden_size": [32, 32]}},
             "batch_size": 256,
         }
-        memory = MultiAgentReplayBuffer(
+        memory = ReplayBuffer(
             max_size=10000,
             device=device,
         )
@@ -701,7 +701,7 @@ class TestCheckPolicyQLearningWithProbeEnv:
             "gamma": 0.99,  # Stable discount factor
             "tau": 0.005,  # Smaller soft update parameter
         }
-        memory = MultiAgentReplayBuffer(
+        memory = ReplayBuffer(
             max_size=10000,
             device=device,
         )

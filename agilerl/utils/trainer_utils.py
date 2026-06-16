@@ -22,7 +22,6 @@ from agilerl.algorithms.core.base import (
 )
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components.replay_buffer import (
-    MultiAgentReplayBuffer,
     MultiStepReplayBuffer,
     PrioritizedReplayBuffer,
     ReplayBuffer,
@@ -47,12 +46,7 @@ if TYPE_CHECKING:
 LLMEnvType = ReasoningGym | PreferenceGym | SFTGym
 EnvironmentT = GymEnvType | PzEnvType | BanditEnv | LLMEnvType
 PopulationT = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
-BufferT = (
-    ReplayBuffer
-    | MultiStepReplayBuffer
-    | MultiAgentReplayBuffer
-    | PrioritizedReplayBuffer
-)
+BufferT = ReplayBuffer | MultiStepReplayBuffer | PrioritizedReplayBuffer
 
 
 def hp_config_from_mutation_spec(spec: MutationSpec) -> HyperparameterConfig | None:
@@ -301,8 +295,8 @@ def build_replay_buffer_from_spec(
     device: str | torch.device = "cpu",
 ) -> BufferT | None:
     """Convert a :class:`ReplayBufferSpec` into a :class:`ReplayBuffer`,
-    :class:`MultiStepReplayBuffer`, :class:`MultiAgentReplayBuffer`, or
-    :class:`PrioritizedReplayBuffer` instance, given an algorithm spec.
+    :class:`MultiStepReplayBuffer`, or :class:`PrioritizedReplayBuffer`
+    instance, given an algorithm spec.
 
     A buffer is created for off-policy **and** offline algorithms.
     On-policy algorithms return ``None``.

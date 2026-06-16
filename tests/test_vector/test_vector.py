@@ -24,7 +24,7 @@ from tests.pz_vector_test_utils import (
     term_env,
 )
 
-from agilerl.components.replay_buffer import MultiAgentReplayBuffer
+from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.vector.pz_async_vec_env import (
     AsyncPettingZooVecEnv,
     AsyncState,
@@ -1715,7 +1715,7 @@ def create_replay_buffer_with_transitions(env, max_size=10):
 
     from agilerl.components.data import MultiAgentTransition
 
-    buffer = MultiAgentReplayBuffer(max_size=max_size)
+    buffer = ReplayBuffer(max_size=max_size)
     env.reset()
     num_envs = env.num_envs
     for _ in range(max_size):

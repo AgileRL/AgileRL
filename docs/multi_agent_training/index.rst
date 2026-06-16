@@ -374,14 +374,14 @@ In order to efficiently train a population of RL agents, off-policy algorithms m
 by an individual agent because it allows faster learning from the behaviour of other agents. For example, if you were able to watch a bunch of people attempt to solve
 a maze, you could learn from their mistakes and successes without necessarily having to explore the entire maze yourself.
 
-The object used to store experiences collected by agents in the environment is called the Experience Replay Buffer, and is defined by the class ``MultiAgentReplayBuffer()`` for
-multi-agent environments. Transitions are built using the ``MultiAgentTransition`` tensorclass, added via ``memory.add()``, and sampled using ``memory.sample()``.
+The object used to store experiences collected by agents in the environment is called the Experience Replay Buffer, and is defined by the class ``ReplayBuffer()``, which handles
+multi-agent environments transparently. Transitions are built using the ``MultiAgentTransition`` tensorclass, added via ``memory.add()``, and sampled using ``memory.sample()``.
 
 .. code-block:: python
 
-    from agilerl.components.replay_buffer import MultiAgentReplayBuffer
+    from agilerl.components.replay_buffer import ReplayBuffer
 
-    memory = MultiAgentReplayBuffer(
+    memory = ReplayBuffer(
         max_size=100000,
         device=device,
     )
@@ -462,7 +462,7 @@ Alternatively, use a custom training loop. Combining all of the above:
 
         from agilerl.algorithms import MADDPG
         from agilerl.components.data import MultiAgentTransition
-        from agilerl.components.replay_buffer import MultiAgentReplayBuffer
+        from agilerl.components.replay_buffer import ReplayBuffer
         from agilerl.hpo.mutation import Mutations
         from agilerl.hpo.tournament import TournamentSelection
         from agilerl.population import Population
@@ -529,7 +529,7 @@ Alternatively, use a custom training loop. Combining all of the above:
         )
 
         # Configure the multi-agent replay buffer
-        memory = MultiAgentReplayBuffer(
+        memory = ReplayBuffer(
             max_size=100000,
             device=device,
         )

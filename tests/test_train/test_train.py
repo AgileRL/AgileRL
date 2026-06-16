@@ -676,7 +676,7 @@ class DummyBanditMemory(ReplayBuffer):
 class DummyMultiMemory(ReplayBuffer):
     """TensorDict-based multi-agent replay buffer stub.
 
-    Mirrors the API of :class:`MultiAgentReplayBuffer` that the
+    Mirrors the API of :class:`ReplayBuffer` that the
     multi-agent off-policy training loop expects (``add``, ``sample``,
     ``counter``, ``__len__``).
     """

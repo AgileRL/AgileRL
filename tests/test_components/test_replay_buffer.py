@@ -5,7 +5,6 @@ from tensordict import TensorDict
 
 from agilerl.components.data import MultiAgentTransition
 from agilerl.components.replay_buffer import (
-    MultiAgentReplayBuffer,
     MultiStepReplayBuffer,
     PrioritizedReplayBuffer,
     ReplayBuffer,
@@ -366,6 +365,71 @@ class TestReplayBufferSample:
         assert "idxs" in samples
         assert samples["idxs"].shape == (batch_size,)
         assert all(0 <= idx < len(buffer) for idx in samples["idxs"])
+
+
+class TestReplayBufferAdaptiveSampling:
+    """`sample` draws without replacement for small buffers and switches to
+    (faster) with-replacement once duplicates become unlikely."""
+
+    @staticmethod
+    def _fill(buf: ReplayBuffer, n: int) -> None:
+        data = TensorDict(
+            {
+                "state": torch.arange(n).unsqueeze(1).float(),
+                "action": torch.zeros(n, 1),
+                "reward": torch.zeros(n, 1),
+            },
+            batch_size=[n],
+        )
+        buf.add(data)
+
+    def test_small_buffer_samples_without_replacement(self):
+        buf = ReplayBuffer(max_size=1000)
+        self._fill(buf, 200)
+        # default tolerance (1%): threshold for k=64 is ~2e5 >> 200 -> unique
+        idxs = buf.sample(64, return_idx=True)["idxs"].tolist()
+        assert len(set(idxs)) == len(idxs)
+
+    def test_sample_k_equals_size_is_a_permutation(self):
+        buf = ReplayBuffer(max_size=50)
+        self._fill(buf, 30)
+        idxs = buf.sample(30, return_idx=True)["idxs"].tolist()
+        assert sorted(idxs) == list(range(30))
+
+    def test_large_buffer_uses_with_replacement(self, monkeypatch):
+        # Fill above the with-replacement threshold (16384) so the buffer
+        # switches to with-replacement sampling.
+        buf = ReplayBuffer(max_size=20000)
+        self._fill(buf, 18000)
+
+        used: list[str] = []
+        real_randint, real_randperm = torch.randint, torch.randperm
+
+        def spy_randint(*args, **kwargs):
+            used.append("randint")
+            return real_randint(*args, **kwargs)
+
+        def spy_randperm(*args, **kwargs):
+            used.append("randperm")
+            return real_randperm(*args, **kwargs)
+
+        monkeypatch.setattr(torch, "randint", spy_randint)
+        monkeypatch.setattr(torch, "randperm", spy_randperm)
+
+        s = buf.sample(8, return_idx=True)
+        assert used == ["randint"]
+        assert s["idxs"].shape == (8,)
+        assert (s["idxs"] >= 0).all() and (s["idxs"] < buf.size).all()
+
+    def test_sample_more_than_size_returns_size(self):
+        buf = ReplayBuffer(max_size=50)
+        self._fill(buf, 5)
+        assert buf.sample(20).batch_size[0] == 5
+
+    def test_sample_zero_batch_returns_empty(self):
+        buf = ReplayBuffer(max_size=50)
+        self._fill(buf, 5)
+        assert buf.sample(0).batch_size[0] == 0
 
 
 class TestReplayBufferClear:
@@ -953,6 +1017,23 @@ class TestPrioritizedReplayBufferUpdatePriorities:
         buffer.update_priorities(torch.tensor([0, 1]), torch.tensor([1e-10, 1e-10]))
         assert buffer.sum_tree[0] >= 1e-5**buffer.alpha
 
+    def test_update_priorities_empty_is_noop(self):
+        buffer = PrioritizedReplayBuffer(max_size=10, alpha=0.6)
+        for i in range(3):
+            data = TensorDict(
+                {
+                    "state": torch.tensor([i]),
+                    "action": torch.tensor([0]),
+                    "reward": torch.tensor([1.0]),
+                },
+            )
+            data = data.unsqueeze(0)
+            data.batch_size = [1]
+            buffer.add(data)
+        total_before = buffer.sum_tree.sum()
+        buffer.update_priorities(torch.tensor([], dtype=torch.long), torch.tensor([]))
+        assert buffer.sum_tree.sum() == total_before
+
 
 class TestPrioritizedReplayBufferSampleProportional:
     def test_proportional_sampling(self):
@@ -983,10 +1064,16 @@ class TestPrioritizedReplayBufferSampleProportional:
             counter = 0
 
             def mock_rand(size):
+                # _sample_proportional draws all uniforms in a single
+                # torch.rand(batch_size) call, so return a tensor of that length.
                 nonlocal counter
-                val = predetermined_values[counter % len(predetermined_values)]
-                counter += 1
-                return torch.tensor([val])
+                n = size if isinstance(size, int) else size[0]
+                vals = [
+                    predetermined_values[(counter + j) % len(predetermined_values)]
+                    for j in range(n)
+                ]
+                counter += n
+                return torch.tensor(vals)
 
             torch.rand = mock_rand
 
@@ -1140,7 +1227,7 @@ def _make_deterministic_ma_td(
 
 class TestMultiAgentReplayBufferInit:
     def test_empty_defaults(self):
-        buf = MultiAgentReplayBuffer(100)
+        buf = ReplayBuffer(100)
         assert len(buf) == 0
         assert buf.size == 0
         assert buf.max_size == 100
@@ -1150,7 +1237,7 @@ class TestMultiAgentReplayBufferInit:
         assert buf.storage is None
 
     def test_size_setter(self):
-        buf = MultiAgentReplayBuffer(50)
+        buf = ReplayBuffer(50)
         buf.size = 7
         assert buf.size == 7
         assert len(buf) == 7
@@ -1161,7 +1248,7 @@ class TestMultiAgentReplayBufferInit:
 
 class TestMultiAgentReplayBufferAdd:
     def test_single_transition(self):
-        buf = MultiAgentReplayBuffer(100)
+        buf = ReplayBuffer(100)
         buf.add(_make_ma_td(MA_AGENTS, batch_size=1))
         assert len(buf) == 1
         assert buf.counter == 1
@@ -1169,20 +1256,20 @@ class TestMultiAgentReplayBufferAdd:
         assert buf.storage is not None
 
     def test_batch_add(self):
-        buf = MultiAgentReplayBuffer(100)
+        buf = ReplayBuffer(100)
         buf.add(_make_ma_td(MA_AGENTS, batch_size=8))
         assert len(buf) == 8
         assert buf.counter == 8
 
     def test_multiple_sequential_adds(self):
-        buf = MultiAgentReplayBuffer(100)
+        buf = ReplayBuffer(100)
         for _ in range(5):
             buf.add(_make_ma_td(MA_AGENTS, batch_size=3))
         assert len(buf) == 15
         assert buf.counter == 15
 
     def test_storage_batch_dim_equals_max_size(self):
-        buf = MultiAgentReplayBuffer(20)
+        buf = ReplayBuffer(20)
         buf.add(_make_ma_td(MA_AGENTS, batch_size=1))
         assert buf.storage.shape[0] == 20
 
@@ -1195,7 +1282,7 @@ class TestMultiAgentReplayBufferNormalizeDims:
         """Top-level 1-D tensor is reshaped to (batch, 1)."""
         bs = 4
         td = TensorDict({"global_reward": torch.rand(bs)}, batch_size=[bs])
-        buf = MultiAgentReplayBuffer(50)
+        buf = ReplayBuffer(50)
         buf.add(td)
         assert buf.storage["global_reward"].shape == (50, 1)
 
@@ -1211,7 +1298,7 @@ class TestMultiAgentReplayBufferNormalizeDims:
             },
             batch_size=[bs],
         )
-        buf = MultiAgentReplayBuffer(50)
+        buf = ReplayBuffer(50)
         buf.add(td)
         for a in MA_AGENTS:
             assert buf.storage["reward", a].shape == (50, 1)
@@ -1233,7 +1320,7 @@ class TestMultiAgentReplayBufferNormalizeDims:
             },
             batch_size=[bs],
         )
-        buf = MultiAgentReplayBuffer(50)
+        buf = ReplayBuffer(50)
         buf.add(td)
         assert buf.storage["info", "agent_0", "health"].shape == (50, 1)
 
@@ -1248,7 +1335,7 @@ class TestMultiAgentReplayBufferNormalizeDims:
             },
             batch_size=[bs],
         )
-        buf = MultiAgentReplayBuffer(50)
+        buf = ReplayBuffer(50)
         buf.add(td)
         for a in MA_AGENTS:
             assert buf.storage["state", a].shape == (50, obs_size)
@@ -1265,7 +1352,7 @@ class TestMultiAgentReplayBufferNormalizeDims:
             },
             batch_size=[bs],
         )
-        buf = MultiAgentReplayBuffer(50)
+        buf = ReplayBuffer(50)
         buf.add(td)
         for a in MA_AGENTS:
             assert buf.storage["obs", a].shape == (50, *img)
@@ -1285,7 +1372,7 @@ class TestMultiAgentReplayBufferNormalizeDims:
             },
             batch_size=[bs],
         )
-        buf = MultiAgentReplayBuffer(50)
+        buf = ReplayBuffer(50)
         buf.add(td)
         for a in MA_AGENTS:
             assert buf.storage["reward", a].shape == (50, 1)
@@ -1303,7 +1390,7 @@ class TestMultiAgentReplayBufferNormalizeDims:
             },
             batch_size=[bs],
         )
-        buf = MultiAgentReplayBuffer(50)
+        buf = ReplayBuffer(50)
         buf.add(td)
         for a in MA_AGENTS:
             assert buf.storage["done", a].shape == (50, 1)
@@ -1314,7 +1401,7 @@ class TestMultiAgentReplayBufferNormalizeDims:
 
 class TestMultiAgentReplayBufferCircular:
     def test_overwrites_oldest(self):
-        buf = MultiAgentReplayBuffer(4)
+        buf = ReplayBuffer(4)
         for _ in range(6):
             buf.add(_make_ma_td(MA_AGENTS, batch_size=1))
         assert len(buf) == 4
@@ -1322,7 +1409,7 @@ class TestMultiAgentReplayBufferCircular:
         assert buf.is_full
 
     def test_wrap_around_single_batch(self):
-        buf = MultiAgentReplayBuffer(5)
+        buf = ReplayBuffer(5)
         buf.add(_make_ma_td(MA_AGENTS, batch_size=3))
         buf.add(_make_ma_td(MA_AGENTS, batch_size=4))
         assert len(buf) == 5
@@ -1330,20 +1417,20 @@ class TestMultiAgentReplayBufferCircular:
         assert buf.counter == 7
 
     def test_exact_fill(self):
-        buf = MultiAgentReplayBuffer(4)
+        buf = ReplayBuffer(4)
         buf.add(_make_ma_td(MA_AGENTS, batch_size=4))
         assert len(buf) == 4
         assert buf.is_full
 
     def test_storage_shape_constant_after_overflow(self):
-        buf = MultiAgentReplayBuffer(10)
+        buf = ReplayBuffer(10)
         for _ in range(20):
             buf.add(_make_ma_td(MA_AGENTS, batch_size=3))
         assert buf.storage.shape[0] == 10
         assert len(buf) == 10
 
     def test_overwritten_values_are_newest(self):
-        buf = MultiAgentReplayBuffer(3)
+        buf = ReplayBuffer(3)
         old = _make_deterministic_ma_td(MA_AGENTS, 3, offset=0.0)
         new = _make_deterministic_ma_td(MA_AGENTS, 3, offset=100.0)
         buf.add(old)
@@ -1354,7 +1441,7 @@ class TestMultiAgentReplayBufferCircular:
                 assert row.item() >= 100.0
 
     def test_cursor_position_after_wrap(self):
-        buf = MultiAgentReplayBuffer(5)
+        buf = ReplayBuffer(5)
         buf.add(_make_ma_td(MA_AGENTS, batch_size=3))
         assert buf._cursor == 3
         buf.add(_make_ma_td(MA_AGENTS, batch_size=4))
@@ -1366,14 +1453,14 @@ class TestMultiAgentReplayBufferCircular:
 
 class TestMultiAgentReplayBufferSample:
     def test_returns_tensordict(self):
-        buf = MultiAgentReplayBuffer(100)
+        buf = ReplayBuffer(100)
         buf.add(_make_ma_td(MA_AGENTS, batch_size=20))
         s = buf.sample(8)
         assert isinstance(s, TensorDict)
         assert s.shape[0] == 8
 
     def test_nested_structure_preserved(self):
-        buf = MultiAgentReplayBuffer(100)
+        buf = ReplayBuffer(100)
         buf.add(_make_ma_td(MA_AGENTS, batch_size=10))
         s = buf.sample(4)
         for field in ("obs", "action", "reward", "next_obs", "done"):
@@ -1386,7 +1473,7 @@ class TestMultiAgentReplayBufferSample:
 
     def test_sample_shapes(self):
         obs_size, act_size = 5, 2
-        buf = MultiAgentReplayBuffer(100)
+        buf = ReplayBuffer(100)
         buf.add(
             _make_ma_td(MA_AGENTS, batch_size=20, obs_size=obs_size, act_size=act_size)
         )
@@ -1399,20 +1486,20 @@ class TestMultiAgentReplayBufferSample:
             assert s["done", aid].shape == (8, 1)
 
     def test_return_idx(self):
-        buf = MultiAgentReplayBuffer(100)
+        buf = ReplayBuffer(100)
         buf.add(_make_ma_td(MA_AGENTS, batch_size=20))
         s = buf.sample(5, return_idx=True)
         assert "idxs" in s.keys()
         assert s["idxs"].shape == (5,)
 
     def test_no_idx_by_default(self):
-        buf = MultiAgentReplayBuffer(100)
+        buf = ReplayBuffer(100)
         buf.add(_make_ma_td(MA_AGENTS, batch_size=10))
         s = buf.sample(3)
         assert "idxs" not in s.keys()
 
     def test_sampled_indices_within_bounds(self):
-        buf = MultiAgentReplayBuffer(50)
+        buf = ReplayBuffer(50)
         buf.add(_make_ma_td(MA_AGENTS, batch_size=20))
         s = buf.sample(15, return_idx=True)
         assert (s["idxs"] >= 0).all()
@@ -1424,7 +1511,7 @@ class TestMultiAgentReplayBufferSample:
 
 class TestMultiAgentReplayBufferValues:
     def test_exact_recovery_single_transition(self):
-        buf = MultiAgentReplayBuffer(100)
+        buf = ReplayBuffer(100)
         td = TensorDict(
             {
                 "obs": TensorDict(
@@ -1452,7 +1539,7 @@ class TestMultiAgentReplayBufferValues:
         torch.testing.assert_close(s["reward", "a1"], torch.tensor([[20.0]]))
 
     def test_batch_values_belong_to_original(self):
-        buf = MultiAgentReplayBuffer(100)
+        buf = ReplayBuffer(100)
         obs_a0 = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
         td = TensorDict(
             {
@@ -1470,7 +1557,7 @@ class TestMultiAgentReplayBufferValues:
 
     def test_scalar_reward_round_trip(self):
         """1-D rewards (auto-unsqueezed) are recovered correctly."""
-        buf = MultiAgentReplayBuffer(100)
+        buf = ReplayBuffer(100)
         td = TensorDict(
             {
                 "reward": TensorDict(
@@ -1486,7 +1573,7 @@ class TestMultiAgentReplayBufferValues:
 
     def test_multi_field_deterministic_round_trip(self):
         """Full 5-field transition round-trips correctly with a single stored item."""
-        buf = MultiAgentReplayBuffer(10)
+        buf = ReplayBuffer(10)
         td = TensorDict(
             {
                 "obs": TensorDict(
@@ -1542,7 +1629,7 @@ class TestMultiAgentReplayBufferImages:
             },
             batch_size=[1],
         )
-        buf = MultiAgentReplayBuffer(50)
+        buf = ReplayBuffer(50)
         buf.add(td)
         s = buf.sample(1)
         for a in MA_AGENTS:
@@ -1560,7 +1647,7 @@ class TestMultiAgentReplayBufferImages:
             },
             batch_size=[n],
         )
-        buf = MultiAgentReplayBuffer(50)
+        buf = ReplayBuffer(50)
         buf.add(td)
         s = buf.sample(2)
         for a in MA_AGENTS:
@@ -1585,7 +1672,7 @@ class TestMultiAgentReplayBufferHeterogeneous:
             },
             batch_size=[2],
         )
-        buf = MultiAgentReplayBuffer(50)
+        buf = ReplayBuffer(50)
         buf.add(td)
         s = buf.sample(2)
         assert s["obs", "big"].shape == (2, 10)
@@ -1621,7 +1708,7 @@ class TestMultiAgentReplayBufferHeterogeneous:
             },
             batch_size=[2],
         )
-        buf = MultiAgentReplayBuffer(50)
+        buf = ReplayBuffer(50)
         buf.add(td)
         s = buf.sample(2)
         assert s["obs", "visual_agent"].shape == (2, 3, 128, 128)
@@ -1636,7 +1723,7 @@ class TestMultiAgentReplayBufferAgentCounts:
     def test_single_agent(self):
         agents = ["solo"]
         td = _make_ma_td(agents, batch_size=5)
-        buf = MultiAgentReplayBuffer(20)
+        buf = ReplayBuffer(20)
         buf.add(td)
         s = buf.sample(3)
         assert "solo" in s["obs"].keys()
@@ -1645,7 +1732,7 @@ class TestMultiAgentReplayBufferAgentCounts:
     def test_three_agents(self):
         agents = ["a", "b", "c"]
         td = _make_ma_td(agents, batch_size=5, obs_size=4)
-        buf = MultiAgentReplayBuffer(20)
+        buf = ReplayBuffer(20)
         buf.add(td)
         s = buf.sample(3)
         for a in agents:
@@ -1655,7 +1742,7 @@ class TestMultiAgentReplayBufferAgentCounts:
     def test_five_agents(self):
         agents = [f"agent_{i}" for i in range(5)]
         td = _make_ma_td(agents, batch_size=4, obs_size=2, act_size=3)
-        buf = MultiAgentReplayBuffer(30)
+        buf = ReplayBuffer(30)
         buf.add(td)
         s = buf.sample(4)
         assert len(s["obs"].keys()) == 5
@@ -1668,7 +1755,7 @@ class TestMultiAgentReplayBufferAgentCounts:
 
 class TestMultiAgentReplayBufferDevice:
     def test_cpu_explicit(self):
-        buf = MultiAgentReplayBuffer(50, device="cpu")
+        buf = ReplayBuffer(50, device="cpu")
         buf.add(_make_ma_td(MA_AGENTS, batch_size=2))
         s = buf.sample(1)
         for a in MA_AGENTS:
@@ -1676,7 +1763,7 @@ class TestMultiAgentReplayBufferDevice:
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     def test_cuda(self):
-        buf = MultiAgentReplayBuffer(50, device="cuda")
+        buf = ReplayBuffer(50, device="cuda")
         buf.add(_make_ma_td(MA_AGENTS, batch_size=2))
         s = buf.sample(1)
         for a in MA_AGENTS:
@@ -1688,7 +1775,7 @@ class TestMultiAgentReplayBufferDevice:
 
 class TestMultiAgentReplayBufferClear:
     def test_resets_all_state(self):
-        buf = MultiAgentReplayBuffer(50)
+        buf = ReplayBuffer(50)
         buf.add(_make_ma_td(MA_AGENTS, batch_size=10))
         buf.clear()
         assert len(buf) == 0
@@ -1698,7 +1785,7 @@ class TestMultiAgentReplayBufferClear:
         assert not buf.is_full
 
     def test_usable_after_clear(self):
-        buf = MultiAgentReplayBuffer(50)
+        buf = ReplayBuffer(50)
         buf.add(_make_ma_td(MA_AGENTS, batch_size=5))
         buf.clear()
         buf.add(_make_ma_td(MA_AGENTS, batch_size=3))
@@ -1707,7 +1794,7 @@ class TestMultiAgentReplayBufferClear:
         assert s.shape[0] == 2
 
     def test_counter_persists_after_clear(self):
-        buf = MultiAgentReplayBuffer(50)
+        buf = ReplayBuffer(50)
         buf.add(_make_ma_td(MA_AGENTS, batch_size=5))
         assert buf.counter == 5
         buf.clear()
@@ -1721,7 +1808,7 @@ class TestMultiAgentReplayBufferClear:
 
 class TestMultiAgentReplayBufferEdgeCases:
     def test_add_exactly_max_size(self):
-        buf = MultiAgentReplayBuffer(8)
+        buf = ReplayBuffer(8)
         buf.add(_make_ma_td(MA_AGENTS, batch_size=8))
         assert len(buf) == 8
         assert buf.is_full
@@ -1729,19 +1816,19 @@ class TestMultiAgentReplayBufferEdgeCases:
         assert s.shape[0] == 8
 
     def test_add_larger_than_max_size(self):
-        buf = MultiAgentReplayBuffer(4)
+        buf = ReplayBuffer(4)
         buf.add(_make_ma_td(MA_AGENTS, batch_size=6))
         assert len(buf) == 4
         assert buf.is_full
 
     def test_sample_entire_buffer(self):
-        buf = MultiAgentReplayBuffer(10)
+        buf = ReplayBuffer(10)
         buf.add(_make_ma_td(MA_AGENTS, batch_size=10))
         s = buf.sample(10)
         assert s.shape[0] == 10
 
     def test_is_full_transitions_at_boundary(self):
-        buf = MultiAgentReplayBuffer(5)
+        buf = ReplayBuffer(5)
         assert not buf.is_full
         buf.add(_make_ma_td(MA_AGENTS, batch_size=4))
         assert not buf.is_full
@@ -1749,7 +1836,7 @@ class TestMultiAgentReplayBufferEdgeCases:
         assert buf.is_full
 
     def test_add_batch_size_one_repeatedly(self):
-        buf = MultiAgentReplayBuffer(3)
+        buf = ReplayBuffer(3)
         for i in range(5):
             buf.add(_make_ma_td(MA_AGENTS, batch_size=1))
         assert len(buf) == 3
@@ -1817,7 +1904,7 @@ class TestMultiAgentReplayBufferTransitionFlat:
             next_obs={"a0": np.array([[3.0, 4.0]])},
             done={"a0": np.array([0.0])},
         )
-        buf = MultiAgentReplayBuffer(10)
+        buf = ReplayBuffer(10)
         buf.add(td)
         s = buf.sample(1)
         torch.testing.assert_close(s["obs", "a0"], torch.tensor([[1.0, 2.0]]))
@@ -1888,7 +1975,7 @@ class TestMultiAgentReplayBufferTransitionDictObs:
             },
             done={"a0": np.zeros(n)},
         )
-        buf = MultiAgentReplayBuffer(20)
+        buf = ReplayBuffer(20)
         buf.add(td)
         s = buf.sample(2)
         assert s["obs", "a0", "cam"].shape == (2, 3, 4, 4)
@@ -1945,7 +2032,7 @@ class TestMultiAgentReplayBufferTransitionDictObs:
 
     def test_dict_obs_buffer_circular_overwrite(self):
         """Dict-obs transitions survive circular buffer overwrites."""
-        buf = MultiAgentReplayBuffer(3)
+        buf = ReplayBuffer(3)
         for i in range(5):
             td = _build_ma_transition(
                 num_envs=1,

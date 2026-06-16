@@ -68,7 +68,7 @@ multi-agent training function by passing the info dictionary into the agents get
 
       from agilerl.algorithms import MADDPG
       from agilerl.components.data import MultiAgentTransition
-      from agilerl.components.replay_buffer import MultiAgentReplayBuffer
+      from agilerl.components.replay_buffer import ReplayBuffer
       from agilerl.population import Population
       from agilerl.utils.utils import default_progress_bar, init_loggers
       from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
@@ -87,7 +87,7 @@ multi-agent training function by passing the info dictionary into the agents get
       action_spaces = [env.single_action_space(agent) for agent in env.agents]
       agent_ids = [agent_id for agent_id in env.agents]
 
-      memory = MultiAgentReplayBuffer(max_size=1_000_000, device=device)
+      memory = ReplayBuffer(max_size=1_000_000, device=device)
 
       maddpg = MADDPG(
           observation_spaces=observation_spaces,
