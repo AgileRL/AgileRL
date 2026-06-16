@@ -23,7 +23,7 @@ from agilerl.typing import ExperiencesType, LLMObsType
 from agilerl.utils.algo_utils import get_experiences_samples
 
 if HAS_LIGER_KERNEL:
-    from agilerl.algorithms.core.llm_ops.fused_loss import _LigerDPOWithAlpha
+    from agilerl.algorithms.core.llm_ops.fused_loss import LigerDPOWithAlpha
 
 
 class DPO(LLMAlgorithm):
@@ -576,7 +576,7 @@ class DPO(LLMAlgorithm):
         policy_hidden = policy_hidden[:, :-1, :].contiguous()
         ref_hidden = ref_hidden[:, :-1, :].contiguous()
 
-        loss, aux = _LigerDPOWithAlpha.apply(
+        loss, aux = LigerDPOWithAlpha.apply(
             policy_hidden,
             lm_head_weight,
             stacked_target,

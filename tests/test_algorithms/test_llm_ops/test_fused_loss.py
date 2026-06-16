@@ -31,7 +31,7 @@ from agilerl.algorithms.core.llm_ops.fused_loss import (
     flatten_tokens_for_fused_loss,
     llm_policy_loss_fn,
     LigerFusedLinearPolicyLossFunction,
-    _LigerDPOWithAlpha,
+    LigerDPOWithAlpha,
 )
 
 
@@ -67,7 +67,7 @@ def test_llm_ops_package_init_sets_symbols_to_none_without_liger() -> None:
         agilerl.HAS_LIGER_KERNEL = False
         importlib.reload(llm_ops_pkg)
         assert llm_ops_pkg.LigerFusedLinearPolicyLossFunction is None
-        assert llm_ops_pkg._LigerDPOWithAlpha is None
+        assert llm_ops_pkg.LigerDPOWithAlpha is None
         assert llm_ops_pkg.llm_policy_loss_fn is None
         # Always-available helpers are still re-exported.
         assert callable(llm_ops_pkg.patch_lora_for_fused_forward)
@@ -1194,7 +1194,7 @@ class TestLigerDPOWithAlphaBackward:
     def test_liger_dpo_with_alpha_backward_returns_sixteen_outputs_with_trailing_nones(
         self,
     ) -> None:
-        """``_LigerDPOWithAlpha.backward`` forwards to the base, keeps four grads, pads twelve ``None``."""
+        """``LigerDPOWithAlpha.backward`` forwards to the base, keeps four grads, pads twelve ``None``."""
 
         def fake_parent_backward(ctx, grad_output):
             return tuple(range(16))
@@ -1204,7 +1204,7 @@ class TestLigerDPOWithAlphaBackward:
             "backward",
             staticmethod(fake_parent_backward),
         ):
-            out = _LigerDPOWithAlpha.backward(MagicMock(), torch.tensor(1.0))
+            out = LigerDPOWithAlpha.backward(MagicMock(), torch.tensor(1.0))
 
         assert len(out) == 16
         assert out[:4] == (0, 1, 2, 3)
