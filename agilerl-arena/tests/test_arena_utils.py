@@ -89,9 +89,20 @@ class TestExtractFilename:
         assert result == "data.csv"
 
 
+def _read_payload(payload) -> bytes:
+    """Read an upload payload (open binary handle or raw bytes) into bytes."""
+    if isinstance(payload, bytes):
+        return payload
+    try:
+        return payload.read()
+    finally:
+        payload.close()
+
+
 class TestPrepareEnvUpload:
     @staticmethod
-    def _archive_names(archive_bytes: bytes) -> list[str]:
+    def _archive_names(archive) -> list[str]:
+        archive_bytes = _read_payload(archive)
         with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as tar:
             return tar.getnames()
 
@@ -133,7 +144,7 @@ class TestPrepareEnvUpload:
 
         name, archive = prepare_env_upload(archive_path)
         assert name == "env.tar.gz"
-        assert archive == b"fake-archive-content"
+        assert _read_payload(archive) == b"fake-archive-content"
 
     def test_bytes_passthrough(self):
         raw = b"raw-bytes"
@@ -151,7 +162,9 @@ class TestPrepareEnvUpload:
         (src / "main.py").write_text("pass")
 
         _, archive = prepare_env_upload(src)
-        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+        with tarfile.open(
+            fileobj=io.BytesIO(_read_payload(archive)), mode="r:gz"
+        ) as tar:
             assert len(tar.getnames()) >= 1
 
 
@@ -165,7 +178,7 @@ class TestPrepareFileUpload:
             content_type="application/x-yaml",
         )
         assert name == "cfg.yaml"
-        assert payload == b"key: val\n"
+        assert _read_payload(payload) == b"key: val\n"
         assert content_type == "application/x-yaml"
 
     def test_bytes_upload(self):

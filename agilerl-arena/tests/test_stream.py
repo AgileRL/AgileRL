@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock
 
+import pytest
+
 from agilerl.arena.stream import (
     CheckEvent,
     ErrorEvent,
@@ -399,6 +401,69 @@ class TestNDJsonStream:
         stream = NDJsonStream(mock)
 
         assert stream.collect() == {}
+
+    def test_collect_raises_on_error_event(self):
+        """A server-side failure must surface as an exception, not {}."""
+        from agilerl.arena.exceptions import ArenaAPIError
+
+        lines = [
+            json.dumps(
+                {
+                    "kind": "status",
+                    "stage": "validation",
+                    "status": "failed",
+                    "message": "Validation failed",
+                }
+            ),
+        ]
+        resp = _make_mock_response(lines)
+        stream = NDJsonStream(resp)
+        with pytest.raises(ArenaAPIError, match="Validation failed"):
+            stream.collect()
+
+    def test_collect_raises_endpoint_specific_error_class(self):
+        from agilerl.arena.exceptions import ArenaValidationError
+
+        lines = [
+            json.dumps(
+                {
+                    "kind": "status",
+                    "stage": "validation",
+                    "status": "failed",
+                    "message": "Rollout check failed",
+                }
+            ),
+        ]
+        resp = _make_mock_response(lines)
+        stream = NDJsonStream(resp, error_cls=ArenaValidationError)
+        with pytest.raises(ArenaValidationError, match="Rollout check failed"):
+            stream.collect()
+
+    def test_error_property_tracks_first_error_event(self):
+        lines = [
+            json.dumps(
+                {
+                    "kind": "status",
+                    "stage": "a",
+                    "status": "failed",
+                    "message": "first failure",
+                }
+            ),
+            json.dumps(
+                {
+                    "kind": "status",
+                    "stage": "b",
+                    "status": "failed",
+                    "message": "second failure",
+                }
+            ),
+        ]
+        resp = _make_mock_response(lines)
+        stream = NDJsonStream(resp)
+        list(stream)
+
+        assert stream.error is not None
+        assert stream.error.message == "first failure"
 
     def test_handler_called_for_each_event(self):
         lines = [
