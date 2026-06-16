@@ -1,4 +1,3 @@
-import math
 from collections import deque
 
 import numpy as np
@@ -10,14 +9,13 @@ from agilerl.typing import ArrayOrTensor
 
 DataType = dict[str, ArrayOrTensor] | TensorDict
 
-# Probability of at least one duplicate within a sampled minibatch that we
-# tolerate before `ReplayBuffer.sample` switches from without-replacement to
-# (faster) with-replacement index sampling. Fixed at the 3-sigma level (~0.27%).
-_COLLISION_PROBABILITY = 0.0027
-# Precomputed denominator of the birthday-bound switch-over size: sample with
-# replacement once  size >= k(k - 1) / (-2 ln(1 - p)).  Computed once at import so
-# `_sample_indices` does a single comparison per call (no per-sample transcendental).
-_REPLACEMENT_SIZE_DENOM = -2.0 * math.log1p(-_COLLISION_PROBABILITY)
+# Buffer fill (`size`) at or above which `ReplayBuffer.sample` switches from
+# without-replacement (`torch.randperm`, O(size)) to with-replacement
+# (`torch.randint`, O(batch)) index sampling. Below this the O(size) shuffle is
+# cheap and we keep unique samples; above it the shuffle dominates while the
+# expected duplicate fraction of with-replacement (~ k / (2 * size)) stays under
+# ~1% for any typical batch size (e.g. 0.78% at batch 256). See `_sample_indices`.
+_WITH_REPLACEMENT_MIN_SIZE = 16384
 
 
 class ReplayBuffer:
@@ -141,18 +139,15 @@ class ReplayBuffer:
         """Draw ``k`` storage indices in ``[0, size)``.
 
         Small buffers sample **without replacement** via ``torch.randperm`` (no
-        duplicate transitions within a minibatch). Once the *current fill*
-        (``self.size``, which grows as the buffer fills) is large enough that the
-        chance of any duplicate drops below ``_COLLISION_PROBABILITY`` (~0.27%),
-        we switch to **with replacement** - a single O(``k``) ``torch.randint``
-        draw, which avoids ``randperm``'s O(``size``) shuffle of the whole buffer.
-
-        The crossover uses the birthday bound
-        ``P(>=1 duplicate) ~= 1 - exp(-k(k-1) / (2 * size))``; solving
-        ``P <= _COLLISION_PROBABILITY`` gives ``size >= k(k-1) / DENOM`` with the
-        denominator precomputed, so this is one comparison with no transcendental.
-        ``self.size`` (not ``max_size``) because a partially-full buffer has a far
-        higher collision rate than its eventual capacity.
+        duplicate transitions within a minibatch). Once the current fill
+        (``self.size``, which grows as the buffer fills) reaches
+        ``_WITH_REPLACEMENT_MIN_SIZE`` we switch to **with replacement** - a single
+        O(``k``) ``torch.randint`` draw, which avoids ``randperm``'s O(``size``)
+        shuffle of the whole buffer. At that size the expected duplicate fraction
+        (~ ``k / (2 * size)``) is well under 1% for any typical batch, and
+        with-replacement is the standard for experience replay. The check uses the
+        live fill, not ``max_size``, since a partially-full buffer has a far higher
+        collision rate than its eventual capacity.
 
         :param k: Number of indices to draw.
         :type k: int
@@ -162,8 +157,7 @@ class ReplayBuffer:
         if k <= 0:
             return torch.empty(0, dtype=torch.long)
 
-        if self.size * _REPLACEMENT_SIZE_DENOM >= k * (k - 1):
-            # Duplicates are below tolerance: a single O(k) vectorised draw.
+        if self.size >= _WITH_REPLACEMENT_MIN_SIZE:
             return torch.randint(0, self.size, (k,))
 
         # Otherwise sample without replacement (no intra-batch duplicates).

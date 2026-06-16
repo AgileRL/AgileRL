@@ -398,10 +398,10 @@ class TestReplayBufferAdaptiveSampling:
         assert sorted(idxs) == list(range(30))
 
     def test_large_buffer_uses_with_replacement(self, monkeypatch):
-        # 0.27% collision threshold for k=8 is ~10.4k; fill above it so the
-        # buffer switches to with-replacement sampling.
+        # Fill above _WITH_REPLACEMENT_MIN_SIZE (16384) so the buffer switches
+        # to with-replacement sampling.
         buf = ReplayBuffer(max_size=20000)
-        self._fill(buf, 12000)
+        self._fill(buf, 18000)
 
         used: list[str] = []
         real_randint, real_randperm = torch.randint, torch.randperm
