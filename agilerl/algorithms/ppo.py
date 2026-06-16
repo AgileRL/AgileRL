@@ -91,6 +91,9 @@ class PPO(RLAlgorithm):
     :type num_envs: int, optional
     :param use_rollout_buffer: Flag to use the rollout buffer instead of tuple experiences, defaults to False
     :type use_rollout_buffer: bool, optional
+    :param rollout_buffer_config: Extra keyword arguments forwarded to the
+        rollout buffer constructor, defaults to None (treated as an empty dict).
+    :type rollout_buffer_config: dict[str, Any] | None, optional
     :param recurrent: Flag to use hidden states for recurrent policies, defaults to False
     :type recurrent: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'

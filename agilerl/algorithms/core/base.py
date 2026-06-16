@@ -1309,12 +1309,14 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
     :type action_space: spaces.Space
     :param index: The index of the individual.
     :type index: int
-    :param learn_step: Learning frequency, defaults to 2048.
-    :type learn_step: int, optional
+    :param hp_config: Hyperparameter configuration for the algorithm, defaults to None.
+    :type hp_config: HyperparameterConfig | None, optional
     :param device: Device to run the algorithm on, defaults to "cpu".
     :type device: str | torch.device, optional
     :param accelerator: Accelerator object for distributed computing, defaults to None.
     :type accelerator: Accelerator | None, optional
+    :param torch_compiler: The torch compiler mode to use, defaults to None.
+    :type torch_compiler: Any | None, optional
     :param normalize_images: If True, normalize images, defaults to True.
     :type normalize_images: bool, optional
     :param name: Name of the algorithm, defaults to the class name.
@@ -1372,8 +1374,8 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
     :type index: int.
     :param agent_ids: The agent IDs of the agents in the environment.
     :type agent_ids: list[int] | None, optional
-    :param learn_step: Learning frequency, defaults to 2048
-    :type learn_step: int, optional
+    :param hp_config: Hyperparameter configuration for the algorithm, defaults to None.
+    :type hp_config: HyperparameterConfig | None, optional
     :param device: Device to run the algorithm on, defaults to "cpu"
     :type device: str, optional
     :param accelerator: Accelerator object for distributed computing, defaults to None
@@ -2052,8 +2054,14 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         disabled; since base weights are immutable, that reference stays the
         initial policy for the whole run.
     :type use_separate_reference_adapter: bool
+    :param lr_critic: Critic/value-head learning rate. If ``None``, ``lr_actor`` is used.
+    :type lr_critic: float | None, optional
     :param use_value_head: Whether to use a separate value head.
     :type use_value_head: bool
+    :param use_vllm: Whether to route generation through vLLM.
+    :type use_vllm: bool, optional
+    :param vllm_config: vLLM runtime configuration.
+    :type vllm_config: VLLMConfig | None, optional
     :param model_name: The name of the model.
     :type model_name: str | None
     :param actor_network: The actor network.
@@ -2064,6 +2072,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     :type cosine_lr_schedule_config: CosineLRScheduleConfig | None
     :param hp_config: The hyperparameter configuration.
     :type hp_config: Optional[HyperparameterConfig]
+    :param use_memory_efficient_params: For colocated vLLM, offload the trainer's
+        own base to CPU during rollout (and bring it back for the training step)
+        so the rollout engine and the trainer never both hold a base on the GPU.
+        Defaults to True; inert without colocated vLLM.
+    :type use_memory_efficient_params: bool, optional
     :param wrap: Whether to wrap the model.
     :type wrap: bool
     :param device: The device to run the algorithm on.
@@ -2079,6 +2092,28 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     :param lora_target_scope: Optional PEFT LoRA path scope for multimodal models
         (e.g. ``"language_model"``). Passed to :func:`adapt_lora_config_for_model`.
     :type lora_target_scope: str | None, optional
+    :param fused_logprobs_chunk_rows: Standard (non-Liger) path only. Rows
+        (tokens) per ``(chunk_rows, vocab)`` logit tile when computing per-token
+        log-probs via the fused-linear-logprob path. Peak logits memory is
+        ``O(chunk_rows * vocab)`` regardless of batch/sequence length. ``None``
+        (default) auto-tunes to a ~256 MB fp32 tile.
+    :type fused_logprobs_chunk_rows: int | None, optional
+    :param fused_loss_chunk_rows: Rows per ``(chunk_rows, vocab)`` logit tile in
+        the token-level Liger fused policy loss. ``None`` (default) auto-tunes to
+        a ~256 MB fp32 logit workspace — the same heuristic as
+        ``fused_logprobs_chunk_rows`` on the standard path; pass an int to
+        override.
+    :type fused_loss_chunk_rows: int | None, optional
+    :param vllm_importance_sampling_correction: When ``True`` (default) and
+        ``use_vllm=True``, correct the rollout/trainer log-prob mismatch by
+        weighting each training token by ``clamp(exp(trainer - sampling),
+        max=vllm_importance_sampling_cap)``. Active only for training rollouts;
+        inert on the HuggingFace path and at eval.
+    :type vllm_importance_sampling_correction: bool, optional
+    :param vllm_importance_sampling_cap: Upper clamp on the vLLM
+        importance-sampling ratio (default ``2.0``), bounding the correction
+        weight to limit variance from outlier tokens. Must be > 0.
+    :type vllm_importance_sampling_cap: float, optional
     :param gradient_checkpointing: Whether to use gradient checkpointing.
     :type gradient_checkpointing: bool
     :param torch_compiler: The torch compiler mode to use ('default',
@@ -2098,6 +2133,21 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         acceptable for your vocab/shape — it saves ~6 MB on the
         fused-linear-logprob path.
     :type cast_logprobs_to_fp32: bool, optional
+    :param quantization_config: Optional ``transformers.BitsAndBytesConfig`` for
+        loading the base model in 4-/8-bit (QLoRA). ``lm_head`` is kept
+        unquantized so the fused-linear-logprob path stays numerically exact.
+    :type quantization_config: BitsAndBytesConfig | None, optional
+    :param activation_offload: When ``True``, run the training forward inside
+        ``torch.autograd.graph.save_on_cpu`` so tensors saved for backward live
+        in pinned host RAM instead of GPU memory. Trades PCIe bandwidth for GPU
+        memory (the win grows with sequence length); a no-op during rollout /
+        reference forwards.
+    :type activation_offload: bool, optional
+    :param use_sequence_packing: Opt in to padding-free sequence packing for the
+        gradient forward (sequences pack into one varlen / blockmask pass). Only
+        honoured under a FlashAttention-2 / FlexAttention backend, otherwise
+        inert; the no-grad reference/old-logprob pass stays padded.
+    :type use_sequence_packing: bool, optional
     """
 
     _allowed_adapters = frozenset({"actor", "reference", "critic"})

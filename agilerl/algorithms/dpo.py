@@ -98,12 +98,35 @@ class DPO(LLMAlgorithm):
         batch/sequence length, so it is the way to tune DPO's peak memory by
         token budget. ``None`` (default) auto-tunes to a ~256 MB fp32 tile.
     :type fused_logprobs_chunk_rows: int | None, optional
+    :param reduce_memory_peak: Deprecated and ignored; previously hinted
+        peak-memory batching. Configure ``micro_batch_size_per_gpu`` instead.
+    :type reduce_memory_peak: bool, optional
+    :param cast_logprobs_to_fp32: When ``True`` (default), run the per-token
+        log-prob reduction (``gather`` / ``logsumexp``) in fp32 before casting
+        back to the input dtype, for numerically stable log-probs. ``False`` runs
+        it in the input dtype, saving a little memory at the cost of a per-token
+        bf16 quantisation error that can bias importance-sampling ratios.
+    :type cast_logprobs_to_fp32: bool, optional
     :param use_separate_reference_adapter: Keep a dedicated ``reference`` LoRA
         adapter whose weights are frozen snapshots of the actor used for the
         DPO log-probability baseline. When ``False`` the reference log-probs
         are obtained by disabling the actor adapter at inference time.
         Defaults to True.
     :type use_separate_reference_adapter: bool, optional
+    :param quantization_config: Optional ``transformers.BitsAndBytesConfig`` for
+        loading the base model in 4-/8-bit (QLoRA). ``lm_head`` is kept
+        unquantized so the fused-linear-logprob path stays numerically exact.
+    :type quantization_config: BitsAndBytesConfig | None, optional
+    :param activation_offload: When ``True``, run the training forward inside
+        ``torch.autograd.graph.save_on_cpu`` so tensors saved for backward live
+        in pinned host RAM instead of GPU memory. Trades PCIe bandwidth for GPU
+        memory (the win grows with sequence length); a no-op during rollout /
+        reference forwards.
+    :type activation_offload: bool, optional
+    :param lora_target_scope: Optional PEFT LoRA path scope for multimodal models
+        (e.g. ``"language_model"``). Passed to
+        :func:`adapt_lora_config_for_model`.
+    :type lora_target_scope: str | None, optional
     """
 
     def __init__(
