@@ -369,212 +369,6 @@ class GRPO(LLMAlgorithm):
         if self.wrap:
             self.wrap_models()
 
-    def _validate_core_args(
-        self,
-        batch_size: int,
-        lr: float,
-        update_epochs: int,
-        actor_network: PreTrainedModelProtocol | None,
-    ) -> None:
-        """Validate the core training arguments."""
-        assert isinstance(batch_size, int), "Batch size must be an integer."
-        assert batch_size >= 1, "Batch size must be greater than or equal to one."
-        assert isinstance(lr, float), "Learning rate must be a float."
-        assert lr > 0, "Learning rate must be greater than zero."
-        assert isinstance(
-            update_epochs,
-            int,
-        ), "Policy update epochs must be an integer."
-        assert update_epochs >= 1, (
-            "Policy update epochs must be greater than or equal to one."
-        )
-        if actor_network is not None:
-            assert isinstance(
-                actor_network,
-                (PeftModelProtocol, PreTrainedModelProtocol),
-            ), "Actor network must be a PeftModelProtocol or PreTrainedModelProtocol"
-
-    @staticmethod
-    def _resolve_clip_coef(
-        clip_coef: float | tuple[float, float],
-    ) -> tuple[float | tuple[float, float], float, float]:
-        """Resolve a scalar or ``(min, max)`` clip_coef to explicit ratio bounds."""
-        if isinstance(clip_coef, (tuple, list)):
-            if len(clip_coef) != 2:
-                msg = "clip_coef tuple must contain exactly two values."
-                raise ValueError(msg)
-            # min < max is intentionally not enforced for user-provided bounds.
-            return clip_coef, float(clip_coef[0]), float(clip_coef[1])
-        if isinstance(clip_coef, (float, int)):
-            clip_coef = float(clip_coef)
-            if clip_coef < 0:
-                msg = "clip_coef must be greater than or equal to zero."
-                raise ValueError(msg)
-            return clip_coef, 1 - clip_coef, 1 + clip_coef
-        msg = "clip_coef must be a float or a tuple or list of two floats."
-        raise TypeError(msg)
-
-    def _setup_advantage_options(
-        self,
-        adv_norm: str,
-        group_size: int,
-        advantage_granularity: str,
-        action_granularity: str | None,
-        whiten_advantages: bool,
-        adv_clip_range: float | None,
-        filter_zero_adv: bool,
-        adv_filter_eps: float,
-    ) -> None:
-        """Validate and store the advantage-computation options."""
-        if adv_norm not in {"mean_std", "mean_only"}:
-            msg = (
-                f"Invalid adv_norm '{adv_norm}'. Expected one of "
-                "['mean_std', 'mean_only']."
-            )
-            raise ValueError(msg)
-        if group_size < 2:
-            msg = (
-                f"group_size must be >= 2 for GRPO-style group-relative "
-                f"advantages; got {group_size}. A group of one yields a zero "
-                "advantage for every sample (reward minus its own mean), so the "
-                "policy receives no gradient signal."
-            )
-            raise ValueError(msg)
-        if adv_clip_range is not None and adv_clip_range <= 0:
-            msg = "adv_clip_range must be > 0 when provided."
-            raise ValueError(msg)
-        if adv_filter_eps < 0:
-            msg = "adv_filter_eps must be >= 0."
-            raise ValueError(msg)
-        if action_granularity is not None:
-            warnings.warn(
-                "action_granularity is deprecated; use advantage_granularity.",
-                DeprecationWarning,
-                stacklevel=3,
-            )
-            advantage_granularity = action_granularity
-        if advantage_granularity not in {"auto", "trajectory", "turn"}:
-            msg = (
-                f"Invalid advantage_granularity '{advantage_granularity}'. Expected "
-                "one of ['auto', 'trajectory', 'turn']. The GRPO family has no "
-                "token-level advantage (group-relative needs a reward per unit, "
-                "and tokens have none) — use 'trajectory' or 'turn'."
-            )
-            raise ValueError(msg)
-        self.adv_norm = adv_norm
-        self.group_size = group_size
-        self.advantage_granularity = advantage_granularity
-        self.whiten_advantages = whiten_advantages
-        self.adv_clip_range = adv_clip_range
-        self.filter_zero_adv = filter_zero_adv
-        self.adv_filter_eps = adv_filter_eps
-
-    def _setup_objective(
-        self,
-        loss_type: str,
-        importance_sampling_level: str | None,
-        use_kl_advantage_shaping: bool,
-    ) -> None:
-        """Validate and resolve the objective, IS level, and Liger routing."""
-        if loss_type not in {"grpo", "gspo", "cispo"}:
-            msg = (
-                f"Invalid loss_type '{loss_type}'. "
-                "Expected one of ['grpo', 'gspo', 'cispo']."
-            )
-            raise ValueError(msg)
-        if importance_sampling_level is not None:
-            validate_importance_sampling_level(
-                importance_sampling_level, allow_auto=False
-            )
-        self.loss_type = loss_type
-        if loss_type == "gspo":
-            # GSPO is, by definition, the grpo objective at trajectory level.
-            if importance_sampling_level not in (None, "trajectory"):
-                warnings.warn(
-                    "loss_type='gspo' implies trajectory-level importance "
-                    "sampling; overriding importance_sampling_level="
-                    f"'{importance_sampling_level}' with 'trajectory'.",
-                    stacklevel=3,
-                )
-            self.importance_sampling_level = "trajectory"
-        else:
-            self.importance_sampling_level = importance_sampling_level or "token"
-        if self.loss_type == "cispo" and self.beta != 0:
-            warnings.warn(
-                "CISPO is typically used with beta=0; nonzero beta adds KL "
-                "regularization to the objective.",
-                stacklevel=3,
-            )
-        # Turn-level pooling (and non-token CISPO) has no fused Liger kernel;
-        # those combinations run the standard path, which is always
-        # memory-bounded via the fused-linear-logprob path.
-        self._liger_level_supported = self.importance_sampling_level != "turn" and not (
-            loss_type == "cispo" and self.importance_sampling_level != "token"
-        )
-        if self.use_liger_loss and self.importance_sampling_level in {
-            "turn",
-            "trajectory",
-        }:
-            # Warn once, up front, about Liger + non-token IS memory behaviour;
-            # suppresses the duplicate loss-time warning (warn-once in the base
-            # ``_warn_liger_non_token_is`` helper).
-            algo_name = (
-                "GSPO" if self.importance_sampling_level == "trajectory" else "GRPO"
-            )
-            self._warn_liger_non_token_is(self.importance_sampling_level, algo_name)
-        if self.use_liger_loss and use_kl_advantage_shaping:
-            warnings.warn(
-                "use_kl_advantage_shaping is not supported with use_liger_loss=True; "
-                "disabling KL advantage shaping.",
-                stacklevel=3,
-            )
-            use_kl_advantage_shaping = False
-        self.use_kl_advantage_shaping = use_kl_advantage_shaping
-        self._loss_fn = self._resolve_standard_loss_fn()
-
-    def _setup_generation(
-        self,
-        max_output_tokens: int | None,
-        min_output_tokens: int | None,
-        max_model_len: int | None,
-        hf_generate_chunk_size: int | None,
-    ) -> None:
-        """Validate context lengths and build the HF generation config."""
-        if max_output_tokens is None and max_model_len is None:
-            msg = "Either max_output_tokens or max_model_len must be specified"
-            raise ValueError(
-                msg,
-            )
-        self.max_output_tokens = (
-            max_output_tokens if max_output_tokens is not None else max_model_len
-        )
-        self.min_output_tokens = min_output_tokens
-        self.max_model_len = (
-            max_model_len if max_model_len is not None else max_output_tokens
-        )
-        validate_llm_context_lengths(self.max_model_len, max_output_tokens)
-        self.hf_generate_chunk_size = int(
-            1 if hf_generate_chunk_size is None else max(1, hf_generate_chunk_size)
-        )
-        if self.use_vllm and hf_generate_chunk_size is not None:
-            warnings.warn(
-                "hf_generate_chunk_size is only used for HuggingFace generation "
-                "(use_vllm=False) and will be ignored when use_vllm=True.",
-                stacklevel=3,
-            )
-        self.generation_config = GenerationConfig(
-            do_sample=True,
-            temperature=self.temperature,
-            max_length=self.max_model_len,
-            max_new_tokens=max_output_tokens,
-            min_new_tokens=min_output_tokens,
-            pad_token_id=self.pad_token_id,
-            repetition_penalty=self.repetition_penalty,
-            top_p=self.top_p,
-            top_k=self.top_k,
-            min_p=self.min_p,
-        )
-
     def get_action(
         self,
         obs: LLMObsType,
@@ -805,6 +599,274 @@ class GRPO(LLMAlgorithm):
         result.update(is_metrics)
         return result
 
+    def test(
+        self,
+        env: ReasoningGym | MultiTurnEnv,
+        loop: int = 1,
+        *args: Any,
+        **kwargs: Any,
+    ) -> np.ndarray:
+        """Return fitness (test) score of llm on test sub-set.
+
+        :param env: Dataset-style ``ReasoningGym`` environment or tokenized
+            multi-turn episode environment.
+        :type env: ReasoningGym | MultiTurnEnv
+        :param loop: Number of outer test iterations over ``reset`` / ``step``.
+        :type loop: int
+        :return: Concatenated reward tensor from the test loop.
+        :rtype: torch.Tensor
+        """
+        eval_context = getattr(env, "eval_mode", nullcontext)
+        with eval_context():
+            if isinstance(env, ReasoningGym):
+                prompts = env.reset()
+                rewards = []
+                for _ in range(loop):
+                    completion_ids = self.get_action(
+                        prompts, training=False
+                    ).completion_ids
+                    next_prompts, reward = env.step(completion_ids)
+                    prompts = next_prompts
+                    rewards.append(reward)
+                reward_tensor = torch.cat(rewards)
+            elif isinstance(env, MultiTurnEnv):
+                all_rewards: list[torch.Tensor] = []
+                for _ in range(loop):
+                    prompt_dict, _info = env.reset()
+                    terminated, truncated = False, False
+                    while not terminated and not truncated:
+                        completion_ids = self.get_action(
+                            [prompt_dict],
+                            training=False,
+                        ).completion_ids
+                        full = completion_ids[0]
+                        prompt_dict, reward, terminated, truncated, _info = env.step(
+                            full,
+                        )
+                        all_rewards.append(
+                            torch.tensor(
+                                [float(reward)],
+                                dtype=torch.float32,
+                                device=full.device,
+                            )
+                        )
+                reward_tensor = torch.cat(all_rewards)
+            else:
+                msg = (
+                    "env must be a ReasoningGym (or subclass) or "
+                    f"MultiTurnEnv; got {type(env).__name__}"
+                )
+                raise TypeError(msg)
+        mean_fit = torch.mean(reward_tensor).item()
+        self.fitness.append(mean_fit)
+        return np.array(mean_fit)
+
+    def _validate_core_args(
+        self,
+        batch_size: int,
+        lr: float,
+        update_epochs: int,
+        actor_network: PreTrainedModelProtocol | None,
+    ) -> None:
+        """Validate the core training arguments."""
+        assert isinstance(batch_size, int), "Batch size must be an integer."
+        assert batch_size >= 1, "Batch size must be greater than or equal to one."
+        assert isinstance(lr, float), "Learning rate must be a float."
+        assert lr > 0, "Learning rate must be greater than zero."
+        assert isinstance(
+            update_epochs,
+            int,
+        ), "Policy update epochs must be an integer."
+        assert update_epochs >= 1, (
+            "Policy update epochs must be greater than or equal to one."
+        )
+        if actor_network is not None:
+            assert isinstance(
+                actor_network,
+                (PeftModelProtocol, PreTrainedModelProtocol),
+            ), "Actor network must be a PeftModelProtocol or PreTrainedModelProtocol"
+
+    @staticmethod
+    def _resolve_clip_coef(
+        clip_coef: float | tuple[float, float],
+    ) -> tuple[float | tuple[float, float], float, float]:
+        """Resolve a scalar or ``(min, max)`` clip_coef to explicit ratio bounds."""
+        if isinstance(clip_coef, (tuple, list)):
+            if len(clip_coef) != 2:
+                msg = "clip_coef tuple must contain exactly two values."
+                raise ValueError(msg)
+            # min < max is intentionally not enforced for user-provided bounds.
+            return clip_coef, float(clip_coef[0]), float(clip_coef[1])
+        if isinstance(clip_coef, (float, int)):
+            clip_coef = float(clip_coef)
+            if clip_coef < 0:
+                msg = "clip_coef must be greater than or equal to zero."
+                raise ValueError(msg)
+            return clip_coef, 1 - clip_coef, 1 + clip_coef
+        msg = "clip_coef must be a float or a tuple or list of two floats."
+        raise TypeError(msg)
+
+    def _setup_advantage_options(
+        self,
+        adv_norm: str,
+        group_size: int,
+        advantage_granularity: str,
+        action_granularity: str | None,
+        whiten_advantages: bool,
+        adv_clip_range: float | None,
+        filter_zero_adv: bool,
+        adv_filter_eps: float,
+    ) -> None:
+        """Validate and store the advantage-computation options."""
+        if adv_norm not in {"mean_std", "mean_only"}:
+            msg = (
+                f"Invalid adv_norm '{adv_norm}'. Expected one of "
+                "['mean_std', 'mean_only']."
+            )
+            raise ValueError(msg)
+        if group_size < 2:
+            msg = (
+                f"group_size must be >= 2 for GRPO-style group-relative "
+                f"advantages; got {group_size}. A group of one yields a zero "
+                "advantage for every sample (reward minus its own mean), so the "
+                "policy receives no gradient signal."
+            )
+            raise ValueError(msg)
+        if adv_clip_range is not None and adv_clip_range <= 0:
+            msg = "adv_clip_range must be > 0 when provided."
+            raise ValueError(msg)
+        if adv_filter_eps < 0:
+            msg = "adv_filter_eps must be >= 0."
+            raise ValueError(msg)
+        if action_granularity is not None:
+            warnings.warn(
+                "action_granularity is deprecated; use advantage_granularity.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+            advantage_granularity = action_granularity
+        if advantage_granularity not in {"auto", "trajectory", "turn"}:
+            msg = (
+                f"Invalid advantage_granularity '{advantage_granularity}'. Expected "
+                "one of ['auto', 'trajectory', 'turn']. The GRPO family has no "
+                "token-level advantage (group-relative needs a reward per unit, "
+                "and tokens have none) — use 'trajectory' or 'turn'."
+            )
+            raise ValueError(msg)
+        self.adv_norm = adv_norm
+        self.group_size = group_size
+        self.advantage_granularity = advantage_granularity
+        self.whiten_advantages = whiten_advantages
+        self.adv_clip_range = adv_clip_range
+        self.filter_zero_adv = filter_zero_adv
+        self.adv_filter_eps = adv_filter_eps
+
+    def _setup_objective(
+        self,
+        loss_type: str,
+        importance_sampling_level: str | None,
+        use_kl_advantage_shaping: bool,
+    ) -> None:
+        """Validate and resolve the objective, IS level, and Liger routing."""
+        if loss_type not in {"grpo", "gspo", "cispo"}:
+            msg = (
+                f"Invalid loss_type '{loss_type}'. "
+                "Expected one of ['grpo', 'gspo', 'cispo']."
+            )
+            raise ValueError(msg)
+        if importance_sampling_level is not None:
+            validate_importance_sampling_level(
+                importance_sampling_level, allow_auto=False
+            )
+        self.loss_type = loss_type
+        if loss_type == "gspo":
+            # GSPO is, by definition, the grpo objective at trajectory level.
+            if importance_sampling_level not in (None, "trajectory"):
+                warnings.warn(
+                    "loss_type='gspo' implies trajectory-level importance "
+                    "sampling; overriding importance_sampling_level="
+                    f"'{importance_sampling_level}' with 'trajectory'.",
+                    stacklevel=3,
+                )
+            self.importance_sampling_level = "trajectory"
+        else:
+            self.importance_sampling_level = importance_sampling_level or "token"
+        if self.loss_type == "cispo" and self.beta != 0:
+            warnings.warn(
+                "CISPO is typically used with beta=0; nonzero beta adds KL "
+                "regularization to the objective.",
+                stacklevel=3,
+            )
+        # Turn-level pooling (and non-token CISPO) has no fused Liger kernel;
+        # those combinations run the standard path, which is always
+        # memory-bounded via the fused-linear-logprob path.
+        self._liger_level_supported = self.importance_sampling_level != "turn" and not (
+            loss_type == "cispo" and self.importance_sampling_level != "token"
+        )
+        if self.use_liger_loss and self.importance_sampling_level in {
+            "turn",
+            "trajectory",
+        }:
+            # Warn once, up front, about Liger + non-token IS memory behaviour;
+            # suppresses the duplicate loss-time warning (warn-once in the base
+            # ``_warn_liger_non_token_is`` helper).
+            algo_name = (
+                "GSPO" if self.importance_sampling_level == "trajectory" else "GRPO"
+            )
+            self._warn_liger_non_token_is(self.importance_sampling_level, algo_name)
+        if self.use_liger_loss and use_kl_advantage_shaping:
+            warnings.warn(
+                "use_kl_advantage_shaping is not supported with use_liger_loss=True; "
+                "disabling KL advantage shaping.",
+                stacklevel=3,
+            )
+            use_kl_advantage_shaping = False
+        self.use_kl_advantage_shaping = use_kl_advantage_shaping
+        self._loss_fn = self._resolve_standard_loss_fn()
+
+    def _setup_generation(
+        self,
+        max_output_tokens: int | None,
+        min_output_tokens: int | None,
+        max_model_len: int | None,
+        hf_generate_chunk_size: int | None,
+    ) -> None:
+        """Validate context lengths and build the HF generation config."""
+        if max_output_tokens is None and max_model_len is None:
+            msg = "Either max_output_tokens or max_model_len must be specified"
+            raise ValueError(
+                msg,
+            )
+        self.max_output_tokens = (
+            max_output_tokens if max_output_tokens is not None else max_model_len
+        )
+        self.min_output_tokens = min_output_tokens
+        self.max_model_len = (
+            max_model_len if max_model_len is not None else max_output_tokens
+        )
+        validate_llm_context_lengths(self.max_model_len, max_output_tokens)
+        self.hf_generate_chunk_size = int(
+            1 if hf_generate_chunk_size is None else max(1, hf_generate_chunk_size)
+        )
+        if self.use_vllm and hf_generate_chunk_size is not None:
+            warnings.warn(
+                "hf_generate_chunk_size is only used for HuggingFace generation "
+                "(use_vllm=False) and will be ignored when use_vllm=True.",
+                stacklevel=3,
+            )
+        self.generation_config = GenerationConfig(
+            do_sample=True,
+            temperature=self.temperature,
+            max_length=self.max_model_len,
+            max_new_tokens=max_output_tokens,
+            min_new_tokens=min_output_tokens,
+            pad_token_id=self.pad_token_id,
+            repetition_penalty=self.repetition_penalty,
+            top_p=self.top_p,
+            top_k=self.top_k,
+            min_p=self.min_p,
+        )
+
     def _prepare_experience_batch(
         self,
         experiences: ExperiencesType,
@@ -886,68 +948,6 @@ class GRPO(LLMAlgorithm):
             sampling_logps, action_masks, old_log_probs
         )
         return is_turn_ids, sampling_log_probs, is_metrics
-
-    def test(
-        self,
-        env: ReasoningGym | MultiTurnEnv,
-        loop: int = 1,
-        *args: Any,
-        **kwargs: Any,
-    ) -> np.ndarray:
-        """Return fitness (test) score of llm on test sub-set.
-
-        :param env: Dataset-style ``ReasoningGym`` environment or tokenized
-            multi-turn episode environment.
-        :type env: ReasoningGym | MultiTurnEnv
-        :param loop: Number of outer test iterations over ``reset`` / ``step``.
-        :type loop: int
-        :return: Concatenated reward tensor from the test loop.
-        :rtype: torch.Tensor
-        """
-        eval_context = getattr(env, "eval_mode", nullcontext)
-        with eval_context():
-            if isinstance(env, ReasoningGym):
-                prompts = env.reset()
-                rewards = []
-                for _ in range(loop):
-                    completion_ids = self.get_action(
-                        prompts, training=False
-                    ).completion_ids
-                    next_prompts, reward = env.step(completion_ids)
-                    prompts = next_prompts
-                    rewards.append(reward)
-                reward_tensor = torch.cat(rewards)
-            elif isinstance(env, MultiTurnEnv):
-                all_rewards: list[torch.Tensor] = []
-                for _ in range(loop):
-                    prompt_dict, _info = env.reset()
-                    terminated, truncated = False, False
-                    while not terminated and not truncated:
-                        completion_ids = self.get_action(
-                            [prompt_dict],
-                            training=False,
-                        ).completion_ids
-                        full = completion_ids[0]
-                        prompt_dict, reward, terminated, truncated, _info = env.step(
-                            full,
-                        )
-                        all_rewards.append(
-                            torch.tensor(
-                                [float(reward)],
-                                dtype=torch.float32,
-                                device=full.device,
-                            )
-                        )
-                reward_tensor = torch.cat(all_rewards)
-            else:
-                msg = (
-                    "env must be a ReasoningGym (or subclass) or "
-                    f"MultiTurnEnv; got {type(env).__name__}"
-                )
-                raise TypeError(msg)
-        mean_fit = torch.mean(reward_tensor).item()
-        self.fitness.append(mean_fit)
-        return np.array(mean_fit)
 
     def _assert_batch_divisible_by_group(self, num_samples: int) -> None:
         """Require the trajectory batch to split evenly into GRPO groups.

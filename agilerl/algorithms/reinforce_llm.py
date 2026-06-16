@@ -274,102 +274,22 @@ class REINFORCE(LLMAlgorithm):
             vllm_importance_sampling_correction=vllm_importance_sampling_correction,
             vllm_importance_sampling_cap=vllm_importance_sampling_cap,
         )
-        assert isinstance(batch_size, int), "Batch size must be an integer."
-        assert batch_size >= 1, "Batch size must be greater than or equal to one."
-        assert isinstance(lr, float), "Learning rate must be a float."
-        assert lr > 0, "Learning rate must be greater than zero."
-        assert isinstance(clip_coef, (float, int)), (
-            "Clipping coefficient must be a float."
+        self._validate_core_args(
+            batch_size, lr, clip_coef, update_epochs, actor_network, clone
         )
-        assert clip_coef >= 0, (
-            "Clipping coefficient must be greater than or equal to zero."
-        )
-        assert isinstance(update_epochs, int), (
-            "Policy update epochs must be an integer."
-        )
-        assert update_epochs >= 1, (
-            "Policy update epochs must be greater than or equal to one."
-        )
-        valid_action_granularities = {"turn", "token", "auto"}
-        if action_granularity is not None:
-            warnings.warn(
-                "action_granularity is deprecated; use advantage_granularity.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            advantage_granularity = action_granularity
-        if advantage_granularity not in valid_action_granularities:
-            msg = (
-                "advantage_granularity must be one of "
-                f"{sorted(valid_action_granularities)}."
-            )
-            raise ValueError(msg)
-        if clone and actor_network is not None:
-            assert isinstance(
-                actor_network,
-                (PeftModelProtocol, PreTrainedModelProtocol),
-            ), "Actor network must be a PeftModelProtocol or PreTrainedModelProtocol"
-        if max_output_tokens is None and max_model_len is None:
-            msg = "Either max_output_tokens or max_model_len must be specified"
-            raise ValueError(msg)
-
-        validate_importance_sampling_level(importance_sampling_level, allow_auto=False)
         self.beta = beta
         self.clip_coef = clip_coef
-        self.gamma = gamma
-        self.advantage_granularity = advantage_granularity
-        # IS / ratio-pooling level for the clipped surrogate, orthogonal to the
-        # ReBN advantage granularity (``advantage_granularity``). ``"token"`` (the
-        # default) preserves the original token-level clip; ``"turn"`` /
-        # ``"trajectory"`` pool the ratio (length-normalized mean) per turn /
-        # whole completion. Turn level requires ``turn_ids`` in ``learn``.
-        self.importance_sampling_level = importance_sampling_level
-        # Warn once, up front, when Liger is paired with a non-token IS level.
-        # It is permitted but not memory-bounded: turn-/trajectory-level pooling
-        # couples a unit's tokens, so the fused kernel processes one whole
-        # sequence per chunk and materializes a (seq_len, vocab) logits tensor
-        # per trajectory. The shared once-flag suppresses the loss-time dup.
-        if self.use_liger_loss and self.importance_sampling_level in {
-            "turn",
-            "trajectory",
-        }:
-            self._warn_liger_non_token_is(
-                self.importance_sampling_level,
-                "REINFORCE",
-                once_attr="_reinforce_liger_mem_warned",
-            )
         self.update_epochs = update_epochs
         self.temperature = temperature
         self.repetition_penalty = repetition_penalty
         self.top_p = top_p
         self.top_k = top_k
         self.min_p = min_p
-        self.max_output_tokens = max_output_tokens
-        self.min_output_tokens = min_output_tokens
-        self.max_model_len = (
-            max_model_len if max_model_len is not None else max_output_tokens
+        self._setup_advantage_options(
+            importance_sampling_level, advantage_granularity, action_granularity, gamma
         )
-        validate_llm_context_lengths(self.max_model_len, self.max_output_tokens)
-        self.hf_generate_chunk_size = int(
-            1 if hf_generate_chunk_size is None else max(1, hf_generate_chunk_size)
-        )
-        if self.use_vllm and hf_generate_chunk_size is not None:
-            warnings.warn(
-                "hf_generate_chunk_size is only used for HuggingFace generation "
-                "(use_vllm=False) and will be ignored when use_vllm=True.",
-                stacklevel=2,
-            )
-        self.generation_config = GenerationConfig(
-            do_sample=True,
-            temperature=temperature,
-            max_length=self.max_model_len,
-            max_new_tokens=max_output_tokens,
-            min_new_tokens=min_output_tokens,
-            pad_token_id=pad_token_id,
-            repetition_penalty=repetition_penalty,
-            top_p=top_p,
-            top_k=top_k,
-            min_p=min_p,
+        self._setup_generation(
+            max_output_tokens, min_output_tokens, max_model_len, hf_generate_chunk_size
         )
         self._setup_actors(actor_network, clone=clone)
 
@@ -709,6 +629,191 @@ class REINFORCE(LLMAlgorithm):
         result.update(is_metrics)
         return result
 
+    def test(
+        self,
+        env: ReasoningGym | MultiTurnEnv,
+        loop: int = 1,
+    ) -> torch.Tensor:
+        """Return fitness (test) score tensor of llm on test sub-set.
+
+        ``ReasoningGym`` (and compatible dataset envs): ``reset`` returns a batch
+        of prompt dicts; each ``step`` accepts completion id tensors and returns
+        the next batch plus rewards. ``loop`` iterations advance the test
+        dataloader that many times.
+
+        :param env: A :class:`~agilerl.utils.llm_utils.ReasoningGym` or
+            :class:`~agilerl.llm_envs.TokenObservationWrapper`.
+        :type env: ReasoningGym | MultiTurnEnv
+        :param loop: Number of outer test iterations (dataloader passes or episodes).
+        :type loop: int
+        :return: Concatenated per-step rewards from the test loop.
+        :rtype: torch.Tensor
+        """
+        eval_context = getattr(env, "eval_mode", nullcontext)
+        with eval_context():
+            if isinstance(env, ReasoningGym):
+                prompts = env.reset()
+                rewards = []
+                for _ in range(loop):
+                    completion_ids = self.get_action(
+                        prompts, training=False
+                    ).completion_ids
+                    next_prompts, reward = env.step(completion_ids)
+                    prompts = next_prompts
+                    rewards.append(reward)
+                reward_tensor = torch.cat(rewards)
+            elif isinstance(env, MultiTurnEnv):
+                all_rewards: list[torch.Tensor] = []
+                for _ in range(loop):
+                    prompt_dict, _info = env.reset()
+                    terminated, truncated = False, False
+
+                    while not terminated and not truncated:
+                        completion_ids = self.get_action(
+                            [prompt_dict],
+                            training=False,
+                        ).completion_ids
+                        full = completion_ids[0]
+                        prompt_dict, reward, terminated, truncated, _step_info = (
+                            env.step(
+                                full,
+                            )
+                        )
+                        all_rewards.append(
+                            torch.tensor(
+                                [float(reward)],
+                                dtype=torch.float32,
+                                device=full.device,
+                            ),
+                        )
+                reward_tensor = torch.cat(all_rewards)
+            else:
+                msg = (
+                    "env must be a ReasoningGym (or subclass) or "
+                    f"MultiTurnEnv; got {type(env).__name__}"
+                )
+                raise TypeError(msg)
+        mean_fit = torch.mean(reward_tensor.float()).item()
+        self.fitness.append(mean_fit)
+        return np.array(mean_fit)
+
+    def _validate_core_args(
+        self,
+        batch_size: int,
+        lr: float,
+        clip_coef: float,
+        update_epochs: int,
+        actor_network: Any | None,
+        clone: bool,
+    ) -> None:
+        """Validate the core training arguments."""
+        assert isinstance(batch_size, int), "Batch size must be an integer."
+        assert batch_size >= 1, "Batch size must be greater than or equal to one."
+        assert isinstance(lr, float), "Learning rate must be a float."
+        assert lr > 0, "Learning rate must be greater than zero."
+        assert isinstance(clip_coef, (float, int)), (
+            "Clipping coefficient must be a float."
+        )
+        assert clip_coef >= 0, (
+            "Clipping coefficient must be greater than or equal to zero."
+        )
+        assert isinstance(update_epochs, int), (
+            "Policy update epochs must be an integer."
+        )
+        assert update_epochs >= 1, (
+            "Policy update epochs must be greater than or equal to one."
+        )
+        if clone and actor_network is not None:
+            assert isinstance(
+                actor_network,
+                (PeftModelProtocol, PreTrainedModelProtocol),
+            ), "Actor network must be a PeftModelProtocol or PreTrainedModelProtocol"
+
+    def _setup_advantage_options(
+        self,
+        importance_sampling_level: str,
+        advantage_granularity: str,
+        action_granularity: str | None,
+        gamma: float,
+    ) -> None:
+        """Validate and store the ReBN advantage / importance-sampling options."""
+        valid_action_granularities = {"turn", "token", "auto"}
+        if action_granularity is not None:
+            warnings.warn(
+                "action_granularity is deprecated; use advantage_granularity.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+            advantage_granularity = action_granularity
+        if advantage_granularity not in valid_action_granularities:
+            msg = (
+                "advantage_granularity must be one of "
+                f"{sorted(valid_action_granularities)}."
+            )
+            raise ValueError(msg)
+        validate_importance_sampling_level(importance_sampling_level, allow_auto=False)
+        self.advantage_granularity = advantage_granularity
+        # IS / ratio-pooling level for the clipped surrogate, orthogonal to the
+        # ReBN advantage granularity (``advantage_granularity``). ``"token"`` (the
+        # default) preserves the original token-level clip; ``"turn"`` /
+        # ``"trajectory"`` pool the ratio (length-normalized mean) per turn /
+        # whole completion. Turn level requires ``turn_ids`` in ``learn``.
+        self.importance_sampling_level = importance_sampling_level
+        self.gamma = gamma
+        # Warn once, up front, when Liger is paired with a non-token IS level.
+        # It is permitted but not memory-bounded: turn-/trajectory-level pooling
+        # couples a unit's tokens, so the fused kernel processes one whole
+        # sequence per chunk and materializes a (seq_len, vocab) logits tensor
+        # per trajectory. The shared once-flag suppresses the loss-time dup.
+        if self.use_liger_loss and self.importance_sampling_level in {
+            "turn",
+            "trajectory",
+        }:
+            self._warn_liger_non_token_is(
+                self.importance_sampling_level,
+                "REINFORCE",
+                once_attr="_reinforce_liger_mem_warned",
+            )
+
+    def _setup_generation(
+        self,
+        max_output_tokens: int | None,
+        min_output_tokens: int | None,
+        max_model_len: int | None,
+        hf_generate_chunk_size: int | None,
+    ) -> None:
+        """Validate context lengths and build the HF generation config."""
+        if max_output_tokens is None and max_model_len is None:
+            msg = "Either max_output_tokens or max_model_len must be specified"
+            raise ValueError(msg)
+        self.max_output_tokens = max_output_tokens
+        self.min_output_tokens = min_output_tokens
+        self.max_model_len = (
+            max_model_len if max_model_len is not None else max_output_tokens
+        )
+        validate_llm_context_lengths(self.max_model_len, self.max_output_tokens)
+        self.hf_generate_chunk_size = int(
+            1 if hf_generate_chunk_size is None else max(1, hf_generate_chunk_size)
+        )
+        if self.use_vllm and hf_generate_chunk_size is not None:
+            warnings.warn(
+                "hf_generate_chunk_size is only used for HuggingFace generation "
+                "(use_vllm=False) and will be ignored when use_vllm=True.",
+                stacklevel=3,
+            )
+        self.generation_config = GenerationConfig(
+            do_sample=True,
+            temperature=self.temperature,
+            max_length=self.max_model_len,
+            max_new_tokens=max_output_tokens,
+            min_new_tokens=min_output_tokens,
+            pad_token_id=self.pad_token_id,
+            repetition_penalty=self.repetition_penalty,
+            top_p=self.top_p,
+            top_k=self.top_k,
+            min_p=self.min_p,
+        )
+
     def _reinforce_loss_liger(
         self,
         batch_ids: torch.Tensor,
@@ -879,74 +984,6 @@ class REINFORCE(LLMAlgorithm):
         per_sample_num_turns = turn_ids.max(dim=1).values + 1
         all_single_turn = bool((per_sample_num_turns <= 1).all())
         return "token" if all_single_turn else "turn"
-
-    def test(
-        self,
-        env: ReasoningGym | MultiTurnEnv,
-        loop: int = 1,
-    ) -> torch.Tensor:
-        """Return fitness (test) score tensor of llm on test sub-set.
-
-        ``ReasoningGym`` (and compatible dataset envs): ``reset`` returns a batch
-        of prompt dicts; each ``step`` accepts completion id tensors and returns
-        the next batch plus rewards. ``loop`` iterations advance the test
-        dataloader that many times.
-
-        :param env: A :class:`~agilerl.utils.llm_utils.ReasoningGym` or
-            :class:`~agilerl.llm_envs.TokenObservationWrapper`.
-        :type env: ReasoningGym | MultiTurnEnv
-        :param loop: Number of outer test iterations (dataloader passes or episodes).
-        :type loop: int
-        :return: Concatenated per-step rewards from the test loop.
-        :rtype: torch.Tensor
-        """
-        eval_context = getattr(env, "eval_mode", nullcontext)
-        with eval_context():
-            if isinstance(env, ReasoningGym):
-                prompts = env.reset()
-                rewards = []
-                for _ in range(loop):
-                    completion_ids = self.get_action(
-                        prompts, training=False
-                    ).completion_ids
-                    next_prompts, reward = env.step(completion_ids)
-                    prompts = next_prompts
-                    rewards.append(reward)
-                reward_tensor = torch.cat(rewards)
-            elif isinstance(env, MultiTurnEnv):
-                all_rewards: list[torch.Tensor] = []
-                for _ in range(loop):
-                    prompt_dict, _info = env.reset()
-                    terminated, truncated = False, False
-
-                    while not terminated and not truncated:
-                        completion_ids = self.get_action(
-                            [prompt_dict],
-                            training=False,
-                        ).completion_ids
-                        full = completion_ids[0]
-                        prompt_dict, reward, terminated, truncated, _step_info = (
-                            env.step(
-                                full,
-                            )
-                        )
-                        all_rewards.append(
-                            torch.tensor(
-                                [float(reward)],
-                                dtype=torch.float32,
-                                device=full.device,
-                            ),
-                        )
-                reward_tensor = torch.cat(all_rewards)
-            else:
-                msg = (
-                    "env must be a ReasoningGym (or subclass) or "
-                    f"MultiTurnEnv; got {type(env).__name__}"
-                )
-                raise TypeError(msg)
-        mean_fit = torch.mean(reward_tensor.float()).item()
-        self.fitness.append(mean_fit)
-        return np.array(mean_fit)
 
     def _compute_rebn_advantages(
         self,
