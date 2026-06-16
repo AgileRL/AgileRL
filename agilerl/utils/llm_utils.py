@@ -1131,18 +1131,14 @@ def clipped_is_surrogate(
         num_turns,
         turn_reduction=turn_reduction,
     )
-    # Pool advantages with the identical mechanics (discard the redundant mask).
     adv, _ = pool_log_ratio_by_level(
         advantages,
         action_mask,
         turn_ids,
         importance_sampling_level,
         num_turns,
-        turn_reduction=turn_reduction,
+        turn_reduction="mean",
     )
-    # Pool the per-token vLLM-correction reweight to the same IS unit (identity
-    # at token level; length-normalized mean over the unit's action tokens at
-    # turn/trajectory level) so it multiplies the per-unit surrogate consistently.
     pooled_loss_weight = None
     if loss_weight is not None:
         pooled_loss_weight, _ = pool_log_ratio_by_level(
@@ -1151,7 +1147,7 @@ def clipped_is_surrogate(
             turn_ids,
             importance_sampling_level,
             num_turns,
-            turn_reduction=turn_reduction,
+            turn_reduction="mean",
         )
     return clipped_min_surrogate(
         log_importance_weights,
