@@ -10,6 +10,15 @@ from agilerl.typing import ArrayOrTensor
 
 DataType = dict[str, ArrayOrTensor] | TensorDict
 
+# Probability of at least one duplicate within a sampled minibatch that we
+# tolerate before `ReplayBuffer.sample` switches from without-replacement to
+# (faster) with-replacement index sampling. Fixed at the 3-sigma level (~0.27%).
+_COLLISION_PROBABILITY = 0.0027
+# Precomputed denominator of the birthday-bound switch-over size: sample with
+# replacement once  size >= k(k - 1) / (-2 ln(1 - p)).  Computed once at import so
+# `_sample_indices` does a single comparison per call (no per-sample transcendental).
+_REPLACEMENT_SIZE_DENOM = -2.0 * math.log1p(-_COLLISION_PROBABILITY)
+
 
 class ReplayBuffer:
     """A circular replay buffer for off-policy learning using a TensorDict as storage.
@@ -21,11 +30,6 @@ class ReplayBuffer:
     :param dtype: Data type for the tensors
     :type dtype: torch.dtype, optional
     """
-
-    # Tolerated probability of at least one duplicate within a sampled minibatch
-    # before `sample` switches from without-replacement to (faster)
-    # with-replacement index sampling. See `_sample_indices`.
-    collision_tolerance: float = 0.01
 
     def __init__(
         self,
@@ -137,16 +141,18 @@ class ReplayBuffer:
         """Draw ``k`` storage indices in ``[0, size)``.
 
         Small buffers sample **without replacement** via ``torch.randperm`` (no
-        duplicate transitions within a minibatch). Once the buffer is large
-        enough that the chance of any duplicate drops below
-        :attr:`collision_tolerance`, we switch to **with replacement** - a single
-        O(``k``) ``torch.randint`` draw, which avoids ``randperm``'s O(``size``)
-        shuffle of the whole buffer.
+        duplicate transitions within a minibatch). Once the *current fill*
+        (``self.size``, which grows as the buffer fills) is large enough that the
+        chance of any duplicate drops below ``_COLLISION_PROBABILITY`` (~0.27%),
+        we switch to **with replacement** - a single O(``k``) ``torch.randint``
+        draw, which avoids ``randperm``'s O(``size``) shuffle of the whole buffer.
 
         The crossover uses the birthday bound
         ``P(>=1 duplicate) ~= 1 - exp(-k(k-1) / (2 * size))``; solving
-        ``P <= collision_tolerance`` gives
-        ``size >= k(k-1) / (-2 ln(1 - collision_tolerance))``.
+        ``P <= _COLLISION_PROBABILITY`` gives ``size >= k(k-1) / DENOM`` with the
+        denominator precomputed, so this is one comparison with no transcendental.
+        ``self.size`` (not ``max_size``) because a partially-full buffer has a far
+        higher collision rate than its eventual capacity.
 
         :param k: Number of indices to draw.
         :type k: int
@@ -156,9 +162,7 @@ class ReplayBuffer:
         if k <= 0:
             return torch.empty(0, dtype=torch.long)
 
-        denom = -2.0 * math.log1p(-self.collision_tolerance)
-        min_size_for_replacement = k * (k - 1) / denom if denom > 0 else math.inf
-        if self.size >= min_size_for_replacement:
+        if self.size * _REPLACEMENT_SIZE_DENOM >= k * (k - 1):
             # Duplicates are below tolerance: a single O(k) vectorised draw.
             return torch.randint(0, self.size, (k,))
 
