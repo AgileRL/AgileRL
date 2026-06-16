@@ -67,9 +67,9 @@ This example demonstrates how to use the GRPO algorithm to fine-tune a LLM on a 
 
 .. note::
 
-   The current colocated rollout design — vLLM native sleep/wake with each side
-   holding its own base — is documented under "Colocated rollout (native vLLM
-   sleep/wake)" in the :doc:`quantization` topic. ``vllm_sleep_handoff.md`` is a
-   historical record of the earlier standby-sleep + zero-copy weight-sharing
-   investigation that this superseded (kept for context; not built into this
-   site).
+   Colocated rollouts (where the trainer and vLLM share a single GPU and hand it
+   back and forth using vLLM's native sleep/wake) are covered for users under
+   "Colocated rollout (native vLLM sleep/wake)" in the :doc:`quantization` topic.
+   A deeper, code-level walkthrough of the same mechanism lives in
+   ``docs/llm_finetuning/vllm_sleep_handoff.md`` (a developer note kept in the
+   repository, not built into this documentation site).
