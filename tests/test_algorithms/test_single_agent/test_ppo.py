@@ -1425,8 +1425,8 @@ class TestPPOLearn:
                 action=action,
                 reward=1.0,
                 done=i == learn_step - 1,
-                value=float(value),
-                log_prob=float(log_prob),
+                value=np.asarray(value).item(),
+                log_prob=np.asarray(log_prob).item(),
                 next_obs=next_obs,
                 action_mask=np.array([action_mask]),
             )
@@ -1521,8 +1521,8 @@ class TestPPOLearn:
                 "action": action,
                 "reward": 1.0,
                 "done": i == learn_step - 1,
-                "value": float(value),
-                "log_prob": float(log_prob),
+                "value": np.asarray(value).item(),
+                "log_prob": np.asarray(log_prob).item(),
                 "next_obs": next_obs,
                 "action_mask": np.array([action_mask]),
             }

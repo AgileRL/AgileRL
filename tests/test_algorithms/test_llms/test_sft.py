@@ -405,7 +405,6 @@ class TestSFTLearn:
         model_factory,
     ) -> None:
         """Patch MPS on CI so ``torch.mps.empty_cache()`` in ``learn()`` is exercised."""
-        empty = _patch_mps_learn_hooks(monkeypatch, "agilerl.algorithms.sft")
         sft = generate_sft(
             accelerator_factory,
             model_factory,
@@ -418,6 +417,10 @@ class TestSFTLearn:
             micro_batch_size_per_gpu=None,
             from_name=False,
         )
+        # Patch MPS only *after* the agent is built: patching is_available()
+        # before construction makes the device resolve to "mps", and the dummy
+        # actor's ``.to("mps")`` then crashes on a non-MPS (Linux/CI) torch build.
+        empty = _patch_mps_learn_hooks(monkeypatch, "agilerl.algorithms.sft")
         seq_len = 5 + 10
         prompt_len = 4
         experiences = {
@@ -661,9 +664,14 @@ class TestSFTSaveLoadCheckpoint:
                 pad_token_id=vocab_size - 1,
                 pad_token="<pad>",
                 device="cuda" if torch.cuda.is_available() else "cpu",
+                lora_config=copy.deepcopy(sft.lora_config),
                 accelerator=accelerator,
+                # Match the saved agent's setting so the constructor doesn't
+                # mutate ``lora_config`` differently (``use_liger_loss=True``
+                # adds ``exclude_modules=["lm_head"]``).
+                use_liger_loss=sft.use_liger_loss,
             )
-            new_sft.load_checkpoint(tmpdir, merge_lora_configs=True)
+            new_sft.load_checkpoint(tmpdir)
 
             for attr in EvolvableAlgorithm.inspect_attributes(sft):
                 if attr.startswith("_"):
@@ -696,7 +704,16 @@ class TestSFTSaveLoadCheckpoint:
                     assert getattr(sft, attr) is not None
                     old_targets = set(getattr(sft, attr).target_modules)
                     new_targets = set(getattr(new_sft, attr).target_modules)
-                    assert old_targets.issubset(new_targets)
+                    assert old_targets == new_targets
+                    assert getattr(new_sft, attr).r == getattr(sft, attr).r
+                    assert (
+                        getattr(new_sft, attr).lora_alpha
+                        == getattr(sft, attr).lora_alpha
+                    )
+                    assert (
+                        getattr(new_sft, attr).lora_dropout
+                        == getattr(sft, attr).lora_dropout
+                    )
                 elif not isinstance(getattr(sft, attr), torch.Tensor):
                     assert getattr(new_sft, attr) == getattr(sft, attr), (
                         f"Attribute {attr} is not equal"
@@ -790,6 +807,7 @@ class TestSFTGetLogprobs:
     )
     @pytest.mark.parametrize("batch_size", [1])
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
+    @pytest.mark.gpu  # real Qwen2 forward is Liger/Triton-fused → needs CUDA
     def test_sft_get_logprobs(
         self,
         deepspeed_env,
@@ -838,6 +856,7 @@ class TestSFTBackwardPass:
     )
     @pytest.mark.parametrize("batch_size", [1])
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
+    @pytest.mark.gpu  # real Qwen2 forward is Liger/Triton-fused → needs CUDA
     def test_sft_backward_pass(
         self,
         deepspeed_env,

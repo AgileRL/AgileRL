@@ -58,6 +58,7 @@ from __future__ import annotations
 import copy
 import inspect
 import re
+import shutil
 from unittest.mock import MagicMock, PropertyMock, patch
 import warnings
 from types import SimpleNamespace
@@ -2027,13 +2028,17 @@ class TestLogprobsFromHiddenFused:
             temperature=1.0,
             cast_to_fp32=False,
         )
-        # Reference: gather - logsumexp in bf16 (no fp32 promotion).
-        logits = hidden @ weight.t()
-        max_lg = logits.amax(dim=-1, keepdim=True)
-        shifted = logits - max_lg
-        target = shifted.gather(dim=-1, index=targets.unsqueeze(-1)).squeeze(-1)
-        log_z = torch.logsumexp(shifted, dim=-1)
-        ref = target - log_z
+        # Reference: gather - logsumexp in bf16 (no fp32 promotion). Mirror the
+        # kernel exactly — flat (B*T, H) reshape and a bare logsumexp with no
+        # explicit max-shift (logsumexp is internally stable; an extra
+        # subtraction would introduce its own bf16 rounding and break
+        # bit-equality).
+        flat_h = hidden.reshape(-1, H)
+        flat_targets = targets.reshape(-1)
+        logits = flat_h @ weight.t()
+        selected = logits.gather(dim=-1, index=flat_targets.unsqueeze(-1)).squeeze(-1)
+        log_z = torch.logsumexp(logits, dim=-1)
+        ref = (selected - log_z).reshape(B, T)
         assert result.dtype == torch.bfloat16
         assert torch.equal(result, ref)
 
@@ -2090,6 +2095,142 @@ class TestLogprobsFromHiddenFused:
             .squeeze(-1)
         )
         assert torch.allclose(result, ref, rtol=1e-5, atol=1e-5)
+
+
+class TestFusedLinearLogProbsGrad:
+    """Cover the gradient-capable counterpart
+    (:meth:`LLMAlgorithm._logprobs_from_hidden_fused_grad`) backed by the
+    gradient-checkpointed :class:`_FusedLinearLogProbsFunction`. The forward
+    must match the no-grad fused path bit-for-bit; the backward must yield
+    the exact ``log_softmax`` gradient, never materializing ``(B, T, V)``.
+    """
+
+    @staticmethod
+    def _naive_logps(hidden, weight, bias, targets, temperature, cast):
+        logits = hidden @ weight.t()
+        if bias is not None:
+            logits = logits + bias
+        if temperature != 1.0:
+            logits = logits / temperature
+        if cast:
+            logits = logits.float()
+        return (
+            F.log_softmax(logits, dim=-1)
+            .gather(dim=-1, index=targets.unsqueeze(-1))
+            .squeeze(-1)
+        )
+
+    def test_forward_value_matches_nograd_path_bitwise(self) -> None:
+        """The grad path's forward value is bit-identical to the no-grad
+        fused path, so old/ref logprobs (computed no-grad) and policy
+        logprobs (computed under grad) stay consistent — the first-step
+        ratio is exactly 1."""
+        torch.manual_seed(0)
+        B, T, H, V = 3, 9, 32, 4096
+        hidden = torch.randn(B, T, H, dtype=torch.bfloat16, requires_grad=True)
+        weight = torch.randn(V, H, dtype=torch.bfloat16) * 0.02
+        bias = torch.randn(V, dtype=torch.bfloat16)
+        targets = torch.randint(0, V, (B, T))
+
+        grad_val = LLMAlgorithm._logprobs_from_hidden_fused_grad(
+            hidden, weight, bias, targets, temperature=0.7, cast_to_fp32=True
+        )
+        nograd_val = LLMAlgorithm._logprobs_from_hidden_fused(
+            hidden.detach(), weight, bias, targets, temperature=0.7, cast_to_fp32=True
+        )
+        assert grad_val.requires_grad
+        assert grad_val.shape == (B, T)
+        assert torch.equal(grad_val.detach(), nograd_val)
+
+    def test_hidden_grad_matches_naive_autograd(self) -> None:
+        """Gradient w.r.t. hidden matches autograd through a materialized
+        ``log_softmax`` to fp32 tolerance."""
+        torch.manual_seed(1)
+        B, T, H, V = 4, 6, 24, 1024
+        weight = torch.randn(V, H)
+        bias = torch.randn(V)
+        targets = torch.randint(0, V, (B, T))
+        upstream = torch.randn(B, T)
+
+        hid_f = torch.randn(B, T, H, requires_grad=True)
+        out_f = LLMAlgorithm._logprobs_from_hidden_fused_grad(
+            hid_f, weight, bias, targets, temperature=0.8, cast_to_fp32=True
+        )
+        out_f.backward(upstream)
+
+        hid_n = hid_f.detach().clone().requires_grad_(True)
+        out_n = self._naive_logps(hid_n, weight, bias, targets, 0.8, True)
+        out_n.backward(upstream)
+
+        assert torch.allclose(hid_f.grad, hid_n.grad, rtol=1e-4, atol=1e-5)
+
+    def test_weight_and_bias_grad_match_naive_autograd(self) -> None:
+        """Gradients w.r.t. lm_head weight and bias match naive autograd."""
+        torch.manual_seed(2)
+        B, T, H, V = 2, 5, 16, 512
+        targets = torch.randint(0, V, (B, T))
+        upstream = torch.randn(B, T)
+
+        hid_f = torch.randn(B, T, H, requires_grad=True)
+        w_f = torch.randn(V, H, requires_grad=True)
+        b_f = torch.randn(V, requires_grad=True)
+        out_f = LLMAlgorithm._logprobs_from_hidden_fused_grad(
+            hid_f, w_f, b_f, targets, temperature=1.0, cast_to_fp32=True
+        )
+        out_f.backward(upstream)
+
+        hid_n = hid_f.detach().clone().requires_grad_(True)
+        w_n = w_f.detach().clone().requires_grad_(True)
+        b_n = b_f.detach().clone().requires_grad_(True)
+        out_n = self._naive_logps(hid_n, w_n, b_n, targets, 1.0, True)
+        out_n.backward(upstream)
+
+        assert torch.allclose(w_f.grad, w_n.grad, rtol=1e-4, atol=1e-4)
+        assert torch.allclose(b_f.grad, b_n.grad, rtol=1e-4, atol=1e-4)
+
+    def test_grad_invariant_to_chunk_rows(self) -> None:
+        """Forward value and hidden gradient are independent of
+        ``_chunk_rows`` (single chunk vs many) up to fp32 matmul-tiling
+        noise — chunking only partitions rows, it changes nothing about
+        each row's reduction."""
+        torch.manual_seed(3)
+        B, T, H, V = 3, 7, 20, 2048
+        weight = torch.randn(V, H)
+        targets = torch.randint(0, V, (B, T))
+        upstream = torch.randn(B, T)
+
+        def run(chunk_rows):
+            hid = torch.randn(B, T, H, generator=torch.Generator().manual_seed(7))
+            hid.requires_grad_(True)
+            out = LLMAlgorithm._logprobs_from_hidden_fused_grad(
+                hid,
+                weight,
+                None,
+                targets,
+                temperature=0.9,
+                cast_to_fp32=True,
+                _chunk_rows=chunk_rows,
+            )
+            out.backward(upstream)
+            return out.detach(), hid.grad
+
+        big_out, big_grad = run(10_000)  # single chunk (> B*T)
+        small_out, small_grad = run(4)  # forces many chunks
+        assert torch.allclose(big_out, small_out, rtol=1e-5, atol=1e-5)
+        assert torch.allclose(big_grad, small_grad, rtol=1e-5, atol=1e-5)
+
+    def test_no_grad_when_inputs_detached(self) -> None:
+        """With no input requiring grad the output is detached and the
+        bounded backward simply isn't exercised."""
+        torch.manual_seed(4)
+        B, T, H, V = 2, 4, 12, 256
+        hidden = torch.randn(B, T, H)
+        weight = torch.randn(V, H)
+        targets = torch.randint(0, V, (B, T))
+        out = LLMAlgorithm._logprobs_from_hidden_fused_grad(
+            hidden, weight, None, targets, temperature=1.0, cast_to_fp32=True
+        )
+        assert not out.requires_grad
 
     def test_temperature_scaling_applied_once(self) -> None:
         """Temperature folds into logits exactly once before log_softmax."""
@@ -2185,21 +2326,20 @@ class _TinyPeftWrapper(torch.nn.Module):
 
 
 class TestFusedLinearLogprobsIntegration:
-    """End-to-end: ``use_fused_linear_logprobs=True`` produces logprobs
-    numerically equivalent to the unfused path on the same model under
+    """End-to-end: the (unconditional) fused-linear-logprob path in
+    ``_get_logprobs`` produces logprobs numerically equivalent to a reference
+    computed from full ``(B, T, V)`` logits on the same model under
     ``torch.no_grad()``. Exercises ``_get_lm_head_parent``,
-    ``_patch_lm_head_to_identity``, and ``_logprobs_from_hidden_fused``
-    via ``_get_logprobs``.
+    ``_patch_lm_head_to_identity``, and ``_logprobs_from_hidden_fused``.
     """
 
     def _build_agent(
-        self, vocab_size: int, hidden_size: int, *, use_fused: bool
+        self, vocab_size: int, hidden_size: int
     ) -> tuple[LLMAlgorithm, _TinyPeftWrapper]:
         agent = _make_llm_agent()
         actor = _TinyPeftWrapper(_TinyCausalLM(vocab_size, hidden_size))
         actor.eval()
         agent.actor = actor
-        agent.use_fused_linear_logprobs = use_fused
         agent.use_value_head = False
         agent.temperature = 0.7
         agent.calc_position_embeddings = False
@@ -2214,33 +2354,35 @@ class TestFusedLinearLogprobsIntegration:
         agent.select_adapter = _noop_select
         return agent, actor
 
-    def test_fused_matches_unfused_under_no_grad(self) -> None:
+    def test_fused_matches_reference_logits_under_no_grad(self) -> None:
         torch.manual_seed(0)
         B, T, H, V = 3, 7, 16, 256
-        agent, actor = self._build_agent(V, H, use_fused=False)
+        agent, actor = self._build_agent(V, H)
         ids = torch.randint(1, V, (B, T))
 
         with torch.no_grad():
-            lp_unfused = agent._get_logprobs(
-                ids, batch_size=B, use_reference=False, eval_mode=True
-            )
-            agent.use_fused_linear_logprobs = True
             lp_fused = agent._get_logprobs(
                 ids, batch_size=B, use_reference=False, eval_mode=True
             )
+            # Reference: full (B, T, V) logits → _logprobs_from_logits, the
+            # exact math the fused path approximates chunk-by-chunk.
+            full_logits = actor(input_ids=ids).logits / agent.temperature
+            lp_ref = LLMAlgorithm._logprobs_from_logits(
+                full_logits[:, :-1], ids[:, 1:], cast_to_fp32=True
+            )
 
-        assert lp_unfused.shape == (B, T - 1)
         assert lp_fused.shape == (B, T - 1)
-        assert torch.allclose(lp_unfused, lp_fused, rtol=1e-5, atol=1e-5)
+        assert lp_ref.shape == (B, T - 1)
+        assert torch.allclose(lp_fused, lp_ref, rtol=1e-5, atol=1e-5)
         # lm_head restored after the patched call (try/finally teardown).
         assert isinstance(actor.base_model.model.lm_head, torch.nn.Linear)
 
-    def test_fused_path_skipped_when_grad_enabled(self) -> None:
-        """Gradient-time call sites keep the unfused path even with the
-        flag on. Verified by spying on the kernel."""
+    def test_no_grad_fused_method_skipped_when_grad_enabled(self) -> None:
+        """Under grad, ``_get_logprobs`` uses the gradient-aware fused fn, so
+        the no-grad ``_logprobs_from_hidden_fused`` static is not called."""
         torch.manual_seed(1)
         B, T, H, V = 2, 5, 8, 128
-        agent, _ = self._build_agent(V, H, use_fused=True)
+        agent, _ = self._build_agent(V, H)
         ids = torch.randint(1, V, (B, T))
         with patch.object(
             LLMAlgorithm,
@@ -2258,7 +2400,7 @@ class TestFusedLinearLogprobsIntegration:
         kernel call so toggling it controls the reduction precision."""
         torch.manual_seed(2)
         B, T, H, V = 2, 4, 8, 64
-        agent, _ = self._build_agent(V, H, use_fused=True)
+        agent, _ = self._build_agent(V, H)
         agent.cast_logprobs_to_fp32 = cast_to_fp32
         ids = torch.randint(1, V, (B, T))
         with patch.object(
@@ -2274,41 +2416,15 @@ class TestFusedLinearLogprobsIntegration:
         assert spy.call_args.kwargs["cast_to_fp32"] is cast_to_fp32
 
     @pytest.mark.parametrize("cast_to_fp32", [True, False])
-    def test_cast_logprobs_to_fp32_threaded_into_unfused_kernel(
-        self, cast_to_fp32: bool
-    ) -> None:
-        """``self.cast_logprobs_to_fp32`` flows into the unfused
-        ``_logprobs_from_logits`` call too — the two paths share the
-        same regime."""
-        torch.manual_seed(3)
-        B, T, H, V = 2, 4, 8, 64
-        agent, _ = self._build_agent(V, H, use_fused=False)
-        agent.cast_logprobs_to_fp32 = cast_to_fp32
-        ids = torch.randint(1, V, (B, T))
-        with patch.object(
-            LLMAlgorithm,
-            "_logprobs_from_logits",
-            wraps=LLMAlgorithm._logprobs_from_logits,
-        ) as spy:
-            with torch.no_grad():
-                agent._get_logprobs(
-                    ids, batch_size=B, use_reference=False, eval_mode=True
-                )
-        assert spy.called
-        assert spy.call_args.kwargs["cast_to_fp32"] is cast_to_fp32
-
-    @pytest.mark.parametrize("cast_to_fp32", [True, False])
-    @pytest.mark.parametrize("use_fused", [True, False])
     def test_cast_logprobs_to_fp32_threaded_into_fused_model_pass(
-        self, cast_to_fp32: bool, use_fused: bool
+        self, cast_to_fp32: bool
     ) -> None:
         """``self.cast_logprobs_to_fp32`` also flows through the other
         call site (``_fused_model_pass``), which is what
-        ``_fused_forward`` / ``_fused_forward_no_grad`` go through. Covers
-        both fused-linear-logprob and unfused branches of that method."""
+        ``_fused_forward`` / ``_fused_forward_no_grad`` go through."""
         torch.manual_seed(4)
         B, T, H, V = 2, 4, 8, 64
-        agent, _ = self._build_agent(V, H, use_fused=use_fused)
+        agent, _ = self._build_agent(V, H)
         agent.cast_logprobs_to_fp32 = cast_to_fp32
 
         # ``_fused_model_pass`` calls ``set_fused_adapter_routing`` and
@@ -2319,9 +2435,6 @@ class TestFusedLinearLogprobsIntegration:
         fused_mask = torch.ones_like(fused_ids)
         routing = ["actor"] * B
 
-        target_kernel = (
-            "_logprobs_from_hidden_fused" if use_fused else "_logprobs_from_logits"
-        )
         with (
             patch(
                 "agilerl.algorithms.core.base.set_fused_adapter_routing",
@@ -2329,8 +2442,8 @@ class TestFusedLinearLogprobsIntegration:
             ),
             patch.object(
                 LLMAlgorithm,
-                target_kernel,
-                wraps=getattr(LLMAlgorithm, target_kernel),
+                "_logprobs_from_hidden_fused",
+                wraps=LLMAlgorithm._logprobs_from_hidden_fused,
             ) as spy,
         ):
             with torch.no_grad():
@@ -2719,34 +2832,21 @@ class TestLLMSetReferencePolicy:
             ):
                 agent.set_reference_policy(1)
 
-    def test_set_reference_without_separate_adapter_no_accelerator(self):
+    def test_set_reference_without_separate_adapter_warns_and_keeps_base(self):
+        """Base weights are immutable: the implicit reference cannot move, so an
+        update request warns once and only advances the tracker."""
         agent = _make_llm_agent(use_separate_reference_adapter=False)
         agent.accelerator = None
-        with patch.object(
-            LLMAlgorithm,
-            "_merge_adapter_into_base_in_place",
-        ) as mock_manual_merge:
-            agent.set_reference_policy(1)
-        mock_manual_merge.assert_called_once()
-        assert agent.reference_update_tracker == 1
-
-    def test_set_reference_without_separate_adapter_with_accelerator(self):
-        acc = _make_mock_accelerator()
-        agent = _make_llm_agent(accelerator=acc, use_separate_reference_adapter=False)
-        unwrapped = MagicMock()
-        unwrapped.parameters.return_value = [torch.tensor([1.0])]
-        acc.unwrap_model = MagicMock(return_value=unwrapped)
-        with patch.object(
-            LLMAlgorithm,
-            "_merge_adapter_into_base_in_place",
-        ) as mock_manual_merge:
-            agent.set_reference_policy(1)
-        mock_manual_merge.assert_called_once_with(
-            peft_model=unwrapped,
-            adapter_name="actor",
-        )
-        assert agent.reference_update_tracker == 1
-        acc.wait_for_everyone.assert_called()
+        with patch.object(LLMAlgorithm, "_copy_adapter_weights") as mock_copy:
+            with pytest.warns(UserWarning, match="stays the initial base policy"):
+                agent.set_reference_policy(1)
+            mock_copy.assert_not_called()
+            assert agent.reference_update_tracker == 1
+            # Warn-once: a second update advances the tracker silently.
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                agent.set_reference_policy(2)
+        assert agent.reference_update_tracker == 2
 
     def test_no_update_when_tracker_equal(self):
         agent = _make_llm_agent()
@@ -2757,174 +2857,22 @@ class TestLLMSetReferencePolicy:
         assert agent.reference_update_tracker == 5
 
 
-class TestLLMManualMergeIntoBase:
-    def test_merge_adapter_into_base_preserves_forward_and_resets_lora(self):
-        torch.manual_seed(0)
-        model = create_module(input_size=6, max_tokens=4, vocab_size=64, device="cpu")
-        lora_cfg = LoraConfig(
-            r=2,
-            lora_alpha=4,
-            target_modules=["linear_1"],
-            task_type="CAUSAL_LM",
-            lora_dropout=0.0,
-        )
-        peft_model = get_peft_model(model, lora_cfg, adapter_name="actor")
-        peft_model.eval()
-
-        lora_modules = [
-            module
-            for module in peft_model.base_model.model.modules()
-            if hasattr(module, "lora_A") and "actor" in module.lora_A
-        ]
-        assert lora_modules, "Expected at least one LoRA-capable layer."
-        for module in lora_modules:
-            with torch.no_grad():
-                module.lora_A["actor"].weight.fill_(0.05)
-                module.lora_B["actor"].weight.fill_(0.05)
-
-        first = lora_modules[0]
-        base_before = first.get_base_layer().weight.detach().clone()
-        lora_a_before = first.lora_A["actor"].weight.detach().clone()
-        lora_b_before = first.lora_B["actor"].weight.detach().clone()
-
-        input_ids = torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]], dtype=torch.long)
-        attention_mask = torch.ones_like(input_ids)
-        with torch.no_grad():
-            logits_before = peft_model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-            ).logits
-
-        agent = _make_llm_agent()
-        agent._merge_adapter_into_base_in_place(
-            peft_model=peft_model,
-            adapter_name="actor",
-        )
-
-        with torch.no_grad():
-            logits_after = peft_model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-            ).logits
-
-        assert torch.allclose(logits_before, logits_after, atol=3.2e-2, rtol=1e-3)
-        assert not torch.allclose(base_before, first.get_base_layer().weight)
-        assert not torch.allclose(lora_a_before, first.lora_A["actor"].weight)
-        assert not torch.allclose(lora_b_before, first.lora_B["actor"].weight)
-        assert torch.allclose(
-            first.lora_B["actor"].weight,
-            torch.zeros_like(first.lora_B["actor"].weight),
-        )
-
-    def test_merge_adapter_into_base_raises_when_no_lora_tensors_found(self):
-        agent = _make_llm_agent()
-        peft_model = MagicMock()
-        peft_model.base_model.model.modules.return_value = []
-
-        with pytest.raises(ValueError, match="No LoRA tensors found for adapter"):
-            agent._merge_adapter_into_base_in_place(
-                peft_model=peft_model,
-                adapter_name="actor",
-            )
-
-    def test_merge_adapter_raises_when_lora_bias_set_but_base_bias_missing(self):
-        """If a LoRA module declares a bias but the base layer has none, fail loudly."""
-        agent = _make_llm_agent()
-
-        class _BaseLayerNoBias:
-            def __init__(self):
-                self.weight = torch.nn.Parameter(torch.zeros(2, 2))
-
-        base_layer = _BaseLayerNoBias()
-
-        module = MagicMock(
-            spec=[
-                "lora_A",
-                "lora_B",
-                "lora_bias",
-                "lora_variant",
-                "get_base_layer",
-                "get_delta_weight",
-                "scaling",
-            ]
-        )
-        module.lora_A = {"actor": MagicMock()}
-        module.lora_B = {"actor": MagicMock()}
-        module.lora_bias = {"actor": True}
-        module.lora_variant = {}
-        module.scaling = {"actor": 1.0}
-        module.get_base_layer = MagicMock(return_value=base_layer)
-        module.get_delta_weight = MagicMock(return_value=torch.zeros(2, 2))
-
-        peft_model = MagicMock()
-        peft_model.base_model.model.modules.return_value = [module]
-
-        with pytest.raises(
-            RuntimeError,
-            match="Cannot merge LoRA bias into base layer because bias is missing",
-        ):
-            agent._merge_adapter_into_base_in_place(
-                peft_model=peft_model,
-                adapter_name="actor",
-            )
-
-    def test_merge_adapter_falls_back_to_kaiming_init_when_no_reset_method(self):
-        """LoRA modules without reset_lora_parameters get a manual A/B reset."""
-        agent = _make_llm_agent()
-
-        class _BaseLayer:
-            def __init__(self):
-                self.weight = torch.nn.Parameter(torch.zeros(4, 4))
-                self.bias = torch.nn.Parameter(torch.zeros(4))
-
-        base_layer = _BaseLayer()
-
-        lora_a = MagicMock()
-        lora_a.weight = torch.nn.Parameter(torch.full((4, 4), 0.5))
-        lora_b = MagicMock()
-        lora_b.weight = torch.nn.Parameter(torch.full((4, 4), 0.5))
-        lora_b.bias = torch.zeros(4)
-
-        module = MagicMock(
-            spec=[
-                "lora_A",
-                "lora_B",
-                "lora_bias",
-                "lora_variant",
-                "get_base_layer",
-                "get_delta_weight",
-                "scaling",
-            ]
-        )
-        module.lora_A = {"actor": lora_a}
-        module.lora_B = {"actor": lora_b}
-        module.lora_bias = {"actor": False}
-        module.lora_variant = {}
-        module.scaling = {"actor": 1.0}
-        module.get_base_layer = MagicMock(return_value=base_layer)
-        module.get_delta_weight = MagicMock(return_value=torch.zeros(4, 4))
-
-        peft_model = MagicMock()
-        peft_model.base_model.model.modules.return_value = [module]
-
-        torch.manual_seed(0)
-        agent._merge_adapter_into_base_in_place(
-            peft_model=peft_model,
-            adapter_name="actor",
-        )
-
-        assert torch.equal(lora_b.weight, torch.zeros(4, 4))
-        assert not torch.allclose(lora_a.weight, torch.full((4, 4), 0.5))
-
-
 class TestLLMGetLogprobs:
     def test_get_logprobs_computes_correctly(self):
         agent = _make_llm_agent()
         agent.calc_position_embeddings = True
         agent.pad_token_id = 0
         ids = torch.randint(1, 50, (2, 10))
-        with patch.object(
-            LLMAlgorithm, "_logprobs_from_logits", return_value=torch.randn(2, 9)
+        # ``_get_logprobs`` always uses the fused-linear-logprob path; patch the
+        # no-grad fused kernel so the mock PEFT actor's stub lm_head isn't
+        # actually matmul'd.
+        with (
+            torch.no_grad(),
+            patch.object(
+                LLMAlgorithm,
+                "_logprobs_from_hidden_fused",
+                return_value=torch.randn(2, 9),
+            ),
         ):
             result = agent._get_logprobs(ids, batch_size=4)
         assert result.shape[0] == 2
@@ -3841,72 +3789,8 @@ def get_lora_config(
     )
 
 
-class TestMergeLoraConfigs:
-    """Unit tests for ``LLMAlgorithm._merge_lora_configs``. Rules under test:
-
-    * ``current=None`` → checkpoint is returned as-is, no warnings.
-    * ``r``               → ``max(current, checkpoint)``; warn on mismatch.
-    * ``target_modules``  → set union; warn on difference.
-    * ``modules_to_save`` → set union; warn on difference.
-    * anything else       → current kept; warn on difference.
-    """
-
-    def test_current_none_returns_checkpoint_unchanged(self):
-        ckpt = get_lora_config(r=8)
-        # No warnings should fire when there's nothing to merge against.
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")
-            merged = LLMAlgorithm._merge_lora_configs(None, ckpt)
-        assert merged is ckpt
-
-    def test_rank_takes_max_and_warns_on_mismatch(self):
-        current = get_lora_config(r=2)
-        ckpt = get_lora_config(r=8)
-        with pytest.warns(UserWarning, match="LoRA rank mismatch"):
-            merged = LLMAlgorithm._merge_lora_configs(current, ckpt)
-        assert merged.r == 8
-
-    def test_rank_equal_no_warning(self):
-        current = get_lora_config(r=4)
-        ckpt = get_lora_config(r=4)
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", UserWarning)
-            merged = LLMAlgorithm._merge_lora_configs(current, ckpt)
-        assert merged.r == 4
-
-    def test_target_modules_unioned_and_warns(self):
-        current = get_lora_config(target_modules=("linear_1",))
-        ckpt = get_lora_config(target_modules=("linear_1", "linear_2"))
-        with pytest.warns(UserWarning, match="'target_modules' differs"):
-            merged = LLMAlgorithm._merge_lora_configs(current, ckpt)
-        # merged.target_modules is a sorted list (per the implementation).
-        assert set(merged.target_modules) == {"linear_1", "linear_2"}
-
-    def test_target_modules_equal_no_warning(self):
-        current = get_lora_config(target_modules=("linear_1", "linear_2"))
-        ckpt = get_lora_config(target_modules=("linear_1", "linear_2"))
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", UserWarning)
-            LLMAlgorithm._merge_lora_configs(current, ckpt)
-
-    def test_modules_to_save_unioned_and_warns(self):
-        current = get_lora_config(modules_to_save=("summary",))
-        ckpt = get_lora_config(modules_to_save=("summary", "v_head"))
-        with pytest.warns(UserWarning, match="'modules_to_save' differs"):
-            merged = LLMAlgorithm._merge_lora_configs(current, ckpt)
-        assert set(merged.modules_to_save) == {"summary", "v_head"}
-
-    def test_other_field_mismatch_warns_and_keeps_current(self):
-        current = get_lora_config(lora_alpha=8)
-        ckpt = get_lora_config(lora_alpha=32)
-        with pytest.warns(UserWarning, match="'lora_alpha' differs"):
-            merged = LLMAlgorithm._merge_lora_configs(current, ckpt)
-        # Current wins for non-special fields.
-        assert merged.lora_alpha == 8
-
-
 # --------------------------------------------------------------------------- #
-# LoRA config merge — integration with save/load                              #
+# LoRA config strict matching — integration with save/load                    #
 # --------------------------------------------------------------------------- #
 
 
@@ -3930,20 +3814,11 @@ def _build_grpo_with_lora(lora_config: LoraConfig) -> GRPO:
     )
 
 
-class TestMergeLoraConfigsRoundtrip:
-    """Save a lora-only checkpoint with config A, load into an agent built
-    with config B, and verify the merged config survives load.
+class TestStrictLoraConfigLoading:
+    """lora-only checkpoints must be loaded by an agent built with a matching
+    LoRA config; mismatches raise instead of being reconciled."""
 
-    Only lora-only checkpoints carry a ``LoraConfig`` on disk (via
-    ``save_pretrained``), so that's the branch where ``_merge_lora_configs``
-    actually runs during load when ``merge_lora_configs=True``.
-    """
-
-    def test_merged_lora_config_persists_on_agent_when_merge_enabled(self, tmp_path):
-        """The merged config should survive on ``self.lora_config``, mirroring
-        the deepspeed path's ``_restore_checkpoint_attributes`` behaviour."""
-        from unittest.mock import patch
-
+    def test_mismatched_config_raises(self, tmp_path):
         saver = _build_grpo_with_lora(
             get_lora_config(r=2, target_modules=("linear_1",))
         )
@@ -3952,40 +3827,10 @@ class TestMergeLoraConfigsRoundtrip:
         loader = _build_grpo_with_lora(
             get_lora_config(r=8, target_modules=("linear_1", "linear_2"))
         )
-        with (
-            patch.object(LLMAlgorithm, "_load_adapter_weights"),
-            patch.object(LLMAlgorithm, "_copy_adapter_weights"),
-            patch.object(LLMAlgorithm, "_reconfigure_adapters_to_match"),
-        ):
-            loader.load_checkpoint(
-                str(tmp_path), load_optimizer=False, merge_lora_configs=True
-            )
+        with pytest.raises(ValueError, match="LoRA configs differ"):
+            loader.load_checkpoint(str(tmp_path), load_optimizer=False)
 
-        assert loader.lora_config.r == 8
-        assert set(loader.lora_config.target_modules) == {"linear_1", "linear_2"}
-
-    def test_full_roundtrip_with_rank_growth_loads_weights_when_merge_enabled(
-        self, tmp_path
-    ):
-        """End-to-end: save at r=2, load into r=8 agent — merge takes
-        ``r=max(2,8)=8``, ``_reconfigure_adapters_to_match`` rebuilds the live
-        adapter at rank 8, and ``_pad_adapter_state_to_live_shape`` drops the
-        saved r=2 weights into the top-left rank slice before peft's
-        ``set_peft_model_state_dict`` applies them."""
-        saver = _build_grpo_with_lora(
-            get_lora_config(r=2, target_modules=("linear_1",))
-        )
-        saver.save_checkpoint(str(tmp_path), lora_only=True, save_optimizer=False)
-
-        loader = _build_grpo_with_lora(
-            get_lora_config(r=8, target_modules=("linear_1",))
-        )
-        loader.load_checkpoint(
-            str(tmp_path), load_optimizer=False, merge_lora_configs=True
-        )
-        assert loader.lora_config.r == 8
-
-    def test_load_no_warning_when_configs_match(self, tmp_path):
+    def test_load_succeeds_when_configs_match(self, tmp_path):
         cfg = get_lora_config(r=4, target_modules=("linear_1",))
         saver = _build_grpo_with_lora(cfg)
         saver.save_checkpoint(str(tmp_path), lora_only=True, save_optimizer=False)
@@ -3993,21 +3838,7 @@ class TestMergeLoraConfigsRoundtrip:
         loader = _build_grpo_with_lora(
             get_lora_config(r=4, target_modules=("linear_1",))
         )
-        # We only assert the merge-specific warnings don't fire — PEFT /
-        # other parts of load may legitimately warn on unrelated things.
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            loader.load_checkpoint(str(tmp_path), load_optimizer=False)
-        merge_warnings = [
-            w
-            for w in caught
-            if "rank mismatch" in str(w.message)
-            or "'target_modules' differs" in str(w.message)
-            or "'modules_to_save' differs" in str(w.message)
-        ]
-        assert merge_warnings == [], (
-            f"unexpected merge warnings: {[str(w.message) for w in merge_warnings]}"
-        )
+        loader.load_checkpoint(str(tmp_path), load_optimizer=False)
         assert loader.lora_config.r == 4
 
 
@@ -4080,54 +3911,168 @@ class TestLLMGenerateWithVllmColocate:
                 agent._generate_with_vllm_colocate([], 1, 0.9)
 
 
-class TestLLMMoveModelToVllm:
-    def test_move_model_to_vllm_resolves_model_ref(self):
-        """``model_ref`` from unwrap (accelerator), ``DummyEvolvable.module``, or ``actor``."""
+def _fake_save_peft_adapter_for_vllm_rollout(
+    peft_model,
+    staging_dir,
+    adapter_name,
+    *,
+    target_modules,
+    is_main_process=True,
+):
+    from pathlib import Path
+
+    adapter_dir = Path(staging_dir) / adapter_name
+    adapter_dir.mkdir(parents=True, exist_ok=True)
+    (adapter_dir / "adapter_config.json").write_text("{}")
+    (adapter_dir / "adapter_model.safetensors").write_bytes(b"")
+    return adapter_dir
+
+
+def _setup_agent_for_vllm_lora_sync(agent):
+    import tempfile
+    from pathlib import Path
+
+    agent.vllm_config = VLLMConfig()
+    agent._vllm_lora_staging_dir = Path(tempfile.mkdtemp())
+    agent._vllm_lora_loaded = False
+    agent._vllm_rollout_lora_request = None
+    agent.llm = MagicMock()
+    agent.llm.llm_engine = MagicMock()
+    agent.llm.llm_engine.add_lora = MagicMock(return_value=True)
+    agent.llm.reset_prefix_cache = MagicMock()
+    return agent
+
+
+class TestEnsureVllmLoraStagingDir:
+    """``_ensure_vllm_lora_staging_dir`` resolves the rollout-adapter export
+    dir once, honouring a configured ``VLLMConfig.lora_staging_dir`` (e.g. an
+    NFS path for colocated Ray rollouts) and never deleting it."""
+
+    def _agent(self, lora_staging_dir):
+        agent = SimpleNamespace(
+            vllm_config=VLLMConfig(lora_staging_dir=lora_staging_dir),
+            _vllm_lora_staging_dir=None,
+        )
+        return agent
+
+    def test_uses_configured_dir_and_marks_persistent(self, tmp_path):
+        target = tmp_path / "nfs" / "agilerl_lora"  # not yet created
+        agent = self._agent(str(target))
+        resolved = LLMAlgorithm._ensure_vllm_lora_staging_dir(agent)
+        assert resolved == target
+        assert target.is_dir()  # created with parents
+        assert agent._vllm_lora_staging_dir_is_temp is False
+
+    def test_falls_back_to_tempdir_when_unset(self):
+        agent = self._agent(None)
+        resolved = LLMAlgorithm._ensure_vllm_lora_staging_dir(agent)
+        try:
+            assert resolved.is_dir()
+            assert agent._vllm_lora_staging_dir_is_temp is True
+        finally:
+            shutil.rmtree(resolved, ignore_errors=True)
+
+    def test_is_idempotent(self, tmp_path):
+        agent = self._agent(str(tmp_path / "lora"))
+        first = LLMAlgorithm._ensure_vllm_lora_staging_dir(agent)
+        second = LLMAlgorithm._ensure_vllm_lora_staging_dir(agent)
+        assert first is second
+
+    def test_cleanup_preserves_configured_dir(self, tmp_path):
+        """A configured (non-temp) staging dir survives ``clean_up``'s rmtree
+        guard; a temp one would be removed."""
+        target = tmp_path / "nfs_lora"
+        agent = self._agent(str(target))
+        LLMAlgorithm._ensure_vllm_lora_staging_dir(agent)
+        # Mirror clean_up's guard.
+        is_temp = getattr(agent, "_vllm_lora_staging_dir_is_temp", True)
+        assert is_temp is False
+        assert target.is_dir()
+
+
+class TestLLMSyncActorToVllm:
+    def test_sync_actor_to_vllm_lora_path_exports_adapter_without_merge(self):
+        """Adapter-only sync: save_pretrained + add_lora, no merge_adapter."""
         p = torch.nn.Parameter(torch.tensor([1.0]))
-        named = [("base_model.model.layer.weight", p)]
         gather = patch("agilerl.algorithms.core.base.gather_if_zero3")
 
         acc = _make_mock_accelerator()
         agent = _make_llm_agent(accelerator=acc)
-        unwrapped = MagicMock()
-        unwrapped.parameters.return_value = [p]
-        unwrapped.named_parameters.return_value = named
-        unwrapped.prefix = "model"
-        acc.unwrap_model = MagicMock(return_value=unwrapped)
-        agent.llm = MagicMock()
-        with gather:
-            agent._move_model_to_vllm()
-        agent.llm.llm_engine.model_executor.driver_worker.model_runner.model.load_weights.assert_called()
+        peft_ref = MagicMock()
+        peft_ref.parameters.return_value = [p]
+        peft_ref.set_adapter = MagicMock()
+        acc.unwrap_model = MagicMock(return_value=peft_ref)
+        _setup_agent_for_vllm_lora_sync(agent)
+        with (
+            gather,
+            patch(
+                "agilerl.algorithms.core.base.save_peft_adapter_for_vllm_rollout",
+                side_effect=_fake_save_peft_adapter_for_vllm_rollout,
+            ) as mock_save,
+        ):
+            agent._sync_actor_to_vllm()
+        peft_ref.set_adapter.assert_called_with("actor")
+        mock_save.assert_called_once()
+        peft_ref.merge_adapter.assert_not_called()
+        agent.llm.llm_engine.add_lora.assert_called_once()
+        assert agent._vllm_rollout_lora_request is not None
         agent.llm.reset_prefix_cache.assert_called_once()
 
         agent = _make_llm_agent(accelerator=None)
         inner = _make_mock_peft_actor()
         inner.parameters = MagicMock(return_value=[p])
-        inner.named_parameters = MagicMock(return_value=named)
-        inner.merge_adapter = MagicMock()
-        inner.unmerge_adapter = MagicMock()
         inner.set_adapter = MagicMock()
-        inner.prefix = "model"
+        inner.merge_adapter = MagicMock()
         agent.actor = DummyEvolvable(device="cpu", module=inner)
-        agent.llm = MagicMock()
-        with gather:
-            agent._move_model_to_vllm()
-        inner.merge_adapter.assert_called_once()
-        agent.llm.llm_engine.model_executor.driver_worker.model_runner.model.load_weights.assert_called()
-        agent.llm.reset_prefix_cache.assert_called_once()
+        _setup_agent_for_vllm_lora_sync(agent)
+        with (
+            gather,
+            patch(
+                "agilerl.algorithms.core.base.save_peft_adapter_for_vllm_rollout",
+                side_effect=_fake_save_peft_adapter_for_vllm_rollout,
+            ) as mock_save,
+        ):
+            agent._sync_actor_to_vllm()
+        inner.merge_adapter.assert_not_called()
+        mock_save.assert_called_once()
+        agent.llm.llm_engine.add_lora.assert_called_once()
 
-        agent = _make_llm_agent(accelerator=None)
-        actor = MagicMock()
-        actor.parameters.return_value = [p]
-        actor.named_parameters.return_value = named
-        actor.prefix = "model"
-        agent.actor = actor
-        agent.llm = MagicMock()
-        with gather:
-            agent._move_model_to_vllm()
-        actor.merge_adapter.assert_called_once()
-        agent.llm.llm_engine.model_executor.driver_worker.model_runner.model.load_weights.assert_called()
-        agent.llm.reset_prefix_cache.assert_called_once()
+    def test_move_lora_to_vllm_waits_before_non_main_path_check(self, tmp_path):
+        """Non-main ranks must wait for rank-0 export before dir existence check."""
+        p = torch.nn.Parameter(torch.tensor([1.0]))
+        acc = _make_mock_accelerator(
+            num_processes=2, is_main_process=False, process_index=1
+        )
+        agent = _make_llm_agent(accelerator=acc)
+        peft_ref = MagicMock()
+        peft_ref.parameters.return_value = [p]
+        peft_ref.set_adapter = MagicMock()
+        acc.unwrap_model = MagicMock(return_value=peft_ref)
+        _setup_agent_for_vllm_lora_sync(agent)
+        agent._vllm_lora_staging_dir = tmp_path
+
+        def _fake_export(*_args, **_kwargs):
+            return tmp_path / "actor"
+
+        def _wait_and_materialize():
+            adapter_dir = tmp_path / "actor"
+            adapter_dir.mkdir(parents=True, exist_ok=True)
+            (adapter_dir / "adapter_config.json").write_text("{}")
+            (adapter_dir / "adapter_model.safetensors").write_bytes(b"")
+
+        acc.wait_for_everyone = MagicMock(side_effect=_wait_and_materialize)
+
+        with (
+            patch("agilerl.algorithms.core.base.gather_if_zero3"),
+            patch(
+                "agilerl.algorithms.core.base.save_peft_adapter_for_vllm_rollout",
+                side_effect=_fake_export,
+            ),
+        ):
+            agent._move_lora_to_vllm()
+
+        acc.wait_for_everyone.assert_called_once()
+        agent.llm.llm_engine.add_lora.assert_called_once()
 
 
 class TestMultiAgentPreprocessObservation:
@@ -4609,35 +4554,62 @@ class TestLLMUseReferencePolicySeparateAdapter:
         assert critic_param.requires_grad
 
 
-class TestLLMMoveModelToVllmSkipsPrefixAndOriginalModule:
-    """_move_model_to_vllm skips original_module params and loads remaining weights."""
+class TestLLMMoveModelToVllmAdapterReload:
+    """Second sync uses load_inplace on the LoRA request."""
 
-    def test_skips_peft_adapter_params(self):
+    def test_second_sync_passes_load_inplace(self):
         acc = _make_mock_accelerator()
         agent = _make_llm_agent(accelerator=acc)
-        agent.llm = MagicMock()
-        model_ref = MagicMock()
-        model_ref.prefix = "base_model"
-        model_ref.named_parameters.return_value = [
-            ("base_model.model.model.layer.base_layer.weight", torch.tensor([1.0])),
-            ("base_model.model.model.layer.lora_A.actor.weight", torch.tensor([2.0])),
-            ("base_model.model.model.layer.lora_B.actor.weight", torch.tensor([3.0])),
-            (
-                "base_model.model.model.layer.original_module.weight",
-                torch.tensor([4.0]),
+        peft_ref = MagicMock()
+        peft_ref.parameters.return_value = [torch.tensor([1.0])]
+        acc.unwrap_model = MagicMock(return_value=peft_ref)
+        _setup_agent_for_vllm_lora_sync(agent)
+        with (
+            patch("agilerl.algorithms.core.base.gather_if_zero3"),
+            patch(
+                "agilerl.algorithms.core.base.save_peft_adapter_for_vllm_rollout",
+                side_effect=_fake_save_peft_adapter_for_vllm_rollout,
             ),
-            ("base_model.model.dense.weight", torch.tensor([5.0])),
-        ]
-        acc.unwrap_model = MagicMock(return_value=model_ref)
-        with patch("agilerl.algorithms.core.base.gather_if_zero3"):
-            agent._move_model_to_vllm()
-        load_weights = agent.llm.llm_engine.model_executor.driver_worker.model_runner.model.load_weights
-        assert load_weights.call_count == 4
-        names = [call.args[0][0][0] for call in load_weights.call_args_list]
-        assert "model.layer.weight" in names
-        assert "model.layer.lora_A.actor.weight" in names
-        assert "model.layer.lora_B.actor.weight" in names
-        assert "dense.weight" in names
+        ):
+            agent._sync_actor_to_vllm()
+            agent._vllm_moved = False
+            agent._sync_actor_to_vllm()
+        second_call = agent.llm.llm_engine.add_lora.call_args_list[-1]
+        assert second_call.args[0].load_inplace is True
+
+    def test_generation_request_never_uses_load_inplace(self):
+        """The request handed to ``generate()`` must never set ``load_inplace``.
+
+        vLLM re-evaluates ``add_adapter`` for the active LoRA on every
+        ``execute_model`` step, and reloads the adapter from disk whenever
+        ``load_inplace`` is True. Reusing the one-shot refresh request (which
+        does carry ``load_inplace`` from the second sync onward) for generation
+        would make every decode step disk-bound and starve the GPU. Pin: the
+        stored ``_vllm_rollout_lora_request`` stays ``load_inplace=False`` even
+        after repeated syncs.
+        """
+        acc = _make_mock_accelerator()
+        agent = _make_llm_agent(accelerator=acc)
+        peft_ref = MagicMock()
+        peft_ref.parameters.return_value = [torch.tensor([1.0])]
+        acc.unwrap_model = MagicMock(return_value=peft_ref)
+        _setup_agent_for_vllm_lora_sync(agent)
+        with (
+            patch("agilerl.algorithms.core.base.gather_if_zero3"),
+            patch(
+                "agilerl.algorithms.core.base.save_peft_adapter_for_vllm_rollout",
+                side_effect=_fake_save_peft_adapter_for_vllm_rollout,
+            ),
+        ):
+            agent._sync_actor_to_vllm()
+            assert agent._vllm_rollout_lora_request.load_inplace is False
+            agent._vllm_moved = False
+            agent._sync_actor_to_vllm()
+        # Even though the second add_lora refresh used load_inplace=True, the
+        # request used for generation must remain load_inplace=False.
+        assert agent._vllm_rollout_lora_request.load_inplace is False
+        second_call = agent.llm.llm_engine.add_lora.call_args_list[-1]
+        assert second_call.args[0].load_inplace is True
 
 
 class TestLLMCloneWithoutAccelerator:
@@ -4869,6 +4841,10 @@ class TestLLMInitializeActors:
 
         with (
             patch(
+                "agilerl.algorithms.core.base.adapt_lora_config_for_model",
+                side_effect=lambda model, cfg, **kw: cfg,
+            ),
+            patch(
                 "agilerl.algorithms.core.base.get_peft_model", return_value=peft_actor
             ),
             patch(
@@ -4886,13 +4862,20 @@ class TestLLMInitializeActors:
         agent.pretrained_model_name_or_path = "mock-path"
         agent.lora_config = MagicMock()
         peft_actor = _make_mock_peft_actor()
-        created_model = MagicMock()
+        # spec=[] so the created model doesn't duck-type as a PeftModel on
+        # Python <= 3.11 (a bare MagicMock satisfies any runtime protocol
+        # there; 3.12+ uses getattr_static and is immune).
+        created_model = MagicMock(spec=[])
 
         with (
             patch(
                 "agilerl.algorithms.core.base.create_model_from_name_or_path",
                 return_value=created_model,
             ) as mock_create,
+            patch(
+                "agilerl.algorithms.core.base.adapt_lora_config_for_model",
+                side_effect=lambda model, cfg, **kw: cfg,
+            ),
             patch(
                 "agilerl.algorithms.core.base.get_peft_model", return_value=peft_actor
             ),
@@ -4902,53 +4885,19 @@ class TestLLMInitializeActors:
         ):
             LLMAlgorithm._initialize_actors(agent, None, add_adapters=True)
         mock_create.assert_called_once_with(
-            "mock-path", add_value_head=False, use_accelerator=False
+            "mock-path", model_config=None, add_value_head=False, use_accelerator=False
         )
 
-    def test_initialize_actors_user_peft_warns_and_reinitializes_adapters(self):
-        """User PEFT input is warned and replaced with a fresh actor adapter."""
+    def test_initialize_actors_user_peft_raises(self):
+        """User-supplied PeftModel inputs are rejected outright."""
         agent = _make_llm_agent()
         agent.lora_config = MagicMock()
         peft_model = _make_mock_peft_actor()
-        dense = MagicMock(spec=[])
-        peft_actor = _make_mock_peft_actor()
 
-        with (
-            patch.object(
-                LLMAlgorithm, "_warn_peft_model", return_value=dense
-            ) as mock_warn,
-            patch(
-                "agilerl.algorithms.core.base.get_peft_model", return_value=peft_actor
-            ) as mock_gpm,
-            patch(
-                "agilerl.algorithms.core.base.DummyEvolvable", return_value=peft_actor
-            ),
+        with pytest.raises(
+            ValueError, match=re.escape("actor_network: a PeftModel was passed")
         ):
             LLMAlgorithm._initialize_actors(agent, peft_model, add_adapters=True)
-
-        mock_warn.assert_called_once_with(peft_model, context="actor_network")
-        mock_gpm.assert_called_once()
-        call_kw = mock_gpm.call_args
-        assert call_kw[0][0] is dense
-
-    def test_warn_peft_model_warns_and_merges(self):
-        """_warn_peft_model emits the expected warning and merges adapters."""
-        agent = _make_llm_agent()
-        peft_model = _make_mock_peft_actor()
-        dense = torch.nn.Module()
-        peft_model.merge_and_unload.return_value = dense
-
-        with pytest.warns(
-            UserWarning,
-            match=re.escape(
-                "actor_network: A PeftModel was passed; calling merge_and_unload() to merge active adapter weights "
-                "into the dense base model before attaching new randomly initialized AgileRL adapters."
-            ),
-        ):
-            out = agent._warn_peft_model(peft_model, context="actor_network")
-
-        peft_model.merge_and_unload.assert_called_once_with()
-        assert out is dense
 
     def test_initialize_actors_with_separate_reference_adapter(self):
         agent = _make_llm_agent()
@@ -4957,6 +4906,10 @@ class TestLLMInitializeActors:
         peft_actor = _make_mock_peft_actor()
 
         with (
+            patch(
+                "agilerl.algorithms.core.base.adapt_lora_config_for_model",
+                side_effect=lambda model, cfg, **kw: cfg,
+            ),
             patch(
                 "agilerl.algorithms.core.base.get_peft_model", return_value=peft_actor
             ),
@@ -4987,30 +4940,6 @@ class TestLLMInitializeActors:
             LLMAlgorithm._initialize_actors(agent, base_model, add_adapters=False)
         mock_use_adapter.assert_called_once_with("actor")
 
-    def test_initialize_actors_peft_extra_adapter_names_warns_and_reinitializes(self):
-        """Stray adapter names on user PEFT input are ignored via reinitialization."""
-        agent = _make_llm_agent()
-        agent.lora_config = MagicMock()
-
-        peft_in = _make_mock_peft_actor()
-        peft_in.peft_config = {"actor": MagicMock(), "stray_adapter": MagicMock()}
-        dense = MagicMock(spec=[])
-        peft_out = _make_mock_peft_actor()
-
-        with (
-            patch.object(
-                LLMAlgorithm, "_warn_peft_model", return_value=dense
-            ) as mock_warn,
-            patch(
-                "agilerl.algorithms.core.base.get_peft_model", return_value=peft_out
-            ) as mock_gpm,
-            patch("agilerl.algorithms.core.base.DummyEvolvable", return_value=peft_out),
-        ):
-            LLMAlgorithm._initialize_actors(agent, peft_in, add_adapters=True)
-
-        mock_warn.assert_called_once_with(peft_in, context="actor_network")
-        assert mock_gpm.call_args[0][0] is dense
-
     def test_initialize_actors_value_head_adds_critic_and_sets_wrapper(self):
         acc = _make_mock_accelerator()
         agent = _make_llm_agent(accelerator=acc)
@@ -5026,6 +4955,10 @@ class TestLLMInitializeActors:
         peft_actor.peft_config = {}
 
         with (
+            patch(
+                "agilerl.algorithms.core.base.adapt_lora_config_for_model",
+                side_effect=lambda model, cfg, **kw: cfg,
+            ),
             patch(
                 "agilerl.algorithms.core.base.get_peft_model", return_value=peft_actor
             ) as mock_gpm,
@@ -5047,7 +4980,7 @@ class TestLLMInitializeActors:
         assert agent.actor is base_model
         mock_use_adapter.assert_called_once_with("actor")
 
-    def test_initialize_actors_value_head_merges_inner_peft_and_warns(self):
+    def test_initialize_actors_value_head_inner_peft_raises(self):
         acc = _make_mock_accelerator()
         agent = _make_llm_agent(accelerator=acc)
         agent.use_value_head = True
@@ -5056,29 +4989,14 @@ class TestLLMInitializeActors:
 
         inner_peft = _make_mock_peft_actor()
         inner_peft.peft_config = {"default": MagicMock()}
-        dense_inner = torch.nn.Module()
         base_model = torch.nn.Module()
         base_model.pretrained_model = inner_peft
-        peft_actor = _make_mock_peft_actor()
-        peft_actor.peft_config = {}
 
-        with (
-            patch.object(
-                LLMAlgorithm, "_warn_peft_model", return_value=dense_inner
-            ) as mock_warn,
-            patch(
-                "agilerl.algorithms.core.base.get_peft_model", return_value=peft_actor
-            ) as mock_gpm,
-            patch("agilerl.algorithms.core.base.patch_lora_for_fused_forward"),
+        with pytest.raises(
+            ValueError,
+            match=re.escape("actor_network.pretrained_model: a PeftModel was passed"),
         ):
             LLMAlgorithm._initialize_actors(agent, base_model, add_adapters=True)
-
-        mock_warn.assert_called_once_with(
-            inner_peft, context="actor_network.pretrained_model"
-        )
-        assert mock_gpm.call_args[0][0] is dense_inner
-        assert base_model.pretrained_model is peft_actor
-        assert agent.actor is base_model
 
 
 class TestLLMInitializeActorsTorchCompiler:
@@ -5209,45 +5127,6 @@ class TestLLMCloneActorNetwork:
         assert mock_clone_llm.call_args.kwargs["state_dict"] is None
 
 
-class TestLLMMemoryEfficientParams:
-    """_memory_efficient_params context manager moves params on/off GPU outside ZeRO-3."""
-
-    def test_zero_stage_3_warns_and_yields_without_moving_params(self):
-        agent = _make_llm_agent()
-        agent.zero_stage = 3
-
-        with (
-            patch("agilerl.algorithms.core.base.move_params_to_gpu") as mock_to_gpu,
-            patch("agilerl.algorithms.core.base.move_params_to_cpu") as mock_to_cpu,
-            pytest.warns(
-                UserWarning,
-                match="Memory efficient params is not yet compatible with DeepSpeed ZeRO-3",
-            ),
-            agent._memory_efficient_params(),
-        ):
-            pass
-
-        mock_to_gpu.assert_not_called()
-        mock_to_cpu.assert_not_called()
-
-    def test_default_path_moves_params_to_gpu_and_back_to_cpu(self):
-        agent = _make_llm_agent()
-        agent.zero_stage = None
-        agent.device = "cpu"
-        unwrapped = MagicMock()
-
-        with (
-            patch.object(agent, "_get_unwrapped_actor", return_value=unwrapped),
-            patch("agilerl.algorithms.core.base.move_params_to_gpu") as mock_to_gpu,
-            patch("agilerl.algorithms.core.base.move_params_to_cpu") as mock_to_cpu,
-        ):
-            with agent._memory_efficient_params():
-                mock_to_gpu.assert_called_once_with(unwrapped, "cpu")
-                mock_to_cpu.assert_not_called()
-
-        mock_to_cpu.assert_called_once_with(unwrapped)
-
-
 class TestLLMLoadAdapterWeights:
     """_load_adapter_weights overwrites adapter weights in-place."""
 
@@ -5365,7 +5244,7 @@ class TestLLMConfigureVllmAcceleratorPaths:
             agent._configure_vllm()
         assert agent.llm is mock_llm_instance
         mock_llm_cls.assert_called_once()
-        mock_llm_instance.sleep.assert_called_once_with(level=2)
+        mock_llm_instance.sleep.assert_called_once_with(level=1)
 
     def test_configure_vllm_value_error_with_backend_env(self):
         import os
@@ -5629,7 +5508,7 @@ class TestLLMLoadCheckpointLoraOnlyWithRefAdapter:
             ),
         ):
             agent.load_checkpoint(str(tmp_path), load_optimizer=False)
-        mock_model_load.assert_called_once_with(str(tmp_path), False, True, False)
+        mock_model_load.assert_called_once_with(str(tmp_path), False, True)
 
     def test_load_model_checkpoint_fails_fast_on_lora_config_mismatch(self, tmp_path):
         agent = _make_llm_agent()
@@ -5654,53 +5533,9 @@ class TestLLMLoadCheckpointLoraOnlyWithRefAdapter:
                 "_load_checkpoint_lora_config",
                 return_value=ckpt_lora_config,
             ),
-            patch.object(
-                LLMAlgorithm, "_reconfigure_adapters_to_match"
-            ) as mock_reconfig,
             pytest.raises(ValueError, match="LoRA configs differ"),
         ):
             agent._load_model_checkpoint(str(tmp_path))
-
-        mock_reconfig.assert_not_called()
-
-    def test_load_model_checkpoint_can_merge_on_lora_config_mismatch(self, tmp_path):
-        agent = _make_llm_agent()
-        agent.lora_config = LoraConfig(
-            r=8,
-            lora_alpha=16,
-            target_modules=["linear_1"],
-            task_type="CAUSAL_LM",
-            lora_dropout=0.05,
-        )
-        ckpt_lora_config = LoraConfig(
-            r=4,
-            lora_alpha=16,
-            target_modules=["linear_2"],
-            task_type="CAUSAL_LM",
-            lora_dropout=0.05,
-        )
-
-        with (
-            patch.object(
-                LLMAlgorithm,
-                "_load_checkpoint_lora_config",
-                return_value=ckpt_lora_config,
-            ),
-            patch.object(
-                LLMAlgorithm,
-                "_merge_lora_configs",
-                wraps=LLMAlgorithm._merge_lora_configs,
-            ) as mock_merge,
-            patch.object(
-                LLMAlgorithm, "_reconfigure_adapters_to_match"
-            ) as mock_reconfig,
-        ):
-            agent._load_model_checkpoint(str(tmp_path), merge_lora_configs=True)
-
-        mock_merge.assert_called_once()
-        mock_reconfig.assert_called_once()
-        assert "linear_1" in set(agent.lora_config.target_modules)
-        assert "linear_2" in set(agent.lora_config.target_modules)
 
 
 class TestLLMGenerateWithVllmColocateFullPaths:
@@ -5752,7 +5587,7 @@ class TestLLMGenerateWithVllmColocateFullPaths:
                 return_value=(torch.zeros(2, 5), None),
             ),
         ):
-            completion_ids, action_masks = agent._generate_with_vllm_colocate(
+            completion_ids, action_masks, _ = agent._generate_with_vllm_colocate(
                 prompts, group_size=2, temperature=0.9
             )
         assert len(completion_ids) == 2
@@ -5802,7 +5637,7 @@ class TestLLMGenerateWithVllmColocateAccelerator:
                 return_value=(torch.zeros(2, 5), None),
             ),
         ):
-            completion_ids, action_masks = agent._generate_with_vllm_colocate(
+            completion_ids, action_masks, _ = agent._generate_with_vllm_colocate(
                 prompts, group_size=2, temperature=0.9
             )
         acc.wait_for_everyone.assert_called()
@@ -5860,7 +5695,7 @@ class TestLLMGenerateWithVllmColocateTP:
             patch("torch.distributed.all_gather_object", side_effect=fake_all_gather),
             patch("torch.distributed.get_rank", return_value=0),
         ):
-            completion_ids, action_masks = agent._generate_with_vllm_colocate(
+            completion_ids, action_masks, _ = agent._generate_with_vllm_colocate(
                 prompts, group_size=2, temperature=0.9
             )
         assert len(completion_ids) == 1

@@ -48,7 +48,7 @@ class BanditEnv:
     """
 
     def __init__(self, features: pd.DataFrame, targets: pd.DataFrame) -> None:
-        self.arms = int(targets.nunique()[0])
+        self.arms = int(targets.nunique().iloc[0])
         self.context_dim = (len(np.array(features.loc[0])) * self.arms,)
 
         self.features = features
