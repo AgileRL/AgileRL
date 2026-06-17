@@ -1,5 +1,6 @@
 from unittest.mock import patch
 
+import pytest
 import torch
 from torch import nn
 
@@ -9,6 +10,7 @@ from agilerl.algorithms.core.llm_ops.fused_lora import (
     clear_fused_adapter_routing,
     patch_lora_for_fused_forward,
     set_fused_adapter_routing,
+    unpatch_lora_for_fused_forward,
 )
 
 
@@ -35,6 +37,18 @@ class _CacheRejectingFusedModel(_DummyFusedModel):
         if name == "_fused_lora_layers":
             raise AttributeError("cache assignment not allowed")
         super().__setattr__(name, value)
+
+
+class _BaseLayerLoraLayer(_DummyLoraLayer):
+    """LoRA layer exposing a ``base_layer`` submodule, like real PEFT layers.
+
+    ``base_layer`` returns its input unchanged, so the clone hook is the only
+    thing that can produce a distinct output tensor.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.base_layer = nn.Identity()
 
 
 class TestPatchLoraForFusedForward:
@@ -110,6 +124,235 @@ class TestFusedRoutingPreHook:
         assert returned_args == args
         assert returned_kwargs["existing_kwarg"] == "present"
         assert "adapter_names" not in returned_kwargs
+
+
+class _AdapterAwareLoraLayer(_DummyLoraLayer):
+    """Dummy layer exposing PEFT-style adapter containers for validation."""
+
+    adapter_layer_names = ("lora_A", "lora_B")
+
+    def __init__(self, adapters=("actor", "critic")) -> None:  # noqa: ANN001
+        super().__init__()
+        self.lora_A = nn.ModuleDict({name: nn.Identity() for name in adapters})
+        self.lora_B = nn.ModuleDict({name: nn.Identity() for name in adapters})
+
+
+class _AdapterAwareFusedModel(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.lora_a = _AdapterAwareLoraLayer()
+        self.lora_b = _AdapterAwareLoraLayer()
+
+
+class TestSetFusedAdapterRoutingGuards:
+    def test_set_raises_when_model_not_patched(self):
+        model = _DummyFusedModel()
+        with (
+            patch(
+                "agilerl.algorithms.core.llm_ops.fused_lora.LoraLayer",
+                _DummyLoraLayer,
+            ),
+            pytest.raises(RuntimeError, match="patch_lora_for_fused_forward"),
+        ):
+            set_fused_adapter_routing(model, ["actor", "critic"])
+
+    def test_set_noops_when_model_has_no_lora_layers(self):
+        model = nn.Linear(2, 2)
+        with patch(
+            "agilerl.algorithms.core.llm_ops.fused_lora.LoraLayer", _DummyLoraLayer
+        ):
+            set_fused_adapter_routing(model, ["actor"])
+
+    def test_clear_on_unpatched_model_does_not_mask_the_patch_check(self):
+        model = _DummyFusedModel()
+        with patch(
+            "agilerl.algorithms.core.llm_ops.fused_lora.LoraLayer", _DummyLoraLayer
+        ):
+            clear_fused_adapter_routing(model)
+            assert not hasattr(model.lora_a, "_fused_adapter_routing")
+            with pytest.raises(RuntimeError, match="patch_lora_for_fused_forward"):
+                set_fused_adapter_routing(model, ["actor"])
+
+
+class TestSetFusedAdapterRoutingValidation:
+    def test_known_adapter_names_accepted(self):
+        model = _AdapterAwareFusedModel()
+        with patch(
+            "agilerl.algorithms.core.llm_ops.fused_lora.LoraLayer", _DummyLoraLayer
+        ):
+            patch_lora_for_fused_forward(model)
+            set_fused_adapter_routing(model, ["actor", "critic"])
+
+        assert model.lora_a._fused_adapter_routing == ["actor", "critic"]
+
+    def test_unknown_adapter_name_raises(self):
+        model = _AdapterAwareFusedModel()
+        with patch(
+            "agilerl.algorithms.core.llm_ops.fused_lora.LoraLayer", _DummyLoraLayer
+        ):
+            patch_lora_for_fused_forward(model)
+            with pytest.raises(ValueError, match="critc"):
+                set_fused_adapter_routing(model, ["actor", "critc"])
+
+    def test_base_adapter_name_always_allowed(self):
+        model = _AdapterAwareFusedModel()
+        with patch(
+            "agilerl.algorithms.core.llm_ops.fused_lora.LoraLayer", _DummyLoraLayer
+        ):
+            patch_lora_for_fused_forward(model)
+            set_fused_adapter_routing(model, ["__base__", "actor"])
+
+        assert model.lora_a._fused_adapter_routing == ["__base__", "actor"]
+
+    def test_adapter_names_unioned_across_layers(self):
+        model = nn.Module()
+        model.lora_a = _AdapterAwareLoraLayer(adapters=("actor",))
+        model.lora_b = _AdapterAwareLoraLayer(adapters=("critic",))
+        with patch(
+            "agilerl.algorithms.core.llm_ops.fused_lora.LoraLayer", _DummyLoraLayer
+        ):
+            patch_lora_for_fused_forward(model)
+            set_fused_adapter_routing(model, ["actor", "critic"])
+
+        assert model.lora_b._fused_adapter_routing == ["actor", "critic"]
+
+    def test_validation_skipped_when_no_adapter_containers(self):
+        # Layers that don't expose PEFT's adapter containers (opaque test
+        # doubles) keep the previous unvalidated behavior.
+        model = _DummyFusedModel()
+        with patch(
+            "agilerl.algorithms.core.llm_ops.fused_lora.LoraLayer", _DummyLoraLayer
+        ):
+            patch_lora_for_fused_forward(model)
+            set_fused_adapter_routing(model, ["anything-goes"])
+
+        assert model.lora_a._fused_adapter_routing == ["anything-goes"]
+
+
+class TestPatchIdempotency:
+    def test_repatch_does_not_double_register_hooks(self):
+        model = _DummyFusedModel()
+        with patch(
+            "agilerl.algorithms.core.llm_ops.fused_lora.LoraLayer", _DummyLoraLayer
+        ):
+            patch_lora_for_fused_forward(model)
+            patch_lora_for_fused_forward(model)
+
+        for layer in (model.lora_a, model.lora_b):
+            assert len(layer._forward_pre_hooks) == 1
+
+    def test_repatch_hooks_layers_added_after_first_patch(self):
+        model = _DummyFusedModel()
+        with patch(
+            "agilerl.algorithms.core.llm_ops.fused_lora.LoraLayer", _DummyLoraLayer
+        ):
+            patch_lora_for_fused_forward(model)
+            model.lora_c = _DummyLoraLayer()
+            patch_lora_for_fused_forward(model)
+
+            assert len(model._fused_lora_layers) == 3
+            assert len(model.lora_c._forward_pre_hooks) == 1
+            assert model.lora_c._fused_adapter_routing is None
+            # Existing layers keep their single hook.
+            assert len(model.lora_a._forward_pre_hooks) == 1
+
+            set_fused_adapter_routing(model, ["actor"])
+            assert model.lora_c._fused_adapter_routing == ["actor"]
+
+
+class TestUnpatchLoraForFusedForward:
+    def test_unpatch_removes_hooks_state_and_cache(self):
+        model = _DummyFusedModel()
+        with patch(
+            "agilerl.algorithms.core.llm_ops.fused_lora.LoraLayer", _DummyLoraLayer
+        ):
+            patch_lora_for_fused_forward(model)
+            set_fused_adapter_routing(model, ["actor", "critic"])
+            unpatch_lora_for_fused_forward(model)
+
+            for layer in (model.lora_a, model.lora_b):
+                assert len(layer._forward_pre_hooks) == 0
+                assert not hasattr(layer, "_fused_adapter_routing")
+                assert not hasattr(layer, "_fused_routing_hook_handle")
+            assert not hasattr(model, "_fused_lora_layers")
+
+            # Forward no longer injects adapter_names.
+            _ = model.lora_a(torch.ones(1, 2))
+            assert model.lora_a.last_adapter_names is None
+
+            # And routing cannot be silently re-applied without re-patching.
+            with pytest.raises(RuntimeError, match="patch_lora_for_fused_forward"):
+                set_fused_adapter_routing(model, ["actor"])
+
+    def test_unpatch_then_repatch_restores_routing(self):
+        model = _DummyFusedModel()
+        with patch(
+            "agilerl.algorithms.core.llm_ops.fused_lora.LoraLayer", _DummyLoraLayer
+        ):
+            patch_lora_for_fused_forward(model)
+            unpatch_lora_for_fused_forward(model)
+            patch_lora_for_fused_forward(model)
+            set_fused_adapter_routing(model, ["actor"])
+            _ = model.lora_a(torch.ones(1, 2))
+
+        assert model.lora_a.last_adapter_names == ["actor"]
+        assert len(model.lora_a._forward_pre_hooks) == 1
+
+    def test_unpatch_on_never_patched_model_is_noop(self):
+        model = _DummyFusedModel()
+        with patch(
+            "agilerl.algorithms.core.llm_ops.fused_lora.LoraLayer", _DummyLoraLayer
+        ):
+            unpatch_lora_for_fused_forward(model)
+
+        assert not hasattr(model, "_fused_lora_layers")
+        assert not hasattr(model.lora_a, "_fused_adapter_routing")
+
+
+class TestBaseOutputCloneHook:
+    """The base_layer forward hook clones the frozen base output only while
+    fused routing is active (so PEFT's in-place LoRA accumulation can't mutate
+    a bnb custom-Function output view)."""
+
+    def test_clones_base_output_when_routing_active(self):
+        model = nn.Module()
+        model.lora_a = _BaseLayerLoraLayer()
+        with patch(
+            "agilerl.algorithms.core.llm_ops.fused_lora.LoraLayer", _DummyLoraLayer
+        ):
+            patch_lora_for_fused_forward(model)
+            set_fused_adapter_routing(model, ["actor"])
+            x = torch.ones(2, 2)
+            out = model.lora_a.base_layer(x)
+
+        # Identity returns its input; a distinct, equal tensor means the hook
+        # cloned it.
+        assert out is not x
+        assert torch.equal(out, x)
+
+    def test_noop_when_routing_inactive(self):
+        model = nn.Module()
+        model.lora_a = _BaseLayerLoraLayer()
+        with patch(
+            "agilerl.algorithms.core.llm_ops.fused_lora.LoraLayer", _DummyLoraLayer
+        ):
+            patch_lora_for_fused_forward(model)  # routing defaults to None
+            x = torch.ones(2, 2)
+            out = model.lora_a.base_layer(x)
+
+        # No routing -> hook is a no-op -> Identity's input passes through.
+        assert out is x
+
+    def test_unpatch_removes_clone_handle(self):
+        model = nn.Module()
+        model.lora_a = _BaseLayerLoraLayer()
+        with patch(
+            "agilerl.algorithms.core.llm_ops.fused_lora.LoraLayer", _DummyLoraLayer
+        ):
+            patch_lora_for_fused_forward(model)
+            unpatch_lora_for_fused_forward(model)
+            assert not hasattr(model.lora_a, "_fused_base_clone_handle")
+            assert len(model.lora_a.base_layer._forward_hooks) == 0
 
 
 class TestGetCachedLoraLayers:

@@ -13,6 +13,7 @@ from agilerl.algorithms.core.llm_ops.fused_lora import (
     clear_fused_adapter_routing,
     patch_lora_for_fused_forward,
     set_fused_adapter_routing,
+    unpatch_lora_for_fused_forward,
 )
 from agilerl.algorithms.core.llm_ops.vllm_colocate import (
     get_vllm_internal_model,
@@ -44,4 +45,5 @@ __all__ = [
     "patch_vllm_lora_keep_resident",
     "patch_vllm_strip_multimodal_towers",
     "set_fused_adapter_routing",
+    "unpatch_lora_for_fused_forward",
 ]

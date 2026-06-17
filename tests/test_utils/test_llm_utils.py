@@ -1473,6 +1473,24 @@ class TestClippedIsSurrogate:
         expected = torch.max(-mean_adv * ratio, -mean_adv * clipped)
         assert torch.allclose(pg, expected, atol=1e-5)
 
+    def test_turn_sum_reduction_pools_ratio_by_product_but_advantage_by_mean(self):
+        """With ``turn_reduction="sum"`` the turn ratio is the product of token
+        ratios (nightly/Turn-PPO), while the (broadcast) advantage is still
+        recovered by the turn mean — i.e. it is *not* rescaled by turn length."""
+        # One sample, one turn, two action tokens; advantage is the per-turn
+        # value broadcast across both tokens (as the GAE code produces).
+        tlr = torch.tensor([[0.1, 0.2]])
+        adv = torch.tensor([[2.0, 2.0]])
+        mask = torch.ones(1, 2)
+        turn_ids = torch.zeros(1, 2, dtype=torch.long)
+        # Wide clip so the ratio is never clamped, isolating the pooling logic.
+        pg, _ = clipped_is_surrogate(
+            tlr, adv, mask, turn_ids, "turn", 10.0, turn_reduction="sum"
+        )
+        ratio = torch.exp(torch.tensor(0.1 + 0.2))  # product ratio
+        expected = -2.0 * ratio  # mean-pooled advantage, NOT 4.0
+        assert torch.allclose(pg, expected, atol=1e-5)
+
     def test_turn_requires_turn_ids(self):
         tlr, adv, mask, _B, _T = self._setup()
         with pytest.raises(ValueError, match="turn-level surrogate requires turn_ids"):
@@ -2317,6 +2335,17 @@ class TestPoolLogRatioByLevel:
         weights, unit_mask = pool_log_ratio_by_level(tlr, mask, turn_ids, "turn")
         assert unit_mask.tolist() == [[1.0, 0.0]]
         assert weights[0, 1].item() == pytest.approx(0.0)
+
+    def test_turn_level_sum_reduction_matches_product_ratio_log_pooling(self):
+        tlr = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
+        mask = torch.ones(1, 4)
+        turn_ids = torch.tensor([[0, 0, 1, 1]])
+        weights, unit_mask = pool_log_ratio_by_level(
+            tlr, mask, turn_ids, "turn", turn_reduction="sum"
+        )
+        assert weights.shape == (1, 2)
+        assert weights[0].tolist() == pytest.approx([3.0, 7.0])
+        assert unit_mask.tolist() == [[1.0, 1.0]]
 
     def test_trajectory_level_masks_rows_without_action_tokens(self):
         tlr = torch.tensor([[1.0, 2.0], [3.0, 4.0]])

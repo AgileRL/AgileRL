@@ -151,13 +151,23 @@ class REINFORCE(LLMAlgorithm):
     :type action_granularity: str | None, optional
     :param importance_sampling_level: IS / ratio-pooling level for the clipped
         surrogate, orthogonal to ``advantage_granularity``. ``"token"`` (default)
-        clips per token; ``"turn"`` pools the ratio (length-normalized mean) per
-        turn (requires ``turn_ids`` in :meth:`learn`); ``"trajectory"`` pools over
+        clips per token; ``"turn"`` pools the ratio per turn (requires
+        ``turn_ids`` in :meth:`learn`); ``"trajectory"`` pools over
         the whole completion; the advantage is pooled to the same bucket.
         Turn/trajectory pooling cannot be token-chunked in the fused kernel, so
         set ``use_liger_loss=False`` there (the standard path is always
         memory-bounded).
     :type importance_sampling_level: Literal["token", "turn", "trajectory"], optional
+    :param turn_ratio_pooling: Reduction used to pool per-token log-ratios into a
+        per-turn ratio when ``importance_sampling_level="turn"``; ignored at
+        token/trajectory level. ``"sum"`` (default) yields the product ratio per
+        turn — the standard, paper-aligned per-turn importance weight. ``"mean"``
+        yields a length-normalized geometric-mean ratio (GSPO-style); reach for it
+        on long or highly variable-length turns, where the product ratio lands far
+        outside the clip band on every turn and saturates the clipped surrogate —
+        length-normalizing keeps the per-turn ratio in range so the surrogate stays
+        informative.
+    :type turn_ratio_pooling: Literal["sum", "mean"], optional
     :param gradient_checkpointing: Enable gradient checkpointing.
     :type gradient_checkpointing: bool
     :param torch_compiler: Torch compiler mode.
@@ -262,6 +272,7 @@ class REINFORCE(LLMAlgorithm):
         advantage_granularity: Literal["turn", "token", "auto"] = "auto",
         action_granularity: Literal["turn", "token", "auto"] | None = None,
         importance_sampling_level: Literal["token", "turn", "trajectory"] = "token",
+        turn_ratio_pooling: Literal["sum", "mean"] = "sum",
         gradient_checkpointing: bool = True,
         torch_compiler: str | None = None,
         reduce_memory_peak: bool = False,
@@ -332,7 +343,7 @@ class REINFORCE(LLMAlgorithm):
         self.top_k = top_k
         self.min_p = min_p
         self._setup_advantage_options(advantage_granularity, action_granularity, gamma)
-        self._setup_objective(importance_sampling_level)
+        self._setup_objective(importance_sampling_level, turn_ratio_pooling)
         self._setup_generation(
             max_output_tokens, min_output_tokens, max_model_len, hf_generate_chunk_size
         )
@@ -654,6 +665,7 @@ class REINFORCE(LLMAlgorithm):
                         self.importance_sampling_level,
                         self.clip_coef,
                         loss_weight=loss_weight,
+                        turn_reduction=self.turn_ratio_pooling,
                     )
 
                     self._backward_pass(pg_loss)
@@ -798,15 +810,25 @@ class REINFORCE(LLMAlgorithm):
         self.advantage_granularity = advantage_granularity
         self.gamma = gamma
 
-    def _setup_objective(self, importance_sampling_level: str) -> None:
+    def _setup_objective(
+        self,
+        importance_sampling_level: str,
+        turn_ratio_pooling: str,
+    ) -> None:
         """Validate and resolve the importance-sampling level and Liger routing."""
         validate_importance_sampling_level(importance_sampling_level, allow_auto=False)
+        if turn_ratio_pooling not in {"sum", "mean"}:
+            msg = "turn_ratio_pooling must be one of ['mean', 'sum']."
+            raise ValueError(msg)
         # IS / ratio-pooling level for the clipped surrogate, orthogonal to the
         # ReBN advantage granularity (``advantage_granularity``). ``"token"`` (the
         # default) preserves the original token-level clip; ``"turn"`` /
         # ``"trajectory"`` pool the ratio (length-normalized mean) per turn /
         # whole completion. Turn level requires ``turn_ids`` in ``learn``.
         self.importance_sampling_level = importance_sampling_level
+        # Turn-level ratio pooling reduction (sum=product ratio, mean=geometric
+        # mean ratio) used by both the standard and Liger REINFORCE losses.
+        self.turn_ratio_pooling = turn_ratio_pooling
         # Warn once, up front, when Liger is paired with a non-token IS level.
         # It is permitted but not memory-bounded: turn-/trajectory-level pooling
         # couples a unit's tokens, so the fused kernel processes one whole
@@ -1006,6 +1028,7 @@ class REINFORCE(LLMAlgorithm):
             token_chunk_size=self._resolve_fused_chunk_rows(
                 lm_head_weight.shape[0], self.fused_loss_chunk_rows
             ),
+            turn_log_ratio_reduction=self.turn_ratio_pooling,
             vllm_is_ratio=vllm_is_ratio,
         )
         # aux = [kl, clipfrac, pg_loss, entropy] scalars in fp32.

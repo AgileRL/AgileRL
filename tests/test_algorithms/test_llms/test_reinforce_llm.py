@@ -542,6 +542,29 @@ class TestREINFORCEInit:
         rf = _cpu_llmreinforce(fused_loss_chunk_rows=256)
         assert rf.fused_loss_chunk_rows == 256
 
+    def test_init_turn_ratio_pooling_must_be_valid(self):
+        actor = create_dummy_actor(10, 8, 100, "cpu")
+        lora = LoraConfig(
+            r=4,
+            lora_alpha=16,
+            target_modules=["lin"],
+            task_type="CAUSAL_LM",
+        )
+        with pytest.raises(ValueError, match="turn_ratio_pooling"):
+            REINFORCE(
+                actor_network=actor,
+                pad_token_id=99,
+                pad_token="<pad>",
+                lora_config=lora,
+                turn_ratio_pooling="median",
+                wrap=False,
+                gradient_checkpointing=False,
+            )
+
+    def test_init_default_turn_ratio_pooling_is_sum(self):
+        rf = _cpu_llmreinforce()
+        assert rf.turn_ratio_pooling == "sum"
+
     def test_init_action_granularity_deprecated_warns_and_overrides(self):
         """The legacy ``action_granularity`` kwarg warns and is carried over
         into ``advantage_granularity``."""
@@ -1219,6 +1242,7 @@ class TestReinforceLossLiger:
         assert torch.equal(call.kwargs["turn_ids"], turn_ids)
         assert torch.allclose(call.kwargs["full_turn_mask"], torch.ones(2, 2))
         assert call.kwargs["max_turns"] == 2
+        assert call.kwargs["turn_log_ratio_reduction"] == "sum"
 
     def test_trajectory_level_pools_advantages_to_per_sample_scalar(self) -> None:
         """Trajectory-level IS pools the per-token advantages to a masked

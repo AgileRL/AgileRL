@@ -938,6 +938,7 @@ def pool_log_ratio_by_level(
     turn_ids: torch.Tensor | None,
     level: str,
     num_turns: int | None = None,
+    turn_reduction: str = "mean",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pool per-token log-ratios to a token/turn/trajectory importance-sampling unit.
 
@@ -945,8 +946,10 @@ def pool_log_ratio_by_level(
     matching unit mask, mirroring the pooling used by :func:`clipped_is_surrogate`:
 
     * ``"token"``    — identity: per-token log-ratio, ``action_mask`` as units.
-    * ``"turn"``     — length-normalized mean of token log-ratios per turn
-      (``turn_ids`` required); a turn is active when any of its tokens appear.
+    * ``"turn"``     — per-turn pooling of token log-ratios (``turn_ids``
+      required); ``turn_reduction="mean"`` gives a length-normalized mean
+      (geometric-mean ratio), ``"sum"`` gives a sum (product ratio). A turn is
+      active when any of its tokens appear.
     * ``"trajectory"`` — length-normalized mean over the completion's action
       tokens; the trajectory is active when it has at least one action token.
 
@@ -964,6 +967,9 @@ def pool_log_ratio_by_level(
     :param num_turns: Number of turns for the turn level; inferred from
         ``turn_ids`` when ``None``.
     :type num_turns: int | None
+    :param turn_reduction: Turn-level pooling reduction for ``level="turn"``,
+        one of ``"mean"`` or ``"sum"``.
+    :type turn_reduction: str
     :return: ``(log_importance_weights, unit_mask)`` at the requested level.
     :rtype: tuple[torch.Tensor, torch.Tensor]
     :raises ValueError: If ``level`` is unknown or turn ids are missing.
@@ -973,6 +979,12 @@ def pool_log_ratio_by_level(
     if level == "turn":
         if turn_ids is None:
             msg = "turn-level surrogate requires turn_ids."
+            raise ValueError(msg)
+        if turn_reduction not in {"mean", "sum"}:
+            msg = (
+                "turn_reduction must be one of ['mean', 'sum'], got "
+                f"{turn_reduction!r}."
+            )
             raise ValueError(msg)
         if num_turns is None:
             num_turns = int(turn_ids.max().item()) + 1
@@ -987,7 +999,7 @@ def pool_log_ratio_by_level(
             torch.full_like(turn_ids, -1),
         )
         log_importance_weights = pool_by_turns(
-            token_log_ratio, effective_turn_ids, num_turns, reduction="mean"
+            token_log_ratio, effective_turn_ids, num_turns, reduction=turn_reduction
         )
         # Per-turn action-token counts via the same pooling; a turn is active
         # iff it owns at least one action token.
@@ -1065,6 +1077,7 @@ def clipped_is_surrogate(
     importance_sampling_level: str,
     clip_coef: float,
     loss_weight: torch.Tensor | None = None,
+    turn_reduction: str = "mean",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Clipped PPO-style policy surrogate at a token/turn/trajectory IS level.
 
@@ -1072,8 +1085,10 @@ def clipped_is_surrogate(
     ``importance_sampling_level``:
 
     * ``"token"``    — per-token ratio, clip per token.
-    * ``"turn"``     — length-normalized mean of token log-ratios per turn,
-      clip per turn (``turn_ids`` required).
+    * ``"turn"``     — per-turn pooling of token log-ratios, clip per turn
+      (``turn_ids`` required). ``turn_reduction="mean"`` uses a length-
+      normalized mean (geometric-mean ratio), ``"sum"`` uses a sum (product
+      ratio).
     * ``"trajectory"`` — length-normalized mean over the whole completion, clip
       per trajectory.
 
@@ -1095,6 +1110,9 @@ def clipped_is_surrogate(
     :type importance_sampling_level: str
     :param clip_coef: Symmetric clip coefficient (clip to ``[1-c, 1+c]``).
     :type clip_coef: float
+    :param turn_reduction: Turn-level pooling reduction when
+        ``importance_sampling_level="turn"``, one of ``"mean"`` or ``"sum"``.
+    :type turn_reduction: str
     :return: ``(pg_loss, clipfrac)`` scalars.
     :rtype: tuple[torch.Tensor, torch.Tensor]
     """
@@ -1104,19 +1122,30 @@ def clipped_is_surrogate(
         else None
     )
     log_importance_weights, unit_mask = pool_log_ratio_by_level(
-        token_log_ratio, action_mask, turn_ids, importance_sampling_level, num_turns
+        token_log_ratio,
+        action_mask,
+        turn_ids,
+        importance_sampling_level,
+        num_turns,
+        turn_reduction=turn_reduction,
     )
-    # Pool advantages with the identical mechanics (discard the redundant mask).
     adv, _ = pool_log_ratio_by_level(
-        advantages, action_mask, turn_ids, importance_sampling_level, num_turns
+        advantages,
+        action_mask,
+        turn_ids,
+        importance_sampling_level,
+        num_turns,
+        turn_reduction="mean",
     )
-    # Pool the per-token vLLM-correction reweight to the same IS unit (identity
-    # at token level; length-normalized mean over the unit's action tokens at
-    # turn/trajectory level) so it multiplies the per-unit surrogate consistently.
     pooled_loss_weight = None
     if loss_weight is not None:
         pooled_loss_weight, _ = pool_log_ratio_by_level(
-            loss_weight, action_mask, turn_ids, importance_sampling_level, num_turns
+            loss_weight,
+            action_mask,
+            turn_ids,
+            importance_sampling_level,
+            num_turns,
+            turn_reduction="mean",
         )
     return clipped_min_surrogate(
         log_importance_weights,

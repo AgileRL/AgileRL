@@ -57,6 +57,7 @@ def llm_policy_loss_fn(
     full_turn_mask: torch.Tensor | None = None,
     max_turns: int | None = None,
     importance_sampling_level: str = "token",
+    turn_log_ratio_reduction: str = "mean",
     vllm_is_ratio: torch.Tensor | None = None,
     # Liger's ``LigerFusedLinearPPOBase._compute_loss`` invokes the loss fn
     # with kwargs this fn does not consume (``ref_log_probs``, ``loss_type``,
@@ -73,9 +74,11 @@ def llm_policy_loss_fn(
 
     * ``"token"`` — ratio, clip, max(-adv*r, ...) at the token level.
       ``advantages`` is ``(chunk_B, T)``.
-    * ``"turn"`` — token log-ratios are mean-pooled into
+    * ``"turn"`` — token log-ratios are pooled into
       ``(chunk_B, max_turns)`` per-turn log ratios; clipping and the policy
-      formula run on those. ``advantages`` is ``(chunk_B, max_turns)``.
+      formula run on those. ``turn_log_ratio_reduction="mean"`` gives a
+      length-normalized mean (geometric-mean ratio), ``"sum"`` gives a sum
+      (product ratio). ``advantages`` is ``(chunk_B, max_turns)``.
       ``full_turn_mask`` is the global ``(B, max_turns)`` mask (for the
       cross-chunk reduction denominator). KL stays token-level (matches
       unfused turn-PPO).
@@ -119,6 +122,9 @@ def llm_policy_loss_fn(
     :param importance_sampling_level: Ratio-pooling granularity —
         ``"token"`` (default), ``"turn"`` or ``"trajectory"``.
     :type importance_sampling_level: str
+    :param turn_log_ratio_reduction: Turn-level reduction for pooled log-ratios,
+        one of ``"mean"`` or ``"sum"``.
+    :type turn_log_ratio_reduction: str
     :param vllm_is_ratio: Optional detached, upper-clamped per-token vLLM
         sampling-mismatch ratio ``(chunk_B, T)`` (token mode only). When
         provided, the per-token policy loss is multiplied by it *before* the KL
@@ -171,12 +177,18 @@ def llm_policy_loss_fn(
         unit_mask = attention_mask
         unit_global_count = token_global_count
     elif importance_sampling_level == "turn":
-        # Turn mode: length-normalized mean of token log-ratios per turn
-        # (geometric-mean ratio, matching GSPO's sequence pooling at turn
-        # granularity), then clip + max at turn level. ``advantages`` is
-        # per-turn ``(chunk_b, max_turns)``.
+        # Turn mode: pool token log-ratios per turn, then clip + max at turn
+        # level. ``turn_log_ratio_reduction="mean"`` gives a geometric-mean
+        # ratio; ``"sum"`` gives the product ratio. ``advantages`` is per-turn
+        # ``(chunk_b, max_turns)``.
         if max_turns is None or full_turn_mask is None or turn_ids is None:
             msg = "turn-level loss requires turn_ids, max_turns and full_turn_mask."
+            raise ValueError(msg)
+        if turn_log_ratio_reduction not in {"mean", "sum"}:
+            msg = (
+                "turn_log_ratio_reduction must be one of ['mean', 'sum'], got "
+                f"{turn_log_ratio_reduction!r}."
+            )
             raise ValueError(msg)
         chunk_b = token_log_ratio.shape[0]
         # Mask non-action tokens out of the per-turn sum and clamp -1
@@ -198,7 +210,10 @@ def llm_policy_loss_fn(
             1, safe_turn_ids, attention_mask.to(token_log_ratio.dtype)
         )
         chunk_turn_mask = (chunk_turn_active > 0).to(token_log_ratio.dtype)
-        turn_log_ratio = turn_log_ratio_sum / chunk_turn_active.clamp(min=1.0)
+        if turn_log_ratio_reduction == "mean":
+            turn_log_ratio = turn_log_ratio_sum / chunk_turn_active.clamp(min=1.0)
+        else:
+            turn_log_ratio = turn_log_ratio_sum
 
         ratio = torch.exp(turn_log_ratio)
         clipped_ratio = torch.clamp(ratio, 1.0 - epsilon_low, 1.0 + epsilon_high)
@@ -294,6 +309,7 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
         full_turn_mask=None,
         max_turns=None,
         importance_sampling_level="token",
+        turn_log_ratio_reduction="mean",
         vllm_is_ratio=None,
     ):
         """Chunked forward + backward.
@@ -359,6 +375,7 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
                 full_turn_mask=full_turn_mask,
                 max_turns=max_turns,
                 importance_sampling_level=importance_sampling_level,
+                turn_log_ratio_reduction=turn_log_ratio_reduction,
                 vllm_is_ratio=vllm_is_ratio_chunk,
             )
 
@@ -503,6 +520,7 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
             None,  # full_turn_mask
             None,  # max_turns
             None,  # importance_sampling_level
+            None,  # turn_log_ratio_reduction
             None,  # vllm_is_ratio
         )
 
@@ -582,6 +600,7 @@ def apply_fused_policy_loss(
     full_turn_mask: torch.Tensor | None = None,
     max_turns: int | None = None,
     token_chunk_size: int = 2048,
+    turn_log_ratio_reduction: str = "mean",
     vllm_is_ratio: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
     """Run :class:`LigerFusedLinearPolicyLossFunction`, bounded at token level.
@@ -616,6 +635,9 @@ def apply_fused_policy_loss(
         trajectory pooling cannot express the per-token reweight, so it is ignored
         there (callers fall back to the standard path for those levels).
     :type vllm_is_ratio: torch.Tensor | None
+    :param turn_log_ratio_reduction: Turn-level reduction for pooled log-ratios,
+        one of ``"mean"`` or ``"sum"``.
+    :type turn_log_ratio_reduction: str
     :return: ``(loss, aux)`` straight from the fused Function.
     :rtype: tuple[torch.Tensor, tuple[torch.Tensor, ...]]
     """
@@ -654,6 +676,7 @@ def apply_fused_policy_loss(
             None,  # full_turn_mask
             None,  # max_turns
             "token",
+            "mean",  # turn_log_ratio_reduction (inert at token level)
             # vllm_is_ratio: token-flattened to match the loss layout above.
             vllm_is_ratio.reshape(n_tokens, 1).contiguous()
             if vllm_is_ratio is not None
@@ -678,6 +701,7 @@ def apply_fused_policy_loss(
         full_turn_mask,
         max_turns,
         importance_sampling_level,
+        turn_log_ratio_reduction,
         None,  # vllm_is_ratio (token level only)
     )
 

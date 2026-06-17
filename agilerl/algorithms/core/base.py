@@ -4185,13 +4185,15 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """Compute reference log-probs, actor log-probs, and critic values in
         one forward pass (under ``torch.no_grad``).
 
-        When ``use_separate_reference_adapter`` is ``True``, the batch is
-        tripled (reference / actor / critic).  When ``False``, reference
-        log-probs are computed separately (adapter layers disabled) and the
-        actor/critic portion is double-fused.
+        The batch is tripled (reference / actor / critic rows) and routed per
+        row, so the frozen base runs in a single fused pass.  When
+        ``use_separate_reference_adapter`` is ``True`` the reference rows use
+        the ``"reference"`` adapter; when ``False`` they are routed to PEFT's
+        reserved ``"__base__"`` name, which applies no LoRA delta (the frozen
+        base is the reference policy).
 
-        Unlike ``_fused_forward`` this method **can** micro-batch because no
-        gradient checkpoint recomputation is involved.
+        This method micro-batches because no gradient checkpoint recomputation
+        is involved.
 
         :param ids: Token IDs ``(B, seq_len)``.
         :type ids: torch.Tensor
@@ -4210,11 +4212,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.actor.eval()
 
         with torch.inference_mode():
-            if self.use_separate_reference_adapter:
-                adapters = ["reference", "actor"]
-            else:
-                adapters = ["actor"]
-
+            reference_adapter = (
+                "reference" if self.use_separate_reference_adapter else "__base__"
+            )
+            adapters = [reference_adapter, "actor"]
             if self.use_value_head:
                 adapters.append("critic")
 
@@ -4232,23 +4233,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 batch_size=batch_size,
             )
             clear_fused_adapter_routing(self._get_unwrapped_actor())
-            critic_values = None
-            if self.use_separate_reference_adapter:
-                ref_logprobs = log_probs[:B]
-                actor_logprobs = log_probs[B : 2 * B]
-                if self.use_value_head:
-                    critic_values = values[2 * B :]
-            else:
-                ref_logprobs = self._get_logprobs(
-                    ids,
-                    batch_size=batch_size,
-                    use_reference=True,
-                    eval_mode=True,
-                    attention_mask=attention_mask,
-                )
-                actor_logprobs = log_probs[:B]
-                if self.use_value_head:
-                    critic_values = values[B:]
+            ref_logprobs = log_probs[:B]
+            actor_logprobs = log_probs[B : 2 * B]
+            critic_values = values[2 * B :] if self.use_value_head else None
 
         return ref_logprobs, actor_logprobs, critic_values
 
