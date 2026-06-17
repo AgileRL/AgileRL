@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shlex
 import shutil
 import subprocess
 import tempfile
+import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import ClassVar
@@ -35,9 +37,48 @@ from agilerl.arena.on_prem.scripts import (
     stage_failure,
     swarm_script_env,
 )
-from agilerl.arena.on_prem.ssh import SshExecutor
+from agilerl.arena.on_prem.ssh import SshExecutor, SshTarget
 
 logger = logging.getLogger("agilerl.arena.on_prem")
+
+STACK_VERIFY_INTERVAL_SEC = 10
+STACK_VERIFY_MAX_WAIT_SEC = 300
+
+
+def stack_readiness_state(
+    output: str | None,
+    *,
+    service_ps_output: str | None = None,
+) -> tuple[bool, list[str], list[str]]:
+    """Parse ``docker stack services`` / ``docker service ps`` output.
+
+    :param output: The ``docker stack services`` tab-separated output.
+    :type output: str | None
+    :param service_ps_output: Optional ``docker service ps`` output.
+    :type service_ps_output: str | None
+    :returns: ``(ready, not_ready, scheduling_errors)`` where *ready* is true
+        when every service replica count matches and no scheduling errors appear.
+    :rtype: tuple[bool, list[str], list[str]]
+    """
+    if not output or not output.strip():
+        return False, [], []
+    not_ready: list[str] = []
+    for line in output.splitlines():
+        parts = line.split("\t") if "\t" in line else line.split()
+        if len(parts) < 2:
+            continue
+        name, replicas = parts[0], parts[1]
+        running, _, desired = replicas.partition("/")
+        if desired and running != desired:
+            not_ready.append(f"{name} {replicas}")
+    scheduling_errors: list[str] = []
+    if service_ps_output:
+        for line in service_ps_output.splitlines():
+            lower = line.lower()
+            if "no suitable node" in lower or "insufficient resources" in lower:
+                scheduling_errors.append(line.strip())
+    ready = not not_ready and not scheduling_errors
+    return ready, not_ready, scheduling_errors
 
 
 def normalize_setup_type(setup_type: str) -> SetupKind:
@@ -121,13 +162,20 @@ def warn_ignored_swarm_flags(
         )
 
 
-def report_stack_readiness(stack_name: str, output: str | None) -> None:
+def report_stack_readiness(
+    stack_name: str,
+    output: str | None,
+    *,
+    service_ps_output: str | None = None,
+) -> None:
     r"""Log whether every service in *output* (``name\treplicas`` lines) is up.
 
     :param stack_name: The Docker stack name being reported on.
     :type stack_name: str
     :param output: The ``docker stack services`` output, or ``None`` if unavailable.
     :type output: str | None
+    :param service_ps_output: Optional ``docker service ps`` output for pending tasks.
+    :type service_ps_output: str | None
     :returns: None
     :rtype: None
     """
@@ -139,22 +187,20 @@ def report_stack_readiness(stack_name: str, output: str | None) -> None:
             stack_name,
         )
         return
-    not_ready: list[str] = []
-    for line in output.splitlines():
-        parts = line.split("\t") if "\t" in line else line.split()
-        if len(parts) < 2:
-            continue
-        name, replicas = parts[0], parts[1]
-        running, _, desired = replicas.partition("/")
-        if desired and running != desired:
-            not_ready.append(f"{name} {replicas}")
+    ready, not_ready, scheduling_errors = stack_readiness_state(
+        output, service_ps_output=service_ps_output
+    )
+    for err in scheduling_errors[:3]:
+        logger.warning("Stack %r scheduling issue: %s", stack_name, err)
+    if scheduling_errors:
+        return
     if not_ready:
         logger.warning(
             "Stack %r not fully up yet: %s (services may still be starting).",
             stack_name,
             ", ".join(not_ready),
         )
-    else:
+    elif ready:
         logger.info("Stack %r is up; all services running.", stack_name)
 
 
@@ -398,7 +444,29 @@ class SwarmInstaller(OnPremInstaller):
             env.pop("SSH_USER", None)
         if self._ssh_extra_opts:
             env["SSH_EXTRA_OPTS"] = self._ssh_extra_opts
-        adv = (self._advertise_addr or manager).strip()
+        adv_raw = (self._advertise_addr or manager).strip()
+        adv = SshTarget.parse(adv_raw).hostname
+        if (
+            self._advertise_addr
+            and SshTarget.parse(self._advertise_addr).port is not None
+        ):
+            logger.warning(
+                "Using Swarm advertise-addr %r (port stripped from %r). "
+                "Swarm uses port 2377; do not pass SSH ports here.",
+                adv,
+                self._advertise_addr,
+            )
+        elif (
+            self._advertise_addr is None
+            and re.search(r":\d+$", manager.strip())
+            and adv != manager.strip()
+        ):
+            logger.warning(
+                "Using Swarm advertise-addr %r (SSH port stripped from manager %r). "
+                "Pass --advertise-addr explicitly if Swarm should use a different IP.",
+                adv,
+                manager,
+            )
         env["SWARM_MANAGER_HOST"] = manager
         env["SWARM_ADVERTISE_ADDR"] = adv
         tokens_file = bundle_root / "swarm-tokens.txt"
@@ -445,13 +513,15 @@ class SwarmInstaller(OnPremInstaller):
                 ) from exc
 
     def verify(self, bundle_root: Path) -> None:
-        """Query the deployed stack and warn if services are not all up.
+        """Query the deployed stack and fail if services do not become ready.
 
         :param bundle_root: The extracted bundle root directory (unused; kept for
             interface symmetry with :class:`HelmInstaller`).
         :type bundle_root: Path
         :returns: None
         :rtype: None
+        :raises click.ClickException: If services never reach the desired replica
+            count or Swarm reports scheduling errors.
         """
         manager = self._require_manager(
             "--manager is required for dockerSwarm "
@@ -463,8 +533,44 @@ class SwarmInstaller(OnPremInstaller):
             f"sudo docker stack services {shlex.quote(stack_name)} "
             "--format '{{.Name}}\\t{{.Replicas}}'"
         )
-        output = self._executor.run(manager, remote_cmd, capture=True)
-        report_stack_readiness(stack_name, output)
+        ps_cmd = (
+            f"sudo docker service ps {shlex.quote(f'{stack_name}_ray-worker')} "
+            f"{shlex.quote(f'{stack_name}_ray-head')} --no-trunc 2>/dev/null || true"
+        )
+        deadline = time.monotonic() + STACK_VERIFY_MAX_WAIT_SEC
+        last_not_ready: list[str] = []
+        while True:
+            output = self._executor.run(manager, remote_cmd, capture=True)
+            ps_output = self._executor.run(manager, ps_cmd, capture=True)
+            ready, not_ready, scheduling_errors = stack_readiness_state(
+                output, service_ps_output=ps_output
+            )
+            if scheduling_errors:
+                report_stack_readiness(stack_name, output, service_ps_output=ps_output)
+                msg = (
+                    f"Stack {stack_name!r} has scheduling errors; "
+                    f"check 'docker service ps {stack_name}_ray-worker' on the manager."
+                )
+                raise click.ClickException(msg)
+            if ready:
+                report_stack_readiness(stack_name, output, service_ps_output=ps_output)
+                return
+            last_not_ready = not_ready
+            if time.monotonic() >= deadline:
+                break
+            logger.info(
+                "Waiting for stack %r (%s)…",
+                stack_name,
+                ", ".join(not_ready) if not_ready else "services starting",
+            )
+            time.sleep(STACK_VERIFY_INTERVAL_SEC)
+        report_stack_readiness(stack_name, output, service_ps_output=ps_output)
+        detail = ", ".join(last_not_ready) if last_not_ready else "unknown"
+        msg = (
+            f"Stack {stack_name!r} not ready after {STACK_VERIFY_MAX_WAIT_SEC}s "
+            f"({detail}). Check 'docker stack services {stack_name}' on the manager."
+        )
+        raise click.ClickException(msg)
 
     def teardown_cluster(self) -> None:
         """Remove the Docker stack, optionally leaving the Swarm on every host.

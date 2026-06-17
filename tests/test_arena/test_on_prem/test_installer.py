@@ -19,6 +19,7 @@ from agilerl.arena.on_prem.installer import (
     report_stack_readiness,
     run_on_prem_install,
     run_on_prem_teardown,
+    stack_readiness_state,
     warn_ignored_swarm_flags,
 )
 from agilerl.arena.on_prem.scripts import BundleScriptRunner, StageFailed
@@ -99,6 +100,26 @@ def test_warn_ignored_swarm_flags_silent_when_none() -> None:
     log.warning.assert_not_called()
 
 
+def test_stack_readiness_state_detects_scheduling_errors() -> None:
+    ready, not_ready, scheduling_errors = stack_readiness_state(
+        "arena_ray-worker\t0/1",
+        service_ps_output="x  Pending  no suitable node (insufficient resources on 1 node)",
+    )
+    assert ready is False
+    assert not_ready == ["arena_ray-worker 0/1"]
+    assert scheduling_errors
+
+
+def test_report_stack_readiness_warns_on_scheduling_errors() -> None:
+    with patch("agilerl.arena.on_prem.installer.logger") as log:
+        report_stack_readiness(
+            "arena",
+            "arena_ray-worker\t0/1",
+            service_ps_output="x  Pending  no suitable node (insufficient resources on 1 node)",
+        )
+    assert any("scheduling issue" in str(c) for c in log.warning.call_args_list)
+
+
 def test_report_stack_readiness_warns_on_partial() -> None:
     with patch("agilerl.arena.on_prem.installer.logger") as log:
         report_stack_readiness("arena", "arena_ray-head\t0/1\narena_ray-worker\t1/1")
@@ -125,6 +146,50 @@ def test_report_stack_readiness_warns_when_no_output() -> None:
 
 
 class TestSwarmInstaller:
+    def test_install_cluster_strips_ssh_port_from_advertise_addr(
+        self, api: OnPremApi
+    ) -> None:
+        inst = SwarmInstaller(api, name="pool", manager="127.0.0.1:5043")
+        captured: dict[str, str] = {}
+
+        class _CapturingRunner:
+            def __init__(
+                self, bundle_root: Path, env: dict[str, str] | None = None
+            ) -> None:
+                captured.update(env or {})
+
+            def run(self, script: str, args: list[str]) -> None:
+                return None
+
+        with patch(
+            "agilerl.arena.on_prem.installer.BundleScriptRunner", _CapturingRunner
+        ):
+            inst.install_cluster(Path("/tmp/bundle"))
+        assert captured["SWARM_ADVERTISE_ADDR"] == "127.0.0.1"
+
+    def test_install_cluster_strips_ssh_port_from_explicit_advertise_addr(
+        self, api: OnPremApi
+    ) -> None:
+        inst = SwarmInstaller(
+            api, name="pool", manager="localhost", advertise_addr="127.0.0.1:5043"
+        )
+        captured: dict[str, str] = {}
+
+        class _CapturingRunner:
+            def __init__(
+                self, bundle_root: Path, env: dict[str, str] | None = None
+            ) -> None:
+                captured.update(env or {})
+
+            def run(self, script: str, args: list[str]) -> None:
+                return None
+
+        with patch(
+            "agilerl.arena.on_prem.installer.BundleScriptRunner", _CapturingRunner
+        ):
+            inst.install_cluster(Path("/tmp/bundle"))
+        assert captured["SWARM_ADVERTISE_ADDR"] == "127.0.0.1"
+
     @pytest.mark.parametrize(
         ("workers", "expect_join"),
         [((), False), (("w1",), True)],
@@ -162,9 +227,10 @@ class TestSwarmInstaller:
         )
         with patch.object(SshExecutor, "run", return_value="svc\t1/1") as ssh_mock:
             inst.verify(Path("/tmp"))
-        remote_cmd = ssh_mock.call_args.args[1]
+        remote_cmd = ssh_mock.call_args_list[0].args[1]
         assert "'arena; rm -rf /'" in remote_cmd
         assert "; rm -rf / --format" not in remote_cmd
+        assert ssh_mock.call_count == 2
 
     def test_teardown_cluster_quotes_stack_name(self, api: OnPremApi) -> None:
         inst = SwarmInstaller(
