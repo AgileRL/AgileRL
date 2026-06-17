@@ -519,6 +519,7 @@ class LLMAlgorithmSpec(AlgorithmSpec):
     fused_loss_chunk_rows: int | None = Field(default=None)
     vllm_importance_sampling_correction: bool = Field(default=True)
     vllm_importance_sampling_cap: float = Field(default=2.0, ge=0.0)
+    attn_implementation: str | None = Field(default=None)
 
     # These fields come from the "network" section of the manifest
     pretrained_model_name_or_path: str | None = Field(default=None, min_length=1)
@@ -589,6 +590,14 @@ class LLMAlgorithmSpec(AlgorithmSpec):
             kwargs["quantization_config"] = build_bnb_quantization_config(
                 kwargs.pop("quantization")
             )
+
+        # A non-"auto" attn_implementation is forwarded through model_config so
+        # the model-creation path treats it as authoritative.
+        attn_implementation = kwargs.pop("attn_implementation", None)
+        if attn_implementation is not None and attn_implementation != "auto":
+            model_config = dict(kwargs.get("model_config") or {})
+            model_config.setdefault("attn_implementation", attn_implementation)
+            kwargs["model_config"] = model_config
 
         algo_cls = self.algo_class()
         algo = algo_cls(
