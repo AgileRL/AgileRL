@@ -5,7 +5,6 @@ import torch
 from torch import nn
 
 from agilerl.algorithms.core.llm_ops.fused_lora import (
-    BASE_ADAPTER_NAME,
     _fused_routing_pre_hook,
     _get_cached_lora_layers,
     clear_fused_adapter_routing,
@@ -38,6 +37,18 @@ class _CacheRejectingFusedModel(_DummyFusedModel):
         if name == "_fused_lora_layers":
             raise AttributeError("cache assignment not allowed")
         super().__setattr__(name, value)
+
+
+class _BaseLayerLoraLayer(_DummyLoraLayer):
+    """LoRA layer exposing a ``base_layer`` submodule, like real PEFT layers.
+
+    ``base_layer`` returns its input unchanged, so the clone hook is the only
+    thing that can produce a distinct output tensor.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.base_layer = nn.Identity()
 
 
 class TestPatchLoraForFusedForward:
@@ -189,9 +200,9 @@ class TestSetFusedAdapterRoutingValidation:
             "agilerl.algorithms.core.llm_ops.fused_lora.LoraLayer", _DummyLoraLayer
         ):
             patch_lora_for_fused_forward(model)
-            set_fused_adapter_routing(model, [BASE_ADAPTER_NAME, "actor"])
+            set_fused_adapter_routing(model, ["__base__", "actor"])
 
-        assert model.lora_a._fused_adapter_routing == [BASE_ADAPTER_NAME, "actor"]
+        assert model.lora_a._fused_adapter_routing == ["__base__", "actor"]
 
     def test_adapter_names_unioned_across_layers(self):
         model = nn.Module()
@@ -296,6 +307,52 @@ class TestUnpatchLoraForFusedForward:
 
         assert not hasattr(model, "_fused_lora_layers")
         assert not hasattr(model.lora_a, "_fused_adapter_routing")
+
+
+class TestBaseOutputCloneHook:
+    """The base_layer forward hook clones the frozen base output only while
+    fused routing is active (so PEFT's in-place LoRA accumulation can't mutate
+    a bnb custom-Function output view)."""
+
+    def test_clones_base_output_when_routing_active(self):
+        model = nn.Module()
+        model.lora_a = _BaseLayerLoraLayer()
+        with patch(
+            "agilerl.algorithms.core.llm_ops.fused_lora.LoraLayer", _DummyLoraLayer
+        ):
+            patch_lora_for_fused_forward(model)
+            set_fused_adapter_routing(model, ["actor"])
+            x = torch.ones(2, 2)
+            out = model.lora_a.base_layer(x)
+
+        # Identity returns its input; a distinct, equal tensor means the hook
+        # cloned it.
+        assert out is not x
+        assert torch.equal(out, x)
+
+    def test_noop_when_routing_inactive(self):
+        model = nn.Module()
+        model.lora_a = _BaseLayerLoraLayer()
+        with patch(
+            "agilerl.algorithms.core.llm_ops.fused_lora.LoraLayer", _DummyLoraLayer
+        ):
+            patch_lora_for_fused_forward(model)  # routing defaults to None
+            x = torch.ones(2, 2)
+            out = model.lora_a.base_layer(x)
+
+        # No routing -> hook is a no-op -> Identity's input passes through.
+        assert out is x
+
+    def test_unpatch_removes_clone_handle(self):
+        model = nn.Module()
+        model.lora_a = _BaseLayerLoraLayer()
+        with patch(
+            "agilerl.algorithms.core.llm_ops.fused_lora.LoraLayer", _DummyLoraLayer
+        ):
+            patch_lora_for_fused_forward(model)
+            unpatch_lora_for_fused_forward(model)
+            assert not hasattr(model.lora_a, "_fused_base_clone_handle")
+            assert len(model.lora_a.base_layer._forward_hooks) == 0
 
 
 class TestGetCachedLoraLayers:

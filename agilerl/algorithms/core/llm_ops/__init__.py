@@ -10,7 +10,6 @@ fires.
 
 from agilerl import HAS_LIGER_KERNEL
 from agilerl.algorithms.core.llm_ops.fused_lora import (
-    BASE_ADAPTER_NAME,
     clear_fused_adapter_routing,
     patch_lora_for_fused_forward,
     set_fused_adapter_routing,
@@ -36,7 +35,6 @@ else:
     llm_policy_loss_fn = None  # type: ignore[assignment]
 
 __all__ = [
-    "BASE_ADAPTER_NAME",
     "LigerDPOWithAlpha",
     "LigerFusedLinearPolicyLossFunction",
     "apply_fused_policy_loss",

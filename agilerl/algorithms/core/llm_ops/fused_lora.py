@@ -29,16 +29,13 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+import torch
 import torch.nn as nn
 
 try:
     from peft.tuners.lora.layer import LoraLayer
 except ImportError:  # pragma: no cover
     LoraLayer = None  # type: ignore[assignment, misc]
-
-#: PEFT's reserved adapter name: rows routed to it bypass every LoRA delta
-#: and see only the frozen base weights.
-BASE_ADAPTER_NAME = "__base__"
 
 
 def _fused_routing_pre_hook(
@@ -88,6 +85,38 @@ def _get_cached_lora_layers(model: nn.Module) -> list[nn.Module]:
     return layers
 
 
+def _make_base_output_clone_hook(lora_layer: nn.Module):
+    """Build a ``base_layer`` forward hook that clones the base output while
+    fused routing is active.
+
+    PEFT's ``_mixed_batch_forward`` accumulates each adapter's LoRA delta in
+    place onto the frozen base-layer output (``result[idx] += ...``). For a
+    bitsandbytes ``Linear4bit`` / ``Linear8bitLt`` base, that output is the
+    tensor returned by the ``MatMul4Bit`` / ``MatMul8bitLt`` custom autograd
+    Function, and autograd forbids modifying such a (view) output in place:
+
+        RuntimeError: Output 0 of MatMul4BitBackward is a view and is being
+        modified inplace. ... You can fix this by cloning the output of the
+        custom Function.
+
+    It only surfaces in the *gradient* forward of a multi-adapter fused pass —
+    in practice PPO's fused actor+critic routing on a 4-bit/8-bit base — but
+    cloning is harmless for the single-adapter case too. Returning a clone
+    makes PEFT's in-place accumulation land on a fresh tensor (autograd-safe,
+    numerically identical). The hook is a no-op whenever fused routing is
+    inactive, so the standard single-adapter and no-grad paths are untouched.
+    """
+
+    def _hook(module: nn.Module, args: tuple, output):
+        if getattr(lora_layer, "_fused_adapter_routing", None) is None:
+            return None
+        if isinstance(output, torch.Tensor):
+            return output.clone()
+        return None
+
+    return _hook
+
+
 def patch_lora_for_fused_forward(model: nn.Module) -> None:
     """Register forward pre-hooks on all LoRA layers.
 
@@ -129,6 +158,15 @@ def patch_lora_for_fused_forward(model: nn.Module) -> None:
                 with_kwargs=True,
             )
         )
+        # Clone the frozen base output during fused routing so PEFT's in-place
+        # LoRA accumulation (``result[idx] += ...``) never mutates a bnb 4-bit/
+        # 8-bit custom-Function output view (forbidden by autograd; crashes the
+        # multi-adapter PPO gradient forward). No-op when routing is inactive.
+        base_layer = getattr(module, "base_layer", None)
+        if base_layer is not None:
+            module._fused_base_clone_handle = (  # type: ignore[attr-defined]
+                base_layer.register_forward_hook(_make_base_output_clone_hook(module))
+            )
     try:
         model._fused_lora_layers = layers  # type: ignore[attr-defined]
     except (AttributeError, TypeError):
@@ -155,6 +193,10 @@ def unpatch_lora_for_fused_forward(model: nn.Module) -> None:
         if handle is not None:
             handle.remove()
             del module._fused_routing_hook_handle
+        clone_handle = getattr(module, "_fused_base_clone_handle", None)
+        if clone_handle is not None:
+            clone_handle.remove()
+            del module._fused_base_clone_handle
         if hasattr(module, "_fused_adapter_routing"):
             del module._fused_adapter_routing
     try:
@@ -200,7 +242,7 @@ def set_fused_adapter_routing(model: nn.Module, routing: Sequence[str]) -> None:
         raise RuntimeError(msg)
 
     routing = list(routing)
-    requested = set(routing) - {BASE_ADAPTER_NAME}
+    requested = set(routing) - {"__base__"}
     available: set[str] = set()
     for module in layers:
         for attr in getattr(module, "adapter_layer_names", ()):
@@ -210,13 +252,13 @@ def set_fused_adapter_routing(model: nn.Module, routing: Sequence[str]) -> None:
         if requested <= available:
             break
     # Validation is best-effort: real PEFT layers always expose their adapter
-    # containers via ``adapter_layer_names``; if none are discoverable (e.g.
-    # test doubles), routing is applied unvalidated as before.
+    # containers via ``adapter_layer_names``; when none are discoverable (e.g.
+    # test doubles), routing is applied without validation.
     if available and not requested <= available:
         unknown = sorted(requested - available)
         msg = (
             f"Unknown adapter name(s) in fused routing: {unknown}. Known "
-            f"adapters: {sorted(available)} (plus '{BASE_ADAPTER_NAME}' for "
+            f"adapters: {sorted(available)} (plus '__base__' for "
             "base-only rows)."
         )
         raise ValueError(msg)

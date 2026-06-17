@@ -143,7 +143,6 @@ if TYPE_CHECKING or HAS_VLLM:
     from vllm import LLM, CompletionOutput, SamplingParams
 
     from agilerl.algorithms.core.llm_ops.fused_lora import (
-        BASE_ADAPTER_NAME,
         clear_fused_adapter_routing,
         patch_lora_for_fused_forward,
         set_fused_adapter_routing,
@@ -4190,12 +4189,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         row, so the frozen base runs in a single fused pass.  When
         ``use_separate_reference_adapter`` is ``True`` the reference rows use
         the ``"reference"`` adapter; when ``False`` they are routed to PEFT's
-        reserved ``"__base__"`` name, which applies no LoRA delta — numerically
-        equivalent to the previous separate disable-adapter pass, without the
-        extra forward.
+        reserved ``"__base__"`` name, which applies no LoRA delta (the frozen
+        base is the reference policy).
 
-        Unlike ``_fused_forward`` this method **can** micro-batch because no
-        gradient checkpoint recomputation is involved.
+        This method micro-batches because no gradient checkpoint recomputation
+        is involved.
 
         :param ids: Token IDs ``(B, seq_len)``.
         :type ids: torch.Tensor
@@ -4215,9 +4213,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         with torch.inference_mode():
             reference_adapter = (
-                "reference"
-                if self.use_separate_reference_adapter
-                else BASE_ADAPTER_NAME
+                "reference" if self.use_separate_reference_adapter else "__base__"
             )
             adapters = [reference_adapter, "actor"]
             if self.use_value_head:
