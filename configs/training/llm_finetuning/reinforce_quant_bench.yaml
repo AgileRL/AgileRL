@@ -66,7 +66,7 @@ mutation:
             max: 0.01
 
 network:
-    pretrained_model_name_or_path: google/gemma-3-4b-it
+    pretrained_model_name_or_path: google/gemma-4-E4B-it
     max_context_length: 32768
     lora_config:
         lora_r: 16
