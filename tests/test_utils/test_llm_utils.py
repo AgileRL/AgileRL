@@ -1421,6 +1421,23 @@ class TestPoolByTurnsBadReduction:
             pool_by_turns(token_values, turn_ids, num_turns=1, reduction="unsupported")
 
 
+class TestPoolLogRatioByLevelBadReduction:
+    """``pool_log_ratio_by_level`` rejects unknown turn reductions at the turn level."""
+
+    def test_unknown_turn_reduction_raises(self) -> None:
+        token_log_ratio = torch.zeros(1, 2)
+        action_mask = torch.ones(1, 2)
+        turn_ids = torch.tensor([[0, 0]])
+        with pytest.raises(ValueError, match=r"turn_reduction must be one of"):
+            pool_log_ratio_by_level(
+                token_log_ratio,
+                action_mask,
+                turn_ids,
+                level="turn",
+                turn_reduction="unsupported",
+            )
+
+
 class TestClippedIsSurrogate:
     """The shared token/turn/sequence clipped surrogate used by the non-Liger
     PPO and REINFORCE paths. token/turn/sequence are points on one

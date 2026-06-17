@@ -580,6 +580,63 @@ class TestLlmPpoLossFnTurnMode:
         assert metrics[1].item() == pytest.approx(ref_m["clipfrac"], abs=1e-6)
         assert metrics[2].item() == pytest.approx(ref_m["pg_loss"], rel=1e-6, abs=1e-6)
 
+    def test_turn_mode_sum_reduction_runs(self) -> None:
+        """``turn_log_ratio_reduction="sum"`` (product-ratio) takes the else
+        branch of the per-turn pooling and yields a finite loss."""
+        B, T, V, max_turns = 2, 8, 16, 2
+        (
+            log_probs,
+            target_ids,
+            token_mask,
+            turn_ids,
+            turn_adv,
+            turn_mask,
+            old_lp,
+            ref_lp,
+        ) = self._build_turn_inputs(B, T, V, max_turns, seed=3)
+        loss, _ = llm_policy_loss_fn(
+            log_probs=log_probs,
+            selected_token_ids=target_ids,
+            attention_mask=token_mask,
+            advantages=turn_adv,
+            full_attention_mask=token_mask,
+            ref_per_token_logps=ref_lp,
+            old_per_token_logps=old_lp,
+            turn_ids=turn_ids,
+            full_turn_mask=turn_mask,
+            max_turns=max_turns,
+            importance_sampling_level="turn",
+            turn_log_ratio_reduction="sum",
+        )
+        assert torch.isfinite(loss).all()
+
+    def test_turn_mode_rejects_unknown_reduction(self) -> None:
+        """An unknown ``turn_log_ratio_reduction`` raises a clear ValueError."""
+        B, T, V, max_turns = 2, 8, 16, 2
+        (
+            log_probs,
+            target_ids,
+            token_mask,
+            turn_ids,
+            turn_adv,
+            turn_mask,
+            old_lp,
+            ref_lp,
+        ) = self._build_turn_inputs(B, T, V, max_turns, seed=3)
+        with pytest.raises(ValueError, match="turn_log_ratio_reduction must be one of"):
+            llm_policy_loss_fn(
+                log_probs=log_probs,
+                selected_token_ids=target_ids,
+                attention_mask=token_mask,
+                advantages=turn_adv,
+                full_attention_mask=token_mask,
+                turn_ids=turn_ids,
+                full_turn_mask=turn_mask,
+                max_turns=max_turns,
+                importance_sampling_level="turn",
+                turn_log_ratio_reduction="nope",
+            )
+
     def test_chunk_accumulation_recovers_global_loss_turn_mode(self) -> None:
         """Splitting along B and summing chunk losses must equal the
         single-shot turn-mode loss — Liger's chunk loop relies on this."""

@@ -29,6 +29,25 @@ def _args():
     return h, w, None, targets, 1.0, True
 
 
+def test_fused_logprob_chunk_applies_bias_and_temperature():
+    """Exercise the optional lm_head bias and temperature!=1 branches and
+    confirm the result matches a plain log-softmax of the scaled, biased logits."""
+    torch.manual_seed(0)
+    h = torch.randn(4, 8)
+    w = torch.randn(16, 8)
+    bias = torch.randn(16)
+    targets = torch.randint(0, 16, (4,))
+    out = _fused_logprob_chunk(h, w, bias, targets, 2.0, True)
+    expected = (
+        ((h @ w.t() + bias) / 2.0)
+        .log_softmax(dim=-1)
+        .gather(dim=-1, index=targets.unsqueeze(-1))
+        .squeeze(-1)
+    )
+    assert out.shape == (4,)
+    assert torch.allclose(out, expected, atol=1e-5)
+
+
 class TestFusedLogprobChunkDispatch:
     def test_non_cuda_device_uses_eager(self):
         expected = _fused_logprob_chunk(*_args())

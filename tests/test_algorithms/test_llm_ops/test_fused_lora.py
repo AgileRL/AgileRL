@@ -7,6 +7,7 @@ from torch import nn
 from agilerl.algorithms.core.llm_ops.fused_lora import (
     _fused_routing_pre_hook,
     _get_cached_lora_layers,
+    _make_base_output_clone_hook,
     clear_fused_adapter_routing,
     patch_lora_for_fused_forward,
     set_fused_adapter_routing,
@@ -308,6 +309,20 @@ class TestUnpatchLoraForFusedForward:
         assert not hasattr(model, "_fused_lora_layers")
         assert not hasattr(model.lora_a, "_fused_adapter_routing")
 
+    def test_unpatch_tolerates_cache_delete_failure(self):
+        # A model that rejects the ``_fused_lora_layers`` cache attribute never
+        # stores it, so unpatch's ``del model._fused_lora_layers`` raises; the
+        # best-effort teardown must swallow it and still clear the layers.
+        model = _CacheRejectingFusedModel()
+        with patch(
+            "agilerl.algorithms.core.llm_ops.fused_lora.LoraLayer", _DummyLoraLayer
+        ):
+            patch_lora_for_fused_forward(model)
+            unpatch_lora_for_fused_forward(model)
+
+        assert not hasattr(model.lora_a, "_fused_adapter_routing")
+        assert not hasattr(model.lora_b, "_fused_adapter_routing")
+
 
 class TestBaseOutputCloneHook:
     """The base_layer forward hook clones the frozen base output only while
@@ -353,6 +368,16 @@ class TestBaseOutputCloneHook:
             unpatch_lora_for_fused_forward(model)
             assert not hasattr(model.lora_a, "_fused_base_clone_handle")
             assert len(model.lora_a.base_layer._forward_hooks) == 0
+
+    def test_passes_through_non_tensor_base_output(self):
+        # Routing active but the base layer returns a non-Tensor (e.g. a tuple
+        # of hidden states): the hook must leave it untouched rather than try to
+        # clone it.
+        layer = _BaseLayerLoraLayer()
+        layer._fused_adapter_routing = ["actor"]
+        hook = _make_base_output_clone_hook(layer)
+        sentinel = ("not", "a", "tensor")
+        assert hook(layer.base_layer, (), sentinel) is None
 
 
 class TestGetCachedLoraLayers:
