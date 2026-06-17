@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from pydantic import Field, model_validator
 
@@ -30,6 +30,14 @@ class GRPOSpec(LLMAlgorithmSpec):
     cosine_lr_schedule_config: CosineLRScheduleConfig | None = Field(default=None)
     vllm_config: VLLMConfig | None = Field(default=None)
     use_vllm: bool = Field(default=False)
+    adv_norm: str = Field(default="mean_std")
+    importance_sampling_level: Literal["token", "turn", "trajectory"] | None = Field(
+        default=None
+    )
+    advantage_granularity: Literal["auto", "trajectory", "turn"] = Field(default="auto")
+    whiten_advantages: bool = Field(default=False)
+    adv_clip_range: float | None = Field(default=None)
+    filter_zero_adv: bool = Field(default=False)
 
     env_type: ClassVar[LLMEnvType] = "reasoning"
 

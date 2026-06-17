@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from pydantic import Field
+
 from agilerl.models.algo import register
 from agilerl.models.algorithms.grpo import GRPOSpec
 
@@ -12,6 +14,9 @@ from agilerl.models.algorithms.grpo import GRPOSpec
 @register(arena=True)
 class CISPOSpec(GRPOSpec):
     """Specification for CISPO algorithm (GRPO with CISPO loss)."""
+
+    # CISPO uses asymmetric clip bounds [epsilon_low, epsilon_high].
+    clip_coef: float | list[float] = Field(default=0.2)
 
     @staticmethod
     def get_training_fn(*, multiturn: bool = False) -> Callable[..., Any]:

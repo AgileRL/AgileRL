@@ -34,6 +34,13 @@ class LLMPPOSpec(LLMAlgorithmSpec):
     cosine_lr_schedule_config: CosineLRScheduleConfig | None = Field(default=None)
     vllm_config: VLLMConfig | None = Field(default=None)
     use_vllm: bool = Field(default=False)
+    turn_level_clip: bool = Field(default=True)
+    importance_sampling_level: Literal["auto", "token", "turn", "trajectory"] = Field(
+        default="auto"
+    )
+    advantage_granularity: Literal["turn", "token", "auto"] = Field(default="auto")
+    turn_ratio_pooling: Literal["sum", "mean"] = Field(default="sum")
+    whiten_advantages: bool = Field(default=True)
 
     env_type: ClassVar[LLMEnvType] = "reasoning"
 
