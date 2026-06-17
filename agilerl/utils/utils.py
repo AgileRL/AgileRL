@@ -158,8 +158,43 @@ def _prepare_llm_algo_kwargs(
             "MICRO_BATCH_SIZE_PER_GPU",
             batch_size,
         )
-    if "reduce_memory_peak" not in merged and "REDUCE_MEMORY_PEAK" in INIT_HP:
-        merged["reduce_memory_peak"] = bool(INIT_HP["REDUCE_MEMORY_PEAK"])
+    # Plain passthroughs: (merged_key, init_hp_key, caster, present_when_truthy).
+    # reduce_memory_peak/activation_offload fire on key membership (so an explicit
+    # False is honoured); lora_target_scope/fused_loss_chunk_rows fire only on a
+    # truthy value. fused_loss_chunk_rows overrides the auto-tuned Liger fused-loss
+    # chunk (caps backward peak memory).
+    _passthroughs = (
+        ("reduce_memory_peak", "REDUCE_MEMORY_PEAK", bool, False),
+        ("activation_offload", "ACTIVATION_OFFLOAD", bool, False),
+        ("lora_target_scope", "LORA_TARGET_SCOPE", lambda v: v, True),
+        ("fused_loss_chunk_rows", "FUSED_LOSS_CHUNK_ROWS", int, True),
+    )
+    for merged_key, init_hp_key, caster, present_when_truthy in _passthroughs:
+        present = (
+            bool(INIT_HP.get(init_hp_key))
+            if present_when_truthy
+            else init_hp_key in INIT_HP
+        )
+        if merged_key not in merged and present:
+            merged[merged_key] = caster(INIT_HP[init_hp_key])
+    # Trainer-side bitsandbytes quantization driven from config / INIT_HP.
+    # An explicit quantization_config in algo_kwargs always wins; otherwise a
+    # QUANTIZATION preset name or BitsAndBytesConfig kwargs dict is resolved.
+    if "quantization_config" not in merged and INIT_HP.get("QUANTIZATION") is not None:
+        from agilerl.utils.llm_utils import build_bnb_quantization_config
+
+        quant_config = build_bnb_quantization_config(INIT_HP["QUANTIZATION"])
+        if quant_config is not None:
+            merged["quantization_config"] = quant_config
+    # ATTN_IMPLEMENTATION: inject a non-"auto" value into model_config so the
+    # algorithm's create_model call treats it as authoritative (overrides the
+    # auto-pick and legacy AGILERL_ATTN_IMPLEMENTATION env var); "auto"/absent
+    # leaves model_config alone so the auto-pick path still runs.
+    attn_impl = INIT_HP.get("ATTN_IMPLEMENTATION")
+    if attn_impl and attn_impl != "auto":
+        mc = dict(merged.get("model_config") or {})
+        mc.setdefault("attn_implementation", attn_impl)
+        merged["model_config"] = mc
     return merged
 
 
@@ -754,16 +789,23 @@ def create_population(
                 cosine_lr_schedule_config=cosine_lr,
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
+                # Agents after the first receive a clone_llm copy that already
+                # carries AgileRL's adapters — construct them via the clone
+                # path (reuse as-is) rather than re-attaching adapters.
+                clone=idx != 0 and act is not None,
                 seed=INIT_HP.get("SEED", 42),
                 use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
-                use_fused_linear_logprobs=INIT_HP.get(
-                    "USE_FUSED_LINEAR_LOGPROBS",
-                    INIT_HP.get("USE_FUSED_LINEAR", False),
-                ),
                 cast_logprobs_to_fp32=INIT_HP.get("CAST_LOGPROBS_TO_FP32", True),
                 use_kl_advantage_shaping=INIT_HP.get("USE_KL_ADVANTAGE_SHAPING", False),
                 adv_norm=INIT_HP.get("ADV_NORM", "mean_std"),
                 loss_type=INIT_HP.get("LOSS_TYPE", "grpo"),
+                # ``None`` (no config key) lets GRPO resolve the default per
+                # loss_type — "token", or "trajectory" for gspo — without
+                # tripping the explicit-override warning.
+                importance_sampling_level=INIT_HP.get("IMPORTANCE_SAMPLING_LEVEL"),
+                advantage_granularity=INIT_HP.get(
+                    "ADVANTAGE_GRANULARITY", INIT_HP.get("ACTION_GRANULARITY", "auto")
+                ),
                 whiten_advantages=INIT_HP.get("WHITEN_ADVANTAGES", False),
                 adv_clip_range=INIT_HP.get("ADV_CLIP_RANGE"),
                 filter_zero_adv=INIT_HP.get(
@@ -774,6 +816,13 @@ def create_population(
                     "ADV_FILTER_EPS",
                     INIT_HP.get("ADVANTAGE_FILTER_EPS", 0.0),
                 ),
+                vllm_importance_sampling_correction=INIT_HP.get(
+                    "VLLM_IMPORTANCE_SAMPLING_CORRECTION", True
+                ),
+                vllm_importance_sampling_cap=INIT_HP.get(
+                    "VLLM_IMPORTANCE_SAMPLING_CAP", 2.0
+                ),
+                use_sequence_packing=INIT_HP.get("USE_SEQUENCE_PACKING", False),
             )
             if torch_compiler is not None:
                 kw.setdefault("torch_compiler", torch_compiler)
@@ -825,6 +874,7 @@ def create_population(
                 calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
+                clone=idx != 0 and act is not None,
                 seed=INIT_HP.get("SEED", 42),
                 use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
             )
@@ -875,6 +925,7 @@ def create_population(
                 calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
+                clone=idx != 0 and act is not None,
                 seed=INIT_HP.get("SEED", 42),
                 use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
             )
@@ -924,7 +975,16 @@ def create_population(
                 clip_coef=INIT_HP.get("CLIP_COEF", 0.2),
                 gamma=INIT_HP.get("GAMMA", 1.0),
                 gae_lambda=INIT_HP.get("GAE_LAMBDA", 1.0),
-                action_granularity=INIT_HP.get("ACTION_GRANULARITY", "auto"),
+                advantage_granularity=INIT_HP.get(
+                    "ADVANTAGE_GRANULARITY", INIT_HP.get("ACTION_GRANULARITY", "auto")
+                ),
+                importance_sampling_level=INIT_HP.get(
+                    "IMPORTANCE_SAMPLING_LEVEL", "auto"
+                ),
+                turn_ratio_pooling=INIT_HP.get("TURN_RATIO_POOLING", "sum"),
+                turn_level_clip=INIT_HP.get("TURN_LEVEL_CLIP", True),
+                turn_value_reduction=INIT_HP.get("TURN_VALUE_REDUCTION", "final_value"),
+                whiten_advantages=INIT_HP.get("WHITEN_ADVANTAGES", True),
                 lr_actor=INIT_HP.get("LR_ACTOR", INIT_HP.get("LR", 5e-6)),
                 lr_critic=INIT_HP.get("LR_CRITIC"),
                 max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 1.0),
@@ -940,13 +1000,16 @@ def create_population(
                 cosine_lr_schedule_config=cosine_lr,
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
+                clone=idx != 0 and act is not None,
                 seed=INIT_HP.get("SEED", 42),
                 use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
-                use_fused_linear_logprobs=INIT_HP.get(
-                    "USE_FUSED_LINEAR_LOGPROBS",
-                    INIT_HP.get("USE_FUSED_LINEAR", False),
-                ),
                 cast_logprobs_to_fp32=INIT_HP.get("CAST_LOGPROBS_TO_FP32", True),
+                vllm_importance_sampling_correction=INIT_HP.get(
+                    "VLLM_IMPORTANCE_SAMPLING_CORRECTION", True
+                ),
+                vllm_importance_sampling_cap=INIT_HP.get(
+                    "VLLM_IMPORTANCE_SAMPLING_CAP", 2.0
+                ),
             )
             if torch_compiler is not None:
                 kw.setdefault("torch_compiler", torch_compiler)
@@ -995,7 +1058,13 @@ def create_population(
                 beta=INIT_HP.get("BETA", 0.01),
                 clip_coef=INIT_HP.get("CLIP_COEF", 0.2),
                 gamma=INIT_HP.get("GAMMA", 0.99),
-                action_granularity=INIT_HP.get("ACTION_GRANULARITY", "auto"),
+                advantage_granularity=INIT_HP.get(
+                    "ADVANTAGE_GRANULARITY", INIT_HP.get("ACTION_GRANULARITY", "auto")
+                ),
+                importance_sampling_level=INIT_HP.get(
+                    "IMPORTANCE_SAMPLING_LEVEL", "token"
+                ),
+                turn_ratio_pooling=INIT_HP.get("TURN_RATIO_POOLING", "sum"),
                 lr=INIT_HP.get("LR", 5e-7),
                 max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 1.0),
                 update_epochs=INIT_HP.get("UPDATE_EPOCHS", 1),
@@ -1010,13 +1079,16 @@ def create_population(
                 cosine_lr_schedule_config=cosine_lr,
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
+                clone=idx != 0 and act is not None,
                 seed=INIT_HP.get("SEED", 42),
                 use_liger_loss=INIT_HP.get("USE_LIGER_LOSS", False),
-                use_fused_linear_logprobs=INIT_HP.get(
-                    "USE_FUSED_LINEAR_LOGPROBS",
-                    INIT_HP.get("USE_FUSED_LINEAR", False),
-                ),
                 cast_logprobs_to_fp32=INIT_HP.get("CAST_LOGPROBS_TO_FP32", True),
+                vllm_importance_sampling_correction=INIT_HP.get(
+                    "VLLM_IMPORTANCE_SAMPLING_CORRECTION", True
+                ),
+                vllm_importance_sampling_cap=INIT_HP.get(
+                    "VLLM_IMPORTANCE_SAMPLING_CAP", 2.0
+                ),
             )
             if torch_compiler is not None:
                 kw.setdefault("torch_compiler", torch_compiler)
@@ -1138,7 +1210,10 @@ def init_wandb(
         wandb.login(key=api_key)
     else:
         warnings.warn(
-            "No wandb API key provided; set WANDB_API_KEY or pass wandb_api_key for online logging.",
+            "No Weights & Biases API key found (pass wandb_api_key or set the "
+            "WANDB_API_KEY environment variable); wandb may prompt interactively "
+            "or fail to log.",
+            UserWarning,
             stacklevel=2,
         )
 

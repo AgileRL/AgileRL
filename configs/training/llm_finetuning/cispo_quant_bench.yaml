@@ -1,0 +1,114 @@
+---
+# CISPO benchmark config for quantization benchmarking.
+# CISPO is GRPO with cispo loss variant.
+
+MUTATION_PARAMS:
+    NO_MUT: 0.1
+    RL_HP_MUT: 0.6
+    MUT_SD: 0.1
+    RAND_SEED: 42
+    MIN_LR: 0.0000001
+    MAX_LR: 0.000025
+    MIN_BETA: 0.0
+    MAX_BETA: 0.01
+    MIN_GROUP_SIZE: 2
+    MAX_GROUP_SIZE: 2
+
+INIT_HP:
+    # Advantage granularity (independent of IS level below). For the GRPO
+    # family: "trajectory" (one group-relative scalar per completion), "turn"
+    # (group-relative per turn), or "auto" (follow the IS level). "turn"
+    # requires the env to supply turn_ids + per-turn rewards to learn();
+    # otherwise it falls back to trajectory. (Note: "token" is invalid here —
+    # group-relative advantages have no per-token reward.)
+    ADVANTAGE_GRANULARITY: turn
+    # IS / ratio-pooling level (independent of ADVANTAGE_GRANULARITY). "turn"
+    # pools the importance ratio per turn (length-normalized mean) and clips
+    # per turn. Turn/sequence levels have no fused Liger kernel, so they run on
+    # the decoupled standard path, which is always memory-bounded via the
+    # fused-linear-logprob path (Liger will warn and fall back).
+    IMPORTANCE_SAMPLING_LEVEL: token
+    ALGO: CISPO
+    BATCH_SIZE: 2
+    BETA: 0.0
+    # Asymmetric clip bounds [min, max]. CISPO uses clip_coef_max directly as
+    # epsilon_high (not offset by 1.0), so this gives epsilon_high = 2.0 with
+    # the same lower bound that scalar CLIP_COEF=0.2 produces (1 - 0.2 = 0.8).
+    CLIP_COEF: [0.8, 2.0]
+    ELITISM: true
+    EVAL_LOOP: 1
+    GROUP_SIZE: 4
+    # Per-episode interaction-turn cap used by the rollout wrapper.
+    MAX_TURNS: 50
+    # mean_std divides by per-group std; mean_only only centers.
+    ADV_NORM: mean_only
+    # Skip the GRPO update when every advantage is zero (e.g. all rewards in a
+    # group tie) instead of running a no-signal backward that crashes the trainer.
+    FILTER_ZERO_ADV: true
+    LR: 0.00002
+    MAX_GRAD_NORM: 1
+    MAX_MODEL_LEN: 32768
+    # Per-turn generation cap; must be < MAX_MODEL_LEN or prompt budget is 0.
+    MAX_OUTPUT_TOKENS: 2768
+    # Sliding-window prompt truncation in the multi-turn rollout wrapper.
+    # When false (default): trajectories that would push the cumulative
+    # prompt past (MAX_MODEL_LEN - MAX_OUTPUT_TOKENS) terminate cleanly
+    # with truncated=True and an `agilerl_context_overflow` breadcrumb.
+    # When true: older turns silently get dropped from the prompt so the
+    # rollout continues — at the cost of the model losing visibility into
+    # its own earlier turns, which can degrade multi-turn reasoning.
+    ENABLE_SLIDING_WINDOW: false
+    MICRO_BATCH_SIZE_PER_GPU: 1
+    POP_SIZE: 1
+    # Trainer-side bnb quant (none | int8 | nf4). Overridden by --trainer-quantization.
+    QUANTIZATION: nf4
+    # HF activation offload; or use --trainer-activation-offload.
+    ACTIVATION_OFFLOAD: true
+    # For multimodal models, we may want to only apply LoRA to e.g. the language model part.
+    LORA_TARGET_SCOPE: language_model
+    TARGET_MODULES:
+        - q_proj.linear
+        - k_proj.linear
+        - v_proj.linear
+        - o_proj.linear
+        - up_proj.linear
+        - down_proj.linear
+        - gate_proj.linear
+    TEMPERATURE: 1.0
+    TOURN_SIZE: 1
+    UPDATE_EPOCHS: 1
+    USE_VLLM: true
+    # Turn-level CISPO has no fused Liger kernel, so it runs on the standard
+    # path (always memory-bounded via the fused-linear-logprob path); Liger
+    # warns and falls back here.
+    USE_LIGER_LOSS: true
+    LORA_R: 2
+    LORA_ALPHA: 32
+    LORA_DROPOUT: 0
+    LORA_BIAS: none
+    # HF attention backend. "auto" picks flash_attention_2 if installed, else
+    # sdpa. "flex_attention" is PyTorch's block-sparse masked attention with
+    # O(T) memory — required for long-context Gemma (sliding-window models
+    # break SDPA's flash backend when an explicit mask is present).
+    ATTN_IMPLEMENTATION: flex_attention
+    # Per-chunk token count for the Liger fused-loss path. Lower values cut
+    # backward peak memory (smaller (chunk, vocab) logits tensor) at the cost
+    # of more chunk iterations. Replaces the legacy AGILERL_LIGER_TOKEN_CHUNK
+    # env var (default 2048 when unset).
+    LIGER_TOKEN_CHUNK_SIZE: 256
+    # Padding-free sequence packing for the gradient forward (FA2-varlen or
+    # flex-attention BlockMask). Flattens the real tokens of the (B, T) padded
+    # training batch into one (1, N) row so the forward wastes no compute on
+    # pad tokens — a large saving in RL where completion lengths vary. Same
+    # loss as the padded path; requires a varlen/block-sparse attn backend
+    # (flex_attention above qualifies).
+    USE_SEQUENCE_PACKING: true
+    # vLLM sampling-mismatch correction (truncated importance sampling). The
+    # rollouts are drawn from the vLLM engine but the loss treats the trainer's
+    # recomputed logprobs as the behaviour policy; these two differ (engine /
+    # kernel / quant / LoRA-path differences). CORRECTION captures + logs the
+    # vllm_is_* mismatch metrics; APPLY also reweights the loss by the detached,
+    # clamped trainer/vLLM ratio. Most impactful in decoupled/off-policy setups;
+    # near-no-op (ratio ~1) when colocated and same-precision. CAP clamps the
+    # ratio (defaults to 2.0 when unset).
+    VLLM_IMPORTANCE_SAMPLING_CORRECTION: true

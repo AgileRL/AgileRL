@@ -32,6 +32,13 @@ def _resolve_hidden_size(config: Any) -> int:
         return int(config.word_embed_proj_dim)
     hidden = getattr(config, "hidden_size", None)
     if hidden is None:
+        # Gemma-4 and other multimodal wrappers keep text dims nested.
+        text_cfg = getattr(config, "text_config", None)
+        if isinstance(text_cfg, dict):
+            hidden = text_cfg.get("hidden_size")
+        elif text_cfg is not None:
+            hidden = getattr(text_cfg, "hidden_size", None)
+    if hidden is None:
         msg = "Cannot infer value-head hidden size from config."
         raise ValueError(msg)
     return int(hidden)

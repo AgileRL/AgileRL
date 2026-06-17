@@ -32,9 +32,9 @@ A typical checkpoint directory written by :meth:`save_checkpoint` looks like:
 
 Which adapter subdirectories appear depends on the algorithm:
 
-* **SFT** — ``actor`` only.
-* **DPO, GRPO** — ``actor`` + ``reference``.
-* **PPO-LLM** (with value head) — ``actor`` + ``reference`` + ``critic``.
+* **SFT**: ``actor`` only.
+* **DPO, GRPO**: ``actor`` + ``reference``.
+* **PPO-LLM** (with value head): ``actor`` + ``reference`` + ``critic``.
 
 Saving
 ------
@@ -43,8 +43,8 @@ Saving
 
     agent.save_checkpoint(
         path,
-        lora_only=True,        # default — adapters only, no base weights
-        save_optimizer=True,   # default — persist optimizer + LR scheduler
+        lora_only=True,        # default: adapters only, no base weights
+        save_optimizer=True,   # default: persist optimizer + LR scheduler
     )
 
 The four combinations (identical for single-device, data-parallel and FSDP2 runs):
@@ -61,7 +61,7 @@ The four combinations (identical for single-device, data-parallel and FSDP2 runs
 |               |                    | inside ``attributes.pt``.                         |
 +---------------+--------------------+---------------------------------------------------+
 | ``False``     | ``False``          | Full actor ``state_dict`` inside ``attributes.pt``|
-|               |                    | — no optimizer state.                             |
+|               |                    | (no optimizer state).                             |
 +---------------+--------------------+---------------------------------------------------+
 
 Under FSDP2, sharded parameters and optimizer state are gathered to full
@@ -76,11 +76,11 @@ Common scenarios:
     # can resume where it left off):
     agent.save_checkpoint(path)
 
-    # Release a deployable artefact — adapters only, no training state:
+    # Release a deployable artefact (adapters only, no training state):
     agent.save_checkpoint(path, save_optimizer=False)
 
-    # Persist the full merged model (e.g. for hand-off to a non-AgileRL
-    # consumer that doesn't understand PEFT):
+    # Persist the full model, base weights included, not just the adapters
+    # (e.g. for hand-off to a consumer that can't re-download the base):
     agent.save_checkpoint(path, lora_only=False, save_optimizer=False)
 
 Loading
@@ -90,10 +90,10 @@ Loading
 
     agent.load_checkpoint(
         path,
-        load_optimizer=True,   # default — restore optimizer + LR scheduler
+        load_optimizer=True,   # default: restore optimizer + LR scheduler
     )
 
-``save_optimizer`` and ``load_optimizer`` are independent flags — you can
+``save_optimizer`` and ``load_optimizer`` are independent flags: you can
 load a checkpoint that contains optimizer state while passing
 ``load_optimizer=False`` to keep the live optimizer, or load a
 weights-only checkpoint with ``load_optimizer=True`` (in which case a
@@ -102,14 +102,12 @@ weights-only checkpoint with ``load_optimizer=True`` (in which case a
 :meth:`load_checkpoint` expects the live algorithm to already be configured
 against the same base model. It restores adapter weights on top of that base
 and, by default, copies the just-loaded ``actor`` adapter onto ``reference``
-so that SFT → DPO → GRPO pipelines work out of the box — the actor trained
+so that SFT → DPO → GRPO pipelines work out of the box: the actor trained
 in stage *N* becomes the reference for stage *N+1*.
 
-LoRA config mismatch between the checkpoint and the live algorithm
-(e.g. after a rank mutation) is handled non-destructively: rank is merged as
-``max(current, checkpoint)`` with weights padded into the larger shape;
-``target_modules`` / ``modules_to_save`` are unioned. See
-:meth:`load_checkpoint` for details.
+The checkpoint's LoRA config must match the live algorithm's (rank,
+target modules, etc.); a mismatch raises ``ValueError``. Re-create the
+agent with the checkpoint's LoRA config to load it.
 
 Common scenarios:
 
@@ -119,7 +117,7 @@ Common scenarios:
     agent.load_checkpoint(path)
 
     # Inference / evaluation with a checkpoint that may or may not contain
-    # optimizer state — we don't need it:
+    # optimizer state, which we don't need:
     agent.load_checkpoint(path, load_optimizer=False)
 
 Distributed training

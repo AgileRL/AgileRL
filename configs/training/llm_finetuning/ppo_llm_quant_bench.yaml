@@ -1,0 +1,68 @@
+---
+# LLMPPO benchmark config used to measure BF16 vs INT8 vs NF4 quantization on
+# the Qwen2.5-0.5B-Instruct base. Targets an L4-class single GPU (24 GiB);
+# may OOM at BF16 baseline on a T4 (15 GiB) because of the larger LoRA
+# target list, batch=32 and 4k context.
+
+MUTATION_PARAMS:
+    NO_MUT: 0.1
+    RL_HP_MUT: 0.6
+    MUT_SD: 0.1
+    RAND_SEED: 42
+    MIN_LR: 0.0000001
+    MAX_LR: 0.00001
+    MIN_BETA: 0.0001
+    MAX_BETA: 0.01
+
+INIT_HP:
+    ADVANTAGE_GRANULARITY: token
+    ALGO: LLMPPO
+    BATCH_SIZE: 32
+    BETA: 0.001
+    CLIP_COEF: 0.2
+    ELITISM: true
+    EVAL_LOOP: 1
+    GAE_LAMBDA: 1
+    GAMMA: 1
+    LORA_ALPHA: 32
+    LORA_DROPOUT: 0
+    LORA_R: 16
+    LORA_BIAS: none
+    LR_ACTOR: 0.000005
+    LR_CRITIC: 0.00005
+    MAX_GRAD_NORM: 1
+    MAX_MODEL_LEN: 4096
+    MAX_OUTPUT_TOKENS: 64
+    # Per-episode interaction-turn cap used by the rollout wrapper.
+    MAX_TURNS: 50
+    MICRO_BATCH_SIZE_PER_GPU: 16
+    POP_SIZE: 1
+    # Trainer-side bitsandbytes quantization. Resolved by create_population:
+    #   none  -> BF16 baseline (no quantization)
+    #   int8  -> LLM.int8() 8-bit weights
+    #   nf4   -> 4-bit NF4 QLoRA recipe (bf16 compute + storage, double quant)
+    # May also be a BitsAndBytesConfig kwargs mapping for full control.
+    # The benchmark sweep overrides this via --trainer-quantization.
+    QUANTIZATION: none
+    # Offload activations saved for backward (gradient-checkpoint boundary
+    # tensors) to pinned host RAM via torch.autograd.graph.save_on_cpu.
+    # Trades PCIe bandwidth for GPU memory; the win scales with context
+    # length, so enable it for long-context / large-model training.
+    ACTIVATION_OFFLOAD: false
+    TARGET_MODULES:
+        - q_proj
+        - k_proj
+        - v_proj
+        - o_proj
+        - up_proj
+        - down_proj
+        - gate_proj
+    TEMPERATURE: 0.7
+    TOURN_SIZE: 2
+    UPDATE_EPOCHS: 1
+    USE_VLLM: true
+    # Token-level PPO: Liger is memory-bounded (hidden states are
+    # token-flattened and chunked, like GRPO/CISPO). The non-Liger path is
+    # always memory-bounded too (the fused-linear-logprob path is unconditional).
+    USE_LIGER_LOSS: true
+    VF_COEF: 0.5

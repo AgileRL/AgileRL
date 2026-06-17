@@ -21,7 +21,9 @@ def load_minari_dataset(
     :param dataset_id: The ID of the Minari dataset to load
     :type dataset_id: str
     :param remote: Whether to load from remote repository. Defaults to False.
+    :type remote: bool
     :return: The loaded Minari dataset
+    :rtype: minari.MinariDataset
     :raises KeyError: If remote=True and dataset_id is not a valid remote dataset
     :raises FileNotFoundError: If remote=False and dataset not found locally
     """
@@ -72,9 +74,13 @@ def minari_to_agile_buffer(
     """Convert a Minari dataset to an agile buffer.
 
     :param dataset_id: The ID of the Minari dataset to load
+    :type dataset_id: str
     :param memory: The memory to save the dataset to
+    :type memory: ReplayBuffer
     :param remote: Whether to load from remote repository. Defaults to False.
+    :type remote: bool
     :return: The loaded Minari dataset
+    :rtype: ReplayBuffer
     """
     minari_dataset = load_minari_dataset(dataset_id, remote)
     for episode in minari_dataset.iterate_episodes():
@@ -103,8 +109,11 @@ def minari_to_agile_dataset(dataset_id: str, remote: bool = False) -> h5py.File:
     """Convert a Minari dataset to an agile dataset.
 
     :param dataset_id: The ID of the Minari dataset to load
+    :type dataset_id: str
     :param remote: Whether to load from remote repository. Defaults to False.
+    :type remote: bool
     :return: The loaded Minari dataset
+    :rtype: h5py.File
     """
     observations = []
     next_observations = []

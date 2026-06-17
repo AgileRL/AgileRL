@@ -135,8 +135,9 @@ def train_off_policy(
     :param verbose: Display training stats, defaults to True
     :type verbose: bool, optional
     :param wandb_api_key: API key for Weights & Biases, defaults to None
+    :type wandb_api_key: str, optional
     :param wandb_kwargs: Additional kwargs to pass to wandb.init()
-    :type wand_kwargs: dict, optional
+    :type wandb_kwargs: dict, optional
     """
     assert isinstance(
         algo,

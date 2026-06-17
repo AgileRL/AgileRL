@@ -1,5 +1,11 @@
 from contextlib import contextmanager
+import json
+import logging
+import re
 import sys
+import types
+from pathlib import Path
+from types import SimpleNamespace
 
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -14,6 +20,7 @@ from torch import nn
 from transformers import AutoTokenizer
 from torch.utils.data import DataLoader
 from tests import TINY_LLM_FIXTURE_PATH
+from agilerl.utils import llm_utils as llm_utils_module
 from agilerl.utils.distributed import (
     FSDPConfig,
     barrier,
@@ -27,22 +34,53 @@ from agilerl.utils.distributed import (
 from agilerl.utils.llm_utils import (
     PreferenceGym,
     ReasoningGym,
+    adapt_lora_config_for_model,
+    build_bnb_quantization_config,
+    build_clippable_linear_lora_target_regex,
+    build_clippable_linear_lora_target_suffixes,
+    build_completion_mask,
+    build_scoped_lora_target_regex,
+    build_vllm_llm_init_kwargs,
+    build_vllm_rollout_lora_request,
+    clipped_is_surrogate,
+    collect_trainable_param_stats,
+    create_model_from_name_or_path,
+    cuda_tensor_bytes_in_module,
+    discover_clippable_inner_linear_module_keys,
+    discover_clippable_projection_leaf_names,
+    filter_peft_state_dict_for_vllm_lora,
+    format_colocated_vllm_oom_hint,
     gather_full_params,
     get_model_name_or_path,
     get_state_dict,
     is_fsdp_sharded,
+    list_peft_matched_module_keys,
     load_full_state_dict,
+    log_cuda_memory_snapshot,
     masked_mean,
     masked_var,
+    model_has_clippable_linear_wrappers,
     move_params_to_cpu,
     move_params_to_gpu,
     normalize_reasoning_prompt_batch,
+    offload_colocated_trainer_from_gpu,
+    patch_flex_attention_kernel_options,
+    peft_lora_state_dict_key_to_module_key,
+    peft_target_key_matches,
     pool_by_turns,
+    pool_log_ratio_by_level,
+    remap_peft_lora_key_for_vllm,
+    resolve_attn_implementation,
+    resolve_peft_adapter_export_dir,
+    resolve_vllm_max_lora_rank,
+    resolve_vllm_max_num_batched_tokens,
+    save_peft_adapter_for_vllm_rollout,
     stitch_completion_after_windowed_hf_generate,
     stitch_completion_after_windowed_vllm_generate,
     compare_responses,
     sample_eval_prompts,
     calculate_k3_kl,
+    validate_importance_sampling_level,
 )
 
 DUMMY_CONVERSATION_TEMPLATE = [
@@ -917,7 +955,6 @@ def test_llm_utils_fallback_types_when_no_llm_dependencies():
             import agilerl.utils.llm_utils as llm_utils_reloaded
 
             # Verify the fallback type aliases are set to Any
-            assert llm_utils_reloaded.AutoTokenizer is Any
             assert llm_utils_reloaded.PreTrainedModel is Any
             assert llm_utils_reloaded.Dataset is Any
             assert llm_utils_reloaded.AutoModelForCausalLM is Any
@@ -1049,6 +1086,30 @@ class TestMaxPromptTokensForSlidingWindow:
         from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
 
         assert max_prompt_tokens_for_sliding_window(0, None) == 0
+
+
+class TestValidateLlmContextLengths:
+    def test_skips_when_max_output_tokens_none(self):
+        from agilerl.utils.llm_utils import validate_llm_context_lengths
+
+        validate_llm_context_lengths(32768, None)
+
+    def test_accepts_strictly_smaller_max_output_tokens(self):
+        from agilerl.utils.llm_utils import validate_llm_context_lengths
+
+        validate_llm_context_lengths(32768, 1024)
+
+    def test_raises_when_max_output_equals_max_model_len(self):
+        from agilerl.utils.llm_utils import validate_llm_context_lengths
+
+        with pytest.raises(ValueError, match="max_output_tokens \\(32768\\)"):
+            validate_llm_context_lengths(32768, 32768)
+
+    def test_raises_when_max_output_exceeds_max_model_len(self):
+        from agilerl.utils.llm_utils import validate_llm_context_lengths
+
+        with pytest.raises(ValueError, match="max_prompt_tokens=0"):
+            validate_llm_context_lengths(64, 256)
 
 
 class TestNormalizeReasoningPromptBatch:
@@ -1198,6 +1259,132 @@ class TestPoolByTurnsBadReduction:
             pool_by_turns(token_values, turn_ids, num_turns=1, reduction="unsupported")
 
 
+class TestPoolLogRatioByLevelBadReduction:
+    """``pool_log_ratio_by_level`` rejects unknown turn reductions at the turn level."""
+
+    def test_unknown_turn_reduction_raises(self) -> None:
+        token_log_ratio = torch.zeros(1, 2)
+        action_mask = torch.ones(1, 2)
+        turn_ids = torch.tensor([[0, 0]])
+        with pytest.raises(ValueError, match=r"turn_reduction must be one of"):
+            pool_log_ratio_by_level(
+                token_log_ratio,
+                action_mask,
+                turn_ids,
+                level="turn",
+                turn_reduction="unsupported",
+            )
+
+
+class TestClippedIsSurrogate:
+    """The shared token/turn/sequence clipped surrogate used by the non-Liger
+    PPO and REINFORCE paths. token/turn/sequence are points on one
+    ratio-pooling axis, so the level collapses cleanly at the limits."""
+
+    @staticmethod
+    def _setup():
+        torch.manual_seed(0)
+        B, T = 3, 6
+        token_log_ratio = torch.randn(B, T)
+        advantages = torch.randn(B, T)
+        mask = torch.ones(B, T)
+        mask[0, 5:] = 0  # ragged sequence
+        return token_log_ratio, advantages, mask, B, T
+
+    def test_turn_each_token_own_turn_equals_token(self):
+        tlr, adv, mask, _B, T = self._setup()
+        turn_each = torch.where(
+            mask.bool(),
+            torch.arange(T).unsqueeze(0).expand_as(mask).long(),
+            torch.full_like(mask, -1, dtype=torch.long),
+        )
+        pg_tok, cf_tok = clipped_is_surrogate(tlr, adv, mask, turn_each, "token", 0.2)
+        pg_turn, cf_turn = clipped_is_surrogate(tlr, adv, mask, turn_each, "turn", 0.2)
+        assert torch.allclose(pg_tok, pg_turn, atol=1e-5)
+        assert torch.allclose(cf_tok, cf_turn, atol=1e-5)
+
+    def test_single_turn_equals_sequence(self):
+        tlr, adv, mask, B, T = self._setup()
+        turn_one = torch.where(
+            mask.bool(),
+            torch.zeros(B, T, dtype=torch.long),
+            torch.full((B, T), -1, dtype=torch.long),
+        )
+        pg_turn, _ = clipped_is_surrogate(tlr, adv, mask, turn_one, "turn", 0.2)
+        pg_seq, _ = clipped_is_surrogate(tlr, adv, mask, turn_one, "trajectory", 0.2)
+        assert torch.allclose(pg_turn, pg_seq, atol=1e-5)
+
+    def test_sequence_pools_ratio_and_advantage(self):
+        """Trajectory level uses the length-normalized mean log-ratio and the
+        mean advantage over a completion's action tokens."""
+        tlr = torch.tensor([[0.2, 0.4, 1.0, -5.0]])
+        adv = torch.tensor([[1.0, 3.0, 2.0, 99.0]])
+        mask = torch.tensor([[1.0, 1.0, 1.0, 0.0]])  # last token non-action
+        pg, _ = clipped_is_surrogate(tlr, adv, mask, None, "trajectory", 0.2)
+        mean_lr = (0.2 + 0.4 + 1.0) / 3
+        mean_adv = (1.0 + 3.0 + 2.0) / 3
+        ratio = torch.exp(torch.tensor(mean_lr))
+        clipped = torch.clamp(ratio, 0.8, 1.2)
+        expected = torch.max(-mean_adv * ratio, -mean_adv * clipped)
+        assert torch.allclose(pg, expected, atol=1e-5)
+
+    def test_turn_sum_reduction_pools_ratio_by_product_but_advantage_by_mean(self):
+        """With ``turn_reduction="sum"`` the turn ratio is the product of token
+        ratios (nightly/Turn-PPO), while the (broadcast) advantage is still
+        recovered by the turn mean — i.e. it is *not* rescaled by turn length."""
+        # One sample, one turn, two action tokens; advantage is the per-turn
+        # value broadcast across both tokens (as the GAE code produces).
+        tlr = torch.tensor([[0.1, 0.2]])
+        adv = torch.tensor([[2.0, 2.0]])
+        mask = torch.ones(1, 2)
+        turn_ids = torch.zeros(1, 2, dtype=torch.long)
+        # Wide clip so the ratio is never clamped, isolating the pooling logic.
+        pg, _ = clipped_is_surrogate(
+            tlr, adv, mask, turn_ids, "turn", 10.0, turn_reduction="sum"
+        )
+        ratio = torch.exp(torch.tensor(0.1 + 0.2))  # product ratio
+        expected = -2.0 * ratio  # mean-pooled advantage, NOT 4.0
+        assert torch.allclose(pg, expected, atol=1e-5)
+
+    def test_turn_requires_turn_ids(self):
+        tlr, adv, mask, _B, _T = self._setup()
+        with pytest.raises(ValueError, match="turn-level surrogate requires turn_ids"):
+            clipped_is_surrogate(tlr, adv, mask, None, "turn", 0.2)
+
+    def test_unknown_level_raises(self):
+        tlr, adv, mask, _B, _T = self._setup()
+        with pytest.raises(ValueError, match="Unknown importance_sampling_level"):
+            clipped_is_surrogate(tlr, adv, mask, None, "bogus", 0.2)
+
+    def test_gradient_flows_to_log_ratio(self):
+        """All levels are differentiable w.r.t. the token log-ratio."""
+        for level, turn_ids in (
+            ("token", None),
+            ("trajectory", None),
+            ("turn", torch.zeros(3, 6, dtype=torch.long)),
+        ):
+            tlr, adv, mask, _B, _T = self._setup()
+            tlr = tlr.clone().requires_grad_(True)
+            pg, _ = clipped_is_surrogate(tlr, adv, mask, turn_ids, level, 0.2)
+            pg.backward()
+            assert tlr.grad is not None and torch.isfinite(tlr.grad).all()
+
+    def test_loss_weight_scales_per_unit_surrogate(self):
+        """A detached per-token loss weight reweights the surrogate; uniform
+        weights of 1 are a no-op and uniform weights of w scale pg_loss by w."""
+        tlr, adv, mask, _B, _T = self._setup()
+        pg_base, cf_base = clipped_is_surrogate(tlr, adv, mask, None, "token", 0.2)
+        pg_ones, cf_ones = clipped_is_surrogate(
+            tlr, adv, mask, None, "token", 0.2, loss_weight=torch.ones_like(tlr)
+        )
+        assert torch.allclose(pg_base, pg_ones, atol=1e-6)
+        assert torch.allclose(cf_base, cf_ones, atol=1e-6)
+        pg_half, _ = clipped_is_surrogate(
+            tlr, adv, mask, None, "token", 0.2, loss_weight=torch.full_like(tlr, 0.5)
+        )
+        assert torch.allclose(pg_half, 0.5 * pg_base, atol=1e-6)
+
+
 class TestCreateModelFromNameOrPathValueHead:
     """``create_model_from_name_or_path`` should route through ``AutoModelForCausalLMWithValueHead``
     when a value head is requested."""
@@ -1286,3 +1473,1184 @@ class TestGetModelNameOrPathBaseModelBranches:
 
         wrapper = _Wrapper()
         assert get_model_name_or_path(wrapper) == "via_base_pretrained"
+
+
+GiB = 1024**3
+
+
+# ---------------------------------------------------------------------------
+# Fixture models for the ClippableLinear / LoRA-targeting helpers
+# ---------------------------------------------------------------------------
+
+
+class _FakeClippableLinear(nn.Module):
+    """Stand-in for Gemma's *ClippableLinear projection wrappers.
+
+    Only the class-name suffix matters to the helpers under test.
+    """
+
+    def __init__(self, inner: nn.Module | None = None):
+        super().__init__()
+        self.linear = nn.Linear(4, 4) if inner is None else inner
+
+
+class _ClippableTower(nn.Module):
+    """Vision-tower-like container of *ClippableLinear projection wrappers."""
+
+    def __init__(self):
+        super().__init__()
+        self.q_proj = _FakeClippableLinear()
+        self.k_proj = _FakeClippableLinear()
+
+
+class _RootClippableModel(nn.Module):
+    """ClippableLinear wrappers outside any language_model/audio_tower scope."""
+
+    def __init__(self):
+        super().__init__()
+        self.tower = _ClippableTower()
+
+
+class _ScopedClippableModel(nn.Module):
+    """ClippableLinear wrappers nested under ``model.language_model``."""
+
+    def __init__(self):
+        super().__init__()
+        self.model = nn.Module()
+        self.model.language_model = _ClippableTower()
+
+
+class _AudioScopedClippableModel(nn.Module):
+    """ClippableLinear wrappers nested under ``model.audio_tower``."""
+
+    def __init__(self):
+        super().__init__()
+        self.model = nn.Module()
+        self.model.audio_tower = _ClippableTower()
+
+
+class _LanguageScopedLinearModel(nn.Module):
+    """Plain ``nn.Linear`` projections under a nested ``language_model`` scope."""
+
+    def __init__(self):
+        super().__init__()
+        self.model = nn.Module()
+        self.model.language_model = nn.Module()
+        self.model.language_model.q_proj = nn.Linear(4, 4)
+        self.model.language_model.mlp = nn.Linear(4, 4)
+
+
+class _PlainLinearModel(nn.Module):
+    """No ClippableLinear wrappers at all."""
+
+    def __init__(self):
+        super().__init__()
+        self.q_proj = nn.Linear(4, 4)
+
+
+class _PlainLoraConfig:
+    """Minimal LoraConfig stand-in without ``to_dict`` (deepcopy clone path)."""
+
+    def __init__(self, target_modules, exclude_modules=None):
+        self.target_modules = target_modules
+        self.exclude_modules = exclude_modules
+
+
+class _DictLoraConfig:
+    """LoraConfig stand-in with ``to_dict`` (reconstruction clone path)."""
+
+    def __init__(self, target_modules=None, exclude_modules=None, r=8):
+        self.target_modules = target_modules
+        self.exclude_modules = exclude_modules
+        self.r = r
+
+    def to_dict(self):
+        return {
+            "target_modules": self.target_modules,
+            "exclude_modules": self.exclude_modules,
+            "r": self.r,
+        }
+
+
+class TestBuildBnbQuantizationConfig:
+    """YAML-friendly QUANTIZATION spec -> BitsAndBytesConfig resolution."""
+
+    class _FakeBnbConfig:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    @pytest.fixture(autouse=True)
+    def _fake_bnb(self, monkeypatch):
+        monkeypatch.setattr(llm_utils_module, "HAS_LLM_DEPENDENCIES", True)
+        monkeypatch.setattr(llm_utils_module, "BitsAndBytesConfig", self._FakeBnbConfig)
+
+    def test_none_spec_returns_none(self):
+        assert build_bnb_quantization_config(None) is None
+
+    @pytest.mark.parametrize("spec", ["none", "", "  NONE  "])
+    def test_none_preset_strings_return_none(self, spec):
+        assert build_bnb_quantization_config(spec) is None
+
+    def test_int8_preset(self):
+        out = build_bnb_quantization_config("int8")
+        assert out.kwargs == {"load_in_8bit": True}
+
+    def test_nf4_preset_matches_qlora_recipe(self):
+        out = build_bnb_quantization_config("nf4")
+        assert out.kwargs == {
+            "load_in_4bit": True,
+            "bnb_4bit_quant_type": "nf4",
+            "bnb_4bit_compute_dtype": torch.bfloat16,
+            "bnb_4bit_quant_storage": torch.bfloat16,
+            "bnb_4bit_use_double_quant": True,
+        }
+
+    def test_dict_spec_forwarded_verbatim(self):
+        spec = {"load_in_8bit": True, "llm_int8_threshold": 5.0}
+        out = build_bnb_quantization_config(spec)
+        assert out.kwargs == spec
+
+    def test_existing_config_instance_passthrough(self):
+        spec = self._FakeBnbConfig(load_in_4bit=True)
+        assert build_bnb_quantization_config(spec) is spec
+
+    def test_unknown_preset_raises_value_error(self):
+        with pytest.raises(
+            ValueError, match=r"Unknown quantization preset 'fp4'"
+        ) as exc_info:
+            build_bnb_quantization_config("fp4")
+        assert "['int8', 'nf4', 'none']" in str(exc_info.value)
+
+    def test_invalid_type_raises_type_error(self):
+        with pytest.raises(TypeError, match="got int"):
+            build_bnb_quantization_config(42)
+
+    def test_missing_llm_dependencies_raises_import_error(self, monkeypatch):
+        monkeypatch.setattr(llm_utils_module, "HAS_LLM_DEPENDENCIES", False)
+        with pytest.raises(ImportError, match=r"install agilerl\[llm\]"):
+            build_bnb_quantization_config("int8")
+
+    def test_none_spec_skips_dependency_check(self, monkeypatch):
+        monkeypatch.setattr(llm_utils_module, "HAS_LLM_DEPENDENCIES", False)
+        assert build_bnb_quantization_config(None) is None
+
+
+class TestClippableLinearDiscovery:
+    def test_model_has_clippable_linear_wrappers(self):
+        assert model_has_clippable_linear_wrappers(_RootClippableModel())
+        assert not model_has_clippable_linear_wrappers(_PlainLinearModel())
+
+    def test_discover_projection_leaf_names_sorted(self):
+        assert discover_clippable_projection_leaf_names(_RootClippableModel()) == [
+            "k_proj",
+            "q_proj",
+        ]
+        assert discover_clippable_projection_leaf_names(_PlainLinearModel()) == []
+
+    def test_discover_inner_linear_module_keys(self):
+        keys = discover_clippable_inner_linear_module_keys(_RootClippableModel())
+        assert keys == ["tower.k_proj.linear", "tower.q_proj.linear"]
+
+    def test_discover_inner_keys_skips_non_adaptable_inner_modules(self):
+        model = nn.Module()
+        model.q_proj = _FakeClippableLinear(inner=nn.SiLU())
+        assert discover_clippable_inner_linear_module_keys(model) == []
+
+    def test_discover_inner_keys_accepts_bnb_quantized_linear_names(self):
+        class Linear4bit(nn.Module):
+            """Class name mimics the bitsandbytes 4-bit linear layer."""
+
+        model = nn.Module()
+        model.q_proj = _FakeClippableLinear(inner=Linear4bit())
+        assert discover_clippable_inner_linear_module_keys(model) == ["q_proj.linear"]
+
+    def test_is_peft_adaptable_linear(self):
+        class Linear8bitLt(nn.Module):
+            """Class name mimics the bitsandbytes 8-bit linear layer."""
+
+        assert llm_utils_module._is_peft_adaptable_linear(nn.Linear(2, 2))
+        assert llm_utils_module._is_peft_adaptable_linear(Linear8bitLt())
+        assert not llm_utils_module._is_peft_adaptable_linear(nn.SiLU())
+
+
+class TestPeftTargetKeyMatching:
+    def test_regex_spec_uses_fullmatch(self):
+        spec = r"(?:.*\.)?(q_proj)\.linear"
+        assert peft_target_key_matches("model.layers.0.q_proj.linear", spec)
+        assert peft_target_key_matches("q_proj.linear", spec)
+        assert not peft_target_key_matches("model.layers.0.q_proj", spec)
+
+    def test_list_spec_exact_and_suffix_match(self):
+        assert peft_target_key_matches("q_proj", ["q_proj"])
+        assert peft_target_key_matches("model.layers.0.q_proj", ["q_proj"])
+        assert not peft_target_key_matches("model.layers.0.q_proj_extra", ["q_proj"])
+
+    def test_list_matched_module_keys_respects_exclusions(self):
+        model = _RootClippableModel()
+        targets = ["q_proj.linear", "k_proj.linear"]
+        assert list_peft_matched_module_keys(model, targets) == [
+            "tower.q_proj.linear",
+            "tower.k_proj.linear",
+        ]
+        assert list_peft_matched_module_keys(
+            model, targets, exclude_modules=["k_proj"]
+        ) == ["tower.q_proj.linear"]
+
+
+class TestLoraTargetRegexBuilders:
+    def test_clippable_regex_targets_inner_linear(self):
+        regex = build_clippable_linear_lora_target_regex(["q_proj", "k_proj", "q_proj"])
+        assert regex == r"(?:.*\.)?(k_proj|q_proj)\.linear"
+        assert re.fullmatch(regex, "model.layers.0.q_proj.linear")
+        assert re.fullmatch(regex, "k_proj.linear")
+        assert not re.fullmatch(regex, "model.layers.0.q_proj")
+
+    def test_clippable_regex_requires_projection_names(self):
+        with pytest.raises(ValueError, match="At least one projection name"):
+            build_clippable_linear_lora_target_regex([])
+
+    def test_scoped_regex_matches_plain_and_wrapped_projections(self):
+        regex = build_scoped_lora_target_regex(["q_proj"], "language_model")
+        assert re.fullmatch(regex, "model.language_model.layers.0.q_proj")
+        assert re.fullmatch(regex, "model.language_model.layers.0.q_proj.linear")
+        assert not re.fullmatch(regex, "model.vision_tower.layers.0.q_proj")
+
+    def test_scoped_regex_requires_projection_names(self):
+        with pytest.raises(ValueError, match="At least one projection name"):
+            build_scoped_lora_target_regex([], "language_model")
+
+    def test_suffix_targets_sorted_and_deduped(self):
+        assert build_clippable_linear_lora_target_suffixes(
+            ["q_proj", "k_proj", "q_proj"]
+        ) == ["k_proj.linear", "q_proj.linear"]
+
+
+class TestProjectionNameResolution:
+    def test_regex_spec_short_circuits_to_none(self):
+        assert (
+            llm_utils_module._projection_names_for_clippable_lora(
+                _PlainLinearModel(), r".*\.q_proj"
+            )
+            is None
+        )
+
+    def test_looks_like_peft_target_regex_heuristic(self):
+        looks = llm_utils_module._looks_like_peft_target_regex
+        assert looks(".*foo")
+        assert looks(r"foo\.bar")
+        assert looks("foo(bar)")
+        assert not looks("q_proj")
+        assert not looks("q_proj.linear")
+
+    def test_all_linear_expands_to_discovered_wrapper_names(self):
+        names = llm_utils_module._projection_names_for_clippable_lora(
+            _RootClippableModel(), "all-linear"
+        )
+        assert names == ["k_proj", "q_proj"]
+
+    def test_explicit_names_normalized_sorted_deduped(self):
+        names = llm_utils_module._projection_names_for_clippable_lora(
+            _PlainLinearModel(), ["v_proj.linear", "q_proj", "q_proj"]
+        )
+        assert names == ["q_proj", "v_proj"]
+
+
+class TestInferClippableLoraScope:
+    def test_language_model_scope_inferred(self):
+        assert (
+            llm_utils_module._infer_clippable_lora_scope(_ScopedClippableModel())
+            == "language_model"
+        )
+
+    def test_audio_tower_scope_inferred(self):
+        assert (
+            llm_utils_module._infer_clippable_lora_scope(_AudioScopedClippableModel())
+            == "audio_tower"
+        )
+
+    def test_unscoped_wrappers_infer_none(self):
+        assert (
+            llm_utils_module._infer_clippable_lora_scope(_RootClippableModel()) is None
+        )
+
+    def test_no_wrappers_infer_none(self):
+        assert llm_utils_module._infer_clippable_lora_scope(_PlainLinearModel()) is None
+
+
+class TestExampleModuleKeysForLoraScope:
+    def test_returns_keys_under_scope_only(self):
+        model = _LanguageScopedLinearModel()
+        keys = llm_utils_module._example_module_keys_for_lora_scope(
+            model, "language_model"
+        )
+        assert keys == [
+            "model.language_model.q_proj",
+            "model.language_model.mlp",
+        ]
+
+    def test_limit_truncates_examples(self):
+        model = _LanguageScopedLinearModel()
+        keys = llm_utils_module._example_module_keys_for_lora_scope(
+            model, "language_model", limit=1
+        )
+        assert keys == ["model.language_model.q_proj"]
+
+
+class TestAdaptLoraConfigForModel:
+    def test_regex_targets_returned_unchanged(self):
+        cfg = _PlainLoraConfig(target_modules=r".*\.q_proj")
+        assert adapt_lora_config_for_model(_RootClippableModel(), cfg) is cfg
+
+    def test_plain_model_short_names_returned_unchanged(self):
+        cfg = _PlainLoraConfig(target_modules=["q_proj"])
+        assert adapt_lora_config_for_model(_PlainLinearModel(), cfg) is cfg
+
+    def test_explicit_scope_rewrites_to_scoped_regex(self):
+        model = _LanguageScopedLinearModel()
+        cfg = _PlainLoraConfig(target_modules=["q_proj"])
+        adapted = adapt_lora_config_for_model(
+            model, cfg, lora_target_scope="language_model"
+        )
+        expected = build_scoped_lora_target_regex(["q_proj"], "language_model")
+        assert adapted is not cfg
+        assert adapted.target_modules == expected
+        # Original config untouched (deepcopy clone path).
+        assert cfg.target_modules == ["q_proj"]
+        assert re.fullmatch(expected, "model.language_model.q_proj")
+
+    def test_explicit_scope_with_to_dict_config_reconstructs_class(self):
+        model = _LanguageScopedLinearModel()
+        cfg = _DictLoraConfig(target_modules=["q_proj"], r=16)
+        adapted = adapt_lora_config_for_model(
+            model, cfg, lora_target_scope="language_model"
+        )
+        assert isinstance(adapted, _DictLoraConfig)
+        assert adapted is not cfg
+        assert adapted.r == 16
+        assert adapted.target_modules == build_scoped_lora_target_regex(
+            ["q_proj"], "language_model"
+        )
+
+    def test_explicit_scope_without_matches_raises_with_examples(self):
+        model = _LanguageScopedLinearModel()
+        cfg = _PlainLoraConfig(target_modules=["v_proj"])
+        with pytest.raises(
+            ValueError, match="No modules matched scoped LoRA target_modules"
+        ) as exc_info:
+            adapt_lora_config_for_model(model, cfg, lora_target_scope="language_model")
+        assert "Example keys under scope" in str(exc_info.value)
+        assert "model.language_model.q_proj" in str(exc_info.value)
+
+    def test_explicit_scope_with_empty_targets_raises(self):
+        cfg = _PlainLoraConfig(target_modules=[])
+        with pytest.raises(ValueError, match="lora_target_scope is set but no"):
+            adapt_lora_config_for_model(
+                _LanguageScopedLinearModel(), cfg, lora_target_scope="language_model"
+            )
+
+    def test_inferred_language_model_scope_with_all_linear(self):
+        model = _ScopedClippableModel()
+        cfg = _PlainLoraConfig(target_modules="all-linear")
+        adapted = adapt_lora_config_for_model(model, cfg)
+        assert adapted.target_modules == build_scoped_lora_target_regex(
+            ["k_proj", "q_proj"], "language_model"
+        )
+
+    def test_unscoped_clippable_rewrites_to_suffix_list(self):
+        model = _RootClippableModel()
+        cfg = _PlainLoraConfig(target_modules=["q_proj"])
+        adapted = adapt_lora_config_for_model(model, cfg)
+        assert adapted is not cfg
+        assert adapted.target_modules == ["q_proj.linear"]
+        assert cfg.target_modules == ["q_proj"]
+
+    def test_unscoped_clippable_with_matching_suffix_targets_is_identity(self):
+        model = _RootClippableModel()
+        cfg = _PlainLoraConfig(target_modules=["q_proj.linear"])
+        assert adapt_lora_config_for_model(model, cfg) is cfg
+
+    def test_unscoped_clippable_with_empty_targets_raises(self):
+        cfg = _PlainLoraConfig(target_modules=[])
+        with pytest.raises(
+            ValueError, match="ClippableLinear wrappers but no projection names"
+        ):
+            adapt_lora_config_for_model(_RootClippableModel(), cfg)
+
+    def test_unscoped_clippable_with_unmatched_projection_raises(self):
+        model = _RootClippableModel()
+        cfg = _PlainLoraConfig(target_modules=["v_proj"])
+        with pytest.raises(
+            ValueError,
+            match="No modules matched LoRA target_modules for ClippableLinear",
+        ) as exc_info:
+            adapt_lora_config_for_model(model, cfg)
+        assert "LORA_TARGET_SCOPE" in str(exc_info.value)
+
+
+class TestLogCudaMemorySnapshot:
+    def test_noop_without_cuda(self, monkeypatch, caplog):
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        with caplog.at_level(logging.INFO, logger="agilerl.utils.llm_utils"):
+            log_cuda_memory_snapshot("label")
+        assert caplog.text == ""
+
+    def test_logs_allocated_and_reserved_gib(self, monkeypatch, caplog):
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(torch.cuda, "memory_allocated", lambda device: 2 * GiB)
+        monkeypatch.setattr(torch.cuda, "memory_reserved", lambda device: 3 * GiB)
+        with caplog.at_level(logging.INFO, logger="agilerl.utils.llm_utils"):
+            log_cuda_memory_snapshot("after wake_up", device_index=0)
+        assert "after wake_up" in caplog.text
+        assert "allocated=2.00 GiB" in caplog.text
+        assert "reserved=3.00 GiB" in caplog.text
+
+
+class TestFormatColocatedVllmOomHint:
+    @staticmethod
+    def _fake_cuda(monkeypatch, free_gib=10, total_gib=40, alloc_gib=25):
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(
+            torch.cuda,
+            "mem_get_info",
+            lambda device_index: (free_gib * GiB, total_gib * GiB),
+        )
+        monkeypatch.setattr(
+            torch.cuda, "memory_allocated", lambda device_index: alloc_gib * GiB
+        )
+
+    def test_no_cuda_short_circuit(self, monkeypatch):
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        assert format_colocated_vllm_oom_hint() == "CUDA is not available on this host."
+
+    def test_full_summary_includes_all_sections(self, monkeypatch):
+        self._fake_cuda(monkeypatch)
+        hint = format_colocated_vllm_oom_hint(
+            kv_cache_memory_bytes=12 * GiB,
+            gpu_memory_utilization=0.55,
+            max_model_len=32768,
+        )
+        assert "40.00 GiB total" in hint
+        assert "25.00 GiB torch-allocated" in hint
+        assert "10.00 GiB free (driver)" in hint
+        assert "requests 12.00 GiB" in hint
+        assert "≈2.00 GiB more free VRAM" in hint
+        assert "gpu_memory_utilization=0.55" in hint
+        assert "max_model_len=32768" in hint
+        assert "trainer was still on GPU" in hint  # trainer_on_gpu defaults to True
+        assert "Check nvidia-smi" in hint
+
+    def test_optional_sections_omitted(self, monkeypatch):
+        self._fake_cuda(monkeypatch)
+        hint = format_colocated_vllm_oom_hint(trainer_on_gpu=False)
+        # Only the device summary and the closing advice remain.
+        assert "requests" not in hint  # kv_cache_memory_bytes line
+        assert "is also checked at" not in hint  # gpu_memory_utilization line
+        assert "KV slot length cap" not in hint  # max_model_len line
+        assert "DeepSpeed trainer" not in hint
+        assert "Check nvidia-smi" in hint
+
+    def test_kv_shortfall_clamped_at_zero(self, monkeypatch):
+        self._fake_cuda(monkeypatch, free_gib=10)
+        hint = format_colocated_vllm_oom_hint(kv_cache_memory_bytes=5 * GiB)
+        assert "≈0.00 GiB more free VRAM" in hint
+
+
+class TestResolveAttnImplementation:
+    def test_explicit_choice_is_authoritative(self):
+        assert resolve_attn_implementation("flex_attention") == "flex_attention"
+        assert resolve_attn_implementation("eager") == "eager"
+
+    def test_auto_prefers_flash_attention_2_when_installed(self, monkeypatch):
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
+        assert resolve_attn_implementation(None) == "flash_attention_2"
+        assert resolve_attn_implementation("auto") == "flash_attention_2"
+
+    def test_auto_falls_back_to_sdpa(self, monkeypatch):
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+        assert resolve_attn_implementation(None) == "sdpa"
+
+
+class _RegisterOnlyRegistry:
+    """Attention-function registry that rejects item assignment."""
+
+    def __init__(self):
+        self.registered = {}
+
+    def __setitem__(self, key, value):
+        msg = "immutable registry"
+        raise TypeError(msg)
+
+    def register(self, key, value):
+        self.registered[key] = value
+
+
+class TestPatchFlexAttentionKernelOptions:
+    @staticmethod
+    def _install_fake_flex(monkeypatch, *, already_patched=False, registry=None):
+        """Install fake transformers flex-attention modules into sys.modules."""
+        calls = []
+
+        def fake_flex_attention_forward(
+            module, query, key, value, attention_mask, **kwargs
+        ):
+            calls.append(kwargs)
+            return "flex-out"
+
+        if already_patched:
+            fake_flex_attention_forward._agilerl_kernel_opts_patched = True
+        flex_mod = types.ModuleType("transformers.integrations.flex_attention")
+        flex_mod.flex_attention_forward = fake_flex_attention_forward
+        modeling_mod = types.ModuleType("transformers.modeling_utils")
+        modeling_mod.ALL_ATTENTION_FUNCTIONS = registry if registry is not None else {}
+        monkeypatch.setitem(
+            sys.modules, "transformers.integrations.flex_attention", flex_mod
+        )
+        monkeypatch.setitem(sys.modules, "transformers.modeling_utils", modeling_mod)
+        return modeling_mod.ALL_ATTENTION_FUNCTIONS, calls
+
+    def test_returns_silently_when_flex_import_unavailable(self, monkeypatch):
+        flex_mod = types.ModuleType("transformers.integrations.flex_attention")
+        # Intentionally missing ``flex_attention_forward``.
+        modeling_mod = types.ModuleType("transformers.modeling_utils")
+        modeling_mod.ALL_ATTENTION_FUNCTIONS = {}
+        monkeypatch.setitem(
+            sys.modules, "transformers.integrations.flex_attention", flex_mod
+        )
+        monkeypatch.setitem(sys.modules, "transformers.modeling_utils", modeling_mod)
+        patch_flex_attention_kernel_options()
+        assert modeling_mod.ALL_ATTENTION_FUNCTIONS == {}
+
+    def test_double_patch_guard_skips_reinstall(self, monkeypatch):
+        registry, _ = self._install_fake_flex(monkeypatch, already_patched=True)
+        patch_flex_attention_kernel_options()
+        assert registry == {}
+
+    def test_auto_skips_on_hopper_capability(self, monkeypatch):
+        registry, _ = self._install_fake_flex(monkeypatch)
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (9, 0))
+        patch_flex_attention_kernel_options()
+        assert registry == {}
+
+    def test_installs_sram_safe_defaults_without_cuda(self, monkeypatch):
+        registry, calls = self._install_fake_flex(monkeypatch)
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        patch_flex_attention_kernel_options()
+        wrapper = registry["flex_attention"]
+        assert wrapper._agilerl_kernel_opts_patched is True
+        out = wrapper(None, "q", "k", "v", None)
+        assert out == "flex-out"
+        opts = calls[0]["kernel_options"]
+        assert opts["BLOCK_M"] == 32
+        assert opts["BLOCK_N"] == 32
+        assert opts["BLOCK_M1"] == 16
+        assert opts["num_warps"] == 4
+        assert opts["num_stages"] == 2
+
+    def test_capability_probe_failure_installs_safe_defaults(self, monkeypatch):
+        registry, _ = self._install_fake_flex(monkeypatch)
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+
+        def _boom():
+            msg = "no device"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(torch.cuda, "get_device_capability", _boom)
+        patch_flex_attention_kernel_options()
+        assert "flex_attention" in registry
+
+    def test_explicit_options_bypass_hopper_autoskip(self, monkeypatch):
+        registry, calls = self._install_fake_flex(monkeypatch)
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (9, 0))
+        patch_flex_attention_kernel_options(options={"BLOCK_M": 64})
+        wrapper = registry["flex_attention"]
+        wrapper(None, "q", "k", "v", None)
+        assert calls[0]["kernel_options"] == {"BLOCK_M": 64}
+
+    def test_caller_kernel_options_take_precedence(self, monkeypatch):
+        registry, calls = self._install_fake_flex(monkeypatch)
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        patch_flex_attention_kernel_options()
+        wrapper = registry["flex_attention"]
+        wrapper(None, "q", "k", "v", None, kernel_options={"BLOCK_M": 128})
+        assert calls[0]["kernel_options"] == {"BLOCK_M": 128}
+
+    def test_falls_back_to_registry_register_method(self, monkeypatch):
+        registry = _RegisterOnlyRegistry()
+        self._install_fake_flex(monkeypatch, registry=registry)
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        patch_flex_attention_kernel_options()
+        assert "flex_attention" in registry.registered
+
+
+class TestCreateModelFromNameOrPathDefaults:
+    @staticmethod
+    def _fake_loader(captured):
+        class _Loader:
+            @staticmethod
+            def from_pretrained(pretrained_model_name_or_path, **kwargs):
+                captured["name"] = pretrained_model_name_or_path
+                captured["kwargs"] = kwargs
+                return "model-sentinel"
+
+        return _Loader
+
+    def test_defaults_to_bf16_and_sdpa(self, monkeypatch):
+        captured = {}
+        monkeypatch.setattr(
+            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
+        )
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+        out = create_model_from_name_or_path("org/tiny")
+        assert out == "model-sentinel"
+        assert captured["name"] == "org/tiny"
+        assert captured["kwargs"]["torch_dtype"] is torch.bfloat16
+        assert captured["kwargs"]["attn_implementation"] == "sdpa"
+
+    def test_distributed_defaults_to_fp16(self, monkeypatch):
+        captured = {}
+        monkeypatch.setattr(
+            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
+        )
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+        create_model_from_name_or_path("org/tiny", use_distributed=True)
+        assert captured["kwargs"]["torch_dtype"] is torch.float16
+
+    def test_caller_dtype_stays_authoritative(self, monkeypatch):
+        captured = {}
+        monkeypatch.setattr(
+            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
+        )
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+        create_model_from_name_or_path(
+            "org/tiny", model_config={"torch_dtype": torch.float32}
+        )
+        assert captured["kwargs"]["torch_dtype"] is torch.float32
+
+    def test_flex_attention_triggers_kernel_options_patch(self, monkeypatch):
+        captured = {}
+        patch_calls = []
+        monkeypatch.setattr(
+            llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
+        )
+        monkeypatch.setattr(
+            llm_utils_module,
+            "patch_flex_attention_kernel_options",
+            lambda *a, **k: patch_calls.append(1),
+        )
+        caller_config = {"attn_implementation": "flex_attention"}
+        create_model_from_name_or_path("org/tiny", model_config=caller_config)
+        assert captured["kwargs"]["attn_implementation"] == "flex_attention"
+        assert patch_calls == [1]
+        # The caller's dict is copied, not mutated.
+        assert caller_config == {"attn_implementation": "flex_attention"}
+
+
+class TestValidateImportanceSamplingLevel:
+    @pytest.mark.parametrize("level", ["token", "turn", "trajectory"])
+    @pytest.mark.parametrize("allow_auto", [True, False])
+    def test_valid_levels_pass(self, level, allow_auto):
+        validate_importance_sampling_level(level, allow_auto=allow_auto)
+
+    def test_auto_accepted_only_when_allowed(self):
+        validate_importance_sampling_level("auto", allow_auto=True)
+        with pytest.raises(ValueError, match="got 'auto'"):
+            validate_importance_sampling_level("auto", allow_auto=False)
+
+    def test_legacy_sequence_level_rejected_after_rename(self):
+        with pytest.raises(ValueError, match="got 'sequence'") as exc_info:
+            validate_importance_sampling_level("sequence", allow_auto=True)
+        assert "trajectory" in str(exc_info.value)
+
+
+class TestPoolLogRatioByLevel:
+    def test_token_level_is_identity(self):
+        tlr = torch.tensor([[1.0, 2.0]])
+        mask = torch.tensor([[1.0, 0.0]])
+        weights, unit_mask = pool_log_ratio_by_level(tlr, mask, None, "token")
+        assert weights is tlr
+        assert unit_mask is mask
+
+    def test_turn_level_infers_num_turns_from_turn_ids(self):
+        tlr = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
+        mask = torch.ones(1, 4)
+        turn_ids = torch.tensor([[0, 0, 1, 1]])
+        weights, unit_mask = pool_log_ratio_by_level(
+            tlr, mask, turn_ids, "turn", num_turns=None
+        )
+        assert weights.shape == (1, 2)
+        assert weights[0].tolist() == pytest.approx([1.5, 3.5])
+        assert unit_mask.tolist() == [[1.0, 1.0]]
+
+    def test_turn_level_masks_out_turns_without_action_tokens(self):
+        tlr = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
+        mask = torch.tensor([[1.0, 1.0, 0.0, 0.0]])
+        turn_ids = torch.tensor([[0, 0, 1, 1]])
+        weights, unit_mask = pool_log_ratio_by_level(tlr, mask, turn_ids, "turn")
+        assert unit_mask.tolist() == [[1.0, 0.0]]
+        assert weights[0, 1].item() == pytest.approx(0.0)
+
+    def test_turn_level_sum_reduction_matches_product_ratio_log_pooling(self):
+        tlr = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
+        mask = torch.ones(1, 4)
+        turn_ids = torch.tensor([[0, 0, 1, 1]])
+        weights, unit_mask = pool_log_ratio_by_level(
+            tlr, mask, turn_ids, "turn", turn_reduction="sum"
+        )
+        assert weights.shape == (1, 2)
+        assert weights[0].tolist() == pytest.approx([3.0, 7.0])
+        assert unit_mask.tolist() == [[1.0, 1.0]]
+
+    def test_trajectory_level_masks_rows_without_action_tokens(self):
+        tlr = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+        mask = torch.tensor([[1.0, 1.0], [0.0, 0.0]])
+        weights, unit_mask = pool_log_ratio_by_level(tlr, mask, None, "trajectory")
+        assert unit_mask.tolist() == [[1.0], [0.0]]
+        assert weights[0, 0].item() == pytest.approx(1.5)
+        assert weights[1, 0].item() == pytest.approx(0.0)
+
+
+class TestBuildCompletionMask:
+    def test_masks_prompt_and_pad_positions_with_shift(self):
+        completion = torch.tensor([[5, 6, 7, 0, 0]])
+        mask = build_completion_mask(completion, prompt_len=2, pad_token_id=0)
+        # Positions >= 2 and non-pad -> [F,F,T,F,F]; leading position dropped.
+        assert mask.shape == (1, 4)
+        assert mask.tolist() == [[False, True, False, False]]
+
+    @pytest.mark.parametrize("prompt_len", [None, 0])
+    def test_no_prompt_prefix_keeps_all_non_pad_tokens(self, prompt_len):
+        completion = torch.tensor([[5, 6, 7, 0, 0]])
+        mask = build_completion_mask(completion, prompt_len=prompt_len, pad_token_id=0)
+        assert mask.tolist() == [[True, True, False, False]]
+
+
+class TestCudaTensorBytesInModule:
+    def test_cpu_module_reports_zero(self):
+        assert cuda_tensor_bytes_in_module(nn.Linear(4, 4)) == 0
+
+    def test_sums_only_cuda_tensors_across_params_and_buffers(self):
+        class _FakeDeviceTensor:
+            def __init__(self, numel, element_size, is_cuda):
+                self.is_cuda = is_cuda
+                self._numel = numel
+                self._element_size = element_size
+
+            def numel(self):
+                return self._numel
+
+            def element_size(self):
+                return self._element_size
+
+        module = SimpleNamespace(
+            parameters=lambda: iter(
+                [
+                    _FakeDeviceTensor(10, 2, is_cuda=True),
+                    _FakeDeviceTensor(100, 4, is_cuda=False),
+                ]
+            ),
+            buffers=lambda: iter([_FakeDeviceTensor(5, 4, is_cuda=True)]),
+        )
+        assert cuda_tensor_bytes_in_module(module) == 10 * 2 + 5 * 4
+
+
+class TestCollectTrainableParamStats:
+    @staticmethod
+    def _mixed_grad_net():
+        net = nn.Module()
+        net.trainable = nn.Linear(4, 4)  # 20 params
+        net.frozen = nn.Linear(4, 2)  # 10 params
+        net.frozen.requires_grad_(False)
+        return net
+
+    def test_counts_trainable_and_total_params(self):
+        agent = SimpleNamespace(actor=self._mixed_grad_net())
+        stats = collect_trainable_param_stats([agent])
+        assert stats["trainable_params"] == 20
+        assert stats["total_params"] == 30
+        assert stats["trainable_param_ratio"] == pytest.approx(20 / 30)
+
+    def test_unwraps_module_then_model_attributes(self):
+        inner = self._mixed_grad_net()
+        actor = SimpleNamespace(module=SimpleNamespace(model=inner))
+        stats = collect_trainable_param_stats([SimpleNamespace(actor=actor)])
+        assert stats["trainable_params"] == 20
+        assert stats["total_params"] == 30
+
+    def test_actor_none_returns_empty_dict(self):
+        assert collect_trainable_param_stats([SimpleNamespace(actor=None)]) == {}
+
+    def test_zero_param_actor_returns_empty_dict(self):
+        assert collect_trainable_param_stats([SimpleNamespace(actor=nn.Module())]) == {}
+
+    def test_empty_population_swallowed_as_empty_dict(self):
+        assert collect_trainable_param_stats([]) == {}
+
+    def test_introspection_failure_swallowed_as_empty_dict(self):
+        class _ExplodingActor:
+            def parameters(self):
+                msg = "boom"
+                raise RuntimeError(msg)
+
+        agent = SimpleNamespace(actor=_ExplodingActor())
+        assert collect_trainable_param_stats([agent]) == {}
+
+
+class _RecordingToModule(nn.Module):
+    """nn.Module that records every ``.to()`` call."""
+
+    def __init__(self):
+        super().__init__()
+        self.lin = nn.Linear(2, 2)
+        self.to_calls = []
+
+    def to(self, *args, **kwargs):
+        self.to_calls.append((args, kwargs))
+        return super().to(*args, **kwargs)
+
+
+class TestOffloadColocatedTrainerFromGpu:
+    def test_forces_cpu_move_even_when_already_on_cpu(self, monkeypatch):
+        model = _RecordingToModule()
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        remaining = offload_colocated_trainer_from_gpu(model)
+        assert remaining == 0
+        assert (("cpu",), {}) in model.to_calls
+
+    def test_synchronizes_and_clears_cache_when_cuda_available(self, monkeypatch):
+        model = _RecordingToModule()
+        calls = {"sync": 0, "empty": 0}
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(
+            torch.cuda,
+            "synchronize",
+            lambda: calls.__setitem__("sync", calls["sync"] + 1),
+        )
+        monkeypatch.setattr(
+            torch.cuda,
+            "empty_cache",
+            lambda: calls.__setitem__("empty", calls["empty"] + 1),
+        )
+        remaining = offload_colocated_trainer_from_gpu(model)
+        assert remaining == 0
+        assert calls == {"sync": 1, "empty": 1}
+
+
+class TestResolveVllmMaxLoraRank:
+    def test_no_trainer_rank_keeps_configured_value(self):
+        assert resolve_vllm_max_lora_rank(16, None) == 16
+
+    def test_trainer_rank_raises_floor(self):
+        assert resolve_vllm_max_lora_rank(16, 32) == 32
+
+    def test_configured_value_wins_when_larger(self):
+        assert resolve_vllm_max_lora_rank(16, 8) == 16
+
+
+class TestResolveVllmMaxNumBatchedTokens:
+    def test_explicit_value_is_authoritative(self):
+        assert resolve_vllm_max_num_batched_tokens(8, 32768, explicit=4096) == 4096
+
+    def test_small_worst_case_used_directly(self):
+        # 2 * 1024 = 2048 is below the 8k-per-slot concurrent budget.
+        assert resolve_vllm_max_num_batched_tokens(2, 1024) == 2048
+
+    def test_concurrent_budget_caps_long_context_batches(self):
+        # 8 * 32768 = 262144 worst case capped at max(32768, 8 * 8192) = 65536.
+        assert resolve_vllm_max_num_batched_tokens(8, 32768) == 65536
+
+    def test_keeps_at_least_one_full_context(self):
+        # Budget never drops below one max_model_len context.
+        assert resolve_vllm_max_num_batched_tokens(1, 32768) == 32768
+
+
+class TestResolvePeftAdapterExportDir:
+    def test_nested_layout_preferred(self, tmp_path):
+        nested = tmp_path / "actor"
+        nested.mkdir()
+        (nested / "adapter_config.json").write_text("{}", encoding="utf-8")
+        assert resolve_peft_adapter_export_dir(tmp_path, "actor") == nested
+
+    def test_flat_layout_falls_back_to_staging_dir(self, tmp_path):
+        (tmp_path / "adapter_config.json").write_text("{}", encoding="utf-8")
+        assert resolve_peft_adapter_export_dir(tmp_path, "actor") == tmp_path
+
+    def test_defaults_to_nested_when_nothing_exists(self, tmp_path):
+        assert resolve_peft_adapter_export_dir(tmp_path, "actor") == tmp_path / "actor"
+
+
+def _vllm_config(**overrides):
+    """SimpleNamespace mirroring the VLLMConfig fields read by the builder."""
+    base = dict(
+        vllm_model_name_or_path=None,
+        tensor_parallel_size=1,
+        gpu_memory_utilization=0.8,
+        max_num_seqs=8,
+        sleep_mode=True,
+        dtype=None,
+        quantization=None,
+        kv_cache_dtype=None,
+        kv_cache_memory_bytes=None,
+        enforce_eager=None,
+        max_lora_rank=16,
+        max_loras=1,
+        max_num_batched_tokens=None,
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+class TestBuildVllmLlmInitKwargs:
+    def test_defaults_fall_back_to_trainer_model(self):
+        kwargs = build_vllm_llm_init_kwargs(
+            _vllm_config(),
+            trainer_model_name_or_path="org/base",
+            max_model_len=32768,
+        )
+        assert kwargs["model"] == "org/base"
+        assert kwargs["tensor_parallel_size"] == 1
+        assert kwargs["gpu_memory_utilization"] == 0.8
+        assert kwargs["max_num_seqs"] == 8
+        assert kwargs["max_model_len"] == 32768
+        assert kwargs["distributed_executor_backend"] == "external_launcher"
+        assert kwargs["seed"] == 0
+        assert kwargs["max_num_batched_tokens"] == 65536
+        assert kwargs["model_impl"] == "vllm"
+        assert kwargs["enable_sleep_mode"] is True
+        # Colocated vLLM always serves the trainer's LoRA adapter.
+        assert kwargs["enable_lora"] is True
+        assert kwargs["max_lora_rank"] == 16
+        assert kwargs["max_loras"] == 1
+        for absent in (
+            "dtype",
+            "quantization",
+            "kv_cache_dtype",
+            "kv_cache_memory_bytes",
+            "enforce_eager",
+        ):
+            assert absent not in kwargs
+
+    def test_optional_fields_and_lora_rank_floor(self):
+        kwargs = build_vllm_llm_init_kwargs(
+            _vllm_config(
+                vllm_model_name_or_path="org/quantized",
+                dtype="bfloat16",
+                quantization="bitsandbytes",
+                kv_cache_dtype="fp8",
+                kv_cache_memory_bytes=123456,
+                enforce_eager=True,
+                max_num_batched_tokens=4096,
+                tensor_parallel_size=2,
+            ),
+            trainer_model_name_or_path="org/base",
+            max_model_len=8192,
+            process_index=5,
+            lora_rank=64,
+        )
+        assert kwargs["model"] == "org/quantized"
+        assert kwargs["dtype"] == "bfloat16"
+        assert kwargs["quantization"] == "bitsandbytes"
+        assert kwargs["kv_cache_dtype"] == "fp8"
+        assert kwargs["kv_cache_memory_bytes"] == 123456
+        assert kwargs["enforce_eager"] is True
+        assert kwargs["max_num_batched_tokens"] == 4096
+        assert kwargs["seed"] == 2  # process_index // tensor_parallel_size
+        assert kwargs["max_lora_rank"] == 64  # trainer rank outranks the config
+
+
+class TestBuildVllmRolloutLoraRequest:
+    def test_builds_request_with_defaults_and_str_path(self, monkeypatch, tmp_path):
+        class _FakeLoRARequest:
+            def __init__(self, lora_name, lora_int_id, lora_path, load_inplace):
+                self.lora_name = lora_name
+                self.lora_int_id = lora_int_id
+                self.lora_path = lora_path
+                self.load_inplace = load_inplace
+
+        fake_mod = types.ModuleType("vllm.lora.request")
+        fake_mod.LoRARequest = _FakeLoRARequest
+        monkeypatch.setitem(sys.modules, "vllm.lora.request", fake_mod)
+
+        adapter_path = tmp_path / "adapter"
+        req = build_vllm_rollout_lora_request(adapter_path, load_inplace=True)
+        assert req.lora_name == "actor"
+        assert req.lora_int_id == 1
+        assert isinstance(req.lora_path, str)
+        assert req.lora_path == str(adapter_path)
+        assert req.load_inplace is True
+
+
+class TestPeftLoraKeyHelpers:
+    @pytest.mark.parametrize(
+        "marker",
+        [".lora_A.", ".lora_B.", ".lora_embedding_A.", ".lora_embedding_B."],
+    )
+    def test_module_key_strips_lora_weight_suffixes(self, marker):
+        key = f"base.layers.0.q_proj{marker}weight"
+        assert peft_lora_state_dict_key_to_module_key(key) == "base.layers.0.q_proj"
+
+    def test_module_key_passthrough_without_marker(self):
+        assert (
+            peft_lora_state_dict_key_to_module_key("base.layers.0.q_proj.weight")
+            == "base.layers.0.q_proj.weight"
+        )
+
+    def test_remap_strips_clippable_inner_linear_suffix(self):
+        assert (
+            remap_peft_lora_key_for_vllm("model.layers.0.q_proj.linear.lora_A.weight")
+            == "model.layers.0.q_proj.lora_A.weight"
+        )
+        assert (
+            remap_peft_lora_key_for_vllm("model.layers.0.q_proj.linear.lora_B.weight")
+            == "model.layers.0.q_proj.lora_B.weight"
+        )
+
+    def test_remap_strips_base_layer_segment(self):
+        assert (
+            remap_peft_lora_key_for_vllm("model.layers.0.q_proj.base_layer.weight")
+            == "model.layers.0.q_proj.weight"
+        )
+
+    def test_remap_passthrough_for_plain_keys(self):
+        key = "model.layers.0.q_proj.lora_A.weight"
+        assert remap_peft_lora_key_for_vllm(key) == key
+
+
+class TestFilterPeftStateDictForVllmLora:
+    def test_keeps_matching_modules_and_remaps_keys(self):
+        t_keep = torch.zeros(1)
+        t_drop = torch.ones(1)
+        state = {
+            "model.layers.0.q_proj.linear.lora_A.weight": t_keep,
+            "model.layers.0.out_proj.lora_A.weight": t_drop,
+        }
+        out = filter_peft_state_dict_for_vllm_lora(state, ["q_proj.linear"])
+        assert list(out) == ["model.layers.0.q_proj.lora_A.weight"]
+        assert out["model.layers.0.q_proj.lora_A.weight"] is t_keep
+
+    def test_regex_target_modules_supported(self):
+        state = {"model.layers.0.q_proj.linear.lora_A.weight": torch.zeros(1)}
+        out = filter_peft_state_dict_for_vllm_lora(state, r"(?:.*\.)?(q_proj)\.linear")
+        assert list(out) == ["model.layers.0.q_proj.lora_A.weight"]
+
+    def test_no_matches_yields_empty_dict(self):
+        state = {"model.layers.0.out_proj.lora_A.weight": torch.zeros(1)}
+        assert filter_peft_state_dict_for_vllm_lora(state, ["q_proj"]) == {}
+
+
+class TestJsonSafeValue:
+    def test_primitives_pass_through(self):
+        assert llm_utils_module._json_safe_value(None) is None
+        assert llm_utils_module._json_safe_value("x") == "x"
+        assert llm_utils_module._json_safe_value(3) == 3
+        assert llm_utils_module._json_safe_value(1.5) == 1.5
+        assert llm_utils_module._json_safe_value(True) is True
+
+    def test_sets_become_sorted_lists(self):
+        assert llm_utils_module._json_safe_value({"b", "a"}) == ["a", "b"]
+
+    def test_tuples_become_lists(self):
+        assert llm_utils_module._json_safe_value((1, "two")) == [1, "two"]
+
+    def test_nested_dicts_get_string_keys(self):
+        assert llm_utils_module._json_safe_value({1: {"s": {"b", "a"}}}) == {
+            "1": {"s": ["a", "b"]}
+        }
+
+    def test_arbitrary_objects_stringified(self):
+        assert llm_utils_module._json_safe_value(torch.bfloat16) == "torch.bfloat16"
+
+
+class TestSavePeftAdapterForVllmRollout:
+    class _FakePeftConfig:
+        def to_dict(self):
+            return {
+                "r": 8,
+                "target_modules": {"q_proj"},
+                "lora_dtype": torch.bfloat16,
+            }
+
+    def _install_fakes(self, monkeypatch, state):
+        """Install fake peft/safetensors modules and return the call recorder."""
+        calls = {}
+        fake_peft = types.ModuleType("peft")
+
+        def fake_get_state(model, adapter_name):
+            calls["adapter_name"] = adapter_name
+            return dict(state)
+
+        fake_peft.get_peft_model_state_dict = fake_get_state
+        fake_st = types.ModuleType("safetensors.torch")
+
+        def fake_save_file(tensors, path):
+            calls["saved_tensors"] = tensors
+            calls["saved_path"] = Path(path)
+            Path(path).write_bytes(b"")
+
+        fake_st.save_file = fake_save_file
+        monkeypatch.setitem(sys.modules, "peft", fake_peft)
+        monkeypatch.setitem(sys.modules, "safetensors.torch", fake_st)
+        monkeypatch.setattr(llm_utils_module, "HAS_LLM_DEPENDENCIES", True)
+        return calls
+
+    def _peft_model(self):
+        return SimpleNamespace(peft_config={"actor": self._FakePeftConfig()})
+
+    def test_requires_llm_dependencies(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(llm_utils_module, "HAS_LLM_DEPENDENCIES", False)
+        with pytest.raises(ImportError, match="requires peft and transformers"):
+            save_peft_adapter_for_vllm_rollout(
+                MagicMock(), tmp_path, "actor", target_modules=["q_proj"]
+            )
+
+    def test_non_main_process_returns_export_dir_without_writing(
+        self, monkeypatch, tmp_path
+    ):
+        calls = self._install_fakes(monkeypatch, state={})
+        out = save_peft_adapter_for_vllm_rollout(
+            self._peft_model(),
+            tmp_path,
+            "actor",
+            target_modules=["q_proj"],
+            is_main_process=False,
+        )
+        assert out == tmp_path / "actor"
+        assert not (tmp_path / "actor").exists()
+        assert "adapter_name" not in calls
+
+    def test_exports_filtered_remapped_adapter_with_config(self, monkeypatch, tmp_path):
+        t_keep = torch.zeros(2)
+        state = {
+            "model.layers.0.q_proj.linear.lora_A.weight": t_keep,
+            "model.layers.0.out_proj.lora_A.weight": torch.ones(2),
+        }
+        calls = self._install_fakes(monkeypatch, state)
+        out = save_peft_adapter_for_vllm_rollout(
+            self._peft_model(),
+            tmp_path,
+            "actor",
+            target_modules=["q_proj.linear"],
+        )
+        assert out == tmp_path / "actor"
+        assert calls["adapter_name"] == "actor"
+        assert list(calls["saved_tensors"]) == ["model.layers.0.q_proj.lora_A.weight"]
+        assert calls["saved_tensors"]["model.layers.0.q_proj.lora_A.weight"] is t_keep
+        assert calls["saved_path"] == tmp_path / "actor" / "adapter_model.safetensors"
+        cfg = json.loads(
+            (tmp_path / "actor" / "adapter_config.json").read_text(encoding="utf-8")
+        )
+        assert cfg["target_modules"] == ["q_proj.linear"]
+        assert cfg["r"] == 8
+        assert cfg["lora_dtype"] == "torch.bfloat16"
+
+    def test_raises_when_filter_drops_every_tensor(self, monkeypatch, tmp_path):
+        state = {"model.layers.0.out_proj.lora_A.weight": torch.zeros(2)}
+        self._install_fakes(monkeypatch, state)
+        with pytest.raises(ValueError, match="No LoRA tensors left for vLLM export"):
+            save_peft_adapter_for_vllm_rollout(
+                self._peft_model(),
+                tmp_path,
+                "actor",
+                target_modules=["q_proj"],
+            )

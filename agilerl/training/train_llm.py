@@ -24,6 +24,7 @@ from agilerl.rollouts.on_policy import collect_rollouts_llm
 from agilerl.typing import PopulationType
 from agilerl.utils.algo_utils import stack_and_pad_experiences
 from agilerl.utils.distributed import barrier, is_distributed, is_main_process
+from agilerl.utils.llm_utils import collect_trainable_param_stats
 from agilerl.utils.utils import (
     _distributed_world_size,
     aggregate_metrics_across_gpus,
@@ -112,6 +113,7 @@ def _init_llm_wandb(
     init_hp["batch_size"] = init_hp.get("BATCH_SIZE", pop[0].batch_size)
     init_hp["distributed_training"] = is_distributed()
     init_hp["model_name"] = pop[0].pretrained_model_name_or_path
+    init_hp.update(collect_trainable_param_stats(pop))
     if additional_fields is not None:
         init_hp.update(additional_fields)
 
@@ -684,7 +686,13 @@ def finetune_llm_reasoning(
             current_prompts = prompts_by_agent[agent_idx] if uses_env_fn else prompts
 
             agent.set_reference_policy(training_env.num_epochs)
-            completion_ids, action_masks = agent.get_action(current_prompts)
+            action_result = agent.get_action(current_prompts)
+            completion_ids = action_result.completion_ids
+            action_masks = action_result.action_masks
+            # Per-row vLLM sampling logprobs captured during get_action (only
+            # when the GRPO-family mismatch correction is enabled); ``None``
+            # otherwise.
+            sampling_logps = action_result.sampling_logps
             completion_lengths = np.mean([x.shape[1] for x in completion_ids])
 
             # Use the reward function stored in env.step to calculate reward of the each answer from the group
@@ -696,7 +704,13 @@ def finetune_llm_reasoning(
                 rewards,
             )
 
-            learn_output = agent.learn(experiences)
+            learn_kwargs = (
+                {"sampling_logps": sampling_logps}
+                if sampling_logps is not None
+                and isinstance(agent, (GRPO, LLMPPO, LLMREINFORCE))
+                else {}
+            )
+            learn_output = agent.learn(experiences, **learn_kwargs)
             metrics = _normalize_learn_metrics(
                 agent=agent,
                 learn_output=learn_output,
@@ -1235,28 +1249,6 @@ def finetune_llm_multiturn(
         init_hp["ALGO"] = pop[0].algo
 
     batch_size = init_hp.get("BATCH_SIZE", pop[0].batch_size)
-    for agent in pop:
-        effective_group_size = getattr(agent, "group_size", 1)
-        if isinstance(agent, GRPO):
-            if (
-                batch_size > effective_group_size
-                and batch_size % effective_group_size != 0
-            ):
-                msg = (
-                    f"Batch size ({batch_size}) must be divisible by "
-                    f"group_size ({effective_group_size}) for GRPO when group size is greater than batch size."
-                )
-                raise ValueError(msg)
-
-            if (
-                batch_size < effective_group_size
-                and effective_group_size % batch_size != 0
-            ):
-                msg = (
-                    f"Group size ({effective_group_size}) must be divisible by "
-                    f"batch size ({batch_size}) for GRPO when batch size is less than group size."
-                )
-                raise ValueError(msg)
 
     env_name = init_hp.get("env_name", "gem_multiturn")
     data_increment = _distributed_world_size()
@@ -1330,6 +1322,7 @@ def finetune_llm_multiturn(
                 all_rewards,
                 batch_steps,
                 group_seed,
+                all_sampling_logps,
             ) = collect_rollouts_llm(
                 agent=agent,
                 env=rollout_env,
@@ -1366,11 +1359,20 @@ def finetune_llm_multiturn(
                 rewards_2d,
             )
 
+            # Pass turn_ids to every multi-turn RL agent that accepts it
+            # (LLMPPO/LLMREINFORCE, and the GRPO family — GRPO/CISPO/GSPO —
+            # which use it for turn-level importance sampling + per-turn
+            # group-relative advantages). Agents that don't need it (e.g.
+            # token/sequence levels, GSPO) simply ignore it.
             learn_kwargs = (
                 {"turn_ids": turn_ids_padded}
-                if isinstance(agent, (LLMREINFORCE, LLMPPO))
+                if isinstance(agent, (LLMREINFORCE, LLMPPO, GRPO))
                 else {}
             )
+            if all_sampling_logps is not None and isinstance(
+                agent, (GRPO, LLMPPO, LLMREINFORCE)
+            ):
+                learn_kwargs["sampling_logps"] = all_sampling_logps
             learn_output = agent.learn(experiences, **learn_kwargs)
             metrics = _normalize_learn_metrics(
                 agent=agent,
@@ -1582,22 +1584,38 @@ def finetune_llm_sft(
     positions are masked with ``ignore_index=-100``).
 
     :param pop: Population of SFT agents.
+    :type pop: PopulationType
     :param env: Shared :class:`~agilerl.llm_envs.SFTGym` instance.
+    :type env: SFTGym | None, optional
     :param env_fn: Optional factory returning one ``SFTGym`` per agent.
+    :type env_fn: Callable[[], SFTGym] | None, optional
     :param init_hp: Hyperparameter dict forwarded to wandb, defaults to None.
+    :type init_hp: dict[str, Any] | None, optional
     :param save_elite: Save best agent to disk, defaults to None.
+    :type save_elite: bool | None, optional
     :param elite_path: Directory for checkpoints, defaults to None.
+    :type elite_path: str | None, optional
     :param wb: Weights & Biases logging, defaults to False.
+    :type wb: bool, optional
     :param evo_steps: Steps between HPO evolution rounds, defaults to None.
+    :type evo_steps: int | None, optional
     :param checkpoint_steps: Steps between non-HPO saves, defaults to None.
+    :type checkpoint_steps: int | None, optional
     :param tournament: Tournament selection object, defaults to None.
+    :type tournament: TournamentSelection | None, optional
     :param mutation: Mutation object, defaults to None.
+    :type mutation: Mutations | None, optional
     :param wandb_api_key: W&B API key, defaults to None.
+    :type wandb_api_key: str | None, optional
     :param evaluation_interval: Steps between eval passes, defaults to 10.
+    :type evaluation_interval: int, optional
     :param verbose: Print summary at end, defaults to True.
     :param max_steps: Total samples to process (one epoch if None), defaults to None.
+    :type max_steps: int | None, optional
     :param num_epochs: Dataset passes; takes precedence over max_steps when set.
+    :type num_epochs: int | None, optional
     :param log_csv: If True and ``elite_path`` is set, log aggregate metrics to CSV.
+    :type log_csv: bool, optional
     """
     _validate_llm_evolution_args(evo_steps, tournament, mutation, checkpoint_steps)
     envs, uses_env_fn = _resolve_training_envs(pop=pop, env=env, env_fn=env_fn)

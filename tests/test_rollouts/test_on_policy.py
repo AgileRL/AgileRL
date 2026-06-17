@@ -6,6 +6,7 @@ pytest.importorskip("transformers", reason="LLM tests require transformers.")
 pytest.importorskip("peft", reason="LLM tests require peft.")
 pytest.importorskip("vllm", reason="LLM tests require vllm.")
 
+from agilerl.algorithms.core import ActionResult
 from agilerl.rollouts.on_policy import collect_rollouts_llm
 from agilerl.llm_envs import (
     SyncMultiTurnVecEnv,
@@ -129,7 +130,7 @@ class TestCollectRolloutsLlm:
                 max_output_tokens=8,
             )
 
-        experiences, masks, turns, rewards, steps, next_group_seed = (
+        experiences, masks, turns, rewards, steps, next_group_seed, _sampling_logps = (
             collect_rollouts_llm(
                 agent=agent,
                 env=env,
@@ -205,7 +206,7 @@ class TestCollectRolloutsLlm:
                 self,
                 prompts: list[dict[str, torch.Tensor]],
                 training: bool = True,
-            ) -> tuple[list[torch.Tensor], None]:
+            ) -> ActionResult:
                 """Return one completion per prompt row while preserving input order."""
                 del training
                 row_tokens = [
@@ -215,7 +216,11 @@ class TestCollectRolloutsLlm:
                     torch.tensor([[int(tok), int(tok) + 1]], dtype=torch.long)
                     for tok in row_tokens
                 ]
-                return completions, None
+                return ActionResult(
+                    completion_ids=completions,
+                    action_masks=None,
+                    sampling_logps=None,
+                )
 
         def env_fn() -> _OrderingEnv:
             """Create deterministic env instances in construction order."""
@@ -226,7 +231,7 @@ class TestCollectRolloutsLlm:
         env = SyncMultiTurnVecEnv(env_factory=env_fn, batch_size=4, group_size=2)
         agent = _EchoAgent()
 
-        completion_ids_list, _masks, _turns, rewards, steps, next_group_seed = (
+        completion_ids_list, _masks, _turns, rewards, steps, next_group_seed, _logps = (
             collect_rollouts_llm(
                 agent=agent,
                 env=env,

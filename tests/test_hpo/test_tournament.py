@@ -412,7 +412,7 @@ class TestTournamentSelectionSelect:
             clip_coef=0.2,
             max_grad_norm=0.1,
             update_epochs=1,
-            group_size=1,
+            group_size=2,
             temperature=0.9,
             calc_position_embeddings=True,
             use_memory_efficient_params=True,

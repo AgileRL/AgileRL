@@ -1272,6 +1272,7 @@ class TestMutationsMutation:
             "LR": 0.001,
             "MAX_GRAD_NORM": 0.5,
             "UPDATE_EPOCHS": 1,
+            "MAX_OUTPUT_TOKENS": 32,
             "MAX_MODEL_LEN": 100,
         }
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -1364,6 +1365,7 @@ class TestMutationsMutation:
             "LR": 5e-7,
             "MAX_GRAD_NORM": 0.1,
             "UPDATE_EPOCHS": 1,
+            "MAX_OUTPUT_TOKENS": 32,
             "MAX_MODEL_LEN": 100,
         }
 

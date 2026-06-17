@@ -4,6 +4,7 @@ from numbers import Number
 from typing import (
     Any,
     ClassVar,
+    NamedTuple,
     Protocol,
     TypedDict,
     TypeVar,
@@ -172,3 +173,18 @@ class BPTTSequenceType(Enum):
     FIFTY_PERCENT_OVERLAP = (
         "fifty_percent_overlap"  # Generate sequences with 50% overlap
     )
+
+
+class ActionResult(NamedTuple):
+    """Structured return of an LLM algorithm's :meth:`get_action`.
+
+    A tuple subclass, so callers may unpack positionally *or* (preferred, and
+    forward-compatible if fields are added) read by attribute. ``sampling_logps``
+    holds the per-completion vLLM sampling logprobs captured for the
+    sampling-mismatch correction, or ``None`` when not captured (HF generation,
+    evaluation, or correction disabled).
+    """
+
+    completion_ids: list[torch.Tensor]
+    action_masks: list[torch.Tensor]
+    sampling_logps: list[torch.Tensor | None] | None = None

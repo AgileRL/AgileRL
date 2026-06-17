@@ -16,6 +16,23 @@ from tests.utils import (
 )
 
 
+def _cuda_bf16_available() -> bool:
+    """True only when a usable CUDA device supports bf16.
+
+    ``torch.cuda.is_bf16_supported()`` calls ``current_device()`` internally,
+    which raises ``RuntimeError`` when the CUDA driver is loaded but no device
+    is visible (e.g. ``CUDA_VISIBLE_DEVICES=`` on the CPU CI runner, where
+    ``is_available()`` can still report True). Guard against that so model
+    construction falls back to fp32 instead of crashing.
+    """
+    if not torch.cuda.is_available() or torch.cuda.device_count() == 0:
+        return False
+    try:
+        return torch.cuda.is_bf16_supported()
+    except RuntimeError:
+        return False
+
+
 @pytest.fixture(autouse=True)
 def cleanup_after_test(request):
     if torch.cuda.is_available() and (num_gpus := torch.cuda.device_count()) > 0:
@@ -60,46 +77,29 @@ def set_seed():
 
 
 def generate_model(pretrained_model_name_or_path, add_value_head=False):
+    """Build a dense base model for ``actor_network``.
+
+    AgileRL attaches and manages its own LoRA adapters (PeftModel inputs are
+    rejected), so the factory returns the unwrapped base model.
+    """
     pytest.importorskip("peft", reason="LLM tests require peft.")
     pytest.importorskip("transformers", reason="LLM tests require transformers.")
-    from peft import LoraConfig, get_peft_model
     from transformers import AutoModelForCausalLM
 
-    peft_config = LoraConfig(
-        task_type="CAUSAL_LM",
-        r=16,
-        lora_alpha=64,
-        target_modules=[
-            "q_proj",
-            "k_proj",
-            "v_proj",
-            "o_proj",
-            "gate_proj",
-            "up_proj",
-            "down_proj",
-        ],
-    )
     if add_value_head:
-        peft_config.modules_to_save = ["summary"]
         model = AutoModelForCausalLMWithValueHead.from_pretrained(
             pretrained_model_name_or_path=pretrained_model_name_or_path,
             torch_dtype=torch.bfloat16,
             attn_implementation="sdpa",
         )
         model.gradient_checkpointing_enable()
-        model = get_peft_model(model, peft_config)
         return model
     model = AutoModelForCausalLM.from_pretrained(
         pretrained_model_name_or_path=pretrained_model_name_or_path,
-        dtype=(
-            torch.bfloat16
-            if (torch.cuda.is_available() and torch.cuda.is_bf16_supported())
-            else torch.float32
-        ),
+        dtype=torch.bfloat16 if _cuda_bf16_available() else torch.float32,
         attn_implementation="sdpa",
     )
     model.gradient_checkpointing_enable()
-    model = get_peft_model(model, peft_config)
     return model
 
 

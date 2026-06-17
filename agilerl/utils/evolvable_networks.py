@@ -329,7 +329,7 @@ def get_normalization(
     :param normalization_names: Normalization layer name
     :type normalization_names: str
     :param layer_size: The layer after which the normalization layer will be applied
-    :param layer_size: int
+    :type layer_size: int
 
     :return: Normalization layer
     :rtype: nn.Module
