@@ -1215,7 +1215,55 @@ class TestFinetuneLlmMultiturn:
             mock_agent.learn.assert_called_with(ANY, turn_ids=ANY)
         assert mock_save.call_count == 1
 
-    def test_finetune_llm_multiturn_grpo_requires_batch_multiple_of_group_size(self):
+    def test_finetune_llm_multiturn_forwards_sampling_logps_to_learn(self):
+        """When the rollout captures sampling logps, they're forwarded to
+        ``learn(..., sampling_logps=...)`` for GRPO/PPO/REINFORCE agents."""
+        mock_agent = _make_multiturn_mock_agent(spec=GRPO)
+        mock_env = _make_multiturn_mock_env(turn_boundaries_len=3)
+        sampling_logps = [torch.zeros(1, 7)]
+        rollout_return = (
+            [torch.ones(1, 8, dtype=torch.long)],  # completion_ids_list
+            [torch.ones(1, 7, dtype=torch.bool)],  # action_masks_list
+            [torch.zeros(1, 7, dtype=torch.long)],  # all_turn_ids
+            [torch.ones(2, dtype=torch.float32)],  # all_rewards
+            len(mock_env.turn_boundaries),  # batch_steps
+            123,  # group_seed
+            sampling_logps,  # all_sampling_logps (non-None)
+        )
+        with (
+            patch("agilerl.training.train_llm.trange"),
+            patch(
+                "agilerl.training.train_llm.collect_rollouts_llm",
+                return_value=rollout_return,
+            ),
+            patch("agilerl.training.train_llm.stack_and_pad_experiences") as mock_stack,
+            patch(
+                "agilerl.training.train_llm.aggregate_metrics_across_gpus",
+                return_value=0.5,
+            ),
+            patch("agilerl.training.train_llm.save_llm_checkpoint"),
+        ):
+            mock_stack.return_value = (torch.zeros(1, 8, dtype=torch.long),)
+            finetune_llm_multiturn(
+                pop=[mock_agent],
+                env_factory=lambda: mock_env,
+                max_turns=2,
+                init_hp={"BATCH_SIZE": 1, "ALGO": mock_agent.algo},
+                max_steps=len(mock_env.turn_boundaries),  # one outer iteration
+                evaluation_interval=100,
+                verbose=False,
+                accelerator=None,
+            )
+
+        _, learn_kwargs = mock_agent.learn.call_args
+        assert learn_kwargs.get("sampling_logps") is sampling_logps
+
+    def test_finetune_llm_multiturn_allows_batch_size_indivisible_by_group_size(self):
+        """The batch>group case is unconstrained too: batch_size=3, group_size=2
+        (three prompts, two completions each) must pass startup validation rather
+        than being rejected. Patch the rollout to a sentinel and assert the call
+        reaches it — i.e. it gets past the (now-removed) divisibility guard.
+        """
         mock_agent = _make_multiturn_mock_agent(spec=GRPO)
         mock_agent.group_size = 2
         mock_agent.batch_size = 16
@@ -1499,9 +1547,17 @@ class TestFinetuneLlmMultiturn:
         assert init_hp_passed["BATCH_SIZE_PER_GPU"] == 7
         assert init_hp_passed["ALGO"] == "LLMPPO"
 
-    def test_finetune_llm_multiturn_raises_when_group_size_not_divisible_by_batch_size(
+    def test_finetune_llm_multiturn_allows_group_size_indivisible_by_batch_size(
         self,
     ):
+        """batch_size and group_size need not divide each other for GRPO.
+
+        The rollout vec env keeps each prompt's group whole (group-contiguous),
+        so e.g. batch_size=2, group_size=3 (two prompts, three completions each)
+        is valid and must pass startup validation rather than being rejected.
+        We patch the rollout to raise a sentinel and assert the call reaches it
+        — i.e. it gets past the (now-removed) divisibility guard.
+        """
         agent = _make_multiturn_mock_agent(spec=GRPO)
         agent.group_size = 3
         agent.batch_size = 2
@@ -1746,6 +1802,7 @@ def test_collect_rollouts_llm_breaks_when_vector_env_has_no_active_prompts():
         [torch.zeros(1, 7, dtype=torch.long)],
         [torch.ones(2, dtype=torch.float32)],
         1,
+        None,  # all_sampling_logps (added to get_trajectories' return)
     )
 
     _ = collect_rollouts_llm(

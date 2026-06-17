@@ -3,25 +3,43 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-if TYPE_CHECKING:
-    import torch
+import torch
 
+if TYPE_CHECKING:
     from agilerl.protocols import MultiTurnEnv
     from agilerl.typing import ReasoningPrompts
 
 
 @dataclass
 class Trajectory:
-    """State for one environment rollout within a synchronized vector batch."""
+    """State for one environment rollout within a synchronized vector batch.
+
+    :param env: The multi-turn environment this trajectory steps.
+    :type env: MultiTurnEnv
+    :param batch_idx: Index of the logical batch item this trajectory belongs to.
+    :type batch_idx: int
+    :param group_idx: Index of this trajectory within its group (the buffer holds
+        ``batch_size * group_size`` trajectories laid out group-contiguous).
+    :type group_idx: int
+    :param prompt: The current prompt the environment is rolling out.
+    :type prompt: ReasoningPrompts
+    :param done: Whether this rollout has terminated.
+    :type done: bool
+    :param sampling_logps: Per-token sampling logprobs from the vLLM rollout, one
+        1-D tensor per turn; ``get_trajectories`` concatenates them across turns.
+        Defaults to an empty list.
+    :type sampling_logps: list[torch.Tensor]
+    """
 
     env: MultiTurnEnv
     batch_idx: int
     group_idx: int
     prompt: ReasoningPrompts
     done: bool
+    sampling_logps: list[torch.Tensor] = field(default_factory=list)
 
 
 class TrajectoryBuffer:
@@ -112,6 +130,7 @@ class TrajectoryBuffer:
         prompt_dict, _ = self.trajectories[env_idx].env.reset(seed=seed)
         self.trajectories[env_idx].prompt = prompt_dict
         self.trajectories[env_idx].done = False
+        self.trajectories[env_idx].sampling_logps.clear()
 
     def __getitem__(self, index: int) -> Trajectory:
         return self.trajectories[index]
@@ -195,11 +214,19 @@ class SyncMultiTurnVecEnv:
                     self.trajectories.reset_trajectory(env_idx=env_idx, seed=batch_seed)
         return self.trajectories.get_prompts()
 
-    def step(self, completion_ids: list[torch.Tensor]) -> list[ReasoningPrompts] | None:
+    def step(
+        self,
+        completion_ids: list[torch.Tensor],
+        sampling_logps: list[torch.Tensor | None] | None = None,
+    ) -> list[ReasoningPrompts] | None:
         """Step each active trajectory with its corresponding completion.
 
         :param completion_ids: One completion tensor per active trajectory.
         :type completion_ids: list[torch.Tensor]
+        :param sampling_logps: Sampling logprobs from vLLM rollout for this
+            turn, parallel to ``completion_ids``; entries (or the whole list)
+            may be ``None`` when nothing was captured.
+        :type sampling_logps: list[torch.Tensor | None] | None
         :return: Next active prompt dictionaries after stepping.
         :rtype: list[ReasoningPrompts] | None
         """
@@ -210,6 +237,16 @@ class SyncMultiTurnVecEnv:
                 f"{len(completion_ids)} != {len(active)}"
             )
             raise RuntimeError(msg)
+        if sampling_logps is not None:
+            if len(sampling_logps) != len(active):
+                msg = (
+                    "Number of sampling logprobs does not match number of active "
+                    f"trajectories: {len(sampling_logps)} != {len(active)}"
+                )
+                raise RuntimeError(msg)
+            for traj, slp in zip(active, sampling_logps, strict=True):
+                if slp is not None:
+                    traj.sampling_logps.append(slp)
         for traj, completion in zip(active, completion_ids, strict=False):
             full_completion = completion
             if full_completion.dim() == 1:
@@ -242,18 +279,24 @@ class SyncMultiTurnVecEnv:
         list[torch.Tensor],
         list[torch.Tensor],
         int,
+        list[torch.Tensor | None] | None,
     ]:
         """Collect complete episode tensors from all trajectories.
 
         :return: ``(completion_ids_list, action_masks_list, all_turn_ids,
-            all_rewards, batch_steps)`` where ``batch_steps`` is the summed
-            number of recorded turn boundaries across trajectories.
-        :rtype: tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], int]
+            all_rewards, batch_steps, all_sampling_logps)`` where ``batch_steps``
+            is the summed number of recorded turn boundaries across trajectories.
+            ``all_sampling_logps`` is ``None`` when no vLLM logprobs were captured
+            this rollout; otherwise it holds one 1-D tensor of generated-token
+            logprobs per trajectory (concatenated across turns), with ``None`` for
+            any trajectory that captured none.
+        :rtype: tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], int, list[torch.Tensor | None] | None]
         """
         completion_ids_list: list[torch.Tensor] = []
         action_masks_list: list[torch.Tensor] = []
         all_turn_ids: list[torch.Tensor] = []
         all_rewards: list[torch.Tensor] = []
+        all_sampling_logps: list[torch.Tensor | None] = []
         batch_steps = 0
         self.trajectories.sort(key=lambda t: (t.batch_idx, t.group_idx))
         for traj in self.trajectories:
@@ -263,6 +306,8 @@ class SyncMultiTurnVecEnv:
             all_turn_ids.append(turn_ids)
             all_rewards.append(turn_rewards_t)
             batch_steps += len(getattr(traj.env, "turn_boundaries", []))
+            turns = traj.sampling_logps
+            all_sampling_logps.append(torch.cat(turns) if turns else None)
 
         return (
             completion_ids_list,
@@ -270,4 +315,11 @@ class SyncMultiTurnVecEnv:
             all_turn_ids,
             all_rewards,
             batch_steps,
+            # Collapse to a single ``None`` when nothing was captured, so the
+            # caller needs only an ``is not None`` check (no per-row re-scan).
+            (
+                all_sampling_logps
+                if any(logps is not None for logps in all_sampling_logps)
+                else None
+            ),
         )

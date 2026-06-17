@@ -253,6 +253,7 @@ def collect_rollouts_llm(
     list[torch.Tensor],
     int,
     int,
+    list[torch.Tensor | None] | None,
 ]:
     """Collect multi-turn rollouts for LLM on-policy algorithms.
 
@@ -267,8 +268,10 @@ def collect_rollouts_llm(
     :param group_seed: Seed for the group of environments.
     :type group_seed: int
     :return: Episode tensors, masks, turn ids, rewards, counted batch steps,
-        and updated group seed.
-    :rtype: tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], int, int]
+        updated group seed, and per-trajectory vLLM sampling logprobs (one 1-D
+        tensor of generated-token logprobs each, individual entries possibly
+        ``None``; ``None`` overall when none were captured this rollout).
+    :rtype: tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], int, int, list[torch.Tensor | None] | None]
     """
     prompts = env.reset(
         seed=group_seed,
@@ -278,18 +281,23 @@ def collect_rollouts_llm(
         if prompts is None:
             break
         if isinstance(agent, GRPO):
-            completion_ids, _ = agent.get_action(
+            action_result = agent.get_action(
                 prompts,
                 training=True,
                 repeat_prompts=False,
             )
         else:
-            completion_ids, _ = agent.get_action(prompts, training=True)
-        prompts = env.step(completion_ids)
+            action_result = agent.get_action(prompts, training=True)
+        prompts = env.step(action_result.completion_ids, action_result.sampling_logps)
 
-    completion_ids_list, action_masks_list, all_turn_ids, all_rewards, batch_steps = (
-        env.get_trajectories()
-    )
+    (
+        completion_ids_list,
+        action_masks_list,
+        all_turn_ids,
+        all_rewards,
+        batch_steps,
+        all_sampling_logps,
+    ) = env.get_trajectories()
     group_seed = group_seed + batch_size
 
     return (
@@ -299,4 +307,5 @@ def collect_rollouts_llm(
         all_rewards,
         batch_steps,
         group_seed,
+        all_sampling_logps,
     )

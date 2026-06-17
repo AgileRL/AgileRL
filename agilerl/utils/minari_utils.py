@@ -34,7 +34,9 @@ def load_minari_dataset(
     :param accelerator: Optional accelerator for distributed training
     :type accelerator: Accelerator | None
     :param remote: Whether to load from remote repository. Defaults to False.
+    :type remote: bool
     :return: The loaded Minari dataset
+    :rtype: minari.MinariDataset
     :raises KeyError: If remote=True and dataset_id is not a valid remote dataset
     :raises FileNotFoundError: If remote=False and dataset not found locally
     """
