@@ -657,16 +657,27 @@ class DPO(LLMAlgorithm):
         :return: Mean test score (numpy array)
         :rtype: np.ndarray
         """
+        from agilerl.llm_envs import PreferenceGymV2
+
         with env.eval_mode(), torch.no_grad():
-            prompts = env.reset()
+            # PreferenceGymV2 splits reset/step: reset returns ``(prompts,
+            # info)`` and step returns a 5-tuple without advancing the
+            # dataloader, so it must be reset every iteration.
+            is_v2 = isinstance(env, PreferenceGymV2)
             rewards = []
+            prompts = None if is_v2 else env.reset()
             for _ in range(loop):
+                if is_v2:
+                    prompts, _info = env.reset()
                 learn_result = self.learn(prompts, training=False)
                 chosen_reward = learn_result["mean_chosen_reward"]
                 rejected_reward = learn_result["mean_rejected_reward"]
                 reward_margin = chosen_reward - rejected_reward
                 rewards.append(np.asarray(reward_margin).item())
-                prompts = env.step()
+                if is_v2:
+                    env.step()
+                else:
+                    prompts = env.step()
             mean_fit = float(np.mean(rewards))
         self.fitness.append(mean_fit)
         return np.array(mean_fit)

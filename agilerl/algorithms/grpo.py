@@ -29,6 +29,7 @@ else:
 
 from agilerl.algorithms.core import ActionResult, LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.llm_envs import ReasoningGymV2
 from agilerl.protocols import (
     MultiTurnEnv,
     PeftModelProtocol,
@@ -675,15 +676,24 @@ class GRPO(LLMAlgorithm):
         """
         eval_context = getattr(env, "eval_mode", nullcontext)
         with eval_context():
-            if isinstance(env, ReasoningGym):
-                prompts = env.reset()
+            if isinstance(env, (ReasoningGym, ReasoningGymV2)):
+                # ReasoningGymV2 splits reset/step: reset returns ``(prompts,
+                # info)`` and step returns a gem-style 5-tuple without advancing
+                # the dataloader, so it must be reset every iteration.
+                is_v2 = isinstance(env, ReasoningGymV2)
                 rewards = []
+                prompts = None if is_v2 else env.reset()
                 for _ in range(loop):
+                    if is_v2:
+                        prompts, _info = env.reset()
                     completion_ids = self.get_action(
                         prompts, training=False
                     ).completion_ids
-                    next_prompts, reward = env.step(completion_ids)
-                    prompts = next_prompts
+                    step_out = env.step(completion_ids)
+                    if is_v2:
+                        _obs, reward, _term, _trunc, _step_info = step_out
+                    else:
+                        prompts, reward = step_out
                     rewards.append(reward)
                 reward_tensor = torch.cat(rewards)
             elif isinstance(env, MultiTurnEnv):

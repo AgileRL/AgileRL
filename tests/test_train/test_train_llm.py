@@ -20,7 +20,9 @@ from agilerl.training.train_llm import (
     build_train_wandb_dict,
     finetune_llm_multiturn,
     finetune_llm_preference,
+    finetune_llm_preference_v2,
     finetune_llm_reasoning,
+    finetune_llm_reasoning_v2,
     finetune_llm_sft,
 )
 
@@ -818,6 +820,112 @@ class TestFinetuneLlmReasoning:
         text = (tmp_path / "metrics.csv").read_text()
         assert "Train/Best Reward" in text
         mock_wandb.log.assert_not_called()
+
+
+class TestFinetuneLlmReasoningV2:
+    @pytest.mark.parametrize("use_accelerator", [True, False])
+    def test_finetune_llm_reasoning_v2_basic_training_loop(self, use_accelerator):
+        """Basic training loop for the gem-aligned finetune_llm_reasoning_v2."""
+        mock_agent = MagicMock(spec=GRPO)
+        mock_agent.fitness = [0.0]
+        mock_agent.local_rank = "0"
+        mock_agent.get_action.return_value = ActionResult(
+            [torch.ones(1, 100) for _ in range(2)],
+            Mock(),
+        )
+        mock_agent.learn.return_value = (0.5, 0.2)
+        mock_agent.test.return_value = torch.tensor([0.8])
+        mock_agent.algo = "GRPO"
+        mock_agent.batch_size_per_process = 32
+        mock_agent.batch_size = 32
+        mock_agent.steps = [10]
+        mock_agent.scores = [0.0]
+        mock_agent.pretrained_model_name_or_path = "Qwen/Qwen2.5-0.5B"
+
+        mock_env = MagicMock()
+        mock_env.__len__.return_value = 6
+        # V2: reset returns (prompts, info); step returns the gem-style 5-tuple
+        # and does NOT advance the dataloader.
+        mock_env.reset.return_value = ("initial_prompts", {})
+        mock_env.step.return_value = ({}, torch.tensor([2.0, 3.0]), True, False, {})
+        mock_env.data_batch_size_per_gpu = 1
+
+        with (
+            patch("agilerl.training.train_llm.trange"),
+            patch(
+                "agilerl.training.train_llm.aggregate_metrics_across_gpus"
+            ) as mock_agg,
+            patch("agilerl.training.train_llm.save_llm_checkpoint"),
+        ):
+            mock_agg.return_value = 0.5
+            finetune_llm_reasoning_v2(
+                pop=[mock_agent],
+                env=mock_env,
+                evaluation_interval=2,
+                max_reward=2.0,
+                accelerator=Accelerator() if use_accelerator else None,
+            )
+            # reset is now called once per iteration (not once before the loop).
+            assert mock_env.reset.call_count == 6
+            assert mock_agent.get_action.call_count == 6
+            assert mock_env.step.call_count == 6
+            assert mock_agent.learn.call_count == 6
+            assert mock_agent.test.call_count == 3
+
+
+class TestFinetuneLlmPreferenceV2:
+    @pytest.mark.parametrize("use_accelerator", [True, False])
+    def test_finetune_llm_preference_v2_basic_training_loop(self, use_accelerator):
+        """Basic training loop for the gem-aligned finetune_llm_preference_v2."""
+        mock_agent = MagicMock(spec=DPO)
+        mock_agent.algo = "DPO"
+        mock_agent.fitness = [0.0]
+        mock_agent.local_rank = "0"
+        mock_agent.get_action = MagicMock()
+        mock_agent.learn.return_value = (0.5, 0.2, 0.1)
+        mock_agent.test.return_value = 0.87
+        mock_agent.batch_size = 32
+        mock_agent.batch_size_per_process = 32
+        mock_agent.steps = [10]
+        mock_agent.scores = [0.0]
+
+        mock_env = MagicMock()
+        mock_env.__len__.return_value = 6
+        example_preference_env_return = {
+            "prompt": ["This is a mock prompt"],
+            "prompt_lengths": [10],
+            "chosen": ["This is a mock chosen prompt"],
+            "rejected": ["This is a mock rejected prompt"],
+            "chosen_input_ids": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            "chosen_attention_mask": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+            "rejected_input_ids": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            "rejected_attention_mask": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+        }
+        # V2: reset returns (prompts, info); step returns a None reward and does
+        # not advance.
+        mock_env.reset.return_value = (example_preference_env_return, {})
+        mock_env.step.return_value = ({}, None, True, False, {})
+        mock_env.data_batch_size_per_gpu = 1
+
+        with (
+            patch("agilerl.training.train_llm.trange"),
+            patch(
+                "agilerl.training.train_llm.aggregate_metrics_across_gpus"
+            ) as mock_agg,
+            patch("agilerl.training.train_llm.save_llm_checkpoint"),
+        ):
+            mock_agg.return_value = 0.5
+            finetune_llm_preference_v2(
+                pop=[mock_agent],
+                env=mock_env,
+                evaluation_interval=2,
+                accelerator=Accelerator() if use_accelerator else None,
+            )
+            assert mock_env.reset.call_count == 6
+            assert mock_agent.get_action.call_count == 0
+            assert mock_env.step.call_count == 6
+            assert mock_agent.learn.call_count == 6
+            assert mock_agent.test.call_count == 3
 
 
 class TestFinetuneLlmPreference:

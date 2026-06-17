@@ -6,8 +6,8 @@ from agilerl.llm_envs.base import (
     IterablePromptBatchGym,
     apply_chat_template,
 )
-from agilerl.llm_envs.preference import PreferenceGym
-from agilerl.llm_envs.reasoning import ReasoningGym
+from agilerl.llm_envs.preference import PreferenceGym, PreferenceGymV2
+from agilerl.llm_envs.reasoning import ReasoningGym, ReasoningGymV2
 from agilerl.llm_envs.search import TIMEOUT, FormatRewardWrapper, SearchTool
 from agilerl.llm_envs.sft import SFTGym
 from agilerl.llm_envs.sync_vec_env import (
@@ -25,7 +25,9 @@ __all__ = [
     "HuggingFaceGym",
     "IterablePromptBatchGym",
     "PreferenceGym",
+    "PreferenceGymV2",
     "ReasoningGym",
+    "ReasoningGymV2",
     "SFTGym",
     "SearchTool",
     "SyncMultiTurnVecEnv",
