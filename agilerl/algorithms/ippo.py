@@ -387,7 +387,7 @@ class IPPO(MultiAgentRLAlgorithm):
         )
 
         # Register metrics to keep track of during training
-        for metric_name in ("total_loss", "policy_loss", "value_loss", "entropy_loss"):
+        for metric_name in ("loss", "policy_loss", "value_loss", "entropy_loss"):
             self.metrics.register(metric_name)
 
     def process_infos(
@@ -762,7 +762,7 @@ class IPPO(MultiAgentRLAlgorithm):
         num_samples = experiences[4].size(0)
         batch_idxs = np.arange(num_samples)
         learn_metrics = {
-            "total_loss": 0.0,
+            "loss": 0.0,
             "policy_loss": 0.0,
             "value_loss": 0.0,
             "entropy_loss": 0.0,
@@ -856,9 +856,7 @@ class IPPO(MultiAgentRLAlgorithm):
                     clip_grad_norm_(critic.parameters(), self.max_grad_norm)
                     critic_optimizer.step()
 
-                    learn_metrics["total_loss"] += (
-                        actor_loss.item() + critic_loss.item()
-                    )
+                    learn_metrics["loss"] += actor_loss.item() + critic_loss.item()
                     learn_metrics["policy_loss"] += pg_loss.item()
                     learn_metrics["value_loss"] += v_loss.item()
                     learn_metrics["entropy_loss"] += entropy_loss.item()
@@ -874,7 +872,7 @@ class IPPO(MultiAgentRLAlgorithm):
         for key, value in learn_metrics.items():
             self.metrics.log(key, agent_id, value)
 
-        return learn_metrics["total_loss"]
+        return learn_metrics["loss"]
 
     def test(
         self,
