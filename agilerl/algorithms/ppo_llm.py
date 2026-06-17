@@ -162,10 +162,16 @@ class PPO(LLMAlgorithm):
         turn-level updates, ``"token"`` enforces token-level updates, and
         ``"auto"`` uses token-level only when all samples are single-turn.
     :type advantage_granularity: Literal["turn", "token", "auto"], optional
-    :param turn_ratio_pooling: Reduction used to pool per-token log-ratios when
-        turn-level importance sampling is active. ``"sum"`` yields a product
-        ratio per turn (nightly/paper-aligned), ``"mean"`` yields a
-        length-normalized geometric-mean ratio.
+    :param turn_ratio_pooling: Reduction used to pool per-token log-ratios into
+        a per-turn ratio when the importance-sampling level is ``"turn"`` (the
+        default ``"auto"`` resolves to turn for multi-turn batches); ignored at
+        token/trajectory level. ``"sum"`` (default) yields the product ratio per
+        turn — the standard, paper-aligned per-turn importance weight. ``"mean"``
+        yields a length-normalized geometric-mean ratio (GSPO-style); reach for it
+        on long or highly variable-length turns, where the product ratio lands far
+        outside the clip band on every turn and saturates the clipped surrogate —
+        length-normalizing keeps the per-turn ratio in range so the surrogate stays
+        informative.
     :type turn_ratio_pooling: Literal["sum", "mean"], optional
     :param action_granularity: Deprecated alias for ``advantage_granularity``;
         when set it overrides ``advantage_granularity`` and emits a

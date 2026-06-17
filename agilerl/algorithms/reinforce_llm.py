@@ -158,9 +158,15 @@ class REINFORCE(LLMAlgorithm):
         set ``use_liger_loss=False`` there (the standard path is always
         memory-bounded).
     :type importance_sampling_level: Literal["token", "turn", "trajectory"], optional
-    :param turn_ratio_pooling: Reduction used to pool per-token log-ratios when
-        turn-level importance sampling is active. ``"sum"`` yields a product
-        ratio per turn, ``"mean"`` yields a length-normalized geometric-mean ratio.
+    :param turn_ratio_pooling: Reduction used to pool per-token log-ratios into a
+        per-turn ratio when ``importance_sampling_level="turn"``; ignored at
+        token/trajectory level. ``"sum"`` (default) yields the product ratio per
+        turn — the standard, paper-aligned per-turn importance weight. ``"mean"``
+        yields a length-normalized geometric-mean ratio (GSPO-style); reach for it
+        on long or highly variable-length turns, where the product ratio lands far
+        outside the clip band on every turn and saturates the clipped surrogate —
+        length-normalizing keeps the per-turn ratio in range so the surrogate stays
+        informative.
     :type turn_ratio_pooling: Literal["sum", "mean"], optional
     :param gradient_checkpointing: Enable gradient checkpointing.
     :type gradient_checkpointing: bool
