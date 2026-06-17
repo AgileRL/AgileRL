@@ -1309,9 +1309,9 @@ class TestREINFORCELearnWithLiger:
         learn_out = rf.learn((completions, action_masks, rewards), turn_ids=turn_ids)
 
         assert rf._reinforce_loss_liger.call_count >= 1
-        assert learn_out["mean_loss"] == pytest.approx(0.3, rel=1e-6)
-        assert learn_out["mean_kl"] == pytest.approx(0.05, rel=1e-6)
-        assert learn_out["mean_pg_loss"] == pytest.approx(0.25, rel=1e-6)
+        assert learn_out["loss"] == pytest.approx(0.3, rel=1e-6)
+        assert learn_out["kl"] == pytest.approx(0.05, rel=1e-6)
+        assert learn_out["pg_loss"] == pytest.approx(0.25, rel=1e-6)
 
     def test_learn_liger_token_with_sampling_logps_uses_fused_kernel(self, monkeypatch):
         """token-level use_liger_loss=True + captured vLLM logprobs: the
@@ -1398,7 +1398,7 @@ class TestREINFORCELearnWithLiger:
         rf._reinforce_loss_liger.assert_not_called()
         assert rf._is_correction_liger_warned is True
         assert "vllm_is_delta_mean" in metrics
-        assert torch.isfinite(torch.tensor(metrics["mean_loss"]))
+        assert torch.isfinite(torch.tensor(metrics["loss"]))
 
 
 class TestREINFORCEVllmISCorrection:
@@ -1436,7 +1436,7 @@ class TestREINFORCEVllmISCorrection:
             assert key in metrics
             assert isinstance(metrics[key], float)
         assert metrics["vllm_is_ratio_mean"] > 0
-        assert torch.isfinite(torch.tensor(metrics["mean_loss"]))
+        assert torch.isfinite(torch.tensor(metrics["loss"]))
 
 
 class TestREINFORCESequencePacking:
@@ -1458,4 +1458,4 @@ class TestREINFORCESequencePacking:
         )[:, : seq_len - 1]
         rewards = torch.tensor([[0.5, -0.5]], dtype=torch.float32)
         metrics = rf.learn((completions, action_masks, rewards), turn_ids=turn_ids)
-        assert torch.isfinite(torch.tensor(metrics["mean_loss"]))
+        assert torch.isfinite(torch.tensor(metrics["loss"]))

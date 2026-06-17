@@ -558,12 +558,12 @@ class PPO(LLMAlgorithm):
             )
             updates = 0
             learn_metrics = {
-                "mean_loss": 0.0,
-                "mean_pg_loss": 0.0,
-                "mean_vf_loss": 0.0,
-                "mean_kl": 0.0,
-                "mean_entropy": 0.0,
-                "mean_clipfrac": 0.0,
+                "loss": 0.0,
+                "pg_loss": 0.0,
+                "vf_loss": 0.0,
+                "kl": 0.0,
+                "entropy": 0.0,
+                "clipfrac": 0.0,
             }
             reference_log_probs, old_log_probs, old_values = (
                 self._fused_forward_no_grad(
@@ -675,12 +675,12 @@ class PPO(LLMAlgorithm):
                         )
                         self._backward_pass(total_loss)
                         clear_fused_adapter_routing(self._get_unwrapped_actor())
-                        learn_metrics["mean_kl"] += metrics["kl"]
-                        learn_metrics["mean_entropy"] += metrics["entropy"]
-                        learn_metrics["mean_clipfrac"] += metrics["clipfrac"]
-                        learn_metrics["mean_pg_loss"] += metrics["pg_loss"]
-                        learn_metrics["mean_vf_loss"] += metrics["vf_loss"]
-                        learn_metrics["mean_loss"] += total_loss.item()
+                        learn_metrics["kl"] += metrics["kl"]
+                        learn_metrics["entropy"] += metrics["entropy"]
+                        learn_metrics["clipfrac"] += metrics["clipfrac"]
+                        learn_metrics["pg_loss"] += metrics["pg_loss"]
+                        learn_metrics["vf_loss"] += metrics["vf_loss"]
+                        learn_metrics["loss"] += total_loss.item()
                         updates += 1
                         continue
 
@@ -774,12 +774,12 @@ class PPO(LLMAlgorithm):
                     self._backward_pass(total_loss)
                     clear_fused_adapter_routing(self._get_unwrapped_actor())
 
-                    learn_metrics["mean_kl"] += kl_loss.item()
-                    learn_metrics["mean_entropy"] += masked_entropy.mean().item()
-                    learn_metrics["mean_clipfrac"] += clipfrac.item()
-                    learn_metrics["mean_pg_loss"] += pg_loss.mean().item()
-                    learn_metrics["mean_vf_loss"] += vf_loss.mean().item()
-                    learn_metrics["mean_loss"] += total_loss.item()
+                    learn_metrics["kl"] += kl_loss.item()
+                    learn_metrics["entropy"] += masked_entropy.mean().item()
+                    learn_metrics["clipfrac"] += clipfrac.item()
+                    learn_metrics["pg_loss"] += pg_loss.mean().item()
+                    learn_metrics["vf_loss"] += vf_loss.mean().item()
+                    learn_metrics["loss"] += total_loss.item()
                     updates += 1
 
         averaged = {
@@ -795,12 +795,12 @@ class PPO(LLMAlgorithm):
         agg = aggregate_metrics_dict(
             self.accelerator,
             {
-                "loss": averaged["mean_loss"],
-                "pg_loss": averaged["mean_pg_loss"],
-                "vf_loss": averaged["mean_vf_loss"],
-                "kl": averaged["mean_kl"],
-                "entropy": averaged["mean_entropy"],
-                "clipfrac": averaged["mean_clipfrac"],
+                "loss": averaged["loss"],
+                "pg_loss": averaged["pg_loss"],
+                "vf_loss": averaged["vf_loss"],
+                "kl": averaged["kl"],
+                "entropy": averaged["entropy"],
+                "clipfrac": averaged["clipfrac"],
                 "completion_length": completion_length,
             },
         )

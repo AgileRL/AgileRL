@@ -470,8 +470,8 @@ class REINFORCE(LLMAlgorithm):
             Parallel to the stacked ``completion_ids`` rows. ``None`` disables
             the correction for this update.
         :type sampling_logps: list[torch.Tensor | None] | None
-        :return: Dict with keys ``mean_loss``, ``mean_kl``, ``mean_pg_loss``,
-            ``mean_entropy``, averaged over all minibatch updates.
+        :return: Dict with keys ``loss``, ``kl``, ``pg_loss``,
+            ``entropy``, averaged over all minibatch updates.
         :rtype: dict[str, float]
         """
         self._prepare_vllm_for_training()
@@ -509,10 +509,10 @@ class REINFORCE(LLMAlgorithm):
                 else num_samples
             )
             learn_metrics = {
-                "mean_loss": 0.0,
-                "mean_kl": 0.0,
-                "mean_pg_loss": 0.0,
-                "mean_entropy": 0.0,
+                "loss": 0.0,
+                "kl": 0.0,
+                "pg_loss": 0.0,
+                "entropy": 0.0,
             }
             updates = 0
 
@@ -620,10 +620,10 @@ class REINFORCE(LLMAlgorithm):
                             batch_sampling_log_probs,
                         )
                         self._backward_pass(pg_loss)
-                        learn_metrics["mean_kl"] += metrics["kl"]
-                        learn_metrics["mean_entropy"] += metrics["entropy"]
-                        learn_metrics["mean_pg_loss"] += metrics["pg_loss"]
-                        learn_metrics["mean_loss"] += pg_loss.item()
+                        learn_metrics["kl"] += metrics["kl"]
+                        learn_metrics["entropy"] += metrics["entropy"]
+                        learn_metrics["pg_loss"] += metrics["pg_loss"]
+                        learn_metrics["loss"] += pg_loss.item()
                         updates += 1
                         continue
 
@@ -672,12 +672,10 @@ class REINFORCE(LLMAlgorithm):
 
                     self._backward_pass(pg_loss)
 
-                    learn_metrics["mean_kl"] += masked_mean(
-                        kl, batch_action_mask
-                    ).item()
-                    learn_metrics["mean_entropy"] += masked_entropy.item()
-                    learn_metrics["mean_pg_loss"] += pg_loss.item()
-                    learn_metrics["mean_loss"] += pg_loss.item()
+                    learn_metrics["kl"] += masked_mean(kl, batch_action_mask).item()
+                    learn_metrics["entropy"] += masked_entropy.item()
+                    learn_metrics["pg_loss"] += pg_loss.item()
+                    learn_metrics["loss"] += pg_loss.item()
                     updates += 1
 
         averaged = {
@@ -693,9 +691,9 @@ class REINFORCE(LLMAlgorithm):
         agg = aggregate_metrics_dict(
             self.accelerator,
             {
-                "loss": averaged["mean_loss"],
-                "kl": averaged["mean_kl"],
-                "entropy": averaged["mean_entropy"],
+                "loss": averaged["loss"],
+                "kl": averaged["kl"],
+                "entropy": averaged["entropy"],
                 "completion_length": completion_length,
             },
         )

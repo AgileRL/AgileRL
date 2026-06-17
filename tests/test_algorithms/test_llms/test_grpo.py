@@ -5955,7 +5955,7 @@ class TestGRPOVLLMSamplingCorrection:
         mock_liger_loss.assert_not_called()
         assert grpo._is_correction_liger_warned is True
         assert "vllm_is_delta_mean" in metrics
-        assert torch.isfinite(torch.tensor(metrics["mean_loss"]))
+        assert torch.isfinite(torch.tensor(metrics["loss"]))
         grpo.clean_up()
 
 
@@ -6109,7 +6109,7 @@ class TestGRPOTurnAdvantageLearnPath:
             metrics = grpo.learn(
                 (completion_ids, action_masks, turn_rewards), turn_ids=turn_ids
             )
-        assert np.isfinite(metrics["mean_loss"])
+        assert np.isfinite(metrics["loss"])
         grpo.clean_up()
 
     def test_learn_liger_turn_level_falls_back_to_standard_path(self):
@@ -6137,5 +6137,5 @@ class TestGRPOTurnAdvantageLearnPath:
                 (completion_ids, action_masks, turn_rewards), turn_ids=turn_ids
             )
         mock_liger.assert_not_called()
-        assert np.isfinite(metrics["mean_loss"])
+        assert np.isfinite(metrics["loss"])
         grpo.clean_up()

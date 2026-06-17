@@ -568,7 +568,8 @@ class GRPO(LLMAlgorithm):
             importance-ratio pooling (when ``importance_sampling_level="turn"``).
             Ignored when neither applies.
         :type turn_ids: torch.Tensor | None
-        :return: Dict with keys ``mean_loss`` and ``mean_kl``, averaged over the update.
+        :return: Dict with averaged ``loss``, ``kl`` and ``completion_length`` (plus
+            the ``vllm_is_*`` sampling-mismatch metrics when the correction is active).
         :rtype: dict[str, float]
         """
         gc.collect()
@@ -591,11 +592,11 @@ class GRPO(LLMAlgorithm):
                     "All samples were filtered by advantage threshold; skipping GRPO update.",
                     stacklevel=2,
                 )
-                return {"mean_loss": 0.0, "mean_kl": 0.0}
+                return {"loss": 0.0, "kl": 0.0}
 
             learn_metrics = {
-                "mean_loss": 0.0,
-                "mean_kl": 0.0,
+                "loss": 0.0,
+                "kl": 0.0,
             }
             updates = 0
             batch_size = (
@@ -650,29 +651,22 @@ class GRPO(LLMAlgorithm):
                         raise ValueError(msg)
 
                     self._backward_pass(loss)
-                    learn_metrics["mean_loss"] += loss.item()
-                    learn_metrics["mean_kl"] += kl.item()
+                    learn_metrics["loss"] += loss.item()
+                    learn_metrics["kl"] += kl.item()
                     updates += 1
         result = {
             metric: value / max(updates, 1) for metric, value in learn_metrics.items()
         }
-        # Batch-level metrics: not divided by the update count above.
-        result.update(is_metrics)
+        result["completion_length"] = np.mean([x.shape[-1] for x in experiences[0]])
 
-        # Wire averaged metrics into the metrics tracker (new API).
-        completion_length = np.mean([x.shape[-1] for x in experiences[0]])
-        agg = aggregate_metrics_dict(
-            self.accelerator,
-            {
-                "loss": result["mean_loss"],
-                "kl": result["mean_kl"],
-                "completion_length": completion_length,
-            },
-        )
+        # Aggregate across GPUs and report to the metrics tracker (new API).
+        agg = aggregate_metrics_dict(self.accelerator, result)
         agg["completion_length"] = int(agg["completion_length"])
         for key, value in agg.items():
             self.metrics.log(key, value)
 
+        # Batch-level sampling-mismatch metrics bypass the per-update averaging.
+        result.update(is_metrics)
         return result
 
     def test(
