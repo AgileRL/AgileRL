@@ -380,6 +380,17 @@ class EvolvableCNN(EvolvableModule):
         )
 
     @property
+    def rng(self) -> np.random.Generator:
+        return self._rng
+
+    @rng.setter
+    def rng(self, value: np.random.Generator) -> None:
+        self._rng = value
+        self.mut_kernel_size.rng = value
+        for module in self.modules().values():
+            module.rng = value
+
+    @property
     def net_config(self) -> dict[str, Any]:
         net_config = self.init_dict.copy()
         for attr in ["input_shape", "num_outputs", "device", "name"]:
