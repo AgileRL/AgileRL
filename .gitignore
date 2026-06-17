@@ -116,6 +116,7 @@ venv/
 .envrc
 env.bak/
 venv.bak/
+.cursor/
 
 # Spyder project settings
 .spyderproject
