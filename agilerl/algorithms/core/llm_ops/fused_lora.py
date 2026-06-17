@@ -86,25 +86,12 @@ def _get_cached_lora_layers(model: nn.Module) -> list[nn.Module]:
 
 
 def _make_base_output_clone_hook(lora_layer: nn.Module):
-    """Build a ``base_layer`` forward hook that clones the base output while
-    fused routing is active.
+    """Clone the base-layer output while fused routing is active.
 
-    PEFT's ``_mixed_batch_forward`` accumulates each adapter's LoRA delta in
-    place onto the frozen base-layer output (``result[idx] += ...``). For a
-    bitsandbytes ``Linear4bit`` / ``Linear8bitLt`` base, that output is the
-    tensor returned by the ``MatMul4Bit`` / ``MatMul8bitLt`` custom autograd
-    Function, and autograd forbids modifying such a (view) output in place:
-
-        RuntimeError: Output 0 of MatMul4BitBackward is a view and is being
-        modified inplace. ... You can fix this by cloning the output of the
-        custom Function.
-
-    It only surfaces in the *gradient* forward of a multi-adapter fused pass —
-    in practice PPO's fused actor+critic routing on a 4-bit/8-bit base — but
-    cloning is harmless for the single-adapter case too. Returning a clone
-    makes PEFT's in-place accumulation land on a fresh tensor (autograd-safe,
-    numerically identical). The hook is a no-op whenever fused routing is
-    inactive, so the standard single-adapter and no-grad paths are untouched.
+    Fused adapter routing otherwise breaks on a quantized base: PEFT
+    accumulates the LoRA delta in place into the base output, which is a view
+    of bitsandbytes' quantized matmul output, and autograd forbids that
+    in-place edit. Cloning the output fixes it; no-op when routing is inactive.
     """
 
     def _hook(module: nn.Module, args: tuple, output):
