@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,29 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from agilerl.arena.auth import ArenaOAuth2
+
+
+@pytest.fixture(autouse=True)
+def _detach_arena_rich_handler() -> None:
+    """Detach the package ``RichHandler`` from ``agilerl.arena`` during tests.
+
+    The package attaches a ``RichHandler`` to the ``agilerl.arena`` logger at
+    import time. Under coverage instrumentation that handler's highlighter can
+    raise, turning any test that merely emits a log record into a spurious
+    failure. Tests don't assert on rendered log output (they patch the module
+    logger when they care), so drop the handler and let records propagate to
+    pytest's capture instead.
+    """
+    arena_logger = logging.getLogger("agilerl.arena")
+    saved_handlers = arena_logger.handlers[:]
+    saved_propagate = arena_logger.propagate
+    arena_logger.handlers = []
+    arena_logger.propagate = True
+    try:
+        yield
+    finally:
+        arena_logger.handlers = saved_handlers
+        arena_logger.propagate = saved_propagate
 
 
 @pytest.fixture

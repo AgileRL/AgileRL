@@ -149,6 +149,8 @@ tensorboard_logs/
 # Large data files
 data/wordle/
 data/wordle.zip
+*.tar.gz
+*metrics.csv
 
 # WandB
 wandb/

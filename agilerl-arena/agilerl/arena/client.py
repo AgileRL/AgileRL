@@ -4,10 +4,10 @@ import json
 import logging
 import os
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, TypedDict
 
 import httpx
 from agilerl.arena.auth import (
@@ -46,6 +46,40 @@ logger = logging.getLogger(__name__)
 DATASET_CATEGORIES = frozenset({"sft", "preference", "reasoning"})
 
 
+# Functional syntax because ``in`` (a parameter's location) is a Python keyword
+# and can't be a class-statement field name.
+ManifestParamSpec = TypedDict(
+    "ManifestParamSpec",
+    {
+        "name": str,
+        "in": str,  # "query" | "body" | "client"
+        "type": str,  # "string" | "int" | "bool" | "json"
+        "required": bool,
+        "help": str,
+        "click": dict[str, Any],
+    },
+    total=False,
+)
+"""One on-prem command parameter as described by the server manifest.
+
+The server is the source of truth for these specs, so every field is optional
+here; the CLI validates required keys at runtime.
+"""
+
+
+class ManifestInvoke(TypedDict, total=False):
+    """The fixed call descriptor for an on-prem command (method, path, params).
+
+    Used both for the hardcoded invokes in ``agilerl.arena.on_prem.endpoints``
+    and for command nodes parsed from the server capabilities manifest.
+    """
+
+    method: str
+    path: str
+    responseKind: str  # "json" | "binary"
+    params: list[ManifestParamSpec]
+
+
 @dataclass(slots=True)
 class _TokenStore:
     """In-memory holder for OAuth tokens with redacted repr."""
@@ -66,8 +100,7 @@ class _TokenStore:
 class ArenaClient:
     """Client for the Arena RLOps platform.
 
-    Handles authentication, environment management, and training job
-    submission.
+    Handles authentication, environment management, and training job submission.
 
     Authentication is resolved in priority order:
 
@@ -82,8 +115,15 @@ class ArenaClient:
     if you obtain one elsewhere.
 
     :param api_key: Bearer token material (profile PAT or OAuth access token). When set, device login is not required.
+    :type api_key: str | None
     :param request_timeout: Default timeout in seconds for API requests.
+    :type request_timeout: int
     :param upload_timeout: Timeout in seconds for file-upload requests.
+    :type upload_timeout: int
+    :param verbose: Whether to enable verbose logging.
+    :type verbose: bool
+    :returns: None
+    :rtype: None
     """
 
     # TODO: Remove this once we have a production URL
@@ -92,6 +132,15 @@ class ArenaClient:
     BASE_URL: ClassVar[str] = "http://localhost:3001"
     CONFIG_DIR: ClassVar[Path] = Path.home() / ".arena"
     CONFIG_FILE: ClassVar[Path] = CONFIG_DIR / "config.json"
+
+    _CAPABILITIES_PATH: ClassVar[str] = "/api/cli/v1/capabilities"
+    # Capability checks gate `--help` rendering, so keep them snappy even when the
+    # API is slow/unreachable instead of blocking on the full request timeout.
+    _CAPABILITIES_TIMEOUT_SECS: ClassVar[float] = 5.0
+    _MANIFEST_ALLOWED_PATH_PREFIX: ClassVar[str] = "/api/cli/v1/on-prem"
+    _MANIFEST_ALLOWED_METHODS: ClassVar[frozenset[str]] = frozenset(
+        {"GET", "POST", "PATCH", "DELETE"}
+    )
 
     _ERROR_MAP: ClassVar[dict[str, type[ArenaAPIError]]] = {
         "/api/cli/v1/environments/create-and-validate": ArenaValidationError,
@@ -119,6 +168,7 @@ class ArenaClient:
         self._tokens = _TokenStore()
         self._verbose = verbose
         self._stream_handler: Callable[[StreamEvent], None] | None = None
+        self._cli_capabilities_cache: dict[str, Any] | None = None
 
         self._http = httpx.Client(
             base_url=self._base_url,
@@ -274,7 +324,12 @@ class ArenaClient:
     # -------------------------------------------------------------------------
 
     def get_current_user(self) -> dict[str, Any]:
-        """Get the authenticated user's profile details."""
+        """Get the authenticated user's profile details.
+
+        Includes account fields such as email and name. When the Arena server
+        exposes them, the payload may also contain entitlement flags (e.g.
+        enterprise / on-prem access) relevant to CLI feature gating.
+        """
         return self._request("GET", "/api/users/current")
 
     def get_user_credits(self) -> Any:
@@ -1621,6 +1676,210 @@ class ArenaClient:
             resp.headers.get("content-disposition"),
         )
 
+    def _get_cli_capabilities(
+        self, *, force_refresh: bool = False
+    ) -> dict[str, Any] | None:
+        """Fetch CLI capabilities document (internal; used by Arena CLI only)."""
+        if self._cli_capabilities_cache is not None and not force_refresh:
+            return self._cli_capabilities_cache
+
+        try:
+            headers = self._auth_headers()
+        except ArenaAuthError:
+            self._cli_capabilities_cache = None
+            return None
+
+        try:
+            resp = self._http.request(
+                "GET",
+                self._CAPABILITIES_PATH,
+                headers=headers,
+                timeout=min(self._request_timeout, self._CAPABILITIES_TIMEOUT_SECS),
+            )
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "Arena CLI capabilities request failed (%s): %s",
+                self._CAPABILITIES_PATH,
+                exc,
+            )
+            self._cli_capabilities_cache = None
+            return None
+
+        if resp.status_code == 404:
+            self._cli_capabilities_cache = None
+            return None
+
+        if not resp.is_success:
+            raw = resp.text
+            raise ArenaAPIError.from_response_body(raw, status_code=resp.status_code)
+
+        try:
+            envelope = resp.json()
+        except ValueError:
+            # Empty body, HTML fallback pages, or other non-JSON success payloads.
+            self._cli_capabilities_cache = None
+            return None
+
+        if (
+            not isinstance(envelope, dict)
+            or envelope.get("ok") is not True
+            or "data" not in envelope
+        ):
+            self._cli_capabilities_cache = None
+            return None
+
+        data = envelope["data"]
+        if not isinstance(data, dict):
+            self._cli_capabilities_cache = None
+            return None
+        schema_v = data.get("schemaVersion")
+        if schema_v != 1 and schema_v != "1":
+            logger.warning(
+                "Arena CLI capabilities unsupported schemaVersion=%r (need 1)",
+                schema_v,
+            )
+            self._cli_capabilities_cache = None
+            return None
+
+        self._cli_capabilities_cache = data
+        return data
+
+    def _validate_manifest_invoke(
+        self, invoke: ManifestInvoke
+    ) -> tuple[str, str, str, list[dict[str, Any]]]:
+        """Check an invoke descriptor and return ``(path, method, responseKind, params)``.
+
+        Guards against unsupported methods/paths so a malformed or untrusted
+        server manifest can't drive the client to an unexpected endpoint.
+        """
+        path = invoke["path"]
+        if not isinstance(path, str):
+            msg = "The Arena server sent an invalid on-prem command."
+            raise ArenaValidationError(
+                msg,
+                cli_hint="Upgrade agilerl — the server sent an on-prem "
+                "configuration this version can't use.",
+            )
+        if not path.startswith(self._MANIFEST_ALLOWED_PATH_PREFIX):
+            msg = "This on-prem command isn't permitted by the CLI."
+            raise ArenaValidationError(msg)
+        if ".." in path.split("/"):
+            msg = "The Arena server sent an invalid on-prem command path."
+            raise ArenaValidationError(msg)
+
+        method = str(invoke["method"]).upper()
+        if method not in self._MANIFEST_ALLOWED_METHODS:
+            msg = f"Unsupported manifest HTTP method {method!r}."
+            raise ArenaValidationError(msg)
+
+        response_kind = invoke["responseKind"]
+        if response_kind not in {"json", "binary"}:
+            msg = f"Unsupported manifest responseKind {response_kind!r}."
+            raise ArenaValidationError(msg)
+
+        allowed_param_in = frozenset({"query", "body", "client"})
+        allowed_param_types = frozenset({"string", "int", "bool", "json"})
+
+        params_list = list(invoke.get("params") or [])
+        for spec in params_list:
+            pin = spec.get("in")
+            if pin not in allowed_param_in:
+                msg = f"Unsupported manifest param location {pin!r}."
+                raise ArenaValidationError(msg)
+            ptyp = spec.get("type")
+            if ptyp not in allowed_param_types:
+                msg = f"Unsupported manifest param type {ptyp!r}."
+                raise ArenaValidationError(msg)
+
+        return path, method, response_kind, params_list
+
+    def _partition_manifest_args(
+        self,
+        *,
+        method: str,
+        params_list: list[dict[str, Any]],
+        parsed_args: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """Split parsed CLI args into ``(query, body)`` per each param's ``in``.
+
+        Returns the query dict and the JSON body (``None`` when the command
+        takes no body). Raises if a required argument is missing.
+        """
+        query: dict[str, Any] = {}
+        body_obj: dict[str, Any] | None = None
+
+        for spec in params_list:
+            where = spec["in"]
+            key = spec["name"]
+            if where == "client":
+                continue
+
+            required = bool(spec["required"])
+            if key not in parsed_args:
+                if required:
+                    msg = f"Missing required argument {key!r}."
+                    raise ArenaValidationError(msg)
+                continue
+
+            val = parsed_args[key]
+            if val is None:
+                if required:
+                    msg = f"Missing required argument {key!r}."
+                    raise ArenaValidationError(msg)
+                continue
+
+            if where == "query":
+                query[key] = val
+            elif where == "body":
+                if body_obj is None:
+                    body_obj = {}
+                body_obj[key] = val
+
+        body_needed = any(spec["in"] == "body" for spec in params_list)
+        if body_needed and body_obj is None:
+            body_obj = {}
+
+        # Hardcoded invokes (e.g. on-prem install) pass a full payload without
+        # manifest param specs — route by HTTP method.
+        if not params_list and parsed_args:
+            if method == "GET":
+                query = {**parsed_args, **query}
+            elif method in {"POST", "PATCH", "PUT", "DELETE"} and body_obj is None:
+                body_obj = dict(parsed_args)
+
+        return query, body_obj
+
+    def _invoke_manifest_command(
+        self,
+        invoke: ManifestInvoke,
+        parsed_args: Mapping[str, Any],
+    ) -> Any:
+        """Dispatch an on-prem command using already-parsed CLI kwargs.
+
+        Returns decoded JSON for ``responseKind == "json"`` invokes, or a
+        ``(bytes, content_type, content_disposition)`` tuple for ``"binary"``
+        ones (e.g. bundle downloads); hence the dynamic ``Any`` return.
+        """
+        path, method, response_kind, params_list = self._validate_manifest_invoke(
+            invoke
+        )
+        query, body_obj = self._partition_manifest_args(
+            method=method,
+            params_list=params_list,
+            parsed_args=parsed_args,
+        )
+
+        req_kw: dict[str, Any] = {}
+        if query:
+            req_kw["params"] = query
+        if body_obj is not None:
+            req_kw["json"] = body_obj
+
+        if response_kind == "binary":
+            return self._request_raw(method, path, **req_kw)
+
+        return self._request(method, path, **req_kw)
+
     def _open_stream(
         self,
         method: str,
@@ -1636,6 +1895,8 @@ class ArenaClient:
         if handler is None and self._verbose:
             renderer = StreamRichRenderer(error_cls=error_cls)
             handler = renderer.handle_event
+
+        # Send the request and return an NDJsonStream
         resp = self._send(method, path, stream=True, timeout=timeout, **kwargs)
         return NDJsonStream(
             resp, handler=handler, renderer=renderer, error_cls=error_cls
