@@ -62,15 +62,6 @@ def build_install_command() -> click.Command:
         help="[dockerSwarm] Comma-separated worker SSH hosts.",
     )
     @click.option(
-        "--num-nodes",
-        type=click.IntRange(1),
-        default=None,
-        help=(
-            "Node count when creating a new class. "
-            "Default: manager+workers for dockerSwarm, 1 for helm."
-        ),
-    )
-    @click.option(
         "--ssh-user",
         default=None,
         help=(
@@ -114,7 +105,6 @@ def build_install_command() -> click.Command:
         setup_type: str,
         manager: str | None,
         workers: str,
-        num_nodes: int | None,
         ssh_user: str | None,
         ssh_extra_opts: str | None,
         advertise_addr: str | None,
@@ -123,6 +113,9 @@ def build_install_command() -> click.Command:
         verbose: bool,
     ) -> None:
         """Install an on-prem worker cluster for CLASS_NAME.
+
+        CLASS_NAME must already exist (create via the Arena UI or
+        ``arena on-prem classes create``).
 
         **dockerSwarm** — downloads the deployment bundle and runs install-docker,
         NVIDIA setup, swarm init/join, GPU node labels, and stack deploy on
@@ -142,7 +135,6 @@ def build_install_command() -> click.Command:
                 skip_enable=skip_enable,
                 manager=manager.strip() if manager else None,
                 workers=worker_hosts,
-                num_nodes=num_nodes,
                 ssh_user=ssh_user,
                 ssh_extra_opts=ssh_extra_opts,
                 advertise_addr=advertise_addr,
@@ -202,13 +194,7 @@ def build_teardown_command() -> click.Command:
         "--skip-cluster",
         is_flag=True,
         default=False,
-        help="Only update Arena (delete class / disable provider); do not touch Helm or Swarm.",
-    )
-    @click.option(
-        "--keep-class",
-        is_flag=True,
-        default=False,
-        help="Remove cluster workloads but keep the Arena resource class.",
+        help="Skip Helm/Swarm teardown (use with --disable-provider if needed).",
     )
     @click.option(
         "--disable-provider",
@@ -240,7 +226,6 @@ def build_teardown_command() -> click.Command:
         ssh_user: str | None,
         ssh_extra_opts: str | None,
         skip_cluster: bool,
-        keep_class: bool,
         disable_provider: bool,
         leave_swarm: bool,
         verbose: bool,
@@ -252,8 +237,8 @@ def build_teardown_command() -> click.Command:
 
         **dockerSwarm** — ``docker stack rm`` on ``--manager`` (default stack name ``arena``).
 
-        By default also deletes the Arena on-prem resource class; use ``--keep-class`` to
-        leave the class registered. Use ``--skip-cluster`` for API-only cleanup.
+        Does not delete the Arena resource class; use ``arena on-prem classes delete``
+        when you want to remove the class from Arena.
         """
         _apply_verbosity(verbose=verbose)
 
@@ -263,7 +248,6 @@ def build_teardown_command() -> click.Command:
                 name=name.strip(),
                 setup_type=setup_type,
                 skip_cluster=skip_cluster,
-                delete_class=not keep_class,
                 disable_provider=disable_provider,
                 manager=manager.strip() if manager else None,
                 workers=tuple(h.strip() for h in workers.split(",") if h.strip()),

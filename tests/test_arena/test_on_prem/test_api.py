@@ -8,7 +8,7 @@ import pytest
 
 from agilerl.arena.exceptions import ArenaAPIError
 from agilerl.arena.on_prem import OnPremApi
-from agilerl.arena.on_prem.api import class_by_name, resolve_num_nodes
+from agilerl.arena.on_prem.api import class_by_name
 
 
 class TestClassByName:
@@ -24,29 +24,6 @@ class TestClassByName:
         classes = [{"name": "dup"}, {"name": "dup"}]
         with pytest.raises(ArenaAPIError, match="Multiple on-prem classes"):
             class_by_name(classes, "dup")
-
-
-class TestResolveNumNodes:
-    @pytest.mark.parametrize(
-        ("existing", "explicit", "default", "expected"),
-        [
-            ({"num_nodes": 5}, None, 9, 5),  # existing wins
-            (None, 3, 9, 3),  # explicit next
-            (None, None, 9, 9),  # falls back to default
-            ({"num_nodes": 0}, 4, 9, 4),  # invalid existing ignored
-            ({"num_nodes": "x"}, None, 9, 9),  # non-int existing ignored
-        ],
-    )
-    def test_precedence(
-        self,
-        existing: dict[str, object] | None,
-        explicit: int | None,
-        default: int,
-        expected: int,
-    ) -> None:
-        assert (
-            resolve_num_nodes(existing, explicit=explicit, default=default) == expected
-        )
 
 
 class TestOnPremApi:
@@ -69,32 +46,6 @@ class TestOnPremApi:
     ) -> None:
         mock_client._invoke_manifest_command.return_value = [{"name": "pool", "id": 7}]
         assert on_prem_api.find_class("pool") == {"name": "pool", "id": 7}
-
-    def test_ensure_class_reuses_existing(
-        self, on_prem_api: OnPremApi, mock_client: MagicMock
-    ) -> None:
-        mock_client._invoke_manifest_command.return_value = [{"name": "pool", "id": 9}]
-        row = on_prem_api.ensure_class("pool", num_nodes=2)
-        assert row["id"] == 9
-        # Only the list call; no create.
-        mock_client._invoke_manifest_command.assert_called_once()
-
-    def test_ensure_class_creates_when_absent(
-        self, on_prem_api: OnPremApi, mock_client: MagicMock
-    ) -> None:
-        mock_client._invoke_manifest_command.side_effect = [[], {"name": "p", "id": 7}]
-        row = on_prem_api.ensure_class("p", num_nodes=2)
-        assert row["id"] == 7
-        create = mock_client._invoke_manifest_command.call_args_list[1]
-        assert create.args[0]["path"].endswith("/classes/create")
-        assert create.args[1]["num_nodes"] == 2
-
-    def test_ensure_class_rejects_non_object_create_response(
-        self, on_prem_api: OnPremApi, mock_client: MagicMock
-    ) -> None:
-        mock_client._invoke_manifest_command.side_effect = [[], "oops"]
-        with pytest.raises(ArenaAPIError, match="not an object"):
-            on_prem_api.ensure_class("p", num_nodes=1)
 
     def test_delete_class_skips_when_absent(
         self, on_prem_api: OnPremApi, mock_client: MagicMock

@@ -1,6 +1,6 @@
 """Provider-specific install/teardown orchestration.
 
-:class:`OnPremInstaller` holds the shared install/teardown flow (enable, ensure
+:class:`OnPremInstaller` holds the shared install/teardown flow (enable, require
 class, download bundle, …) as template methods; :class:`SwarmInstaller` and
 :class:`HelmInstaller` fill in the cluster-specific steps. The module-level
 :func:`run_on_prem_install` / :func:`run_on_prem_teardown` are a thin functional
@@ -24,7 +24,7 @@ from typing import ClassVar
 import click
 
 from agilerl.arena.client import ArenaClient
-from agilerl.arena.on_prem.api import OnPremApi, resolve_num_nodes
+from agilerl.arena.on_prem.api import OnPremApi
 from agilerl.arena.on_prem.bundle import (
     extract_bundle,
     parse_helm_release_ids,
@@ -223,32 +223,31 @@ class OnPremInstaller(ABC):
     def install(
         self,
         *,
-        num_nodes: int | None = None,
         skip_enable: bool = False,
         skip_verify: bool = False,
     ) -> None:
-        """Enable on-prem, ensure the class exists, download the bundle, install.
+        """Enable on-prem, require the class, download the bundle, install.
 
-        :param num_nodes: Node count when creating a new class; ``None`` uses the
-            per-flavor default.
-        :type num_nodes: int | None
         :param skip_enable: If ``True``, skip enabling the on-prem provider.
         :type skip_enable: bool
         :param skip_verify: If ``True``, skip post-install verification.
         :type skip_verify: bool
         :returns: None
         :rtype: None
+        :raises click.ClickException: If the resource class does not exist.
         """
         self.preflight_install()
 
         if not skip_enable:
             self.api.enable()
 
-        existing = self.api.find_class(self.name)
-        nodes = resolve_num_nodes(
-            existing, explicit=num_nodes, default=self.default_num_nodes()
-        )
-        self.api.ensure_class(self.name, num_nodes=nodes)
+        if self.api.find_class(self.name) is None:
+            msg = (
+                f"No on-prem resource class {self.name!r}. "
+                "Create it first: ``arena on-prem classes create --name ... "
+                "--num-nodes ...``."
+            )
+            raise click.ClickException(msg)
 
         with tempfile.TemporaryDirectory(prefix="arena-on-prem-") as tmp:
             data = self.api.fetch_bundle(self.name, self.kind)
@@ -264,15 +263,12 @@ class OnPremInstaller(ABC):
         self,
         *,
         skip_cluster: bool = False,
-        delete_class: bool = True,
         disable_provider: bool = False,
     ) -> None:
-        """Remove cluster workloads and optionally delete the class / disable on-prem.
+        """Remove cluster workloads and optionally disable the on-prem provider.
 
-        :param skip_cluster: If ``True``, do not touch the cluster (API-only cleanup).
+        :param skip_cluster: If ``True``, skip Helm/Swarm teardown steps.
         :type skip_cluster: bool
-        :param delete_class: If ``True``, delete the Arena resource class.
-        :type delete_class: bool
         :param disable_provider: If ``True``, disable the on-prem provider afterward.
         :type disable_provider: bool
         :returns: None
@@ -280,8 +276,6 @@ class OnPremInstaller(ABC):
         """
         if not skip_cluster:
             self.teardown_cluster()
-        if delete_class:
-            self.api.delete_class(self.name)
         if disable_provider:
             self.api.disable()
         logger.info(
@@ -295,14 +289,6 @@ class OnPremInstaller(ABC):
 
         :returns: None
         :rtype: None
-        """
-
-    @abstractmethod
-    def default_num_nodes(self) -> int:
-        """Node count used when creating a new class with no explicit value.
-
-        :returns: The per-flavor default node count.
-        :rtype: int
         """
 
     @abstractmethod
@@ -410,18 +396,6 @@ class SwarmInstaller(OnPremInstaller):
         if not shutil.which("ssh"):
             msg = "ssh not found on PATH; required for dockerSwarm install."
             raise click.ClickException(msg)
-
-    def default_num_nodes(self) -> int:
-        """Default to the number of distinct manager + worker hosts.
-
-        :returns: ``max(1, number of hosts)``.
-        :rtype: int
-        """
-        manager = self._require_manager(
-            "--manager is required for dockerSwarm "
-            "(SSH hostname or IP of the swarm manager)."
-        )
-        return max(1, len(all_hosts(manager, self._workers)))
 
     def install_cluster(self, bundle_root: Path) -> None:
         """Run the ordered Swarm install stages over SSH.
@@ -652,14 +626,6 @@ class HelmInstaller(OnPremInstaller):
             advertise_addr=self._advertise_addr,
         )
 
-    def default_num_nodes(self) -> int:
-        """Helm clusters default to a single node.
-
-        :returns: ``1``.
-        :rtype: int
-        """
-        return 1
-
     def install_cluster(self, bundle_root: Path) -> None:
         """Run the bundle's ``setup.sh`` against the local kubectl context.
 
@@ -830,10 +796,9 @@ def run_on_prem_install(
     ssh_user: str | None = None,
     ssh_extra_opts: str | None = None,
     advertise_addr: str | None = None,
-    num_nodes: int | None = None,
     skip_verify: bool = False,
 ) -> None:
-    """Enable on-prem, ensure class exists, download bundle, run install scripts.
+    """Enable on-prem, require class exists, download bundle, run install scripts.
 
     :param client: The authenticated Arena client.
     :type client: ArenaClient
@@ -853,8 +818,6 @@ def run_on_prem_install(
     :type ssh_extra_opts: str | None
     :param advertise_addr: Swarm ``--advertise-addr`` (dockerSwarm only).
     :type advertise_addr: str | None
-    :param num_nodes: Node count when creating a new class; ``None`` uses the default.
-    :type num_nodes: int | None
     :param skip_verify: If ``True``, skip post-install verification.
     :type skip_verify: bool
     :returns: None
@@ -873,9 +836,7 @@ def run_on_prem_install(
         advertise_addr=advertise_addr,
         stack_name=os.environ.get("ARENA_STACK_NAME", "arena"),
     )
-    installer.install(
-        num_nodes=num_nodes, skip_enable=skip_enable, skip_verify=skip_verify
-    )
+    installer.install(skip_enable=skip_enable, skip_verify=skip_verify)
 
 
 def run_on_prem_teardown(
@@ -884,7 +845,6 @@ def run_on_prem_teardown(
     name: str,
     setup_type: str,
     skip_cluster: bool,
-    delete_class: bool,
     disable_provider: bool,
     manager: str | None = None,
     workers: tuple[str, ...] = (),
@@ -893,7 +853,7 @@ def run_on_prem_teardown(
     stack_name: str = "arena",
     leave_swarm: bool = False,
 ) -> None:
-    """Remove cluster workloads and optionally delete the Arena on-prem class.
+    """Remove cluster workloads and optionally disable the on-prem provider.
 
     :param client: The authenticated Arena client.
     :type client: ArenaClient
@@ -901,10 +861,8 @@ def run_on_prem_teardown(
     :type name: str
     :param setup_type: The bundle flavor (``dockerSwarm`` or ``helm``).
     :type setup_type: str
-    :param skip_cluster: If ``True``, do not touch the cluster (API-only cleanup).
+    :param skip_cluster: If ``True``, skip Helm/Swarm teardown steps.
     :type skip_cluster: bool
-    :param delete_class: If ``True``, delete the Arena resource class.
-    :type delete_class: bool
     :param disable_provider: If ``True``, disable the on-prem provider afterward.
     :type disable_provider: bool
     :param manager: The Swarm manager SSH host (dockerSwarm only).
@@ -937,6 +895,5 @@ def run_on_prem_teardown(
     )
     installer.teardown(
         skip_cluster=skip_cluster,
-        delete_class=delete_class,
         disable_provider=disable_provider,
     )

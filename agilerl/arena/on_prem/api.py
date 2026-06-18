@@ -43,35 +43,6 @@ def class_by_name(classes: object, name: str) -> dict[str, Any] | None:
     return matches[0]
 
 
-def resolve_num_nodes(
-    existing: dict[str, Any] | None,
-    *,
-    explicit: int | None,
-    default: int,
-) -> int:
-    """Decide the node count when creating a class.
-
-    Prefers an existing class's ``num_nodes``, then an explicit ``--num-nodes``,
-    then the per-flavor *default* supplied by the installer.
-
-    :param existing: The existing resource class, or ``None`` if it does not exist.
-    :type existing: dict[str, Any] | None
-    :param explicit: The node count passed via ``--num-nodes``, if any.
-    :type explicit: int | None
-    :param default: The per-flavor fallback node count.
-    :type default: int
-    :returns: The resolved node count.
-    :rtype: int
-    """
-    if existing is not None:
-        raw = existing.get("num_nodes")
-        if isinstance(raw, int) and raw > 0:
-            return raw
-    if explicit is not None:
-        return explicit
-    return default
-
-
 class OnPremApi:
     """Talks to the Arena on-prem endpoints through an :class:`ArenaClient`."""
 
@@ -118,35 +89,6 @@ class OnPremApi:
         :rtype: dict[str, Any] | None
         """
         return class_by_name(self.list_classes(), name)
-
-    def ensure_class(self, name: str, *, num_nodes: int) -> dict[str, Any]:
-        """Return the existing resource class named *name*, creating it if needed.
-
-        :param name: The resource class name.
-        :type name: str
-        :param num_nodes: Node count to use if the class must be created.
-        :type num_nodes: int
-        :returns: The existing or newly created resource class.
-        :rtype: dict[str, Any]
-        :raises ArenaAPIError: If the create response is not a JSON object.
-        """
-        existing = self.find_class(name)
-        if existing is not None:
-            logger.info("Using existing resource class %r.", name)
-            return existing
-
-        logger.info("Creating resource class %r (%d nodes)…", name, num_nodes)
-        body: dict[str, Any] = {
-            "name": name,
-            "num_nodes": num_nodes,
-            "enabled": True,
-            "metadata": endpoints.DEFAULT_METADATA,
-        }
-        created = self._client._invoke_manifest_command(endpoints.CREATE_CLASS, body)
-        if isinstance(created, dict):
-            return created
-        msg = "Create class response was not an object."
-        raise ArenaAPIError(msg)
 
     def delete_class(self, name: str) -> None:
         """Delete the resource class named *name* if it is registered in Arena.

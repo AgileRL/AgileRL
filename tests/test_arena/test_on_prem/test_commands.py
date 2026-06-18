@@ -55,7 +55,6 @@ def test_teardown_command_maps_flags(
                 "pool",
                 "--manager",
                 "m",
-                "--keep-class",
                 "--disable-provider",
                 "--leave-swarm",
             ],
@@ -64,7 +63,6 @@ def test_teardown_command_maps_flags(
     assert result.exit_code == 0, result.output
     kwargs = run_mock.call_args.kwargs
     assert kwargs["name"] == "pool"
-    assert kwargs["delete_class"] is False  # --keep-class inverts
     assert kwargs["disable_provider"] is True
     assert kwargs["leave_swarm"] is True
 

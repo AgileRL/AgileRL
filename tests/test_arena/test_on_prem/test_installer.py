@@ -268,10 +268,6 @@ class TestSwarmInstaller:
         with pytest.raises(ClickException, match="--manager is required"):
             inst.teardown_cluster()
 
-    def test_default_num_nodes_counts_hosts(self, api: OnPremApi) -> None:
-        inst = SwarmInstaller(api, name="pool", manager="m", workers=("w1", "w2"))
-        assert inst.default_num_nodes() == 3
-
 
 # --------------------------------------------------------------------------- #
 # HelmInstaller                                                                #
@@ -326,9 +322,6 @@ class TestHelmInstaller:
         with patch("agilerl.arena.on_prem.installer.logger") as log:
             inst.verify(helm_bundle)
         log.warning.assert_called_once()
-
-    def test_default_num_nodes_is_one(self, api: OnPremApi) -> None:
-        assert HelmInstaller(api, name="pool").default_num_nodes() == 1
 
     def test_helm_uninstall_invokes_cli(self) -> None:
         completed = MagicMock(returncode=0)
@@ -394,7 +387,6 @@ class TestRunOnPremInstall:
         client._invoke_manifest_command.side_effect = [
             {},  # enable
             [{"name": "pool", "id": 9}],  # find_class
-            [{"name": "pool", "id": 9}],  # ensure_class -> find_class
             (b"zip", "application/zip", None),  # fetch_bundle
         ]
         with (
@@ -420,7 +412,7 @@ class TestRunOnPremInstall:
                 skip_enable=False,
             )
         install_mock.assert_called_once()
-        bundle_call = client._invoke_manifest_command.call_args_list[3]
+        bundle_call = client._invoke_manifest_command.call_args_list[2]
         assert bundle_call.args[1] == {
             "name": "pool",
             "setupType": "dockerSwarm",
@@ -454,7 +446,6 @@ class TestRunOnPremInstall:
         client._invoke_manifest_command.side_effect = [
             {},  # enable
             [{"name": "k8s-pool", "num_nodes": 3}],  # find_class
-            [{"name": "k8s-pool", "num_nodes": 3}],  # ensure_class -> find_class
             (b"zip", "application/zip", None),  # fetch_bundle
         ]
         with (
@@ -470,7 +461,25 @@ class TestRunOnPremInstall:
                 client, name="k8s-pool", setup_type="helm", skip_enable=False
             )
         install_mock.assert_called_once()
-        assert client._invoke_manifest_command.call_count == 4
+        assert client._invoke_manifest_command.call_count == 3
+
+    def test_install_fails_when_class_missing(self) -> None:
+        client = MagicMock(spec=ArenaClient)
+        client._invoke_manifest_command.side_effect = [
+            {},  # enable
+            [],  # find_class
+        ]
+        with (
+            patch(
+                "agilerl.arena.on_prem.installer.shutil.which",
+                return_value="/usr/bin/helm",
+            ),
+            pytest.raises(ClickException, match="No on-prem resource class"),
+        ):
+            run_on_prem_install(
+                client, name="missing-pool", setup_type="helm", skip_enable=False
+            )
+        assert client._invoke_manifest_command.call_count == 2
 
 
 class TestRunOnPremTeardown:
@@ -482,7 +491,6 @@ class TestRunOnPremTeardown:
                 name="pool",
                 setup_type="dockerSwarm",
                 skip_cluster=False,
-                delete_class=False,
                 disable_provider=False,
             )
 
@@ -495,7 +503,6 @@ class TestRunOnPremTeardown:
                 name="pool",
                 setup_type="dockerSwarm",
                 skip_cluster=False,
-                delete_class=False,
                 disable_provider=True,
                 manager="10.0.0.1",
             )
@@ -505,12 +512,10 @@ class TestRunOnPremTeardown:
         ]
         assert any(p.endswith("/disable") for p in paths)
 
-    def test_helm_uninstalls_and_deletes_class(self) -> None:
+    def test_helm_uninstalls_without_deleting_class(self) -> None:
         client = MagicMock(spec=ArenaClient)
         client._invoke_manifest_command.side_effect = [
             (b"zip", "application/zip", None),  # fetch_bundle (teardown_cluster)
-            [{"name": "k8s-pool", "id": 1}],  # delete_class -> list
-            {},  # delete
         ]
         with (
             patch(
@@ -528,7 +533,6 @@ class TestRunOnPremTeardown:
                 name="k8s-pool",
                 setup_type="helm",
                 skip_cluster=False,
-                delete_class=True,
                 disable_provider=False,
             )
         helm_mock.assert_called_once_with("k8s-pool", "k8s-pool")
@@ -537,5 +541,4 @@ class TestRunOnPremTeardown:
             for c in client._invoke_manifest_command.call_args_list
             if c.args[0]["path"].endswith("/classes/delete")
         ]
-        assert len(delete_calls) == 1
-        assert delete_calls[0].args[1] == {"name": "k8s-pool"}
+        assert delete_calls == []
