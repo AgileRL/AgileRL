@@ -287,7 +287,7 @@ class TestLLMEnvSpec:
             "test": "test_split",
         }
 
-        with patch("agilerl.models.env.load_dataset", return_value=mock_ds):
+        with patch("datasets.load_dataset", return_value=mock_ds):
             train, test = spec._load_dataset_hf()
 
         mock_ds.rename_columns.assert_called_once_with({"old": "new"})
@@ -309,7 +309,7 @@ class TestLLMEnvSpec:
 
         with (
             patch("agilerl.models.env.pd.read_parquet", return_value=mock_df),
-            patch("agilerl.models.env.Dataset.from_pandas", return_value=mock_hf_ds),
+            patch("datasets.Dataset.from_pandas", return_value=mock_hf_ds),
         ):
             train, test = spec._load_dataset_file()
 
@@ -452,9 +452,9 @@ class TestAlgorithmRegistry:
         class _DummySpec(AlgorithmSpec):
             pass
 
-        ALGO_REGISTRY.add("__test_dup__", _DummySpec, arena=False)
+        ALGO_REGISTRY.add("__test_dup__", _DummySpec)
         with patch("agilerl.models.algo.logger") as mock_logger:
-            ALGO_REGISTRY.add("__test_dup__", _DummySpec, arena=False)
+            ALGO_REGISTRY.add("__test_dup__", _DummySpec)
             mock_logger.warning.assert_called_once()
 
     def test_build_algorithm_not_implemented(self):
@@ -788,13 +788,6 @@ class TestManifestResolveAlgorithm:
         with pytest.raises(TypeError, match="Expected a dict or AlgorithmSpec"):
             _resolve_algorithm(42)
 
-    def test_resolve_arena_only_rejects_local(self):
-        """arena_only=True rejects non-arena algo."""
-        from agilerl.models.manifest import _resolve_algorithm
-
-        with pytest.raises(ValueError, match="not available on Arena"):
-            _resolve_algorithm({"name": "SFT"}, arena_only=True)
-
     def test_resolve_llm_without_dependencies(self):
         """LLM algo without LLM deps raises ImportError."""
         from agilerl.models.manifest import _resolve_algorithm
@@ -802,26 +795,6 @@ class TestManifestResolveAlgorithm:
         with patch("agilerl.models.manifest.HAS_LLM_DEPENDENCIES", False):
             with pytest.raises(ImportError, match="LLM dependencies"):
                 _resolve_algorithm({"name": "GRPO", "group_size": 4})
-
-    def test_resolve_arena_only_strips_dqn_cudagraphs(self):
-        """Arena manifests ignore ``cudagraphs`` on DQN."""
-        from agilerl.models.algorithms.dqn import DQNSpec
-        from agilerl.models.manifest import _resolve_algorithm
-
-        spec = _resolve_algorithm(
-            {"name": "DQN", "cudagraphs": True},
-            arena_only=True,
-        )
-        assert isinstance(spec, DQNSpec)
-        assert spec.cudagraphs is False
-
-    def test_resolve_local_keeps_dqn_cudagraphs(self):
-        from agilerl.models.algorithms.dqn import DQNSpec
-        from agilerl.models.manifest import _resolve_algorithm
-
-        spec = _resolve_algorithm({"name": "DQN", "cudagraphs": True})
-        assert isinstance(spec, DQNSpec)
-        assert spec.cudagraphs is True
 
 
 class TestTrainingSpec:

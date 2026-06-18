@@ -85,10 +85,21 @@ match the registered class name exactly.
      lr: 6.3e-4
      batch_size: 128
 
-:class:`~agilerl.models.manifest.ArenaManifest` rejects algorithms not marked ``arena=True`` in the
-registry (e.g. ``CQN``, ``NeuralUCB`` are not available for Arena training).
+.. _manifest_models_split:
 
-2. ``environment``
+Local training vs Arena manifest models
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Local validation uses :class:`~agilerl.models.manifest.TrainingManifest` and
+:data:`~agilerl.models.algo.ALGO_REGISTRY` to dispatch manifest fields to the appropriate Pydantic model.
+Arena submission uses the
+**separate** models shipped in the ``agilerl-arena`` package (:class:`~agilerl.arena.models.TrainingManifest` and
+:data:`~agilerl.arena.models.ARENA_REGISTRY`, containing the algorithms eligible for Arena training). Local training
+models can instantiate environments and tie into local training loops; Arena models are lightweight schemas for remote
+validation and serialization.
+
+
+1. ``environment``
 ^^^^^^^^^^^^^^^^^^
 
 Validated differently for local and Arena training. Locally, we validate against an appropriate model depending on the chosen
@@ -437,7 +448,7 @@ Training on Managed Cloud Infrastructure
 :class:`~agilerl.training.trainer.ArenaTrainer` submits the same
 manifest-based configuration to `Arena <https://arena.agilerl.com>`_, AgileRL's
 managed RLOps platform. The trainer validates the specified training configuration against the
-:class:`~agilerl.models.manifest.TrainingManifest`, then uses an
+:class:`~agilerl.arena.models.manifest.TrainingManifest`, then uses an
 :class:`~agilerl.arena.client.ArenaClient` to submit the job for training on a remote cluster.
 
 .. tip::
@@ -450,11 +461,13 @@ Pre-requisites
 Installation
 ^^^^^^^^^^^^
 
-Make sure you have the extra dependencies for Arena installed, available via:
+Make sure you have `agilerl-arena` installed, either directly or through the AgileRL extra:
 
 .. code-block:: bash
 
-  pip install agilerl[arena]
+  pip install agilerl-arena
+  # or
+  pip install "agilerl[arena]"
 
 
 Authentication

@@ -16,7 +16,7 @@ else:
     EvolvableModule = Any
 
 
-@register(arena=False)
+@register()
 @offline()
 class CQNSpec(RLAlgorithmSpec):
     """Specification for CQN algorithm."""

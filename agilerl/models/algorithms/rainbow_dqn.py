@@ -17,7 +17,7 @@ else:
     EvolvableModule = Any
 
 
-@register(arena=True)
+@register()
 @off_policy()
 class RainbowDQNSpec(RLAlgorithmSpec):
     """Specification for Rainbow DQN algorithm."""

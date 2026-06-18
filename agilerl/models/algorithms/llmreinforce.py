@@ -17,7 +17,7 @@ else:
     VLLMConfig = Any
 
 
-@register(arena=True)
+@register()
 class LLMREINFORCESpec(LLMAlgorithmSpec):
     """Specification for LLMREINFORCE algorithm."""
 

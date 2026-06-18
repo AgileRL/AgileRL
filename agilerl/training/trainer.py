@@ -18,8 +18,6 @@ from agilerl.algorithms.core.base import (
 from agilerl.models import (
     ALGO_REGISTRY,
     AlgoSpecT,
-    ArenaManifest,
-    FinetuningNetworkSpec,
     LLMAlgorithmSpec,
     MutationSpec,
     ReplayBufferSpec,
@@ -28,7 +26,6 @@ from agilerl.models import (
     TrainingSpec,
 )
 from agilerl.models.env import (
-    ArenaEnvSpec,
     BanditEnvSpec,
     GymEnvSpec,
     LLMEnvSpec,
@@ -47,14 +44,17 @@ from agilerl.utils.trainer_utils import (
 logger = logging.getLogger(__name__)
 
 EnvSpecT = GymEnvSpec | PzEnvSpec | OfflineEnvSpec | LLMEnvSpec | BanditEnvSpec
-ArenaEnvT = ArenaEnvSpec | dict[str, str] | str
 ReplayBufferT = ReplayBufferSpec | None
 PopulationT = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
 
 if HAS_ARENA_DEPENDENCIES:
     from agilerl.arena import ArenaClient
+    from agilerl.arena.models import TrainingManifest as ArenaManifest
+    from agilerl.arena.models.env import EnvSpec as ArenaEnvSpec
 else:
     ArenaClient = None
+    ArenaManifest = None
+    ArenaEnvSpec = None
 
 if HAS_LLM_DEPENDENCIES:
     from transformers import AutoTokenizer
@@ -201,32 +201,6 @@ class Trainer(ABC):
             device=device,
             accelerator=accelerator,
         )
-
-    def to_manifest(self) -> dict[str, Any]:
-        """Build a manifest from the :class:`Trainer` instance.
-
-        :returns: A fully validated manifest ready for submission to Arena.
-        :rtype: dict[str, Any]
-        """
-        if isinstance(self.algorithm_spec, LLMAlgorithmSpec):
-            network = FinetuningNetworkSpec(
-                pretrained_model_name_or_path=self.algorithm_spec.pretrained_model_name_or_path,
-                max_context_length=self.algorithm_spec.max_model_len,
-                lora_config=self.algorithm_spec.lora_config,
-            )
-        else:
-            network = getattr(self.algorithm_spec, "net_config", None)
-
-        manifest = TrainingManifest(
-            algorithm=self.algorithm_spec,
-            environment=self.env_spec,
-            training=self.training_spec,
-            network=network,
-            mutation=self.mutation_spec,
-            replay_buffer=self.replay_buffer_spec,
-            tournament_selection=self.tournament_selection_spec,
-        )
-        return manifest.model_dump(mode="json", exclude_none=True)
 
     @classmethod
     def _resolve_env_spec(cls, manifest: TrainingManifest) -> Any:
@@ -474,6 +448,22 @@ class LocalTrainer(Trainer):
 
         return GymEnvSpec(**env_data)
 
+    def to_manifest(self) -> dict[str, Any]:
+        """Build a local training manifest from the :class:`LocalTrainer` instance.
+
+        :returns: A JSON-serializable manifest using core :mod:`agilerl.models`.
+        :rtype: dict[str, Any]
+        """
+        manifest = TrainingManifest.from_trainer_specs(
+            algorithm=self.algorithm_spec,
+            environment=self.env_spec,
+            training=self.training_spec,
+            mutation=self.mutation_spec,
+            replay_buffer=self.replay_buffer_spec,
+            tournament_selection=self.tournament_selection_spec,
+        )
+        return manifest.model_dump(mode="json", exclude_none=True)
+
     def train(
         self,
         *,
@@ -593,7 +583,7 @@ class ArenaTrainer(Trainer):
     def __init__(
         self,
         algorithm: AlgoSpecT | str,
-        environment: ArenaEnvT,
+        environment: ArenaEnvSpec | str,
         training: TrainingSpec | None = None,
         *,
         client: ArenaClient | None = None,
@@ -618,8 +608,11 @@ class ArenaTrainer(Trainer):
         if client is not None:
             self._client = client
         else:
-            if ArenaClient is None:
-                msg = "Arena dependencies are not installed. Please install them using: pip install agilerl[arena]"
+            if not HAS_ARENA_DEPENDENCIES or ArenaClient is None:
+                msg = (
+                    "Arena dependencies are not installed. "
+                    "Please install them using: pip install agilerl-arena"
+                )
                 raise ImportError(msg)
 
             self._client = ArenaClient(api_key=api_key)
@@ -647,7 +640,6 @@ class ArenaTrainer(Trainer):
         :returns: A fully configured :class:`ArenaTrainer` instance.
         :rtype: ArenaTrainer
         """
-        # Validate manifest and resolve environment spec.
         validated_manifest = ArenaManifest.get_validated(manifest, mode="python")
         env_spec = cls._resolve_env_spec(validated_manifest)
 
@@ -680,8 +672,25 @@ class ArenaTrainer(Trainer):
         return ArenaEnvSpec(
             name=env_data.get("name", ""),
             num_envs=env_data.get("num_envs", 16),
-            version=str(env_data.get("version", "latest")),
+            version=str(env_data.get("version")),
         )
+
+    def to_manifest(self) -> dict[str, Any]:
+        """Build an Arena submission manifest from the :class:`ArenaTrainer` instance.
+
+        :returns: A JSON-serializable manifest validated with
+            :class:`~agilerl.arena.models.TrainingManifest`.
+        :rtype: dict[str, Any]
+        """
+        manifest = TrainingManifest.from_trainer_specs(
+            algorithm=self.algorithm_spec,
+            environment=self.env_spec,
+            training=self.training_spec,
+            mutation=self.mutation_spec,
+            replay_buffer=self.replay_buffer_spec,
+            tournament_selection=self.tournament_selection_spec,
+        )
+        return TrainingManifest.to_arena_manifest(manifest)
 
     def train(self) -> dict[str, Any]:
         """Build the manifest and submit the training job to Arena.
@@ -689,8 +698,7 @@ class ArenaTrainer(Trainer):
         :returns: Arena API response including ``job_id`` and ``status``.
         :rtype: dict[str, Any]
         """
-        manifest = ArenaManifest.get_validated(self.to_manifest(), mode="json")
-        return self._client.submit_experiment(manifest)
+        return self._client.submit_experiment(self.to_manifest())
 
     def resume_from_checkpoint(self, job_id: str, max_steps: int) -> None:
         """Resume a training job from a checkpoint.

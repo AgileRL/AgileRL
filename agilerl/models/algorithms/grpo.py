@@ -17,7 +17,7 @@ else:
     VLLMConfig = Any
 
 
-@register(arena=True)
+@register()
 class GRPOSpec(LLMAlgorithmSpec):
     """Specification for GRPO algorithm."""
 

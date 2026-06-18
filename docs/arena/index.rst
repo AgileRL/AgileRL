@@ -22,11 +22,13 @@ inference.
 Installation
 ------------
 
-To use the Arena client, you need to install the extra dependencies for Arena, available via:
+To use the Arena client, install the standalone package directly with lightweight dependencies, or use the AgileRL extra:
 
 .. code-block:: bash
 
-   pip install agilerl[arena]
+   pip install agilerl-arena
+   # or
+   pip install "agilerl[arena]"
 
 Authentication
 --------------
@@ -131,15 +133,8 @@ See :ref:`tutorial_arena_end_to_end` for a full walkthrough.
 
          # Upload, create, and validate in one step
          result = client.validate_environment(
-             source="custom-gym-env/acrobot.py",
-             name="acrobot-env",
-         )
-
-         # With an explicit entrypoint (when multiple exist in the same path)
-         result = client.validate_environment(
              source="acrobot.py",
              name="acrobot-env",
-             entrypoint="acrobot:AcrobotEnv",
          )
 
          # Re-validate an already-registered environment
@@ -155,12 +150,6 @@ See :ref:`tutorial_arena_end_to_end` for a full walkthrough.
              --source acrobot.py \
              --name acrobot-env
 
-         # With an explicit entrypoint (when multiple exist in the same path)
-         arena env validate \
-             --source acrobot.py \
-             --name acrobot-env \
-             --entrypoint acrobot:AcrobotEnv
-
          # Re-validate an already-registered environment
          arena env validate acrobot-env --version v1
 
@@ -175,15 +164,20 @@ LLM Datasets
 
       .. code-block:: python
 
-         result = client.validate_dataset(source="./my_dataset/")
+         result = client.create_dataset(
+             name="my-dataset",
+             category="reasoning",
+             column_mapping={"question": "prompt", "answer": "completion"},
+             file="./my_dataset/data.csv",
+         )
 
    .. tab-item:: CLI
       :sync: cli
 
       .. code-block:: bash
 
-         # Upload and validate in one step
-         arena dataset validate --source ./my_dataset/ --version v1
+         # Upload and validate from a local directory
+         arena datasets create --source ./my_dataset/
 
 Additional Tools
 ^^^^^^^^^^^^^^^^

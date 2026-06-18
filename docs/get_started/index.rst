@@ -29,7 +29,11 @@ AgileRL ships optional dependency groups that you can install as needed:
    * - ``agilerl[box2d]``
      - Box2D physics engine for Gymnasium environments.
    * - ``agilerl[arena]``
-     - `Arena <https://arena.agilerl.com>`_ SDK & CLI. Validate custom environments, train & deploy agents on managed cloud infrastructure.
+     - Installs ``agilerl-arena`` (Python SDK and CLI).
+       Use for `Arena <https://arena.agilerl.com>`_ environment validation,
+       cloud training, and deployment.
+   * - ``pip install agilerl-arena``
+     - Arena SDK & CLI for remote training only.
    * - ``agilerl[llm]``
      - LLM reinforcement fine-tuning.
    * - ``agilerl[all]``

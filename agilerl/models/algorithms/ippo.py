@@ -16,7 +16,7 @@ else:
     ModuleDict = Any
 
 
-@register(arena=True)
+@register()
 class IPPOSpec(MultiAgentRLAlgorithmSpec):
     """Specification for IPPO algorithm."""
 

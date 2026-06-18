@@ -16,7 +16,7 @@ else:
     ModuleDict = Any
 
 
-@register(arena=True)
+@register()
 @off_policy()
 class MATD3Spec(MultiAgentRLAlgorithmSpec):
     """Specification for MATD3 algorithm."""

@@ -11,7 +11,7 @@ from agilerl.models.algo import register
 from agilerl.models.algorithms.grpo import GRPOSpec
 
 
-@register(arena=True)
+@register()
 class CISPOSpec(GRPOSpec):
     """Specification for CISPO algorithm (GRPO with CISPO loss)."""
 
