@@ -23,7 +23,9 @@ class _StubTokenizer:
 
 
 def _bare_wrapper() -> TokenObservationWrapper:
-    return TokenObservationWrapper.__new__(TokenObservationWrapper)
+    w = TokenObservationWrapper.__new__(TokenObservationWrapper)
+    w.tools = None  # optional config; __init__ default, read by the tokenize paths
+    return w
 
 
 class TestTokenObservationWrapperBuildModelPromptFields:
