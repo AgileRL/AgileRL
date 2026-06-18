@@ -61,6 +61,7 @@ This example demonstrates how to use the GRPO algorithm to fine-tune a LLM on a 
    :hidden:
 
    fused_logprobs
+   quantization
    llm_checkpoints
 
 .. seealso::
@@ -84,3 +85,12 @@ This example demonstrates how to use the GRPO algorithm to fine-tune a LLM on a 
 
    :ref:`multiturn_grpo_ppo_tutorial`
       Multi-turn GRPO and PPO for LLMs.
+
+.. note::
+
+   Colocated rollouts (where the trainer and vLLM share a single GPU and hand it
+   back and forth using vLLM's native sleep/wake) are covered for users under
+   "Colocated rollout (native vLLM sleep/wake)" in the :doc:`quantization` topic.
+   A deeper, code-level walkthrough of the same mechanism lives in
+   ``docs/llm_finetuning/vllm_sleep_handoff.md`` (a developer note kept in the
+   repository, not built into this documentation site).

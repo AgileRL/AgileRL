@@ -11,6 +11,7 @@ pytest.importorskip("deepspeed", reason="LLM tests require deepspeed.")
 pytest.importorskip("vllm", reason="LLM tests require vllm.")
 
 from agilerl.algorithms import DPO, GRPO, LLMPPO, LLMREINFORCE
+from agilerl.algorithms.core import ActionResult
 from agilerl.algorithms.core.base import MultiAgentRLAlgorithm
 from agilerl.algorithms.sft import SFT
 from agilerl.population import Population
@@ -69,9 +70,10 @@ def _mock_grpo_agent(**overrides):
     agent.algo = "GRPO"
     agent.fitness = [0.0]
     agent.local_rank = "0"
-    agent.get_action.return_value = (
+    agent.get_action.return_value = ActionResult(
         [torch.ones(1, 100) for _ in range(2)],
         Mock(),
+        None,
     )
     agent.learn.return_value = (0.5, 0.2)
     agent.test.return_value = torch.tensor([0.8])
@@ -112,7 +114,11 @@ def _mock_dpo_agent(**overrides):
     agent.algo = "DPO"
     agent.fitness = [0.0]
     agent.local_rank = "0"
-    agent.learn.return_value = (0.5, 0.2, 0.1)
+    agent.learn.return_value = {
+        "loss": 0.5,
+        "chosen_reward": 0.2,
+        "rejected_reward": 0.1,
+    }
     agent.test.return_value = 0.87
     agent.batch_size_per_process = 32
     agent.batch_size = 32
@@ -150,7 +156,7 @@ def _mock_sft_agent(**overrides):
     agent.algo = "SFT"
     agent.fitness = [0.0]
     agent.local_rank = "0"
-    agent.learn.return_value = (0.5, 1.65)
+    agent.learn.return_value = {"loss": 0.5, "perplexity": 1.65}
     agent.test.return_value = -0.4
     agent.batch_size_per_process = 32
     agent.batch_size = 32
@@ -197,11 +203,11 @@ def _make_multiturn_mock_agent(*, spec=LLMPPO):
         mock_agent.algo = getattr(spec, "__name__", "MOCK")
 
     mock_agent.learn.return_value = {
-        "mean_loss": 0.5,
-        "mean_kl": 0.2,
-        "mean_pg_loss": 0.1,
-        "mean_vf_loss": 0.1,
-        "mean_entropy": 1.0,
+        "loss": 0.5,
+        "kl": 0.2,
+        "pg_loss": 0.1,
+        "vf_loss": 0.1,
+        "entropy": 1.0,
     }
     mock_agent.batch_size = 16
     mock_agent.batch_size_per_process = 16
@@ -243,6 +249,7 @@ def _multiturn_collect_return(*, batch_steps=3):
         [torch.ones(2, dtype=torch.float32)],
         batch_steps,
         42,
+        None,  # all_sampling_logps
     )
 
 
@@ -1209,18 +1216,81 @@ class TestFinetuneLlmMultiturn:
         assert mock_collect.call_count == num_outer
         assert mock_agent.learn.call_count == num_outer
         assert mock_agent.test.call_count == 0
-        if agent_spec is GRPO:
-            mock_agent.learn.assert_called_with(ANY)
-        else:
-            mock_agent.learn.assert_called_with(ANY, turn_ids=ANY)
+        # GRPO/CISPO/GSPO now also receive turn_ids in the multi-turn loop
+        # (turn-level importance sampling + per-turn group-relative advantages).
+        mock_agent.learn.assert_called_with(ANY, turn_ids=ANY)
         assert mock_save.call_count == 1
 
-    def test_finetune_llm_multiturn_grpo_requires_batch_multiple_of_group_size(self):
+    def test_finetune_llm_multiturn_forwards_sampling_logps_to_learn(self):
+        """When the rollout captures sampling logps, they're forwarded to
+        ``learn(..., sampling_logps=...)`` for GRPO/PPO/REINFORCE agents."""
+        mock_agent = _make_multiturn_mock_agent(spec=GRPO)
+        sampling_logps = [torch.zeros(1, 8)]
+        rollout_return = (
+            [torch.ones(1, 8, dtype=torch.long)],  # completion_ids_list
+            [torch.ones(1, 8, dtype=torch.bool)],  # action_masks_list
+            [torch.zeros(1, 8, dtype=torch.long)],  # all_turn_ids
+            [torch.ones(2, dtype=torch.float32)],  # all_rewards
+            3,  # batch_steps
+            123,  # group_seed
+            sampling_logps,  # all_sampling_logps (non-None)
+        )
+        with (
+            patch(
+                "agilerl.training.train_llm.default_progress_bar",
+                return_value=MagicMock(),
+            ),
+            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
+            patch(
+                "agilerl.training.train_llm.safe_aggregate_metrics",
+                return_value=0.5,
+            ),
+            patch("agilerl.training.train_llm.save_llm_checkpoint"),
+            patch("agilerl.training.train_llm.SyncMultiTurnVecEnv"),
+            patch(
+                "agilerl.training.train_llm.collect_rollouts_llm",
+                return_value=rollout_return,
+            ),
+            patch("agilerl.training.train_llm.stack_and_pad_experiences") as mock_stack,
+        ):
+            mock_stack.return_value = (torch.zeros(1, 8, dtype=torch.long),)
+            finetune_llm_multiturn(
+                pop=[mock_agent],
+                env_factory=MagicMock(),
+                max_turns=2,
+                init_hp={"BATCH_SIZE": 1, "ALGO": mock_agent.algo},
+                max_steps=3,  # one outer iteration (batch_steps=3)
+                evaluation_interval=100,
+                verbose=False,
+                accelerator=None,
+            )
+
+        _, learn_kwargs = mock_agent.learn.call_args
+        assert learn_kwargs.get("sampling_logps") is sampling_logps
+
+    def test_finetune_llm_multiturn_allows_batch_size_indivisible_by_group_size(self):
+        """The batch>group case is unconstrained too: batch_size=3, group_size=2
+        (three prompts, two completions each) must pass startup validation rather
+        than being rejected. Patch the rollout to a sentinel and assert the call
+        reaches it — i.e. it gets past the (now-removed) divisibility guard.
+        """
         mock_agent = _make_multiturn_mock_agent(spec=GRPO)
         mock_agent.group_size = 2
         mock_agent.batch_size = 16
         mock_agent.batch_size_per_process = 16
-        with pytest.raises(ValueError, match="divisible by"):
+        with (
+            patch(
+                "agilerl.training.train_llm.default_progress_bar",
+                return_value=MagicMock(),
+            ),
+            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
+            patch("agilerl.training.train_llm.SyncMultiTurnVecEnv"),
+            patch(
+                "agilerl.training.train_llm.collect_rollouts_llm",
+                side_effect=RuntimeError("reached rollout"),
+            ),
+            pytest.raises(RuntimeError, match="reached rollout"),
+        ):
             finetune_llm_multiturn(
                 pop=[mock_agent],
                 max_turns=1,
@@ -1499,17 +1569,34 @@ class TestFinetuneLlmMultiturn:
         assert init_hp_passed["BATCH_SIZE_PER_GPU"] == 7
         assert init_hp_passed["ALGO"] == "LLMPPO"
 
-    def test_finetune_llm_multiturn_raises_when_group_size_not_divisible_by_batch_size(
+    def test_finetune_llm_multiturn_allows_group_size_indivisible_by_batch_size(
         self,
     ):
+        """batch_size and group_size need not divide each other for GRPO.
+
+        The rollout vec env keeps each prompt's group whole (group-contiguous),
+        so e.g. batch_size=2, group_size=3 (two prompts, three completions each)
+        is valid and must pass startup validation rather than being rejected.
+        We patch the rollout to raise a sentinel and assert the call reaches it
+        — i.e. it gets past the (now-removed) divisibility guard.
+        """
         agent = _make_multiturn_mock_agent(spec=GRPO)
         agent.group_size = 3
         agent.batch_size = 2
         agent.batch_size_per_process = 2
 
-        with pytest.raises(
-            ValueError,
-            match=r"Group size \(3\) must be divisible by batch size \(2\)",
+        with (
+            patch(
+                "agilerl.training.train_llm.default_progress_bar",
+                return_value=MagicMock(),
+            ),
+            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
+            patch("agilerl.training.train_llm.SyncMultiTurnVecEnv"),
+            patch(
+                "agilerl.training.train_llm.collect_rollouts_llm",
+                side_effect=RuntimeError("reached rollout"),
+            ),
+            pytest.raises(RuntimeError, match="reached rollout"),
         ):
             finetune_llm_multiturn(
                 pop=[agent],
@@ -1729,7 +1816,9 @@ def test_collect_rollouts_llm_breaks_when_vector_env_has_no_active_prompts():
             batch = int(input_ids.shape[0]) if hasattr(input_ids, "shape") else 1
         else:
             batch = len(obs)
-        return ([torch.ones(1, 5, dtype=torch.long) for _ in range(batch)], None)
+        return ActionResult(
+            [torch.ones(1, 5, dtype=torch.long) for _ in range(batch)], None, None
+        )
 
     mock_agent.get_action.side_effect = _mock_get_action
 
@@ -1746,6 +1835,7 @@ def test_collect_rollouts_llm_breaks_when_vector_env_has_no_active_prompts():
         [torch.zeros(1, 7, dtype=torch.long)],
         [torch.ones(2, dtype=torch.float32)],
         1,
+        None,  # all_sampling_logps (added to get_trajectories' return)
     )
 
     _ = collect_rollouts_llm(

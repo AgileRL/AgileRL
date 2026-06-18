@@ -68,6 +68,8 @@ class RainbowDQN(RLAlgorithm):
     :type n_step: int, optional
     :param mut: Most recent mutation to agent, defaults to None
     :type mut: str, optional
+    :param normalize_images: Flag to normalize images, defaults to True
+    :type normalize_images: bool, optional
     :param combined_reward: Boolean flag indicating whether to use combined 1-step and n-step reward, defaults to False
     :type combined_reward: bool, optional
     :param actor_network: Custom actor network, defaults to None

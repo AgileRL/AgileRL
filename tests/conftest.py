@@ -1,4 +1,5 @@
 import gc
+import itertools
 import os
 import shutil
 import socket
@@ -103,7 +104,7 @@ def pytest_collection_modifyitems(config, items):
       invocation handles both. The cap is set by:
 
       1. **GPU memory.** Each container has a dedicated ~14.6 GiB GPU. Peak
-         per-test usage: ~4.4 GiB (``test_grpo_move_model_to_vllm``), ~3.0
+         per-test usage: ~4.4 GiB (``test_grpo_sync_actor_to_vllm``), ~3.0
          GiB (``test_grpo_learn``), ~2.5 GiB
          (``test_grpo_clone_with_accelerator_vllm``); median ~1.5 GiB.
          With every test factory constructing ``VLLMConfig`` with
@@ -111,11 +112,10 @@ def pytest_collection_modifyitems(config, items):
          ``kv_cache_memory_bytes=32 * 1024 * 1024``, a vLLM worker reserves
          ~3.2 GiB and ``gpu`` (DeepSpeed) tests use ~0.5 GiB; the worst-case
          "4 vLLM workers + small DeepSpeed share" still fits in ~13 GiB.
-      2. **Port races.** Each worker's ``deepspeed_env`` fixture allocates a
-         free ``MASTER_PORT`` via the standard bind-to-port-0 / close /
-         return dance, which is TOCTOU. Above ~4 concurrent workers the
-         collision rate produces ``EADDRINUSE`` during
-         ``torch.distributed.init_process_group``.
+      2. **Port races.** Concurrent distributed inits race on MASTER_PORT;
+         ``get_free_port`` hands each xdist worker a disjoint port range to
+         avoid cross-worker ``EADDRINUSE``, and capping GPU-test concurrency
+         keeps simultaneous inits rare.
 
       ``vllm`` tests run in ``subprocess_runner.py``-spawned subprocesses, so
       worker-process state is reset between them. ``gpu`` tests run
@@ -152,11 +152,22 @@ def pytest_collection_modifyitems(config, items):
     # regardless of -n auto's worker count. See docstring above.
     gputest_groups = [pytest.mark.xdist_group(f"gputest{i}") for i in range(4)]
     minari_group = pytest.mark.xdist_group("minari")
+    # ``gpu``/``vllm``-marked tests need a usable CUDA device (real DeepSpeed
+    # init, a live vLLM engine). Skip them when CUDA is unavailable — a CPU-only
+    # runner, or a GPU whose driver is too old for the installed torch (the GPU
+    # is then hidden via ``CUDA_VISIBLE_DEVICES=``, so ``is_available()`` is
+    # False). On a real GPU the guard is inert and they run as before.
+    cuda_available = torch.cuda.is_available()
+    skip_no_cuda = pytest.mark.skip(
+        reason="Requires a usable CUDA device (gpu/vllm-marked); none available."
+    )
     gputest_count = 0
     for item in items:
         if item.get_closest_marker("vllm") or item.get_closest_marker("gpu"):
             item.add_marker(gputest_groups[gputest_count % len(gputest_groups)])
             gputest_count += 1
+            if not cuda_available:
+                item.add_marker(skip_no_cuda)
         elif "test_minari_utils" in item.nodeid:
             item.add_marker(minari_group)
 
@@ -468,7 +479,34 @@ dist_env = {
 }
 
 
+_port_counter = itertools.count()
+
+
 def get_free_port():
+    """Pick a MASTER_PORT that won't collide across xdist workers.
+
+    The classic bind-to-port-0 / close / reuse dance is TOCTOU-racy: two
+    workers can be handed the same ephemeral port and the loser dies with
+    EADDRINUSE inside ``init_process_group``. Carve a disjoint 300-port range
+    per xdist worker and walk it with a per-process counter, probing each
+    candidate; fall back to an OS-assigned port only if the whole range is
+    somehow occupied.
+    """
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "gw0")
+    try:
+        worker_num = int(worker.lstrip("gw"))
+    except ValueError:
+        worker_num = 0
+    base = 20000 + (worker_num % 100) * 300
+    for _ in range(300):
+        port = base + next(_port_counter) % 300
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                s.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+            return port
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
@@ -479,6 +517,14 @@ def deepspeed_env():
 
     dynamic_dist_env = dist_env.copy()
     dynamic_dist_env["MASTER_PORT"] = str(get_free_port())
+    # On a CPU-only / hidden-GPU runner the GPU is masked via
+    # ``CUDA_VISIBLE_DEVICES=`` (so ``is_available()`` is False at collection).
+    # Don't re-expose it here: forcing ``CUDA_VISIBLE_DEVICES=0`` makes
+    # ``is_available()`` flip True for CPU-runnable tests (config=None) that use
+    # this fixture, and they then crash trying to ``.to("cuda")`` on a device
+    # the driver can't actually serve. Keep the GPU masked unless it's usable.
+    if not torch.cuda.is_available():
+        dynamic_dist_env.pop("CUDA_VISIBLE_DEVICES", None)
     existing_vars = {}
     for key, value in dynamic_dist_env.items():
         key = key.upper()

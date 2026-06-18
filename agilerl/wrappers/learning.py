@@ -70,7 +70,6 @@ class BanditEnv:
     """
 
     def __init__(self, features: pd.DataFrame, targets: pd.DataFrame) -> None:
-        # Define the number of arms and the context dimension
         self.arms = int(targets.nunique().iloc[0])
         self.context_dim = (len(np.array(features.loc[0])) * self.arms,)
 
