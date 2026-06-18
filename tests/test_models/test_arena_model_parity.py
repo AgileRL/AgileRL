@@ -1,4 +1,11 @@
-"""Parity tests between core ``agilerl.models`` and ``agilerl.arena.models``."""
+"""Parity tests between core ``agilerl.models`` and ``agilerl.arena.models``.
+
+The check is directional: every field on an Arena spec must also exist on the
+corresponding core spec (Arena fields ⊆ core fields). The reverse is *not*
+required — ``agilerl.arena.models`` is a deliberately decoupled, torch-free
+fork, so core may carry trainer-side fields the Arena manifest does not expose.
+Arena-only fields remain a violation, and shared fields must agree on defaults.
+"""
 
 from __future__ import annotations
 
@@ -114,10 +121,10 @@ def _assert_field_name_parity(
 ) -> None:
     core_fields = _serializable_field_names(core_cls) - core_exclude
     arena_fields = _serializable_field_names(arena_cls)
-    assert core_fields == arena_fields, (
-        f"{label}: manifest field mismatch — "
-        f"core-only={sorted(core_fields - arena_fields)}, "
-        f"arena-only={sorted(arena_fields - core_fields)}"
+    arena_only = arena_fields - core_fields
+    assert not arena_only, (
+        f"{label}: Arena spec defines fields absent from core: "
+        f"{sorted(arena_only)}. Arena fields must be a subset of core fields."
     )
 
 
@@ -130,18 +137,18 @@ def _assert_model_parity(
 ) -> None:
     core_fields = _serializable_field_names(core_cls) - core_exclude
     arena_fields = _serializable_field_names(arena_cls)
-    assert core_fields == arena_fields, (
-        f"{label}: manifest field mismatch — "
-        f"core-only={sorted(core_fields - arena_fields)}, "
-        f"arena-only={sorted(arena_fields - core_fields)}"
+    arena_only = arena_fields - core_fields
+    assert not arena_only, (
+        f"{label}: Arena spec defines fields absent from core: "
+        f"{sorted(arena_only)}. Arena fields must be a subset of core fields."
     )
 
     core_dump = _default_json_dump(core_cls, exclude=core_exclude)
     arena_dump = _default_json_dump(arena_cls)
-    assert set(core_dump) == set(arena_dump), (
-        f"{label}: default serialization keys differ — "
-        f"core-only={sorted(set(core_dump) - set(arena_dump))}, "
-        f"arena-only={sorted(set(arena_dump) - set(core_dump))}"
+    arena_only_defaults = set(arena_dump) - set(core_dump)
+    assert not arena_only_defaults, (
+        f"{label}: Arena defines default-bearing fields absent from core: "
+        f"{sorted(arena_only_defaults)}"
     )
     for key in arena_dump:
         assert core_dump[key] == arena_dump[key], (
