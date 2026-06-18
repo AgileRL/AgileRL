@@ -486,6 +486,15 @@ class LLMAlgorithmSpec(AlgorithmSpec):
     gradient_checkpointing: bool = Field(default=True)
     use_liger_loss: bool = Field(default=False)
     seed: int = Field(default=42)
+    quantization: str | dict[str, Any] | None = Field(default=None)
+    activation_offload: bool = Field(default=False)
+    use_sequence_packing: bool = Field(default=False)
+    lora_target_scope: str | None = Field(default=None)
+    fused_logprobs_chunk_rows: int | None = Field(default=None)
+    fused_loss_chunk_rows: int | None = Field(default=None)
+    vllm_importance_sampling_correction: bool = Field(default=True)
+    vllm_importance_sampling_cap: float = Field(default=2.0, ge=0.0)
+    attn_implementation: str | None = Field(default=None)
 
     # These fields come from the "network" section of the manifest
     pretrained_model_name_or_path: str | None = Field(default=None, min_length=1)
@@ -546,6 +555,24 @@ class LLMAlgorithmSpec(AlgorithmSpec):
         kwargs.pop("pretrained_model_name_or_path", None)
         if not use_vllm:
             kwargs.pop("max_model_len", None)
+
+        # Resolve trainer-side bitsandbytes quantization (a preset name or a
+        # BitsAndBytesConfig kwargs dict) to the quantization_config the
+        # algorithm constructor expects.
+        if "quantization" in kwargs:
+            from agilerl.utils.llm_utils import build_bnb_quantization_config
+
+            kwargs["quantization_config"] = build_bnb_quantization_config(
+                kwargs.pop("quantization")
+            )
+
+        # A non-"auto" attn_implementation is forwarded through model_config so
+        # the model-creation path treats it as authoritative.
+        attn_implementation = kwargs.pop("attn_implementation", None)
+        if attn_implementation is not None and attn_implementation != "auto":
+            model_config = dict(kwargs.get("model_config") or {})
+            model_config.setdefault("attn_implementation", attn_implementation)
+            kwargs["model_config"] = model_config
 
         algo_cls = self.algo_class()
         algo = algo_cls(

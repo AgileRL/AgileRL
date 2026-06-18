@@ -325,11 +325,23 @@ def finetune_llm_reasoning(
             agent.set_reference_policy(training_env.num_epochs)
             agent.init_training_step()
 
-            completion_ids, action_masks = agent.get_action(current_prompts)
+            action_result = agent.get_action(current_prompts)
+            completion_ids = action_result.completion_ids
+            action_masks = action_result.action_masks
+            # Per-row vLLM sampling logprobs captured during get_action (only
+            # when the GRPO-family mismatch correction is enabled); ``None``
+            # otherwise.
+            sampling_logps = action_result.sampling_logps
             next_prompts_i, rewards = training_env.step(completion_ids)
 
             experiences = (completion_ids, action_masks, rewards)
-            agent.learn(experiences)
+            learn_kwargs = (
+                {"sampling_logps": sampling_logps}
+                if sampling_logps is not None
+                and isinstance(agent, (GRPO, LLMPPO, LLMREINFORCE))
+                else {}
+            )
+            agent.learn(experiences, **learn_kwargs)
 
             if max_reward is not None:
                 if "accuracy" not in agent.metrics.additional_metrics:
@@ -574,7 +586,9 @@ def finetune_llm_preference(
             agent.set_reference_policy(training_env.num_epochs)
             agent.init_training_step()
 
-            _, chosen_reward, rejected_reward = agent.learn(current_prompts)
+            learn_result = agent.learn(current_prompts)
+            chosen_reward = learn_result["chosen_reward"]
+            rejected_reward = learn_result["rejected_reward"]
             next_prompts_i = training_env.step()
 
             agent.add_scores([float(chosen_reward - rejected_reward)])
@@ -798,7 +812,8 @@ def finetune_llm_sft(
             agent.set_reference_policy(env.num_epochs)
             agent.init_training_step()
 
-            agg_loss, _agg_perplexity = agent.learn(prompts)
+            learn_result = agent.learn(prompts)
+            agg_loss = learn_result["loss"]
             next_prompts = env.step()
 
             agent.add_scores([-agg_loss])
@@ -981,21 +996,6 @@ def finetune_llm_multiturn(
         }
 
     batch_size = init_hp.get("BATCH_SIZE", pop[0].batch_size)
-    for agent in pop:
-        if isinstance(agent, GRPO):
-            group_size = getattr(agent, "group_size", 1)
-            if batch_size > group_size and batch_size % group_size != 0:
-                msg = (
-                    f"Batch size ({batch_size}) must be divisible by "
-                    f"group_size ({group_size}) for GRPO."
-                )
-                raise ValueError(msg)
-            if batch_size < group_size and group_size % batch_size != 0:
-                msg = (
-                    f"Group size ({group_size}) must be divisible by "
-                    f"batch size ({batch_size}) for GRPO."
-                )
-                raise ValueError(msg)
 
     data_increment = accelerator.num_processes if accelerator is not None else 1
     effective_data_batch_size = data_increment * batch_size
@@ -1069,6 +1069,7 @@ def finetune_llm_multiturn(
                 all_rewards,
                 batch_steps,
                 group_seed,
+                all_sampling_logps,
             ) = collect_rollouts_llm(
                 agent=agent,
                 env=rollout_env,
@@ -1095,12 +1096,26 @@ def finetune_llm_multiturn(
             )
             mean_score = episode_scores.mean().to(agent.device)
 
-            experiences = (completion_ids_list, action_masks_list, rewards_2d)
+            experiences = (
+                completion_ids_list,
+                action_masks_list,
+                rewards_2d,
+            )
+
+            # Pass turn_ids to every multi-turn RL agent that accepts it
+            # (LLMPPO/LLMREINFORCE, and the GRPO family — GRPO/CISPO/GSPO —
+            # which use it for turn-level importance sampling + per-turn
+            # group-relative advantages). Agents that don't need it (e.g.
+            # token/sequence levels, GSPO) simply ignore it.
             learn_kwargs = (
                 {"turn_ids": turn_ids_padded}
-                if isinstance(agent, (LLMREINFORCE, LLMPPO))
+                if isinstance(agent, (LLMREINFORCE, LLMPPO, GRPO))
                 else {}
             )
+            if all_sampling_logps is not None and isinstance(
+                agent, (GRPO, LLMPPO, LLMREINFORCE)
+            ):
+                learn_kwargs["sampling_logps"] = all_sampling_logps
             agent.learn(experiences, **learn_kwargs)
 
             agg_score = safe_aggregate_metrics(accelerator, mean_score)

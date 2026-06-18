@@ -93,6 +93,9 @@ class PPO(RLAlgorithm):
     :type share_encoders: bool, optional
     :param num_envs: Number of parallel environments, defaults to 1
     :type num_envs: int, optional
+    :param rollout_buffer_config: Extra keyword arguments forwarded to the
+        rollout buffer constructor, defaults to None (treated as an empty dict).
+    :type rollout_buffer_config: dict[str, Any] | None, optional
     :param recurrent: Flag to use hidden states for recurrent policies, defaults to False
     :type recurrent: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'

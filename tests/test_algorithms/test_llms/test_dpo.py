@@ -419,9 +419,9 @@ class TestDPOLearn:
         prompts = env.reset()
         pre_learn_actor_state_dict = copy.deepcopy(dpo.actor.state_dict())
         learn_result = dpo.learn(prompts)
-        loss = learn_result["mean_loss"]
-        chosen_reward = learn_result["mean_chosen_reward"]
-        rejected_reward = learn_result["mean_rejected_reward"]
+        loss = learn_result["loss"]
+        chosen_reward = learn_result["chosen_reward"]
+        rejected_reward = learn_result["rejected_reward"]
 
         assert isinstance(loss, float)
         assert isinstance(chosen_reward, float)

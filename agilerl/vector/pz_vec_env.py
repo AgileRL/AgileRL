@@ -108,6 +108,7 @@ class PettingZooVecEnv:
         """Wait for the step taken with step_async().
 
         :param timeout: Number of seconds before the call times out. If ``None``, never times out.
+        :type timeout: float | None, optional
         """
         msg = "Subclasses must implement step_wait()"
         raise NotImplementedError(msg)

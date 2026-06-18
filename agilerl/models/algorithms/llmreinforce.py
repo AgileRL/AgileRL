@@ -31,6 +31,11 @@ class LLMREINFORCESpec(LLMAlgorithmSpec):
     cosine_lr_schedule_config: CosineLRScheduleConfig | None = Field(default=None)
     vllm_config: VLLMConfig | None = Field(default=None)
     use_vllm: bool = Field(default=False)
+    advantage_granularity: Literal["turn", "token", "auto"] = Field(default="auto")
+    importance_sampling_level: Literal["token", "turn", "trajectory"] = Field(
+        default="token"
+    )
+    turn_ratio_pooling: Literal["sum", "mean"] = Field(default="sum")
 
     env_type: ClassVar[LLMEnvType] = "reasoning"
 
