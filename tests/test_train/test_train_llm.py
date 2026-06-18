@@ -245,6 +245,7 @@ def _multiturn_collect_return(*, batch_steps=3):
         [torch.ones(2, dtype=torch.float32)],
         batch_steps,
         42,
+        None,  # all_sampling_logps
     )
 
 
