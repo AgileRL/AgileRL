@@ -29,6 +29,7 @@ class TokenObservationWrapper:
         max_model_len: int | None = None,
         max_output_tokens: int | None = None,
         enable_sliding_window: bool = False,
+        tools: list[dict[str, Any]] | None = None,
     ) -> None:
         """Token-level wrapper for multi-turn LLM environments.
 
@@ -45,12 +46,19 @@ class TokenObservationWrapper:
             multi-turn reasoning (the model loses access to its own earlier
             attempts) and hide budget-management bugs.
         :type enable_sliding_window: bool
+        :param tools: Optional OpenAI/JSON tool schemas forwarded to the chat
+            template (``tools=``) so the policy can emit tool calls. ``None``
+            (default) preserves the exact pre-tool behaviour (no ``tools=`` kwarg
+            is passed). Sourced from the wrapped env / integration ``EnvWorker``
+            tool set.
+        :type tools: list[dict] | None
         """
         self._env = env
         self.tokenizer = tokenizer
         self.max_turns = max_turns
         self.pad_id = pad_id
         self.apply_chat_template = apply_chat_template
+        self.tools = tools
         self._sw_max_model_len = max_model_len
         self._sw_max_output_tokens = max_output_tokens
         self._sw_enabled = enable_sliding_window
@@ -80,10 +88,14 @@ class TokenObservationWrapper:
     def _tokenize_initial_prompt(self, obs_text: str) -> dict[str, torch.Tensor]:
         """Tokenize the initial observation, optionally with chat template."""
         if self.apply_chat_template:
+            tmpl_kwargs: dict[str, Any] = {}
+            if self.tools is not None:
+                tmpl_kwargs["tools"] = self.tools
             result = self.tokenizer.apply_chat_template(
                 [{"role": "user", "content": obs_text}],
                 tokenize=True,
                 add_generation_prompt=True,
+                **tmpl_kwargs,
             )
             # Transformers v5 apply_chat_template returns a dict
             token_ids = result["input_ids"]
@@ -168,11 +180,15 @@ class TokenObservationWrapper:
             {"role": "assistant", "content": placeholder},
             {"role": "user", "content": feedback_text},
         ]
+        tmpl_kwargs: dict[str, Any] = {}
+        if self.tools is not None:
+            tmpl_kwargs["tools"] = self.tools
         try:
             rendered = self.tokenizer.apply_chat_template(
                 messages,
                 tokenize=False,
                 add_generation_prompt=True,
+                **tmpl_kwargs,
             )
         except Exception:
             return None
