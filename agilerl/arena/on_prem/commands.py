@@ -8,6 +8,7 @@ import click
 
 from agilerl.arena.config import CommandConfig, arena_client
 from agilerl.arena.on_prem.installer import (
+    run_on_prem_down,
     run_on_prem_install,
     run_on_prem_teardown,
 )
@@ -144,6 +145,97 @@ def build_install_command() -> click.Command:
     return install_cmd
 
 
+def build_down_command() -> click.Command:
+    """``arena on-prem down`` — stop workloads; stack or Helm release remains.
+
+    :returns: The configured ``down`` Click command.
+    :rtype: click.Command
+    """
+
+    @click.command(
+        "down",
+        context_settings={"max_content_width": 100},
+    )
+    @click.argument("name")
+    @click.option(
+        "--setup-type",
+        "setup_type",
+        default="dockerSwarm",
+        show_default=True,
+        type=click.Choice(["dockerSwarm", "helm"], case_sensitive=False),
+        help="Must match how the cluster was installed.",
+    )
+    @click.option(
+        "--manager",
+        default=None,
+        help="[dockerSwarm] Swarm manager SSH host (required for dockerSwarm).",
+    )
+    @click.option(
+        "--workers",
+        default="",
+        help="Ignored for down (kept for symmetry with install).",
+    )
+    @click.option(
+        "--stack-name",
+        default="arena",
+        show_default=True,
+        help="[dockerSwarm] Docker stack name to stop.",
+    )
+    @click.option(
+        "--ssh-user",
+        default=None,
+        help="[dockerSwarm] SSH login for the manager.",
+    )
+    @click.option(
+        "--ssh-extra-opts",
+        default=None,
+        help="[dockerSwarm] Extra ssh(1) arguments.",
+    )
+    @click.option(
+        "-v",
+        "--verbose",
+        is_flag=True,
+        default=False,
+        help="Show the underlying commands and their full output.",
+    )
+    @click.pass_obj
+    def down_cmd(
+        config: CommandConfig,
+        name: str,
+        setup_type: str,
+        manager: str | None,
+        workers: str,
+        stack_name: str,
+        ssh_user: str | None,
+        ssh_extra_opts: str | None,
+        verbose: bool,
+    ) -> None:
+        """Stop on-prem workloads for CLASS_NAME without removing the deployment.
+
+        **dockerSwarm** — scales every service in the stack to zero replicas; the
+        stack definition remains on the manager.
+
+        **helm** — scales deployments to zero replicas; the Helm release remains.
+
+        Re-run ``arena on-prem install`` to bring workloads back.
+        """
+        _apply_verbosity(verbose=verbose)
+
+        with arena_client(config) as client:
+            run_on_prem_down(
+                client,
+                name=name.strip(),
+                setup_type=setup_type,
+                manager=manager.strip() if manager else None,
+                workers=tuple(h.strip() for h in workers.split(",") if h.strip()),
+                ssh_user=ssh_user,
+                ssh_extra_opts=ssh_extra_opts,
+                stack_name=stack_name,
+            )
+
+    return down_cmd
+
+
 def build_teardown_command() -> click.Command:
     """``arena on-prem teardown`` — reverse install (cluster + optional API cleanup).
 
@@ -172,7 +264,7 @@ def build_teardown_command() -> click.Command:
     @click.option(
         "--workers",
         default="",
-        help="Ignored for teardown (kept for symmetry with install).",
+        help="[dockerSwarm] Worker SSH hosts for --leave-swarm (required on multi-node clusters).",
     )
     @click.option(
         "--stack-name",
@@ -230,15 +322,16 @@ def build_teardown_command() -> click.Command:
         leave_swarm: bool,
         verbose: bool,
     ) -> None:
-        """Tear down an on-prem install for CLASS_NAME.
+        """Remove the on-prem deployment for CLASS_NAME.
 
         **helm** — ``helm uninstall`` using ``clusterName`` from the class deployment bundle
         (same release/namespace as ``setup.sh``).
 
         **dockerSwarm** — ``docker stack rm`` on ``--manager`` (default stack name ``arena``).
 
-        Does not delete the Arena resource class; use ``arena on-prem classes delete``
-        when you want to remove the class from Arena.
+        Removes the deployment only; does not uninstall Docker/NVIDIA or delete the Arena
+        resource class. Use ``arena on-prem classes delete`` when you want to remove the
+        class from Arena.
         """
         _apply_verbosity(verbose=verbose)
 
@@ -270,4 +363,5 @@ def register_on_prem_install(on_prem_group: click.Group) -> None:
     """
     on_prem_group.commands.pop("install", None)
     on_prem_group.add_command(build_install_command())
+    on_prem_group.add_command(build_down_command())
     on_prem_group.add_command(build_teardown_command())

@@ -45,6 +45,17 @@ STACK_VERIFY_INTERVAL_SEC = 10
 STACK_VERIFY_MAX_WAIT_SEC = 300
 
 
+def resolve_stack_name(cli_value: str) -> str:
+    """Return ``ARENA_STACK_NAME`` when set, otherwise *cli_value*.
+
+    :param cli_value: The ``--stack-name`` CLI default or explicit value.
+    :type cli_value: str
+    :returns: The effective Docker stack name.
+    :rtype: str
+    """
+    return os.environ.get("ARENA_STACK_NAME", cli_value)
+
+
 def stack_readiness_state(
     output: str | None,
     *,
@@ -282,6 +293,15 @@ class OnPremInstaller(ABC):
             "On-prem teardown finished for class %r (%s).", self.name, self.kind
         )
 
+    def down(self) -> None:
+        """Stop cluster workloads without removing the stack or Helm release.
+
+        :returns: None
+        :rtype: None
+        """
+        self.down_cluster()
+        logger.info("On-prem down finished for class %r (%s).", self.name, self.kind)
+
     # --- hooks ---------------------------------------------------------------
     @abstractmethod
     def preflight_install(self) -> None:
@@ -314,6 +334,14 @@ class OnPremInstaller(ABC):
     @abstractmethod
     def teardown_cluster(self) -> None:
         """Remove cluster workloads (no-op pieces are the subclass's choice).
+
+        :returns: None
+        :rtype: None
+        """
+
+    @abstractmethod
+    def down_cluster(self) -> None:
+        """Stop cluster workloads; stack or Helm release remains.
 
         :returns: None
         :rtype: None
@@ -546,6 +574,37 @@ class SwarmInstaller(OnPremInstaller):
         )
         raise click.ClickException(msg)
 
+    def down_cluster(self) -> None:
+        """Scale every service in the stack to zero replicas.
+
+        :returns: None
+        :rtype: None
+        :raises click.ClickException: If no manager host is configured.
+        """
+        manager = self._require_manager(
+            "--manager is required for dockerSwarm down."
+        )
+        logger.info("Stopping Docker stack %r on %s…", self._stack_name, manager)
+        list_cmd = (
+            f"sudo docker stack services {shlex.quote(self._stack_name)} "
+            "--format '{{.Name}}'"
+        )
+        output = self._executor.run(manager, list_cmd, capture=True)
+        service_names = [
+            line.strip() for line in (output or "").splitlines() if line.strip()
+        ]
+        if not service_names:
+            logger.warning(
+                "Stack %r not found; nothing to stop.", self._stack_name
+            )
+            return
+        scale_args = " ".join(
+            shlex.quote(f"{name}=0") for name in service_names
+        )
+        self._executor.run(
+            manager, f"sudo docker service scale {scale_args}"
+        )
+
     def teardown_cluster(self) -> None:
         """Remove the Docker stack, optionally leaving the Swarm on every host.
 
@@ -562,6 +621,19 @@ class SwarmInstaller(OnPremInstaller):
         )
         if not self._leave_swarm:
             return
+        deadline = time.monotonic() + STACK_VERIFY_MAX_WAIT_SEC
+        while time.monotonic() < deadline:
+            stacks = self._executor.run(
+                manager, "sudo docker stack ls --format '{{.Name}}'", capture=True
+            )
+            if self._stack_name not in (stacks or "").splitlines():
+                break
+            time.sleep(STACK_VERIFY_INTERVAL_SEC)
+        else:
+            logger.warning(
+                "Stack %r still listed after wait; proceeding with leave-swarm.",
+                self._stack_name,
+            )
         logger.info("Leaving Docker Swarm on cluster hosts…")
         for host in all_hosts(manager, self._workers):
             self._executor.run(
@@ -677,6 +749,51 @@ class HelmInstaller(OnPremInstaller):
         except StageFailed as exc:
             err = stage_failure("Helm post-install validation", "local", exc)
             raise err from exc
+
+    def down_cluster(self) -> None:
+        """Scale all deployments for the release to zero replicas.
+
+        :returns: None
+        :rtype: None
+        :raises click.ClickException: If ``kubectl`` is not on PATH.
+        """
+        warn_ignored_swarm_flags(
+            manager=self._manager,
+            workers=self._workers,
+            ssh_user=self._ssh_user,
+            ssh_extra_opts=self._ssh_extra_opts,
+            advertise_addr=None,
+        )
+        if not shutil.which("kubectl"):
+            msg = "kubectl not found on PATH; required for helm down."
+            raise click.ClickException(msg)
+        with tempfile.TemporaryDirectory(prefix="arena-on-prem-down-") as tmp:
+            data = self.api.fetch_bundle(self.name, self.kind)
+            bundle_root = extract_bundle(data, Path(tmp), class_name=self.name)
+            release, namespace = parse_helm_release_ids(bundle_root)
+            logger.info(
+                "Scaling Helm release %r (namespace %s) to zero replicas…",
+                release,
+                namespace,
+            )
+            result = subprocess.run(
+                [
+                    "kubectl",
+                    "scale",
+                    "deployment",
+                    "-n",
+                    namespace,
+                    "-l",
+                    f"app.kubernetes.io/instance={release}",
+                    "--replicas=0",
+                ],
+                check=False,
+            )
+            if result.returncode != 0:
+                logger.warning(
+                    "kubectl scale exited %d (deployments may already be stopped).",
+                    result.returncode,
+                )
 
     def teardown_cluster(self) -> None:
         """Download the bundle to resolve release ids, then ``helm uninstall``.
@@ -834,7 +951,7 @@ def run_on_prem_install(
         ssh_user=ssh_user,
         ssh_extra_opts=ssh_extra_opts,
         advertise_addr=advertise_addr,
-        stack_name=os.environ.get("ARENA_STACK_NAME", "arena"),
+        stack_name=resolve_stack_name("arena"),
     )
     installer.install(skip_enable=skip_enable, skip_verify=skip_verify)
 
@@ -890,10 +1007,57 @@ def run_on_prem_teardown(
         workers=workers,
         ssh_user=ssh_user,
         ssh_extra_opts=ssh_extra_opts,
-        stack_name=stack_name,
+        stack_name=resolve_stack_name(stack_name),
         leave_swarm=leave_swarm,
     )
     installer.teardown(
         skip_cluster=skip_cluster,
         disable_provider=disable_provider,
     )
+
+
+def run_on_prem_down(
+    client: ArenaClient,
+    *,
+    name: str,
+    setup_type: str,
+    manager: str | None = None,
+    workers: tuple[str, ...] = (),
+    ssh_user: str | None = None,
+    ssh_extra_opts: str | None = None,
+    stack_name: str = "arena",
+) -> None:
+    """Stop cluster workloads without removing the stack or Helm release.
+
+    :param client: The authenticated Arena client.
+    :type client: ArenaClient
+    :param name: The resource class name.
+    :type name: str
+    :param setup_type: The bundle flavor (``dockerSwarm`` or ``helm``).
+    :type setup_type: str
+    :param manager: The Swarm manager SSH host (dockerSwarm only).
+    :type manager: str | None
+    :param workers: The Swarm worker SSH hosts (dockerSwarm only; unused on down).
+    :type workers: tuple[str, ...]
+    :param ssh_user: SSH login for the manager (dockerSwarm only).
+    :type ssh_user: str | None
+    :param ssh_extra_opts: Extra ssh(1) arguments (dockerSwarm only).
+    :type ssh_extra_opts: str | None
+    :param stack_name: The Docker stack name to stop (dockerSwarm only).
+    :type stack_name: str
+    :returns: None
+    :rtype: None
+    """
+    kind = normalize_setup_type(setup_type)
+    api = OnPremApi(client)
+    installer = build_installer(
+        kind,
+        api,
+        name=name,
+        manager=manager,
+        workers=workers,
+        ssh_user=ssh_user,
+        ssh_extra_opts=ssh_extra_opts,
+        stack_name=resolve_stack_name(stack_name),
+    )
+    installer.down()

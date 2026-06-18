@@ -17,6 +17,7 @@ from agilerl.arena.on_prem.installer import (
     build_installer,
     normalize_setup_type,
     report_stack_readiness,
+    resolve_stack_name,
     run_on_prem_install,
     run_on_prem_teardown,
     stack_readiness_state,
@@ -54,6 +55,13 @@ def test_normalize_setup_type_maps_known_aliases(raw: str, expected: str) -> Non
 def test_normalize_setup_type_rejects_unknown() -> None:
     with pytest.raises(ClickException, match="Unsupported setup type"):
         normalize_setup_type("nomad")
+
+
+def test_resolve_stack_name_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ARENA_STACK_NAME", raising=False)
+    assert resolve_stack_name("arena") == "arena"
+    monkeypatch.setenv("ARENA_STACK_NAME", "custom")
+    assert resolve_stack_name("arena") == "custom"
 
 
 @pytest.mark.parametrize(
@@ -240,11 +248,84 @@ class TestSwarmInstaller:
             inst.teardown_cluster()
         assert ssh_mock.call_args.args[1] == "sudo docker stack rm 'arena$(whoami)'"
 
+    def test_down_cluster_scales_services(self, api: OnPremApi) -> None:
+        inst = SwarmInstaller(api, name="pool", manager="m", stack_name="arena")
+        with patch.object(
+            SshExecutor,
+            "run",
+            side_effect=["svc-a\nsvc-b", None],
+        ) as ssh_mock:
+            inst.down_cluster()
+        scale_cmd = ssh_mock.call_args_list[1].args[1]
+        assert "service scale" in scale_cmd
+        assert "=0" in scale_cmd
+        assert "svc-a=0" in scale_cmd
+        assert "svc-b=0" in scale_cmd
+
+    def test_down_cluster_missing_stack_warns(self, api: OnPremApi) -> None:
+        inst = SwarmInstaller(api, name="pool", manager="m", stack_name="arena")
+        with (
+            patch.object(SshExecutor, "run", return_value=""),
+            patch("agilerl.arena.on_prem.installer.logger") as log,
+        ):
+            inst.down_cluster()
+        log.warning.assert_called_once()
+        assert "not found" in str(log.warning.call_args)
+
+    def test_down_cluster_quotes_stack_name(self, api: OnPremApi) -> None:
+        inst = SwarmInstaller(
+            api, name="pool", manager="manager-host", stack_name="arena$(whoami)"
+        )
+        with patch.object(
+            SshExecutor,
+            "run",
+            side_effect=["svc$(whoami)", None],
+        ) as ssh_mock:
+            inst.down_cluster()
+        list_cmd = ssh_mock.call_args_list[0].args[1]
+        assert "'arena$(whoami)'" in list_cmd
+        scale_cmd = ssh_mock.call_args_list[1].args[1]
+        assert "'svc$(whoami)=0'" in scale_cmd
+
+    def test_teardown_waits_before_leave_swarm(self, api: OnPremApi) -> None:
+        inst = SwarmInstaller(
+            api, name="pool", manager="m", workers=("w1",), leave_swarm=True
+        )
+        with (
+            patch.object(
+                SshExecutor,
+                "run",
+                side_effect=[
+                    None,  # stack rm
+                    "arena\nother",  # first stack ls — still present
+                    "",  # second stack ls — gone
+                    None,  # leave m
+                    None,  # leave w1
+                ],
+            ) as ssh_mock,
+            patch("agilerl.arena.on_prem.installer.time.sleep"),
+        ):
+            inst.teardown_cluster()
+        stack_ls_calls = [
+            c.args[1]
+            for c in ssh_mock.call_args_list
+            if "stack ls" in c.args[1]
+        ]
+        assert len(stack_ls_calls) == 2
+        assert sum("swarm leave" in c.args[1] for c in ssh_mock.call_args_list) == 2
+
     def test_teardown_cluster_leaves_swarm_on_all_hosts(self, api: OnPremApi) -> None:
         inst = SwarmInstaller(
             api, name="pool", manager="m", workers=("w1",), leave_swarm=True
         )
-        with patch.object(SshExecutor, "run") as ssh_mock:
+        with (
+            patch.object(
+                SshExecutor,
+                "run",
+                side_effect=[None, "", None, None],
+            ) as ssh_mock,
+            patch("agilerl.arena.on_prem.installer.time.sleep"),
+        ):
             inst.teardown_cluster()
         cmds = [c.args[1] for c in ssh_mock.call_args_list]
         assert any("stack rm" in c for c in cmds)

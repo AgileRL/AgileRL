@@ -11,7 +11,11 @@ from click.testing import CliRunner
 
 from agilerl.arena.config import CommandConfig
 from agilerl.arena.on_prem import build_install_command, register_on_prem_install
-from agilerl.arena.on_prem.commands import _apply_verbosity, build_teardown_command
+from agilerl.arena.on_prem.commands import (
+    _apply_verbosity,
+    build_down_command,
+    build_teardown_command,
+)
 
 
 def test_install_command_parses_workers_and_delegates(
@@ -67,11 +71,40 @@ def test_teardown_command_maps_flags(
     assert kwargs["leave_swarm"] is True
 
 
+def test_down_command_maps_flags(
+    command_config: CommandConfig, client_context: Callable[[MagicMock], MagicMock]
+) -> None:
+    client = MagicMock()
+    with (
+        patch(
+            "agilerl.arena.on_prem.commands.arena_client",
+            return_value=client_context(client),
+        ),
+        patch("agilerl.arena.on_prem.commands.run_on_prem_down") as run_mock,
+    ):
+        result = CliRunner().invoke(
+            build_down_command(),
+            [
+                "pool",
+                "--manager",
+                "m",
+                "--stack-name",
+                "my-stack",
+            ],
+            obj=command_config,
+        )
+    assert result.exit_code == 0, result.output
+    kwargs = run_mock.call_args.kwargs
+    assert kwargs["name"] == "pool"
+    assert kwargs["manager"] == "m"
+    assert kwargs["stack_name"] == "my-stack"
+
+
 def test_register_on_prem_install_replaces_install_with_commands() -> None:
     group = click.Group(name="on-prem")
     group.add_command(click.Command(name="install"))  # placeholder manifest install
     register_on_prem_install(group)
-    assert set(group.commands) >= {"install", "teardown"}
+    assert set(group.commands) >= {"install", "down", "teardown"}
     # The replacement install is the hardcoded command (has a NAME argument).
     install = group.commands["install"]
     assert any(p.name == "name" for p in install.params)

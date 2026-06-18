@@ -145,7 +145,7 @@ class OnPremDynamicGroup(click.Group):
             name="on-prem",
             help=(
                 "Enterprise on-prem worker clusters (from Arena capabilities). "
-                "Quick start: install / teardown. See arena on-prem install --help."
+                "Quick start: install / down / teardown. See arena on-prem install --help."
             ),
         )
         self._caps_fingerprint: str | None = None
