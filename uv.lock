@@ -186,7 +186,7 @@ requires-dist = [
     { name = "pandas", specifier = ">=2.2.3" },
     { name = "peft", marker = "extra == 'all'", specifier = "==0.19.1" },
     { name = "peft", marker = "extra == 'llm'", specifier = "==0.19.1" },
-    { name = "pettingzoo", specifier = ">=1.23.1" },
+    { name = "pettingzoo", specifier = ">=1.23.1,<1.25" },
     { name = "pre-commit", specifier = ">=3.8.0" },
     { name = "pydantic", specifier = ">=2.0,<3" },
     { name = "pygame", specifier = ">=2.6.0" },
@@ -4386,7 +4386,7 @@ wheels = [
 
 [[package]]
 name = "pettingzoo"
-version = "1.26.1"
+version = "1.24.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "gymnasium" },
@@ -4394,9 +4394,9 @@ dependencies = [
     { name = "numpy", version = "2.3.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' and python_full_version < '3.13' and sys_platform != 'darwin'" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.13' and sys_platform != 'darwin') or (python_full_version >= '3.11' and sys_platform == 'darwin')" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/df/a6/b92fbff8dc3aabc0fcbd9ad26073b36161f96ab3bb8fa96ee1f907ea8431/pettingzoo-1.26.1.tar.gz", hash = "sha256:1bae0c7d3c51bf032f2e2abb589b211feec786de76cbbff87f8189ad51649820", size = 695464, upload-time = "2026-04-27T00:38:40.162Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/14/2e/09195ec0f38e444111d3d6fa3623b164c743dd5f0070fd07241bb742ea42/pettingzoo-1.24.4.tar.gz", hash = "sha256:a90644ab47748e0f854c956c80cd803b5bbb3d90ecef201fa6b459843c0a6fdf", size = 723979, upload-time = "2025-04-22T14:10:04.753Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/95/da/89907ebf66f435ad36395ec25af4a79e5f9a58821314811f33649959162d/pettingzoo-1.26.1-py3-none-any.whl", hash = "sha256:f4715dde696bf159d68bb1d3f764ff5083eb7e0cc32ac31a748e81ae530181dd", size = 805499, upload-time = "2026-04-27T00:38:38.377Z" },
+    { url = "https://files.pythonhosted.org/packages/21/3c/9512548806362b7d00ffc1beb63ef763254c48f6d5d87279ae53f2665041/pettingzoo-1.24.4-py3-none-any.whl", hash = "sha256:4e81b6b1eff74f6f74c221431d8b3723482a483f826ef282530b7062b7cd28cd", size = 852488, upload-time = "2025-04-22T14:10:02.955Z" },
 ]
 
 [[package]]
