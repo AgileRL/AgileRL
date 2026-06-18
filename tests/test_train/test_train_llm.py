@@ -11,6 +11,7 @@ pytest.importorskip("deepspeed", reason="LLM tests require deepspeed.")
 pytest.importorskip("vllm", reason="LLM tests require vllm.")
 
 from agilerl.algorithms import DPO, GRPO, LLMPPO, LLMREINFORCE
+from agilerl.algorithms.core import ActionResult
 from agilerl.algorithms.core.base import MultiAgentRLAlgorithm
 from agilerl.algorithms.sft import SFT
 from agilerl.population import Population
@@ -69,9 +70,10 @@ def _mock_grpo_agent(**overrides):
     agent.algo = "GRPO"
     agent.fitness = [0.0]
     agent.local_rank = "0"
-    agent.get_action.return_value = (
+    agent.get_action.return_value = ActionResult(
         [torch.ones(1, 100) for _ in range(2)],
         Mock(),
+        None,
     )
     agent.learn.return_value = (0.5, 0.2)
     agent.test.return_value = torch.tensor([0.8])
