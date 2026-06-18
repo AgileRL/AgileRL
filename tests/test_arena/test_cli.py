@@ -68,7 +68,7 @@ def mock_client() -> MagicMock:
 @contextmanager
 def _patched_arena_client(mock_client: MagicMock):
     """Patch build_client so arena_client yields our mock."""
-    with patch("agilerl.arena.cli.build_client", return_value=mock_client):
+    with patch("agilerl.arena.config.build_client", return_value=mock_client):
         yield
 
 
@@ -104,7 +104,7 @@ class TestCommandConfig:
         with pytest.raises(AttributeError):
             cfg.nonexistent = "x"  # type: ignore[attr-defined]
 
-    @patch("agilerl.arena.cli.build_client")
+    @patch("agilerl.arena.config.build_client")
     def test_build_client_calls_configure_and_init(self, mock_build):
         with patch("agilerl.arena.config.ArenaClient") as MockArenaClient:
             MockArenaClient.configure = MagicMock()
@@ -142,7 +142,7 @@ class TestArenaClientContextManager:
             request_timeout=30,
             upload_timeout=300,
         )
-        with patch("agilerl.arena.cli.build_client", return_value=mock_client):
+        with patch("agilerl.arena.config.build_client", return_value=mock_client):
             with arena_client(cfg) as client:
                 assert client is mock_client
         mock_client.close.assert_called_once()
@@ -157,8 +157,8 @@ class TestArenaClientContextManager:
             request_timeout=30,
             upload_timeout=300,
         )
-        with patch("agilerl.arena.cli.build_client", return_value=mock_client):
-            with patch("agilerl.arena.cli.handle_error") as mock_handle:
+        with patch("agilerl.arena.config.build_client", return_value=mock_client):
+            with patch("agilerl.arena.config.handle_error") as mock_handle:
                 with arena_client(cfg) as client:
                     raise ArenaAPIError("boom", status_code=500)
                 mock_handle.assert_called_once()
@@ -174,7 +174,7 @@ class TestArenaClientContextManager:
             request_timeout=30,
             upload_timeout=300,
         )
-        with patch("agilerl.arena.cli.build_client", return_value=mock_client):
+        with patch("agilerl.arena.config.build_client", return_value=mock_client):
             with pytest.raises(RuntimeError, match="unexpected"):
                 with arena_client(cfg) as client:
                     raise RuntimeError("unexpected")
@@ -193,7 +193,7 @@ class TestMainGroup:
         def _test_ctx(config):
             click.echo(f"timeout={config.request_timeout}")
 
-        with patch("agilerl.arena.cli.build_client"):
+        with patch("agilerl.arena.config.build_client"):
             result = runner.invoke(main, ["--request-timeout", "42", "_test_ctx"])
         assert "timeout=42" in result.output
 
@@ -1062,21 +1062,21 @@ class TestCliErrorHandling:
 
 class TestGlobalOptions:
     def test_api_key_passed_to_config(self, runner, mock_client):
-        with patch("agilerl.arena.cli.build_client", return_value=mock_client) as m:
+        with patch("agilerl.arena.config.build_client", return_value=mock_client) as m:
             result = runner.invoke(main, ["--api-key", "pat_abc", "logout"])
         assert result.exit_code == 0
         config_arg = m.call_args[0][0]
         assert config_arg.api_key == "pat_abc"
 
     def test_base_url_passed_to_config(self, runner, mock_client):
-        with patch("agilerl.arena.cli.build_client", return_value=mock_client) as m:
+        with patch("agilerl.arena.config.build_client", return_value=mock_client) as m:
             result = runner.invoke(main, ["--base-url", "http://local:8000", "logout"])
         assert result.exit_code == 0
         config_arg = m.call_args[0][0]
         assert config_arg.base_url == "http://local:8000"
 
     def test_upload_timeout_passed_to_config(self, runner, mock_client):
-        with patch("agilerl.arena.cli.build_client", return_value=mock_client) as m:
+        with patch("agilerl.arena.config.build_client", return_value=mock_client) as m:
             result = runner.invoke(main, ["--upload-timeout", "600", "logout"])
         assert result.exit_code == 0
         config_arg = m.call_args[0][0]
