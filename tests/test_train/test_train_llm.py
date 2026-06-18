@@ -115,9 +115,9 @@ def _mock_dpo_agent(**overrides):
     agent.fitness = [0.0]
     agent.local_rank = "0"
     agent.learn.return_value = {
-        "mean_loss": 0.5,
-        "mean_chosen_reward": 0.2,
-        "mean_rejected_reward": 0.1,
+        "loss": 0.5,
+        "chosen_reward": 0.2,
+        "rejected_reward": 0.1,
     }
     agent.test.return_value = 0.87
     agent.batch_size_per_process = 32
@@ -156,7 +156,7 @@ def _mock_sft_agent(**overrides):
     agent.algo = "SFT"
     agent.fitness = [0.0]
     agent.local_rank = "0"
-    agent.learn.return_value = {"mean_loss": 0.5, "mean_perplexity": 1.65}
+    agent.learn.return_value = {"loss": 0.5, "perplexity": 1.65}
     agent.test.return_value = -0.4
     agent.batch_size_per_process = 32
     agent.batch_size = 32
@@ -203,11 +203,11 @@ def _make_multiturn_mock_agent(*, spec=LLMPPO):
         mock_agent.algo = getattr(spec, "__name__", "MOCK")
 
     mock_agent.learn.return_value = {
-        "mean_loss": 0.5,
-        "mean_kl": 0.2,
-        "mean_pg_loss": 0.1,
-        "mean_vf_loss": 0.1,
-        "mean_entropy": 1.0,
+        "loss": 0.5,
+        "kl": 0.2,
+        "pg_loss": 0.1,
+        "vf_loss": 0.1,
+        "entropy": 1.0,
     }
     mock_agent.batch_size = 16
     mock_agent.batch_size_per_process = 16

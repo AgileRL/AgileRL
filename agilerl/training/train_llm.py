@@ -587,8 +587,8 @@ def finetune_llm_preference(
             agent.init_training_step()
 
             learn_result = agent.learn(current_prompts)
-            chosen_reward = learn_result["mean_chosen_reward"]
-            rejected_reward = learn_result["mean_rejected_reward"]
+            chosen_reward = learn_result["chosen_reward"]
+            rejected_reward = learn_result["rejected_reward"]
             next_prompts_i = training_env.step()
 
             agent.add_scores([float(chosen_reward - rejected_reward)])
@@ -813,7 +813,7 @@ def finetune_llm_sft(
             agent.init_training_step()
 
             learn_result = agent.learn(prompts)
-            agg_loss = learn_result["mean_loss"]
+            agg_loss = learn_result["loss"]
             next_prompts = env.step()
 
             agent.add_scores([-agg_loss])

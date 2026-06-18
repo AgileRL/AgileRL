@@ -375,8 +375,8 @@ class TestSFTLearn:
         prompts = env.reset()
         pre_learn_actor_state_dict = copy.deepcopy(sft.actor.state_dict())
         metrics = sft.learn(prompts)
-        loss = metrics["mean_loss"]
-        perplexity = metrics["mean_perplexity"]
+        loss = metrics["loss"]
+        perplexity = metrics["perplexity"]
         assert isinstance(loss, float)
         assert isinstance(perplexity, float)
         assert perplexity >= 1.0  # perplexity is exp(loss), always >= 1

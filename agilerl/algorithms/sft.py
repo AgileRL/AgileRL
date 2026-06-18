@@ -240,7 +240,7 @@ class SFT(LLMAlgorithm):
         :type experiences: ExperiencesType
         :param training: When ``False`` the backward pass is skipped (eval mode).
         :type training: bool
-        :return: ``(mean_loss, mean_perplexity)`` averaged over all samples in
+        :return: ``(loss, perplexity)`` averaged over all samples in
             the batch.
         :rtype: tuple[float, float]
         """
@@ -277,8 +277,8 @@ class SFT(LLMAlgorithm):
         num_updates = 0
 
         learn_metrics = {
-            "mean_loss": 0.0,
-            "mean_perplexity": 0.0,
+            "loss": 0.0,
+            "perplexity": 0.0,
         }
 
         for _ in range(self.update_epochs):
@@ -294,8 +294,8 @@ class SFT(LLMAlgorithm):
                 if training:
                     self._backward_pass(loss)
                 loss_val = loss.item()
-                learn_metrics["mean_loss"] += loss_val
-                learn_metrics["mean_perplexity"] += float(np.exp(min(loss_val, 100)))
+                learn_metrics["loss"] += loss_val
+                learn_metrics["perplexity"] += float(np.exp(min(loss_val, 100)))
                 num_updates += 1
 
         learn_metrics = {
@@ -305,8 +305,8 @@ class SFT(LLMAlgorithm):
         learn_metrics = aggregate_metrics_dict(self.accelerator, learn_metrics)
 
         if training:
-            self.metrics.log("loss", learn_metrics["mean_loss"])
-            self.metrics.log("perplexity", learn_metrics["mean_perplexity"])
+            self.metrics.log("loss", learn_metrics["loss"])
+            self.metrics.log("perplexity", learn_metrics["perplexity"])
 
         return learn_metrics
 
@@ -394,7 +394,7 @@ class SFT(LLMAlgorithm):
             losses = []
             for _ in range(loop):
                 metrics = self.learn(prompts, training=False)
-                losses.append(metrics["mean_loss"])
+                losses.append(metrics["loss"])
                 prompts = env.step()
             mean_fit = -float(np.mean(losses))
         self.metrics.add_fitness(mean_fit)

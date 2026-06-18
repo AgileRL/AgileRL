@@ -264,7 +264,7 @@ class DPO(LLMAlgorithm):
         :type experiences: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
         :param training: Whether the agent is training or not
         :type training: bool
-        :return: Dict with keys ``mean_loss``, ``mean_chosen_reward``, ``mean_rejected_reward``.
+        :return: Dict with keys ``loss``, ``chosen_reward``, ``rejected_reward``.
         :rtype: dict[str, float]
         """
         gc.collect()
@@ -309,9 +309,9 @@ class DPO(LLMAlgorithm):
         )
         batch_idxs = np.arange(num_samples)
         learn_metrics = {
-            "mean_loss": 0.0,
-            "mean_chosen_reward": 0.0,
-            "mean_rejected_reward": 0.0,
+            "loss": 0.0,
+            "chosen_reward": 0.0,
+            "rejected_reward": 0.0,
         }
         ref_rejected_log_probs, ref_chosen_log_probs = None, None
         if not self.use_liger_loss:
@@ -352,9 +352,9 @@ class DPO(LLMAlgorithm):
                 if training:
                     self._backward_pass(loss)
 
-                learn_metrics["mean_loss"] += loss.item()
-                learn_metrics["mean_chosen_reward"] += chosen_reward.mean().item()
-                learn_metrics["mean_rejected_reward"] += rejected_reward.mean().item()
+                learn_metrics["loss"] += loss.item()
+                learn_metrics["chosen_reward"] += chosen_reward.mean().item()
+                learn_metrics["rejected_reward"] += rejected_reward.mean().item()
 
         learn_metrics = {
             key: value / num_samples for key, value in learn_metrics.items()
@@ -364,11 +364,11 @@ class DPO(LLMAlgorithm):
         agg = aggregate_metrics_dict(self.accelerator, learn_metrics)
 
         if training:
-            self.metrics.log("loss", agg["mean_loss"])
-            self.metrics.log("chosen_reward", agg["mean_chosen_reward"])
-            self.metrics.log("rejected_reward", agg["mean_rejected_reward"])
+            self.metrics.log("loss", agg["loss"])
+            self.metrics.log("chosen_reward", agg["chosen_reward"])
+            self.metrics.log("rejected_reward", agg["rejected_reward"])
             self.metrics.log(
-                "reward_margin", agg["mean_chosen_reward"] - agg["mean_rejected_reward"]
+                "reward_margin", agg["chosen_reward"] - agg["rejected_reward"]
             )
 
         return learn_metrics
@@ -689,8 +689,8 @@ class DPO(LLMAlgorithm):
             rewards = []
             for _ in range(loop):
                 learn_result = self.learn(prompts, training=False)
-                chosen_reward = learn_result["mean_chosen_reward"]
-                rejected_reward = learn_result["mean_rejected_reward"]
+                chosen_reward = learn_result["chosen_reward"]
+                rejected_reward = learn_result["rejected_reward"]
                 reward_margin = chosen_reward - rejected_reward
                 rewards.append(np.asarray(reward_margin).item())
                 prompts = env.step()
