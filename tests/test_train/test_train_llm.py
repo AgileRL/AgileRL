@@ -1212,10 +1212,9 @@ class TestFinetuneLlmMultiturn:
         assert mock_collect.call_count == num_outer
         assert mock_agent.learn.call_count == num_outer
         assert mock_agent.test.call_count == 0
-        if agent_spec is GRPO:
-            mock_agent.learn.assert_called_with(ANY)
-        else:
-            mock_agent.learn.assert_called_with(ANY, turn_ids=ANY)
+        # GRPO/CISPO/GSPO now also receive turn_ids in the multi-turn loop
+        # (turn-level importance sampling + per-turn group-relative advantages).
+        mock_agent.learn.assert_called_with(ANY, turn_ids=ANY)
         assert mock_save.call_count == 1
 
     def test_finetune_llm_multiturn_forwards_sampling_logps_to_learn(self):
