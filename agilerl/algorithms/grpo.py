@@ -657,7 +657,10 @@ class GRPO(LLMAlgorithm):
         result = {
             metric: value / max(updates, 1) for metric, value in learn_metrics.items()
         }
-        result["completion_length"] = np.mean([x.shape[-1] for x in experiences[0]])
+        # Mean generated-token count per row: the action mask excludes prompt
+        # and pad positions, so it measures the completion, not the full
+        # prompt+completion length of ``completion_ids``.
+        result["completion_length"] = np.mean([int(m.sum()) for m in experiences[1]])
 
         # Aggregate across GPUs and report to the metrics tracker (new API).
         agg = aggregate_metrics_dict(self.accelerator, result)

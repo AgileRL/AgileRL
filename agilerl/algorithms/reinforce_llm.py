@@ -686,8 +686,10 @@ class REINFORCE(LLMAlgorithm):
         # they bypass the per-update averaging above.
         result.update(is_metrics)
 
-        # Wire averaged metrics into the metrics tracker (new API).
-        completion_length = float(np.mean([c.shape[-1] for c in experiences[0]]))
+        # Wire averaged metrics into the metrics tracker (new API). The action
+        # mask excludes prompt and pad positions, so summing it measures the
+        # completion, not the full prompt+completion length of ``completion_ids``.
+        completion_length = float(np.mean([int(m.sum()) for m in experiences[1]]))
         agg = aggregate_metrics_dict(
             self.accelerator,
             {

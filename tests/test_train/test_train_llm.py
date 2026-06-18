@@ -1284,7 +1284,7 @@ class TestFinetuneLlmMultiturn:
                 return_value=MagicMock(),
             ),
             patch("agilerl.training.train_llm.init_loggers", return_value=[]),
-            patch("agilerl.training.train_llm.SyncMultiTurnVecEnv"),
+            patch("agilerl.training.train_llm.SyncMultiTurnVecEnv") as mock_vec_env,
             patch(
                 "agilerl.training.train_llm.collect_rollouts_llm",
                 side_effect=RuntimeError("reached rollout"),
@@ -1300,6 +1300,13 @@ class TestFinetuneLlmMultiturn:
                 accelerator=None,
                 verbose=False,
             )
+
+        # The indivisible (batch_size, group_size) must flow unchanged into the
+        # group-contiguous vec env (signature: env_factory, batch_size,
+        # group_size, env_config) — that is what makes the batch well-defined.
+        mock_vec_env.assert_called_once()
+        assert mock_vec_env.call_args.args[1] == 3  # batch_size
+        assert mock_vec_env.call_args.args[2] == 2  # group_size
 
     @pytest.mark.parametrize("use_accelerator", [True, False])
     def test_finetune_llm_multiturn_with_wandb_and_checkpoints(self, use_accelerator):
@@ -1591,7 +1598,7 @@ class TestFinetuneLlmMultiturn:
                 return_value=MagicMock(),
             ),
             patch("agilerl.training.train_llm.init_loggers", return_value=[]),
-            patch("agilerl.training.train_llm.SyncMultiTurnVecEnv"),
+            patch("agilerl.training.train_llm.SyncMultiTurnVecEnv") as mock_vec_env,
             patch(
                 "agilerl.training.train_llm.collect_rollouts_llm",
                 side_effect=RuntimeError("reached rollout"),
@@ -1608,6 +1615,13 @@ class TestFinetuneLlmMultiturn:
                 wb=False,
                 verbose=False,
             )
+
+        # The indivisible (batch_size, group_size) must flow unchanged into the
+        # group-contiguous vec env (signature: env_factory, batch_size,
+        # group_size, env_config) — that is what makes the batch well-defined.
+        mock_vec_env.assert_called_once()
+        assert mock_vec_env.call_args.args[1] == 2  # batch_size
+        assert mock_vec_env.call_args.args[2] == 3  # group_size
 
 
 # ---------------------------------------------------------------------------
