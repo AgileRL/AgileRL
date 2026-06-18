@@ -581,9 +581,7 @@ class SwarmInstaller(OnPremInstaller):
         :rtype: None
         :raises click.ClickException: If no manager host is configured.
         """
-        manager = self._require_manager(
-            "--manager is required for dockerSwarm down."
-        )
+        manager = self._require_manager("--manager is required for dockerSwarm down.")
         logger.info("Stopping Docker stack %r on %s…", self._stack_name, manager)
         list_cmd = (
             f"sudo docker stack services {shlex.quote(self._stack_name)} "
@@ -594,16 +592,10 @@ class SwarmInstaller(OnPremInstaller):
             line.strip() for line in (output or "").splitlines() if line.strip()
         ]
         if not service_names:
-            logger.warning(
-                "Stack %r not found; nothing to stop.", self._stack_name
-            )
+            logger.warning("Stack %r not found; nothing to stop.", self._stack_name)
             return
-        scale_args = " ".join(
-            shlex.quote(f"{name}=0") for name in service_names
-        )
-        self._executor.run(
-            manager, f"sudo docker service scale {scale_args}"
-        )
+        scale_args = " ".join(shlex.quote(f"{name}=0") for name in service_names)
+        self._executor.run(manager, f"sudo docker service scale {scale_args}")
 
     def teardown_cluster(self) -> None:
         """Remove the Docker stack, optionally leaving the Swarm on every host.

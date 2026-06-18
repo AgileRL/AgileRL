@@ -307,9 +307,7 @@ class TestSwarmInstaller:
         ):
             inst.teardown_cluster()
         stack_ls_calls = [
-            c.args[1]
-            for c in ssh_mock.call_args_list
-            if "stack ls" in c.args[1]
+            c.args[1] for c in ssh_mock.call_args_list if "stack ls" in c.args[1]
         ]
         assert len(stack_ls_calls) == 2
         assert sum("swarm leave" in c.args[1] for c in ssh_mock.call_args_list) == 2
