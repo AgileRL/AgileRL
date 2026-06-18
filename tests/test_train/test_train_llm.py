@@ -114,7 +114,11 @@ def _mock_dpo_agent(**overrides):
     agent.algo = "DPO"
     agent.fitness = [0.0]
     agent.local_rank = "0"
-    agent.learn.return_value = (0.5, 0.2, 0.1)
+    agent.learn.return_value = {
+        "mean_loss": 0.5,
+        "mean_chosen_reward": 0.2,
+        "mean_rejected_reward": 0.1,
+    }
     agent.test.return_value = 0.87
     agent.batch_size_per_process = 32
     agent.batch_size = 32
@@ -152,7 +156,7 @@ def _mock_sft_agent(**overrides):
     agent.algo = "SFT"
     agent.fitness = [0.0]
     agent.local_rank = "0"
-    agent.learn.return_value = (0.5, 1.65)
+    agent.learn.return_value = {"mean_loss": 0.5, "mean_perplexity": 1.65}
     agent.test.return_value = -0.4
     agent.batch_size_per_process = 32
     agent.batch_size = 32

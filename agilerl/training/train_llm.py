@@ -586,7 +586,9 @@ def finetune_llm_preference(
             agent.set_reference_policy(training_env.num_epochs)
             agent.init_training_step()
 
-            _, chosen_reward, rejected_reward = agent.learn(current_prompts)
+            learn_result = agent.learn(current_prompts)
+            chosen_reward = learn_result["mean_chosen_reward"]
+            rejected_reward = learn_result["mean_rejected_reward"]
             next_prompts_i = training_env.step()
 
             agent.add_scores([float(chosen_reward - rejected_reward)])
@@ -810,7 +812,8 @@ def finetune_llm_sft(
             agent.set_reference_policy(env.num_epochs)
             agent.init_training_step()
 
-            agg_loss, _agg_perplexity = agent.learn(prompts)
+            learn_result = agent.learn(prompts)
+            agg_loss = learn_result["mean_loss"]
             next_prompts = env.step()
 
             agent.add_scores([-agg_loss])

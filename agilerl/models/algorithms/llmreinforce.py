@@ -36,7 +36,6 @@ class LLMREINFORCESpec(LLMAlgorithmSpec):
         default="token"
     )
     turn_ratio_pooling: Literal["sum", "mean"] = Field(default="sum")
-    max_turns: int | None = Field(default=None)
 
     env_type: ClassVar[LLMEnvType] = "reasoning"
 
