@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 
 import click
-
 from agilerl.arena.config import CommandConfig, arena_client
 from agilerl.arena.on_prem.installer import (
     run_on_prem_down,
