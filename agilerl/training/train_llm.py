@@ -429,7 +429,7 @@ def finetune_llm_reasoning(
 
     population.finish()
     pbar.close()
-    return population.agents
+    return population.agents, population.last_fitnesses
 
 
 def finetune_llm_preference(
@@ -668,7 +668,7 @@ def finetune_llm_preference(
 
     population.finish()
     pbar.close()
-    return population.agents
+    return population.agents, population.last_fitnesses
 
 
 def finetune_llm_sft(
@@ -890,7 +890,7 @@ def finetune_llm_sft(
 
     population.finish()
     pbar.close()
-    return population.agents
+    return population.agents, population.last_fitnesses
 
 
 def finetune_llm_multiturn(
@@ -1202,4 +1202,4 @@ def finetune_llm_multiturn(
 
     population.finish()
     pbar.close()
-    return population.agents
+    return population.agents, population.last_fitnesses

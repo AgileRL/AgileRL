@@ -277,13 +277,20 @@ class TestFinetuneLlmReasoning:
         ):
             mock_pbar_fn.return_value = MagicMock()
             mock_agg.return_value = 0.5
-            finetune_llm_reasoning(
+            result = finetune_llm_reasoning(
                 pop=[mock_agent],
                 env=mock_env,
                 evaluation_interval=2,
                 max_reward=2.0,
                 accelerator=None if use_accelerator else Accelerator(),
             )
+            # finetune_llm_* must return (population, fitnesses) — same contract
+            # as the non-LLM train fns — so the `agilerl train` CLI can unpack
+            # the result (otherwise it raises ValueError on a 1-element return).
+            assert isinstance(result, tuple) and len(result) == 2
+            agents, fitnesses = result
+            assert mock_agent in agents
+            assert isinstance(fitnesses, list)
             assert mock_env.reset.call_count == 1
             assert mock_env.reset.call_args == call(reset_dataloaders=True)
             assert mock_agent.get_action.call_count == 6
