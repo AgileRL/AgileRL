@@ -1,5 +1,6 @@
 import copy
 import gc
+import importlib.util
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -31,11 +32,16 @@ from tests.helper_functions import (
     generate_random_box_space,
 )
 
-if HAS_LLM_DEPENDENCIES:
-    # ``create_module`` lives in test_grpo, which ``importorskip``s deepspeed/vllm.
-    # Only import it where those deps exist so this module stays collectable on
-    # platforms without them; the tests using it are skipif(not HAS_LLM_DEPENDENCIES).
+if importlib.util.find_spec("deepspeed") and importlib.util.find_spec("vllm"):
+    # ``create_module`` lives in test_grpo, which ``importorskip``s deepspeed/vllm,
+    # so gate the import on those being importable to keep this module collectable
+    # without them. (HAS_LLM_DEPENDENCIES can't gate this: it's True on macOS/Windows
+    # because the linux-only deps are filtered out of the llm extra by their markers,
+    # leaving peft/transformers/datasets, which are installed.) The tests that use
+    # create_module are @pytest.mark.gpu and so are skipped without CUDA.
     from tests.test_algorithms.test_llms.test_grpo import create_module
+else:
+    create_module = None
 
 if TYPE_CHECKING:
     from agilerl.algorithms.core import EvolvableAlgorithm
