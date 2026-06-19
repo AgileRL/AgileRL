@@ -5269,6 +5269,7 @@ class TestLLMCloneActorNetwork:
             patch(
                 "agilerl.algorithms.core.base.clone_tensors_for_torch_save",
                 return_value={"w": torch.tensor([1.0, 2.0])},
+                create=True,
             ) as mock_clone_sd,
             patch(
                 "agilerl.algorithms.core.base.clone_llm", return_value=cloned_inner
@@ -5294,7 +5295,8 @@ class TestLLMCloneActorNetwork:
 
         with (
             patch(
-                "agilerl.algorithms.core.base.clone_tensors_for_torch_save"
+                "agilerl.algorithms.core.base.clone_tensors_for_torch_save",
+                create=True,
             ) as mock_clone_sd,
             patch(
                 "agilerl.algorithms.core.base.clone_llm", return_value=cloned_inner
@@ -5354,7 +5356,9 @@ class TestLLMConfigureVllmAcceleratorPaths:
 
         mock_llm_instance = MagicMock()
         with patch(
-            "agilerl.algorithms.core.base.LLM", return_value=mock_llm_instance
+            "agilerl.algorithms.core.base.LLM",
+            return_value=mock_llm_instance,
+            create=True,
         ) as mock_llm_cls:
             agent._configure_vllm()
         assert agent.llm is mock_llm_instance
@@ -5387,7 +5391,9 @@ class TestLLMConfigureVllmAcceleratorPaths:
         agent.pretrained_model_name_or_path = "mock-model"
 
         with patch(
-            "agilerl.algorithms.core.base.LLM", return_value=MagicMock()
+            "agilerl.algorithms.core.base.LLM",
+            return_value=MagicMock(),
+            create=True,
         ) as mock_llm_cls:
             agent._configure_vllm()
 
@@ -5417,7 +5423,9 @@ class TestLLMConfigureVllmAcceleratorPaths:
                 return_value=(MagicMock(name="tp_group"), None),
             ),
             patch(
-                "agilerl.algorithms.core.base.LLM", return_value=mock_llm_instance
+                "agilerl.algorithms.core.base.LLM",
+                return_value=mock_llm_instance,
+                create=True,
             ) as mock_llm_cls,
         ):
             agent._configure_vllm()
