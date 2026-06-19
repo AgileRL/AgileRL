@@ -77,7 +77,7 @@ from gymnasium import spaces
 from torch import optim
 from typing import TYPE_CHECKING
 
-from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl import HAS_LLM_DEPENDENCIES, HAS_VLLM
 from agilerl.algorithms.core.base import (
     EvolvableAlgorithm,
     LLMAlgorithm,
@@ -4153,6 +4153,14 @@ class TestEnsureVllmLoraStagingDir:
         assert target.is_dir()
 
 
+@pytest.mark.skipif(
+    not HAS_VLLM,
+    reason=(
+        "vLLM rollout sync calls build_vllm_rollout_lora_request, whose lazy "
+        "`from vllm.lora.request import LoRARequest` needs the Linux-only vllm "
+        "extra; skipped where vLLM is unavailable (off-Linux), as on nightly."
+    ),
+)
 class TestLLMSyncActorToVllm:
     def test_sync_actor_to_vllm_lora_path_exports_adapter_without_merge(self):
         """Adapter-only sync: save_pretrained + add_lora, no merge_adapter."""
@@ -4717,6 +4725,14 @@ class TestLLMUseReferencePolicySeparateAdapter:
         assert critic_param.requires_grad
 
 
+@pytest.mark.skipif(
+    not HAS_VLLM,
+    reason=(
+        "vLLM rollout sync calls build_vllm_rollout_lora_request, whose lazy "
+        "`from vllm.lora.request import LoRARequest` needs the Linux-only vllm "
+        "extra; skipped where vLLM is unavailable."
+    ),
+)
 class TestLLMMoveModelToVllmAdapterReload:
     """Second sync uses load_inplace on the LoRA request."""
 
