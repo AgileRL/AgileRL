@@ -37,8 +37,10 @@ if importlib.util.find_spec("deepspeed") and importlib.util.find_spec("vllm"):
     # so gate the import on those being importable to keep this module collectable
     # without them. (HAS_LLM_DEPENDENCIES can't gate this: it's True on macOS/Windows
     # because the linux-only deps are filtered out of the llm extra by their markers,
-    # leaving peft/transformers/datasets, which are installed.) The tests that use
-    # create_module are @pytest.mark.gpu and so are skipped without CUDA.
+    # leaving peft/transformers/datasets, which are installed.) Tests that call
+    # create_module are either @pytest.mark.gpu (skipped without CUDA) or, for the
+    # CPU ones, guarded with skipif(create_module is None), so they're skipped where
+    # the import is unavailable.
     from tests.test_algorithms.test_llms.test_grpo import create_module
 else:
     create_module = None
@@ -1506,6 +1508,13 @@ class TestMutationsMutation:
 
     @pytest.mark.skipif(
         not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed"
+    )
+    @pytest.mark.skipif(
+        create_module is None,
+        reason=(
+            "create_module lives in test_grpo, which requires the Linux-only "
+            "deepspeed+vllm extras; skipped off-Linux (where it's None)."
+        ),
     )
     @pytest.mark.parametrize(
         "mutation_type", ["architecture", "parameters", "activation"]
