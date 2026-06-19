@@ -22,7 +22,7 @@ else:
     apply_fused_policy_loss = None  # type: ignore[assignment]
 from agilerl.protocols import (
     LoraConfigProtocol,
-    MultiTurnEnv,
+    RolloutEnv,
     PeftModelProtocol,
     PreTrainedModelProtocol,
 )
@@ -688,7 +688,7 @@ class REINFORCE(LLMAlgorithm):
 
     def test(
         self,
-        env: ReasoningGym | MultiTurnEnv,
+        env: ReasoningGym | RolloutEnv,
         loop: int = 1,
     ) -> torch.Tensor:
         """Return fitness (test) score tensor of llm on test sub-set.
@@ -700,7 +700,7 @@ class REINFORCE(LLMAlgorithm):
 
         :param env: A :class:`~agilerl.utils.llm_utils.ReasoningGym` or
             :class:`~agilerl.llm_envs.TokenObservationWrapper`.
-        :type env: ReasoningGym | MultiTurnEnv
+        :type env: ReasoningGym | RolloutEnv
         :param loop: Number of outer test iterations (dataloader passes or episodes).
         :type loop: int
         :return: Concatenated per-step rewards from the test loop.
@@ -719,7 +719,7 @@ class REINFORCE(LLMAlgorithm):
                     prompts = next_prompts
                     rewards.append(reward)
                 reward_tensor = torch.cat(rewards)
-            elif isinstance(env, MultiTurnEnv):
+            elif isinstance(env, RolloutEnv):
                 all_rewards: list[torch.Tensor] = []
                 for _ in range(loop):
                     prompt_dict, _info = env.reset()
@@ -747,7 +747,7 @@ class REINFORCE(LLMAlgorithm):
             else:
                 msg = (
                     "env must be a ReasoningGym (or subclass) or "
-                    f"MultiTurnEnv; got {type(env).__name__}"
+                    f"RolloutEnv; got {type(env).__name__}"
                 )
                 raise TypeError(msg)
         mean_fit = torch.mean(reward_tensor.float()).item()

@@ -15,7 +15,7 @@ from agilerl.typing import GymEnvType
 
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE
-    from agilerl.llm_envs import SyncMultiTurnVecEnv
+    from agilerl.llm_envs import BatchRolloutEnv
 
 SupportedOnPolicy = PPO
 
@@ -247,7 +247,7 @@ def collect_rollouts_recurrent(
 
 def collect_rollouts_llm(
     agent: LLMPPO | LLMREINFORCE | GRPO,
-    env: SyncMultiTurnVecEnv,
+    env: BatchRolloutEnv,
     n_steps: int,
     batch_size: int,
     group_seed: int,
@@ -265,8 +265,8 @@ def collect_rollouts_llm(
 
     :param agent: The agent to collect rollouts for.
     :type agent: SupportedOnPolicyLLM
-    :param env: Synchronous vectorized multi-turn environment.
-    :type env: SyncGemVecEnv
+    :param env: Batched in-process rollout environment.
+    :type env: BatchRolloutEnv
     :param n_steps: Number of steps (max turns) for the agent to take.
     :type n_steps: int
     :param batch_size: Number of environments to collect rollouts from.

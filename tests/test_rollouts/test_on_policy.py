@@ -8,7 +8,7 @@ pytest.importorskip("vllm", reason="LLM tests require vllm.")
 from agilerl.algorithms.core import ActionResult
 from agilerl.rollouts.on_policy import collect_rollouts_llm
 from agilerl.llm_envs import (
-    SyncMultiTurnVecEnv,
+    BatchRolloutEnv,
     TokenObservationWrapper,
 )
 from agilerl.algorithms.ppo import PPO
@@ -113,7 +113,7 @@ class TestCollectRolloutsLlm:
                 max_output_tokens=8,
             )
 
-        env = SyncMultiTurnVecEnv(env_factory=env_fn, batch_size=2, group_size=1)
+        env = BatchRolloutEnv(env_factory=env_fn, batch_size=2, group_size=1)
         if algo_name == "ppo":
             agent = _cpu_llmppo(
                 use_vllm=False,
@@ -227,7 +227,7 @@ class TestCollectRolloutsLlm:
             creation_idx["value"] += 1
             return _OrderingEnv(prompt_tokens_by_env_index[idx])
 
-        env = SyncMultiTurnVecEnv(env_factory=env_fn, batch_size=4, group_size=2)
+        env = BatchRolloutEnv(env_factory=env_fn, batch_size=4, group_size=2)
         agent = _EchoAgent()
 
         completion_ids_list, _masks, _turns, rewards, steps, next_group_seed, _logps = (

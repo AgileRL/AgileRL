@@ -18,9 +18,9 @@ from agilerl.llm_envs import (
     HuggingFaceGym,
     ReasoningGym,
     SFTGym,
-    SyncMultiTurnVecEnv,
+    BatchRolloutEnv,
 )
-from agilerl.protocols import MultiTurnEnv
+from agilerl.protocols import RolloutEnv
 from agilerl.rollouts.on_policy import collect_rollouts_llm
 from agilerl.typing import PopulationType
 from agilerl.utils.algo_utils import stack_and_pad_experiences
@@ -411,7 +411,7 @@ def build_eval_wandb_dict(
 
 def _resolve_training_envs(
     pop: PopulationType,
-    env: HuggingFaceGym | MultiTurnEnv | None,
+    env: HuggingFaceGym | RolloutEnv | None,
     env_fn: Callable[[], HuggingFaceGym] | None,
 ) -> tuple[list[HuggingFaceGym], bool]:
     """Resolve shared or per-agent training environments.
@@ -421,7 +421,7 @@ def _resolve_training_envs(
     :param env: Shared environment instance.
     :type env: HuggingFaceGym | None
     :param env_fn: Factory for creating one environment per agent.
-    :type env_fn: Callable[[], HuggingFaceGym | MultiTurnEnv] | None
+    :type env_fn: Callable[[], HuggingFaceGym | RolloutEnv] | None
     :return: Environment list (aligned with population) and whether env_fn mode is active.
     :rtype: tuple[list[HuggingFaceGym], bool]
     """
@@ -1200,7 +1200,7 @@ def finetune_llm_preference(
 def finetune_llm_multiturn(
     pop: PopulationType,
     max_turns: int,
-    env_factory: Callable[[], MultiTurnEnv],
+    env_factory: Callable[[], RolloutEnv],
     env_config: dict[str, Any] | None = None,
     init_hp: dict[str, Any] | None = None,
     max_steps: int = 32768,
@@ -1334,13 +1334,13 @@ def finetune_llm_multiturn(
     next_checkpoint_step = checkpoint_steps
     max_steps_checkpoint_saved = False
     group_size = getattr(pop[0], "group_size", 1)
-    rollout_env = SyncMultiTurnVecEnv(env_factory, batch_size, group_size, env_config)
-    # ``agent.test`` expects a single ``MultiTurnEnv``; ``rollout_env`` is a
-    # ``SyncMultiTurnVecEnv`` wrapping N inner envs whose state is mid-rollout
+    rollout_env = BatchRolloutEnv(env_factory, batch_size, group_size, env_config)
+    # ``agent.test`` expects a single ``RolloutEnv``; ``rollout_env`` is a
+    # ``BatchRolloutEnv`` wrapping N inner envs whose state is mid-rollout
     # during training. Build a separate test env so evaluation is isolated.
     # NOTE: this means one extra env is held for the run's lifetime. Future
     # refactor could share a subset of the rollout envs (e.g. lease one of the
-    # vec env's inner ``MultiTurnEnv`` instances when no trajectory is active)
+    # vec env's inner ``RolloutEnv`` instances when no trajectory is active)
     # to avoid the duplication for heavy env setups.
     test_env = env_factory(**(env_config or {}))
     wall_deadline = (

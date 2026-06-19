@@ -10,6 +10,7 @@ from agilerl.llm_envs.dataset_env import DatasetEnv, PreferenceGym, SFTGym
 from agilerl.llm_envs.reasoning import ReasoningGym
 from agilerl.llm_envs.search import TIMEOUT, FormatRewardWrapper, SearchTool
 from agilerl.llm_envs.sync_vec_env import (
+    BatchRolloutEnv,
     SyncMultiTurnVecEnv,
     Trajectory,
     TrajectoryBuffer,
@@ -20,6 +21,7 @@ requests = _search.requests
 
 __all__ = [
     "TIMEOUT",
+    "BatchRolloutEnv",
     "DatasetEnv",
     "FormatRewardWrapper",
     "HuggingFaceGym",

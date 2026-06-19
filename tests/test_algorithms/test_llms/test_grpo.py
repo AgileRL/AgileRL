@@ -4835,7 +4835,7 @@ class TestGRPOTest:
         grpo = _make_cpu_grpo_for_branch_tests()
         with pytest.raises(
             TypeError,
-            match=re.escape("env must be a ReasoningGym (or subclass) or MultiTurnEnv"),
+            match=re.escape("env must be a ReasoningGym (or subclass) or RolloutEnv"),
         ):
             grpo.test(object(), loop=1)
         grpo.clean_up()

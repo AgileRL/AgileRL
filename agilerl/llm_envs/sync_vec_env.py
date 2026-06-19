@@ -1,4 +1,4 @@
-"""Synchronous multi-turn vector environment utilities for LLM rollouts."""
+"""Batched in-process rollout environment utilities for LLM rollouts."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 if TYPE_CHECKING:
-    from agilerl.protocols import MultiTurnEnv
+    from agilerl.protocols import RolloutEnv
     from agilerl.typing import ReasoningPrompts
 
 
@@ -18,7 +18,7 @@ class Trajectory:
     """State for one environment rollout within a synchronized vector batch.
 
     :param env: The multi-turn environment this trajectory steps.
-    :type env: MultiTurnEnv
+    :type env: RolloutEnv
     :param batch_idx: Index of the logical batch item this trajectory belongs to.
     :type batch_idx: int
     :param group_idx: Index of this trajectory within its group (the buffer holds
@@ -34,7 +34,7 @@ class Trajectory:
     :type sampling_logps: list[torch.Tensor]
     """
 
-    env: MultiTurnEnv
+    env: RolloutEnv
     batch_idx: int
     group_idx: int
     prompt: ReasoningPrompts
@@ -139,16 +139,16 @@ class TrajectoryBuffer:
         return len(self.trajectories)
 
 
-class SyncMultiTurnVecEnv:
-    """Synchronous multi-turn vector environment for LLM rollouts.
+class BatchRolloutEnv:
+    """Batched in-process collector of LLM rollout episodes.
 
-    Maintains ``batch_size * group_size`` independent multi-turn environments and
-    steps all active trajectories in lock-step using policy completions.
+    Maintains ``batch_size * group_size`` independent rollout environments and steps all
+    active trajectories in lock-step using policy completions.
     """
 
     def __init__(
         self,
-        env_factory: Callable[..., MultiTurnEnv],
+        env_factory: Callable[..., RolloutEnv],
         batch_size: int,
         group_size: int,
         env_config: dict[str, Any] | None = None,
@@ -156,7 +156,7 @@ class SyncMultiTurnVecEnv:
         """Create ``batch_size * group_size`` independent environments.
 
         :param env_factory: Factory that builds one multi-turn environment.
-        :type env_factory: Callable[..., MultiTurnEnv]
+        :type env_factory: Callable[..., RolloutEnv]
         :param batch_size: Number of logical batch items.
         :type batch_size: int
         :param group_size: Number of grouped trajectories per batch item.
@@ -323,3 +323,7 @@ class SyncMultiTurnVecEnv:
                 else None
             ),
         )
+
+
+# Back-compat alias (one release): SyncMultiTurnVecEnv was renamed to BatchRolloutEnv.
+SyncMultiTurnVecEnv = BatchRolloutEnv

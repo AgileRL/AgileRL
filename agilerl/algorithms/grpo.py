@@ -30,7 +30,7 @@ else:
 from agilerl.algorithms.core import ActionResult, LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.protocols import (
-    MultiTurnEnv,
+    RolloutEnv,
     PeftModelProtocol,
     PreTrainedModelProtocol,
 )
@@ -658,7 +658,7 @@ class GRPO(LLMAlgorithm):
 
     def test(
         self,
-        env: ReasoningGym | MultiTurnEnv,
+        env: ReasoningGym | RolloutEnv,
         loop: int = 1,
         *args: Any,
         **kwargs: Any,
@@ -667,7 +667,7 @@ class GRPO(LLMAlgorithm):
 
         :param env: Dataset-style ``ReasoningGym`` environment or tokenized
             multi-turn episode environment.
-        :type env: ReasoningGym | MultiTurnEnv
+        :type env: ReasoningGym | RolloutEnv
         :param loop: Number of outer test iterations over ``reset`` / ``step``.
         :type loop: int
         :return: Concatenated reward tensor from the test loop.
@@ -686,7 +686,7 @@ class GRPO(LLMAlgorithm):
                     prompts = next_prompts
                     rewards.append(reward)
                 reward_tensor = torch.cat(rewards)
-            elif isinstance(env, MultiTurnEnv):
+            elif isinstance(env, RolloutEnv):
                 all_rewards: list[torch.Tensor] = []
                 for _ in range(loop):
                     prompt_dict, _info = env.reset()
@@ -711,7 +711,7 @@ class GRPO(LLMAlgorithm):
             else:
                 msg = (
                     "env must be a ReasoningGym (or subclass) or "
-                    f"MultiTurnEnv; got {type(env).__name__}"
+                    f"RolloutEnv; got {type(env).__name__}"
                 )
                 raise TypeError(msg)
         mean_fit = torch.mean(reward_tensor).item()

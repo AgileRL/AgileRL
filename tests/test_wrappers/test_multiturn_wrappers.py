@@ -10,7 +10,7 @@ import torch
 from agilerl.llm_envs import (
     FormatRewardWrapper,
     SearchTool,
-    SyncMultiTurnVecEnv,
+    BatchRolloutEnv,
     TokenObservationWrapper,
     Trajectory,
     TrajectoryBuffer,
@@ -583,7 +583,7 @@ class _SyncStubEnv:
 
 class TestSyncMultiTurnVecEnvReset:
     def test_sync_gem_vec_env_reset_seeds_per_batch_group(self) -> None:
-        vec_env = SyncMultiTurnVecEnv(
+        vec_env = BatchRolloutEnv(
             env_factory=_SyncStubEnv,
             batch_size=2,
             group_size=2,
@@ -593,7 +593,7 @@ class TestSyncMultiTurnVecEnvReset:
         assert seen == [10, 10, 11, 11]
 
     def test_sync_gem_vec_env_reset_with_none_seed(self) -> None:
-        vec_env = SyncMultiTurnVecEnv(
+        vec_env = BatchRolloutEnv(
             env_factory=_SyncStubEnv,
             batch_size=2,
             group_size=2,
@@ -603,7 +603,7 @@ class TestSyncMultiTurnVecEnvReset:
         assert seen == [None, None, None, None]
 
     def test_sync_gem_vec_env_reset_reuses_existing_trajectories(self) -> None:
-        vec_env = SyncMultiTurnVecEnv(
+        vec_env = BatchRolloutEnv(
             env_factory=_SyncStubEnv,
             batch_size=2,
             group_size=2,
@@ -618,7 +618,7 @@ class TestSyncMultiTurnVecEnvStep:
     def test_sync_gem_vec_env_step_raises_when_completion_count_mismatches_active(
         self,
     ) -> None:
-        vec_env = SyncMultiTurnVecEnv(
+        vec_env = BatchRolloutEnv(
             env_factory=_SyncStubEnv,
             batch_size=1,
             group_size=2,
@@ -642,7 +642,7 @@ class TestSyncMultiTurnVecEnvStep:
             idx["i"] += 1
             return env
 
-        vec = SyncMultiTurnVecEnv(env_factory=_factory, batch_size=1, group_size=2)
+        vec = BatchRolloutEnv(env_factory=_factory, batch_size=1, group_size=2)
         _ = vec.reset(seed=0)
         prompts = vec.step(
             [
@@ -658,7 +658,7 @@ class TestSyncMultiTurnVecEnvStep:
         assert created[1].step_shapes == [(1, 3)]
 
     def test_sync_vec_env_step_raises_on_sampling_logps_count_mismatch(self) -> None:
-        vec_env = SyncMultiTurnVecEnv(
+        vec_env = BatchRolloutEnv(
             env_factory=_SyncStubEnv,
             batch_size=1,
             group_size=2,
@@ -681,7 +681,7 @@ class TestSyncMultiTurnVecEnvStep:
         ``Trajectory.sampling_logps``; ``None`` rows (nothing captured) are
         skipped. ``get_trajectories`` concatenates across turns and keeps a
         per-trajectory ``None`` for rows that never captured any."""
-        vec = SyncMultiTurnVecEnv(
+        vec = BatchRolloutEnv(
             env_factory=lambda: _StepVariantEnv(done_after_step=False),
             batch_size=1,
             group_size=2,
@@ -707,7 +707,7 @@ class TestSyncMultiTurnVecEnvStep:
         """Without captured logprobs the rollout-wide entry is a single
         ``None`` (not a list of ``None``s), and a reset clears any logprobs
         accumulated in a previous rollout."""
-        vec = SyncMultiTurnVecEnv(
+        vec = BatchRolloutEnv(
             env_factory=lambda: _StepVariantEnv(done_after_step=False),
             batch_size=1,
             group_size=2,
@@ -733,7 +733,7 @@ class TestSyncMultiTurnVecEnvStep:
 
 class TestSyncMultiTurnVecEnvClose:
     def test_sync_vec_env_close_calls_underlying_env_close_once(self) -> None:
-        vec_env = SyncMultiTurnVecEnv(
+        vec_env = BatchRolloutEnv(
             env_factory=lambda: _SyncStubEnv(sw_max_model_len=1024),
             batch_size=2,
             group_size=2,
@@ -745,7 +745,7 @@ class TestSyncMultiTurnVecEnvClose:
 
     def test_sync_vec_env_close_dedupes_same_env_instance(self) -> None:
         shared = _SyncStubEnv()
-        vec = SyncMultiTurnVecEnv(
+        vec = BatchRolloutEnv(
             env_factory=lambda: shared, batch_size=2, group_size=2
         )
         _ = vec.reset(seed=0)
@@ -756,13 +756,13 @@ class TestSyncMultiTurnVecEnvClose:
 class TestSyncMultiTurnVecEnvInit:
     def test_sync_vec_env_constructor_rejects_non_positive_sizes(self) -> None:
         with pytest.raises(ValueError, match="batch_size must be > 0"):
-            _ = SyncMultiTurnVecEnv(
+            _ = BatchRolloutEnv(
                 env_factory=_SyncStubEnv,
                 batch_size=0,
                 group_size=1,
             )
         with pytest.raises(ValueError, match="group_size must be > 0"):
-            _ = SyncMultiTurnVecEnv(
+            _ = BatchRolloutEnv(
                 env_factory=_SyncStubEnv,
                 batch_size=1,
                 group_size=0,
@@ -1262,7 +1262,7 @@ class TestSyncMultiTurnVecEnvGetTrajectories:
             idx["i"] += 1
             return env
 
-        vec = SyncMultiTurnVecEnv(env_factory=_factory, batch_size=1, group_size=2)
+        vec = BatchRolloutEnv(env_factory=_factory, batch_size=1, group_size=2)
         _ = vec.reset(seed=0)
         _ = vec.step(
             [
@@ -1274,3 +1274,10 @@ class TestSyncMultiTurnVecEnvGetTrajectories:
         # batch_steps is second-to-last.
         *_parts, batch_steps, _sampling_logps = vec.get_trajectories()
         assert batch_steps == 1
+
+
+def test_syncmultiturnvecenv_is_backcompat_alias_of_batchrolloutenv():
+    """SyncMultiTurnVecEnv was renamed to BatchRolloutEnv; the alias stays one release."""
+    from agilerl.llm_envs import BatchRolloutEnv, SyncMultiTurnVecEnv
+
+    assert SyncMultiTurnVecEnv is BatchRolloutEnv

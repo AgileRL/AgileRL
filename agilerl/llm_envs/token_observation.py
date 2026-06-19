@@ -8,7 +8,7 @@ from typing import Any
 
 import torch
 
-from agilerl.protocols import MultiTurnEnv
+from agilerl.protocols import RolloutEnv
 from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
 
 
@@ -21,7 +21,7 @@ class TokenObservationWrapper:
 
     def __init__(
         self,
-        env: MultiTurnEnv,
+        env: RolloutEnv,
         tokenizer: Any,
         max_turns: int,
         pad_id: int | None = None,

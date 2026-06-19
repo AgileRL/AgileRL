@@ -565,16 +565,16 @@ def test_protocol_type_aliases_importable():
     assert TorchObsType is not None
 
 
-class TestMultiTurnEnvProtocol:
-    """Cover the ``pass`` bodies of :class:`agilerl.protocols.MultiTurnEnv`
+class TestRolloutEnvProtocol:
+    """Cover the ``pass`` bodies of :class:`agilerl.protocols.RolloutEnv`
     protocol methods. A subclass that doesn't override them inherits the
     base implementation (the bare ``pass``), so invoking the inherited
     methods runs those statements and registers coverage."""
 
     def test_protocol_default_method_bodies_execute(self):
-        from agilerl.protocols import MultiTurnEnv
+        from agilerl.protocols import RolloutEnv
 
-        class _PassthroughEnv(MultiTurnEnv):
+        class _PassthroughEnv(RolloutEnv):
             max_turns = 1
 
         env = _PassthroughEnv()
@@ -584,3 +584,11 @@ class TestMultiTurnEnvProtocol:
         assert env.reset(seed=0) is None
         assert env.step(action="noop") is None
         assert env.close() is None
+
+    def test_multiturnenv_is_backcompat_alias_of_rolloutenv(self):
+        """MultiTurnEnv was renamed to RolloutEnv; the alias must stay one release."""
+        from agilerl.protocols import LLMEnv, MultiTurnEnv, RolloutEnv
+
+        assert MultiTurnEnv is RolloutEnv
+        # RolloutEnv is the generation subtype of the base LLMEnv contract.
+        assert issubclass(RolloutEnv, LLMEnv)

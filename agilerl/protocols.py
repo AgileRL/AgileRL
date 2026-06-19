@@ -613,10 +613,27 @@ class PeftModelProtocol(Protocol):
 
 
 @runtime_checkable
-class MultiTurnEnv(Protocol):
-    """Protocol for multi-turn LLM environments and AgileRL wrappers.
+class LLMEnv(Protocol):
+    """Base structural contract shared by every LLM env (rollout and dataset).
 
-    Covers both:
+    The minimal ``reset`` / ``step`` / ``close`` surface the trainer holds uniformly;
+    :class:`RolloutEnv` (generation) and the dataset envs (teacher-forced) both satisfy it.
+    Permissive signatures so the two arms' differing shapes (per-episode 5-tuple vs
+    batch 2-tuple) both structurally conform.
+    """
+
+    def reset(self, *args: Any, **kwargs: Any) -> Any: ...
+
+    def step(self, *args: Any, **kwargs: Any) -> Any: ...
+
+    def close(self) -> None: ...
+
+
+@runtime_checkable
+class RolloutEnv(LLMEnv, Protocol):
+    """Protocol for multi-turn LLM rollout environments and AgileRL wrappers.
+
+    The model generates, then the env scores. Covers both:
     - raw multi-turn envs / ``FormatRewardWrapper``: text obs + text actions
     - ``TokenObservationWrapper``: dict obs + token-id tensor actions
     """
@@ -635,3 +652,8 @@ class MultiTurnEnv(Protocol):
 
     def close(self) -> None:
         pass
+
+
+# Back-compat alias (one release): MultiTurnEnv was renamed to RolloutEnv. Same
+# runtime_checkable object, so isinstance(env, MultiTurnEnv) == isinstance(env, RolloutEnv).
+MultiTurnEnv = RolloutEnv
