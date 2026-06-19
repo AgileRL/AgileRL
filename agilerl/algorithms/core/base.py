@@ -135,9 +135,11 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.utils.algo_utils import clone_llm
     from agilerl.utils.llm_utils import (
         adapt_lora_config_for_model,
+        align_deepspeed_lr,
         create_model_from_name_or_path,
         format_colocated_vllm_oom_hint,
         gather_if_zero3,
+        get_model_name_or_path,
         get_state_dict,
         log_cuda_memory_snapshot,
     )
