@@ -1507,14 +1507,8 @@ class TestMutationsMutation:
             AcceleratorState._reset_state(True)
 
     @pytest.mark.skipif(
-        not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed"
-    )
-    @pytest.mark.skipif(
         create_module is None,
-        reason=(
-            "create_module lives in test_grpo, which requires the Linux-only "
-            "deepspeed+vllm extras; skipped off-Linux (where it's None)."
-        ),
+        reason="create_module needs the Linux-only deepspeed+vllm extras.",
     )
     @pytest.mark.parametrize(
         "mutation_type", ["architecture", "parameters", "activation"]

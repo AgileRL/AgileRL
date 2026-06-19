@@ -366,15 +366,8 @@ class TestCreatePopulation:
                 assert agent.accelerator is None
 
     @pytest.mark.skipif(
-        not HAS_LLM_DEPENDENCIES,
-        reason="agilerl[llm] not installed",
-    )
-    @pytest.mark.skipif(
         create_dummy_lm_for_reinforce is None,
-        reason=(
-            "create_module lives in test_grpo, which requires the Linux-only "
-            "deepspeed+vllm extras; skipped off-Linux (where it's None)."
-        ),
+        reason="create_module needs the Linux-only deepspeed+vllm extras.",
     )
     @pytest.mark.parametrize(
         "algo,expected_type",
