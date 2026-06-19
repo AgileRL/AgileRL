@@ -93,14 +93,23 @@ from agilerl.modules.dummy import DummyEvolvable
 from agilerl.algorithms.grpo import GRPO
 
 from tests.test_algorithms.test_base import DummyMARLAlgorithm, DummyRLAlgorithm
-from tests.test_algorithms.test_llms.test_grpo import create_module
+
+import importlib.util
+
+create_module = None
+if importlib.util.find_spec("deepspeed") and importlib.util.find_spec("vllm"):
+    # create_module lives in test_grpo, which importorskips deepspeed/vllm.
+    from tests.test_algorithms.test_llms.test_grpo import create_module
 
 
 pytest.importorskip("peft", reason="LLM checkpoint tests require peft.")
 pytest.importorskip("transformers", reason="LLM checkpoint tests require transformers.")
 
-if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
+deepspeed_config_stage_2 = None
+if importlib.util.find_spec("deepspeed") and importlib.util.find_spec("vllm"):
     from tests.test_algorithms.test_llms.test_grpo import deepspeed_config_stage_2
+
+if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
     from peft import LoraConfig, get_peft_model
 
 

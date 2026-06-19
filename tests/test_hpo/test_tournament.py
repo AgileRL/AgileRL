@@ -19,6 +19,14 @@ if HAS_LLM_DEPENDENCIES:
     from peft import LoraConfig
 
     from agilerl.algorithms import GRPO
+
+import importlib.util
+
+create_module = None
+if importlib.util.find_spec("deepspeed") and importlib.util.find_spec("vllm"):
+    # create_module lives in test_grpo, which importorskips deepspeed/vllm, so
+    # gate on those to keep this module collectable without them (the tests using
+    # it are @pytest.mark.gpu and skip without CUDA).
     from tests.test_algorithms.test_llms.test_grpo import create_module
 
 # Shared HP dict that can be used by any algorithm

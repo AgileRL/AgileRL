@@ -52,9 +52,15 @@ from agilerl.utils.utils import (
 )
 from agilerl.utils.algo_utils import CosineLRScheduleConfig
 from agilerl.wrappers.learning import Skill
-from tests.test_algorithms.test_llms.test_grpo import (
-    create_module as create_dummy_lm_for_reinforce,
-)
+import importlib.util
+
+if importlib.util.find_spec("deepspeed") and importlib.util.find_spec("vllm"):
+    # create_module lives in test_grpo, which importorskips deepspeed/vllm.
+    from tests.test_algorithms.test_llms.test_grpo import (
+        create_module as create_dummy_lm_for_reinforce,
+    )
+else:
+    create_dummy_lm_for_reinforce = None
 
 # Shared HP dict that can be used by any algorithm
 SHARED_INIT_HP = {
