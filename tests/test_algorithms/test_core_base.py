@@ -3092,6 +3092,12 @@ def normalize_optimizer_state(value):
 
 def generate_tiny_grpo(accelerator=None) -> GRPO:
     """Build a tiny CPU GRPO agent with (actor, reference) adapters."""
+    if create_module is None:
+        pytest.skip(
+            "create_module lives in test_grpo, which requires the Linux-only "
+            "deepspeed+vllm extras; the GRPO checkpoint tests are skipped where "
+            "they're unavailable (off-Linux), as on nightly."
+        )
     actor = create_module(input_size=6, max_tokens=4, vocab_size=64, device="cpu")
     return GRPO(
         actor_network=actor,
@@ -3947,6 +3953,12 @@ def get_lora_config(
 
 def _build_grpo_with_lora(lora_config: LoraConfig) -> GRPO:
     """Like ``_build_grpo`` but lets the caller override ``lora_config``."""
+    if create_module is None:
+        pytest.skip(
+            "create_module lives in test_grpo, which requires the Linux-only "
+            "deepspeed+vllm extras; the GRPO checkpoint tests are skipped where "
+            "they're unavailable."
+        )
     actor = create_module(input_size=6, max_tokens=4, vocab_size=64, device="cpu")
     return GRPO(
         actor_network=actor,
