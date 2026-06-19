@@ -30,7 +30,12 @@ from tests.helper_functions import (
     generate_discrete_space,
     generate_random_box_space,
 )
-from tests.test_algorithms.test_llms.test_grpo import create_module
+
+if HAS_LLM_DEPENDENCIES:
+    # ``create_module`` lives in test_grpo, which ``importorskip``s deepspeed/vllm.
+    # Only import it where those deps exist so this module stays collectable on
+    # platforms without them; the tests using it are skipif(not HAS_LLM_DEPENDENCIES).
+    from tests.test_algorithms.test_llms.test_grpo import create_module
 
 if TYPE_CHECKING:
     from agilerl.algorithms.core import EvolvableAlgorithm
