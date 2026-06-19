@@ -132,24 +132,6 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     )
     from safetensors.torch import load_file
 
-    from agilerl.utils.algo_utils import clone_llm
-    from agilerl.utils.llm_utils import (
-        adapt_lora_config_for_model,
-        align_deepspeed_lr,
-        create_model_from_name_or_path,
-        format_colocated_vllm_oom_hint,
-        gather_if_zero3,
-        get_model_name_or_path,
-        get_state_dict,
-        log_cuda_memory_snapshot,
-    )
-
-if TYPE_CHECKING or HAS_DEEPSPEED:
-    from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
-
-if TYPE_CHECKING or HAS_VLLM:
-    from vllm import LLM, CompletionOutput, SamplingParams
-
     from agilerl.algorithms.core.llm_ops.fused_lora import (
         clear_fused_adapter_routing,
         patch_lora_for_fused_forward,
@@ -159,20 +141,31 @@ if TYPE_CHECKING or HAS_VLLM:
         patch_vllm_lora_keep_resident,
         patch_vllm_strip_multimodal_towers,
     )
+    from agilerl.utils.algo_utils import clone_llm
     from agilerl.utils.llm_utils import (
+        adapt_lora_config_for_model,
         align_deepspeed_lr,
         build_completion_mask,
         build_vllm_llm_init_kwargs,
         build_vllm_rollout_lora_request,
         create_model_from_name_or_path,
+        format_colocated_vllm_oom_hint,
         gather_if_zero3,
         get_model_name_or_path,
+        get_state_dict,
+        log_cuda_memory_snapshot,
         move_params_to_cpu,
         move_params_to_gpu,
         offload_colocated_trainer_from_gpu,
         save_peft_adapter_for_vllm_rollout,
         stitch_completion_after_windowed_vllm_generate,
     )
+
+if TYPE_CHECKING or HAS_DEEPSPEED:
+    from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
+
+if TYPE_CHECKING or HAS_VLLM:
+    from vllm import LLM, CompletionOutput, SamplingParams
 
 __all__ = ["ActionResult", "EvolvableAlgorithm", "MultiAgentRLAlgorithm", "RLAlgorithm"]
 
