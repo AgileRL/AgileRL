@@ -19,8 +19,14 @@ from agilerl.rollouts.on_policy import (
 )
 
 
-from tests.test_algorithms.test_llms.test_ppo_llm import _cpu_llmppo
-from tests.test_algorithms.test_llms.test_reinforce_llm import _cpu_llmreinforce
+import importlib.util
+
+if importlib.util.find_spec("deepspeed") and importlib.util.find_spec("vllm"):
+    from tests.test_algorithms.test_llms.test_ppo_llm import _cpu_llmppo
+    from tests.test_algorithms.test_llms.test_reinforce_llm import _cpu_llmreinforce
+else:
+    _cpu_llmppo = None
+    _cpu_llmreinforce = None
 
 
 class _TinyTokenizer:
