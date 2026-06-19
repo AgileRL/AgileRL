@@ -1,0 +1,3 @@
+# Large test fixtures: treat as generated/binary so they don't bloat diffs,
+# blame, or PR reviews. This is a minified HuggingFace tokenizer used by tests.
+tests/assets/tiny_llm/tokenizer.json linguist-generated=true -diff

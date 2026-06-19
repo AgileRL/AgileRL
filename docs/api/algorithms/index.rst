@@ -165,6 +165,9 @@ LLM Algorithms
    * - :ref:`DPO <dpo>`
      - Preference optimization
      - Offline preference learning without reward-model RL loop.
+   * - :ref:`SFT <sft>`
+     - Supervised fine-tuning
+     - Cross-entropy on response tokens; typical warm-up before DPO/RL.
    * - :ref:`LLM PPO <llmppo>`
      - On-policy RL
      - PPO-style actor-critic objective for token-level trajectories.
@@ -179,6 +182,7 @@ LLM Algorithms
    cispo
    gspo
    dpo
+   sft
    llmppo
    llmreinforce
    sft

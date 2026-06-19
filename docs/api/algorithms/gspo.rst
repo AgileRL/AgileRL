@@ -1,7 +1,7 @@
 .. _gspo:
 
-Grouped Sequence Policy Optimization (GSPO)
-===========================================
+Group Sequence Policy Optimization (GSPO)
+=========================================
 
 `GSPO <https://arxiv.org/abs/2507.18071>`_ (Group Sequence Policy Optimization)
 proposes sequence-level importance-ratio optimization for LLM RL. Compared with

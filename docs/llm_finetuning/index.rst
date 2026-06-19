@@ -19,7 +19,13 @@ develop *agency* and can be described as **agents**.
      - **Tutorials**
    * - :ref:`GRPO<grpo>`
      - :ref:`LLM reasoning with GRPO<grpo_tutorial>`
-   * - :ref:`SFT<sft>`, :ref:`DPO<dpo>`
+   * - :ref:`GRPO<grpo>` (with evolutionary HPO)
+     - :ref:`LLM Finetuning with HPO<llm_finetuning_hpo>`
+   * - :ref:`CISPO<cispo>` and :ref:`GSPO<gspo>`
+     - GRPO specializations with alternative loss objectives (see the :ref:`GRPO tutorial<grpo_tutorial>`).
+   * - :ref:`LLM PPO<llmppo>`, :ref:`LLM REINFORCE<llmreinforce>` and :ref:`GRPO<grpo>`
+     - :ref:`Multi-turn finetuning with LLMPPO, LLMREINFORCE, and GRPO<multiturn_grpo_ppo_tutorial>`
+   * - :ref:`SFT<sft>` and :ref:`DPO<dpo>`
      - :ref:`LLM fine-tuning with SFT and DPO<sft_dpo_finetuning>`
 
 .. _rl_for_reasoning:
