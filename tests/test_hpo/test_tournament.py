@@ -293,6 +293,13 @@ class TestTournamentSelectionSelect:
     @pytest.mark.skipif(
         not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed"
     )
+    @pytest.mark.skipif(
+        create_module is None,
+        reason=(
+            "create_module lives in test_grpo, which requires the Linux-only "
+            "deepspeed+vllm extras; skipped off-Linux (where it's None), as on nightly."
+        ),
+    )
     @pytest.mark.parametrize("use_accelerator", [True, False])
     @pytest.mark.parametrize("elitism", [True, False])
     @pytest.mark.parametrize("num_processes", [1, 2])
@@ -407,6 +414,13 @@ class TestTournamentSelectionSelect:
 
     @pytest.mark.skipif(
         not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed"
+    )
+    @pytest.mark.skipif(
+        create_module is None,
+        reason=(
+            "create_module lives in test_grpo, which requires the Linux-only "
+            "deepspeed+vllm extras; skipped off-Linux (where it's None)."
+        ),
     )
     def test_detects_llm_by_type_not_algo_name(self):
         """LLM branch selection should rely on type, not a specific algo string."""
