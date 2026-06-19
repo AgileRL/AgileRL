@@ -666,13 +666,13 @@ class TestPreferenceGymInit:
         )
         # Has "prompt" (so super().__init__ filter works) but missing "chosen"/"rejected"
         bad_dataset = HFDataset.from_dict({"prompt": ["p"], "other": ["o"]})
-        with pytest.raises(AssertionError, match="'prompt', 'chosen', and 'rejected'"):
+        with pytest.raises(AssertionError, match="must contain columns"):
             PreferenceGym(
                 train_dataset=bad_dataset,
                 test_dataset=good_dataset,
                 tokenizer=tokenizer,
             )
-        with pytest.raises(AssertionError, match="'prompt', 'chosen', and 'rejected'"):
+        with pytest.raises(AssertionError, match="must contain columns"):
             PreferenceGym(
                 train_dataset=good_dataset,
                 test_dataset=bad_dataset,

@@ -6,10 +6,9 @@ from agilerl.llm_envs.base import (
     IterablePromptBatchGym,
     apply_chat_template,
 )
-from agilerl.llm_envs.preference import PreferenceGym
+from agilerl.llm_envs.dataset_env import DatasetEnv, PreferenceGym, SFTGym
 from agilerl.llm_envs.reasoning import ReasoningGym
 from agilerl.llm_envs.search import TIMEOUT, FormatRewardWrapper, SearchTool
-from agilerl.llm_envs.sft import SFTGym
 from agilerl.llm_envs.sync_vec_env import (
     SyncMultiTurnVecEnv,
     Trajectory,
@@ -21,6 +20,7 @@ requests = _search.requests
 
 __all__ = [
     "TIMEOUT",
+    "DatasetEnv",
     "FormatRewardWrapper",
     "HuggingFaceGym",
     "IterablePromptBatchGym",
