@@ -8,6 +8,12 @@ from agilerl.llm_envs.base import (
 )
 from agilerl.llm_envs.dataset_env import DatasetEnv, PreferenceGym, SFTGym
 from agilerl.llm_envs.reasoning import ReasoningGym
+from agilerl.llm_envs.reasoning_rollout import (
+    ReasoningRolloutState,
+    SingleTurnReasoningEnv,
+    dataloader_shuffle_order,
+    make_reasoning_rollout_env,
+)
 from agilerl.llm_envs.search import TIMEOUT, FormatRewardWrapper, SearchTool
 from agilerl.llm_envs.sync_vec_env import (
     BatchRolloutEnv,
@@ -28,12 +34,16 @@ __all__ = [
     "IterablePromptBatchGym",
     "PreferenceGym",
     "ReasoningGym",
+    "ReasoningRolloutState",
     "SFTGym",
     "SearchTool",
+    "SingleTurnReasoningEnv",
     "SyncMultiTurnVecEnv",
     "TokenObservationWrapper",
     "Trajectory",
     "TrajectoryBuffer",
     "apply_chat_template",
+    "dataloader_shuffle_order",
+    "make_reasoning_rollout_env",
     "requests",
 ]

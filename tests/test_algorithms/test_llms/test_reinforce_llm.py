@@ -20,7 +20,6 @@ from transformers.modeling_utils import PreTrainedModel
 from agilerl.algorithms.core import ActionResult
 from agilerl.algorithms.reinforce_llm import REINFORCE
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig
-from agilerl.utils.llm_utils import ReasoningGym
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.utils import (
     assert_vllm_get_action_contract,
@@ -338,30 +337,45 @@ class _RebnStub:
     _resolve_advantage_granularity = REINFORCE._resolve_advantage_granularity
 
 
-def _minimal_reasoning_gym(device: str, vocab_size: int, input_size: int, bs: int):
-    env = ReasoningGym.__new__(ReasoningGym)
+def _minimal_reasoning_rollout_env(device: str, vocab_size: int, input_size: int):
+    """Single-turn reasoning ``RolloutEnv`` stub (the folded reasoning case)."""
 
-    @contextmanager
-    def eval_mode():
-        yield
+    class _SingleTurnReasoning:
+        max_turns = 1
 
-    env.eval_mode = eval_mode
+        def _prompt(self):
+            return {
+                "input_ids": torch.randint(
+                    0, vocab_size, (1, input_size), device=device
+                ),
+                "attention_mask": torch.ones(1, input_size, device=device),
+                "text": "q",
+            }
 
-    def reset(reset_dataloaders=False):
-        return {
-            "input_ids": torch.randint(0, vocab_size, (bs, input_size), device=device),
-            "attention_mask": torch.ones(bs, input_size, device=device),
-            "question": [f"q_{i}" for i in range(bs)],
-            "answer": [f"a_{i}" for i in range(bs)],
-        }
+        def reset(self, seed=None):
+            del seed
+            return self._prompt(), {}
 
-    def step(completion_ids):
-        r = torch.ones(bs, device=device)
-        return reset(), r
+        def step(self, full_completion_ids):
+            del full_completion_ids
+            return self._prompt(), 1.0, True, False, {}
 
-    env.reset = reset
-    env.step = step
-    return env
+        def get_episode_data(self):
+            return (
+                torch.ones(1, input_size, dtype=torch.long, device=device),
+                torch.ones(1, input_size - 1, dtype=torch.bool, device=device),
+                torch.zeros(1, input_size - 1, dtype=torch.long, device=device),
+                torch.tensor([1.0], dtype=torch.float32, device=device),
+            )
+
+        @contextmanager
+        def eval_mode(self):
+            yield
+
+        def close(self):
+            return None
+
+    return _SingleTurnReasoning()
 
 
 class TestREINFORCEInit:
@@ -982,10 +996,15 @@ class TestREINFORCELearn:
 
 
 class TestREINFORCETest:
-    def test_test_method_reasoning_gym_branch(self):
+    def test_test_method_reasoning_rollout_branch(self):
         rf = _cpu_llmreinforce()
-        env = _minimal_reasoning_gym("cpu", 100, 10, 2)
-        out = rf.test(env, loop=2)
+        env = _minimal_reasoning_rollout_env("cpu", 100, 10)
+        completion = torch.ones(1, 12, dtype=torch.long)
+        action_mask = torch.ones(1, 11, dtype=torch.bool)
+        with patch.object(
+            rf, "get_action", return_value=ActionResult([completion], [action_mask])
+        ):
+            out = rf.test(env, loop=2)
         assert out.shape == ()
         assert out.item() == pytest.approx(1.0)
 
@@ -1042,7 +1061,7 @@ class TestREINFORCETest:
 
     def test_test_method_unknown_env_typeerror(self):
         rf = _cpu_llmreinforce()
-        with pytest.raises(TypeError, match="env must be a ReasoningGym"):
+        with pytest.raises(TypeError, match="env must be a RolloutEnv"):
             rf.test(object(), loop=1)
 
     def test_test_method_token_observation_wrapper_branch(self):

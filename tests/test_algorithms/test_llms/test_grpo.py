@@ -50,7 +50,6 @@ from tests.utils import (
     make_mock_vllm_instance,
     spawn_new_process_for_each_test,
 )
-from agilerl.utils.llm_utils import ReasoningGym
 
 deepspeed_base_config = {
     "bf16": {
@@ -191,50 +190,43 @@ class DummyMLPPreTrainedModel(PreTrainedModel, GenerationMixin):
         return
 
 
-class DummyReasoningEnv(ReasoningGym):
+class DummyReasoningEnv:
+    """Single-turn reasoning ``RolloutEnv`` stub for ``test()`` coverage."""
+
+    max_turns = 1
+
     def __init__(self, vocab_size, input_size, data_batch_size, device):
         self.vocab_size = vocab_size
         self.input_size = input_size
         self.data_batch_size = data_batch_size
         self.device = device
 
-    def reset(self, reset_dataloaders=False):
-        return [
-            {
-                "input_ids": torch.randint(
-                    0,
-                    self.vocab_size,
-                    (1, self.input_size),
-                    device=self.device,
-                ),
-                "attention_mask": torch.ones(*(1, self.input_size), device=self.device),
-                "text": "Write me a short story about a cat.",
-            }
-            for _ in range(self.data_batch_size)
-        ]
-
-    def step(self, completion_ids):
-        states = [
-            {
-                "input_ids": torch.randint(
-                    0,
-                    self.vocab_size,
-                    (1, self.input_size),
-                    device=self.device,
-                ),
-                "attention_mask": torch.ones(*(1, self.input_size), device=self.device),
-                "text": "Write me a short story about a cat.",
-            }
-            for _ in range(self.data_batch_size)
-        ]
-        return (
-            states,
-            torch.cat(
-                [
-                    torch.tensor([1.0], device=self.device)
-                    for _ in range(self.data_batch_size)
-                ],
+    def _prompt(self):
+        return {
+            "input_ids": torch.randint(
+                0,
+                self.vocab_size,
+                (1, self.input_size),
+                device=self.device,
             ),
+            "attention_mask": torch.ones(*(1, self.input_size), device=self.device),
+            "text": "Write me a short story about a cat.",
+        }
+
+    def reset(self, seed=None):
+        del seed
+        return self._prompt(), {}
+
+    def step(self, full_completion_ids):
+        del full_completion_ids
+        return self._prompt(), 1.0, True, False, {}
+
+    def get_episode_data(self):
+        return (
+            torch.ones(1, self.input_size, dtype=torch.long, device=self.device),
+            torch.ones(1, self.input_size - 1, dtype=torch.bool, device=self.device),
+            torch.zeros(1, self.input_size - 1, dtype=torch.long, device=self.device),
+            torch.tensor([1.0], dtype=torch.float32, device=self.device),
         )
 
     @contextmanager
@@ -4835,7 +4827,7 @@ class TestGRPOTest:
         grpo = _make_cpu_grpo_for_branch_tests()
         with pytest.raises(
             TypeError,
-            match=re.escape("env must be a ReasoningGym (or subclass) or RolloutEnv"),
+            match=re.escape("env must be a RolloutEnv"),
         ):
             grpo.test(object(), loop=1)
         grpo.clean_up()

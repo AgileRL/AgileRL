@@ -7,9 +7,9 @@ from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.training.train_llm import finetune_llm_reasoning
+from agilerl.training.train_llm import finetune_llm_multiturn
 from agilerl.utils.algo_utils import VLLMConfig
-from agilerl.llm_envs import ReasoningGym
+from agilerl.llm_envs import ReasoningRolloutState, make_reasoning_rollout_env
 from agilerl.utils.utils import create_population
 
 if HAS_LLM_DEPENDENCIES:
@@ -122,17 +122,24 @@ def main(init_hp, mut_p):
         {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
     ]
 
-    env = ReasoningGym(
-        train_dataset=train_dataset,
-        test_dataset=test_dataset,
-        tokenizer=tokenizer,
-        reward_fn=combined_rewards,
-        conversation_template=conversation_template,
-        data_batch_size_per_gpu=10,
-        accelerator=accelerator,
-        return_raw_completions=USE_VLLM,
-        max_context_length=init_hp["MAX_MODEL_LEN"],
+    # Reasoning folds into the single-turn rollout taxonomy; a shared state
+    # keeps each GRPO group's dataset order deterministic and consistent.
+    train_state = ReasoningRolloutState.from_dataset(
+        train_dataset, seed=42, column="question"
     )
+
+    def env_factory(evaluation_mode: bool = False):
+        return make_reasoning_rollout_env(
+            train_dataset=train_dataset,
+            test_dataset=test_dataset,
+            tokenizer=tokenizer,
+            reward_fn=combined_rewards,
+            conversation_template=conversation_template,
+            evaluation_mode=evaluation_mode,
+            seed=42,
+            max_model_len=init_hp["MAX_MODEL_LEN"],
+            state=None if evaluation_mode else train_state,
+        )
 
     hp_config = HyperparameterConfig(
         beta=RLParameter(min=mut_p["MIN_BETA"], max=mut_p["MAX_BETA"]),
@@ -189,9 +196,10 @@ def main(init_hp, mut_p):
         accelerator=accelerator,
     )
 
-    finetune_llm_reasoning(
+    finetune_llm_multiturn(
         pop=pop,
-        env=env,
+        max_turns=1,
+        env_factory=env_factory,
         init_hp=init_hp,
         evaluation_interval=10,
         wb=True,
@@ -203,7 +211,6 @@ def main(init_hp, mut_p):
         tournament=tournament,
         accelerator=accelerator,
         verbose=True,
-        num_epochs=1,
     )
     accelerator.end_training()
 

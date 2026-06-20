@@ -7,9 +7,9 @@ from torch.utils.data import Dataset
 from transformers import AutoTokenizer
 
 from agilerl.algorithms import GRPO
-from agilerl.training.train_llm import finetune_llm_reasoning
+from agilerl.training.train_llm import finetune_llm_multiturn
 from agilerl.utils.algo_utils import VLLMConfig
-from agilerl.llm_envs import ReasoningGym
+from agilerl.llm_envs import ReasoningRolloutState, make_reasoning_rollout_env
 
 MODEL_PATH = "Qwen/Qwen2.5-0.5B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
@@ -120,18 +120,24 @@ def main():
         {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
     ]
 
-    # Convert the HuggingFace dataset into a Gymnasium environment
-    env = ReasoningGym(
-        train_dataset=train_dataset,
-        test_dataset=test_dataset,
-        tokenizer=tokenizer,
-        reward_fn=combined_rewards,
-        conversation_template=conversation_template,
-        data_batch_size_per_gpu=10,
-        accelerator=accelerator,
-        return_raw_completions=USE_VLLM,  # This is necessary for vLLM to work
-        max_context_length=MAX_CONTEXT_LENGTH,
+    # Reasoning is a single-turn rollout env. The shared state gives every
+    # trajectory in a GRPO group a deterministic, group-consistent dataset order.
+    train_state = ReasoningRolloutState.from_dataset(
+        train_dataset, seed=42, column="question"
     )
+
+    def env_factory(evaluation_mode: bool = False):
+        return make_reasoning_rollout_env(
+            train_dataset=train_dataset,
+            test_dataset=test_dataset,
+            tokenizer=tokenizer,
+            reward_fn=combined_rewards,
+            conversation_template=conversation_template,
+            evaluation_mode=evaluation_mode,
+            seed=42,
+            max_model_len=MAX_CONTEXT_LENGTH,
+            state=None if evaluation_mode else train_state,
+        )
 
     # Define the LoRA configuration
     lora_config = LoraConfig(
@@ -163,16 +169,16 @@ def main():
         use_vllm=USE_VLLM,
         vllm_config=VLLMConfig(sleep_mode=True, max_num_seqs=4),
     )
-    finetune_llm_reasoning(
+    finetune_llm_multiturn(
         pop=[agent],
-        env=env,
+        max_turns=1,
+        env_factory=env_factory,
         evaluation_interval=10,
         wb=True,
         save_elite=True,
         elite_path="checkpoints",
         max_reward=2.0,
         accelerator=accelerator,
-        num_epochs=1,
     )
 
 

@@ -1186,3 +1186,183 @@ def test_apply_chat_template():
     assert result["input_ids"].ndim == 2
     decoded = tokenizer.decode(result["input_ids"][0], skip_special_tokens=False)
     assert "2+2" in decoded
+
+
+def test_dataloader_shuffle_order_is_deterministic_permutation():
+    """The shuffle index list is deterministic and a full per-epoch permutation."""
+    from agilerl.llm_envs import dataloader_shuffle_order
+
+    dataset_size = 16
+    seed = 7
+    epochs = 3
+    order = dataloader_shuffle_order(dataset_size, seed, epochs)
+    assert len(order) == dataset_size * epochs
+    # Each epoch slice is a full permutation of the dataset indices.
+    for start in range(0, len(order), dataset_size):
+        assert sorted(order[start : start + dataset_size]) == list(range(dataset_size))
+
+    # Deterministic per seed; a different seed produces a different shuffle.
+    assert order == dataloader_shuffle_order(dataset_size, seed, epochs)
+    assert order != dataloader_shuffle_order(dataset_size, seed + 1, epochs)
+
+
+def test_reasoning_rollout_state_seed_maps_group_to_same_row():
+    """A reused per-row seed maps every group member to the same dataset row."""
+    from agilerl.llm_envs import ReasoningRolloutState, dataloader_shuffle_order
+
+    state = ReasoningRolloutState(
+        shuffle_order=[5, 3, 9, 1],
+        seed=0,
+        dataset_size=4,
+    )
+    # First sighting of a seed binds it to the current cursor; repeats return it.
+    first = state.position_for_seed(100)
+    repeat = state.position_for_seed(100)
+    assert first == repeat == 0
+    # A new seed advances the cursor.
+    second = state.position_for_seed(101)
+    assert second == 1
+    # ``row_index`` extends the order across epoch boundaries deterministically.
+    assert state.row_index(0) == 5
+    expected_epoch_two = dataloader_shuffle_order(4, 0, 2)
+    assert state.row_index(4) == expected_epoch_two[4]
+
+
+class TestReasoningRolloutEquivalence:
+    """Bit-for-bit oracle: old ``ReasoningGym`` vs the single-turn ``RolloutEnv``.
+
+    Seeding the new env's shared shuffle order from the exact dataset rows the
+    batched reasoning env produced, and stepping with identical appended
+    generation tokens in ``(batch_idx, group_idx)`` order, must reproduce the old
+    path's dataset rows, group layout, decoded completions, and rewards exactly.
+    """
+
+    @staticmethod
+    def _length_reward_fn(completion, answer, question):
+        # Depends on all three arguments so any row/grouping/decode divergence
+        # changes the reward — making the equivalence check sensitive.
+        return float(len(completion) * 0.01 + len(answer) + len(question))
+
+    @pytest.mark.parametrize("num_samples", [80])
+    @pytest.mark.parametrize("group_size", [1, 4])
+    def test_reasoning_rollout_matches_reasoning_gym(
+        self, reasoning_dataset, num_samples, group_size
+    ):
+        from agilerl.llm_envs import (
+            BatchRolloutEnv,
+            ReasoningRolloutState,
+            make_reasoning_rollout_env,
+        )
+
+        train_dataset, test_dataset = reasoning_dataset
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+        if tokenizer.pad_token_id is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        data_batch_size = 4
+        seed = 123
+        gen_base = [101, 102, 103]
+
+        old_env = ReasoningGym(
+            train_dataset=train_dataset,
+            test_dataset=test_dataset,
+            tokenizer=tokenizer,
+            reward_fn=self._length_reward_fn,
+            conversation_template=DUMMY_CONVERSATION_TEMPLATE,
+            data_batch_size_per_gpu=data_batch_size,
+            seed=seed,
+        )
+        old_prompts = old_env.reset()
+        old_questions = list(old_env.questions)
+
+        # Build grouped completions: prompt ids + identical appended gen tokens.
+        old_completions = []
+        old_decoded = []
+        for batch_idx in range(data_batch_size):
+            prompt_ids = old_prompts[batch_idx]["input_ids"]
+            prompt_len = prompt_ids.shape[1]
+            group_rows = []
+            for grp in range(group_size):
+                gen = torch.tensor(
+                    [[gen_base[0] + batch_idx, gen_base[1] + grp, gen_base[2]]]
+                )
+                group_rows.append(torch.cat([prompt_ids, gen], dim=1))
+            grouped = torch.cat(group_rows, dim=0)
+            old_completions.append(grouped)
+            old_decoded.append(
+                tokenizer.batch_decode(
+                    grouped[:, prompt_len:], skip_special_tokens=True
+                )
+            )
+        _, old_rewards = old_env.step(old_completions)
+        assert tuple(old_rewards.shape) == (data_batch_size, group_size)
+
+        # Recover the exact dataset rows the old env drew (its explicit order).
+        question_to_index = {
+            f"This is question {i}?": i for i in range(len(train_dataset))
+        }
+        old_rows = [question_to_index[q] for q in old_questions]
+
+        # New path: seed the shared shuffle order from old's exact rows.
+        state = ReasoningRolloutState(
+            shuffle_order=list(old_rows),
+            seed=seed,
+            dataset_size=len(train_dataset),
+        )
+
+        def env_factory(**_kwargs):
+            return make_reasoning_rollout_env(
+                train_dataset=train_dataset,
+                test_dataset=test_dataset,
+                tokenizer=tokenizer,
+                reward_fn=self._length_reward_fn,
+                conversation_template=DUMMY_CONVERSATION_TEMPLATE,
+                seed=seed,
+                state=state,
+            )
+
+        vec_env = BatchRolloutEnv(
+            env_factory, batch_size=data_batch_size, group_size=group_size
+        )
+        vec_env.reset(seed=1000)
+        active = vec_env.trajectories.get_active_trajectories(sorted_by_index=True)
+        assert len(active) == data_batch_size * group_size
+
+        # Group layout matches: (batch_idx, group_idx) contiguous, row shared.
+        for batch_idx in range(data_batch_size):
+            group = [t for t in active if t.batch_idx == batch_idx]
+            assert {t.group_idx for t in group} == set(range(group_size))
+            rows = {t.env._env._question for t in group}
+            assert rows == {f"This is question {old_rows[batch_idx]}?"}
+
+        # Step with identical appended gen tokens, in (batch, group) order.
+        new_completions = []
+        for traj in active:
+            prompt_ids = traj.prompt["input_ids"]
+            gen = torch.tensor(
+                [
+                    [
+                        gen_base[0] + traj.batch_idx,
+                        gen_base[1] + traj.group_idx,
+                        gen_base[2],
+                    ]
+                ]
+            )
+            new_completions.append(torch.cat([prompt_ids, gen], dim=1))
+        vec_env.step(new_completions)
+
+        (_ids, _masks, _turn_ids, all_rewards, _steps, _logps) = (
+            vec_env.get_trajectories()
+        )
+
+        # Decoded generated text parity, per (batch, group).
+        idx = 0
+        new_matrix = torch.zeros(data_batch_size, group_size)
+        for batch_idx in range(data_batch_size):
+            for grp in range(group_size):
+                traj = active[idx]
+                wrapper = traj.env
+                assert wrapper._gen_texts[0] == old_decoded[batch_idx][grp]
+                new_matrix[batch_idx, grp] = all_rewards[idx].sum()
+                idx += 1
+
+        assert torch.equal(new_matrix, old_rewards.float())

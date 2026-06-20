@@ -38,7 +38,6 @@ from agilerl.training import train_llm
 from agilerl.training.train_llm import (
     finetune_llm_multiturn,
     finetune_llm_preference,
-    finetune_llm_reasoning,
 )
 from agilerl.utils.probe_envs_llm import ConditionalTargetEnv
 from agilerl.utils.utils import create_population
@@ -58,99 +57,6 @@ class MatrixCase:
         """Return a stable identifier for logs."""
         evo = "tournament" if self.with_tournament else "no_tournament"
         return f"{self.loop_name}:{self.algo}:pop{self.population_size}:{evo}"
-
-
-class TinyReasoningEnv:
-    """Tiny env compatible with `finetune_llm_reasoning`."""
-
-    def __init__(
-        self,
-        tokenizer: TinyDigitTokenizer,
-        data_batch_size_per_gpu: int,
-        dataset_size: int,
-    ) -> None:
-        self.tokenizer = tokenizer
-        self.data_batch_size_per_gpu = data_batch_size_per_gpu
-        self.name = "tiny_reasoning_debug"
-        self.num_epochs = 0
-
-        self._cursor = 0
-        self._questions = [f"{idx % 5}{(idx + 1) % 5}" for idx in range(dataset_size)]
-        self._answers = [
-            str((idx % 5 + (idx + 1) % 5) % 5) for idx in range(dataset_size)
-        ]
-        self._last_prompts: dict[str, Any] | None = None
-
-    def __len__(self) -> int:
-        """Return dataset size."""
-        return len(self._questions)
-
-    def reset(self, reset_dataloaders: bool = False) -> dict[str, Any]:
-        """Reset cursor (optional) and return the next prompt batch."""
-        if reset_dataloaders:
-            self._cursor = 0
-            self.num_epochs = 0
-        self._last_prompts = self._next_batch()
-        return self._last_prompts
-
-    def step(
-        self, completions: list[torch.Tensor]
-    ) -> tuple[dict[str, Any], torch.Tensor]:
-        """Score completions and return the next prompt batch."""
-        if self._last_prompts is None:
-            msg = "reset() must be called before step()."
-            raise RuntimeError(msg)
-
-        prompt_len = int(self._last_prompts["input_ids"].shape[1])
-        answers: list[str] = self._last_prompts["answer"]
-        rewards: list[list[float]] = []
-
-        for completion_group, answer in zip(completions, answers, strict=False):
-            if completion_group.dim() == 1:
-                completion_group = completion_group.unsqueeze(0)
-            decoded = self.tokenizer.batch_decode(
-                completion_group[:, prompt_len:],
-                skip_special_tokens=True,
-            )
-            rewards.append([1.0 if answer in text else 0.0 for text in decoded])
-
-        self._last_prompts = self._next_batch()
-        return self._last_prompts, torch.tensor(rewards, dtype=torch.float32)
-
-    def _next_batch(self) -> dict[str, Any]:
-        """Return the next tokenized mini-batch."""
-        start = self._cursor
-        end = start + self.data_batch_size_per_gpu
-        total = len(self._questions)
-
-        if end <= total:
-            idxs = list(range(start, end))
-            self._cursor = end
-            if self._cursor == total:
-                self._cursor = 0
-                self.num_epochs += 1
-        else:
-            idxs = list(range(start, total))
-            remaining = end - total
-            idxs.extend(range(remaining))
-            self._cursor = remaining
-            self.num_epochs += 1
-
-        questions = [self._questions[i] for i in idxs]
-        answers = [self._answers[i] for i in idxs]
-        tokenized = self.tokenizer(
-            questions,
-            return_tensors="pt",
-            padding=True,
-            padding_side="left",
-            return_attention_mask=True,
-        )
-        return {
-            "input_ids": tokenized["input_ids"],
-            "attention_mask": tokenized["attention_mask"],
-            "question": questions,
-            "answer": answers,
-        }
 
 
 class TinyPreferenceEnv:
@@ -365,47 +271,6 @@ def build_evolution_components(
     return tournament, mutation
 
 
-def run_reasoning_case(
-    case: MatrixCase,
-    args: argparse.Namespace,
-) -> None:
-    """Run one reasoning case."""
-    pop, tokenizer, _ = build_population(
-        algo=case.algo,
-        population_size=case.population_size,
-        seed=args.seed,
-        batch_size=args.batch_size,
-        max_model_len=args.max_model_len,
-        max_output_tokens=args.max_output_tokens,
-    )
-    env = TinyReasoningEnv(
-        tokenizer=tokenizer,
-        data_batch_size_per_gpu=args.batch_size,
-        dataset_size=args.reasoning_dataset_size,
-    )
-
-    tournament = mutation = None
-    evo_steps = None
-    if case.with_tournament:
-        tournament, mutation = build_evolution_components(case.population_size)
-        evo_steps = args.evo_steps
-
-    finetune_llm_reasoning(
-        pop=pop,
-        env=env,
-        wb=False,
-        save_elite=False,
-        verbose=False,
-        max_steps=args.reasoning_steps,
-        evaluation_interval=args.evaluation_interval,
-        evo_steps=evo_steps,
-        tournament=tournament,
-        mutation=mutation,
-        accelerator=None,
-        checkpoint_steps=args.checkpoint_steps,
-    )
-
-
 def run_preference_case(
     case: MatrixCase,
     args: argparse.Namespace,
@@ -512,8 +377,6 @@ def should_validate_tournament(case: MatrixCase, args: argparse.Namespace) -> bo
 
 def case_runner(case: MatrixCase) -> Callable[[argparse.Namespace], None]:
     """Map a matrix case to its runner."""
-    if case.loop_name == "reasoning":
-        return lambda args: run_reasoning_case(case, args)
     if case.loop_name == "preference":
         return lambda args: run_preference_case(case, args)
     if case.loop_name == "multiturn":
@@ -591,10 +454,6 @@ def build_cases() -> list[MatrixCase]:
     ]
     cases: list[MatrixCase] = []
 
-    for algo in ("GRPO", "LLMPPO", "LLMREINFORCE"):
-        for scenario in scenarios:
-            cases.append(MatrixCase(loop_name="reasoning", algo=algo, **scenario))
-
     for scenario in scenarios:
         cases.append(MatrixCase(loop_name="preference", algo="DPO", **scenario))
 
@@ -629,11 +488,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-model-len", type=int, default=32)
     parser.add_argument("--max-output-tokens", type=int, default=2)
 
-    parser.add_argument("--reasoning-steps", type=int, default=2)
     parser.add_argument("--preference-steps", type=int, default=2)
     parser.add_argument("--multiturn-steps", type=int, default=3)
 
-    parser.add_argument("--reasoning-dataset-size", type=int, default=12)
     parser.add_argument("--preference-dataset-size", type=int, default=12)
 
     parser.add_argument("--evaluation-interval", type=int, default=10_000)
