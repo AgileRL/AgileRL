@@ -62,7 +62,44 @@ def apply_chat_template(
     )
 
 
-class HuggingFaceGym(gym.Env, ABC):
+class LLMEnv(ABC):
+    """Base contract shared by every LLM env (rollout and dataset).
+
+    The minimal ``reset`` / ``step`` / ``close`` surface the trainer holds
+    uniformly. Generation envs (:class:`~agilerl.llm_envs.rollout_env.RolloutEnv`)
+    and teacher-forced dataset envs both subclass this. ``evaluation_mode`` flags
+    whether the env is serving its held-out split; :meth:`eval_mode` toggles it for
+    the duration of a block and restores the prior value.
+
+    :ivar evaluation_mode: Whether the env is currently serving the held-out split.
+    :vartype evaluation_mode: bool
+    """
+
+    evaluation_mode: bool = False
+
+    @abstractmethod
+    def reset(self, *args: Any, **kwargs: Any) -> Any:
+        """Reset the environment and return its first observation."""
+
+    @abstractmethod
+    def step(self, *args: Any, **kwargs: Any) -> Any:
+        """Advance the environment by one step."""
+
+    @contextmanager
+    def eval_mode(self) -> Generator[None, None, None]:
+        """Serve the held-out split for the duration of the block, then restore."""
+        previous = self.evaluation_mode
+        self.evaluation_mode = True
+        try:
+            yield
+        finally:
+            self.evaluation_mode = previous
+
+    def close(self) -> None:
+        """Release any resources held by the environment (no-op by default)."""
+
+
+class HuggingFaceGym(LLMEnv, gym.Env, ABC):
     """Abstract base class for HuggingFace Gymnasium environments."""
 
     def __init__(

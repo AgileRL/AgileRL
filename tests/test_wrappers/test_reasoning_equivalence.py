@@ -2,7 +2,7 @@
 
 Reasoning used to be a dedicated ``ReasoningGym`` with a batched, shuffled
 ``DataLoader``. The fold makes it a one-turn ``RolloutEnv``
-(:mod:`agilerl.llm_envs.reasoning_rollout`). The behavioural contract that has to
+(:mod:`agilerl.llm_envs.rollout_env`). The behavioural contract that has to
 survive the fold is:
 
 1. **Dataset row order** — must be deterministic per seed and a full permutation
@@ -19,9 +19,9 @@ survive the fold is:
 
 from __future__ import annotations
 
-from agilerl.llm_envs.reasoning_rollout import (
+from agilerl.llm_envs.rollout_env import (
     ReasoningRolloutState,
-    SingleTurnReasoningEnv,
+    RolloutEnv,
     dataloader_shuffle_order,
 )
 
@@ -87,7 +87,8 @@ def test_prompt_is_templated_and_reward_scores_once() -> None:
     def prompt_builder(question: str) -> str:
         return f"Q: {question}\nA:"
 
-    env = SingleTurnReasoningEnv(
+    env = RolloutEnv(
+        max_turns=1,
         questions=questions,
         answers=answers,
         reward_fn=reward_fn,
@@ -115,7 +116,8 @@ def test_prompt_is_templated_and_reward_scores_once() -> None:
 def test_eval_mode_draws_from_held_out_split() -> None:
     """Under eval_mode the env serves the test split, restoring the train split after."""
     state = ReasoningRolloutState(shuffle_order=[0], seed=0, dataset_size=1)
-    env = SingleTurnReasoningEnv(
+    env = RolloutEnv(
+        max_turns=1,
         questions=["train-q"],
         answers=["train-a"],
         reward_fn=lambda c, a, q: 0.0,

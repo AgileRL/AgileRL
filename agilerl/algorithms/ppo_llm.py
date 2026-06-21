@@ -21,11 +21,11 @@ else:
     # tests can patch it. ``_ppo_loss_liger`` guards against actual use.
     LigerFusedLinearPolicyLossFunction = None  # type: ignore[assignment]
     apply_fused_policy_loss = None  # type: ignore[assignment]
+from agilerl.llm_envs import RolloutEnv
 from agilerl.protocols import (
     LoraConfigProtocol,
     PeftModelProtocol,
     PreTrainedModelProtocol,
-    RolloutEnv,
 )
 from agilerl.typing import ExperiencesType, LLMObsType
 from agilerl.utils.algo_utils import (

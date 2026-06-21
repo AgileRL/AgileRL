@@ -4,13 +4,14 @@ from agilerl.llm_envs import search as _search
 from agilerl.llm_envs.base import (
     HuggingFaceGym,
     IterablePromptBatchGym,
+    LLMEnv,
     apply_chat_template,
 )
 from agilerl.llm_envs.dataset_env import DatasetEnv, PreferenceGym, SFTGym
 from agilerl.llm_envs.reasoning import ReasoningGym
-from agilerl.llm_envs.reasoning_rollout import (
+from agilerl.llm_envs.rollout_env import (
     ReasoningRolloutState,
-    SingleTurnReasoningEnv,
+    RolloutEnv,
     dataloader_shuffle_order,
     make_reasoning_rollout_env,
 )
@@ -32,12 +33,13 @@ __all__ = [
     "FormatRewardWrapper",
     "HuggingFaceGym",
     "IterablePromptBatchGym",
+    "LLMEnv",
     "PreferenceGym",
     "ReasoningGym",
     "ReasoningRolloutState",
+    "RolloutEnv",
     "SFTGym",
     "SearchTool",
-    "SingleTurnReasoningEnv",
     "SyncMultiTurnVecEnv",
     "TokenObservationWrapper",
     "Trajectory",

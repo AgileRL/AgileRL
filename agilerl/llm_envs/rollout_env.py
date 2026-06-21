@@ -1,35 +1,36 @@
-"""Reasoning as a single-turn ``RolloutEnv``.
+"""Generation rollout envs, with reasoning as the one-turn case.
 
-Reasoning is the degenerate one-turn case of the rollout taxonomy: the model
-generates one completion to a dataset-seeded prompt and the env scores it with
-a ``reward_fn``. This module provides the raw single-turn env
-(:class:`SingleTurnReasoningEnv`, text obs / text action) and a factory
-(:func:`make_reasoning_rollout_env`) that wraps it in
-:class:`~agilerl.llm_envs.token_observation.TokenObservationWrapper` with
-``max_turns=1`` so it plugs into ``BatchRolloutEnv`` like any other rollout env.
+A :class:`RolloutEnv` is the generation half of the env taxonomy: the model
+generates a completion to a dataset-seeded prompt and the env scores it with a
+``reward_fn``. Reasoning is the degenerate ``max_turns=1`` configuration — a
+plain :class:`RolloutEnv` instance, no subclass. :func:`make_reasoning_rollout_env`
+builds one and wraps it in
+:class:`~agilerl.llm_envs.token_observation.TokenObservationWrapper` so it plugs
+into ``BatchRolloutEnv`` like any other rollout env.
 
 Dataset order is deterministic: the seeded shuffle is precomputed as an explicit
 index list (:func:`dataloader_shuffle_order`) and shared (with a cursor) across
 the trajectories of a ``BatchRolloutEnv`` so a per-row seed selects one
 reproducible dataset row for every trajectory in its group. Batch/row order need
-not match the old reasoning dataloader — only be deterministic and
-group-consistent, which is what grouped-advantage training relies on.
+only be deterministic and group-consistent, which is what grouped-advantage
+training relies on.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Generator
-from contextlib import contextmanager
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import torch
 
-from agilerl.llm_envs.token_observation import TokenObservationWrapper
+from agilerl.llm_envs.base import LLMEnv
 
 if TYPE_CHECKING:
     from datasets import Dataset
     from transformers import AutoTokenizer
+
+    from agilerl.llm_envs.token_observation import TokenObservationWrapper
 
 
 def dataloader_shuffle_order(
@@ -165,43 +166,52 @@ class ReasoningRolloutState:
         return self.shuffle_order[position]
 
 
-class SingleTurnReasoningEnv:
-    """Raw single-turn reasoning env: dataset-seeded prompt in, scored text out.
+class RolloutEnv(LLMEnv):
+    """Generation rollout env: dataset-seeded prompt in, scored text out.
 
-    Text observation / text action, terminating after one turn. Wrapped by
+    Text observation / text action. With ``max_turns=1`` (the default) this is the
+    reasoning env: the model produces one completion to a dataset-seeded prompt and
+    the env scores it via ``reward_fn(completion, answer, question)`` on the decoded
+    generation. Multi-turn / tool-using rollouts subclass this and override
+    :meth:`step`. Wrapped by
     :class:`~agilerl.llm_envs.token_observation.TokenObservationWrapper` (via
     :func:`make_reasoning_rollout_env`) to participate in the rollout taxonomy.
-    The reward is ``reward_fn(completion, answer, question)`` on the decoded
-    generation — identical to the scoring the batched reasoning env applied.
 
+    :param max_turns: Number of generation turns before the episode terminates.
+    :type max_turns: int
+    :param tools: Optional tool schemas available to the policy.
+    :type tools: list | None
     :param questions: Per-row question strings.
-    :type questions: list[str]
+    :type questions: list[str] | None
     :param answers: Per-row training answer strings.
-    :type answers: list[str]
+    :type answers: list[str] | None
     :param reward_fn: ``(completion, answer, question) -> float`` scorer.
-    :type reward_fn: Callable[[str, str, str], float]
+    :type reward_fn: Callable[[str, str, str], float] | None
     :param prompt_builder: Maps a question to the prompt text shown to the model.
-    :type prompt_builder: Callable[[str], str]
+    :type prompt_builder: Callable[[str], str] | None
     :param state: Shared dataset-iteration state across a trajectory group.
-    :type state: ReasoningRolloutState
+    :type state: ReasoningRolloutState | None
     :param test_questions: Held-out question strings used under ``eval_mode``.
     :type test_questions: list[str] | None
     :param test_answers: Held-out answer strings used under ``eval_mode``.
     :type test_answers: list[str] | None
     """
 
-    max_turns = 1
-
     def __init__(
         self,
-        questions: list[str],
-        answers: list[str],
-        reward_fn: Callable[[str, str, str], float],
-        prompt_builder: Callable[[str], str],
-        state: ReasoningRolloutState,
+        *,
+        max_turns: int = 1,
+        tools: list | None = None,
+        questions: list[str] | None = None,
+        answers: list[str] | None = None,
+        reward_fn: Callable[[str, str, str], float] | None = None,
+        prompt_builder: Callable[[str], str] | None = None,
+        state: ReasoningRolloutState | None = None,
         test_questions: list[str] | None = None,
         test_answers: list[str] | None = None,
     ) -> None:
+        self.max_turns = max_turns
+        self.tools = list(tools) if tools else []
         self.questions = questions
         self.answers = answers
         self.reward_fn = reward_fn
@@ -210,6 +220,7 @@ class SingleTurnReasoningEnv:
         self.test_questions = test_questions
         self.test_answers = test_answers
         self.evaluation_mode = False
+        self._turn = 0
         self._question: str = ""
         self._answer: str = ""
 
@@ -221,6 +232,7 @@ class SingleTurnReasoningEnv:
 
     def reset(self, seed: int | None = None) -> tuple[str, dict[str, Any]]:
         """Select the next dataset row and return its prompt text plus info."""
+        self._turn = 0
         questions, answers = self._active_rows()
         position = self.state.position_for_seed(seed)
         row = self.state.row_index(position) % len(questions)
@@ -229,22 +241,11 @@ class SingleTurnReasoningEnv:
         return self.prompt_builder(self._question), {}
 
     def step(self, action: str) -> tuple[str, float, bool, bool, dict[str, Any]]:
-        """Score the completion against the current row; terminate (one turn)."""
+        """Score the completion against the current row; terminate at ``max_turns``."""
+        self._turn += 1
         reward = float(self.reward_fn(action, self._answer, self._question))
-        return "", reward, True, False, {}
-
-    @contextmanager
-    def eval_mode(self) -> Generator[None, None, None]:
-        """Draw from the held-out test split for the duration of the block."""
-        previous = self.evaluation_mode
-        self.evaluation_mode = True
-        try:
-            yield
-        finally:
-            self.evaluation_mode = previous
-
-    def close(self) -> None:
-        """No resources to release."""
+        terminated = self._turn >= self.max_turns
+        return "", reward, terminated, False, {}
 
 
 def _extract_question_answer_columns(
@@ -333,6 +334,8 @@ def make_reasoning_rollout_env(
     :return: A token-observation-wrapped single-turn reasoning env.
     :rtype: TokenObservationWrapper
     """
+    from agilerl.llm_envs.token_observation import TokenObservationWrapper
+
     train_questions, train_answers = _extract_question_answer_columns(train_dataset)
     test_questions, test_answers = _extract_question_answer_columns(test_dataset)
 
@@ -345,7 +348,8 @@ def make_reasoning_rollout_env(
     if state is None:
         state = ReasoningRolloutState.from_dataset(train_dataset, seed=seed)
 
-    raw_env = SingleTurnReasoningEnv(
+    raw_env = RolloutEnv(
+        max_turns=1,
         questions=train_questions,
         answers=train_answers,
         reward_fn=reward_fn,

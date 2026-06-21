@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 if TYPE_CHECKING:
-    from agilerl.protocols import RolloutEnv
+    from agilerl.llm_envs.rollout_env import RolloutEnv
     from agilerl.typing import ReasoningPrompts
 
 

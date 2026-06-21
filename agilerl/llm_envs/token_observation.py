@@ -8,11 +8,11 @@ from typing import Any
 
 import torch
 
-from agilerl.protocols import RolloutEnv
+from agilerl.llm_envs.rollout_env import RolloutEnv
 from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
 
 
-class TokenObservationWrapper:
+class TokenObservationWrapper(RolloutEnv):
     """Token-level observation wrapper for multi-turn environments."""
 
     # Unique marker that ``_chat_template_boundary_ids`` slices on; must not
@@ -53,11 +53,13 @@ class TokenObservationWrapper:
             tool set.
         :type tools: list[dict] | None
         """
+        super().__init__(max_turns=max_turns, tools=tools)
         self._env = env
         self.tokenizer = tokenizer
-        self.max_turns = max_turns
         self.pad_id = pad_id
         self.apply_chat_template = apply_chat_template
+        # Preserve the None-vs-list distinction the chat-template path keys on
+        # (``None`` => omit the ``tools=`` kwarg entirely).
         self.tools = tools
         self._sw_max_model_len = max_model_len
         self._sw_max_output_tokens = max_output_tokens

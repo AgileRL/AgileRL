@@ -565,30 +565,47 @@ def test_protocol_type_aliases_importable():
     assert TorchObsType is not None
 
 
-class TestRolloutEnvProtocol:
-    """Cover the ``pass`` bodies of :class:`agilerl.protocols.RolloutEnv`
-    protocol methods. A subclass that doesn't override them inherits the
-    base implementation (the bare ``pass``), so invoking the inherited
-    methods runs those statements and registers coverage."""
+class TestLLMEnvHierarchy:
+    """The LLM env contract lives in :mod:`agilerl.llm_envs` as concrete bases.
 
-    def test_protocol_default_method_bodies_execute(self):
-        from agilerl.protocols import RolloutEnv
+    ``LLMEnv`` is the abstract base every LLM env shares; ``RolloutEnv`` is the
+    concrete generation subtype, and ``TokenObservationWrapper`` is a
+    ``RolloutEnv`` so the algorithms' ``isinstance(env, RolloutEnv)`` checks key
+    on the wrapper they actually drive.
+    """
 
-        class _PassthroughEnv(RolloutEnv):
-            max_turns = 1
+    def test_rollout_env_is_concrete_llm_env_subtype(self):
+        pytest.importorskip("datasets", reason="LLM dependencies not installed")
+        from agilerl.llm_envs import LLMEnv, RolloutEnv, TokenObservationWrapper
 
-        env = _PassthroughEnv()
-        # Each call executes the inherited ``pass`` body in the protocol
-        # method. Returns ``None`` (the implicit return after ``pass``);
-        # the line gets covered regardless.
-        assert env.reset(seed=0) is None
-        assert env.step(action="noop") is None
-        assert env.close() is None
-
-    def test_multiturnenv_is_backcompat_alias_of_rolloutenv(self):
-        """MultiTurnEnv was renamed to RolloutEnv; the alias must stay one release."""
-        from agilerl.protocols import LLMEnv, MultiTurnEnv, RolloutEnv
-
-        assert MultiTurnEnv is RolloutEnv
-        # RolloutEnv is the generation subtype of the base LLMEnv contract.
         assert issubclass(RolloutEnv, LLMEnv)
+        assert issubclass(TokenObservationWrapper, RolloutEnv)
+        # The env contract no longer lives on agilerl.protocols.
+        import agilerl.protocols as protocols
+
+        assert not hasattr(protocols, "RolloutEnv")
+        assert not hasattr(protocols, "LLMEnv")
+
+    def test_rollout_env_default_is_single_turn_reasoning(self):
+        pytest.importorskip("datasets", reason="LLM dependencies not installed")
+        from agilerl.llm_envs import ReasoningRolloutState, RolloutEnv
+
+        state = ReasoningRolloutState(shuffle_order=[0], seed=0, dataset_size=1)
+        env = RolloutEnv(
+            questions=["2+2"],
+            answers=["4"],
+            reward_fn=lambda completion, answer, question: float(answer in completion),
+            prompt_builder=lambda question: f"Q: {question}",
+            state=state,
+        )
+        assert env.max_turns == 1
+        assert env.tools == []
+
+        prompt, info = env.reset(seed=0)
+        assert prompt == "Q: 2+2"
+        assert info == {}
+
+        _, reward, terminated, truncated, _ = env.step("the answer is 4")
+        assert reward == 1.0
+        assert terminated is True
+        assert truncated is False

@@ -18,9 +18,9 @@ from agilerl.llm_envs import (
     BatchRolloutEnv,
     HuggingFaceGym,
     PreferenceGym,
+    RolloutEnv,
     SFTGym,
 )
-from agilerl.protocols import RolloutEnv
 from agilerl.rollouts.on_policy import collect_rollouts_llm
 from agilerl.typing import PopulationType
 from agilerl.utils.algo_utils import stack_and_pad_experiences
