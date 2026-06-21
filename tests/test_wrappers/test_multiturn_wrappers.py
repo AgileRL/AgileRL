@@ -745,9 +745,7 @@ class TestSyncMultiTurnVecEnvClose:
 
     def test_sync_vec_env_close_dedupes_same_env_instance(self) -> None:
         shared = _SyncStubEnv()
-        vec = BatchRolloutEnv(
-            env_factory=lambda: shared, batch_size=2, group_size=2
-        )
+        vec = BatchRolloutEnv(env_factory=lambda: shared, batch_size=2, group_size=2)
         _ = vec.reset(seed=0)
         vec.close()
         assert shared.close_calls == 1

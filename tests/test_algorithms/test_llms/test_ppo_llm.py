@@ -1126,9 +1126,7 @@ class TestPPOFusedNoGradBaseRoutedReference:
             assert torch.isfinite(torch.tensor(metrics[key]))
 
 
-def _minimal_reasoning_rollout_env(
-    device: str, vocab_size: int, input_size: int
-):
+def _minimal_reasoning_rollout_env(device: str, vocab_size: int, input_size: int):
     """Single-turn reasoning ``RolloutEnv`` stub (the folded reasoning case)."""
 
     class _SingleTurnReasoning:

@@ -84,7 +84,7 @@ class DatasetEnv(IterablePromptBatchGym):
 def preference_collate_builder(
     env: DatasetEnv,
     tokenizer: AutoTokenizer,
-    max_context_length: int | None = None,  # noqa: ARG001 - env.max_context_length is authoritative
+    max_context_length: int | None = None,
 ) -> Callable[[list[dict[str, str]]], dict[str, Any]]:
     """Collate ``(prompt, chosen, rejected)`` preference triples (DPO)."""
 
@@ -159,7 +159,7 @@ def preference_collate_builder(
 def sft_collate_builder(
     env: DatasetEnv,
     tokenizer: AutoTokenizer,
-    max_context_length: int | None = None,  # noqa: ARG001 - env.max_context_length is authoritative
+    max_context_length: int | None = None,
 ) -> Callable[[list[dict[str, Any]]], dict[str, Any]]:
     """Collate ``(prompt, response)`` pairs (supervised fine-tuning)."""
     response_column = env.response_column

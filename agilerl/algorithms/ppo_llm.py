@@ -23,9 +23,9 @@ else:
     apply_fused_policy_loss = None  # type: ignore[assignment]
 from agilerl.protocols import (
     LoraConfigProtocol,
-    RolloutEnv,
     PeftModelProtocol,
     PreTrainedModelProtocol,
+    RolloutEnv,
 )
 from agilerl.typing import ExperiencesType, LLMObsType
 from agilerl.utils.algo_utils import (

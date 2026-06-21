@@ -54,8 +54,9 @@ def test_shuffle_order_extends_without_rewriting_first_epoch() -> None:
     # Force the order to grow across the epoch boundary.
     _ = state.row_index(dataset_size + 3)
     assert state.shuffle_order[:dataset_size] == first_epoch
-    assert dataloader_shuffle_order(dataset_size, seed, state.epochs_built) == (
-        state.shuffle_order[: dataset_size * state.epochs_built]
+    assert (
+        dataloader_shuffle_order(dataset_size, seed, state.epochs_built)
+        == (state.shuffle_order[: dataset_size * state.epochs_built])
     )
 
 
