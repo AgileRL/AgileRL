@@ -277,6 +277,20 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
     def __init__(self, device: str, random_seed: int | None = None) -> None:
         nn.Module.__init__(self)
         self._init_surface_methods()
+
+        # When no explicit seed is given, derive one DETERMINISTICALLY from the
+        # global numpy RNG (seeded by seed_everything / set_global_seed) rather
+        # than letting default_rng(None) pull fresh OS entropy. The latter makes
+        # every process seed this module's RNG differently, so architecture
+        # mutations -- which sample the target layer / node count from self.rng
+        # (e.g. EvolvableCNN.add_channel, EvolvableMLP.add_node) -- pick
+        # differently across processes, so arch_mut runs are not reproducible
+        # cross-process even at a fixed global seed. Drawing from the seeded
+        # global stream keeps modules distinct yet reproducible, and still varies
+        # with the global seed. If the global RNG is itself unseeded this is no
+        # less reproducible than before (numpy seeds it from OS entropy).
+        if random_seed is None:
+            random_seed = int(np.random.randint(0, 2**31 - 1))
         self.random_seed = random_seed
 
         self._rng = np.random.default_rng(seed=random_seed)
@@ -566,9 +580,15 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
 
         check_base_methods(self.__class__)
 
-        # We want the unique set of mutation methods across the class and its superclasses
-        self._layer_mutation_methods = list(set(layer_methods))
-        self._node_mutation_methods = list(set(node_methods))
+        # We want the unique set of mutation methods across the class and its superclasses.
+        # sorted() (not list(set())) so the order is DETERMINISTIC across processes:
+        # list(set(<strings>)) order depends on per-process hash randomization, which makes
+        # sample_mutation_method's rng.choice pick a different mutation in each process at an
+        # identical seed -> arch_mut runs are not reproducible cross-process. Verified on the
+        # cluster: reverting this (with the random_seed fix kept) still diverges -- DQN in the
+        # final weights, PPO in fitness too -- so this fix is required alongside random_seed.
+        self._layer_mutation_methods = sorted(set(layer_methods))
+        self._node_mutation_methods = sorted(set(node_methods))
 
     def reset_noise(self) -> None:
         """Reset noise for all NoisyLinear layers in the network."""

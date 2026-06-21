@@ -5,7 +5,9 @@
 # This is the HPO counterpart of ppo_relu_no_hpo.yaml. The base hyperparameters,
 # the "ReLU to the Rescue" (Jesson et al., 2024) mapping, and the 1-env -> 16-env
 # CleanRL scaling (learn_step = 16 x 2048 = 32768, batch_size = 32768/32 = 1024)
-# are all unchanged -- see ppo_relu_no_hpo.yaml for the full derivation. The only
+# are unchanged -- see ppo_relu_no_hpo.yaml for the full derivation -- with one
+# deliberate exception: ent_coef is raised from the paper's 0.0 to 0.001 so HPO can
+# mutate it (the multiplicative mutation cannot move a 0.0 base off zero). The other
 # additions here are the `mutation` / `tournament_selection` blocks (and
 # pop_size = 16), which switch this same training script into an evolutionary HPO
 # regime: a population of agents is trained, periodically mutated, and re-selected
@@ -15,8 +17,8 @@
 #   pop_size = 16, elitism = true, tournament_size = 2
 #   activation mutations OFF (act_mut = 0.0); arch / new_layer / params / rl_hp on
 #   rl_hp_selection mutates the highest-leverage, well-behaved PPO hyperparameters
-#     (lr, clip_coef, update_epochs, batch_size, learn_step), each with grow/shrink
-#     factors scaled to its sensitivity
+#     (lr, clip_coef, update_epochs, batch_size, learn_step, ent_coef), each with
+#     grow/shrink factors scaled to its sensitivity
 #   network min/max bounds now actively define the architecture search space
 
 algorithm:
@@ -28,7 +30,8 @@ algorithm:
     gae_lambda: 0.95
     action_std_init: 0.0
     clip_coef: 0.2
-    ent_coef: 0.0
+    ent_coef: 0.001  # nonzero so HPO can mutate it (a 0.0 base is a multiplicative
+                     # no-op); matches ppo_relu_no_hpo.yaml's base
     vf_coef: 0.5
     max_grad_norm: 0.5
     target_kl:
@@ -105,8 +108,19 @@ mutation:
             max: 65536
             grow_factor: 1.2
             shrink_factor: 0.8
-        # gamma, gae_lambda, ent_coef, vf_coef and max_grad_norm are deliberately
-        # NOT mutated:
+        ent_coef:
+            # Entropy bonus -- exploration vs policy sharpening. The ReLU-paper
+            # MuJoCo recipe uses 0.0, but a 0.0 base is a permanent multiplicative
+            # no-op, so the base is raised to 0.001 (in the algorithm block) to make
+            # this knob mutable. Base 0.001 is the geometric midpoint of 0.0001 .. 0.01
+            # (sqrt(0.0001 x 0.01) = 0.001), so -- since mutation is multiplicative --
+            # a mutation is equally likely to explore a smaller or larger bonus.
+            # Coarse factors.
+            min: 0.0001
+            max: 0.01
+            grow_factor: 1.2
+            shrink_factor: 0.8
+        # gamma, gae_lambda, vf_coef and max_grad_norm are deliberately NOT mutated:
         #
         # gamma / gae_lambda: both sit very close to 1.0, where the impactful
         # quantity is the effective horizon 1/(1 - x), not the value itself. The
@@ -116,15 +130,11 @@ mutation:
         # mutation on the agent attribute may not even propagate. Left fixed at the
         # robust 0.99 / 0.95 base values.
         #
-        # ent_coef: base is 0.0 (the ReLU-paper MuJoCo setting). Multiplicative
-        # mutation is value *= factor, so a 0.0 base is a permanent no-op -- it can
-        # never move off zero. Mutating it would require a nonzero base, which would
-        # change the recipe; left fixed at 0.0.
-        #
         # vf_coef / max_grad_norm: low-leverage and robust at their defaults
         # (0.5 / 0.5); left fixed to keep the search budget on the knobs above.
     mutation_sd: 0.1  # std of the Gaussian weight perturbation for params_mut (typical)
     rand_seed: 42
+    mutate_elite: false  # keep the elite member unmutated so the best agent survives intact into the next generation
 
 network:
     # Paper architecture: width-64 tanh MLP. Under HPO the min/max bounds below
@@ -161,7 +171,7 @@ network:
 
 tournament_selection:
     tournament_size: 2
-    elitism: true  # the single best agent is cloned into the next generation each step (still subject to mutation, since mutate_elite defaults to true)
+    elitism: true  # the single best agent is cloned into the next generation each step (preserved unmutated, since mutate_elite is false above)
 
 training:
     max_steps: 6_000_000

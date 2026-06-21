@@ -1,33 +1,28 @@
 ---
 # IPPO on cooperative MPE (MPEv2) with NO HPO (a single agent, never mutated).
 #
-# Hyperparameters from "The Surprising Effectiveness of PPO in Cooperative
-# Multi-Agent Games" (Yu et al., 2021) -- the MAPPO/IPPO settings for MPE (their
-# Appendix MPE hyperparameter table + the marlbenchmark/on-policy MPE scripts).
+# Hyperparameters match AgileRL's canonical multi-agent IPPO/MPE settings (the
+# gentler, exploration-heavy recipe: low lr, few PPO epochs, tight gradient
+# clipping, high entropy bonus). These differ from the earlier MAPPO-paper recipe
+# (Yu et al., 2021); the canonical values give more stable learning here and avoid
+# the premature policy over-sharpening seen with the aggressive recipe.
 #
-# Mapping notes (paper -> AgileRL IPPO):
-#   lr 7e-4, gamma 0.99, GAE lambda 0.95, PPO clip 0.2, entropy coef 0.01,
-#   value-loss coef 1.0, max grad norm 10.0, PPO epochs 10 -> the fields below.
-#   The paper uses a width-64, 2-layer MLP -> latent_dim 64, encoder [64], head [64].
-#   Discrete actions (the MPE default, and what the paper used) are produced by the
-#   adapter (continuous_actions=False), so action_std_init is unused (categorical).
+# Mapping notes:
+#   lr 1e-4, gamma 0.99, GAE lambda 0.95, PPO clip 0.2, entropy coef 0.05,
+#   value-loss coef 0.5, max grad norm 0.5, PPO epochs 4 -> the fields below.
+#   Discrete actions (the MPE default) are produced by the adapter
+#   (continuous_actions=False), so action_std_init is unused (categorical).
+#   torch_compiler is deliberately omitted: torch.compile's GPU (Inductor/Triton)
+#   kernels are nondeterministic across processes and bypass the cuDNN/cuBLAS
+#   deterministic flags set by reproducibility.seed_everything, which made IPPO
+#   runs non-reproducible at a fixed seed (verified on the cluster: compile+GPU
+#   diverges; no-compile+GPU and compile+CPU are both bitwise reproducible). The
+#   compile speedup is not worth losing reproducibility for the benchmark.
 #
-#   update_epochs: the paper uses 10 for Simple-Spread and 15 for Simple-Reference /
-#   Simple-Speaker-Listener. The harness runs ONE config across every env in a suite
-#   (run_training overrides only environment.name/config, not the algorithm block), so
-#   we use a single suite-wide value of 10. The 10-vs-15 gap is minor next to the
-#   reward-scale caveats already documented in registry.py.
-#
-# Rollout sizing (paper -> 16 parallel envs):
-#   The paper collects one 25-step episode from each of 128 rollout threads per update
-#   (128 x 25 = 3200 transitions/update). In AgileRL IPPO, `learn_step` is the total
-#   rollout size (transitions collected before each learn) and the per-env horizon is
-#   learn_step/num_envs. We keep the rollout size faithful at 3200 with num_envs 16
-#   (so each env collects 200 steps = 8 auto-reset episodes per update), rather than
-#   spawning 128 vec-env subprocesses. `batch_size` is the MINIBATCH size
-#   (num_minibatches = learn_step/batch_size); the paper uses 1 minibatch, but we use a
-#   moderate 1024 (~3 minibatches) to keep per-update gradient noise reasonable -- the
-#   same fix-the-minibatch reasoning as the PPO/MuJoCo configs.
+# Rollout sizing:
+#   `learn_step` is the total rollout size (transitions collected before each learn);
+#   the per-env horizon is learn_step/num_envs (2048/16 = 128 steps/env). `batch_size`
+#   is the MINIBATCH size, so num_minibatches = learn_step/batch_size = 2048/128 = 16.
 #
 #   The environment `name` here is a placeholder; the benchmark script overrides it per
 #   selected env and fills environment.config from registry.MPE_ENV_CONFIGS. The
@@ -35,18 +30,19 @@
 
 algorithm:
     name: IPPO
-    batch_size: 1024
-    lr: 0.0007
-    learn_step: 3200
+    batch_size: 128
+    lr: 0.0001
+    learn_step: 2048
     gamma: 0.99
     gae_lambda: 0.95
     action_std_init: 0.0
     clip_coef: 0.2
-    ent_coef: 0.01
-    vf_coef: 1.0
-    max_grad_norm: 10.0
+    ent_coef: 0.05
+    vf_coef: 0.5
+    max_grad_norm: 0.5
     target_kl:
-    update_epochs: 10
+    update_epochs: 4
+    # torch_compiler omitted on purpose -- see the mapping note above (reproducibility).
 
 environment:
     name: simple_spread_v3
@@ -55,11 +51,12 @@ environment:
     # `path` and `config` are filled by benchmark.run_training (path -> this
     # benchmarking dir so the adapter imports in vec-env workers; config -> the
     # selected env's registry.MPE_ENV_CONFIGS entry).
+    # NOTE: the adapter trains ONE policy PER AGENT (fully-independent IPPO) by
+    # default -- AgileRL's parameter-shared grouping of homogeneous agents does not
+    # learn these tasks. See mpe_adapter.make_mpe_parallel_env (separate_policies).
 
 network:
-    # Paper architecture: width-64, 2-layer MLP. ReLU is used suite-wide for
-    # cross-env comparability; the paper used ReLU for Reference / Speaker-Listener
-    # and Tanh for Spread, a minor deviation we accept for one shared config.
+    # Width-64, 2-layer MLP. ReLU is used suite-wide for cross-env comparability.
     latent_dim: 64
     max_latent_dim: 64
     arch: mlp
@@ -87,13 +84,11 @@ network:
 # switches this same script into an HPO regime (see ippo_mpe_hpo.yaml).
 
 training:
-    # MPE converges far faster than MuJoCo/Atari; 5M env steps is ample for the
-    # cooperative tasks (the paper runs 20M, but that is well past convergence here).
-    max_steps: 5_000_000
+    max_steps: 2_000_000
     target_score:
     pop_size: 1
-    # ~39 evaluation cycles over the budget (128000 = 40 x the 3200-step rollout, so
-    # agents complete whole collect->update cycles between evaluations).
-    evo_steps: 128000
+    # Steps between evaluations. 10240 = 5 x the 2048 learn_step -> exactly 5
+    # rollout->update cycles per evaluation; ~195 evaluations over the 2M budget.
+    evo_steps: 10240
     eval_steps:
     eval_loop: 1

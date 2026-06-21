@@ -60,6 +60,8 @@ class PopulationMetrics:
     nonscalar_additional_metrics: list[dict[str, np.ndarray | None]] = field(
         default_factory=list
     )
+    mut_details: list[dict | None] = field(default_factory=list)
+    parent_indices: ScalarRow = field(default_factory=list)
 
     @property
     def pop_size(self) -> int:
@@ -606,6 +608,8 @@ class Population(Generic[AgentT]):
             additional_metrics=self._collect_additional_metrics(),
             hyperparameters=self._collect_hyperparameters(),
             nonscalar_additional_metrics=self._collect_nonscalar_metrics(),
+            mut_details=[getattr(a, "mut_details", None) for a in self.agents],
+            parent_indices=[getattr(a, "_parent_index", a.index) for a in self.agents],
         )
 
     def _collect_fitnesses(self) -> ScalarOrNestedRow:

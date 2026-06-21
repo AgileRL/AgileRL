@@ -9,12 +9,12 @@ from typing import TYPE_CHECKING, Any
 import gymnasium as gym
 import numpy as np
 import tqdm
-import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import (
     CQN,
@@ -33,7 +33,13 @@ from agilerl.algorithms.core import EvolvableAlgorithm, LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.logger import CSVLogger, StdOutLogger, TensorboardLogger, WandbLogger
+from agilerl.logger import (
+    CSVLogger,
+    MutationHistoryLogger,
+    StdOutLogger,
+    TensorboardLogger,
+    WandbLogger,
+)
 from agilerl.modules import EvolvableModule
 from agilerl.typing import BPTTSequenceType, GymSpaceType, PopulationType
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, DummyOptimizer, clone_llm
@@ -1281,6 +1287,27 @@ def init_wandb(
         wandb.init(**kwargs)
 
 
+# Process-local output directory for the evolutionary mutation history CSV. When
+# set (via ``set_mutation_history_dir``), ``init_loggers`` attaches a
+# :class:`~agilerl.logger.MutationHistoryLogger` to every training run. This avoids
+# threading an extra argument through each algorithm-specific training function.
+_MUTATION_HISTORY_DIR: str | None = None
+
+
+def set_mutation_history_dir(out_dir: str | Path | None) -> None:
+    """Enable (or disable) per-generation mutation-history logging for the next run.
+
+    Set to a directory before calling a trainer's ``train()`` to have a
+    ``mutation_history.csv`` written there; set back to ``None`` afterwards.
+
+    :param out_dir: Directory to write ``mutation_history.csv`` into, or ``None``
+        to disable mutation-history logging.
+    :type out_dir: str | pathlib.Path | None
+    """
+    global _MUTATION_HISTORY_DIR
+    _MUTATION_HISTORY_DIR = str(out_dir) if out_dir is not None else None
+
+
 def init_loggers(
     *,
     algo: str,
@@ -1363,6 +1390,13 @@ def init_loggers(
         )
     if csv:
         loggers.append(CSVLogger(csv_log_dir))
+
+    # Optionally record a per-generation evolutionary mutation history. The output
+    # directory is set process-locally by the caller via ``set_mutation_history_dir``
+    # (used by the thesis benchmarking harness) so no extra plumbing is needed
+    # through the algorithm-specific training functions.
+    if _MUTATION_HISTORY_DIR is not None:
+        loggers.append(MutationHistoryLogger(_MUTATION_HISTORY_DIR))
 
     return loggers
 

@@ -64,6 +64,7 @@ mutation:
             shrink_factor: 0.995
     mutation_sd: 0.1
     rand_seed: 42
+    mutate_elite: false  # keep the elite member unmutated so the best agent survives intact into the next generation
 
 network:
     latent_dim: 64

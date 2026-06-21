@@ -86,8 +86,8 @@ network:
     # The min/max bounds bracket the fixed sizes only to satisfy manifest
     # validation; with no `mutation` block nothing is ever mutated.
     latent_dim: 512
-    min_latent_dim: 256
-    max_latent_dim: 1024
+    min_latent_dim: 512
+    max_latent_dim: 513
     arch: cnn
     encoder_config:
         channel_size:
@@ -106,7 +106,7 @@ network:
         layer_norm: false
         init_layers: true
         min_channel_size: 32
-        max_channel_size: 256
+        max_channel_size: 64
     head_config:
         hidden_size:
             - 512
@@ -115,9 +115,9 @@ network:
         layer_norm: false
         init_layers: true
         min_hidden_layers: 1
-        max_hidden_layers: 3
-        min_mlp_nodes: 128
-        max_mlp_nodes: 1024
+        max_hidden_layers: 2
+        min_mlp_nodes: 512
+        max_mlp_nodes: 513
 
 replay_buffer:
     # 300,000 (not the paper's 1,000,000): AgileRL keeps the buffer on the

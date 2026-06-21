@@ -58,6 +58,8 @@ class MutationSpec(BaseModel):
     :type mutation_sd: float
     :param rand_seed: Random seed for repeatability.
     :type rand_seed: int
+    :param mutate_elite: Whether the elite member of the population is itself mutated.
+    :type mutate_elite: bool
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -66,6 +68,7 @@ class MutationSpec(BaseModel):
     rl_hp_selection: dict[str, RLHyperparameter] = Field(default_factory=dict)
     mutation_sd: float = Field(default=0.1, ge=0.0)
     rand_seed: int = Field(default=42, ge=0)
+    mutate_elite: bool = False
 
 
 class TournamentSelectionSpec(BaseModel):

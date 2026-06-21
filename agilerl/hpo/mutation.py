@@ -368,6 +368,7 @@ class Mutations:
         :type individual:
         """
         individual.mut = "None"  # No mutation
+        individual.mut_details = {"category": "no mutation", "name": "none"}
         return individual
 
     @reinit_shared_networks
@@ -426,12 +427,16 @@ class Mutations:
         hp_config = individual.registry.hp_config
         if not hp_config:
             individual.mut = "None"
+            individual.mut_details = {"category": "no mutation", "name": "none"}
             return individual
 
         mutate_attr, mutate_param = hp_config.sample()
 
         if mutate_param.value is None:
             mutate_param.value = getattr(individual, mutate_attr)
+
+        # Capture the hyperparameter value before mutating it
+        hp_before = getattr(individual, mutate_attr)
 
         # Randomly grow or shrink hyperparameters by specified factors
         new_value = mutate_param.mutate()
@@ -450,6 +455,12 @@ class Mutations:
             individual.reinit_optimizers(optimizer=to_reinit)
 
         individual.mut = mutate_attr
+        individual.mut_details = {
+            "category": "hyperparameter",
+            "name": mutate_attr,
+            "hp_before": hp_before,
+            "hp_after": new_value,
+        }
         return individual
 
     # TODO: Activation mutations should really be integrated as architecture mutations
@@ -476,11 +487,14 @@ class Mutations:
                 stacklevel=2,
             )
             individual.mut = "None"
+            individual.mut_details = {"category": "no mutation", "name": "none"}
             return individual
 
         # Mutate network activation layer
         registry = individual.registry
         no_activation = False
+        act_before = None
+        act_after = None
         for network_group in registry.groups:
             eval_module: EvolvableNetworkType = getattr(
                 individual,
@@ -490,7 +504,11 @@ class Mutations:
             if eval_module.activation is None:
                 no_activation = True
             else:
+                if act_before is None:
+                    act_before = eval_module.activation
                 eval_module = self._permutate_activation(eval_module)
+                if act_after is None:
+                    act_after = eval_module.activation
 
             if no_activation:
                 warnings.warn(
@@ -510,6 +528,15 @@ class Mutations:
 
         individual.reinit_optimizers()  # Reinitialize optimizer
         individual.mut = "act" if not no_activation else "None"
+        if no_activation:
+            individual.mut_details = {"category": "no mutation", "name": "none"}
+        else:
+            individual.mut_details = {
+                "category": "activation",
+                "name": "activation",
+                "act_before": act_before,
+                "act_after": act_after,
+            }
         return individual
 
     def parameter_mutation(self, individual: IndividualType) -> IndividualType:
@@ -531,6 +558,7 @@ class Mutations:
                 stacklevel=2,
             )
             individual.mut = "None"
+            individual.mut_details = {"category": "no mutation", "name": "none"}
             return individual
 
         registry = individual.registry
@@ -542,11 +570,17 @@ class Mutations:
             individual,
             policy_group.eval_network,
         )
+        # Accumulate per-category weight counts across all mutated networks
+        counts = {"reset": 0, "ordinary": 0, "amplified": 0}
         if isinstance(offspring_policy, ModuleDict):
             for agent_id, module in offspring_policy.items():
-                offspring_policy[agent_id] = self._gaussian_parameter_mutation(module)
+                offspring_policy[agent_id] = self._gaussian_parameter_mutation(
+                    module, counts=counts
+                )
         else:
-            offspring_policy = self._gaussian_parameter_mutation(offspring_policy)
+            offspring_policy = self._gaussian_parameter_mutation(
+                offspring_policy, counts=counts
+            )
 
         self._to_device_and_set_individual(
             individual,
@@ -566,6 +600,13 @@ class Mutations:
 
         individual.reinit_optimizers()  # Reinitialize optimizer
         individual.mut = "param"
+        individual.mut_details = {
+            "category": "parameter",
+            "name": "param",
+            "weights_reset": counts["reset"],
+            "weights_ordinary_noise": counts["ordinary"],
+            "weights_amplified_noise": counts["amplified"],
+        }
 
         return individual
 
@@ -730,11 +771,18 @@ class Mutations:
 
         return network
 
-    def _gaussian_parameter_mutation(self, network: EvolvableModule) -> EvolvableModule:
+    def _gaussian_parameter_mutation(
+        self,
+        network: EvolvableModule,
+        counts: dict[str, int] | None = None,
+    ) -> EvolvableModule:
         """Return network with mutated weights using a Gaussian distribution.
 
         :param network: Neural network to mutate.
         :type network: EvolvableModule
+        :param counts: Optional dict accumulating the number of weights mutated by
+            category (``"reset"``, ``"ordinary"``, ``"amplified"``). Updated in place.
+        :type counts: dict[str, int] | None
         :return: Mutated network.
         :rtype: EvolvableModule
         """
@@ -797,6 +845,8 @@ class Mutations:
                     std=std_super,
                 )
                 new_vals[mask_super] = current_vals[mask_super] + noise_super
+                if counts is not None:
+                    counts["amplified"] += int(mask_super.sum().item())
 
             # Reset mutation: completely reset the weight using N(0, 1)
             if mask_reset.sum() > 0:
@@ -805,6 +855,8 @@ class Mutations:
                     std=torch.ones(mask_reset.sum(), device=W.device),
                 )
                 new_vals[mask_reset] = noise_reset
+                if counts is not None:
+                    counts["reset"] += int(mask_reset.sum().item())
 
             # Normal mutation: add noise with std proportional to the absolute current value times mut_strength
             if mask_normal.sum() > 0:
@@ -814,6 +866,8 @@ class Mutations:
                     std=std_normal,
                 )
                 new_vals[mask_normal] = current_vals[mask_normal] + noise_normal
+                if counts is not None:
+                    counts["ordinary"] += int(mask_normal.sum().item())
 
             # Integrate regularization by clamping all mutated values at once.
             # This is equivalent to your regularize_weight function.
@@ -854,6 +908,7 @@ class Mutations:
                 stacklevel=2,
             )
             individual.mut = "None"
+            individual.mut_details = {"category": "no mutation", "name": "none"}
             return individual
 
         # Sample mutation method from policy network
@@ -862,10 +917,12 @@ class Mutations:
             self.rng,
         )
 
+        sizes_before = self._arch_signature(policy_offspring)
         applied_mutation, mut_dict = self._apply_arch_mutation(
             policy_offspring,
             mut_method,
         )
+        sizes_after = self._arch_signature(policy_offspring)
         self._to_device_and_set_individual(individual, policy_name, policy_offspring)
 
         if isinstance(individual, (NeuralTS, NeuralUCB)):
@@ -881,6 +938,9 @@ class Mutations:
         individual.mutation_hook()  # Apply mutation hook
         individual.reinit_optimizers()  # Reinitialize optimizer
         individual.mut = applied_mutation or "None"
+        individual.mut_details = self._build_arch_details(
+            applied_mutation, mut_dict, sizes_before, sizes_after
+        )
 
         return individual
 
@@ -920,6 +980,7 @@ class Mutations:
                 stacklevel=2,
             )
             individual.mut = "None"
+            individual.mut_details = {"category": "no mutation", "name": "none"}
             return individual
 
         # Sample mutation method from policy network
@@ -929,10 +990,12 @@ class Mutations:
         )
 
         # Apply the sampled method to the policy network (will only apply to one sub-agent)
+        sizes_before = self._arch_signature(policy_offspring)
         applied_mutation, mut_dict = self._apply_arch_mutation(
             policy_offspring,
             mut_method,
         )
+        sizes_after = self._arch_signature(policy_offspring)
 
         applied_mutations = []
         if applied_mutation is not None:
@@ -1007,8 +1070,112 @@ class Mutations:
         individual.mutation_hook()  # Apply mutation hook
         individual.reinit_optimizers()  # Reinitialize optimizer
         individual.mut = sampled_mutation or "None"
+        individual.mut_details = self._build_arch_details(
+            sampled_mutation, mut_dict, sizes_before, sizes_after
+        )
 
         return individual
+
+    @staticmethod
+    def _arch_signature(network: EvolvableModule) -> list[int]:
+        """Return a per-layer width signature of a network's weight tensors.
+
+        The signature is the output dimension (``shape[0]``) of every weight
+        tensor with two or more dimensions (linear weights ``[out, in]`` and
+        conv weights ``[out_ch, in_ch, ...]``). Diffing the signature before and
+        after a mutation reveals which layer changed width or whether a layer was
+        added/removed, generically across MLP and CNN policies (and ``ModuleDict``
+        multi-agent policies, whose ``state_dict`` flattens all sub-agents).
+
+        :param network: The network to summarize.
+        :type network: EvolvableModule
+        :return: List of per-layer output widths.
+        :rtype: list[int]
+        """
+        try:
+            return [
+                int(tensor.shape[0])
+                for tensor in network.state_dict().values()
+                if hasattr(tensor, "shape") and len(tensor.shape) >= 2
+            ]
+        except (AttributeError, RuntimeError):
+            return []
+
+    @staticmethod
+    def _build_arch_details(
+        applied_mutation: str | None,
+        mut_dict: dict[str, Any] | None,
+        sizes_before: list[int],
+        sizes_after: list[int],
+    ) -> dict[str, Any]:
+        """Build the ``mut_details`` dict for an architecture mutation.
+
+        Node mutations (``add_node``/``remove_node``/``add_channel``/``remove_channel``)
+        carry the changed layer and the number of neurons/channels in ``mut_dict``.
+        Layer mutations (``add_layer``/``remove_layer``) are derived from the
+        before/after width signatures.
+
+        :param applied_mutation: The mutation method name (may include an
+            ``<agent_id>.`` prefix for multi-agent algorithms).
+        :type applied_mutation: str | None
+        :param mut_dict: The dict returned by the mutation method.
+        :type mut_dict: dict[str, Any] | None
+        :param sizes_before: Width signature before the mutation.
+        :type sizes_before: list[int]
+        :param sizes_after: Width signature after the mutation.
+        :type sizes_after: list[int]
+        :return: The architecture mutation details.
+        :rtype: dict[str, Any]
+        """
+        if applied_mutation is None:
+            return {"category": "no mutation", "name": "none"}
+
+        mut_dict = mut_dict or {}
+        # Strip any "<agent_id>." prefix used by multi-agent mutation names
+        base_name = applied_mutation.split(".")[-1]
+        details: dict[str, Any] = {
+            "category": "architecture",
+            "name": applied_mutation,
+            "layer_changed": "",
+            "neurons_delta": "",
+            "new_layer_position": "",
+            "new_layer_size": "",
+        }
+
+        node_neurons = mut_dict.get("numb_new_nodes", mut_dict.get("numb_new_channels"))
+        if "node" in base_name or "channel" in base_name:
+            details["layer_changed"] = mut_dict.get("hidden_layer", "")
+            if node_neurons is not None:
+                sign = -1 if base_name.startswith("remove") else 1
+                details["neurons_delta"] = sign * int(node_neurons)
+        elif "layer" in base_name:
+            if base_name.startswith("add") and len(sizes_after) > len(sizes_before):
+                pos = next(
+                    (
+                        i
+                        for i in range(len(sizes_before))
+                        if sizes_before[i] != sizes_after[i]
+                    ),
+                    len(sizes_before),
+                )
+                details["new_layer_position"] = pos
+                details["new_layer_size"] = sizes_after[pos]
+                details["neurons_delta"] = sizes_after[pos]
+            elif base_name.startswith("remove") and len(sizes_after) < len(
+                sizes_before
+            ):
+                pos = next(
+                    (
+                        i
+                        for i in range(len(sizes_after))
+                        if sizes_before[i] != sizes_after[i]
+                    ),
+                    len(sizes_after),
+                )
+                details["new_layer_position"] = pos
+                details["neurons_delta"] = -sizes_before[pos]
+
+        return details
 
     def _apply_arch_mutation(
         self,

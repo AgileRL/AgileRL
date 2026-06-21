@@ -62,6 +62,7 @@ from agilerl.algorithms import DQN, IPPO, PPO  # noqa: E402
 from agilerl.models.env import GymEnvSpec  # noqa: E402
 from agilerl.models.manifest import TrainingManifest  # noqa: E402
 from agilerl.training.trainer import LocalTrainer  # noqa: E402
+from agilerl.utils.utils import set_mutation_history_dir  # noqa: E402
 from agilerl.wrappers.agent import RSNorm  # noqa: E402
 
 logger = logging.getLogger("hpo_benchmark")
@@ -1266,10 +1267,25 @@ def run_training(
             env_cfg["path"] = str(SCRIPT_DIR)
 
     # Fresh, reproducible agent. On the single-agent path EnvPool is seeded at
-    # creation (do not call env.reset(seed=...) afterwards); on the multi-agent path
-    # the loop seeds the env at its first reset.
+    # creation (do not call env.reset(seed=...) afterwards).
     seed_everything(seed)
     trainer = _build_trainer(manifest, env_name, algo, seed, device)
+
+    # Multi-agent (PettingZoo) env seeding for reproducibility. Unlike EnvPool
+    # (seeded at creation), AgileRL's multi-agent on-policy loop calls env.reset()
+    # WITHOUT a seed (agilerl/training/train_multi_agent_on_policy.py), so the
+    # PettingZoo vector env would draw fresh OS entropy each run and the collected
+    # rollouts -- hence the fitness curve itself -- would not be reproducible. We
+    # therefore seed the shared vec env exactly ONCE here, before training. After
+    # this single seeded reset the env's RNG advances deterministically, so the
+    # loop's later unseeded resets stay reproducible across runs yet still vary per
+    # episode (re-seeding on every reset would instead restart every episode from
+    # the same layout and harm training -- see reproducibility.seed_everything's
+    # note). The seed is scaled by num_envs so consecutive run seeds map to disjoint
+    # sub-env seed ranges, mirroring the EnvPool path's rationale.
+    if multi_agent:
+        num_envs = int(manifest.get("environment", {}).get("num_envs", 1) or 1)
+        trainer.env.reset(seed=seed * num_envs)
 
     # Observation normalization (PPO only). "ReLU to the Rescue" (Jesson et al.,
     # 2024) normalizes observations to zero mean / unit variance -- in AgileRL
@@ -1314,16 +1330,22 @@ def run_training(
     os.environ["WANDB_MODE"] = "offline"
 
     logger.info("=== Training %s on %s (run '%s') ===", algo, env_name, run_name)
-    with tee_to_file(log_path):
-        population, _ = trainer.train(
-            wb=True,
-            wandb_api_key=wandb_api_key,
-            wandb_kwargs={
-                "project": project,
-                "addl_args": {"name": run_name, "dir": str(out_dir)},
-            },
-            verbose=True,
-        )
+    # Record a per-generation evolutionary mutation history alongside the other
+    # run artifacts. Set process-locally so it covers every algorithm/trainer.
+    set_mutation_history_dir(out_dir)
+    try:
+        with tee_to_file(log_path):
+            population, _ = trainer.train(
+                wb=True,
+                wandb_api_key=wandb_api_key,
+                wandb_kwargs={
+                    "project": project,
+                    "addl_args": {"name": run_name, "dir": str(out_dir)},
+                },
+                verbose=True,
+            )
+    finally:
+        set_mutation_history_dir(None)
 
     # Save the best agent of the final population (works with or without HPO).
     def _last_fitness(agent: Any) -> float:

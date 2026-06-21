@@ -42,7 +42,7 @@ algorithm:
     gae_lambda: 0.95
     action_std_init: 0.0
     clip_coef: 0.2
-    ent_coef: 0.0
+    ent_coef: 0.001
     vf_coef: 0.5
     max_grad_norm: 0.5
     target_kl:

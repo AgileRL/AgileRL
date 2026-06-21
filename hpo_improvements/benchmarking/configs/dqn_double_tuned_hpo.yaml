@@ -92,6 +92,7 @@ mutation:
         # tuned 1/30000 base value; learn_step carries the related search.
     mutation_sd: 0.1  # std of the Gaussian weight perturbation for params_mut (typical)
     rand_seed: 42
+    mutate_elite: false  # keep the elite member unmutated so the best agent survives intact into the next generation
 
 network:
     # Nature DQN convolutional architecture (see dqn_double_tuned_no_hpo.yaml).
@@ -146,7 +147,7 @@ replay_buffer:
 
 tournament_selection:
     tournament_size: 2
-    elitism: true  # the single best agent is cloned into the next generation each step (still subject to mutation, since mutate_elite defaults to true)
+    elitism: true  # the single best agent is cloned into the next generation each step (preserved unmutated, since mutate_elite is false above)
 
 training:
     max_steps: 6_250_000

@@ -14,7 +14,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -182,6 +182,176 @@ class CSVLogger(Logger):
         # Write data to file
         self._writer.writerow(data)
         self._file.flush()
+
+    def close(self) -> None:
+        """Close the CSV file."""
+        if self._file is not None:
+            self._file.close()
+            self._file = None
+            self._writer = None
+
+
+class MutationHistoryLogger(Logger):
+    """Writes a per-generation, per-agent record of evolutionary mutations to CSV.
+
+    One row is emitted per agent per generation, describing the mutation that
+    produced the agent (applied at the previous tournament/mutation boundary and
+    carried through training), together with its fitness/score *after* that
+    mutation (this generation's evaluation) and *before* it (the parent's value
+    from the previous generation, linked via the parent's index). Rows are written
+    incrementally so the file is complete even if the run is interrupted.
+
+    The "before" values for the final boundary mutation (agents created after the
+    last :meth:`write` and never re-evaluated) are never measured, so that final
+    mutation is intentionally absent from the file.
+
+    :param out_dir: Directory to write ``mutation_history.csv`` into.
+    :type out_dir: str | Path
+    """
+
+    FIELDNAMES: ClassVar[list[str]] = [
+        "generation",
+        "global_step",
+        "agent_slot",
+        "agent_id",
+        "parent_id",
+        "mutation_category",
+        "mutation_name",
+        "hp_before",
+        "hp_after",
+        "arch_layer_changed",
+        "arch_neurons_delta",
+        "arch_new_layer_position",
+        "arch_new_layer_size",
+        "param_weights_reset",
+        "param_weights_ordinary_noise",
+        "param_weights_amplified_noise",
+        "fitness_before",
+        "score_before",
+        "fitness_after",
+        "score_after",
+    ]
+
+    def __init__(self, out_dir: str | Path) -> None:
+        self._path = Path(out_dir) / "mutation_history.csv"
+        self._file: io.TextIOWrapper | None = None
+        self._writer: csv.DictWriter | None = None
+        self._generation = 0
+        # Maps agent_id -> (fitness, score) from the previous generation.
+        self._prev: dict[int, tuple[float, float]] = {}
+
+    @staticmethod
+    def _scalarize(value: object) -> float:
+        """Reduce a possibly dict/sequence-valued metric to a scalar mean."""
+        if value is None:
+            return float("nan")
+        if isinstance(value, dict):
+            vals = list(value.values())
+            return float(sum(vals) / len(vals)) if vals else float("nan")
+        if isinstance(value, (list, tuple)):
+            return float(sum(value) / len(value)) if value else float("nan")
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float("nan")
+
+    def write(self, report: MetricsReport) -> None:
+        """Append this generation's per-agent mutation rows to the CSV file.
+
+        :param report: The metrics report to log.
+        :type report: MetricsReport
+        """
+        metrics = report.metrics
+        indices = metrics.indices
+        pop_size = len(indices)
+
+        mutations = metrics.mutations or [None] * pop_size
+        mut_details = metrics.mut_details or [None] * pop_size
+        parent_indices = metrics.parent_indices or list(indices)
+        fitnesses = metrics.fitnesses or [float("nan")] * pop_size
+        scores = metrics.scores or [float("nan")] * pop_size
+
+        if self._writer is None:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            self._file = self._path.open("w", newline="")
+            self._writer = csv.DictWriter(self._file, fieldnames=self.FIELDNAMES)
+            self._writer.writeheader()
+
+        current: dict[int, tuple[float, float]] = {}
+        for slot in range(pop_size):
+            agent_id = indices[slot]
+            parent_id = parent_indices[slot]
+            fitness_after = self._scalarize(fitnesses[slot])
+            score_after = self._scalarize(scores[slot])
+            current[agent_id] = (fitness_after, score_after)
+
+            fitness_before, score_before = self._prev.get(
+                parent_id, (float("nan"), float("nan"))
+            )
+
+            row = self._build_row(
+                agent_slot=slot,
+                agent_id=agent_id,
+                parent_id=parent_id,
+                global_step=metrics.global_step,
+                mut=mutations[slot],
+                details=mut_details[slot],
+                fitness_before=fitness_before,
+                score_before=score_before,
+                fitness_after=fitness_after,
+                score_after=score_after,
+            )
+            self._writer.writerow(row)
+
+        self._file.flush()
+        self._prev = current
+        self._generation += 1
+
+    def _build_row(
+        self,
+        *,
+        agent_slot: int,
+        agent_id: int,
+        parent_id: int,
+        global_step: int,
+        mut: object,
+        details: dict | None,
+        fitness_before: float,
+        score_before: float,
+        fitness_after: float,
+        score_after: float,
+    ) -> dict:
+        """Assemble a single CSV row from a snapshot entry."""
+        details = details or {}
+        category = details.get("category")
+        name = details.get("name")
+        if category is None:
+            # No detail recorded (e.g. no-HPO runs): infer from the ``mut`` flag.
+            category = "no mutation" if mut in (None, "None") else "other"
+            name = "none" if mut in (None, "None") else str(mut)
+
+        return {
+            "generation": self._generation,
+            "global_step": global_step,
+            "agent_slot": agent_slot,
+            "agent_id": agent_id,
+            "parent_id": parent_id,
+            "mutation_category": category,
+            "mutation_name": name,
+            "hp_before": details.get("hp_before", ""),
+            "hp_after": details.get("hp_after", ""),
+            "arch_layer_changed": details.get("layer_changed", ""),
+            "arch_neurons_delta": details.get("neurons_delta", ""),
+            "arch_new_layer_position": details.get("new_layer_position", ""),
+            "arch_new_layer_size": details.get("new_layer_size", ""),
+            "param_weights_reset": details.get("weights_reset", ""),
+            "param_weights_ordinary_noise": details.get("weights_ordinary_noise", ""),
+            "param_weights_amplified_noise": details.get("weights_amplified_noise", ""),
+            "fitness_before": fitness_before,
+            "score_before": score_before,
+            "fitness_after": fitness_after,
+            "score_after": score_after,
+        }
 
     def close(self) -> None:
         """Close the CSV file."""

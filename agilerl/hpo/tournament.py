@@ -115,7 +115,10 @@ class TournamentSelection:
         elite, rank, max_id = self._elitism(population)
         new_population = []
         if self.elitism:  # keep top agent in population
-            new_population.append(elite.clone(wrap=False))
+            elite_clone = elite.clone(wrap=False)
+            # The elite is carried over unchanged: its parent is itself.
+            elite_clone._parent_index = elite.index
+            new_population.append(elite_clone)
             selection_size = self.population_size - 1
         else:
             selection_size = self.population_size
@@ -125,6 +128,7 @@ class TournamentSelection:
             max_id += 1
             actor_parent = population[self._tournament(rank)]
             new_individual = actor_parent.clone(max_id, wrap=False)
+            new_individual._parent_index = actor_parent.index
             new_population.append(new_individual)
 
         return elite, new_population
