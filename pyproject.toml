@@ -180,7 +180,8 @@ override-dependencies = [
 packages = ["agilerl"]
 
 [tool.hatch.build.targets.sdist]
-exclude = ["tutorials"]
+include = ["agilerl", "README.md", "LICENSE", "pyproject.toml"]
+exclude = ["agilerl-arena"]
 
 [tool.ruff]
 target-version = "py310"

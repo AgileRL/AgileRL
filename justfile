@@ -7,26 +7,25 @@ default:
 # Build / publish
 # ---------------------------------------------------------------------------
 
+# In a uv workspace, every `uv build` writes to the workspace-root dist/,
+# so both packages' artifacts share this one directory and are selected by
+# name below (agilerl_arena-* vs agilerl-[0-9]*).
 clean-dist:
-    rm -rf dist agilerl-arena/dist
+    rm -rf dist
 
-build-arena: clean-dist
-    uv build --directory agilerl-arena
-
-build-core:
-    uv build --directory .
-
-build: build-arena build-core
+build: clean-dist
+    uv build --package agilerl-arena
+    uv build --package agilerl
 
 check-dist: build
-    uv publish --dry-run --check-url https://pypi.org/simple agilerl-arena/dist/* dist/*
+    uv publish --dry-run --check-url https://pypi.org/simple dist/*
 
 # Publish order matters: agilerl-arena first, then agilerl.
 publish-arena: check-dist
-    uv publish agilerl-arena/dist/*
+    uv publish dist/agilerl_arena-*
 
-publish-core:
-    uv publish dist/*
+publish-core: check-dist
+    uv publish dist/agilerl-[0-9]*
 
 publish: publish-arena publish-core
 
