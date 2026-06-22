@@ -45,47 +45,43 @@ Training and Usage
 ------------------
 
 Use ``CISPO`` anywhere you would use ``GRPO`` in AgileRL training loops, such
-as ``finetune_llm_reasoning`` or ``finetune_llm_multiturn``.
+as ``finetune_llm_multiturn``. Single-turn reasoning is the ``max_turns=1`` case
+of the same function.
 
 .. code-block:: python
 
-  from datasets import Dataset
-  from agilerl.llm_envs import ReasoningGym, TokenObservationWrapper
-  from agilerl.training.train_llm import (
-      finetune_llm_multiturn,
-      finetune_llm_reasoning,
-  )
-
-  # 1) Single-turn / reasoning datasets (ReasoningGym)
-  train_ds = Dataset.from_dict(
-      {
-          "question": ["2+2?", "Capital of France?"],
-          "answer": ["4", "Paris"],
-      }
-  )
-  test_ds = Dataset.from_dict(
-      {
-          "question": ["3+3?"],
-          "answer": ["6"],
-      }
-  )
+  from agilerl.llm_envs import RolloutEnv, TokenObservationWrapper
+  from agilerl.training.train_llm import finetune_llm_multiturn
 
   def reward_fn(completion: str, answer: str, question: str) -> float:
       del question
       return float(answer.lower() in completion.lower())
 
-  reasoning_env = ReasoningGym(
-      train_dataset=train_ds,
-      test_dataset=test_ds,
-      tokenizer=tokenizer,
-      reward_fn=reward_fn,
-      conversation_template=[{"role": "user", "content": "Q: {question}\nA:"}],
-      data_batch_size_per_gpu=2,
-  )
+  # 1) Single-turn / reasoning datasets (RolloutEnv with max_turns=1)
+  def env_factory(evaluation_mode: bool = False):
+      raw_env = RolloutEnv(
+          max_turns=1,
+          questions=["2+2?", "Capital of France?"],
+          answers=["4", "Paris"],
+          reward_fn=reward_fn,
+          prompt_builder=lambda question: f"Q: {question}\nA:",
+          test_questions=["3+3?"],
+          test_answers=["6"],
+      )
+      raw_env.evaluation_mode = evaluation_mode
+      return TokenObservationWrapper(
+          raw_env,
+          tokenizer=tokenizer,
+          max_turns=1,
+          pad_id=tokenizer.eos_token_id,
+          apply_chat_template=True,
+          max_model_len=1024,
+      )
 
-  trained_pop = finetune_llm_reasoning(
+  trained_pop = finetune_llm_multiturn(
       pop=[agent],
-      env=reasoning_env,
+      max_turns=1,
+      env_factory=env_factory,
       max_steps=2000,
       evaluation_interval=50,
   )

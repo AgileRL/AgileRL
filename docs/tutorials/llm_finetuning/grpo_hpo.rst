@@ -34,8 +34,13 @@ Dependencies
     from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
-    from agilerl.training.train_llm import finetune_llm_reasoning
-    from agilerl.llm_envs import ReasoningGym
+    from agilerl.training.train_llm import finetune_llm_multiturn
+    from agilerl.llm_envs import (
+        RolloutEnv,
+        TokenObservationWrapper,
+        _default_prompt_builder,
+        _extract_question_answer_columns,
+    )
     from agilerl.utils.utils import create_population
 
 Defining Hyperparameters
@@ -121,8 +126,9 @@ become very good at taking actions to solve tasks - to develop *agency*. Since w
 with reinforcement learning, it becomes an agent through this process.
 
 We must create a reinforcement learning environment in which our agent can explore possible
-solutions and learn to optimise rewards. AgileRL provides a :class:`ReasoningGym <agilerl.llm_envs.ReasoningGym>`
-class that wraps a Hugging Face dataset and converts it into a reinforcement learning, gymnasium-style environment.
+solutions and learn to optimise rewards. AgileRL provides a :class:`RolloutEnv <agilerl.llm_envs.RolloutEnv>`
+class that turns lists of questions and answers into a reinforcement learning, gymnasium-style environment.
+Reasoning is the single-turn case, so we build the environment with ``max_turns=1``.
 
 So, how does the environment know how to reward an agent for its outputs? Well, we must define a *reward_function*
 that the agent learns to optimise. Following the techniques used in the DeepSeek reasoning `paper <https://arxiv.org/pdf/2501.12948>`_,
@@ -205,13 +211,15 @@ Now we have defined our reward functions, we must also design our prompt. This f
 to the agent and provides the context necessary to complete the task. This is a task-specific feature,
 and different reasoning problems will require different conversation templates, although they can follow a similar
 format. We define the conversation template as follows (using ``question`` and ``answer`` as placeholders for the question and answer data)
-and then instantiate the ``ReasoningGym`` object which converts a Hugging Face dataset into a Gymnasium-style environment.
+and then build a single-turn :class:`RolloutEnv <agilerl.llm_envs.RolloutEnv>` from the question and answer
+columns of our dataset, wrapping it in a :class:`TokenObservationWrapper <agilerl.llm_envs.TokenObservationWrapper>`
+inside an ``env_factory``.
 
-.. collapse:: Convert HuggingFace Dataset to Gymnasium Environment
+.. collapse:: Build the Single-Turn Rollout Environment
 
     .. code-block:: python
 
-        conversation = [
+        conversation_template = [
             {
                 "role": "system",
                 "content": "You are a helpful assistant. You first think about the reasoning process in your mind and then provide the user with the answer.",
@@ -226,17 +234,28 @@ and then instantiate the ``ReasoningGym`` object which converts a Hugging Face d
         # Define accelerators for distributed training
         accelerator = Accelerator()
 
-        # Convert the HuggingFace dataset into a Gymnasium environment
-        env = ReasoningGym(
-            train_dataset=train_dataset,
-            test_dataset=test_dataset,
-            tokenizer=tokenizer,
-            reward_fn=combined_rewards,
-            conversation_template=conversation_template,
-            data_batch_size_per_gpu=10,
-            accelerator=accelerator,
-            return_raw_completions=True, # This is necessary for vLLM to work
-        )
+        # Build a single-turn rollout environment from the dataset
+        def env_factory(evaluation_mode: bool = False):
+            train_questions, train_answers = _extract_question_answer_columns(train_dataset)
+            test_questions, test_answers = _extract_question_answer_columns(test_dataset)
+            raw_env = RolloutEnv(
+                max_turns=1,
+                questions=train_questions,
+                answers=train_answers,
+                reward_fn=combined_rewards,
+                prompt_builder=_default_prompt_builder(conversation_template),
+                test_questions=test_questions,
+                test_answers=test_answers,
+            )
+            raw_env.evaluation_mode = evaluation_mode
+            return TokenObservationWrapper(
+                raw_env,
+                tokenizer=tokenizer,
+                max_turns=1,
+                pad_id=tokenizer.pad_token_id,
+                apply_chat_template=True,
+                max_model_len=1024,
+            )
 
 
 Create a population of GRPO Agents
@@ -335,13 +354,15 @@ The ``Mutations()`` class is used to mutate agents with pre-set probabilities. T
 
 Training and Saving an Agent
 ----------------------------
-The simplest way to train an AgileRL agent is to use the :meth:`finetune_llm_reasoning() <agilerl.training.train_llm.finetune_llm_reasoning>` function.
+The simplest way to train an AgileRL agent is to use the :meth:`finetune_llm_multiturn() <agilerl.training.train_llm.finetune_llm_multiturn>` function
+with ``max_turns=1`` for single-turn reasoning.
 
 .. code-block:: python
 
-    finetune_llm_reasoning(
+    finetune_llm_multiturn(
         pop=pop,
-        env=env,
+        max_turns=1,
+        env_factory=env_factory,
         init_hp=init_hp,
         evaluation_interval=10,
         wb=True,
@@ -409,7 +430,7 @@ Example config file:
 Using a Custom Training Loop
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 If we wanted to have more control over the training process, it is also possible to write our own custom
-training loops to train our agents. The training loop below can be used alternatively to the above ``finetune_llm_reasoning``
+training loops to train our agents. The training loop below can be used alternatively to the above ``finetune_llm_multiturn``
 function and is an example of how we might choose to make use of a population of AgileRL agents in our own training loop.
 
 .. collapse:: Custom Training Loop
@@ -423,6 +444,7 @@ function and is an example of how we might choose to make use of a population of
         import torch
         from accelerate import Accelerator
 
+        env = env_factory()
         accelerator = Accelerator()
         if accelerator is None or accelerator.is_main_process:
             print("\nTraining...")
