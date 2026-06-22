@@ -1701,3 +1701,17 @@ class TestAggregateMetricsNoAccelerator:
             torch.tensor([1.0, 3.0], device=accelerator.device),
         )
         assert result == pytest.approx(2.0)
+
+
+class TestDistributedWorldSize:
+    def test_returns_one_without_accelerator(self):
+        from agilerl.utils.utils import _distributed_world_size
+
+        assert _distributed_world_size(None) == 1
+
+    def test_uses_accelerator_num_processes(self):
+        from agilerl.utils.utils import _distributed_world_size
+
+        accelerator = MagicMock()
+        accelerator.num_processes = 4
+        assert _distributed_world_size(accelerator) == 4

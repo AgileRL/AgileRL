@@ -18,6 +18,7 @@ from agilerl.arena.on_prem.installer import (
     normalize_setup_type,
     report_stack_readiness,
     resolve_stack_name,
+    run_on_prem_down,
     run_on_prem_install,
     run_on_prem_teardown,
     stack_readiness_state,
@@ -621,3 +622,231 @@ class TestRunOnPremTeardown:
             if c.args[0]["path"].endswith("/classes/delete")
         ]
         assert delete_calls == []
+
+
+# --------------------------------------------------------------------------- #
+# Additional coverage: parsing edge cases, down flows, and the down facade.    #
+# --------------------------------------------------------------------------- #
+
+
+class TestStackReadinessStateEdges:
+    def test_empty_output_is_not_ready(self) -> None:
+        assert stack_readiness_state("") == (False, [], [])
+        assert stack_readiness_state(None) == (False, [], [])
+
+    def test_short_lines_are_skipped(self) -> None:
+        # "garbage" has a single column and is ignored; the valid line parses.
+        ready, not_ready, errors = stack_readiness_state("garbage\nsvc\t1/1")
+        assert ready is True
+        assert not_ready == []
+        assert errors == []
+
+
+class TestWarnIgnoredSwarmFlags:
+    def test_warns_about_ssh_extra_opts_and_advertise_addr(self) -> None:
+        with patch("agilerl.arena.on_prem.installer.logger") as log:
+            warn_ignored_swarm_flags(
+                manager=None,
+                workers=(),
+                ssh_user=None,
+                ssh_extra_opts="-o StrictHostKeyChecking=no",
+                advertise_addr="10.0.0.1",
+            )
+        log.warning.assert_called_once()
+        ignored = log.warning.call_args.args[1]
+        assert "--ssh-extra-opts" in ignored
+        assert "--advertise-addr" in ignored
+
+
+class TestOnPremInstallerDown:
+    def test_down_delegates_to_down_cluster(self, api: OnPremApi) -> None:
+        inst = HelmInstaller(api, name="pool")
+        with (
+            patch.object(inst, "down_cluster") as down_cluster,
+            patch("agilerl.arena.on_prem.installer.logger") as log,
+        ):
+            inst.down()
+        down_cluster.assert_called_once_with()
+        log.info.assert_called()
+
+
+class TestSwarmInstallerExtraPaths:
+    def test_install_cluster_propagates_ssh_env(
+        self, api: OnPremApi, swarm_bundle: Path
+    ) -> None:
+        inst = SwarmInstaller(
+            api,
+            name="pool",
+            manager="m",
+            ssh_user="ubuntu",
+            ssh_extra_opts="-o StrictHostKeyChecking=no",
+        )
+        with patch.object(BundleScriptRunner, "run") as run_mock:
+            inst.install_cluster(swarm_bundle)
+        assert run_mock.call_count >= 1
+
+    def test_verify_raises_on_scheduling_errors(self, api: OnPremApi) -> None:
+        inst = SwarmInstaller(api, name="pool", manager="m", stack_name="arena")
+        with patch.object(
+            SshExecutor,
+            "run",
+            side_effect=["svc\t0/1", "task xyz no suitable node"],
+        ):
+            with pytest.raises(ClickException, match="scheduling errors"):
+                inst.verify(Path("/tmp"))
+
+    def test_verify_times_out_when_never_ready(self, api: OnPremApi) -> None:
+        inst = SwarmInstaller(api, name="pool", manager="m", stack_name="arena")
+        with (
+            patch.object(SshExecutor, "run", side_effect=["svc\t0/1", ""]),
+            patch(
+                "agilerl.arena.on_prem.installer.time.monotonic",
+                side_effect=[0.0, 1e9],
+            ),
+        ):
+            with pytest.raises(ClickException, match="not ready after"):
+                inst.verify(Path("/tmp"))
+
+    def test_verify_waits_then_succeeds(self, api: OnPremApi) -> None:
+        inst = SwarmInstaller(api, name="pool", manager="m", stack_name="arena")
+        with (
+            # iter 1: not ready -> logs + sleeps; iter 2: ready -> returns.
+            patch.object(
+                SshExecutor,
+                "run",
+                side_effect=["svc\t0/1", "", "svc\t1/1", ""],
+            ),
+            patch(
+                "agilerl.arena.on_prem.installer.time.monotonic",
+                side_effect=[0.0, 1.0],
+            ),
+            patch("agilerl.arena.on_prem.installer.time.sleep") as sleep_mock,
+        ):
+            inst.verify(Path("/tmp"))
+        sleep_mock.assert_called_once()
+
+    def test_teardown_warns_when_stack_still_listed_after_wait(
+        self, api: OnPremApi
+    ) -> None:
+        inst = SwarmInstaller(api, name="pool", manager="m", leave_swarm=True)
+        with (
+            patch.object(SshExecutor, "run", return_value="arena") as ssh_mock,
+            patch(
+                "agilerl.arena.on_prem.installer.time.monotonic",
+                side_effect=[0.0, 1e9],
+            ),
+            patch("agilerl.arena.on_prem.installer.logger") as log,
+        ):
+            inst.teardown_cluster()
+        # The while-loop never sees the stack disappear, so the else-branch warns.
+        assert any("still listed" in str(c) for c in log.warning.call_args_list)
+        assert any("swarm leave" in c.args[1] for c in ssh_mock.call_args_list)
+
+
+class TestHelmInstallerExtraPaths:
+    def test_install_cluster_wraps_stage_failure(
+        self, api: OnPremApi, helm_bundle: Path
+    ) -> None:
+        inst = HelmInstaller(api, name="pool")
+        with (
+            patch(
+                "agilerl.arena.on_prem.installer.shutil.which",
+                return_value="/usr/bin/helm",
+            ),
+            patch.object(
+                BundleScriptRunner,
+                "run",
+                side_effect=StageFailed("setup.sh", 1, "boom"),
+            ),
+        ):
+            with pytest.raises(ClickException):
+                inst.install_cluster(helm_bundle)
+
+    def test_verify_wraps_stage_failure(
+        self, api: OnPremApi, helm_bundle: Path
+    ) -> None:
+        (helm_bundle / "validate.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+        inst = HelmInstaller(api, name="pool")
+        with patch.object(
+            BundleScriptRunner,
+            "run",
+            side_effect=StageFailed("validate.sh", 1, "boom"),
+        ):
+            with pytest.raises(ClickException):
+                inst.verify(helm_bundle)
+
+    def test_down_cluster_requires_kubectl(self, api: OnPremApi) -> None:
+        inst = HelmInstaller(api, name="pool")
+        with (
+            patch("agilerl.arena.on_prem.installer.shutil.which", return_value=None),
+            pytest.raises(ClickException, match="kubectl not found"),
+        ):
+            inst.down_cluster()
+
+    def test_down_cluster_scales_release_to_zero(
+        self, api: OnPremApi, helm_bundle: Path
+    ) -> None:
+        inst = HelmInstaller(api, name="pool")
+        completed = MagicMock(returncode=0)
+        with (
+            patch(
+                "agilerl.arena.on_prem.installer.shutil.which",
+                return_value="/usr/bin/kubectl",
+            ),
+            patch.object(inst.api, "fetch_bundle", return_value=b"zip-bytes"),
+            patch(
+                "agilerl.arena.on_prem.installer.extract_bundle",
+                return_value=helm_bundle,
+            ),
+            patch(
+                "agilerl.arena.on_prem.installer.parse_helm_release_ids",
+                return_value=("rel", "ns"),
+            ),
+            patch(
+                "agilerl.arena.on_prem.installer.subprocess.run",
+                return_value=completed,
+            ) as run_mock,
+        ):
+            inst.down_cluster()
+        assert run_mock.call_args.args[0][:3] == ["kubectl", "scale", "deployment"]
+
+    def test_down_cluster_warns_on_nonzero_scale(
+        self, api: OnPremApi, helm_bundle: Path
+    ) -> None:
+        inst = HelmInstaller(api, name="pool")
+        completed = MagicMock(returncode=2)
+        with (
+            patch(
+                "agilerl.arena.on_prem.installer.shutil.which",
+                return_value="/usr/bin/kubectl",
+            ),
+            patch.object(inst.api, "fetch_bundle", return_value=b"zip-bytes"),
+            patch(
+                "agilerl.arena.on_prem.installer.extract_bundle",
+                return_value=helm_bundle,
+            ),
+            patch(
+                "agilerl.arena.on_prem.installer.parse_helm_release_ids",
+                return_value=("rel", "ns"),
+            ),
+            patch(
+                "agilerl.arena.on_prem.installer.subprocess.run",
+                return_value=completed,
+            ),
+            patch("agilerl.arena.on_prem.installer.logger") as log,
+        ):
+            inst.down_cluster()
+        log.warning.assert_called_once()
+
+
+class TestRunOnPremDown:
+    def test_builds_installer_and_calls_down(self) -> None:
+        client = MagicMock(spec=ArenaClient)
+        fake_installer = MagicMock()
+        with patch(
+            "agilerl.arena.on_prem.installer.build_installer",
+            return_value=fake_installer,
+        ) as build:
+            run_on_prem_down(client, name="pool", setup_type="helm")
+        build.assert_called_once()
+        fake_installer.down.assert_called_once_with()

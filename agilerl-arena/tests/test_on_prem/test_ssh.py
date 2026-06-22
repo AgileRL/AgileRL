@@ -36,6 +36,15 @@ class TestSshTarget:
     def test_remote_is_not_local(self) -> None:
         assert SshTarget.parse("some-remote-box.example.com").is_local is False
 
+    def test_is_local_false_when_hostname_lookup_fails(self) -> None:
+        # A non-loopback host whose local hostname lookup raises OSError must
+        # safely resolve to "not local" rather than propagating the error.
+        with patch(
+            "agilerl.arena.on_prem.ssh.socket.gethostname",
+            side_effect=OSError("no host"),
+        ):
+            assert SshTarget.parse("some-remote-box.example.com").is_local is False
+
     def test_connection_target_uses_host_alias_without_user(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

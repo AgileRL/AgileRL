@@ -1,5 +1,6 @@
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 from accelerate import Accelerator
 
@@ -518,3 +519,29 @@ class TestTournamentSelectionElitism:
         assert rank.shape == (4,)
         assert max_id == 3
         assert elite.index == 3
+
+
+class TestScalarFitness:
+    def test_scalar_fitness_dict(self):
+        # Multi-agent per-sub-agent fitness collapses to the mean across values.
+        result = TournamentSelection._scalar_fitness({"agent_0": 2.0, "agent_1": 4.0})
+        assert result == pytest.approx(3.0)
+        assert isinstance(result, float)
+
+    @pytest.mark.parametrize(
+        "fitness,expected",
+        [
+            ([1.0, 2.0, 3.0], 2.0),
+            ((4.0, 6.0), 5.0),
+            (np.array([0.0, 10.0]), 5.0),
+        ],
+    )
+    def test_scalar_fitness_sequence(self, fitness, expected):
+        result = TournamentSelection._scalar_fitness(fitness)
+        assert result == pytest.approx(expected)
+        assert isinstance(result, float)
+
+    def test_scalar_fitness_scalar(self):
+        result = TournamentSelection._scalar_fitness(7.5)
+        assert result == pytest.approx(7.5)
+        assert isinstance(result, float)

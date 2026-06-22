@@ -458,6 +458,41 @@ class TestTransposeImageObservation:
         chw_obs = np.zeros((3, 84, 84), dtype=np.uint8)
         assert transpose_image_observation(chw_obs, space) is chw_obs
 
+    def test_3d_tensor_already_target_returned_unchanged(self):
+        """A 3-D tensor already in the target (CHW) layout is returned as-is."""
+        space = spaces.Box(0, 255, (3, 84, 84), np.uint8)
+        obs = torch.zeros(3, 84, 84)
+        assert transpose_image_observation(obs, space) is obs
+
+    def test_4d_tensor_already_target_returned_unchanged(self):
+        """A 4-D batched tensor already in the target layout is returned as-is."""
+        space = spaces.Box(0, 255, (3, 84, 84), np.uint8)
+        obs = torch.zeros(2, 3, 84, 84)
+        assert transpose_image_observation(obs, space) is obs
+
+    def test_4d_numpy_already_target_returned_unchanged(self):
+        """A 4-D batched numpy array already in the target layout is returned as-is."""
+        space = spaces.Box(0, 255, (3, 84, 84), np.uint8)
+        obs = np.zeros((2, 3, 84, 84), dtype=np.uint8)
+        assert transpose_image_observation(obs, space) is obs
+
+    def test_tuple_obs(self):
+        """Tuple spaces recurse over their sub-spaces."""
+        space = spaces.Tuple(
+            (
+                spaces.Box(0, 255, (84, 84, 3), np.uint8),
+                spaces.Box(-1, 1, (3,), np.float32),
+            )
+        )
+        obs = (
+            np.zeros((84, 84, 3), dtype=np.uint8),
+            np.zeros((3,), dtype=np.float32),
+        )
+        result = transpose_image_observation(obs, space)
+        assert isinstance(result, tuple)
+        assert result[0].shape == (3, 84, 84)
+        assert result[1].shape == (3,)
+
 
 def test_key_in_nested_dict():
     # Test with key in top-level dict

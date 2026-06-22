@@ -1688,3 +1688,114 @@ class TestOpenInferenceAgent:
         api_key_client._ensure_inference_binding.assert_called_once_with(
             "dep", refresh=True, experiment_name="e", project_name="p"
         )
+
+
+def _capabilities_response(
+    *, status_code=200, is_success=True, json_value=None, raise_json=False
+):
+    """Build a fake httpx response for ``_get_cli_capabilities`` tests."""
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.is_success = is_success
+    resp.text = "error body"
+    if raise_json:
+        resp.json.side_effect = ValueError("not json")
+    else:
+        resp.json.return_value = json_value
+    return resp
+
+
+class TestRewindUploadFiles:
+    def test_rewinds_seekable_payload(self):
+        import io
+
+        buf = io.BytesIO(b"payload")
+        buf.seek(7)  # simulate a consumed stream after a failed attempt
+        files = {"manifest": ("manifest.json", buf, "application/json")}
+        ArenaClient._rewind_upload_files(files)
+        assert buf.tell() == 0
+
+    def test_handles_none_and_non_seekable_entries(self):
+        # No tuple payload and a non-seekable payload must both be ignored.
+        ArenaClient._rewind_upload_files(None)
+        ArenaClient._rewind_upload_files({"a": ("name", object(), "text/plain")})
+
+
+class TestGetCliCapabilities:
+    def test_returns_cached_without_refetch(self, api_key_client):
+        api_key_client._cli_capabilities_cache = {"schemaVersion": 1}
+        with patch.object(api_key_client._http, "request") as request:
+            result = api_key_client._get_cli_capabilities()
+        assert result == {"schemaVersion": 1}
+        request.assert_not_called()
+
+    def test_returns_none_on_http_error(self, api_key_client):
+        api_key_client._cli_capabilities_cache = {"stale": True}
+        with patch.object(api_key_client, "_auth_headers", return_value={}):
+            with patch.object(
+                api_key_client._http,
+                "request",
+                side_effect=httpx.ConnectError("boom"),
+            ):
+                result = api_key_client._get_cli_capabilities(force_refresh=True)
+        assert result is None
+        assert api_key_client._cli_capabilities_cache is None
+
+    def test_returns_none_on_404(self, api_key_client):
+        resp = _capabilities_response(status_code=404, is_success=False)
+        with patch.object(api_key_client, "_auth_headers", return_value={}):
+            with patch.object(api_key_client._http, "request", return_value=resp):
+                assert api_key_client._get_cli_capabilities(force_refresh=True) is None
+
+    def test_raises_on_other_error_status(self, api_key_client):
+        resp = _capabilities_response(status_code=500, is_success=False)
+        with patch.object(api_key_client, "_auth_headers", return_value={}):
+            with patch.object(api_key_client._http, "request", return_value=resp):
+                with pytest.raises(ArenaAPIError):
+                    api_key_client._get_cli_capabilities(force_refresh=True)
+
+    def test_returns_none_when_envelope_not_ok(self, api_key_client):
+        resp = _capabilities_response(json_value={"ok": False})
+        with patch.object(api_key_client, "_auth_headers", return_value={}):
+            with patch.object(api_key_client._http, "request", return_value=resp):
+                assert api_key_client._get_cli_capabilities(force_refresh=True) is None
+
+    def test_returns_none_when_data_not_dict(self, api_key_client):
+        resp = _capabilities_response(json_value={"ok": True, "data": "nope"})
+        with patch.object(api_key_client, "_auth_headers", return_value={}):
+            with patch.object(api_key_client._http, "request", return_value=resp):
+                assert api_key_client._get_cli_capabilities(force_refresh=True) is None
+
+
+class TestValidateManifestInvoke:
+    def test_rejects_non_string_path(self, api_key_client):
+        with pytest.raises(ArenaValidationError, match="invalid on-prem command"):
+            api_key_client._validate_manifest_invoke(
+                {"path": 123, "method": "GET", "responseKind": "json"}
+            )
+
+
+class TestPartitionManifestArgs:
+    def test_skips_absent_optional_and_defaults_empty_body(self, api_key_client):
+        params = [{"in": "body", "name": "x", "required": False, "type": "string"}]
+        query, body = api_key_client._partition_manifest_args(
+            method="POST", params_list=params, parsed_args={}
+        )
+        # Optional + absent -> skipped; body still defaults to {} when expected.
+        assert query == {}
+        assert body == {}
+
+    def test_raises_when_required_value_is_none(self, api_key_client):
+        params = [{"in": "body", "name": "x", "required": True, "type": "string"}]
+        with pytest.raises(ArenaValidationError, match="Missing required argument"):
+            api_key_client._partition_manifest_args(
+                method="POST", params_list=params, parsed_args={"x": None}
+            )
+
+    def test_skips_optional_none_value(self, api_key_client):
+        params = [{"in": "query", "name": "x", "required": False, "type": "string"}]
+        query, body = api_key_client._partition_manifest_args(
+            method="GET", params_list=params, parsed_args={"x": None}
+        )
+        assert query == {}
+        assert body is None

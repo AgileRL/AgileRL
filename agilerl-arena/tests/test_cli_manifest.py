@@ -11,6 +11,8 @@ from click.testing import CliRunner
 
 from agilerl.arena.cli_manifest import (
     _manifest_spec_to_click_option,
+    _parse_json_cli_value,
+    attach_manifest_tree,
     build_manifest_click_command,
     pythonize_manifest_param_name,
     write_binary_atomic,
@@ -71,6 +73,9 @@ class TestPythonizeManifestParamName:
 
     def test_snake_case(self) -> None:
         assert pythonize_manifest_param_name("num_nodes") == "num_nodes"
+
+    def test_id_is_preserved(self) -> None:
+        assert pythonize_manifest_param_name("id") == "id"
 
 
 class TestGetCliCapabilities:
@@ -259,6 +264,27 @@ class TestWriteBinaryAtomic:
         write_binary_atomic(dest, b"new", force=True)
         assert dest.read_bytes() == b"new"
 
+    def test_cleans_up_temp_when_replace_fails(self, tmp_path: Path) -> None:
+        # If os.replace fails, the .tmp file is removed before the error surfaces.
+        dest = tmp_path / "out.bin"
+        with patch(
+            "agilerl.arena.cli_manifest.os.replace", side_effect=OSError("nope")
+        ):
+            with pytest.raises(OSError):
+                write_binary_atomic(dest, b"data")
+        assert not dest.with_name(dest.name + ".tmp").exists()
+        assert not dest.exists()
+
+    def test_ignores_temp_cleanup_failure(self, tmp_path: Path) -> None:
+        # A failing cleanup unlink must not mask the original replace error.
+        dest = tmp_path / "out.bin"
+        with (
+            patch("agilerl.arena.cli_manifest.os.replace", side_effect=OSError("nope")),
+            patch.object(Path, "unlink", side_effect=OSError("locked")),
+        ):
+            with pytest.raises(OSError):
+                write_binary_atomic(dest, b"data")
+
 
 class TestManifestSpecToClickOption:
     @staticmethod
@@ -443,3 +469,86 @@ class TestManifestCommandCallback:
 
         assert result.exit_code == 0
         assert dest.read_bytes() == b"data"
+
+
+class TestParseJsonCliValue:
+    def test_parses_inline_json(self) -> None:
+        assert _parse_json_cli_value('{"a": 1}') == {"a": 1}
+
+    def test_reads_json_from_at_file(self, tmp_path: Path) -> None:
+        f = tmp_path / "payload.json"
+        f.write_text('{"k": [1, 2, 3]}', encoding="utf-8")
+        assert _parse_json_cli_value(f"@{f}") == {"k": [1, 2, 3]}
+
+
+class TestManifestCommandCallback:
+    @staticmethod
+    def _binary_get_command() -> click.Command:
+        invoke = {
+            "method": "GET",
+            "path": "/api/cli/v1/on-prem/classes/get",
+            "responseKind": "binary",
+            "params": [
+                {
+                    "name": "name",
+                    "click": {"option": ["--name"]},
+                    "in": "query",
+                    "type": "string",
+                    "required": True,
+                    "help": "h",
+                },
+                {
+                    "name": "extra",
+                    "click": {"option": ["--extra"]},
+                    "in": "query",
+                    "type": "json",
+                    "required": False,
+                    "help": "h",
+                },
+            ],
+        }
+        return build_manifest_click_command("get", "Fetch", invoke)
+
+    def test_optional_arg_omitted_and_binary_echoed(self) -> None:
+        client = MagicMock()
+        client._invoke_manifest_command.return_value = (b"hello", None, None)
+        with patch(
+            "agilerl.arena.cli_manifest.arena_client",
+            return_value=_client_context(client),
+        ):
+            res = CliRunner().invoke(
+                self._binary_get_command(),
+                ["--name", "pool"],
+                obj=_command_config(),
+            )
+        assert res.exit_code == 0
+        assert "hello" in res.output
+        # Optional 'extra' was omitted -> not forwarded to the server call.
+        sent_args = client._invoke_manifest_command.call_args.args[1]
+        assert "extra" not in sent_args
+
+    def test_json_option_is_parsed_before_send(self) -> None:
+        client = MagicMock()
+        client._invoke_manifest_command.return_value = (b"ok", None, None)
+        with patch(
+            "agilerl.arena.cli_manifest.arena_client",
+            return_value=_client_context(client),
+        ):
+            res = CliRunner().invoke(
+                self._binary_get_command(),
+                ["--name", "pool", "--extra", '{"nested": true}'],
+                obj=_command_config(),
+            )
+        assert res.exit_code == 0
+        sent_args = client._invoke_manifest_command.call_args.args[1]
+        assert sent_args["extra"] == {"nested": True}
+
+
+class TestAttachManifestTree:
+    def test_warns_on_unknown_node_type(self) -> None:
+        group = click.Group(name="root")
+        node = {"children": [{"type": "mystery", "name": "weird"}]}
+        with patch("agilerl.arena.cli_manifest.logger") as log:
+            attach_manifest_tree(group, node)
+        log.warning.assert_called_once()
+        assert "weird" not in group.commands

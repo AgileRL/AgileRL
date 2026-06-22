@@ -16,6 +16,10 @@ from agilerl.arena.on_prem import (
     capabilities_show_on_prem_root,
     register_on_prem_manifest_group,
 )
+from agilerl.arena.on_prem.group import (
+    _ON_PREM_ENSURED_META_KEY,
+    OnPremDynamicGroup,
+)
 
 
 class TestCapsAllowOnPremAtRoot:
@@ -99,6 +103,20 @@ class TestArenaRootGroupVisibility:
             r = CliRunner().invoke(root, ["--help"], obj=command_config)
         assert r.exit_code == 0
         assert ("on-prem" in r.output) is should_show
+
+    def test_hidden_on_prem_command_not_resolvable(
+        self, command_config: CommandConfig
+    ) -> None:
+        # When capabilities hide on-prem, get_command must return None so the
+        # command is genuinely unreachable (not just absent from --help).
+        root = self._root_with_on_prem()
+        with patch(
+            "agilerl.arena.on_prem.group.capabilities_show_on_prem_root",
+            return_value=False,
+        ):
+            r = CliRunner().invoke(root, ["on-prem", "--help"], obj=command_config)
+        assert r.exit_code != 0
+        assert "No such command" in r.output
 
     def test_main_help_uses_argv_before_callback_for_capabilities(self) -> None:
         """Eager ``--help`` runs before ``main`` sets ``ctx.obj``; config comes from params."""
@@ -262,3 +280,55 @@ class TestOnPremDynamicGroup:
         assert res.exit_code == 0
         assert expected in res.output
         assert "/api/" not in res.output  # no backend endpoints leak
+
+    def test_on_prem_group_help_lists_loaded_commands(
+        self, command_config: CommandConfig
+    ) -> None:
+        # Rendering ``on-prem --help`` exercises list_commands, which lazily
+        # ensures the manifest tree is loaded before listing subcommands.
+        root, client_mock = self._root_with_caps(CAP_FIXTURE_V2)
+        with patch(
+            "agilerl.arena.on_prem.group.build_client", return_value=client_mock
+        ):
+            res = CliRunner().invoke(root, ["on-prem", "--help"], obj=command_config)
+        assert res.exit_code == 0
+        assert "providers" in res.output
+        assert "install" in res.output
+
+
+class TestOnPremDynamicGroupEnsure:
+    """Direct unit tests for the lazy ``_ensure`` loader's guard branches."""
+
+    def test_ensure_is_noop_when_already_ensured(
+        self, command_config: CommandConfig
+    ) -> None:
+        group = OnPremDynamicGroup()
+        ctx = click.Context(group, obj=command_config)
+        ctx.meta[_ON_PREM_ENSURED_META_KEY] = True
+        with patch("agilerl.arena.on_prem.group.build_client") as build_client:
+            group._ensure(ctx)
+        build_client.assert_not_called()
+
+    def test_ensure_raises_without_command_config_on_root(self) -> None:
+        group = OnPremDynamicGroup()
+        ctx = click.Context(group, obj=None)
+        with pytest.raises(click.ClickException, match="missing CommandConfig"):
+            group._ensure(ctx)
+
+    def test_ensure_skips_rebuild_when_fingerprint_unchanged(
+        self, command_config: CommandConfig
+    ) -> None:
+        group = OnPremDynamicGroup()
+        client_mock = MagicMock(spec=ArenaClient)
+        client_mock._get_cli_capabilities.return_value = CAP_FIXTURE_V2
+        with patch(
+            "agilerl.arena.on_prem.group.build_client", return_value=client_mock
+        ):
+            # First call builds the tree and records the capabilities fingerprint.
+            group._ensure(click.Context(group, obj=command_config))
+            assert "providers" in group.commands
+            # A fresh context with identical caps must short-circuit on the
+            # unchanged fingerprint rather than rebuilding the command tree.
+            group._ensure(click.Context(group, obj=command_config))
+        assert "providers" in group.commands
+        assert client_mock._get_cli_capabilities.call_count == 2
