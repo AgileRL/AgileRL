@@ -612,14 +612,16 @@ class DPO(LLMAlgorithm):
             chunk_size=self.fused_loss_chunk_rows or 1,  # sequences per chunk
             loss_type="sigmoid",
         )
+        # Keyword args matching upstream ``LigerFusedLinearDPOLoss.forward``;
+        # lm_head is never LoRA-adapted, so the ref weight/bias equal the policy's.
         loss, aux = dpo_loss_fn(
-            lm_head_weight,
-            policy_hidden,
-            stacked_target,
-            lm_head_bias,  # bias (None for most LLMs)
-            ref_hidden,  # ref_input
-            lm_head_weight,  # ref_weight (lm_head is never LoRA-adapted, so is the same as the policy weight)
-            lm_head_bias,  # ref_bias (same weight → same bias)
+            lin_weight=lm_head_weight,
+            _input=policy_hidden,
+            target=stacked_target,
+            bias=lm_head_bias,  # None for most LLMs
+            ref_input=ref_hidden,
+            ref_weight=lm_head_weight,
+            ref_bias=lm_head_bias,
         )
         # aux = (chosen_logps, rejected_logps, chosen_logits_mean, rejected_logits_mean,
         #        nll_loss, chosen_rewards, rejected_rewards)
