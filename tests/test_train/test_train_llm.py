@@ -1431,6 +1431,7 @@ class TestFinetuneLlmMultiturn:
         mock_env.step.return_value = (prompt, 0.0, False, False, {})
         mock_env.turn_boundaries = [0, 1, 2]
         mock_env._sw_max_model_len = 1024
+        mock_env.dataset_size = 0
         mock_env.get_episode_data.return_value = (
             torch.ones(1, L, dtype=torch.long),
             torch.ones(1, L, dtype=torch.long),

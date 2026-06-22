@@ -28,7 +28,9 @@ def reinforce_factory():
 def _minimal_reasoning_gym(
     device: str, vocab_size: int, input_size: int, batch_size: int
 ):
+    del batch_size  # single-turn rollout env: test() steps one prompt at a time
     env = RolloutEnv.__new__(RolloutEnv)
+    env.max_turns = 1
 
     @contextmanager
     def eval_mode():
@@ -36,22 +38,20 @@ def _minimal_reasoning_gym(
 
     env.eval_mode = eval_mode
 
-    def reset(reset_dataloaders=False):
-        del reset_dataloaders
+    def _prompt():
         return {
-            "input_ids": torch.randint(
-                0, vocab_size, (batch_size, input_size), device=device
-            ),
-            "attention_mask": torch.ones(batch_size, input_size, device=device),
-            "question": [f"q_{i}" for i in range(batch_size)],
-            "answer": [f"a_{i}" for i in range(batch_size)],
-            "text": ["Solve the task briefly."] * batch_size,
+            "input_ids": torch.randint(0, vocab_size, (1, input_size), device=device),
+            "attention_mask": torch.ones(1, input_size, device=device),
+            "text": "Solve the task briefly.",
         }
+
+    def reset(seed=None, *, row_index=None):
+        del seed, row_index
+        return _prompt(), {}
 
     def step(completion_ids):
         del completion_ids
-        rewards = torch.ones(batch_size, device=device)
-        return reset(), rewards
+        return _prompt(), 1.0, True, False, {}
 
     env.reset = reset
     env.step = step
