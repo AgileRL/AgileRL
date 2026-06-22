@@ -87,6 +87,10 @@ class GRPO(LLMAlgorithm):
     :type group_size: int, optional
     :param temperature: Temperature, controls randomness of text generation
     :type temperature: float, optional
+    :param eval_temperature: Sampling temperature used during evaluation
+        (``training=False``).  A small value gives near-deterministic eval rollouts,
+        defaults to 0.01
+    :type eval_temperature: float, optional
     :param repetition_penalty: Repetition penalty used during generation, defaults to 1.0
     :type repetition_penalty: float, optional
     :param top_p: Top-p nucleus sampling threshold, defaults to 0.95
@@ -181,6 +185,10 @@ class GRPO(LLMAlgorithm):
         ``(B, T, V)`` and fusing only the rollout doesn't lower overall
         peak.
     :type use_fused_linear_logprobs: bool, optional
+    :param liger_chunk_size: Number of sequences per chunk in the Liger fused GRPO
+        loss.  Larger values trade memory for fewer kernel launches; only used when
+        ``use_liger_loss=True``, defaults to 1
+    :type liger_chunk_size: int, optional
     """
 
     def __init__(
@@ -200,6 +208,7 @@ class GRPO(LLMAlgorithm):
         update_epochs: int = 1,
         group_size: int = 8,
         temperature: float = 0.9,
+        eval_temperature: float = 0.01,
         repetition_penalty: float = 1.0,
         top_p: float = 0.95,
         top_k: int = 50,
@@ -234,6 +243,7 @@ class GRPO(LLMAlgorithm):
         reduce_memory_peak: bool = False,
         use_fused_linear_logprobs: bool = False,
         cast_logprobs_to_fp32: bool = True,
+        liger_chunk_size: int = 1,
     ) -> None:
         resolved_device = (
             f"cuda:{accelerator.process_index}"
@@ -319,6 +329,8 @@ class GRPO(LLMAlgorithm):
         self.group_size = group_size
         self.beta = beta
         self.temperature = temperature
+        self.eval_temperature = eval_temperature
+        self.liger_chunk_size = liger_chunk_size
         self.repetition_penalty = repetition_penalty
         self.top_p = top_p
         self.top_k = top_k
@@ -504,9 +516,7 @@ class GRPO(LLMAlgorithm):
                 completion_ids, completion_masks = self._generate_with_vllm_colocate(
                     prompt_batch,
                     group_size,
-                    temperature=self.temperature
-                    if training
-                    else 0.01,  # Almost deterministic for evaluation
+                    temperature=self.temperature if training else self.eval_temperature,
                 )
 
         return completion_ids, completion_masks
@@ -1083,7 +1093,7 @@ class GRPO(LLMAlgorithm):
             self.temperature,
             None,
             reference_log_probs is not None,  # use_ref_model
-            1,  # chunk_size
+            self.liger_chunk_size,  # chunk_size
             None,
         )
 

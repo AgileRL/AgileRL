@@ -1425,10 +1425,29 @@ class VLLMConfig:
     :param max_num_seqs: Maximum number of sequences processed concurrently.  For GRPO,
         set this to at least ``group_size`` to avoid request queuing, defaults to 8.
     :type max_num_seqs: int, optional
+    :param max_num_batched_tokens: Maximum number of tokens processed in a single engine
+        step — vLLM V1's chunked-prefill token budget.  ``None`` falls back to
+        ``max_num_seqs * max_model_len``.  Prefill-heavy workloads benefit from larger
+        values; decode-heavy workloads can lower it to free memory for KV cache, defaults
+        to None.
+    :type max_num_batched_tokens: int | None, optional
+    :param enable_prefix_caching: Forwarded to vLLM's ``enable_prefix_caching``.  ``None``
+        uses vLLM's own default (on for generative models in V1).  Benefits grouped or
+        multi-turn rollouts that share long prompt prefixes, defaults to None.
+    :type enable_prefix_caching: bool | None, optional
+    :param enforce_eager: Forwarded to vLLM's ``enforce_eager``.  ``True`` disables
+        CUDA-graph capture (lower memory, slower decode); ``None`` uses vLLM's default
+        (``False``), defaults to None.
+    :type enforce_eager: bool | None, optional
     :param sleep_mode: Put vLLM to sleep between ``get_action`` calls to free GPU memory
         for training.  Cannot be used with agent populations on a single device,
         defaults to False.
     :type sleep_mode: bool, optional
+    :param sleep_level: vLLM sleep level used when ``sleep_mode`` is enabled.  Level 2
+        discards weights and KV cache; level 1 offloads weights to CPU and frees KV.
+        Quantized (e.g. bnb-4bit) engines require a level that keeps weights resident,
+        defaults to 2.
+    :type sleep_level: int, optional
     :param dtype: Model weight dtype passed to the vLLM ``LLM`` constructor
         (e.g. ``"bfloat16"``, ``"float16"``).  ``None`` lets vLLM choose,
         defaults to None.
@@ -1474,9 +1493,11 @@ class VLLMConfig:
     tensor_parallel_size: int = 1
     gpu_memory_utilization: float = 0.3
     max_num_seqs: int = 8
-    swap_space: float | None = None
+    max_num_batched_tokens: int | None = None
+    enable_prefix_caching: bool | None = None
     enforce_eager: bool | None = None
     sleep_mode: bool = False
+    sleep_level: int = 2
     dtype: str | None = None
     quantization: str | None = None
     stop_sequences: list[str] | None = None
@@ -1487,12 +1508,30 @@ class VLLMConfig:
     kv_cache_memory_bytes: int | None = None
 
     def __post_init__(self) -> None:
+        if self.sleep_level not in (0, 1, 2):
+            msg = f"sleep_level must be 0, 1 or 2, got {self.sleep_level}."
+            raise ValueError(msg)
         if self.sleep_mode:
             warnings.warn(
                 """VLLM sleep mode cannot be used with populations of agents on a single device. To use sleep mode, ensure,
                 you are training a single agent or, alternatively, use a different device for each agent.""",
                 stacklevel=2,
             )
+
+    def resolve_max_num_batched_tokens(self, max_model_len: int) -> int:
+        """Resolve the vLLM prefill token budget.
+
+        Returns the explicit ``max_num_batched_tokens`` when set, otherwise the
+        ``max_num_seqs * max_model_len`` default.
+
+        :param max_model_len: Engine context length.
+        :type max_model_len: int
+        :return: Token budget to pass to vLLM's ``max_num_batched_tokens``.
+        :rtype: int
+        """
+        if self.max_num_batched_tokens is not None:
+            return self.max_num_batched_tokens
+        return self.max_num_seqs * max_model_len
 
 
 def create_warmup_cosine_scheduler(
