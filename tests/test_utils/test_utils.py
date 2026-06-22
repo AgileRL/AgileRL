@@ -9,7 +9,7 @@ import torch
 from accelerate import Accelerator, DeepSpeedPlugin
 from gymnasium import spaces
 from peft import LoraConfig
-from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl import HAS_DEEPSPEED, HAS_LLM_DEPENDENCIES, HAS_VLLM
 from agilerl.algorithms import (
     CQN,
     DDPG,
@@ -52,15 +52,10 @@ from agilerl.utils.utils import (
 )
 from agilerl.utils.algo_utils import CosineLRScheduleConfig
 from agilerl.wrappers.learning import Skill
-import importlib.util
 
-if importlib.util.find_spec("deepspeed") and importlib.util.find_spec("vllm"):
-    # create_module lives in test_grpo, which importorskips deepspeed/vllm.
-    from tests.test_algorithms.test_llms.test_grpo import (
-        create_module as create_dummy_lm_for_reinforce,
-    )
-else:
-    create_dummy_lm_for_reinforce = None
+create_module = None
+if HAS_DEEPSPEED and HAS_VLLM:
+    from tests.test_algorithms.test_llms.test_grpo import create_module
 
 # Shared HP dict that can be used by any algorithm
 SHARED_INIT_HP = {
@@ -366,8 +361,8 @@ class TestCreatePopulation:
                 assert agent.accelerator is None
 
     @pytest.mark.skipif(
-        create_dummy_lm_for_reinforce is None,
-        reason="create_module needs the Linux-only deepspeed+vllm extras.",
+        not (HAS_DEEPSPEED and HAS_VLLM),
+        reason="Need to install agilerl with deepspeed + vllm",
     )
     @pytest.mark.parametrize(
         "algo,expected_type",
@@ -400,7 +395,7 @@ class TestCreatePopulation:
             "task_type": "CAUSAL_LM",
             "lora_dropout": 0.05,
         }
-        actor = create_dummy_lm_for_reinforce(
+        actor = create_module(
             input_size=10,
             max_tokens=20,
             vocab_size=1000,
@@ -694,13 +689,16 @@ class TestCreatePopulation:
         assert call_kw["use_liger_loss"] is True
         assert call_kw["cast_logprobs_to_fp32"] is False
 
+    @pytest.mark.skipif(
+        not (HAS_DEEPSPEED and HAS_VLLM),
+        reason="Need to install agilerl with deepspeed + vllm",
+    )
     def test_sft_cpu(self):
         """Exercise ``create_population`` SFT branch (clone after first agent)."""
         pytest.importorskip("peft")
         from peft import LoraConfig
 
         from agilerl.algorithms.sft import SFT
-        from tests.test_algorithms.test_llms.test_grpo import create_module
 
         lora_config = LoraConfig(
             r=8,
@@ -725,13 +723,16 @@ class TestCreatePopulation:
         assert len(pop) == 2
         assert all(isinstance(agent, SFT) for agent in pop)
 
+    @pytest.mark.skipif(
+        not (HAS_DEEPSPEED and HAS_VLLM),
+        reason="Need to install agilerl with deepspeed + vllm",
+    )
     def test_dpo_cpu(self):
         """Exercise ``create_population`` DPO branch (clone after first agent)."""
         pytest.importorskip("peft")
         from peft import LoraConfig
 
         from agilerl.algorithms.dpo import DPO
-        from tests.test_algorithms.test_llms.test_grpo import create_module
 
         lora_config = LoraConfig(
             r=8,
@@ -1524,18 +1525,17 @@ class TestPrepareLlmAlgoKwargsLoraDefaults:
         assert merged["lora_config"] is explicit
 
 
-@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="agilerl[llm] not installed")
+@pytest.mark.skipif(
+    not (HAS_DEEPSPEED and HAS_VLLM),
+    reason="Need to install agilerl with deepspeed + vllm",
+)
 class TestCreatePopulationLlmTorchCompiler:
     """``create_population`` should forward ``torch_compiler`` into every LLM
     branch's kwargs (GRPO/CISPO/GSPO, SFT, DPO, LLMPPO, LLMREINFORCE)."""
 
     @pytest.fixture
     def actor(self):
-        from tests.test_algorithms.test_llms.test_grpo import (
-            create_module as create_dummy_lm,
-        )
-
-        return create_dummy_lm(input_size=5, max_tokens=10, vocab_size=30, device="cpu")
+        return create_module(input_size=5, max_tokens=10, vocab_size=30, device="cpu")
 
     @pytest.fixture
     def init_hp(self):

@@ -3,7 +3,7 @@ from unittest.mock import MagicMock
 import pytest
 from accelerate import Accelerator
 
-from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl import HAS_DEEPSPEED, HAS_LLM_DEPENDENCIES, HAS_VLLM
 from agilerl.algorithms import CQN, DDPG, DQN, MADDPG, MATD3, PPO, TD3, RainbowDQN
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.algo_utils import clone_llm
@@ -20,13 +20,8 @@ if HAS_LLM_DEPENDENCIES:
 
     from agilerl.algorithms import GRPO
 
-import importlib.util
-
 create_module = None
-if importlib.util.find_spec("deepspeed") and importlib.util.find_spec("vllm"):
-    # create_module lives in test_grpo, which importorskips deepspeed/vllm, so
-    # gate on those to keep this module collectable without them (the tests using
-    # it are @pytest.mark.gpu and skip without CUDA).
+if HAS_DEEPSPEED and HAS_VLLM:
     from tests.test_algorithms.test_llms.test_grpo import create_module
 
 # Shared HP dict that can be used by any algorithm
@@ -291,8 +286,8 @@ class TestTournamentSelectionSelect:
             assert len(new_population) == population_size
 
     @pytest.mark.skipif(
-        create_module is None,
-        reason="create_module needs the Linux-only deepspeed+vllm extras.",
+        not (HAS_VLLM and HAS_DEEPSPEED),
+        reason="Need to install agilerl with deepspeed + vllm",
     )
     @pytest.mark.parametrize("use_accelerator", [True, False])
     @pytest.mark.parametrize("elitism", [True, False])
@@ -407,8 +402,8 @@ class TestTournamentSelectionSelect:
         assert len(new_population) == population_size
 
     @pytest.mark.skipif(
-        create_module is None,
-        reason="create_module needs the Linux-only deepspeed+vllm extras.",
+        not (HAS_VLLM and HAS_DEEPSPEED),
+        reason="Need to install agilerl with deepspeed + vllm",
     )
     def test_detects_llm_by_type_not_algo_name(self):
         """LLM branch selection should rely on type, not a specific algo string."""

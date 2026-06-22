@@ -1,6 +1,5 @@
 import copy
 import gc
-import importlib.util
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -11,7 +10,7 @@ from accelerate.state import AcceleratorState
 from accelerate.utils import DeepSpeedPlugin
 from gymnasium import spaces
 
-from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl import HAS_DEEPSPEED, HAS_LLM_DEPENDENCIES, HAS_VLLM
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 
 if HAS_LLM_DEPENDENCIES:
@@ -32,15 +31,7 @@ from tests.helper_functions import (
     generate_random_box_space,
 )
 
-if importlib.util.find_spec("deepspeed") and importlib.util.find_spec("vllm"):
-    # ``create_module`` lives in test_grpo, which ``importorskip``s deepspeed/vllm,
-    # so gate the import on those being importable to keep this module collectable
-    # without them. (HAS_LLM_DEPENDENCIES can't gate this: it's True on macOS/Windows
-    # because the linux-only deps are filtered out of the llm extra by their markers,
-    # leaving peft/transformers/datasets, which are installed.) Tests that call
-    # create_module are either @pytest.mark.gpu (skipped without CUDA) or, for the
-    # CPU ones, guarded with skipif(create_module is None), so they're skipped where
-    # the import is unavailable.
+if HAS_DEEPSPEED and HAS_VLLM:
     from tests.test_algorithms.test_llms.test_grpo import create_module
 else:
     create_module = None
@@ -1507,8 +1498,8 @@ class TestMutationsMutation:
             AcceleratorState._reset_state(True)
 
     @pytest.mark.skipif(
-        create_module is None,
-        reason="create_module needs the Linux-only deepspeed+vllm extras.",
+        not (HAS_VLLM and HAS_DEEPSPEED),
+        reason="Need to install agilerl with deepspeed + vllm",
     )
     @pytest.mark.parametrize(
         "mutation_type", ["architecture", "parameters", "activation"]
