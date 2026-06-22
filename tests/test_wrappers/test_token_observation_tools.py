@@ -1,11 +1,9 @@
-"""Tool-aware tokenization & masking in ``TokenObservationWrapper`` (Phase 0).
+"""Tool-aware tokenization & masking in ``TokenObservationWrapper``.
 
-The P0-4 contract for tool-calling env support. Masking is by *generation
-provenance*: a token contributes to the policy loss iff the policy sampled it
-(``turn_boundaries``), so env-observation / tool-result tokens appended via the
-feedback path are already excluded. The genuinely-new piece is ``tools=`` schema
-injection into the chat template. Full design + research in agilerl-integration:
-``docs/design/tool-calling-envs.md``.
+Masking is by *generation provenance*: a token contributes to the policy loss
+iff the policy sampled it (``turn_boundaries``), so env-observation / tool-result
+tokens appended via the feedback path are already excluded. The genuinely-new
+piece is ``tools=`` schema injection into the chat template.
 """
 
 from __future__ import annotations
@@ -17,7 +15,7 @@ import torch
 
 from agilerl.llm_envs import TokenObservationWrapper
 
-_WIP = "Phase-0 P0-4: pending tool-path wiring (engine / _align_sampling_logprobs)"
+_WIP = "pending tool-path wiring (engine / _align_sampling_logprobs)"
 
 
 def _bare_wrapper() -> TokenObservationWrapper:
@@ -101,6 +99,17 @@ def test_tools_none_is_backward_compatible() -> None:
     w.tokenizer = _RecordingTokenizer()
     w._tokenize_initial_prompt("hi")
     assert w.tokenizer.last_tools is None  # template default; tools= not passed
+
+
+def test_tool_schema_injected_into_feedback_boundary() -> None:
+    """``tools`` are forwarded to ``apply_chat_template`` on the multi-turn
+    feedback-boundary render (``_chat_template_boundary_ids``), not only the
+    initial prompt."""
+    w = _bare_wrapper()
+    w.tools = _TOOLS
+    w.tokenizer = _RecordingTokenizer()
+    w._chat_template_boundary_ids("tool result")
+    assert w.tokenizer.last_tools == _TOOLS
 
 
 @pytest.mark.skip(reason=_WIP)

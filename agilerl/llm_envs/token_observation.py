@@ -49,8 +49,7 @@ class TokenObservationWrapper(RolloutEnv):
         :param tools: Optional OpenAI/JSON tool schemas forwarded to the chat
             template (``tools=``) so the policy can emit tool calls. ``None``
             (default) preserves the exact pre-tool behaviour (no ``tools=`` kwarg
-            is passed). Sourced from the wrapped env / integration ``EnvWorker``
-            tool set.
+            is passed).
         :type tools: list[dict] | None
         """
         super().__init__(max_turns=max_turns, tools=tools)
