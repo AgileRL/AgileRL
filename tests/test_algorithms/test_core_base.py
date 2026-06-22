@@ -2887,6 +2887,10 @@ class TestLLMGetLmHead:
             agent._get_lm_head()
 
 
+@pytest.mark.skipif(
+    not HAS_VLLM,
+    reason="_configure_vllm exercises the vllm extra.",
+)
 class TestLLMConfigureVllm:
     def test_raises_when_vllm_not_installed(self):
         agent = _make_llm_agent()
@@ -5323,6 +5327,10 @@ class TestLLMLoadAdapterWeights:
         assert not ref_param.requires_grad
 
 
+@pytest.mark.skipif(
+    not HAS_VLLM,
+    reason="_configure_vllm exercises the Linux-only vllm extra.",
+)
 class TestLLMConfigureVllmAcceleratorPaths:
     """_configure_vllm with accelerator and various TP configurations."""
 
