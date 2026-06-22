@@ -4778,8 +4778,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             "max_model_len": self.max_model_len,
             "distributed_executor_backend": "external_launcher",
             "seed": process_index // self.vllm_config.tensor_parallel_size,
-            "max_num_batched_tokens": self.vllm_config.max_num_seqs
-            * self.max_model_len,
+            "max_num_batched_tokens": self.vllm_config.resolve_max_num_batched_tokens(
+                self.max_model_len
+            ),
             "model_impl": "vllm",
             "enable_sleep_mode": self.vllm_config.sleep_mode,
         }
@@ -4787,6 +4788,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             llm_kwargs["dtype"] = self.vllm_config.dtype
         if self.vllm_config.quantization is not None:
             llm_kwargs["quantization"] = self.vllm_config.quantization
+        if self.vllm_config.enforce_eager is not None:
+            llm_kwargs["enforce_eager"] = self.vllm_config.enforce_eager
+        if self.vllm_config.enable_prefix_caching is not None:
+            llm_kwargs["enable_prefix_caching"] = self.vllm_config.enable_prefix_caching
         if self.vllm_config.kv_cache_memory_bytes is not None:
             # Forwards to vLLM's ``CacheConfig.kv_cache_memory_bytes``. When set,
             # vLLM's ``determine_available_memory`` returns early and skips the
@@ -4810,7 +4815,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             raise
 
         if self.vllm_config.sleep_mode:
-            self.llm.sleep(level=2)
+            self.llm.sleep(level=self.vllm_config.sleep_level)
 
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
@@ -4914,7 +4919,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             self.accelerator is None or self.accelerator.is_main_process
         ):
             torch.cuda.empty_cache()
-            self.llm.sleep(level=2)
+            self.llm.sleep(level=self.vllm_config.sleep_level)
             self._vllm_awake = False
 
         if self.use_vllm:

@@ -1469,6 +1469,40 @@ def test_vllm_config_sleep_mode_warns():
         VLLMConfig(sleep_mode=True)
 
 
+def test_vllm_config_engine_knob_defaults():
+    """New engine knobs default to behaviour-preserving values."""
+    config = VLLMConfig()
+    assert config.max_num_batched_tokens is None
+    assert config.enable_prefix_caching is None
+    assert config.enforce_eager is None
+    assert config.sleep_level == 2
+
+
+def test_vllm_config_swap_space_removed():
+    """The dead ``swap_space`` field is gone (it was never forwarded to vLLM)."""
+    with pytest.raises(TypeError):
+        VLLMConfig(swap_space=4)
+
+
+def test_vllm_config_resolve_max_num_batched_tokens_default():
+    """Unset token budget falls back to ``max_num_seqs * max_model_len``."""
+    config = VLLMConfig(max_num_seqs=8)
+    assert config.resolve_max_num_batched_tokens(1024) == 8192
+
+
+def test_vllm_config_resolve_max_num_batched_tokens_override():
+    """Explicit token budget is returned verbatim, ignoring the default product."""
+    config = VLLMConfig(max_num_seqs=8, max_num_batched_tokens=4096)
+    assert config.resolve_max_num_batched_tokens(1024) == 4096
+
+
+@pytest.mark.parametrize("level", [-1, 3, 99])
+def test_vllm_config_invalid_sleep_level_raises(level):
+    """``sleep_level`` outside {0, 1, 2} is rejected at construction."""
+    with pytest.raises(ValueError, match="sleep_level"):
+        VLLMConfig(sleep_level=level)
+
+
 def test_concatenate_experiences_into_batches():
     """concatenate_experiences_into_batches."""
     space = spaces.Box(0, 1, (3,))
