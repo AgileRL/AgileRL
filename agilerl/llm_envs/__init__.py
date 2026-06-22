@@ -7,7 +7,6 @@ from agilerl.llm_envs.base import (
 )
 from agilerl.llm_envs.dataset_env import DatasetEnv, PreferenceGym, SFTGym
 from agilerl.llm_envs.rollout_env import (
-    BatchIterationState,
     RolloutEnv,
     _default_prompt_builder,
     _extract_question_answer_columns,
@@ -26,7 +25,6 @@ requests = _search.requests
 
 __all__ = [
     "TIMEOUT",
-    "BatchIterationState",
     "BatchRolloutEnv",
     "DatasetEnv",
     "FormatRewardWrapper",

@@ -15,7 +15,6 @@ from transformers import AutoTokenizer
 from transformers.tokenization_utils_base import BatchEncoding
 
 from agilerl.llm_envs import (
-    BatchIterationState,
     DatasetEnv,
     PreferenceGym,
     RolloutEnv,
@@ -746,67 +745,97 @@ def test_apply_chat_template():
 
 
 def test_dataloader_shuffle_order_is_deterministic_permutation():
-    """The shuffle index list is deterministic and a full per-epoch permutation."""
+    """The shuffle index list is deterministic and a full permutation of the rows."""
     from agilerl.llm_envs import dataloader_shuffle_order
 
     dataset_size = 16
     seed = 7
-    epochs = 3
-    order = dataloader_shuffle_order(dataset_size, seed, epochs)
-    assert len(order) == dataset_size * epochs
-    # Each epoch slice is a full permutation of the dataset indices.
-    for start in range(0, len(order), dataset_size):
-        assert sorted(order[start : start + dataset_size]) == list(range(dataset_size))
+    order = dataloader_shuffle_order(dataset_size, seed)
+    assert len(order) == dataset_size
+    # One epoch's order is a full permutation of the dataset indices.
+    assert sorted(order) == list(range(dataset_size))
 
     # Deterministic per seed; a different seed produces a different shuffle.
-    assert order == dataloader_shuffle_order(dataset_size, seed, epochs)
-    assert order != dataloader_shuffle_order(dataset_size, seed + 1, epochs)
+    assert order == dataloader_shuffle_order(dataset_size, seed)
+    assert order != dataloader_shuffle_order(dataset_size, seed + 1)
 
 
-def test_batch_iteration_state_seed_maps_group_to_same_row():
-    """A reused per-row seed maps every group member to the same dataset row."""
-    from agilerl.llm_envs import BatchIterationState, dataloader_shuffle_order
+def _collect_batch_rows(vec, num_resets, seed):
+    """Reset ``vec`` ``num_resets`` times and return the per-batch-row dataset rows.
 
-    state = BatchIterationState(
-        shuffle_order=[5, 3, 9, 1],
-        seed=0,
-        dataset_size=4,
+    Returns a list (one entry per reset) of lists (one per batch row) of the
+    distinct dataset row each group resolved to. Asserts group row-consistency:
+    every trajectory within a batch row shares the same row.
+    """
+    per_reset_rows: list[list[int]] = []
+    for _ in range(num_resets):
+        vec.reset(seed=seed)
+        reset_rows: list[int] = []
+        for batch_idx in range(vec.batch_size):
+            group_rows = {
+                vec.trajectories[batch_idx * vec.group_size + g].env._last_row
+                for g in range(vec.group_size)
+            }
+            assert len(group_rows) == 1, "group trajectories must share one row"
+            reset_rows.append(group_rows.pop())
+        per_reset_rows.append(reset_rows)
+    return per_reset_rows
+
+
+def test_batch_rollout_env_shuffle_is_group_consistent_full_permutation():
+    """BatchRolloutEnv resolves one shuffled row per group; epochs are full perms."""
+    from agilerl.llm_envs import BatchRolloutEnv
+
+    dataset_size = 6
+    questions = [f"q{i}" for i in range(dataset_size)]
+    answers = [f"a{i}" for i in range(dataset_size)]
+
+    class _RowRecordingEnv(RolloutEnv):
+        def reset(self, seed=None, *, row_index=None):
+            prompt, info = super().reset(seed=seed, row_index=row_index)
+            self._last_row = row_index
+            return prompt, info
+
+    def _factory():
+        return _RowRecordingEnv(
+            questions=list(questions),
+            answers=list(answers),
+            reward_fn=lambda c, a, q: 0.0,
+            prompt_builder=lambda q: q,
+        )
+
+    # batch_size * resets spans two full epochs of the 6-row dataset.
+    batch_size, group_size = 3, 2
+    vec = BatchRolloutEnv(
+        env_factory=_factory, batch_size=batch_size, group_size=group_size
     )
-    # First sighting of a seed binds it to the current cursor; repeats return it.
-    first = state.position_for_seed(100)
-    repeat = state.position_for_seed(100)
-    assert first == repeat == 0
-    # A new seed advances the cursor.
-    second = state.position_for_seed(101)
-    assert second == 1
-    # ``row_index`` extends the order across epoch boundaries deterministically.
-    assert state.row_index(0) == 5
-    expected_epoch_two = dataloader_shuffle_order(4, 0, 2)
-    assert state.row_index(4) == expected_epoch_two[4]
+    per_reset_rows = _collect_batch_rows(vec, num_resets=4, seed=7)
 
+    # Flatten in cursor order: batch rows within a reset are consumed in order.
+    flat = [row for reset_rows in per_reset_rows for row in reset_rows]
+    assert len(flat) == 4 * batch_size  # 12 == two epochs of 6 rows
+    for start in range(0, len(flat), dataset_size):
+        epoch = flat[start : start + dataset_size]
+        assert sorted(epoch) == list(range(dataset_size)), "each epoch is a full perm"
 
-def test_rollout_shuffle_order_extends_without_rewriting_first_epoch():
-    """Row lookups past the first epoch append fresh epochs, never overwrite epoch 0."""
-    dataset_size, seed = 11, 7
-    state = BatchIterationState(
-        shuffle_order=dataloader_shuffle_order(dataset_size, seed, 1),
-        seed=seed,
-        dataset_size=dataset_size,
+    # Same seed reproduces the same row sequence.
+    vec_again = BatchRolloutEnv(
+        env_factory=_factory, batch_size=batch_size, group_size=group_size
     )
-    first_epoch = list(state.shuffle_order)
-    # Force the order to grow across the epoch boundary.
-    _ = state.row_index(dataset_size + 3)
-    assert state.shuffle_order[:dataset_size] == first_epoch
-    assert (
-        dataloader_shuffle_order(dataset_size, seed, state.epochs_built)
-        == (state.shuffle_order[: dataset_size * state.epochs_built])
+    again = _collect_batch_rows(vec_again, num_resets=4, seed=7)
+    assert again == per_reset_rows
+
+    # A different seed yields a different ordering.
+    vec_other = BatchRolloutEnv(
+        env_factory=_factory, batch_size=batch_size, group_size=group_size
     )
+    other = _collect_batch_rows(vec_other, num_resets=4, seed=8)
+    assert other != per_reset_rows
 
 
 def test_rollout_prompt_is_templated_and_reward_scores_once():
     """reset() returns the templated prompt; step() scores via reward_fn and ends."""
     questions, answers = ["2+2", "3+5"], ["4", "8"]
-    state = BatchIterationState(shuffle_order=[0, 1], seed=0, dataset_size=2)
 
     def reward_fn(completion, answer, _question):
         return 1.0 if answer in completion else 0.0
@@ -822,7 +851,7 @@ def test_rollout_prompt_is_templated_and_reward_scores_once():
         prompt_builder=prompt_builder,
     )
 
-    prompt, info = env.reset(seed=0, row_index=state.row_for_seed(0))
+    prompt, info = env.reset(seed=0, row_index=0)
     assert prompt == "Q: 2+2\nA:"
     assert info == {}
 
@@ -832,7 +861,7 @@ def test_rollout_prompt_is_templated_and_reward_scores_once():
     assert truncated is False
 
     # A wrong completion on the next row scores zero, still one turn.
-    next_prompt, _ = env.reset(seed=1, row_index=state.row_for_seed(1))
+    next_prompt, _ = env.reset(seed=1, row_index=1)
     assert next_prompt == "Q: 3+5\nA:"
     _, wrong_reward, terminated, _, _ = env.step("definitely 99")
     assert wrong_reward == 0.0

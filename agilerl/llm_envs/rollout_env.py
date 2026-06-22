@@ -9,18 +9,18 @@ into ``BatchRolloutEnv`` like any other rollout env, deriving a prompt builder
 from a conversation template via :func:`_default_prompt_builder` and pulling
 question/answer columns via :func:`_extract_question_answer_columns`.
 
-Dataset order is deterministic: the seeded shuffle is precomputed as an explicit
-index list (:func:`dataloader_shuffle_order`). A ``BatchRolloutEnv`` owns the
-shared cursor (:class:`BatchIterationState`) across its trajectories so a per-row
-seed selects one reproducible dataset row for every trajectory in its group.
-Batch/row order need only be deterministic and group-consistent, which is what
-grouped-advantage training relies on.
+Dataset order is deterministic: a ``BatchRolloutEnv`` owns the shared dataset
+cursor across its trajectories, re-drawing a seeded per-epoch shuffle
+(:func:`dataloader_shuffle_order`) at each epoch boundary so a per-row seed
+selects one reproducible dataset row for every trajectory in its group. Batch/row
+order need only be deterministic and group-consistent, which is what
+grouped-advantage training relies on. A standalone (eval) env owns no batch
+cursor and walks its active split sequentially.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
 from typing import Any
 
 import torch
@@ -31,164 +31,28 @@ from agilerl.llm_envs.base import LLMEnv
 def dataloader_shuffle_order(
     dataset_size: int,
     seed: int,
-    num_epochs: int,
 ) -> list[int]:
-    """Deterministic per-epoch shuffle of dataset row indices.
+    """Deterministic shuffle of dataset row indices for one epoch.
 
-    Each epoch is a fresh ``torch.randperm`` drawn from a single seeded generator,
-    and the epochs are concatenated. The result is reproducible for a given
-    ``seed`` and covers every row exactly once per epoch. The exact permutation
-    need not match any particular ``DataLoader``: grouped-advantage training only
-    needs the row order to be deterministic and group-consistent, not to mirror a
-    specific batch order.
+    A single ``torch.randperm`` drawn from a seeded generator. The result is
+    reproducible for a given ``seed`` and is a full permutation covering every row
+    exactly once. The exact permutation need not match any particular
+    ``DataLoader``: grouped-advantage training only needs the row order to be
+    deterministic and group-consistent, not to mirror a specific batch order.
+    ``BatchRolloutEnv`` calls this once per epoch (varying the seed per epoch).
 
     :param dataset_size: Number of rows in the dataset.
     :type dataset_size: int
     :param seed: Generator seed (matches the env seed).
     :type seed: int
-    :param num_epochs: How many epochs of ordering to materialize (>= 1).
-    :type num_epochs: int
-    :return: Flat list of dataset row indices, ``dataset_size * num_epochs`` long.
+    :return: Permutation of dataset row indices, ``dataset_size`` long.
     :rtype: list[int]
     """
     if dataset_size <= 0:
         msg = f"dataset_size must be > 0, got {dataset_size}."
         raise ValueError(msg)
-    epochs = max(1, num_epochs)
     generator = torch.Generator().manual_seed(seed)
-    order: list[int] = []
-    for _ in range(epochs):
-        order.extend(torch.randperm(dataset_size, generator=generator).tolist())
-    return order
-
-
-@dataclass
-class BatchIterationState:
-    """Shared dataset-iteration state for a group of dataset-backed rollout trajectories.
-
-    A ``BatchRolloutEnv`` builds one env per trajectory but seeds per batch row
-    (shared across the group). Sharing this state lets every trajectory draw from
-    one precomputed shuffle order and one monotonic cursor, so the row a given
-    ``reset(seed)`` selects is deterministic and group-consistent.
-
-    :param shuffle_order: Precomputed dataset row indices (see
-        :func:`dataloader_shuffle_order`).
-    :type shuffle_order: list[int]
-    :param seed: Generator seed used to build ``shuffle_order``.
-    :type seed: int
-    :param dataset_size: Rows in the dataset, used to extend the order lazily.
-    :type dataset_size: int
-    :param cursor: Next position to consume in ``shuffle_order``.
-    :type cursor: int
-    :param epochs_built: Epochs of ordering already materialized.
-    :type epochs_built: int
-    """
-
-    shuffle_order: list[int]
-    seed: int
-    dataset_size: int
-    cursor: int = 0
-    epochs_built: int = 1
-    _seed_to_position: dict[int, int] = field(default_factory=dict)
-
-    @classmethod
-    def from_dataset_size(
-        cls,
-        dataset_size: int,
-        seed: int = 42,
-    ) -> BatchIterationState:
-        """Build state with a first-epoch shuffle order over ``dataset_size`` rows.
-
-        :param dataset_size: Number of rows the shuffle order ranges over.
-        :type dataset_size: int
-        :param seed: Shuffle seed (shared across a trajectory group).
-        :type seed: int
-        :return: A fresh shared state seeded for one epoch.
-        :rtype: BatchIterationState
-        """
-        return cls(
-            shuffle_order=dataloader_shuffle_order(dataset_size, seed, 1),
-            seed=seed,
-            dataset_size=dataset_size,
-        )
-
-    @classmethod
-    def from_dataset(
-        cls,
-        dataset: Any,
-        seed: int = 42,
-        column: str = "question",
-    ) -> BatchIterationState:
-        """Build state with a first-epoch shuffle order over ``dataset``'s rows.
-
-        :param dataset: Dataset whose length sets the shuffle range.
-        :type dataset: Dataset
-        :param seed: Shuffle seed (shared across a trajectory group).
-        :type seed: int
-        :param column: Column used only to size the dataset when ``len`` is
-            unavailable; ignored otherwise.
-        :type column: str
-        :return: A fresh shared state seeded for one epoch.
-        :rtype: BatchIterationState
-        """
-        try:
-            dataset_size = len(dataset)
-        except TypeError:
-            dataset_size = len(dataset[column])
-        return cls.from_dataset_size(dataset_size, seed=seed)
-
-    def position_for_seed(self, seed: int | None) -> int:
-        """Map a reset seed to a dataset-order position, monotonic per unique seed.
-
-        ``BatchRolloutEnv`` reuses the same per-row seed across a group, so all
-        trajectories in a group must land on the same row. The first time a seed
-        is seen it is bound to the current cursor (which then advances); repeats of
-        that seed return the bound position. ``None`` always advances the cursor.
-
-        :param seed: The reset seed, or ``None`` for unconditioned advancement.
-        :type seed: int | None
-        :return: Index into ``shuffle_order`` for the selected row.
-        :rtype: int
-        """
-        if seed is not None and seed in self._seed_to_position:
-            return self._seed_to_position[seed]
-        position = self.cursor
-        self.cursor += 1
-        if seed is not None:
-            self._seed_to_position[seed] = position
-        return position
-
-    def row_for_seed(self, seed: int | None) -> int:
-        """Return the dataset row a reset ``seed`` selects.
-
-        Convenience over :meth:`position_for_seed` then :meth:`row_index`: it
-        binds (or reuses) the seed's position and resolves it to a row index.
-
-        :param seed: The reset seed, or ``None`` for unconditioned advancement.
-        :type seed: int | None
-        :return: Dataset row index for the selected position.
-        :rtype: int
-        """
-        return self.row_index(self.position_for_seed(seed))
-
-    def row_index(self, position: int) -> int:
-        """Return the dataset row at ``position``, extending the order if needed.
-
-        Extension appends whole epochs computed from ``seed`` so the originally
-        supplied first-epoch order is never overwritten (it may have been seeded
-        explicitly to mirror an existing dataloader).
-        """
-        while position >= len(self.shuffle_order):
-            self.epochs_built += 1
-            full = dataloader_shuffle_order(
-                self.dataset_size,
-                self.seed,
-                self.epochs_built,
-            )
-            self.shuffle_order.extend(
-                full[(self.epochs_built - 1) * self.dataset_size :]
-            )
-        return self.shuffle_order[position]
+    return torch.randperm(dataset_size, generator=generator).tolist()
 
 
 class RolloutEnv(LLMEnv):
@@ -244,10 +108,10 @@ class RolloutEnv(LLMEnv):
         self._turn = 0
         self._question: str = ""
         self._answer: str = ""
-        # Dataset cursor owned by ``BatchRolloutEnv`` when batched; built lazily
-        # here only for the standalone / eval path, per active split.
-        self._standalone_state: BatchIterationState | None = None
-        self._standalone_split: str = ""
+        # Dataset cursor owned by ``BatchRolloutEnv`` when batched; on the
+        # standalone / eval path the env walks its active split sequentially.
+        self._cursor = 0
+        self._cursor_split = ""
 
     @property
     def dataset_size(self) -> int:
@@ -268,7 +132,8 @@ class RolloutEnv(LLMEnv):
     ) -> tuple[str, dict[str, Any]]:
         """Select a dataset row and return its prompt text plus info.
 
-        :param seed: Optional reset seed; only consulted on the standalone path.
+        :param seed: Optional reset seed (unused on the standalone path, which
+            walks its split sequentially).
         :type seed: int | None
         :param row_index: Dataset row chosen by the owning ``BatchRolloutEnv``;
             when ``None`` the env resolves a row from its own per-split cursor.
@@ -282,13 +147,11 @@ class RolloutEnv(LLMEnv):
                 if self.evaluation_mode and self.test_questions is not None
                 else "train"
             )
-            if self._standalone_state is None or self._standalone_split != split:
-                self._standalone_state = BatchIterationState.from_dataset_size(
-                    len(questions),
-                    seed=42,
-                )
-                self._standalone_split = split
-            row_index = self._standalone_state.row_for_seed(seed)
+            if split != self._cursor_split:
+                self._cursor = 0
+                self._cursor_split = split
+            row_index = self._cursor
+            self._cursor += 1
         row = row_index % len(questions)
         self._question = questions[row]
         self._answer = answers[row]

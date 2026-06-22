@@ -8,8 +8,10 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
+from agilerl.llm_envs.rollout_env import dataloader_shuffle_order
+
 if TYPE_CHECKING:
-    from agilerl.llm_envs.rollout_env import BatchIterationState, RolloutEnv
+    from agilerl.llm_envs.rollout_env import RolloutEnv
     from agilerl.typing import ReasoningPrompts
 
 
@@ -190,7 +192,25 @@ class BatchRolloutEnv:
         self.batch_size = batch_size
         self.group_size = group_size
         self.trajectories = TrajectoryBuffer(batch_size, group_size)
-        self._iteration_state: BatchIterationState | None = None
+        self._cursor = 0
+        self._epoch_order: list[int] | None = None
+        self._dataset_size = 0
+        self._shuffle_seed = 0
+
+    def _next_row(self) -> int:
+        """Advance the shared dataset cursor and return the next (shuffled) row.
+
+        Re-shuffles deterministically at each epoch boundary so every row is seen
+        once per epoch; the seed makes the order reproducible.
+        """
+        epoch, pos = divmod(self._cursor, self._dataset_size)
+        if pos == 0:
+            self._epoch_order = dataloader_shuffle_order(
+                self._dataset_size, self._shuffle_seed + epoch
+            )
+        row = self._epoch_order[pos]
+        self._cursor += 1
+        return row
 
     def reset(
         self,
@@ -198,21 +218,19 @@ class BatchRolloutEnv:
     ) -> list[ReasoningPrompts] | None:
         """Reset all environments and initialize trajectories.
 
-        Seeds are assigned per batch row (same seed across groups). A shared
-        :class:`~agilerl.llm_envs.rollout_env.BatchIterationState` owns the
-        dataset cursor: each batch row resolves a single ``row_index`` (the
-        cursor advancing once per row), and every group env of that row is reset
-        with both the row seed and that one row, so the group is row-consistent.
-        Prompts are returned in stable ``(batch_idx, group_idx)`` order. Envs that
-        are not dataset-backed (``dataset_size == 0``) skip the cursor entirely.
+        Seeds are assigned per batch row (same seed across groups). The shared
+        dataset cursor resolves a single ``row_index`` per batch row (advancing
+        once per row, re-shuffling each epoch), and every group env of that row is
+        reset with both the row seed and that one row, so the group is
+        row-consistent. Prompts are returned in stable ``(batch_idx, group_idx)``
+        order. Envs that are not dataset-backed (``dataset_size == 0``) skip the
+        cursor entirely.
 
         :param seed: Optional base seed for deterministic rollouts.
         :type seed: int | None
         :return: Active prompt dictionaries after reset.
         :rtype: list[ReasoningPrompts] | None
         """
-        from agilerl.llm_envs.rollout_env import BatchIterationState
-
         seed_base = seed
         for batch_idx in range(self.batch_size):
             batch_seed = None if seed_base is None else seed_base + batch_idx
@@ -221,18 +239,16 @@ class BatchRolloutEnv:
                 env_idx = batch_idx * self.group_size + group_idx
                 if not self.trajectories.is_initialized:
                     env_i = self.env_factory(**self.env_config)
-                    # Build the shared cursor from the first env's dataset size,
-                    # before resolving any row, so all rows draw from one order.
+                    # Size the shared cursor from the first env's dataset, before
+                    # resolving any row, so all rows draw from one shuffle order.
                     # Envs that aren't dataset-backed (no ``dataset_size``, or 0)
                     # get no cursor and a reset without a ``row_index``.
                     ds_size = getattr(env_i, "dataset_size", 0)
-                    if self._iteration_state is None and ds_size > 0:
-                        self._iteration_state = BatchIterationState.from_dataset_size(
-                            ds_size,
-                            seed=seed if seed is not None else 42,
-                        )
-                    if group_idx == 0 and self._iteration_state is not None:
-                        row_index = self._iteration_state.row_for_seed(batch_seed)
+                    if self._dataset_size == 0 and ds_size > 0:
+                        self._dataset_size = ds_size
+                        self._shuffle_seed = seed if seed is not None else 42
+                    if group_idx == 0 and self._dataset_size > 0:
+                        row_index = self._next_row()
                     prompt_dict, _ = (
                         env_i.reset(seed=batch_seed, row_index=row_index)
                         if row_index is not None
@@ -248,8 +264,8 @@ class BatchRolloutEnv:
                         )
                     )
                 else:
-                    if group_idx == 0 and self._iteration_state is not None:
-                        row_index = self._iteration_state.row_for_seed(batch_seed)
+                    if group_idx == 0 and self._dataset_size > 0:
+                        row_index = self._next_row()
                     self.trajectories.reset_trajectory(
                         env_idx=env_idx,
                         seed=batch_seed,
