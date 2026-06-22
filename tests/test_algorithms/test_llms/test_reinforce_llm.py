@@ -1015,6 +1015,7 @@ class TestREINFORCETest:
 
             def __init__(self):
                 self._step_count = 0
+                self._env = None
 
             def reset(self, seed=None):
                 del seed

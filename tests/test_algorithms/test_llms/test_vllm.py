@@ -6,7 +6,7 @@ import torch
 pytest.importorskip("deepspeed", reason="LLM tests require deepspeed.")
 pytest.importorskip("vllm", reason="LLM tests require vllm.")
 
-from agilerl.llm_envs import RolloutEnv
+from agilerl.llm_envs import RolloutHarness
 from agilerl.utils.algo_utils import VLLMConfig
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.test_algorithms.test_llms.test_reinforce_llm import (
@@ -29,7 +29,7 @@ def _minimal_reasoning_gym(
     device: str, vocab_size: int, input_size: int, batch_size: int
 ):
     del batch_size  # single-turn rollout env: test() steps one prompt at a time
-    env = RolloutEnv.__new__(RolloutEnv)
+    env = RolloutHarness.__new__(RolloutHarness)
     env.max_turns = 1
 
     @contextmanager
