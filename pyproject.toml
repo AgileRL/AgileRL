@@ -59,7 +59,7 @@ llm = [
     "vllm>=0.23; sys_platform == 'linux'",
 ]
 arena = [
-    "agilerl-arena>=0.1.0",
+    "agilerl-arena==0.1.0.dev0",
 ]
 all = [
     "swig>=4.4.1; sys_platform != 'win32'",
@@ -71,7 +71,7 @@ all = [
     "peft==0.19.1",
     "transformers==5.11.0",
     "vllm>=0.23; sys_platform == 'linux'",
-    "agilerl-arena>=0.1.0",
+    "agilerl-arena==0.1.0.dev0",
 ]
 
 [dependency-groups]
