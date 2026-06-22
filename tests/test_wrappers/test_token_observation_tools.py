@@ -13,9 +13,21 @@ from typing import Any
 import pytest
 import torch
 
-from agilerl.llm_envs import RolloutHarness
+from agilerl.llm_envs import RolloutEnv, RolloutHarness
 
 _WIP = "pending tool-path wiring (engine / _align_sampling_logprobs)"
+
+
+def _rollout_env() -> RolloutEnv:
+    """A tiny dataset-backed :class:`RolloutEnv` with a held-out split."""
+    return RolloutEnv(
+        questions=["train-q"],
+        answers=["train-a"],
+        reward_fn=lambda c, a, q: 0.0,
+        prompt_builder=lambda q: q,
+        test_questions=["eval-q"],
+        test_answers=["eval-a"],
+    )
 
 
 def _bare_wrapper() -> RolloutHarness:
@@ -110,6 +122,81 @@ def test_tool_schema_injected_into_feedback_boundary() -> None:
     w.tokenizer = _RecordingTokenizer()
     w._chat_template_boundary_ids("tool result")
     assert w.tokenizer.last_tools == _TOOLS
+
+
+def test_format_obs_applies_prefix_and_suffix_from_info() -> None:
+    """``_format_obs`` wraps the observation with the info prefix/suffix; an empty
+    or absent info leaves the text untouched."""
+    assert RolloutHarness._format_obs("body", None) == "body"
+    assert RolloutHarness._format_obs("body", {}) == "body"
+    decorated = RolloutHarness._format_obs("body", {"prefix": "PRE:", "suffix": "SUF"})
+    assert decorated == "PRE:body\nSUF"
+
+
+def test_dataset_size_delegates_to_wrapped_env() -> None:
+    """``dataset_size`` reports the wrapped env's training-row count."""
+    inner = _rollout_env()
+    w = _bare_wrapper()
+    w._env = inner
+    assert w.dataset_size == inner.dataset_size == 1
+
+
+def test_evaluation_mode_getter_and_setter_forward_to_wrapped_env() -> None:
+    """The ``evaluation_mode`` getter reflects the wrapped env and the setter
+    writes through to it."""
+    inner = _rollout_env()
+    w = _bare_wrapper()
+    w._env = inner
+
+    assert w.evaluation_mode is False
+    inner.evaluation_mode = True
+    assert w.evaluation_mode is True
+
+    w.evaluation_mode = False
+    assert inner.evaluation_mode is False
+
+
+def test_eval_mode_enters_wrapped_env_eval_split() -> None:
+    """``eval_mode()`` enters the wrapped env's held-out split and restores after."""
+    inner = _rollout_env()
+    w = _bare_wrapper()
+    w._env = inner
+
+    with w.eval_mode():
+        assert inner.evaluation_mode is True
+    assert inner.evaluation_mode is False
+
+
+def test_reset_inner_forwards_row_index_when_wrapped_env_accepts_it() -> None:
+    """``_reset_inner`` passes ``row_index`` through to a wrapped env whose
+    ``reset`` declares the parameter, selecting that dataset row."""
+    inner = RolloutEnv(
+        questions=["q0", "q1"],
+        answers=["a0", "a1"],
+        reward_fn=lambda c, a, q: 0.0,
+        prompt_builder=lambda q: f"P:{q}",
+        test_questions=["q0", "q1"],
+        test_answers=["a0", "a1"],
+    )
+    w = _bare_wrapper()
+    w._env = inner
+    obs_text, info = w._reset_inner(seed=None, row_index=1)
+    assert obs_text == "P:q1"
+    assert info == {}
+
+
+def test_delegation_falls_back_when_wrapped_env_lacks_members() -> None:
+    """A wrapped object with no env interface degrades gracefully: a no-op
+    ``eval_mode``, a ``False`` ``evaluation_mode`` getter, and a no-op setter."""
+    w = _bare_wrapper()
+    w._env = object()
+
+    assert w.dataset_size == 0
+    assert w.evaluation_mode is False
+    with w.eval_mode():
+        pass  # nullcontext branch
+    w.evaluation_mode = True  # no-op: object() has no evaluation_mode attribute
+    assert w.evaluation_mode is False
 
 
 @pytest.mark.skip(reason=_WIP)

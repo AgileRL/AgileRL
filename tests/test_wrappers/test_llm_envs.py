@@ -16,11 +16,16 @@ from transformers.tokenization_utils_base import BatchEncoding
 
 from agilerl.llm_envs import (
     DatasetEnv,
+    LLMEnv,
     PreferenceGym,
     RolloutEnv,
     SFTGym,
     apply_chat_template,
     dataloader_shuffle_order,
+)
+from agilerl.llm_envs.rollout_env import (
+    _default_prompt_builder,
+    _extract_question_answer_columns,
 )
 from tests import TINY_LLM_FIXTURE_PATH
 
@@ -885,3 +890,136 @@ def test_rollout_eval_mode_draws_from_held_out_split():
 
     train_prompt, _ = env.reset(seed=1, row_index=0)
     assert train_prompt == "train-q"
+
+
+def test_dataloader_shuffle_order_rejects_empty_dataset():
+    """A non-positive dataset size has no valid permutation, so it is rejected."""
+    with pytest.raises(ValueError, match="dataset_size must be > 0"):
+        dataloader_shuffle_order(0, seed=0)
+
+
+def test_rollout_standalone_cursor_walks_split_and_resets_on_switch():
+    """With no ``row_index`` the env walks its active split via an internal cursor,
+    resetting the cursor when the train/eval split changes."""
+    env = RolloutEnv(
+        questions=["q0", "q1"],
+        answers=["a0", "a1"],
+        reward_fn=lambda c, a, q: 0.0,
+        prompt_builder=lambda q: q,
+        test_questions=["e0"],
+        test_answers=["ea0"],
+    )
+    # Standalone resets (row_index omitted) consume the train split sequentially,
+    # wrapping modulo the split length.
+    assert env.reset()[0] == "q0"
+    assert env.reset()[0] == "q1"
+    assert env.reset()[0] == "q0"  # wrapped back to the start of the split
+
+    # Switching to the eval split resets the per-split cursor to its start.
+    with env.eval_mode():
+        assert env.reset()[0] == "e0"
+
+    # Back on the train split the cursor restarts from the beginning.
+    assert env.reset()[0] == "q0"
+
+
+def test_extract_question_answer_columns_from_hf_style_dataset():
+    """Column access (``dataset["question"]``) is preferred for HF-style datasets."""
+
+    class _ColumnDataset:
+        def __init__(self):
+            self._cols = {"question": ["q0", "q1"], "answer": ["a0", "a1"]}
+
+        def __getitem__(self, key):
+            return self._cols[key]
+
+    questions, answers = _extract_question_answer_columns(_ColumnDataset())
+    assert questions == ["q0", "q1"]
+    assert answers == ["a0", "a1"]
+
+
+def test_extract_question_answer_columns_from_torch_style_dataset():
+    """A per-row ``torch``-style dataset (string indexing raises) is read row by row."""
+
+    class _RowDataset(Dataset):
+        def __init__(self):
+            self._rows = [
+                {"question": "q0", "answer": "a0"},
+                {"question": "q1", "answer": "a1"},
+            ]
+
+        def __len__(self):
+            return len(self._rows)
+
+        def __getitem__(self, index):
+            return self._rows[index]
+
+    questions, answers = _extract_question_answer_columns(_RowDataset())
+    assert questions == ["q0", "q1"]
+    assert answers == ["a0", "a1"]
+
+
+def test_default_prompt_builder_formats_and_joins_template():
+    """The builder formats each template message's content with the question
+    (answer blank, mirroring generation) and joins the non-empty parts."""
+    template = [
+        {"role": "system", "content": "Solve it."},
+        {"role": "user", "content": "Q: {question} A: {answer}"},
+        {"role": "assistant", "content": ""},  # empty render is dropped
+    ]
+    build = _default_prompt_builder(template)
+    assert build("2+2") == "Solve it.\nQ: 2+2 A: "
+
+
+def test_llm_env_close_is_a_noop_by_default():
+    """The base ``close`` releases nothing by default and returns ``None``."""
+
+    class _MinimalEnv(LLMEnv):
+        def reset(self, *args, **kwargs):
+            return None
+
+        def step(self, *args, **kwargs):
+            return None
+
+    assert _MinimalEnv().close() is None
+
+
+def test_preference_sft_back_compat_modules_reexport_dataset_env_subclasses():
+    """The back-compat shim modules re-export the descriptor-configured
+    :class:`DatasetEnv` subclasses."""
+    from agilerl.llm_envs.preference import PreferenceGym as ShimPreferenceGym
+    from agilerl.llm_envs.sft import SFTGym as ShimSFTGym
+
+    assert issubclass(ShimPreferenceGym, DatasetEnv)
+    assert issubclass(ShimSFTGym, DatasetEnv)
+    assert ShimPreferenceGym is PreferenceGym
+    assert ShimSFTGym is SFTGym
+
+
+def test_dataset_env_len_and_eval_mode_preserve_tokenized_prompts():
+    """``__len__`` reflects the active split and ``eval_mode`` saves/restores
+    ``last_tokenized_prompts`` around the held-out block."""
+    train_dataset = DummyPreferenceDataset(6)
+    test_dataset = DummyPreferenceDataset(2)
+    tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+    env = PreferenceGym(
+        train_dataset=train_dataset,
+        test_dataset=test_dataset,
+        tokenizer=tokenizer,
+        data_batch_size_per_gpu=2,
+    )
+
+    # Stand-in for prompts cached on a real training step; eval_mode must not
+    # clobber it for the surrounding train loop.
+    sentinel = {"input_ids": torch.tensor([[1, 2, 3]])}
+    env.last_tokenized_prompts = sentinel
+
+    assert len(env) == 6  # train split length (evaluation_mode is False)
+    with env.eval_mode():
+        assert env.evaluation_mode is True
+        assert len(env) == 2  # held-out split length
+    assert env.evaluation_mode is False
+    assert len(env) == 6  # restored to the train split
+
+    # The cached prompts survive the eval block (restored, equal by value).
+    assert torch.equal(env.last_tokenized_prompts["input_ids"], sentinel["input_ids"])
