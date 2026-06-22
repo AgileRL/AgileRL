@@ -91,6 +91,10 @@ class PPO(LLMAlgorithm):
     :type update_epochs: int, optional
     :param temperature: Sampling temperature for generation.
     :type temperature: float, optional
+    :param eval_temperature: Sampling temperature used during evaluation
+        (``training=False``).  A small value gives near-deterministic eval rollouts,
+        defaults to 0.01
+    :type eval_temperature: float, optional
     :param repetition_penalty: Repetition penalty used during generation.
     :type repetition_penalty: float, optional
     :param top_p: Nucleus sampling threshold.
@@ -173,6 +177,7 @@ class PPO(LLMAlgorithm):
         max_grad_norm: float = 1.0,
         update_epochs: int = 1,
         temperature: float = 1.0,
+        eval_temperature: float = 0.01,
         repetition_penalty: float = 1.0,
         top_p: float = 1.0,
         top_k: int = 50,
@@ -298,6 +303,7 @@ class PPO(LLMAlgorithm):
         self.gae_lambda = gae_lambda
         self.update_epochs = update_epochs
         self.temperature = temperature
+        self.eval_temperature = eval_temperature
         self.repetition_penalty = repetition_penalty
         self.top_p = top_p
         self.top_k = top_k
@@ -408,9 +414,7 @@ class PPO(LLMAlgorithm):
                 completion_ids, completion_masks = self._generate_with_vllm_colocate(
                     prompt_batch,
                     1,
-                    temperature=self.temperature
-                    if training
-                    else 0.01,  # Almost deterministic for evaluation
+                    temperature=self.temperature if training else self.eval_temperature,
                 )
 
         return completion_ids, completion_masks

@@ -87,6 +87,10 @@ class GRPO(LLMAlgorithm):
     :type group_size: int, optional
     :param temperature: Temperature, controls randomness of text generation
     :type temperature: float, optional
+    :param eval_temperature: Sampling temperature used during evaluation
+        (``training=False``).  A small value gives near-deterministic eval rollouts,
+        defaults to 0.01
+    :type eval_temperature: float, optional
     :param repetition_penalty: Repetition penalty used during generation, defaults to 1.0
     :type repetition_penalty: float, optional
     :param top_p: Top-p nucleus sampling threshold, defaults to 0.95
@@ -200,6 +204,7 @@ class GRPO(LLMAlgorithm):
         update_epochs: int = 1,
         group_size: int = 8,
         temperature: float = 0.9,
+        eval_temperature: float = 0.01,
         repetition_penalty: float = 1.0,
         top_p: float = 0.95,
         top_k: int = 50,
@@ -319,6 +324,7 @@ class GRPO(LLMAlgorithm):
         self.group_size = group_size
         self.beta = beta
         self.temperature = temperature
+        self.eval_temperature = eval_temperature
         self.repetition_penalty = repetition_penalty
         self.top_p = top_p
         self.top_k = top_k
@@ -504,9 +510,7 @@ class GRPO(LLMAlgorithm):
                 completion_ids, completion_masks = self._generate_with_vllm_colocate(
                     prompt_batch,
                     group_size,
-                    temperature=self.temperature
-                    if training
-                    else 0.01,  # Almost deterministic for evaluation
+                    temperature=self.temperature if training else self.eval_temperature,
                 )
 
         return completion_ids, completion_masks
