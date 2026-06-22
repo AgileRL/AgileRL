@@ -77,7 +77,7 @@ from gymnasium import spaces
 from torch import optim
 from typing import TYPE_CHECKING
 
-from agilerl import HAS_LLM_DEPENDENCIES, HAS_VLLM
+from agilerl import HAS_DEEPSPEED, HAS_LLM_DEPENDENCIES, HAS_VLLM
 from agilerl.algorithms.core.base import (
     EvolvableAlgorithm,
     LLMAlgorithm,
@@ -94,10 +94,8 @@ from agilerl.algorithms.grpo import GRPO
 
 from tests.test_algorithms.test_base import DummyMARLAlgorithm, DummyRLAlgorithm
 
-import importlib.util
-
 create_module = None
-if importlib.util.find_spec("deepspeed") and importlib.util.find_spec("vllm"):
+if HAS_DEEPSPEED and HAS_VLLM:
     # create_module lives in test_grpo, which importorskips deepspeed/vllm.
     from tests.test_algorithms.test_llms.test_grpo import create_module
 
@@ -106,7 +104,7 @@ pytest.importorskip("peft", reason="LLM checkpoint tests require peft.")
 pytest.importorskip("transformers", reason="LLM checkpoint tests require transformers.")
 
 deepspeed_config_stage_2 = None
-if importlib.util.find_spec("deepspeed") and importlib.util.find_spec("vllm"):
+if HAS_DEEPSPEED and HAS_VLLM:
     from tests.test_algorithms.test_llms.test_grpo import deepspeed_config_stage_2
 
 if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
@@ -3096,8 +3094,8 @@ def normalize_optimizer_state(value):
 
 def generate_tiny_grpo(accelerator=None) -> GRPO:
     """Build a tiny CPU GRPO agent with (actor, reference) adapters."""
-    if create_module is None:
-        pytest.skip("create_module needs the Linux-only deepspeed+vllm extras.")
+    if not (HAS_VLLM and HAS_DEEPSPEED):
+        pytest.skip("Need to install agilerl with deepspeed + vllm")
     actor = create_module(input_size=6, max_tokens=4, vocab_size=64, device="cpu")
     return GRPO(
         actor_network=actor,
@@ -3953,8 +3951,8 @@ def get_lora_config(
 
 def _build_grpo_with_lora(lora_config: LoraConfig) -> GRPO:
     """Like ``_build_grpo`` but lets the caller override ``lora_config``."""
-    if create_module is None:
-        pytest.skip("create_module needs the Linux-only deepspeed+vllm extras.")
+    if not (HAS_VLLM and HAS_DEEPSPEED):
+        pytest.skip("Need to install agilerl with deepspeed + vllm")
     actor = create_module(input_size=6, max_tokens=4, vocab_size=64, device="cpu")
     return GRPO(
         actor_network=actor,
