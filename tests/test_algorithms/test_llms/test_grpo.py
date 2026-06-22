@@ -36,6 +36,7 @@ from vllm import LLM
 
 from agilerl.algorithms import CISPO, GRPO, GSPO
 from agilerl.algorithms.core import ActionResult
+from agilerl.llm_envs import RolloutEnv
 from agilerl.algorithms.core.base import (
     EvolvableAlgorithm,
     LLMAlgorithm,
@@ -190,7 +191,7 @@ class DummyMLPPreTrainedModel(PreTrainedModel, GenerationMixin):
         return
 
 
-class DummyReasoningEnv:
+class DummyReasoningEnv(RolloutEnv):
     """Single-turn reasoning ``RolloutEnv`` stub for ``test()`` coverage."""
 
     max_turns = 1
@@ -4760,7 +4761,7 @@ class TestGRPOTest:
         accelerator_factory,
         model_factory,
     ):
-        class DummyMultiTurnEpisodeEnv:
+        class DummyMultiTurnEpisodeEnv(RolloutEnv):
             max_turns = 2
 
             def __init__(self):

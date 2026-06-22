@@ -19,6 +19,7 @@ from transformers.modeling_utils import PreTrainedModel
 
 from agilerl.algorithms.core import ActionResult
 from agilerl.algorithms.ppo_llm import PPO as LLMPPO
+from agilerl.llm_envs import RolloutEnv
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig
 from agilerl.utils.llm_utils import masked_whiten
 from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
@@ -1129,7 +1130,7 @@ class TestPPOFusedNoGradBaseRoutedReference:
 def _minimal_reasoning_rollout_env(device: str, vocab_size: int, input_size: int):
     """Single-turn reasoning ``RolloutEnv`` stub (the folded reasoning case)."""
 
-    class _SingleTurnReasoning:
+    class _SingleTurnReasoning(RolloutEnv):
         max_turns = 1
 
         def _prompt(self):
@@ -1181,7 +1182,7 @@ class TestPPOTest:
         assert out.item() == pytest.approx(1.0)
 
     def test_test_method_multiturn_episode_env_branch(self):
-        class DummyMultiTurnEpisodeEnv:
+        class DummyMultiTurnEpisodeEnv(RolloutEnv):
             max_turns = 2
 
             def __init__(self):
