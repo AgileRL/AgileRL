@@ -185,6 +185,10 @@ class GRPO(LLMAlgorithm):
         ``(B, T, V)`` and fusing only the rollout doesn't lower overall
         peak.
     :type use_fused_linear_logprobs: bool, optional
+    :param liger_chunk_size: Number of sequences per chunk in the Liger fused GRPO
+        loss.  Larger values trade memory for fewer kernel launches; only used when
+        ``use_liger_loss=True``, defaults to 1
+    :type liger_chunk_size: int, optional
     """
 
     def __init__(
@@ -239,6 +243,7 @@ class GRPO(LLMAlgorithm):
         reduce_memory_peak: bool = False,
         use_fused_linear_logprobs: bool = False,
         cast_logprobs_to_fp32: bool = True,
+        liger_chunk_size: int = 1,
     ) -> None:
         resolved_device = (
             f"cuda:{accelerator.process_index}"
@@ -325,6 +330,7 @@ class GRPO(LLMAlgorithm):
         self.beta = beta
         self.temperature = temperature
         self.eval_temperature = eval_temperature
+        self.liger_chunk_size = liger_chunk_size
         self.repetition_penalty = repetition_penalty
         self.top_p = top_p
         self.top_k = top_k
@@ -1087,7 +1093,7 @@ class GRPO(LLMAlgorithm):
             self.temperature,
             None,
             reference_log_probs is not None,  # use_ref_model
-            1,  # chunk_size
+            self.liger_chunk_size,  # chunk_size
             None,
         )
 
