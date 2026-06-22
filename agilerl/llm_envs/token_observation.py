@@ -89,14 +89,14 @@ class TokenObservationWrapper(RolloutEnv):
     def _tokenize_initial_prompt(self, obs_text: str) -> dict[str, torch.Tensor]:
         """Tokenize the initial observation, optionally with chat template."""
         if self.apply_chat_template:
-            tmpl_kwargs: dict[str, Any] = {}
+            chat_template_kwargs: dict[str, Any] = {}
             if self.tools is not None:
-                tmpl_kwargs["tools"] = self.tools
+                chat_template_kwargs["tools"] = self.tools
             result = self.tokenizer.apply_chat_template(
                 [{"role": "user", "content": obs_text}],
                 tokenize=True,
                 add_generation_prompt=True,
-                **tmpl_kwargs,
+                **chat_template_kwargs,
             )
             # Transformers v5 apply_chat_template returns a dict
             token_ids = result["input_ids"]
@@ -181,15 +181,15 @@ class TokenObservationWrapper(RolloutEnv):
             {"role": "assistant", "content": placeholder},
             {"role": "user", "content": feedback_text},
         ]
-        tmpl_kwargs: dict[str, Any] = {}
+        chat_template_kwargs: dict[str, Any] = {}
         if self.tools is not None:
-            tmpl_kwargs["tools"] = self.tools
+            chat_template_kwargs["tools"] = self.tools
         try:
             rendered = self.tokenizer.apply_chat_template(
                 messages,
                 tokenize=False,
                 add_generation_prompt=True,
-                **tmpl_kwargs,
+                **chat_template_kwargs,
             )
         except Exception:
             return None
