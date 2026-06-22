@@ -36,7 +36,7 @@ else:
     BitsAndBytesConfig = Any  # type: ignore[assignment,misc]
 
 _DEPRECATED_LLM_ENV_NAMES = frozenset(
-    ("apply_chat_template", "ReasoningGym", "PreferenceGym", "SFTGym"),
+    ("apply_chat_template", "PreferenceGym", "SFTGym"),
 )
 
 # Named bitsandbytes quantization presets

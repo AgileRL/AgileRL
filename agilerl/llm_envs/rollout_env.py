@@ -3,10 +3,11 @@
 A :class:`RolloutEnv` is the generation half of the env taxonomy: the model
 generates a completion to a dataset-seeded prompt and the env scores it with a
 ``reward_fn``. Reasoning is the degenerate ``max_turns=1`` configuration — a
-plain :class:`RolloutEnv` instance, no subclass. :func:`make_reasoning_rollout_env`
-builds one and wraps it in
+plain :class:`RolloutEnv` instance, no subclass. Callers wrap it in
 :class:`~agilerl.llm_envs.token_observation.TokenObservationWrapper` so it plugs
-into ``BatchRolloutEnv`` like any other rollout env.
+into ``BatchRolloutEnv`` like any other rollout env, deriving a prompt builder
+from a conversation template via :func:`_default_prompt_builder` and pulling
+question/answer columns via :func:`_extract_question_answer_columns`.
 
 Dataset order is deterministic: the seeded shuffle is precomputed as an explicit
 index list (:func:`dataloader_shuffle_order`). A ``BatchRolloutEnv`` owns the
@@ -20,17 +21,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import torch
 
 from agilerl.llm_envs.base import LLMEnv
-
-if TYPE_CHECKING:
-    from datasets import Dataset
-    from transformers import AutoTokenizer
-
-    from agilerl.llm_envs.token_observation import TokenObservationWrapper
 
 
 def dataloader_shuffle_order(
@@ -204,8 +199,8 @@ class RolloutEnv(LLMEnv):
     the env scores it via ``reward_fn(completion, answer, question)`` on the decoded
     generation. Multi-turn / tool-using rollouts subclass this and override
     :meth:`step`. Wrapped by
-    :class:`~agilerl.llm_envs.token_observation.TokenObservationWrapper` (via
-    :func:`make_reasoning_rollout_env`) to participate in the rollout taxonomy.
+    :class:`~agilerl.llm_envs.token_observation.TokenObservationWrapper` to
+    participate in the rollout taxonomy.
 
     :param max_turns: Number of generation turns before the episode terminates.
     :type max_turns: int
@@ -342,86 +337,3 @@ def _default_prompt_builder(
         return "\n".join(part for part in rendered if part)
 
     return build
-
-
-def make_reasoning_rollout_env(
-    train_dataset: Dataset,
-    test_dataset: Dataset,
-    tokenizer: AutoTokenizer,
-    reward_fn: Callable[[str, str, str], float],
-    *,
-    prompt_builder: Callable[[str], str] | None = None,
-    conversation_template: list[dict[str, str]] | None = None,
-    evaluation_mode: bool = False,
-    seed: int = 42,
-    max_model_len: int | None = None,
-    max_output_tokens: int | None = None,
-) -> TokenObservationWrapper:
-    """Build a single-turn reasoning ``RolloutEnv`` wrapped for token rollouts.
-
-    The returned wrapper exposes the rollout-env surface (``reset`` ->
-    ``(obs_dict, info)``, ``step(full_completion_ids)`` -> 5-tuple,
-    ``get_episode_data``) that ``BatchRolloutEnv`` drives. When driven by a
-    ``BatchRolloutEnv`` the dataset cursor is owned there, so the same per-row
-    seed selects one reproducible row for every env in a trajectory group.
-
-    :param train_dataset: Training dataset with ``question`` / ``answer`` columns.
-    :type train_dataset: Dataset
-    :param test_dataset: Held-out dataset (used when ``evaluation_mode``).
-    :type test_dataset: Dataset
-    :param tokenizer: Tokenizer used for chat-templating and decoding.
-    :type tokenizer: AutoTokenizer
-    :param reward_fn: ``(completion, answer, question) -> float`` scorer.
-    :type reward_fn: Callable[[str, str, str], float]
-    :param prompt_builder: Optional explicit question->prompt-text function;
-        defaults to one derived from ``conversation_template``.
-    :type prompt_builder: Callable[[str], str] | None
-    :param conversation_template: Template used to build ``prompt_builder`` when
-        the latter is not given.
-    :type conversation_template: list[dict[str, str]] | None
-    :param evaluation_mode: Draw from ``test_dataset`` instead of ``train_dataset``.
-    :type evaluation_mode: bool
-    :param seed: Shuffle seed (shared across a trajectory group).
-    :type seed: int
-    :param max_model_len: Optional context window forwarded to the wrapper.
-    :type max_model_len: int | None
-    :param max_output_tokens: Optional generation cap forwarded to the wrapper.
-    :type max_output_tokens: int | None
-    :return: A token-observation-wrapped single-turn reasoning env.
-    :rtype: TokenObservationWrapper
-    """
-    from agilerl.llm_envs.token_observation import TokenObservationWrapper
-
-    train_questions, train_answers = _extract_question_answer_columns(train_dataset)
-    test_questions, test_answers = _extract_question_answer_columns(test_dataset)
-
-    if prompt_builder is None:
-        if conversation_template is None:
-            msg = "Provide either prompt_builder or conversation_template."
-            raise ValueError(msg)
-        prompt_builder = _default_prompt_builder(conversation_template)
-
-    raw_env = RolloutEnv(
-        max_turns=1,
-        questions=train_questions,
-        answers=train_answers,
-        reward_fn=reward_fn,
-        prompt_builder=prompt_builder,
-        test_questions=test_questions,
-        test_answers=test_answers,
-    )
-    raw_env.evaluation_mode = evaluation_mode
-    pad_id = getattr(tokenizer, "pad_token_id", None)
-    wrapper = TokenObservationWrapper(
-        raw_env,
-        tokenizer=tokenizer,
-        max_turns=1,
-        pad_id=pad_id,
-        apply_chat_template=True,
-        max_model_len=max_model_len,
-        max_output_tokens=max_output_tokens,
-    )
-    # Surface ``eval_mode`` so ``agent.test`` evaluates on the held-out split
-    # (the trainer reuses the same factory/config for train and test envs).
-    wrapper.eval_mode = raw_env.eval_mode
-    return wrapper

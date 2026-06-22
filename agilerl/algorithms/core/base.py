@@ -4328,7 +4328,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             self.actor.train(mode=not eval_mode)
             num_samples = ids.shape[0]
             if attention_mask is None:
-                # TODO this calc is avoided when using PreferenceGym, need to make ReasoningGym do the same
+                # TODO this calc is avoided when using PreferenceGym; generation
+                # (RolloutEnv) rollouts should supply an attention mask too
                 attention_mask = ids != self.pad_token_id
             if self.calc_position_embeddings:
                 position_ids = self._position_ids_from_mask(attention_mask)

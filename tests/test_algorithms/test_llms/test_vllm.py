@@ -6,8 +6,8 @@ import torch
 pytest.importorskip("deepspeed", reason="LLM tests require deepspeed.")
 pytest.importorskip("vllm", reason="LLM tests require vllm.")
 
+from agilerl.llm_envs import RolloutEnv
 from agilerl.utils.algo_utils import VLLMConfig
-from agilerl.utils.llm_utils import ReasoningGym
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.test_algorithms.test_llms.test_reinforce_llm import (
     generate_reinforce,
@@ -28,7 +28,7 @@ def reinforce_factory():
 def _minimal_reasoning_gym(
     device: str, vocab_size: int, input_size: int, batch_size: int
 ):
-    env = ReasoningGym.__new__(ReasoningGym)
+    env = RolloutEnv.__new__(RolloutEnv)
 
     @contextmanager
     def eval_mode():

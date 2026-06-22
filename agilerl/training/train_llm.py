@@ -16,7 +16,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.llm_envs import (
     BatchRolloutEnv,
-    HuggingFaceGym,
+    DatasetEnv,
     PreferenceGym,
     RolloutEnv,
     SFTGym,
@@ -411,19 +411,19 @@ def build_eval_wandb_dict(
 
 def _resolve_training_envs(
     pop: PopulationType,
-    env: HuggingFaceGym | RolloutEnv | None,
-    env_fn: Callable[[], HuggingFaceGym] | None,
-) -> tuple[list[HuggingFaceGym], bool]:
+    env: DatasetEnv | RolloutEnv | None,
+    env_fn: Callable[[], DatasetEnv | RolloutEnv] | None,
+) -> tuple[list[DatasetEnv | RolloutEnv], bool]:
     """Resolve shared or per-agent training environments.
 
     :param pop: Population of agents being trained.
     :type pop: PopulationType
     :param env: Shared environment instance.
-    :type env: HuggingFaceGym | None
+    :type env: DatasetEnv | RolloutEnv | None
     :param env_fn: Factory for creating one environment per agent.
-    :type env_fn: Callable[[], HuggingFaceGym | RolloutEnv] | None
+    :type env_fn: Callable[[], DatasetEnv | RolloutEnv] | None
     :return: Environment list (aligned with population) and whether env_fn mode is active.
-    :rtype: tuple[list[HuggingFaceGym], bool]
+    :rtype: tuple[list[DatasetEnv | RolloutEnv], bool]
     """
     if env is not None and env_fn is not None:
         msg = "Provide exactly one of 'env' or 'env_fn', not both."
@@ -444,7 +444,9 @@ def _resolve_training_envs(
     return [env], False
 
 
-def _num_epochs_reached(envs: list[HuggingFaceGym], num_epochs: int | None) -> bool:
+def _num_epochs_reached(
+    envs: list[DatasetEnv | RolloutEnv], num_epochs: int | None
+) -> bool:
     """Check whether all active environments have reached the epoch budget."""
     if num_epochs is None:
         return False

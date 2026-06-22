@@ -9,7 +9,12 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_llm import finetune_llm_multiturn
 from agilerl.utils.algo_utils import VLLMConfig
-from agilerl.llm_envs import make_reasoning_rollout_env
+from agilerl.llm_envs import (
+    RolloutEnv,
+    TokenObservationWrapper,
+    _default_prompt_builder,
+    _extract_question_answer_columns,
+)
 from agilerl.utils.utils import create_population
 
 if HAS_LLM_DEPENDENCIES:
@@ -126,16 +131,28 @@ def main(init_hp, mut_p):
     # owns the dataset cursor, keeping each GRPO group's dataset order
     # deterministic and consistent.
     def env_factory(evaluation_mode: bool = False):
-        return make_reasoning_rollout_env(
-            train_dataset=train_dataset,
-            test_dataset=test_dataset,
-            tokenizer=tokenizer,
+        train_questions, train_answers = _extract_question_answer_columns(train_dataset)
+        test_questions, test_answers = _extract_question_answer_columns(test_dataset)
+        raw_env = RolloutEnv(
+            max_turns=1,
+            questions=train_questions,
+            answers=train_answers,
             reward_fn=combined_rewards,
-            conversation_template=conversation_template,
-            evaluation_mode=evaluation_mode,
-            seed=42,
+            prompt_builder=_default_prompt_builder(conversation_template),
+            test_questions=test_questions,
+            test_answers=test_answers,
+        )
+        raw_env.evaluation_mode = evaluation_mode
+        wrapper = TokenObservationWrapper(
+            raw_env,
+            tokenizer=tokenizer,
+            max_turns=1,
+            pad_id=getattr(tokenizer, "pad_token_id", None),
+            apply_chat_template=True,
             max_model_len=init_hp["MAX_MODEL_LEN"],
         )
+        wrapper.eval_mode = raw_env.eval_mode
+        return wrapper
 
     hp_config = HyperparameterConfig(
         beta=RLParameter(min=mut_p["MIN_BETA"], max=mut_p["MAX_BETA"]),

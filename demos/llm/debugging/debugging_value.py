@@ -14,8 +14,104 @@ from llm_debug_utils import lora_config_from_dict
 from tiny_model import TinyDigitTokenizer, build_tiny_actor_network
 
 from agilerl.algorithms import LLMPPO
-from agilerl.llm_envs import ReasoningGym
+from agilerl.llm_envs import DatasetEnv, apply_chat_template
 from agilerl.utils.algo_utils import stack_and_pad_experiences
+
+
+def _reasoning_collate_builder(env, tokenizer, max_context_length=None):
+    """Collate ``(question, answer)`` rows into chat-templated token prompts."""
+    del max_context_length
+
+    def collate_fn(batch):
+        questions = [item["question"] for item in batch]
+        answers = [item["answer"] for item in batch]
+        tokenized_prompts = [
+            apply_chat_template(env.conversation_template, q, a, tokenizer)
+            for q, a in zip(questions, answers, strict=False)
+        ]
+        return {
+            "question": questions,
+            "answer": answers,
+            "tokenized_prompts": tokenized_prompts,
+        }
+
+    return collate_fn
+
+
+class ReasoningProbeEnv(DatasetEnv):
+    """Single-turn reasoning env that scores decoded completions via ``reward_fn``.
+
+    Reproduces the batched tokenized-prompt surface this value-head probe drives:
+    ``reset`` returns a list of prompt dicts and ``step`` decodes the generated
+    completions and returns ``(next_prompts, rewards)``.
+    """
+
+    def __init__(
+        self,
+        train_dataset,
+        test_dataset,
+        tokenizer,
+        reward_fn,
+        conversation_template,
+        data_batch_size_per_gpu=8,
+        accelerator=None,
+        max_context_length=None,
+        seed=42,
+    ) -> None:
+        self.conversation_template = conversation_template
+        self.reward_fn = reward_fn
+        super().__init__(
+            train_dataset,
+            test_dataset,
+            tokenizer,
+            required_columns={"question", "answer"},
+            collate_builder=_reasoning_collate_builder,
+            data_batch_size_per_gpu=data_batch_size_per_gpu,
+            accelerator=accelerator,
+            max_context_length=max_context_length,
+            seed=seed,
+        )
+
+    def reset(self, reset_dataloaders: bool = False):
+        prompts = super().reset(reset_dataloaders)
+        self.last_tokenized_prompts = prompts
+        return prompts
+
+    def step(self, completions):
+        self.reset_called = False
+        rewards = self._decode_and_evaluate(completions)
+        new_prompts = self._get_next_batch()
+        self.last_tokenized_prompts = new_prompts
+        return new_prompts, rewards
+
+    def _get_next_batch(self):
+        batch = super()._get_next_batch()
+        self.questions = batch["question"]
+        self.answers = batch["answer"]
+        return [
+            {
+                "input_ids": prompt["input_ids"],
+                "attention_mask": prompt["attention_mask"],
+                "text": None,
+            }
+            for prompt in batch["tokenized_prompts"]
+        ]
+
+    def _decode_and_evaluate(self, completions):
+        total_rewards = []
+        for idx, (group_completion, answer, question) in enumerate(
+            zip(completions, self.answers, self.questions, strict=False),
+        ):
+            completion_to_decode = group_completion[
+                :,
+                self.last_tokenized_prompts[idx]["input_ids"].shape[1] :,
+            ]
+            decoded = self.tokenizer.batch_decode(
+                completion_to_decode,
+                skip_special_tokens=True,
+            )
+            total_rewards.append([self.reward_fn(c, answer, question) for c in decoded])
+        return torch.tensor(total_rewards)
 
 
 def constant_reward_factory(value: float):
@@ -74,7 +170,7 @@ def main(cfg: dict) -> None:
         {"role": "assistant", "content": ""},
     ]
 
-    env = ReasoningGym(
+    env = ReasoningProbeEnv(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
@@ -83,7 +179,6 @@ def main(cfg: dict) -> None:
         data_batch_size_per_gpu=int(dbg["data_batch_size_per_gpu"]),
         accelerator=None,
         max_context_length=max_ctx,
-        return_raw_completions=False,
         seed=0,
     )
 

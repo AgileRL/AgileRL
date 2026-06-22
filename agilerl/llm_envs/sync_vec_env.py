@@ -134,9 +134,11 @@ class TrajectoryBuffer:
                 f"{env_idx} not in [0, {len(self.trajectories) - 1}]"
             )
             raise IndexError(msg)
-        prompt_dict, _ = self.trajectories[env_idx].env.reset(
-            seed=seed,
-            row_index=row_index,
+        env = self.trajectories[env_idx].env
+        prompt_dict, _ = (
+            env.reset(seed=seed, row_index=row_index)
+            if row_index is not None
+            else env.reset(seed=seed)
         )
         self.trajectories[env_idx].prompt = prompt_dict
         self.trajectories[env_idx].done = False
@@ -221,14 +223,21 @@ class BatchRolloutEnv:
                     env_i = self.env_factory(**self.env_config)
                     # Build the shared cursor from the first env's dataset size,
                     # before resolving any row, so all rows draw from one order.
-                    if self._iteration_state is None and env_i.dataset_size > 0:
+                    # Envs that aren't dataset-backed (no ``dataset_size``, or 0)
+                    # get no cursor and a reset without a ``row_index``.
+                    ds_size = getattr(env_i, "dataset_size", 0)
+                    if self._iteration_state is None and ds_size > 0:
                         self._iteration_state = BatchIterationState.from_dataset_size(
-                            env_i.dataset_size,
+                            ds_size,
                             seed=seed if seed is not None else 42,
                         )
                     if group_idx == 0 and self._iteration_state is not None:
                         row_index = self._iteration_state.row_for_seed(batch_seed)
-                    prompt_dict, _ = env_i.reset(seed=batch_seed, row_index=row_index)
+                    prompt_dict, _ = (
+                        env_i.reset(seed=batch_seed, row_index=row_index)
+                        if row_index is not None
+                        else env_i.reset(seed=batch_seed)
+                    )
                     self.trajectories.add_trajectory(
                         Trajectory(
                             env=env_i,

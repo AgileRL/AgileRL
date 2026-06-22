@@ -26,7 +26,6 @@ from agilerl.utils.algo_utils import DummyOptimizer
 from agilerl.utils import llm_utils as llm_utils_module
 from agilerl.utils.llm_utils import (
     PreferenceGym,
-    ReasoningGym,
     adapt_lora_config_for_model,
     align_deepspeed_lr,
     build_bnb_quantization_config,
@@ -78,13 +77,6 @@ from agilerl.utils.llm_utils import (
     calculate_k3_kl,
     validate_importance_sampling_level,
 )
-
-DUMMY_CONVERSATION_TEMPLATE = [
-    {
-        "role": "system",
-        "content": "question: {question}\nanswer: {answer}",
-    },
-]
 
 
 class TestStitchCompletionAfterWindowedHfGenerate:
@@ -224,34 +216,6 @@ class Info:
         self.dataset_name = name
 
 
-class DummyReasoningDataset:
-    def __init__(self, num_samples):
-        # Create dummy questions and answers
-        self.questions = [f"This is question {i}?" for i in range(num_samples)]
-        self.answers = [f"This is answer {i}." for i in range(num_samples)]
-        self.features = {"question": self.questions, "answer": self.answers}
-        self.info = Info("dummy_dataset")
-
-    def __len__(self):
-        return len(self.questions)
-
-    def __getitem__(self, index):
-        return {"question": self.questions[index], "answer": self.answers[index]}
-
-    def filter(self, fn):
-        keep_indices = [
-            i
-            for i in range(len(self))
-            if fn({"question": self.questions[i], "answer": self.answers[i]})
-        ]
-        filtered = DummyReasoningDataset(0)
-        filtered.questions = [self.questions[i] for i in keep_indices]
-        filtered.answers = [self.answers[i] for i in keep_indices]
-        filtered.features = {"question": filtered.questions, "answer": filtered.answers}
-        filtered.info = self.info
-        return filtered
-
-
 class DummyPreferenceDataset:
     def __init__(self, num_samples):
         self.prompt = [f"This is prompt {i}." for i in range(num_samples)]
@@ -299,28 +263,6 @@ class DummyPreferenceDataset:
         return filtered
 
 
-def dummy_reward_fn(*args, **kwargs):
-    return 1.0
-
-
-def dummy_chat_template_fn_custom(q, a, tokenizer):
-    """Chat template function for test_reasoning_gym_reset_dataloaders, gives unique input_ids for each question so
-    we can test equality.
-    """
-    index = int(q.split(" ")[-1][0])
-    return {
-        "input_ids": torch.tensor([index]),
-        "attention_mask": torch.ones(1),
-    }
-
-
-def dummy_chat_template_fn(q, a, tokenizer):
-    return {
-        "input_ids": torch.randint(0, 1000, (1, 356)),
-        "attention_mask": torch.ones(1, 356),
-    }
-
-
 @pytest.fixture(scope="function")
 def accelerator_factory():
     def generate_accelerator(use_accelerator):
@@ -331,325 +273,10 @@ def accelerator_factory():
 
 
 @pytest.fixture
-def reasoning_dataset(num_samples):
-    train_dataset = DummyReasoningDataset(int(num_samples * 0.8))
-    test_dataset = DummyReasoningDataset(int(num_samples * 0.2))
-    return train_dataset, test_dataset
-
-
-@pytest.fixture
 def preference_dataset(num_samples):
     train_dataset = DummyPreferenceDataset(int(num_samples * 0.8))
     test_dataset = DummyPreferenceDataset(int(num_samples * 0.2))
     return train_dataset, test_dataset
-
-
-class TestReasoningGymInit:
-    @pytest.mark.parametrize("num_samples", [200])
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    def test_reasoning_gym_init(
-        self,
-        reasoning_dataset,
-        accelerator_factory,
-        num_samples,
-        use_accelerator,
-    ):
-        train_dataset, test_dataset = reasoning_dataset
-        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
-        data_batch_size = 8
-        env = ReasoningGym(
-            train_dataset=train_dataset,
-            test_dataset=test_dataset,
-            tokenizer=tokenizer,
-            reward_fn=dummy_reward_fn,
-            conversation_template=DUMMY_CONVERSATION_TEMPLATE,
-            data_batch_size_per_gpu=data_batch_size,
-            accelerator=accelerator_factory(use_accelerator),
-        )
-        assert env.name == "dummy_dataset"
-        assert callable(env.reward_fn)
-        assert hasattr(env, "tokenizer")
-        assert env.tokenizer is not None
-        assert isinstance(env.train_dataloader, DataLoader)
-        assert isinstance(env.test_dataloader, DataLoader)
-        assert list(next(env.train_dataloader_iter).keys()) == [
-            "question",
-            "answer",
-            "tokenized_prompts",
-        ]
-        assert env.dataloader == env.train_dataloader_iter
-        assert not env.reset_called
-        assert not env.evaluation_mode
-        assert env.data_batch_size_per_gpu == data_batch_size
-
-    def test_reasoning_gym_max_context_length_warning(self):
-        train_dataset = Datasets.from_dict(
-            {
-                "question": [
-                    "This is a prompt that is longer than the max context length. This prompt really is a lot longer than the other one.",
-                    "This is a prompt that is shorter.",
-                ],
-                "answer": ["This is an answer.", "This is an answer."],
-            },
-        )
-        test_dataset = Datasets.from_dict(
-            {
-                "question": ["This is a normal length prompt"],
-                "answer": ["This is an answer."],
-            },
-        )
-        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
-        data_batch_size = 8
-        with pytest.warns(
-            UserWarning,
-            match=r"1 samples were filtered out of the train dataset due to the max context length constraint.",
-        ):
-            env = ReasoningGym(
-                train_dataset=train_dataset,
-                test_dataset=test_dataset,
-                tokenizer=tokenizer,
-                reward_fn=dummy_reward_fn,
-                conversation_template=DUMMY_CONVERSATION_TEMPLATE,
-                data_batch_size_per_gpu=data_batch_size,
-                max_context_length=10,
-            )
-        assert len(env.train_dataloader) == 1
-        assert len(env.test_dataloader) == 1
-
-
-class TestReasoningGymStep:
-    @pytest.mark.parametrize("num_samples", [200])
-    @pytest.mark.parametrize("eval_mode", [True, False])
-    def test_reasoning_gym_step(
-        self,
-        reasoning_dataset,
-        num_samples,
-        eval_mode,
-    ):
-        train_dataset, test_dataset = reasoning_dataset
-        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
-        data_batch_size = 8
-        env = ReasoningGym(
-            train_dataset=train_dataset,
-            test_dataset=test_dataset,
-            tokenizer=tokenizer,
-            reward_fn=dummy_reward_fn,
-            conversation_template=DUMMY_CONVERSATION_TEMPLATE,
-            data_batch_size_per_gpu=data_batch_size,
-        )
-        env.evaluation_mode = eval_mode
-        env.reset()
-        completions = [
-            torch.randint(0, 1000, (10, 356)) for _ in range(data_batch_size)
-        ]
-        tokenized_prompts, rewards = env.step(completions)
-        assert isinstance(tokenized_prompts, list)
-        assert isinstance(rewards, torch.Tensor)
-        assert len(tokenized_prompts) > 0
-        assert isinstance(tokenized_prompts[0]["input_ids"], torch.Tensor)
-        assert isinstance(tokenized_prompts[0]["attention_mask"], torch.Tensor)
-
-
-class TestReasoningGymReset:
-    @pytest.mark.parametrize("num_samples", [200])
-    @pytest.mark.parametrize("reset_dataloaders", [True, False])
-    def test_reasoning_gym_reset(
-        self,
-        reasoning_dataset,
-        num_samples,
-        reset_dataloaders,
-    ):
-        train_dataset, test_dataset = reasoning_dataset
-        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
-        data_batch_size = 8
-        env = ReasoningGym(
-            train_dataset=train_dataset,
-            test_dataset=test_dataset,
-            tokenizer=tokenizer,
-            reward_fn=dummy_reward_fn,
-            conversation_template=DUMMY_CONVERSATION_TEMPLATE,
-            data_batch_size_per_gpu=data_batch_size,
-        )
-        tokenized_prompts = env.reset(reset_dataloaders)
-        assert isinstance(tokenized_prompts, list)
-        assert len(tokenized_prompts) > 0
-        assert isinstance(tokenized_prompts[0]["input_ids"], torch.Tensor)
-        assert isinstance(tokenized_prompts[0]["attention_mask"], torch.Tensor)
-
-    @pytest.mark.parametrize("num_samples", [200])
-    def test_reset_warning(self, reasoning_dataset, num_samples):
-        train_dataset, test_dataset = reasoning_dataset
-        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
-        data_batch_size = 8
-        env = ReasoningGym(
-            train_dataset=train_dataset,
-            test_dataset=test_dataset,
-            tokenizer=tokenizer,
-            reward_fn=dummy_reward_fn,
-            conversation_template=DUMMY_CONVERSATION_TEMPLATE,
-            data_batch_size_per_gpu=data_batch_size,
-        )
-        with pytest.warns():
-            env.reset()
-            env.reset()
-
-
-class TestReasoningGymResetDataloaders:
-    @pytest.mark.parametrize("num_samples", [200])
-    @pytest.mark.parametrize("reset_dataloaders", [True, False])
-    def test_reasoning_gym_reset_dataloaders(
-        self,
-        reasoning_dataset,
-        num_samples,
-        reset_dataloaders,
-    ):
-        train_dataset, test_dataset = reasoning_dataset
-        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
-        data_batch_size = 8
-        env = ReasoningGym(
-            train_dataset=train_dataset,
-            test_dataset=test_dataset,
-            tokenizer=tokenizer,
-            reward_fn=dummy_reward_fn,
-            conversation_template=DUMMY_CONVERSATION_TEMPLATE,
-            data_batch_size_per_gpu=data_batch_size,
-        )
-        first_data_point = next(
-            env.test_dataloader_iter,
-        )  # use test_dataloader_iter as it is not shuffled
-        env._reset_dataloaders()
-        first_data_point_reset = next(env.test_dataloader_iter)
-        assert first_data_point["question"] == first_data_point_reset["question"]
-        assert first_data_point["answer"] == first_data_point_reset["answer"]
-        for prompt_a, prompt_b in zip(
-            first_data_point["tokenized_prompts"],
-            first_data_point_reset["tokenized_prompts"],
-            strict=False,
-        ):
-            assert torch.equal(prompt_a["input_ids"], prompt_b["input_ids"])
-            assert torch.equal(prompt_a["attention_mask"], prompt_b["attention_mask"])
-
-
-class TestReasoningGymLen:
-    @pytest.mark.parametrize("num_samples", [200])
-    def test_reasoning_gym_len(self, reasoning_dataset, num_samples):
-        train_dataset, test_dataset = reasoning_dataset
-        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
-        data_batch_size = 8
-        env = ReasoningGym(
-            train_dataset=train_dataset,
-            test_dataset=test_dataset,
-            tokenizer=tokenizer,
-            reward_fn=dummy_reward_fn,
-            conversation_template=DUMMY_CONVERSATION_TEMPLATE,
-            data_batch_size_per_gpu=data_batch_size,
-        )
-        env.reset()
-        assert len(env) == 200 * 0.8  # Length returns the training length
-        with env.eval_mode():
-            assert len(env) == 200 * 0.2
-
-
-class TestReasoningGymCreateCollateFn:
-    @pytest.mark.parametrize("num_samples", [20])
-    def test_create_chat_collate_fn(self, reasoning_dataset, num_samples):
-        """Test the create_chat_collate_fn method."""
-        # Create a mock tokenizer
-        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
-
-        train_dataset, test_dataset = reasoning_dataset
-        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
-        data_batch_size = 8
-
-        env = ReasoningGym(
-            train_dataset=train_dataset,
-            test_dataset=test_dataset,
-            tokenizer=tokenizer,
-            reward_fn=dummy_reward_fn,
-            conversation_template=DUMMY_CONVERSATION_TEMPLATE,
-            data_batch_size_per_gpu=data_batch_size,
-        )
-
-        # Create the collate function
-        collate_fn = env.create_collate_fn(tokenizer)
-
-        # Create a sample batch
-        batch = [
-            {"question": "What is 2+2?", "answer": "4"},
-            {"question": "What is 3+3?", "answer": "6"},
-        ]
-
-        # Apply the collate function
-        result = collate_fn(batch)
-
-        # Verify the result structure
-        assert isinstance(result, dict)
-        assert "question" in result
-        assert "answer" in result
-        assert "tokenized_prompts" in result
-
-        # Verify the content
-        assert result["question"] == ["What is 2+2?", "What is 3+3?"]
-        assert result["answer"] == ["4", "6"]
-        assert len(result["tokenized_prompts"]) == 2
-        assert isinstance(result["tokenized_prompts"][0]["input_ids"], torch.Tensor)
-        assert isinstance(
-            result["tokenized_prompts"][0]["attention_mask"], torch.Tensor
-        )
-
-
-class TestReasoningGymGetNextBatch:
-    @pytest.mark.parametrize("num_samples", [20])
-    @pytest.mark.parametrize("data_batch_size", [8, 10])
-    def test_reset_dataloaders_when_train_dataloader_exhausted(
-        self,
-        reasoning_dataset,
-        num_samples,
-        data_batch_size,
-    ):
-        train_dataset, test_dataset = reasoning_dataset
-        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
-        env = ReasoningGym(
-            train_dataset=train_dataset,
-            test_dataset=test_dataset,
-            tokenizer=tokenizer,
-            reward_fn=dummy_reward_fn,
-            conversation_template=DUMMY_CONVERSATION_TEMPLATE,
-            data_batch_size_per_gpu=data_batch_size,
-        )
-        total_sampled = 0
-        for _ in range(3):
-            env._get_next_batch()
-            total_sampled += data_batch_size
-
-        assert env.num_epochs == 1
-
-    @pytest.mark.parametrize("num_samples", [20])
-    @pytest.mark.parametrize("data_batch_size", [8, 10])
-    def test_not_reset_dataloaders_when_test_dataloader_exhausted(
-        self,
-        reasoning_dataset,
-        num_samples,
-        data_batch_size,
-    ):
-        train_dataset, test_dataset = reasoning_dataset
-        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
-        env = ReasoningGym(
-            train_dataset=train_dataset,
-            test_dataset=test_dataset,
-            tokenizer=tokenizer,
-            reward_fn=dummy_reward_fn,
-            conversation_template=DUMMY_CONVERSATION_TEMPLATE,
-            data_batch_size_per_gpu=data_batch_size,
-        )
-        total_sampled = 0
-        env.reset()
-        for _ in range(10):
-            with env.eval_mode():
-                env._get_next_batch()
-                total_sampled += data_batch_size
-
-        assert env.num_epochs == 0
 
 
 class TestDummyOptimizerInit:
@@ -1297,8 +924,8 @@ class TestLlmUtilsDeprecatedReexports:
         import agilerl.utils.llm_utils as llm_utils_module
 
         with pytest.warns(FutureWarning, match="moved to agilerl.llm_envs"):
-            cls = llm_utils_module.ReasoningGym
-        from agilerl.llm_envs import ReasoningGym as expected
+            cls = llm_utils_module.SFTGym
+        from agilerl.llm_envs import SFTGym as expected
 
         assert cls is expected
 
@@ -1312,7 +939,7 @@ class TestLlmUtilsDeprecatedReexports:
         import agilerl.utils.llm_utils as llm_utils_module
 
         d = dir(llm_utils_module)
-        assert "ReasoningGym" in d
+        assert "SFTGym" in d
         assert "PreferenceGym" in d
 
 
