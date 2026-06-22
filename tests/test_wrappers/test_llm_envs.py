@@ -1206,11 +1206,11 @@ def test_dataloader_shuffle_order_is_deterministic_permutation():
     assert order != dataloader_shuffle_order(dataset_size, seed + 1, epochs)
 
 
-def test_reasoning_rollout_state_seed_maps_group_to_same_row():
+def test_batch_iteration_state_seed_maps_group_to_same_row():
     """A reused per-row seed maps every group member to the same dataset row."""
-    from agilerl.llm_envs import ReasoningRolloutState, dataloader_shuffle_order
+    from agilerl.llm_envs import BatchIterationState, dataloader_shuffle_order
 
-    state = ReasoningRolloutState(
+    state = BatchIterationState(
         shuffle_order=[5, 3, 9, 1],
         seed=0,
         dataset_size=4,
@@ -1249,8 +1249,8 @@ class TestReasoningRolloutEquivalence:
         self, reasoning_dataset, num_samples, group_size
     ):
         from agilerl.llm_envs import (
+            BatchIterationState,
             BatchRolloutEnv,
-            ReasoningRolloutState,
             make_reasoning_rollout_env,
         )
 
@@ -1302,8 +1302,9 @@ class TestReasoningRolloutEquivalence:
         }
         old_rows = [question_to_index[q] for q in old_questions]
 
-        # New path: seed the shared shuffle order from old's exact rows.
-        state = ReasoningRolloutState(
+        # New path: the BatchRolloutEnv owns the dataset cursor. Seed its shared
+        # iteration order from old's exact rows so row selection matches.
+        state = BatchIterationState(
             shuffle_order=list(old_rows),
             seed=seed,
             dataset_size=len(train_dataset),
@@ -1317,12 +1318,12 @@ class TestReasoningRolloutEquivalence:
                 reward_fn=self._length_reward_fn,
                 conversation_template=DUMMY_CONVERSATION_TEMPLATE,
                 seed=seed,
-                state=state,
             )
 
         vec_env = BatchRolloutEnv(
             env_factory, batch_size=data_batch_size, group_size=group_size
         )
+        vec_env._iteration_state = state
         vec_env.reset(seed=1000)
         active = vec_env.trajectories.get_active_trajectories(sorted_by_index=True)
         assert len(active) == data_batch_size * group_size

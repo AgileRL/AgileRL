@@ -588,20 +588,19 @@ class TestLLMEnvHierarchy:
 
     def test_rollout_env_default_is_single_turn_reasoning(self):
         pytest.importorskip("datasets", reason="LLM dependencies not installed")
-        from agilerl.llm_envs import ReasoningRolloutState, RolloutEnv
+        from agilerl.llm_envs import BatchIterationState, RolloutEnv
 
-        state = ReasoningRolloutState(shuffle_order=[0], seed=0, dataset_size=1)
+        state = BatchIterationState(shuffle_order=[0], seed=0, dataset_size=1)
         env = RolloutEnv(
             questions=["2+2"],
             answers=["4"],
             reward_fn=lambda completion, answer, question: float(answer in completion),
             prompt_builder=lambda question: f"Q: {question}",
-            state=state,
         )
         assert env.max_turns == 1
         assert env.tools == []
 
-        prompt, info = env.reset(seed=0)
+        prompt, info = env.reset(seed=0, row_index=state.row_for_seed(0))
         assert prompt == "Q: 2+2"
         assert info == {}
 

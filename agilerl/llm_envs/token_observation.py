@@ -241,8 +241,47 @@ class TokenObservationWrapper(RolloutEnv):
                 obs.update(self.build_model_prompt_fields(max_pt))
         return obs
 
-    def reset(self, seed: int | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Create a fresh episode and return the policy-ready observation plus info."""
+    @property
+    def dataset_size(self) -> int:
+        """Number of training rows backing the wrapped env (0 if not dataset-backed)."""
+        return getattr(self._env, "dataset_size", 0)
+
+    def _reset_inner(
+        self,
+        seed: int | None,
+        row_index: int | None,
+    ) -> tuple[Any, dict[str, Any]]:
+        """Reset the wrapped env, forwarding ``row_index`` only when it accepts it.
+
+        Custom envs may define ``reset(self, seed=None)`` with no ``row_index``;
+        for those the row stays unset (they resolve their own dataset position).
+        """
+        reset_sig = inspect.signature(self._env.reset)
+        supports_row_index = "row_index" in reset_sig.parameters or any(
+            p.kind is inspect.Parameter.VAR_KEYWORD
+            for p in reset_sig.parameters.values()
+        )
+        kwargs: dict[str, Any] = {}
+        if seed is not None:
+            kwargs["seed"] = seed
+        if supports_row_index:
+            kwargs["row_index"] = row_index
+        return self._env.reset(**kwargs)
+
+    def reset(
+        self,
+        seed: int | None = None,
+        *,
+        row_index: int | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Create a fresh episode and return the policy-ready observation plus info.
+
+        :param seed: Optional reset seed forwarded to the wrapped env.
+        :type seed: int | None
+        :param row_index: Dataset row chosen by the owning ``BatchRolloutEnv``,
+            forwarded to the wrapped env when it accepts it.
+        :type row_index: int | None
+        """
         if seed is not None:
             reset_sig = inspect.signature(self._env.reset)
             supports_seed = "seed" in reset_sig.parameters or any(
@@ -250,7 +289,7 @@ class TokenObservationWrapper(RolloutEnv):
                 for p in reset_sig.parameters.values()
             )
             if supports_seed:
-                obs_text, info = self._env.reset(seed=seed)
+                obs_text, info = self._reset_inner(seed=seed, row_index=row_index)
             else:
                 warnings.warn(
                     f"Wrapped env {type(self._env).__name__}.reset does not "
@@ -259,7 +298,7 @@ class TokenObservationWrapper(RolloutEnv):
                 )
                 obs_text, info = self._env.reset()
         else:
-            obs_text, info = self._env.reset()
+            obs_text, info = self._reset_inner(seed=None, row_index=row_index)
         obs_text = self._format_obs(obs_text, info)
 
         encoded = self._tokenize_initial_prompt(obs_text)

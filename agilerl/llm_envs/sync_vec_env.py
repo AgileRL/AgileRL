@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 if TYPE_CHECKING:
-    from agilerl.llm_envs.rollout_env import RolloutEnv
+    from agilerl.llm_envs.rollout_env import BatchIterationState, RolloutEnv
     from agilerl.typing import ReasoningPrompts
 
 
@@ -113,13 +113,20 @@ class TrajectoryBuffer:
         """Iterate over stored trajectories."""
         return iter(self.trajectories)
 
-    def reset_trajectory(self, seed: int | None, env_idx: int) -> None:
+    def reset_trajectory(
+        self,
+        seed: int | None,
+        env_idx: int,
+        row_index: int | None = None,
+    ) -> None:
         """Reset one trajectory in place.
 
         :param seed: Optional reset seed passed to the wrapped environment.
         :type seed: int | None
         :param env_idx: Index into ``self.trajectories`` to reset.
         :type env_idx: int
+        :param row_index: Dataset row chosen by the owning ``BatchRolloutEnv``.
+        :type row_index: int | None
         """
         if env_idx < 0 or env_idx >= len(self.trajectories):
             msg = (
@@ -127,7 +134,10 @@ class TrajectoryBuffer:
                 f"{env_idx} not in [0, {len(self.trajectories) - 1}]"
             )
             raise IndexError(msg)
-        prompt_dict, _ = self.trajectories[env_idx].env.reset(seed=seed)
+        prompt_dict, _ = self.trajectories[env_idx].env.reset(
+            seed=seed,
+            row_index=row_index,
+        )
         self.trajectories[env_idx].prompt = prompt_dict
         self.trajectories[env_idx].done = False
         self.trajectories[env_idx].sampling_logps.clear()
@@ -178,6 +188,7 @@ class BatchRolloutEnv:
         self.batch_size = batch_size
         self.group_size = group_size
         self.trajectories = TrajectoryBuffer(batch_size, group_size)
+        self._iteration_state: BatchIterationState | None = None
 
     def reset(
         self,
@@ -185,22 +196,39 @@ class BatchRolloutEnv:
     ) -> list[ReasoningPrompts] | None:
         """Reset all environments and initialize trajectories.
 
-        Seeds are assigned per batch row (same seed across groups), then prompts
-        are returned in stable ``(batch_idx, group_idx)`` order.
+        Seeds are assigned per batch row (same seed across groups). A shared
+        :class:`~agilerl.llm_envs.rollout_env.BatchIterationState` owns the
+        dataset cursor: each batch row resolves a single ``row_index`` (the
+        cursor advancing once per row), and every group env of that row is reset
+        with both the row seed and that one row, so the group is row-consistent.
+        Prompts are returned in stable ``(batch_idx, group_idx)`` order. Envs that
+        are not dataset-backed (``dataset_size == 0``) skip the cursor entirely.
 
         :param seed: Optional base seed for deterministic rollouts.
         :type seed: int | None
         :return: Active prompt dictionaries after reset.
         :rtype: list[ReasoningPrompts] | None
         """
+        from agilerl.llm_envs.rollout_env import BatchIterationState
+
         seed_base = seed
         for batch_idx in range(self.batch_size):
             batch_seed = None if seed_base is None else seed_base + batch_idx
+            row_index: int | None = None
             for group_idx in range(self.group_size):
                 env_idx = batch_idx * self.group_size + group_idx
                 if not self.trajectories.is_initialized:
                     env_i = self.env_factory(**self.env_config)
-                    prompt_dict, _ = env_i.reset(seed=batch_seed)
+                    # Build the shared cursor from the first env's dataset size,
+                    # before resolving any row, so all rows draw from one order.
+                    if self._iteration_state is None and env_i.dataset_size > 0:
+                        self._iteration_state = BatchIterationState.from_dataset_size(
+                            env_i.dataset_size,
+                            seed=seed if seed is not None else 42,
+                        )
+                    if group_idx == 0 and self._iteration_state is not None:
+                        row_index = self._iteration_state.row_for_seed(batch_seed)
+                    prompt_dict, _ = env_i.reset(seed=batch_seed, row_index=row_index)
                     self.trajectories.add_trajectory(
                         Trajectory(
                             env=env_i,
@@ -211,7 +239,13 @@ class BatchRolloutEnv:
                         )
                     )
                 else:
-                    self.trajectories.reset_trajectory(env_idx=env_idx, seed=batch_seed)
+                    if group_idx == 0 and self._iteration_state is not None:
+                        row_index = self._iteration_state.row_for_seed(batch_seed)
+                    self.trajectories.reset_trajectory(
+                        env_idx=env_idx,
+                        seed=batch_seed,
+                        row_index=row_index,
+                    )
         return self.trajectories.get_prompts()
 
     def step(

@@ -10,7 +10,7 @@ from agilerl.llm_envs.base import (
 from agilerl.llm_envs.dataset_env import DatasetEnv, PreferenceGym, SFTGym
 from agilerl.llm_envs.reasoning import ReasoningGym
 from agilerl.llm_envs.rollout_env import (
-    ReasoningRolloutState,
+    BatchIterationState,
     RolloutEnv,
     dataloader_shuffle_order,
     make_reasoning_rollout_env,
@@ -28,6 +28,7 @@ requests = _search.requests
 
 __all__ = [
     "TIMEOUT",
+    "BatchIterationState",
     "BatchRolloutEnv",
     "DatasetEnv",
     "FormatRewardWrapper",
@@ -36,7 +37,6 @@ __all__ = [
     "LLMEnv",
     "PreferenceGym",
     "ReasoningGym",
-    "ReasoningRolloutState",
     "RolloutEnv",
     "SFTGym",
     "SearchTool",

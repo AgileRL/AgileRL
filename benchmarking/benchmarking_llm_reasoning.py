@@ -15,7 +15,7 @@ from datasets import load_dataset
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer
 
-from agilerl.llm_envs import ReasoningRolloutState, make_reasoning_rollout_env
+from agilerl.llm_envs import make_reasoning_rollout_env
 from agilerl.training.train_llm import finetune_llm_multiturn
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import create_llm_accelerator
@@ -114,12 +114,10 @@ def main(init_hp, mut_p):
     ]
 
     accelerator = create_llm_accelerator()
-    # Reasoning folds into the single-turn rollout taxonomy; one shared state
-    # keeps each GRPO group's dataset order deterministic and consistent.
-    train_state = ReasoningRolloutState.from_dataset(
-        train_dataset, seed=42, column="question"
-    )
 
+    # Reasoning folds into the single-turn rollout taxonomy; the BatchRolloutEnv
+    # owns the dataset cursor, keeping each GRPO group's dataset order
+    # deterministic and consistent.
     def env_factory(evaluation_mode: bool = False):
         return make_reasoning_rollout_env(
             train_dataset=train_dataset,
@@ -130,7 +128,6 @@ def main(init_hp, mut_p):
             evaluation_mode=evaluation_mode,
             seed=42,
             max_model_len=init_hp["MAX_MODEL_LEN"],
-            state=None if evaluation_mode else train_state,
         )
 
     use_vllm = bool(init_hp.get("USE_VLLM", True))

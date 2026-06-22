@@ -20,7 +20,7 @@ survive the fold is:
 from __future__ import annotations
 
 from agilerl.llm_envs.rollout_env import (
-    ReasoningRolloutState,
+    BatchIterationState,
     RolloutEnv,
     dataloader_shuffle_order,
 )
@@ -45,7 +45,7 @@ def test_shuffle_order_is_deterministic_and_a_full_permutation() -> None:
 def test_shuffle_order_extends_without_rewriting_first_epoch() -> None:
     """Row lookups past the first epoch append fresh epochs, never overwrite epoch 0."""
     dataset_size, seed = 11, 7
-    state = ReasoningRolloutState(
+    state = BatchIterationState(
         shuffle_order=dataloader_shuffle_order(dataset_size, seed, 1),
         seed=seed,
         dataset_size=dataset_size,
@@ -62,7 +62,7 @@ def test_shuffle_order_extends_without_rewriting_first_epoch() -> None:
 
 def test_group_shares_one_row_per_seed() -> None:
     """A reused per-row seed pins every group trajectory to the same dataset row."""
-    state = ReasoningRolloutState(
+    state = BatchIterationState(
         shuffle_order=dataloader_shuffle_order(10, 7, 1),
         seed=7,
         dataset_size=10,
@@ -74,12 +74,14 @@ def test_group_shares_one_row_per_seed() -> None:
     assert next_row_position != group_positions[0]
     # Re-presenting the original seed still returns its bound position.
     assert state.position_for_seed(5) == group_positions[0]
+    # ``row_for_seed`` resolves a seed straight to its bound dataset row.
+    assert state.row_for_seed(5) == state.shuffle_order[group_positions[0]]
 
 
 def test_prompt_is_templated_and_reward_scores_once() -> None:
     """reset() returns the templated prompt; step() scores via reward_fn and ends."""
     questions, answers = ["2+2", "3+5"], ["4", "8"]
-    state = ReasoningRolloutState(shuffle_order=[0, 1], seed=0, dataset_size=2)
+    state = BatchIterationState(shuffle_order=[0, 1], seed=0, dataset_size=2)
 
     def reward_fn(completion: str, answer: str, _question: str) -> float:
         return 1.0 if answer in completion else 0.0
@@ -93,10 +95,9 @@ def test_prompt_is_templated_and_reward_scores_once() -> None:
         answers=answers,
         reward_fn=reward_fn,
         prompt_builder=prompt_builder,
-        state=state,
     )
 
-    prompt, info = env.reset(seed=0)
+    prompt, info = env.reset(seed=0, row_index=state.row_for_seed(0))
     assert prompt == "Q: 2+2\nA:"
     assert info == {}
 
@@ -106,7 +107,7 @@ def test_prompt_is_templated_and_reward_scores_once() -> None:
     assert truncated is False
 
     # A wrong completion on the next row scores zero, still one turn.
-    next_prompt, _ = env.reset(seed=1)
+    next_prompt, _ = env.reset(seed=1, row_index=state.row_for_seed(1))
     assert next_prompt == "Q: 3+5\nA:"
     _, wrong_reward, terminated, _, _ = env.step("definitely 99")
     assert wrong_reward == 0.0
@@ -115,21 +116,18 @@ def test_prompt_is_templated_and_reward_scores_once() -> None:
 
 def test_eval_mode_draws_from_held_out_split() -> None:
     """Under eval_mode the env serves the test split, restoring the train split after."""
-    state = ReasoningRolloutState(shuffle_order=[0], seed=0, dataset_size=1)
     env = RolloutEnv(
         max_turns=1,
         questions=["train-q"],
         answers=["train-a"],
         reward_fn=lambda c, a, q: 0.0,
         prompt_builder=lambda q: q,
-        state=state,
         test_questions=["eval-q"],
         test_answers=["eval-a"],
     )
     with env.eval_mode():
-        eval_prompt, _ = env.reset(seed=0)
+        eval_prompt, _ = env.reset(seed=0, row_index=0)
     assert eval_prompt == "eval-q"
 
-    state.cursor = 0
-    train_prompt, _ = env.reset(seed=1)
+    train_prompt, _ = env.reset(seed=1, row_index=0)
     assert train_prompt == "train-q"

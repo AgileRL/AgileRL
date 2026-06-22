@@ -9,11 +9,11 @@ builds one and wraps it in
 into ``BatchRolloutEnv`` like any other rollout env.
 
 Dataset order is deterministic: the seeded shuffle is precomputed as an explicit
-index list (:func:`dataloader_shuffle_order`) and shared (with a cursor) across
-the trajectories of a ``BatchRolloutEnv`` so a per-row seed selects one
-reproducible dataset row for every trajectory in its group. Batch/row order need
-only be deterministic and group-consistent, which is what grouped-advantage
-training relies on.
+index list (:func:`dataloader_shuffle_order`). A ``BatchRolloutEnv`` owns the
+shared cursor (:class:`BatchIterationState`) across its trajectories so a per-row
+seed selects one reproducible dataset row for every trajectory in its group.
+Batch/row order need only be deterministic and group-consistent, which is what
+grouped-advantage training relies on.
 """
 
 from __future__ import annotations
@@ -68,8 +68,8 @@ def dataloader_shuffle_order(
 
 
 @dataclass
-class ReasoningRolloutState:
-    """Shared dataset-iteration state for a group of single-turn reasoning envs.
+class BatchIterationState:
+    """Shared dataset-iteration state for a group of dataset-backed rollout trajectories.
 
     A ``BatchRolloutEnv`` builds one env per trajectory but seeds per batch row
     (shared across the group). Sharing this state lets every trajectory draw from
@@ -97,12 +97,33 @@ class ReasoningRolloutState:
     _seed_to_position: dict[int, int] = field(default_factory=dict)
 
     @classmethod
+    def from_dataset_size(
+        cls,
+        dataset_size: int,
+        seed: int = 42,
+    ) -> BatchIterationState:
+        """Build state with a first-epoch shuffle order over ``dataset_size`` rows.
+
+        :param dataset_size: Number of rows the shuffle order ranges over.
+        :type dataset_size: int
+        :param seed: Shuffle seed (shared across a trajectory group).
+        :type seed: int
+        :return: A fresh shared state seeded for one epoch.
+        :rtype: BatchIterationState
+        """
+        return cls(
+            shuffle_order=dataloader_shuffle_order(dataset_size, seed, 1),
+            seed=seed,
+            dataset_size=dataset_size,
+        )
+
+    @classmethod
     def from_dataset(
         cls,
         dataset: Any,
         seed: int = 42,
         column: str = "question",
-    ) -> ReasoningRolloutState:
+    ) -> BatchIterationState:
         """Build state with a first-epoch shuffle order over ``dataset``'s rows.
 
         :param dataset: Dataset whose length sets the shuffle range.
@@ -113,17 +134,13 @@ class ReasoningRolloutState:
             unavailable; ignored otherwise.
         :type column: str
         :return: A fresh shared state seeded for one epoch.
-        :rtype: ReasoningRolloutState
+        :rtype: BatchIterationState
         """
         try:
             dataset_size = len(dataset)
         except TypeError:
             dataset_size = len(dataset[column])
-        return cls(
-            shuffle_order=dataloader_shuffle_order(dataset_size, seed, 1),
-            seed=seed,
-            dataset_size=dataset_size,
-        )
+        return cls.from_dataset_size(dataset_size, seed=seed)
 
     def position_for_seed(self, seed: int | None) -> int:
         """Map a reset seed to a dataset-order position, monotonic per unique seed.
@@ -145,6 +162,19 @@ class ReasoningRolloutState:
         if seed is not None:
             self._seed_to_position[seed] = position
         return position
+
+    def row_for_seed(self, seed: int | None) -> int:
+        """Return the dataset row a reset ``seed`` selects.
+
+        Convenience over :meth:`position_for_seed` then :meth:`row_index`: it
+        binds (or reuses) the seed's position and resolves it to a row index.
+
+        :param seed: The reset seed, or ``None`` for unconditioned advancement.
+        :type seed: int | None
+        :return: Dataset row index for the selected position.
+        :rtype: int
+        """
+        return self.row_index(self.position_for_seed(seed))
 
     def row_index(self, position: int) -> int:
         """Return the dataset row at ``position``, extending the order if needed.
@@ -189,8 +219,6 @@ class RolloutEnv(LLMEnv):
     :type reward_fn: Callable[[str, str, str], float] | None
     :param prompt_builder: Maps a question to the prompt text shown to the model.
     :type prompt_builder: Callable[[str], str] | None
-    :param state: Shared dataset-iteration state across a trajectory group.
-    :type state: ReasoningRolloutState | None
     :param test_questions: Held-out question strings used under ``eval_mode``.
     :type test_questions: list[str] | None
     :param test_answers: Held-out answer strings used under ``eval_mode``.
@@ -206,7 +234,6 @@ class RolloutEnv(LLMEnv):
         answers: list[str] | None = None,
         reward_fn: Callable[[str, str, str], float] | None = None,
         prompt_builder: Callable[[str], str] | None = None,
-        state: ReasoningRolloutState | None = None,
         test_questions: list[str] | None = None,
         test_answers: list[str] | None = None,
     ) -> None:
@@ -216,13 +243,21 @@ class RolloutEnv(LLMEnv):
         self.answers = answers
         self.reward_fn = reward_fn
         self.prompt_builder = prompt_builder
-        self.state = state
         self.test_questions = test_questions
         self.test_answers = test_answers
         self.evaluation_mode = False
         self._turn = 0
         self._question: str = ""
         self._answer: str = ""
+        # Dataset cursor owned by ``BatchRolloutEnv`` when batched; built lazily
+        # here only for the standalone / eval path, per active split.
+        self._standalone_state: BatchIterationState | None = None
+        self._standalone_split: str = ""
+
+    @property
+    def dataset_size(self) -> int:
+        """Number of training rows backing this env (0 when not dataset-backed)."""
+        return len(self.questions) if self.questions else 0
 
     def _active_rows(self) -> tuple[list[str], list[str]]:
         """Return the (questions, answers) for the current train/eval split."""
@@ -230,12 +265,36 @@ class RolloutEnv(LLMEnv):
             return self.test_questions, self.test_answers
         return self.questions, self.answers
 
-    def reset(self, seed: int | None = None) -> tuple[str, dict[str, Any]]:
-        """Select the next dataset row and return its prompt text plus info."""
+    def reset(
+        self,
+        seed: int | None = None,
+        *,
+        row_index: int | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        """Select a dataset row and return its prompt text plus info.
+
+        :param seed: Optional reset seed; only consulted on the standalone path.
+        :type seed: int | None
+        :param row_index: Dataset row chosen by the owning ``BatchRolloutEnv``;
+            when ``None`` the env resolves a row from its own per-split cursor.
+        :type row_index: int | None
+        """
         self._turn = 0
         questions, answers = self._active_rows()
-        position = self.state.position_for_seed(seed)
-        row = self.state.row_index(position) % len(questions)
+        if row_index is None:
+            split = (
+                "eval"
+                if self.evaluation_mode and self.test_questions is not None
+                else "train"
+            )
+            if self._standalone_state is None or self._standalone_split != split:
+                self._standalone_state = BatchIterationState.from_dataset_size(
+                    len(questions),
+                    seed=42,
+                )
+                self._standalone_split = split
+            row_index = self._standalone_state.row_for_seed(seed)
+        row = row_index % len(questions)
         self._question = questions[row]
         self._answer = answers[row]
         return self.prompt_builder(self._question), {}
@@ -297,15 +356,14 @@ def make_reasoning_rollout_env(
     seed: int = 42,
     max_model_len: int | None = None,
     max_output_tokens: int | None = None,
-    state: ReasoningRolloutState | None = None,
 ) -> TokenObservationWrapper:
     """Build a single-turn reasoning ``RolloutEnv`` wrapped for token rollouts.
 
     The returned wrapper exposes the rollout-env surface (``reset`` ->
     ``(obs_dict, info)``, ``step(full_completion_ids)`` -> 5-tuple,
-    ``get_episode_data``) that ``BatchRolloutEnv`` drives. Pass a shared
-    ``state`` (and identical ``seed``) to every env in a trajectory group so the
-    dataset order is consistent and reproducible.
+    ``get_episode_data``) that ``BatchRolloutEnv`` drives. When driven by a
+    ``BatchRolloutEnv`` the dataset cursor is owned there, so the same per-row
+    seed selects one reproducible row for every env in a trajectory group.
 
     :param train_dataset: Training dataset with ``question`` / ``answer`` columns.
     :type train_dataset: Dataset
@@ -329,8 +387,6 @@ def make_reasoning_rollout_env(
     :type max_model_len: int | None
     :param max_output_tokens: Optional generation cap forwarded to the wrapper.
     :type max_output_tokens: int | None
-    :param state: Optional shared dataset-iteration state; created if omitted.
-    :type state: ReasoningRolloutState | None
     :return: A token-observation-wrapped single-turn reasoning env.
     :rtype: TokenObservationWrapper
     """
@@ -345,16 +401,12 @@ def make_reasoning_rollout_env(
             raise ValueError(msg)
         prompt_builder = _default_prompt_builder(conversation_template)
 
-    if state is None:
-        state = ReasoningRolloutState.from_dataset(train_dataset, seed=seed)
-
     raw_env = RolloutEnv(
         max_turns=1,
         questions=train_questions,
         answers=train_answers,
         reward_fn=reward_fn,
         prompt_builder=prompt_builder,
-        state=state,
         test_questions=test_questions,
         test_answers=test_answers,
     )
