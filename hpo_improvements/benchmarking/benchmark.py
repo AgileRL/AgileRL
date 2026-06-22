@@ -79,6 +79,11 @@ RENDER_FILENAME = "render.mp4"
 # Filename of the per-run training log, both on disk and on the W&B run.
 LOG_FILENAME = "train.log"
 
+# Filename of the per-generation evolutionary mutation history, both on disk and
+# on the W&B run. Must match the name written by
+# :class:`agilerl.logger.MutationHistoryLogger`.
+MUTATION_HISTORY_FILENAME = "mutation_history.csv"
+
 
 def elite_filename(algo: str) -> str:
     """Return the elite-checkpoint filename for *algo* (e.g. ``elite_PPO.pt``).
@@ -502,6 +507,32 @@ def _find_wandb_run(project: str, run_name: str) -> Any:
             "Could not locate W&B run '%s' in project '%s'.", run_name, project
         )
     return run
+
+
+def wandb_run_succeeded(project: str, run_name: str) -> bool:
+    """Whether a W&B run exists and finished cleanly (``state == "finished"``).
+
+    Used by the Ray orchestrator to *recover* a job that Ray reports FAILED even
+    though its training run actually completed and uploaded every artifact -- the
+    classic case being the worker being killed by a signal (OOM, node preemption,
+    or an uncatchable teardown-time exit) *after* ``wandb.finish()`` and all
+    uploads have already succeeded. ``"finished"`` is only ever set by an explicit
+    ``wandb.finish()``, so it cleanly separates a fully-completed run from one that
+    truly died mid-training (which stays ``running`` or goes ``crashed``/``failed``/
+    ``killed``). Such a finished run is durable on W&B and should be collected, not
+    dropped. Best-effort: any lookup error is treated as "not recoverable".
+
+    :param project: W&B project name.
+    :param run_name: Display name of the run to check.
+    :return: True only if the run is present and in the ``finished`` state.
+    :rtype: bool
+    """
+    try:
+        run = _find_wandb_run(project, run_name)
+    except Exception as exc:  # noqa: BLE001 - recovery probe must never raise
+        logger.warning("W&B completion check failed for %s: %s", run_name, exc)
+        return False
+    return run is not None and getattr(run, "state", None) == "finished"
 
 
 _TERMINAL_RUN_STATES = ("finished", "crashed", "failed", "killed")
@@ -961,7 +992,7 @@ def fetch_and_plot(
     pop_size: int,
     env_dir: Path,
     hp_names: list[str] | None = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, np.ndarray] | None] | None:
     """Pull a finished W&B run, write the CSV, plot, and return the curve.
 
     This is the read-only, network-and-plot half of a learning run. It is shared
@@ -977,10 +1008,14 @@ def fetch_and_plot(
     :param pop_size: Population size (per-agent step normalization for the x-axis).
     :param env_dir: Output directory for this run's CSV and plots.
     :param hp_names: Optional hyperparameter names for the mutation-schedule plot.
-    :return: ``(x, best_fitness, normalized_fitness)`` — best fitness feeds the
-        per-environment over-seeds plot, normalized fitness the aggregate. None
-        if there is no plottable history.
-    :rtype: tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray] | None
+    :return: ``(x, best_fitness, normalized_fitness, diversity)`` — best fitness
+        feeds the per-environment over-seeds plot, normalized fitness the
+        aggregate, and ``diversity`` maps each logged ``eval/*_diversity`` column
+        to its per-cycle values (aligned on the same rows) for the diversity
+        over-seeds and aggregate plots (None when no diversity was logged). The
+        whole tuple is None if there is no plottable history.
+    :rtype: tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray, dict[str,
+        numpy.ndarray] | None] | None
     """
     env_dir.mkdir(parents=True, exist_ok=True)
 
@@ -998,7 +1033,12 @@ def fetch_and_plot(
         project,
         run_name,
         env_dir,
-        [elite_filename(algo), RENDER_FILENAME, LOG_FILENAME],
+        [
+            elite_filename(algo),
+            RENDER_FILENAME,
+            LOG_FILENAME,
+            MUTATION_HISTORY_FILENAME,
+        ],
     )
 
     scores = normalization_scores(algo, env_name)
@@ -1012,6 +1052,10 @@ def fetch_and_plot(
         str(env_dir / "mutation_schedule.png"),
         hp_names=hp_names,
     )
+    plotting.plot_dormant_fraction(
+        history, env_name, pop_size, str(env_dir / "dormant_fraction.png")
+    )
+    plotting.plot_diversity(history, env_name, pop_size, str(env_dir / "diversity.png"))
 
     # Build the per-env normalized curve for the aggregate plot.
     data = history.dropna(
@@ -1022,7 +1066,15 @@ def fetch_and_plot(
     x = data[plotting.GLOBAL_STEP_COL].to_numpy(dtype=float) / max(pop_size, 1)
     best = data[plotting.BEST_FITNESS_COL].to_numpy(dtype=float)
     y = np.array([scores.normalize(f) for f in best])
-    return x, best, y
+
+    # Per-env diversity curves (aligned on the same rows as the fitness curve),
+    # one array per logged diagnostic, for the over-seeds and aggregate plots.
+    diversity = {
+        col: data[col].to_numpy(dtype=float)
+        for col, _ in plotting.DIVERSITY_SPECS
+        if col in data.columns
+    }
+    return x, best, y, (diversity or None)
 
 
 def plot_seed_aggregates(
@@ -1074,6 +1126,48 @@ def plot_seed_aggregates(
         suite_name=suite_name,
     )
     logger.info("Saved aggregate plot across %d environments.", len(env_curves))
+
+
+def plot_diversity_aggregates(
+    curves: dict[str, list[tuple[np.ndarray, dict[str, np.ndarray]]]],
+    bench_dir: Path,
+    algo_label: str,
+    suite_name: str,
+) -> None:
+    """Draw per-env over-seeds and cross-env aggregate population-diversity plots.
+
+    Mirrors :func:`plot_seed_aggregates` for the three normalised-diversity
+    diagnostics: each environment's seeds are reduced to one IQM curve (with a
+    stratified-bootstrap CI) per diagnostic, then fed into the suite-level
+    aggregate. Shared by the sequential benchmark and the Ray orchestrator.
+
+    :param curves: Mapping env_name -> list of ``(x, {column: values})``, one
+        entry per finished seed (the ``diversity`` element of
+        :func:`fetch_and_plot`).
+    :param bench_dir: Benchmark output directory (plots are written under it).
+    :param algo_label: Display label for the algorithm + HPO method.
+    :param suite_name: Human-readable environment-suite name (aggregate titles).
+    """
+    per_metric_curves: dict[str, dict[str, tuple[np.ndarray, np.ndarray]]] = {}
+    for env_name, seed_curves in curves.items():
+        out_path = bench_dir / env_name / "diversity_over_seeds.png"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        stacks = plotting.plot_diversity_over_seeds(
+            seed_curves, env_name, str(out_path), algo_label=algo_label
+        )
+        for col, grid_stack in stacks.items():
+            per_metric_curves.setdefault(col, {})[env_name] = grid_stack
+
+    if not per_metric_curves:
+        logger.warning("No run logged diversity; skipping diversity aggregate.")
+        return
+    plotting.plot_diversity_aggregate(
+        per_metric_curves,
+        str(bench_dir / "aggregate_diversity.png"),
+        algo_label=algo_label,
+        suite_name=suite_name,
+    )
+    logger.info("Saved diversity aggregate across %d environments.", len(curves))
 
 
 # --------------------------------------------------------------------------- #
@@ -1387,6 +1481,13 @@ def run_training(
     artifacts = [elite_path, log_path]
     if render and render_path.is_file():
         artifacts.append(render_path)
+    # The mutation history (written by MutationHistoryLogger into out_dir during
+    # training) is uploaded too so the orchestrator can pull it back: on the Ray
+    # path out_dir is a throwaway remote working dir, so without this the CSV
+    # would never reach the local results tree.
+    mutation_history_path = out_dir / MUTATION_HISTORY_FILENAME
+    if mutation_history_path.is_file():
+        artifacts.append(mutation_history_path)
     upload_run_files(project, run_name, artifacts, root=out_dir)
 
     return {
@@ -1412,7 +1513,7 @@ def run_environment(
     stamp: str,
     bench_dir: Path,
     wandb_api_key: str | None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, np.ndarray] | None] | None:
     """Train, log, fetch, render and plot for a single environment.
 
     The training/checkpoint/render half is :func:`run_training` (also wrapped as
@@ -1420,9 +1521,10 @@ def run_environment(
     :func:`fetch_and_plot`. Both halves are reused by the Ray orchestrator,
     keeping a single source of truth.
 
-    :return: ``(x, best_fitness, normalized_fitness)`` for the plots, or None on
-        failure.
-    :rtype: tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray] | None
+    :return: ``(x, best_fitness, normalized_fitness, diversity)`` for the plots,
+        or None on failure.
+    :rtype: tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray, dict[str,
+        numpy.ndarray] | None] | None
     """
     env_dir = bench_dir / env_name / f"s{seed}"
     run_name = f"{base_name}-{algo}-{env_name}-s{seed}-{stamp}"
@@ -1515,6 +1617,7 @@ def main(argv: list[str] | None = None) -> None:
     # shape the Ray orchestrator collects, so plot_seed_aggregates reduces seeds
     # to IQM curves identically on both paths.
     curves: dict[str, list[tuple[np.ndarray, np.ndarray, np.ndarray]]] = {}
+    diversity_curves: dict[str, list[tuple[np.ndarray, dict[str, np.ndarray]]]] = {}
     for env_name in env_names:
         for seed in seeds:
             try:
@@ -1531,21 +1634,23 @@ def main(argv: list[str] | None = None) -> None:
                     wandb_api_key=args.wandb_api_key,
                 )
                 if result is not None:
-                    curves.setdefault(env_name, []).append(result)
+                    x, best, norm, diversity = result
+                    curves.setdefault(env_name, []).append((x, best, norm))
+                    if diversity is not None:
+                        diversity_curves.setdefault(env_name, []).append((x, diversity))
             except Exception as exc:  # noqa: PERF203
                 logger.exception(
                     "Environment %s (seed %d) failed: %s", env_name, seed, exc
                 )
 
+    algo_label = f"{algo.upper()} ({base_name})"
+    suite_name = env_suite_name(algo)
     if curves:
-        plot_seed_aggregates(
-            curves,
-            bench_dir,
-            f"{algo.upper()} ({base_name})",
-            env_suite_name(algo),
-        )
+        plot_seed_aggregates(curves, bench_dir, algo_label, suite_name)
     else:
         logger.warning("No environment produced plottable data.")
+    if diversity_curves:
+        plot_diversity_aggregates(diversity_curves, bench_dir, algo_label, suite_name)
 
 
 if __name__ == "__main__":

@@ -27,6 +27,18 @@ if TYPE_CHECKING:
 
 GLOBAL_STEP_COL = "train/global_step"
 BEST_FITNESS_COL = "eval/best_fitness"
+DORMANT_FRACTION_COL = "eval/best_dormant_fraction"
+
+# Population-diversity diagnostics: three deliberately-separate [0, 1]-normalised
+# curves logged each cycle. Ordered as (W&B column, human-readable label).
+HP_DIVERSITY_COL = "eval/hp_diversity"
+ARCH_DIVERSITY_COL = "eval/arch_diversity"
+ACTIVATION_DIVERSITY_COL = "eval/activation_diversity"
+DIVERSITY_SPECS: list[tuple[str, str]] = [
+    (HP_DIVERSITY_COL, "Hyperparameter diversity"),
+    (ARCH_DIVERSITY_COL, "Architecture diversity"),
+    (ACTIVATION_DIVERSITY_COL, "Activation diversity"),
+]
 
 # Shared figure styling. The main data curve is always blue; the random/expert
 # reference lines are red/green so they are easy to tell apart.
@@ -131,6 +143,59 @@ def plot_fitness(
     ax2.set_xlabel(X_LABEL)
     ax2.set_ylabel("Best normalised fitness")
     _finalize_axis(ax2, legend_handles=[rnd, exp])
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
+def plot_dormant_fraction(
+    df: pd.DataFrame,
+    env_name: str,
+    pop_size: int,
+    out_path: str,
+) -> None:
+    """Save the best agent's dormant-neuron percentage over training.
+
+    Plots the percentage of dormant neurons of the best individual (Sokar et al.
+    2023, Definition 3.1) against per-agent environment steps, in the same house
+    style as :func:`plot_fitness`. A placeholder figure is emitted when the run
+    logged no dormant-neuron values so the artifact always exists.
+
+    :param df: W&B history dataframe for the run.
+    :type df: pandas.DataFrame
+    :param env_name: Environment id (for titles).
+    :type env_name: str
+    :param pop_size: Population size (x-axis divisor).
+    :type pop_size: int
+    :param out_path: Destination .png path.
+    :type out_path: str
+    """
+    fig, ax = plt.subplots(figsize=(8, 5))
+    if DORMANT_FRACTION_COL in df.columns:
+        data = df.dropna(subset=[GLOBAL_STEP_COL, DORMANT_FRACTION_COL]).sort_values(
+            GLOBAL_STEP_COL
+        )
+    else:
+        data = df.iloc[0:0]
+
+    if data.empty:
+        ax.set_title(f"{env_name}: no dormant-neuron values logged")
+        ax.set_xlabel(X_LABEL)
+        _finalize_axis(ax)
+        fig.tight_layout()
+        fig.savefig(out_path, dpi=150)
+        plt.close(fig)
+        return
+
+    x = _per_agent_x(data, pop_size)
+    y = data[DORMANT_FRACTION_COL].to_numpy(dtype=float) * 100.0
+
+    ax.plot(x, y, color=MAIN_COLOR)
+    ax.set_title(f"{env_name}: Dormant neurons (best agent)")
+    ax.set_xlabel(X_LABEL)
+    ax.set_ylabel("% dormant neurons")
+    _finalize_axis(ax)
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
@@ -559,6 +624,197 @@ def plot_performance_profile(
     )
     ax.set_title(f"{suite_name}: Performance profile")
     _finalize_axis(ax, legend_handles=[rnd, exp])
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
+# --------------------------------------------------------------------------- #
+# Population-diversity figures
+#
+# Three deliberately-separate normalised-diversity curves (hyperparameter,
+# architecture, activation), each in [0, 1]. They share the fitness house style
+# but omit the random/expert reference lines: diversity is already normalised and
+# has no external reference -- 0 is a collapsed population, 1 is maximally spread
+# across the mutation search space.
+# --------------------------------------------------------------------------- #
+def plot_diversity(
+    df: pd.DataFrame,
+    env_name: str,
+    pop_size: int,
+    out_path: str,
+) -> None:
+    """Save the three normalised population-diversity curves for one run.
+
+    One panel per diagnostic (hyperparameter / architecture / activation),
+    plotted against per-agent environment steps with a fixed ``[0, 1]`` y-axis.
+    A panel shows a placeholder when its column was not logged so the artifact
+    always exists.
+
+    :param df: W&B history dataframe for the run.
+    :type df: pandas.DataFrame
+    :param env_name: Environment id (for titles).
+    :type env_name: str
+    :param pop_size: Population size (x-axis divisor).
+    :type pop_size: int
+    :param out_path: Destination .png path.
+    :type out_path: str
+    """
+    fig, axes = plt.subplots(
+        1, len(DIVERSITY_SPECS), figsize=(7 * len(DIVERSITY_SPECS), 5)
+    )
+    axes = np.atleast_1d(axes).ravel()
+    for ax, (col, label) in zip(axes, DIVERSITY_SPECS, strict=False):
+        data = (
+            df.dropna(subset=[GLOBAL_STEP_COL, col]).sort_values(GLOBAL_STEP_COL)
+            if col in df.columns
+            else df.iloc[0:0]
+        )
+        if data.empty:
+            ax.set_title(f"{env_name}: no {label.lower()} logged")
+            ax.set_xlabel(X_LABEL)
+            _finalize_axis(ax)
+            continue
+        ax.plot(
+            _per_agent_x(data, pop_size),
+            data[col].to_numpy(dtype=float),
+            color=MAIN_COLOR,
+        )
+        ax.set_title(f"{env_name}: {label}")
+        ax.set_xlabel(X_LABEL)
+        ax.set_ylabel(label)
+        ax.set_ylim(0.0, 1.0)
+        _finalize_axis(ax)
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
+def plot_diversity_over_seeds(
+    seed_curves: list[tuple[np.ndarray, dict[str, np.ndarray]]],
+    env_name: str,
+    out_path: str,
+    *,
+    algo_label: str = "Algorithm",
+) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    """Overlay every seed's diversity curves for one environment, with IQM + CI.
+
+    One panel per diagnostic. As with :func:`plot_fitness_over_seeds`, all seeds
+    are logged at identical timesteps so the curves are stacked directly (no
+    interpolation) and reduced to an interquartile mean with a
+    stratified-bootstrap 95% confidence band via rliable.
+
+    :param seed_curves: One ``(x, {column: values})`` per seed.
+    :type seed_curves: list[tuple[numpy.ndarray, dict[str, numpy.ndarray]]]
+    :param env_name: Environment id (for titles).
+    :type env_name: str
+    :param out_path: Destination .png path.
+    :type out_path: str
+    :param algo_label: Display label for the algorithm + HPO method.
+    :type algo_label: str
+    :return: ``{column: (grid, stacked)}`` per diagnostic for the suite aggregate,
+        with ``stacked`` of shape ``(n_seeds, n_frames)``.
+    :rtype: dict[str, tuple[numpy.ndarray, numpy.ndarray]]
+    """
+    seed_curves = [c for c in seed_curves if c is not None and len(c[0])]
+    fig, axes = plt.subplots(
+        1, len(DIVERSITY_SPECS), figsize=(7 * len(DIVERSITY_SPECS), 5)
+    )
+    axes = np.atleast_1d(axes).ravel()
+    stacks: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    for ax, (col, label) in zip(axes, DIVERSITY_SPECS, strict=False):
+        curves = [(x, d[col]) for x, d in seed_curves if d is not None and col in d]
+        grid, stacked = _align_on_common_x(curves) if curves else (np.array([]), None)
+        if grid.size == 0 or stacked is None:
+            ax.set_title(f"{env_name}: no {label.lower()} logged")
+            ax.set_xlabel(X_LABEL)
+            _finalize_axis(ax)
+            continue
+        point, cis = _iqm_interval_estimates({algo_label: stacked[:, None, :]})
+        rly_plot.plot_sample_efficiency_curve(
+            grid,
+            point,
+            cis,
+            algorithms=[algo_label],
+            colors={algo_label: MAIN_COLOR},
+            ax=ax,
+            marker="",
+            xlabel=X_LABEL,
+            ylabel=f"IQM of {label.lower()}",
+            labelsize="medium",
+            ticklabelsize="medium",
+        )
+        ax.set_title(f"{env_name}: {label}")
+        ax.set_ylim(0.0, 1.0)
+        _finalize_axis(ax)
+        stacks[col] = (grid, stacked)
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    return stacks
+
+
+def plot_diversity_aggregate(
+    per_metric_curves: dict[str, dict[str, tuple[np.ndarray, np.ndarray]]],
+    out_path: str,
+    *,
+    algo_label: str = "Algorithm",
+    suite_name: str = "Environment suite",
+) -> None:
+    """Save the cross-environment aggregate of the three diversity diagnostics.
+
+    For each diagnostic the aggregate IQM is computed with rliable over **all
+    tasks and all seeds** at each timestep (every ``(seed, env)`` pair is one
+    sample), with a stratified-bootstrap 95% confidence band -- mirroring
+    :func:`plot_aggregate` but without the random/expert reference lines.
+
+    :param per_metric_curves: ``{column: {env_name: (grid, stacked)}}`` where
+        ``stacked`` has shape ``(n_seeds, n_frames)``.
+    :type per_metric_curves: dict[str, dict[str, tuple[numpy.ndarray, numpy.ndarray]]]
+    :param out_path: Destination .png path.
+    :type out_path: str
+    :param algo_label: Display label for the algorithm + HPO method.
+    :type algo_label: str
+    :param suite_name: Human-readable environment-suite name (for the title).
+    :type suite_name: str
+    """
+    fig, axes = plt.subplots(
+        1, len(DIVERSITY_SPECS), figsize=(7 * len(DIVERSITY_SPECS), 5)
+    )
+    axes = np.atleast_1d(axes).ravel()
+    drew = False
+    for ax, (col, label) in zip(axes, DIVERSITY_SPECS, strict=False):
+        assembled = _aggregate_score_array(per_metric_curves.get(col, {}))
+        if assembled is None:
+            ax.set_title(f"{suite_name}: {label}")
+            ax.set_xlabel(X_LABEL)
+            _finalize_axis(ax)
+            continue
+        grid, scores = assembled
+        point, cis = _iqm_interval_estimates({algo_label: scores})
+        rly_plot.plot_sample_efficiency_curve(
+            grid,
+            point,
+            cis,
+            algorithms=[algo_label],
+            colors={algo_label: MAIN_COLOR},
+            ax=ax,
+            marker="",
+            xlabel=X_LABEL,
+            ylabel=f"IQM of {label.lower()}",
+            labelsize="medium",
+            ticklabelsize="medium",
+        )
+        ax.set_title(f"{suite_name}: {label}")
+        ax.set_ylim(0.0, 1.0)
+        _finalize_axis(ax)
+        drew = True
+
+    if not drew:
+        plt.close(fig)
+        return
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)

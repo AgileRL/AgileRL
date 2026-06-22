@@ -214,6 +214,13 @@ class TrainingSpec(BaseModel):
     hpo: bool = Field(default=True)
     target_score: float | None = Field(default=None)
 
+    # Threshold for the τ-dormant neuron metric (Sokar et al. 2023) logged for
+    # the best agent each evaluation cycle. 0.0 counts only exactly-dead neurons,
+    # which is degenerate for smooth/bounded activations (e.g. Tanh) that are
+    # essentially never exactly 0; 0.1 (a value used by Sokar et al.) flags units
+    # well below their layer's average activation.
+    dormant_tau: float = Field(default=0.1, ge=0.0)
+
     # Learning delay / exploration parameters only applicable for off policy algorithms
     learning_delay: int = Field(default=0)
     eps_start: float | None = Field(default=None)

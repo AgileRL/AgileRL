@@ -11,6 +11,11 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
 from agilerl.typing import GymEnvType
+from agilerl.utils.dormant_neurons import (
+    collect_observation_batch,
+    dormant_neuron_fraction,
+)
+from agilerl.utils.population_diversity import population_diversity
 from agilerl.utils.utils import (
     default_progress_bar,
     init_loggers,
@@ -38,6 +43,7 @@ def train_on_policy(
     eval_steps: int | None = None,
     eval_loop: int = 1,
     target: float | None = None,
+    dormant_tau: float = 0.0,
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
     checkpoint: int | None = None,
@@ -82,6 +88,9 @@ def train_on_policy(
     :type eval_loop: int, optional
     :param target: Target score for early stopping, defaults to None
     :type target: float, optional
+    :param dormant_tau: Threshold for the τ-dormant neuron metric (Sokar et al.
+        2023) logged for the best agent each evaluation cycle, defaults to 0.0
+    :type dormant_tau: float, optional
     :param tournament: Tournament selection object, defaults to None
     :type tournament: object, optional
     :param mutation: Mutation object, defaults to None
@@ -248,6 +257,24 @@ def train_on_policy(
                 env,
                 max_steps=eval_steps,
                 loop=eval_loop,
+            )
+
+        # Dormant-neuron fraction of the best agent (Sokar et al. 2023)
+        if wb:
+            best_agent = max(
+                population.agents,
+                key=lambda a: a.fitness[-1] if a.fitness else float("-inf"),
+            )
+            obs_batch = collect_observation_batch(env, best_agent)
+            population.set_best_dormant_fraction(
+                dormant_neuron_fraction(best_agent, obs_batch, dormant_tau)
+            )
+            # Normalised population-diversity diagnostics (hp / arch / activation).
+            population.set_diversity(
+                population_diversity(
+                    population.agents,
+                    activation_options=getattr(mutation, "activation_selection", None),
+                )
             )
 
         # Report progress

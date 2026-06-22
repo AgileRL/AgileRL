@@ -62,6 +62,10 @@ class PopulationMetrics:
     )
     mut_details: list[dict | None] = field(default_factory=list)
     parent_indices: ScalarRow = field(default_factory=list)
+    best_dormant_fraction: float = float("nan")
+    hp_diversity: float = float("nan")
+    arch_diversity: float = float("nan")
+    activation_diversity: float = float("nan")
 
     @property
     def pop_size(self) -> int:
@@ -133,6 +137,22 @@ class PopulationMetrics:
         else:
             d["eval/mean_fitness"] = mean_fitness
             d["eval/best_fitness"] = self.best_fitness
+
+        # Dormant-neuron fraction of the best agent (Sokar et al. 2023). Only
+        # emitted when it has been computed so the key shares the W&B history row
+        # with ``train/global_step``; left out otherwise.
+        if not np.isnan(self.best_dormant_fraction):
+            d["eval/best_dormant_fraction"] = self.best_dormant_fraction
+
+        # Population-diversity diagnostics (hyperparameter / architecture /
+        # activation), each normalised to [0, 1]. Emitted only when computed so
+        # they share the W&B history row with ``train/global_step``.
+        if not np.isnan(self.hp_diversity):
+            d["eval/hp_diversity"] = self.hp_diversity
+        if not np.isnan(self.arch_diversity):
+            d["eval/arch_diversity"] = self.arch_diversity
+        if not np.isnan(self.activation_diversity):
+            d["eval/activation_diversity"] = self.activation_diversity
 
         if self.scores:
             mean_score = self.mean_score
@@ -471,6 +491,8 @@ class Population(Generic[AgentT]):
         self.loggers = loggers or []
 
         self.last_fitnesses: ScalarOrNestedRow = []
+        self._pending_dormant_fraction: float = float("nan")
+        self._pending_diversity: dict[str, float] | None = None
         self.evo_steps = 0
         self.is_multi_agent = all(
             isinstance(agent, MultiAgentRLAlgorithm) for agent in agents
@@ -560,6 +582,31 @@ class Population(Generic[AgentT]):
         for agent in self._agents:
             agent.metrics.clear()
 
+    def set_best_dormant_fraction(self, value: float) -> None:
+        """Stash the best agent's dormant-neuron fraction for the next report.
+
+        The value is consumed by the next :meth:`report_metrics` call and then
+        cleared, so it is logged exactly once on the same row as the cycle's
+        other metrics (e.g. ``train/global_step``).
+
+        :param value: Dormant-neuron fraction in ``[0, 1]`` (or ``nan`` to skip).
+        :type value: float
+        """
+        self._pending_dormant_fraction = value
+
+    def set_diversity(self, values: dict[str, float]) -> None:
+        """Stash the population-diversity diagnostics for the next report.
+
+        Like :meth:`set_best_dormant_fraction`, the values are consumed by the
+        next :meth:`report_metrics` call and then cleared, so they are logged
+        exactly once on the same row as the cycle's other metrics.
+
+        :param values: Mapping with ``"hp"``, ``"arch"`` and ``"activation"``
+            normalised-diversity scalars in ``[0, 1]`` (or ``nan`` to skip an axis).
+        :type values: dict[str, float]
+        """
+        self._pending_diversity = values
+
     def report_metrics(self, clear: bool = True) -> MetricsReport:
         """Gather, format, and log population metrics.
 
@@ -577,6 +624,11 @@ class Population(Generic[AgentT]):
 
         if clear:
             self.clear_agent_metrics()
+
+        # The dormant fraction is per-cycle: clear it so it is not re-logged.
+        self._pending_dormant_fraction = float("nan")
+        # Diversity diagnostics are likewise per-cycle.
+        self._pending_diversity = None
 
         return report
 
@@ -598,6 +650,8 @@ class Population(Generic[AgentT]):
         if self.accelerator is not None and self.accelerator.is_main_process:
             steps = [step * self.accelerator.num_processes for step in steps]
 
+        diversity = getattr(self, "_pending_diversity", None) or {}
+
         return PopulationMetrics(
             fitnesses=fitnesses,
             scores=self._collect_scores(),
@@ -610,6 +664,12 @@ class Population(Generic[AgentT]):
             nonscalar_additional_metrics=self._collect_nonscalar_metrics(),
             mut_details=[getattr(a, "mut_details", None) for a in self.agents],
             parent_indices=[getattr(a, "_parent_index", a.index) for a in self.agents],
+            best_dormant_fraction=getattr(
+                self, "_pending_dormant_fraction", float("nan")
+            ),
+            hp_diversity=diversity.get("hp", float("nan")),
+            arch_diversity=diversity.get("arch", float("nan")),
+            activation_diversity=diversity.get("activation", float("nan")),
         )
 
     def _collect_fitnesses(self) -> ScalarOrNestedRow:

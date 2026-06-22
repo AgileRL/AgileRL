@@ -345,6 +345,14 @@ class AlgorithmSpec(BaseModel):
         if self.agent_type == AgentType.MultiAgent:
             kwargs["sum_scores"] = training.sum_scores
 
+        # The dormant-neuron metric is computed by the on-policy, off-policy and
+        # multi-agent on-policy trainers; only those accept ``dormant_tau``.
+        supports_dormant = not (self.offline or self.bandit) and not (
+            self.agent_type == AgentType.MultiAgent and self.off_policy
+        )
+        if supports_dormant:
+            kwargs["dormant_tau"] = training.dormant_tau
+
         return kwargs
 
 
