@@ -201,6 +201,7 @@ class DummyReasoningEnv(RolloutHarness):
         self.input_size = input_size
         self.data_batch_size = data_batch_size
         self.device = device
+        self._env = None
 
     def _prompt(self):
         return {

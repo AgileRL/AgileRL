@@ -1133,6 +1133,9 @@ def _minimal_reasoning_rollout_env(device: str, vocab_size: int, input_size: int
     class _SingleTurnReasoning(RolloutHarness):
         max_turns = 1
 
+        def __init__(self):
+            self._env = None
+
         def _prompt(self):
             return {
                 "input_ids": torch.randint(
