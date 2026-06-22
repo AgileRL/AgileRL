@@ -11,7 +11,7 @@ from agilerl.training.train_llm import finetune_llm_multiturn
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.llm_envs import (
     RolloutEnv,
-    TokenObservationWrapper,
+    RolloutHarness,
     _default_prompt_builder,
     _extract_question_answer_columns,
 )
@@ -143,7 +143,7 @@ def main(init_hp, mut_p):
             test_answers=test_answers,
         )
         raw_env.evaluation_mode = evaluation_mode
-        wrapper = TokenObservationWrapper(
+        wrapper = RolloutHarness(
             raw_env,
             tokenizer=tokenizer,
             max_turns=1,

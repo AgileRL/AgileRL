@@ -1,4 +1,4 @@
-"""Tool-aware tokenization & masking in ``TokenObservationWrapper``.
+"""Tool-aware tokenization & masking in ``RolloutHarness``.
 
 Masking is by *generation provenance*: a token contributes to the policy loss
 iff the policy sampled it (``turn_boundaries``), so env-observation / tool-result
@@ -13,16 +13,16 @@ from typing import Any
 import pytest
 import torch
 
-from agilerl.llm_envs import TokenObservationWrapper
+from agilerl.llm_envs import RolloutHarness
 
 _WIP = "pending tool-path wiring (engine / _align_sampling_logprobs)"
 
 
-def _bare_wrapper() -> TokenObservationWrapper:
-    return TokenObservationWrapper.__new__(TokenObservationWrapper)
+def _bare_wrapper() -> RolloutHarness:
+    return RolloutHarness.__new__(RolloutHarness)
 
 
-def _mask_wrapper() -> TokenObservationWrapper:
+def _mask_wrapper() -> RolloutHarness:
     """Wrapper carrying just the fields ``get_episode_data`` reads.
 
     ``full_ids`` layout: ``[p0 p1 | g0 g1 | f0 f1 | g2 g3]`` — initial prompt,

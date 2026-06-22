@@ -11,7 +11,7 @@ if not HAS_LLM_DEPENDENCIES:
     raise ImportError("LLM dependencies are not installed.")
 
 import torch
-from agilerl.wrappers.gem_wrappers import TokenObservationWrapper
+from agilerl.llm_envs import RolloutHarness
 from config_load import load_debug_config
 from llm_debug_utils import lora_config_from_dict
 from tiny_model import TinyDigitTokenizer, build_tiny_actor_network
@@ -170,8 +170,8 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
     print(f"[seed={seed}] pre per-class sampled: {pre_class}")
     print(f"[seed={seed}] pre per-class greedy: {pre_class_g}")
 
-    def env_factory() -> TokenObservationWrapper:
-        return TokenObservationWrapper(
+    def env_factory() -> RolloutHarness:
+        return RolloutHarness(
             ConditionalTargetEnv(seed=seed),
             tokenizer,
             1,

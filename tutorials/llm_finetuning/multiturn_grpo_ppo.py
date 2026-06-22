@@ -19,7 +19,7 @@ from agilerl.training.train_llm import finetune_llm_multiturn
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import create_llm_accelerator
 from agilerl.utils.utils import create_population, _normalize_algo_name
-from agilerl.llm_envs import TokenObservationWrapper
+from agilerl.llm_envs import RolloutHarness
 
 if not HAS_LLM_DEPENDENCIES:
     msg = (
@@ -138,10 +138,10 @@ def main() -> None:
     if hasattr(env_probe, "close"):
         env_probe.close()
 
-    def env_factory() -> TokenObservationWrapper:
+    def env_factory() -> RolloutHarness:
         """Create one wrapped multi-turn environment instance."""
         env = gem.make(args.env_name)
-        return TokenObservationWrapper(
+        return RolloutHarness(
             env=env,
             tokenizer=tokenizer,
             max_turns=max_turns,

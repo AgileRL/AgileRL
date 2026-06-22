@@ -1,4 +1,4 @@
-"""Tests for TokenObservationWrapper sliding-window prompt fields."""
+"""Tests for RolloutHarness sliding-window prompt fields."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from agilerl.llm_envs import (
     FormatRewardWrapper,
     SearchTool,
     BatchRolloutEnv,
-    TokenObservationWrapper,
+    RolloutHarness,
     Trajectory,
     TrajectoryBuffer,
 )
@@ -22,8 +22,8 @@ class _StubTokenizer:
         return "x" * len(ids)
 
 
-def _bare_wrapper() -> TokenObservationWrapper:
-    w = TokenObservationWrapper.__new__(TokenObservationWrapper)
+def _bare_wrapper() -> RolloutHarness:
+    w = RolloutHarness.__new__(RolloutHarness)
     w.tools = None  # optional config; __init__ default, read by the tokenize paths
     return w
 
@@ -143,7 +143,7 @@ class _RecordingGemEnv:
 class TestTokenObservationWrapperReset:
     def test_reset_returns_tuple_with_text_and_sets_prompt_len(self) -> None:
         inner = _RecordingGemEnv()
-        w = TokenObservationWrapper(
+        w = RolloutHarness(
             inner,
             _ChrTokenizer(),
             max_turns=3,
@@ -157,7 +157,7 @@ class TestTokenObservationWrapperReset:
         assert w._last_full_prompt_token_len == obs["input_ids"].shape[1]
 
     def test_reset_seed_fallback_for_seedless_env(self) -> None:
-        w = TokenObservationWrapper(
+        w = RolloutHarness(
             _SeedlessResetEnv(),
             _ChrTokenizer(),
             max_turns=1,
@@ -171,7 +171,7 @@ class TestTokenObservationWrapperReset:
 class TestTokenObservationWrapperStep:
     def test_step_from_full_completion_slices_generation(self) -> None:
         inner = _RecordingGemEnv()
-        w = TokenObservationWrapper(
+        w = RolloutHarness(
             inner,
             _ChrTokenizer(),
             max_turns=3,
@@ -195,7 +195,7 @@ class TestTokenObservationWrapperStep:
 
     def test_chat_template_paths_and_nonterminal_step_feedback_append(self) -> None:
         env = _NonTerminalEnv()
-        w = TokenObservationWrapper(
+        w = RolloutHarness(
             env,
             _ChatTokenizer(),
             max_turns=2,
@@ -222,7 +222,7 @@ class TestTokenObservationWrapperStep:
 
     def test_non_chat_feedback_tokenization_path(self) -> None:
         env = _NonTerminalEnv()
-        w = TokenObservationWrapper(
+        w = RolloutHarness(
             env,
             _ChrTokenizer(),
             max_turns=2,
@@ -246,7 +246,7 @@ class TestTokenObservationWrapperStep:
         env = _NonTerminalEnv()
         # Tiny budget: 20 - 4 = 16 prompt tokens. Initial prompt "P:hello\nS"
         # is 9 char-tokens; +2 gen +12 feedback ("F:feedback\nT") => 23 > 16.
-        w = TokenObservationWrapper(
+        w = RolloutHarness(
             env,
             _ChrTokenizer(),
             max_turns=4,
@@ -278,7 +278,7 @@ class TestTokenObservationWrapperStep:
         """Counterpart to strict-mode test: with sliding window enabled,
         overflow is masked by dropping older turns from the prompt."""
         env = _NonTerminalEnv()
-        w = TokenObservationWrapper(
+        w = RolloutHarness(
             env,
             _ChrTokenizer(),
             max_turns=4,
@@ -316,7 +316,7 @@ class TestTokenObservationWrapperChatTemplateBoundary:
         decoded = "".join(chr(int(x)) for x in out[0].tolist())
         # Must close the assistant turn, open a user turn with the feedback,
         # close it, then open a fresh model turn. Placeholder must not leak.
-        assert TokenObservationWrapper._BOUNDARY_PLACEHOLDER not in decoded
+        assert RolloutHarness._BOUNDARY_PLACEHOLDER not in decoded
         assert decoded.startswith("<end_of_turn>\n<start_of_turn>user\n")
         assert "FEEDBACK" in decoded
         assert decoded.endswith("<start_of_turn>model\n")
@@ -330,7 +330,7 @@ class TestTokenObservationWrapperChatTemplateBoundary:
 
         assert out is not None
         decoded = "".join(chr(int(x)) for x in out[0].tolist())
-        assert TokenObservationWrapper._BOUNDARY_PLACEHOLDER not in decoded
+        assert RolloutHarness._BOUNDARY_PLACEHOLDER not in decoded
         assert decoded.startswith("<|im_end|>\n<|im_start|>user\n")
         assert "FEEDBACK" in decoded
         assert decoded.endswith("<|im_start|>assistant\n")
@@ -344,7 +344,7 @@ class TestTokenObservationWrapperChatTemplateBoundary:
 
         assert out is not None
         decoded = "".join(chr(int(x)) for x in out[0].tolist())
-        assert TokenObservationWrapper._BOUNDARY_PLACEHOLDER not in decoded
+        assert RolloutHarness._BOUNDARY_PLACEHOLDER not in decoded
         # Should close assistant via <|eot_id|> then open a user header.
         assert decoded.startswith("<|eot_id|><|start_header_id|>user")
         assert "FEEDBACK" in decoded
@@ -882,10 +882,9 @@ class _NonTerminalEnv:
 
 class TestTokenObservationWrapperFormatObs:
     def test_format_obs_prefix_suffix_and_empty_info(self) -> None:
-        assert TokenObservationWrapper._format_obs("x", None) == "x"
+        assert RolloutHarness._format_obs("x", None) == "x"
         assert (
-            TokenObservationWrapper._format_obs("x", {"prefix": "A:", "suffix": "B"})
-            == "A:x\nB"
+            RolloutHarness._format_obs("x", {"prefix": "A:", "suffix": "B"}) == "A:x\nB"
         )
 
 

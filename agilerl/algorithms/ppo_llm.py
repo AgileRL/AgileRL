@@ -21,7 +21,7 @@ else:
     # tests can patch it. ``_ppo_loss_liger`` guards against actual use.
     LigerFusedLinearPolicyLossFunction = None  # type: ignore[assignment]
     apply_fused_policy_loss = None  # type: ignore[assignment]
-from agilerl.llm_envs import RolloutEnv
+from agilerl.llm_envs import RolloutHarness
 from agilerl.protocols import (
     LoraConfigProtocol,
     PeftModelProtocol,
@@ -779,7 +779,7 @@ class PPO(LLMAlgorithm):
 
     def test(
         self,
-        env: RolloutEnv,
+        env: RolloutHarness,
         loop: int = 1,
     ) -> torch.Tensor:
         """Return fitness (test) score tensor of llm on test sub-set.
@@ -789,8 +789,8 @@ class PPO(LLMAlgorithm):
         after ``max_turns`` (one for reasoning). ``loop`` iterations replay the
         test episode that many times.
 
-        :param env: A :class:`~agilerl.llm_envs.TokenObservationWrapper` rollout env.
-        :type env: RolloutEnv
+        :param env: A :class:`~agilerl.llm_envs.RolloutHarness` rollout harness.
+        :type env: RolloutHarness
         :param loop: Number of outer test iterations (episodes).
         :type loop: int
         :return: Concatenated per-step rewards from the test loop.
@@ -798,8 +798,8 @@ class PPO(LLMAlgorithm):
         """
         eval_context = getattr(env, "eval_mode", nullcontext)
         with eval_context():
-            if not isinstance(env, RolloutEnv):
-                msg = f"env must be a RolloutEnv; got {type(env).__name__}"
+            if not isinstance(env, RolloutHarness):
+                msg = f"env must be a RolloutHarness; got {type(env).__name__}"
                 raise TypeError(msg)
             all_rewards: list[torch.Tensor] = []
             for _ in range(loop):

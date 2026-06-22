@@ -4,7 +4,7 @@ A :class:`RolloutEnv` is the generation half of the env taxonomy: the model
 generates a completion to a dataset-seeded prompt and the env scores it with a
 ``reward_fn``. Reasoning is the degenerate ``max_turns=1`` configuration — a
 plain :class:`RolloutEnv` instance, no subclass. Callers wrap it in
-:class:`~agilerl.llm_envs.token_observation.TokenObservationWrapper` so it plugs
+:class:`~agilerl.llm_envs.token_observation.RolloutHarness` so it plugs
 into ``BatchRolloutEnv`` like any other rollout env, deriving a prompt builder
 from a conversation template via :func:`_default_prompt_builder` and pulling
 question/answer columns via :func:`_extract_question_answer_columns`.
@@ -63,7 +63,7 @@ class RolloutEnv(LLMEnv):
     the env scores it via ``reward_fn(completion, answer, question)`` on the decoded
     generation. Multi-turn / tool-using rollouts subclass this and override
     :meth:`step`. Wrapped by
-    :class:`~agilerl.llm_envs.token_observation.TokenObservationWrapper` to
+    :class:`~agilerl.llm_envs.token_observation.RolloutHarness` to
     participate in the rollout taxonomy.
 
     :param max_turns: Number of generation turns before the episode terminates.
@@ -188,7 +188,7 @@ def _default_prompt_builder(
 
     Formats each template message's ``content`` with the question (answer left
     blank, mirroring generation time) and joins them. The wrapped
-    ``TokenObservationWrapper`` applies the tokenizer's chat template to this
+    ``RolloutHarness`` applies the tokenizer's chat template to this
     text, so the builder only assembles the user-visible prompt string.
     """
 

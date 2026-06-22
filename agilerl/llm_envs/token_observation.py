@@ -1,9 +1,10 @@
-"""Token-level wrapper for multi-turn LLM environments."""
+"""Token-level rollout harness for multi-turn LLM environments."""
 
 from __future__ import annotations
 
 import inspect
 import warnings
+from contextlib import contextmanager, nullcontext
 from typing import Any
 
 import torch
@@ -12,8 +13,15 @@ from agilerl.llm_envs.rollout_env import RolloutEnv
 from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
 
 
-class TokenObservationWrapper(RolloutEnv):
-    """Token-level observation wrapper for multi-turn environments."""
+class RolloutHarness:
+    """Token-level rollout harness wrapping a text :class:`RolloutEnv`.
+
+    Adapts a text-level :class:`RolloutEnv` (``reset`` -> text, ``step(text)``
+    -> reward) to the token contract the trainer drives (``reset`` -> dict
+    observation, ``step(completion_ids)``, ``get_episode_data`` -> trajectory)
+    and assembles the multi-turn masked transcript. It composes (wraps) the
+    inner env rather than being an env itself.
+    """
 
     # Unique marker that ``_chat_template_boundary_ids`` slices on; must not
     # collide with anything a real chat template renders.
@@ -52,7 +60,7 @@ class TokenObservationWrapper(RolloutEnv):
             is passed).
         :type tools: list[dict] | None
         """
-        super().__init__(max_turns=max_turns, tools=tools)
+        self.max_turns = max_turns
         self._env = env
         self.tokenizer = tokenizer
         self.pad_id = pad_id
@@ -244,6 +252,27 @@ class TokenObservationWrapper(RolloutEnv):
     def dataset_size(self) -> int:
         """Number of training rows backing the wrapped env (0 if not dataset-backed)."""
         return getattr(self._env, "dataset_size", 0)
+
+    @property
+    def evaluation_mode(self) -> bool:
+        """Whether the wrapped env is currently serving its held-out split."""
+        return bool(getattr(self._env, "evaluation_mode", False))
+
+    @evaluation_mode.setter
+    def evaluation_mode(self, value: bool) -> None:
+        if hasattr(self._env, "evaluation_mode"):
+            self._env.evaluation_mode = value
+
+    @contextmanager
+    def eval_mode(self):
+        """Serve the wrapped env's held-out split for the duration of the block."""
+        inner = getattr(self._env, "eval_mode", None)
+        if callable(inner):
+            with inner():
+                yield
+        else:
+            with nullcontext():
+                yield
 
     def _reset_inner(
         self,
@@ -540,3 +569,7 @@ class TokenObservationWrapper(RolloutEnv):
             "turn_details": turn_details,
             "feedback_texts": self._feedback_texts,
         }
+
+
+# Back-compat alias (one release): TokenObservationWrapper was renamed to RolloutHarness.
+TokenObservationWrapper = RolloutHarness

@@ -891,7 +891,7 @@ def finetune_llm_multiturn(
     Collects token-level episodes (``reset`` returns ``(obs, info)``,
     repeated ``get_action`` / ``step`` (full completion tensor), then
     ``get_episode_data``), then runs turn-level PPO updates. For
-    ``TokenObservationWrapper`` with ``max_model_len`` set, sliding-window
+    ``RolloutHarness`` with ``max_model_len`` set, sliding-window
     prompt fields are included in each observation before generation.
 
     :param pop: Population of LLMPPO agents to finetune.

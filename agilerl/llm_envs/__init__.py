@@ -19,7 +19,10 @@ from agilerl.llm_envs.sync_vec_env import (
     Trajectory,
     TrajectoryBuffer,
 )
-from agilerl.llm_envs.token_observation import TokenObservationWrapper
+from agilerl.llm_envs.token_observation import (
+    RolloutHarness,
+    TokenObservationWrapper,
+)
 
 requests = _search.requests
 
@@ -31,6 +34,7 @@ __all__ = [
     "LLMEnv",
     "PreferenceGym",
     "RolloutEnv",
+    "RolloutHarness",
     "SFTGym",
     "SearchTool",
     "SyncMultiTurnVecEnv",

@@ -13,7 +13,7 @@ import yaml
 from transformers import AutoTokenizer
 
 from agilerl.algorithms import CISPO, GRPO, GSPO, LLMPPO, LLMREINFORCE
-from agilerl.llm_envs import TokenObservationWrapper
+from agilerl.llm_envs import RolloutHarness
 from agilerl.training.train_llm import finetune_llm_multiturn
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import (
@@ -76,7 +76,7 @@ def main(init_hp, mut_p):
             # Fix gem's Sudoku instruction-prompt bugs (subgrid wording + an
             # out-of-range worked example on the easy/4x4 board).
             env.reset = _patch_sudoku_prompt(env.reset)
-        return TokenObservationWrapper(
+        return RolloutHarness(
             env,
             tokenizer,
             rollout_max_turns,

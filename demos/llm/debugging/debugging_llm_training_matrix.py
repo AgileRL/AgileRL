@@ -28,7 +28,7 @@ from agilerl import HAS_LLM_DEPENDENCIES
 if not HAS_LLM_DEPENDENCIES:
     raise ImportError("LLM dependencies are not installed.")
 
-from agilerl.llm_envs import TokenObservationWrapper
+from agilerl.llm_envs import RolloutHarness
 from llm_debug_utils import lora_config_from_dict
 from tiny_model import TinyDigitTokenizer, build_tiny_actor_network
 
@@ -327,9 +327,9 @@ def run_multiturn_case(
     )
     rng = Random(args.seed)
 
-    def env_factory() -> TokenObservationWrapper:
+    def env_factory() -> RolloutHarness:
         """Create one tiny token observation environment."""
-        return TokenObservationWrapper(
+        return RolloutHarness(
             ConditionalTargetEnv(seed=rng.randint(0, 2**31)),
             tokenizer,
             1,
