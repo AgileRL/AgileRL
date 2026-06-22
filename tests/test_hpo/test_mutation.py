@@ -11,6 +11,7 @@ from accelerate.utils import DeepSpeedPlugin
 from gymnasium import spaces
 
 from agilerl import HAS_DEEPSPEED, HAS_LLM_DEPENDENCIES, HAS_VLLM
+from agilerl.algorithms import DDPG, DQN, PPO, TD3, NeuralUCB
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 
 if HAS_LLM_DEPENDENCIES:
@@ -2085,24 +2086,20 @@ class TestMutationsNoMutation:
 
 class TestMutationsActivationMutation:
     @pytest.mark.gpu
-    @pytest.mark.parametrize("algo", ["PPO", "DDPG", "TD3"])
+    @pytest.mark.parametrize("algo_cls", [PPO, DDPG, TD3])
     def test_warns_for_policy_gradient_algos(
-        self, algo, vector_space, encoder_mlp_config, device
+        self, algo_cls, vector_space, encoder_mlp_config, device
     ):
-        from agilerl.utils.utils import create_population
-
         action_space = (
             generate_random_box_space((2,))
-            if algo in ("DDPG", "TD3")
+            if algo_cls in (DDPG, TD3)
             else generate_discrete_space(2)
         )
-        pop = create_population(
-            algo=algo,
+        pop = algo_cls.population(
+            size=1,
             observation_space=vector_space,
             action_space=action_space,
             net_config=encoder_mlp_config,
-            INIT_HP=SHARED_INIT_HP,
-            population_size=1,
             device=device,
         )
         muts = Mutations(0, 0, 0, 0, 1, 0, 0.1, device=device)
@@ -2153,15 +2150,11 @@ class TestGetExpLayer:
     def test_returns_output_layer_for_evolvable_module(
         self, vector_space, discrete_space, encoder_mlp_config
     ):
-        from agilerl.utils.utils import create_population
-
-        pop = create_population(
-            algo="NeuralUCB",
+        pop = NeuralUCB.population(
+            size=1,
             observation_space=vector_space,
             action_space=discrete_space,
             net_config=encoder_mlp_config,
-            INIT_HP=SHARED_INIT_HP,
-            population_size=1,
             device="cpu",
         )
         offspring = pop[0].actor.clone()
@@ -2181,15 +2174,11 @@ def test_set_global_seed(seed):
 def test_get_offspring_eval_modules_returns_policy_and_modules(
     vector_space, discrete_space, encoder_mlp_config
 ):
-    from agilerl.utils.utils import create_population
-
-    pop = create_population(
-        algo="DQN",
+    pop = DQN.population(
+        size=1,
         observation_space=vector_space,
         action_space=discrete_space,
         net_config=encoder_mlp_config,
-        INIT_HP=SHARED_INIT_HP,
-        population_size=1,
         device="cpu",
     )
     policy, offspring_evals = get_offspring_eval_modules(pop[0])

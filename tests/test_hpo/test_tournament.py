@@ -8,7 +8,6 @@ from agilerl import HAS_DEEPSPEED, HAS_LLM_DEPENDENCIES, HAS_VLLM
 from agilerl.algorithms import CQN, DDPG, DQN, MADDPG, MATD3, PPO, TD3, RainbowDQN
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.algo_utils import clone_llm
-from agilerl.utils.utils import create_population
 from tests.helper_functions import (
     generate_discrete_space,
     generate_multi_agent_box_spaces,
@@ -24,43 +23,6 @@ if HAS_LLM_DEPENDENCIES:
 create_module = None
 if HAS_DEEPSPEED and HAS_VLLM:
     from tests.test_algorithms.test_llms.test_grpo import create_module
-
-# Shared HP dict that can be used by any algorithm
-INIT_HP = {
-    "POPULATION_SIZE": 4,
-    "DOUBLE": True,
-    "BATCH_SIZE": 128,
-    "LR": 1e-3,
-    "CUDAGRAPHS": False,
-    "LR_ACTOR": 1e-4,
-    "LR_CRITIC": 1e-3,
-    "GAMMA": 0.99,
-    "LEARN_STEP": 1,
-    "TAU": 1e-3,
-    "BETA": 0.4,
-    "PRIOR_EPS": 0.000001,
-    "NUM_ATOMS": 51,
-    "V_MIN": 0,
-    "V_MAX": 200,
-    "N_STEP": 3,
-    "POLICY_FREQ": 10,
-    "GAE_LAMBDA": 0.95,
-    "ACTION_STD_INIT": 0.6,
-    "CLIP_COEF": 0.2,
-    "ENT_COEF": 0.01,
-    "VF_COEF": 0.5,
-    "MAX_GRAD_NORM": 0.5,
-    "TARGET_KL": None,
-    "UPDATE_EPOCHS": 4,
-    "AGENT_IDS": ["agent1", "agent2"],
-    "LAMBDA": 1.0,
-    "REG": 0.000625,
-    "O_U_NOISE": True,
-    "EXPL_NOISE": 0.1,
-    "MEAN_NOISE": 0.0,
-    "THETA": 0.15,
-    "DT": 0.01,
-}
 
 
 class TestTournamentSelectionInit:
@@ -116,19 +78,17 @@ class TestTournamentSelectionSelect:
             "CQN": CQN,
         }
 
-        for algo in algo_classes:
-            if algo in ["TD3", "DDPG"]:
+        for algo_name, algo_cls in algo_classes.items():
+            if algo_name in ["TD3", "DDPG"]:
                 action_space = continuous_action_space
             else:
                 action_space = discrete_action_space
 
-            population = create_population(
-                algo=algo,
+            population = algo_cls.population(
+                size=population_size,
                 observation_space=observation_space,
                 action_space=action_space,
                 net_config=net_config,
-                INIT_HP=INIT_HP,
-                population_size=population_size,
                 device=device,
             )
 
@@ -171,19 +131,17 @@ class TestTournamentSelectionSelect:
             "CQN": CQN,
         }
 
-        for algo in algo_classes:
-            if algo in ["TD3", "DDPG"]:
+        for algo_name, algo_cls in algo_classes.items():
+            if algo_name in ["TD3", "DDPG"]:
                 action_space = continuous_action_space
             else:
                 action_space = discrete_action_space
 
-            population = create_population(
-                algo=algo,
+            population = algo_cls.population(
+                size=population_size,
                 observation_space=observation_space,
                 action_space=action_space,
                 net_config=net_config,
-                INIT_HP=INIT_HP,
-                population_size=population_size,
                 device=device,
             )
 
@@ -208,6 +166,7 @@ class TestTournamentSelectionSelect:
     def test_returns_best_agent_and_new_population_multi_agent(self):
         observation_space = generate_multi_agent_box_spaces(2, (4,))
         action_space = generate_multi_agent_discrete_spaces(2, 2)
+        agent_ids = ["agent_0", "agent_1"]
         net_config = {"encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 7}}
         device = "cpu"
         population_size = 5
@@ -217,14 +176,13 @@ class TestTournamentSelectionSelect:
 
         algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
 
-        for algo in algo_classes:
-            population = create_population(
-                algo=algo,
+        for algo_cls in algo_classes.values():
+            population = algo_cls.population(
+                size=population_size,
                 observation_space=observation_space,
                 action_space=action_space,
+                agent_ids=agent_ids,
                 net_config=net_config,
-                INIT_HP=INIT_HP,
-                population_size=population_size,
                 device=device,
             )
 
@@ -250,6 +208,7 @@ class TestTournamentSelectionSelect:
     def test_returns_best_agent_and_new_population_without_elitism_multi_agent(self):
         observation_space = generate_multi_agent_box_spaces(2, (4,))
         action_space = generate_multi_agent_discrete_spaces(2, 2)
+        agent_ids = ["agent_0", "agent_1"]
         net_config = {"encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 7}}
         device = "cpu"
         population_size = 5
@@ -259,14 +218,13 @@ class TestTournamentSelectionSelect:
 
         algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
 
-        for algo in algo_classes:
-            population = create_population(
-                algo=algo,
+        for algo_cls in algo_classes.values():
+            population = algo_cls.population(
+                size=population_size,
                 observation_space=observation_space,
                 action_space=action_space,
+                agent_ids=agent_ids,
                 net_config=net_config,
-                INIT_HP=INIT_HP,
-                population_size=population_size,
                 device=device,
             )
 
@@ -499,13 +457,11 @@ class TestTournamentSelectionElitism:
         observation_space = generate_random_box_space((4,))
         discrete_action_space = generate_discrete_space(2)
         net_config = {"encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 7}}
-        population = create_population(
-            algo="DQN",
+        population = DQN.population(
+            size=4,
             observation_space=observation_space,
             action_space=discrete_action_space,
             net_config=net_config,
-            INIT_HP=INIT_HP,
-            population_size=4,
             device="cpu",
         )
         population[0].fitness = [1, 2]
