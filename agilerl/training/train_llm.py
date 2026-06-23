@@ -730,11 +730,14 @@ def train_llm_dataset(
                     - agg_metrics["mean_rejected_reward"]
                 )
             else:
-                loss, perplexity = agent.learn(current_prompts)
+                learn_output = agent.learn(current_prompts)
                 next_prompts = training_env.step()
+                # SFT.learn returns a {"mean_loss", "mean_perplexity"} dict.
                 agg_metrics = [
-                    safe_aggregate_metrics(accelerator, loss),
-                    safe_aggregate_metrics(accelerator, perplexity),
+                    safe_aggregate_metrics(accelerator, learn_output["mean_loss"]),
+                    safe_aggregate_metrics(
+                        accelerator, learn_output["mean_perplexity"]
+                    ),
                 ]
             if uses_env_fn:
                 prompts_by_agent[agent_idx] = next_prompts

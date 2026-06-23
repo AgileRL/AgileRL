@@ -650,7 +650,7 @@ class TestFinetuneLlmSft:
         mock_agent = MagicMock(spec=SFT)
         mock_agent.algo = "SFT"
         mock_agent.fitness = [0.0]
-        mock_agent.learn.return_value = (0.5, 1.65)
+        mock_agent.learn.return_value = {"mean_loss": 0.5, "mean_perplexity": 1.65}
         mock_agent.test.return_value = -0.4
         mock_agent.batch_size_per_process = 1
         mock_agent.batch_size = 1
@@ -694,7 +694,7 @@ class TestFinetuneLlmSft:
         mock_agent.registry.hp_config = MagicMock()
         mock_agent.registry.hp_config.config = {"lr": 0.001, "batch_size": 32}
         mock_agent.fitness = [0.0]
-        mock_agent.learn.return_value = (0.5, 1.65)
+        mock_agent.learn.return_value = {"mean_loss": 0.5, "mean_perplexity": 1.65}
         mock_agent.test.return_value = -0.4
         mock_agent.batch_size_per_process = 1
         mock_agent.batch_size = 1
@@ -746,7 +746,7 @@ class TestFinetuneLlmSft:
         mock_agent = MagicMock(spec=SFT)
         mock_agent.algo = "SFT"
         mock_agent.fitness = [0.0]
-        mock_agent.learn.return_value = (0.5, 1.65)
+        mock_agent.learn.return_value = {"mean_loss": 0.5, "mean_perplexity": 1.65}
         mock_agent.test.return_value = -0.4
         mock_agent.batch_size_per_process = 1
         mock_agent.batch_size = 1
@@ -801,7 +801,7 @@ class TestFinetuneLlmSft:
         mock_agent = MagicMock(spec=SFT)
         mock_agent.algo = "SFT"
         mock_agent.fitness = [0.0]
-        mock_agent.learn.return_value = (0.5, 1.65)
+        mock_agent.learn.return_value = {"mean_loss": 0.5, "mean_perplexity": 1.65}
         mock_agent.test.return_value = -0.4
         mock_agent.batch_size_per_process = 32
         mock_agent.batch_size = 32
@@ -839,7 +839,7 @@ class TestFinetuneLlmSft:
         mock_agent = MagicMock(spec=SFT)
         mock_agent.algo = "SFT"
         mock_agent.fitness = [0.0]
-        mock_agent.learn.return_value = (0.5, 1.65)
+        mock_agent.learn.return_value = {"mean_loss": 0.5, "mean_perplexity": 1.65}
         mock_agent.test.return_value = -0.4
         mock_agent.batch_size_per_process = 32
         mock_agent.batch_size = 32
@@ -920,7 +920,7 @@ class TestFinetuneLlmSft:
         agent1 = MagicMock(spec=SFT)
         for agent in (agent0, agent1):
             agent.algo = "SFT"
-            agent.learn.return_value = (0.5, 1.2)
+            agent.learn.return_value = {"mean_loss": 0.5, "mean_perplexity": 1.2}
             agent.test.return_value = -0.3
             agent.batch_size = 1
             agent.batch_size_per_process = 1
@@ -967,7 +967,7 @@ class TestFinetuneLlmSft:
         mock_agent.registry.hp_config = MagicMock()
         mock_agent.registry.hp_config.config = {}
         mock_agent.fitness = [0.0]
-        mock_agent.learn.return_value = (0.5, 1.65)
+        mock_agent.learn.return_value = {"mean_loss": 0.5, "mean_perplexity": 1.65}
         mock_agent.test.return_value = -0.4
         mock_agent.batch_size_per_process = 32
         mock_agent.batch_size = 32
@@ -1018,7 +1018,7 @@ class TestFinetuneLlmSft:
         mock_agent.registry.hp_config = MagicMock()
         mock_agent.registry.hp_config.config = {}
         mock_agent.fitness = [0.0]
-        mock_agent.learn.return_value = (0.5, 1.65)
+        mock_agent.learn.return_value = {"mean_loss": 0.5, "mean_perplexity": 1.65}
         mock_agent.test.return_value = -0.4
         mock_agent.batch_size_per_process = 32
         mock_agent.batch_size = 32
@@ -1920,7 +1920,7 @@ def test_finetune_llm_warns_on_shared_env_with_population(finetune_fn, agent_spe
         agent.fitness = [0.0]
         agent.index = algo_name
         if agent_spec is SFT:
-            agent.learn.return_value = (0.5, 1.0)
+            agent.learn.return_value = {"mean_loss": 0.5, "mean_perplexity": 1.0}
             agent.test.return_value = -0.1
         agents.append(agent)
 
@@ -2096,7 +2096,7 @@ def test_inner_loop_breaks_after_max_steps_first_agent(finetune_fn, agent_spec):
         agent1 = MagicMock(spec=SFT)
         for agent in (agent0, agent1):
             agent.algo = "SFT"
-            agent.learn.return_value = (0.5, 1.2)
+            agent.learn.return_value = {"mean_loss": 0.5, "mean_perplexity": 1.2}
             agent.test.return_value = -0.3
             agent.batch_size = 1
             agent.batch_size_per_process = 1

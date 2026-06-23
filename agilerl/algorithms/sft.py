@@ -236,9 +236,9 @@ class SFT(LLMAlgorithm):
         :type experiences: ExperiencesType
         :param training: When ``False`` the backward pass is skipped (eval mode).
         :type training: bool
-        :return: ``(mean_loss, mean_perplexity)`` averaged over all samples in
+        :return: ``{"mean_loss", "mean_perplexity"}`` averaged over all samples in
             the batch.
-        :rtype: tuple[float, float]
+        :rtype: dict[str, float]
         """
         gc.collect()
         torch.cuda.empty_cache()
