@@ -1774,11 +1774,11 @@ class TestBuildEvalWandbDict:
         agent = MagicMock(spec=DPO)
         train_metrics = {
             "agent_0/train_metrics": {
-                "Train/Mean Loss": 0.5,
+                "Train/Loss": 0.5,
                 "Train/Mean Reward Margin": 0.2,
             },
             "agent_1/train_metrics": {
-                "Train/Mean Loss": 0.3,
+                "Train/Loss": 0.3,
                 "Train/Mean Reward Margin": 0.4,
             },
         }
@@ -1806,12 +1806,21 @@ class TestNormalizeLearnMetrics:
         assert metrics["pg_loss"] == 0.2
         assert metrics["entropy"] == 0.3
 
-    def test_preference_tuple_normalizes_to_mean_loss(self):
+    def test_preference_normalizes_loss_key(self):
         agent = MagicMock(spec=DPO)
+        # tuple form
         metrics = _normalize_learn_metrics(agent, (0.7, 0.2, 0.1), mode="preference")
-        assert metrics["mean_loss"] == 0.7
+        assert metrics["loss"] == 0.7
         assert metrics["mean_chosen_reward"] == 0.2
         assert metrics["mean_rejected_reward"] == 0.1
+        # dict form: DPO.learn returns "mean_loss", translated to "loss"
+        dict_metrics = _normalize_learn_metrics(
+            agent,
+            {"mean_loss": 0.5, "mean_chosen_reward": 0.1, "mean_rejected_reward": 0.0},
+            mode="preference",
+        )
+        assert dict_metrics["loss"] == 0.5
+        assert "mean_loss" not in dict_metrics
 
     def test_normalize_learn_metrics_error_paths_and_multiturn_len5(self):
         agent = MagicMock(spec=LLMPPO)
