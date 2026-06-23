@@ -306,16 +306,20 @@ class RolloutHarness:
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Create a fresh episode and return the policy-ready observation plus info.
 
-        The wrapped env follows the :class:`RolloutEnv` reset contract
-        (``reset(seed=None, *, row_index=None)``), so both are forwarded directly.
+        ``seed`` is forwarded to the wrapped env; ``row_index`` is forwarded only
+        when set, so non-dataset envs (e.g. constant/probe envs whose ``reset``
+        takes no ``row_index``) still work — they are never assigned a row.
 
         :param seed: Optional reset seed forwarded to the wrapped env.
         :type seed: int | None
         :param row_index: Dataset row chosen by the owning ``BatchRolloutEnv``,
-            forwarded to the wrapped env's ``reset``.
+            forwarded to the wrapped env's ``reset`` only when not ``None``.
         :type row_index: int | None
         """
-        obs_text, info = self._env.reset(seed=seed, row_index=row_index)
+        reset_kwargs: dict[str, Any] = {"seed": seed}
+        if row_index is not None:
+            reset_kwargs["row_index"] = row_index
+        obs_text, info = self._env.reset(**reset_kwargs)
         obs_text = self._format_obs(obs_text, info)
 
         encoded = self._tokenize_initial_prompt(obs_text)
