@@ -32,7 +32,6 @@ from agilerl.utils.probe_envs_ma import (
     PolicyImageEnv,
     check_on_policy_learning_with_probe_env,
     check_policy_q_learning_with_probe_env,
-    run_probe_env_main,
 )
 
 
@@ -804,18 +803,3 @@ class TestCheckOnPolicyLearningWithProbeEnv:
         )
         gc.collect()
         torch.cuda.empty_cache()
-
-
-def test_probe_envs_ma_main_block(monkeypatch):
-    """Exercise ``run_probe_env_main`` without full on-policy learning runs."""
-    calls: list[tuple] = []
-
-    def record_call(*args, **kwargs):
-        calls.append((args, kwargs))
-
-    monkeypatch.setattr(
-        "agilerl.utils.probe_envs_ma.check_on_policy_learning_with_probe_env",
-        record_call,
-    )
-    run_probe_env_main()
-    assert len(calls) == 22
