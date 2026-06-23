@@ -57,7 +57,7 @@ def make_preference_gym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
-        kind="preference",
+        objective="preference",
         data_batch_size_per_gpu=data_batch_size_per_gpu,
         accelerator=accelerator,
     )
@@ -410,7 +410,7 @@ class TestDPOLearn:
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
-            kind="preference",
+            objective="preference",
             data_batch_size_per_gpu=data_batch_size,
             accelerator=dpo.accelerator,
         )
@@ -523,7 +523,7 @@ class TestDPOTest:
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
-            kind="preference",
+            objective="preference",
             data_batch_size_per_gpu=data_batch_size,
             accelerator=dpo.accelerator,
         )

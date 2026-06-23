@@ -482,14 +482,14 @@ class TestCompareResponses:
 
 class TestSampleEvalPrompts:
     def test_sample_eval_prompts_sft_style_response_column(self):
-        """A ``kind="sft"`` env resolves ``chosen`` from ``response_column``."""
+        """A ``objective="sft"`` env resolves ``chosen`` from ``response_column``."""
         from types import SimpleNamespace
 
         ds = Datasets.from_dict(
             {"prompt": ["p0", "p1"], "response": ["r0", "r1"]},
         )
         env = SimpleNamespace(
-            kind="sft",
+            objective="sft",
             response_column="response",
             test_dataloader=SimpleNamespace(dataset=ds),
         )
@@ -502,7 +502,7 @@ class TestSampleEvalPrompts:
             assert r is None
 
     def test_sample_eval_prompts_preference_style_chosen_rejected(self):
-        """A ``kind="preference"`` env resolves ``chosen`` / ``rejected`` columns."""
+        """A ``objective="preference"`` env resolves ``chosen`` / ``rejected`` columns."""
         from types import SimpleNamespace
 
         ds = Datasets.from_dict(
@@ -513,7 +513,7 @@ class TestSampleEvalPrompts:
             },
         )
         env = SimpleNamespace(
-            kind="preference", test_dataloader=SimpleNamespace(dataset=ds)
+            objective="preference", test_dataloader=SimpleNamespace(dataset=ds)
         )
         rows = sample_eval_prompts(env, n=2, seed=0)
         assert len(rows) == 2
@@ -555,7 +555,7 @@ class TestDatasetEnvPreferenceInit:
                 train_dataset=train_dataset,
                 test_dataset=test_dataset,
                 tokenizer=tokenizer,
-                kind="preference",
+                objective="preference",
                 data_batch_size_per_gpu=data_batch_size,
                 max_context_length=10,
                 min_completion_length=1,

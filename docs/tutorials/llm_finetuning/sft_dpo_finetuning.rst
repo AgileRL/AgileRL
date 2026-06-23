@@ -65,7 +65,7 @@ Evaluate a saved checkpoint interactively:
 Minimal benchmarking scripts (no CLI args, default configs) are also available at
 ``benchmarking/benchmarking_sft.py`` and ``benchmarking/benchmarking_dpo.py``.
 
-The first block of code applies the model's tokenizer to the dataset, and creates an SFT ``DatasetEnv`` environment (``kind="sft"``). This wraps the dataset so the LLM can be trained easily.
+The first block of code applies the model's tokenizer to the dataset, and creates an SFT ``DatasetEnv`` environment (``objective="sft"``). This wraps the dataset so the LLM can be trained easily.
 
 .. code-block:: python
 
@@ -76,7 +76,7 @@ The first block of code applies the model's tokenizer to the dataset, and create
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
-        kind="sft",
+        objective="sft",
         response_column="chosen",
         data_batch_size_per_gpu=16,
         accelerator=accelerator,

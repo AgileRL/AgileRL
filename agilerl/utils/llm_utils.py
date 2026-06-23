@@ -1435,11 +1435,11 @@ def sample_eval_prompts(
     """Randomly sample *n* ``(prompt, chosen, rejected)`` triples from
     *env*'s held-out test dataset.
 
-    Columns are resolved automatically per dataset ``kind``:
+    Columns are resolved automatically per dataset ``objective``:
 
-    * ``kind="sft"`` — ``chosen`` is ``env.response_column``; ``rejected``
+    * ``objective="sft"`` — ``chosen`` is ``env.response_column``; ``rejected``
       is ``None`` (SFT has no negative example).
-    * ``kind="preference"`` — ``chosen`` and ``rejected`` map to the
+    * ``objective="preference"`` — ``chosen`` and ``rejected`` map to the
       dataset's ``"chosen"`` / ``"rejected"`` columns.
     * Any other env — both are ``None``.
 
@@ -1458,10 +1458,10 @@ def sample_eval_prompts(
 
     chosen_col: str | None = None
     rejected_col: str | None = None
-    kind = getattr(env, "kind", None)
-    if kind == "sft":
+    objective = getattr(env, "objective", None)
+    if objective == "sft":
         chosen_col = env.response_column
-    elif kind == "preference":
+    elif objective == "preference":
         chosen_col = "chosen"
         rejected_col = "rejected"
 

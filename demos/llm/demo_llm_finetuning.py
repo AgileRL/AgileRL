@@ -104,12 +104,12 @@ def main(
         accelerator = None
 
     # --- Environment -------------------------------------------------------
-    env_kind = "sft" if mode == "sft" else "preference"
+    env_objective = "sft" if mode == "sft" else "preference"
     env_kwargs: dict = dict(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
-        kind=env_kind,
+        objective=env_objective,
         data_batch_size_per_gpu=init_hp["BATCH_SIZE"],
         accelerator=accelerator,
         max_context_length=init_hp.get("MAX_CONTEXT_LENGTH"),
@@ -117,7 +117,7 @@ def main(
     if mode == "sft":
         env_kwargs["response_column"] = "chosen"
 
-    print(f"Setting up {env_kind} DatasetEnv environment...")
+    print(f"Setting up {env_objective} DatasetEnv environment...")
     env = DatasetEnv(**env_kwargs)
 
     init_hp["PAD_TOKEN_ID"] = tokenizer.eos_token_id

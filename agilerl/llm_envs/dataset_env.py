@@ -1,10 +1,10 @@
-"""Dataset-backed (teacher-forced) LLM env — one class, selected by ``kind``.
+"""Dataset-backed (teacher-forced) LLM env — one class, selected by ``objective``.
 
 A ``DatasetEnv`` is the no-generation half of the env taxonomy: the completions are dataset
 labels, scored in a single teacher-forced forward (SFT cross-entropy, DPO preference) with
 no autoregressive rollout. The training regimes (preference / SFT) differ only by the
 *required columns* and the *collate function*, so they share one class and are picked with
-the ``kind`` argument rather than separate subclasses.
+the ``objective`` argument rather than separate subclasses.
 """
 
 from __future__ import annotations
@@ -40,16 +40,16 @@ class DatasetEnv(LLMEnv, gym.Env):
     The no-generation half of the env taxonomy: completions are dataset labels
     scored in a single teacher-forced forward (SFT cross-entropy, DPO preference)
     with no autoregressive rollout. The training regimes differ only by the
-    *required columns* and the *collate function*, selected with ``kind``:
+    *required columns* and the *collate function*, selected with ``objective``:
 
-    * ``kind="preference"`` (DPO) — requires ``prompt`` / ``chosen`` / ``rejected``.
-    * ``kind="sft"`` — requires ``prompt`` and ``response_column`` (default
+    * ``objective="preference"`` (DPO) — requires ``prompt`` / ``chosen`` / ``rejected``.
+    * ``objective="sft"`` — requires ``prompt`` and ``response_column`` (default
       ``"target"``).
 
     ``reset`` / ``step`` advance the seeded ``DataLoader`` (completions ignored).
 
-    :ivar kind: The selected regime, ``"preference"`` or ``"sft"``.
-    :vartype kind: str
+    :ivar objective: The selected regime, ``"preference"`` or ``"sft"``.
+    :vartype objective: str
     :ivar dataset_size: ``{"train": N, "test": M}`` row counts after filtering.
     :vartype dataset_size: dict[str, int]
     :ivar num_epochs: Number of full passes completed over the train split.
@@ -62,7 +62,7 @@ class DatasetEnv(LLMEnv, gym.Env):
         test_dataset: Dataset,
         tokenizer: AutoTokenizer,
         *,
-        kind: Literal["preference", "sft"],
+        objective: Literal["preference", "sft"],
         response_column: str = "target",
         data_batch_size_per_gpu: int = 8,
         accelerator: Accelerator | None = None,
@@ -70,17 +70,17 @@ class DatasetEnv(LLMEnv, gym.Env):
         min_completion_length: int | None = None,
         seed: int = 42,
     ) -> None:
-        """Build a teacher-forced dataset env for the given ``kind``."""
-        if kind == "preference":
+        """Build a teacher-forced dataset env for the given ``objective``."""
+        if objective == "preference":
             required_columns = {"prompt", "chosen", "rejected"}
             collate_builder: CollateBuilder = preference_collate_builder
-        elif kind == "sft":
+        elif objective == "sft":
             required_columns = {"prompt", response_column}
             collate_builder = sft_collate_builder
         else:
-            msg = f"Unknown dataset kind {kind!r}; expected 'preference' or 'sft'."
+            msg = f"Unknown dataset objective {objective!r}; expected 'preference' or 'sft'."
             raise ValueError(msg)
-        self.kind = kind
+        self.objective = objective
         self.required_columns = set(required_columns)
         self.response_column = response_column
         self._collate_builder = collate_builder

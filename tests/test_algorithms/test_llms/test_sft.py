@@ -52,7 +52,7 @@ def make_sft_gym(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
-        kind="sft",
+        objective="sft",
         data_batch_size_per_gpu=data_batch_size_per_gpu,
         response_column=response_column,
         accelerator=accelerator,
@@ -367,7 +367,7 @@ class TestSFTLearn:
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
-            kind="sft",
+            objective="sft",
             data_batch_size_per_gpu=data_batch_size,
             accelerator=sft.accelerator,
         )
@@ -505,7 +505,7 @@ class TestSFTTest:
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
-            kind="sft",
+            objective="sft",
             data_batch_size_per_gpu=data_batch_size,
             accelerator=sft.accelerator,
         )

@@ -54,7 +54,7 @@ class DummySFTDataset(Dataset):
     def __init__(self, num_samples: int) -> None:
         self.prompt = [f"This is prompt {i}." for i in range(num_samples)]
         self.target = [f"This is response {i}." for i in range(num_samples)]
-        # ``DatasetEnv(kind="sft")``'s default ``response_column`` is "target";
+        # ``DatasetEnv(objective="sft")``'s default ``response_column`` is "target";
         # the output batch is still keyed under "response" regardless of input name.
         self.features = {
             "prompt": self.prompt,
@@ -112,7 +112,7 @@ class TestDatasetEnvPreferenceInit:
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
-            kind="preference",
+            objective="preference",
             data_batch_size_per_gpu=data_batch_size,
             accelerator=accelerator_factory(use_accelerator),
         )
@@ -163,7 +163,7 @@ class TestDatasetEnvPreferenceInit:
                 train_dataset=train_dataset,
                 test_dataset=test_dataset,
                 tokenizer=tokenizer,
-                kind="preference",
+                objective="preference",
                 data_batch_size_per_gpu=data_batch_size,
                 max_context_length=5,
                 min_completion_length=1,
@@ -197,7 +197,7 @@ class TestDatasetEnvPreferenceInit:
                 train_dataset=train_dataset,
                 test_dataset=test_dataset,
                 tokenizer=tokenizer,
-                kind="preference",
+                objective="preference",
                 data_batch_size_per_gpu=data_batch_size,
                 max_context_length=10,
                 min_completion_length=1,
@@ -218,14 +218,14 @@ class TestDatasetEnvPreferenceInit:
                 train_dataset=bad_dataset,
                 test_dataset=good_dataset,
                 tokenizer=tokenizer,
-                kind="preference",
+                objective="preference",
             )
         with pytest.raises(AssertionError, match="must contain columns"):
             DatasetEnv(
                 train_dataset=good_dataset,
                 test_dataset=bad_dataset,
                 tokenizer=tokenizer,
-                kind="preference",
+                objective="preference",
             )
 
 
@@ -246,7 +246,7 @@ class TestDatasetEnvPreferenceStep:
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
-            kind="preference",
+            objective="preference",
             data_batch_size_per_gpu=data_batch_size,
             accelerator=accelerator_factory(use_accelerator),
         )
@@ -300,7 +300,7 @@ class TestDatasetEnvPreferenceReset:
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
-            kind="preference",
+            objective="preference",
             data_batch_size_per_gpu=data_batch_size,
             accelerator=accelerator_factory(use_accelerator),
         )
@@ -352,7 +352,7 @@ class TestDatasetEnvPreferenceReset:
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
-            kind="preference",
+            objective="preference",
             data_batch_size_per_gpu=data_batch_size,
             accelerator=accelerator_factory(use_accelerator),
         )
@@ -412,7 +412,7 @@ class TestDatasetEnvPreferenceReset:
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
-            kind="preference",
+            objective="preference",
             data_batch_size_per_gpu=data_batch_size,
             accelerator=accelerator_factory(use_accelerator),
         )
@@ -470,7 +470,7 @@ class TestDatasetEnvPreferenceReset:
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
-            kind="preference",
+            objective="preference",
             data_batch_size_per_gpu=data_batch_size,
             accelerator=accelerator_factory(use_accelerator),
         )
@@ -503,7 +503,7 @@ class TestDatasetEnvPreferenceCreateCollateFn:
             train_dataset=train_ds,
             test_dataset=test_ds,
             tokenizer=tokenizer,
-            kind="preference",
+            objective="preference",
             data_batch_size_per_gpu=1,
             max_context_length=64,
         )
@@ -533,7 +533,7 @@ class TestDatasetEnvSFTInit:
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
-            kind="sft",
+            objective="sft",
             data_batch_size_per_gpu=data_batch_size,
             accelerator=accelerator_factory(use_accelerator),
         )
@@ -575,7 +575,7 @@ class TestDatasetEnvSFTInit:
                 train_dataset=train_dataset,
                 test_dataset=test_dataset,
                 tokenizer=tokenizer,
-                kind="sft",
+                objective="sft",
                 data_batch_size_per_gpu=8,
                 max_context_length=10,
             )
@@ -592,14 +592,14 @@ class TestDatasetEnvSFTInit:
                 train_dataset=bad_dataset,
                 test_dataset=good_dataset,
                 tokenizer=tokenizer,
-                kind="sft",
+                objective="sft",
             )
         with pytest.raises(AssertionError, match="must contain"):
             DatasetEnv(
                 train_dataset=good_dataset,
                 test_dataset=bad_dataset,
                 tokenizer=tokenizer,
-                kind="sft",
+                objective="sft",
             )
 
 
@@ -619,7 +619,7 @@ class TestDatasetEnvSFTStep:
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
-            kind="sft",
+            objective="sft",
             data_batch_size_per_gpu=1,
             accelerator=accelerator_factory(use_accelerator),
         )
@@ -645,7 +645,7 @@ class TestDatasetEnvSFTReset:
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
-            kind="sft",
+            objective="sft",
             data_batch_size_per_gpu=data_batch_size,
             accelerator=accelerator_factory(use_accelerator),
         )
@@ -685,7 +685,7 @@ class TestDatasetEnvSFTReset:
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
-            kind="sft",
+            objective="sft",
             data_batch_size_per_gpu=1,
             accelerator=accelerator_factory(use_accelerator),
         )
@@ -726,7 +726,7 @@ class TestDatasetEnvSFTReset:
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
-            kind="sft",
+            objective="sft",
             data_batch_size_per_gpu=1,
             response_column="chosen",
         )
@@ -948,7 +948,7 @@ def test_dataset_env_len_and_eval_mode_preserve_tokenized_prompts():
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
-        kind="preference",
+        objective="preference",
         data_batch_size_per_gpu=2,
     )
 
@@ -969,13 +969,13 @@ def test_dataset_env_len_and_eval_mode_preserve_tokenized_prompts():
 
 
 def test_dataset_env_rejects_unknown_kind():
-    """``kind`` must be ``"preference"`` or ``"sft"``; anything else raises."""
+    """``objective`` must be ``"preference"`` or ``"sft"``; anything else raises."""
     tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
     dataset = DummyPreferenceDataset(4)
-    with pytest.raises(ValueError, match="Unknown dataset kind"):
+    with pytest.raises(ValueError, match="Unknown dataset objective"):
         DatasetEnv(
             train_dataset=dataset,
             test_dataset=dataset,
             tokenizer=tokenizer,
-            kind="bogus",
+            objective="bogus",
         )

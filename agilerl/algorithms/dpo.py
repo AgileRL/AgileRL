@@ -650,7 +650,7 @@ class DPO(LLMAlgorithm):
     ) -> np.ndarray:
         """Return the fitness (test) score of the agent.
 
-        :param env: The environment to be tested in (``kind="preference"``)
+        :param env: The environment to be tested in (``objective="preference"``)
         :type env: DatasetEnv
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 1
         :type loop: int, optional

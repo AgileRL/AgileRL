@@ -3,7 +3,7 @@ LLM environments
 
 Gymnasium-style environments for supervised fine-tuning, preference optimization,
 and reasoning RL. :class:`~agilerl.llm_envs.DatasetEnv` covers the teacher-forced
-SFT (``kind="sft"``) and preference (``kind="preference"``) regimes;
+SFT (``objective="sft"``) and preference (``objective="preference"``) regimes;
 :class:`~agilerl.llm_envs.RolloutEnv` covers generation. ``apply_chat_template``
 is also re-exported from :mod:`agilerl.utils.llm_utils` for backwards compatibility.
 

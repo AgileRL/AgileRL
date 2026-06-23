@@ -48,7 +48,7 @@ Example
     train_dataset=train_dataset,
     test_dataset=test_dataset,
     tokenizer=tokenizer,
-    kind="sft",
+    objective="sft",
     response_column="chosen",
     data_batch_size_per_gpu=16,
     accelerator=accelerator,

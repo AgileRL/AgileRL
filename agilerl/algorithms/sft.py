@@ -232,7 +232,7 @@ class SFT(LLMAlgorithm):
 
         :param experiences: Dict with keys ``input_ids`` (prompt + response token
             IDs), ``attention_mask``, and ``prompt_lengths`` (number of prompt
-            tokens per sample) as produced by a ``kind="sft"`` :class:`~agilerl.llm_envs.DatasetEnv`.
+            tokens per sample) as produced by a ``objective="sft"`` :class:`~agilerl.llm_envs.DatasetEnv`.
         :type experiences: ExperiencesType
         :param training: When ``False`` the backward pass is skipped (eval mode).
         :type training: bool
@@ -370,7 +370,7 @@ class SFT(LLMAlgorithm):
     ) -> np.ndarray:
         """Return the negative mean loss as a fitness score (higher is better).
 
-        :param env: SFT environment providing evaluation batches (``kind="sft"``)
+        :param env: SFT environment providing evaluation batches (``objective="sft"``)
         :type env: DatasetEnv
         :param loop: Number of evaluation batches, defaults to 1
         :type loop: int, optional
