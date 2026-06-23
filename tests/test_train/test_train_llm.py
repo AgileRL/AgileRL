@@ -1787,6 +1787,20 @@ class TestBuildEvalWandbDict:
         assert train_out["Train/Mean Population Loss"] == pytest.approx(0.4)
         assert train_out["Train/Mean Population Reward Margin"] == pytest.approx(0.3)
 
+    def test_build_eval_wandb_dict_reasoning_reward_and_accuracy(self):
+        """Default reasoning mode aggregates Eval/Reward, plus Eval/Accuracy when
+        ``max_reward`` is set, across the population."""
+        pop = _make_pop_for_wandb_dict(size=2)
+        metrics = {
+            "agent_0/test_metrics": {"Eval/Reward": 1.0, "Eval/Accuracy": 0.8},
+            "agent_1/test_metrics": {"Eval/Reward": 0.6, "Eval/Accuracy": 0.4},
+        }
+        out = build_eval_wandb_dict(metrics, pop=pop, mode="reasoning", max_reward=1.0)
+        assert out["Eval/Best Reward"] == pytest.approx(1.0)
+        assert out["Eval/Mean Population Reward"] == pytest.approx(0.8)
+        assert out["Eval/Best Accuracy"] == pytest.approx(0.8)
+        assert out["Eval/Mean Population Accuracy"] == pytest.approx(0.6)
+
 
 class TestNormalizeLearnMetrics:
     def test_train_metric_format_and_learn_output_normalization_helpers(self):
@@ -1847,6 +1861,12 @@ class TestNormalizeLearnMetrics:
             match="Reasoning/multi-turn learn\\(\\) tuple output has an unsupported shape",
         ):
             _normalize_learn_metrics(agent, (1.0, 0.5, 0.2), mode="reasoning")
+
+    def test_reasoning_two_tuple_normalizes_loss_and_kl(self):
+        """A 2-value rollout learn() tuple maps to ``mean_loss`` / ``mean_kl``."""
+        agent = MagicMock(spec=LLMREINFORCE)
+        metrics = _normalize_learn_metrics(agent, (0.8, 0.1), mode="reasoning")
+        assert metrics == {"mean_loss": 0.8, "mean_kl": 0.1}
 
 
 class TestSaveEliteCheckpoint:
