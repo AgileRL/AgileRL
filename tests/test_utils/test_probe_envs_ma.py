@@ -770,6 +770,8 @@ class TestCheckOnPolicyLearningWithProbeEnv:
         [
             (ConstantRewardImageEnv, True),
             (FixedObsPolicyImageEnv, True),
+            (ConstantRewardContActionsImageEnv, False),
+            (FixedObsPolicyContActionsImageEnv, False),
         ],
     )
     def test_on_policy_learning_with_probe_env_cnn(self, Env, discrete):

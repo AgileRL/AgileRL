@@ -795,6 +795,32 @@ class TestAsyncPettingZooVecEnvCloseExtras:
         env.close_extras(terminate=True)
         assert all(not p.is_alive() for p in env.processes)
 
+    @pytest.mark.parametrize(
+        "env_fns",
+        [[speaker_listener_like_env for _ in range(2)]],
+    )
+    def test_close_extras_terminates_when_join_times_out(self, env_fns):
+        """Cover forced terminate when a worker is still alive after join."""
+        import types
+
+        env = AsyncPettingZooVecEnv(env_fns)
+        proc = env.processes[0]
+        still_alive = [True]
+        terminate_called = [False]
+
+        def fake_is_alive(_self):
+            return still_alive[0]
+
+        def fake_terminate(_self):
+            terminate_called[0] = True
+            still_alive[0] = False
+            mp.Process.terminate(proc)
+
+        proc.is_alive = types.MethodType(fake_is_alive, proc)
+        proc.terminate = types.MethodType(fake_terminate, proc)
+        env.close_extras(terminate=False)
+        assert terminate_called[0]
+
 
 class TestAsyncPettingZooVecEnvPollPipeEnvs:
     @pytest.mark.parametrize(

@@ -974,3 +974,41 @@ class TestMutableKernelSizesAddLayer:
         )
         mut.add_layer(5)
         assert mut.sizes[-1] == (5,)
+
+
+class TestEvolvableCNNRngAndNoise:
+    def test_reset_noise(self, device):
+        cnn = EvolvableCNN(
+            input_shape=[1, 16, 16],
+            channel_size=[32],
+            kernel_size=[3],
+            stride_size=[1],
+            num_outputs=4,
+            device=device,
+        )
+        cnn.reset_noise()
+
+    def test_rng_propagates_to_nested_modules(self, device):
+        parent = EvolvableCNN(
+            input_shape=[1, 16, 16],
+            channel_size=[32],
+            kernel_size=[3],
+            stride_size=[1],
+            num_outputs=4,
+            device=device,
+            name="parent",
+        )
+        child = EvolvableCNN(
+            input_shape=[1, 16, 16],
+            channel_size=[32],
+            kernel_size=[3],
+            stride_size=[1],
+            num_outputs=4,
+            device=device,
+            name="child",
+        )
+        parent.nested = child
+        new_rng = np.random.default_rng(42)
+        parent.rng = new_rng
+        assert parent.rng is new_rng
+        assert child.rng is new_rng
