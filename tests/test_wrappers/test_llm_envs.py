@@ -966,3 +966,16 @@ def test_dataset_env_len_and_eval_mode_preserve_tokenized_prompts():
 
     # The cached prompts survive the eval block (restored, equal by value).
     assert torch.equal(env.last_tokenized_prompts["input_ids"], sentinel["input_ids"])
+
+
+def test_dataset_env_rejects_unknown_kind():
+    """``kind`` must be ``"preference"`` or ``"sft"``; anything else raises."""
+    tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+    dataset = DummyPreferenceDataset(4)
+    with pytest.raises(ValueError, match="Unknown dataset kind"):
+        DatasetEnv(
+            train_dataset=dataset,
+            test_dataset=dataset,
+            tokenizer=tokenizer,
+            kind="bogus",
+        )
