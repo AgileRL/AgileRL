@@ -95,7 +95,7 @@ We are constantly updating our tutorials to showcase the latest features of Agil
 | [Hierarchical curriculum learning](https://docs.agilerl.com/en/latest/tutorials/skills/index.html) | Shows how to teach agents Skills and combine them to achieve an end goal. | [PPO - Lunar Lander](https://docs.agilerl.com/en/latest/tutorials/skills/index.html) |
 | [Contextual multi-arm bandits](https://docs.agilerl.com/en/latest/tutorials/bandits/index.html) | Learn to make the correct decision in environments that only have one timestep. | [NeuralUCB - Iris Dataset](https://docs.agilerl.com/en/latest/tutorials/bandits/agilerl_neural_ucb_tutorial.html) <br> [NeuralTS - PenDigits](https://docs.agilerl.com/en/latest/tutorials/bandits/agilerl_neural_ts_tutorial.html) |
 | [Custom Modules & Networks](https://docs.agilerl.com/en/latest/tutorials/custom_networks/index.html) | Learn how to create custom evolvable modules and networks for RL algorithms. | [Dueling Distributional Q Network](https://docs.agilerl.com/en/latest/tutorials/custom_networks/agilerl_rainbow_tutorial.html) <br> [EvolvableSimBa](https://docs.agilerl.com/en/latest/tutorials/custom_networks/agilerl_simba_tutorial.html) |
-| [LLM Finetuning](https://docs.agilerl.com/en/latest/tutorials/llm_finetuning/index.html) | Learn how to finetune an LLM using AgileRL. | [GRPO](https://docs.agilerl.com/en/latest/tutorials/llm_finetuning/index.html) |
+| [LLM Finetuning](https://docs.agilerl.com/en/latest/tutorials/llm_finetuning/index.html) | Learn how to finetune an LLM using AgileRL. | [GRPO](https://docs.agilerl.com/en/latest/tutorials/llm_finetuning/grpo_finetuning.html) <br> [GRPO with HPO](https://docs.agilerl.com/en/latest/tutorials/llm_finetuning/grpo_hpo.html) <br> [SFT & DPO](https://docs.agilerl.com/en/latest/tutorials/llm_finetuning/sft_dpo_finetuning.html) <br> [Multi-turn LLMPPO, LLMREINFORCE & GRPO](https://docs.agilerl.com/en/latest/tutorials/llm_finetuning/multiturn_grpo_ppo.html) |
 
 ## Evolvable algorithms (more coming soon!)
 
@@ -121,10 +121,11 @@ We are constantly updating our tutorials to showcase the latest features of Agil
 
   ### LLM Fine-tuning Algorithms
 
-  | RL         | Algorithm |
-  | ---------- | --------- |
-  | [On-Policy](https://docs.agilerl.com/en/latest/llm_finetuning/index.html) | [Group Relative Policy Optimization (GRPO)](https://docs.agilerl.com/en/latest/api/algorithms/grpo.html)
-  | [Off-Policy](https://docs.agilerl.com/en/latest/llm_finetuning/index.html) | [Direct Preference Optimization (DPO)](https://docs.agilerl.com/en/latest/api/algorithms/dpo.html)
+  | Type         | Algorithm |
+  | ------------ | --------- |
+  | [On-Policy RL](https://docs.agilerl.com/en/latest/llm_finetuning/index.html) | [Group Relative Policy Optimization (GRPO)](https://docs.agilerl.com/en/latest/api/algorithms/grpo.html) <br> [Clipped IS-weight Policy Optimization (CISPO)](https://docs.agilerl.com/en/latest/api/algorithms/cispo.html) <br> [Group Sequence Policy Optimization (GSPO)](https://docs.agilerl.com/en/latest/api/algorithms/gspo.html) <br> [LLM Proximal Policy Optimization (LLM PPO)](https://docs.agilerl.com/en/latest/api/algorithms/llmppo.html) <br> [LLM REINFORCE](https://docs.agilerl.com/en/latest/api/algorithms/llmreinforce.html) |
+  | [Preference Optimization](https://docs.agilerl.com/en/latest/llm_finetuning/index.html) | [Direct Preference Optimization (DPO)](https://docs.agilerl.com/en/latest/api/algorithms/dpo.html) |
+  | [Supervised Fine-Tuning](https://docs.agilerl.com/en/latest/llm_finetuning/index.html) | [Supervised Fine-Tuning (SFT)](https://docs.agilerl.com/en/latest/api/algorithms/sft.html) |
 
 
 ## Train an Agent to Beat a Gym Environment

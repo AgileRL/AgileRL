@@ -125,6 +125,9 @@ def main(
     lora_config = LoraConfig(**init_hp["LORA"])
 
     # --- Optional warm-start from a saved LoRA adapter ---------------------
+    # AgileRL manages its own adapters on an immutable base and rejects
+    # PeftModel inputs, so fold the saved adapter into the base here before
+    # handing the dense model over.
     actor_network = None
     if load_path is not None:
         print(f"Loading pre-trained LoRA weights from {load_path} ...")
@@ -133,7 +136,7 @@ def main(
         base_model = AutoModelForCausalLM.from_pretrained(base_model_name)
         actor_network = PeftModel.from_pretrained(
             base_model, load_path, adapter_name="actor"
-        )
+        ).merge_and_unload()
 
     # --- Agent population --------------------------------------------------
     agent_cls = SFT if mode == "sft" else DPO
@@ -237,7 +240,8 @@ def eval_mode(mode: str, load_path: str, max_new_tokens: int = 200) -> None:
     base_model = AutoModelForCausalLM.from_pretrained(base_model_name)
 
     print(f"Applying LoRA adapter from {load_path} ...")
-    actor_network = PeftModel.from_pretrained(base_model, load_path)
+    # Fold the saved adapter into the base — AgileRL rejects PeftModel inputs.
+    actor_network = PeftModel.from_pretrained(base_model, load_path).merge_and_unload()
 
     agent_cls = SFT if mode == "sft" else DPO
     agent = agent_cls(

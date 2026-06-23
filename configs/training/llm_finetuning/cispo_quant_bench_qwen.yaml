@@ -1,0 +1,69 @@
+---
+# CISPO quant bench — shrunk variant for a fast learning-signal smoke run on a
+# small dense model (e.g. Qwen2.5-1.5B-Instruct) on the easy 4x4 Sudoku env.
+# Validates the colocated native-sleep path end to end (bnb nf4 trainer + vLLM
+# bitsandbytes rollout, sleep/wake each cycle, trainer base offloaded during
+# rollout). Differs from cispo_quant_bench.yaml only in: shorter context/turns,
+# plain (non-ClippableLinear) LoRA target names, and no multimodal target scope.
+
+MUTATION_PARAMS:
+    NO_MUT: 0.1
+    RL_HP_MUT: 0.6
+    MUT_SD: 0.1
+    RAND_SEED: 42
+    MIN_LR: 0.0000001
+    MAX_LR: 0.000025
+    MIN_BETA: 0.0
+    MAX_BETA: 0.01
+    MIN_GROUP_SIZE: 2
+    MAX_GROUP_SIZE: 2
+
+INIT_HP:
+    ADVANTAGE_GRANULARITY: turn
+    IMPORTANCE_SAMPLING_LEVEL: token
+    ALGO: CISPO
+    BATCH_SIZE: 2
+    BETA: 0.0
+    CLIP_COEF: [0.8, 2.0]
+    ELITISM: true
+    EVAL_LOOP: 1
+    GROUP_SIZE: 4
+    MAX_TURNS: 8
+    ADV_NORM: mean_only
+    FILTER_ZERO_ADV: true
+    LR: 0.00002
+    MAX_GRAD_NORM: 1
+    MAX_MODEL_LEN: 8192
+    MAX_OUTPUT_TOKENS: 1024
+    ENABLE_SLIDING_WINDOW: false
+    MICRO_BATCH_SIZE_PER_GPU: 1
+    POP_SIZE: 1
+    # Trainer-side bnb quant (none | int8 | nf4).
+    QUANTIZATION: nf4
+    ACTIVATION_OFFLOAD: true
+    # Qwen2.5 is a plain causal LM (no multimodal towers, no ClippableLinear
+    # wrappers), so target the projections directly and use no target scope.
+    LORA_TARGET_SCOPE:
+    TARGET_MODULES:
+        - q_proj
+        - k_proj
+        - v_proj
+        - o_proj
+        - up_proj
+        - down_proj
+        - gate_proj
+    TEMPERATURE: 1.0
+    TOURN_SIZE: 1
+    UPDATE_EPOCHS: 1
+    USE_VLLM: true
+    USE_LIGER_LOSS: true
+    LORA_R: 8
+    LORA_ALPHA: 32
+    LORA_DROPOUT: 0
+    LORA_BIAS: none
+    # flex_attention is dependency-free (pure PyTorch) and supports the
+    # block-sparse mask that sequence packing needs — no flash-attn required.
+    ATTN_IMPLEMENTATION: flex_attention
+    LIGER_TOKEN_CHUNK_SIZE: 256
+    USE_SEQUENCE_PACKING: true
+    VLLM_IMPORTANCE_SAMPLING_CORRECTION: true

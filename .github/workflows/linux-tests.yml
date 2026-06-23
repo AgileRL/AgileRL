@@ -33,7 +33,7 @@ jobs:
                 python-version: ['3.10', '3.11', '3.12', '3.13']
 
         container:
-            image: pytorch/pytorch:2.7.1-cuda12.6-cudnn9-devel
+            image: pytorch/pytorch:2.11.0-cuda13.0-cudnn9-devel
             options: --user root
 
         # Workspace (/__w) is ~1GB with little free space; root (/) has plenty. Put cache and venv on /.

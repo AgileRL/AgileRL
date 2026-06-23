@@ -8,6 +8,18 @@ from accelerate import Accelerator
 from agilerl.utils.log_utils import DistributeCombineLogs, label_logs
 
 
+def identity_gather(accelerator):
+    """Pin single-process ``Accelerator.gather`` (identity) semantics.
+
+    These unit tests target the log-combination logic, not the collective.
+    Accelerate resolves its distributed state from process globals, so a
+    single-rank NCCL group left behind by a GPU test in the same worker
+    would otherwise route these CPU tensors into ``all_gather_into_tensor``
+    and fail with "Tensors must be CUDA and dense".
+    """
+    return patch.object(accelerator, "gather", side_effect=lambda value: value)
+
+
 class TestDistributeCombineLogsInit:
     def test_init_dcl_invalid_accelerator_type(self):
         with pytest.raises(
@@ -116,7 +128,8 @@ class TestDistributeCombineLogsGatherLogs:
         def dummy_func(a):
             return a
 
-        logs = DCL.gather_logs(dummy_func)
+        with identity_gather(accelerator):
+            logs = DCL.gather_logs(dummy_func)
 
         assert logs == {"a": np.inf}
 
@@ -134,7 +147,8 @@ class TestDistributeCombineLogsGatherLogs:
         def dummy_func(a):
             return a
 
-        logs = DCL.gather_logs(dummy_func)
+        with identity_gather(accelerator):
+            logs = DCL.gather_logs(dummy_func)
 
         assert logs == {"a": 3.0}
 
@@ -150,7 +164,8 @@ class TestDistributeCombineLogsGatherLogs:
         def return_none(_logs):
             return None
 
-        logs = DCL.gather_logs(return_none)
+        with identity_gather(accelerator):
+            logs = DCL.gather_logs(return_none)
         assert logs == {"a": 3.0}
 
     def test_gather_logs_postproc_returns_non_none(self):
@@ -165,7 +180,8 @@ class TestDistributeCombineLogsGatherLogs:
         def add_prefix(logs):
             return {"prefixed_a": logs["a"]}
 
-        logs = DCL.gather_logs(add_prefix)
+        with identity_gather(accelerator):
+            logs = DCL.gather_logs(add_prefix)
         assert logs == {"prefixed_a": 3.0}
 
     def test_gather_logs_additional_items_merge(self):
@@ -177,7 +193,8 @@ class TestDistributeCombineLogsGatherLogs:
             ("a",): torch.tensor([5.0]),
         }
 
-        logs = DCL.gather_logs(extra_key=42, other="value")
+        with identity_gather(accelerator):
+            logs = DCL.gather_logs(extra_key=42, other="value")
         assert logs["a"] == 5.0
         assert logs["extra_key"] == 42
         assert logs["other"] == "value"

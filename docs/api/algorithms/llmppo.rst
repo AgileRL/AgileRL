@@ -19,6 +19,20 @@ In AgileRL, the implementation is turn-aware:
 
 This algorithm can therefore be used in multi-turn agentic finetuning or single-turn reasoning tasks.
 
+Variance Reduction
+------------------
+
+LLM PPO reduces the variance of its policy gradient with a **learned value
+baseline**: a value head is trained alongside the policy to predict expected
+return, and the advantage is computed as return minus the value estimate
+(GAE-style when discounting across turns). Compared with the group-relative
+normalization used by :ref:`GRPO<grpo>` and the Return Batch Normalization
+(ReBN) used by :ref:`LLM REINFORCE<llmreinforce>`, this is the most
+expressive variance reducer (state-conditioned, no group requirement) but
+also the most expensive: an extra adapter must be trained, the baseline is
+biased while the value head is catching up, and value-fit pathologies are an
+extra failure mode to debug.
+
 Example
 -------
 
