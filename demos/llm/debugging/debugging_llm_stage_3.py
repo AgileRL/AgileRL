@@ -20,7 +20,7 @@ from transformers import AutoTokenizer
 
 from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE
 from agilerl.training import train_llm
-from agilerl.training.train_llm import finetune_llm_multiturn
+from agilerl.training.train_llm import train_llm_rollout
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import create_llm_accelerator
 from agilerl.utils.probe_envs_llm import GridNavigationEnv
@@ -328,7 +328,7 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
         original_save = train_llm.save_llm_checkpoint
         train_llm.save_llm_checkpoint = lambda *args, **kwargs: None
         try:
-            finetune_llm_multiturn(
+            train_llm_rollout(
                 pop=[agent],
                 max_turns=max_turns,
                 init_hp=init_hp,

@@ -70,13 +70,13 @@ Example
 Training a DPO agent
 --------------------
 
-To train a DPO agent on a single preference gym environment, use the :ref:`finetune_llm_preference<finetune_llm_preference>` function:
+To train a DPO agent on a single dataset environment, use the :ref:`train_llm_dataset<train_llm_dataset>` function:
 
 .. code-block:: python
 
-  from agilerl.training.train_llm import finetune_llm_preference
+  from agilerl.training.train_llm import train_llm_dataset
 
-  finetune_llm_preference(
+  train_llm_dataset(
     [agent],
     env,
     num_epochs=1,

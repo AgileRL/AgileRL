@@ -50,7 +50,7 @@ from agilerl.algorithms.dpo import DPO
 from agilerl.algorithms.sft import SFT
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.training.train_llm import finetune_llm_preference, finetune_llm_sft
+from agilerl.training.train_llm import train_llm_dataset
 from agilerl.utils.llm_utils import compare_responses, sample_eval_prompts
 from agilerl.llm_envs import PreferenceGym, SFTGym
 
@@ -188,7 +188,7 @@ def main(
     max_steps = num_batches * init_hp["BATCH_SIZE"] if num_batches is not None else None
 
     # --- Training ----------------------------------------------------------
-    train_fn = finetune_llm_sft if mode == "sft" else finetune_llm_preference
+    train_fn = train_llm_dataset
     train_kwargs: dict = dict(
         pop=pop,
         env=env,

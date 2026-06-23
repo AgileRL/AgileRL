@@ -34,7 +34,7 @@ from transformers import AutoTokenizer
 from agilerl.algorithms.sft import SFT
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.training.train_llm import finetune_llm_sft
+from agilerl.training.train_llm import train_llm_dataset
 from agilerl.utils.llm_utils import compare_responses, sample_eval_prompts
 from agilerl.llm_envs import SFTGym
 
@@ -136,7 +136,7 @@ def main(init_hp: dict, mut_p: dict, save_path: str = "outputs") -> None:
     max_steps = num_batches * init_hp["BATCH_SIZE"] if num_batches is not None else None
 
     print("Finetuning SFT agents...")
-    finetune_llm_sft(
+    train_llm_dataset(
         pop=pop,
         env=env,
         init_hp=init_hp,

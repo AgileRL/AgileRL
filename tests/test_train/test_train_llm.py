@@ -18,9 +18,8 @@ from agilerl.training.train_llm import (
     _normalize_learn_metrics,
     build_eval_wandb_dict,
     build_train_wandb_dict,
-    finetune_llm_multiturn,
-    finetune_llm_preference,
-    finetune_llm_sft,
+    train_llm_dataset,
+    train_llm_rollout,
 )
 
 
@@ -157,7 +156,7 @@ class TestFinetuneLlmPreference:
             patch("agilerl.training.train_llm.save_llm_checkpoint"),
         ):
             mock_agg.return_value = 0.5
-            finetune_llm_preference(
+            train_llm_dataset(
                 pop=[mock_agent],
                 env=mock_env,
                 evaluation_interval=2,
@@ -231,7 +230,7 @@ class TestFinetuneLlmPreference:
             mock_agg.return_value = 0.5
 
             # Run the function with wandb and checkpointing enabled
-            finetune_llm_preference(
+            train_llm_dataset(
                 pop=[mock_agent],
                 env=mock_env,
                 save_elite=True,
@@ -306,7 +305,7 @@ class TestFinetuneLlmPreference:
             mock_tournament_selection_and_mutation.return_value = [mock_agent]
 
             mock_agg.return_value = 0.5
-            finetune_llm_preference(
+            train_llm_dataset(
                 pop=[mock_agent],
                 env=mock_env,
                 evaluation_interval=2,
@@ -378,7 +377,7 @@ class TestFinetuneLlmPreference:
 
             mock_agg.return_value = 0.5
             with pytest.warns(UserWarning) as num_epochs_and_max_steps_warning:
-                finetune_llm_preference(
+                train_llm_dataset(
                     pop=[mock_agent],
                     env=mock_env,
                     evaluation_interval=2,
@@ -441,7 +440,7 @@ class TestFinetuneLlmPreference:
         ):
             mock_env.num_epochs = 2
             mock_agg.return_value = 0.5
-            finetune_llm_preference(
+            train_llm_dataset(
                 pop=[mock_agent],
                 env=mock_env,
                 evaluation_interval=2,
@@ -462,9 +461,9 @@ class TestFinetuneLlmPreference:
         mock_agent.scores = [0.0]
         with pytest.raises(
             ValueError,
-            match="The algorithm must be DPO for preference-based reinforcement learning.",
+            match="The algorithm must be DPO .preference. or SFT .supervised.",
         ):
-            finetune_llm_preference(
+            train_llm_dataset(
                 pop=[mock_agent],
                 env=MagicMock(),
                 evaluation_interval=2,
@@ -518,7 +517,7 @@ class TestFinetuneLlmPreference:
             ),
             patch("agilerl.training.train_llm.save_llm_checkpoint"),
         ):
-            finetune_llm_preference(
+            train_llm_dataset(
                 pop=[agent_a, agent_b],
                 env_fn=env_fn,
                 max_steps=2,
@@ -572,7 +571,7 @@ class TestFinetuneLlmPreference:
             patch("agilerl.training.train_llm.wandb") as mock_wandb,
         ):
             mock_agg.return_value = 0.5
-            finetune_llm_preference(
+            train_llm_dataset(
                 pop=[mock_agent],
                 env=mock_env,
                 evaluation_interval=2,
@@ -630,7 +629,7 @@ class TestFinetuneLlmPreference:
             patch("agilerl.training.train_llm.wandb") as mock_wandb,
         ):
             mock_agg.return_value = 0.5
-            finetune_llm_preference(
+            train_llm_dataset(
                 pop=[mock_agent],
                 env=mock_env,
                 evaluation_interval=100,
@@ -674,7 +673,7 @@ class TestFinetuneLlmSft:
             mock_safe_agg.side_effect = lambda acc, val: (
                 float(val) if not isinstance(val, float) else val
             )
-            finetune_llm_sft(
+            train_llm_dataset(
                 pop=[mock_agent],
                 env=mock_env,
                 evaluation_interval=2,
@@ -725,7 +724,7 @@ class TestFinetuneLlmSft:
                 float(val) if not isinstance(val, float) else val
             )
 
-            finetune_llm_sft(
+            train_llm_dataset(
                 pop=[mock_agent],
                 env=mock_env,
                 save_elite=True,
@@ -781,7 +780,7 @@ class TestFinetuneLlmSft:
                 float(val) if not isinstance(val, float) else val
             )
 
-            finetune_llm_sft(
+            train_llm_dataset(
                 pop=[mock_agent],
                 env=mock_env,
                 evaluation_interval=2,
@@ -824,7 +823,7 @@ class TestFinetuneLlmSft:
                 float(val) if not isinstance(val, float) else val
             )
             with pytest.warns(UserWarning) as num_epochs_and_max_steps_warning:
-                finetune_llm_sft(
+                train_llm_dataset(
                     pop=[mock_agent],
                     env=mock_env,
                     evaluation_interval=2,
@@ -870,7 +869,7 @@ class TestFinetuneLlmSft:
             mock_safe_agg.side_effect = lambda acc, val: (
                 float(val) if not isinstance(val, float) else val
             )
-            finetune_llm_sft(
+            train_llm_dataset(
                 pop=[mock_agent],
                 env=mock_env,
                 evaluation_interval=2,
@@ -891,9 +890,9 @@ class TestFinetuneLlmSft:
         mock_agent.scores = [0.0]
         with pytest.raises(
             ValueError,
-            match="The algorithm must be SFT",
+            match="The algorithm must be DPO .preference. or SFT .supervised.",
         ):
-            finetune_llm_sft(
+            train_llm_dataset(
                 pop=[mock_agent],
                 env=MagicMock(),
                 evaluation_interval=2,
@@ -906,7 +905,7 @@ class TestFinetuneLlmSft:
             ValueError,
             match="'evo_steps' must be set if 'tournament' and 'mutation' are not None",
         ):
-            finetune_llm_sft(
+            train_llm_dataset(
                 pop=[MagicMock(spec=SFT)],
                 env=MagicMock(),
                 evo_steps=None,
@@ -949,7 +948,7 @@ class TestFinetuneLlmSft:
                 side_effect=lambda _a, v: float(v),
             ),
         ):
-            finetune_llm_sft(
+            train_llm_dataset(
                 pop=[agent0, agent1],
                 env_fn=_mk_env,
                 accelerator=None,
@@ -991,7 +990,7 @@ class TestFinetuneLlmSft:
             mock_safe_agg.side_effect = lambda acc, val: (
                 float(val) if not isinstance(val, float) else val
             )
-            finetune_llm_sft(
+            train_llm_dataset(
                 pop=[mock_agent],
                 env=mock_env,
                 evaluation_interval=2,
@@ -1041,7 +1040,7 @@ class TestFinetuneLlmSft:
             mock_safe_agg.side_effect = lambda acc, val: (
                 float(val) if not isinstance(val, float) else val
             )
-            finetune_llm_sft(
+            train_llm_dataset(
                 pop=[mock_agent],
                 env=mock_env,
                 evaluation_interval=100,
@@ -1079,7 +1078,7 @@ class TestFinetuneLlmMultiturn:
         ):
             mock_stack.return_value = (torch.zeros(1, 8, dtype=torch.long),)
             mock_agg.return_value = 0.5
-            finetune_llm_multiturn(
+            train_llm_rollout(
                 pop=[mock_agent],
                 env_factory=lambda: mock_env,
                 max_turns=max_turns,
@@ -1132,7 +1131,7 @@ class TestFinetuneLlmMultiturn:
             patch("agilerl.training.train_llm.save_llm_checkpoint"),
         ):
             mock_stack.return_value = (torch.zeros(1, 8, dtype=torch.long),)
-            finetune_llm_multiturn(
+            train_llm_rollout(
                 pop=[mock_agent],
                 env_factory=lambda: mock_env,
                 max_turns=2,
@@ -1166,7 +1165,7 @@ class TestFinetuneLlmMultiturn:
             ),
             pytest.raises(RuntimeError, match="reached rollout"),
         ):
-            finetune_llm_multiturn(
+            train_llm_rollout(
                 pop=[mock_agent],
                 max_turns=1,
                 env_factory=_make_multiturn_env_factory(turn_boundaries_len=3),
@@ -1199,7 +1198,7 @@ class TestFinetuneLlmMultiturn:
             mock_stack.return_value = (torch.zeros(1, 8, dtype=torch.long),)
             mock_agg.return_value = 0.5
 
-            finetune_llm_multiturn(
+            train_llm_rollout(
                 pop=[mock_agent],
                 env_factory=lambda: mock_env,
                 max_turns=2,
@@ -1242,7 +1241,7 @@ class TestFinetuneLlmMultiturn:
             mock_agg.return_value = 0.5
             mock_tourn.return_value = [mock_agent]
 
-            finetune_llm_multiturn(
+            train_llm_rollout(
                 pop=[mock_agent],
                 env_factory=lambda: mock_env,
                 max_turns=2,
@@ -1269,7 +1268,7 @@ class TestFinetuneLlmMultiturn:
         mutation.activation_mut = 0
         mock_agent = _make_multiturn_mock_agent()
         with pytest.raises(ValueError, match="'evo_steps' must be set"):
-            finetune_llm_multiturn(
+            train_llm_rollout(
                 pop=[mock_agent],
                 env_factory=MagicMock,
                 max_turns=1,
@@ -1284,7 +1283,7 @@ class TestFinetuneLlmMultiturn:
     def test_finetune_llm_multiturn_warns_when_evo_steps_without_tournament(self):
         mock_agent = _make_multiturn_mock_agent()
         with pytest.warns(UserWarning, match="evo_steps"):
-            finetune_llm_multiturn(
+            train_llm_rollout(
                 pop=[mock_agent],
                 env_factory=MagicMock,
                 max_turns=1,
@@ -1306,7 +1305,7 @@ class TestFinetuneLlmMultiturn:
             ValueError,
             match="The algorithm must be LLMPPO, LLMREINFORCE, or GRPO for multi-turn finetuning",
         ):
-            finetune_llm_multiturn(
+            train_llm_rollout(
                 pop=[mock_agent],
                 env_factory=MagicMock,
                 max_turns=1,
@@ -1335,7 +1334,7 @@ class TestFinetuneLlmMultiturn:
         ):
             mock_stack.return_value = (torch.zeros(1, 8, dtype=torch.long),)
             mock_agg.return_value = 0.5
-            finetune_llm_multiturn(
+            train_llm_rollout(
                 pop=[mock_agent],
                 env_factory=lambda: mock_env,
                 max_turns=2,
@@ -1367,7 +1366,7 @@ class TestFinetuneLlmMultiturn:
         ):
             mock_stack.return_value = (torch.zeros(1, 8, dtype=torch.long),)
             mock_agg.return_value = 0.5
-            finetune_llm_multiturn(
+            train_llm_rollout(
                 pop=[mock_agent],
                 env_factory=lambda: mock_env,
                 max_turns=2,
@@ -1401,7 +1400,7 @@ class TestFinetuneLlmMultiturn:
         ):
             mock_stack.return_value = (torch.zeros(1, 8, dtype=torch.long),)
             mock_agg.return_value = 0.5
-            finetune_llm_multiturn(
+            train_llm_rollout(
                 pop=[mock_agent],
                 env_factory=lambda: mock_env,
                 max_turns=2,
@@ -1449,7 +1448,7 @@ class TestFinetuneLlmMultiturn:
         ):
             mock_stack.return_value = (torch.zeros(1, 8, dtype=torch.long),)
             mock_agg.return_value = 0.5
-            finetune_llm_multiturn(
+            train_llm_rollout(
                 pop=[mock_agent],
                 env_factory=lambda: mock_env,
                 max_turns=2,
@@ -1482,7 +1481,7 @@ class TestFinetuneLlmMultiturn:
         ):
             mock_stack.return_value = (torch.zeros(1, 8, dtype=torch.long),)
             mock_agg.return_value = 0.5
-            finetune_llm_multiturn(
+            train_llm_rollout(
                 pop=[mock_agent],
                 env_factory=lambda: mock_env,
                 max_turns=max_turns,
@@ -1520,7 +1519,7 @@ class TestFinetuneLlmMultiturn:
         ):
             mock_stack.return_value = (torch.zeros(1, 8, dtype=torch.long),)
             mock_agg.return_value = 0.5
-            finetune_llm_multiturn(
+            train_llm_rollout(
                 pop=[mock_agent],
                 env_factory=lambda: mock_env,
                 max_turns=2,
@@ -1572,7 +1571,7 @@ class TestFinetuneLlmMultiturn:
         ):
             mock_stack.return_value = (torch.zeros(1, 8, dtype=torch.long),)
             mock_agg.return_value = 0.5
-            finetune_llm_multiturn(
+            train_llm_rollout(
                 pop=[mock_agent],
                 env_factory=lambda: mock_env,
                 max_turns=2,
@@ -1611,7 +1610,7 @@ class TestFinetuneLlmMultiturn:
             ),
             pytest.raises(RuntimeError, match="reached rollout"),
         ):
-            finetune_llm_multiturn(
+            train_llm_rollout(
                 pop=[agent],
                 max_turns=2,
                 env_factory=_make_multiturn_env_factory(),
@@ -1653,7 +1652,7 @@ class TestFinetuneLlmMultiturn:
             patch("builtins.print", side_effect=_capture_print),
             patch("agilerl.training.train_llm.save_llm_checkpoint"),
         ):
-            finetune_llm_multiturn(
+            train_llm_rollout(
                 pop=[mock_agent],
                 env_factory=lambda: mock_env,
                 max_turns=2,
@@ -1845,8 +1844,8 @@ class TestSaveEliteCheckpoint:
 @pytest.mark.parametrize(
     ("finetune_fn", "agent_spec"),
     [
-        (finetune_llm_preference, DPO),
-        (finetune_llm_sft, SFT),
+        (train_llm_dataset, DPO),
+        (train_llm_dataset, SFT),
     ],
 )
 def test_finetune_llm_env_and_env_fn_mutually_exclusive(finetune_fn, agent_spec):
@@ -1883,16 +1882,11 @@ def test_finetune_llm_env_and_env_fn_mutually_exclusive(finetune_fn, agent_spec)
         )
 
 
-@pytest.mark.parametrize(
-    "finetune_fn",
-    [finetune_llm_preference, finetune_llm_sft],
-)
-def test_finetune_llm_requires_env_or_env_fn(finetune_fn):
+@pytest.mark.parametrize("agent_spec", [DPO, SFT])
+def test_finetune_llm_requires_env_or_env_fn(agent_spec):
     with pytest.raises(ValueError, match="Either 'env' or 'env_fn' must be provided"):
-        finetune_fn(
-            pop=[
-                MagicMock(spec=SFT) if finetune_fn is finetune_llm_sft else MagicMock()
-            ],
+        train_llm_dataset(
+            pop=[MagicMock(spec=agent_spec)],
             env=None,
             env_fn=None,
             max_steps=0,
@@ -1904,8 +1898,8 @@ def test_finetune_llm_requires_env_or_env_fn(finetune_fn):
 @pytest.mark.parametrize(
     ("finetune_fn", "agent_spec"),
     [
-        (finetune_llm_preference, DPO),
-        (finetune_llm_sft, SFT),
+        (train_llm_dataset, DPO),
+        (train_llm_dataset, SFT),
     ],
 )
 def test_finetune_llm_warns_on_shared_env_with_population(finetune_fn, agent_spec):
@@ -1948,7 +1942,7 @@ def test_finetune_llm_warns_on_shared_env_with_population(finetune_fn, agent_spe
         )
 
 
-@pytest.mark.parametrize("finetune_fn", [finetune_llm_preference])
+@pytest.mark.parametrize("finetune_fn", [train_llm_dataset])
 def test_finetune_llm_checkpoint_triggering_non_divisible_steps(finetune_fn):
     agent = MagicMock(spec=DPO)
     agent.algo = "DPO"
@@ -2065,8 +2059,8 @@ def test_init_llm_wandb_passes_entity_and_run_name():
 @pytest.mark.parametrize(
     "finetune_fn, agent_spec",
     [
-        (finetune_llm_preference, DPO),
-        (finetune_llm_sft, SFT),
+        (train_llm_dataset, DPO),
+        (train_llm_dataset, SFT),
     ],
 )
 def test_inner_loop_breaks_after_max_steps_first_agent(finetune_fn, agent_spec):

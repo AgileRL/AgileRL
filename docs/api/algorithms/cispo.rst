@@ -45,13 +45,13 @@ Training and Usage
 ------------------
 
 Use ``CISPO`` anywhere you would use ``GRPO`` in AgileRL training loops, such
-as ``finetune_llm_multiturn``. Single-turn reasoning is the ``max_turns=1`` case
+as ``train_llm_rollout``. Single-turn reasoning is the ``max_turns=1`` case
 of the same function.
 
 .. code-block:: python
 
   from agilerl.llm_envs import RolloutEnv, TokenObservationWrapper
-  from agilerl.training.train_llm import finetune_llm_multiturn
+  from agilerl.training.train_llm import train_llm_rollout
 
   def reward_fn(completion: str, answer: str, question: str) -> float:
       del question
@@ -78,7 +78,7 @@ of the same function.
           max_model_len=1024,
       )
 
-  trained_pop = finetune_llm_multiturn(
+  trained_pop = train_llm_rollout(
       pop=[agent],
       max_turns=1,
       env_factory=env_factory,
@@ -106,7 +106,7 @@ of the same function.
           max_output_tokens=128,
       )
 
-  trained_pop = finetune_llm_multiturn(
+  trained_pop = train_llm_rollout(
       pop=[agent],
       max_turns=4,
       env_factory=env_factory,

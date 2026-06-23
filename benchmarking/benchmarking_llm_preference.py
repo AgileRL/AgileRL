@@ -34,7 +34,7 @@ from transformers import AutoTokenizer
 from agilerl.algorithms.dpo import DPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.training.train_llm import finetune_llm_preference
+from agilerl.training.train_llm import train_llm_dataset
 from agilerl.llm_envs import PreferenceGym
 from agilerl.utils.llm_utils import (
     compare_responses,
@@ -140,7 +140,7 @@ def main(init_hp: dict, mut_p: dict, save_path: str = "outputs") -> None:
     max_steps = num_batches * init_hp["BATCH_SIZE"] if num_batches is not None else None
 
     print("Fine-tuning DPO agents...")
-    finetune_llm_preference(
+    train_llm_dataset(
         pop=pop,
         env=env,
         init_hp=init_hp,

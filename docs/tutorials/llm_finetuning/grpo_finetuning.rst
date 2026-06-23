@@ -45,7 +45,7 @@ Dependencies
     from torch.utils.data import Dataset
     from transformers import AutoTokenizer
     from agilerl.algorithms import GRPO
-    from agilerl.training.train_llm import finetune_llm_multiturn
+    from agilerl.training.train_llm import train_llm_rollout
     from agilerl.llm_envs import (
         RolloutEnv,
         TokenObservationWrapper,
@@ -258,13 +258,13 @@ training in this tutorial, we use deepspeed and accelerate.
 
 Training and Saving an Agent
 ----------------------------
-The simplest way to train an AgileRL agent is to use the :meth:`finetune_llm_multiturn() <agilerl.training.train_llm.finetune_llm_multiturn>` function
+The simplest way to train an AgileRL agent is to use the :meth:`train_llm_rollout() <agilerl.training.train_llm.train_llm_rollout>` function
 with ``max_turns=1`` for single-turn reasoning. This training function will orchestrate the training process, removing the need to implement a training loop, and will save
 checkpoints of the trained agent that can be used later for inference. It also uses Weights and Biases for tracking.
 
 .. code-block:: python
 
-    finetune_llm_multiturn(
+    train_llm_rollout(
         pop=[agent],
         max_turns=1,
         env_factory=env_factory,
@@ -330,7 +330,7 @@ Example config file:
 Using a custom training loop
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 If we wanted to have more control over the training process, it is also possible to write our own custom
-training loop to train our agent. The training loop below can be used alternatively to the above ``finetune_llm_multiturn``
+training loop to train our agent. The training loop below can be used alternatively to the above ``train_llm_rollout``
 function and is an example of how we might choose to train our agent to exhibit reasoning.
 
 .. collapse:: Custom Training Loop

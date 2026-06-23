@@ -21,7 +21,7 @@ from agilerl.llm_envs import (
     _default_prompt_builder,
     _extract_question_answer_columns,
 )
-from agilerl.training.train_llm import finetune_llm_multiturn
+from agilerl.training.train_llm import train_llm_rollout
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import create_llm_accelerator
 from agilerl.utils.utils import create_population
@@ -194,7 +194,7 @@ def main(init_hp, mut_p):
         device=accelerator.device,
     )
 
-    finetune_llm_multiturn(
+    train_llm_rollout(
         pop=pop,
         max_turns=1,
         env_factory=env_factory,

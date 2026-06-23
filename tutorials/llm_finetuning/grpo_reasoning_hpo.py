@@ -7,7 +7,7 @@ from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.training.train_llm import finetune_llm_multiturn
+from agilerl.training.train_llm import train_llm_rollout
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.llm_envs import (
     RolloutEnv,
@@ -209,7 +209,7 @@ def main(init_hp, mut_p):
         accelerator=accelerator,
     )
 
-    finetune_llm_multiturn(
+    train_llm_rollout(
         pop=pop,
         max_turns=1,
         env_factory=env_factory,

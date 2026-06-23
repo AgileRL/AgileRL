@@ -7,7 +7,7 @@ from torch.utils.data import Dataset
 from transformers import AutoTokenizer
 
 from agilerl.algorithms import GRPO
-from agilerl.training.train_llm import finetune_llm_multiturn
+from agilerl.training.train_llm import train_llm_rollout
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.llm_envs import (
     RolloutEnv,
@@ -182,7 +182,7 @@ def main():
         use_vllm=USE_VLLM,
         vllm_config=VLLMConfig(sleep_mode=True, max_num_seqs=4),
     )
-    finetune_llm_multiturn(
+    train_llm_rollout(
         pop=[agent],
         max_turns=1,
         env_factory=env_factory,

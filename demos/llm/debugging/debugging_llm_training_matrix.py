@@ -36,8 +36,8 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training import train_llm
 from agilerl.training.train_llm import (
-    finetune_llm_multiturn,
-    finetune_llm_preference,
+    train_llm_dataset,
+    train_llm_rollout,
 )
 from agilerl.utils.probe_envs_llm import ConditionalTargetEnv
 from agilerl.utils.utils import create_population
@@ -60,7 +60,7 @@ class MatrixCase:
 
 
 class TinyPreferenceEnv:
-    """Tiny env compatible with `finetune_llm_preference`."""
+    """Tiny env compatible with `train_llm_dataset`."""
 
     def __init__(
         self,
@@ -296,7 +296,7 @@ def run_preference_case(
         tournament, mutation = build_evolution_components(case.population_size)
         evo_steps = args.evo_steps
 
-    finetune_llm_preference(
+    train_llm_dataset(
         pop=pop,
         env=env,
         wb=False,
@@ -345,7 +345,7 @@ def run_multiturn_case(
         tournament, mutation = build_evolution_components(case.population_size)
         evo_steps = args.evo_steps
 
-    finetune_llm_multiturn(
+    train_llm_rollout(
         pop=pop,
         max_turns=1,
         env_factory=env_factory,

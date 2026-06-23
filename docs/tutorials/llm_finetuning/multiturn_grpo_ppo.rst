@@ -114,7 +114,7 @@ Dependencies
     import gem
     import yaml
     from transformers import AutoTokenizer
-    from agilerl.training.train_llm import finetune_llm_multiturn
+    from agilerl.training.train_llm import train_llm_rollout
     from agilerl.utils.algo_utils import VLLMConfig
     from agilerl.utils.llm_utils import create_llm_accelerator
     from agilerl.utils.utils import create_population
@@ -128,7 +128,7 @@ All runs use:
 * Environment: ``game:GuessTheNumber-v0-easy``
 * Model: ``Qwen/Qwen2.5-0.5B-Instruct``
 * Wrapper: :class:`TokenObservationWrapper <agilerl.llm_envs.TokenObservationWrapper>`
-* Training loop: :meth:`finetune_llm_multiturn() <agilerl.training.train_llm.finetune_llm_multiturn>`
+* Training loop: :meth:`train_llm_rollout() <agilerl.training.train_llm.train_llm_rollout>`
 * Population size: ``1``
 * Evolution/HPO: disabled
 
@@ -265,7 +265,7 @@ These values are intentionally conservative and align with the shipped configs:
 .. note::
 
    For GRPO, ``BATCH_SIZE`` and ``GROUP_SIZE`` must satisfy divisibility constraints in
-   :meth:`finetune_llm_multiturn() <agilerl.training.train_llm.finetune_llm_multiturn>`.
+   :meth:`train_llm_rollout() <agilerl.training.train_llm.train_llm_rollout>`.
 
 Train call (no evo/HPO)
 -----------------------
@@ -274,7 +274,7 @@ The key training call is the same for both algorithms. Evolutionary fields are e
 
 .. code-block:: python
 
-    finetune_llm_multiturn(
+    train_llm_rollout(
         pop=[agent],
         max_turns=max_turns,
         env_factory=env_factory,

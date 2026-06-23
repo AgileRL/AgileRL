@@ -15,7 +15,7 @@ import yaml
 from transformers import AutoTokenizer
 
 from agilerl import HAS_LLM_DEPENDENCIES
-from agilerl.training.train_llm import finetune_llm_multiturn
+from agilerl.training.train_llm import train_llm_rollout
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import create_llm_accelerator
 from agilerl.utils.utils import create_population, _normalize_algo_name
@@ -177,7 +177,7 @@ def main() -> None:
     agent = pop[0]
 
     try:
-        finetune_llm_multiturn(
+        train_llm_rollout(
             pop=[agent],
             max_turns=max_turns,
             env_factory=env_factory,

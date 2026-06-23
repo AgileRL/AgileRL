@@ -85,13 +85,13 @@ Example
 Training
 --------
 
-The typical training entry point is ``finetune_llm_multiturn`` in
+The typical training entry point is ``train_llm_rollout`` in
 ``agilerl.training.train_llm``. Single-turn reasoning is the ``max_turns=1``
 case of the same function.
 
 .. code-block:: python
 
-  from agilerl.training.train_llm import finetune_llm_multiturn
+  from agilerl.training.train_llm import train_llm_rollout
   from agilerl.llm_envs import RolloutEnv, TokenObservationWrapper
 
   def reward_fn(completion: str, answer: str, question: str) -> float:
@@ -119,7 +119,7 @@ case of the same function.
           max_model_len=1024,
       )
 
-  trained_pop = finetune_llm_multiturn(
+  trained_pop = train_llm_rollout(
       pop=[agent],
       max_turns=1,
       env_factory=env_factory,
@@ -147,7 +147,7 @@ case of the same function.
           max_output_tokens=128,
       )
 
-  trained_pop = finetune_llm_multiturn(
+  trained_pop = train_llm_rollout(
       pop=[agent],
       max_turns=4,
       env_factory=env_factory,

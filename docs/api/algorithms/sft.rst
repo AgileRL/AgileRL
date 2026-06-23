@@ -80,13 +80,13 @@ Example
 Training an SFT agent
 ---------------------
 
-To train an SFT agent on a single SFT gym environment, use the :ref:`finetune_llm_sft<finetune_llm_sft>` function:
+To train an SFT agent on a single dataset environment, use the :ref:`train_llm_dataset<train_llm_dataset>` function:
 
 .. code-block:: python
 
-  from agilerl.training.train_llm import finetune_llm_sft
+  from agilerl.training.train_llm import train_llm_dataset
 
-  finetune_llm_sft(
+  train_llm_dataset(
     pop=[agent],
     env=env,
     init_hp={"BATCH_SIZE": 32, "UPDATE_EPOCHS": 1},

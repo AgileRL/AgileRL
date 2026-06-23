@@ -14,7 +14,7 @@ from transformers import AutoTokenizer
 
 from agilerl.algorithms import CISPO, GRPO, GSPO, LLMPPO, LLMREINFORCE
 from agilerl.llm_envs import RolloutHarness
-from agilerl.training.train_llm import finetune_llm_multiturn
+from agilerl.training.train_llm import train_llm_rollout
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import (
     build_bnb_quantization_config,
@@ -125,7 +125,7 @@ def main(init_hp, mut_p):
         algo_kwargs=algo_kwargs or None,
     )
 
-    finetune_llm_multiturn(
+    train_llm_rollout(
         pop=pop,
         max_turns=rollout_max_turns,
         env_factory=env_factory,
