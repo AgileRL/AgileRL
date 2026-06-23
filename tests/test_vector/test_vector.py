@@ -770,6 +770,31 @@ class TestAsyncPettingZooVecEnvCloseExtras:
         for p in env.processes:
             assert not p.is_alive()
 
+    def test_close_terminates_processes_still_alive_after_join(self):
+        env = AsyncPettingZooVecEnv(
+            [speaker_listener_like_env for _ in range(2)],
+        )
+
+        class StubProcess:
+            def __init__(self):
+                self.alive = True
+                self.terminated = False
+
+            def join(self, timeout=None):
+                del timeout
+
+            def is_alive(self):
+                return self.alive and not self.terminated
+
+            def terminate(self):
+                self.terminated = True
+                self.alive = False
+
+        env.processes = [StubProcess(), StubProcess()]
+        env.parent_pipes = [None, None]
+        env.close_extras(terminate=True)
+        assert all(not p.is_alive() for p in env.processes)
+
 
 class TestAsyncPettingZooVecEnvPollPipeEnvs:
     @pytest.mark.parametrize(

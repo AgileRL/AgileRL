@@ -1240,6 +1240,10 @@ def cnn_net():
 
 
 class TestMakeEvolvableChangeActivation:
+    def test_activation_property(self, mlp_net, device):
+        evolvable = MakeEvolvable(mlp_net, torch.randn(1, 10), device=device)
+        assert evolvable.activation == evolvable.mlp_activation
+
     @pytest.mark.gpu
     def test_change_activation_output_false(self, mlp_net, device):
         evolvable = MakeEvolvable(mlp_net, torch.randn(1, 10), device=device)
@@ -1252,6 +1256,44 @@ class TestMakeEvolvableChangeActivation:
         evolvable.change_activation("LeakyReLU", output=True)
         assert evolvable.mlp_activation == "LeakyReLU"
         assert evolvable.mlp_output_activation == "LeakyReLU"
+
+
+class TestMakeEvolvableForwardErrors:
+    def test_forward_rainbow_cnn_missing_value_stream(self, cnn_net, device):
+        evolvable = MakeEvolvable(
+            cnn_net,
+            torch.randn(1, 3, 32, 32),
+            support=torch.linspace(-10, 10, 51),
+            rainbow=True,
+            device=device,
+        )
+        null_value_net = torch.nn.Linear(1, 1)
+
+        def _null_forward(_x):
+            return None
+
+        null_value_net.forward = _null_forward  # type: ignore[method-assign]
+        object.__setattr__(evolvable, "value_net", null_value_net)
+        with pytest.raises(
+            RuntimeError, match="Rainbow value stream is not initialized"
+        ):
+            evolvable.forward(torch.randn(1, 3, 32, 32))
+
+    def test_forward_cnn_missing_value_stream(self, cnn_net, device):
+        evolvable = MakeEvolvable(
+            cnn_net,
+            torch.randn(1, 3, 32, 32),
+            device=device,
+        )
+        null_value_net = torch.nn.Linear(1, 1)
+
+        def _null_forward(_x):
+            return None
+
+        null_value_net.forward = _null_forward  # type: ignore[method-assign]
+        object.__setattr__(evolvable, "value_net", null_value_net)
+        with pytest.raises(RuntimeError, match="Value stream is not initialized"):
+            evolvable.forward(torch.randn(1, 3, 32, 32))
 
 
 class TestMakeEvolvableInitWeightsGaussian:

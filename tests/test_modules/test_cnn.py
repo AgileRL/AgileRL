@@ -447,21 +447,7 @@ class TestEvolvableCNNAddLayer:
         evolvable_cnn.add_layer()
         assert len(evolvable_cnn.channel_size) >= initial_channels
 
-    def test_add_layer_revert_max_s_new_lt_1(self, device):
-        """Covers add_layer revert when max_s_new < 1."""
-        evolvable_cnn = EvolvableCNN(
-            input_shape=[1, 4, 4],
-            channel_size=[32],
-            kernel_size=[4],
-            stride_size=[1],
-            num_outputs=4,
-            max_hidden_layers=3,
-            device=device,
-            random_seed=0,
-        )
-        evolvable_cnn.add_layer()
-        output = evolvable_cnn(torch.ones(1, 1, 4, 4, device=device))
-        assert output.shape[1] == 4
+    # add_layer revert when max_s_new < 1: see test_cnn_cpu.py
 
 
 class TestEvolvableCNNRemoveLayer:

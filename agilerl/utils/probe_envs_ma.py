@@ -2091,7 +2091,7 @@ def check_on_policy_learning_with_probe_env(
                     #     )
 
 
-if __name__ == "__main__":
+def run_probe_env_main() -> None:
     from agilerl.algorithms import IPPO
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -2223,3 +2223,7 @@ if __name__ == "__main__":
             device,
             discrete=False,
         )
+
+
+if __name__ == "__main__":
+    run_probe_env_main()

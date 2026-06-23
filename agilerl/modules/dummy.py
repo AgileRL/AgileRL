@@ -13,7 +13,11 @@ def to_evolvable(
     module_kwargs: dict[str, Any],
     device: DeviceType,
 ) -> EvolvableModule:
-    return DummyEvolvable(module_fn, module_kwargs, device)
+    return DummyEvolvable(
+        device=device,
+        module_fn=module_fn,
+        module_kwargs=module_kwargs,
+    )
 
 
 class DummyEvolvable(EvolvableModule):

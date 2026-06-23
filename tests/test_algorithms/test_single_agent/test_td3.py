@@ -19,6 +19,10 @@ from tests.helper_functions import (
     get_experiences_batch,
     get_sample_from_space,
 )
+from tests.helpers.algorithm_coverage import (
+    assert_swap_channels_called,
+    patch_obs_channels_to_first,
+)
 
 
 class DummyTD3(TD3):
@@ -630,6 +634,28 @@ class TestTD3Learn:
         assert isinstance(critic_loss, float)
         td3.clean_up()
 
+    def test_learn_uses_accelerator_backward_on_policy_step(self, vector_space):
+        action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        accelerator = Accelerator()
+        td3 = TD3(
+            vector_space,
+            action_space,
+            batch_size=4,
+            policy_freq=1,
+            accelerator=accelerator,
+        )
+        experiences = get_experiences_batch(
+            vector_space,
+            action_space,
+            4,
+            accelerator.device,
+        )
+        td3.scores = [0]
+        actor_loss, critic_loss = td3.learn(experiences)
+        assert isinstance(actor_loss, float)
+        assert isinstance(critic_loss, float)
+        td3.clean_up()
+
 
 class TestTD3SoftUpdate:
     # Updates target network parameters with soft update
@@ -746,6 +772,16 @@ class TestTD3Test:
         agent = TD3(observation_space, vector_space, device=device)
         mean_score = agent.test(env, max_steps=10)
         assert isinstance(mean_score, float)
+        agent.clean_up()
+
+    def test_swap_channels_path(self, image_space, vector_space, monkeypatch, request):
+        observation_space = request.getfixturevalue("image_space")
+        env = DummyEnv(state_size=observation_space.shape, vect=False, num_envs=1)
+        spy = patch_obs_channels_to_first(monkeypatch, "agilerl.algorithms.td3")
+        agent = TD3(observation_space, vector_space)
+        mean_score = agent.test(env, swap_channels=True, max_steps=1, loop=1)
+        assert isinstance(mean_score, float)
+        assert_swap_channels_called(spy)
         agent.clean_up()
 
 

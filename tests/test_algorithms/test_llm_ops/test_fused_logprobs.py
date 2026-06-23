@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from agilerl.algorithms.core.llm_ops.fused_logprobs import (
+    FusedLinearLogProbsFunction,
     _FUSED_LOGPROB_COMPILE_STATE,
     _fused_logprob_chunk,
     _fused_logprob_chunk_dispatch,
@@ -79,3 +80,23 @@ class TestFusedLogprobChunkDispatch:
             again = _fused_logprob_chunk_dispatch(torch.device("cuda"), *_args())
         mock_compile.assert_not_called()
         assert torch.allclose(again, expected)
+
+
+def test_fused_logprob_backward_skips_when_no_inputs_require_grad():
+    hidden = torch.randn(1, 4, 8)
+    weight = torch.randn(16, 8)
+    targets = torch.randint(0, 16, (1, 4))
+
+    class Ctx:
+        needs_hidden_grad = False
+        needs_weight_grad = False
+        needs_bias_grad = False
+        chunk_rows = 2
+        temperature = 1.0
+        cast_to_fp32 = True
+        saved_tensors = (hidden, weight, None, targets)
+
+    grad_output = torch.ones(1, 4)
+    grads = FusedLinearLogProbsFunction.backward(Ctx(), grad_output)
+    assert grads[0] is None
+    assert grads[1] is None

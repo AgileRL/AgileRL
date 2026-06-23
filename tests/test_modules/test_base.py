@@ -601,6 +601,23 @@ class TestModuleDictGetMutationMethods:
             == MutationType.LAYER
         )
 
+    def test_module_dict_get_mutation_methods_without_dot(self):
+        """Covers ModuleDict.get_mutation_methods when name has no dot."""
+
+        class ModuleDictWithDirectMutation(ModuleDict):
+            @mutation(MutationType.NODE)
+            def direct_mutation(self):
+                return {"mutation": "direct"}
+
+            @property
+            def mutation_methods(self):
+                return ["direct_mutation"]
+
+        module_dict = ModuleDictWithDirectMutation(device="cpu")
+        methods = module_dict.get_mutation_methods()
+        assert "direct_mutation" in methods
+        assert methods["direct_mutation"].__name__ == "direct_mutation"
+
 
 class TestModuleDictMutationMethodsProperties:
     def test_module_dict_layer_node_methods(self):

@@ -16,6 +16,10 @@ from tests.helper_functions import (
     assert_state_dicts_equal,
     get_experiences_batch,
 )
+from tests.helpers.algorithm_coverage import (
+    assert_swap_channels_called,
+    patch_obs_channels_to_first,
+)
 
 
 class DummyCQN(CQN):
@@ -461,6 +465,18 @@ class TestCQNTest:
         agent = CQN(observation_space=observation_space, action_space=action_space)
         mean_score = agent.test(env, max_steps=10)
         assert isinstance(mean_score, float)
+        agent.clean_up()
+
+    def test_swap_channels_path(
+        self, image_space, discrete_space, monkeypatch, request
+    ):
+        observation_space = request.getfixturevalue("image_space")
+        env = DummyEnv(state_size=observation_space.shape, vect=False, num_envs=1)
+        spy = patch_obs_channels_to_first(monkeypatch, "agilerl.algorithms.cqn")
+        agent = CQN(observation_space=observation_space, action_space=discrete_space)
+        mean_score = agent.test(env, swap_channels=True, max_steps=1, loop=1)
+        assert isinstance(mean_score, float)
+        assert_swap_channels_called(spy)
         agent.clean_up()
 
 

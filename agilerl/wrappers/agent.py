@@ -286,16 +286,17 @@ class RSNorm(AgentWrapper[AgentType]):
         :rtype: RunningMeanStd | dict[str, RunningMeanStd] | tuple[RunningMeanStd, ...]
         """
         if isinstance(observation_space, spaces.Dict):
+            spaces_map = observation_space.spaces
             if norm_obs_keys is not None:
-                observation_space = {
+                spaces_map = {
                     key: value
-                    for key, value in observation_space.spaces.items()
+                    for key, value in spaces_map.items()
                     if key in norm_obs_keys
                 }
 
             return {
                 key: RunningMeanStd(epsilon, shape=value.shape, device=device)
-                for key, value in observation_space.spaces.items()
+                for key, value in spaces_map.items()
             }
 
         if isinstance(observation_space, spaces.Tuple):
@@ -306,34 +307,47 @@ class RSNorm(AgentWrapper[AgentType]):
 
         return RunningMeanStd(epsilon, shape=observation_space.shape, device=device)
 
-    def _normalize_observation(self, observation: ObservationType) -> ObservationType:
+    def _normalize_observation(
+        self,
+        observation: ObservationType,
+        *,
+        rms: RunningMeanStd
+        | dict[str, RunningMeanStd]
+        | tuple[RunningMeanStd, ...]
+        | None = None,
+    ) -> ObservationType:
         """Normalize the observation using the RunningMeanStd object(s).
 
         :param observation: Observation from the environment
         :type observation: ObservationType
+        :param rms: Running mean/std tracker(s) to use. Defaults to ``self.obs_rms``.
+        :type rms: RunningMeanStd | dict[str, RunningMeanStd] | tuple[RunningMeanStd, ...] | None
 
         :return: Normalized observation
         :rtype: ObservationType
         """
-        if isinstance(self.obs_rms, dict):
+        if rms is None:
+            rms = self.obs_rms
+
+        if isinstance(rms, dict):
             norm_observation = {}
-            for key, rms in self.obs_rms.items():
-                norm_observation[key] = (observation[key] - rms.mean) / (
-                    rms.var + rms.epsilon
+            for key, key_rms in rms.items():
+                norm_observation[key] = (observation[key] - key_rms.mean) / (
+                    key_rms.var + key_rms.epsilon
                 ).sqrt()
 
             observation = norm_observation
-        elif isinstance(self.obs_rms, tuple):
+        elif isinstance(rms, tuple):
             norm_observation = []
-            for i, rms in enumerate(self.obs_rms):
-                norm_obs = (observation[i] - rms.mean) / (rms.var + rms.epsilon).sqrt()
+            for i, key_rms in enumerate(rms):
+                norm_obs = (observation[i] - key_rms.mean) / (
+                    key_rms.var + key_rms.epsilon
+                ).sqrt()
                 norm_observation.append(norm_obs)
 
             observation = tuple(norm_observation)
         else:
-            observation = (observation - self.obs_rms.mean) / (
-                self.obs_rms.var + self.obs_rms.epsilon
-            ).sqrt()
+            observation = (observation - rms.mean) / (rms.var + rms.epsilon).sqrt()
 
         return observation
 
@@ -347,26 +361,40 @@ class RSNorm(AgentWrapper[AgentType]):
         :rtype: ObservationType
         """
         if self.multi_agent:
-            for agent_id, obs in observation.items():
-                observation[agent_id] = self._normalize_observation(obs)
-            return observation
+            return {
+                agent_id: self._normalize_observation(obs, rms=self.obs_rms[agent_id])
+                for agent_id, obs in observation.items()
+            }
 
         return self._normalize_observation(observation)
 
-    def _update_statistics(self, observation: ObservationType) -> None:
+    def _update_statistics(
+        self,
+        observation: ObservationType,
+        *,
+        rms: RunningMeanStd
+        | dict[str, RunningMeanStd]
+        | tuple[RunningMeanStd, ...]
+        | None = None,
+    ) -> None:
         """Update the running statistics using the observation.
 
         :param observation: Observation from the environment
         :type observation: ObservationType
+        :param rms: Running mean/std tracker(s) to use. Defaults to ``self.obs_rms``.
+        :type rms: RunningMeanStd | dict[str, RunningMeanStd] | tuple[RunningMeanStd, ...] | None
         """
-        if isinstance(self.obs_rms, dict):
-            for key, rms in self.obs_rms.items():
-                rms.update(observation[key])
-        elif isinstance(self.obs_rms, tuple):
-            for i, rms in enumerate(self.obs_rms):
-                rms.update(observation[i])
+        if rms is None:
+            rms = self.obs_rms
+
+        if isinstance(rms, dict):
+            for key, key_rms in rms.items():
+                key_rms.update(observation[key])
+        elif isinstance(rms, tuple):
+            for i, key_rms in enumerate(rms):
+                key_rms.update(observation[i])
         else:
-            self.obs_rms.update(observation)
+            rms.update(observation)
 
     def update_statistics(self, observation: ObservationType) -> None:
         """Update the running statistics using the observation.
@@ -375,8 +403,8 @@ class RSNorm(AgentWrapper[AgentType]):
         :type observation: ObservationType
         """
         if self.multi_agent:
-            for obs in observation.values():
-                self._update_statistics(obs)
+            for agent_id, obs in observation.items():
+                self._update_statistics(obs, rms=self.obs_rms[agent_id])
         else:
             self._update_statistics(observation)
 

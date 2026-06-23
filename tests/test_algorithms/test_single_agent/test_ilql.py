@@ -1,4 +1,5 @@
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import torch
 import pytest
@@ -67,6 +68,18 @@ class TestILQLInit:
         assert algo.cql_temp == 1.0
         assert algo.weight_decay == 0.0
         assert algo.device == "cpu"
+        algo.clean_up()
+
+    def test_default_net_config_when_none(self):
+        List_RL_Dataset.__abstractmethods__ = set()
+        tokenizer = WordleTokenizer()
+        token_reward = ConstantTokenReward(1)
+        rl_ds = List_RL_Dataset(tokenizer, token_reward, 10)
+        with patch("agilerl.algorithms.ilql.EvolvableGPT") as mock_gpt:
+            mock_gpt.return_value = MagicMock()
+            algo = ILQL(rl_ds, net_config=None)
+        assert algo.net_config["vocab_size"] == 50257
+        assert algo.net_config["block_size"] == 1024
         algo.clean_up()
 
 
@@ -832,7 +845,6 @@ class TestILQLPolicyAct:
         }
 
         algo = ILQL(rl_ds, net_config=net_config, double_q=True)
-        algo.max_length = None
 
         policy = ILQL_Policy(algo, "beam", beam_width=5)
 
@@ -1038,6 +1050,17 @@ class TestTopAdvantageNGramsEvaluate:
         )
         evaluator.evaluate(FakeModel(), None)
 
+        tokenizer = WordleTokenizer()
+        eoa_model = FakeModel()
+        eoa_model.prepare_inputs = lambda _items: {
+            "tokens": torch.tensor([[0, 1, tokenizer.eoa_token_id, 8, 3]]),
+            "action_idxs": torch.tensor([[0, 1, 2]]),
+        }
+        TopAdvantageNGrams(FakeData(), print_every=1, print_k=1, n_gram=None).evaluate(
+            eoa_model,
+            None,
+        )
+
         nested = {"a": [torch.tensor([1, 2]), {"b": torch.tensor([3])}]}
         mapped = map_pytree(lambda x: x + 1, nested)
         moved = to({"x": [1, 2]}, "cpu")
@@ -1102,6 +1125,171 @@ class TestILQLPolicyBeamRaw:
             termination_condition=lambda _x: True,
             max_generation_len=1,
             beam_width=1,
+        )
+        assert len(beam_out[0]) == 1
+        algo.clean_up()
+
+    def test_sample_raw_exp_adv_and_adv_clip_paths(self, monkeypatch):
+        torch.manual_seed(0)
+        algo = _make_algo(double_q=False)
+        algo.dataset.max_len = None
+        tokens = torch.tensor([[0, 1, 2]])
+        attn_mask = torch.tensor([[1, 1, 1]]).bool()
+        state_idxs = torch.tensor([[0, 1, 2]])
+        action_idxs = torch.tensor([[0, 1, 2]])
+        tokenizer = algo.dataset.tokenizer
+
+        monkeypatch.setattr(
+            torch.distributions.categorical.Categorical,
+            "sample",
+            lambda self: torch.zeros(
+                (self.logits.shape[0],),
+                dtype=torch.long,
+                device=self.logits.device,
+            ),
+        )
+
+        policy = ILQL_Policy(algo, "sample")
+        sample_out = policy.sample_raw(
+            tokens=tokens,
+            attn_mask=attn_mask,
+            state_idxs=state_idxs,
+            action_idxs=action_idxs,
+            termination_condition=lambda _x: False,
+            max_generation_len=1,
+            num_generations=1,
+            exp_adv=True,
+            adv_weight=1.0,
+            adv_clip=0.5,
+        )
+        assert len(sample_out[0]) == 1
+        algo.clean_up()
+
+    def test_sample_raw_uses_block_size_when_dataset_max_len_none(self, monkeypatch):
+        torch.manual_seed(0)
+        algo = _make_algo(double_q=False)
+        algo.dataset.max_len = None
+        tokens = torch.tensor([[0, 1, 2]])
+        attn_mask = torch.tensor([[1, 1, 1]]).bool()
+        state_idxs = torch.tensor([[0, 1, 2]])
+        action_idxs = torch.tensor([[0, 1, 2]])
+
+        monkeypatch.setattr(
+            torch.distributions.categorical.Categorical,
+            "sample",
+            lambda self: torch.zeros(
+                (self.logits.shape[0],),
+                dtype=torch.long,
+                device=self.logits.device,
+            ),
+        )
+
+        policy = ILQL_Policy(algo, "sample")
+        sample_out = policy.sample_raw(
+            tokens=tokens,
+            attn_mask=attn_mask,
+            state_idxs=state_idxs,
+            action_idxs=action_idxs,
+            termination_condition=lambda _x: True,
+            max_generation_len=1,
+            num_generations=1,
+        )
+        assert len(sample_out[0]) == 1
+        algo.clean_up()
+
+    def test_beam_raw_non_exp_adv_and_adv_clip_paths(self, monkeypatch):
+        torch.manual_seed(0)
+        algo = _make_algo(double_q=False)
+        algo.dataset.max_len = None
+        tokens = torch.tensor([[0, 1, 2]])
+        attn_mask = torch.tensor([[1, 1, 1]]).bool()
+        state_idxs = torch.tensor([[0, 1, 2]])
+        action_idxs = torch.tensor([[0, 1, 2]])
+        tokenizer = algo.dataset.tokenizer
+
+        monkeypatch.setattr(
+            torch.distributions.categorical.Categorical,
+            "sample",
+            lambda self: torch.full(
+                (self.logits.shape[0],),
+                tokenizer.eoa_token_id,
+                dtype=torch.long,
+                device=self.logits.device,
+            ),
+        )
+
+        original_forward = algo.forward
+
+        def patched_forward(*args, **kwargs):
+            kwargs.pop("is_causal", None)
+            return original_forward(*args, **kwargs)
+
+        monkeypatch.setattr(algo, "forward", patched_forward)
+
+        policy = ILQL_Policy(algo, "beam")
+        beam_out = policy.beam_raw(
+            tokens=tokens,
+            attn_mask=attn_mask,
+            state_idxs=state_idxs,
+            action_idxs=action_idxs,
+            termination_condition=lambda _x: True,
+            max_generation_len=1,
+            beam_width=1,
+            exp_adv=False,
+            adv_weight=0.5,
+            adv_clip=0.25,
+        )
+        assert len(beam_out[0]) == 1
+        algo.clean_up()
+
+    def test_beam_raw_exp_adv_eoa_termination_and_output_trim(self, monkeypatch):
+        torch.manual_seed(0)
+        algo = _make_algo(double_q=False)
+        tokens = torch.tensor([[0, 1, 2]])
+        attn_mask = torch.tensor([[1, 1, 1]]).bool()
+        state_idxs = torch.tensor([[0, 1, 2]])
+        action_idxs = torch.tensor([[0, 1, 2]])
+        tokenizer = algo.dataset.tokenizer
+        eoa = tokenizer.eoa_token_id
+        eoa_str = tokenizer.id_to_token(eoa)
+        real_decode = tokenizer.decode
+
+        def decode_with_eoa_suffix(token_ids, **kwargs):
+            decoded = real_decode(token_ids, **kwargs)
+            if len(token_ids) > attn_mask.sum().item():
+                return decoded + eoa_str
+            return decoded
+
+        tokenizer.decode = decode_with_eoa_suffix
+
+        original_forward = algo.forward
+
+        def patched_forward(*args, **kwargs):
+            kwargs.pop("is_causal", None)
+            return original_forward(*args, **kwargs)
+
+        monkeypatch.setattr(algo, "forward", patched_forward)
+
+        real_topk = torch.topk
+
+        def topk_select_eoa(input_tensor, k, dim=-1):
+            values, _ = real_topk(input_tensor, k, dim=dim)
+            indices = torch.full_like(values, eoa, dtype=torch.long)
+            return values, indices
+
+        monkeypatch.setattr(torch, "topk", topk_select_eoa)
+
+        policy = ILQL_Policy(algo, "beam")
+        beam_out = policy.beam_raw(
+            tokens=tokens,
+            attn_mask=attn_mask,
+            state_idxs=state_idxs,
+            action_idxs=action_idxs,
+            termination_condition=lambda _x: True,
+            max_generation_len=8,
+            beam_width=1,
+            exp_adv=True,
+            adv_weight=1.0,
         )
         assert len(beam_out[0]) == 1
         algo.clean_up()
