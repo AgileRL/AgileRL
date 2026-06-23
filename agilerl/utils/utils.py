@@ -31,6 +31,7 @@ from agilerl.algorithms import (
 )
 from agilerl.algorithms.core import EvolvableAlgorithm, LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig
+from agilerl.hpo.crossover import Crossover
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.logger import (
@@ -1142,8 +1143,13 @@ def tournament_selection_and_mutation(
     save_elite: bool = False,
     accelerator: Accelerator | None = None,
     language_model: bool | None = False,
+    crossover: Crossover | None = None,
 ) -> PopulationType:
-    """Perform tournament selection and mutation on a population of agents.
+    """Perform selection and mutation on a population of agents.
+
+    When a *crossover* operator is provided it replaces tournament selection in the
+    evolution step (evaluate fitness → crossover → mutate); otherwise tournament
+    selection is used. The mutation step is unchanged in both cases.
 
     :param population: Population of agents
     :type population: list[PopulationType]
@@ -1161,7 +1167,9 @@ def tournament_selection_and_mutation(
     :type accelerator: accelerate.Accelerator(), optional
     :param language_model: Flag to indicate if the environment is a language model, defaults to False
     :type language_model: bool, optional
-    :return: Population of agents after tournament selection and mutation
+    :param crossover: Crossover operator that replaces tournament selection when provided, defaults to None
+    :type crossover: Crossover, optional
+    :return: Population of agents after selection and mutation
     :rtype: list[PopulationType]
     """
     if algo is None:
@@ -1190,9 +1198,12 @@ def tournament_selection_and_mutation(
         for model in population:
             model.unwrap_models()
         accelerator.wait_for_everyone()
-        # Perform tournament selection and mutation on main process
+        # Perform selection and mutation on main process
         if accelerator.is_main_process:
-            elite, population = tournament.select(population)
+            if crossover is not None:
+                elite, population = crossover.crossover(population)
+            else:
+                elite, population = tournament.select(population)
             population = mutation.mutation(population)
             for pop_i, model in enumerate(population):
                 model.save_checkpoint(f"{accel_temp_models_path}/{algo}_{pop_i}.pt")
@@ -1208,8 +1219,11 @@ def tournament_selection_and_mutation(
         for model in population:
             model.wrap_models()
     else:
-        # Perform tournament selection and mutation
-        elite, population = tournament.select(population)
+        # Perform selection (crossover or tournament) and mutation
+        if crossover is not None:
+            elite, population = crossover.crossover(population)
+        else:
+            elite, population = tournament.select(population)
         population = mutation.mutation(population)
 
     if save_elite and elite is not None:

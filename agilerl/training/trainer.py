@@ -18,6 +18,7 @@ from agilerl.algorithms.core.base import (
 from agilerl.models import (
     ALGO_REGISTRY,
     AlgoSpecT,
+    CrossoverSpec,
     FinetuningNetworkSpec,
     LLMAlgorithmSpec,
     MutationSpec,
@@ -37,6 +38,7 @@ from agilerl.models.env import (
 )
 from agilerl.utils.trainer_utils import (
     EnvironmentT,
+    build_crossover_from_spec,
     build_mutations_from_spec,
     build_replay_buffer_from_spec,
     build_tournament_from_spec,
@@ -102,6 +104,7 @@ class Trainer(ABC):
         training: TrainingSpec | None = None,
         mutation: MutationSpec | None = None,
         tournament: TournamentSelectionSpec | None = None,
+        crossover: CrossoverSpec | None = None,
         replay_buffer: ReplayBufferT | None = None,
         *,
         resume_from_checkpoint: str | None = None,
@@ -122,6 +125,7 @@ class Trainer(ABC):
         self.training_spec = training or TrainingSpec()
         self.mutation_spec = mutation
         self.tournament_selection_spec = tournament
+        self.crossover_spec = crossover
         self.replay_buffer_spec = replay_buffer
         self.device = device
         self.accelerator = accelerator
@@ -195,6 +199,7 @@ class Trainer(ABC):
             training=validated_manifest.training,
             mutation=validated_manifest.mutation,
             tournament=validated_manifest.tournament_selection,
+            crossover=validated_manifest.crossover,
             replay_buffer=validated_manifest.replay_buffer,
             resume_from_checkpoint=resume_from_checkpoint,
             device=device,
@@ -224,6 +229,7 @@ class Trainer(ABC):
             mutation=self.mutation_spec,
             replay_buffer=self.replay_buffer_spec,
             tournament_selection=self.tournament_selection_spec,
+            crossover=self.crossover_spec,
         )
         return manifest.model_dump(mode="json", exclude_none=True)
 
@@ -296,6 +302,7 @@ class LocalTrainer(Trainer):
         training: TrainingSpec | None = None,
         mutation: MutationSpec | None = None,
         tournament: TournamentSelectionSpec | None = None,
+        crossover: CrossoverSpec | None = None,
         replay_buffer: ReplayBufferT | None = None,
         *,
         resume_from_checkpoint: str | None = None,
@@ -310,6 +317,7 @@ class LocalTrainer(Trainer):
             training=training,
             mutation=mutation,
             tournament=tournament,
+            crossover=crossover,
             replay_buffer=replay_buffer,
             resume_from_checkpoint=resume_from_checkpoint,
             device=device,
@@ -362,6 +370,9 @@ class LocalTrainer(Trainer):
         )
         self.tournament_selection = build_tournament_from_spec(
             self.tournament_selection_spec, self.training_spec
+        )
+        self.crossover = build_crossover_from_spec(
+            self.crossover_spec, self.training_spec
         )
         self.memory = build_replay_buffer_from_spec(
             self.algorithm_spec, self.replay_buffer_spec, self.device
@@ -542,6 +553,13 @@ class LocalTrainer(Trainer):
             "wandb_kwargs": wandb_kwargs,
         }
 
+        # Crossover replaces tournament selection when configured. Only add the
+        # kwarg when a crossover operator is built so the offline/bandit/LLM
+        # trainers (which do not accept it) never receive it.
+        if self.crossover is not None:
+            kwargs["crossover"] = self.crossover
+            kwargs["tournament"] = None
+
         if self._multiturn:
             kwargs["env_factory"] = self.env_factory
             kwargs["max_turns"] = self.env_spec.max_turns
@@ -597,6 +615,7 @@ class ArenaTrainer(Trainer):
         api_key: str | None = None,
         mutation: MutationSpec | None = None,
         tournament: TournamentSelectionSpec | None = None,
+        crossover: CrossoverSpec | None = None,
         replay_buffer: ReplayBufferT | None = None,
     ) -> None:
 
@@ -609,6 +628,7 @@ class ArenaTrainer(Trainer):
             training=training,
             mutation=mutation,
             tournament=tournament,
+            crossover=crossover,
             replay_buffer=replay_buffer,
         )
 
@@ -656,6 +676,7 @@ class ArenaTrainer(Trainer):
             training=validated_manifest.training,
             mutation=validated_manifest.mutation,
             tournament=validated_manifest.tournament_selection,
+            crossover=validated_manifest.crossover,
             replay_buffer=validated_manifest.replay_buffer,
         )
 

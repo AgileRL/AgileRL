@@ -16,6 +16,7 @@ from agilerl.components import (
 )
 from agilerl.components.data import ReplayDataset, Transition
 from agilerl.components.sampler import Sampler
+from agilerl.hpo.crossover import Crossover
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks.actors import DeterministicActor
@@ -100,6 +101,7 @@ def train_off_policy(
     n_step_memory: MultiStepReplayBuffer | None = None,
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
+    crossover: Crossover | None = None,
     checkpoint: int | None = None,
     checkpoint_path: str | None = None,
     overwrite_checkpoints: bool = False,
@@ -444,13 +446,14 @@ def train_off_policy(
             pbar.close()
             return population.agents, population.last_fitnesses
 
-        # Tournament selection and population mutation
-        if tournament and mutation is not None:
+        # Selection (crossover or tournament) and population mutation
+        if (tournament or crossover is not None) and mutation is not None:
             population.update(
                 tournament_selection_and_mutation(
                     population=population.agents,
                     tournament=tournament,
                     mutation=mutation,
+                    crossover=crossover,
                     env_name=env_name,
                     algo=algo,
                     elite_path=elite_path,

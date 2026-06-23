@@ -16,7 +16,7 @@ from agilerl.models.algo import (
     AlgoSpecT,
     LLMAlgorithmSpec,
 )
-from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
+from agilerl.models.hpo import CrossoverSpec, MutationSpec, TournamentSelectionSpec
 from agilerl.models.networks import (
     FinetuningNetworkSpec,
     NetworkSpec,
@@ -235,6 +235,7 @@ class TrainingManifest(BaseModel):
     mutation: MutationSpec | None = Field(default=None)
     replay_buffer: ReplayBufferSpec | None = Field(default=None)
     tournament_selection: TournamentSelectionSpec | None = Field(default=None)
+    crossover: CrossoverSpec | None = Field(default=None)
 
     @model_validator(mode="after")
     def _process_manifest(self) -> Self:

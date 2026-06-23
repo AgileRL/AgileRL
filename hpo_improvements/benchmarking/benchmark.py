@@ -235,6 +235,7 @@ class _EnvPoolLocalTrainer(LocalTrainer):
                 training=validated.training,
                 mutation=validated.mutation,
                 tournament=validated.tournament_selection,
+                crossover=validated.crossover,
                 replay_buffer=validated.replay_buffer,
                 device=device,
             )

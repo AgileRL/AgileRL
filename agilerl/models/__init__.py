@@ -26,6 +26,7 @@ from agilerl.models.algorithms import (  # noqa: F401
     TD3Spec,
 )
 from agilerl.models.hpo import (  # noqa: F401
+    CrossoverSpec,
     MutationProbabilities,
     MutationSpec,
     TournamentSelectionSpec,

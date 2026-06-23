@@ -9,6 +9,7 @@ from gymnasium import spaces
 from pettingzoo import ParallelEnv
 
 from agilerl.algorithms import IPPO
+from agilerl.hpo.crossover import Crossover
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks import StochasticActor
@@ -53,6 +54,7 @@ def train_multi_agent_on_policy(
     dormant_tau: float = 0.0,
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
+    crossover: Crossover | None = None,
     checkpoint: int | None = None,
     checkpoint_path: str | None = None,
     overwrite_checkpoints: bool = False,
@@ -398,13 +400,14 @@ def train_multi_agent_on_policy(
             pbar.close()
             return population.agents, population.last_fitnesses
 
-        # Tournament selection and population mutation
-        if tournament and mutation is not None:
+        # Selection (crossover or tournament) and population mutation
+        if (tournament or crossover is not None) and mutation is not None:
             population.update(
                 tournament_selection_and_mutation(
                     population=population.agents,
                     tournament=tournament,
                     mutation=mutation,
+                    crossover=crossover,
                     env_name=env_name,
                     algo=algo,
                     elite_path=elite_path,

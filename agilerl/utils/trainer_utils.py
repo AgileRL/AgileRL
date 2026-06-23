@@ -27,6 +27,7 @@ from agilerl.components.replay_buffer import (
     PrioritizedReplayBuffer,
     ReplayBuffer,
 )
+from agilerl.hpo.crossover import Crossover
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.llm_envs import PreferenceGym, ReasoningGym, SFTGym
@@ -35,7 +36,7 @@ from agilerl.models.algo import (
     MultiAgentRLAlgorithmSpec,
     RLAlgorithmSpec,
 )
-from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
+from agilerl.models.hpo import CrossoverSpec, MutationSpec, TournamentSelectionSpec
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
 from agilerl.typing import GymEnvType, PzEnvType
 from agilerl.wrappers.learning import BanditEnv
@@ -293,6 +294,38 @@ def build_tournament_from_spec(
         tournament_size=tournament_spec.tournament_size,
         elitism=tournament_spec.elitism,
         population_size=training_spec.pop_size,
+    )
+
+
+def build_crossover_from_spec(
+    crossover_spec: CrossoverSpec | None,
+    training_spec: TrainingSpec,
+) -> Crossover | None:
+    """Convert a :class:`CrossoverSpec` into a :class:`Crossover`.
+
+    :param crossover_spec: Crossover specification.
+    :type crossover_spec: CrossoverSpec | None
+    :param training_spec: Training specification.
+    :type training_spec: TrainingSpec
+    :returns: A :class:`Crossover` instance, or ``None`` if *crossover_spec* is ``None``.
+    :rtype: Crossover | None
+    """
+    if crossover_spec is None:
+        return None
+
+    if crossover_spec.num_parents > training_spec.pop_size:
+        msg = (
+            f"crossover.num_parents ({crossover_spec.num_parents}) cannot exceed "
+            f"the population size ({training_spec.pop_size})."
+        )
+        raise ValueError(msg)
+
+    return Crossover(
+        num_parents=crossover_spec.num_parents,
+        swap_prob=crossover_spec.swap_prob,
+        elitism=crossover_spec.elitism,
+        population_size=training_spec.pop_size,
+        rand_seed=crossover_spec.rand_seed,
     )
 
 

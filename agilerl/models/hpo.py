@@ -82,3 +82,30 @@ class TournamentSelectionSpec(BaseModel):
 
     tournament_size: int = Field(default=2, ge=2)
     elitism: bool = True
+
+
+class CrossoverSpec(BaseModel):
+    """Pydantic model for the :class:`Crossover` (recombination) operator, an
+    alternative to tournament selection in the evolutionary HPO loop.
+
+    :param num_parents: Number of top agents (by fitness) that form the
+        recombination pool. The paper uses ~80% of the population (e.g. 13 for a
+        population of 16). Must not exceed the population size (validated when the
+        :class:`Crossover` object is built, where the population size is known).
+    :type num_parents: int
+    :param swap_prob: Per-section probability of exchanging hyperparameter genes
+        between the two parent chromosomes during the two-point crossover.
+    :type swap_prob: float
+    :param elitism: Whether the single best agent is cloned unchanged into the
+        next generation.
+    :type elitism: bool
+    :param rand_seed: Random seed for reproducible recombination.
+    :type rand_seed: int
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    num_parents: int = Field(default=2, ge=2)
+    swap_prob: float = Field(default=0.7, ge=0.0, le=1.0)
+    elitism: bool = True
+    rand_seed: int = Field(default=42, ge=0)
