@@ -83,7 +83,6 @@ def main(init_hp, mut_p):
             tokenizer.pad_token_id,
             max_model_len=init_hp.get("MAX_MODEL_LEN", None),
             max_output_tokens=init_hp.get("MAX_OUTPUT_TOKENS", None),
-            enable_sliding_window=init_hp.get("ENABLE_SLIDING_WINDOW", False),
         )
 
     accelerator = create_llm_accelerator()

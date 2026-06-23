@@ -2339,54 +2339,6 @@ class TestGRPOGetAction:
         assert len(action_masks) == 1
         grpo.clean_up()
 
-    def test_get_action_grpo_hf_repeats_single_row_stitch_ids_when_grouping(self):
-        """When training with ``group_size > 1`` and a prompt carries a single-row
-        ``stitch_prefix_ids`` tensor, the HF generate path must repeat the stitch
-        prefix to match the grouped batch dimension. Otherwise downstream
-        ``stitch_completion_after_windowed_hf_generate`` would receive a [1, N]
-        prefix against a [group_size, T] completion."""
-        grpo = _make_cpu_grpo_for_branch_tests(group_size=3)
-        seq_len = 4
-        prompts = [
-            {
-                "input_ids": torch.randint(0, 60, (1, seq_len), device=grpo.device),
-                "attention_mask": torch.ones(1, seq_len, device=grpo.device),
-                "stitch_prefix_ids": torch.tensor(
-                    [[7, 8]], dtype=torch.long, device=grpo.device
-                ),
-                "initial_prompt_len": 2,
-            },
-        ]
-        observed_stitch = {}
-
-        def fake_actor_generate(input_ids, attention_mask, generation_config=None):
-            # After repeat, the grouped input_ids should already have the group
-            # dim baked in.
-            return torch.cat(
-                [input_ids, torch.full_like(input_ids[:, :2], 1)],
-                dim=1,
-            )
-
-        def fake_stitch(completion_id, stitch, initial_len):
-            observed_stitch["stitch_shape"] = (
-                None if stitch is None else tuple(stitch.shape)
-            )
-            return completion_id, initial_len
-
-        with (
-            patch.object(grpo.actor, "generate", side_effect=fake_actor_generate),
-            patch(
-                "agilerl.algorithms.grpo.stitch_completion_after_windowed_hf_generate",
-                side_effect=fake_stitch,
-            ),
-        ):
-            completion_ids, _, _ = grpo.get_action(prompts, training=True)
-
-        # The single-row stitch prefix should have been broadcast to group_size.
-        assert observed_stitch["stitch_shape"] == (3, 2)
-        assert completion_ids[0].shape[0] == 3
-        grpo.clean_up()
-
     @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
     @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False])
@@ -2689,50 +2641,6 @@ class TestGRPOGenerateWithVllmColocate:
         assert completion_ids[0].shape[0] == 1
         assert completion_ids[0][0, -1].item() == 8
         assert action_masks[0].shape[1] == completion_ids[0].shape[1] - 1
-        grpo.clean_up()
-
-    def test_generate_with_vllm_colocate_stitch_path(
-        self,
-        grpo_factory,
-        accelerator_factory,
-        model_factory,
-    ):
-        grpo = _build_grpo_for_colocate_tests(
-            grpo_factory, accelerator_factory, model_factory
-        )
-        prompts = [
-            {
-                "input_ids": torch.tensor([[1, 2, 3]], dtype=torch.long),
-                "attention_mask": torch.ones(1, 3, dtype=torch.long),
-                "stitch_prefix_ids": torch.tensor([[9]], dtype=torch.long),
-                "initial_prompt_len": 2,
-            }
-        ]
-        grpo.llm.generate.return_value = [
-            SimpleNamespace(outputs=[SimpleNamespace(token_ids=[4, 5])]),
-        ]
-        with patch(
-            "agilerl.algorithms.core.base.stitch_completion_after_windowed_vllm_generate",
-            side_effect=lambda completion_ids, *_args, **_kwargs: completion_ids,
-        ) as mock_stitch:
-            grpo._generate_with_vllm_colocate(
-                prompts=prompts,
-                group_size=1,
-                temperature=0.7,
-            )
-        mock_stitch.assert_called_once()
-        args, _kwargs = mock_stitch.call_args
-        (
-            completion_ids_arg,
-            stitch_prefixes_arg,
-            group_prompts_arg,
-            group_size_arg,
-            prompts_arg,
-        ) = args
-        assert len(completion_ids_arg) == len(prompts)
-        assert len(stitch_prefixes_arg) == len(group_prompts_arg)
-        assert group_size_arg == 1
-        assert len(prompts_arg) == len(prompts)
         grpo.clean_up()
 
 

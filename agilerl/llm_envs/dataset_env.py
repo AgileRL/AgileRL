@@ -47,6 +47,13 @@ class DatasetEnv(LLMEnv, gym.Env):
       ``"target"``).
 
     ``reset`` / ``step`` advance the seeded ``DataLoader`` (completions ignored).
+
+    :ivar kind: The selected regime, ``"preference"`` or ``"sft"``.
+    :vartype kind: str
+    :ivar dataset_size: ``{"train": N, "test": M}`` row counts after filtering.
+    :vartype dataset_size: dict[str, int]
+    :ivar num_epochs: Number of full passes completed over the train split.
+    :vartype num_epochs: int
     """
 
     def __init__(

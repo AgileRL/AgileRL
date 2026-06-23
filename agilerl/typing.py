@@ -41,10 +41,6 @@ class RolloutPrompts(TypedDict):
     attention_mask: torch.Tensor
     question: str | list[str] | None
     answer: str | list[str] | None
-    trajectory_input_ids: torch.Tensor | None
-    trajectory_attention_mask: torch.Tensor | None
-    initial_prompt_len: int | list[int] | torch.Tensor | None
-    stitch_prefix_ids: torch.Tensor | None
 
 
 class PreferencePrompts(TypedDict):

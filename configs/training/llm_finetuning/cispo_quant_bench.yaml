@@ -50,14 +50,6 @@ INIT_HP:
     MAX_MODEL_LEN: 32768
     # Per-turn generation cap; must be < MAX_MODEL_LEN or prompt budget is 0.
     MAX_OUTPUT_TOKENS: 2768
-    # Sliding-window prompt truncation in the multi-turn rollout wrapper.
-    # When false (default): trajectories that would push the cumulative
-    # prompt past (MAX_MODEL_LEN - MAX_OUTPUT_TOKENS) terminate cleanly
-    # with truncated=True and an `agilerl_context_overflow` breadcrumb.
-    # When true: older turns silently get dropped from the prompt so the
-    # rollout continues — at the cost of the model losing visibility into
-    # its own earlier turns, which can degrade multi-turn reasoning.
-    ENABLE_SLIDING_WINDOW: false
     MICRO_BATCH_SIZE_PER_GPU: 1
     POP_SIZE: 1
     # Trainer-side bnb quant (none | int8 | nf4). Overridden by --trainer-quantization.

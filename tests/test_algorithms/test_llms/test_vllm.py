@@ -116,10 +116,6 @@ class TestREINFORCETest:
                 ),
                 "attention_mask": torch.ones(1, input_size, device=rf.device),
                 "text": "Continue the answer.",
-                "stitch_prefix_ids": torch.randint(
-                    0, vocab_size, (1, 2), device=rf.device
-                ),
-                "initial_prompt_len": max(1, input_size // 2),
             }
         )
 

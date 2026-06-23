@@ -69,7 +69,7 @@ def __dir__() -> list[str]:
     return sorted(set(globals()) | set(_DEPRECATED_LLM_ENV_NAMES))
 
 
-def max_prompt_tokens_for_sliding_window(
+def max_prompt_tokens_for_model_len(
     max_model_len: int,
     max_output_tokens: int | None,
 ) -> int:
@@ -100,7 +100,7 @@ def validate_llm_context_lengths(
     max_model_len: int,
     max_output_tokens: int | None,
 ) -> None:
-    """Reject configs that leave no prompt room under sliding-window rollouts.
+    """Reject configs that leave no prompt room for multi-turn rollouts.
 
     :param max_model_len: Total context length (prompt + completion ceiling).
     :type max_model_len: int
@@ -115,7 +115,7 @@ def validate_llm_context_lengths(
             f"max_output_tokens ({max_output_tokens}) must be less than "
             f"max_model_len ({max_model_len}); equal or larger values leave no "
             "prompt budget for multi-turn rollouts "
-            f"(max_prompt_tokens={max_prompt_tokens_for_sliding_window(max_model_len, max_output_tokens)})."
+            f"(max_prompt_tokens={max_prompt_tokens_for_model_len(max_model_len, max_output_tokens)})."
         )
         raise ValueError(msg)
 
@@ -1324,46 +1324,6 @@ def move_params_to_cpu(unwrapped_model: torch.nn.Module) -> None:
         torch.cuda.empty_cache()
 
 
-def stitch_completion_after_windowed_hf_generate(
-    completion_id: torch.Tensor,
-    stitch: torch.Tensor,
-    initial_len: int,
-) -> tuple[torch.Tensor, int]:
-    """Reinsert dropped middle tokens after HF ``generate`` on a windowed prompt.
-
-    ``completion_id`` is ``concat(model_input_ids, new_tokens)``. The full
-    chronological sequence is
-    ``concat(completion_id[:, :initial_len], stitch, completion_id[:, initial_len:])``.
-
-    :param completion_id: Output of ``generate`` on the truncated prompt,
-        shape ``(1, seq_len)``.
-    :type completion_id: torch.Tensor
-    :param stitch: Middle segment removed for context windowing, shape ``(1, K)``.
-    :type stitch: torch.Tensor
-    :param initial_len: ``model_window_initial_len`` (length of the initial
-        user segment within ``model_input_ids``).
-    :type initial_len: int
-    :return: Full prompt plus generation with stitch restored.
-    :rtype: torch.Tensor
-    """
-    if stitch is None:
-        return completion_id, initial_len
-    stitch = stitch.to(completion_id.device, non_blocking=True)
-    stitch_len = stitch.shape[1] if stitch is not None else 0
-    full_prompt_len = initial_len + stitch_len
-    return (
-        torch.cat(
-            [
-                completion_id[:, :initial_len],
-                stitch,
-                completion_id[:, initial_len:],
-            ],
-            dim=1,
-        ),
-        full_prompt_len,
-    )
-
-
 def build_completion_mask(
     completion_id: torch.Tensor,
     prompt_len: int | None,
@@ -1379,11 +1339,9 @@ def build_completion_mask(
         the prompt followed by generated tokens.
     :type completion_id: torch.Tensor
     :param prompt_len: Number of leading tokens to mask out (the full
-        prompt length, possibly after sliding-window stitching). ``None``
-        means "no prompt prefix" — every non-pad token is part of the
-        completion. This matches the legacy slice semantics where
-        ``mask[:, None:] = True`` set the entire dim before pads were
-        zeroed back out.
+        prompt length). ``None`` means "no prompt prefix" — every non-pad
+        token is part of the completion, so the entire dim is set before
+        pads are zeroed back out.
     :type prompt_len: int | None
     :param pad_token_id: Pad token id used to suppress padding positions.
     :type pad_token_id: int
@@ -1399,96 +1357,21 @@ def build_completion_mask(
     return mask[:, 1:]
 
 
-def stitch_completion_after_windowed_vllm_generate(
-    completion_ids: list[torch.Tensor],
-    stitch_prefixes: list[torch.Tensor],
-    group_prompts: list[dict[str, Any]],
-    group_size: int,
-    prompts: list[dict[str, Any]],
-) -> list[torch.Tensor]:
-    """Reinsert dropped middle segments into ``model_prompt | generation`` tensors.
-
-    For each logical prompt ``i``, ``block`` is
-    ``concat(trajectory_input_ids, new_tokens)`` (batched over ``group_size``).
-    When ``stitch_prefix_ids`` is non-empty, the full chronological sequence is
-    ``concat(block[:, :I], stitch, block[:, I:], dim=1)`` with
-    ``I = initial_prompt_len`` from the corresponding prompt dict.
-
-    :param completion_ids: One tensor per logical prompt: prompt+gen per row.
-    :type completion_ids: list[torch.Tensor]
-    :param stitch_prefixes: Parallel to expanded ``group_prompts``; empty
-        tensors when no windowing for that slot.
-    :type stitch_prefixes: list[torch.Tensor]
-    :param group_prompts: ``prompts`` expanded so each original prompt repeats
-        ``group_size`` times (same order as vLLM batch).
-    :type group_prompts: list[dict[str, Any]]
-    :param group_size: Number of repeated entries per logical prompt.
-    :type group_size: int
-    :param prompts: Original batch of observation dicts (length ``N``).
-    :type prompts: list[dict[str, Any]]
-    :return: Same length as ``completion_ids``, with middle stitch applied
-        where ``stitch_prefixes`` is non-empty.
-    :rtype: list[torch.Tensor]
-    """
-    if group_size != 1:
-        error_msg = f"vLLM sliding-window stitch is only implemented for group_size=1 (got {group_size})."
-        raise ValueError(error_msg)
-    stitched: list[torch.Tensor] = []
-    for i, _ in enumerate(prompts):
-        completion_i = completion_ids[i]
-        stitch_i = stitch_prefixes[group_size * i]
-        if stitch_i.shape[1] == 0:
-            stitched.append(completion_i)
-            continue
-        initial_prompt_len_raw = group_prompts[group_size * i].get("initial_prompt_len")
-        if initial_prompt_len_raw is None:
-            msg = "initial_prompt_len required when stitch_prefix_ids is non-empty"
-            raise ValueError(
-                msg,
-            )
-        initial_prompt_len_i = int(initial_prompt_len_raw)
-        group_size_i = completion_i.shape[0]
-        stitch_group_i = stitch_i.expand(group_size_i, -1)
-        stitched.append(
-            torch.cat(
-                [
-                    completion_i[:, :initial_prompt_len_i],
-                    stitch_group_i,
-                    completion_i[:, initial_prompt_len_i:],
-                ],
-                dim=1,
-            ),
-        )
-    return stitched
-
-
 def prepare_prompt_hf_generate(
     prompt_dict: RolloutPrompts, device: torch.device
-) -> dict[str, torch.Tensor | int]:
+) -> dict[str, torch.Tensor]:
     """Prepare a prompt dictionary for HuggingFace generate.
 
     :param prompt_dict: The prompt dictionary to prepare.
     :type prompt_dict: RolloutPrompts
     :param device: The device to move the prompt dictionary to.
     :type device: torch.device
-    :return: The prepared prompt dictionary.
-    :rtype: dict[str, torch.Tensor | int]
+    :return: ``input_ids`` / ``attention_mask`` moved to ``device``.
+    :rtype: dict[str, torch.Tensor]
     """
-    input_ids = prompt_dict.get("trajectory_input_ids", prompt_dict["input_ids"])
-    attention_mask = prompt_dict.get(
-        "trajectory_attention_mask",
-        prompt_dict["attention_mask"],
-    )
-    stitched = prompt_dict.get("stitch_prefix_ids")
-    initial_prompt_len = prompt_dict.get("initial_prompt_len")
-    if isinstance(initial_prompt_len, torch.Tensor) and initial_prompt_len.numel() == 1:
-        initial_prompt_len = int(initial_prompt_len.item())
-
     return {
-        "input_ids": input_ids.to(device),
-        "attention_mask": attention_mask.to(device),
-        "stitch_prefix_ids": stitched,
-        "initial_prompt_len": initial_prompt_len,
+        "input_ids": prompt_dict["input_ids"].to(device),
+        "attention_mask": prompt_dict["attention_mask"].to(device),
     }
 
 

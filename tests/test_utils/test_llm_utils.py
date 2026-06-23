@@ -68,8 +68,6 @@ from agilerl.utils.llm_utils import (
     resolve_vllm_max_lora_rank,
     resolve_vllm_max_num_batched_tokens,
     save_peft_adapter_for_vllm_rollout,
-    stitch_completion_after_windowed_hf_generate,
-    stitch_completion_after_windowed_vllm_generate,
     compare_responses,
     gather_if_zero3,
     get_state_dict,
@@ -77,124 +75,6 @@ from agilerl.utils.llm_utils import (
     calculate_k3_kl,
     validate_importance_sampling_level,
 )
-
-
-class TestStitchCompletionAfterWindowedHfGenerate:
-    def test_no_stitch_passthrough(self):
-        completion_id = torch.tensor([[11, 12, 13, 14]], dtype=torch.long)
-        out, full_prompt_len = stitch_completion_after_windowed_hf_generate(
-            completion_id=completion_id,
-            stitch=None,
-            initial_len=2,
-        )
-        assert torch.equal(out, completion_id)
-        assert full_prompt_len == 2
-
-    def test_basic_stitch_insertion(self):
-        completion_id = torch.tensor([[1, 2, 7, 8]], dtype=torch.long)
-        stitch = torch.tensor([[3, 4, 5, 6]], dtype=torch.long)
-        out, full_prompt_len = stitch_completion_after_windowed_hf_generate(
-            completion_id=completion_id,
-            stitch=stitch,
-            initial_len=2,
-        )
-        expected = torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8]], dtype=torch.long)
-        assert torch.equal(out, expected)
-        assert full_prompt_len == 6
-
-    def test_output_stays_on_completion_device(self):
-        completion_id = torch.tensor([[1, 2, 3, 4]], dtype=torch.long)
-        stitch = torch.tensor([[9, 10]], dtype=torch.long)
-        out, _ = stitch_completion_after_windowed_hf_generate(
-            completion_id=completion_id,
-            stitch=stitch,
-            initial_len=2,
-        )
-        assert out.device == completion_id.device
-
-    def test_empty_stitch_tensor_keeps_sequence(self):
-        completion_id = torch.tensor([[1, 2, 3, 4]], dtype=torch.long)
-        stitch = torch.empty((1, 0), dtype=torch.long)
-        out, full_prompt_len = stitch_completion_after_windowed_hf_generate(
-            completion_id=completion_id,
-            stitch=stitch,
-            initial_len=2,
-        )
-        assert torch.equal(out, completion_id)
-        assert full_prompt_len == 2
-
-
-class TestStitchCompletionAfterWindowedVllmGenerate:
-    def test_rejects_group_size_not_one(self):
-        with pytest.raises(ValueError, match="only implemented for group_size=1"):
-            stitch_completion_after_windowed_vllm_generate(
-                completion_ids=[torch.tensor([[1, 2, 3]], dtype=torch.long)],
-                stitch_prefixes=[torch.tensor([[9]], dtype=torch.long)],
-                group_prompts=[{"initial_prompt_len": 1}],
-                group_size=2,
-                prompts=[{"input_ids": torch.tensor([[1, 2]], dtype=torch.long)}],
-            )
-
-    def test_selective_stitching_per_prompt(self):
-        completion_ids = [
-            torch.tensor([[1, 2, 7]], dtype=torch.long),
-            torch.tensor([[4, 5, 6]], dtype=torch.long),
-        ]
-        stitch_prefixes = [
-            torch.tensor([[9, 10]], dtype=torch.long),
-            torch.empty((1, 0), dtype=torch.long),
-        ]
-        group_prompts = [{"initial_prompt_len": 2}, {"initial_prompt_len": 1}]
-        prompts = [{}, {}]
-        out = stitch_completion_after_windowed_vllm_generate(
-            completion_ids=completion_ids,
-            stitch_prefixes=stitch_prefixes,
-            group_prompts=group_prompts,
-            group_size=1,
-            prompts=prompts,
-        )
-        assert torch.equal(out[0], torch.tensor([[1, 2, 9, 10, 7]], dtype=torch.long))
-        assert torch.equal(out[1], completion_ids[1])
-
-    def test_inserts_at_initial_prompt_len(self):
-        completion_ids = [torch.tensor([[10, 11, 12, 13]], dtype=torch.long)]
-        stitch_prefixes = [torch.tensor([[99, 98]], dtype=torch.long)]
-        group_prompts = [{"initial_prompt_len": 1}]
-        out = stitch_completion_after_windowed_vllm_generate(
-            completion_ids=completion_ids,
-            stitch_prefixes=stitch_prefixes,
-            group_prompts=group_prompts,
-            group_size=1,
-            prompts=[{}],
-        )
-        assert torch.equal(out[0], torch.tensor([[10, 99, 98, 11, 12, 13]]))
-
-    def test_broadcasts_single_stitch_row_across_group_rows(self):
-        completion_ids = [torch.tensor([[1, 2, 7], [3, 4, 8]], dtype=torch.long)]
-        stitch_prefixes = [torch.tensor([[9, 10]], dtype=torch.long)]
-        group_prompts = [{"initial_prompt_len": 2}]
-        out = stitch_completion_after_windowed_vllm_generate(
-            completion_ids=completion_ids,
-            stitch_prefixes=stitch_prefixes,
-            group_prompts=group_prompts,
-            group_size=1,
-            prompts=[{}],
-        )
-        expected = torch.tensor([[1, 2, 9, 10, 7], [3, 4, 9, 10, 8]], dtype=torch.long)
-        assert torch.equal(out[0], expected)
-
-    def test_raises_when_initial_prompt_len_missing_with_non_empty_stitch(self):
-        with pytest.raises(
-            ValueError,
-            match="initial_prompt_len required when stitch_prefix_ids is non-empty",
-        ):
-            stitch_completion_after_windowed_vllm_generate(
-                completion_ids=[torch.tensor([[1, 2, 3]], dtype=torch.long)],
-                stitch_prefixes=[torch.tensor([[9]], dtype=torch.long)],
-                group_prompts=[{}],
-                group_size=1,
-                prompts=[{}],
-            )
 
 
 class DummyTokenizer:
@@ -850,27 +730,27 @@ def test_masked_var_unbiased_requires_at_least_two_unmasked_values():
         masked_var(values, mask, unbiased=True)
 
 
-class TestMaxPromptTokensForSlidingWindow:
+class TestMaxPromptTokensForModelLen:
     def test_reserves_one_token_when_max_output_tokens_none(self):
-        from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
+        from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
 
-        assert max_prompt_tokens_for_sliding_window(128, None) == 127
+        assert max_prompt_tokens_for_model_len(128, None) == 127
 
     def test_reserves_max_output_tokens_when_set(self):
-        from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
+        from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
 
-        assert max_prompt_tokens_for_sliding_window(128, 32) == 96
+        assert max_prompt_tokens_for_model_len(128, 32) == 96
 
     def test_caps_reservation_at_max_model_len(self):
-        from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
+        from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
 
         # max_output_tokens > max_model_len → reserve max_model_len, return 0
-        assert max_prompt_tokens_for_sliding_window(64, 256) == 0
+        assert max_prompt_tokens_for_model_len(64, 256) == 0
 
     def test_clamps_at_zero_when_no_room(self):
-        from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
+        from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
 
-        assert max_prompt_tokens_for_sliding_window(0, None) == 0
+        assert max_prompt_tokens_for_model_len(0, None) == 0
 
 
 class TestValidateLlmContextLengths:
@@ -1215,24 +1095,6 @@ class TestCreateModelFromNameOrPathValueHead:
         call_kwargs = mock_loader.call_args.kwargs
         assert call_kwargs["pretrained_model_name_or_path"] == "some/model"
         assert call_kwargs["attn_implementation"] == "sdpa"
-
-
-class TestPreparePromptHfGenerateTensorInitialLen:
-    """Multi-turn rollouts may pass ``initial_prompt_len`` as a scalar tensor;
-    the helper must coerce it to a plain Python int so downstream slicing works.
-    """
-
-    def test_tensor_scalar_initial_prompt_len_coerced_to_int(self) -> None:
-        from agilerl.utils.llm_utils import prepare_prompt_hf_generate
-
-        prompt = {
-            "input_ids": torch.tensor([[1, 2, 3, 4]], dtype=torch.long),
-            "attention_mask": torch.tensor([[1, 1, 1, 1]], dtype=torch.long),
-            "initial_prompt_len": torch.tensor([2], dtype=torch.long),
-        }
-        out = prepare_prompt_hf_generate(prompt, torch.device("cpu"))
-        assert out["initial_prompt_len"] == 2
-        assert isinstance(out["initial_prompt_len"], int)
 
 
 class TestGetModelNameOrPathBaseModelBranches:

@@ -50,7 +50,6 @@ from agilerl.utils.llm_utils import (
     normalize_reasoning_prompt_batch,
     pool_log_ratio_by_level,
     prepare_prompt_hf_generate,
-    stitch_completion_after_windowed_hf_generate,
     validate_importance_sampling_level,
     validate_llm_context_lengths,
 )
@@ -486,31 +485,15 @@ class GRPO(LLMAlgorithm):
                                     group_size,
                                     1,
                                 )
-                            stitch_ids = prompt.pop("stitch_prefix_ids", None)
-                            if (
-                                stitch_ids is not None
-                                and training
-                                and group_size > 1
-                                and stitch_ids.shape[0] == 1
-                            ):
-                                stitch_ids = stitch_ids.repeat(group_size, 1)
-                            initial_prompt_len = prompt.pop("initial_prompt_len", None)
                             completion_id = self.actor.generate(
                                 **prompt,
                                 generation_config=self.generation_config,
-                            )
-                            completion_id, full_prompt_len = (
-                                stitch_completion_after_windowed_hf_generate(
-                                    completion_id,
-                                    stitch_ids,
-                                    initial_prompt_len,
-                                )
                             )
                             completion_ids.append(completion_id)
                             completion_masks.append(
                                 build_completion_mask(
                                     completion_id,
-                                    full_prompt_len,
+                                    None,
                                     self.pad_token_id,
                                 )
                             )

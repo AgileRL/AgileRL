@@ -1416,8 +1416,8 @@ class TestFinetuneLlmMultiturn:
         assert init_kw["BATCH_SIZE_PER_GPU"] == 7
         assert init_kw["ALGO"] == "LLMPPO"
 
-    def test_finetune_llm_multiturn_sliding_window_max_model_len_assert_passes(self):
-        """Covers getattr(env, '_sw_max_model_len') when it matches agent.max_model_len."""
+    def test_finetune_llm_multiturn_max_model_len_rollout(self):
+        """Covers the multiturn rollout loop when the agent has max_model_len set."""
         mock_agent = _make_multiturn_mock_agent()
         mock_agent.max_model_len = 1024
         mock_env = MagicMock()
@@ -1429,7 +1429,6 @@ class TestFinetuneLlmMultiturn:
         mock_env.reset.return_value = (prompt, {})
         mock_env.step.return_value = (prompt, 0.0, False, False, {})
         mock_env.turn_boundaries = [0, 1, 2]
-        mock_env._sw_max_model_len = 1024
         mock_env.dataset_size = 0
         mock_env.get_episode_data.return_value = (
             torch.ones(1, L, dtype=torch.long),

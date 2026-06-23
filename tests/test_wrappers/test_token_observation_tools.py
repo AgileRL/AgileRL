@@ -167,9 +167,22 @@ def test_eval_mode_enters_wrapped_env_eval_split() -> None:
     assert inner.evaluation_mode is False
 
 
-def test_reset_inner_forwards_row_index_when_wrapped_env_accepts_it() -> None:
-    """``_reset_inner`` passes ``row_index`` through to a wrapped env whose
-    ``reset`` declares the parameter, selecting that dataset row."""
+class _MiniTokenizer:
+    """Minimal tokenizer for the non-chat ``_tokenize_initial_prompt`` path."""
+
+    def __call__(self, texts: list[str], **kwargs: Any) -> dict[str, torch.Tensor]:
+        del texts, kwargs
+        ids = torch.tensor([[1, 2, 3]], dtype=torch.long)
+        return {"input_ids": ids, "attention_mask": torch.ones_like(ids)}
+
+    def decode(self, ids: Any, **kwargs: Any) -> str:
+        del ids, kwargs
+        return ""
+
+
+def test_reset_forwards_row_index_to_wrapped_env() -> None:
+    """``reset`` passes ``row_index`` through to the wrapped env, selecting that
+    dataset row."""
     inner = RolloutEnv(
         questions=["q0", "q1"],
         answers=["a0", "a1"],
@@ -178,11 +191,10 @@ def test_reset_inner_forwards_row_index_when_wrapped_env_accepts_it() -> None:
         test_questions=["q0", "q1"],
         test_answers=["a0", "a1"],
     )
-    w = _bare_wrapper()
-    w._env = inner
-    obs_text, info = w._reset_inner(seed=None, row_index=1)
-    assert obs_text == "P:q1"
-    assert info == {}
+    w = RolloutHarness(inner, _MiniTokenizer(), max_turns=1, apply_chat_template=False)
+    w.reset(row_index=1)
+    assert inner._question == "q1"
+    assert inner._answer == "a1"
 
 
 def test_delegation_falls_back_when_wrapped_env_lacks_members() -> None:
@@ -209,8 +221,7 @@ def test_sampling_logps_align_across_tool_turns() -> None:
 
 @pytest.mark.skip(reason=_WIP)
 def test_prompt_prefix_stable_across_tool_turn() -> None:
-    """Appending a tool-result turn keeps the prior prompt ids as a literal prefix
-    (covered structurally by the build_model_prompt_fields stitch tests)."""
+    """Appending a tool-result turn keeps the prior prompt ids as a literal prefix."""
     ...
 
 

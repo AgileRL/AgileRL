@@ -44,7 +44,6 @@ from agilerl.utils.llm_utils import (
     normalize_reasoning_prompt_batch,
     pool_by_turns,
     prepare_prompt_hf_generate,
-    stitch_completion_after_windowed_hf_generate,
     validate_importance_sampling_level,
     validate_llm_context_lengths,
 )
@@ -447,24 +446,15 @@ class PPO(LLMAlgorithm):
                             prompt = prepare_prompt_hf_generate(
                                 prompt_dict, actor_device
                             )
-                            stitch_ids = prompt.pop("stitch_prefix_ids", None)
-                            initial_prompt_len = prompt.pop("initial_prompt_len", None)
                             completion_id = self.actor.generate(
                                 **prompt,
                                 generation_config=self.generation_config,
-                            )
-                            completion_id, full_prompt_len = (
-                                stitch_completion_after_windowed_hf_generate(
-                                    completion_id,
-                                    stitch_ids,
-                                    initial_prompt_len,
-                                )
                             )
                             completion_ids.append(completion_id)
                             completion_masks.append(
                                 build_completion_mask(
                                     completion_id,
-                                    full_prompt_len,
+                                    None,
                                     self.pad_token_id,
                                 )
                             )

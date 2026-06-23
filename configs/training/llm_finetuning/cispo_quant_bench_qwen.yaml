@@ -35,7 +35,6 @@ INIT_HP:
     MAX_GRAD_NORM: 1
     MAX_MODEL_LEN: 8192
     MAX_OUTPUT_TOKENS: 1024
-    ENABLE_SLIDING_WINDOW: false
     MICRO_BATCH_SIZE_PER_GPU: 1
     POP_SIZE: 1
     # Trainer-side bnb quant (none | int8 | nf4).

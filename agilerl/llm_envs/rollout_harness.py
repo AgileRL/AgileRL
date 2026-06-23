@@ -2,26 +2,38 @@
 
 from __future__ import annotations
 
-import inspect
 import uuid
-import warnings
 from contextlib import contextmanager, nullcontext
 from typing import Any
 
 import torch
 
 from agilerl.llm_envs.rollout_env import RolloutEnv
-from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
+from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
 
 
 class RolloutHarness:
-    """Token-level rollout harness wrapping a text :class:`RolloutEnv`.
+    """Token-level rollout harness around a text :class:`RolloutEnv`.
 
-    Adapts a text-level :class:`RolloutEnv` (``reset`` -> text, ``step(text)``
-    -> reward) to the token contract the trainer drives (``reset`` -> dict
-    observation, ``step(completion_ids)``, ``get_episode_data`` -> trajectory)
-    and assembles the multi-turn masked transcript. It composes (wraps) the
-    inner env rather than being an env itself.
+    The *harness* is the adapter that lets a plain **text** environment be
+    trained at the **token** level. The wrapped :class:`RolloutEnv` speaks
+    strings (``reset()`` -> prompt text, ``step(action_text)`` -> reward); this
+    harness exposes the token contract the trainer and rollout engine drive:
+
+    * ``reset()`` / ``step(completion_ids)`` return a tokenised **observation
+      dict** (``input_ids`` / ``attention_mask`` / ``text``);
+    * it assembles the multi-turn **transcript** (``full_ids`` = prompt + gen0 +
+      feedback0 + ... with per-turn ``turn_boundaries``);
+    * it builds the **provenance mask** via :meth:`get_episode_data` ->
+      ``(full_ids, action_mask, turn_ids, turn_rewards)``, where only
+      policy-generated tokens train;
+    * it renders the **chat template** (optionally with ``tools=`` schemas) and
+      enforces the **context budget**: when ``max_model_len`` is set and the next
+      turn would overflow, the episode terminates rather than dropping turns.
+
+    It **composes** the inner env (delegating ``eval_mode`` / ``evaluation_mode``
+    / ``dataset_size`` / ``close``); the rollout algorithms' ``.test()`` guards
+    key on ``isinstance(env, RolloutHarness)``.
     """
 
     def __init__(
@@ -33,29 +45,48 @@ class RolloutHarness:
         apply_chat_template: bool = True,
         max_model_len: int | None = None,
         max_output_tokens: int | None = None,
-        enable_sliding_window: bool = False,
         tools: list[dict[str, Any]] | None = None,
     ) -> None:
-        """Token-level wrapper for multi-turn LLM environments.
+        """Wrap ``env`` so it can be driven at the token level.
 
-        :param enable_sliding_window: When ``True`` and ``max_model_len`` is
-            set, drop the oldest post-initial turns from the prompt sent to
-            the rollout backend so it always fits under
-            ``max_model_len - max_output_tokens``. The full history is still
-            retained for training. When ``False`` (default), prompts are
-            never truncated; instead, if appending the next user feedback
-            would push the cumulative prompt past the budget, the trajectory
-            terminates with ``truncated=True`` and an
-            ``agilerl_context_overflow`` breadcrumb in ``info``. Strict mode
-            is the default because silent prompt truncation can degrade
-            multi-turn reasoning (the model loses access to its own earlier
-            attempts) and hide budget-management bugs.
-        :type enable_sliding_window: bool
+        When ``max_model_len`` is set, the cumulative prompt is never
+        truncated: if appending the next turn's feedback would push the prompt
+        past ``max_model_len - max_output_tokens``, the trajectory terminates
+        with ``truncated=True`` and an ``agilerl_context_overflow`` breadcrumb
+        in ``info`` (generation stops rather than dropping older turns).
+
+        :param env: The text-level rollout environment to wrap.
+        :type env: RolloutEnv
+        :param tokenizer: Tokenizer used to encode prompts/feedback and apply the
+            chat template.
+        :type tokenizer: Any
+        :param max_turns: Maximum number of generation turns per episode.
+        :type max_turns: int
+        :param pad_id: Padding token id used when assembling token tensors,
+            defaults to ``None``.
+        :type pad_id: int | None
+        :param apply_chat_template: Render prompts through the tokenizer's chat
+            template (vs. raw encoding), defaults to ``True``.
+        :type apply_chat_template: bool
+        :param max_model_len: Engine context length (prompt + completion). When
+            set, enables the stop-on-overflow check above, defaults to ``None``.
+        :type max_model_len: int | None
+        :param max_output_tokens: Generation budget reserved under
+            ``max_model_len`` when checking for overflow, defaults to ``None``.
+        :type max_output_tokens: int | None
         :param tools: Optional OpenAI/JSON tool schemas forwarded to the chat
             template (``tools=``) so the policy can emit tool calls. ``None``
             (default) preserves the exact pre-tool behaviour (no ``tools=`` kwarg
             is passed).
         :type tools: list[dict] | None
+        :ivar full_ids: The episode's running token sequence (prompt + each
+            generation + each feedback turn), or ``None`` before ``reset``.
+        :vartype full_ids: torch.Tensor | None
+        :ivar turn_boundaries: ``(start, end, turn_idx)`` spans of the
+            policy-generated tokens within ``full_ids`` — the masking provenance.
+        :vartype turn_boundaries: list[tuple[int, int, int]]
+        :ivar turn_rewards: Per-turn rewards returned by the wrapped env.
+        :vartype turn_rewards: list[float]
         """
         self.max_turns = max_turns
         self._env = env
@@ -65,9 +96,8 @@ class RolloutHarness:
         # Preserve the None-vs-list distinction the chat-template path keys on
         # (``None`` => omit the ``tools=`` kwarg entirely).
         self.tools = tools
-        self._sw_max_model_len = max_model_len
-        self._sw_max_output_tokens = max_output_tokens
-        self._sw_enabled = enable_sliding_window
+        self._max_model_len = max_model_len
+        self._max_output_tokens = max_output_tokens
         self.full_ids: torch.Tensor | None = None
         self.turn_boundaries: list[tuple[int, int, int]] = []
         self.turn_rewards: list[float] = []
@@ -217,12 +247,12 @@ class RolloutHarness:
         return torch.tensor([encoded], dtype=torch.long)
 
     def _prompt_budget(self) -> int | None:
-        """Sliding-window prompt cap, or ``None`` when no model length is set."""
-        if self._sw_max_model_len is None:
+        """Max prompt tokens before context overflow, or ``None`` when no model length is set."""
+        if self._max_model_len is None:
             return None
-        return max_prompt_tokens_for_sliding_window(
-            self._sw_max_model_len,
-            self._sw_max_output_tokens,
+        return max_prompt_tokens_for_model_len(
+            self._max_model_len,
+            self._max_output_tokens,
         )
 
     def _policy_observation_from_state(self) -> dict[str, Any]:
@@ -240,10 +270,6 @@ class RolloutHarness:
                 skip_special_tokens=True,
             ),
         }
-        if self._sw_enabled:
-            max_pt = self._prompt_budget()
-            if max_pt is not None:
-                obs.update(self.build_model_prompt_fields(max_pt))
         return obs
 
     @property
@@ -272,28 +298,6 @@ class RolloutHarness:
             with nullcontext():
                 yield
 
-    def _reset_inner(
-        self,
-        seed: int | None,
-        row_index: int | None,
-    ) -> tuple[Any, dict[str, Any]]:
-        """Reset the wrapped env, forwarding ``row_index`` only when it accepts it.
-
-        Custom envs may define ``reset(self, seed=None)`` with no ``row_index``;
-        for those the row stays unset (they resolve their own dataset position).
-        """
-        reset_sig = inspect.signature(self._env.reset)
-        supports_row_index = "row_index" in reset_sig.parameters or any(
-            p.kind is inspect.Parameter.VAR_KEYWORD
-            for p in reset_sig.parameters.values()
-        )
-        kwargs: dict[str, Any] = {}
-        if seed is not None:
-            kwargs["seed"] = seed
-        if supports_row_index:
-            kwargs["row_index"] = row_index
-        return self._env.reset(**kwargs)
-
     def reset(
         self,
         seed: int | None = None,
@@ -302,34 +306,20 @@ class RolloutHarness:
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Create a fresh episode and return the policy-ready observation plus info.
 
+        The wrapped env follows the :class:`RolloutEnv` reset contract
+        (``reset(seed=None, *, row_index=None)``), so both are forwarded directly.
+
         :param seed: Optional reset seed forwarded to the wrapped env.
         :type seed: int | None
         :param row_index: Dataset row chosen by the owning ``BatchRolloutEnv``,
-            forwarded to the wrapped env when it accepts it.
+            forwarded to the wrapped env's ``reset``.
         :type row_index: int | None
         """
-        if seed is not None:
-            reset_sig = inspect.signature(self._env.reset)
-            supports_seed = "seed" in reset_sig.parameters or any(
-                p.kind is inspect.Parameter.VAR_KEYWORD
-                for p in reset_sig.parameters.values()
-            )
-            if supports_seed:
-                obs_text, info = self._reset_inner(seed=seed, row_index=row_index)
-            else:
-                warnings.warn(
-                    f"Wrapped env {type(self._env).__name__}.reset does not "
-                    "accept a `seed` parameter; resetting without it.",
-                    stacklevel=2,
-                )
-                obs_text, info = self._env.reset()
-        else:
-            obs_text, info = self._reset_inner(seed=None, row_index=row_index)
+        obs_text, info = self._env.reset(seed=seed, row_index=row_index)
         obs_text = self._format_obs(obs_text, info)
 
         encoded = self._tokenize_initial_prompt(obs_text)
         self.full_ids = encoded["input_ids"]
-        self._initial_prompt_len = int(encoded["input_ids"].shape[1])
         self.turn_boundaries = []
         self.turn_rewards = []
         self._turn_idx = 0
@@ -364,11 +354,10 @@ class RolloutHarness:
             )
             self.full_ids = torch.cat([self.full_ids, feedback_ids], dim=1)
 
-            # Strict-mode overflow check: if the cumulative prompt would no
+            # Strict overflow check: if the cumulative prompt would no
             # longer fit under ``max_model_len`` with room for at least one
-            # generation, terminate the trajectory cleanly. With sliding
-            # window enabled, the older turns get dropped and we keep going.
-            if not self._sw_enabled and (max_pt := self._prompt_budget()) is not None:
+            # generation, terminate the trajectory cleanly.
+            if (max_pt := self._prompt_budget()) is not None:
                 prompt_len = int(self.full_ids.shape[1])
                 if prompt_len > max_pt:
                     truncated = True
@@ -377,10 +366,10 @@ class RolloutHarness:
                         "agilerl_context_overflow": {
                             "full_prompt_len": prompt_len,
                             "max_prompt_tokens": int(max_pt),
-                            "max_model_len": int(self._sw_max_model_len),
+                            "max_model_len": int(self._max_model_len),
                             "max_output_tokens": (
-                                int(self._sw_max_output_tokens)
-                                if self._sw_max_output_tokens is not None
+                                int(self._max_output_tokens)
+                                if self._max_output_tokens is not None
                                 else None
                             ),
                         },
@@ -409,75 +398,6 @@ class RolloutHarness:
             skip_special_tokens=True,
         )
         return self._step(full_completion_ids, gen_text)
-
-    def build_model_prompt_fields(
-        self,
-        max_prompt_tokens: int,
-    ) -> dict[str, Any]:
-        """Build truncated prompt tensors for model-window operation."""
-        if self.full_ids is None:
-            msg = "No prompt: reset() was never called"
-            raise RuntimeError(msg)
-
-        full = self.full_ids
-        initial_len = self._initial_prompt_len
-        seq_len = full.shape[1]
-        boundaries = self.turn_boundaries
-        n = len(boundaries)
-
-        if initial_len > max_prompt_tokens:
-            msg = (
-                f"Initial prompt ({initial_len} tokens) exceeds "
-                f"max_prompt_tokens ({max_prompt_tokens})."
-            )
-            raise RuntimeError(msg)
-
-        k = 0
-        while True:
-            if k < n:
-                drop_from = boundaries[k][0]
-            elif n == 0:
-                drop_from = initial_len
-            else:
-                drop_from = seq_len
-            if drop_from >= seq_len:
-                trunc = full[:, :initial_len].clone()
-            else:
-                trunc = torch.cat(
-                    [full[:, :initial_len], full[:, drop_from:]],
-                    dim=1,
-                )
-            if trunc.shape[1] <= max_prompt_tokens or k >= n:
-                break
-            k += 1
-
-        if trunc.shape[1] > max_prompt_tokens:
-            msg = (
-                "Could not fit prompt even after dropping all post-initial turns; "
-                f"trunc_len={trunc.shape[1]}, max_prompt_tokens={max_prompt_tokens}."
-            )
-            raise RuntimeError(msg)
-
-        if k < n:
-            drop_from_final = boundaries[k][0]
-        elif n == 0:
-            drop_from_final = initial_len
-        else:
-            drop_from_final = seq_len
-        stitch = full[:, initial_len:drop_from_final]
-
-        prompt_ids_1d = trunc[0]
-        trajectory_text = self.tokenizer.decode(
-            prompt_ids_1d.tolist(),
-            skip_special_tokens=True,
-        )
-        return {
-            "trajectory_input_ids": trunc,
-            "trajectory_attention_mask": torch.ones_like(trunc),
-            "trajectory_text": trajectory_text,
-            "stitch_prefix_ids": stitch,
-            "initial_prompt_len": initial_len,
-        }
 
     def get_episode_data(
         self,

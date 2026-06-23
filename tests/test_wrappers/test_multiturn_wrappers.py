@@ -1,4 +1,4 @@
-"""Tests for RolloutHarness sliding-window prompt fields."""
+"""Tests for RolloutHarness prompt fields and context-overflow handling."""
 
 from __future__ import annotations
 
@@ -31,88 +31,12 @@ def _bare_wrapper() -> RolloutHarness:
     return w
 
 
-class TestRolloutHarnessBuildModelPromptFields:
-    def test_build_model_prompt_fields_no_truncation(self) -> None:
-        w = _bare_wrapper()
-        w.tokenizer = _StubTokenizer()
-        w._initial_prompt_len = 3
-        w.turn_boundaries = []
-        w.full_ids = torch.tensor([[1, 2, 3, 4, 5]], dtype=torch.long)
+def test_max_prompt_tokens_for_model_len() -> None:
+    from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
 
-        out = w.build_model_prompt_fields(max_prompt_tokens=100)
-        assert torch.equal(out["trajectory_input_ids"], w.full_ids)
-        assert out["stitch_prefix_ids"].shape[1] == 0
-        assert out["initial_prompt_len"] == 3
-
-    def test_sliding_window_reconstructs_full_sequence(self) -> None:
-        """After dropping oldest post-initial turns, stitch + trunc[:I] + trunc[I:] equals full."""
-        w = _bare_wrapper()
-        w.tokenizer = _StubTokenizer()
-        w._initial_prompt_len = 2
-        # [init0,init1 | gen0a,gen0b | fb0a,fb0b | gen1a,gen1b | tail0,tail1]
-        w.full_ids = torch.tensor(
-            [[0, 1, 10, 11, 20, 21, 40, 41, 50, 51]], dtype=torch.long
-        )
-        w.turn_boundaries = [
-            (2, 4, 0),
-            (6, 8, 1),
-        ]
-        out = w.build_model_prompt_fields(max_prompt_tokens=6)
-        trunc = out["trajectory_input_ids"]
-        stitch = out["stitch_prefix_ids"]
-        il = out["initial_prompt_len"]
-        assert il == 2
-        merged = torch.cat([trunc[:, :il], stitch, trunc[:, il:]], dim=1)
-        assert torch.equal(merged, w.full_ids)
-
-    def test_build_model_prompt_fields_errors(self) -> None:
-        w = _bare_wrapper()
-        w.tokenizer = _StubTokenizer()
-        w.full_ids = None
-        with pytest.raises(RuntimeError, match="No prompt"):
-            w.build_model_prompt_fields(max_prompt_tokens=8)
-
-        w.full_ids = torch.tensor([[1, 2, 3]], dtype=torch.long)
-        w._initial_prompt_len = 3
-        w.turn_boundaries = []
-        with pytest.raises(RuntimeError, match="Initial prompt"):
-            w.build_model_prompt_fields(max_prompt_tokens=2)
-
-        w.full_ids = torch.tensor([[1, 2, 3, 4, 5, 6]], dtype=torch.long)
-        w._initial_prompt_len = 2
-        w.turn_boundaries = []
-        with pytest.raises(RuntimeError, match="Could not fit prompt"):
-            w.build_model_prompt_fields(max_prompt_tokens=5)
-
-    def test_build_model_prompt_fields_drop_from_ge_seq_len_branch(self) -> None:
-        w = _bare_wrapper()
-        w.tokenizer = _StubTokenizer()
-        w._initial_prompt_len = 2
-        w.full_ids = torch.tensor([[10, 11, 12, 13, 14]], dtype=torch.long)
-        w.turn_boundaries = [(5, 5, 0)]
-        out = w.build_model_prompt_fields(max_prompt_tokens=4)
-        assert torch.equal(
-            out["trajectory_input_ids"],
-            torch.tensor([[10, 11]], dtype=torch.long),
-        )
-
-
-def test_max_prompt_tokens_for_sliding_window() -> None:
-    from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
-
-    assert max_prompt_tokens_for_sliding_window(8192, 1024) == 8192 - 1024
-    assert max_prompt_tokens_for_sliding_window(100, 50) == 50
-    assert max_prompt_tokens_for_sliding_window(100, None) == 99
-
-
-def test_middle_stitch_tensor_layout_matches_vllm_colocate() -> None:
-    """Same cat layout as LLMAlgorithm._generate_with_vllm_colocate post-process."""
-    il = 2
-    stitch = torch.tensor([[30, 31]], dtype=torch.long)
-    block = torch.tensor([[0, 1, 10, 11, 100, 101]], dtype=torch.long)
-    merged = torch.cat([block[:, :il], stitch, block[:, il:]], dim=1)
-    expected = torch.tensor([[0, 1, 30, 31, 10, 11, 100, 101]], dtype=torch.long)
-    assert torch.equal(merged, expected)
+    assert max_prompt_tokens_for_model_len(8192, 1024) == 8192 - 1024
+    assert max_prompt_tokens_for_model_len(100, 50) == 50
+    assert max_prompt_tokens_for_model_len(100, None) == 99
 
 
 class _ChrTokenizer:
@@ -135,7 +59,8 @@ class _RecordingGemEnv:
     def __init__(self) -> None:
         self.last_gen: str | None = None
 
-    def reset(self):
+    def reset(self, seed: int | None = None, *, row_index: int | None = None):
+        del seed, row_index
         return "hello", {}
 
     def step(self, gen_text: str):
@@ -158,17 +83,6 @@ class TestRolloutHarnessReset:
         assert set(obs.keys()) >= {"input_ids", "attention_mask", "text"}
         assert obs["text"] == "hello"
         assert w._last_full_prompt_token_len == obs["input_ids"].shape[1]
-
-    def test_reset_seed_fallback_for_seedless_env(self) -> None:
-        w = RolloutHarness(
-            _SeedlessResetEnv(),
-            _ChrTokenizer(),
-            max_turns=1,
-            pad_id=None,
-            apply_chat_template=False,
-        )
-        obs, _ = w.reset(seed=123)
-        assert "input_ids" in obs
 
 
 class TestRolloutHarnessStep:
@@ -204,13 +118,9 @@ class TestRolloutHarnessStep:
             max_turns=2,
             pad_id=None,
             apply_chat_template=True,
-            max_model_len=32,
-            max_output_tokens=4,
-            enable_sliding_window=True,
         )
         obs, _ = w.reset()
         assert obs["input_ids"].dtype == torch.long
-        assert "trajectory_input_ids" in obs
 
         completion = torch.cat(
             [obs["input_ids"], torch.tensor([[7, 8]], dtype=torch.long)],
@@ -242,10 +152,10 @@ class TestRolloutHarnessStep:
         assert next_obs["input_ids"].shape[1] > completion.shape[1]
 
     def test_strict_mode_terminates_on_context_overflow(self) -> None:
-        """When sliding window is disabled and the cumulative prompt would
-        exceed ``max_model_len - max_output_tokens``, the trajectory ends
-        with ``truncated=True`` and an ``agilerl_context_overflow``
-        breadcrumb in ``info``."""
+        """When the cumulative prompt would exceed
+        ``max_model_len - max_output_tokens``, the trajectory ends with
+        ``truncated=True`` and an ``agilerl_context_overflow`` breadcrumb in
+        ``info``."""
         env = _NonTerminalEnv()
         # Tiny budget: 20 - 4 = 16 prompt tokens. Initial prompt "P:hello\nS"
         # is 9 char-tokens; +2 gen +12 feedback ("F:feedback\nT") => 23 > 16.
@@ -257,7 +167,6 @@ class TestRolloutHarnessStep:
             apply_chat_template=False,
             max_model_len=20,
             max_output_tokens=4,
-            # enable_sliding_window defaults to False (strict mode).
         )
         obs, _ = w.reset()
         completion = torch.cat(
@@ -274,34 +183,6 @@ class TestRolloutHarnessStep:
         assert overflow["max_model_len"] == 20
         assert overflow["max_output_tokens"] == 4
         assert overflow["full_prompt_len"] > overflow["max_prompt_tokens"]
-
-    def test_sliding_window_silently_truncates_instead_of_terminating(
-        self,
-    ) -> None:
-        """Counterpart to strict-mode test: with sliding window enabled,
-        overflow is masked by dropping older turns from the prompt."""
-        env = _NonTerminalEnv()
-        w = RolloutHarness(
-            env,
-            _ChrTokenizer(),
-            max_turns=4,
-            pad_id=None,
-            apply_chat_template=False,
-            max_model_len=20,
-            max_output_tokens=4,
-            enable_sliding_window=True,
-        )
-        obs, _ = w.reset()
-        completion = torch.cat(
-            [obs["input_ids"], torch.tensor([[120, 121]], dtype=torch.long)],
-            dim=1,
-        )
-        next_obs, _, terminated, truncated, info = w.step(completion)
-        assert not terminated
-        assert not truncated
-        assert "agilerl_context_overflow" not in info
-        assert "trajectory_input_ids" in next_obs
-        assert next_obs["trajectory_input_ids"].shape[1] <= 16
 
 
 class TestRolloutHarnessChatTemplateBoundary:
@@ -512,35 +393,14 @@ class _ChrTokenizerWithChatTemplateBroken(_ChrTokenizer):
 
 
 class TestRolloutHarnessPolicyObservationFromState:
-    def test_policy_observation_merges_sliding_window_when_max_model_len_set(
-        self,
-    ) -> None:
+    def test_policy_observation_returns_current_prompt_fields(self) -> None:
+        """The policy observation carries the current ``input_ids`` directly."""
         w = _bare_wrapper()
         w.tokenizer = _StubTokenizer()
-        w._sw_max_model_len = 100
-        w._sw_max_output_tokens = 10
-        w._sw_enabled = True
-        w._initial_prompt_len = 2
         w.full_ids = torch.tensor([[0, 1, 2, 3]], dtype=torch.long)
         w.turn_boundaries = []
         obs = w._policy_observation_from_state()
-        assert "trajectory_input_ids" in obs
-        assert "trajectory_text" in obs
-        assert obs["input_ids"].shape[1] == 4
-
-    def test_policy_observation_skips_sliding_window_by_default(self) -> None:
-        """Strict mode (sliding window disabled) does NOT emit trunc/stitch fields."""
-        w = _bare_wrapper()
-        w.tokenizer = _StubTokenizer()
-        w._sw_max_model_len = 100
-        w._sw_max_output_tokens = 10
-        w._sw_enabled = False
-        w._initial_prompt_len = 2
-        w.full_ids = torch.tensor([[0, 1, 2, 3]], dtype=torch.long)
-        w.turn_boundaries = []
-        obs = w._policy_observation_from_state()
-        assert "trajectory_input_ids" not in obs
-        assert "stitch_prefix_ids" not in obs
+        assert set(obs.keys()) >= {"input_ids", "attention_mask", "text"}
         assert obs["input_ids"].shape[1] == 4
 
     def test_policy_observation_raises_without_full_ids(self) -> None:
@@ -551,8 +411,7 @@ class TestRolloutHarnessPolicyObservationFromState:
 
 
 class _SyncStubEnv:
-    def __init__(self, sw_max_model_len: int | None = None) -> None:
-        self._sw_max_model_len = sw_max_model_len
+    def __init__(self) -> None:
         self.turn_boundaries: list[int] = []
         self.reset_calls: list[int | None] = []
         self.close_calls = 0
@@ -743,7 +602,7 @@ class TestBatchRolloutEnvStep:
 class TestBatchRolloutEnvClose:
     def test_batch_rollout_env_close_calls_underlying_env_close_once(self) -> None:
         vec_env = BatchRolloutEnv(
-            env_factory=lambda: _SyncStubEnv(sw_max_model_len=1024),
+            env_factory=_SyncStubEnv,
             batch_size=2,
             group_size=2,
         )
@@ -863,22 +722,13 @@ class TestRolloutHarnessTokenizeInitialPrompt:
         assert torch.equal(out["attention_mask"], torch.ones_like(out["input_ids"]))
 
 
-class _SeedlessResetEnv:
-    def reset(self):
-        return "obs", {}
-
-    def step(self, gen_text: str):
-        del gen_text
-        return "done", 0.0, True, False, {}
-
-
 class _NonTerminalEnv:
     def __init__(self) -> None:
         self.calls = 0
         self.last_gen: str | None = None
 
-    def reset(self, seed: int | None = None):
-        del seed
+    def reset(self, seed: int | None = None, *, row_index: int | None = None):
+        del seed, row_index
         return "hello", {"prefix": "P:", "suffix": "S"}
 
     def step(self, gen_text: str):
@@ -1075,10 +925,6 @@ class TestRolloutBufferGetPrompts:
             prompt={
                 "input_ids": torch.ones(1, 2, dtype=torch.long),
                 "attention_mask": torch.ones(1, 2, dtype=torch.long),
-                "trajectory_input_ids": torch.ones(1, 2, dtype=torch.long),
-                "trajectory_attention_mask": torch.ones(1, 2, dtype=torch.long),
-                "stitch_prefix_ids": torch.ones(1, 1, dtype=torch.long),
-                "initial_prompt_len": 2,
             },
             done=False,
         )
@@ -1089,10 +935,6 @@ class TestRolloutBufferGetPrompts:
             prompt={
                 "input_ids": torch.ones(1, 3, dtype=torch.long),
                 "attention_mask": torch.ones(1, 3, dtype=torch.long),
-                "trajectory_input_ids": torch.ones(1, 3, dtype=torch.long),
-                "trajectory_attention_mask": torch.ones(1, 3, dtype=torch.long),
-                "stitch_prefix_ids": torch.ones(1, 2, dtype=torch.long),
-                "initial_prompt_len": 3,
             },
             done=False,
         )
@@ -1102,7 +944,7 @@ class TestRolloutBufferGetPrompts:
         prompts = buf.get_prompts()
         assert prompts is not None
         assert len(prompts) == 2
-        assert [int(p["initial_prompt_len"]) for p in prompts] == [2, 3]
+        assert [int(p["input_ids"].shape[1]) for p in prompts] == [2, 3]
         assert prompts[0]["input_ids"].shape == (1, 2)
         assert prompts[1]["input_ids"].shape == (1, 3)
 

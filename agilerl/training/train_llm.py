@@ -986,8 +986,9 @@ def train_llm_rollout(
     Collects token-level episodes (``reset`` returns ``(obs, info)``,
     repeated ``get_action`` / ``step`` (full completion tensor), then
     ``get_episode_data``), then runs turn-level PPO updates. For
-    ``RolloutHarness`` with ``max_model_len`` set, sliding-window
-    prompt fields are included in each observation before generation.
+    ``RolloutHarness`` with ``max_model_len`` set, a trajectory whose
+    cumulative prompt would overflow the context is stopped with
+    ``truncated=True``.
 
     :param pop: Population of LLMPPO agents to finetune.
     :type pop: PopulationType
