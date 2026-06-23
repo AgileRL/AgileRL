@@ -4,10 +4,8 @@ A :class:`RolloutEnv` is the generation half of the env taxonomy: the model
 generates a completion to a dataset-seeded prompt and the env scores it with a
 ``reward_fn``. Reasoning is the degenerate ``max_turns=1`` configuration — a
 plain :class:`RolloutEnv` instance, no subclass. Callers wrap it in
-:class:`~agilerl.llm_envs.token_observation.RolloutHarness` so it plugs
-into ``BatchRolloutEnv`` like any other rollout env, deriving a prompt builder
-from a conversation template via :func:`_default_prompt_builder` and pulling
-question/answer columns via :func:`_extract_question_answer_columns`.
+:class:`~agilerl.llm_envs.rollout_harness.RolloutHarness` so it plugs
+into ``BatchRolloutEnv`` like any other rollout env.
 
 Dataset order is deterministic: a ``BatchRolloutEnv`` owns the shared dataset
 cursor across its trajectories, re-drawing a seeded per-epoch shuffle
@@ -21,11 +19,15 @@ cursor and walks its active split sequentially.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
 from agilerl.llm_envs.base import LLMEnv
+from agilerl.llm_envs.rollout_buffer import RolloutBuffer, Trajectory
+
+if TYPE_CHECKING:
+    from agilerl.typing import RolloutPrompts
 
 
 def dataloader_shuffle_order(
@@ -165,38 +167,232 @@ class RolloutEnv(LLMEnv):
         return "", reward, terminated, False, {}
 
 
-def _extract_question_answer_columns(
-    dataset: Any,
-) -> tuple[list[str], list[str]]:
-    """Pull ``question`` / ``answer`` columns from an HF or torch-style dataset.
+class BatchRolloutEnv:
+    """Batched in-process collector of LLM rollout episodes.
 
-    HuggingFace datasets support column access (``dataset["question"]``); plain
-    ``torch.utils.data.Dataset`` instances are indexed per row and return a dict.
-    """
-    try:
-        return list(dataset["question"]), list(dataset["answer"])
-    except (KeyError, TypeError):
-        questions = [dataset[i]["question"] for i in range(len(dataset))]
-        answers = [dataset[i]["answer"] for i in range(len(dataset))]
-        return questions, answers
-
-
-def _default_prompt_builder(
-    conversation_template: list[dict[str, str]],
-) -> Callable[[str], str]:
-    """Build a question->prompt-text function from a conversation template.
-
-    Formats each template message's ``content`` with the question (answer left
-    blank, mirroring generation time) and joins them. The wrapped
-    ``RolloutHarness`` applies the tokenizer's chat template to this
-    text, so the builder only assembles the user-visible prompt string.
+    Maintains ``batch_size * group_size`` independent rollout environments and steps all
+    active trajectories in lock-step using policy completions.
     """
 
-    def build(question: str) -> str:
-        rendered = [
-            msg["content"].format(question=question, answer="")
-            for msg in conversation_template
-        ]
-        return "\n".join(part for part in rendered if part)
+    def __init__(
+        self,
+        env_factory: Callable[..., RolloutEnv],
+        batch_size: int,
+        group_size: int,
+        env_config: dict[str, Any] | None = None,
+    ):
+        """Create ``batch_size * group_size`` independent environments.
 
-    return build
+        :param env_factory: Factory that builds one multi-turn environment.
+        :type env_factory: Callable[..., RolloutEnv]
+        :param batch_size: Number of logical batch items.
+        :type batch_size: int
+        :param group_size: Number of grouped trajectories per batch item.
+        :type group_size: int
+        :param env_config: Optional kwargs passed to ``env_factory``.
+        :type env_config: dict[str, Any] | None
+        """
+        if batch_size <= 0:
+            msg = f"batch_size must be > 0, got {batch_size}."
+            raise ValueError(msg)
+        if group_size <= 0:
+            msg = f"group_size must be > 0, got {group_size}."
+            raise ValueError(msg)
+        if env_config is None:
+            env_config = {}
+        self.env_factory = env_factory
+        self.env_config = env_config
+        self.num_envs = batch_size * group_size
+        self.batch_size = batch_size
+        self.group_size = group_size
+        self.trajectories = RolloutBuffer(batch_size, group_size)
+        self._cursor = 0
+        self._epoch_order: list[int] | None = None
+        self._dataset_size = 0
+        self._shuffle_seed = 0
+
+    def _next_row(self) -> int:
+        """Advance the shared dataset cursor and return the next (shuffled) row.
+
+        Re-shuffles deterministically at each epoch boundary so every row is seen
+        once per epoch; the seed makes the order reproducible.
+        """
+        epoch, pos = divmod(self._cursor, self._dataset_size)
+        if pos == 0:
+            self._epoch_order = dataloader_shuffle_order(
+                self._dataset_size, self._shuffle_seed + epoch
+            )
+        row = self._epoch_order[pos]
+        self._cursor += 1
+        return row
+
+    def reset(
+        self,
+        seed: int | None = None,
+    ) -> list[RolloutPrompts] | None:
+        """Reset all environments and initialize trajectories.
+
+        Seeds are assigned per batch row (same seed across groups). The shared
+        dataset cursor resolves a single ``row_index`` per batch row (advancing
+        once per row, re-shuffling each epoch), and every group env of that row is
+        reset with both the row seed and that one row, so the group is
+        row-consistent. Prompts are returned in stable ``(batch_idx, group_idx)``
+        order. Envs that are not dataset-backed (``dataset_size == 0``) skip the
+        cursor entirely.
+
+        :param seed: Optional base seed for deterministic rollouts.
+        :type seed: int | None
+        :return: Active prompt dictionaries after reset.
+        :rtype: list[RolloutPrompts] | None
+        """
+        seed_base = seed
+        for batch_idx in range(self.batch_size):
+            batch_seed = None if seed_base is None else seed_base + batch_idx
+            row_index: int | None = None
+            for group_idx in range(self.group_size):
+                env_idx = batch_idx * self.group_size + group_idx
+                if not self.trajectories.is_initialized:
+                    env_i = self.env_factory(**self.env_config)
+                    # Size the shared cursor from the first env's dataset, before
+                    # resolving any row, so all rows draw from one shuffle order.
+                    # Envs that aren't dataset-backed (no ``dataset_size``, or 0)
+                    # get no cursor and a reset without a ``row_index``.
+                    ds_size = getattr(env_i, "dataset_size", 0)
+                    if self._dataset_size == 0 and ds_size > 0:
+                        self._dataset_size = ds_size
+                        self._shuffle_seed = seed if seed is not None else 42
+                    if group_idx == 0 and self._dataset_size > 0:
+                        row_index = self._next_row()
+                    prompt_dict, _ = (
+                        env_i.reset(seed=batch_seed, row_index=row_index)
+                        if row_index is not None
+                        else env_i.reset(seed=batch_seed)
+                    )
+                    self.trajectories.add_trajectory(
+                        Trajectory(
+                            env=env_i,
+                            batch_idx=batch_idx,
+                            group_idx=group_idx,
+                            prompt=prompt_dict,
+                            done=False,
+                        )
+                    )
+                else:
+                    if group_idx == 0 and self._dataset_size > 0:
+                        row_index = self._next_row()
+                    self.trajectories.reset_trajectory(
+                        env_idx=env_idx,
+                        seed=batch_seed,
+                        row_index=row_index,
+                    )
+        return self.trajectories.get_prompts()
+
+    def step(
+        self,
+        completion_ids: list[torch.Tensor],
+        sampling_logps: list[torch.Tensor | None] | None = None,
+    ) -> list[RolloutPrompts] | None:
+        """Step each active trajectory with its corresponding completion.
+
+        :param completion_ids: One completion tensor per active trajectory.
+        :type completion_ids: list[torch.Tensor]
+        :param sampling_logps: Sampling logprobs from vLLM rollout for this
+            turn, parallel to ``completion_ids``; entries (or the whole list)
+            may be ``None`` when nothing was captured.
+        :type sampling_logps: list[torch.Tensor | None] | None
+        :return: Next active prompt dictionaries after stepping.
+        :rtype: list[RolloutPrompts] | None
+        """
+        active = self.trajectories.get_active_trajectories(sorted_by_index=True)
+        if len(completion_ids) != len(active):
+            msg = (
+                "Number of completions does not match number of active trajectories: "
+                f"{len(completion_ids)} != {len(active)}"
+            )
+            raise RuntimeError(msg)
+        if sampling_logps is not None:
+            if len(sampling_logps) != len(active):
+                msg = (
+                    "Number of sampling logprobs does not match number of active "
+                    f"trajectories: {len(sampling_logps)} != {len(active)}"
+                )
+                raise RuntimeError(msg)
+            for traj, slp in zip(active, sampling_logps, strict=True):
+                if slp is not None:
+                    traj.sampling_logps.append(slp)
+        for traj, completion in zip(active, completion_ids, strict=False):
+            full_completion = completion
+            if full_completion.dim() == 1:
+                full_completion = full_completion.unsqueeze(0)
+            next_prompt, _reward, terminated, truncated, _info = traj.env.step(
+                full_completion,
+            )
+            traj.done = bool(terminated or truncated)
+            if not traj.done:
+                traj.prompt = next_prompt
+        return self.trajectories.get_prompts()
+
+    def close(self) -> None:
+        """Close all underlying environments."""
+        seen: set[int] = set()
+        for traj in self.trajectories:
+            env = traj.env
+            env_id = id(env)
+            if env_id in seen:
+                continue
+            seen.add(env_id)
+            if hasattr(env, "close"):
+                env.close()
+
+    def get_trajectories(
+        self,
+    ) -> tuple[
+        list[torch.Tensor],
+        list[torch.Tensor],
+        list[torch.Tensor],
+        list[torch.Tensor],
+        int,
+        list[torch.Tensor | None] | None,
+    ]:
+        """Collect complete episode tensors from all trajectories.
+
+        :return: ``(completion_ids_list, action_masks_list, all_turn_ids,
+            all_rewards, batch_steps, all_sampling_logps)`` where ``batch_steps``
+            is the summed number of recorded turn boundaries across trajectories.
+            ``all_sampling_logps`` is ``None`` when no vLLM logprobs were captured
+            this rollout; otherwise it holds one 1-D tensor of generated-token
+            logprobs per trajectory (concatenated across turns), with ``None`` for
+            any trajectory that captured none.
+        :rtype: tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], int, list[torch.Tensor | None] | None]
+        """
+        completion_ids_list: list[torch.Tensor] = []
+        action_masks_list: list[torch.Tensor] = []
+        all_turn_ids: list[torch.Tensor] = []
+        all_rewards: list[torch.Tensor] = []
+        all_sampling_logps: list[torch.Tensor | None] = []
+        batch_steps = 0
+        self.trajectories.sort(key=lambda t: (t.batch_idx, t.group_idx))
+        for traj in self.trajectories:
+            ep_ids, action_mask, turn_ids, turn_rewards_t = traj.env.get_episode_data()
+            completion_ids_list.append(ep_ids)
+            action_masks_list.append(action_mask)
+            all_turn_ids.append(turn_ids)
+            all_rewards.append(turn_rewards_t)
+            batch_steps += len(getattr(traj.env, "turn_boundaries", []))
+            turns = traj.sampling_logps
+            all_sampling_logps.append(torch.cat(turns) if turns else None)
+
+        return (
+            completion_ids_list,
+            action_masks_list,
+            all_turn_ids,
+            all_rewards,
+            batch_steps,
+            # Collapse to a single ``None`` when nothing was captured, so the
+            # caller needs only an ``is not None`` check (no per-row re-scan).
+            (
+                all_sampling_logps
+                if any(logps is not None for logps in all_sampling_logps)
+                else None
+            ),
+        )

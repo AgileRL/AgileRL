@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from peft import LoraConfig
     from transformers import BitsAndBytesConfig
 
-    from agilerl.llm_envs import SFTGym
+    from agilerl.llm_envs import DatasetEnv
 
 if HAS_LIGER_KERNEL or TYPE_CHECKING:
     from liger_kernel.transformers.fused_linear_cross_entropy import (
@@ -232,7 +232,7 @@ class SFT(LLMAlgorithm):
 
         :param experiences: Dict with keys ``input_ids`` (prompt + response token
             IDs), ``attention_mask``, and ``prompt_lengths`` (number of prompt
-            tokens per sample) as produced by :class:`~agilerl.llm_envs.SFTGym`.
+            tokens per sample) as produced by a ``kind="sft"`` :class:`~agilerl.llm_envs.DatasetEnv`.
         :type experiences: ExperiencesType
         :param training: When ``False`` the backward pass is skipped (eval mode).
         :type training: bool
@@ -363,15 +363,15 @@ class SFT(LLMAlgorithm):
 
     def test(
         self,
-        env: SFTGym,
+        env: DatasetEnv,
         loop: int = 1,
         *args: Any,
         **kwargs: Any,
     ) -> np.ndarray:
         """Return the negative mean loss as a fitness score (higher is better).
 
-        :param env: SFT environment providing evaluation batches
-        :type env: SFTGym
+        :param env: SFT environment providing evaluation batches (``kind="sft"``)
+        :type env: DatasetEnv
         :param loop: Number of evaluation batches, defaults to 1
         :type loop: int, optional
         :return: Mean negative loss (scalar numpy array)

@@ -46,7 +46,7 @@ entry points such as ``train_llm_rollout``. Single-turn reasoning is the
 
 .. code-block:: python
 
-  from agilerl.llm_envs import RolloutEnv, TokenObservationWrapper
+  from agilerl.llm_envs import RolloutEnv, RolloutHarness
   from agilerl.training.train_llm import train_llm_rollout
 
   def reward_fn(completion: str, answer: str, question: str) -> float:
@@ -65,7 +65,7 @@ entry points such as ``train_llm_rollout``. Single-turn reasoning is the
           test_answers=["6"],
       )
       raw_env.evaluation_mode = evaluation_mode
-      return TokenObservationWrapper(
+      return RolloutHarness(
           raw_env,
           tokenizer=tokenizer,
           max_turns=1,
@@ -93,7 +93,7 @@ entry points such as ``train_llm_rollout``. Single-turn reasoning is the
           return "Done.", reward, True, False, {"correct": bool(reward)}
 
   def env_factory():
-      return TokenObservationWrapper(
+      return RolloutHarness(
           env=ToyMultiTurnEnv(),
           tokenizer=tokenizer,
           max_turns=4,

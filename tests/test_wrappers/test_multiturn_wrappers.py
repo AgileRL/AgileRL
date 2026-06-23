@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
 
 import pytest
 import torch
 
 from agilerl.llm_envs import (
-    FormatRewardWrapper,
-    SearchTool,
     BatchRolloutEnv,
+    RolloutBuffer,
     RolloutHarness,
     Trajectory,
-    TrajectoryBuffer,
 )
+
+# The boundary marker is a per-render ``uuid4().hex`` (32 lowercase hex chars);
+# a correctly sliced boundary contains no such run.
+_UUID4_HEX = re.compile(r"[0-9a-f]{32}")
 
 
 class _StubTokenizer:
@@ -28,7 +31,7 @@ def _bare_wrapper() -> RolloutHarness:
     return w
 
 
-class TestTokenObservationWrapperBuildModelPromptFields:
+class TestRolloutHarnessBuildModelPromptFields:
     def test_build_model_prompt_fields_no_truncation(self) -> None:
         w = _bare_wrapper()
         w.tokenizer = _StubTokenizer()
@@ -140,7 +143,7 @@ class _RecordingGemEnv:
         return "", 1.0, True, False, {}
 
 
-class TestTokenObservationWrapperReset:
+class TestRolloutHarnessReset:
     def test_reset_returns_tuple_with_text_and_sets_prompt_len(self) -> None:
         inner = _RecordingGemEnv()
         w = RolloutHarness(
@@ -168,7 +171,7 @@ class TestTokenObservationWrapperReset:
         assert "input_ids" in obs
 
 
-class TestTokenObservationWrapperStep:
+class TestRolloutHarnessStep:
     def test_step_from_full_completion_slices_generation(self) -> None:
         inner = _RecordingGemEnv()
         w = RolloutHarness(
@@ -301,7 +304,7 @@ class TestTokenObservationWrapperStep:
         assert next_obs["trajectory_input_ids"].shape[1] <= 16
 
 
-class TestTokenObservationWrapperChatTemplateBoundary:
+class TestRolloutHarnessChatTemplateBoundary:
     """Verify the assistant→user→assistant boundary is computed via the
     tokenizer's chat template rather than hard-coded ChatML markers."""
 
@@ -316,7 +319,7 @@ class TestTokenObservationWrapperChatTemplateBoundary:
         decoded = "".join(chr(int(x)) for x in out[0].tolist())
         # Must close the assistant turn, open a user turn with the feedback,
         # close it, then open a fresh model turn. Placeholder must not leak.
-        assert RolloutHarness._BOUNDARY_PLACEHOLDER not in decoded
+        assert not _UUID4_HEX.search(decoded)
         assert decoded.startswith("<end_of_turn>\n<start_of_turn>user\n")
         assert "FEEDBACK" in decoded
         assert decoded.endswith("<start_of_turn>model\n")
@@ -330,7 +333,7 @@ class TestTokenObservationWrapperChatTemplateBoundary:
 
         assert out is not None
         decoded = "".join(chr(int(x)) for x in out[0].tolist())
-        assert RolloutHarness._BOUNDARY_PLACEHOLDER not in decoded
+        assert not _UUID4_HEX.search(decoded)
         assert decoded.startswith("<|im_end|>\n<|im_start|>user\n")
         assert "FEEDBACK" in decoded
         assert decoded.endswith("<|im_start|>assistant\n")
@@ -344,7 +347,7 @@ class TestTokenObservationWrapperChatTemplateBoundary:
 
         assert out is not None
         decoded = "".join(chr(int(x)) for x in out[0].tolist())
-        assert RolloutHarness._BOUNDARY_PLACEHOLDER not in decoded
+        assert not _UUID4_HEX.search(decoded)
         # Should close assistant via <|eot_id|> then open a user header.
         assert decoded.startswith("<|eot_id|><|start_header_id|>user")
         assert "FEEDBACK" in decoded
@@ -508,7 +511,7 @@ class _ChrTokenizerWithChatTemplateBroken(_ChrTokenizer):
     """Has no apply_chat_template at all, so the boundary diff path errors."""
 
 
-class TestTokenObservationWrapperPolicyObservationFromState:
+class TestRolloutHarnessPolicyObservationFromState:
     def test_policy_observation_merges_sliding_window_when_max_model_len_set(
         self,
     ) -> None:
@@ -581,7 +584,7 @@ class _SyncStubEnv:
         )
 
 
-class TestSyncMultiTurnVecEnvReset:
+class TestBatchRolloutEnvReset:
     def test_sync_gem_vec_env_reset_seeds_per_batch_group(self) -> None:
         vec_env = BatchRolloutEnv(
             env_factory=_SyncStubEnv,
@@ -614,7 +617,7 @@ class TestSyncMultiTurnVecEnvReset:
         assert seen == [20, 20, 21, 21]
 
 
-class TestSyncMultiTurnVecEnvStep:
+class TestBatchRolloutEnvStep:
     def test_sync_gem_vec_env_step_raises_when_completion_count_mismatches_active(
         self,
     ) -> None:
@@ -630,7 +633,9 @@ class TestSyncMultiTurnVecEnvStep:
         ):
             vec_env.step([torch.ones(1, 5, dtype=torch.long)])
 
-    def test_sync_vec_env_step_happy_path_1d_and_2d_and_active_filtering(self) -> None:
+    def test_batch_rollout_env_step_happy_path_1d_and_2d_and_active_filtering(
+        self,
+    ) -> None:
         created = [
             _StepVariantEnv(done_after_step=False),
             _StepVariantEnv(done_after_step=True),
@@ -657,7 +662,9 @@ class TestSyncMultiTurnVecEnvStep:
         assert created[0].step_shapes == [(1, 3)]
         assert created[1].step_shapes == [(1, 3)]
 
-    def test_sync_vec_env_step_raises_on_sampling_logps_count_mismatch(self) -> None:
+    def test_batch_rollout_env_step_raises_on_sampling_logps_count_mismatch(
+        self,
+    ) -> None:
         vec_env = BatchRolloutEnv(
             env_factory=_SyncStubEnv,
             batch_size=1,
@@ -676,7 +683,9 @@ class TestSyncMultiTurnVecEnvStep:
                 sampling_logps=[torch.tensor([-0.1, -0.2])],  # 1 != 2 active
             )
 
-    def test_sync_vec_env_step_accumulates_sampling_logps_per_trajectory(self) -> None:
+    def test_batch_rollout_env_step_accumulates_sampling_logps_per_trajectory(
+        self,
+    ) -> None:
         """Each turn's vLLM sampling logprobs append onto that trajectory's
         ``Trajectory.sampling_logps``; ``None`` rows (nothing captured) are
         skipped. ``get_trajectories`` concatenates across turns and keeps a
@@ -701,7 +710,7 @@ class TestSyncMultiTurnVecEnvStep:
         assert torch.equal(sampling[0], torch.tensor([-0.1, -0.2, -0.3]))
         assert sampling[1] is None
 
-    def test_sync_vec_env_sampling_logps_collapse_to_none_when_uncaptured(
+    def test_batch_rollout_env_sampling_logps_collapse_to_none_when_uncaptured(
         self,
     ) -> None:
         """Without captured logprobs the rollout-wide entry is a single
@@ -731,8 +740,8 @@ class TestSyncMultiTurnVecEnvStep:
         assert sampling is None
 
 
-class TestSyncMultiTurnVecEnvClose:
-    def test_sync_vec_env_close_calls_underlying_env_close_once(self) -> None:
+class TestBatchRolloutEnvClose:
+    def test_batch_rollout_env_close_calls_underlying_env_close_once(self) -> None:
         vec_env = BatchRolloutEnv(
             env_factory=lambda: _SyncStubEnv(sw_max_model_len=1024),
             batch_size=2,
@@ -743,7 +752,7 @@ class TestSyncMultiTurnVecEnvClose:
         close_counts = [traj.env.close_calls for traj in vec_env.trajectories]
         assert close_counts == [1, 1, 1, 1]
 
-    def test_sync_vec_env_close_dedupes_same_env_instance(self) -> None:
+    def test_batch_rollout_env_close_dedupes_same_env_instance(self) -> None:
         shared = _SyncStubEnv()
         vec = BatchRolloutEnv(env_factory=lambda: shared, batch_size=2, group_size=2)
         _ = vec.reset(seed=0)
@@ -751,8 +760,8 @@ class TestSyncMultiTurnVecEnvClose:
         assert shared.close_calls == 1
 
 
-class TestSyncMultiTurnVecEnvInit:
-    def test_sync_vec_env_constructor_rejects_non_positive_sizes(self) -> None:
+class TestBatchRolloutEnvInit:
+    def test_batch_rollout_env_constructor_rejects_non_positive_sizes(self) -> None:
         with pytest.raises(ValueError, match="batch_size must be > 0"):
             _ = BatchRolloutEnv(
                 env_factory=_SyncStubEnv,
@@ -767,9 +776,9 @@ class TestSyncMultiTurnVecEnvInit:
             )
 
 
-class TestTrajectoryBufferResetTrajectory:
+class TestRolloutBufferResetTrajectory:
     def test_trajectory_buffer_reset_trajectory_out_of_bounds(self) -> None:
-        buf = TrajectoryBuffer(batch_size=1, group_size=1)
+        buf = RolloutBuffer(batch_size=1, group_size=1)
         with pytest.raises(IndexError, match="env_idx out of bounds"):
             buf.reset_trajectory(seed=0, env_idx=0)
 
@@ -782,7 +791,7 @@ class TestTrajectoryBufferResetTrajectory:
             prompt={},
             done=True,
         )
-        buf = TrajectoryBuffer(batch_size=1, group_size=1)
+        buf = RolloutBuffer(batch_size=1, group_size=1)
         buf.add_trajectory(traj)
         buf.reset_trajectory(seed=5, env_idx=0)
         assert buf[0].done is False
@@ -836,7 +845,7 @@ class _NestedChatTokenizer(_ChatTokenizer):
         return out
 
 
-class TestTokenObservationWrapperTokenizeInitialPrompt:
+class TestRolloutHarnessTokenizeInitialPrompt:
     def test_initial_prompt_unwraps_batched_token_id_lists(self) -> None:
         """Tokenizers returning ``[[ids]]`` (batch dim) and ``[ids]`` (flat)
         from ``apply_chat_template`` must produce identical ``(1, T)``
@@ -880,7 +889,7 @@ class _NonTerminalEnv:
         return "done", 1.0, True, False, {}
 
 
-class TestTokenObservationWrapperFormatObs:
+class TestRolloutHarnessFormatObs:
     def test_format_obs_prefix_suffix_and_empty_info(self) -> None:
         assert RolloutHarness._format_obs("x", None) == "x"
         assert (
@@ -888,7 +897,7 @@ class TestTokenObservationWrapperFormatObs:
         )
 
 
-class TestTokenObservationWrapperGetEpisodeData:
+class TestRolloutHarnessGetEpisodeData:
     def test_get_episode_data_padding_and_pad_mask(self) -> None:
         w = _bare_wrapper()
         w.pad_id = 0
@@ -911,7 +920,7 @@ class TestTokenObservationWrapperGetEpisodeData:
             w.get_episode_data()
 
 
-class TestTokenObservationWrapperGetDebugInfo:
+class TestRolloutHarnessGetDebugInfo:
     def test_get_debug_info_paths(self) -> None:
         w = _bare_wrapper()
         w.full_ids = None
@@ -934,111 +943,12 @@ class TestTokenObservationWrapperGetDebugInfo:
         assert info["turn_details"][0]["gen_len"] == 2
 
 
-class TestSearchToolParseAction:
-    def test_search_tool_parse_action_and_instruction(self) -> None:
-        tool = SearchTool(search_url="http://x")
-        query, parsed_action, valid = tool._parse_action("a<search> q </search>z")
-        assert (query, parsed_action, valid) == ("q", "a<search> q </search>", True)
-        assert tool._parse_action("no tags") == ("", "", False)
-        assert "<answer>" in tool.instruction_string()
-
-
-class TestSearchToolSearch:
-    def test_search_tool_search_success_and_failure_paths(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        tool = SearchTool(search_url="http://x", topk=1, timeout=1)
-
-        class _Resp:
-            def json(self):
-                return {"results": [{"content": "first"}, {"content": "second"}]}
-
-        def _ok_get(url, params, timeout):
-            del url, params, timeout
-            return _Resp()
-
-        monkeypatch.setattr("agilerl.llm_envs.requests.get", _ok_get)
-        out = tool._search("hello")
-        assert "first" in out and "second" not in out
-
-        def _fail_get(url, params, timeout):
-            del url, params, timeout
-            raise RuntimeError("boom")
-
-        monkeypatch.setattr("agilerl.llm_envs.requests.get", _fail_get)
-        assert "[SearchTool Error:" in tool._search("hello")
-
-        no_url = SearchTool(search_url=None)
-        monkeypatch.delenv("SEARCH_URL", raising=False)
-        with pytest.raises(ValueError, match="search_url must be provided"):
-            no_url._search("x")
-
-
-class TestSearchToolExecuteAction:
-    def test_search_tool_passages_to_string_and_execute_action(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        tool = SearchTool(search_url="http://x")
-        passages = [
-            {"document": {"contents": "Title A\nBody A"}},
-            {"document": {"contents": "Title B\nBody B"}},
-        ]
-        formatted = tool._passages2string(passages)
-        assert "Doc 1(Title: Title A) Body A" in formatted
-
-        valid, has_error, observation, parsed_action = tool.execute_action("nope")
-        assert (valid, has_error, observation, parsed_action) == (False, True, "", "")
-
-        monkeypatch.setattr(tool, "_search", lambda q: f"res:{q}")
-        valid, has_error, observation, parsed_action = tool.execute_action(
-            "<search>cats</search> trailing",
-        )
-        assert valid is True and has_error is False
-        assert "<information>res:cats</information>" in observation
-        assert parsed_action == "<search>cats</search>"
-
-
-class _FormatEnv:
-    def __init__(self):
-        self.state = "ok"
-
-    def reset(self, **kwargs):
-        return ("obs", kwargs)
-
-    def step(self, action: str, **kwargs):
-        del kwargs
-        return ("next", 1.0, True, False, {"correct": False, "action": action})
-
-
-class TestFormatRewardWrapperStep:
-    def test_format_reward_wrapper_branches_and_passthrough(self) -> None:
-        env = _FormatEnv()
-        wrapped = FormatRewardWrapper(env, format_bonus=0.3)
-        assert wrapped.format_bonus == 0.3
-        assert wrapped.state == "ok"
-        obs, rew, term, trunc, info = wrapped.step("<answer>bad</answer>")
-        assert (obs, term, trunc) == ("next", True, False)
-        assert info["correct"] is False
-        assert rew == 1.3
-        assert wrapped.reset(seed=7) == ("obs", {"seed": 7})
-
-        class _NoBonusEnv(_FormatEnv):
-            def step(self, action: str, **kwargs):
-                del action, kwargs
-                return ("next", 2.0, True, False, {"correct": True})
-
-        no_bonus = FormatRewardWrapper(_NoBonusEnv(), format_bonus=0.5)
-        assert no_bonus.step("<answer>good</answer>")[1] == 2.0
-
-
-class TestTrajectoryBufferInvariantsAndHelpers:
+class TestRolloutBufferInvariantsAndHelpers:
     def test_trajectory_buffer_invariants_and_helpers(self) -> None:
         with pytest.raises(ValueError, match="batch_size must be > 0"):
-            _ = TrajectoryBuffer(batch_size=0, group_size=1)
+            _ = RolloutBuffer(batch_size=0, group_size=1)
         with pytest.raises(ValueError, match="group_size must be > 0"):
-            _ = TrajectoryBuffer(batch_size=1, group_size=0)
+            _ = RolloutBuffer(batch_size=1, group_size=0)
 
         env = _SyncStubEnv()
         t1 = Trajectory(
@@ -1061,7 +971,7 @@ class TestTrajectoryBufferInvariantsAndHelpers:
             },
             done=True,
         )
-        buf = TrajectoryBuffer(batch_size=1, group_size=2)
+        buf = RolloutBuffer(batch_size=1, group_size=2)
         buf.add_trajectory(t1)
         buf.add_trajectory(t2)
         assert buf.is_initialized is True
@@ -1075,7 +985,7 @@ class TestTrajectoryBufferInvariantsAndHelpers:
         assert len(buf) == 0 and buf.has_active() is False
 
 
-class TestTrajectoryBufferGetActiveTrajectories:
+class TestRolloutBufferGetActiveTrajectories:
     def test_trajectory_buffer_get_active_trajectories_sorting(self) -> None:
         env = _SyncStubEnv()
         t0 = Trajectory(
@@ -1108,7 +1018,7 @@ class TestTrajectoryBufferGetActiveTrajectories:
             },
             done=True,
         )
-        buf = TrajectoryBuffer(batch_size=2, group_size=2)
+        buf = RolloutBuffer(batch_size=2, group_size=2)
         buf.add_trajectory(t0)
         buf.add_trajectory(t1)
         buf.add_trajectory(t2)
@@ -1119,7 +1029,7 @@ class TestTrajectoryBufferGetActiveTrajectories:
         assert sorted_active == [t1, t0]
 
 
-class TestTrajectoryBufferGetPrompts:
+class TestRolloutBufferGetPrompts:
     def test_trajectory_buffer_get_prompts_returns_none_when_no_active(self) -> None:
         env = _SyncStubEnv()
         done_traj = Trajectory(
@@ -1142,7 +1052,7 @@ class TestTrajectoryBufferGetPrompts:
             },
             done=False,
         )
-        buf = TrajectoryBuffer(batch_size=1, group_size=2)
+        buf = RolloutBuffer(batch_size=1, group_size=2)
         buf.add_trajectory(done_traj)
         buf.add_trajectory(active_traj)
 
@@ -1186,7 +1096,7 @@ class TestTrajectoryBufferGetPrompts:
             },
             done=False,
         )
-        buf = TrajectoryBuffer(batch_size=1, group_size=2)
+        buf = RolloutBuffer(batch_size=1, group_size=2)
         buf.add_trajectory(a)
         buf.add_trajectory(b)
         prompts = buf.get_prompts()
@@ -1244,8 +1154,8 @@ class _StepVariantEnv:
         )
 
 
-class TestSyncMultiTurnVecEnvGetTrajectories:
-    def test_sync_vec_env_get_trajectories_counts_steps_with_and_without_turn_boundaries(
+class TestBatchRolloutEnvGetTrajectories:
+    def test_batch_rollout_env_get_trajectories_counts_steps_with_and_without_turn_boundaries(
         self,
     ) -> None:
         created = [
@@ -1271,10 +1181,3 @@ class TestSyncMultiTurnVecEnvGetTrajectories:
         # batch_steps is second-to-last.
         *_parts, batch_steps, _sampling_logps = vec.get_trajectories()
         assert batch_steps == 1
-
-
-def test_syncmultiturnvecenv_is_backcompat_alias_of_batchrolloutenv():
-    """SyncMultiTurnVecEnv was renamed to BatchRolloutEnv; the alias stays one release."""
-    from agilerl.llm_envs import BatchRolloutEnv, SyncMultiTurnVecEnv
-
-    assert SyncMultiTurnVecEnv is BatchRolloutEnv

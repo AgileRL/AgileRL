@@ -118,7 +118,7 @@ Dependencies
     from agilerl.utils.algo_utils import VLLMConfig
     from agilerl.utils.llm_utils import create_llm_accelerator
     from agilerl.utils.utils import create_population
-    from agilerl.llm_envs import TokenObservationWrapper
+    from agilerl.llm_envs import RolloutHarness
 
 Shared setup
 ------------
@@ -127,7 +127,7 @@ All runs use:
 
 * Environment: ``game:GuessTheNumber-v0-easy``
 * Model: ``Qwen/Qwen2.5-0.5B-Instruct``
-* Wrapper: :class:`TokenObservationWrapper <agilerl.llm_envs.TokenObservationWrapper>`
+* Wrapper: :class:`RolloutHarness <agilerl.llm_envs.RolloutHarness>`
 * Training loop: :meth:`train_llm_rollout() <agilerl.training.train_llm.train_llm_rollout>`
 * Population size: ``1``
 * Evolution/HPO: disabled
@@ -150,7 +150,7 @@ All runs use:
 
         def env_factory():
             env = gem.make(ENV_NAME)
-            return TokenObservationWrapper(
+            return RolloutHarness(
                 env=env,
                 tokenizer=tokenizer,
                 max_turns=max_turns,

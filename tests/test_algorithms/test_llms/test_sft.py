@@ -19,7 +19,7 @@ from transformers import AutoTokenizer
 
 from agilerl.algorithms.core.base import EvolvableAlgorithm, OptimizerWrapper
 from agilerl.algorithms.sft import SFT
-from agilerl.llm_envs import SFTGym
+from agilerl.llm_envs import DatasetEnv
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.test_algorithms.test_llms.test_grpo import (
     _patch_mps_learn_hooks,
@@ -48,10 +48,11 @@ def make_sft_gym(
             response_column: [f"Response {i}" for i in range(num_samples)],
         }
     )
-    return SFTGym(
+    return DatasetEnv(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
+        kind="sft",
         data_batch_size_per_gpu=data_batch_size_per_gpu,
         response_column=response_column,
         accelerator=accelerator,
@@ -362,10 +363,11 @@ class TestSFTLearn:
             },
         )
         tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path)
-        env = SFTGym(
+        env = DatasetEnv(
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
+            kind="sft",
             data_batch_size_per_gpu=data_batch_size,
             accelerator=sft.accelerator,
         )
@@ -499,10 +501,11 @@ class TestSFTTest:
             },
         )
         tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path)
-        env = SFTGym(
+        env = DatasetEnv(
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
+            kind="sft",
             data_batch_size_per_gpu=data_batch_size,
             accelerator=sft.accelerator,
         )

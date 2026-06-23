@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from peft import LoraConfig
     from transformers import BitsAndBytesConfig
 
-    from agilerl.llm_envs import PreferenceGym
+    from agilerl.llm_envs import DatasetEnv
 
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
@@ -643,15 +643,15 @@ class DPO(LLMAlgorithm):
 
     def test(
         self,
-        env: PreferenceGym,
+        env: DatasetEnv,
         loop: int = 1,
         *args: Any,
         **kwargs: Any,
     ) -> np.ndarray:
         """Return the fitness (test) score of the agent.
 
-        :param env: The environment to be tested in
-        :type env: PreferenceGym environment
+        :param env: The environment to be tested in (``kind="preference"``)
+        :type env: DatasetEnv
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 1
         :type loop: int, optional
         :return: Mean test score (numpy array)

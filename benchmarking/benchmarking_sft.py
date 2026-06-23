@@ -36,7 +36,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_llm import train_llm_dataset
 from agilerl.utils.llm_utils import compare_responses, sample_eval_prompts
-from agilerl.llm_envs import SFTGym
+from agilerl.llm_envs import DatasetEnv
 
 MODEL_PATH = "Qwen/Qwen2.5-0.5B"
 DATASET = "HumanLLMs/Human-Like-DPO-Dataset"
@@ -76,13 +76,14 @@ def main(init_hp: dict, mut_p: dict, save_path: str = "outputs") -> None:
     except Exception:
         accelerator = None
 
-    print("Setting up SFTGym environment...")
-    env = SFTGym(
+    print("Setting up SFT DatasetEnv environment...")
+    env = DatasetEnv(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
-        data_batch_size_per_gpu=init_hp["BATCH_SIZE"],
+        kind="sft",
         response_column="chosen",
+        data_batch_size_per_gpu=init_hp["BATCH_SIZE"],
         accelerator=accelerator,
         max_context_length=init_hp.get("MAX_CONTEXT_LENGTH"),
     )

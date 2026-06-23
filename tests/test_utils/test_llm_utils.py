@@ -24,8 +24,8 @@ from torch.utils.data import DataLoader
 from tests import TINY_LLM_FIXTURE_PATH
 from agilerl.utils.algo_utils import DummyOptimizer
 from agilerl.utils import llm_utils as llm_utils_module
+from agilerl.llm_envs import DatasetEnv
 from agilerl.utils.llm_utils import (
-    PreferenceGym,
     adapt_lora_config_for_model,
     align_deepspeed_lr,
     build_bnb_quantization_config,
@@ -602,23 +602,27 @@ class TestCompareResponses:
 
 class TestSampleEvalPrompts:
     def test_sample_eval_prompts_sft_style_response_column(self):
-        """Covers SFTGym-style envs that expose ``response_column``."""
+        """A ``kind="sft"`` env resolves ``chosen`` from ``response_column``."""
         from types import SimpleNamespace
 
         ds = Datasets.from_dict(
             {"prompt": ["p0", "p1"], "response": ["r0", "r1"]},
         )
         env = SimpleNamespace(
+            kind="sft",
             response_column="response",
             test_dataloader=SimpleNamespace(dataset=ds),
         )
         rows = sample_eval_prompts(env, n=2, seed=0)
         assert len(rows) == 2
-        assert {rows[0][0], rows[1][0]} == {"p0", "p1"}
-        assert all(r[2] is None for r in rows)
+        assert {r[0] for r in rows} == {"p0", "p1"}
+        # chosen comes from response_column; rejected is None for SFT.
+        for p, c, r in rows:
+            assert c == ("r0" if p == "p0" else "r1")
+            assert r is None
 
     def test_sample_eval_prompts_preference_style_chosen_rejected(self):
-        """Covers PreferenceGym-style datasets with ``chosen`` / ``rejected`` columns."""
+        """A ``kind="preference"`` env resolves ``chosen`` / ``rejected`` columns."""
         from types import SimpleNamespace
 
         ds = Datasets.from_dict(
@@ -628,7 +632,9 @@ class TestSampleEvalPrompts:
                 "rejected": ["x0", "x1"],
             },
         )
-        env = SimpleNamespace(test_dataloader=SimpleNamespace(dataset=ds))
+        env = SimpleNamespace(
+            kind="preference", test_dataloader=SimpleNamespace(dataset=ds)
+        )
         rows = sample_eval_prompts(env, n=2, seed=0)
         assert len(rows) == 2
         prompts = {r[0] for r in rows}
@@ -640,8 +646,8 @@ class TestSampleEvalPrompts:
                 assert (c, r) == ("c1", "x1")
 
 
-class TestPreferenceGymInit:
-    def test_preference_gym_max_context_length_warning(self):
+class TestDatasetEnvPreferenceInit:
+    def test_preference_max_context_length_warning(self):
         train_dataset = Datasets.from_dict(
             {
                 "prompt": [
@@ -665,10 +671,11 @@ class TestPreferenceGymInit:
             UserWarning,
             match=r"1 samples were filtered out of the train dataset due to the max context length constraint.",
         ):
-            env = PreferenceGym(
+            env = DatasetEnv(
                 train_dataset=train_dataset,
                 test_dataset=test_dataset,
                 tokenizer=tokenizer,
+                kind="preference",
                 data_batch_size_per_gpu=data_batch_size,
                 max_context_length=10,
                 min_completion_length=1,
@@ -924,10 +931,10 @@ class TestLlmUtilsDeprecatedReexports:
         import agilerl.utils.llm_utils as llm_utils_module
 
         with pytest.warns(FutureWarning, match="moved to agilerl.llm_envs"):
-            cls = llm_utils_module.SFTGym
-        from agilerl.llm_envs import SFTGym as expected
+            fn = llm_utils_module.apply_chat_template
+        from agilerl.llm_envs import apply_chat_template as expected
 
-        assert cls is expected
+        assert fn is expected
 
     def test_unknown_name_raises_attribute_error(self):
         import agilerl.utils.llm_utils as llm_utils_module
@@ -939,8 +946,7 @@ class TestLlmUtilsDeprecatedReexports:
         import agilerl.utils.llm_utils as llm_utils_module
 
         d = dir(llm_utils_module)
-        assert "SFTGym" in d
-        assert "PreferenceGym" in d
+        assert "apply_chat_template" in d
 
 
 def test_move_params_helpers_call_model_move_and_cuda_sync():

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import uuid
 import warnings
 from contextlib import contextmanager, nullcontext
 from typing import Any
@@ -22,10 +23,6 @@ class RolloutHarness:
     and assembles the multi-turn masked transcript. It composes (wraps) the
     inner env rather than being an env itself.
     """
-
-    # Unique marker that ``_chat_template_boundary_ids`` slices on; must not
-    # collide with anything a real chat template renders.
-    _BOUNDARY_PLACEHOLDER = "__AGILERL_PRIOR_ASSISTANT_PLACEHOLDER_a8b2f__"
 
     def __init__(
         self,
@@ -177,13 +174,14 @@ class RolloutHarness:
         ``feedback_text``, and open the next assistant turn — for whatever
         chat template the tokenizer carries. The dummy leading user message
         keeps strict-alternation templates (e.g. some Mistral variants)
-        happy; the placeholder must be unique enough not to collide with
-        anything the template might already render.
+        happy. The placeholder is a per-render unique token (a ``uuid4`` hex)
+        chosen so it renders verbatim and cannot collide with anything the
+        template or ``feedback_text`` might already contain.
 
         Returns ``None`` if the placeholder cannot be located in the render
         (caller should fall back to ChatML markers).
         """
-        placeholder = self._BOUNDARY_PLACEHOLDER
+        placeholder = uuid.uuid4().hex
         messages = [
             {"role": "user", "content": "."},
             {"role": "assistant", "content": placeholder},
@@ -569,7 +567,3 @@ class RolloutHarness:
             "turn_details": turn_details,
             "feedback_texts": self._feedback_texts,
         }
-
-
-# Back-compat alias (one release): TokenObservationWrapper was renamed to RolloutHarness.
-TokenObservationWrapper = RolloutHarness

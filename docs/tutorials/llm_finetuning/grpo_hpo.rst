@@ -37,9 +37,7 @@ Dependencies
     from agilerl.training.train_llm import train_llm_rollout
     from agilerl.llm_envs import (
         RolloutEnv,
-        TokenObservationWrapper,
-        _default_prompt_builder,
-        _extract_question_answer_columns,
+        RolloutHarness,
     )
     from agilerl.utils.utils import create_population
 
@@ -212,7 +210,7 @@ to the agent and provides the context necessary to complete the task. This is a 
 and different reasoning problems will require different conversation templates, although they can follow a similar
 format. We define the conversation template as follows (using ``question`` and ``answer`` as placeholders for the question and answer data)
 and then build a single-turn :class:`RolloutEnv <agilerl.llm_envs.RolloutEnv>` from the question and answer
-columns of our dataset, wrapping it in a :class:`TokenObservationWrapper <agilerl.llm_envs.TokenObservationWrapper>`
+columns of our dataset, wrapping it in a :class:`RolloutHarness <agilerl.llm_envs.RolloutHarness>`
 inside an ``env_factory``.
 
 .. collapse:: Build the Single-Turn Rollout Environment
@@ -234,21 +232,34 @@ inside an ``env_factory``.
         # Define accelerators for distributed training
         accelerator = Accelerator()
 
+        def prompt_builder(question: str) -> str:
+            parts = [
+                m["content"].format(question=question, answer="")
+                for m in conversation_template
+            ]
+            return "\n".join(p for p in parts if p)
+
         # Build a single-turn rollout environment from the dataset
         def env_factory(evaluation_mode: bool = False):
-            train_questions, train_answers = _extract_question_answer_columns(train_dataset)
-            test_questions, test_answers = _extract_question_answer_columns(test_dataset)
+            train_questions, train_answers = (
+                list(train_dataset["question"]),
+                list(train_dataset["answer"]),
+            )
+            test_questions, test_answers = (
+                list(test_dataset["question"]),
+                list(test_dataset["answer"]),
+            )
             raw_env = RolloutEnv(
                 max_turns=1,
                 questions=train_questions,
                 answers=train_answers,
                 reward_fn=combined_rewards,
-                prompt_builder=_default_prompt_builder(conversation_template),
+                prompt_builder=prompt_builder,
                 test_questions=test_questions,
                 test_answers=test_answers,
             )
             raw_env.evaluation_mode = evaluation_mode
-            return TokenObservationWrapper(
+            return RolloutHarness(
                 raw_env,
                 tokenizer=tokenizer,
                 max_turns=1,

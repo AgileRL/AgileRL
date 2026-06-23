@@ -36,7 +36,7 @@ class IsDataclass(Protocol):
     __dataclass_fields__: ClassVar[dict[str, Any]]
 
 
-class ReasoningPrompts(TypedDict):
+class RolloutPrompts(TypedDict):
     input_ids: torch.Tensor
     attention_mask: torch.Tensor
     question: str | list[str] | None
@@ -112,7 +112,7 @@ KernelSizeType = int | tuple[int, ...]
 GymSpaceType = SupportedObsSpaces | list[SupportedObsSpaces]
 GymEnvType = str | gym.Env | gym.vector.VectorEnv | gym.vector.AsyncVectorEnv
 PzEnvType = str | ParallelEnv
-LLMObsType = list[ReasoningPrompts] | ReasoningPrompts
+LLMObsType = list[RolloutPrompts] | RolloutPrompts
 
 NumpyObsType = np.ndarray | ArrayDict | ArrayTuple
 TorchObsType = torch.Tensor | TensorDict | TensorTuple | StandardTensorDict

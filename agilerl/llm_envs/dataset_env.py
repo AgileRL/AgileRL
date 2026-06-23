@@ -1,11 +1,10 @@
-"""Dataset-backed (teacher-forced) LLM env — one class, configured by descriptors.
+"""Dataset-backed (teacher-forced) LLM env — one class, selected by ``kind``.
 
-A ``DatasetEnv`` is the no-generation half of the env taxonomy (see
-``docs/design/llm-env-taxonomy.md`` in agilerl-integration): the completions are dataset
+A ``DatasetEnv`` is the no-generation half of the env taxonomy: the completions are dataset
 labels, scored in a single teacher-forced forward (SFT cross-entropy, DPO preference) with
 no autoregressive rollout. The training regimes (preference / SFT) differ only by the
-*required columns* and the *collate function* — descriptors, not subclasses — so they share
-one class. ``PreferenceGym`` / ``SFTGym`` remain as thin back-compat subclasses.
+*required columns* and the *collate function*, so they share one class and are picked with
+the ``kind`` argument rather than separate subclasses.
 """
 
 from __future__ import annotations
@@ -14,7 +13,7 @@ import copy
 import warnings
 from collections.abc import Callable
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import gymnasium as gym
 import torch
@@ -40,12 +39,14 @@ class DatasetEnv(LLMEnv, gym.Env):
 
     The no-generation half of the env taxonomy: completions are dataset labels
     scored in a single teacher-forced forward (SFT cross-entropy, DPO preference)
-    with no autoregressive rollout. The training regimes (preference / SFT) differ
-    only by the *required columns* and the *collate function* — descriptors, not
-    subclasses — configured via ``required_columns`` + a ``collate_builder`` (and
-    optional ``response_column``). ``reset`` / ``step`` advance the seeded
-    ``DataLoader`` (completions ignored); ``PreferenceGym`` / ``SFTGym`` remain as
-    thin back-compat subclasses.
+    with no autoregressive rollout. The training regimes differ only by the
+    *required columns* and the *collate function*, selected with ``kind``:
+
+    * ``kind="preference"`` (DPO) — requires ``prompt`` / ``chosen`` / ``rejected``.
+    * ``kind="sft"`` — requires ``prompt`` and ``response_column`` (default
+      ``"target"``).
+
+    ``reset`` / ``step`` advance the seeded ``DataLoader`` (completions ignored).
     """
 
     def __init__(
@@ -54,16 +55,25 @@ class DatasetEnv(LLMEnv, gym.Env):
         test_dataset: Dataset,
         tokenizer: AutoTokenizer,
         *,
-        required_columns: set[str],
-        collate_builder: CollateBuilder,
-        response_column: str | None = None,
+        kind: Literal["preference", "sft"],
+        response_column: str = "target",
         data_batch_size_per_gpu: int = 8,
         accelerator: Accelerator | None = None,
         max_context_length: int | None = None,
         min_completion_length: int | None = None,
         seed: int = 42,
     ) -> None:
-        """Build a dataset env over ``required_columns`` collated by ``collate_builder``."""
+        """Build a teacher-forced dataset env for the given ``kind``."""
+        if kind == "preference":
+            required_columns = {"prompt", "chosen", "rejected"}
+            collate_builder: CollateBuilder = preference_collate_builder
+        elif kind == "sft":
+            required_columns = {"prompt", response_column}
+            collate_builder = sft_collate_builder
+        else:
+            msg = f"Unknown dataset kind {kind!r}; expected 'preference' or 'sft'."
+            raise ValueError(msg)
+        self.kind = kind
         self.required_columns = set(required_columns)
         self.response_column = response_column
         self._collate_builder = collate_builder
@@ -343,67 +353,3 @@ def sft_collate_builder(
         }
 
     return collate_fn
-
-
-class PreferenceGym(DatasetEnv):
-    """Back-compat thin subclass: a :class:`DatasetEnv` for preference (DPO) datasets."""
-
-    def __init__(
-        self,
-        train_dataset: Dataset,
-        test_dataset: Dataset,
-        tokenizer: AutoTokenizer,
-        data_batch_size_per_gpu: int = 8,
-        accelerator: Accelerator | None = None,
-        max_context_length: int | None = None,
-        min_completion_length: int | None = None,
-        seed: int = 42,
-    ) -> None:
-        super().__init__(
-            train_dataset,
-            test_dataset,
-            tokenizer,
-            required_columns={"prompt", "chosen", "rejected"},
-            collate_builder=preference_collate_builder,
-            data_batch_size_per_gpu=data_batch_size_per_gpu,
-            accelerator=accelerator,
-            max_context_length=max_context_length,
-            min_completion_length=min_completion_length,
-            seed=seed,
-        )
-
-    def step(self, completions: torch.Tensor | None = None) -> Any:
-        """Return the next batch (``completions`` is unused)."""
-        return super().step(completions)
-
-
-class SFTGym(DatasetEnv):
-    """Back-compat thin subclass: a :class:`DatasetEnv` for SFT datasets."""
-
-    def __init__(
-        self,
-        train_dataset: Dataset,
-        test_dataset: Dataset,
-        tokenizer: AutoTokenizer,
-        data_batch_size_per_gpu: int = 8,
-        response_column: str = "target",
-        accelerator: Accelerator | None = None,
-        max_context_length: int | None = None,
-        seed: int = 42,
-    ) -> None:
-        super().__init__(
-            train_dataset,
-            test_dataset,
-            tokenizer,
-            required_columns={"prompt", response_column},
-            collate_builder=sft_collate_builder,
-            response_column=response_column,
-            data_batch_size_per_gpu=data_batch_size_per_gpu,
-            accelerator=accelerator,
-            max_context_length=max_context_length,
-            seed=seed,
-        )
-
-    def step(self, completions: torch.Tensor | None = None) -> Any:
-        """Advance the data iterator and return the next batch."""
-        return super().step(completions)

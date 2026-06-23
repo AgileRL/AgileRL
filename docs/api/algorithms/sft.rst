@@ -22,7 +22,7 @@ Example
 .. code-block:: python
 
   from agilerl.algorithms.sft import SFT
-  from agilerl.llm_envs import SFTGym
+  from agilerl.llm_envs import DatasetEnv
   from accelerate import Accelerator
   from datasets import load_dataset
   from peft import LoraConfig
@@ -39,17 +39,18 @@ Example
   # Instantiate an accelerator object for distributed training
   accelerator = Accelerator()
 
-  # Load the dataset into an SFTGym environment
+  # Load the dataset into an SFT DatasetEnv
   raw_dataset = load_dataset("HumanLLMs/Human-Like-DPO-Dataset", split="train").shuffle(seed=42)
   train_test_split = raw_dataset.train_test_split(test_size=0.1)
   train_dataset = train_test_split["train"]
   test_dataset = train_test_split["test"]
-  env = SFTGym(
+  env = DatasetEnv(
     train_dataset=train_dataset,
     test_dataset=test_dataset,
     tokenizer=tokenizer,
-    data_batch_size_per_gpu=16,
+    kind="sft",
     response_column="chosen",
+    data_batch_size_per_gpu=16,
     accelerator=accelerator,
   )
 

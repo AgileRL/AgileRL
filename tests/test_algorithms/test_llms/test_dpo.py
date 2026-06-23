@@ -24,7 +24,7 @@ from agilerl.algorithms.core.base import (
     OptimizerWrapper,
 )
 from agilerl.algorithms.dpo import DPO
-from agilerl.llm_envs import PreferenceGym
+from agilerl.llm_envs import DatasetEnv
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.test_algorithms.test_llms.test_grpo import (
     create_module,
@@ -53,10 +53,11 @@ def make_preference_gym(
             "rejected": [f"Rejected {i}" for i in range(num_samples)],
         }
     )
-    return PreferenceGym(
+    return DatasetEnv(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
+        kind="preference",
         data_batch_size_per_gpu=data_batch_size_per_gpu,
         accelerator=accelerator,
     )
@@ -405,10 +406,11 @@ class TestDPOLearn:
             },
         )
         tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path)
-        env = PreferenceGym(
+        env = DatasetEnv(
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
+            kind="preference",
             data_batch_size_per_gpu=data_batch_size,
             accelerator=dpo.accelerator,
         )
@@ -517,10 +519,11 @@ class TestDPOTest:
             },
         )
         tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path)
-        env = PreferenceGym(
+        env = DatasetEnv(
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
+            kind="preference",
             data_batch_size_per_gpu=data_batch_size,
             accelerator=dpo.accelerator,
         )

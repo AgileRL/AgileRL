@@ -18,7 +18,7 @@ from accelerate import Accelerator
 from torch import nn
 
 from agilerl import HAS_DEEPSPEED, HAS_LLM_DEPENDENCIES
-from agilerl.typing import ReasoningPrompts
+from agilerl.typing import RolloutPrompts
 
 logger = logging.getLogger(__name__)
 
@@ -35,9 +35,7 @@ else:
     AutoModelForCausalLMWithValueHead = Any  # type: ignore[assignment,misc]
     BitsAndBytesConfig = Any  # type: ignore[assignment,misc]
 
-_DEPRECATED_LLM_ENV_NAMES = frozenset(
-    ("apply_chat_template", "PreferenceGym", "SFTGym"),
-)
+_DEPRECATED_LLM_ENV_NAMES = frozenset(("apply_chat_template",))
 
 # Named bitsandbytes quantization presets
 _BNB_QUANT_PRESETS = frozenset({"none", "int8", "nf4"})
@@ -123,16 +121,16 @@ def validate_llm_context_lengths(
 
 
 def normalize_reasoning_prompt_batch(
-    prompts: ReasoningPrompts | list[ReasoningPrompts],
-) -> list[ReasoningPrompts]:
+    prompts: RolloutPrompts | list[RolloutPrompts],
+) -> list[RolloutPrompts]:
     """Normalize reasoning prompts into a list-of-dicts per sample.
 
     Supports both legacy list-of-dicts and stacked dict formats where tensor/list
     values are batched on dimension 0.
     :param prompts: The prompts to normalize.
-    :type prompts: ReasoningPrompts | list[ReasoningPrompts]
+    :type prompts: RolloutPrompts | list[RolloutPrompts]
     :return: The normalized prompts.
-    :rtype: list[ReasoningPrompts]
+    :rtype: list[RolloutPrompts]
     """
     if isinstance(prompts, list):
         return prompts
@@ -146,7 +144,7 @@ def normalize_reasoning_prompt_batch(
         return []
 
     # Inspect each key once and write into all output dicts in one pass
-    result: list[ReasoningPrompts] = [{} for _ in range(batch_size)]
+    result: list[RolloutPrompts] = [{} for _ in range(batch_size)]
     for key, value in prompts.items():
         if (
             isinstance(value, torch.Tensor)
@@ -1465,12 +1463,12 @@ def stitch_completion_after_windowed_vllm_generate(
 
 
 def prepare_prompt_hf_generate(
-    prompt_dict: ReasoningPrompts, device: torch.device
+    prompt_dict: RolloutPrompts, device: torch.device
 ) -> dict[str, torch.Tensor | int]:
     """Prepare a prompt dictionary for HuggingFace generate.
 
     :param prompt_dict: The prompt dictionary to prepare.
-    :type prompt_dict: ReasoningPrompts
+    :type prompt_dict: RolloutPrompts
     :param device: The device to move the prompt dictionary to.
     :type device: torch.device
     :return: The prepared prompt dictionary.
@@ -1554,13 +1552,13 @@ def sample_eval_prompts(
     """Randomly sample *n* ``(prompt, chosen, rejected)`` triples from
     *env*'s held-out test dataset.
 
-    Columns are resolved automatically per gym type:
+    Columns are resolved automatically per dataset ``kind``:
 
-    * :class:`SFTGym` — ``chosen`` is ``env.response_column``; ``rejected``
+    * ``kind="sft"`` — ``chosen`` is ``env.response_column``; ``rejected``
       is ``None`` (SFT has no negative example).
-    * :class:`PreferenceGym` — ``chosen`` and ``rejected`` map to the
+    * ``kind="preference"`` — ``chosen`` and ``rejected`` map to the
       dataset's ``"chosen"`` / ``"rejected"`` columns.
-    * Any other gym — both are ``None``.
+    * Any other env — both are ``None``.
 
     :param env: AgileRL gym environment with a ``test_dataloader`` attribute.
     :type env: Any
@@ -1577,9 +1575,10 @@ def sample_eval_prompts(
 
     chosen_col: str | None = None
     rejected_col: str | None = None
-    if hasattr(env, "response_column"):  # SFTGym
+    kind = getattr(env, "kind", None)
+    if kind == "sft":
         chosen_col = env.response_column
-    elif "chosen" in dataset.features:  # PreferenceGym
+    elif kind == "preference":
         chosen_col = "chosen"
         rejected_col = "rejected"
 

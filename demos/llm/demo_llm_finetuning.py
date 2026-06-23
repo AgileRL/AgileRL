@@ -52,7 +52,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_llm import train_llm_dataset
 from agilerl.utils.llm_utils import compare_responses, sample_eval_prompts
-from agilerl.llm_envs import PreferenceGym, SFTGym
+from agilerl.llm_envs import DatasetEnv
 
 MODEL_PATH = "Qwen/Qwen2.5-0.5B"
 DATASET = "HumanLLMs/Human-Like-DPO-Dataset"
@@ -104,11 +104,12 @@ def main(
         accelerator = None
 
     # --- Environment -------------------------------------------------------
-    env_cls = SFTGym if mode == "sft" else PreferenceGym
+    env_kind = "sft" if mode == "sft" else "preference"
     env_kwargs: dict = dict(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
+        kind=env_kind,
         data_batch_size_per_gpu=init_hp["BATCH_SIZE"],
         accelerator=accelerator,
         max_context_length=init_hp.get("MAX_CONTEXT_LENGTH"),
@@ -116,8 +117,8 @@ def main(
     if mode == "sft":
         env_kwargs["response_column"] = "chosen"
 
-    print(f"Setting up {env_cls.__name__} environment...")
-    env = env_cls(**env_kwargs)
+    print(f"Setting up {env_kind} DatasetEnv environment...")
+    env = DatasetEnv(**env_kwargs)
 
     init_hp["PAD_TOKEN_ID"] = tokenizer.eos_token_id
     init_hp["PAD_TOKEN"] = tokenizer.eos_token

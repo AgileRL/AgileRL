@@ -35,7 +35,7 @@ from agilerl.algorithms.dpo import DPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_llm import train_llm_dataset
-from agilerl.llm_envs import PreferenceGym
+from agilerl.llm_envs import DatasetEnv
 from agilerl.utils.llm_utils import (
     compare_responses,
     sample_eval_prompts,
@@ -79,11 +79,12 @@ def main(init_hp: dict, mut_p: dict, save_path: str = "outputs") -> None:
     except Exception:
         accelerator = None
 
-    print("Setting up PreferenceGym environment...")
-    env = PreferenceGym(
+    print("Setting up preference DatasetEnv environment...")
+    env = DatasetEnv(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
+        kind="preference",
         data_batch_size_per_gpu=init_hp["BATCH_SIZE"],
         accelerator=accelerator,
         max_context_length=init_hp.get("MAX_CONTEXT_LENGTH"),

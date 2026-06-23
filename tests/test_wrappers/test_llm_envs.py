@@ -1,7 +1,5 @@
 """Tests for :mod:`agilerl.llm_envs` (preference and SFT dataset envs, rollout env)."""
 
-import importlib
-import sys
 import pytest
 import torch
 from accelerate import Accelerator
@@ -17,26 +15,11 @@ from transformers.tokenization_utils_base import BatchEncoding
 from agilerl.llm_envs import (
     DatasetEnv,
     LLMEnv,
-    PreferenceGym,
     RolloutEnv,
-    SFTGym,
     apply_chat_template,
     dataloader_shuffle_order,
 )
-from agilerl.llm_envs.rollout_env import (
-    _default_prompt_builder,
-    _extract_question_answer_columns,
-)
 from tests import TINY_LLM_FIXTURE_PATH
-
-
-def test_wrappers_llm_envs_compat_module_warns_and_reexports():
-    sys.modules.pop("agilerl.wrappers.llm_envs", None)
-    with pytest.warns(FutureWarning, match="deprecated"):
-        compat_module = importlib.import_module("agilerl.wrappers.llm_envs")
-    from agilerl.llm_envs import PreferenceGym as NewPreferenceGym
-
-    assert compat_module.PreferenceGym is NewPreferenceGym
 
 
 class Info:
@@ -71,8 +54,8 @@ class DummySFTDataset(Dataset):
     def __init__(self, num_samples: int) -> None:
         self.prompt = [f"This is prompt {i}." for i in range(num_samples)]
         self.target = [f"This is response {i}." for i in range(num_samples)]
-        # SFTGym's default ``response_column`` is "target"; the output
-        # batch is still keyed under "response" regardless of input name.
+        # ``DatasetEnv(kind="sft")``'s default ``response_column`` is "target";
+        # the output batch is still keyed under "response" regardless of input name.
         self.features = {
             "prompt": self.prompt,
             "target": self.target,
@@ -112,10 +95,10 @@ def sft_dataset(num_samples):
     return train_dataset, test_dataset
 
 
-class TestPreferenceGymInit:
+class TestDatasetEnvPreferenceInit:
     @pytest.mark.parametrize("use_accelerator", [True, False])
     @pytest.mark.parametrize("num_samples", [20])
-    def test_preference_gym_init(
+    def test_preference_init(
         self,
         preference_dataset,
         accelerator_factory,
@@ -125,10 +108,11 @@ class TestPreferenceGymInit:
         train_dataset, test_dataset = preference_dataset
         tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
         data_batch_size = 8
-        env = PreferenceGym(
+        env = DatasetEnv(
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
+            kind="preference",
             data_batch_size_per_gpu=data_batch_size,
             accelerator=accelerator_factory(use_accelerator),
         )
@@ -152,7 +136,7 @@ class TestPreferenceGymInit:
         assert not env.evaluation_mode
         assert env.data_batch_size_per_gpu == data_batch_size
 
-    def test_preference_gym_max_context_length_error(self):
+    def test_preference_max_context_length_error(self):
         train_dataset = HFDataset.from_dict(
             {
                 "prompt": [
@@ -175,16 +159,17 @@ class TestPreferenceGymInit:
             ValueError,
             match="No samples left in the train dataset after filtering by the max context length constraint, use a larger max context length.",
         ):
-            PreferenceGym(
+            DatasetEnv(
                 train_dataset=train_dataset,
                 test_dataset=test_dataset,
                 tokenizer=tokenizer,
+                kind="preference",
                 data_batch_size_per_gpu=data_batch_size,
                 max_context_length=5,
                 min_completion_length=1,
             )
 
-    def test_preference_gym_max_context_length_warning(self):
+    def test_preference_max_context_length_warning(self):
         train_dataset = HFDataset.from_dict(
             {
                 "prompt": [
@@ -208,10 +193,11 @@ class TestPreferenceGymInit:
             UserWarning,
             match=r"1 samples were filtered out of the train dataset due to the max context length constraint.",
         ):
-            env = PreferenceGym(
+            env = DatasetEnv(
                 train_dataset=train_dataset,
                 test_dataset=test_dataset,
                 tokenizer=tokenizer,
+                kind="preference",
                 data_batch_size_per_gpu=data_batch_size,
                 max_context_length=10,
                 min_completion_length=1,
@@ -219,32 +205,34 @@ class TestPreferenceGymInit:
         assert len(env.train_dataloader) == 1
         assert len(env.test_dataloader) == 1
 
-    def test_preference_gym_init_missing_features(self):
-        """PreferenceGym raises AssertionError when dataset lacks required features."""
+    def test_preference_init_missing_features(self):
+        """A preference ``DatasetEnv`` raises AssertionError when the dataset lacks required features."""
         tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
         good_dataset = HFDataset.from_dict(
             {"prompt": ["p"], "chosen": ["c"], "rejected": ["r"]},
         )
-        # Has "prompt" (so super().__init__ filter works) but missing "chosen"/"rejected"
+        # Has "prompt" (so the column filter in __init__ works) but missing "chosen"/"rejected"
         bad_dataset = HFDataset.from_dict({"prompt": ["p"], "other": ["o"]})
         with pytest.raises(AssertionError, match="must contain columns"):
-            PreferenceGym(
+            DatasetEnv(
                 train_dataset=bad_dataset,
                 test_dataset=good_dataset,
                 tokenizer=tokenizer,
+                kind="preference",
             )
         with pytest.raises(AssertionError, match="must contain columns"):
-            PreferenceGym(
+            DatasetEnv(
                 train_dataset=good_dataset,
                 test_dataset=bad_dataset,
                 tokenizer=tokenizer,
+                kind="preference",
             )
 
 
-class TestPreferenceGymStep:
+class TestDatasetEnvPreferenceStep:
     @pytest.mark.parametrize("use_accelerator", [True, False])
     @pytest.mark.parametrize("num_samples", [20])
-    def test_preference_gym_step(
+    def test_preference_step(
         self,
         preference_dataset,
         accelerator_factory,
@@ -254,10 +242,11 @@ class TestPreferenceGymStep:
         train_dataset, test_dataset = preference_dataset
         tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
         data_batch_size = 8
-        env = PreferenceGym(
+        env = DatasetEnv(
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
+            kind="preference",
             data_batch_size_per_gpu=data_batch_size,
             accelerator=accelerator_factory(use_accelerator),
         )
@@ -294,10 +283,10 @@ class TestPreferenceGymStep:
         assert not env.reset_called
 
 
-class TestPreferenceGymReset:
+class TestDatasetEnvPreferenceReset:
     @pytest.mark.parametrize("use_accelerator", [True, False])
     @pytest.mark.parametrize("num_samples", [20])
-    def test_preference_gym_reset(
+    def test_preference_reset(
         self,
         preference_dataset,
         accelerator_factory,
@@ -307,10 +296,11 @@ class TestPreferenceGymReset:
         train_dataset, test_dataset = preference_dataset
         tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
         data_batch_size = 8
-        env = PreferenceGym(
+        env = DatasetEnv(
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
+            kind="preference",
             data_batch_size_per_gpu=data_batch_size,
             accelerator=accelerator_factory(use_accelerator),
         )
@@ -348,7 +338,7 @@ class TestPreferenceGymReset:
 
     @pytest.mark.parametrize("use_accelerator", [True, False])
     @pytest.mark.parametrize("num_samples", [20])
-    def test_preference_gym_reset_reset_dataloaders_warning(
+    def test_preference_reset_reset_dataloaders_warning(
         self,
         preference_dataset,
         accelerator_factory,
@@ -358,10 +348,11 @@ class TestPreferenceGymReset:
         train_dataset, test_dataset = preference_dataset
         tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
         data_batch_size = 1
-        env = PreferenceGym(
+        env = DatasetEnv(
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
+            kind="preference",
             data_batch_size_per_gpu=data_batch_size,
             accelerator=accelerator_factory(use_accelerator),
         )
@@ -407,7 +398,7 @@ class TestPreferenceGymReset:
 
     @pytest.mark.parametrize("use_accelerator", [True, False])
     @pytest.mark.parametrize("num_samples", [20])
-    def test_preference_gym_reset_reset_called_warning(
+    def test_preference_reset_reset_called_warning(
         self,
         preference_dataset,
         accelerator_factory,
@@ -417,10 +408,11 @@ class TestPreferenceGymReset:
         train_dataset, test_dataset = preference_dataset
         tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
         data_batch_size = 1
-        env = PreferenceGym(
+        env = DatasetEnv(
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
+            kind="preference",
             data_batch_size_per_gpu=data_batch_size,
             accelerator=accelerator_factory(use_accelerator),
         )
@@ -464,7 +456,7 @@ class TestPreferenceGymReset:
 
     @pytest.mark.parametrize("num_samples", [20])
     @pytest.mark.parametrize("use_accelerator", [True, False])
-    def test_preference_gym_reset_num_epochs(
+    def test_preference_reset_num_epochs(
         self,
         preference_dataset,
         num_samples,
@@ -474,10 +466,11 @@ class TestPreferenceGymReset:
         train_dataset, test_dataset = preference_dataset
         tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
         data_batch_size = 1
-        env = PreferenceGym(
+        env = DatasetEnv(
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
+            kind="preference",
             data_batch_size_per_gpu=data_batch_size,
             accelerator=accelerator_factory(use_accelerator),
         )
@@ -486,9 +479,9 @@ class TestPreferenceGymReset:
         assert env.num_epochs == 1
 
 
-class TestPreferenceGymCreateCollateFn:
-    def test_preference_gym_collate_max_context_length_branch(self):
-        """Exercise ``max_context_length is not None`` tokenisation in PreferenceGym."""
+class TestDatasetEnvPreferenceCreateCollateFn:
+    def test_preference_collate_max_context_length_branch(self):
+        """Exercise ``max_context_length is not None`` tokenisation in a preference ``DatasetEnv``."""
         tokenizer = AutoTokenizer.from_pretrained(
             TINY_LLM_FIXTURE_PATH,
         )
@@ -506,10 +499,11 @@ class TestPreferenceGymCreateCollateFn:
                 "rejected": ["no"],
             },
         )
-        env = PreferenceGym(
+        env = DatasetEnv(
             train_dataset=train_ds,
             test_dataset=test_ds,
             tokenizer=tokenizer,
+            kind="preference",
             data_batch_size_per_gpu=1,
             max_context_length=64,
         )
@@ -522,10 +516,10 @@ class TestPreferenceGymCreateCollateFn:
         assert out["chosen_input_ids"].shape[1] == 64
 
 
-class TestSFTGymInit:
+class TestDatasetEnvSFTInit:
     @pytest.mark.parametrize("use_accelerator", [True, False])
     @pytest.mark.parametrize("num_samples", [20])
-    def test_sft_gym_init(
+    def test_sft_init(
         self,
         sft_dataset,
         accelerator_factory,
@@ -535,10 +529,11 @@ class TestSFTGymInit:
         train_dataset, test_dataset = sft_dataset
         tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
         data_batch_size = 8
-        env = SFTGym(
+        env = DatasetEnv(
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
+            kind="sft",
             data_batch_size_per_gpu=data_batch_size,
             accelerator=accelerator_factory(use_accelerator),
         )
@@ -555,7 +550,7 @@ class TestSFTGymInit:
         assert not env.reset_called
         assert env.data_batch_size_per_gpu == data_batch_size
 
-    def test_sft_gym_max_context_length_warning(self):
+    def test_sft_max_context_length_warning(self):
         train_dataset = HFDataset.from_dict(
             {
                 "prompt": [
@@ -576,39 +571,42 @@ class TestSFTGymInit:
             UserWarning,
             match=r"1 samples were filtered out of the train dataset due to the max context length constraint.",
         ):
-            env = SFTGym(
+            env = DatasetEnv(
                 train_dataset=train_dataset,
                 test_dataset=test_dataset,
                 tokenizer=tokenizer,
+                kind="sft",
                 data_batch_size_per_gpu=8,
                 max_context_length=10,
             )
         assert len(env.train_dataloader) == 1
 
-    def test_sft_gym_init_missing_features(self):
-        """SFTGym raises AssertionError when dataset lacks required features."""
+    def test_sft_init_missing_features(self):
+        """An SFT ``DatasetEnv`` raises AssertionError when the dataset lacks required features."""
         tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
         good_dataset = HFDataset.from_dict({"prompt": ["p"], "target": ["r"]})
-        # Has "prompt" (so super().__init__ filter works) but missing "target"
+        # Has "prompt" (so the column filter in __init__ works) but missing "target"
         bad_dataset = HFDataset.from_dict({"prompt": ["p"], "other": ["o"]})
         with pytest.raises(AssertionError, match="must contain"):
-            SFTGym(
+            DatasetEnv(
                 train_dataset=bad_dataset,
                 test_dataset=good_dataset,
                 tokenizer=tokenizer,
+                kind="sft",
             )
         with pytest.raises(AssertionError, match="must contain"):
-            SFTGym(
+            DatasetEnv(
                 train_dataset=good_dataset,
                 test_dataset=bad_dataset,
                 tokenizer=tokenizer,
+                kind="sft",
             )
 
 
-class TestSFTGymStep:
+class TestDatasetEnvSFTStep:
     @pytest.mark.parametrize("num_samples", [20])
     @pytest.mark.parametrize("use_accelerator", [True, False])
-    def test_sft_gym_num_epochs_increment(
+    def test_sft_num_epochs_increment(
         self,
         sft_dataset,
         num_samples,
@@ -617,10 +615,11 @@ class TestSFTGymStep:
     ):
         train_dataset, test_dataset = sft_dataset
         tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
-        env = SFTGym(
+        env = DatasetEnv(
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
+            kind="sft",
             data_batch_size_per_gpu=1,
             accelerator=accelerator_factory(use_accelerator),
         )
@@ -629,10 +628,10 @@ class TestSFTGymStep:
         assert env.num_epochs == 1
 
 
-class TestSFTGymReset:
+class TestDatasetEnvSFTReset:
     @pytest.mark.parametrize("use_accelerator", [True, False])
     @pytest.mark.parametrize("num_samples", [20])
-    def test_sft_gym_step_and_reset(
+    def test_sft_step_and_reset(
         self,
         sft_dataset,
         accelerator_factory,
@@ -642,10 +641,11 @@ class TestSFTGymReset:
         train_dataset, test_dataset = sft_dataset
         tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
         data_batch_size = 8
-        env = SFTGym(
+        env = DatasetEnv(
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
+            kind="sft",
             data_batch_size_per_gpu=data_batch_size,
             accelerator=accelerator_factory(use_accelerator),
         )
@@ -672,7 +672,7 @@ class TestSFTGymReset:
 
     @pytest.mark.parametrize("use_accelerator", [True, False])
     @pytest.mark.parametrize("num_samples", [20])
-    def test_sft_gym_reset_warnings_match_iterable_base(
+    def test_sft_reset_warnings_match_iterable_base(
         self,
         sft_dataset,
         accelerator_factory,
@@ -681,10 +681,11 @@ class TestSFTGymReset:
     ):
         train_dataset, test_dataset = sft_dataset
         tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
-        env = SFTGym(
+        env = DatasetEnv(
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
+            kind="sft",
             data_batch_size_per_gpu=1,
             accelerator=accelerator_factory(use_accelerator),
         )
@@ -704,7 +705,7 @@ class TestSFTGymReset:
             env.reset_called = True
             env.reset()
 
-    def test_sft_gym_response_column_chosen(self):
+    def test_sft_response_column_chosen(self):
         """``response_column`` can point at a DPO-style ``chosen`` column."""
         train_dataset = HFDataset.from_dict(
             {
@@ -721,10 +722,11 @@ class TestSFTGymReset:
             },
         )
         tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
-        env = SFTGym(
+        env = DatasetEnv(
             train_dataset=train_dataset,
             test_dataset=test_dataset,
             tokenizer=tokenizer,
+            kind="sft",
             data_batch_size_per_gpu=1,
             response_column="chosen",
         )
@@ -923,54 +925,6 @@ def test_rollout_standalone_cursor_walks_split_and_resets_on_switch():
     assert env.reset()[0] == "q0"
 
 
-def test_extract_question_answer_columns_from_hf_style_dataset():
-    """Column access (``dataset["question"]``) is preferred for HF-style datasets."""
-
-    class _ColumnDataset:
-        def __init__(self):
-            self._cols = {"question": ["q0", "q1"], "answer": ["a0", "a1"]}
-
-        def __getitem__(self, key):
-            return self._cols[key]
-
-    questions, answers = _extract_question_answer_columns(_ColumnDataset())
-    assert questions == ["q0", "q1"]
-    assert answers == ["a0", "a1"]
-
-
-def test_extract_question_answer_columns_from_torch_style_dataset():
-    """A per-row ``torch``-style dataset (string indexing raises) is read row by row."""
-
-    class _RowDataset(Dataset):
-        def __init__(self):
-            self._rows = [
-                {"question": "q0", "answer": "a0"},
-                {"question": "q1", "answer": "a1"},
-            ]
-
-        def __len__(self):
-            return len(self._rows)
-
-        def __getitem__(self, index):
-            return self._rows[index]
-
-    questions, answers = _extract_question_answer_columns(_RowDataset())
-    assert questions == ["q0", "q1"]
-    assert answers == ["a0", "a1"]
-
-
-def test_default_prompt_builder_formats_and_joins_template():
-    """The builder formats each template message's content with the question
-    (answer blank, mirroring generation) and joins the non-empty parts."""
-    template = [
-        {"role": "system", "content": "Solve it."},
-        {"role": "user", "content": "Q: {question} A: {answer}"},
-        {"role": "assistant", "content": ""},  # empty render is dropped
-    ]
-    build = _default_prompt_builder(template)
-    assert build("2+2") == "Solve it.\nQ: 2+2 A: "
-
-
 def test_llm_env_close_is_a_noop_by_default():
     """The base ``close`` releases nothing by default and returns ``None``."""
 
@@ -984,28 +938,17 @@ def test_llm_env_close_is_a_noop_by_default():
     assert _MinimalEnv().close() is None
 
 
-def test_preference_sft_back_compat_modules_reexport_dataset_env_subclasses():
-    """The back-compat shim modules re-export the descriptor-configured
-    :class:`DatasetEnv` subclasses."""
-    from agilerl.llm_envs.preference import PreferenceGym as ShimPreferenceGym
-    from agilerl.llm_envs.sft import SFTGym as ShimSFTGym
-
-    assert issubclass(ShimPreferenceGym, DatasetEnv)
-    assert issubclass(ShimSFTGym, DatasetEnv)
-    assert ShimPreferenceGym is PreferenceGym
-    assert ShimSFTGym is SFTGym
-
-
 def test_dataset_env_len_and_eval_mode_preserve_tokenized_prompts():
     """``__len__`` reflects the active split and ``eval_mode`` saves/restores
     ``last_tokenized_prompts`` around the held-out block."""
     train_dataset = DummyPreferenceDataset(6)
     test_dataset = DummyPreferenceDataset(2)
     tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
-    env = PreferenceGym(
+    env = DatasetEnv(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
+        kind="preference",
         data_batch_size_per_gpu=2,
     )
 
