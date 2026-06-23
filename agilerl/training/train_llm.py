@@ -203,7 +203,7 @@ def _normalize_learn_metrics(
             msg = "Preference learn() tuple output must have 3 values."
             raise ValueError(msg)
         return {
-            "loss": learn_output[0],
+            "mean_loss": learn_output[0],
             "mean_chosen_reward": learn_output[1],
             "mean_rejected_reward": learn_output[2],
         }
@@ -266,7 +266,7 @@ def build_train_wandb_dict(
             }
 
         for metric_name, wandb_name in (
-            ("Train/Loss", "Train/Mean Population Loss"),
+            ("Train/Mean Loss", "Train/Mean Population Loss"),
             ("Train/Mean Chosen Reward", "Train/Mean Population Chosen Reward"),
             ("Train/Mean Rejected Reward", "Train/Mean Population Rejected Reward"),
         ):
@@ -898,7 +898,7 @@ def train_llm_dataset(
                 f"{border}\n"
                 f"Fitness:\t\t{fitness}\n"
                 f"Reward Margin:\t{mean_reward_margin:.4f}\n"
-                f"Loss:\t\t{agg_metrics.get('loss', 'N/A')}\n"
+                f"Loss:\t\t{agg_metrics.get('mean_loss', 'N/A')}\n"
                 f"Chosen Reward:\t{agg_metrics.get('mean_chosen_reward', 'N/A')}\n"
                 f"Rejected Reward:\t{agg_metrics.get('mean_rejected_reward', 'N/A')}\n"
                 f"5 fitness avgs:\t{avg_fitness}\n"

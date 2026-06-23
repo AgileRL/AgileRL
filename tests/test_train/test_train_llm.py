@@ -1769,6 +1769,25 @@ class TestBuildEvalWandbDict:
         assert eval_out["Eval/Best Fitness"] == pytest.approx(-0.3)
         assert eval_out["Eval/Mean Population Fitness"] == pytest.approx(-0.4)
 
+    def test_build_train_wandb_dict_preference_mode(self):
+        pop = _make_pop_for_wandb_dict(size=2)
+        agent = MagicMock(spec=DPO)
+        train_metrics = {
+            "agent_0/train_metrics": {
+                "Train/Mean Loss": 0.5,
+                "Train/Mean Reward Margin": 0.2,
+            },
+            "agent_1/train_metrics": {
+                "Train/Mean Loss": 0.3,
+                "Train/Mean Reward Margin": 0.4,
+            },
+        }
+        train_out = build_train_wandb_dict(
+            agent_metrics_dict=train_metrics, pop=pop, agent=agent, mode="preference"
+        )
+        assert train_out["Train/Mean Population Loss"] == pytest.approx(0.4)
+        assert train_out["Train/Mean Population Reward Margin"] == pytest.approx(0.3)
+
 
 class TestNormalizeLearnMetrics:
     def test_train_metric_format_and_learn_output_normalization_helpers(self):
@@ -1786,6 +1805,13 @@ class TestNormalizeLearnMetrics:
         assert metrics["mean_kl"] == 0.5
         assert metrics["pg_loss"] == 0.2
         assert metrics["entropy"] == 0.3
+
+    def test_preference_tuple_normalizes_to_mean_loss(self):
+        agent = MagicMock(spec=DPO)
+        metrics = _normalize_learn_metrics(agent, (0.7, 0.2, 0.1), mode="preference")
+        assert metrics["mean_loss"] == 0.7
+        assert metrics["mean_chosen_reward"] == 0.2
+        assert metrics["mean_rejected_reward"] == 0.1
 
     def test_normalize_learn_metrics_error_paths_and_multiturn_len5(self):
         agent = MagicMock(spec=LLMPPO)
