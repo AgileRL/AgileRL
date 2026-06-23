@@ -11,6 +11,15 @@ comparable across generations and runs):
   ranges spanning >= 1 order of magnitude, e.g. learning rates), and the per-HP
   diversity is ``2 * std`` of those normalised values (the ``2x`` rescales the
   ``[0, 0.5]`` maximum std of bounded data onto ``[0, 1]``). Averaged over HPs.
+  This is a *marginal* measure -- it sees each HP axis independently.
+* **Hyperparameter effective dimensionality** -- the joint counterpart of the
+  above: the participation ratio ``(sum lambda)^2 / sum lambda^2`` of the
+  eigenvalues of the population's covariance over the same normalised HP vectors,
+  i.e. how many *independent directions* of the joint configuration space the
+  population spans. Rescaled onto ``[0, 1]`` by the rank ceiling
+  ``min(D, n - 1)``. Unlike the marginal spread it responds to recombination of
+  hyperparameters (e.g. a crossover operator) that creates new *combinations*
+  without widening any single axis.
 * **Architecture diversity** -- each evolvable network is *scalarized* to a
   descriptor vector capturing shape and capacity: **depth** (number of hidden
   layers), **total width** (sum of layer sizes), **mean width**, **max width**
@@ -194,6 +203,72 @@ def _hp_diversity(agents: list[Any]) -> float:
     return float(np.mean(spreads)) if spreads else float("nan")
 
 
+def _normalized_hp_matrix(agents: list[Any]) -> np.ndarray:
+    """``(n_agents, D)`` matrix of search-range-normalised hyperparameter values.
+
+    Same per-HP normalisation as :func:`_hp_diversity`: each column is linearly
+    rescaled onto ``[0, 1]`` by the HP's fixed ``min``/``max``, in *log space* for
+    strictly-positive ranges spanning >= 1 order of magnitude. Non-scalar or
+    degenerate hyperparameters are dropped, so ``D`` is the number of usable
+    scalar HPs (the columns of the returned matrix, in ``config`` order).
+    """
+    config = getattr(agents[0].registry, "hp_config", None)
+    if not config:
+        return np.empty((len(agents), 0))
+    columns: list[np.ndarray] = []
+    for name in config.names():
+        try:
+            param = config[name]
+            lo, hi = float(param.min), float(param.max)
+            values = np.asarray(
+                [float(getattr(agent, name)) for agent in agents], dtype=float
+            )
+        except (TypeError, ValueError):
+            continue  # non-scalar hyperparameter (e.g. array-valued noise)
+        if hi <= lo:
+            continue
+        if (
+            lo > 0.0 and hi > 0.0 and (hi / lo) >= 10.0
+        ):  # log-scale, matches _hp_diversity
+            if np.any(values <= 0.0):
+                continue
+            values, lo, hi = np.log(values), math.log(lo), math.log(hi)
+        columns.append(np.clip((values - lo) / (hi - lo), 0.0, 1.0))
+    return np.column_stack(columns) if columns else np.empty((len(agents), 0))
+
+
+def _hp_effective_dimensionality(agents: list[Any]) -> float:
+    """Normalised participation ratio of the population's hyperparameter covariance.
+
+    Counts how many *independent directions* of the joint hyperparameter space the
+    population spans -- the joint/combinatorial diversity that the marginal spread
+    metric (:func:`_hp_diversity`) is blind to. Computed as the participation ratio
+    ``(sum lambda)^2 / sum lambda^2`` of the covariance eigenvalues (the "effective
+    number of dimensions", in ``[1, rank]``), then rescaled onto ``[0, 1]`` by the
+    rank ceiling ``min(D, n - 1)`` so it reads as the fraction of the *achievable*
+    independent directions in use -- comparable across populations of different
+    size despite the small-population rank cap.
+
+    Built on the covariance (not the correlation) of the search-range-normalised
+    values: a pinned/constant HP then contributes a zero eigenvalue and harmlessly
+    drops out, rather than blowing up a per-column standardisation.
+    """
+    matrix = _normalized_hp_matrix(agents)
+    n, d = matrix.shape
+    rank_cap = min(d, n - 1)
+    if rank_cap < 2:
+        return float("nan")  # need >= 2 achievable directions to be meaningful
+    cov = np.cov(matrix, rowvar=False)  # (D, D), observations = agents
+    if float(np.trace(cov)) <= 0.0:
+        return 0.0  # population collapsed to a point: no diversity
+    eigvals = np.clip(np.linalg.eigvalsh(cov), 0.0, None)
+    s1, s2 = float(eigvals.sum()), float((eigvals**2).sum())
+    if s2 <= 0.0:
+        return 0.0
+    participation_ratio = (s1 * s1) / s2
+    return float(min(1.0, max(0.0, (participation_ratio - 1.0) / (rank_cap - 1.0))))
+
+
 def _arch_diversity(agents: list[Any]) -> float:
     """Mean per-descriptor normalised spread across the population."""
     per_agent: list[dict[tuple, float]] = []
@@ -263,8 +338,11 @@ def population_diversity(
         (``Mutations.activation_selection``) used as the entropy normaliser;
         defaults to ``["ReLU", "ELU", "GELU"]`` (the ``Mutations`` default) when
         ``None``.
-    :return: ``{"hp": float, "arch": float, "activation": float}``, each in
-        ``[0, 1]`` (or ``nan`` for an axis that could not be measured).
+    :return: ``{"hp": float, "hp_effdim": float, "arch": float,
+        "activation": float}``, each in ``[0, 1]`` (or ``nan`` for an axis that
+        could not be measured). ``hp_effdim`` is the normalised effective
+        dimensionality (joint/combinatorial spread) of the hyperparameter
+        configurations, complementing the marginal per-HP spread of ``hp``.
     """
     if not agents:
         return {"hp": float("nan"), "arch": float("nan"), "activation": float("nan")}
@@ -279,6 +357,7 @@ def population_diversity(
 
     return {
         "hp": _safe(_hp_diversity, agents),
+        "hp_effdim": _safe(_hp_effective_dimensionality, agents),
         "arch": _safe(_arch_diversity, agents),
         "activation": _safe(_activation_diversity, agents, options),
     }

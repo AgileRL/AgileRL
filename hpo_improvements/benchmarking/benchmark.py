@@ -270,6 +270,27 @@ def _build_trainer(
     )
 
 
+def _move_replay_buffer_to_cpu(trainer: LocalTrainer) -> None:
+    """Relocate the trainer's off-policy replay buffer(s) to CPU (host RAM).
+
+    The trainer builds its buffer on the training device, but the buffer's
+    backing storage is allocated lazily on the first ``add()`` (which copies the
+    transition to ``buffer.device``). Re-pointing ``buffer.device`` to ``"cpu"``
+    *before* training therefore makes the whole buffer live in host RAM, keeping
+    a large Atari replay buffer out of VRAM so an HPO population (one set of
+    networks per agent) fits on the GPU. Sampled minibatches are small and are
+    moved back to the agent's device in each algorithm's ``learn()`` (see
+    ``DQN.learn``). On-policy algorithms (e.g. IPPO) have no replay buffer, so
+    this is a no-op for them.
+
+    :param trainer: A constructed (untrained) trainer.
+    """
+    for attr in ("memory", "n_step_memory"):
+        buffer = getattr(trainer, attr, None)
+        if buffer is not None:
+            buffer.device = "cpu"
+
+
 # --------------------------------------------------------------------------- #
 # Input stage
 # --------------------------------------------------------------------------- #
@@ -300,6 +321,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--wandb-api-key",
         default=None,
         help="W&B API key (else WANDB_API_KEY env var is used)",
+    )
+    p.add_argument(
+        "--move-replay-buffer-to-cpu",
+        action="store_true",
+        help=(
+            "Store the off-policy replay buffer on CPU (host RAM) instead of the "
+            "training device. Keeps a large Atari buffer out of VRAM so an HPO "
+            "population fits on the GPU; sampled minibatches are moved to the "
+            "agent's device in learn(). No effect for on-policy algos (no buffer)."
+        ),
     )
     return p.parse_args(argv)
 
@@ -1313,6 +1344,7 @@ def run_training(
     out_dir: Path,
     wandb_api_key: str | None,
     render: bool = True,
+    move_replay_buffer_to_cpu: bool = False,
 ) -> dict[str, Any]:
     """Train a fresh agent for one (environment, seed), checkpoint and render.
 
@@ -1333,6 +1365,9 @@ def run_training(
     :param out_dir: Directory for ``elite_{algo}.pt``, ``train.log`` and the render.
     :param wandb_api_key: W&B API key (else ``WANDB_API_KEY`` env var is used).
     :param render: Whether to render the best agent to an MP4.
+    :param move_replay_buffer_to_cpu: Keep the off-policy replay buffer on CPU
+        (host RAM) instead of the training device (see
+        :func:`_move_replay_buffer_to_cpu`). No effect for on-policy algos.
     :return: ``{"run_name", "pop_size", "hp_names", "elite_path"}``.
     :rtype: dict[str, Any]
     """
@@ -1364,6 +1399,8 @@ def run_training(
     # creation (do not call env.reset(seed=...) afterwards).
     seed_everything(seed)
     trainer = _build_trainer(manifest, env_name, algo, seed, device)
+    if move_replay_buffer_to_cpu:
+        _move_replay_buffer_to_cpu(trainer)
 
     # Multi-agent (PettingZoo) env seeding for reproducibility. Unlike EnvPool
     # (seeded at creation), AgileRL's multi-agent on-policy loop calls env.reset()
@@ -1513,6 +1550,7 @@ def run_environment(
     stamp: str,
     bench_dir: Path,
     wandb_api_key: str | None,
+    move_replay_buffer_to_cpu: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, np.ndarray] | None] | None:
     """Train, log, fetch, render and plot for a single environment.
 
@@ -1540,6 +1578,7 @@ def run_environment(
         out_dir=env_dir,
         wandb_api_key=wandb_api_key,
         render=True,
+        move_replay_buffer_to_cpu=move_replay_buffer_to_cpu,
     )
 
     return fetch_and_plot(
@@ -1632,6 +1671,7 @@ def main(argv: list[str] | None = None) -> None:
                     stamp=stamp,
                     bench_dir=bench_dir,
                     wandb_api_key=args.wandb_api_key,
+                    move_replay_buffer_to_cpu=args.move_replay_buffer_to_cpu,
                 )
                 if result is not None:
                     x, best, norm, diversity = result

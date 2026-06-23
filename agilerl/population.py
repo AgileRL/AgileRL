@@ -64,6 +64,7 @@ class PopulationMetrics:
     parent_indices: ScalarRow = field(default_factory=list)
     best_dormant_fraction: float = float("nan")
     hp_diversity: float = float("nan")
+    hp_effective_dim: float = float("nan")
     arch_diversity: float = float("nan")
     activation_diversity: float = float("nan")
 
@@ -149,6 +150,8 @@ class PopulationMetrics:
         # they share the W&B history row with ``train/global_step``.
         if not np.isnan(self.hp_diversity):
             d["eval/hp_diversity"] = self.hp_diversity
+        if not np.isnan(self.hp_effective_dim):
+            d["eval/hp_effective_dim"] = self.hp_effective_dim
         if not np.isnan(self.arch_diversity):
             d["eval/arch_diversity"] = self.arch_diversity
         if not np.isnan(self.activation_diversity):
@@ -668,6 +671,7 @@ class Population(Generic[AgentT]):
                 self, "_pending_dormant_fraction", float("nan")
             ),
             hp_diversity=diversity.get("hp", float("nan")),
+            hp_effective_dim=diversity.get("hp_effdim", float("nan")),
             arch_diversity=diversity.get("arch", float("nan")),
             activation_diversity=diversity.get("activation", float("nan")),
         )

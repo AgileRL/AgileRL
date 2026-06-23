@@ -29,13 +29,16 @@ GLOBAL_STEP_COL = "train/global_step"
 BEST_FITNESS_COL = "eval/best_fitness"
 DORMANT_FRACTION_COL = "eval/best_dormant_fraction"
 
-# Population-diversity diagnostics: three deliberately-separate [0, 1]-normalised
-# curves logged each cycle. Ordered as (W&B column, human-readable label).
+# Population-diversity diagnostics: deliberately-separate [0, 1]-normalised curves
+# logged each cycle (marginal HP spread plus its joint effective-dimensionality
+# counterpart, architecture, activation). Ordered as (W&B column, label).
 HP_DIVERSITY_COL = "eval/hp_diversity"
+HP_EFFDIM_COL = "eval/hp_effective_dim"
 ARCH_DIVERSITY_COL = "eval/arch_diversity"
 ACTIVATION_DIVERSITY_COL = "eval/activation_diversity"
 DIVERSITY_SPECS: list[tuple[str, str]] = [
     (HP_DIVERSITY_COL, "Hyperparameter diversity"),
+    (HP_EFFDIM_COL, "Hyperparameter effective dimensionality"),
     (ARCH_DIVERSITY_COL, "Architecture diversity"),
     (ACTIVATION_DIVERSITY_COL, "Activation diversity"),
 ]
@@ -309,39 +312,59 @@ def plot_mutation_schedule(
     plt.close(fig)
 
 
+def _common_overlap_grid(xs: list[np.ndarray]) -> np.ndarray:
+    """A shared, regular grid over the range covered by *every* x array.
+
+    Used to stack curves that do not share exact x-values. The grid spans the
+    overlapping range ``[max(min xᵢ), min(max xᵢ)]`` so no curve is ever
+    extrapolated, and has as many points as the *coarsest* curve so resolution
+    is never fabricated beyond what was actually logged.
+
+    :param xs: List of (non-empty) x arrays.
+    :return: The shared grid, or an empty array if the arrays do not overlap.
+    """
+    if not xs:
+        return np.array([])
+    lo = max(float(np.min(x)) for x in xs)
+    hi = min(float(np.max(x)) for x in xs)
+    if not hi > lo:
+        return np.array([])
+    npts = max(2, min(len(x) for x in xs))
+    return np.linspace(lo, hi, npts)
+
+
 def _align_on_common_x(
     curves: list[tuple[np.ndarray, np.ndarray]],
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Stack ``(x, y)`` curves reported at the **same timesteps** — no interp.
+    """Stack ``(x, y)`` curves by interpolating onto a shared grid.
 
-    Every run in this benchmark logs at identical timesteps (same manifest, eval
-    frequency and pop size), so there is no need to interpolate onto an arbitrary
-    grid: we take the intersection of the curves' x-values and index each curve
-    onto it. This keeps every reported value exact instead of resampling it.
+    Runs in this benchmark do **not** log at identical timesteps: a run's eval
+    timesteps are the cumulative ``global_step`` reached at each eval, which
+    drifts seed-to-seed because episode lengths are stochastic (so the
+    exact-intersection of timesteps is typically empty). We therefore build one
+    grid over the overlapping step range (see :func:`_common_overlap_grid`) and
+    linearly interpolate each curve onto it. When every curve already shares the
+    same timesteps the interpolation is exact, so no value is altered.
 
     :param curves: List of ``(x, y)`` arrays.
     :return: ``(grid, stacked)`` where ``grid`` is the shared, sorted x-values
         and ``stacked`` has shape ``(len(curves), len(grid))``. Both are empty
-        when the curves share no common timestep.
+        when the curves share no overlapping range.
     """
-    keyed: list[tuple[np.ndarray, np.ndarray]] = []
-    common: set[float] | None = None
+    prepared: list[tuple[np.ndarray, np.ndarray]] = []
     for x, y in curves:
-        order = np.argsort(x)
-        xr = np.round(np.asarray(x, dtype=float)[order], 6)
-        yr = np.asarray(y, dtype=float)[order]
-        keyed.append((xr, yr))
-        xs = set(xr.tolist())
-        common = xs if common is None else (common & xs)
+        x_arr = np.asarray(x, dtype=float)
+        y_arr = np.asarray(y, dtype=float)
+        order = np.argsort(x_arr)
+        prepared.append((x_arr[order], y_arr[order]))
 
-    if not common:
-        return np.array([]), np.empty((len(curves), 0))
+    grid = _common_overlap_grid([x for x, _ in prepared])
+    if grid.size == 0:
+        return np.array([]), np.empty((len(prepared), 0))
 
-    grid = np.array(sorted(common))
-    stacked = np.empty((len(keyed), grid.size))
-    for i, (xr, yr) in enumerate(keyed):
-        idx = {v: j for j, v in enumerate(xr.tolist())}
-        stacked[i] = np.array([yr[idx[v]] for v in grid])
+    stacked = np.empty((len(prepared), grid.size))
+    for i, (x_arr, y_arr) in enumerate(prepared):
+        stacked[i] = np.interp(grid, x_arr, y_arr)
     return grid, stacked
 
 
@@ -470,33 +493,35 @@ def _aggregate_score_array(
 ) -> tuple[np.ndarray, np.ndarray] | None:
     """Assemble per-env ``(x, stacked_norm)`` into one rliable score tensor.
 
-    Aligns all environments on their common timesteps (no interpolation) and
-    truncates to the smallest shared seed count so the result is rectangular.
+    Environments are aligned by interpolating each one's per-seed curves onto a
+    shared grid over the overlapping step range (the per-env grids differ — see
+    :func:`_align_on_common_x`) and truncated to the smallest shared seed count
+    so the result is rectangular.
 
     :param curves: Mapping env_name -> ``(x, stacked_norm)`` with ``stacked_norm``
         of shape ``(n_seeds, n_frames)`` (per-seed normalized fitness).
     :return: ``(grid, scores)`` where ``scores`` has shape
-        ``(n_runs, n_tasks, n_frames)``, or None if there is no shared timestep.
+        ``(n_runs, n_tasks, n_frames)``, or None if there is no overlapping range.
     """
-    items = [(env, g, s) for env, (g, s) in curves.items() if g.size and s.size]
+    items = [
+        (env, np.asarray(g, dtype=float), np.asarray(s, dtype=float))
+        for env, (g, s) in curves.items()
+        if np.asarray(g).size and np.asarray(s).size
+    ]
     if not items:
         return None
 
-    common: set[float] | None = None
-    for _, g, _ in items:
-        gs = set(np.round(np.asarray(g, dtype=float), 6).tolist())
-        common = gs if common is None else (common & gs)
-    if not common:
+    grid = _common_overlap_grid([g for _, g, _ in items])
+    if grid.size == 0:
         return None
-    grid = np.array(sorted(common))
 
     n_runs = min(s.shape[0] for _, _, s in items)
     scores = np.empty((n_runs, len(items), grid.size))
     for t, (_, g, s) in enumerate(items):
-        gr = np.round(np.asarray(g, dtype=float), 6)
-        idx = {v: j for j, v in enumerate(gr.tolist())}
-        cols = [idx[v] for v in grid]
-        scores[:, t, :] = s[:n_runs][:, cols]
+        order = np.argsort(g)
+        gx = g[order]
+        for r in range(n_runs):
+            scores[r, t, :] = np.interp(grid, gx, s[r][order])
     return grid, scores
 
 
@@ -632,8 +657,9 @@ def plot_performance_profile(
 # --------------------------------------------------------------------------- #
 # Population-diversity figures
 #
-# Three deliberately-separate normalised-diversity curves (hyperparameter,
-# architecture, activation), each in [0, 1]. They share the fitness house style
+# Deliberately-separate normalised-diversity curves (hyperparameter marginal
+# spread + effective dimensionality, architecture, activation), each in [0, 1].
+# They share the fitness house style
 # but omit the random/expert reference lines: diversity is already normalised and
 # has no external reference -- 0 is a collapsed population, 1 is maximally spread
 # across the mutation search space.
@@ -644,10 +670,11 @@ def plot_diversity(
     pop_size: int,
     out_path: str,
 ) -> None:
-    """Save the three normalised population-diversity curves for one run.
+    """Save the normalised population-diversity curves for one run.
 
-    One panel per diagnostic (hyperparameter / architecture / activation),
-    plotted against per-agent environment steps with a fixed ``[0, 1]`` y-axis.
+    One panel per diagnostic (hyperparameter spread / effective dimensionality /
+    architecture / activation), plotted against per-agent environment steps with a
+    fixed ``[0, 1]`` y-axis.
     A panel shows a placeholder when its column was not logged so the artifact
     always exists.
 
@@ -763,7 +790,7 @@ def plot_diversity_aggregate(
     algo_label: str = "Algorithm",
     suite_name: str = "Environment suite",
 ) -> None:
-    """Save the cross-environment aggregate of the three diversity diagnostics.
+    """Save the cross-environment aggregate of the diversity diagnostics.
 
     For each diagnostic the aggregate IQM is computed with rliable over **all
     tasks and all seeds** at each timestep (every ``(seed, env)`` pair is one

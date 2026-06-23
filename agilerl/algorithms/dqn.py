@@ -358,11 +358,17 @@ class DQN(RLAlgorithm):
         :return: Loss value from the learning step
         :rtype: float
         """
+        # Move the sampled tensors to the agent's device. This makes learning work
+        # when the replay buffer lives on a different device than the agent (e.g.
+        # the hpo_improvements benchmarking harness can keep a large Atari buffer
+        # on CPU while agents train on GPU). obs/next_obs are moved by
+        # preprocess_observation below; the rest are moved explicitly here. The
+        # .to() calls are no-ops when the buffer is already on-device.
         obs = experiences["obs"]
-        actions = experiences["action"]
-        rewards = experiences["reward"]
+        actions = experiences["action"].to(self.device)
+        rewards = experiences["reward"].to(self.device)
         next_obs = experiences["next_obs"]
-        dones = experiences["done"]
+        dones = experiences["done"].to(self.device)
 
         obs = self.preprocess_observation(obs)
         next_obs = self.preprocess_observation(next_obs)
