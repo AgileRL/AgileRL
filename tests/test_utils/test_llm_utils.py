@@ -1206,6 +1206,78 @@ def test_masked_stats_and_pool_by_turns_helpers():
     assert pooled_final[0, 1].item() == pytest.approx(5.0)
 
 
+class TestPoolByTurnsFinalStateToken:
+    """``final_state_token`` selects the first action-token value per turn.
+
+    In the next-token-shifted critic frame that position holds the value
+    produced from the last query/env-output (state) token preceding the
+    response (the turn-level state-boundary value ``V_n``).
+    """
+
+    def test_selects_first_action_token_value_per_turn(self):
+        from agilerl.utils.llm_utils import pool_by_turns
+
+        # turn_ids: -1 (state), 0,0 (resp0), -1 (env-out), 1,1 (resp1)
+        turn_ids = torch.tensor([[-1, 0, 0, -1, 1, 1]])
+        values = torch.tensor([[9.0, 100.0, 11.0, 12.0, 200.0, 14.0]])
+        pooled = pool_by_turns(
+            values, turn_ids, num_turns=2, reduction="final_state_token"
+        )
+        assert pooled.shape == (1, 2)
+        assert pooled[0, 0].item() == pytest.approx(100.0)
+        assert pooled[0, 1].item() == pytest.approx(200.0)
+
+    def test_missing_turn_pools_to_zero(self):
+        from agilerl.utils.llm_utils import pool_by_turns
+
+        # Sample only has turn 0; turn 1 is absent and must pool to 0.
+        turn_ids = torch.tensor([[0, 0, -1, -1]])
+        values = torch.tensor([[5.0, 6.0, 7.0, 8.0]])
+        pooled = pool_by_turns(
+            values, turn_ids, num_turns=2, reduction="final_state_token"
+        )
+        assert pooled[0, 0].item() == pytest.approx(5.0)
+        assert pooled[0, 1].item() == pytest.approx(0.0)
+
+
+class TestAssertStateBoundaryValueIndices:
+    """State-boundary gather must never read a critic value from a response."""
+
+    def test_well_formed_trajectory_passes(self):
+        from agilerl.utils.llm_utils import assert_state_boundary_value_indices
+
+        turn_ids = torch.tensor([[-1, 0, 0, -1, 1, 1]])
+        assert_state_boundary_value_indices(turn_ids)  # no raise
+
+    def test_turn_starting_at_index_zero_is_a_valid_state(self):
+        from agilerl.utils.llm_utils import assert_state_boundary_value_indices
+
+        # First response begins at position 0 (s_n == 0): the initial prompt is
+        # always a valid state boundary.
+        turn_ids = torch.tensor([[0, 0, -1, 1, 1, -1]])
+        assert_state_boundary_value_indices(turn_ids)  # no raise
+
+    def test_ragged_batch_passes(self):
+        from agilerl.utils.llm_utils import assert_state_boundary_value_indices
+
+        turn_ids = torch.tensor(
+            [
+                [-1, 0, 0, -1, 1, 1, -1, -1],
+                [-1, -1, 0, 0, 0, -1, -1, -1],
+            ]
+        )
+        assert_state_boundary_value_indices(turn_ids)  # no raise
+
+    def test_adjacent_responses_without_env_output_raise(self):
+        from agilerl.utils.llm_utils import assert_state_boundary_value_indices
+
+        # resp0 (0,0) directly followed by resp1 (1,1): no state token before
+        # resp1, so its state-boundary gather would read a response value.
+        turn_ids = torch.tensor([[-1, 0, 0, 1, 1, -1]])
+        with pytest.raises(ValueError, match="final_state_token"):
+            assert_state_boundary_value_indices(turn_ids)
+
+
 def test_masked_var_unbiased_requires_at_least_two_unmasked_values():
     values = torch.tensor([[1.0, 3.0, 5.0, 7.0]])
     mask = torch.tensor([[1.0, 0.0, 0.0, 0.0]])

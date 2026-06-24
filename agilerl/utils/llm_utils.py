@@ -864,7 +864,13 @@ def pool_by_turns(
     :type num_turns: int
     :param reduction: ``"mean"`` (default) for mean-pooling,
         ``"sum"`` for sum-pooling (e.g. to aggregate log-ratios),
-        ``"final_value"`` to select the last token value per turn.
+        ``"final_value"`` to select the last token value per turn,
+        ``"final_state_token"`` to select the *first* action-token value per
+        turn. In the next-token-shifted critic frame the first action position
+        of turn ``n`` reads the value produced from the last query /
+        environment-output (state) token preceding response ``n`` — i.e. the
+        turn-level state-boundary value ``V_n`` (see
+        :func:`assert_state_boundary_value_indices`).
     :type reduction: str
     :return: [batch, num_turns] aggregated values per turn.
     :rtype: torch.Tensor
@@ -902,12 +908,107 @@ def pool_by_turns(
                 final_vals,
                 torch.zeros_like(final_vals),
             )
+        elif reduction == "final_state_token":
+            # State-boundary value gather. Select the *first* action-token
+            # position of the turn; in the next-token-shifted critic frame the
+            # value there is the critic output produced from the last query /
+            # environment-output token preceding the response (the state the
+            # value function conditions on, before the model acts). Indexing
+            # off the structural turn segmentation — never EOS / response end.
+            masked_positions = torch.where(
+                mask_t.bool(),
+                token_positions,
+                torch.full_like(token_positions, seq_len),
+            )
+            first_pos = masked_positions.min(dim=1).values
+            has_turn = first_pos < seq_len
+            safe_first_pos = first_pos.clamp(max=seq_len - 1)
+            first_vals = token_values[
+                torch.arange(batch_size, device=token_values.device),
+                safe_first_pos,
+            ]
+            turn_values[:, t] = torch.where(
+                has_turn,
+                first_vals,
+                torch.zeros_like(first_vals),
+            )
         else:
             msg = (
-                f"Invalid reduction: {reduction}. Must be 'mean', 'sum', 'final_value'."
+                f"Invalid reduction: {reduction}. Must be 'mean', 'sum', "
+                "'final_value', 'final_state_token'."
             )
             raise ValueError(msg)
     return turn_values
+
+
+def assert_state_boundary_value_indices(turn_ids: torch.Tensor) -> None:
+    """Validate that ``final_state_token`` value gathers land on state tokens.
+
+    Under ``turn_value_reduction="final_state_token"`` the turn value ``V_n`` is
+    read at the *first* action-token position of turn ``n`` in the
+    next-token-shifted critic frame (``s_n = min{ j : turn_ids[j] == n }``).
+    Because of the shift, the critic output there is produced from the hidden
+    state of the token at ``full_ids[s_n]`` — the last query / environment-output
+    (state) token preceding response ``n``. This holds only when a state segment
+    actually separates response ``n`` from the previous response. If two
+    responses are adjacent (no environment output between them) the gather would
+    instead read a critic value produced from a *response* token, which is
+    detectable as ``turn_ids[s_n - 1] >= 0`` (the value position reads from a
+    token that is itself inside a response). ``s_n == 0`` is the initial prompt
+    and is always a valid state boundary.
+
+    Index off the recorded turn segmentation only — never EOS / a response-final
+    position — since base models (e.g. Qwen3-1.7B-Base) have no reliable EOS.
+
+    :param turn_ids: ``(B, T)`` turn index per token (``-1`` for non-action /
+        padding) in the next-token-shifted frame.
+    :type turn_ids: torch.Tensor
+    :raises ValueError: If any turn's state-boundary value index reads from a
+        token that is itself part of a response segment.
+    """
+    if turn_ids.numel() == 0:
+        return
+    num_turns = int(turn_ids.max().item()) + 1
+    if num_turns <= 0:
+        return
+    _, seq_len = turn_ids.shape
+    positions = (
+        torch.arange(seq_len, device=turn_ids.device).unsqueeze(0).expand_as(turn_ids)
+    )
+    offenders: list[tuple[int, int, int]] = []
+    for t in range(num_turns):
+        mask_t = turn_ids == t
+        has_turn = mask_t.any(dim=1)
+        if not bool(has_turn.any()):
+            continue
+        masked_pos = torch.where(mask_t, positions, torch.full_like(positions, seq_len))
+        first_pos = masked_pos.min(dim=1).values  # (B,)
+        # Only samples that own this turn and whose value index reads from a
+        # preceding token (``s_n >= 1``) can land inside a response.
+        check = has_turn & (first_pos >= 1)
+        if not bool(check.any()):
+            continue
+        prev_idx = (first_pos - 1).clamp(min=0)
+        prev_turn = turn_ids.gather(1, prev_idx.unsqueeze(1)).squeeze(1)
+        bad = check & (prev_turn >= 0)
+        if bool(bad.any()):
+            for b in torch.nonzero(bad, as_tuple=False).flatten().tolist():
+                offenders.append((int(b), t, int(first_pos[b].item())))
+    if offenders:
+        sample = ", ".join(
+            f"(sample={b}, turn={t}, value_index={p})" for b, t, p in offenders[:8]
+        )
+        msg = (
+            "turn_value_reduction='final_state_token' requires every turn value "
+            "to be gathered at a state boundary (the last query / "
+            "environment-output token before the response). The following gathers "
+            "landed inside a response segment instead — i.e. two responses are "
+            "adjacent with no environment output between them, so there is no "
+            f"state token to read V from: {sample}"
+            + (" ..." if len(offenders) > 8 else "")
+            + ". Check the rollout segmentation (turn_ids / turn_boundaries)."
+        )
+        raise ValueError(msg)
 
 
 def validate_importance_sampling_level(level: str, *, allow_auto: bool) -> None:

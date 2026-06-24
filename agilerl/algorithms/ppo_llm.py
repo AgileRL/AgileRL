@@ -37,6 +37,7 @@ from agilerl.utils.algo_utils import (
 from agilerl.utils.llm_utils import (
     BitsAndBytesConfig,
     ReasoningGym,
+    assert_state_boundary_value_indices,
     build_completion_mask,
     calculate_k3_kl,
     clipped_is_surrogate,
@@ -180,9 +181,21 @@ class PPO(LLMAlgorithm):
         when set it overrides ``advantage_granularity`` and emits a
         ``DeprecationWarning``.
     :type action_granularity: str | None, optional
-    :param turn_value_reduction: Aggregation used to map token critic values to
-        turn values. ``"mean"`` reproduces existing behavior, ``"final_value"``
-        uses the final action token value in each turn.
+    :param turn_value_reduction: Where the turn value ``V_n`` is gathered from
+        the per-token critic outputs (controls both the turn-level advantage and
+        the value-loss target, so the critic is trained at the index it is read
+        at). ``"mean"`` mean-pools the action-token values; ``"final_value"``
+        (default) uses the final action-token value of each turn (near the
+        response end); ``"final_state_token"`` uses the *first* action-token
+        value — which, in the next-token-shifted critic frame, is the critic
+        output produced from the last query / environment-output (state) token
+        preceding the response. ``"final_state_token"`` is the turn-level PPO
+        correct gather: the value conditions on the prompt-side state boundary
+        before the model acts, never on a token inside the response. It is
+        indexed off the recorded turn segmentation (``turn_ids``), not off EOS
+        or the response-final position, and asserts every gathered index lands
+        in a state segment (see
+        :func:`~agilerl.utils.llm_utils.assert_state_boundary_value_indices`).
     :type turn_value_reduction: str, optional
     :param whiten_advantages: Whether to whiten computed advantages before PPO
         optimization.
@@ -301,7 +314,9 @@ class PPO(LLMAlgorithm):
         advantage_granularity: Literal["turn", "token", "auto"] = "auto",
         turn_ratio_pooling: Literal["sum", "mean"] = "sum",
         action_granularity: Literal["turn", "token", "auto"] | None = None,
-        turn_value_reduction: Literal["mean", "final_value"] = "final_value",
+        turn_value_reduction: Literal[
+            "mean", "final_value", "final_state_token"
+        ] = "final_value",
         whiten_advantages: bool = True,
         gradient_checkpointing: bool = True,
         torch_compiler: str | None = None,
@@ -547,6 +562,15 @@ class PPO(LLMAlgorithm):
                 if rewards_2d.dim() == 1:
                     rewards_2d = rewards_2d.unsqueeze(-1)
             ppo_granularity = self._resolve_advantage_granularity(turn_ids)
+            # Fail loud before any gather if a state-boundary value index would
+            # land inside a response segment (adjacent turns with no env output
+            # between them); the rollout segmentation must expose a state token
+            # before each response under ``final_state_token``.
+            if (
+                ppo_granularity == "turn"
+                and self.turn_value_reduction == "final_state_token"
+            ):
+                assert_state_boundary_value_indices(turn_ids)
             critic_warmup_active = self._learn_step_count < self.critic_wram_up_Steps
 
             del rewards
@@ -943,7 +967,7 @@ class PPO(LLMAlgorithm):
                 f"{sorted(valid_action_granularities)}."
             )
             raise ValueError(msg)
-        valid_turn_value_reductions = {"mean", "final_value"}
+        valid_turn_value_reductions = {"mean", "final_value", "final_state_token"}
         if turn_value_reduction not in valid_turn_value_reductions:
             msg = (
                 "turn_value_reduction must be one of "

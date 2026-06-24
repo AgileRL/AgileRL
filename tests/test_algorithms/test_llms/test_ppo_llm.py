@@ -800,6 +800,38 @@ class TestPPOComputeGaeReturns:
         assert torch.allclose(advantages, expected_advantages, atol=1e-6)
         assert torch.allclose(returns, expected_returns)
 
+    def test_compute_gae_returns_final_state_token_uses_first_action_token_value(
+        self,
+    ):
+        # final_state_token reads V_n at the *first* action position of each
+        # turn (the state boundary). Here V_0 = values[0] = 1.0 and
+        # V_1 = values[2] = 8.0 (not values[1]/values[3], which final_value
+        # would read), confirming the gather index differs from final_value.
+        stub = _PPOStub(
+            gamma=1.0, gae_lambda=1.0, turn_value_reduction="final_state_token"
+        )
+        action_mask = torch.ones(1, 4, dtype=torch.bool)
+        turn_ids = torch.tensor([[0, 0, 1, 1]])
+        values = torch.tensor([[1.0, 4.0, 8.0, 2.0]])
+        rewards = torch.tensor([[0.0, 0.0, 0.0, 0.0]])
+
+        returns, advantages = stub._compute_gae_returns(
+            rewards,
+            values,
+            action_mask,
+            turn_ids,
+        )
+
+        # Whitening is over the two per-turn advantages [[7, -8]], which always
+        # maps a two-turn case to +/- 1/sqrt(2), broadcast to each turn's tokens
+        # (turn 0 is the higher advantage -> positive).
+        expected_advantages = torch.tensor(
+            [[0.70710677, 0.70710677, -0.70710677, -0.70710677]]
+        )
+        expected_returns = torch.tensor([[0.0, 0.0, 0.0, 0.0]])
+        assert torch.allclose(advantages, expected_advantages, atol=1e-6)
+        assert torch.allclose(returns, expected_returns)
+
     def test_compute_gae_returns_without_whitening_uses_raw_turn_advantages(self):
         stub = _PPOStub(gamma=1.0, gae_lambda=1.0, whiten_advantages=False)
         action_mask = torch.ones(1, 2, dtype=torch.bool)
