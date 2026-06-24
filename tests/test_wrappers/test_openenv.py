@@ -14,6 +14,7 @@ import pytest
 import torch
 
 from agilerl.llm_envs import (
+    BatchRolloutEnv,
     OpenEnvClient,
     OpenEnvServer,
     RolloutEnv,
@@ -244,6 +245,58 @@ def test_from_dataset_full_step_loop_scores_and_terminates() -> None:
     assert reward == 1.0 and terminated is True  # decode() -> "go"
     full_ids, action_mask, turn_ids, turn_rewards, _ = env.get_episode_data()
     assert turn_rewards.tolist() == [1.0]
+
+
+# --- serving: one OpenEnv server instance per rollout ----------------------
+def test_serving_hosts_owns_and_stops_its_server() -> None:
+    """``serving`` hosts a fresh env on its own server and stops it on close."""
+    env = RolloutEnv.serving(_CountingEnv, _MiniTok(), apply_chat_template=False)
+    assert env._owned_server is not None
+    env.reset()  # reachable over real HTTP
+    assert env._prompt_text == "Start.\nReply 'go'."
+    env.close()
+    assert env._owned_server is None  # server stopped + released
+
+
+def test_from_dataset_serve_hosts_a_per_instance_server() -> None:
+    """``from_dataset(serve=True)`` owns a server instead of using local_transport."""
+    env = RolloutEnv.from_dataset(
+        ["q0"],
+        ["a0"],
+        lambda c, a, q: 0.0,
+        _MiniTok(),
+        prompt_builder=lambda q: f"P:{q}",
+        apply_chat_template=False,
+        serve=True,
+    )
+    assert env._owned_server is not None
+    assert env.dataset_size == 1
+    env.reset(row_index=0)
+    assert env._prompt_text == "P:q0"
+    env.close()
+    assert env._owned_server is None
+
+
+def test_batch_serving_factory_gives_one_server_per_env() -> None:
+    """A serving ``env_factory`` gives BatchRolloutEnv one isolated server per env.
+
+    The state race (one stateful server can't serve concurrent rollouts) is avoided:
+    each of the ``batch_size * group_size`` envs binds a distinct server URL, and
+    ``close`` tears them all down.
+    """
+    batch = BatchRolloutEnv(
+        lambda **_: RolloutEnv.serving(
+            _CountingEnv, _MiniTok(), apply_chat_template=False
+        ),
+        batch_size=2,
+        group_size=1,
+    )
+    batch.reset(seed=0)
+    urls = [env._owned_server.base_url for env in batch.envs]
+    assert len(batch.envs) == 2
+    assert len(set(urls)) == 2  # distinct server instances
+    batch.close()
+    assert all(env._owned_server is None for env in batch.envs)
 
 
 # --- RolloutEnv(url) over a real server ------------------------------------

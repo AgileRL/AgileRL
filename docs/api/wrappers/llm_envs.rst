@@ -35,6 +35,18 @@ For driving a *real external* OpenEnv server (e.g. an env on the HuggingFace Hub
 :class:`~agilerl.llm_envs.OpenEnvHTTPEnv` bridges that env's typed schema to the text
 contract so it can be served / driven like any local env.
 
+**Concurrency — one server per rollout.** A served env handles one episode at a
+time, so a single shared URL is correct only for one in-flight rollout
+(``batch_size = 1``, or a GRPO group that shares a prompt). For batched training,
+host one server per rollout: pass :meth:`~agilerl.llm_envs.RolloutEnv.serving` (or
+:meth:`~agilerl.llm_envs.RolloutEnv.from_dataset` with ``serve=True``) as the
+``env_factory``. A :class:`~agilerl.llm_envs.BatchRolloutEnv` calls that factory
+``batch_size * group_size`` times, so it spins up that many isolated server
+instances (one OS thread + port each) and stops them all on ``close`` — the count is
+determined by the batch, at the training layer. An in-process env sidesteps this
+entirely: :func:`~agilerl.llm_envs.local_transport` (what ``from_dataset`` uses by
+default) already gives each rollout its own env, no socket.
+
 .. autoclass:: agilerl.llm_envs.RolloutEnv
 .. autoclass:: agilerl.llm_envs.BatchRolloutEnv
 .. autoclass:: agilerl.llm_envs.DatasetEnv

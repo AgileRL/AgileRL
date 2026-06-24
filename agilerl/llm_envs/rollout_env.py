@@ -20,7 +20,9 @@ import torch
 
 from agilerl.llm_envs.openenv import (
     OpenEnvClient,
+    OpenEnvServer,
     local_transport,
+    serve,
 )
 from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
 
@@ -138,6 +140,9 @@ class RolloutEnv:
             timeout_s=timeout_s,
             transport=transport,
         )
+        # Set by ``serving`` / ``from_dataset(serve=True)`` when this env hosts its
+        # own OpenEnv server; stopped on ``close`` so per-rollout servers don't leak.
+        self._owned_server: OpenEnvServer | None = None
         self.tokenizer = tokenizer
         self.pad_id = pad_id
         self.apply_chat_template = apply_chat_template
@@ -175,15 +180,17 @@ class RolloutEnv:
         test_questions: list[str] | None = None,
         test_answers: list[str] | None = None,
         max_turns: int = 1,
+        serve: bool = False,
         **kwargs: Any,
     ) -> RolloutEnv:
         """Build a reasoning ``RolloutEnv`` over an in-process prompt dataset.
 
         Wraps an in-process prompt-dataset env in the socket-free
         :func:`~agilerl.llm_envs.openenv.local_transport`, so it is driven over the
-        OpenEnv interface with no HTTP cost — the common local case. For an
-        out-of-process / remote dataset env, :func:`~agilerl.llm_envs.openenv.serve`
-        your own env and pass its URL to the constructor instead.
+        OpenEnv interface with no HTTP cost — the common local case. Pass
+        ``serve=True`` to instead host the dataset env on its own OpenEnv server (see
+        :meth:`serving`) — used as the per-rollout factory when you want one
+        process-isolated server per concurrent rollout.
 
         :param questions: Per-row question strings (training split).
         :param answers: Per-row training answers, aligned with ``questions``.
@@ -193,26 +200,72 @@ class RolloutEnv:
         :param test_questions: Held-out questions served under :meth:`eval_mode`.
         :param test_answers: Held-out answers served under :meth:`eval_mode`.
         :param max_turns: Generation turns per episode (``1`` = single-turn).
+        :param serve: Host the dataset env on its own OpenEnv server (one per call,
+            owned and stopped on :meth:`close`) instead of driving it in-process. As
+            the per-rollout factory this gives a :class:`BatchRolloutEnv` one
+            isolated server per concurrent rollout.
         :param kwargs: Forwarded to :class:`RolloutEnv` (e.g. ``pad_id``,
             ``apply_chat_template``, ``max_model_len``).
         :rtype: RolloutEnv
         """
-        env = _PromptDatasetEnv(
-            questions=questions,
-            answers=answers,
-            reward_fn=reward_fn,
-            prompt_builder=prompt_builder,
-            test_questions=test_questions,
-            test_answers=test_answers,
-            max_turns=max_turns,
-        )
+
+        def make_env() -> _PromptDatasetEnv:
+            return _PromptDatasetEnv(
+                questions=questions,
+                answers=answers,
+                reward_fn=reward_fn,
+                prompt_builder=prompt_builder,
+                test_questions=test_questions,
+                test_answers=test_answers,
+                max_turns=max_turns,
+            )
+
+        if serve:
+            return cls.serving(make_env, tokenizer, max_turns=max_turns, **kwargs)
         return cls(
             None,
             tokenizer,
             max_turns=max_turns,
-            transport=local_transport(env),
+            transport=local_transport(make_env()),
             **kwargs,
         )
+
+    @classmethod
+    def serving(
+        cls,
+        make_env: Callable[[], Any],
+        tokenizer: Any,
+        max_turns: int = 1,
+        **kwargs: Any,
+    ) -> RolloutEnv:
+        """Host one OpenEnv server for a fresh env and drive it over HTTP.
+
+        Calls ``make_env()`` for a fresh local env, serves it on its own
+        :class:`~agilerl.llm_envs.openenv.OpenEnvServer`, and returns a ``RolloutEnv``
+        bound to that server — which it **owns** and stops on :meth:`close`. A served
+        env handles one episode at a time, so use this as the per-rollout
+        ``env_factory`` to give a :class:`BatchRolloutEnv` one isolated server per
+        concurrent rollout::
+
+            env_factory = lambda: RolloutEnv.serving(make_env, tokenizer, max_turns=4)
+
+        ``BatchRolloutEnv`` calls the factory ``batch_size * group_size`` times, so the
+        number of servers is determined by the batch (one OS thread + port each). For
+        an in-process env prefer :meth:`from_dataset` / ``local_transport`` (already
+        isolated, no socket); for an already-running external server pass its ``url``
+        to the constructor.
+
+        :param make_env: Zero-arg factory returning a fresh local env to host.
+        :param tokenizer: Tokenizer for the token-level loop.
+        :param max_turns: Generation turns per episode.
+        :param kwargs: Forwarded to :class:`RolloutEnv` (e.g. ``pad_id``,
+            ``apply_chat_template``, ``max_model_len``, ``timeout_s``).
+        :rtype: RolloutEnv
+        """
+        server = serve(make_env())
+        env = cls(server.base_url, tokenizer, max_turns=max_turns, **kwargs)
+        env._owned_server = server
+        return env
 
     @staticmethod
     def _format_obs(obs: str, info: dict[str, Any] | None) -> str:
@@ -565,9 +618,12 @@ class RolloutEnv:
         )
 
     def close(self) -> None:
-        """Close the backend when it supports it."""
+        """Close the backend and stop the owned server, when present."""
         if hasattr(self._backend, "close"):
             self._backend.close()
+        if self._owned_server is not None:
+            self._owned_server.stop()
+            self._owned_server = None
 
     def get_debug_info(self) -> dict[str, Any]:
         """Return a dict of human-readable debug information for the episode."""

@@ -1365,6 +1365,12 @@ def train_llm_rollout(
         elite_path if csv_logger.csv_file is not None else None,
     )
 
+    # Release the rollout envs (and any per-rollout OpenEnv servers they own) plus
+    # the separate test env, so repeated calls (e.g. HPO generations) don't leak.
+    rollout_env.close()
+    if hasattr(test_env, "close"):
+        test_env.close()
+
     return pop
 
 
