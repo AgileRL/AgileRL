@@ -265,7 +265,7 @@ def collect_rollouts_llm(
 
     :param agent: The agent to collect rollouts for.
     :type agent: SupportedOnPolicyLLM
-    :param env: Batched in-process rollout environment.
+    :param env: Batched rollout environment.
     :type env: BatchRolloutEnv
     :param n_steps: Number of steps (max turns) for the agent to take.
     :type n_steps: int

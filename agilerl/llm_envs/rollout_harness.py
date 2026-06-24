@@ -15,10 +15,10 @@ from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
 class RolloutHarness:
     """Token-level rollout harness around a text :class:`RolloutEnv`.
 
-    The *harness* is the adapter that lets a plain **text** environment be
-    trained at the **token** level. The wrapped :class:`RolloutEnv` speaks
+    The *harness* is the adapter that lets a model which produces tokens
+    interact with a text-based environment. The wrapped :class:`RolloutEnv` speaks
     strings (``reset()`` -> prompt text, ``step(action_text)`` -> reward); this
-    harness exposes the token contract the trainer and rollout engine drive:
+    harness exposes the token contract the trainer/rollout engine and the env:
 
     * ``reset()`` / ``step(completion_ids)`` return a tokenised **observation
       dict** (``input_ids`` / ``attention_mask`` / ``text``);
@@ -30,10 +30,6 @@ class RolloutHarness:
     * it renders the **chat template** (optionally with ``tools=`` schemas) and
       enforces the **context budget**: when ``max_model_len`` is set and the next
       turn would overflow, the episode terminates rather than dropping turns.
-
-    It **composes** the inner env (delegating ``eval_mode`` / ``evaluation_mode``
-    / ``dataset_size`` / ``close``); the rollout algorithms' ``.test()`` guards
-    key on ``isinstance(env, RolloutHarness)``.
     """
 
     def __init__(

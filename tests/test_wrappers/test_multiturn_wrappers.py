@@ -10,7 +10,6 @@ import torch
 
 from agilerl.llm_envs import (
     BatchRolloutEnv,
-    RolloutBuffer,
     RolloutHarness,
     Trajectory,
 )
@@ -635,26 +634,21 @@ class TestBatchRolloutEnvInit:
             )
 
 
-class TestRolloutBufferResetTrajectory:
-    def test_trajectory_buffer_reset_trajectory_out_of_bounds(self) -> None:
-        buf = RolloutBuffer(batch_size=1, group_size=1)
+class TestBatchRolloutEnvResetTrajectory:
+    def test_reset_trajectory_out_of_bounds(self) -> None:
+        vec = BatchRolloutEnv(env_factory=_SyncStubEnv, batch_size=1, group_size=1)
         with pytest.raises(IndexError, match="env_idx out of bounds"):
-            buf.reset_trajectory(seed=0, env_idx=0)
+            vec._reset_trajectory(seed=0, env_idx=0)
 
-    def test_trajectory_buffer_reset_trajectory_success_path(self) -> None:
+    def test_reset_trajectory_success_path(self) -> None:
         env = _SyncStubEnv()
-        traj = Trajectory(
-            env=env,
-            batch_idx=0,
-            group_idx=0,
-            prompt={},
-            done=True,
+        vec = BatchRolloutEnv(env_factory=_SyncStubEnv, batch_size=1, group_size=1)
+        vec.trajectories.append(
+            Trajectory(env=env, batch_idx=0, group_idx=0, prompt={}, done=True)
         )
-        buf = RolloutBuffer(batch_size=1, group_size=1)
-        buf.add_trajectory(traj)
-        buf.reset_trajectory(seed=5, env_idx=0)
-        assert buf[0].done is False
-        assert buf[0].prompt["input_ids"].shape == (1, 3)
+        vec._reset_trajectory(seed=5, env_idx=0)
+        assert vec.trajectories[0].done is False
+        assert vec.trajectories[0].prompt["input_ids"].shape == (1, 3)
         assert env.reset_calls[-1] == 5
 
 
@@ -793,51 +787,22 @@ class TestRolloutHarnessGetDebugInfo:
         assert info["turn_details"][0]["gen_len"] == 2
 
 
-class TestRolloutBufferInvariantsAndHelpers:
-    def test_trajectory_buffer_invariants_and_helpers(self) -> None:
-        with pytest.raises(ValueError, match="batch_size must be > 0"):
-            _ = RolloutBuffer(batch_size=0, group_size=1)
-        with pytest.raises(ValueError, match="group_size must be > 0"):
-            _ = RolloutBuffer(batch_size=1, group_size=0)
-
+class TestBatchRolloutEnvTrajectoryHelpers:
+    def test_is_initialized_flips_once_all_slots_built(self) -> None:
+        vec = BatchRolloutEnv(env_factory=_SyncStubEnv, batch_size=1, group_size=2)
+        assert vec._is_initialized is False
         env = _SyncStubEnv()
-        t1 = Trajectory(
-            env=env,
-            batch_idx=1,
-            group_idx=0,
-            prompt={
-                "input_ids": torch.ones(1, 1, dtype=torch.long),
-                "attention_mask": torch.ones(1, 1, dtype=torch.long),
-            },
-            done=False,
-        )
-        t2 = Trajectory(
-            env=env,
-            batch_idx=0,
-            group_idx=1,
-            prompt={
-                "input_ids": torch.ones(1, 1, dtype=torch.long),
-                "attention_mask": torch.ones(1, 1, dtype=torch.long),
-            },
-            done=True,
-        )
-        buf = RolloutBuffer(batch_size=1, group_size=2)
-        buf.add_trajectory(t1)
-        buf.add_trajectory(t2)
-        assert buf.is_initialized is True
-        assert buf.has_active() is True
-        assert len(buf) == 2
-        assert list(iter(buf))[0] is t1
-        assert buf[1] is t2
-        buf.sort(key=lambda t: (t.batch_idx, t.group_idx))
-        assert [t.batch_idx for t in buf] == [0, 1]
-        buf.clear()
-        assert len(buf) == 0 and buf.has_active() is False
+        for g in range(2):
+            vec.trajectories.append(
+                Trajectory(env=env, batch_idx=0, group_idx=g, prompt={}, done=False)
+            )
+        assert vec._is_initialized is True
 
 
-class TestRolloutBufferGetActiveTrajectories:
-    def test_trajectory_buffer_get_active_trajectories_sorting(self) -> None:
+class TestBatchRolloutEnvActiveTrajectories:
+    def test_active_trajectories_excludes_done_and_sorts_by_index(self) -> None:
         env = _SyncStubEnv()
+        vec = BatchRolloutEnv(env_factory=_SyncStubEnv, batch_size=2, group_size=2)
         t0 = Trajectory(
             env=env,
             batch_idx=1,
@@ -868,20 +833,15 @@ class TestRolloutBufferGetActiveTrajectories:
             },
             done=True,
         )
-        buf = RolloutBuffer(batch_size=2, group_size=2)
-        buf.add_trajectory(t0)
-        buf.add_trajectory(t1)
-        buf.add_trajectory(t2)
-
-        unsorted_active = buf.get_active_trajectories(sorted_by_index=False)
-        assert unsorted_active == [t0, t1]
-        sorted_active = buf.get_active_trajectories(sorted_by_index=True)
-        assert sorted_active == [t1, t0]
+        vec.trajectories = [t0, t1, t2]
+        # done t2 excluded; remaining sorted by (batch_idx, group_idx).
+        assert vec._active_trajectories() == [t1, t0]
 
 
-class TestRolloutBufferGetPrompts:
-    def test_trajectory_buffer_get_prompts_returns_none_when_no_active(self) -> None:
+class TestBatchRolloutEnvGetPrompts:
+    def test_get_prompts_returns_none_when_no_active(self) -> None:
         env = _SyncStubEnv()
+        vec = BatchRolloutEnv(env_factory=_SyncStubEnv, batch_size=1, group_size=2)
         done_traj = Trajectory(
             env=env,
             batch_idx=0,
@@ -902,11 +862,9 @@ class TestRolloutBufferGetPrompts:
             },
             done=False,
         )
-        buf = RolloutBuffer(batch_size=1, group_size=2)
-        buf.add_trajectory(done_traj)
-        buf.add_trajectory(active_traj)
+        vec.trajectories = [done_traj, active_traj]
 
-        prompts = buf.get_prompts()
+        prompts = vec._get_prompts()
         assert prompts is not None
         assert isinstance(prompts, list)
         assert len(prompts) == 1
@@ -914,10 +872,11 @@ class TestRolloutBufferGetPrompts:
         assert prompts[0]["attention_mask"].shape == (1, 3)
 
         active_traj.done = True
-        assert buf.get_prompts() is None
+        assert vec._get_prompts() is None
 
-    def test_trajectory_buffer_stack_prompt_validation(self) -> None:
+    def test_get_prompts_returns_active_in_index_order(self) -> None:
         env = _SyncStubEnv()
+        vec = BatchRolloutEnv(env_factory=_SyncStubEnv, batch_size=1, group_size=2)
         a = Trajectory(
             env=env,
             batch_idx=0,
@@ -938,10 +897,8 @@ class TestRolloutBufferGetPrompts:
             },
             done=False,
         )
-        buf = RolloutBuffer(batch_size=1, group_size=2)
-        buf.add_trajectory(a)
-        buf.add_trajectory(b)
-        prompts = buf.get_prompts()
+        vec.trajectories = [a, b]
+        prompts = vec._get_prompts()
         assert prompts is not None
         assert len(prompts) == 2
         assert [int(p["input_ids"].shape[1]) for p in prompts] == [2, 3]

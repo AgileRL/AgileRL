@@ -7,15 +7,44 @@ A :class:`RolloutEnv`, produces prompts (usually backed by a dataset) that are s
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import torch
 
 from agilerl.llm_envs.base import LLMEnv
-from agilerl.llm_envs.rollout_buffer import RolloutBuffer, Trajectory
 
 if TYPE_CHECKING:
     from agilerl.typing import RolloutPrompts
+
+
+@dataclass
+class Trajectory:
+    """State for one environment rollout within a synchronized vector batch.
+
+    :param env: The per-trajectory rollout env/harness this trajectory steps.
+    :type env: RolloutEnv
+    :param batch_idx: Index of the logical batch item this trajectory belongs to.
+    :type batch_idx: int
+    :param group_idx: Index of this trajectory within its group (``BatchRolloutEnv``
+        holds ``batch_size * group_size`` trajectories laid out group-contiguous).
+    :type group_idx: int
+    :param prompt: The current prompt the environment is rolling out.
+    :type prompt: RolloutPrompts
+    :param done: Whether this rollout has terminated.
+    :type done: bool
+    :param sampling_logps: Per-token sampling logprobs from the vLLM rollout, one
+        1-D tensor per turn; ``get_trajectories`` concatenates them across turns.
+        Defaults to an empty list.
+    :type sampling_logps: list[torch.Tensor]
+    """
+
+    env: RolloutEnv
+    batch_idx: int
+    group_idx: int
+    prompt: RolloutPrompts
+    done: bool
+    sampling_logps: list[torch.Tensor] = field(default_factory=list)
 
 
 def dataloader_shuffle_order(
@@ -193,7 +222,7 @@ class BatchRolloutEnv:
         self.num_envs = batch_size * group_size
         self.batch_size = batch_size
         self.group_size = group_size
-        self.trajectories = RolloutBuffer(batch_size, group_size)
+        self.trajectories: list[Trajectory] = []
         self._cursor = 0
         self._epoch_order: list[int] | None = None
         self._dataset_size = 0
@@ -213,6 +242,56 @@ class BatchRolloutEnv:
         row = self._epoch_order[pos]
         self._cursor += 1
         return row
+
+    @property
+    def _is_initialized(self) -> bool:
+        """``True`` once every trajectory slot has been created."""
+        return len(self.trajectories) == self.num_envs
+
+    def _active_trajectories(self) -> list[Trajectory]:
+        """Non-terminal trajectories in stable ``(batch_idx, group_idx)`` order."""
+        active = [traj for traj in self.trajectories if not traj.done]
+        active.sort(key=lambda t: (t.batch_idx, t.group_idx))
+        return active
+
+    def _get_prompts(self) -> list[RolloutPrompts] | None:
+        """Prompts for active trajectories, or ``None`` when all are terminal."""
+        active = self._active_trajectories()
+        if not active:
+            return None
+        return [traj.prompt for traj in active]
+
+    def _reset_trajectory(
+        self,
+        *,
+        seed: int | None,
+        env_idx: int,
+        row_index: int | None = None,
+    ) -> None:
+        """Reset one existing trajectory's env in place and rebind its prompt.
+
+        :param seed: Optional reset seed passed to the wrapped environment.
+        :type seed: int | None
+        :param env_idx: Index into ``self.trajectories`` to reset.
+        :type env_idx: int
+        :param row_index: Dataset row chosen by this ``BatchRolloutEnv``.
+        :type row_index: int | None
+        """
+        if env_idx < 0 or env_idx >= len(self.trajectories):
+            msg = (
+                "env_idx out of bounds for trajectory buffer: "
+                f"{env_idx} not in [0, {len(self.trajectories) - 1}]"
+            )
+            raise IndexError(msg)
+        traj = self.trajectories[env_idx]
+        prompt_dict, _ = (
+            traj.env.reset(seed=seed, row_index=row_index)
+            if row_index is not None
+            else traj.env.reset(seed=seed)
+        )
+        traj.prompt = prompt_dict
+        traj.done = False
+        traj.sampling_logps.clear()
 
     def reset(
         self,
@@ -239,7 +318,7 @@ class BatchRolloutEnv:
             row_index: int | None = None
             for group_idx in range(self.group_size):
                 env_idx = batch_idx * self.group_size + group_idx
-                if not self.trajectories.is_initialized:
+                if not self._is_initialized:
                     env_i = self.env_factory(**self.env_config)
                     # Size the shared cursor from the first env's dataset, before
                     # resolving any row, so all rows draw from one shuffle order.
@@ -256,7 +335,7 @@ class BatchRolloutEnv:
                         if row_index is not None
                         else env_i.reset(seed=batch_seed)
                     )
-                    self.trajectories.add_trajectory(
+                    self.trajectories.append(
                         Trajectory(
                             env=env_i,
                             batch_idx=batch_idx,
@@ -268,12 +347,12 @@ class BatchRolloutEnv:
                 else:
                     if group_idx == 0 and self._dataset_size > 0:
                         row_index = self._next_row()
-                    self.trajectories.reset_trajectory(
+                    self._reset_trajectory(
                         env_idx=env_idx,
                         seed=batch_seed,
                         row_index=row_index,
                     )
-        return self.trajectories.get_prompts()
+        return self._get_prompts()
 
     def step(
         self,
@@ -291,7 +370,7 @@ class BatchRolloutEnv:
         :return: Next active prompt dictionaries after stepping.
         :rtype: list[RolloutPrompts] | None
         """
-        active = self.trajectories.get_active_trajectories(sorted_by_index=True)
+        active = self._active_trajectories()
         if len(completion_ids) != len(active):
             msg = (
                 "Number of completions does not match number of active trajectories: "
@@ -318,7 +397,7 @@ class BatchRolloutEnv:
             traj.done = bool(terminated or truncated)
             if not traj.done:
                 traj.prompt = next_prompt
-        return self.trajectories.get_prompts()
+        return self._get_prompts()
 
     def close(self) -> None:
         """Close all underlying environments."""
