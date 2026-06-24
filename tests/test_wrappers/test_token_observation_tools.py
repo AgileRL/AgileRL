@@ -1,4 +1,4 @@
-"""Tool-aware tokenization & masking in ``RolloutHarness``.
+"""Tool-aware tokenization & masking in ``RolloutEnvWrapper``.
 
 Masking is by *generation provenance*: a token contributes to the policy loss
 iff the policy sampled it (``turn_boundaries``), so env-observation / tool-result
@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 import torch
 
-from agilerl.llm_envs import RolloutEnv, RolloutHarness
+from agilerl.llm_envs import RolloutEnv, RolloutEnvWrapper
 
 _WIP = "pending tool-path wiring (engine / _align_sampling_logprobs)"
 
@@ -30,11 +30,11 @@ def _rollout_env() -> RolloutEnv:
     )
 
 
-def _bare_wrapper() -> RolloutHarness:
-    return RolloutHarness.__new__(RolloutHarness)
+def _bare_wrapper() -> RolloutEnvWrapper:
+    return RolloutEnvWrapper.__new__(RolloutEnvWrapper)
 
 
-def _mask_wrapper() -> RolloutHarness:
+def _mask_wrapper() -> RolloutEnvWrapper:
     """Wrapper carrying just the fields ``get_episode_data`` reads.
 
     ``full_ids`` layout: ``[p0 p1 | g0 g1 | f0 f1 | g2 g3]`` — initial prompt,
@@ -47,13 +47,14 @@ def _mask_wrapper() -> RolloutHarness:
     w.turn_rewards = [0.5, 1.0]
     w.pad_id = None
     w.max_turns = 2
+    w.sampling_logps = []
     return w
 
 
 def test_action_mask_excludes_appended_feedback() -> None:
     """Tool-result / feedback tokens (appended after each generated span) are
     masked 0 — locks the provenance guarantee that tool results never train."""
-    _full, action_mask, _turn_ids, _rewards = _mask_wrapper().get_episode_data()
+    _full, action_mask, _turn_ids, _rewards, _logps = _mask_wrapper().get_episode_data()
     # Mask is over positions [1 .. seq_len-1]; True only on generated spans.
     assert action_mask[0].tolist() == [False, True, True, False, False, True, True]
 
@@ -61,7 +62,7 @@ def test_action_mask_excludes_appended_feedback() -> None:
 def test_turn_ids_track_generation_spans_only() -> None:
     """turn_ids hold the turn index on each generated span and -1 elsewhere
     (prompt, feedback / tool-result, pad)."""
-    _full, _action_mask, turn_ids, _rewards = _mask_wrapper().get_episode_data()
+    _full, _action_mask, turn_ids, _rewards, _logps = _mask_wrapper().get_episode_data()
     assert turn_ids[0].tolist() == [-1, 0, 0, -1, -1, 1, 1]
 
 
@@ -127,9 +128,11 @@ def test_tool_schema_injected_into_feedback_boundary() -> None:
 def test_format_obs_applies_prefix_and_suffix_from_info() -> None:
     """``_format_obs`` wraps the observation with the info prefix/suffix; an empty
     or absent info leaves the text untouched."""
-    assert RolloutHarness._format_obs("body", None) == "body"
-    assert RolloutHarness._format_obs("body", {}) == "body"
-    decorated = RolloutHarness._format_obs("body", {"prefix": "PRE:", "suffix": "SUF"})
+    assert RolloutEnvWrapper._format_obs("body", None) == "body"
+    assert RolloutEnvWrapper._format_obs("body", {}) == "body"
+    decorated = RolloutEnvWrapper._format_obs(
+        "body", {"prefix": "PRE:", "suffix": "SUF"}
+    )
     assert decorated == "PRE:body\nSUF"
 
 
@@ -191,7 +194,9 @@ def test_reset_forwards_row_index_to_wrapped_env() -> None:
         test_questions=["q0", "q1"],
         test_answers=["a0", "a1"],
     )
-    w = RolloutHarness(inner, _MiniTokenizer(), max_turns=1, apply_chat_template=False)
+    w = RolloutEnvWrapper(
+        inner, _MiniTokenizer(), max_turns=1, apply_chat_template=False
+    )
     w.reset(row_index=1)
     assert inner._question == "q1"
     assert inner._answer == "a1"

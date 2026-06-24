@@ -9,7 +9,7 @@ from agilerl.algorithms.core import ActionResult
 from agilerl.rollouts.on_policy import collect_rollouts_llm
 from agilerl.llm_envs import (
     BatchRolloutEnv,
-    RolloutHarness,
+    RolloutEnvWrapper,
 )
 from agilerl.algorithms.ppo import PPO
 from agilerl.rollouts.on_policy import (
@@ -103,7 +103,7 @@ class TestCollectRolloutsLlm:
         tokenizer = _TinyTokenizer()
 
         def env_fn():
-            return RolloutHarness(
+            return RolloutEnvWrapper(
                 _SingleTurnTextEnv(),
                 tokenizer=tokenizer,
                 max_turns=1,
@@ -169,30 +169,42 @@ class TestCollectRolloutsLlm:
             ) -> tuple[dict[str, torch.Tensor], dict[str, object]]:
                 """Return a one-token prompt that uniquely marks this trajectory."""
                 del seed
-                return {
+                self.done = False
+                self.current_prompt = {
                     "input_ids": torch.tensor([[self.prompt_token]], dtype=torch.long),
                     "attention_mask": torch.ones(1, 1, dtype=torch.long),
-                }, {}
+                }
+                return self.current_prompt, {}
 
             def step(
                 self,
                 full_completion: torch.Tensor,
+                sampling_logps: torch.Tensor | None = None,
             ) -> tuple[dict[str, torch.Tensor], float, bool, bool, dict[str, object]]:
                 """Record completion identity and terminate after one turn."""
+                del sampling_logps
                 self._seen_token = int(full_completion[0, 0].item())
                 self.turn_boundaries = [(0, 1, 0)]
+                self.done = True
+                self.current_prompt = {}
                 return {}, 1.0, True, False, {}
 
             def get_episode_data(
                 self,
-            ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            ) -> tuple[
+                torch.Tensor,
+                torch.Tensor,
+                torch.Tensor,
+                torch.Tensor,
+                torch.Tensor | None,
+            ]:
                 """Expose marker token via episode ids and rewards for ordering checks."""
                 token = self._seen_token if self._seen_token is not None else -1
                 ep_ids = torch.tensor([[token, token + 1]], dtype=torch.long)
                 action_mask = torch.tensor([[True]], dtype=torch.bool)
                 turn_ids = torch.tensor([[0]], dtype=torch.long)
                 rewards = torch.tensor([float(token)], dtype=torch.float32)
-                return ep_ids, action_mask, turn_ids, rewards
+                return ep_ids, action_mask, turn_ids, rewards, None
 
             def close(self) -> None:
                 """Provide a close method compatible with vector env cleanup."""

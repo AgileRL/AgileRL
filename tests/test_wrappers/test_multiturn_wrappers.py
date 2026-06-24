@@ -1,4 +1,4 @@
-"""Tests for RolloutHarness prompt fields and context-overflow handling."""
+"""Tests for RolloutEnvWrapper prompt fields and context-overflow handling."""
 
 from __future__ import annotations
 
@@ -10,8 +10,7 @@ import torch
 
 from agilerl.llm_envs import (
     BatchRolloutEnv,
-    RolloutHarness,
-    Trajectory,
+    RolloutEnvWrapper,
 )
 
 # The boundary marker is a per-render ``uuid4().hex`` (32 lowercase hex chars);
@@ -24,9 +23,10 @@ class _StubTokenizer:
         return "x" * len(ids)
 
 
-def _bare_wrapper() -> RolloutHarness:
-    w = RolloutHarness.__new__(RolloutHarness)
+def _bare_wrapper() -> RolloutEnvWrapper:
+    w = RolloutEnvWrapper.__new__(RolloutEnvWrapper)
     w.tools = None  # optional config; __init__ default, read by the tokenize paths
+    w.sampling_logps = []  # read by get_episode_data
     return w
 
 
@@ -67,10 +67,10 @@ class _RecordingGemEnv:
         return "", 1.0, True, False, {}
 
 
-class TestRolloutHarnessReset:
+class TestRolloutEnvWrapperReset:
     def test_reset_returns_tuple_with_text_and_sets_prompt_len(self) -> None:
         inner = _RecordingGemEnv()
-        w = RolloutHarness(
+        w = RolloutEnvWrapper(
             inner,
             _ChrTokenizer(),
             max_turns=3,
@@ -84,10 +84,10 @@ class TestRolloutHarnessReset:
         assert w._last_full_prompt_token_len == obs["input_ids"].shape[1]
 
 
-class TestRolloutHarnessStep:
+class TestRolloutEnvWrapperStep:
     def test_step_from_full_completion_slices_generation(self) -> None:
         inner = _RecordingGemEnv()
-        w = RolloutHarness(
+        w = RolloutEnvWrapper(
             inner,
             _ChrTokenizer(),
             max_turns=3,
@@ -111,7 +111,7 @@ class TestRolloutHarnessStep:
 
     def test_chat_template_paths_and_nonterminal_step_feedback_append(self) -> None:
         env = _NonTerminalEnv()
-        w = RolloutHarness(
+        w = RolloutEnvWrapper(
             env,
             _ChatTokenizer(),
             max_turns=2,
@@ -134,7 +134,7 @@ class TestRolloutHarnessStep:
 
     def test_non_chat_feedback_tokenization_path(self) -> None:
         env = _NonTerminalEnv()
-        w = RolloutHarness(
+        w = RolloutEnvWrapper(
             env,
             _ChrTokenizer(),
             max_turns=2,
@@ -158,7 +158,7 @@ class TestRolloutHarnessStep:
         env = _NonTerminalEnv()
         # Tiny budget: 20 - 4 = 16 prompt tokens. Initial prompt "P:hello\nS"
         # is 9 char-tokens; +2 gen +12 feedback ("F:feedback\nT") => 23 > 16.
-        w = RolloutHarness(
+        w = RolloutEnvWrapper(
             env,
             _ChrTokenizer(),
             max_turns=4,
@@ -184,7 +184,7 @@ class TestRolloutHarnessStep:
         assert overflow["full_prompt_len"] > overflow["max_prompt_tokens"]
 
 
-class TestRolloutHarnessChatTemplateBoundary:
+class TestRolloutEnvWrapperChatTemplateBoundary:
     """Verify the assistant→user→assistant boundary is computed via the
     tokenizer's chat template rather than hard-coded ChatML markers."""
 
@@ -391,7 +391,7 @@ class _ChrTokenizerWithChatTemplateBroken(_ChrTokenizer):
     """Has no apply_chat_template at all, so the boundary diff path errors."""
 
 
-class TestRolloutHarnessPolicyObservationFromState:
+class TestRolloutEnvWrapperPolicyObservationFromState:
     def test_policy_observation_returns_current_prompt_fields(self) -> None:
         """The policy observation carries the current ``input_ids`` directly."""
         w = _bare_wrapper()
@@ -414,20 +414,27 @@ class _SyncStubEnv:
         self.turn_boundaries: list[int] = []
         self.reset_calls: list[int | None] = []
         self.close_calls = 0
+        self.done = False
+        self.current_prompt: dict = {}
+        self.sampling_logps: list[torch.Tensor] = []
 
     def reset(self, seed: int | None = None):
         self.reset_calls.append(seed)
-        return (
-            {
-                "input_ids": torch.ones(1, 3, dtype=torch.long),
-                "attention_mask": torch.ones(1, 3, dtype=torch.long),
-            },
-            {},
-        )
+        self.done = False
+        self.sampling_logps = []
+        self.current_prompt = {
+            "input_ids": torch.ones(1, 3, dtype=torch.long),
+            "attention_mask": torch.ones(1, 3, dtype=torch.long),
+        }
+        return (self.current_prompt, {})
 
-    def step(self, full_completion: torch.Tensor):
+    def step(self, full_completion: torch.Tensor, sampling_logps=None):
         del full_completion
         self.turn_boundaries.append(1)
+        if sampling_logps is not None:
+            self.sampling_logps.append(sampling_logps)
+        self.done = True
+        self.current_prompt = {}
         return ({}, 1.0, True, False, {})
 
     def close(self) -> None:
@@ -439,6 +446,7 @@ class _SyncStubEnv:
             torch.ones(1, 3, dtype=torch.bool),
             torch.zeros(1, 3, dtype=torch.long),
             torch.ones(2, dtype=torch.float32),
+            torch.cat(self.sampling_logps) if self.sampling_logps else None,
         )
 
 
@@ -450,7 +458,7 @@ class TestBatchRolloutEnvReset:
             group_size=2,
         )
         _ = vec_env.reset(seed=10)
-        seen = [traj.env.reset_calls[-1] for traj in vec_env.trajectories]
+        seen = [env.reset_calls[-1] for env in vec_env.envs]
         assert seen == [10, 10, 11, 11]
 
     def test_sync_gem_vec_env_reset_with_none_seed(self) -> None:
@@ -460,7 +468,7 @@ class TestBatchRolloutEnvReset:
             group_size=2,
         )
         _ = vec_env.reset(seed=None)
-        seen = [traj.env.reset_calls[-1] for traj in vec_env.trajectories]
+        seen = [env.reset_calls[-1] for env in vec_env.envs]
         assert seen == [None, None, None, None]
 
     def test_sync_gem_vec_env_reset_reuses_existing_trajectories(self) -> None:
@@ -471,7 +479,7 @@ class TestBatchRolloutEnvReset:
         )
         _ = vec_env.reset(seed=10)
         _ = vec_env.reset(seed=20)
-        seen = [traj.env.reset_calls[-1] for traj in vec_env.trajectories]
+        seen = [env.reset_calls[-1] for env in vec_env.envs]
         assert seen == [20, 20, 21, 21]
 
 
@@ -487,7 +495,7 @@ class TestBatchRolloutEnvStep:
         _ = vec_env.reset(seed=0)
         with pytest.raises(
             RuntimeError,
-            match="Number of completions does not match number of active trajectories",
+            match="Number of completions does not match number of active envs",
         ):
             vec_env.step([torch.ones(1, 5, dtype=torch.long)])
 
@@ -544,10 +552,10 @@ class TestBatchRolloutEnvStep:
     def test_batch_rollout_env_step_accumulates_sampling_logps_per_trajectory(
         self,
     ) -> None:
-        """Each turn's vLLM sampling logprobs append onto that trajectory's
-        ``Trajectory.sampling_logps``; ``None`` rows (nothing captured) are
-        skipped. ``get_trajectories`` concatenates across turns and keeps a
-        per-trajectory ``None`` for rows that never captured any."""
+        """Each turn's vLLM sampling logprobs append onto that env's
+        ``sampling_logps``; ``None`` rows (nothing captured) are skipped.
+        ``get_trajectories`` concatenates across turns and keeps a per-env
+        ``None`` for rows that never captured any."""
         vec = BatchRolloutEnv(
             env_factory=lambda: _StepVariantEnv(done_after_step=False),
             batch_size=1,
@@ -560,8 +568,8 @@ class TestBatchRolloutEnvStep:
         ]
         _ = vec.step(completions, sampling_logps=[torch.tensor([-0.1, -0.2]), None])
         _ = vec.step(completions, sampling_logps=[torch.tensor([-0.3]), None])
-        assert len(vec.trajectories[0].sampling_logps) == 2
-        assert vec.trajectories[1].sampling_logps == []
+        assert len(vec.envs[0].sampling_logps) == 2
+        assert vec.envs[1].sampling_logps == []
 
         *_parts, sampling = vec.get_trajectories()
         assert sampling is not None
@@ -591,9 +599,9 @@ class TestBatchRolloutEnvStep:
 
         # Captured logprobs from one rollout must not leak past a reset.
         _ = vec.step(completions, sampling_logps=[torch.tensor([-0.5]), None])
-        assert len(vec.trajectories[0].sampling_logps) == 1
+        assert len(vec.envs[0].sampling_logps) == 1
         _ = vec.reset(seed=1)
-        assert vec.trajectories[0].sampling_logps == []
+        assert vec.envs[0].sampling_logps == []
         *_parts, sampling = vec.get_trajectories()
         assert sampling is None
 
@@ -607,7 +615,7 @@ class TestBatchRolloutEnvClose:
         )
         _ = vec_env.reset(seed=0)
         vec_env.close()
-        close_counts = [traj.env.close_calls for traj in vec_env.trajectories]
+        close_counts = [env.close_calls for env in vec_env.envs]
         assert close_counts == [1, 1, 1, 1]
 
     def test_batch_rollout_env_close_dedupes_same_env_instance(self) -> None:
@@ -634,21 +642,27 @@ class TestBatchRolloutEnvInit:
             )
 
 
-class TestBatchRolloutEnvResetTrajectory:
-    def test_reset_trajectory_out_of_bounds(self) -> None:
+def _stub_env(*, done: bool = False, prompt: dict | None = None) -> _SyncStubEnv:
+    """A stub env preset to a given pool state (``done`` / ``current_prompt``)."""
+    env = _SyncStubEnv()
+    env.done = done
+    env.current_prompt = {} if prompt is None else prompt
+    return env
+
+
+class TestBatchRolloutEnvResetEnv:
+    def test_reset_env_out_of_bounds(self) -> None:
         vec = BatchRolloutEnv(env_factory=_SyncStubEnv, batch_size=1, group_size=1)
         with pytest.raises(IndexError, match="env_idx out of bounds"):
-            vec._reset_trajectory(seed=0, env_idx=0)
+            vec._reset_env(seed=0, env_idx=0)
 
-    def test_reset_trajectory_success_path(self) -> None:
-        env = _SyncStubEnv()
+    def test_reset_env_success_path(self) -> None:
+        env = _stub_env(done=True)
         vec = BatchRolloutEnv(env_factory=_SyncStubEnv, batch_size=1, group_size=1)
-        vec.trajectories.append(
-            Trajectory(env=env, batch_idx=0, group_idx=0, prompt={}, done=True)
-        )
-        vec._reset_trajectory(seed=5, env_idx=0)
-        assert vec.trajectories[0].done is False
-        assert vec.trajectories[0].prompt["input_ids"].shape == (1, 3)
+        vec.envs.append(env)
+        vec._reset_env(seed=5, env_idx=0)
+        assert vec.envs[0].done is False
+        assert vec.envs[0].current_prompt["input_ids"].shape == (1, 3)
         assert env.reset_calls[-1] == 5
 
 
@@ -698,7 +712,7 @@ class _NestedChatTokenizer(_ChatTokenizer):
         return out
 
 
-class TestRolloutHarnessTokenizeInitialPrompt:
+class TestRolloutEnvWrapperTokenizeInitialPrompt:
     def test_initial_prompt_unwraps_batched_token_id_lists(self) -> None:
         """Tokenizers returning ``[[ids]]`` (batch dim) and ``[ids]`` (flat)
         from ``apply_chat_template`` must produce identical ``(1, T)``
@@ -733,15 +747,16 @@ class _NonTerminalEnv:
         return "done", 1.0, True, False, {}
 
 
-class TestRolloutHarnessFormatObs:
+class TestRolloutEnvWrapperFormatObs:
     def test_format_obs_prefix_suffix_and_empty_info(self) -> None:
-        assert RolloutHarness._format_obs("x", None) == "x"
+        assert RolloutEnvWrapper._format_obs("x", None) == "x"
         assert (
-            RolloutHarness._format_obs("x", {"prefix": "A:", "suffix": "B"}) == "A:x\nB"
+            RolloutEnvWrapper._format_obs("x", {"prefix": "A:", "suffix": "B"})
+            == "A:x\nB"
         )
 
 
-class TestRolloutHarnessGetEpisodeData:
+class TestRolloutEnvWrapperGetEpisodeData:
     def test_get_episode_data_padding_and_pad_mask(self) -> None:
         w = _bare_wrapper()
         w.pad_id = 0
@@ -749,7 +764,7 @@ class TestRolloutHarnessGetEpisodeData:
         w.full_ids = torch.tensor([[9, 5, 0, 7, 8]], dtype=torch.long)
         w.turn_boundaries = [(1, 3, 0), (3, 5, 1)]
         w.turn_rewards = [1.5]
-        full_ids, action_mask, turn_ids, rewards = w.get_episode_data()
+        full_ids, action_mask, turn_ids, rewards, _logps = w.get_episode_data()
         assert torch.equal(full_ids, w.full_ids)
         assert action_mask.dtype == torch.bool
         assert turn_ids.dtype == torch.long
@@ -764,7 +779,7 @@ class TestRolloutHarnessGetEpisodeData:
             w.get_episode_data()
 
 
-class TestRolloutHarnessGetDebugInfo:
+class TestRolloutEnvWrapperGetDebugInfo:
     def test_get_debug_info_paths(self) -> None:
         w = _bare_wrapper()
         w.full_ids = None
@@ -787,82 +802,44 @@ class TestRolloutHarnessGetDebugInfo:
         assert info["turn_details"][0]["gen_len"] == 2
 
 
-class TestBatchRolloutEnvTrajectoryHelpers:
+class TestBatchRolloutEnvHelpers:
     def test_is_initialized_flips_once_all_slots_built(self) -> None:
         vec = BatchRolloutEnv(env_factory=_SyncStubEnv, batch_size=1, group_size=2)
         assert vec._is_initialized is False
-        env = _SyncStubEnv()
-        for g in range(2):
-            vec.trajectories.append(
-                Trajectory(env=env, batch_idx=0, group_idx=g, prompt={}, done=False)
-            )
+        for _ in range(2):
+            vec.envs.append(_SyncStubEnv())
         assert vec._is_initialized is True
 
 
-class TestBatchRolloutEnvActiveTrajectories:
-    def test_active_trajectories_excludes_done_and_sorts_by_index(self) -> None:
-        env = _SyncStubEnv()
+class TestBatchRolloutEnvActiveEnvs:
+    def test_active_envs_excludes_done_and_preserves_list_order(self) -> None:
         vec = BatchRolloutEnv(env_factory=_SyncStubEnv, batch_size=2, group_size=2)
-        t0 = Trajectory(
-            env=env,
-            batch_idx=1,
-            group_idx=0,
-            prompt={
-                "input_ids": torch.ones(1, 1, dtype=torch.long),
-                "attention_mask": torch.ones(1, 1, dtype=torch.long),
-            },
-            done=False,
-        )
-        t1 = Trajectory(
-            env=env,
-            batch_idx=0,
-            group_idx=1,
-            prompt={
-                "input_ids": torch.ones(1, 1, dtype=torch.long),
-                "attention_mask": torch.ones(1, 1, dtype=torch.long),
-            },
-            done=False,
-        )
-        t2 = Trajectory(
-            env=env,
-            batch_idx=0,
-            group_idx=0,
-            prompt={
-                "input_ids": torch.ones(1, 1, dtype=torch.long),
-                "attention_mask": torch.ones(1, 1, dtype=torch.long),
-            },
-            done=True,
-        )
-        vec.trajectories = [t0, t1, t2]
-        # done t2 excluded; remaining sorted by (batch_idx, group_idx).
-        assert vec._active_trajectories() == [t1, t0]
+        e0 = _stub_env(done=False)
+        e1 = _stub_env(done=True)
+        e2 = _stub_env(done=False)
+        vec.envs = [e0, e1, e2]
+        # done e1 excluded; the rest keep their list (batch/group) order.
+        assert vec._active_envs() == [e0, e2]
 
 
 class TestBatchRolloutEnvGetPrompts:
     def test_get_prompts_returns_none_when_no_active(self) -> None:
-        env = _SyncStubEnv()
         vec = BatchRolloutEnv(env_factory=_SyncStubEnv, batch_size=1, group_size=2)
-        done_traj = Trajectory(
-            env=env,
-            batch_idx=0,
-            group_idx=0,
+        done_env = _stub_env(
+            done=True,
             prompt={
                 "input_ids": torch.ones(1, 2, dtype=torch.long),
                 "attention_mask": torch.ones(1, 2, dtype=torch.long),
             },
-            done=True,
         )
-        active_traj = Trajectory(
-            env=env,
-            batch_idx=0,
-            group_idx=1,
+        active_env = _stub_env(
+            done=False,
             prompt={
                 "input_ids": torch.ones(1, 3, dtype=torch.long),
                 "attention_mask": torch.ones(1, 3, dtype=torch.long),
             },
-            done=False,
         )
-        vec.trajectories = [done_traj, active_traj]
+        vec.envs = [done_env, active_env]
 
         prompts = vec._get_prompts()
         assert prompts is not None
@@ -871,33 +848,26 @@ class TestBatchRolloutEnvGetPrompts:
         assert prompts[0]["input_ids"].shape == (1, 3)
         assert prompts[0]["attention_mask"].shape == (1, 3)
 
-        active_traj.done = True
+        active_env.done = True
         assert vec._get_prompts() is None
 
     def test_get_prompts_returns_active_in_index_order(self) -> None:
-        env = _SyncStubEnv()
         vec = BatchRolloutEnv(env_factory=_SyncStubEnv, batch_size=1, group_size=2)
-        a = Trajectory(
-            env=env,
-            batch_idx=0,
-            group_idx=0,
+        a = _stub_env(
+            done=False,
             prompt={
                 "input_ids": torch.ones(1, 2, dtype=torch.long),
                 "attention_mask": torch.ones(1, 2, dtype=torch.long),
             },
-            done=False,
         )
-        b = Trajectory(
-            env=env,
-            batch_idx=0,
-            group_idx=1,
+        b = _stub_env(
+            done=False,
             prompt={
                 "input_ids": torch.ones(1, 3, dtype=torch.long),
                 "attention_mask": torch.ones(1, 3, dtype=torch.long),
             },
-            done=False,
         )
-        vec.trajectories = [a, b]
+        vec.envs = [a, b]
         prompts = vec._get_prompts()
         assert prompts is not None
         assert len(prompts) == 2
@@ -911,35 +881,37 @@ class _StepVariantEnv:
         self.done_after_step = done_after_step
         self.include_turn_boundaries = include_turn_boundaries
         self.step_shapes: list[tuple[int, ...]] = []
+        self.done = False
+        self.current_prompt: dict = {}
+        self.sampling_logps: list[torch.Tensor] = []
         if include_turn_boundaries:
             self.turn_boundaries: list[int] = []
 
     def reset(self, seed: int | None = None):
         del seed
-        return (
-            {
-                "input_ids": torch.ones(1, 3, dtype=torch.long),
-                "attention_mask": torch.ones(1, 3, dtype=torch.long),
-            },
-            {},
-        )
+        self.done = False
+        self.sampling_logps = []
+        self.current_prompt = {
+            "input_ids": torch.ones(1, 3, dtype=torch.long),
+            "attention_mask": torch.ones(1, 3, dtype=torch.long),
+        }
+        return (self.current_prompt, {})
 
-    def step(self, full_completion: torch.Tensor):
+    def step(self, full_completion: torch.Tensor, sampling_logps=None):
         self.step_shapes.append(tuple(full_completion.shape))
         if self.include_turn_boundaries:
             self.turn_boundaries.append(1)
+        if sampling_logps is not None:
+            self.sampling_logps.append(sampling_logps)
         if self.done_after_step:
+            self.done = True
+            self.current_prompt = {}
             return ({}, 1.0, True, False, {})
-        return (
-            {
-                "input_ids": torch.ones(1, 4, dtype=torch.long),
-                "attention_mask": torch.ones(1, 4, dtype=torch.long),
-            },
-            0.5,
-            False,
-            False,
-            {},
-        )
+        self.current_prompt = {
+            "input_ids": torch.ones(1, 4, dtype=torch.long),
+            "attention_mask": torch.ones(1, 4, dtype=torch.long),
+        }
+        return (self.current_prompt, 0.5, False, False, {})
 
     def close(self) -> None:
         pass
@@ -950,6 +922,7 @@ class _StepVariantEnv:
             torch.ones(1, 4, dtype=torch.bool),
             torch.zeros(1, 4, dtype=torch.long),
             torch.ones(2, dtype=torch.float32),
+            torch.cat(self.sampling_logps) if self.sampling_logps else None,
         )
 
 

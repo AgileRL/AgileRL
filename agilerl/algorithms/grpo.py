@@ -27,7 +27,7 @@ else:
 
 from agilerl.algorithms.core import ActionResult, LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.llm_envs import RolloutHarness
+from agilerl.llm_envs import RolloutEnvWrapper
 from agilerl.protocols import (
     PeftModelProtocol,
     PreTrainedModelProtocol,
@@ -638,7 +638,7 @@ class GRPO(LLMAlgorithm):
 
     def test(
         self,
-        env: RolloutHarness,
+        env: RolloutEnvWrapper,
         loop: int = 1,
         *args: Any,
         **kwargs: Any,
@@ -646,7 +646,7 @@ class GRPO(LLMAlgorithm):
         """Return fitness (test) score of llm on test sub-set.
 
         :param env: Tokenized rollout episode environment (single- or multi-turn).
-        :type env: RolloutHarness
+        :type env: RolloutEnvWrapper
         :param loop: Number of outer test iterations over ``reset`` / ``step``.
         :type loop: int
         :return: Concatenated reward tensor from the test loop.
@@ -654,8 +654,8 @@ class GRPO(LLMAlgorithm):
         """
         eval_context = getattr(env, "eval_mode", nullcontext)
         with eval_context():
-            if not isinstance(env, RolloutHarness):
-                msg = f"env must be a RolloutHarness; got {type(env).__name__}"
+            if not isinstance(env, RolloutEnvWrapper):
+                msg = f"env must be a RolloutEnvWrapper; got {type(env).__name__}"
                 raise TypeError(msg)
             all_rewards: list[torch.Tensor] = []
             for _ in range(loop):

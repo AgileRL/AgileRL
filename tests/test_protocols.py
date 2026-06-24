@@ -569,18 +569,18 @@ class TestLLMEnvHierarchy:
     """The LLM env contract lives in :mod:`agilerl.llm_envs` as concrete bases.
 
     ``LLMEnv`` is the abstract base every LLM env shares; ``RolloutEnv`` is the
-    concrete generation subtype, and ``RolloutHarness`` composes (wraps) a
+    concrete generation subtype, and ``RolloutEnvWrapper`` composes (wraps) a
     ``RolloutEnv`` rather than subclassing it — the algorithms'
-    ``isinstance(env, RolloutHarness)`` checks key on the harness they drive.
+    ``isinstance(env, RolloutEnvWrapper)`` checks key on the harness they drive.
     """
 
     def test_rollout_env_is_concrete_llm_env_subtype(self):
         pytest.importorskip("datasets", reason="LLM dependencies not installed")
-        from agilerl.llm_envs import LLMEnv, RolloutEnv, RolloutHarness
+        from agilerl.llm_envs import LLMEnv, RolloutEnv, RolloutEnvWrapper
 
         assert issubclass(RolloutEnv, LLMEnv)
         # The harness composes (wraps) a RolloutEnv rather than subclassing it.
-        assert not issubclass(RolloutHarness, RolloutEnv)
+        assert not issubclass(RolloutEnvWrapper, RolloutEnv)
         # The env contract no longer lives on agilerl.protocols.
         import agilerl.protocols as protocols
 

@@ -26,7 +26,14 @@ from agilerl.training.train_llm import (
 def _make_multiturn_mock_env(*, turn_boundaries_len: int = 3):
     """GEM-style env: reset/step/get_episode_data + turn_boundaries for step accounting."""
     mock_env = MagicMock(
-        spec=["reset", "step", "get_episode_data", "turn_boundaries"],
+        spec=[
+            "reset",
+            "step",
+            "get_episode_data",
+            "turn_boundaries",
+            "done",
+            "current_prompt",
+        ],
     )
     prompt_dict: dict = {
         "input_ids": torch.ones(1, 4, dtype=torch.long),
@@ -35,6 +42,8 @@ def _make_multiturn_mock_env(*, turn_boundaries_len: int = 3):
     mock_env.reset.return_value = (prompt_dict, {})
     mock_env.step.return_value = (prompt_dict, 0.0, False, False, {})
     mock_env.turn_boundaries = list(range(turn_boundaries_len))
+    mock_env.done = False
+    mock_env.current_prompt = prompt_dict
     L = 8
     T = 2
     mock_env.get_episode_data.return_value = (
@@ -42,6 +51,7 @@ def _make_multiturn_mock_env(*, turn_boundaries_len: int = 3):
         torch.ones(1, L, dtype=torch.long),
         torch.zeros(1, L, dtype=torch.long),
         torch.ones(T, dtype=torch.float32),
+        None,
     )
     return mock_env
 
@@ -1430,11 +1440,14 @@ class TestFinetuneLlmMultiturn:
         mock_env.step.return_value = (prompt, 0.0, False, False, {})
         mock_env.turn_boundaries = [0, 1, 2]
         mock_env.dataset_size = 0
+        mock_env.done = False
+        mock_env.current_prompt = prompt
         mock_env.get_episode_data.return_value = (
             torch.ones(1, L, dtype=torch.long),
             torch.ones(1, L, dtype=torch.long),
             torch.zeros(1, L, dtype=torch.long),
             torch.ones(T, dtype=torch.float32),
+            None,
         )
 
         with (
@@ -1467,7 +1480,12 @@ class TestFinetuneLlmMultiturn:
             "attention_mask": torch.ones(1, 4, dtype=torch.long),
         }
         mock_env.reset.return_value = (prompt, {})
-        mock_env.step.return_value = (prompt, 1.0, True, False, {})
+
+        def _terminating_step(*_args, **_kwargs):
+            mock_env.done = True  # the real wrapper sets this on terminate
+            return (prompt, 1.0, True, False, {})
+
+        mock_env.step.side_effect = _terminating_step
         max_turns = 5
 
         with (

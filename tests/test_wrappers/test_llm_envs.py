@@ -17,7 +17,6 @@ from agilerl.llm_envs import (
     LLMEnv,
     RolloutEnv,
     apply_chat_template,
-    dataloader_shuffle_order,
 )
 from tests import TINY_LLM_FIXTURE_PATH
 
@@ -751,22 +750,6 @@ def test_apply_chat_template():
     assert "2+2" in decoded
 
 
-def test_dataloader_shuffle_order_is_deterministic_permutation():
-    """The shuffle index list is deterministic and a full permutation of the rows."""
-    from agilerl.llm_envs import dataloader_shuffle_order
-
-    dataset_size = 16
-    seed = 7
-    order = dataloader_shuffle_order(dataset_size, seed)
-    assert len(order) == dataset_size
-    # One epoch's order is a full permutation of the dataset indices.
-    assert sorted(order) == list(range(dataset_size))
-
-    # Deterministic per seed; a different seed produces a different shuffle.
-    assert order == dataloader_shuffle_order(dataset_size, seed)
-    assert order != dataloader_shuffle_order(dataset_size, seed + 1)
-
-
 def _collect_batch_rows(vec, num_resets, seed):
     """Reset ``vec`` ``num_resets`` times and return the per-batch-row dataset rows.
 
@@ -780,10 +763,10 @@ def _collect_batch_rows(vec, num_resets, seed):
         reset_rows: list[int] = []
         for batch_idx in range(vec.batch_size):
             group_rows = {
-                vec.trajectories[batch_idx * vec.group_size + g].env._last_row
+                vec.envs[batch_idx * vec.group_size + g]._last_row
                 for g in range(vec.group_size)
             }
-            assert len(group_rows) == 1, "group trajectories must share one row"
+            assert len(group_rows) == 1, "group envs must share one row"
             reset_rows.append(group_rows.pop())
         per_reset_rows.append(reset_rows)
     return per_reset_rows
@@ -798,9 +781,13 @@ def test_batch_rollout_env_shuffle_is_group_consistent_full_permutation():
     answers = [f"a{i}" for i in range(dataset_size)]
 
     class _RowRecordingEnv(RolloutEnv):
+        # Conform to the pooled-env contract BatchRolloutEnv reads (this test
+        # exercises only reset/cursor, so a minimal current_prompt is enough).
         def reset(self, seed=None, *, row_index=None):
             prompt, info = super().reset(seed=seed, row_index=row_index)
             self._last_row = row_index
+            self.done = False
+            self.current_prompt = {}
             return prompt, info
 
     def _factory():
@@ -892,12 +879,6 @@ def test_rollout_eval_mode_draws_from_held_out_split():
 
     train_prompt, _ = env.reset(seed=1, row_index=0)
     assert train_prompt == "train-q"
-
-
-def test_dataloader_shuffle_order_rejects_empty_dataset():
-    """A non-positive dataset size has no valid permutation, so it is rejected."""
-    with pytest.raises(ValueError, match="dataset_size must be > 0"):
-        dataloader_shuffle_order(0, seed=0)
 
 
 def test_rollout_standalone_cursor_walks_split_and_resets_on_switch():
