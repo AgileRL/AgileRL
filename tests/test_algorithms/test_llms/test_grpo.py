@@ -571,6 +571,15 @@ class TestGRPOInit:
         assert "self" not in class_sig
         assert isinstance(gspo, GRPO)
 
+    def test_cispo_gspo_signatures_match_grpo_minus_loss_type(self):
+        # @inherit_init_signature must expose exactly GRPO's params minus
+        # loss_type (no model construction needed — pure signature introspection).
+        grpo_params = set(inspect.signature(GRPO.__init__).parameters) - {"loss_type"}
+        for variant in (CISPO, GSPO):
+            assert set(inspect.signature(variant.__init__).parameters) == grpo_params
+            assert "loss_type" not in inspect.signature(variant).parameters
+            assert "self" not in inspect.signature(variant).parameters
+
     @patch("agilerl.algorithms.core.base.LLM")
     def test_init_grpo_warns_when_hf_generate_chunk_size_set_with_vllm(
         self, MockLLM, model_factory

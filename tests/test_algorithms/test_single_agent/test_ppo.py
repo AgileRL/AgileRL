@@ -849,6 +849,33 @@ class TestPPOGetAction:
         assert np.all(action >= -1.0)
         ppo.clean_up()
 
+    def test_get_action_scales_squashed_box_actions(self, vector_space):
+        box_action = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
+        ppo = PPO(vector_space, box_action)
+        ppo.set_training_mode(False)
+        ppo.actor.squash_output = True
+        scaled_calls = []
+
+        def _scale_action(action_np):
+            scaled_calls.append(True)
+            return np.clip(action_np, -1.0, 1.0)
+
+        ppo.actor.scale_action = _scale_action
+        ppo._get_action_and_values = lambda *args, **kwargs: (
+            torch.tensor([[0.5, -0.5]]),
+            torch.tensor([0.0]),
+            torch.tensor([0.0]),
+            torch.tensor([0.0]),
+            None,
+        )
+        action, *_ = ppo.get_action(
+            np.zeros((1, vector_space.shape[0]), dtype=np.float32)
+        )
+        assert scaled_calls
+        assert np.all(action <= 1.0)
+        assert np.all(action >= -1.0)
+        ppo.clean_up()
+
 
 class TestPPOGetActionAndValues:
     def test_get_action_and_values_share_encoders_false(
@@ -1156,6 +1183,56 @@ class TestPPOLearn:
         with pytest.warns(UserWarning, match="Buffer data is empty"):
             loss = ppo._learn_from_rollout_buffer_flat(buffer_td_external=empty_td)
         assert loss == 0.0
+        ppo.clean_up()
+
+    def test_learn_experiences_early_stops_on_target_kl(
+        self,
+        vector_space,
+        discrete_space,
+        monkeypatch,
+    ):
+        ppo = PPO(
+            vector_space,
+            discrete_space,
+            use_rollout_buffer=False,
+            target_kl=1e-6,
+            update_epochs=2,
+            batch_size=2,
+        )
+        num_steps = 4
+        states, next_states = get_batch_states(vector_space, num_steps)
+        experiences = [
+            [states],
+            [torch.randint(0, discrete_space.n, (num_steps,)).float()],
+            [torch.randn(num_steps)],
+            [torch.randn(num_steps)],
+            [torch.randint(0, 2, (num_steps,))],
+            [torch.randn(num_steps)],
+            [next_states],
+            [torch.zeros(1)],
+        ]
+        monkeypatch.setattr(
+            ppo,
+            "evaluate_actions",
+            lambda obs, actions, hidden_state=None, action_mask=None: (
+                torch.full((actions.shape[0],), 10.0, requires_grad=True),
+                torch.ones(actions.shape[0], requires_grad=True),
+                torch.zeros(actions.shape[0], requires_grad=True),
+            ),
+        )
+        optimizer_steps = 0
+        original_step = ppo.optimizer.step
+
+        def counting_step(*args, **kwargs):
+            nonlocal optimizer_steps
+            optimizer_steps += 1
+            return original_step(*args, **kwargs)
+
+        monkeypatch.setattr(ppo.optimizer, "step", counting_step)
+        loss = ppo.learn(experiences)
+        assert isinstance(loss, float)
+        assert optimizer_steps == 2
+        assert optimizer_steps < ppo.update_epochs * (num_steps // ppo.batch_size)
         ppo.clean_up()
 
     def test_rollout_buffer_flat_external_early_stops(
@@ -1664,6 +1741,45 @@ class TestPPOTest:
         assert "final_info" in callback_calls[0][1]
         ppo.clean_up()
 
+    def test_vectorized_mask_stack_failure_and_callback_info(
+        self, vector_space, discrete_space
+    ):
+        class VecEnv:
+            def __init__(self):
+                self.num_envs = 2
+                self._steps = 0
+
+            def reset(self):
+                self._steps = 0
+                obs = np.zeros((self.num_envs, *vector_space.shape), dtype=np.float32)
+                info = [
+                    {"action_mask": np.array([1, 0])},
+                    {"action_mask": np.array([1, 0, 1])},
+                ]
+                return obs, info
+
+            def step(self, _action):
+                self._steps += 1
+                obs = np.zeros((self.num_envs, *vector_space.shape), dtype=np.float32)
+                reward = np.array([1.0, 1.0])
+                done = np.array([True, True])
+                trunc = np.array([False, False])
+                info = [{"step": 1}, {"step": 2}]
+                return obs, reward, done, trunc, info
+
+        ppo = PPO(vector_space, discrete_space)
+        callback_calls = []
+        with pytest.warns(UserWarning, match="Could not stack action masks"):
+            _ = ppo.test(
+                VecEnv(),
+                vectorized=True,
+                loop=1,
+                callback=lambda score, info: callback_calls.append((score, info)),
+            )
+        assert len(callback_calls) == 1
+        assert callback_calls[0][1] == {"step": 1}
+        ppo.clean_up()
+
 
 class TestPPOClone:
     # Clones the agent and returns an identical agent.
@@ -1951,4 +2067,42 @@ class TestPPOCollectRollouts:
                 collect_rollouts(ppo, env, n_steps=5)
         else:
             collect_rollouts(ppo, env, n_steps=5)
+        ppo.clean_up()
+
+    def test_collect_rollouts_scalar_terminal_flags(self, vector_space, discrete_space):
+        from agilerl.rollouts.on_policy import _collect_rollouts
+
+        class ScalarTermEnv:
+            def reset(self):
+                return np.random.rand(*vector_space.shape), {}
+
+            def step(self, action):
+                del action
+                return (
+                    np.random.rand(*vector_space.shape),
+                    1.0,
+                    True,
+                    False,
+                    {},
+                )
+
+        ppo = PPO(
+            observation_space=vector_space,
+            action_space=discrete_space,
+            use_rollout_buffer=True,
+            learn_step=2,
+            num_envs=1,
+        )
+        env = ScalarTermEnv()
+        result = _collect_rollouts(
+            ppo,
+            env,
+            n_steps=1,
+            last_obs=None,
+            last_done=None,
+            last_scores=None,
+            last_info=None,
+            recurrent=False,
+        )
+        assert isinstance(result, tuple)
         ppo.clean_up()

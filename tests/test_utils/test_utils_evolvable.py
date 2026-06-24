@@ -74,6 +74,17 @@ def test_config_from_dict():
         {"hidden_size": 128, "num_blocks": 2, "output_activation": "ReLU"}
     )
     assert cfg is not None
+    from agilerl.modules.configs import SimBaNetConfig
+
+    assert isinstance(cfg, SimBaNetConfig)
+    with pytest.raises(TypeError):
+        config_from_dict(
+            {
+                "hidden_size": 64,
+                "num_layers": 2,
+                "output_activation": "ReLU",
+            },
+        )
     cfg = config_from_dict(
         {"channel_size": [32, 32], "kernel_size": [3, 3], "stride_size": [1, 1]}
     )
@@ -82,6 +93,15 @@ def test_config_from_dict():
     assert cfg is not None
     with pytest.raises(ValueError, match="Unable to determine net config class"):
         config_from_dict({"unknown_key": 1})
+
+
+def test_config_from_dict_hidden_size_num_layers_selects_lstm():
+    from agilerl.modules.configs import LstmNetConfig
+
+    lstm_cfg = LstmNetConfig(hidden_state_size=64, num_layers=2)
+    with patch.object(LstmNetConfig, "from_dict", return_value=lstm_cfg):
+        cfg = config_from_dict({"hidden_size": 128, "num_layers": 2})
+    assert cfg is lstm_cfg
 
 
 def test_tuple_to_dict_space():

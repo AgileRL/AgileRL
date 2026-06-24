@@ -7,6 +7,7 @@
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Documentation Status](https://readthedocs.org/projects/agilerl/badge/?version=latest)](https://docs.agilerl.com/en/latest/?badge=latest)
+[![Coverage](https://codecov.io/gh/AgileRL/AgileRL/graph/badge.svg?token=20SOBJFVYL)](https://codecov.io/gh/AgileRL/AgileRL)
 [![Linux](https://github.com/AgileRL/AgileRL/actions/workflows/linux-tests.yml/badge.svg)](https://github.com/AgileRL/AgileRL/actions/workflows/linux-tests.yml)
 [![macOS](https://github.com/AgileRL/AgileRL/actions/workflows/macos-tests.yml/badge.svg)](https://github.com/AgileRL/AgileRL/actions/workflows/macos-tests.yml)
 [![Windows](https://github.com/AgileRL/AgileRL/actions/workflows/windows-tests.yml/badge.svg)](https://github.com/AgileRL/AgileRL/actions/workflows/windows-tests.yml)
@@ -22,7 +23,7 @@ AgileRL is a Deep Reinforcement Learning library focused on improving developmen
 
 This library is initially focused on reducing the time taken for training models and hyperparameter optimization (HPO) by pioneering [evolutionary HPO techniques](https://docs.agilerl.com/en/latest/evo_hyperparam_opt/index.html) for reinforcement learning.<br>
 Evolutionary HPO has been shown to drastically reduce overall training times by automatically converging on optimal hyperparameters, without requiring numerous training runs.<br>
-We are constantly adding more algorithms and features. AgileRL already includes state-of-the-art evolvable [on-policy](https://docs.agilerl.com/en/latest/on_policy/index.html), [off-policy](https://docs.agilerl.com/en/latest/off_policy/index.html), [offline](https://docs.agilerl.com/en/latest/offline_training/index.html), [multi-agent](https://docs.agilerl.com/en/latest/multi_agent_training/index.html) and [contextual multi-armed bandit](https://docs.agilerl.com/en/latest/bandits/index.html) reinforcement learning algorithms with [distributed training](https://docs.agilerl.com/en/latest/distributed_training/index.html).
+We are constantly adding more algorithms and features. AgileRL already includes state-of-the-art evolvable [LLM fine-tuning](https://docs.agilerl.com/en/latest/llm_finetuning/index.html), [on-policy](https://docs.agilerl.com/en/latest/on_policy/index.html), [off-policy](https://docs.agilerl.com/en/latest/off_policy/index.html), [offline](https://docs.agilerl.com/en/latest/offline_training/index.html), [multi-agent](https://docs.agilerl.com/en/latest/multi_agent_training/index.html) and [contextual multi-armed bandit](https://docs.agilerl.com/en/latest/bandits/index.html) reinforcement learning algorithms with [distributed training](https://docs.agilerl.com/en/latest/distributed_training/index.html).
 
 <p align="center">
   <img src=https://user-images.githubusercontent.com/47857277/236407686-21363eb3-ffcf-419f-b019-0be4ddf1ed4a.gif width="100%" max-width="900">
@@ -69,6 +70,17 @@ pip install git+https://github.com/AgileRL/AgileRL.git@nightly
 
 ## Benchmarks
 
+### LLM Fine-tuning benchmarks
+
+AgileRL's multi-turn LLM training enables state-of-the-art performance on long-horizon tasks with small models. In the following example, AgileRL's CISPO was benchmarked against ART and TRL on the <a href="https://github.com/axon-rl/gem">GEM</a> Sudoku Hard task. This is a difficult multi-turn problem, which requires a context length of 32k tokens and up to 50 turns per rollout. The sync AgileRL run is a single agent using the AgileRL framework. The async and HPO runs were performed on <a href="https://arena.agilerl.com">Arena</a>, AgileRL's RLOps platform. All runs used the same starting hyperparameters. AgileRL runs were run on A100 40GB nodes, whereas ART and TRL required A100 80GB nodes due to a lack of optimizations. AgileRL runs significantly outperformed those using the ART and TRL frameworks.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/AgileRL/AgileRL/main/docs/_static/multi_turn_llm_benchmarks.png" min-width="100%" width="700">
+</p>
+
+
+### Classic RL benchmarks
+
 Reinforcement learning algorithms and libraries are usually benchmarked once the optimal hyperparameters for training are known, but it often takes hundreds or thousands of experiments to discover these. This is unrealistic and does not reflect the true, total time taken for training. What if we could remove the need to conduct all these prior experiments?
 
 In the charts below, a single AgileRL run, which automatically tunes hyperparameters, is benchmarked against Optuna's multiple training runs traditionally required for hyperparameter optimization, demonstrating the real time savings possible. Global steps is the sum of every step taken by any agent in the environment, including across an entire population.
@@ -95,7 +107,7 @@ We are constantly updating our tutorials to showcase the latest features of Agil
 | [Hierarchical curriculum learning](https://docs.agilerl.com/en/latest/tutorials/skills/index.html) | Shows how to teach agents Skills and combine them to achieve an end goal. | [PPO - Lunar Lander](https://docs.agilerl.com/en/latest/tutorials/skills/index.html) |
 | [Contextual multi-arm bandits](https://docs.agilerl.com/en/latest/tutorials/bandits/index.html) | Learn to make the correct decision in environments that only have one timestep. | [NeuralUCB - Iris Dataset](https://docs.agilerl.com/en/latest/tutorials/bandits/agilerl_neural_ucb_tutorial.html) <br> [NeuralTS - PenDigits](https://docs.agilerl.com/en/latest/tutorials/bandits/agilerl_neural_ts_tutorial.html) |
 | [Custom Modules & Networks](https://docs.agilerl.com/en/latest/tutorials/custom_networks/index.html) | Learn how to create custom evolvable modules and networks for RL algorithms. | [Dueling Distributional Q Network](https://docs.agilerl.com/en/latest/tutorials/custom_networks/agilerl_rainbow_tutorial.html) <br> [EvolvableSimBa](https://docs.agilerl.com/en/latest/tutorials/custom_networks/agilerl_simba_tutorial.html) |
-| [LLM Finetuning](https://docs.agilerl.com/en/latest/tutorials/llm_finetuning/index.html) | Learn how to finetune an LLM using AgileRL. | [GRPO](https://docs.agilerl.com/en/latest/tutorials/llm_finetuning/index.html) |
+| [LLM Finetuning](https://docs.agilerl.com/en/latest/tutorials/llm_finetuning/index.html) | Learn how to finetune an LLM using AgileRL. | [GRPO](https://docs.agilerl.com/en/latest/tutorials/llm_finetuning/grpo_finetuning.html) <br> [GRPO with HPO](https://docs.agilerl.com/en/latest/tutorials/llm_finetuning/grpo_hpo.html) <br> [SFT & DPO](https://docs.agilerl.com/en/latest/tutorials/llm_finetuning/sft_dpo_finetuning.html) <br> [Multi-turn LLMPPO, LLMREINFORCE & GRPO](https://docs.agilerl.com/en/latest/tutorials/llm_finetuning/multiturn_grpo_ppo.html) |
 
 ## Evolvable algorithms (more coming soon!)
 
@@ -121,10 +133,11 @@ We are constantly updating our tutorials to showcase the latest features of Agil
 
   ### LLM Fine-tuning Algorithms
 
-  | RL         | Algorithm |
-  | ---------- | --------- |
-  | [On-Policy](https://docs.agilerl.com/en/latest/llm_finetuning/index.html) | [Group Relative Policy Optimization (GRPO)](https://docs.agilerl.com/en/latest/api/algorithms/grpo.html)
-  | [Off-Policy](https://docs.agilerl.com/en/latest/llm_finetuning/index.html) | [Direct Preference Optimization (DPO)](https://docs.agilerl.com/en/latest/api/algorithms/dpo.html)
+  | Type         | Algorithm |
+  | ------------ | --------- |
+  | [On-Policy RL](https://docs.agilerl.com/en/latest/llm_finetuning/index.html) | [Group Relative Policy Optimization (GRPO)](https://docs.agilerl.com/en/latest/api/algorithms/grpo.html) <br> [Clipped IS-weight Policy Optimization (CISPO)](https://docs.agilerl.com/en/latest/api/algorithms/cispo.html) <br> [Group Sequence Policy Optimization (GSPO)](https://docs.agilerl.com/en/latest/api/algorithms/gspo.html) <br> [LLM Proximal Policy Optimization (LLM PPO)](https://docs.agilerl.com/en/latest/api/algorithms/llmppo.html) <br> [LLM REINFORCE](https://docs.agilerl.com/en/latest/api/algorithms/llmreinforce.html) |
+  | [Preference Optimization](https://docs.agilerl.com/en/latest/llm_finetuning/index.html) | [Direct Preference Optimization (DPO)](https://docs.agilerl.com/en/latest/api/algorithms/dpo.html) |
+  | [Supervised Fine-Tuning](https://docs.agilerl.com/en/latest/llm_finetuning/index.html) | [Supervised Fine-Tuning (SFT)](https://docs.agilerl.com/en/latest/api/algorithms/sft.html) |
 
 
 ## Train an Agent to Beat a Gym Environment

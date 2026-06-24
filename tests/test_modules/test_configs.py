@@ -72,6 +72,13 @@ class TestNetConfigPop:
         val = config.pop("missing", None)
         assert val is None
 
+    def test_net_config_pop_existing(self):
+        """Covers pop when attr exists and is deleted."""
+        config = MlpNetConfig(hidden_size=[64, 64])
+        val = config.pop("hidden_size")
+        assert val == [64, 64]
+        assert not hasattr(config, "hidden_size")
+
 
 class TestNetConfigKeysValuesItems:
     def test_net_config_keys_values_items(self):

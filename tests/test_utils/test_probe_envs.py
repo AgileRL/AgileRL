@@ -551,6 +551,30 @@ class TestCheckPolicyQLearningWithProbeEnv:
         )
         gc.collect()
 
+    def test_policy_q_learning_with_probe_env_policy_values(self):
+        device = torch.device("cpu")
+        env = PolicyContActionsEnv()
+        learn_steps = 20
+        algo_args = {
+            "observation_space": env.observation_space,
+            "action_space": env.action_space,
+            "lr_actor": 1e-2,
+            "lr_critic": 1e-2,
+        }
+        memory = ReplayBuffer(
+            max_size=1000,
+            device=device,
+        )
+        check_policy_q_learning_with_probe_env(
+            env,
+            DDPG,
+            algo_args,
+            memory,
+            learn_steps,
+            device,
+        )
+        gc.collect()
+
     @pytest.mark.gpu
     def test_policy_q_learning_with_probe_env_cnn(self):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

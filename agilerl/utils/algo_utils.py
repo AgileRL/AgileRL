@@ -3,6 +3,7 @@ import os
 import shutil
 import warnings
 from collections import OrderedDict, defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import singledispatch
 from numbers import Number
@@ -1989,3 +1990,48 @@ def _resolve_lr(
     if isinstance(lr, tuple):
         return getattr(agent, lr[0]), getattr(agent, lr[1])
     return getattr(agent, lr), None
+
+
+def inherit_init_signature(
+    parent: type, fixed: set[str] | None = None
+) -> Callable[[type], type]:
+    """Class decorator giving a subclass its ``parent``'s ``__init__`` signature.
+
+    A subclass that pins some of its parent's constructor arguments via
+    ``*args``/``**kwargs`` loses its introspectable signature
+    (``inspect.signature`` would just report ``(self, *args, **kwargs)``).
+    AgileRL reads ``inspect.signature(agent.__init__).parameters`` to build the
+    clone/checkpoint ``init_dict`` (see :class:`EvolvableAlgorithm`), so this
+    restores the parent's real parameters — minus the ones the subclass fixes —
+    on both the class and its ``__init__``.
+
+    :param parent: Parent class whose ``__init__`` signature to inherit.
+    :type parent: type
+    :param fixed: Parameter names the subclass pins internally and therefore must
+        not accept (excluded from the inherited signature), defaults to ``None``.
+    :type fixed: set[str] | None, optional
+    :return: A class decorator.
+    :rtype: Callable[[type], type]
+    """
+    fixed = fixed or set()
+    parent_sig = inspect.signature(parent.__init__)
+    kept = [p for p in parent_sig.parameters.values() if p.name not in fixed]
+
+    def decorate(cls: type) -> type:
+        if "__init__" not in cls.__dict__:
+            msg = (
+                f"{cls.__name__} must define its own __init__ before "
+                "@inherit_init_signature (otherwise the parent's signature is "
+                "mutated)."
+            )
+            raise TypeError(msg)
+        # inspect.signature(cls) is the constructor *call* — drop ``self``.
+        cls.__signature__ = parent_sig.replace(
+            parameters=[p for p in kept if p.name != "self"]
+        )
+        # inspect.signature(cls.__init__) is the *method* — keep ``self``. This
+        # is the one EvolvableAlgorithm reads to build the clone/checkpoint dict.
+        cls.__init__.__signature__ = parent_sig.replace(parameters=kept)
+        return cls
+
+    return decorate

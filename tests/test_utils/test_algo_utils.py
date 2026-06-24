@@ -1,6 +1,7 @@
 import copy
 import glob
 import importlib
+import inspect
 import sys
 import types
 from collections import OrderedDict
@@ -1916,3 +1917,42 @@ class TestResolveLr:
         primary, secondary = algo_utils._resolve_lr(agent, ("lr_actor", "lr_critic"))
         assert primary == 1e-4
         assert secondary == 1e-3
+
+
+class TestInheritInitSignature:
+    class _Parent:
+        def __init__(self, a, b=2, *, loss_type="x", c=3):
+            self.a, self.b, self.loss_type, self.c = a, b, loss_type, c
+
+    def test_inherits_parent_signature_minus_fixed(self):
+        class Child(self._Parent):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, loss_type="fixed", **kwargs)
+
+        algo_utils.inherit_init_signature(self._Parent, fixed={"loss_type"})(Child)
+        # __init__ signature (read by EvolvableAlgorithm) keeps ``self``.
+        assert set(inspect.signature(Child.__init__).parameters) == {
+            "self",
+            "a",
+            "b",
+            "c",
+        }
+        # The constructor-call signature drops ``self`` and the fixed param.
+        assert set(inspect.signature(Child).parameters) == {"a", "b", "c"}
+        assert "loss_type" not in inspect.signature(Child).parameters
+        assert "self" not in inspect.signature(Child).parameters
+
+    def test_keeps_all_params_when_no_fixed_given(self):
+        class Child(self._Parent):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+
+        algo_utils.inherit_init_signature(self._Parent)(Child)
+        assert "loss_type" in inspect.signature(Child).parameters
+
+    def test_raises_when_subclass_has_no_own_init(self):
+        class NoInit(self._Parent):
+            pass
+
+        with pytest.raises(TypeError, match="must define its own __init__"):
+            algo_utils.inherit_init_signature(self._Parent)(NoInit)

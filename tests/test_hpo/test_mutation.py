@@ -1955,8 +1955,6 @@ class TestMutationsGetMutationsOptions:
         opts, proba = muts._get_mutations_options(pretraining=pretraining)
         assert len(opts) >= 1
         assert muts.no_mutation in opts
-        if pretraining:
-            assert sum(1 for p in proba if p == 1.0) >= 0
 
     def test_all_zero_uses_no_mutation(self):
         muts = Mutations(0, 0, 0, 0, 0, 0, 0.1, device="cpu")

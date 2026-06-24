@@ -11,6 +11,10 @@ from agilerl.algorithms.neural_ucb_bandit import NeuralUCB
 from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import assert_state_dicts_equal
+from tests.helpers.algorithm_coverage import (
+    assert_swap_channels_called,
+    patch_obs_channels_to_first,
+)
 
 
 class DummyNeuralUCB(NeuralUCB):
@@ -246,6 +250,21 @@ class TestNeuralUCBGetAction:
         assert 0 <= action < 3
         bandit.clean_up()
 
+    def test_get_action_multi_output_gradient_path(self, vector_space):
+        action_space = spaces.Discrete(3)
+        actor = EvolvableMLP(
+            num_inputs=vector_space.shape[0],
+            num_outputs=3,
+            hidden_size=[16],
+            layer_norm=False,
+        )
+        bandit = NeuralUCB(vector_space, action_space, actor_network=actor)
+        state = np.array([1.0, 0.5, -0.5, 0.0], dtype=np.float32)
+        action = bandit.get_action(state, action_mask=None)
+        assert isinstance(action, (int, np.integer))
+        assert 0 <= action < 3
+        bandit.clean_up()
+
 
 class TestNeuralUCBLearn:
     # learns from experiences and updates network parameters
@@ -308,13 +327,14 @@ class TestNeuralUCBTest:
     def test_algorithm_test_loop_swap_channels(
         self, image_space, discrete_space, monkeypatch
     ):
-        monkeypatch.setattr(
-            "agilerl.algorithms.neural_ucb_bandit.obs_channels_to_first", lambda x: x
+        spy = patch_obs_channels_to_first(
+            monkeypatch, "agilerl.algorithms.neural_ucb_bandit"
         )
         env = DummyBanditEnv(state_size=image_space.shape, arms=discrete_space.n)
         agent = NeuralUCB(observation_space=image_space, action_space=discrete_space)
         mean_score = agent.test(env, swap_channels=True, max_steps=1, loop=1)
         assert isinstance(mean_score, float)
+        assert_swap_channels_called(spy)
         agent.clean_up()
 
 

@@ -19,6 +19,24 @@ In AgileRL, GRPO can be used for single-turn reasoning tasks or multi-turn agent
 rollouts are still treated as a bandit problem, with environment generated tokens masked and reward signal calculated
 from cumulative episode reward.
 
+The objective is selected via the ``loss_type`` argument, which accepts ``"grpo"`` (the default token-level PPO-style
+clipped surrogate), ``"gspo"`` (sequence-level importance ratio, see :ref:`GSPO<gspo>`) and ``"cispo"`` (clamped
+importance-weighted log-prob objective, see :ref:`CISPO<cispo>`). The :class:`~agilerl.algorithms.cispo.CISPO` and
+:class:`~agilerl.algorithms.gspo.GSPO` classes are thin subclasses that pin ``loss_type`` to the matching variant.
+
+Variance Reduction
+------------------
+
+GRPO replaces PPO's learned value head with **group-relative normalization**:
+for each prompt, ``group_size`` rollouts are drawn and their returns are
+z-scored within the group to form the advantage. The upside is that there is
+no critic to train, fit or tune, which is attractive for LLM scale; the
+downside is that the baseline degenerates when the group's returns collapse
+(e.g. all rollouts succeed or all fail), and the quality of the variance
+reduction is tied to the group size. Compare with the
+:ref:`learned value baseline used by LLM PPO<llmppo>` and
+:ref:`Return Batch Normalization (ReBN) used by LLM REINFORCE<llmreinforce>`.
+
 
 Example
 -------
@@ -27,20 +45,18 @@ For more details on how to set up GRPO and use it for training, check out the :r
 
 .. code-block:: python
 
+  import torch
+  from transformers import AutoModelForCausalLM, AutoTokenizer
   from agilerl.algorithms import GRPO
-  from agilerl.llm_envs import ReasoningGym
 
   model = AutoModelForCausalLM.from_pretrained(
       "Qwen/Qwen2.5-3B",
       torch_dtype=torch.bfloat16,
-      device_map="auto"
+      device_map="auto",
   )
   tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B")
-  env = ReasoningGym(...)
 
   agent = GRPO(
-    env.observation_space,
-    env.action_space,
     actor_network=model,
     pad_token_id=tokenizer.eos_token_id,
     pad_token=tokenizer.eos_token,
@@ -67,7 +83,7 @@ compatible with HuggingFace and Peft models:
 
 .. code-block:: python
 
- from transformers import AutoModelForCausalLM, AutoTokenizer
+  from transformers import AutoModelForCausalLM, AutoTokenizer
   from peft import PeftModel
   import torch
 
