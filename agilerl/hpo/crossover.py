@@ -44,11 +44,16 @@ class Crossover:
     :param swap_prob: Per-section probability of exchanging a chromosome section
         between the two parents during recombination.
     :type swap_prob: float
-    :param elitism: If True, the single best agent is cloned unchanged into the
-        next generation.
+    :param elitism: If True, the top ``number_of_elites`` agents (by fitness) are
+        cloned unchanged into the next generation.
     :type elitism: bool
     :param population_size: Number of agents in the population.
     :type population_size: int
+    :param number_of_elites: Number of highest-fitness agents preserved exactly
+        (cloned unchanged) into the next generation when ``elitism`` is True. The
+        elite *returned* by :func:`crossover` is always a clone of the single best
+        agent regardless of this value. Defaults to 1.
+    :type number_of_elites: int
     :param rand_seed: Random seed for reproducible recombination.
     :type rand_seed: int
     """
@@ -59,6 +64,7 @@ class Crossover:
         swap_prob: float,
         elitism: bool,
         population_size: int,
+        number_of_elites: int = 1,
         rand_seed: int = 42,
     ) -> None:
         assert population_size > 0, "Population size must be greater than zero."
@@ -68,11 +74,16 @@ class Crossover:
         )
         assert 0.0 <= swap_prob <= 1.0, "Swap probability must be in [0, 1]."
         assert isinstance(elitism, bool), "Elitism must be boolean value True or False."
+        assert number_of_elites >= 1, "Number of elites must be at least one."
+        assert number_of_elites <= population_size, (
+            "Number of elites cannot exceed the population size."
+        )
 
         self.num_parents = num_parents
         self.swap_prob = swap_prob
         self.elitism = elitism
         self.population_size = population_size
+        self.number_of_elites = number_of_elites
         # A single, never-reseeded Generator: determinism comes from constructing
         # it once and consuming the stream across calls (mirrors Mutations'
         # rand_seed, and is deliberately isolated from the global np.random that
@@ -116,10 +127,15 @@ class Crossover:
 
         new_population: PopulationT = []
         if self.elitism:
-            # Carry the elite over unchanged: its parent is itself.
-            elite_clone = elite.clone(wrap=False)
-            elite_clone._parent_index = elite.index
-            new_population.append(elite_clone)
+            # Carry the top-`number_of_elites` agents over unchanged; each elite's
+            # parent is itself. They occupy the front of the population so the
+            # subsequent mutation pass can protect exactly them (see
+            # Mutations.mutation's num_elites).
+            for rank_idx in range(self.number_of_elites):
+                parent = population[int(order[rank_idx])]
+                elite_clone = parent.clone(wrap=False)
+                elite_clone._parent_index = parent.index
+                new_population.append(elite_clone)
 
         # Fill the remaining spots with recombination offspring.
         while len(new_population) < self.population_size:

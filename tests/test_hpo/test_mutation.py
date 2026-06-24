@@ -2215,3 +2215,77 @@ def test_get_offspring_eval_modules_returns_policy_and_modules(
     assert isinstance(policy, dict)
     assert isinstance(offspring_evals, dict)
     assert len(policy) >= 1
+
+
+class TestMutationsNumElites:
+    """``num_elites`` controls how many leading agents ``mutate_elite`` protects."""
+
+    @staticmethod
+    def _make_population(population_size):
+        hp_config = HyperparameterConfig(
+            lr=RLParameter(min=6.25e-5, max=1e-2),
+            batch_size=RLParameter(min=8, max=512, dtype=int),
+            learn_step=RLParameter(min=1, max=10, dtype=int),
+        )
+        population = create_population(
+            algo="DQN",
+            observation_space=generate_random_box_space((4,)),
+            action_space=generate_discrete_space(2),
+            hp_config=hp_config,
+            net_config={"encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 7}},
+            INIT_HP=SHARED_INIT_HP,
+            population_size=population_size,
+            device="cpu",
+        )
+        for i, agent in enumerate(population):
+            agent.fitness = [float(i)]
+        return population
+
+    @staticmethod
+    def _rl_hp_only_mutations(mutate_elite):
+        # Only RL-HP mutation is possible, so every non-protected agent mutates.
+        return Mutations(
+            no_mutation=0,
+            architecture=0,
+            new_layer_prob=0,
+            parameters=0,
+            activation=0,
+            rl_hp=1,
+            mutate_elite=mutate_elite,
+            device="cpu",
+        )
+
+    @pytest.mark.parametrize("num_elites", [1, 3])
+    def test_elites_not_mutated_when_mutate_elite_false(self, num_elites):
+        population = self._make_population(5)
+        mutations = self._rl_hp_only_mutations(mutate_elite=False)
+
+        mutated = mutations.mutation(population, num_elites=num_elites)
+
+        # The leading `num_elites` agents are left untouched...
+        for i in range(num_elites):
+            assert mutated[i].mut == "None"
+        # ...while every other agent receives an RL-HP mutation.
+        for i in range(num_elites, len(mutated)):
+            assert mutated[i].mut != "None"
+
+    def test_all_elites_mutated_when_mutate_elite_true(self):
+        population = self._make_population(5)
+        mutations = self._rl_hp_only_mutations(mutate_elite=True)
+
+        mutated = mutations.mutation(population, num_elites=3)
+
+        # With mutate_elite=True nothing is protected; all agents mutate.
+        for individual in mutated:
+            assert individual.mut != "None"
+
+    def test_default_num_elites_protects_single_elite(self):
+        population = self._make_population(5)
+        mutations = self._rl_hp_only_mutations(mutate_elite=False)
+
+        mutated = mutations.mutation(population)
+
+        # Default num_elites=1 reproduces the original single-elite behaviour.
+        assert mutated[0].mut == "None"
+        for individual in mutated[1:]:
+            assert individual.mut != "None"

@@ -88,24 +88,40 @@ class TestCrossoverInit:
         assert cx.swap_prob == 0.7
         assert cx.elitism is True
         assert cx.population_size == 8
+        assert cx.number_of_elites == 1
+
+    def test_number_of_elites_stored(self):
+        cx = Crossover(
+            num_parents=3,
+            swap_prob=0.7,
+            elitism=True,
+            population_size=8,
+            number_of_elites=3,
+        )
+        assert cx.number_of_elites == 3
 
     @pytest.mark.parametrize(
-        "num_parents,swap_prob,elitism,population_size,match",
+        "num_parents,swap_prob,elitism,population_size,number_of_elites,match",
         [
-            (1, 0.7, True, 8, "at least two"),
-            (10, 0.7, True, 8, "cannot exceed"),
-            (3, 1.5, True, 8, r"\[0, 1\]"),
-            (3, 0.7, "no", 8, "boolean"),
-            (3, 0.7, True, 0, "greater than zero"),
+            (1, 0.7, True, 8, 1, "at least two"),
+            (10, 0.7, True, 8, 1, "cannot exceed"),
+            (3, 1.5, True, 8, 1, r"\[0, 1\]"),
+            (3, 0.7, "no", 8, 1, "boolean"),
+            (3, 0.7, True, 0, 1, "greater than zero"),
+            (3, 0.7, True, 8, 0, "at least one"),
+            (3, 0.7, True, 8, 9, "cannot exceed the population size"),
         ],
     )
-    def test_validation(self, num_parents, swap_prob, elitism, population_size, match):
+    def test_validation(
+        self, num_parents, swap_prob, elitism, population_size, number_of_elites, match
+    ):
         with pytest.raises(AssertionError, match=match):
             Crossover(
                 num_parents=num_parents,
                 swap_prob=swap_prob,
                 elitism=elitism,
                 population_size=population_size,
+                number_of_elites=number_of_elites,
             )
 
 
@@ -204,6 +220,51 @@ class TestCrossoverSelect:
         elite, new_population = cx.crossover(population)
         assert elite is not new_population[0]
         assert elite.index == new_population[0].index == population_size - 1
+
+    @pytest.mark.parametrize("number_of_elites", [1, 3])
+    def test_number_of_elites_preserved(self, number_of_elites):
+        # The top-`number_of_elites` agents (by fitness == index here) are carried
+        # over unchanged at the front of the new population, in descending order.
+        population_size = 6
+        population = _make_population("DQN", population_size)
+        cx = Crossover(
+            num_parents=4,
+            swap_prob=0.7,
+            elitism=True,
+            population_size=population_size,
+            number_of_elites=number_of_elites,
+        )
+
+        elite, new_population = cx.crossover(population)
+
+        # The returned elite is always a clone of the single best agent.
+        assert elite.index == population_size - 1
+        assert elite.fitness == [float(population_size - 1)]
+
+        # The leading agents are the top-k by fitness, each its own parent.
+        for i in range(number_of_elites):
+            expected_index = population_size - 1 - i
+            assert new_population[i].index == expected_index
+            assert new_population[i]._parent_index == expected_index
+            assert new_population[i].fitness == [float(expected_index)]
+
+        assert len(new_population) == population_size
+        assert len({a.index for a in new_population}) == population_size
+
+    def test_number_of_elites_ignored_without_elitism(self):
+        # With elitism disabled no agents are preserved, regardless of the count.
+        population_size = 6
+        population = _make_population("DQN", population_size)
+        cx = Crossover(
+            num_parents=4,
+            swap_prob=0.7,
+            elitism=False,
+            population_size=population_size,
+            number_of_elites=3,
+        )
+        _, new_population = cx.crossover(population)
+        assert all(a.mut == "crossover" for a in new_population)
+        assert len(new_population) == population_size
 
     def test_multi_agent(self):
         population_size = 5
@@ -339,17 +400,29 @@ class TestBuildCrossoverFromSpec:
         assert build_crossover_from_spec(None, TrainingSpec(pop_size=8)) is None
 
     def test_builds_crossover(self):
-        spec = CrossoverSpec(num_parents=6, swap_prob=0.6, elitism=False, rand_seed=7)
+        spec = CrossoverSpec(
+            num_parents=6,
+            swap_prob=0.6,
+            elitism=False,
+            number_of_elites=2,
+            rand_seed=7,
+        )
         cx = build_crossover_from_spec(spec, TrainingSpec(pop_size=8))
         assert isinstance(cx, Crossover)
         assert cx.num_parents == 6
         assert cx.swap_prob == 0.6
         assert cx.elitism is False
         assert cx.population_size == 8
+        assert cx.number_of_elites == 2
 
     def test_num_parents_exceeds_pop_size_raises(self):
         spec = CrossoverSpec(num_parents=16)
         with pytest.raises(ValueError, match="cannot exceed"):
+            build_crossover_from_spec(spec, TrainingSpec(pop_size=8))
+
+    def test_number_of_elites_exceeds_pop_size_raises(self):
+        spec = CrossoverSpec(number_of_elites=16)
+        with pytest.raises(ValueError, match="number_of_elites"):
             build_crossover_from_spec(spec, TrainingSpec(pop_size=8))
 
 
@@ -360,6 +433,7 @@ class TestCrossoverSpec:
             {"num_parents": 1},
             {"swap_prob": 1.5},
             {"swap_prob": -0.1},
+            {"number_of_elites": 0},
             {"rand_seed": -1},
         ],
     )
@@ -372,4 +446,5 @@ class TestCrossoverSpec:
         assert spec.num_parents == 2
         assert spec.swap_prob == 0.7
         assert spec.elitism is True
+        assert spec.number_of_elites == 1
         assert spec.rand_seed == 42

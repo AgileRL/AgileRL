@@ -96,9 +96,13 @@ class CrossoverSpec(BaseModel):
     :param swap_prob: Per-section probability of exchanging hyperparameter genes
         between the two parent chromosomes during the two-point crossover.
     :type swap_prob: float
-    :param elitism: Whether the single best agent is cloned unchanged into the
-        next generation.
+    :param elitism: Whether the top ``number_of_elites`` agents are cloned
+        unchanged into the next generation.
     :type elitism: bool
+    :param number_of_elites: Number of highest-fitness agents preserved exactly
+        when ``elitism`` is True. The elite returned for checkpointing is always
+        the single best agent regardless of this value. Defaults to 1.
+    :type number_of_elites: int
     :param rand_seed: Random seed for reproducible recombination.
     :type rand_seed: int
     """
@@ -108,4 +112,5 @@ class CrossoverSpec(BaseModel):
     num_parents: int = Field(default=2, ge=2)
     swap_prob: float = Field(default=0.7, ge=0.0, le=1.0)
     elitism: bool = True
+    number_of_elites: int = Field(default=1, ge=1)
     rand_seed: int = Field(default=42, ge=0)

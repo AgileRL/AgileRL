@@ -320,11 +320,19 @@ def build_crossover_from_spec(
         )
         raise ValueError(msg)
 
+    if crossover_spec.number_of_elites > training_spec.pop_size:
+        msg = (
+            f"crossover.number_of_elites ({crossover_spec.number_of_elites}) cannot "
+            f"exceed the population size ({training_spec.pop_size})."
+        )
+        raise ValueError(msg)
+
     return Crossover(
         num_parents=crossover_spec.num_parents,
         swap_prob=crossover_spec.swap_prob,
         elitism=crossover_spec.elitism,
         population_size=training_spec.pop_size,
+        number_of_elites=crossover_spec.number_of_elites,
         rand_seed=crossover_spec.rand_seed,
     )
 

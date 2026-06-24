@@ -312,6 +312,7 @@ class Mutations:
         self,
         population: PopulationType,
         pre_training_mut: bool = False,
+        num_elites: int = 1,
     ) -> PopulationType:
         """Return a mutated population of agents. See :ref:`evo_hyperparam_opt` for more details.
 
@@ -319,6 +320,10 @@ class Mutations:
         :type population: list[EvolvableAlgorithm]
         :param pre_training_mut: Boolean flag indicating if the mutation is before the training loop
         :type pre_training_mut: bool, optional
+        :param num_elites: Number of leading agents in ``population`` treated as
+            elites. When ``mutate_elite`` is False these are left unmutated;
+            when True they are mutated like any other agent. Defaults to 1.
+        :type num_elites: int, optional
 
         :return: Mutated population
         :rtype: list[EvolvableAlgorithm]
@@ -339,10 +344,11 @@ class Mutations:
             p=mutation_proba,
         )
 
-        # If not mutating elite member of population (first in list from tournament selection),
-        # set this as the first mutation choice
+        # If not mutating elite members of population (the leading `num_elites`
+        # agents from tournament/crossover selection), force them to no mutation.
         if not self.mutate_elite:
-            mutation_choice[0] = self.no_mutation
+            for i in range(min(num_elites, len(population))):
+                mutation_choice[i] = self.no_mutation
 
         mutated_population = []
         for mutation, individual in zip(mutation_choice, population, strict=False):

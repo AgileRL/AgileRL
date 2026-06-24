@@ -1202,9 +1202,11 @@ def tournament_selection_and_mutation(
         if accelerator.is_main_process:
             if crossover is not None:
                 elite, population = crossover.crossover(population)
+                num_elites = crossover.number_of_elites if crossover.elitism else 0
             else:
                 elite, population = tournament.select(population)
-            population = mutation.mutation(population)
+                num_elites = 1
+            population = mutation.mutation(population, num_elites=num_elites)
             for pop_i, model in enumerate(population):
                 model.save_checkpoint(f"{accel_temp_models_path}/{algo}_{pop_i}.pt")
         accelerator.wait_for_everyone()
@@ -1222,9 +1224,11 @@ def tournament_selection_and_mutation(
         # Perform selection (crossover or tournament) and mutation
         if crossover is not None:
             elite, population = crossover.crossover(population)
+            num_elites = crossover.number_of_elites if crossover.elitism else 0
         else:
             elite, population = tournament.select(population)
-        population = mutation.mutation(population)
+            num_elites = 1
+        population = mutation.mutation(population, num_elites=num_elites)
 
     if save_elite and elite is not None:
         elite_save_path = (

@@ -169,7 +169,8 @@ network:
 crossover:
     num_parents: 8    # top half of pop_size = 16 form the recombination pool (stronger truncation selection)
     swap_prob: 0.333333  # per-section hyperparameter-exchange probability (lower churn so good combos persist)
-    elitism: true     # the single best agent is cloned unchanged into the next generation (preserved unmutated, since mutate_elite is false above)
+    elitism: true     # the top number_of_elites agents are cloned unchanged into the next generation (preserved unmutated, since mutate_elite is false above)
+    number_of_elites: 1  # number of highest-fitness agents preserved exactly each generation
     rand_seed: 42
 
 training:
