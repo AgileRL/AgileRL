@@ -75,7 +75,8 @@ def test_server_and_client_round_trip_over_http() -> None:
         assert server.base_url.startswith("http://127.0.0.1:")
         client = OpenEnvClient(base_url=server.base_url)
         prompt, info = client.reset()
-        assert prompt == "Start." and info == {"suffix": "Reply 'go'."}
+        # The env's info['suffix'] is folded into the prompt (OpenEnv drops obs metadata).
+        assert prompt == "Start.\nReply 'go'." and info == {}
         obs1, r1, term1, trunc1, _ = client.step("go now")
         obs2, r2, term2, _, _ = client.step("stop")
         assert (obs1, r1, term1, trunc1) == ("turn 1", 1.0, False, False)
@@ -88,13 +89,15 @@ def test_serve_helper_starts_immediately() -> None:
     """``serve`` returns an already-running server."""
     server = serve(_CountingEnv())
     try:
-        assert OpenEnvClient(base_url=server.base_url).reset()[0] == "Start."
+        assert (
+            OpenEnvClient(base_url=server.base_url).reset()[0] == "Start.\nReply 'go'."
+        )
     finally:
         server.stop()
 
 
 def test_info_reports_dataset_size_and_tools() -> None:
-    """``/info`` carries dataset size and advertised tool schemas to the client."""
+    """``/state`` carries dataset size and advertised tool schemas to the client."""
     tools = [{"type": "function", "function": {"name": "calc", "parameters": {}}}]
     server = serve(_CountingEnv(tools=tools))
     try:
@@ -113,11 +116,15 @@ def test_base_url_or_transport_required() -> None:
 
 # --- local_transport: socket-free parity -----------------------------------
 def test_local_transport_matches_http() -> None:
-    """``local_transport`` drives the same ``_dispatch`` as the server, no socket."""
+    """``local_transport`` drives the same ``GymEnvironment`` as the server, no socket."""
     client = OpenEnvClient(transport=local_transport(_CountingEnv(target=1)))
     prompt, _ = client.reset()
     obs, reward, terminated, _, _ = client.step("go")
-    assert prompt == "Start." and (obs, reward, terminated) == ("turn 1", 1.0, True)
+    assert prompt == "Start.\nReply 'go'." and (obs, reward, terminated) == (
+        "turn 1",
+        1.0,
+        True,
+    )
 
 
 def test_local_transport_unknown_route_raises() -> None:

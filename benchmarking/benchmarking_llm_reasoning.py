@@ -8,6 +8,7 @@ if not HAS_LLM_DEPENDENCIES:
         "LLM dependencies are not installed. Please install them using `pip install agilerl[llm]`.",
     )
 
+import os
 import re
 
 import yaml
@@ -19,6 +20,7 @@ from agilerl.llm_envs import (
     ReasoningEnv,
     RolloutEnv,
     local_transport,
+    serve,
 )
 from agilerl.training.train_llm import train_llm_rollout
 from agilerl.utils.algo_utils import VLLMConfig
@@ -148,15 +150,18 @@ def main(init_hp, mut_p):
             test_answers=test_answers,
         )
         raw_env.evaluation_mode = evaluation_mode
-        return RolloutEnv(
-            None,
-            tokenizer=tokenizer,
-            max_turns=1,
-            transport=local_transport(raw_env),
-            pad_id=getattr(tokenizer, "pad_token_id", None),
-            apply_chat_template=True,
-            max_model_len=init_hp["MAX_MODEL_LEN"],
-        )
+        rollout_kwargs = {
+            "tokenizer": tokenizer,
+            "max_turns": 1,
+            "pad_id": getattr(tokenizer, "pad_token_id", None),
+            "apply_chat_template": True,
+            "max_model_len": init_hp["MAX_MODEL_LEN"],
+        }
+        # AGILERL_OPENENV_HTTP=1 hosts the env on the real OpenEnv HTTP server and
+        # drives it over the wire (verifies the server path); otherwise in-process.
+        if os.environ.get("AGILERL_OPENENV_HTTP"):
+            return RolloutEnv(serve(raw_env).base_url, **rollout_kwargs)
+        return RolloutEnv(None, transport=local_transport(raw_env), **rollout_kwargs)
 
     use_vllm = bool(init_hp.get("USE_VLLM", True))
     vllm_config = (

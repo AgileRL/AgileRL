@@ -1,12 +1,17 @@
 LLM environments
 ================
 
-Every LLM-training environment is reached the same way: over a small text-in /
-text-out HTTP protocol (the OpenEnv interface). Whatever backs an env — a prompt
-dataset, plain Python functions, an imported gem / AxonRL env, or a sandboxed VM —
-it is wrapped by an :class:`~agilerl.llm_envs.OpenEnvServer` (or driven in-process
-by the socket-free :func:`~agilerl.llm_envs.local_transport`) and a
-:class:`~agilerl.llm_envs.RolloutEnv` drives it from a URL.
+Every LLM-training environment is hosted and reached through `OpenEnv
+<https://github.com/meta-pytorch/OpenEnv>`_ (the ``[llm]`` extra): whatever backs an
+env — a prompt dataset, plain Python functions, an imported gem / AxonRL env, or a
+sandboxed VM — it is wrapped in a :class:`~agilerl.llm_envs.GymEnvironment` (an
+OpenEnv ``Environment``), served by OpenEnv's ``HTTPEnvServer`` via
+:class:`~agilerl.llm_envs.OpenEnvServer` / :func:`~agilerl.llm_envs.serve` (or driven
+in-process by the socket-free :func:`~agilerl.llm_envs.local_transport`), and a
+:class:`~agilerl.llm_envs.RolloutEnv` drives it from a URL over the OpenEnv wire. A
+standard text contract — :class:`~agilerl.llm_envs.TextAction` (``message``) and
+:class:`~agilerl.llm_envs.TextObservation` (``prompt``) — carries the model's text
+both ways, so there are no per-env codecs.
 
 * :class:`~agilerl.llm_envs.RolloutEnv` — the token-level rollout env: it owns
   tokenisation, the multi-turn loop and the provenance mask, and talks to the env
@@ -28,12 +33,20 @@ by the socket-free :func:`~agilerl.llm_envs.local_transport`) and a
 
 ``apply_chat_template`` is also re-exported from :mod:`agilerl.utils.llm_utils`.
 
+For driving a *real external* OpenEnv server (e.g. an env on the HuggingFace Hub),
+:class:`~agilerl.llm_envs.OpenEnvHTTPEnv` bridges that env's typed schema to the text
+contract so it can be served / driven like any local env.
+
 .. autoclass:: agilerl.llm_envs.RolloutEnv
 .. autoclass:: agilerl.llm_envs.BatchRolloutEnv
 .. autoclass:: agilerl.llm_envs.ReasoningEnv
 .. autoclass:: agilerl.llm_envs.DatasetEnv
+.. autoclass:: agilerl.llm_envs.GymEnvironment
+.. autoclass:: agilerl.llm_envs.TextAction
+.. autoclass:: agilerl.llm_envs.TextObservation
 .. autoclass:: agilerl.llm_envs.OpenEnvServer
 .. autoclass:: agilerl.llm_envs.OpenEnvClient
+.. autoclass:: agilerl.llm_envs.OpenEnvHTTPEnv
 .. autofunction:: agilerl.llm_envs.serve
 .. autofunction:: agilerl.llm_envs.local_transport
 .. autofunction:: agilerl.llm_envs.resolve_env

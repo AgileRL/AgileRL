@@ -210,7 +210,15 @@ def test_reset_forwards_row_index_to_served_env() -> None:
 
 def test_dataset_size_falls_back_when_env_lacks_it() -> None:
     """An env exposing no ``dataset_size`` degrades to ``0``; eval_mode stays usable."""
-    w = _wrap(object())
+
+    class _NoDataset:
+        def reset(self, seed=None):
+            return "hi", {}
+
+        def step(self, action):
+            return "", 0.0, True, False, {}
+
+    w = _wrap(_NoDataset())
     assert w.dataset_size == 0
     assert w.evaluation_mode is False
     with w.eval_mode():
