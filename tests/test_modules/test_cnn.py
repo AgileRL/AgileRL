@@ -447,21 +447,7 @@ class TestEvolvableCNNAddLayer:
         evolvable_cnn.add_layer()
         assert len(evolvable_cnn.channel_size) >= initial_channels
 
-    def test_add_layer_revert_max_s_new_lt_1(self, device):
-        """Covers add_layer revert when max_s_new < 1."""
-        evolvable_cnn = EvolvableCNN(
-            input_shape=[1, 4, 4],
-            channel_size=[32],
-            kernel_size=[4],
-            stride_size=[1],
-            num_outputs=4,
-            max_hidden_layers=3,
-            device=device,
-            random_seed=0,
-        )
-        evolvable_cnn.add_layer()
-        output = evolvable_cnn(torch.ones(1, 1, 4, 4, device=device))
-        assert output.shape[1] == 4
+    # add_layer revert when max_s_new < 1: see test_cnn_cpu.py
 
 
 class TestEvolvableCNNRemoveLayer:
@@ -988,3 +974,41 @@ class TestMutableKernelSizesAddLayer:
         )
         mut.add_layer(5)
         assert mut.sizes[-1] == (5,)
+
+
+class TestEvolvableCNNRngAndNoise:
+    def test_reset_noise(self, device):
+        cnn = EvolvableCNN(
+            input_shape=[1, 16, 16],
+            channel_size=[32],
+            kernel_size=[3],
+            stride_size=[1],
+            num_outputs=4,
+            device=device,
+        )
+        cnn.reset_noise()
+
+    def test_rng_propagates_to_nested_modules(self, device):
+        parent = EvolvableCNN(
+            input_shape=[1, 16, 16],
+            channel_size=[32],
+            kernel_size=[3],
+            stride_size=[1],
+            num_outputs=4,
+            device=device,
+            name="parent",
+        )
+        child = EvolvableCNN(
+            input_shape=[1, 16, 16],
+            channel_size=[32],
+            kernel_size=[3],
+            stride_size=[1],
+            num_outputs=4,
+            device=device,
+            name="child",
+        )
+        parent.nested = child
+        new_rng = np.random.default_rng(42)
+        parent.rng = new_rng
+        assert parent.rng is new_rng
+        assert child.rng is new_rng

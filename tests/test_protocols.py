@@ -395,6 +395,7 @@ class TestPreTrainedModelProtocol:
         )
         PeftModelProtocol.eval(peft_model)
         PeftModelProtocol.train(peft_model, True)
+        PeftModelProtocol.forward(peft_model, torch.randint(0, 100, (1, 4)))
         PeftModelProtocol.parameters(peft_model)
         _ = PeftModelProtocol.state_dict(peft_model)
         PeftModelProtocol.load_state_dict(

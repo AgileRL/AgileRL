@@ -41,7 +41,7 @@ This library is initially focused on reducing the time taken for training models
 `evolutionary HPO techniques <../evo_hyperparam_opt/index.html>`_ for reinforcement learning. Evolutionary HPO has been shown to drastically reduce
 overall training times by automatically converging on optimal hyperparameters, without requiring numerous training runs.
 
-We are constantly adding more algorithms and features. AgileRL already includes state-of-the-art evolvable `on-policy <../on_policy/index.html>`_, `off-policy <../off_policy/index.html>`_, `offline <../offline_training/index.html>`_, `multi-agent <../multi_agent_training/index.html>`_ and `contextual multi-armed bandit <../bandits/index.html>`_ reinforcement learning algorithms with `distributed training <../distributed_training/index.html>`_.
+We are constantly adding more algorithms and features. AgileRL already includes state-of-the-art evolvable `LLM fine-tuning <../llm_finetuning/index.html>`_, `on-policy <../on_policy/index.html>`_, `off-policy <../off_policy/index.html>`_, `offline <../offline_training/index.html>`_, `multi-agent <../multi_agent_training/index.html>`_ and `contextual multi-armed bandit <../bandits/index.html>`_ reinforcement learning algorithms with `distributed training <../distributed_training/index.html>`_.
 
 .. figure:: https://user-images.githubusercontent.com/47857277/236407686-21363eb3-ffcf-419f-b019-0be4ddf1ed4a.gif
    :width: 100%
@@ -52,6 +52,20 @@ We are constantly adding more algorithms and features. AgileRL already includes 
 .. raw:: html
 
    <h2 id="benchmarks">Benchmarks</h2>
+
+.. raw:: html
+
+   <h3 id="llm-finetuning-benchmarks">LLM Fine-tuning benchmarks</h3>
+
+AgileRL's multi-turn LLM training enables state-of-the-art performance on long-horizon tasks with small models. In the following example, AgileRL's CISPO was benchmarked against ART and TRL on the `GEM <https://github.com/axon-rl/gem>`_ Sudoku Hard task. This is a difficult multi-turn problem, which requires a context length of 32k tokens and up to 50 turns per rollout. The sync AgileRL run is a single agent using the AgileRL framework. The async and HPO runs were performed on `Arena <https://arena.agilerl.com>`_, AgileRL's RLOps platform. All runs used the same starting hyperparameters. AgileRL runs were run on A100 40GB nodes, whereas ART and TRL required A100 80GB nodes due to a lack of optimizations. AgileRL runs significantly outperformed those using the ART and TRL frameworks.
+
+.. figure:: _static/multi_turn_llm_benchmarks.png
+   :width: 700px
+   :align: center
+
+.. raw:: html
+
+   <h3 id="classic-rl-benchmarks">Classic RL benchmarks</h3>
 
 Reinforcement learning algorithms and libraries are usually benchmarked once the optimal hyperparameters for training are known, but it often takes hundreds or thousands of experiments to discover these. This is unrealistic and does not reflect the true, total time taken for training. What if we could remove the need to conduct all these prior experiments?
 

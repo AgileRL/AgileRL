@@ -202,6 +202,17 @@ class TestLoadMinariDataset:
             result = minari_utils.load_minari_dataset(dataset_id, remote=True)
             assert result is mock_ds
 
+    def test_load_minari_dataset_remote_list_missing_dataset_raises(self):
+        dataset_id = "missing/dataset-v0"
+        with (
+            patch(
+                "agilerl.utils.minari_utils.minari.list_remote_datasets",
+                return_value={"other/dataset-v0": {}},
+            ),
+            pytest.raises(KeyError, match="Enter a valid remote Minari Dataset ID"),
+        ):
+            minari_utils.load_minari_dataset(dataset_id, remote=True)
+
     def test_load_minari_dataset_remote_no_accelerator_download(self):
         """Remote download when accelerator is None (else branch)."""
         dataset_id = "D4RL/door/human-v2"

@@ -18,6 +18,10 @@ from tests.helper_functions import (
     get_experiences_batch,
     get_sample_from_space,
 )
+from tests.helpers.algorithm_coverage import (
+    assert_swap_channels_called,
+    patch_obs_channels_to_first,
+)
 
 
 class DummyRainbowDQN(RainbowDQN):
@@ -576,6 +580,46 @@ class TestRainbowDQNLearn:
         dqn.clean_up()
 
 
+class TestRainbowDQNLearnErrors:
+    def test_per_learn_raises_when_elementwise_loss_missing(
+        self, vector_space, discrete_space, monkeypatch
+    ):
+        dqn = RainbowDQN(vector_space, discrete_space, combined_reward=False)
+        batch_size = 4
+        experiences = TensorDict(
+            {
+                "obs": torch.randn(batch_size, vector_space.shape[0]),
+                "action": torch.randint(0, discrete_space.n, (batch_size, 1)),
+                "reward": torch.randn(batch_size, 1),
+                "next_obs": torch.randn(batch_size, vector_space.shape[0]),
+                "done": torch.randint(0, 2, (batch_size, 1)),
+                "weights": torch.rand(batch_size),
+                "idxs": torch.arange(batch_size),
+            },
+            batch_size=[batch_size],
+        )
+        monkeypatch.setattr(dqn, "_dqn_loss", lambda *args, **kwargs: None)
+        with pytest.raises(
+            RuntimeError,
+            match="Elementwise loss was not computed for prioritized replay",
+        ):
+            dqn.learn(experiences, per=True)
+        dqn.clean_up()
+
+    def test_non_per_learn_raises_when_elementwise_loss_missing(
+        self, vector_space, discrete_space, monkeypatch
+    ):
+        dqn = RainbowDQN(vector_space, discrete_space, combined_reward=False)
+        batch_size = 4
+        experiences = get_experiences_batch(
+            vector_space, discrete_space, batch_size, dqn.device
+        )
+        monkeypatch.setattr(dqn, "_dqn_loss", lambda *args, **kwargs: None)
+        with pytest.raises(RuntimeError, match="Elementwise loss was not computed"):
+            dqn.learn(experiences, per=False)
+        dqn.clean_up()
+
+
 class TestRainbowDQNSoftUpdate:
     # Updates target network parameters with soft update
     def test_soft_update(self, vector_space, discrete_space):
@@ -644,6 +688,20 @@ class TestRainbowDQNTest:
         )
         mean_score = agent.test(env, max_steps=10)
         assert isinstance(mean_score, float)
+        agent.clean_up()
+
+    def test_swap_channels_path(
+        self, image_space, discrete_space, monkeypatch, request
+    ):
+        observation_space = request.getfixturevalue("image_space")
+        env = DummyEnv(state_size=observation_space.shape, vect=False, num_envs=1)
+        spy = patch_obs_channels_to_first(monkeypatch, "agilerl.algorithms.dqn_rainbow")
+        agent = RainbowDQN(
+            observation_space=observation_space, action_space=discrete_space
+        )
+        mean_score = agent.test(env, swap_channels=True, max_steps=1, loop=1)
+        assert isinstance(mean_score, float)
+        assert_swap_channels_called(spy)
         agent.clean_up()
 
 

@@ -135,6 +135,30 @@ class TestEvolvableGPTFromPretrained:
         assert model.bias is True
         assert model.device == "cpu"
 
+    def test_from_pretrained_custom_state_dict_mismatched_keys(self, tmp_path):
+        """from_pretrained with custom_sd raises when checkpoint keys do not match."""
+        from unittest.mock import MagicMock
+
+        tiny = _tiny_gpt()
+        sd_path = tmp_path / "custom.pt"
+        sd_path.touch()
+        hf_mock = MagicMock()
+        hf_mock.state_dict.return_value = tiny.state_dict()
+
+        with (
+            patch(
+                "agilerl.modules.gpt.torch.load",
+                return_value={"model.unexpected_weight": torch.zeros(1)},
+            ),
+            patch("transformers.GPT2LMHeadModel", return_value=hf_mock),
+            pytest.raises(AssertionError, match="mismatched keys"),
+        ):
+            EvolvableGPT.from_pretrained(
+                "gpt2",
+                override_args={"vocab_size": tiny.vocab_size},
+                custom_sd=str(sd_path),
+            )
+
 
 class TestEvolvableGPTConfigureOptimizers:
     # Configures optimizers for EvoGPT
@@ -331,6 +355,21 @@ class TestEvolvableGPTClone:
 
 
 class TestCausalSelfAttentionForward:
+    def test_causal_self_attention_init_without_flash(self):
+        """Covers CausalSelfAttention register_buffer path when flash is unavailable."""
+        real_hasattr = hasattr
+
+        def fake_hasattr(obj, name):
+            if obj is torch.nn.functional and name == "scaled_dot_product_attention":
+                return False
+            return real_hasattr(obj, name)
+
+        with patch("agilerl.modules.gpt.hasattr", side_effect=fake_hasattr):
+            attn = CausalSelfAttention(32, 2, True, 0.1, 16, device="cpu")
+        assert attn.flash is False
+        assert hasattr(attn, "attention_bias")
+        assert attn.attention_bias.shape == (1, 1, 16, 16)
+
     # The model can use CausalSelfAttention without flash (coverage for non-flash path)
     def test_causal_self_attention_no_flash(self):
         block_size = 64

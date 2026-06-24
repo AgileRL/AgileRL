@@ -210,6 +210,35 @@ def setup_rs_norm_multi_agent():
     return wrapper, mock_agent
 
 
+@pytest.fixture(scope="function")
+def setup_rs_norm_multi_agent_dict():
+    observation_space = {
+        "agent_1": spaces.Dict(
+            {
+                "sensor1": spaces.Box(low=-1.0, high=1.0, shape=(3,)),
+                "sensor2": spaces.Box(low=-1.0, high=1.0, shape=(2,)),
+            },
+        ),
+        "other_agent_1": spaces.Dict(
+            {
+                "sensor1": spaces.Box(low=-1.0, high=1.0, shape=(4,)),
+                "sensor2": spaces.Box(low=-1.0, high=1.0, shape=(1,)),
+            },
+        ),
+    }
+    mock_agent = MagicMock(spec=MultiAgentRLAlgorithm)
+    mock_agent.observation_space = observation_space
+    mock_agent.action_space = {
+        "agent_1": spaces.Discrete(2),
+        "other_agent_1": spaces.Discrete(2),
+    }
+    mock_agent.device = "cpu"
+    mock_agent.training = True
+
+    wrapper = RSNorm(mock_agent)
+    return wrapper, mock_agent
+
+
 class TestRSNormGetState:
     def test_set_get_state(self, setup_rs_norm):
         wrapper, mock_agent = setup_rs_norm
@@ -314,7 +343,7 @@ class TestRSNormNormalizeObservation:
         wrapper.obs_rms["other_agent_1"].var = torch.tensor([1.0, 1.0])
         wrapper.obs_rms["other_agent_1"].epsilon = 1e-4
 
-        normalized_obs = wrapper._normalize_observation(obs)
+        normalized_obs = wrapper.normalize_observation(obs)
         expected_obs = {
             "agent_1": (obs["agent_1"] - wrapper.obs_rms["agent_1"].mean)
             / torch.sqrt(
@@ -336,6 +365,55 @@ class TestRSNormNormalizeObservation:
             expected_obs["other_agent_1"],
             atol=1e-2,
         )
+
+    def test_normalize_observation_multi_agent_dict(
+        self, setup_rs_norm_multi_agent_dict
+    ):
+        wrapper, _ = setup_rs_norm_multi_agent_dict
+        obs = {
+            "agent_1": {
+                "sensor1": torch.tensor([1.0, 2.0, 3.0]),
+                "sensor2": torch.tensor([1.0, 2.0]),
+            },
+            "other_agent_1": {
+                "sensor1": torch.tensor([1.0, 2.0, 3.0, 4.0]),
+                "sensor2": torch.tensor([1.0]),
+            },
+        }
+        wrapper.obs_rms["agent_1"]["sensor1"].mean = torch.tensor([1.0, 1.0, 1.0])
+        wrapper.obs_rms["agent_1"]["sensor1"].var = torch.tensor([1.0, 1.0, 1.0])
+        wrapper.obs_rms["agent_1"]["sensor1"].epsilon = 1e-4
+        wrapper.obs_rms["agent_1"]["sensor2"].mean = torch.tensor([1.0, 1.0])
+        wrapper.obs_rms["agent_1"]["sensor2"].var = torch.tensor([1.0, 1.0])
+        wrapper.obs_rms["agent_1"]["sensor2"].epsilon = 1e-4
+        wrapper.obs_rms["other_agent_1"]["sensor1"].mean = torch.tensor(
+            [1.0, 1.0, 1.0, 1.0]
+        )
+        wrapper.obs_rms["other_agent_1"]["sensor1"].var = torch.tensor(
+            [1.0, 1.0, 1.0, 1.0]
+        )
+        wrapper.obs_rms["other_agent_1"]["sensor1"].epsilon = 1e-4
+        wrapper.obs_rms["other_agent_1"]["sensor2"].mean = torch.tensor([1.0])
+        wrapper.obs_rms["other_agent_1"]["sensor2"].var = torch.tensor([1.0])
+        wrapper.obs_rms["other_agent_1"]["sensor2"].epsilon = 1e-4
+
+        normalized_obs = wrapper.normalize_observation(obs)
+
+        for agent_id, sensor_key in (
+            ("agent_1", "sensor1"),
+            ("agent_1", "sensor2"),
+            ("other_agent_1", "sensor1"),
+            ("other_agent_1", "sensor2"),
+        ):
+            agent_rms = wrapper.obs_rms[agent_id][sensor_key]
+            expected = (obs[agent_id][sensor_key] - agent_rms.mean) / torch.sqrt(
+                agent_rms.var + agent_rms.epsilon,
+            )
+            assert torch.allclose(
+                normalized_obs[agent_id][sensor_key],
+                expected,
+                atol=1e-2,
+            )
 
 
 class TestRSNormUpdateStatistics:
@@ -381,6 +459,90 @@ class TestRSNormUpdateStatistics:
         assert torch.allclose(
             wrapper.obs_rms["sensor2"].var,
             torch.tensor([1.0, 1.0]),
+            atol=1e-2,
+        )
+
+    def test_update_statistics_multi_agent(self, setup_rs_norm_multi_agent):
+        wrapper, _ = setup_rs_norm_multi_agent
+        obs = {
+            "agent_1": torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
+            "other_agent_1": torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
+        }
+        wrapper.update_statistics(obs)
+
+        assert torch.allclose(
+            wrapper.obs_rms["agent_1"].mean,
+            torch.tensor([2.5, 3.5, 4.5]),
+            atol=1e-2,
+        )
+        assert torch.allclose(
+            wrapper.obs_rms["agent_1"].var,
+            torch.tensor([2.25, 2.25, 2.25]),
+            atol=1e-2,
+        )
+        assert torch.allclose(
+            wrapper.obs_rms["other_agent_1"].mean,
+            torch.tensor([2.0, 3.0]),
+            atol=1e-2,
+        )
+        assert torch.allclose(
+            wrapper.obs_rms["other_agent_1"].var,
+            torch.tensor([1.0, 1.0]),
+            atol=1e-2,
+        )
+
+    def test_update_statistics_multi_agent_dict(self, setup_rs_norm_multi_agent_dict):
+        wrapper, _ = setup_rs_norm_multi_agent_dict
+        obs = {
+            "agent_1": {
+                "sensor1": torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
+                "sensor2": torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
+            },
+            "other_agent_1": {
+                "sensor1": torch.tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]]),
+                "sensor2": torch.tensor([[1.0], [2.0]]),
+            },
+        }
+        wrapper.update_statistics(obs)
+
+        assert torch.allclose(
+            wrapper.obs_rms["agent_1"]["sensor1"].mean,
+            torch.tensor([2.5, 3.5, 4.5]),
+            atol=1e-2,
+        )
+        assert torch.allclose(
+            wrapper.obs_rms["agent_1"]["sensor1"].var,
+            torch.tensor([2.25, 2.25, 2.25]),
+            atol=1e-2,
+        )
+        assert torch.allclose(
+            wrapper.obs_rms["agent_1"]["sensor2"].mean,
+            torch.tensor([2.0, 3.0]),
+            atol=1e-2,
+        )
+        assert torch.allclose(
+            wrapper.obs_rms["agent_1"]["sensor2"].var,
+            torch.tensor([1.0, 1.0]),
+            atol=1e-2,
+        )
+        assert torch.allclose(
+            wrapper.obs_rms["other_agent_1"]["sensor1"].mean,
+            torch.tensor([3.0, 4.0, 5.0, 6.0]),
+            atol=1e-2,
+        )
+        assert torch.allclose(
+            wrapper.obs_rms["other_agent_1"]["sensor1"].var,
+            torch.tensor([4.0, 4.0, 4.0, 4.0]),
+            atol=1e-2,
+        )
+        assert torch.allclose(
+            wrapper.obs_rms["other_agent_1"]["sensor2"].mean,
+            torch.tensor([1.5]),
+            atol=1e-2,
+        )
+        assert torch.allclose(
+            wrapper.obs_rms["other_agent_1"]["sensor2"].var,
+            torch.tensor([0.25]),
             atol=1e-2,
         )
 
@@ -846,6 +1008,21 @@ class TestRSNormBuildRms:
         assert isinstance(rms, dict)
         assert set(rms) == {"sensor1", "sensor2"}
 
+    def test_rsnorm_build_rms_dict_norm_obs_keys_filter(self):
+        obs_space = spaces.Dict(
+            {
+                "sensor1": spaces.Box(low=-1.0, high=1.0, shape=(2,)),
+                "sensor2": spaces.Box(low=-1.0, high=1.0, shape=(3,)),
+                "other": spaces.Box(low=-1.0, high=1.0, shape=(1,)),
+            }
+        )
+        rms = RSNorm.build_rms(
+            obs_space,
+            norm_obs_keys=["sensor1", "sensor2"],
+            device="cpu",
+        )
+        assert set(rms) == {"sensor1", "sensor2"}
+
 
 class TestAgentWrapperGetActionLearn:
     def test_agent_wrapper_base_get_action_learn(self, vector_space):
@@ -1093,6 +1270,57 @@ class TestAsyncAgentsWrapperGetAction:
         }
         action_dict, _, _, _ = wrapper.get_action(obs, {a: {} for a in obs})
         assert "agent_0" in action_dict and "agent_1" in action_dict
+
+    def test_async_get_action_non_tuple_return(
+        self, ma_vector_space, ma_discrete_space
+    ):
+        agent = IPPO(
+            observation_spaces=ma_vector_space[:2],
+            action_spaces=ma_discrete_space[:2],
+            agent_ids=["agent_0", "agent_1"],
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        active_action = np.zeros((1, 1), dtype=np.int64)
+        wrapper.wrapped_get_action = lambda obs, *a, **kw: {
+            "agent_0": active_action,
+        }
+        obs = {
+            "agent_0": np.array([[1.0] * 6, [np.nan] * 6], dtype=np.float32),
+        }
+
+        result = wrapper.get_action(obs)
+
+        # On-policy bare-dict return path (not a tuple of log_probs / values).
+        assert isinstance(result, dict)
+        assert not isinstance(result, tuple)
+        assert tuple(result.keys()) == ("agent_0",)
+        assert result["agent_0"].shape == (2, 1)
+        assert result["agent_0"].dtype == np.int64
+        assert np.array_equal(result["agent_0"][0], active_action[0])
+        assert result["agent_0"][1, 0] == 0
+
+    def test_async_get_action_non_tuple_with_inactive_agents(
+        self, ma_vector_space, ma_discrete_space
+    ):
+        agent = IPPO(
+            observation_spaces=ma_vector_space[:2],
+            action_spaces=ma_discrete_space[:2],
+            agent_ids=["agent_0", "agent_1"],
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        wrapper.wrapped_get_action = lambda obs, *a, **kw: {
+            "agent_0": np.zeros((1, 1), dtype=np.int64),
+        }
+        obs = {
+            "agent_0": np.array([[1.0] * 6, [np.nan] * 6], dtype=np.float32),
+        }
+
+        result = wrapper.get_action(obs)
+
+        assert isinstance(result, dict)
+        assert result["agent_0"].shape == (2, 1)
 
     def test_async_get_action_with_inactive_off_policy_agents(self, ma_vector_space):
         from gymnasium import spaces as gym_spaces

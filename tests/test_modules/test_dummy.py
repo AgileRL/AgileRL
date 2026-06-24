@@ -2,7 +2,15 @@ import pytest
 import torch
 from torch import nn
 
-from agilerl.modules.dummy import DummyEvolvable
+from agilerl.modules.dummy import DummyEvolvable, to_evolvable
+
+
+class TestToEvolvable:
+    def test_to_evolvable(self):
+        module = to_evolvable(lambda: nn.Linear(10, 10), {}, "cpu")
+        assert isinstance(module, DummyEvolvable)
+        assert module.module.weight.shape == (10, 10)
+        assert module.module.bias.shape == (10,)
 
 
 class TestDummyEvolvableInit:

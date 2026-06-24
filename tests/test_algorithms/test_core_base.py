@@ -57,16 +57,15 @@ right branch was taken with the right kwargs.
 from __future__ import annotations
 import copy
 import inspect
+import logging
 import re
 import shutil
+from types import SimpleNamespace
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, PropertyMock, patch
 import warnings
-from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import dill
-import pytest
-import torch
 import numpy as np
 import pytest
 import torch
@@ -75,7 +74,6 @@ from accelerate import Accelerator
 from accelerate.state import AcceleratorState
 from gymnasium import spaces
 from torch import optim
-from typing import TYPE_CHECKING
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core.base import (
@@ -102,6 +100,11 @@ pytest.importorskip("transformers", reason="LLM checkpoint tests require transfo
 if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
     from tests.test_algorithms.test_llms.test_grpo import deepspeed_config_stage_2
     from peft import LoraConfig, get_peft_model
+
+_LLM_DEPS_SKIP = pytest.mark.skipif(
+    not HAS_LLM_DEPENDENCIES,
+    reason="LLM dependencies not installed",
+)
 
 
 @pytest.fixture
@@ -140,6 +143,11 @@ class TestGetCheckpointDict:
         agent.actor = agent.dummy_actor
         chkpt = get_checkpoint_dict(agent, omit_actor_info=True)
         assert "actor" not in chkpt
+
+    def test_checkpoint_dict_omit_optimizer_info(self, dummy_agent):
+        dummy_agent.optimizer = MagicMock()
+        chkpt = get_checkpoint_dict(dummy_agent, omit_optimizer_info=True)
+        assert "optimizer" not in chkpt
 
     def test_checkpoint_dict_with_lr_scheduler(self, dummy_agent):
         dummy_agent.lr_scheduler = MagicMock()
@@ -2462,7 +2470,7 @@ class TestLLMCreatePromptMasks:
         assert mask[1, 6].item()
 
 
-@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed")
+@_LLM_DEPS_SKIP
 class TestLLMConfigureBatchSize:
     def test_clone_mode_sets_batch_size_directly(self):
         agent = _make_llm_agent(clone=True)
@@ -2565,7 +2573,7 @@ class TestLLMConfigureBatchSize:
             _make_llm_agent(accelerator=acc, clone=False)
 
 
-@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed")
+@_LLM_DEPS_SKIP
 class TestLLMInitWarnings:
     def test_cosine_lr_with_accelerator_warns_and_nullifies(self):
         acc = _make_mock_accelerator()
@@ -3852,7 +3860,7 @@ class TestLLMClone:
         assert agent.batch_size_per_process == 4
 
 
-@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed")
+@_LLM_DEPS_SKIP
 class TestLLMConfigureBatchSizeNoDeepSpeedPlugin:
     """``_configure_batch_size`` when ``accelerator.state.deepspeed_plugin`` is None."""
 
@@ -4063,7 +4071,7 @@ class TestLLMSyncActorToVllm:
         acc.wait_for_everyone = MagicMock(side_effect=_wait_and_materialize)
 
         with (
-            patch("agilerl.algorithms.core.base.gather_if_zero3"),
+            patch("agilerl.algorithms.core.base.gather_if_zero3", create=True),
             patch(
                 "agilerl.algorithms.core.base.save_peft_adapter_for_vllm_rollout",
                 side_effect=_fake_export,
@@ -4103,6 +4111,22 @@ class TestMultiAgentPreprocessObservation:
         assert "agent" in result
         assert "agent_0" not in result
         assert "agent_1" not in result
+        assert isinstance(result["agent"], torch.Tensor)
+        assert result["agent"].shape[0] == 2
+
+    def test_preprocess_observation_creates_missing_group_bucket(self, vector_space):
+        """When group_ids omit an agent's network id, the bucket is created lazily."""
+        obs = [vector_space, vector_space]
+        act = [spaces.Discrete(2), spaces.Discrete(2)]
+        agent = DummyMARLAlgorithm(obs, act, agent_ids=["agent_0", "agent_1"], index=0)
+        observation = {
+            "agent_0": np.zeros(4, dtype=np.float32),
+            "agent_1": np.ones(4, dtype=np.float32),
+        }
+
+        result = agent.preprocess_observation(observation, group_ids=["unused_group"])
+
+        assert "agent" in result
         assert isinstance(result["agent"], torch.Tensor)
         assert result["agent"].shape[0] == 2
 
@@ -4190,7 +4214,7 @@ class TestLLMPreprocessObservation:
         assert result == obs
 
 
-@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed")
+@_LLM_DEPS_SKIP
 class TestLLMInitMissingDeps:
     def test_raises_when_no_llm_deps(self):
         with patch("agilerl.algorithms.core.base.HAS_LLM_DEPENDENCIES", False):
@@ -4565,10 +4589,11 @@ class TestLLMMoveModelToVllmAdapterReload:
         acc.unwrap_model = MagicMock(return_value=peft_ref)
         _setup_agent_for_vllm_lora_sync(agent)
         with (
-            patch("agilerl.algorithms.core.base.gather_if_zero3"),
+            patch("agilerl.algorithms.core.base.gather_if_zero3", create=True),
             patch(
                 "agilerl.algorithms.core.base.save_peft_adapter_for_vllm_rollout",
                 side_effect=_fake_save_peft_adapter_for_vllm_rollout,
+                create=True,
             ),
         ):
             agent._sync_actor_to_vllm()
@@ -4595,10 +4620,11 @@ class TestLLMMoveModelToVllmAdapterReload:
         acc.unwrap_model = MagicMock(return_value=peft_ref)
         _setup_agent_for_vllm_lora_sync(agent)
         with (
-            patch("agilerl.algorithms.core.base.gather_if_zero3"),
+            patch("agilerl.algorithms.core.base.gather_if_zero3", create=True),
             patch(
                 "agilerl.algorithms.core.base.save_peft_adapter_for_vllm_rollout",
                 side_effect=_fake_save_peft_adapter_for_vllm_rollout,
+                create=True,
             ),
         ):
             agent._sync_actor_to_vllm()
@@ -4962,7 +4988,9 @@ class TestLLMInitializeActors:
             patch(
                 "agilerl.algorithms.core.base.get_peft_model", return_value=peft_actor
             ) as mock_gpm,
-            patch("agilerl.algorithms.core.base.patch_lora_for_fused_forward"),
+            patch(
+                "agilerl.algorithms.core.base.patch_lora_for_fused_forward", create=True
+            ),
             patch.object(
                 agent, "use_adapter", wraps=agent.use_adapter
             ) as mock_use_adapter,
@@ -5011,7 +5039,9 @@ class TestLLMInitializeActorsTorchCompiler:
         base_model = _make_mock_peft_actor()
 
         with (
-            patch("agilerl.algorithms.core.base.patch_lora_for_fused_forward"),
+            patch(
+                "agilerl.algorithms.core.base.patch_lora_for_fused_forward", create=True
+            ),
             patch("agilerl.algorithms.core.base.compile_model") as mock_compile,
             patch(
                 "agilerl.algorithms.core.base.DummyEvolvable",
@@ -5042,7 +5072,9 @@ class TestLLMInitializeActorsTorchCompiler:
         compiled = _make_mock_peft_actor()
 
         with (
-            patch("agilerl.algorithms.core.base.patch_lora_for_fused_forward"),
+            patch(
+                "agilerl.algorithms.core.base.patch_lora_for_fused_forward", create=True
+            ),
             patch(
                 "agilerl.algorithms.core.base.compile_model", return_value=compiled
             ) as mock_compile,
@@ -5149,9 +5181,13 @@ class TestLLMLoadAdapterWeights:
         adapter_dir.mkdir()
 
         with (
-            patch("agilerl.algorithms.core.base.gather_if_zero3"),
-            patch("agilerl.algorithms.core.base.load_file", return_value={}),
-            patch("agilerl.algorithms.core.base.set_peft_model_state_dict"),
+            patch("agilerl.algorithms.core.base.gather_if_zero3", create=True),
+            patch(
+                "agilerl.algorithms.core.base.load_file", return_value={}, create=True
+            ),
+            patch(
+                "agilerl.algorithms.core.base.set_peft_model_state_dict", create=True
+            ),
         ):
             agent._update_existing_adapter(str(tmp_path), "actor")
         model_ref.set_adapter.assert_called_with("actor")
@@ -5757,3 +5793,573 @@ class TestLLMCloneBroadcastMultiProcess:
         ):
             LLMAlgorithm.clone(agent, index=3)
         mock_broadcast.assert_called_once()
+
+
+@_LLM_DEPS_SKIP
+class TestLLMInitEdgeCases:
+    """Constructor branches not covered by _make_llm_agent defaults."""
+
+    def test_vllm_config_warns_when_use_vllm_false(self):
+        lora = MagicMock()
+        with (
+            patch.object(LLMAlgorithm, "_initialize_actors"),
+            patch.object(LLMAlgorithm, "_configure_vllm"),
+            patch.object(LLMAlgorithm, "wrap_models"),
+            patch.object(EvolvableAlgorithm, "_registry_init"),
+            pytest.warns(
+                UserWarning, match="vllm_config is provided but use_vllm is False"
+            ),
+        ):
+            _StubLLMAlgorithm(
+                index=0,
+                batch_size=4,
+                lr=1e-4,
+                max_grad_norm=0.0,
+                clone=True,
+                calc_position_embeddings=False,
+                seed=42,
+                pad_token_id=0,
+                pad_token="<pad>",
+                use_liger_loss=False,
+                lora_config=lora,
+                actor_network=_make_mock_peft_actor(),
+                device="cpu",
+                model_name="mock-model",
+                use_vllm=False,
+                vllm_config=VLLMConfig(),
+            )
+
+    def test_model_config_strips_lora_target_scope(self):
+        lora = MagicMock()
+        with (
+            patch.object(LLMAlgorithm, "_initialize_actors"),
+            patch.object(LLMAlgorithm, "_configure_vllm"),
+            patch.object(LLMAlgorithm, "wrap_models"),
+            patch.object(EvolvableAlgorithm, "_registry_init"),
+        ):
+            agent = _StubLLMAlgorithm(
+                index=0,
+                batch_size=4,
+                lr=1e-4,
+                max_grad_norm=0.0,
+                clone=True,
+                calc_position_embeddings=False,
+                seed=42,
+                pad_token_id=0,
+                pad_token="<pad>",
+                use_liger_loss=False,
+                lora_config=lora,
+                actor_network=_make_mock_peft_actor(),
+                device="cpu",
+                model_name="mock-model",
+                model_config={
+                    "attn_implementation": "sdpa",
+                    "lora_target_scope": "inner",
+                },
+            )
+        assert "lora_target_scope" not in agent.model_config
+        assert agent.model_config["attn_implementation"] == "sdpa"
+
+    def test_raises_when_vllm_importance_sampling_cap_non_positive(self):
+        lora = MagicMock()
+        with (
+            patch.object(LLMAlgorithm, "_initialize_actors"),
+            patch.object(LLMAlgorithm, "_configure_vllm"),
+            patch.object(LLMAlgorithm, "wrap_models"),
+            patch.object(EvolvableAlgorithm, "_registry_init"),
+            pytest.raises(ValueError, match="vllm_importance_sampling_cap must be > 0"),
+        ):
+            _StubLLMAlgorithm(
+                index=0,
+                batch_size=4,
+                lr=1e-4,
+                max_grad_norm=0.0,
+                clone=True,
+                calc_position_embeddings=False,
+                seed=42,
+                pad_token_id=0,
+                pad_token="<pad>",
+                use_liger_loss=False,
+                lora_config=lora,
+                actor_network=_make_mock_peft_actor(),
+                device="cpu",
+                model_name="mock-model",
+                vllm_importance_sampling_cap=0.0,
+            )
+
+
+@_LLM_DEPS_SKIP
+class TestLLMSaveCheckpointDeprecatedWeightsOnly:
+    def test_save_checkpoint_weights_only_kwarg_warns(self, tmp_path):
+        agent = _make_llm_agent(accelerator=None)
+        agent.accelerator = None
+        mock_actor = MagicMock()
+        with (
+            patch.object(agent, "_get_unwrapped_actor", return_value=mock_actor),
+            patch("agilerl.algorithms.core.base.gather_if_zero3", create=True),
+            patch("agilerl.algorithms.core.base.torch.save"),
+            pytest.warns(DeprecationWarning, match="weights_only is deprecated"),
+        ):
+            agent.save_checkpoint(str(tmp_path), weights_only=True)
+
+
+@_LLM_DEPS_SKIP
+class TestLLMRestoreValueHead:
+    def test_restore_value_head_noop_without_loader(self):
+        agent = _make_llm_agent()
+
+        class _NoResumeWrapper:
+            pass
+
+        agent._get_unwrapped_actor = MagicMock(return_value=_NoResumeWrapper())
+        LLMAlgorithm._restore_value_head(agent, "/unused/path")
+
+
+@_LLM_DEPS_SKIP
+class TestLLMRebuildOptimizerAfterLoad:
+    def test_rebuild_optimizer_after_load(self):
+        agent = _make_llm_agent()
+        with patch.object(agent, "_select_optim_class", return_value=torch.optim.AdamW):
+            agent._rebuild_optimizer_after_load()
+        assert isinstance(agent.optimizer, OptimizerWrapper)
+        assert agent.optimizer.network_names == ["actor"]
+
+
+@_LLM_DEPS_SKIP
+class TestLLMInitializeActorsStrayAdapter:
+    def test_initialize_actors_removes_unlisted_adapters(self):
+        agent = _make_llm_agent()
+        agent.selected_adapters = ("actor",)
+        peft_actor = _make_mock_peft_actor()
+        peft_actor.peft_config = {"actor": MagicMock(), "stray": MagicMock()}
+        base_model = torch.nn.Module()
+
+        with (
+            patch(
+                "agilerl.algorithms.core.base.adapt_lora_config_for_model",
+                side_effect=lambda _model, cfg, **kw: cfg,
+            ),
+            patch(
+                "agilerl.algorithms.core.base.get_peft_model", return_value=peft_actor
+            ),
+            patch(
+                "agilerl.algorithms.core.base.patch_lora_for_fused_forward", create=True
+            ),
+            patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", False),
+            patch.object(agent, "use_adapter"),
+            pytest.warns(UserWarning, match="Adapter 'stray'"),
+        ):
+            LLMAlgorithm._initialize_actors(agent, base_model, add_adapters=True)
+
+        peft_actor.delete_adapter.assert_called_once_with("stray")
+
+    def test_initialize_actors_liger_fallback_on_unsupported_model(self, caplog):
+        agent = _make_llm_agent()
+        agent.selected_adapters = ("actor",)
+        peft_actor = _make_mock_peft_actor()
+        peft_actor.peft_config = {"actor": MagicMock()}
+
+        class _InnerModel:
+            def modules(self):
+                return []
+
+        peft_actor.base_model.model = _InnerModel()
+        base_model = torch.nn.Module()
+
+        with (
+            patch(
+                "agilerl.algorithms.core.base.adapt_lora_config_for_model",
+                side_effect=lambda _model, cfg, **kw: cfg,
+            ),
+            patch(
+                "agilerl.algorithms.core.base.get_peft_model", return_value=peft_actor
+            ),
+            patch(
+                "agilerl.algorithms.core.base.patch_lora_for_fused_forward", create=True
+            ),
+            patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True),
+            patch(
+                "agilerl.algorithms.core.base._apply_liger_kernel_to_instance",
+                side_effect=TypeError("unsupported"),
+                create=True,
+            ),
+            patch.object(agent, "use_adapter"),
+            caplog.at_level(logging.WARNING, logger="agilerl.algorithms.core.base"),
+        ):
+            LLMAlgorithm._initialize_actors(agent, base_model, add_adapters=True)
+
+        assert any(
+            "Liger Kernel does not support" in rec.message for rec in caplog.records
+        )
+
+
+@_LLM_DEPS_SKIP
+class TestLLMFusedForwardPaths:
+    def test_fused_forward_without_value_head(self):
+        agent = _make_llm_agent()
+        agent.use_value_head = False
+        B, T, V, H = 2, 5, 32, 8
+        ids = torch.randint(1, V, (B, T))
+        agent._packing_mode = MagicMock(return_value=None)
+        agent._fused_model_pass = MagicMock(
+            return_value=(torch.zeros(B, T - 1), torch.zeros(B, T - 1))
+        )
+
+        log_probs, values = agent._fused_forward(ids, batch_size=B)
+
+        assert log_probs.shape == (B, T - 1)
+        assert values is None
+        agent._fused_model_pass.assert_called_once()
+        fused_ids = agent._fused_model_pass.call_args.args[0]
+        assert fused_ids.shape[0] == B
+
+    def test_fused_forward_with_value_head(self):
+        agent = _make_llm_agent()
+        agent.use_value_head = True
+        B, T = 2, 5
+        ids = torch.randint(1, 32, (B, T))
+        agent._packing_mode = MagicMock(return_value=None)
+        agent._fused_model_pass = MagicMock(
+            return_value=(
+                torch.zeros(2 * B, T - 1),
+                torch.zeros(2 * B, T - 1),
+            )
+        )
+
+        log_probs, values = agent._fused_forward(ids, batch_size=B)
+
+        assert log_probs.shape == (B, T - 1)
+        assert values.shape == (B, T - 1)
+
+    def test_fused_forward_uses_packed_path_when_enabled(self):
+        agent = _make_llm_agent()
+        agent.use_sequence_packing = True
+        agent.model_config = {"attn_implementation": "flash_attention_2"}
+        B, T = 2, 5
+        ids = torch.randint(1, 32, (B, T))
+        expected = (torch.zeros(B, T - 1), None)
+
+        with (
+            patch.object(
+                agent, "_fused_packed_forward", return_value=expected
+            ) as packed_fwd,
+            torch.enable_grad(),
+        ):
+            log_probs, values = agent._fused_forward(ids, batch_size=B)
+
+        packed_fwd.assert_called_once()
+        assert values is None
+
+    def test_fused_packed_forward_object_output(self):
+        from contextlib import nullcontext
+
+        agent = _make_llm_agent()
+        agent.use_value_head = False
+        agent.temperature = 1.0
+        agent.cast_logprobs_to_fp32 = True
+        B, T, H, V = 2, 6, 8, 32
+        ids = torch.randint(1, V, (B, T))
+        mask = torch.ones_like(ids)
+
+        hidden = torch.randn(1, T, H)
+        actor = MagicMock()
+        actor.forward = MagicMock(return_value=SimpleNamespace(logits=hidden))
+        agent.actor = actor
+        agent._get_unwrapped_actor = MagicMock(return_value=actor)
+        mock_fused_fn = MagicMock(return_value=torch.zeros(1, T - 1))
+        agent._fused_logprob_fn_and_head = MagicMock(
+            return_value=(
+                mock_fused_fn,
+                torch.randn(V, H),
+                None,
+            )
+        )
+        agent._patch_lm_head_to_identity = MagicMock(return_value=nullcontext())
+        agent._amp_ctx = MagicMock(return_value=nullcontext())
+        agent._activation_offload_ctx = MagicMock(return_value=nullcontext())
+
+        with patch(
+            "agilerl.algorithms.core.base.unpack_logprobs",
+            return_value=torch.zeros(B, T - 1),
+        ):
+            log_probs, values = agent._fused_packed_forward(ids, mask)
+
+        assert log_probs.shape == (B, T - 1)
+        assert values is None
+
+
+@_LLM_DEPS_SKIP
+class TestLLMResolveAttnImplementation:
+    def test_falls_back_to_model_config_on_probe_failure(self):
+        agent = SimpleNamespace(
+            model_config={"attn_implementation": "flex_attention"},
+        )
+        agent._get_unwrapped_actor = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("probe failed")
+        )
+        assert LLMAlgorithm._resolve_attn_implementation(agent) == "flex_attention"
+
+    def test_returns_none_when_probe_fails_without_model_config(self):
+        agent = SimpleNamespace(model_config=None)
+        agent._get_unwrapped_actor = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("probe failed")
+        )
+        assert LLMAlgorithm._resolve_attn_implementation(agent) is None
+
+
+@_LLM_DEPS_SKIP
+class TestLLMGetLogprobsPacked:
+    def test_get_logprobs_uses_packed_path_under_grad(self):
+        torch.manual_seed(0)
+        B, T, H, V = 2, 6, 8, 32
+        agent = _make_llm_agent()
+        agent.use_sequence_packing = True
+        agent.model_config = {"attn_implementation": "flash_attention_2"}
+        agent.calc_position_embeddings = False
+        agent.temperature = 1.0
+        agent.cast_logprobs_to_fp32 = True
+        agent.pad_token_id = 0
+
+        actor = _TinyPeftWrapper(_TinyCausalLM(V, H))
+        actor.eval()
+        agent.actor = actor
+        agent._get_unwrapped_actor = lambda: actor
+
+        from contextlib import nullcontext
+
+        agent.select_adapter = lambda _name: nullcontext()
+
+        ids = torch.randint(1, V, (B, T))
+        with torch.enable_grad():
+            lp = agent._get_logprobs(
+                ids,
+                batch_size=B,
+                use_reference=False,
+                eval_mode=False,
+            )
+
+        assert lp.shape == (B, T - 1)
+
+
+@_LLM_DEPS_SKIP
+class TestLLMBackwardPassDeepSpeedScheduler:
+    def test_backward_pass_deepspeed_steps_lr_scheduler(self):
+        acc = _make_mock_accelerator()
+        agent = _make_llm_agent(accelerator=acc)
+        agent._uses_deepspeed = True
+        agent.lr_scheduler = MagicMock()
+        agent.lr_scheduler.get_last_lr.return_value = [3e-4]
+        loss = MagicMock()
+        LLMAlgorithm._backward_pass(agent, loss)
+        acc.backward.assert_called_once_with(loss)
+        agent.lr_scheduler.step.assert_called_once()
+        assert agent.lr == 3e-4
+
+
+@_LLM_DEPS_SKIP
+class TestLLMMoveLoraToVllmErrors:
+    def test_raises_when_lora_config_missing(self):
+        acc = _make_mock_accelerator()
+        agent = _make_llm_agent(accelerator=acc)
+        agent.lora_config = None
+        peft_ref = MagicMock()
+        peft_ref.parameters.return_value = [torch.tensor([1.0])]
+        acc.unwrap_model = MagicMock(return_value=peft_ref)
+        _setup_agent_for_vllm_lora_sync(agent)
+
+        with (
+            patch("agilerl.algorithms.core.base.gather_if_zero3", create=True),
+            pytest.raises(ValueError, match="lora_config is required"),
+        ):
+            agent._move_lora_to_vllm()
+
+    def test_raises_when_adapter_export_missing(self, tmp_path):
+        acc = _make_mock_accelerator()
+        agent = _make_llm_agent(accelerator=acc)
+        peft_ref = MagicMock()
+        peft_ref.parameters.return_value = [torch.tensor([1.0])]
+        acc.unwrap_model = MagicMock(return_value=peft_ref)
+        _setup_agent_for_vllm_lora_sync(agent)
+        agent._vllm_lora_staging_dir = tmp_path
+
+        with (
+            patch("agilerl.algorithms.core.base.gather_if_zero3", create=True),
+            patch(
+                "agilerl.algorithms.core.base.save_peft_adapter_for_vllm_rollout",
+                return_value=tmp_path / "missing_adapter",
+                create=True,
+            ),
+            pytest.raises(FileNotFoundError, match="PEFT adapter export"),
+        ):
+            agent._move_lora_to_vllm()
+
+    def test_logs_debug_lora_norm_on_main_process(self, tmp_path, caplog):
+        acc = _make_mock_accelerator(is_main_process=True)
+        agent = _make_llm_agent(accelerator=acc)
+        lora_b = torch.nn.Parameter(torch.tensor([3.0, 4.0]))
+        peft_ref = MagicMock()
+        peft_ref.parameters.return_value = [lora_b]
+        peft_ref.named_parameters.return_value = [
+            ("lora.actor.lora_B.weight", lora_b),
+        ]
+        acc.unwrap_model = MagicMock(return_value=peft_ref)
+        _setup_agent_for_vllm_lora_sync(agent)
+
+        with (
+            patch("agilerl.algorithms.core.base.gather_if_zero3", create=True),
+            patch(
+                "agilerl.algorithms.core.base.save_peft_adapter_for_vllm_rollout",
+                side_effect=_fake_save_peft_adapter_for_vllm_rollout,
+                create=True,
+            ),
+            caplog.at_level(logging.DEBUG, logger="agilerl.algorithms.core.base"),
+        ):
+            agent._move_lora_to_vllm()
+
+        assert any(
+            "lora-sync: actor lora_B L2=" in rec.message for rec in caplog.records
+        )
+
+    def test_raises_when_vllm_add_lora_fails(self, tmp_path):
+        acc = _make_mock_accelerator()
+        agent = _make_llm_agent(accelerator=acc)
+        peft_ref = MagicMock()
+        peft_ref.parameters.return_value = [torch.tensor([1.0])]
+        acc.unwrap_model = MagicMock(return_value=peft_ref)
+        _setup_agent_for_vllm_lora_sync(agent)
+        agent.llm.llm_engine.add_lora = MagicMock(return_value=False)
+
+        with (
+            patch("agilerl.algorithms.core.base.gather_if_zero3", create=True),
+            patch(
+                "agilerl.algorithms.core.base.save_peft_adapter_for_vllm_rollout",
+                side_effect=_fake_save_peft_adapter_for_vllm_rollout,
+                create=True,
+            ),
+            pytest.raises(RuntimeError, match="vLLM failed to load LoRA adapter"),
+        ):
+            agent._move_lora_to_vllm()
+
+
+@_LLM_DEPS_SKIP
+class TestLLMGenerateWithVllmColocateErrors:
+    def test_raises_when_prompt_exceeds_max_model_len(self):
+        agent = _make_llm_agent(accelerator=None)
+        agent.pad_token = "<pad>"
+        agent.pad_token_id = 0
+        agent.max_output_tokens = 20
+        agent.max_model_len = 4
+        agent.repetition_penalty = 1.0
+        agent.temperature = 1.0
+        agent.top_p = 1.0
+        agent.top_k = None
+        agent.min_p = None
+        agent.min_output_tokens = None
+        agent.device = "cpu"
+        agent.vllm_config = VLLMConfig(tensor_parallel_size=1)
+        agent.llm = MagicMock()
+
+        prompts = [{"input_ids": torch.tensor([[1, 2, 3, 4, 5]]), "text": "hello"}]
+        with pytest.raises(ValueError, match="Model prompt length"):
+            agent._generate_with_vllm_colocate(prompts, group_size=1, temperature=1.0)
+
+    def test_tp_slice_sampling_logps_when_capture_enabled(self):
+        acc = _make_mock_accelerator(num_processes=2)
+        agent = _make_llm_agent(accelerator=acc)
+        agent.pad_token = "<pad>"
+        agent.pad_token_id = 0
+        agent.max_output_tokens = 20
+        agent.max_model_len = 100
+        agent.repetition_penalty = 1.0
+        agent.temperature = 1.0
+        agent.top_p = 1.0
+        agent.top_k = 50
+        agent.min_p = 0.1
+        agent.min_output_tokens = 5
+        agent.device = "cpu"
+        agent.vllm_config = VLLMConfig(tensor_parallel_size=2)
+        agent.tp_group = MagicMock()
+
+        prompts = [{"input_ids": torch.tensor([[1, 2, 3]]), "text": "hello"}]
+
+        mock_output = MagicMock()
+        mock_output.outputs = [MagicMock(token_ids=[1, 2, 3])]
+        agent.llm = MagicMock()
+        agent.llm.generate.return_value = [mock_output] * 4
+
+        def fake_all_gather(dest, src, group=None):
+            for i in range(len(dest)):
+                dest[i] = src
+
+        with (
+            patch(
+                "agilerl.algorithms.core.base.SamplingParams",
+                return_value=MagicMock(),
+                create=True,
+            ),
+            patch(
+                "agilerl.algorithms.core.base.stack_and_pad_experiences",
+                return_value=(torch.zeros(2, 5), None),
+            ),
+            patch(
+                "agilerl.algorithms.core.base._vllm_sampled_token_logprobs",
+                return_value=[-0.1, -0.2],
+            ),
+            patch("torch.distributed.all_gather_object", side_effect=fake_all_gather),
+            patch("torch.distributed.get_rank", return_value=0),
+        ):
+            _, _, sampling_logps = agent._generate_with_vllm_colocate(
+                prompts,
+                group_size=2,
+                temperature=0.9,
+                capture_sampling_logps=True,
+            )
+
+        assert sampling_logps is not None
+        assert len(sampling_logps) == 2
+
+
+@_LLM_DEPS_SKIP
+class TestLLMUpdateExistingAdapterTrainability:
+    def test_update_existing_adapter_sets_actor_critic_trainable(self, tmp_path):
+        acc = _make_mock_accelerator()
+        agent = _make_llm_agent(accelerator=acc)
+        agent.zero_stage = -1
+
+        actor_p = torch.nn.Parameter(torch.tensor([1.0]))
+        critic_p = torch.nn.Parameter(torch.tensor([2.0]))
+        actor_p.requires_grad = False
+        critic_p.requires_grad = False
+
+        model_ref = MagicMock()
+        model_ref.parameters.return_value = [actor_p, critic_p]
+        model_ref.named_parameters.return_value = [
+            ("lora.actor.weight", actor_p),
+            ("lora.critic.weight", critic_p),
+        ]
+        model_ref.set_adapter = MagicMock()
+        acc.unwrap_model = MagicMock(return_value=model_ref)
+
+        adapter_dir = tmp_path / "actor"
+        adapter_dir.mkdir()
+        (adapter_dir / "adapter_model.safetensors").write_bytes(b"")
+
+        with (
+            patch("agilerl.algorithms.core.base.gather_if_zero3", create=True),
+            patch(
+                "agilerl.algorithms.core.base.load_file", return_value={}, create=True
+            ),
+            patch(
+                "agilerl.algorithms.core.base.set_peft_model_state_dict", create=True
+            ),
+        ):
+            agent._update_existing_adapter(str(tmp_path), "actor")
+
+        assert actor_p.requires_grad
+        assert critic_p.requires_grad
+
+
+@_LLM_DEPS_SKIP
+class TestLLMLoadCheckpointLoraConfig:
+    def test_load_checkpoint_lora_config_missing(self, tmp_path):
+        assert LLMAlgorithm._load_checkpoint_lora_config(str(tmp_path)) is None
