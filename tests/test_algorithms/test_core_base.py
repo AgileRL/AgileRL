@@ -2985,7 +2985,12 @@ def generate_tiny_grpo(accelerator=None) -> GRPO:
     )
 
 
-@pytest.fixture
+def _grpo_from_template(template: GRPO) -> GRPO:
+    """Copy the session template so checkpoint tests do not mutate it."""
+    return template.clone(index=0, wrap=False)
+
+
+@pytest.fixture(scope="session")
 def grpo_factory():
     """Expensive PEFT-wrapped GRPO, built once per session.
 
@@ -3011,7 +3016,7 @@ def llm_simple_checkpoint(request, grpo_factory, tmp_path_factory):
     test session (once per cell), not once per test.
     """
     lora_only, save_optimizer = request.param
-    agent = grpo_factory
+    agent = _grpo_from_template(grpo_factory)
     tmp_path = tmp_path_factory.mktemp(
         f"plain_save_lora={lora_only}_optim={save_optimizer}"
     )
@@ -3094,7 +3099,7 @@ def llm_simple_checkpoint_load(request, grpo_factory, tmp_path):
     optimizer). Cheap because deepcopy of the template is near-instant.
     """
     lora_only, save_optimizer = request.param
-    agent = grpo_factory
+    agent = _grpo_from_template(grpo_factory)
     return SimpleNamespace(
         agent=agent,
         path=tmp_path,
@@ -3236,7 +3241,7 @@ def llm_mocked_deepspeed_checkpoint_save(request, grpo_factory, tmp_path_factory
     the template, each saved once.
     """
     lora_only, save_optimizer = request.param
-    agent = grpo_factory
+    agent = _grpo_from_template(grpo_factory)
     _fit_deepspeed_mock(agent)
 
     # save_checkpoint is called as ``self.actor.save_checkpoint(...)`` on the
@@ -3330,7 +3335,7 @@ def llm_mocked_deepspeed_checkpoint_load(request, grpo_factory, tmp_path):
     # DeepSpeed save is stubbed (can't run without a distributed backend)
     # but we still need the expected tag directory on disk so that the load
     # side's ``Path.glob('save_checkpoint')`` assertion passes.
-    saver = grpo_factory
+    saver = _grpo_from_template(grpo_factory)
     _fit_deepspeed_mock(saver)
 
     def _fake_ds_save(path_str, *args, tag="save_checkpoint", **kwargs):
@@ -3344,7 +3349,7 @@ def llm_mocked_deepspeed_checkpoint_load(request, grpo_factory, tmp_path):
     )
 
     # Loader: spy its engine load so we can assert dispatch.
-    loader = grpo_factory
+    loader = _grpo_from_template(grpo_factory)
     _fit_deepspeed_mock(loader)
     load_ckpt_spy = MagicMock(return_value=(str(tmp_path / "save_checkpoint"), None))
     loader.actor.load_checkpoint = load_ckpt_spy
@@ -3425,7 +3430,7 @@ class TestDeepspeedLoad:
         # Arrange: save a DeepSpeed full-model checkpoint with optimizer state.
         # This shape stores model shards in save_checkpoint/ and does not inject
         # actor_state_dict into attributes.pt.
-        saver = grpo_factory
+        saver = _grpo_from_template(grpo_factory)
         _fit_deepspeed_mock(saver)
 
         def _fake_ds_save(path_str, *args, tag="save_checkpoint", **kwargs):
@@ -3440,7 +3445,7 @@ class TestDeepspeedLoad:
 
         # Act/Assert: loading with load_optimizer=False falls back to DS
         # model-only restore (no optimizer/lr scheduler state).
-        loader = grpo_factory
+        loader = _grpo_from_template(grpo_factory)
         _fit_deepspeed_mock(loader)
         load_ckpt_spy = MagicMock(
             return_value=(str(tmp_path / "save_checkpoint"), None)
@@ -3474,7 +3479,7 @@ class TestLLMGatherIfZero3OnSave:
         from contextlib import contextmanager
         from unittest.mock import patch
 
-        agent = grpo_factory
+        agent = _grpo_from_template(grpo_factory)
         _fit_deepspeed_mock(agent, zero_stage=3)
         agent.actor.save_checkpoint = MagicMock()
 
@@ -3500,7 +3505,7 @@ class TestLLMGatherIfZero3OnSave:
         from contextlib import contextmanager
         from unittest.mock import patch
 
-        agent = grpo_factory
+        agent = _grpo_from_template(grpo_factory)
         _fit_deepspeed_mock(agent, zero_stage=3)
         agent.actor.save_checkpoint = MagicMock()
 
