@@ -2105,9 +2105,98 @@ class TestMutationsActivationMutation:
             device=device,
         )
         muts = Mutations(0, 0, 0, 0, 1, 0, 0.1, device=device)
-        with pytest.warns(UserWarning, match="Activation mutations are not supported"):
+        with pytest.warns(
+            UserWarning,
+            match=f"Activation mutations are not supported for {algo}",
+        ):
             out = muts.activation_mutation(pop[0].clone(wrap=False))
         assert out.mut == "None"
+
+    @pytest.mark.gpu
+    @pytest.mark.parametrize("algo", ["IPPO", "MADDPG", "MATD3"])
+    def test_warns_for_multi_agent_policy_gradient_algos(
+        self,
+        algo,
+        ma_discrete_space,
+        ma_vector_space,
+        encoder_mlp_config,
+        device,
+    ):
+        from agilerl.utils.utils import create_population
+
+        pop = create_population(
+            algo=algo,
+            observation_space=ma_discrete_space,
+            action_space=ma_vector_space,
+            net_config=encoder_mlp_config,
+            INIT_HP=SHARED_INIT_HP_MA,
+            population_size=1,
+            device=device,
+        )
+        muts = Mutations(0, 0, 0, 0, 1, 0, 0.1, device=device)
+        with pytest.warns(
+            UserWarning,
+            match=f"Activation mutations are not supported for {algo}",
+        ):
+            out = muts.activation_mutation(pop[0].clone(wrap=False))
+        assert out.mut == "None"
+
+    @pytest.mark.skipif(
+        not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed"
+    )
+    @pytest.mark.parametrize("algo", ["GRPO", "DPO"])
+    def test_warns_for_llm_algorithms(self, algo, grpo_hp_config, vector_space, device):
+        from agilerl.utils.utils import create_population
+
+        init_hp = {
+            "PAD_TOKEN_ID": 1000 - 1,
+            "PAD_TOKEN": "<pad>",
+            "BATCH_SIZE": 2,
+            "BETA": 0.001,
+            "LR": 5e-7,
+            "MAX_GRAD_NORM": 0.1,
+            "UPDATE_EPOCHS": 1,
+            "MAX_OUTPUT_TOKENS": 32,
+            "MAX_MODEL_LEN": 100,
+        }
+        pop = create_population(
+            algo=algo,
+            observation_space=vector_space,
+            action_space=copy.deepcopy(vector_space),
+            net_config=None,
+            INIT_HP=init_hp,
+            hp_config=grpo_hp_config,
+            actor_network=create_module(
+                input_size=10,
+                max_tokens=20,
+                vocab_size=1000,
+                device=device,
+            ),
+            algo_kwargs={
+                "lora_config": LoraConfig(
+                    r=16,
+                    lora_alpha=64,
+                    target_modules=["linear_1"],
+                    task_type="CAUSAL_LM",
+                    lora_dropout=0.05,
+                ),
+                "pad_token_id": 1000 - 1,
+                "pad_token": "<pad>",
+            },
+            population_size=1,
+            device=device,
+        )
+        muts = Mutations(0, 0, 0, 0, 1, 0, 0.1, device=device, accelerator=None)
+        agent = pop[0].clone(wrap=False)
+        try:
+            with pytest.warns(
+                UserWarning,
+                match="Activation mutations are not supported for LLM algorithms",
+            ):
+                out = muts.activation_mutation(agent)
+            assert out.mut == "None"
+        finally:
+            agent.clean_up()
 
 
 class TestMutationsRlHyperparamMutation:
