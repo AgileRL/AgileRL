@@ -618,12 +618,17 @@ class RolloutEnv:
         )
 
     def close(self) -> None:
-        """Close the backend and stop the owned server, when present."""
-        if hasattr(self._backend, "close"):
-            self._backend.close()
+        """Stop the owned server, or close the backend when there isn't one.
+
+        When this env owns its server, stopping it tears the env down directly, so the
+        client's ``/close`` round-trip to our own server is skipped — it is redundant
+        and can stall teardown on a loaded process (one timeout per env).
+        """
         if self._owned_server is not None:
             self._owned_server.stop()
             self._owned_server = None
+        elif hasattr(self._backend, "close"):
+            self._backend.close()
 
     def get_debug_info(self) -> dict[str, Any]:
         """Return a dict of human-readable debug information for the episode."""
