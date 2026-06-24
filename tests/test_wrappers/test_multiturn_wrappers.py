@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 import torch
 
@@ -177,7 +175,7 @@ class TestTokenObservationWrapperStep:
             apply_chat_template=False,
         )
         obs, _ = w.reset()
-        pl = obs["input_ids"].shape[1]
+        obs["input_ids"].shape[1]
         gen_ids = torch.tensor([[ord("x"), ord("y")]], dtype=torch.long)
         full = torch.cat([obs["input_ids"], gen_ids], dim=1)
         _pd, _r, term, _trunc, _i = w.step(full)
@@ -213,7 +211,8 @@ class TestTokenObservationWrapperStep:
         )
         next_obs, reward, terminated, truncated, _ = w.step(completion)
         assert reward == 0.5
-        assert not terminated and not truncated
+        assert not terminated
+        assert not truncated
         assert env.last_gen == "7|8"
         assert next_obs["input_ids"].shape[1] > completion.shape[1]
         assert w._feedback_texts[-1] == "F:feedback\nT"
@@ -233,14 +232,16 @@ class TestTokenObservationWrapperStep:
             dim=1,
         )
         next_obs, _, terminated, truncated, _ = w.step(completion)
-        assert not terminated and not truncated
+        assert not terminated
+        assert not truncated
         assert next_obs["input_ids"].shape[1] > completion.shape[1]
 
     def test_strict_mode_terminates_on_context_overflow(self) -> None:
         """When sliding window is disabled and the cumulative prompt would
         exceed ``max_model_len - max_output_tokens``, the trajectory ends
         with ``truncated=True`` and an ``agilerl_context_overflow``
-        breadcrumb in ``info``."""
+        breadcrumb in ``info``.
+        """
         env = _NonTerminalEnv()
         # Tiny budget: 20 - 4 = 16 prompt tokens. Initial prompt "P:hello\nS"
         # is 9 char-tokens; +2 gen +12 feedback ("F:feedback\nT") => 23 > 16.
@@ -274,7 +275,8 @@ class TestTokenObservationWrapperStep:
         self,
     ) -> None:
         """Counterpart to strict-mode test: with sliding window enabled,
-        overflow is masked by dropping older turns from the prompt."""
+        overflow is masked by dropping older turns from the prompt.
+        """
         env = _NonTerminalEnv()
         w = TokenObservationWrapper(
             env,
@@ -301,7 +303,8 @@ class TestTokenObservationWrapperStep:
 
 class TestTokenObservationWrapperChatTemplateBoundary:
     """Verify the assistant→user→assistant boundary is computed via the
-    tokenizer's chat template rather than hard-coded ChatML markers."""
+    tokenizer's chat template rather than hard-coded ChatML markers.
+    """
 
     def test_gemma_style_template_emits_full_boundary(self) -> None:
         w = _bare_wrapper()
@@ -407,7 +410,8 @@ class TestTokenObservationWrapperChatTemplateBoundary:
         w.apply_chat_template = True
         w.tokenizer = _ChrTokenizerWithChatTemplateBroken()
         out = w._tokenize_feedback("F")
-        assert out.shape[0] == 1 and out.shape[1] > 0
+        assert out.shape[0] == 1
+        assert out.shape[1] > 0
 
 
 def _render_gemma_chat(messages, add_generation_prompt: bool) -> str:
@@ -442,7 +446,8 @@ def _render_llama(messages, add_generation_prompt: bool) -> str:
 
 
 def _render_raises(messages, add_generation_prompt: bool) -> str:
-    raise RuntimeError("template error")
+    msg = "template error"
+    raise RuntimeError(msg)
 
 
 def _render_drops_content(messages, add_generation_prompt: bool) -> str:
@@ -678,7 +683,8 @@ class TestSyncMultiTurnVecEnvStep:
         """Each turn's vLLM sampling logprobs append onto that trajectory's
         ``Trajectory.sampling_logps``; ``None`` rows (nothing captured) are
         skipped. ``get_trajectories`` concatenates across turns and keeps a
-        per-trajectory ``None`` for rows that never captured any."""
+        per-trajectory ``None`` for rows that never captured any.
+        """
         vec = SyncMultiTurnVecEnv(
             env_factory=lambda: _StepVariantEnv(done_after_step=False),
             batch_size=1,
@@ -704,7 +710,8 @@ class TestSyncMultiTurnVecEnvStep:
     ) -> None:
         """Without captured logprobs the rollout-wide entry is a single
         ``None`` (not a list of ``None``s), and a reset clears any logprobs
-        accumulated in a previous rollout."""
+        accumulated in a previous rollout.
+        """
         vec = SyncMultiTurnVecEnv(
             env_factory=lambda: _StepVariantEnv(done_after_step=False),
             batch_size=1,
@@ -820,7 +827,8 @@ class _ChatTokenizer:
 
 class _NestedChatTokenizer(_ChatTokenizer):
     """Chat tokenizer whose ``apply_chat_template`` returns batched (nested)
-    token-id lists — ``{"input_ids": [[...]]}`` — as some tokenizers do."""
+    token-id lists — ``{"input_ids": [[...]]}`` — as some tokenizers do.
+    """
 
     def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=True):
         out = super().apply_chat_template(
@@ -840,7 +848,8 @@ class TestTokenObservationWrapperTokenizeInitialPrompt:
     def test_initial_prompt_unwraps_batched_token_id_lists(self) -> None:
         """Tokenizers returning ``[[ids]]`` (batch dim) and ``[ids]`` (flat)
         from ``apply_chat_template`` must produce identical ``(1, T)``
-        tensors."""
+        tensors.
+        """
         flat_ids = _ChatTokenizer().apply_chat_template(
             [{"role": "user", "content": "hi"}]
         )["input_ids"]
@@ -961,11 +970,13 @@ class TestSearchToolSearch:
 
         monkeypatch.setattr("agilerl.llm_envs.requests.get", _ok_get)
         out = tool._search("hello")
-        assert "first" in out and "second" not in out
+        assert "first" in out
+        assert "second" not in out
 
         def _fail_get(url, params, timeout):
             del url, params, timeout
-            raise RuntimeError("boom")
+            msg = "boom"
+            raise RuntimeError(msg)
 
         monkeypatch.setattr("agilerl.llm_envs.requests.get", _fail_get)
         assert "[SearchTool Error:" in tool._search("hello")
@@ -996,7 +1007,8 @@ class TestSearchToolExecuteAction:
         valid, has_error, observation, parsed_action = tool.execute_action(
             "<search>cats</search> trailing",
         )
-        assert valid is True and has_error is False
+        assert valid is True
+        assert has_error is False
         assert "<information>res:cats</information>" in observation
         assert parsed_action == "<search>cats</search>"
 
@@ -1068,12 +1080,13 @@ class TestTrajectoryBufferInvariantsAndHelpers:
         assert buf.is_initialized is True
         assert buf.has_active() is True
         assert len(buf) == 2
-        assert list(iter(buf))[0] is t1
+        assert next(iter(buf)) is t1
         assert buf[1] is t2
         buf.sort(key=lambda t: (t.batch_idx, t.group_idx))
         assert [t.batch_idx for t in buf] == [0, 1]
         buf.clear()
-        assert len(buf) == 0 and buf.has_active() is False
+        assert len(buf) == 0
+        assert buf.has_active() is False
 
 
 class TestTrajectoryBufferGetActiveTrajectories:

@@ -16,19 +16,19 @@ from agilerl.modules.gpt import (
 # 124M-param ``EvolvableGPT()`` defaults take 4-12s to allocate per test; the
 # functional behaviour exercised by these tests does not depend on those sizes,
 # so a 2-layer / 64-dim model is faithful and ~50x cheaper.
-TINY_GPT_KWARGS = dict(
-    n_layer=2,
-    vocab_size=128,
-    n_embd=32,
-    n_head=2,
+TINY_GPT_KWARGS = {
+    "n_layer": 2,
+    "vocab_size": 128,
+    "n_embd": 32,
+    "n_head": 2,
     # ``EvolvableGPT.remove_node`` samples from ``[32, 64, 128]``; ``dim_feedfwd``
     # must remain strictly positive after the worst-case removal of 128 nodes,
     # so we keep it at 160 (= 32 + 128).
-    dim_feedfwd=160,
-    block_size=32,
-    min_layers=1,
-    max_layers=4,
-)
+    "dim_feedfwd": 160,
+    "block_size": 32,
+    "min_layers": 1,
+    "max_layers": 4,
+}
 
 
 def _tiny_gpt(**override):
@@ -196,7 +196,7 @@ class TestEvolvableGPTForward:
             dtype=torch.long,
             device=tok_emb.device,
         ).unsqueeze(0)
-        logits, all_hidden_states, presents, loss = model(tok_emb=tok_emb, pos=pos)
+        logits, _all_hidden_states, _presents, loss = model(tok_emb=tok_emb, pos=pos)
         assert logits.shape[1] == model.block_size
         assert loss is None
 
@@ -385,7 +385,7 @@ class TestCausalSelfAttentionForward:
             ),
         )
         x = torch.randn(2, 32, 96)
-        y, present = attn(x, attn_mask=None, is_causal=True)
+        y, _present = attn(x, attn_mask=None, is_causal=True)
         assert y.shape == (2, 32, 96)
 
     def test_causal_self_attention_forward(self):

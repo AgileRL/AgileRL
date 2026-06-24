@@ -90,17 +90,17 @@ def create_bert_networks_multi_agent(device):
     )
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def bert_network(device):
     return create_bert_network(device)
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def bert_networks_multi_agent(device):
     return create_bert_networks_multi_agent(device)
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def bert_matd3_critic_networks(device):
     return [
         create_bert_networks_multi_agent(device),
@@ -108,7 +108,7 @@ def bert_matd3_critic_networks(device):
     ]
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def init_pop(
     algo,
     observation_space,
@@ -495,7 +495,7 @@ class TestMutationsMutation:
     @pytest.mark.gpu
     @pytest.mark.parametrize("algo", ["DQN"])
     @pytest.mark.parametrize(
-        "observation_space, net_config",
+        ("observation_space", "net_config"),
         [("vector_space", "encoder_mlp_config")],
     )
     @pytest.mark.parametrize("action_space", ["discrete_space"])
@@ -522,7 +522,7 @@ class TestMutationsMutation:
     # The mutation method applies random mutations to the population and returns the mutated population.
     @pytest.mark.gpu
     @pytest.mark.parametrize(
-        "algo, hp_config, action_space",
+        ("algo", "hp_config", "action_space"),
         [
             ("DQN", "default_hp_config", "discrete_space"),
             ("Rainbow DQN", "default_hp_config", "discrete_space"),
@@ -538,7 +538,7 @@ class TestMutationsMutation:
     @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
     @pytest.mark.parametrize(
-        "observation_space, net_config",
+        ("observation_space", "net_config"),
         [("vector_space", "encoder_mlp_config")],
     )
     @pytest.mark.parametrize("population_size", [1])
@@ -588,7 +588,7 @@ class TestMutationsMutation:
     # The mutation method applies no mutations to the population and returns the mutated population.
     @pytest.mark.gpu
     @pytest.mark.parametrize(
-        "algo, action_space",
+        ("algo", "action_space"),
         [
             ("DQN", "discrete_space"),
             ("Rainbow DQN", "discrete_space"),
@@ -601,7 +601,7 @@ class TestMutationsMutation:
         ],
     )
     @pytest.mark.parametrize(
-        "observation_space, net_config",
+        ("observation_space", "net_config"),
         [("vector_space", "encoder_mlp_config")],
     )
     @pytest.mark.parametrize("torch_compiler", [None])
@@ -642,7 +642,7 @@ class TestMutationsMutation:
     # The mutation method applies no mutations to the population and returns the mutated population.
     @pytest.mark.gpu
     @pytest.mark.parametrize(
-        "algo, action_space",
+        ("algo", "action_space"),
         [
             ("DQN", "discrete_space"),
             ("Rainbow DQN", "discrete_space"),
@@ -655,7 +655,7 @@ class TestMutationsMutation:
         ],
     )
     @pytest.mark.parametrize(
-        "observation_space, net_config",
+        ("observation_space", "net_config"),
         [("vector_space", "encoder_mlp_config")],
     )
     @pytest.mark.parametrize("accelerator_flag", [False, True])
@@ -705,7 +705,7 @@ class TestMutationsMutation:
     # The mutation method applies RL hyperparameter mutations to the population and returns the mutated population.
     @pytest.mark.gpu
     @pytest.mark.parametrize(
-        "algo, hp_config, action_space",
+        ("algo", "hp_config", "action_space"),
         [
             ("DQN", "default_hp_config", "discrete_space"),
             ("Rainbow DQN", "default_hp_config", "discrete_space"),
@@ -718,7 +718,7 @@ class TestMutationsMutation:
         ],
     )
     @pytest.mark.parametrize(
-        "observation_space, net_config",
+        ("observation_space", "net_config"),
         [("vector_space", "encoder_mlp_config")],
     )
     @pytest.mark.parametrize("torch_compiler", [None])
@@ -766,7 +766,7 @@ class TestMutationsMutation:
     # The mutation method applies activation mutations to the population and returns the mutated population.
     @pytest.mark.gpu
     @pytest.mark.parametrize(
-        "algo, action_space",
+        ("algo", "action_space"),
         [
             ("DQN", "discrete_space"),
             ("Rainbow DQN", "discrete_space"),
@@ -779,7 +779,7 @@ class TestMutationsMutation:
         ],
     )
     @pytest.mark.parametrize(
-        "observation_space, net_config",
+        ("observation_space", "net_config"),
         [
             ("vector_space", "encoder_mlp_config"),
             ("image_space", "encoder_cnn_config"),
@@ -837,7 +837,7 @@ class TestMutationsMutation:
     # The mutation method applies activation mutations to the population and returns the mutated population.
     @pytest.mark.gpu
     @pytest.mark.parametrize(
-        "observation_space, net_config",
+        ("observation_space", "net_config"),
         [
             ("vector_space", "encoder_mlp_config"),
             ("image_space", "encoder_cnn_config"),
@@ -845,7 +845,7 @@ class TestMutationsMutation:
             ("discrete_space", "encoder_mlp_config"),
         ],
     )
-    @pytest.mark.parametrize("algo, action_space", [("DDPG", "vector_space")])
+    @pytest.mark.parametrize(("algo", "action_space"), [("DDPG", "vector_space")])
     @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
     @pytest.mark.parametrize("torch_compiler", [None])
@@ -886,7 +886,7 @@ class TestMutationsMutation:
     # The mutation method applies parameter mutations to the population and returns the mutated population.
     @pytest.mark.gpu
     @pytest.mark.parametrize(
-        "algo, action_space, wrapper_cls",
+        ("algo", "action_space", "wrapper_cls"),
         [
             ("DQN", "discrete_space", None),
             ("Rainbow DQN", "discrete_space", None),
@@ -900,7 +900,7 @@ class TestMutationsMutation:
         ],
     )
     @pytest.mark.parametrize(
-        "observation_space, net_config",
+        ("observation_space", "net_config"),
         [("vector_space", "encoder_mlp_config")],
     )
     @pytest.mark.parametrize("torch_compiler", [None])
@@ -968,7 +968,7 @@ class TestMutationsMutation:
     @pytest.mark.gpu
     @pytest.mark.parametrize("algo", ["MADDPG", "MATD3", "IPPO"])
     @pytest.mark.parametrize(
-        "observation_space, net_config",
+        ("observation_space", "net_config"),
         [("ma_vector_space", "encoder_mlp_config")],
     )
     @pytest.mark.parametrize("action_space", ["ma_discrete_space"])
@@ -1027,7 +1027,7 @@ class TestMutationsMutation:
     @pytest.mark.gpu
     @pytest.mark.parametrize("algo", ["MADDPG", "MATD3", "IPPO"])
     @pytest.mark.parametrize(
-        "observation_space, net_config",
+        ("observation_space", "net_config"),
         [("ma_vector_space", "encoder_mlp_config")],
     )
     @pytest.mark.parametrize("action_space", ["ma_discrete_space"])
@@ -1067,7 +1067,7 @@ class TestMutationsMutation:
 
     @pytest.mark.gpu
     @pytest.mark.parametrize(
-        "algo, hp_config",
+        ("algo", "hp_config"),
         [
             ("MADDPG", "ac_hp_config"),
             ("MATD3", "ac_hp_config"),
@@ -1075,7 +1075,7 @@ class TestMutationsMutation:
         ],
     )
     @pytest.mark.parametrize(
-        "observation_space, net_config",
+        ("observation_space", "net_config"),
         [("ma_vector_space", "encoder_mlp_config")],
     )
     @pytest.mark.parametrize("action_space", ["ma_discrete_space"])
@@ -1127,7 +1127,7 @@ class TestMutationsMutation:
     @pytest.mark.gpu
     @pytest.mark.parametrize("algo", ["MADDPG", "MATD3", "IPPO"])
     @pytest.mark.parametrize(
-        "observation_space, net_config",
+        ("observation_space", "net_config"),
         [
             ("ma_vector_space", "encoder_mlp_config"),
             ("ma_image_space", "encoder_cnn_config"),
@@ -1184,7 +1184,7 @@ class TestMutationsMutation:
     @pytest.mark.gpu
     @pytest.mark.parametrize("algo", ["MADDPG", "MATD3", "IPPO"])
     @pytest.mark.parametrize(
-        "observation_space, net_config",
+        ("observation_space", "net_config"),
         [("ma_vector_space", "encoder_mlp_config")],
     )
     @pytest.mark.parametrize("action_space", ["ma_discrete_space"])
@@ -1240,7 +1240,7 @@ class TestMutationsMutation:
     # The mutation method applies parameter mutations to the population and returns the mutated population.
     @pytest.mark.gpu
     @pytest.mark.parametrize(
-        "algo, wrapper_cls",
+        ("algo", "wrapper_cls"),
         [
             ("MADDPG", None),
             ("MATD3", None),
@@ -1249,7 +1249,7 @@ class TestMutationsMutation:
         ],
     )
     @pytest.mark.parametrize(
-        "observation_space, net_config",
+        ("observation_space", "net_config"),
         [("ma_vector_space", "encoder_mlp_config")],
     )
     @pytest.mark.parametrize("action_space", ["ma_discrete_space"])
@@ -1316,7 +1316,7 @@ class TestMutationsMutation:
         not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed"
     )
     @pytest.mark.parametrize(
-        "use_accelerator, use_deepspeed_optimizer",
+        ("use_accelerator", "use_deepspeed_optimizer"),
         [
             (True, True),
             (True, False),
@@ -1600,7 +1600,7 @@ class TestMutationsArchitectureMutate:
     # The mutation method applies architecture mutations to the population and returns the mutated population.
     @pytest.mark.gpu
     @pytest.mark.parametrize(
-        "algo, action_space, wrapper_cls",
+        ("algo", "action_space", "wrapper_cls"),
         [
             ("DQN", "discrete_space", None),
             ("Rainbow DQN", "discrete_space", None),
@@ -1614,7 +1614,7 @@ class TestMutationsArchitectureMutate:
         ],
     )
     @pytest.mark.parametrize(
-        "observation_space, net_config",
+        ("observation_space", "net_config"),
         [
             ("vector_space", "encoder_mlp_config"),
             ("image_space", "encoder_cnn_config"),
@@ -1724,11 +1724,11 @@ class TestMutationsArchitectureMutate:
     @pytest.mark.gpu
     @pytest.mark.skip(reason="Skipping BERT architecture mutations test.")
     @pytest.mark.parametrize(
-        "algo, actor_network, critic_network",
+        ("algo", "actor_network", "critic_network"),
         [("DDPG", "bert_network", "bert_network")],
     )
     @pytest.mark.parametrize(
-        "observation_space, net_config",
+        ("observation_space", "net_config"),
         [("vector_space", "encoder_mlp_config")],
     )
     @pytest.mark.parametrize("action_space", ["vector_space"])
@@ -1827,7 +1827,7 @@ class TestMutationsArchitectureMutate:
     # The mutation method applies architecture mutations to the population and returns the mutated population.
     @pytest.mark.gpu
     @pytest.mark.parametrize(
-        "algo, wrapper_cls",
+        ("algo", "wrapper_cls"),
         [
             ("MADDPG", None),
             ("MATD3", None),
@@ -1836,7 +1836,7 @@ class TestMutationsArchitectureMutate:
         ],
     )
     @pytest.mark.parametrize(
-        "observation_space, net_config",
+        ("observation_space", "net_config"),
         [
             ("ma_vector_space", "encoder_mlp_config"),
             ("ma_image_space", "encoder_cnn_config"),
@@ -1951,14 +1951,14 @@ class TestMutationsArchitectureMutate:
     @pytest.mark.gpu
     @pytest.mark.skip(reason="Skipping BERT architecture mutations test.")
     @pytest.mark.parametrize(
-        "algo, actor_network, critic_network",
+        ("algo", "actor_network", "critic_network"),
         [
             ("MADDPG", "bert_networks_multi_agent", "bert_networks_multi_agent"),
             ("MATD3", "bert_networks_multi_agent", "bert_matd3_critic_networks"),
         ],
     )
     @pytest.mark.parametrize(
-        "observation_space, net_config",
+        ("observation_space", "net_config"),
         [("ma_vector_space", "encoder_mlp_config")],
     )
     @pytest.mark.parametrize("action_space", ["ma_discrete_space"])
@@ -2124,7 +2124,7 @@ class TestMutationsGetMutationsOptions:
     @pytest.mark.parametrize("pretraining", [True, False])
     def test_pretraining_fallback(self, pretraining):
         muts = Mutations(1, 0, 0, 0, 0, 0, 0.1, device="cpu")
-        opts, proba = muts._get_mutations_options(pretraining=pretraining)
+        opts, _proba = muts._get_mutations_options(pretraining=pretraining)
         assert len(opts) >= 1
         assert muts.no_mutation in opts
 

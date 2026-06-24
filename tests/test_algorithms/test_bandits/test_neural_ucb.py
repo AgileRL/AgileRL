@@ -43,7 +43,7 @@ class DummyNeuralUCB(NeuralUCB):
 class DummyBanditEnv:
     def __init__(self, state_size, arms):
         self.arms = arms
-        self.state_size = (arms,) + state_size
+        self.state_size = (arms, *state_size)
         self.n_envs = 1
 
     def reset(self):
@@ -58,7 +58,7 @@ class DummyBanditEnv:
 
 class TestNeuralUCBInit:
     @pytest.mark.parametrize(
-        "observation_space, encoder_cls",
+        ("observation_space", "encoder_cls"),
         [
             ("vector_space", EvolvableMLP),
             ("image_space", EvolvableCNN),
@@ -99,7 +99,7 @@ class TestNeuralUCBInit:
     # Can initialize NeuralUCB with an actor network
     # TODO: Will be deprecated in the future
     @pytest.mark.parametrize(
-        "observation_space, actor_network, input_tensor",
+        ("observation_space", "actor_network", "input_tensor"),
         [
             ("vector_space", "simple_mlp", torch.randn(1, 4)),
             ("image_space", "simple_cnn", torch.randn(1, 3, 32, 32)),
@@ -229,7 +229,8 @@ class TestNeuralUCBGetAction:
         action = bandit.get_action(state, action_mask)
 
         assert action.is_integer()
-        assert action >= 0 and action < discrete_space.n
+        assert action >= 0
+        assert action < discrete_space.n
         bandit.clean_up()
 
     # Returns the expected action when given a state observation and action mask.
@@ -492,7 +493,7 @@ class TestNeuralUCBClone:
 
     # TODO: Will be deprecated in the future
     @pytest.mark.parametrize(
-        "observation_space, actor_network, input_tensor",
+        ("observation_space", "actor_network", "input_tensor"),
         [
             ("vector_space", "simple_mlp", torch.randn(1, 4)),
         ],

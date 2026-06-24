@@ -37,7 +37,7 @@ class DummyEnv:
         self.state_size = state_size
         self.vect = vect
         if self.vect:
-            self.state_size = (num_envs,) + self.state_size
+            self.state_size = (num_envs, *self.state_size)
             self.n_envs = num_envs
             self.num_envs = num_envs
         else:
@@ -100,7 +100,7 @@ class SimpleCNN(nn.Module):
 class TestDDPGInit:
     # initialize ddpg with valid parameters
     @pytest.mark.parametrize(
-        "observation_space, encoder_cls",
+        ("observation_space", "encoder_cls"),
         [
             ("vector_space", EvolvableMLP),
             ("image_space", EvolvableCNN),
@@ -146,7 +146,13 @@ class TestDDPGInit:
     # Can initialize ddpg with an actor network
     # TODO: This will be deprecated in the future
     @pytest.mark.parametrize(
-        "observation_space, actor_network, critic_network, input_tensor, input_tensor_critic",
+        (
+            "observation_space",
+            "actor_network",
+            "critic_network",
+            "input_tensor",
+            "input_tensor_critic",
+        ),
         [
             (
                 "vector_space",
@@ -262,7 +268,13 @@ class TestDDPGInit:
 
     # Can initialize ddpg with an actor network but no critic - should trigger warning
     @pytest.mark.parametrize(
-        "observation_space, actor_network, critic_network, input_tensor, input_tensor_critic",
+        (
+            "observation_space",
+            "actor_network",
+            "critic_network",
+            "input_tensor",
+            "input_tensor_critic",
+        ),
         [
             (
                 "vector_space",

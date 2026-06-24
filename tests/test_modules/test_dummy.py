@@ -61,7 +61,7 @@ class TestDummyEvolvableGetattr:
         """Covers __getattr__ when name == 'module'."""
         module = DummyEvolvable(module=nn.Linear(4, 4), device="cpu")
         assert module.module.weight.shape == (4, 4)
-        m = getattr(module, "module")
+        m = module.module
         assert m is module.module
 
     def test_getattr_delegates_to_inner(self):

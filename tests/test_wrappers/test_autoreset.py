@@ -33,7 +33,7 @@ class RPSParallelEnv(ParallelEnv):
     def __init__(self, render_mode=None):
         """The init method takes in environment arguments and should define the following attributes:
         - possible_agents
-        - render_mode
+        - render_mode.
 
         Note: as of v1.18.1, the action_spaces and observation_spaces attributes are deprecated.
         Spaces should be defined in the action_space() and observation_space() methods.
@@ -94,7 +94,7 @@ class RPSParallelEnv(ParallelEnv):
         environment so that render(), and step() can be called without issues.
         Here it initializes the `num_moves` variable which counts the number of
         hands that are played.
-        Returns the observations for each agent
+        Returns the observations for each agent.
         """
         self.agents = self.possible_agents[:]
         self.num_moves = 0
@@ -111,7 +111,7 @@ class RPSParallelEnv(ParallelEnv):
         - terminations
         - truncations
         - infos
-        dicts where each dict looks like {agent_1: item_1, other_agent_1: item_2}
+        dicts where each dict looks like {agent_1: item_1, other_agent_1: item_2}.
         """
         # If a user passes in actions with no agents, then just return empty observations, etc.
         if not actions:

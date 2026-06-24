@@ -10,7 +10,14 @@ pytestmark = pytest.mark.gpu
 ######### Test instantiation #########
 class TestEvolvableResNetInit:
     @pytest.mark.parametrize(
-        "input_shape, channel_size, kernel_size, stride_size, num_outputs, num_blocks",
+        (
+            "input_shape",
+            "channel_size",
+            "kernel_size",
+            "stride_size",
+            "num_outputs",
+            "num_blocks",
+        ),
         [
             ([3, 32, 32], 64, 3, 1, 10, 2),
             ([3, 64, 64], 128, 3, 2, 10, 3),
@@ -38,7 +45,14 @@ class TestEvolvableResNetInit:
         assert isinstance(evolvable_resnet, EvolvableResNet)
 
     @pytest.mark.parametrize(
-        "input_shape, channel_size, kernel_size, stride_size, num_outputs, num_blocks",
+        (
+            "input_shape",
+            "channel_size",
+            "kernel_size",
+            "stride_size",
+            "num_outputs",
+            "num_blocks",
+        ),
         [
             ([3, 32, 32], 64, 3, 1, 10, "two"),  # Incorrect type for num_blocks
             ([3, 32, 32], 64, 3, 1, 0, 2),  # num_outputs cannot be zero
@@ -83,7 +97,15 @@ class TestEvolvableResNetChangeActivation:
 ######### Test forward #########
 class TestEvolvableResNetForward:
     @pytest.mark.parametrize(
-        "input_shape, channel_size, kernel_size, stride_size, num_outputs, num_blocks, output_shape",
+        (
+            "input_shape",
+            "channel_size",
+            "kernel_size",
+            "stride_size",
+            "num_outputs",
+            "num_blocks",
+            "output_shape",
+        ),
         [
             ([3, 32, 32], 64, 3, 1, 10, 2, (1, 10)),
             ([3, 64, 64], 128, 3, 2, 10, 3, (1, 10)),
@@ -135,7 +157,14 @@ class TestEvolvableResNetForward:
 ######### Test add_block #########
 class TestEvolvableResNetAddBlock:
     @pytest.mark.parametrize(
-        "input_shape, channel_size, kernel_size, stride_size, num_outputs, num_blocks",
+        (
+            "input_shape",
+            "channel_size",
+            "kernel_size",
+            "stride_size",
+            "num_outputs",
+            "num_blocks",
+        ),
         [
             ([3, 32, 32], 64, 3, 1, 10, 2),
             ([3, 64, 64], 128, 3, 2, 10, 3),
@@ -184,7 +213,14 @@ class TestEvolvableResNetAddBlock:
 ######### Test remove_block #########
 class TestEvolvableResNetRemoveBlock:
     @pytest.mark.parametrize(
-        "input_shape, channel_size, kernel_size, stride_size, num_outputs, num_blocks",
+        (
+            "input_shape",
+            "channel_size",
+            "kernel_size",
+            "stride_size",
+            "num_outputs",
+            "num_blocks",
+        ),
         [
             ([3, 32, 32], 64, 3, 1, 10, 2),
             ([3, 64, 64], 128, 3, 2, 10, 3),
@@ -233,7 +269,14 @@ class TestEvolvableResNetRemoveBlock:
 ######### Test add_channel #########
 class TestEvolvableResNetAddChannel:
     @pytest.mark.parametrize(
-        "input_shape, channel_size, kernel_size, stride_size, num_outputs, num_blocks",
+        (
+            "input_shape",
+            "channel_size",
+            "kernel_size",
+            "stride_size",
+            "num_outputs",
+            "num_blocks",
+        ),
         [
             ([3, 32, 32], 64, 3, 1, 10, 2),
             ([3, 64, 64], 128, 3, 2, 10, 3),
@@ -282,7 +325,14 @@ class TestEvolvableResNetAddChannel:
 ######### Test remove_channel #########
 class TestEvolvableResNetRemoveChannel:
     @pytest.mark.parametrize(
-        "input_shape, channel_size, kernel_size, stride_size, num_outputs, num_blocks",
+        (
+            "input_shape",
+            "channel_size",
+            "kernel_size",
+            "stride_size",
+            "num_outputs",
+            "num_blocks",
+        ),
         [
             ([3, 32, 32], 128, 3, 1, 10, 2),
             ([3, 64, 64], 128, 3, 2, 10, 3),
@@ -352,7 +402,14 @@ class TestEvolvableResNetNetConfig:
 ######### Test clone #########
 class TestEvolvableResNetClone:
     @pytest.mark.parametrize(
-        "input_shape, channel_size, kernel_size, stride_size, num_outputs, num_blocks",
+        (
+            "input_shape",
+            "channel_size",
+            "kernel_size",
+            "stride_size",
+            "num_outputs",
+            "num_blocks",
+        ),
         [
             ([3, 32, 32], 64, 3, 1, 10, 2),
             ([3, 64, 64], 128, 3, 2, 10, 3),

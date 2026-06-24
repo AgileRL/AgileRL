@@ -1,10 +1,11 @@
+import contextlib
 import types
 from collections.abc import Callable
 
 import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
-from gymnasium.spaces import Box, Discrete, MultiDiscrete
+from gymnasium.spaces import Box, Discrete
 from pettingzoo import ParallelEnv
 
 
@@ -230,10 +231,8 @@ class SyncMultiAgentVecEnv:
         for env in self.envs:
             close = getattr(env, "close", None)
             if callable(close):
-                try:
+                with contextlib.suppress(Exception):
                     close()
-                except Exception:
-                    pass
 
 
 def make_sync_multi_agent_vec_env(

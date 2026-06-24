@@ -1,3 +1,4 @@
+import contextlib
 import os
 import shutil
 from pathlib import Path
@@ -64,10 +65,8 @@ def create_dataset_return_timesteps(dataset_id: str, env_id: str) -> int:
     buffer = []
 
     # Delete the test dataset if it already exists (registry or filesystem).
-    try:
+    with contextlib.suppress(Exception):
         minari.delete_dataset(dataset_id)
-    except Exception:
-        pass
 
     env = gym.make(env_id)
 
@@ -115,7 +114,7 @@ def create_dataset_return_timesteps(dataset_id: str, env_id: str) -> int:
 
 
 @pytest.mark.parametrize(
-    "dataset_id,env_id",
+    ("dataset_id", "env_id"),
     [("cartpole/test-v0", "CartPole-v1")],
 )
 def test_minari_to_agile_dataset(dataset_id: str, env_id: str) -> None:
@@ -128,7 +127,7 @@ def test_minari_to_agile_dataset(dataset_id: str, env_id: str) -> None:
 
 @pytest.mark.gpu
 @pytest.mark.parametrize(
-    "dataset_id,env_id",
+    ("dataset_id", "env_id"),
     [("cartpole/test-v0", "CartPole-v1")],
 )
 def test_minari_to_agile_buffer(dataset_id: str, env_id: str) -> None:

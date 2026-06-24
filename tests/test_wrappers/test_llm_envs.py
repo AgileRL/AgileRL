@@ -2,6 +2,7 @@
 
 import importlib
 import sys
+
 import pytest
 import torch
 from accelerate import Accelerator
@@ -108,7 +109,7 @@ class DummyReasoningDataset(Dataset):
         return {"question": self.questions[index], "answer": self.answers[index]}
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def accelerator_factory():
     def generate_accelerator(use_accelerator: bool):
         AcceleratorState._reset_state(True)

@@ -31,7 +31,7 @@ def head_config():
 
 class TestQNetworkInit:
     @pytest.mark.parametrize(
-        "observation_space, action_space, expect_error",
+        ("observation_space", "action_space", "expect_error"),
         [
             ("vector_space", "discrete_space", None),
             ("dict_space", "discrete_space", None),
@@ -69,7 +69,7 @@ class TestQNetworkInit:
             QNetwork(vector_space, action_space)
 
     @pytest.mark.parametrize(
-        "observation_space, encoder_type",
+        ("observation_space", "encoder_type"),
         [
             ("dict_space", "multi_input"),
             ("discrete_space", "mlp"),
@@ -255,7 +255,7 @@ class TestRainbowQNetworkInit:
             RainbowQNetwork(vector_space, action_space, support)
 
     @pytest.mark.parametrize(
-        "observation_space, encoder_type",
+        ("observation_space", "encoder_type"),
         [
             ("dict_space", "multi_input"),
             ("discrete_space", "mlp"),
@@ -450,7 +450,7 @@ class TestRainbowQNetworkClone:
 
 class TestContinuousQNetworkInit:
     @pytest.mark.parametrize(
-        "observation_space, encoder_type",
+        ("observation_space", "encoder_type"),
         [
             ("dict_space", "multi_input"),
             ("discrete_space", "mlp"),

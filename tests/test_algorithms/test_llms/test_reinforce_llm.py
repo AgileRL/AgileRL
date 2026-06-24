@@ -15,6 +15,7 @@ from peft import LoraConfig
 from torch import nn
 from transformers.configuration_utils import PretrainedConfig
 from transformers.generation.configuration_utils import GenerationConfig
+from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 
 from agilerl.algorithms.core import ActionResult
@@ -26,7 +27,6 @@ from tests.utils import (
     assert_vllm_get_action_contract,
     make_mock_vllm_instance,
 )
-from transformers.modeling_outputs import CausalLMOutputWithPast
 
 deepspeed_base_config = {
     "bf16": {
@@ -289,37 +289,36 @@ def generate_reinforce(
     # it directly when ``base_model`` is given. ``from_name`` loads the base from
     # the model name instead (real-engine tests).
     share_from_name = from_name
-    reinforce_kwargs = dict(
-        actor_network=actor if not share_from_name else None,
-        model_name=pretrained_model_name_or_path if share_from_name else None,
-        lr=lr_use,
-        pad_token_id=vocab_size - 1,
-        pad_token="<pad>",
-        device="cuda" if torch.cuda.is_available() else "cpu",
-        lora_config=lora_config,
-        cosine_lr_schedule_config=(
+    reinforce_kwargs = {
+        "actor_network": actor if not share_from_name else None,
+        "model_name": pretrained_model_name_or_path if share_from_name else None,
+        "lr": lr_use,
+        "pad_token_id": vocab_size - 1,
+        "pad_token": "<pad>",
+        "device": "cuda" if torch.cuda.is_available() else "cpu",
+        "lora_config": lora_config,
+        "cosine_lr_schedule_config": (
             None
             if accelerator is not None
             else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
         ),
-        accelerator=accelerator,
-        use_vllm=use_vllm,
-        vllm_config=vllm_config,
-        max_output_tokens=max_tokens,
-        max_model_len=max_tokens + 5,
-        micro_batch_size_per_gpu=micro_batch_size_per_gpu,
-        use_memory_efficient_params=use_memory_efficient_params,
-        quantization_config=quantization_config,
-        temperature=temperature,
+        "accelerator": accelerator,
+        "use_vllm": use_vllm,
+        "vllm_config": vllm_config,
+        "max_output_tokens": max_tokens,
+        "max_model_len": max_tokens + 5,
+        "micro_batch_size_per_gpu": micro_batch_size_per_gpu,
+        "use_memory_efficient_params": use_memory_efficient_params,
+        "quantization_config": quantization_config,
+        "temperature": temperature,
         # Pin so the unfused learn() path is exercised by default
         # regardless of liger-kernel availability.
-        use_liger_loss=False,
-    )
-    reinforce = REINFORCE(**reinforce_kwargs)
-    return reinforce
+        "use_liger_loss": False,
+    }
+    return REINFORCE(**reinforce_kwargs)
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def reinforce_factory():
     return generate_reinforce
 
@@ -567,7 +566,8 @@ class TestREINFORCEInit:
 
     def test_init_action_granularity_deprecated_warns_and_overrides(self):
         """The legacy ``action_granularity`` kwarg warns and is carried over
-        into ``advantage_granularity``."""
+        into ``advantage_granularity``.
+        """
         with pytest.warns(DeprecationWarning, match="action_granularity is deprecated"):
             rf = _cpu_llmreinforce(action_granularity="turn")
         assert rf.advantage_granularity == "turn"
@@ -577,7 +577,8 @@ class TestREINFORCEInit:
         self, monkeypatch, is_level
     ):
         """Liger + non-token IS is permitted but not memory-bounded; the
-        constructor emits the canonical warning once via the base helper."""
+        constructor emits the canonical warning once via the base helper.
+        """
         monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
         monkeypatch.setattr("agilerl.algorithms.reinforce_llm.HAS_LIGER_KERNEL", True)
         with pytest.warns(UserWarning, match="NOT memory-bounded"):
@@ -1048,8 +1049,8 @@ class TestREINFORCETest:
     def test_test_method_token_observation_wrapper_branch(self):
         from transformers import AutoTokenizer
 
-        from agilerl.utils.probe_envs_llm import ConstantTargetEnv
         from agilerl.llm_envs import TokenObservationWrapper
+        from agilerl.utils.probe_envs_llm import ConstantTargetEnv
 
         tok = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
         if tok.pad_token_id is None:
@@ -1092,7 +1093,8 @@ class TestReinforceLossLiger:
 
     def test_drives_actor_forward_and_unpacks_metrics(self) -> None:
         """End-to-end with mocked Liger Function: actor pre-hook captures
-        hidden state, Function returns scalar loss + 4-tuple metrics."""
+        hidden state, Function returns scalar loss + 4-tuple metrics.
+        """
         rf = _cpu_llmreinforce(beta=0.01, clip_coef=0.2)
         B, T = 2, 5
         ids = torch.randint(1, 50, (B, T), dtype=torch.long)
@@ -1140,7 +1142,8 @@ class TestReinforceLossLiger:
 
     def test_token_mode_fuses_vllm_is_ratio(self) -> None:
         """token-level IS with captured vLLM logprobs fuses the clamped
-        trainer/vLLM ratio into the kernel via the ``vllm_is_ratio`` kwarg."""
+        trainer/vLLM ratio into the kernel via the ``vllm_is_ratio`` kwarg.
+        """
         rf = _cpu_llmreinforce(beta=0.0)
         B, T = 2, 6
         ids = torch.randint(1, 50, (B, T), dtype=torch.long)
@@ -1212,7 +1215,8 @@ class TestReinforceLossLiger:
     def test_turn_level_pools_advantages_and_passes_turn_args(self) -> None:
         """Turn-level IS pools the per-token advantages per turn (mean) and
         hands ``turn_ids`` / ``full_turn_mask`` / ``max_turns`` to the fused
-        Function."""
+        Function.
+        """
         rf = _cpu_llmreinforce(importance_sampling_level="turn")
         B, T = 2, 5
         ids = torch.randint(1, 50, (B, T), dtype=torch.long)
@@ -1246,7 +1250,8 @@ class TestReinforceLossLiger:
 
     def test_trajectory_level_pools_advantages_to_per_sample_scalar(self) -> None:
         """Trajectory-level IS pools the per-token advantages to a masked
-        per-completion mean ``(B, 1)``."""
+        per-completion mean ``(B, 1)``.
+        """
         rf = _cpu_llmreinforce(importance_sampling_level="trajectory")
         B, T = 2, 5
         ids = torch.randint(1, 50, (B, T), dtype=torch.long)
@@ -1277,7 +1282,8 @@ class TestReinforceLossLiger:
 class TestREINFORCELearnWithLiger:
     """Cover the ``if self.use_liger_loss:`` branch inside REINFORCE
     ``learn()``. Stubs ``_reinforce_loss_liger`` to a fake (loss,
-    metrics) tuple so the test stays CPU-only."""
+    metrics) tuple so the test stays CPU-only.
+    """
 
     def test_learn_use_liger_loss_drives_reinforce_loss_liger(self, monkeypatch):
         # Force the construct-time HAS_LIGER_KERNEL guard to allow
@@ -1316,7 +1322,8 @@ class TestREINFORCELearnWithLiger:
     def test_learn_liger_token_with_sampling_logps_uses_fused_kernel(self, monkeypatch):
         """token-level use_liger_loss=True + captured vLLM logprobs: the
         correction is fused into the kernel (``vllm_is_ratio``), so learn()
-        keeps the fused path and threads ``sampling_log_probs`` through."""
+        keeps the fused path and threads ``sampling_log_probs`` through.
+        """
         monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
         monkeypatch.setattr("agilerl.algorithms.reinforce_llm.HAS_LIGER_KERNEL", True)
         rf = _cpu_llmreinforce(lr=0.05, update_epochs=1, use_liger_loss=True)
@@ -1361,7 +1368,8 @@ class TestREINFORCELearnWithLiger:
     ):
         """turn-level use_liger_loss=True + captured vLLM logprobs: the per-token
         reweight can't be pooled into the turn ratio, so learn() warns once and
-        routes the minibatch through the standard PyTorch path."""
+        routes the minibatch through the standard PyTorch path.
+        """
         monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
         monkeypatch.setattr("agilerl.algorithms.reinforce_llm.HAS_LIGER_KERNEL", True)
         rf = _cpu_llmreinforce(

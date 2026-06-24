@@ -25,7 +25,8 @@ def reset_distributed_state():
     leave ``torch.distributed`` initialised and env-vars like ``WORLD_SIZE``
     set, which causes subsequent ``Accelerator()`` calls to attempt a
     multi-worker rendezvous (hanging on macOS / Windows, or wrapping models
-    in DDP on Linux)."""
+    in DDP on Linux).
+    """
     _cleanup()
     yield
     _cleanup()

@@ -332,7 +332,8 @@ class _PackingGateStub:
         self.model_config = {"attn_implementation": attn_impl}
 
     def _get_unwrapped_actor(self):  # no real model in this unit test
-        raise RuntimeError("no model")
+        msg = "no model"
+        raise RuntimeError(msg)
 
 
 class TestSequencePackingGate:

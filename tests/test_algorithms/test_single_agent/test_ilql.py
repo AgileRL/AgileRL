@@ -1,8 +1,9 @@
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import torch
 import pytest
+import torch
+
 from agilerl.algorithms.ilql import (
     ILQL,
     ILQL_Evaluator,

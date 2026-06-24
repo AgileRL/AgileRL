@@ -1,8 +1,9 @@
 """CPU-only CNN module tests (no GPU mark)."""
 
+from unittest.mock import MagicMock, patch
+
 import numpy as np
 import torch
-from unittest.mock import MagicMock, patch
 
 from agilerl.modules.cnn import EvolvableCNN, MutableKernelSizes
 
@@ -74,11 +75,13 @@ class TestEvolvableCNNAddLayerRevertBranches:
             random_seed=0,
         )
         evolvable_cnn.cnn_output_size = (1, 32, 16, 1)
-        with patch("agilerl.modules.cnn.any", return_value=False):
-            with patch.object(
+        with (
+            patch("agilerl.modules.cnn.any", return_value=False),
+            patch.object(
                 evolvable_cnn, "add_channel", return_value=None
-            ) as mock_add_channel:
-                evolvable_cnn.add_layer()
+            ) as mock_add_channel,
+        ):
+            evolvable_cnn.add_layer()
         mock_add_channel.assert_called_once()
 
     def test_add_layer_revert_max_s_new_lt_1(self, device):
@@ -97,11 +100,13 @@ class TestEvolvableCNNAddLayerRevertBranches:
         initial_kernels = len(evolvable_cnn.mut_kernel_size)
         evolvable_cnn.rng = MagicMock()
         evolvable_cnn.rng.integers.return_value = np.int64(20)
-        with patch("agilerl.modules.cnn.any", return_value=False):
-            with patch.object(
+        with (
+            patch("agilerl.modules.cnn.any", return_value=False),
+            patch.object(
                 evolvable_cnn, "add_channel", return_value=None
-            ) as mock_add_channel:
-                evolvable_cnn.add_layer()
+            ) as mock_add_channel,
+        ):
+            evolvable_cnn.add_layer()
         assert len(evolvable_cnn.channel_size) == initial_channels
         assert len(evolvable_cnn.mut_kernel_size) == initial_kernels
         mock_add_channel.assert_called_once()

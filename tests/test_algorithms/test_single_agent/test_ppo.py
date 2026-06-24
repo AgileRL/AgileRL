@@ -39,7 +39,8 @@ def get_eval_action_for_space(action_space: spaces.Space, device: torch.device):
         return torch.randint(0, 2, (1, n), device=device).float()
     if isinstance(action_space, spaces.Box):
         return torch.zeros(1, *action_space.shape, device=device)
-    raise NotImplementedError(f"Unsupported action space: {type(action_space)}")
+    msg = f"Unsupported action space: {type(action_space)}"
+    raise NotImplementedError(msg)
 
 
 def get_batch_states(observation_space, num_steps) -> tuple[torch.Tensor, torch.Tensor]:
@@ -81,9 +82,8 @@ def get_batch_states(observation_space, num_steps) -> tuple[torch.Tensor, torch.
             torch.rand(1, *space.shape) for space in observation_space.spaces
         )
     else:
-        raise NotImplementedError(
-            f"Unsupported observation space: {type(observation_space)}"
-        )
+        msg = f"Unsupported observation space: {type(observation_space)}"
+        raise NotImplementedError(msg)
     return states, next_states
 
 
@@ -100,7 +100,7 @@ class DummyEnv:
         self.vect = vect
         self.num_envs = num_envs
         if self.vect:
-            self.state_size = (num_envs,) + self.state_size
+            self.state_size = (num_envs, *self.state_size)
             self.n_envs = num_envs
         else:
             self.n_envs = 1
@@ -159,7 +159,7 @@ class SimpleCNN(nn.Module):
         return self.relu3(self.linear2(x))
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def build_ppo(observation_space, action_space, recurrent, accelerator_flag, request):
     accelerator = Accelerator() if accelerator_flag else None
     observation_space = request.getfixturevalue(observation_space)
@@ -177,7 +177,7 @@ def build_ppo(observation_space, action_space, recurrent, accelerator_flag, requ
 class TestPPOInit:
     # Initializes all necessary attributes with default values
     @pytest.mark.parametrize(
-        "observation_space, encoder_cls",
+        ("observation_space", "encoder_cls"),
         [
             ("vector_space", EvolvableMLP),
             ("image_space", EvolvableCNN),
@@ -243,7 +243,14 @@ class TestPPOInit:
     # Can initialize ppo with an actor network
     # TODO: Will be deprecated in the future
     @pytest.mark.parametrize(
-        "obs_space, action_space, actor_network, critic_network, input_tensor, input_tensor_critic",
+        (
+            "obs_space",
+            "action_space",
+            "actor_network",
+            "critic_network",
+            "input_tensor",
+            "input_tensor_critic",
+        ),
         [
             (
                 "vector_space",
@@ -319,7 +326,13 @@ class TestPPOInit:
 
     # Can initialize ppo with an actor network but no critic - should trigger warning
     @pytest.mark.parametrize(
-        "observation_space, actor_network, critic_network, input_tensor, input_tensor_critic",
+        (
+            "observation_space",
+            "actor_network",
+            "critic_network",
+            "input_tensor",
+            "input_tensor_critic",
+        ),
         [
             (
                 "vector_space",
@@ -540,7 +553,7 @@ class TestPPOInit:
             batch_size=8,
         )
 
-        assert "action_masks" not in ppo.rollout_buffer.buffer.keys(), (
+        assert "action_masks" not in ppo.rollout_buffer.buffer, (
             "Continuous action spaces should not have action_masks in the buffer"
         )
         ppo.clean_up()
@@ -582,12 +595,14 @@ class TestPPOGetAction:
         if isinstance(action_space, spaces.Discrete):
             for act in action:
                 assert act.is_integer()
-                assert act >= 0 and act < action_space.n
+                assert act >= 0
+                assert act < action_space.n
         elif isinstance(action_space, spaces.MultiDiscrete):
             assert len(action[0]) == len(action_space.nvec)
             for i, act in enumerate(action[0]):
                 assert act.is_integer()
-                assert act >= 0 and act < action_space.nvec[i]
+                assert act >= 0
+                assert act < action_space.nvec[i]
         elif isinstance(action_space, spaces.MultiBinary):
             assert len(action[0]) == action_space.n
             for act in action[0]:
@@ -657,12 +672,14 @@ class TestPPOGetAction:
         if isinstance(action_space, spaces.Discrete):
             for act in action:
                 assert act.is_integer()
-                assert act >= 0 and act < action_space.n
+                assert act >= 0
+                assert act < action_space.n
         elif isinstance(action_space, spaces.MultiDiscrete):
             assert len(action[0]) == len(action_space.nvec)
             for i, act in enumerate(action[0]):
                 assert act.is_integer()
-                assert act >= 0 and act < action_space.nvec[i]
+                assert act >= 0
+                assert act < action_space.nvec[i]
         elif isinstance(action_space, spaces.MultiBinary):
             assert len(action[0]) == action_space.n
             for act in action[0]:
@@ -905,7 +922,7 @@ class TestPPOGetActionAndValues:
             use_rollout_buffer=False,
         )
         obs = np.zeros((1, *vector_space.shape), dtype=np.float32)
-        action, log_prob, entropy, values, next_hidden = ppo._get_action_and_values(
+        action, _log_prob, _entropy, values, next_hidden = ppo._get_action_and_values(
             obs, sample=True
         )
         assert action is not None
@@ -1515,7 +1532,7 @@ class TestPPOLearn:
 
         # Verify action masks are stored in the buffer
         buffer_td = ppo.rollout_buffer.get_tensor_batch(device=ppo.device)
-        assert "action_masks" in buffer_td.keys(), (
+        assert "action_masks" in buffer_td, (
             "action_masks should be stored in rollout buffer"
         )
 
@@ -2159,7 +2176,7 @@ class TestPPOCollectRollouts:
         ppo.clean_up()
 
     @pytest.mark.parametrize(
-        "use_rollout_buffer, expect_runtime_error",
+        ("use_rollout_buffer", "expect_runtime_error"),
         [
             (True, False),
             (False, True),

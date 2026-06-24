@@ -9,7 +9,6 @@ from agilerl.modules.custom_components import NoisyLinear
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import assert_state_dicts_equal, unpack_network
 
-
 # Tiny shapes used for the multi-input Conv3d fixture. Kept large enough that
 # ``calc_max_kernel_sizes`` (height_out * 0.2) yields >=3 on the final conv,
 # so ``change_cnn_kernel`` can actually pick a different kernel and the test's
@@ -163,7 +162,7 @@ def device():
 class TestMakeEvolvableInit:
     # The class can be instantiated with all the required parameters and no errors occur.
     @pytest.mark.parametrize(
-        "network, input_tensor",
+        ("network", "input_tensor"),
         [
             ("simple_mlp", torch.randn(1, 10)),
             ("simple_cnn", torch.randn(1, 3, 32, 32)),
@@ -247,7 +246,7 @@ class TestMakeEvolvableInit:
 class TestMakeEvolvableForward:
     @pytest.mark.gpu
     @pytest.mark.parametrize(
-        "network, input_tensor, secondary_input_tensor, expected_result",
+        ("network", "input_tensor", "secondary_input_tensor", "expected_result"),
         [
             ("simple_mlp", torch.randn(1, 10), None, (1, 1)),
             ("simple_cnn", torch.randn(1, 3, 32, 32), None, (1, 1)),
@@ -291,7 +290,7 @@ class TestMakeEvolvableForward:
 
     @pytest.mark.gpu
     @pytest.mark.parametrize(
-        "network, input_tensor, secondary_input_tensor, expected_result",
+        ("network", "input_tensor", "secondary_input_tensor", "expected_result"),
         [
             ("simple_mlp", torch.randn(1, 10), None, (1, 1)),
             ("simple_cnn", torch.randn(1, 3, 32, 32), None, (1, 1)),
@@ -442,7 +441,7 @@ class TestMakeEvolvableDetectArchitecture:
     # Test if network after detect arch has the same arch as original network
     @pytest.mark.gpu
     @pytest.mark.parametrize(
-        "network, input_tensor",
+        ("network", "input_tensor"),
         [
             ("simple_mlp", torch.randn(1, 10)),
             ("simple_cnn", torch.randn(1, 3, 32, 32)),
@@ -1174,7 +1173,7 @@ class TestMakeEvolvableClone:
     # The clone() method successfully creates a deep copy of the model.
     @pytest.mark.gpu
     @pytest.mark.parametrize(
-        "network, input_tensor, secondary_input_tensor",
+        ("network", "input_tensor", "secondary_input_tensor"),
         [
             ("simple_mlp", torch.randn(1, 10), None),
             ("simple_cnn", torch.randn(1, 3, 32, 32), None),

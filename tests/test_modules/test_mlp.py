@@ -23,7 +23,7 @@ class TestNoisyLinear:
 ######### Test instantiation #########
 class TestEvolvableMLPInit:
     @pytest.mark.parametrize(
-        "num_inputs, num_outputs, hidden_size",
+        ("num_inputs", "num_outputs", "hidden_size"),
         [(10, 5, [32, 64, 128]), (2, 1, [32]), (100, 3, [8, 8, 8, 8, 8, 8, 8])],
     )
     def test_instantiation(self, num_inputs, num_outputs, hidden_size, device):
@@ -36,7 +36,7 @@ class TestEvolvableMLPInit:
         assert isinstance(evolvable_mlp, EvolvableMLP)
 
     @pytest.mark.parametrize(
-        "num_inputs, num_outputs, hidden_size",
+        ("num_inputs", "num_outputs", "hidden_size"),
         [(0, 20, [16]), (20, 0, [16]), (10, 2, []), (10, 2, [0])],
     )
     def test_incorrect_instantiation(
@@ -51,7 +51,7 @@ class TestEvolvableMLPInit:
             )
 
     @pytest.mark.parametrize(
-        "activation, output_activation",
+        ("activation", "output_activation"),
         [
             ("ELU", "Softmax"),
             ("Tanh", "PReLU"),
@@ -94,7 +94,7 @@ class TestEvolvableMLPInit:
 ######### Test forward #########
 class TestEvolvableMLPForward:
     @pytest.mark.parametrize(
-        "input_tensor, num_inputs, num_outputs, hidden_size, output_size",
+        ("input_tensor", "num_inputs", "num_outputs", "hidden_size", "output_size"),
         [
             (torch.randn(1, 10), 10, 5, [32, 64, 128], (1, 5)),
             (torch.randn(1, 2), 2, 1, [32], (1, 1)),
@@ -127,7 +127,7 @@ class TestEvolvableMLPForward:
 ######### Test add_mlp_layer #########
 class TestEvolvableMLPAddLayer:
     @pytest.mark.parametrize(
-        "num_inputs, num_outputs, hidden_size",
+        ("num_inputs", "num_outputs", "hidden_size"),
         [
             (10, 5, [32, 64, 128]),
             (2, 1, [32]),
@@ -161,7 +161,7 @@ class TestEvolvableMLPAddLayer:
 ######### Test remove_mlp_layer #########
 class TestEvolvableMLPRemoveLayer:
     @pytest.mark.parametrize(
-        "num_inputs, num_outputs, hidden_size",
+        ("num_inputs", "num_outputs", "hidden_size"),
         [(10, 5, [32, 64, 128]), (2, 1, [32]), (100, 3, [8, 8, 8, 8, 8, 8, 8])],
     )
     def test_remove_layer(self, num_inputs, num_outputs, hidden_size, device):
@@ -197,7 +197,7 @@ class TestEvolvableMLPRemoveLayer:
 ######### Test add_mlp_node #########
 class TestEvolvableMLPAddNode:
     @pytest.mark.parametrize(
-        "num_inputs, num_outputs, hidden_size, hidden_layer, numb_new_nodes",
+        ("num_inputs", "num_outputs", "hidden_size", "hidden_layer", "numb_new_nodes"),
         [
             (10, 5, [32, 64, 128], None, 4),
             (2, 1, [32], None, None),
@@ -232,7 +232,7 @@ class TestEvolvableMLPAddNode:
 ######### Test remove_mlp_node #########
 class TestEvolvableMLPRemoveNode:
     @pytest.mark.parametrize(
-        "num_inputs, num_outputs, hidden_size, hidden_layer, numb_new_nodes",
+        ("num_inputs", "num_outputs", "hidden_size", "hidden_layer", "numb_new_nodes"),
         [
             (10, 5, [256, 256, 256], 1, None),
             (2, 1, [32], None, 4),
@@ -271,7 +271,7 @@ class TestEvolvableMLPRemoveNode:
 ######### Test clone #########
 class TestEvolvableMLPClone:
     @pytest.mark.parametrize(
-        "num_inputs, num_outputs, hidden_size",
+        ("num_inputs", "num_outputs", "hidden_size"),
         [(10, 5, [32, 64, 128]), (2, 1, [32]), (100, 3, [8, 8, 8, 8, 8, 8, 8])],
     )
     def test_clone_instance(self, num_inputs, num_outputs, hidden_size, device):

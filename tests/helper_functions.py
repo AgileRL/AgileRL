@@ -118,7 +118,7 @@ def check_equal_params_ind(
 
 
 def unpack_network(model: nn.Sequential) -> list[nn.Module]:
-    """Unpacks an nn.Sequential type model"""
+    """Unpacks an nn.Sequential type model."""
     layer_list = []
     for layer in model.children():
         if isinstance(layer, nn.Sequential):

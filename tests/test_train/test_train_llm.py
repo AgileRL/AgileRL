@@ -1333,7 +1333,7 @@ class TestFinetuneLlmPreference:
                 "agilerl.training.train_llm.aggregate_metrics_across_gpus"
             ) as mock_agg,
             patch("agilerl.training.train_llm.save_llm_checkpoint"),
-            patch("agilerl.training.train_llm.wandb") as mock_wandb,
+            patch("agilerl.training.train_llm.wandb"),
         ):
             mock_agg.return_value = 0.5
             finetune_llm_preference(
@@ -1742,7 +1742,7 @@ class TestFinetuneLlmSft:
             patch("agilerl.training.train_llm.trange"),
             patch("agilerl.utils.utils.safe_aggregate_metrics") as mock_safe_agg,
             patch("agilerl.training.train_llm.save_llm_checkpoint"),
-            patch("agilerl.training.train_llm.wandb") as mock_wandb,
+            patch("agilerl.training.train_llm.wandb"),
         ):
             mock_safe_agg.side_effect = lambda acc, val: (
                 float(val) if not isinstance(val, float) else val
@@ -1811,7 +1811,8 @@ class TestFinetuneLlmMultiturn:
 
     def test_finetune_llm_multiturn_forwards_sampling_logps_to_learn(self):
         """When the rollout captures sampling logps, they're forwarded to
-        ``learn(..., sampling_logps=...)`` for GRPO/PPO/REINFORCE agents."""
+        ``learn(..., sampling_logps=...)`` for GRPO/PPO/REINFORCE agents.
+        """
         mock_agent = _make_multiturn_mock_agent(spec=GRPO)
         mock_env = _make_multiturn_mock_env(turn_boundaries_len=3)
         sampling_logps = [torch.zeros(1, 7)]
@@ -2255,7 +2256,8 @@ class TestFinetuneLlmMultiturn:
 
     def test_finetune_llm_multiturn_accelerator_syncs_after_test(self):
         """Covers accelerator.wait_for_everyone() after distributed eval aggregation
-        that follows the ``agent.test`` call."""
+        that follows the ``agent.test`` call.
+        """
         mock_agent = _make_multiturn_mock_agent()
         mock_agent.test.return_value = np.array(0.1, dtype=np.float32)
         mock_env = _make_multiturn_mock_env(turn_boundaries_len=3)
@@ -2781,7 +2783,7 @@ def test_init_llm_wandb_passes_entity_and_run_name():
 
 
 @pytest.mark.parametrize(
-    "finetune_fn, agent_spec",
+    ("finetune_fn", "agent_spec"),
     [
         (finetune_llm_reasoning, GRPO),
         (finetune_llm_preference, DPO),
@@ -2884,14 +2886,16 @@ def test_open_csv_log_and_log_row(tmp_path):
     from agilerl.training.train_llm import _log_csv_row, _open_csv_log
 
     csv_file, writer = _open_csv_log(str(tmp_path), ["step"], None)
-    assert csv_file is not None and writer is not None
+    assert csv_file is not None
+    assert writer is not None
     _log_csv_row(writer, csv_file, {"step": 1}, None)
     csv_file.close()
 
     non_main = MagicMock()
     non_main.is_main_process = False
     csv_file_none, writer_none = _open_csv_log(str(tmp_path), ["step"], non_main)
-    assert csv_file_none is None and writer_none is None
+    assert csv_file_none is None
+    assert writer_none is None
 
     writer_mock = MagicMock()
     file_mock = MagicMock()
