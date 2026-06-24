@@ -8,11 +8,11 @@ from torch import nn
 from torch._dynamo.eval_frame import OptimizedModule
 
 from agilerl.modules.cnn import MutableKernelSizes
+from agilerl.modules.custom_components import NoisyLinear
 from agilerl.utils.algo_utils import (
     get_input_size_from_space,
     get_output_size_from_space,
 )
-from agilerl.modules.custom_components import NoisyLinear
 from agilerl.utils.evolvable_networks import (
     compile_model,
     config_from_dict,
@@ -74,6 +74,17 @@ def test_config_from_dict():
         {"hidden_size": 128, "num_blocks": 2, "output_activation": "ReLU"}
     )
     assert cfg is not None
+    from agilerl.modules.configs import SimBaNetConfig
+
+    assert isinstance(cfg, SimBaNetConfig)
+    with pytest.raises(TypeError):
+        config_from_dict(
+            {
+                "hidden_size": 64,
+                "num_layers": 2,
+                "output_activation": "ReLU",
+            },
+        )
     cfg = config_from_dict(
         {"channel_size": [32, 32], "kernel_size": [3, 3], "stride_size": [1, 1]}
     )
@@ -82,6 +93,15 @@ def test_config_from_dict():
     assert cfg is not None
     with pytest.raises(ValueError, match="Unable to determine net config class"):
         config_from_dict({"unknown_key": 1})
+
+
+def test_config_from_dict_hidden_size_num_layers_selects_lstm():
+    from agilerl.modules.configs import LstmNetConfig
+
+    lstm_cfg = LstmNetConfig(hidden_state_size=64, num_layers=2)
+    with patch.object(LstmNetConfig, "from_dict", return_value=lstm_cfg):
+        cfg = config_from_dict({"hidden_size": 128, "num_layers": 2})
+    assert cfg is lstm_cfg
 
 
 def test_tuple_to_dict_space():
@@ -93,7 +113,8 @@ def test_tuple_to_dict_space():
     )
     result = tuple_to_dict_space(tuple_space)
     assert isinstance(result, spaces.Dict)
-    assert "0" in result.spaces and "1" in result.spaces
+    assert "0" in result.spaces
+    assert "1" in result.spaces
 
 
 def test_tuple_to_dict_obs():
@@ -123,7 +144,8 @@ def test_get_default_encoder_config_branches():
     assert "num_layers" in cfg
 
     cfg = get_default_encoder_config(box_space)
-    assert "hidden_size" in cfg and "layer_norm" in cfg
+    assert "hidden_size" in cfg
+    assert "layer_norm" in cfg
 
 
 def test_contains_moduledict_and_get_module_dict():
@@ -237,7 +259,7 @@ def test_create_resnet():
 ######### Test MutableKernelSizes.calc_max_kernel_sizes #########
 class TestMutableKernelSizesCalcMaxKernelSizes:
     @pytest.mark.parametrize(
-        "input_shape, channel_size, kernel_size, stride_size",
+        ("input_shape", "channel_size", "kernel_size", "stride_size"),
         [
             ([1, 16, 16], [32, 16], [3, 2], [1, 1]),
         ],
@@ -259,7 +281,7 @@ class TestMutableKernelSizesCalcMaxKernelSizes:
         assert max_kernel_sizes == [3, 3]
 
     @pytest.mark.parametrize(
-        "input_shape, channel_size, kernel_size, stride_size",
+        ("input_shape", "channel_size", "kernel_size", "stride_size"),
         [
             ([1, 3, 3], [32, 16], [1, 1], [1, 1]),
         ],
@@ -281,7 +303,7 @@ class TestMutableKernelSizesCalcMaxKernelSizes:
         assert max_kernel_sizes == [1, 1]
 
 
-@pytest.mark.parametrize("output_vanish, noisy", [(True, True), (False, True)])
+@pytest.mark.parametrize(("output_vanish", "noisy"), [(True, True), (False, True)])
 def test_create_mlp(output_vanish, noisy):
     net = create_mlp(
         10,
@@ -296,7 +318,7 @@ def test_create_mlp(output_vanish, noisy):
 
 ######### Test create_cnn #########
 class TestCreateCnn:
-    @pytest.mark.parametrize("noisy, output_vanish", [(False, True), (True, False)])
+    @pytest.mark.parametrize(("noisy", "output_vanish"), [(False, True), (True, False)])
     def test_create_cnn(self, noisy, output_vanish):
         feature_net = create_cnn(
             "Conv2d",
@@ -323,7 +345,7 @@ class TestCreateCnn:
         assert isinstance(head, nn.Module)
         assert isinstance(feature_net, nn.Module)
 
-    @pytest.mark.parametrize("noisy, output_vanish", [(False, True), (True, False)])
+    @pytest.mark.parametrize(("noisy", "output_vanish"), [(False, True), (True, False)])
     def test_create_cnn_multi(self, noisy, output_vanish):
         feature_net = create_cnn(
             "Conv3d",

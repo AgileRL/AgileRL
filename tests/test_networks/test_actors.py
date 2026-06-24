@@ -37,7 +37,7 @@ def head_config():
 class TestDeterministicActorInit:
     @pytest.mark.parametrize("action_space", ["vector_space"])
     @pytest.mark.parametrize(
-        "observation_space, encoder_type",
+        ("observation_space", "encoder_type"),
         [
             ("dict_space", "multi_input"),
             ("discrete_space", "mlp"),
@@ -140,9 +140,10 @@ class TestDeterministicActorMutationMethods:
                 # Checks that parameters that are not mutated are the same
                 check_equal_params_ind(network, new_network)
             else:
-                raise ValueError(
+                msg = (
                     f"Last mutation attribute is None. Expected {method} to be applied."
                 )
+                raise ValueError(msg)
 
 
 class TestDeterministicActorForward:
@@ -320,9 +321,8 @@ def test_distribution_mutation_methods(dummy_rng, head_config):
             # Checks that parameters that are not mutated are the same
             check_equal_params_ind(evolvable_dist, new_dist)
         else:
-            raise ValueError(
-                f"Last mutation attribute is None. Expected {method} to be applied."
-            )
+            msg = f"Last mutation attribute is None. Expected {method} to be applied."
+            raise ValueError(msg)
 
 
 class TestStochasticActorInit:
@@ -331,7 +331,7 @@ class TestStochasticActorInit:
         ["vector_space", "discrete_space", "multidiscrete_space", "multibinary_space"],
     )
     @pytest.mark.parametrize(
-        "observation_space, encoder_type",
+        ("observation_space", "encoder_type"),
         [
             ("dict_space", "multi_input"),
             ("discrete_space", "mlp"),
@@ -453,9 +453,10 @@ class TestStochasticActorMutationMethods:
                 # Checks that parameters that are not mutated are the same
                 check_equal_params_ind(network, new_network)
             else:
-                raise ValueError(
+                msg = (
                     f"Last mutation attribute is None. Expected {method} to be applied."
                 )
+                raise ValueError(msg)
 
 
 class TestStochasticActorForward:
@@ -573,7 +574,7 @@ class TestStochasticActorForward:
 
         # Run forward pass with mask
         with torch.no_grad():
-            action, log_prob, entropy = actor(obs, action_mask)
+            action, _log_prob, _entropy = actor(obs, action_mask)
 
         # Verify that the selected action is either 1 or 3 (unmasked)
         assert action.item() in [1, 3]

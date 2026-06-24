@@ -20,7 +20,7 @@ class _DummyLoraLayer(nn.Module):
         super().__init__()
         self.last_adapter_names = None
 
-    def forward(self, x, adapter_names=None):  # noqa: ANN001
+    def forward(self, x, adapter_names=None):
         self.last_adapter_names = adapter_names
         return x
 
@@ -34,9 +34,10 @@ class _DummyFusedModel(nn.Module):
 
 
 class _CacheRejectingFusedModel(_DummyFusedModel):
-    def __setattr__(self, name, value):  # noqa: ANN001
+    def __setattr__(self, name, value):
         if name == "_fused_lora_layers":
-            raise AttributeError("cache assignment not allowed")
+            msg = "cache assignment not allowed"
+            raise AttributeError(msg)
         super().__setattr__(name, value)
 
 
@@ -132,7 +133,7 @@ class _AdapterAwareLoraLayer(_DummyLoraLayer):
 
     adapter_layer_names = ("lora_A", "lora_B")
 
-    def __init__(self, adapters=("actor", "critic")) -> None:  # noqa: ANN001
+    def __init__(self, adapters=("actor", "critic")) -> None:
         super().__init__()
         self.lora_A = nn.ModuleDict({name: nn.Identity() for name in adapters})
         self.lora_B = nn.ModuleDict({name: nn.Identity() for name in adapters})
@@ -327,7 +328,8 @@ class TestUnpatchLoraForFusedForward:
 class TestBaseOutputCloneHook:
     """The base_layer forward hook clones the frozen base output only while
     fused routing is active (so PEFT's in-place LoRA accumulation can't mutate
-    a bnb custom-Function output view)."""
+    a bnb custom-Function output view).
+    """
 
     def test_clones_base_output_when_routing_active(self):
         model = nn.Module()

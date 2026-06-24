@@ -20,7 +20,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-import torch.nn as nn
+from torch import nn
 
 from agilerl.algorithms.core.llm_ops.vllm_colocate import (
     _StrippedTower,

@@ -1,9 +1,10 @@
 import gc
-import torch
-import pytest
 from importlib.util import find_spec
-from accelerate.state import AcceleratorState
+
+import pytest
+import torch
 from accelerate import Accelerator
+from accelerate.state import AcceleratorState
 from accelerate.utils import DeepSpeedPlugin
 
 
@@ -33,6 +34,6 @@ def generate_accelerator(use_deepspeed_optimizer, config):
     )
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def accelerator_factory():
     return generate_accelerator

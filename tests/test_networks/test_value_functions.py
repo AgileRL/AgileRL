@@ -31,7 +31,7 @@ def head_config():
 
 class TestValueNetworkInit:
     @pytest.mark.parametrize(
-        "observation_space, encoder_type",
+        ("observation_space", "encoder_type"),
         [
             ("dict_space", "multi_input"),
             ("discrete_space", "mlp"),
