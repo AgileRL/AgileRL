@@ -1,10 +1,10 @@
+from agilerl import HAS_LLM_DEPENDENCIES
+
 from .bc_lm import BC_LM, BC_Evaluator, BC_Policy
 from .cqn import CQN
 from .ddpg import DDPG
-from .dpo import DPO
 from .dqn import DQN
 from .dqn_rainbow import RainbowDQN
-from .grpo import GRPO
 from .ilql import ILQL
 from .ippo import IPPO
 from .maddpg import MADDPG
@@ -18,9 +18,7 @@ __all__ = [
     "BC_LM",
     "CQN",
     "DDPG",
-    "DPO",
     "DQN",
-    "GRPO",
     "ILQL",
     "IPPO",
     "MADDPG",
@@ -33,3 +31,14 @@ __all__ = [
     "NeuralUCB",
     "RainbowDQN",
 ]
+
+if HAS_LLM_DEPENDENCIES:
+    from .cispo import CISPO
+    from .dpo import DPO
+    from .grpo import GRPO
+    from .gspo import GSPO
+    from .ppo_llm import PPO as LLMPPO
+    from .reinforce_llm import REINFORCE as LLMREINFORCE
+    from .sft import SFT
+
+    __all__ += ["CISPO", "DPO", "GRPO", "GSPO", "LLMPPO", "LLMREINFORCE", "SFT"]

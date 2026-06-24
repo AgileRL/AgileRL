@@ -1,13 +1,13 @@
 ---
-compute_environment: LOCAL_MACHINE
-deepspeed_config: {}
-distributed_type: MULTI_GPU
-fsdp_config: {}
-machine_rank: 0
-main_process_ip:
-main_process_port:
-main_training_function: main
-mixed_precision: bf16
-num_machines: 1
-num_processes: 1
-use_cpu: false
+compute_environment: LOCAL_MACHINE    # Where training runs (LOCAL_MACHINE or cloud)
+deepspeed_config: {}                  # DeepSpeed settings (empty = disabled)
+distributed_type: MULTI_GPU           # Distribution strategy (NO, MULTI_GPU, DEEPSPEED, FSDP, TPU)
+fsdp_config: {}                       # Fully Sharded Data Parallel settings (empty = disabled)
+machine_rank: 0                       # Rank of this machine in multi-node setup
+main_process_ip:                      # IP of rank-0 machine (only needed for multi-node)
+main_process_port:                    # Port of rank-0 machine (only needed for multi-node)
+main_training_function: main          # Entry-point function name
+mixed_precision: bf16                 # Mixed precision mode (no, fp16, bf16)
+num_machines: 1                       # Total number of machines
+num_processes: 1                      # Total number of GPU processes across all machines
+use_cpu: false                        # Force CPU-only training

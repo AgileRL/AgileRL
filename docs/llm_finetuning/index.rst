@@ -1,7 +1,7 @@
 .. _llm_finetuning:
 
-LLM Finetuning
-==============
+LLM Fine-Tuning
+===============
 
 Reinforcement learning (RL) has emerged as a powerful technique for improving reasoning capabilities in Large Language Models.
 Reinforcement learning has been used in LLM post-training for several years now, initially through techniques like RLHF (Reinforcement Learning from Human Feedback)
@@ -19,8 +19,14 @@ develop *agency* and can be described as **agents**.
      - **Tutorials**
    * - :ref:`GRPO<grpo>`
      - :ref:`LLM reasoning with GRPO<grpo_tutorial>`
-   * - :ref:`DPO<dpo>`
-     - --
+   * - :ref:`GRPO<grpo>` (with evolutionary HPO)
+     - :ref:`LLM Finetuning with HPO<llm_finetuning_hpo>`
+   * - :ref:`CISPO<cispo>` and :ref:`GSPO<gspo>`
+     - GRPO specializations with alternative loss objectives (see the :ref:`GRPO tutorial<grpo_tutorial>`).
+   * - :ref:`LLM PPO<llmppo>`, :ref:`LLM REINFORCE<llmreinforce>` and :ref:`GRPO<grpo>`
+     - :ref:`Multi-turn finetuning with LLMPPO, LLMREINFORCE, and GRPO<multiturn_grpo_ppo_tutorial>`
+   * - :ref:`SFT<sft>` and :ref:`DPO<dpo>`
+     - :ref:`LLM fine-tuning with SFT and DPO<sft_dpo_finetuning>`
 
 .. _rl_for_reasoning:
 .. _rlhf:
@@ -50,9 +56,26 @@ The agent receives no explicit instructions on which specific reasoning techniqu
 tend to produce correct answers. This allows the emergence of sophisticated reasoning patterns that weren't necessarily anticipated
 by the model's creators, similar to how `AlphaGo <https://deepmind.google/research/projects/alphago/>`_ discovered novel chess strategies through self-play.
 
-This example demonstrates how to use the GRPO algorithm to finetune a LLM on a reasoning task.
+This example demonstrates how to use the GRPO algorithm to fine-tune a LLM on a reasoning task.
 
 .. collapse:: Example
 
   .. literalinclude:: ../../tutorials/llm_finetuning/grpo_reasoning.py
       :language: python
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Topics
+
+   fused_logprobs
+   quantization
+   llm_checkpoints
+
+.. note::
+
+   Colocated rollouts (where the trainer and vLLM share a single GPU and hand it
+   back and forth using vLLM's native sleep/wake) are covered for users under
+   "Colocated rollout (native vLLM sleep/wake)" in the :doc:`quantization` topic.
+   A deeper, code-level walkthrough of the same mechanism lives in
+   ``docs/llm_finetuning/vllm_sleep_handoff.md`` (a developer note kept in the
+   repository, not built into this documentation site).

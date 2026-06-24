@@ -1,14 +1,21 @@
 """Functions for collecting rollouts for on-policy algorithms."""
 
-from typing import Any
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
 from gymnasium import spaces
 
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import PPO
 from agilerl.networks import StochasticActor
 from agilerl.typing import GymEnvType
+
+if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
+    from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE
+    from agilerl.llm_envs import SyncMultiTurnVecEnv
 
 SupportedOnPolicy = PPO
 
@@ -236,3 +243,75 @@ def collect_rollouts_recurrent(
     :rtype: list[float]
     """
     return _collect_rollouts(agent, env, n_steps, recurrent=True, **kwargs)
+
+
+def collect_rollouts_llm(
+    agent: LLMPPO | LLMREINFORCE | GRPO,
+    env: SyncMultiTurnVecEnv,
+    n_steps: int,
+    batch_size: int,
+    group_seed: int,
+    **kwargs,
+) -> tuple[
+    list[torch.Tensor],
+    list[torch.Tensor],
+    list[torch.Tensor],
+    list[torch.Tensor],
+    int,
+    int,
+    list[torch.Tensor | None] | None,
+]:
+    """Collect multi-turn rollouts for LLM on-policy algorithms.
+
+    :param agent: The agent to collect rollouts for.
+    :type agent: SupportedOnPolicyLLM
+    :param env: Synchronous vectorized multi-turn environment.
+    :type env: SyncGemVecEnv
+    :param n_steps: Number of steps (max turns) for the agent to take.
+    :type n_steps: int
+    :param batch_size: Number of environments to collect rollouts from.
+    :type batch_size: int
+    :param group_seed: Seed for the group of environments.
+    :type group_seed: int
+    :return: Episode tensors, masks, turn ids, rewards, counted batch steps,
+        updated group seed, and per-trajectory vLLM sampling logprobs (one 1-D
+        tensor of generated-token logprobs each, individual entries possibly
+        ``None``; ``None`` overall when none were captured this rollout).
+    :rtype: tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], int, int, list[torch.Tensor | None] | None]
+    """
+    prompts = env.reset(
+        seed=group_seed,
+    )
+
+    for _turn_idx in range(n_steps):
+        if prompts is None:
+            break
+        if isinstance(agent, GRPO):
+            action_result = agent.get_action(
+                prompts,
+                training=True,
+                repeat_prompts=False,
+            )
+        else:
+            action_result = agent.get_action(prompts, training=True)
+        prompts = env.step(action_result.completion_ids, action_result.sampling_logps)
+
+    (
+        completion_ids_list,
+        action_masks_list,
+        all_turn_ids,
+        all_rewards,
+        batch_steps,
+        all_sampling_logps,
+    ) = env.get_trajectories()
+    group_seed = group_seed + batch_size
+
+    return (
+        completion_ids_list,
+        action_masks_list,
+        all_turn_ids,
+        all_rewards,
+        batch_steps,
+        group_seed,
+        all_sampling_logps,
+    )

@@ -1,25 +1,25 @@
 ---
-compute_environment: LOCAL_MACHINE
-debug: false
+compute_environment: LOCAL_MACHINE        # Where training runs (LOCAL_MACHINE or cloud)
+debug: false                              # Enable verbose Accelerate debug logging
 deepspeed_config:
-    gradient_accumulation_steps: 4
-    gradient_clipping: 1.5
-    offload_optimizer_device: cpu
-    offload_param_device: cpu
-    zero3_init_flag: false
-    zero_stage: 2
-    gradient_checkpointing: true
-mixed_precision: bf16
-distributed_type: DEEPSPEED
-downcast_bf16: no
-enable_cpu_affinity: false
-machine_rank: 0
-main_training_function: main
-num_machines: 1
-num_processes: 1
-rdzv_backend: static
-same_network: true
-tpu_env: []
-tpu_use_cluster: false
-tpu_use_sudo: false
-use_cpu: false
+    gradient_accumulation_steps: 4        # Accumulate gradients over N steps before update
+    gradient_clipping: 1.5                # Max gradient norm for DeepSpeed clipping
+    offload_optimizer_device: cpu         # Offload optimizer states to CPU to save GPU memory
+    offload_param_device: cpu             # Offload model params to CPU to save GPU memory
+    zero3_init_flag: false                # Initialize with ZeRO-3 param partitioning
+    zero_stage: 2                         # ZeRO optimization stage (0-3)
+    gradient_checkpointing: true          # Trade compute for memory by recomputing activations
+mixed_precision: bf16                     # Mixed precision mode (no, fp16, bf16)
+distributed_type: DEEPSPEED              # Distribution strategy (NO, MULTI_GPU, DEEPSPEED, FSDP, TPU)
+downcast_bf16: no                         # Downcast float ops to bf16 (yes, no)
+enable_cpu_affinity: false                # Pin processes to CPU cores for NUMA locality
+machine_rank: 0                           # Rank of this machine in multi-node setup
+main_training_function: main              # Entry-point function name
+num_machines: 1                           # Total number of machines
+num_processes: 1                          # Total number of GPU processes across all machines
+rdzv_backend: static                      # Rendezvous backend for elastic training
+same_network: true                        # All machines on the same network
+tpu_env: []                               # TPU environment variables
+tpu_use_cluster: false                    # Use TPU pod slice cluster
+tpu_use_sudo: false                       # Use sudo for TPU commands
+use_cpu: false                            # Force CPU-only training

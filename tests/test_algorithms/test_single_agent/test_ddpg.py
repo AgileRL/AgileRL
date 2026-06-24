@@ -93,683 +93,742 @@ class SimpleCNN(nn.Module):
         return self.relu3(self.linear2(x))
 
 
-# initialize ddpg with valid parameters
-@pytest.mark.parametrize(
-    "observation_space, encoder_cls",
-    [
-        ("vector_space", EvolvableMLP),
-        ("image_space", EvolvableCNN),
-        ("dict_space", EvolvableMultiInput),
-        ("multidiscrete_space", EvolvableMLP),
-    ],
-)
-@pytest.mark.parametrize("accelerator_flag", [False, True])
-def test_initialize_ddpg(observation_space, encoder_cls, accelerator_flag, request):
-    accelerator = Accelerator() if accelerator_flag else None
-    action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
-    observation_space = request.getfixturevalue(observation_space)
-    ddpg = DDPG(observation_space, action_space, accelerator=accelerator)
+class TestDDPGInit:
+    # initialize ddpg with valid parameters
+    @pytest.mark.parametrize(
+        "observation_space, encoder_cls",
+        [
+            ("vector_space", EvolvableMLP),
+            ("image_space", EvolvableCNN),
+            ("dict_space", EvolvableMultiInput),
+            ("multidiscrete_space", EvolvableMLP),
+        ],
+    )
+    @pytest.mark.parametrize("accelerator_flag", [False, True])
+    def test_initialize_ddpg(
+        self, observation_space, encoder_cls, accelerator_flag, request
+    ):
+        accelerator = Accelerator() if accelerator_flag else None
+        action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        observation_space = request.getfixturevalue(observation_space)
+        ddpg = DDPG(observation_space, action_space, accelerator=accelerator)
 
-    expected_opt_cls = AcceleratedOptimizer if accelerator else optim.Adam
-    expected_device = accelerator.device if accelerator else "cpu"
-    assert ddpg.observation_space == observation_space
-    assert ddpg.action_space == action_space
-    assert ddpg.batch_size == 64
-    assert ddpg.lr_actor == 0.0001
-    assert ddpg.lr_critic == 0.001
-    assert ddpg.learn_step == 5
-    assert ddpg.gamma == 0.99
-    assert ddpg.tau == 0.001
-    assert ddpg.mut is None
-    assert ddpg.device == expected_device
-    assert ddpg.accelerator == accelerator
-    assert ddpg.index == 0
-    assert ddpg.scores == []
-    assert ddpg.fitness == []
-    assert ddpg.steps == [0]
-    assert isinstance(ddpg.actor.encoder, encoder_cls)
-    assert isinstance(ddpg.actor_target.encoder, encoder_cls)
-    assert isinstance(ddpg.actor_optimizer.optimizer, expected_opt_cls)
-    assert isinstance(ddpg.critic.encoder, encoder_cls)
-    assert isinstance(ddpg.critic_target.encoder, encoder_cls)
-    assert isinstance(ddpg.critic_optimizer.optimizer, expected_opt_cls)
-    assert isinstance(ddpg.criterion, nn.MSELoss)
-    ddpg.clean_up()
+        expected_opt_cls = AcceleratedOptimizer if accelerator else optim.Adam
+        expected_device = accelerator.device if accelerator else "cpu"
+        assert ddpg.observation_space == observation_space
+        assert ddpg.action_space == action_space
+        assert ddpg.batch_size == 64
+        assert ddpg.lr_actor == 0.0001
+        assert ddpg.lr_critic == 0.001
+        assert ddpg.learn_step == 5
+        assert ddpg.gamma == 0.99
+        assert ddpg.tau == 0.001
+        assert ddpg.mut is None
+        assert ddpg.device == expected_device
+        assert ddpg.accelerator == accelerator
+        assert ddpg.index == 0
+        assert ddpg.scores == []
+        assert ddpg.fitness == []
+        assert ddpg.steps == [0]
+        assert isinstance(ddpg.actor.encoder, encoder_cls)
+        assert isinstance(ddpg.actor_target.encoder, encoder_cls)
+        assert isinstance(ddpg.actor_optimizer.optimizer, expected_opt_cls)
+        assert isinstance(ddpg.critic.encoder, encoder_cls)
+        assert isinstance(ddpg.critic_target.encoder, encoder_cls)
+        assert isinstance(ddpg.critic_optimizer.optimizer, expected_opt_cls)
+        assert isinstance(ddpg.criterion, nn.MSELoss)
+        ddpg.clean_up()
 
-
-# Can initialize ddpg with an actor network
-# TODO: This will be deprecated in the future
-@pytest.mark.parametrize(
-    "observation_space, actor_network, critic_network, input_tensor, input_tensor_critic",
-    [
-        (
-            "vector_space",
-            "simple_mlp",
-            "simple_mlp",
-            torch.randn(1, 4),
-            torch.randn(1, 4),
-        ),
-    ],
-)
-def test_initialize_ddpg_with_actor_network(
-    observation_space,
-    actor_network,
-    critic_network,
-    input_tensor,
-    input_tensor_critic,
-    request,
-):
-    action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
-    observation_space = request.getfixturevalue(observation_space)
-    actor_network = request.getfixturevalue(actor_network)
-    actor_network = MakeEvolvable(actor_network, input_tensor)
-    critic_network = request.getfixturevalue(critic_network)
-    critic_network = MakeEvolvable(critic_network, input_tensor_critic)
-
-    ddpg = DDPG(
+    # Can initialize ddpg with an actor network
+    # TODO: This will be deprecated in the future
+    @pytest.mark.parametrize(
+        "observation_space, actor_network, critic_network, input_tensor, input_tensor_critic",
+        [
+            (
+                "vector_space",
+                "simple_mlp",
+                "simple_mlp",
+                torch.randn(1, 4),
+                torch.randn(1, 4),
+            ),
+        ],
+    )
+    def test_initialize_ddpg_with_actor_network(
+        self,
         observation_space,
-        action_space,
-        actor_network=actor_network,
-        critic_network=critic_network,
-    )
+        actor_network,
+        critic_network,
+        input_tensor,
+        input_tensor_critic,
+        request,
+    ):
+        action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        observation_space = request.getfixturevalue(observation_space)
+        actor_network = request.getfixturevalue(actor_network)
+        actor_network = MakeEvolvable(actor_network, input_tensor)
+        critic_network = request.getfixturevalue(critic_network)
+        critic_network = MakeEvolvable(critic_network, input_tensor_critic)
 
-    assert ddpg.observation_space == observation_space
-    assert ddpg.action_space == action_space
-    assert ddpg.batch_size == 64
-    assert ddpg.lr_actor == 0.0001
-    assert ddpg.lr_critic == 0.001
-    assert ddpg.learn_step == 5
-    assert ddpg.gamma == 0.99
-    assert ddpg.tau == 0.001
-    assert ddpg.mut is None
-    assert ddpg.device == "cpu"
-    assert ddpg.accelerator is None
-    assert ddpg.index == 0
-    assert ddpg.scores == []
-    assert ddpg.fitness == []
-    assert ddpg.steps == [0]
-    assert isinstance(ddpg.actor_optimizer.optimizer, optim.Adam)
-    assert isinstance(ddpg.critic_optimizer.optimizer, optim.Adam)
-    assert isinstance(ddpg.criterion, nn.MSELoss)
-    ddpg.clean_up()
-
-
-def test_initialize_ddpg_with_actor_network_evo_net(vector_space):
-    action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
-
-    actor_network = DeterministicActor(vector_space, action_space)
-    critic_network = ContinuousQNetwork(vector_space, action_space)
-
-    ddpg = DDPG(
-        vector_space,
-        action_space,
-        actor_network=actor_network,
-        critic_network=critic_network,
-    )
-
-    assert ddpg.observation_space == vector_space
-    assert ddpg.action_space == action_space
-    assert ddpg.batch_size == 64
-    assert ddpg.lr_actor == 0.0001
-    assert ddpg.lr_critic == 0.001
-    assert ddpg.learn_step == 5
-    assert ddpg.gamma == 0.99
-    assert ddpg.tau == 0.001
-    assert ddpg.mut is None
-    assert ddpg.device == "cpu"
-    assert ddpg.accelerator is None
-    assert ddpg.index == 0
-    assert ddpg.scores == []
-    assert ddpg.fitness == []
-    assert ddpg.steps == [0]
-    assert isinstance(ddpg.actor_optimizer.optimizer, optim.Adam)
-    assert isinstance(ddpg.critic_optimizer.optimizer, optim.Adam)
-    assert isinstance(ddpg.criterion, nn.MSELoss)
-    ddpg.clean_up()
-    ddpg.clean_up()
-
-
-def test_initialize_ddpg_with_incorrect_actor_net(vector_space):
-    action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
-    actor_network = "dummy"
-    critic_network = "dummy"
-    with pytest.raises(TypeError):
         ddpg = DDPG(
-            vector_space,
+            observation_space,
             action_space,
-            expl_noise=np.zeros((1, action_space.shape[0])),
             actor_network=actor_network,
             critic_network=critic_network,
         )
-        assert ddpg
 
+        assert ddpg.observation_space == observation_space
+        assert ddpg.action_space == action_space
+        assert ddpg.batch_size == 64
+        assert ddpg.lr_actor == 0.0001
+        assert ddpg.lr_critic == 0.001
+        assert ddpg.learn_step == 5
+        assert ddpg.gamma == 0.99
+        assert ddpg.tau == 0.001
+        assert ddpg.mut is None
+        assert ddpg.device == "cpu"
+        assert ddpg.accelerator is None
+        assert ddpg.index == 0
+        assert ddpg.scores == []
+        assert ddpg.fitness == []
+        assert ddpg.steps == [0]
+        assert isinstance(ddpg.actor_optimizer.optimizer, optim.Adam)
+        assert isinstance(ddpg.critic_optimizer.optimizer, optim.Adam)
+        assert isinstance(ddpg.criterion, nn.MSELoss)
+        ddpg.clean_up()
 
-# Can initialize ddpg with an actor network but no critic - should trigger warning
-@pytest.mark.parametrize(
-    "observation_space, actor_network, critic_network, input_tensor, input_tensor_critic",
-    [
-        (
-            "vector_space",
-            "simple_mlp",
-            "simple_mlp_critic",
-            torch.randn(1, 4),
-            torch.randn(1, 6),
-        ),
-    ],
-)
-def test_initialize_ddpg_with_actor_network_no_critic(
-    observation_space,
-    actor_network,
-    critic_network,
-    input_tensor,
-    input_tensor_critic,
-    request,
-):
-    action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
-    observation_space = request.getfixturevalue(observation_space)
-    actor_network = request.getfixturevalue(actor_network)
-    actor_network = MakeEvolvable(actor_network, input_tensor)
+    def test_initialize_ddpg_with_actor_network_evo_net(self, vector_space):
+        action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
 
-    ddpg = DDPG(
-        observation_space,
-        action_space,
-        actor_network=actor_network,
-        critic_network=None,
+        actor_network = DeterministicActor(vector_space, action_space)
+        critic_network = ContinuousQNetwork(vector_space, action_space)
+
+        ddpg = DDPG(
+            vector_space,
+            action_space,
+            actor_network=actor_network,
+            critic_network=critic_network,
+        )
+
+        assert ddpg.observation_space == vector_space
+        assert ddpg.action_space == action_space
+        assert ddpg.batch_size == 64
+        assert ddpg.lr_actor == 0.0001
+        assert ddpg.lr_critic == 0.001
+        assert ddpg.learn_step == 5
+        assert ddpg.gamma == 0.99
+        assert ddpg.tau == 0.001
+        assert ddpg.mut is None
+        assert ddpg.device == "cpu"
+        assert ddpg.accelerator is None
+        assert ddpg.index == 0
+        assert ddpg.scores == []
+        assert ddpg.fitness == []
+        assert ddpg.steps == [0]
+        assert isinstance(ddpg.actor_optimizer.optimizer, optim.Adam)
+        assert isinstance(ddpg.critic_optimizer.optimizer, optim.Adam)
+        assert isinstance(ddpg.criterion, nn.MSELoss)
+        ddpg.clean_up()
+        ddpg.clean_up()
+
+    def test_initialize_ddpg_with_incorrect_actor_net(self, vector_space):
+        action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        actor_network = "dummy"
+        critic_network = "dummy"
+        with pytest.raises(TypeError):
+            ddpg = DDPG(
+                vector_space,
+                action_space,
+                expl_noise=np.zeros((1, action_space.shape[0])),
+                actor_network=actor_network,
+                critic_network=critic_network,
+            )
+            assert ddpg
+
+    # Can initialize ddpg with an actor network but no critic - should trigger warning
+    @pytest.mark.parametrize(
+        "observation_space, actor_network, critic_network, input_tensor, input_tensor_critic",
+        [
+            (
+                "vector_space",
+                "simple_mlp",
+                "simple_mlp_critic",
+                torch.randn(1, 4),
+                torch.randn(1, 6),
+            ),
+        ],
     )
-
-    assert ddpg.observation_space == observation_space
-    assert ddpg.action_space == action_space
-    assert ddpg.batch_size == 64
-    assert ddpg.lr_actor == 0.0001
-    assert ddpg.lr_critic == 0.001
-    assert ddpg.learn_step == 5
-    assert ddpg.gamma == 0.99
-    assert ddpg.tau == 0.001
-    assert ddpg.mut is None
-    assert ddpg.device == "cpu"
-    assert ddpg.accelerator is None
-    assert ddpg.index == 0
-    assert ddpg.scores == []
-    assert ddpg.fitness == []
-    assert ddpg.steps == [0]
-    assert ddpg.actor != actor_network
-    # assert ddpg.critic_network is None
-    assert isinstance(ddpg.actor_optimizer.optimizer, optim.Adam)
-    assert isinstance(ddpg.critic_optimizer.optimizer, optim.Adam)
-    assert isinstance(ddpg.criterion, nn.MSELoss)
-    ddpg.clean_up()
-
-
-@pytest.mark.parametrize(
-    "observation_space",
-    [
-        "vector_space",
-        "discrete_space",
-        "image_space",
-        "dict_space",
-        "multidiscrete_space",
-    ],
-)
-@pytest.mark.parametrize("action_dtype", [np.float32, np.float64])
-def test_returns_expected_action_training(observation_space, request, action_dtype):
-    accelerator = Accelerator()
-    action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=action_dtype)
-    observation_space = request.getfixturevalue(observation_space)
-
-    # Test without accelerator
-    ddpg = DDPG(observation_space, action_space)
-    state = get_sample_from_space(observation_space)
-
-    training = False
-    action = ddpg.get_action(state, training)[0]
-    assert len(action) == action_space.shape[0]
-    for act in action:
-        assert isinstance(act, np.float32)
-        assert -1 <= act <= 1
-    ddpg.clean_up()
-
-    # Test with accelerator
-    ddpg = DDPG(observation_space, action_space, accelerator=accelerator)
-    state = get_sample_from_space(observation_space)
-    training = True
-    action = ddpg.get_action(state, training)[0]
-
-    assert len(action) == action_space.shape[0]
-    for act in action:
-        assert isinstance(act, np.float32)
-        assert -1 <= act <= 1
-    ddpg.clean_up()
-
-    # Test without OU noise
-    ddpg = DDPG(
+    def test_initialize_ddpg_with_actor_network_no_critic(
+        self,
         observation_space,
-        action_space,
-        O_U_noise=False,
-        accelerator=accelerator,
-    )
-    state = get_sample_from_space(observation_space)
-    training = True
-    action = ddpg.get_action(state, training)[0]
+        actor_network,
+        critic_network,
+        input_tensor,
+        input_tensor_critic,
+        request,
+    ):
+        action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        observation_space = request.getfixturevalue(observation_space)
+        actor_network = request.getfixturevalue(actor_network)
+        actor_network = MakeEvolvable(actor_network, input_tensor)
 
-    assert len(action) == action_space.shape[0]
-    for act in action:
-        assert isinstance(act, np.float32)
-        assert -1 <= act <= 1
-    ddpg.clean_up()
-
-
-# learns from experiences and updates network parameters
-@pytest.mark.parametrize(
-    "observation_space",
-    [
-        "vector_space",
-        "discrete_space",
-        "image_space",
-        "dict_space",
-        "multidiscrete_space",
-    ],
-)
-@pytest.mark.parametrize("accelerator_flag", [False, True])
-def test_learns_from_experiences(observation_space, accelerator_flag, request):
-    accelerator = Accelerator() if accelerator_flag else None
-    action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
-    observation_space = request.getfixturevalue(observation_space)
-    batch_size = 4
-    policy_freq = 4
-
-    # Create an instance of the ddpg class
-    ddpg = DDPG(
-        observation_space,
-        action_space,
-        batch_size=batch_size,
-        policy_freq=policy_freq,
-        accelerator=accelerator,
-    )
-
-    # Copy state dict before learning - should be different to after updating weights
-    actor = ddpg.actor
-    actor_target = ddpg.actor_target
-    actor_pre_learn_sd = copy.deepcopy(ddpg.actor.state_dict())
-    critic = ddpg.critic
-    critic_target = ddpg.critic_target
-    critic_pre_learn_sd = copy.deepcopy(ddpg.critic.state_dict())
-
-    for _i in range(policy_freq * 2):
-        # Create a batch of experiences & learn
-        device = accelerator.device if accelerator else "cpu"
-        experiences = get_experiences_batch(
+        ddpg = DDPG(
             observation_space,
             action_space,
-            batch_size,
-            device,
+            actor_network=actor_network,
+            critic_network=None,
         )
-        ddpg.scores.append(0)
+
+        assert ddpg.observation_space == observation_space
+        assert ddpg.action_space == action_space
+        assert ddpg.batch_size == 64
+        assert ddpg.lr_actor == 0.0001
+        assert ddpg.lr_critic == 0.001
+        assert ddpg.learn_step == 5
+        assert ddpg.gamma == 0.99
+        assert ddpg.tau == 0.001
+        assert ddpg.mut is None
+        assert ddpg.device == "cpu"
+        assert ddpg.accelerator is None
+        assert ddpg.index == 0
+        assert ddpg.scores == []
+        assert ddpg.fitness == []
+        assert ddpg.steps == [0]
+        assert ddpg.actor != actor_network
+        # assert ddpg.critic_network is None
+        assert isinstance(ddpg.actor_optimizer.optimizer, optim.Adam)
+        assert isinstance(ddpg.critic_optimizer.optimizer, optim.Adam)
+        assert isinstance(ddpg.criterion, nn.MSELoss)
+        ddpg.clean_up()
+
+
+class TestDDPGGetAction:
+    @pytest.mark.parametrize(
+        "observation_space",
+        [
+            "vector_space",
+            "discrete_space",
+            "image_space",
+            "dict_space",
+            "multidiscrete_space",
+        ],
+    )
+    @pytest.mark.parametrize("action_dtype", [np.float32, np.float64])
+    def test_returns_expected_action_training(
+        self, observation_space, request, action_dtype
+    ):
+        accelerator = Accelerator()
+        action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=action_dtype)
+        observation_space = request.getfixturevalue(observation_space)
+
+        # Test without accelerator
+        ddpg = DDPG(observation_space, action_space)
+        state = get_sample_from_space(observation_space)
+
+        training = False
+        action = ddpg.get_action(state, training)[0]
+        assert len(action) == action_space.shape[0]
+        for act in action:
+            assert isinstance(act, np.float32)
+            assert -1 <= act <= 1
+        ddpg.clean_up()
+
+        # Test with accelerator
+        ddpg = DDPG(observation_space, action_space, accelerator=accelerator)
+        state = get_sample_from_space(observation_space)
+        training = True
+        action = ddpg.get_action(state, training)[0]
+
+        assert len(action) == action_space.shape[0]
+        for act in action:
+            assert isinstance(act, np.float32)
+            assert -1 <= act <= 1
+        ddpg.clean_up()
+
+        # Test without OU noise
+        ddpg = DDPG(
+            observation_space,
+            action_space,
+            O_U_noise=False,
+            accelerator=accelerator,
+        )
+        state = get_sample_from_space(observation_space)
+        training = True
+        action = ddpg.get_action(state, training)[0]
+
+        assert len(action) == action_space.shape[0]
+        for act in action:
+            assert isinstance(act, np.float32)
+            assert -1 <= act <= 1
+        ddpg.clean_up()
+
+
+class TestDDPGLearn:
+    # learns from experiences and updates network parameters
+    @pytest.mark.parametrize(
+        "observation_space",
+        [
+            "vector_space",
+            "discrete_space",
+            "image_space",
+            "dict_space",
+            "multidiscrete_space",
+        ],
+    )
+    @pytest.mark.parametrize("accelerator_flag", [False])
+    def test_learns_from_experiences(
+        self, observation_space, accelerator_flag, request
+    ):
+        accelerator = Accelerator() if accelerator_flag else None
+        action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        observation_space = request.getfixturevalue(observation_space)
+        batch_size = 4
+        policy_freq = 4
+
+        # Create an instance of the ddpg class
+        ddpg = DDPG(
+            observation_space,
+            action_space,
+            batch_size=batch_size,
+            policy_freq=policy_freq,
+            accelerator=accelerator,
+        )
+
+        # Copy state dict before learning - should be different to after updating weights
+        actor = ddpg.actor
+        actor_target = ddpg.actor_target
+        actor_pre_learn_sd = copy.deepcopy(ddpg.actor.state_dict())
+        critic = ddpg.critic
+        critic_target = ddpg.critic_target
+        critic_pre_learn_sd = copy.deepcopy(ddpg.critic.state_dict())
+
+        for _i in range(policy_freq * 2):
+            # Create a batch of experiences & learn
+            device = accelerator.device if accelerator else "cpu"
+            experiences = get_experiences_batch(
+                observation_space,
+                action_space,
+                batch_size,
+                device,
+            )
+            ddpg.scores.append(0)
+            actor_loss, critic_loss = ddpg.learn(experiences)
+
+        assert isinstance(actor_loss, float)
+        assert isinstance(critic_loss, float)
+        assert critic_loss >= 0.0
+        assert actor == ddpg.actor
+        assert actor_target == ddpg.actor_target
+        assert_not_equal_state_dict(actor_pre_learn_sd, ddpg.actor.state_dict())
+        assert critic == ddpg.critic
+        assert critic_target == ddpg.critic_target
+        assert_not_equal_state_dict(critic_pre_learn_sd, ddpg.critic.state_dict())
+        ddpg.clean_up()
+
+    @pytest.mark.gpu
+    def test_learns_from_experiences_accelerator_smoke(self, vector_space, request):
+        observation_space = request.getfixturevalue("vector_space")
+        action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        batch_size = 4
+        policy_freq = 4
+        accelerator = Accelerator()
+        ddpg = DDPG(
+            observation_space,
+            action_space,
+            batch_size=batch_size,
+            policy_freq=policy_freq,
+            accelerator=accelerator,
+        )
+        device = accelerator.device
+        for _i in range(policy_freq):
+            experiences = get_experiences_batch(
+                observation_space,
+                action_space,
+                batch_size,
+                device,
+            )
+            ddpg.scores.append(0)
+            ddpg.learn(experiences)
+        ddpg.clean_up()
+
+    def test_learn_returns_none_actor_loss_when_policy_freq_not_met(self, vector_space):
+        action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        batch_size = 4
+        ddpg = DDPG(vector_space, action_space, batch_size=batch_size, policy_freq=4)
+        experiences = get_experiences_batch(vector_space, action_space, batch_size)
         actor_loss, critic_loss = ddpg.learn(experiences)
-
-    assert isinstance(actor_loss, float)
-    assert isinstance(critic_loss, float)
-    assert critic_loss >= 0.0
-    assert actor == ddpg.actor
-    assert actor_target == ddpg.actor_target
-    assert_not_equal_state_dict(actor_pre_learn_sd, ddpg.actor.state_dict())
-    assert critic == ddpg.critic
-    assert critic_target == ddpg.critic_target
-    assert_not_equal_state_dict(critic_pre_learn_sd, ddpg.critic.state_dict())
-    ddpg.clean_up()
+        assert actor_loss is None
+        assert isinstance(critic_loss, float)
+        ddpg.clean_up()
 
 
-# Updates target network parameters with soft update
-def test_soft_update():
-    observation_space = spaces.Box(low=-1, high=1, shape=(4,), dtype=np.float32)
-    action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
-    net_config = {"encoder_config": {"hidden_size": [64, 64]}}
-    batch_size = 64
-    lr_actor = 1e-4
-    lr_critic = 1e-3
-    learn_step = 5
-    gamma = 0.99
-    tau = 1e-3
-    mut = None
-    actor_network = None
-    device = "cpu"
-    accelerator = None
-    wrap = True
+class TestDDPGSoftUpdate:
+    # Updates target network parameters with soft update
+    def test_soft_update(self):
+        observation_space = spaces.Box(low=-1, high=1, shape=(4,), dtype=np.float32)
+        action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        net_config = {"encoder_config": {"hidden_size": [64, 64]}}
+        batch_size = 64
+        lr_actor = 1e-4
+        lr_critic = 1e-3
+        learn_step = 5
+        gamma = 0.99
+        tau = 1e-3
+        mut = None
+        actor_network = None
+        device = "cpu"
+        accelerator = None
+        wrap = True
 
-    ddpg = DDPG(
-        observation_space,
-        action_space,
-        net_config=net_config,
-        batch_size=batch_size,
-        lr_actor=lr_actor,
-        lr_critic=lr_critic,
-        learn_step=learn_step,
-        gamma=gamma,
-        tau=tau,
-        mut=mut,
-        actor_network=actor_network,
-        device=device,
-        accelerator=accelerator,
-        wrap=wrap,
-    )
-
-    ddpg.soft_update(ddpg.actor, ddpg.actor_target)
-
-    eval_params = list(ddpg.actor.parameters())
-    target_params = list(ddpg.actor_target.parameters())
-    expected_params = [
-        ddpg.tau * eval_param + (1.0 - ddpg.tau) * target_param
-        for eval_param, target_param in zip(eval_params, target_params, strict=False)
-    ]
-
-    assert all(
-        torch.allclose(expected_param, target_param)
-        for expected_param, target_param in zip(
-            expected_params,
-            target_params,
-            strict=False,
+        ddpg = DDPG(
+            observation_space,
+            action_space,
+            net_config=net_config,
+            batch_size=batch_size,
+            lr_actor=lr_actor,
+            lr_critic=lr_critic,
+            learn_step=learn_step,
+            gamma=gamma,
+            tau=tau,
+            mut=mut,
+            actor_network=actor_network,
+            device=device,
+            accelerator=accelerator,
+            wrap=wrap,
         )
-    )
 
-    ddpg.soft_update(ddpg.critic, ddpg.critic_target)
+        ddpg.soft_update(ddpg.actor, ddpg.actor_target)
 
-    eval_params = list(ddpg.critic.parameters())
-    target_params = list(ddpg.critic_target.parameters())
-    expected_params = [
-        ddpg.tau * eval_param + (1.0 - ddpg.tau) * target_param
-        for eval_param, target_param in zip(eval_params, target_params, strict=False)
-    ]
+        eval_params = list(ddpg.actor.parameters())
+        target_params = list(ddpg.actor_target.parameters())
+        expected_params = [
+            ddpg.tau * eval_param + (1.0 - ddpg.tau) * target_param
+            for eval_param, target_param in zip(
+                eval_params, target_params, strict=False
+            )
+        ]
 
-    assert all(
-        torch.allclose(expected_param, target_param)
-        for expected_param, target_param in zip(
-            expected_params,
-            target_params,
-            strict=False,
+        assert all(
+            torch.allclose(expected_param, target_param)
+            for expected_param, target_param in zip(
+                expected_params,
+                target_params,
+                strict=False,
+            )
         )
-    )
-    ddpg.clean_up()
+
+        ddpg.soft_update(ddpg.critic, ddpg.critic_target)
+
+        eval_params = list(ddpg.critic.parameters())
+        target_params = list(ddpg.critic_target.parameters())
+        expected_params = [
+            ddpg.tau * eval_param + (1.0 - ddpg.tau) * target_param
+            for eval_param, target_param in zip(
+                eval_params, target_params, strict=False
+            )
+        ]
+
+        assert all(
+            torch.allclose(expected_param, target_param)
+            for expected_param, target_param in zip(
+                expected_params,
+                target_params,
+                strict=False,
+            )
+        )
+        ddpg.clean_up()
 
 
-# Runs algorithm test loop
-@pytest.mark.parametrize("observation_space", ["vector_space", "image_space"])
-@pytest.mark.parametrize("num_envs", [1, 3])
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
-def test_algorithm_test_loop(observation_space, num_envs, device, request):
-    action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
-    observation_space = request.getfixturevalue(observation_space)
+class TestDDPGTest:
+    # Runs algorithm test loop
+    @pytest.mark.gpu
+    @pytest.mark.parametrize("observation_space", ["vector_space", "image_space"])
+    @pytest.mark.parametrize("num_envs", [1, 3])
+    @pytest.mark.parametrize("device", ["cpu", "cuda"])
+    def test_algorithm_test_loop(self, observation_space, num_envs, device, request):
+        action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        observation_space = request.getfixturevalue(observation_space)
 
-    vect = num_envs > 1
-    env = DummyEnv(state_size=observation_space.shape, vect=vect, num_envs=num_envs)
+        vect = num_envs > 1
+        env = DummyEnv(state_size=observation_space.shape, vect=vect, num_envs=num_envs)
 
-    # env = make_vect_envs("CartPole-v1", num_envs=num_envs)
-    agent = DDPG(
-        observation_space=observation_space,
-        action_space=action_space,
-        device=device,
-    )
-    mean_score = agent.test(env, max_steps=10)
-    assert isinstance(mean_score, float)
-    agent.clean_up()
-
-
-# Clones the agent and returns an identical agent.
-@pytest.mark.parametrize("observation_space", ["vector_space"])
-def test_clone_returns_identical_agent(observation_space, request):
-    action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
-    observation_space = request.getfixturevalue(observation_space)
-
-    ddpg = DDPG(observation_space, action_space)
-    ddpg.fitness = [200, 200, 200]
-    ddpg.scores = [94, 94, 94]
-    ddpg.steps = [2500]
-    ddpg.tensor_attribute = torch.randn(1)
-    clone_agent = ddpg.clone()
-
-    assert clone_agent.observation_space == ddpg.observation_space
-    assert clone_agent.action_space == ddpg.action_space
-    assert clone_agent.batch_size == ddpg.batch_size
-    assert clone_agent.lr_actor == ddpg.lr_actor
-    assert clone_agent.lr_critic == ddpg.lr_critic
-    assert clone_agent.learn_step == ddpg.learn_step
-    assert clone_agent.gamma == ddpg.gamma
-    assert clone_agent.tau == ddpg.tau
-    assert clone_agent.mut == ddpg.mut
-    assert clone_agent.device == ddpg.device
-    assert clone_agent.accelerator == ddpg.accelerator
-    assert_state_dicts_equal(clone_agent.actor.state_dict(), ddpg.actor.state_dict())
-    assert_state_dicts_equal(
-        clone_agent.actor_target.state_dict(),
-        ddpg.actor_target.state_dict(),
-    )
-    assert_state_dicts_equal(clone_agent.critic.state_dict(), ddpg.critic.state_dict())
-    assert_state_dicts_equal(
-        clone_agent.critic_target.state_dict(),
-        ddpg.critic_target.state_dict(),
-    )
-    assert_state_dicts_equal(
-        clone_agent.actor_optimizer.state_dict(),
-        ddpg.actor_optimizer.state_dict(),
-    )
-    assert_state_dicts_equal(
-        clone_agent.critic_optimizer.state_dict(),
-        ddpg.critic_optimizer.state_dict(),
-    )
-    assert clone_agent.fitness == ddpg.fitness
-    assert clone_agent.steps == ddpg.steps
-    assert clone_agent.scores == ddpg.scores
-    assert clone_agent.tensor_attribute == ddpg.tensor_attribute
-    ddpg.clean_up()
-    clone_agent.clean_up()
-
-    accelerator = Accelerator()
-    ddpg = DDPG(observation_space, action_space, accelerator=accelerator)
-    clone_agent = ddpg.clone()
-
-    assert clone_agent.observation_space == ddpg.observation_space
-    assert clone_agent.action_space == ddpg.action_space
-    assert clone_agent.batch_size == ddpg.batch_size
-    assert clone_agent.lr_actor == ddpg.lr_actor
-    assert clone_agent.lr_critic == ddpg.lr_critic
-    assert clone_agent.learn_step == ddpg.learn_step
-    assert clone_agent.gamma == ddpg.gamma
-    assert clone_agent.tau == ddpg.tau
-    assert clone_agent.mut == ddpg.mut
-    assert clone_agent.device == ddpg.device
-    assert clone_agent.accelerator == ddpg.accelerator
-    assert_state_dicts_equal(clone_agent.actor.state_dict(), ddpg.actor.state_dict())
-    assert_state_dicts_equal(
-        clone_agent.actor_target.state_dict(),
-        ddpg.actor_target.state_dict(),
-    )
-    assert_state_dicts_equal(clone_agent.critic.state_dict(), ddpg.critic.state_dict())
-    assert_state_dicts_equal(
-        clone_agent.critic_target.state_dict(),
-        ddpg.critic_target.state_dict(),
-    )
-    assert_state_dicts_equal(
-        clone_agent.actor_optimizer.state_dict(),
-        ddpg.actor_optimizer.state_dict(),
-    )
-    assert_state_dicts_equal(
-        clone_agent.critic_optimizer.state_dict(),
-        ddpg.critic_optimizer.state_dict(),
-    )
-    assert clone_agent.fitness == ddpg.fitness
-    assert clone_agent.steps == ddpg.steps
-    assert clone_agent.scores == ddpg.scores
-    ddpg.clean_up()
-    clone_agent.clean_up()
-
-    accelerator = Accelerator()
-    ddpg = DDPG(observation_space, action_space, accelerator=accelerator, wrap=False)
-    clone_agent = ddpg.clone(wrap=False)
-
-    assert clone_agent.observation_space == ddpg.observation_space
-    assert clone_agent.action_space == ddpg.action_space
-    assert clone_agent.batch_size == ddpg.batch_size
-    assert clone_agent.lr_actor == ddpg.lr_actor
-    assert clone_agent.lr_critic == ddpg.lr_critic
-    assert clone_agent.learn_step == ddpg.learn_step
-    assert clone_agent.gamma == ddpg.gamma
-    assert clone_agent.tau == ddpg.tau
-    assert clone_agent.mut == ddpg.mut
-    assert clone_agent.device == ddpg.device
-    assert clone_agent.accelerator == ddpg.accelerator
-    assert_state_dicts_equal(clone_agent.actor.state_dict(), ddpg.actor.state_dict())
-    assert_state_dicts_equal(
-        clone_agent.actor_target.state_dict(),
-        ddpg.actor_target.state_dict(),
-    )
-    assert_state_dicts_equal(clone_agent.critic.state_dict(), ddpg.critic.state_dict())
-    assert_state_dicts_equal(
-        clone_agent.critic_target.state_dict(),
-        ddpg.critic_target.state_dict(),
-    )
-    assert_state_dicts_equal(
-        clone_agent.actor_optimizer.state_dict(),
-        ddpg.actor_optimizer.state_dict(),
-    )
-    assert_state_dicts_equal(
-        clone_agent.critic_optimizer.state_dict(),
-        ddpg.critic_optimizer.state_dict(),
-    )
-    assert clone_agent.fitness == ddpg.fitness
-    assert clone_agent.steps == ddpg.steps
-    assert clone_agent.scores == ddpg.scores
-    ddpg.clean_up()
-    clone_agent.clean_up()
+        # env = make_vect_envs("CartPole-v1", num_envs=num_envs)
+        agent = DDPG(
+            observation_space=observation_space,
+            action_space=action_space,
+            device=device,
+        )
+        mean_score = agent.test(env, max_steps=10)
+        assert isinstance(mean_score, float)
+        agent.clean_up()
 
 
-def test_clone_new_index():
-    observation_space = spaces.Box(low=-1, high=1, shape=(4,), dtype=np.float32)
-    action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+class TestDDPGClone:
+    # Clones the agent and returns an identical agent.
+    @pytest.mark.parametrize("observation_space", ["vector_space"])
+    def test_clone_returns_identical_agent(self, observation_space, request):
+        action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        observation_space = request.getfixturevalue(observation_space)
 
-    ddpg = DDPG(observation_space, action_space)
-    clone_agent = ddpg.clone(index=100)
+        ddpg = DDPG(observation_space, action_space)
+        ddpg.fitness = [200, 200, 200]
+        ddpg.scores = [94, 94, 94]
+        ddpg.steps = [2500]
+        ddpg.tensor_attribute = torch.randn(1)
+        clone_agent = ddpg.clone()
 
-    assert clone_agent.index == 100
-    ddpg.clean_up()
-    clone_agent.clean_up()
+        assert clone_agent.observation_space == ddpg.observation_space
+        assert clone_agent.action_space == ddpg.action_space
+        assert clone_agent.batch_size == ddpg.batch_size
+        assert clone_agent.lr_actor == ddpg.lr_actor
+        assert clone_agent.lr_critic == ddpg.lr_critic
+        assert clone_agent.learn_step == ddpg.learn_step
+        assert clone_agent.gamma == ddpg.gamma
+        assert clone_agent.tau == ddpg.tau
+        assert clone_agent.mut == ddpg.mut
+        assert clone_agent.device == ddpg.device
+        assert clone_agent.accelerator == ddpg.accelerator
+        assert_state_dicts_equal(
+            clone_agent.actor.state_dict(), ddpg.actor.state_dict()
+        )
+        assert_state_dicts_equal(
+            clone_agent.actor_target.state_dict(),
+            ddpg.actor_target.state_dict(),
+        )
+        assert_state_dicts_equal(
+            clone_agent.critic.state_dict(), ddpg.critic.state_dict()
+        )
+        assert_state_dicts_equal(
+            clone_agent.critic_target.state_dict(),
+            ddpg.critic_target.state_dict(),
+        )
+        assert_state_dicts_equal(
+            clone_agent.actor_optimizer.state_dict(),
+            ddpg.actor_optimizer.state_dict(),
+        )
+        assert_state_dicts_equal(
+            clone_agent.critic_optimizer.state_dict(),
+            ddpg.critic_optimizer.state_dict(),
+        )
+        assert clone_agent.fitness == ddpg.fitness
+        assert clone_agent.steps == ddpg.steps
+        assert clone_agent.scores == ddpg.scores
+        assert clone_agent.tensor_attribute == ddpg.tensor_attribute
+        ddpg.clean_up()
+        clone_agent.clean_up()
+
+        accelerator = Accelerator()
+        ddpg = DDPG(observation_space, action_space, accelerator=accelerator)
+        clone_agent = ddpg.clone()
+
+        assert clone_agent.observation_space == ddpg.observation_space
+        assert clone_agent.action_space == ddpg.action_space
+        assert clone_agent.batch_size == ddpg.batch_size
+        assert clone_agent.lr_actor == ddpg.lr_actor
+        assert clone_agent.lr_critic == ddpg.lr_critic
+        assert clone_agent.learn_step == ddpg.learn_step
+        assert clone_agent.gamma == ddpg.gamma
+        assert clone_agent.tau == ddpg.tau
+        assert clone_agent.mut == ddpg.mut
+        assert clone_agent.device == ddpg.device
+        assert clone_agent.accelerator == ddpg.accelerator
+        assert_state_dicts_equal(
+            clone_agent.actor.state_dict(), ddpg.actor.state_dict()
+        )
+        assert_state_dicts_equal(
+            clone_agent.actor_target.state_dict(),
+            ddpg.actor_target.state_dict(),
+        )
+        assert_state_dicts_equal(
+            clone_agent.critic.state_dict(), ddpg.critic.state_dict()
+        )
+        assert_state_dicts_equal(
+            clone_agent.critic_target.state_dict(),
+            ddpg.critic_target.state_dict(),
+        )
+        assert_state_dicts_equal(
+            clone_agent.actor_optimizer.state_dict(),
+            ddpg.actor_optimizer.state_dict(),
+        )
+        assert_state_dicts_equal(
+            clone_agent.critic_optimizer.state_dict(),
+            ddpg.critic_optimizer.state_dict(),
+        )
+        assert clone_agent.fitness == ddpg.fitness
+        assert clone_agent.steps == ddpg.steps
+        assert clone_agent.scores == ddpg.scores
+        ddpg.clean_up()
+        clone_agent.clean_up()
+
+        accelerator = Accelerator()
+        ddpg = DDPG(
+            observation_space, action_space, accelerator=accelerator, wrap=False
+        )
+        clone_agent = ddpg.clone(wrap=False)
+
+        assert clone_agent.observation_space == ddpg.observation_space
+        assert clone_agent.action_space == ddpg.action_space
+        assert clone_agent.batch_size == ddpg.batch_size
+        assert clone_agent.lr_actor == ddpg.lr_actor
+        assert clone_agent.lr_critic == ddpg.lr_critic
+        assert clone_agent.learn_step == ddpg.learn_step
+        assert clone_agent.gamma == ddpg.gamma
+        assert clone_agent.tau == ddpg.tau
+        assert clone_agent.mut == ddpg.mut
+        assert clone_agent.device == ddpg.device
+        assert clone_agent.accelerator == ddpg.accelerator
+        assert_state_dicts_equal(
+            clone_agent.actor.state_dict(), ddpg.actor.state_dict()
+        )
+        assert_state_dicts_equal(
+            clone_agent.actor_target.state_dict(),
+            ddpg.actor_target.state_dict(),
+        )
+        assert_state_dicts_equal(
+            clone_agent.critic.state_dict(), ddpg.critic.state_dict()
+        )
+        assert_state_dicts_equal(
+            clone_agent.critic_target.state_dict(),
+            ddpg.critic_target.state_dict(),
+        )
+        assert_state_dicts_equal(
+            clone_agent.actor_optimizer.state_dict(),
+            ddpg.actor_optimizer.state_dict(),
+        )
+        assert_state_dicts_equal(
+            clone_agent.critic_optimizer.state_dict(),
+            ddpg.critic_optimizer.state_dict(),
+        )
+        assert clone_agent.fitness == ddpg.fitness
+        assert clone_agent.steps == ddpg.steps
+        assert clone_agent.scores == ddpg.scores
+        ddpg.clean_up()
+        clone_agent.clean_up()
+
+    def test_clone_new_index(self):
+        observation_space = spaces.Box(low=-1, high=1, shape=(4,), dtype=np.float32)
+        action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+
+        ddpg = DDPG(observation_space, action_space)
+        clone_agent = ddpg.clone(index=100)
+
+        assert clone_agent.index == 100
+        ddpg.clean_up()
+        clone_agent.clean_up()
+
+    def test_clone_after_learning(self):
+        observation_space = spaces.Box(low=-1, high=1, shape=(4,), dtype=np.float32)
+        action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+
+        batch_size = 8
+        ddpg = DDPG(observation_space, action_space)
+
+        experiences = get_experiences_batch(observation_space, action_space, batch_size)
+
+        ddpg.learn(experiences)
+        clone_agent = ddpg.clone()
+
+        assert clone_agent.observation_space == ddpg.observation_space
+        assert clone_agent.action_space == ddpg.action_space
+        assert clone_agent.batch_size == ddpg.batch_size
+        assert clone_agent.lr_actor == ddpg.lr_actor
+        assert clone_agent.lr_critic == ddpg.lr_critic
+        assert clone_agent.learn_step == ddpg.learn_step
+        assert clone_agent.gamma == ddpg.gamma
+        assert clone_agent.tau == ddpg.tau
+        assert clone_agent.mut == ddpg.mut
+        assert clone_agent.device == ddpg.device
+        assert clone_agent.accelerator == ddpg.accelerator
+        assert_state_dicts_equal(
+            clone_agent.actor.state_dict(), ddpg.actor.state_dict()
+        )
+        assert_state_dicts_equal(
+            clone_agent.actor_target.state_dict(),
+            ddpg.actor_target.state_dict(),
+        )
+        assert_state_dicts_equal(
+            clone_agent.critic.state_dict(), ddpg.critic.state_dict()
+        )
+        assert_state_dicts_equal(
+            clone_agent.critic_target.state_dict(),
+            ddpg.critic_target.state_dict(),
+        )
+        assert_state_dicts_equal(
+            clone_agent.actor_optimizer.state_dict(),
+            ddpg.actor_optimizer.state_dict(),
+        )
+        assert_state_dicts_equal(
+            clone_agent.critic_optimizer.state_dict(),
+            ddpg.critic_optimizer.state_dict(),
+        )
+        assert clone_agent.fitness == ddpg.fitness
+        assert clone_agent.steps == ddpg.steps
+        assert clone_agent.scores == ddpg.scores
+        ddpg.clean_up()
+        clone_agent.clean_up()
 
 
-def test_clone_after_learning():
-    observation_space = spaces.Box(low=-1, high=1, shape=(4,), dtype=np.float32)
-    action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+class TestDDPGShareEncoderParameters:
+    def test_share_encoder_parameters_incompatible_architectures_raises_key_error(
+        self,
+        vector_space,
+    ):
+        """With share_encoders=True, incompatible actor/critic encoder architectures raise KeyError.
 
-    batch_size = 8
-    ddpg = DDPG(observation_space, action_space)
+        Actor uses DeterministicActor with layer_norm=True in the encoder; critic uses
+        ContinuousQNetwork (encoder has layer_norm=False). Sharing params then fails because
+        the actor encoder has extra layer_norm parameters not present in the critic.
+        """
+        action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        observation_space = vector_space
 
-    experiences = get_experiences_batch(observation_space, action_space, batch_size)
+        actor_network = DeterministicActor(
+            observation_space,
+            action_space,
+            encoder_config={"hidden_size": [64, 64], "layer_norm": True},
+        )
+        critic_network = ContinuousQNetwork(observation_space, action_space)
 
-    ddpg.learn(experiences)
-    clone_agent = ddpg.clone()
+        with pytest.raises(KeyError, match="incompatible encoder architectures"):
+            DDPG(
+                observation_space,
+                action_space,
+                actor_network=actor_network,
+                critic_network=critic_network,
+                share_encoders=True,
+            )
 
-    assert clone_agent.observation_space == ddpg.observation_space
-    assert clone_agent.action_space == ddpg.action_space
-    assert clone_agent.batch_size == ddpg.batch_size
-    assert clone_agent.lr_actor == ddpg.lr_actor
-    assert clone_agent.lr_critic == ddpg.lr_critic
-    assert clone_agent.learn_step == ddpg.learn_step
-    assert clone_agent.gamma == ddpg.gamma
-    assert clone_agent.tau == ddpg.tau
-    assert clone_agent.mut == ddpg.mut
-    assert clone_agent.device == ddpg.device
-    assert clone_agent.accelerator == ddpg.accelerator
-    assert_state_dicts_equal(clone_agent.actor.state_dict(), ddpg.actor.state_dict())
-    assert_state_dicts_equal(
-        clone_agent.actor_target.state_dict(),
-        ddpg.actor_target.state_dict(),
-    )
-    assert_state_dicts_equal(clone_agent.critic.state_dict(), ddpg.critic.state_dict())
-    assert_state_dicts_equal(
-        clone_agent.critic_target.state_dict(),
-        ddpg.critic_target.state_dict(),
-    )
-    assert_state_dicts_equal(
-        clone_agent.actor_optimizer.state_dict(),
-        ddpg.actor_optimizer.state_dict(),
-    )
-    assert_state_dicts_equal(
-        clone_agent.critic_optimizer.state_dict(),
-        ddpg.critic_optimizer.state_dict(),
-    )
-    assert clone_agent.fitness == ddpg.fitness
-    assert clone_agent.steps == ddpg.steps
-    assert clone_agent.scores == ddpg.scores
-    ddpg.clean_up()
-    clone_agent.clean_up()
+    def test_share_encoder_parameters_non_evolvable_network_emits_warning(
+        self,
+        vector_space,
+        simple_mlp,
+        simple_mlp_critic,
+    ):
+        """When share_encoder_parameters() is called with actor/critic that are not EvolvableNetwork, a warning is emitted."""
+        action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        observation_space = vector_space
+        actor_network = MakeEvolvable(simple_mlp, torch.randn(1, 4))
+        critic_network = MakeEvolvable(simple_mlp_critic, torch.randn(1, 6))
 
-
-def test_share_encoder_parameters_incompatible_architectures_raises_key_error(
-    vector_space,
-):
-    """With share_encoders=True, incompatible actor/critic encoder architectures raise KeyError.
-
-    Actor uses DeterministicActor with layer_norm=True in the encoder; critic uses
-    ContinuousQNetwork (encoder has layer_norm=False). Sharing params then fails because
-    the actor encoder has extra layer_norm parameters not present in the critic.
-    """
-    action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
-    observation_space = vector_space
-
-    actor_network = DeterministicActor(
-        observation_space,
-        action_space,
-        encoder_config={"hidden_size": [64, 64], "layer_norm": True},
-    )
-    critic_network = ContinuousQNetwork(observation_space, action_space)
-
-    with pytest.raises(KeyError, match="incompatible encoder architectures"):
-        DDPG(
+        ddpg = DDPG(
             observation_space,
             action_space,
             actor_network=actor_network,
             critic_network=critic_network,
             share_encoders=True,
         )
+        with pytest.warns(
+            UserWarning,
+            match="Encoder sharing is disabled as actor or critic is not an EvolvableNetwork",
+        ):
+            ddpg.share_encoder_parameters()
+        ddpg.clean_up()
 
 
-def test_reset_action_noise(vector_space):
-    action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
-    ddpg = DDPG(vector_space, action_space)
-    indices = np.array([0])
-    ddpg.reset_action_noise(indices)
-    assert np.allclose(ddpg.current_noise[indices], ddpg.mean_noise[indices])
-    ddpg.clean_up()
-
-
-def test_learn_returns_none_actor_loss_when_policy_freq_not_met(vector_space):
-    action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
-    batch_size = 4
-    ddpg = DDPG(vector_space, action_space, batch_size=batch_size, policy_freq=4)
-    experiences = get_experiences_batch(vector_space, action_space, batch_size)
-    actor_loss, critic_loss = ddpg.learn(experiences)
-    assert actor_loss is None
-    assert isinstance(critic_loss, float)
-    ddpg.clean_up()
-
-
-def test_share_encoder_parameters_non_evolvable_network_emits_warning(
-    vector_space,
-    simple_mlp,
-    simple_mlp_critic,
-):
-    """When share_encoder_parameters() is called with actor/critic that are not EvolvableNetwork, a warning is emitted."""
-    action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
-    observation_space = vector_space
-    actor_network = MakeEvolvable(simple_mlp, torch.randn(1, 4))
-    critic_network = MakeEvolvable(simple_mlp_critic, torch.randn(1, 6))
-
-    ddpg = DDPG(
-        observation_space,
-        action_space,
-        actor_network=actor_network,
-        critic_network=critic_network,
-        share_encoders=True,
-    )
-    with pytest.warns(
-        UserWarning,
-        match="Encoder sharing is disabled as actor or critic is not an EvolvableNetwork",
-    ):
-        ddpg.share_encoder_parameters()
-    ddpg.clean_up()
+class TestDDPGResetActionNoise:
+    def test_reset_action_noise(self, vector_space):
+        action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        ddpg = DDPG(vector_space, action_space)
+        indices = np.array([0])
+        ddpg.reset_action_noise(indices)
+        assert np.allclose(ddpg.current_noise[indices], ddpg.mean_noise[indices])
+        ddpg.clean_up()

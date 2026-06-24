@@ -89,479 +89,485 @@ def simple_cnn():
     )
 
 
-# initialize CQN with valid parameters
-@pytest.mark.parametrize(
-    "observation_space, encoder_cls",
-    [
-        ("vector_space", EvolvableMLP),
-        ("image_space", EvolvableCNN),
-        ("dict_space", EvolvableMultiInput),
-        ("multidiscrete_space", EvolvableMLP),
-    ],
-)
-@pytest.mark.parametrize("accelerator_flag", [False, True])
-def test_initialize_cqn(observation_space, encoder_cls, accelerator_flag, request):
-    accelerator = Accelerator() if accelerator_flag else None
-    action_space = spaces.Discrete(2)
-    observation_space = request.getfixturevalue(observation_space)
-    cqn = CQN(observation_space, action_space, accelerator=accelerator)
+class TestCQNInit:
+    @pytest.mark.parametrize(
+        "observation_space, encoder_cls",
+        [
+            ("vector_space", EvolvableMLP),
+            ("image_space", EvolvableCNN),
+            ("dict_space", EvolvableMultiInput),
+            ("multidiscrete_space", EvolvableMLP),
+        ],
+    )
+    @pytest.mark.parametrize("accelerator_flag", [False, True])
+    def test_default_construction(
+        self, observation_space, encoder_cls, accelerator_flag, request
+    ):
+        accelerator = Accelerator() if accelerator_flag else None
+        action_space = spaces.Discrete(2)
+        observation_space = request.getfixturevalue(observation_space)
+        cqn = CQN(observation_space, action_space, accelerator=accelerator)
 
-    expected_device = accelerator.device if accelerator else "cpu"
-    assert cqn.observation_space == observation_space
-    assert cqn.action_space == action_space
-    assert cqn.batch_size == 64
-    assert cqn.lr == 0.0001
-    assert cqn.learn_step == 5
-    assert cqn.gamma == 0.99
-    assert cqn.tau == 0.001
-    assert cqn.mut is None
-    assert cqn.device == expected_device
-    assert cqn.accelerator == accelerator
-    assert cqn.index == 0
-    assert cqn.scores == []
-    assert cqn.fitness == []
-    assert cqn.steps == [0]
-    assert isinstance(cqn.actor.encoder, encoder_cls)
-    assert isinstance(cqn.actor_target.encoder, encoder_cls)
-    expected_opt_cls = AcceleratedOptimizer if accelerator else optim.Adam
-    assert isinstance(cqn.optimizer.optimizer, expected_opt_cls)
-    assert isinstance(cqn.criterion, nn.MSELoss)
-    cqn.clean_up()
+        expected_device = accelerator.device if accelerator else "cpu"
+        assert cqn.observation_space == observation_space
+        assert cqn.action_space == action_space
+        assert cqn.batch_size == 64
+        assert cqn.lr == 0.0001
+        assert cqn.learn_step == 5
+        assert cqn.gamma == 0.99
+        assert cqn.tau == 0.001
+        assert cqn.mut is None
+        assert cqn.device == expected_device
+        assert cqn.accelerator == accelerator
+        assert cqn.index == 0
+        assert cqn.scores == []
+        assert cqn.fitness == []
+        assert cqn.steps == [0]
+        assert isinstance(cqn.actor.encoder, encoder_cls)
+        assert isinstance(cqn.actor_target.encoder, encoder_cls)
+        expected_opt_cls = AcceleratedOptimizer if accelerator else optim.Adam
+        assert isinstance(cqn.optimizer.optimizer, expected_opt_cls)
+        assert isinstance(cqn.criterion, nn.MSELoss)
+        cqn.clean_up()
+
+    # Can initialize cqn with an actor network
+    # TODO: This will be deprecated in the future
+    @pytest.mark.parametrize(
+        "observation_space, actor_network, input_tensor",
+        [
+            ("vector_space", "simple_mlp", torch.randn(1, 4)),
+            (
+                "image_space",
+                "simple_cnn",
+                torch.randn(1, 3, 64, 64),
+            ),
+        ],
+    )
+    def test_with_make_evolvable_actor(
+        self,
+        observation_space,
+        actor_network,
+        input_tensor,
+        request,
+    ):
+        action_space = spaces.Discrete(2)
+        observation_space = request.getfixturevalue(observation_space)
+        actor_network = request.getfixturevalue(actor_network)
+        actor_network = MakeEvolvable(actor_network, input_tensor)
+
+        cqn = CQN(observation_space, action_space, actor_network=actor_network)
+
+        assert cqn.observation_space == observation_space
+        assert cqn.action_space == action_space
+        assert cqn.batch_size == 64
+        assert cqn.lr == 0.0001
+        assert cqn.learn_step == 5
+        assert cqn.gamma == 0.99
+        assert cqn.tau == 0.001
+        assert cqn.mut is None
+        assert cqn.device == "cpu"
+        assert cqn.accelerator is None
+        assert cqn.index == 0
+        assert cqn.scores == []
+        assert cqn.fitness == []
+        assert cqn.steps == [0]
+        assert isinstance(cqn.optimizer.optimizer, optim.Adam)
+        assert isinstance(cqn.criterion, nn.MSELoss)
+        cqn.clean_up()
+
+    @pytest.mark.parametrize(
+        "observation_space, net_type",
+        [
+            ("vector_space", "mlp"),
+            ("image_space", "cnn"),
+        ],
+    )
+    def test_with_evolvable_actor(
+        self,
+        observation_space,
+        net_type,
+        request,
+    ):
+        action_space = spaces.Discrete(2)
+        observation_space = request.getfixturevalue(observation_space)
+        if net_type == "mlp":
+            actor_network = EvolvableMLP(
+                num_inputs=observation_space.shape[0],
+                num_outputs=action_space.n,
+                hidden_size=[64, 64],
+                activation="ReLU",
+            )
+        else:
+            actor_network = EvolvableCNN(
+                input_shape=observation_space.shape,
+                num_outputs=action_space.n,
+                channel_size=[8, 8],
+                kernel_size=[2, 2],
+                stride_size=[1, 1],
+                activation="ReLU",
+            )
+
+        cqn = CQN(observation_space, action_space, actor_network=actor_network)
+
+        assert cqn.observation_space == observation_space
+        assert cqn.action_space == action_space
+        assert cqn.batch_size == 64
+        assert cqn.lr == 0.0001
+        assert cqn.learn_step == 5
+        assert cqn.gamma == 0.99
+        assert cqn.tau == 0.001
+        assert cqn.mut is None
+        assert cqn.device == "cpu"
+        assert cqn.accelerator is None
+        assert cqn.index == 0
+        assert cqn.scores == []
+        assert cqn.fitness == []
+        assert cqn.steps == [0]
+        assert isinstance(cqn.optimizer.optimizer, optim.Adam)
+        assert isinstance(cqn.criterion, nn.MSELoss)
+        cqn.clean_up()
+
+    def test_rejects_invalid_actor_type(self, vector_space):
+        action_space = spaces.Discrete(2)
+        actor_network = "String"
+
+        with pytest.raises(TypeError) as e:
+            cqn = CQN(vector_space, action_space, actor_network=actor_network)
+            assert cqn
+            assert (
+                e
+                == f"'actor_network' argument is of type {type(actor_network)}, but must be of type nn.Module."
+            )
 
 
-# Can initialize cqn with an actor network
-# TODO: This will be deprecated in the future
-@pytest.mark.parametrize(
-    "observation_space, actor_network, input_tensor",
-    [
-        ("vector_space", "simple_mlp", torch.randn(1, 4)),
-        (
-            "image_space",
-            "simple_cnn",
-            torch.randn(1, 3, 64, 64),
-        ),
-    ],
-)
-def test_initialize_cqn_with_make_evo(
-    observation_space,
-    actor_network,
-    input_tensor,
-    request,
-):
-    action_space = spaces.Discrete(2)
-    observation_space = request.getfixturevalue(observation_space)
-    actor_network = request.getfixturevalue(actor_network)
-    actor_network = MakeEvolvable(actor_network, input_tensor)
+class TestCQNGetAction:
+    # Returns the expected action when given a state observation and epsilon=0 or 1.
+    def test_epsilon_greedy_returns_valid_action(self, vector_space):
+        action_space = spaces.Discrete(2)
 
-    cqn = CQN(observation_space, action_space, actor_network=actor_network)
+        cqn = CQN(vector_space, action_space)
+        state = np.array([1, 2, 3, 4])
 
-    assert cqn.observation_space == observation_space
-    assert cqn.action_space == action_space
-    assert cqn.batch_size == 64
-    assert cqn.lr == 0.0001
-    assert cqn.learn_step == 5
-    assert cqn.gamma == 0.99
-    assert cqn.tau == 0.001
-    assert cqn.mut is None
-    assert cqn.device == "cpu"
-    assert cqn.accelerator is None
-    assert cqn.index == 0
-    assert cqn.scores == []
-    assert cqn.fitness == []
-    assert cqn.steps == [0]
-    assert isinstance(cqn.optimizer.optimizer, optim.Adam)
-    assert isinstance(cqn.criterion, nn.MSELoss)
-    cqn.clean_up()
+        action_mask = None
+
+        epsilon = 0
+        action = cqn.get_action(state, epsilon, action_mask)[0]
+
+        assert action.is_integer()
+        assert action >= 0 and action < action_space.n
+
+        epsilon = 1
+        action = cqn.get_action(state, epsilon, action_mask)[0]
+
+        assert action.is_integer()
+        assert action >= 0 and action < action_space.n
+        cqn.clean_up()
+
+    # Returns the expected action when given a state observation and action mask.
+    def test_respects_action_mask(self, vector_space):
+        accelerator = Accelerator()
+        action_space = spaces.Discrete(2)
+
+        cqn = CQN(vector_space, action_space, accelerator=accelerator)
+        state = np.array([1, 2, 3, 4])
+
+        action_mask = np.array([0, 1])
+
+        epsilon = 0
+        action = cqn.get_action(state, epsilon, action_mask)[0]
+
+        assert action.is_integer()
+        assert action == 1
+
+        epsilon = 1
+        action = cqn.get_action(state, epsilon, action_mask)[0]
+
+        assert action.is_integer()
+        assert action == 1
+        cqn.clean_up()
 
 
-@pytest.mark.parametrize(
-    "observation_space, net_type",
-    [
-        ("vector_space", "mlp"),
-        ("image_space", "cnn"),
-    ],
-)
-def test_initialize_cqn_with_actor_network_evo_net(
-    observation_space,
-    net_type,
-    request,
-):
-    action_space = spaces.Discrete(2)
-    observation_space = request.getfixturevalue(observation_space)
-    if net_type == "mlp":
-        actor_network = EvolvableMLP(
-            num_inputs=observation_space.shape[0],
-            num_outputs=action_space.n,
-            hidden_size=[64, 64],
-            activation="ReLU",
+class TestCQNLearn:
+    # learns from experiences and updates network parameters
+    @pytest.mark.parametrize(
+        "observation_space",
+        ["vector_space", "image_space", "dict_space", "multidiscrete_space"],
+    )
+    def test_updates_actor_from_experiences(self, observation_space, request):
+        observation_space = request.getfixturevalue(observation_space)
+        action_space = spaces.Discrete(2)
+        batch_size = 64
+
+        cqn = CQN(observation_space, action_space, batch_size=batch_size)
+        td = get_experiences_batch(
+            observation_space, action_space, batch_size, cqn.device
         )
-    else:
-        actor_network = EvolvableCNN(
-            input_shape=observation_space.shape,
-            num_outputs=action_space.n,
-            channel_size=[8, 8],
-            kernel_size=[2, 2],
-            stride_size=[1, 1],
-            activation="ReLU",
+        experiences = (
+            td["obs"],
+            td["action"],
+            td["reward"],
+            td["next_obs"],
+            td["done"],
         )
 
-    cqn = CQN(observation_space, action_space, actor_network=actor_network)
+        # Copy state dict before learning - should be different to after updating weights
+        actor = cqn.actor
+        actor_target = cqn.actor_target
+        actor_pre_learn_sd = copy.deepcopy(cqn.actor.state_dict())
+        actor_target_pre_learn_sd = copy.deepcopy(cqn.actor_target.state_dict())
 
-    assert cqn.observation_space == observation_space
-    assert cqn.action_space == action_space
-    assert cqn.batch_size == 64
-    assert cqn.lr == 0.0001
-    assert cqn.learn_step == 5
-    assert cqn.gamma == 0.99
-    assert cqn.tau == 0.001
-    assert cqn.mut is None
-    assert cqn.device == "cpu"
-    assert cqn.accelerator is None
-    assert cqn.index == 0
-    assert cqn.scores == []
-    assert cqn.fitness == []
-    assert cqn.steps == [0]
-    assert isinstance(cqn.optimizer.optimizer, optim.Adam)
-    assert isinstance(cqn.criterion, nn.MSELoss)
-    cqn.clean_up()
+        # Call the learn method
+        cqn.learn(experiences)
 
+        assert actor == cqn.actor
+        assert actor_target == cqn.actor_target
+        assert_not_equal_state_dict(actor_pre_learn_sd, cqn.actor.state_dict())
+        assert_not_equal_state_dict(
+            actor_target_pre_learn_sd,
+            cqn.actor_target.state_dict(),
+        )
+        cqn.clean_up()
 
-def test_init_with_incorrect_actor_net(vector_space):
-    action_space = spaces.Discrete(2)
-    actor_network = "String"
+    # handles double Q-learning
+    def test_handles_double_q_learning(self, discrete_space):
+        accelerator = Accelerator()
+        action_space = spaces.Discrete(2)
+        double = True
+        batch_size = 64
 
-    with pytest.raises(TypeError) as e:
-        cqn = CQN(vector_space, action_space, actor_network=actor_network)
-        assert cqn
-        assert (
-            e
-            == f"'actor_network' argument is of type {type(actor_network)}, but must be of type nn.Module."
+        # Create an instance of the cqn class
+        cqn = CQN(
+            discrete_space,
+            action_space,
+            double=double,
+            batch_size=batch_size,
+            accelerator=accelerator,
         )
 
+        # Create a batch of experiences
+        states = torch.randint(0, discrete_space.n, (batch_size, 1))
+        actions = torch.randint(0, action_space.n, (batch_size, 1))
+        rewards = torch.randn((batch_size, 1))
+        next_states = torch.randint(0, discrete_space.n, (batch_size, 1))
+        dones = torch.randint(0, 2, (batch_size, 1))
 
-# Returns the expected action when given a state observation and epsilon=0 or 1.
-def test_returns_expected_action_epsilon_greedy(vector_space):
-    action_space = spaces.Discrete(2)
+        experiences = [states, actions, rewards, next_states, dones]
 
-    cqn = CQN(vector_space, action_space)
-    state = np.array([1, 2, 3, 4])
+        # Copy state dict before learning - should be different to after updating weights
+        actor = cqn.actor
+        actor_target = cqn.actor_target
+        actor_pre_learn_sd = copy.deepcopy(cqn.actor.state_dict())
+        actor_target_pre_learn_sd = copy.deepcopy(cqn.actor_target.state_dict())
 
-    action_mask = None
+        # Call the learn method
+        cqn.learn(experiences)
 
-    epsilon = 0
-    action = cqn.get_action(state, epsilon, action_mask)[0]
-
-    assert action.is_integer()
-    assert action >= 0 and action < action_space.n
-
-    epsilon = 1
-    action = cqn.get_action(state, epsilon, action_mask)[0]
-
-    assert action.is_integer()
-    assert action >= 0 and action < action_space.n
-    cqn.clean_up()
-
-
-# Returns the expected action when given a state observation and action mask.
-def test_returns_expected_action_mask(vector_space):
-    accelerator = Accelerator()
-    action_space = spaces.Discrete(2)
-
-    cqn = CQN(vector_space, action_space, accelerator=accelerator)
-    state = np.array([1, 2, 3, 4])
-
-    action_mask = np.array([0, 1])
-
-    epsilon = 0
-    action = cqn.get_action(state, epsilon, action_mask)[0]
-
-    assert action.is_integer()
-    assert action == 1
-
-    epsilon = 1
-    action = cqn.get_action(state, epsilon, action_mask)[0]
-
-    assert action.is_integer()
-    assert action == 1
-    cqn.clean_up()
-
-
-# learns from experiences and updates network parameters
-@pytest.mark.parametrize(
-    "observation_space",
-    ["vector_space", "image_space", "dict_space", "multidiscrete_space"],
-)
-def test_learns_from_experiences(observation_space, request):
-    observation_space = request.getfixturevalue(observation_space)
-    action_space = spaces.Discrete(2)
-    batch_size = 64
-
-    cqn = CQN(observation_space, action_space, batch_size=batch_size)
-    td = get_experiences_batch(observation_space, action_space, batch_size, cqn.device)
-    experiences = (
-        td["obs"],
-        td["action"],
-        td["reward"],
-        td["next_obs"],
-        td["done"],
-    )
-
-    # Copy state dict before learning - should be different to after updating weights
-    actor = cqn.actor
-    actor_target = cqn.actor_target
-    actor_pre_learn_sd = copy.deepcopy(cqn.actor.state_dict())
-    actor_target_pre_learn_sd = copy.deepcopy(cqn.actor_target.state_dict())
-
-    # Call the learn method
-    cqn.learn(experiences)
-
-    assert actor == cqn.actor
-    assert actor_target == cqn.actor_target
-    assert_not_equal_state_dict(actor_pre_learn_sd, cqn.actor.state_dict())
-    assert_not_equal_state_dict(
-        actor_target_pre_learn_sd,
-        cqn.actor_target.state_dict(),
-    )
-    cqn.clean_up()
-
-
-# handles double Q-learning
-def test_handles_double_q_learning(discrete_space):
-    accelerator = Accelerator()
-    action_space = spaces.Discrete(2)
-    double = True
-    batch_size = 64
-
-    # Create an instance of the cqn class
-    cqn = CQN(
-        discrete_space,
-        action_space,
-        double=double,
-        batch_size=batch_size,
-        accelerator=accelerator,
-    )
-
-    # Create a batch of experiences
-    states = torch.randint(0, discrete_space.n, (batch_size, 1))
-    actions = torch.randint(0, action_space.n, (batch_size, 1))
-    rewards = torch.randn((batch_size, 1))
-    next_states = torch.randint(0, discrete_space.n, (batch_size, 1))
-    dones = torch.randint(0, 2, (batch_size, 1))
-
-    experiences = [states, actions, rewards, next_states, dones]
-
-    # Copy state dict before learning - should be different to after updating weights
-    actor = cqn.actor
-    actor_target = cqn.actor_target
-    actor_pre_learn_sd = copy.deepcopy(cqn.actor.state_dict())
-    actor_target_pre_learn_sd = copy.deepcopy(cqn.actor_target.state_dict())
-
-    # Call the learn method
-    cqn.learn(experiences)
-
-    assert actor == cqn.actor
-    assert actor_target == cqn.actor_target
-    assert_not_equal_state_dict(actor_pre_learn_sd, cqn.actor.state_dict())
-    assert_not_equal_state_dict(
-        actor_target_pre_learn_sd,
-        cqn.actor_target.state_dict(),
-    )
-    cqn.clean_up()
-
-
-# Updates target network parameters with soft update
-def test_soft_update(vector_space):
-    action_space = spaces.Discrete(2)
-    net_config = {"encoder_config": {"hidden_size": [64, 64]}}
-    batch_size = 64
-    lr = 1e-4
-    learn_step = 5
-    gamma = 0.99
-    tau = 1e-3
-    mut = None
-    double = False
-    actor_network = None
-    device = "cpu"
-    accelerator = None
-    wrap = True
-
-    cqn = CQN(
-        vector_space,
-        action_space,
-        net_config=net_config,
-        batch_size=batch_size,
-        lr=lr,
-        learn_step=learn_step,
-        gamma=gamma,
-        tau=tau,
-        mut=mut,
-        double=double,
-        actor_network=actor_network,
-        device=device,
-        accelerator=accelerator,
-        wrap=wrap,
-    )
-
-    cqn.soft_update()
-
-    eval_params = list(cqn.actor.parameters())
-    target_params = list(cqn.actor_target.parameters())
-    expected_params = [
-        cqn.tau * eval_param + (1.0 - cqn.tau) * target_param
-        for eval_param, target_param in zip(eval_params, target_params, strict=False)
-    ]
-
-    assert all(
-        torch.allclose(expected_param, target_param)
-        for expected_param, target_param in zip(
-            expected_params,
-            target_params,
-            strict=False,
+        assert actor == cqn.actor
+        assert actor_target == cqn.actor_target
+        assert_not_equal_state_dict(actor_pre_learn_sd, cqn.actor.state_dict())
+        assert_not_equal_state_dict(
+            actor_target_pre_learn_sd,
+            cqn.actor_target.state_dict(),
         )
-    )
-    cqn.clean_up()
+        cqn.clean_up()
+
+    def test_with_accelerator_moves_tensors(self, vector_space):
+        action_space = spaces.Discrete(2)
+        batch_size = 64
+        accelerator = Accelerator()
+        cqn = CQN(
+            vector_space,
+            action_space,
+            batch_size=batch_size,
+            accelerator=accelerator,
+        )
+        states = torch.randn(batch_size, vector_space.shape[0])
+        actions = torch.randint(0, action_space.n, (batch_size, 1))
+        rewards = torch.randn((batch_size, 1))
+        next_states = torch.randn(batch_size, vector_space.shape[0])
+        dones = torch.randint(0, 2, (batch_size, 1))
+        experiences = (states, actions, rewards, next_states, dones)
+        loss = cqn.learn(experiences)
+        assert isinstance(loss, float)
+        cqn.clean_up()
 
 
-def test_learn_with_accelerator_moves_tensors(vector_space):
-    action_space = spaces.Discrete(2)
-    batch_size = 64
-    accelerator = Accelerator()
-    cqn = CQN(
-        vector_space,
-        action_space,
-        batch_size=batch_size,
-        accelerator=accelerator,
-    )
-    states = torch.randn(batch_size, vector_space.shape[0])
-    actions = torch.randint(0, action_space.n, (batch_size, 1))
-    rewards = torch.randn((batch_size, 1))
-    next_states = torch.randn(batch_size, vector_space.shape[0])
-    dones = torch.randint(0, 2, (batch_size, 1))
-    experiences = (states, actions, rewards, next_states, dones)
-    loss = cqn.learn(experiences)
-    assert isinstance(loss, float)
-    cqn.clean_up()
+class TestCQNSoftUpdate:
+    # Updates target network parameters with soft update
+    def test_target_matches_polyak_average(self, vector_space):
+        action_space = spaces.Discrete(2)
+        net_config = {"encoder_config": {"hidden_size": [64, 64]}}
+        batch_size = 64
+        lr = 1e-4
+        learn_step = 5
+        gamma = 0.99
+        tau = 1e-3
+        mut = None
+        double = False
+        actor_network = None
+        device = "cpu"
+        accelerator = None
+        wrap = True
+
+        cqn = CQN(
+            vector_space,
+            action_space,
+            net_config=net_config,
+            batch_size=batch_size,
+            lr=lr,
+            learn_step=learn_step,
+            gamma=gamma,
+            tau=tau,
+            mut=mut,
+            double=double,
+            actor_network=actor_network,
+            device=device,
+            accelerator=accelerator,
+            wrap=wrap,
+        )
+
+        cqn.soft_update()
+
+        eval_params = list(cqn.actor.parameters())
+        target_params = list(cqn.actor_target.parameters())
+        expected_params = [
+            cqn.tau * eval_param + (1.0 - cqn.tau) * target_param
+            for eval_param, target_param in zip(
+                eval_params, target_params, strict=False
+            )
+        ]
+
+        assert all(
+            torch.allclose(expected_param, target_param)
+            for expected_param, target_param in zip(
+                expected_params,
+                target_params,
+                strict=False,
+            )
+        )
+        cqn.clean_up()
 
 
-# Runs algorithm test loop
-@pytest.mark.parametrize("observation_space", ["vector_space", "image_space"])
-@pytest.mark.parametrize("num_envs", [1, 3])
-def test_algorithm_test_loop(observation_space, num_envs, request):
-    observation_space = request.getfixturevalue(observation_space)
-    action_space = spaces.Discrete(2)
+class TestCQNTest:
+    # Runs algorithm test loop
+    @pytest.mark.parametrize("observation_space", ["vector_space", "image_space"])
+    @pytest.mark.parametrize("num_envs", [1, 3])
+    def test_returns_mean_score(self, observation_space, num_envs, request):
+        observation_space = request.getfixturevalue(observation_space)
+        action_space = spaces.Discrete(2)
 
-    vect = num_envs > 1
-    env = DummyEnv(state_size=observation_space.shape, vect=vect, num_envs=num_envs)
-    agent = CQN(observation_space=observation_space, action_space=action_space)
-    mean_score = agent.test(env, max_steps=10)
-    assert isinstance(mean_score, float)
-    agent.clean_up()
-
-
-# Clones the agent and returns an identical agent.
-@pytest.mark.parametrize("observation_space", ["vector_space"])
-def test_clone_returns_identical_agent(observation_space, request):
-    action_space = spaces.Discrete(2)
-    observation_space = request.getfixturevalue(observation_space)
-
-    cqn = DummyCQN(observation_space, action_space)
-    cqn.tensor_attribute = torch.randn(1)
-    clone_agent = cqn.clone()
-
-    assert clone_agent.observation_space == cqn.observation_space
-    assert clone_agent.action_space == cqn.action_space
-    assert clone_agent.batch_size == cqn.batch_size
-    assert clone_agent.lr == cqn.lr
-    assert clone_agent.learn_step == cqn.learn_step
-    assert clone_agent.gamma == cqn.gamma
-    assert clone_agent.tau == cqn.tau
-    assert clone_agent.mut == cqn.mut
-    assert clone_agent.device == cqn.device
-    assert clone_agent.accelerator == cqn.accelerator
-    assert_state_dicts_equal(clone_agent.actor.state_dict(), cqn.actor.state_dict())
-    assert_state_dicts_equal(
-        clone_agent.actor_target.state_dict(),
-        cqn.actor_target.state_dict(),
-    )
-    assert_state_dicts_equal(
-        clone_agent.optimizer.state_dict(),
-        cqn.optimizer.state_dict(),
-    )
-    assert clone_agent.fitness == cqn.fitness
-    assert clone_agent.steps == cqn.steps
-    assert clone_agent.scores == cqn.scores
-    assert clone_agent.tensor_attribute == cqn.tensor_attribute
-    assert clone_agent.tensor_test == cqn.tensor_test
-    cqn.clean_up()
-    clone_agent.clean_up()
-
-    accelerator = Accelerator()
-    cqn = CQN(observation_space, action_space, accelerator=accelerator)
-    clone_agent = cqn.clone()
-
-    assert clone_agent.observation_space == cqn.observation_space
-    assert clone_agent.action_space == cqn.action_space
-    # assert clone_agent.actor_network == cqn.actor_network
-    assert clone_agent.batch_size == cqn.batch_size
-    assert clone_agent.lr == cqn.lr
-    assert clone_agent.learn_step == cqn.learn_step
-    assert clone_agent.gamma == cqn.gamma
-    assert clone_agent.tau == cqn.tau
-    assert clone_agent.mut == cqn.mut
-    assert clone_agent.device == cqn.device
-    assert clone_agent.accelerator == cqn.accelerator
-    assert_state_dicts_equal(clone_agent.actor.state_dict(), cqn.actor.state_dict())
-    assert_state_dicts_equal(
-        clone_agent.actor_target.state_dict(),
-        cqn.actor_target.state_dict(),
-    )
-    assert_state_dicts_equal(
-        clone_agent.optimizer.state_dict(),
-        cqn.optimizer.state_dict(),
-    )
-    assert clone_agent.fitness == cqn.fitness
-    assert clone_agent.steps == cqn.steps
-    assert clone_agent.scores == cqn.scores
-    cqn.clean_up()
-    clone_agent.clean_up()
-
-    accelerator = Accelerator()
-    cqn = CQN(observation_space, action_space, accelerator=accelerator, wrap=False)
-    clone_agent = cqn.clone(wrap=False)
-
-    assert clone_agent.observation_space == cqn.observation_space
-    assert clone_agent.action_space == cqn.action_space
-    # assert clone_agent.actor_network == cqn.actor_network
-    assert clone_agent.batch_size == cqn.batch_size
-    assert clone_agent.lr == cqn.lr
-    assert clone_agent.learn_step == cqn.learn_step
-    assert clone_agent.gamma == cqn.gamma
-    assert clone_agent.tau == cqn.tau
-    assert clone_agent.mut == cqn.mut
-    assert clone_agent.device == cqn.device
-    assert clone_agent.accelerator == cqn.accelerator
-    assert_state_dicts_equal(clone_agent.actor.state_dict(), cqn.actor.state_dict())
-    assert_state_dicts_equal(
-        clone_agent.actor_target.state_dict(),
-        cqn.actor_target.state_dict(),
-    )
-    assert_state_dicts_equal(
-        clone_agent.optimizer.state_dict(),
-        cqn.optimizer.state_dict(),
-    )
-    assert clone_agent.fitness == cqn.fitness
-    assert clone_agent.steps == cqn.steps
-    assert clone_agent.scores == cqn.scores
-    cqn.clean_up()
-    clone_agent.clean_up()
+        vect = num_envs > 1
+        env = DummyEnv(state_size=observation_space.shape, vect=vect, num_envs=num_envs)
+        agent = CQN(observation_space=observation_space, action_space=action_space)
+        mean_score = agent.test(env, max_steps=10)
+        assert isinstance(mean_score, float)
+        agent.clean_up()
 
 
-def test_clone_new_index(vector_space):
-    action_space = spaces.Discrete(2)
+class TestCQNClone:
+    # Clones the agent and returns an identical agent.
+    @pytest.mark.parametrize("observation_space", ["vector_space"])
+    def test_returns_identical_agent(self, observation_space, request):
+        action_space = spaces.Discrete(2)
+        observation_space = request.getfixturevalue(observation_space)
 
-    cqn = CQN(vector_space, action_space)
-    clone_agent = cqn.clone(index=100)
+        cqn = DummyCQN(observation_space, action_space)
+        cqn.tensor_attribute = torch.randn(1)
+        clone_agent = cqn.clone()
 
-    assert clone_agent.index == 100
-    cqn.clean_up()
-    clone_agent.clean_up()
+        assert clone_agent.observation_space == cqn.observation_space
+        assert clone_agent.action_space == cqn.action_space
+        assert clone_agent.batch_size == cqn.batch_size
+        assert clone_agent.lr == cqn.lr
+        assert clone_agent.learn_step == cqn.learn_step
+        assert clone_agent.gamma == cqn.gamma
+        assert clone_agent.tau == cqn.tau
+        assert clone_agent.mut == cqn.mut
+        assert clone_agent.device == cqn.device
+        assert clone_agent.accelerator == cqn.accelerator
+        assert_state_dicts_equal(clone_agent.actor.state_dict(), cqn.actor.state_dict())
+        assert_state_dicts_equal(
+            clone_agent.actor_target.state_dict(),
+            cqn.actor_target.state_dict(),
+        )
+        assert_state_dicts_equal(
+            clone_agent.optimizer.state_dict(),
+            cqn.optimizer.state_dict(),
+        )
+        assert clone_agent.fitness == cqn.fitness
+        assert clone_agent.steps == cqn.steps
+        assert clone_agent.scores == cqn.scores
+        assert clone_agent.tensor_attribute == cqn.tensor_attribute
+        assert clone_agent.tensor_test == cqn.tensor_test
+        cqn.clean_up()
+        clone_agent.clean_up()
+
+        accelerator = Accelerator()
+        cqn = CQN(observation_space, action_space, accelerator=accelerator)
+        clone_agent = cqn.clone()
+
+        assert clone_agent.observation_space == cqn.observation_space
+        assert clone_agent.action_space == cqn.action_space
+        # assert clone_agent.actor_network == cqn.actor_network
+        assert clone_agent.batch_size == cqn.batch_size
+        assert clone_agent.lr == cqn.lr
+        assert clone_agent.learn_step == cqn.learn_step
+        assert clone_agent.gamma == cqn.gamma
+        assert clone_agent.tau == cqn.tau
+        assert clone_agent.mut == cqn.mut
+        assert clone_agent.device == cqn.device
+        assert clone_agent.accelerator == cqn.accelerator
+        assert_state_dicts_equal(clone_agent.actor.state_dict(), cqn.actor.state_dict())
+        assert_state_dicts_equal(
+            clone_agent.actor_target.state_dict(),
+            cqn.actor_target.state_dict(),
+        )
+        assert_state_dicts_equal(
+            clone_agent.optimizer.state_dict(),
+            cqn.optimizer.state_dict(),
+        )
+        assert clone_agent.fitness == cqn.fitness
+        assert clone_agent.steps == cqn.steps
+        assert clone_agent.scores == cqn.scores
+        cqn.clean_up()
+        clone_agent.clean_up()
+
+        accelerator = Accelerator()
+        cqn = CQN(observation_space, action_space, accelerator=accelerator, wrap=False)
+        clone_agent = cqn.clone(wrap=False)
+
+        assert clone_agent.observation_space == cqn.observation_space
+        assert clone_agent.action_space == cqn.action_space
+        # assert clone_agent.actor_network == cqn.actor_network
+        assert clone_agent.batch_size == cqn.batch_size
+        assert clone_agent.lr == cqn.lr
+        assert clone_agent.learn_step == cqn.learn_step
+        assert clone_agent.gamma == cqn.gamma
+        assert clone_agent.tau == cqn.tau
+        assert clone_agent.mut == cqn.mut
+        assert clone_agent.device == cqn.device
+        assert clone_agent.accelerator == cqn.accelerator
+        assert_state_dicts_equal(clone_agent.actor.state_dict(), cqn.actor.state_dict())
+        assert_state_dicts_equal(
+            clone_agent.actor_target.state_dict(),
+            cqn.actor_target.state_dict(),
+        )
+        assert_state_dicts_equal(
+            clone_agent.optimizer.state_dict(),
+            cqn.optimizer.state_dict(),
+        )
+        assert clone_agent.fitness == cqn.fitness
+        assert clone_agent.steps == cqn.steps
+        assert clone_agent.scores == cqn.scores
+        cqn.clean_up()
+        clone_agent.clean_up()
+
+    def test_assigns_new_index(self, vector_space):
+        action_space = spaces.Discrete(2)
+
+        cqn = CQN(vector_space, action_space)
+        clone_agent = cqn.clone(index=100)
+
+        assert clone_agent.index == 100
+        cqn.clean_up()
+        clone_agent.clean_up()

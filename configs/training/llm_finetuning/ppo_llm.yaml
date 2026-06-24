@@ -1,0 +1,44 @@
+---
+MUTATION_PARAMS:
+    NO_MUT: 0.1
+    RL_HP_MUT: 0.6
+    MUT_SD: 0.1
+    RAND_SEED: 42
+    MIN_LR: 0.0000001
+    MAX_LR: 0.00001
+    MIN_BETA: 0.0001
+    MAX_BETA: 0.01
+    MIN_GROUP_SIZE: 4
+    MAX_GROUP_SIZE: 12
+
+
+INIT_HP:
+    ALGO: LLMPPO
+    BATCH_SIZE: 4
+    BETA: 1.0e-3
+    LR_ACTOR: 5.0e-6
+    LR_CRITIC: 5.0e-6
+    CLIP_COEF: 0.2
+    MAX_GRAD_NORM: 0.1
+    UPDATE_EPOCHS: 1
+    TEMPERATURE: 0.9
+    MAX_MODEL_LEN: 2048
+    MAX_OUTPUT_TOKENS: 64
+    TOURN_SIZE: 2
+    GAMMA: 0.99
+    VF_COEF: 0.5
+    GAE_LAMBDA: 0.95
+    ELITISM: true
+    POP_SIZE: 4
+    EVAL_LOOP: 1
+    USE_VLLM: true
+    MICRO_BATCH_SIZE_PER_GPU: 4
+    TARGET_MODULES:
+        - q_proj
+        - k_proj
+        - v_proj
+        - o_proj
+    LORA_R: 16
+    LORA_ALPHA: 64
+    LORA_DROPOUT: 0.05
+    LORA_BIAS: none

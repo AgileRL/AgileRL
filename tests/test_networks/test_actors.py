@@ -34,249 +34,255 @@ def head_config():
     return asdict(MlpNetConfig(hidden_size=[64, 64]))
 
 
-@pytest.mark.parametrize("action_space", ["vector_space"])
-@pytest.mark.parametrize(
-    "observation_space, encoder_type",
-    [
-        ("dict_space", "multi_input"),
-        ("discrete_space", "mlp"),
-        ("vector_space", "mlp"),
-        ("image_space", "cnn"),
-    ],
-)
-def test_deterministic_actor_initialization(
-    observation_space, action_space, encoder_type, request
-):
-    observation_space = request.getfixturevalue(observation_space)
-    action_space = request.getfixturevalue(action_space)
-
-    network = DeterministicActor(observation_space, action_space)
-
-    assert network.observation_space == observation_space
-
-    if encoder_type == "multi_input":
-        assert isinstance(network.encoder, EvolvableMultiInput)
-    elif encoder_type == "mlp":
-        assert isinstance(network.encoder, EvolvableMLP)
-    elif encoder_type == "cnn":
-        assert isinstance(network.encoder, EvolvableCNN)
-
-    evolvable_modules = network.modules()
-    assert "encoder" in evolvable_modules
-    assert "head_net" in evolvable_modules
-
-
-def test_deterministic_actor_initialization_recurrent(vector_space):
-    observation_space = spaces.Box(low=-1, high=1, shape=(32,))
-    network = DeterministicActor(observation_space, vector_space, recurrent=True)
-
-    assert network.observation_space == observation_space
-    assert isinstance(network.encoder, EvolvableLSTM)
-
-    evolvable_modules = network.modules()
-    assert "encoder" in evolvable_modules
-    assert "head_net" in evolvable_modules
-
-
-def test_deterministic_actor_initialization_simba(vector_space):
-    observation_space = spaces.Box(low=-1, high=1, shape=(8,))
-    network = DeterministicActor(observation_space, vector_space, simba=True)
-
-    assert network.observation_space == observation_space
-    assert isinstance(network.encoder, EvolvableSimBa)
-
-    evolvable_modules = network.modules()
-    assert "encoder" in evolvable_modules
-    assert "head_net" in evolvable_modules
-
-
-@pytest.mark.parametrize("action_space", ["vector_space"])
-@pytest.mark.parametrize(
-    "observation_space", ["dict_space", "discrete_space", "vector_space", "image_space"]
-)
-def test_deterministic_actor_mutation_methods(
-    observation_space, action_space, head_config, dummy_rng, request
-):
-    observation_space = request.getfixturevalue(observation_space)
-    action_space = request.getfixturevalue(action_space)
-
-    network = DeterministicActor(
-        observation_space, action_space, head_config=head_config
+class TestDeterministicActorInit:
+    @pytest.mark.parametrize("action_space", ["vector_space"])
+    @pytest.mark.parametrize(
+        "observation_space, encoder_type",
+        [
+            ("dict_space", "multi_input"),
+            ("discrete_space", "mlp"),
+            ("vector_space", "mlp"),
+            ("image_space", "cnn"),
+        ],
     )
-    network.rng = dummy_rng
+    def test_deterministic_actor_initialization(
+        self, observation_space, action_space, encoder_type, request
+    ):
+        observation_space = request.getfixturevalue(observation_space)
+        action_space = request.getfixturevalue(action_space)
 
-    for method in network.mutation_methods:
-        new_network = network.clone()
-        getattr(new_network, method)()
+        network = DeterministicActor(observation_space, action_space)
 
-        if "." in method:
-            net_name = method.split(".")[0]
-            mutated_module: EvolvableModule = getattr(new_network, net_name)
-            exec_method = new_network.last_mutation_attr.split(".")[-1]
+        assert network.observation_space == observation_space
 
-            if isinstance(observation_space, (spaces.Tuple, spaces.Dict)):
-                mutated_attr = mutated_module.last_mutation_attr.split(".")[-1]
+        if encoder_type == "multi_input":
+            assert isinstance(network.encoder, EvolvableMultiInput)
+        elif encoder_type == "mlp":
+            assert isinstance(network.encoder, EvolvableMLP)
+        elif encoder_type == "cnn":
+            assert isinstance(network.encoder, EvolvableCNN)
+
+        evolvable_modules = network.modules()
+        assert "encoder" in evolvable_modules
+        assert "head_net" in evolvable_modules
+
+    def test_deterministic_actor_initialization_recurrent(self, vector_space):
+        observation_space = spaces.Box(low=-1, high=1, shape=(32,))
+        network = DeterministicActor(observation_space, vector_space, recurrent=True)
+
+        assert network.observation_space == observation_space
+        assert isinstance(network.encoder, EvolvableLSTM)
+
+        evolvable_modules = network.modules()
+        assert "encoder" in evolvable_modules
+        assert "head_net" in evolvable_modules
+
+    def test_deterministic_actor_initialization_simba(self, vector_space):
+        observation_space = spaces.Box(low=-1, high=1, shape=(8,))
+        network = DeterministicActor(observation_space, vector_space, simba=True)
+
+        assert network.observation_space == observation_space
+        assert isinstance(network.encoder, EvolvableSimBa)
+
+        evolvable_modules = network.modules()
+        assert "encoder" in evolvable_modules
+        assert "head_net" in evolvable_modules
+
+    def test_deterministic_actor_discrete_output_defaults(self):
+        observation_space = spaces.Box(low=-1, high=1, shape=(4,))
+        action_space = spaces.Discrete(3)
+        actor = DeterministicActor(observation_space, action_space)
+
+        assert actor.output_activation == "GumbelSoftmax"
+        assert actor.action_low is None
+        assert actor.action_high is None
+
+
+class TestDeterministicActorMutationMethods:
+    @pytest.mark.parametrize("action_space", ["vector_space"])
+    @pytest.mark.parametrize(
+        "observation_space",
+        ["dict_space", "discrete_space", "vector_space", "image_space"],
+    )
+    def test_deterministic_actor_mutation_methods(
+        self, observation_space, action_space, head_config, dummy_rng, request
+    ):
+        observation_space = request.getfixturevalue(observation_space)
+        action_space = request.getfixturevalue(action_space)
+
+        network = DeterministicActor(
+            observation_space, action_space, head_config=head_config
+        )
+        network.rng = dummy_rng
+
+        for method in network.mutation_methods:
+            new_network = network.clone()
+            getattr(new_network, method)()
+
+            if "." in method:
+                net_name = method.split(".")[0]
+                mutated_module: EvolvableModule = getattr(new_network, net_name)
+                exec_method = new_network.last_mutation_attr.split(".")[-1]
+
+                if isinstance(observation_space, (spaces.Tuple, spaces.Dict)):
+                    mutated_attr = mutated_module.last_mutation_attr.split(".")[-1]
+                else:
+                    mutated_attr = mutated_module.last_mutation_attr
+
+                assert mutated_attr == exec_method
+
+            if new_network.last_mutation_attr is not None:
+                # Check that architecture has changed
+                assert_not_equal_state_dict(
+                    network.state_dict(), new_network.state_dict()
+                )
+
+                # Checks that parameters that are not mutated are the same
+                check_equal_params_ind(network, new_network)
             else:
-                mutated_attr = mutated_module.last_mutation_attr
+                raise ValueError(
+                    f"Last mutation attribute is None. Expected {method} to be applied."
+                )
 
-            assert mutated_attr == exec_method
 
-        if new_network.last_mutation_attr is not None:
-            # Check that architecture has changed
-            assert_not_equal_state_dict(network.state_dict(), new_network.state_dict())
+class TestDeterministicActorForward:
+    @pytest.mark.parametrize("action_space", ["vector_space"])
+    @pytest.mark.parametrize(
+        "observation_space",
+        ["dict_space", "discrete_space", "vector_space", "image_space"],
+    )
+    def test_deterministic_actor_forward(
+        self, observation_space: spaces.Space, action_space: spaces.Space, request
+    ):
+        observation_space = request.getfixturevalue(observation_space)
+        action_space = request.getfixturevalue(action_space)
 
-            # Checks that parameters that are not mutated are the same
-            check_equal_params_ind(network, new_network)
-        else:
-            raise ValueError(
-                f"Last mutation attribute is None. Expected {method} to be applied."
+        network = DeterministicActor(observation_space, action_space)
+
+        x_np = observation_space.sample()
+
+        if isinstance(observation_space, spaces.Discrete):
+            x_np = (
+                F.one_hot(torch.tensor(x_np), num_classes=observation_space.n)
+                .float()
+                .numpy()
             )
 
+        with torch.no_grad():
+            out = network(x_np)
 
-@pytest.mark.parametrize("action_space", ["vector_space"])
-@pytest.mark.parametrize(
-    "observation_space", ["dict_space", "discrete_space", "vector_space", "image_space"]
-)
-def test_deterministic_actor_forward(
-    observation_space: spaces.Space, action_space: spaces.Space, request
-):
-    observation_space = request.getfixturevalue(observation_space)
-    action_space = request.getfixturevalue(action_space)
+        assert isinstance(out, torch.Tensor)
+        assert out.shape == torch.Size([1, spaces.flatdim(action_space)])
 
-    network = DeterministicActor(observation_space, action_space)
+        if isinstance(observation_space, spaces.Dict):
+            x = {key: torch.tensor(value) for key, value in x_np.items()}
+        elif isinstance(observation_space, spaces.Tuple):
+            x = tuple(torch.tensor(value) for value in x_np)
+        else:
+            x = torch.tensor(x_np)
 
-    x_np = observation_space.sample()
+        with torch.no_grad():
+            out = network(x)
 
-    if isinstance(observation_space, spaces.Discrete):
-        x_np = (
-            F.one_hot(torch.tensor(x_np), num_classes=observation_space.n)
-            .float()
-            .numpy()
+        assert isinstance(out, torch.Tensor)
+        assert out.shape == torch.Size([1, spaces.flatdim(action_space)])
+
+
+class TestDeterministicActorClone:
+    @pytest.mark.parametrize("action_space", ["vector_space"])
+    @pytest.mark.parametrize(
+        "observation_space",
+        ["dict_space", "discrete_space", "vector_space", "image_space"],
+    )
+    def test_deterministic_actor_clone(
+        self, observation_space: spaces.Space, action_space: spaces.Space, request
+    ):
+        observation_space = request.getfixturevalue(observation_space)
+        action_space = request.getfixturevalue(action_space)
+
+        network = DeterministicActor(observation_space, action_space)
+
+        original_net_dict = dict(network.named_parameters())
+        clone = network.clone()
+        assert isinstance(clone, EvolvableNetwork)
+
+        assert_close_dict(network.init_dict, clone.init_dict)
+
+        assert_state_dicts_equal(clone.state_dict(), network.state_dict())
+        for key, param in clone.named_parameters():
+            torch.testing.assert_close(param, original_net_dict[key])
+
+
+class TestDeterministicActorRescaleAction:
+    def test_deterministic_actor_rescale_action(self):
+        # Test rescaling with different output activations
+
+        # Create a simple action space
+        action_low = torch.tensor([-2.0, -1.0], dtype=torch.float64)
+        action_high = torch.tensor([2.0, 3.0], dtype=torch.float64)
+
+        # Test with Tanh activation (default for DeterministicActor)
+        action = torch.tensor(
+            [[-0.5, 0.5]], dtype=torch.float32
+        )  # Action from network between -1 and 1
+        rescaled = DeterministicActor.rescale_action(
+            action, action_low, action_high, "Tanh"
         )
 
-    with torch.no_grad():
-        out = network(x_np)
+        # Calculate expected value: low + (high - low) * (action - (-1)) / (1 - (-1))
+        expected = torch.tensor(
+            [[-1.0, 2.0]], dtype=action_low.dtype
+        )  # Should be mapped to middle of range
+        torch.testing.assert_close(rescaled, expected)
+        assert rescaled.dtype == action_low.dtype
 
-    assert isinstance(out, torch.Tensor)
-    assert out.shape == torch.Size([1, spaces.flatdim(action_space)])
+        # Test with Sigmoid activation
+        action = torch.tensor(
+            [[0.25, 0.75]], dtype=torch.float32
+        )  # Action from network between 0 and 1
+        rescaled = DeterministicActor.rescale_action(
+            action, action_low, action_high, "Sigmoid"
+        )
+        expected = torch.tensor(
+            [[-1.0, 2.0]], dtype=action_low.dtype
+        )  # Should be mapped to quarter/three-quarters of range
+        torch.testing.assert_close(rescaled, expected)
+        assert rescaled.dtype == action_low.dtype
 
-    if isinstance(observation_space, spaces.Dict):
-        x = {key: torch.tensor(value) for key, value in x_np.items()}
-    elif isinstance(observation_space, spaces.Tuple):
-        x = tuple(torch.tensor(value) for value in x_np)
-    else:
-        x = torch.tensor(x_np)
+        # Test clipping behavior (out-of-bounds values)
+        action = torch.tensor(
+            [[-2.0, 2.0]], dtype=torch.float32
+        )  # Actions outside of tanh range
+        rescaled = DeterministicActor.rescale_action(
+            action, action_low, action_high, "Tanh"
+        )
+        # For actions outside the normal range, we still apply the same rescaling formula
+        # For -2.0: low + (high - low) * (-2.0 - (-1)) / (1 - (-1)) = low + (high - low) * (-1.0/2.0)
+        # For 2.0: low + (high - low) * (2.0 - (-1)) / (1 - (-1)) = low + (high - low) * (3.0/2.0)
+        expected_first = action_low + (action_high - action_low) * (
+            action[0, 0] - (-1.0)
+        ) / (1.0 - (-1.0))
+        expected_second = action_low + (action_high - action_low) * (
+            action[0, 1] - (-1.0)
+        ) / (1.0 - (-1.0))
+        expected = torch.tensor(
+            [[expected_first[0], expected_second[1]]], dtype=action_low.dtype
+        )
+        torch.testing.assert_close(rescaled, expected)
+        assert rescaled.dtype == action_low.dtype
 
-    with torch.no_grad():
-        out = network(x)
+    def test_deterministic_actor_rescale_action_unbounded_space(self):
+        action = torch.tensor([[0.2, -0.1]], dtype=torch.float32)
+        low = torch.tensor([-float("inf"), -1.0], dtype=torch.float32)
+        high = torch.tensor([1.0, float("inf")], dtype=torch.float32)
 
-    assert isinstance(out, torch.Tensor)
-    assert out.shape == torch.Size([1, spaces.flatdim(action_space)])
-
-
-@pytest.mark.parametrize("action_space", ["vector_space"])
-@pytest.mark.parametrize(
-    "observation_space", ["dict_space", "discrete_space", "vector_space", "image_space"]
-)
-def test_deterministic_actor_clone(
-    observation_space: spaces.Space, action_space: spaces.Space, request
-):
-    observation_space = request.getfixturevalue(observation_space)
-    action_space = request.getfixturevalue(action_space)
-
-    network = DeterministicActor(observation_space, action_space)
-
-    original_net_dict = dict(network.named_parameters())
-    clone = network.clone()
-    assert isinstance(clone, EvolvableNetwork)
-
-    assert_close_dict(network.init_dict, clone.init_dict)
-
-    assert_state_dicts_equal(clone.state_dict(), network.state_dict())
-    for key, param in clone.named_parameters():
-        torch.testing.assert_close(param, original_net_dict[key])
-
-
-def test_deterministic_actor_rescale_action():
-    # Test rescaling with different output activations
-
-    # Create a simple action space
-    action_low = torch.tensor([-2.0, -1.0], dtype=torch.float64)
-    action_high = torch.tensor([2.0, 3.0], dtype=torch.float64)
-
-    # Test with Tanh activation (default for DeterministicActor)
-    action = torch.tensor(
-        [[-0.5, 0.5]], dtype=torch.float32
-    )  # Action from network between -1 and 1
-    rescaled = DeterministicActor.rescale_action(
-        action, action_low, action_high, "Tanh"
-    )
-
-    # Calculate expected value: low + (high - low) * (action - (-1)) / (1 - (-1))
-    expected = torch.tensor(
-        [[-1.0, 2.0]], dtype=action_low.dtype
-    )  # Should be mapped to middle of range
-    torch.testing.assert_close(rescaled, expected)
-    assert rescaled.dtype == action_low.dtype
-
-    # Test with Sigmoid activation
-    action = torch.tensor(
-        [[0.25, 0.75]], dtype=torch.float32
-    )  # Action from network between 0 and 1
-    rescaled = DeterministicActor.rescale_action(
-        action, action_low, action_high, "Sigmoid"
-    )
-    expected = torch.tensor(
-        [[-1.0, 2.0]], dtype=action_low.dtype
-    )  # Should be mapped to quarter/three-quarters of range
-    torch.testing.assert_close(rescaled, expected)
-    assert rescaled.dtype == action_low.dtype
-
-    # Test clipping behavior (out-of-bounds values)
-    action = torch.tensor(
-        [[-2.0, 2.0]], dtype=torch.float32
-    )  # Actions outside of tanh range
-    rescaled = DeterministicActor.rescale_action(
-        action, action_low, action_high, "Tanh"
-    )
-    # For actions outside the normal range, we still apply the same rescaling formula
-    # For -2.0: low + (high - low) * (-2.0 - (-1)) / (1 - (-1)) = low + (high - low) * (-1.0/2.0)
-    # For 2.0: low + (high - low) * (2.0 - (-1)) / (1 - (-1)) = low + (high - low) * (3.0/2.0)
-    expected_first = action_low + (action_high - action_low) * (
-        action[0, 0] - (-1.0)
-    ) / (1.0 - (-1.0))
-    expected_second = action_low + (action_high - action_low) * (
-        action[0, 1] - (-1.0)
-    ) / (1.0 - (-1.0))
-    expected = torch.tensor(
-        [[expected_first[0], expected_second[1]]], dtype=action_low.dtype
-    )
-    torch.testing.assert_close(rescaled, expected)
-    assert rescaled.dtype == action_low.dtype
+        rescaled = DeterministicActor.rescale_action(action, low, high, "Tanh")
+        torch.testing.assert_close(rescaled, action)
 
 
 def test_get_output_bounds_invalid_activation():
     with pytest.raises(ValueError, match="Received invalid output activation function"):
         get_output_bounds("InvalidActivation")
-
-
-def test_deterministic_actor_discrete_output_defaults():
-    observation_space = spaces.Box(low=-1, high=1, shape=(4,))
-    action_space = spaces.Discrete(3)
-    actor = DeterministicActor(observation_space, action_space)
-
-    assert actor.output_activation == "GumbelSoftmax"
-    assert actor.action_low is None
-    assert actor.action_high is None
-
-
-def test_deterministic_actor_rescale_action_unbounded_space():
-    action = torch.tensor([[0.2, -0.1]], dtype=torch.float32)
-    low = torch.tensor([-float("inf"), -1.0], dtype=torch.float32)
-    high = torch.tensor([1.0, float("inf")], dtype=torch.float32)
-
-    rescaled = DeterministicActor.rescale_action(action, low, high, "Tanh")
-    torch.testing.assert_close(rescaled, action)
 
 
 def test_distribution_mutation_methods(dummy_rng, head_config):
@@ -319,516 +325,530 @@ def test_distribution_mutation_methods(dummy_rng, head_config):
             )
 
 
-@pytest.mark.parametrize(
-    "action_space",
-    ["vector_space", "discrete_space", "multidiscrete_space", "multibinary_space"],
-)
-@pytest.mark.parametrize(
-    "observation_space, encoder_type",
-    [
-        ("dict_space", "multi_input"),
-        ("discrete_space", "mlp"),
-        ("vector_space", "mlp"),
-        ("image_space", "cnn"),
-    ],
-)
-def test_stochastic_actor_initialization(
-    observation_space,
-    action_space,
-    encoder_type,
-    request,
-):
-    observation_space = request.getfixturevalue(observation_space)
-    action_space = request.getfixturevalue(action_space)
-
-    network = StochasticActor(
+class TestStochasticActorInit:
+    @pytest.mark.parametrize(
+        "action_space",
+        ["vector_space", "discrete_space", "multidiscrete_space", "multibinary_space"],
+    )
+    @pytest.mark.parametrize(
+        "observation_space, encoder_type",
+        [
+            ("dict_space", "multi_input"),
+            ("discrete_space", "mlp"),
+            ("vector_space", "mlp"),
+            ("image_space", "cnn"),
+        ],
+    )
+    def test_stochastic_actor_initialization(
+        self,
         observation_space,
         action_space,
+        encoder_type,
+        request,
+    ):
+        observation_space = request.getfixturevalue(observation_space)
+        action_space = request.getfixturevalue(action_space)
+
+        network = StochasticActor(
+            observation_space,
+            action_space,
+        )
+
+        assert network.observation_space == observation_space
+
+        if encoder_type == "multi_input":
+            assert isinstance(network.encoder, EvolvableMultiInput)
+        elif encoder_type == "mlp":
+            assert isinstance(network.encoder, EvolvableMLP)
+        elif encoder_type == "cnn":
+            assert isinstance(network.encoder, EvolvableCNN)
+
+        evolvable_modules = network.modules()
+        assert "encoder" in evolvable_modules
+        assert "head_net" in evolvable_modules
+
+    def test_stochastic_actor_initialization_recurrent(self, vector_space):
+        observation_space = spaces.Box(low=-1, high=1, shape=(32, 8))
+
+        network = StochasticActor(
+            observation_space,
+            vector_space,
+            recurrent=True,
+        )
+
+        assert network.observation_space == observation_space
+        assert isinstance(network.encoder, EvolvableLSTM)
+
+        evolvable_modules = network.modules()
+        assert "encoder" in evolvable_modules
+        assert "head_net" in evolvable_modules
+
+    def test_stochastic_actor_initialization_simba(self, vector_space):
+        observation_space = spaces.Box(low=-1, high=1, shape=(8,))
+
+        network = StochasticActor(
+            observation_space,
+            vector_space,
+            simba=True,
+        )
+
+        assert network.observation_space == observation_space
+        assert isinstance(network.encoder, EvolvableSimBa)
+
+        evolvable_modules = network.modules()
+        assert "encoder" in evolvable_modules
+        assert "head_net" in evolvable_modules
+
+
+class TestStochasticActorMutationMethods:
+    @pytest.mark.parametrize(
+        "action_space",
+        ["vector_space", "discrete_space", "multidiscrete_space", "multibinary_space"],
     )
-
-    assert network.observation_space == observation_space
-
-    if encoder_type == "multi_input":
-        assert isinstance(network.encoder, EvolvableMultiInput)
-    elif encoder_type == "mlp":
-        assert isinstance(network.encoder, EvolvableMLP)
-    elif encoder_type == "cnn":
-        assert isinstance(network.encoder, EvolvableCNN)
-
-    evolvable_modules = network.modules()
-    assert "encoder" in evolvable_modules
-    assert "head_net" in evolvable_modules
-
-
-def test_stochastic_actor_initialization_recurrent(vector_space):
-    observation_space = spaces.Box(low=-1, high=1, shape=(32, 8))
-
-    network = StochasticActor(
-        observation_space,
-        vector_space,
-        recurrent=True,
+    @pytest.mark.parametrize(
+        "observation_space",
+        ["dict_space", "discrete_space", "vector_space", "image_space"],
     )
-
-    assert network.observation_space == observation_space
-    assert isinstance(network.encoder, EvolvableLSTM)
-
-    evolvable_modules = network.modules()
-    assert "encoder" in evolvable_modules
-    assert "head_net" in evolvable_modules
-
-
-def test_stochastic_actor_initialization_simba(vector_space):
-    observation_space = spaces.Box(low=-1, high=1, shape=(8,))
-
-    network = StochasticActor(
-        observation_space,
-        vector_space,
-        simba=True,
-    )
-
-    assert network.observation_space == observation_space
-    assert isinstance(network.encoder, EvolvableSimBa)
-
-    evolvable_modules = network.modules()
-    assert "encoder" in evolvable_modules
-    assert "head_net" in evolvable_modules
-
-
-@pytest.mark.parametrize(
-    "action_space",
-    ["vector_space", "discrete_space", "multidiscrete_space", "multibinary_space"],
-)
-@pytest.mark.parametrize(
-    "observation_space", ["dict_space", "discrete_space", "vector_space", "image_space"]
-)
-def test_stochastic_actor_mutation_methods(
-    observation_space,
-    action_space,
-    head_config,
-    dummy_rng,
-    request,
-):
-    observation_space = request.getfixturevalue(observation_space)
-    action_space = request.getfixturevalue(action_space)
-
-    network = StochasticActor(
+    def test_stochastic_actor_mutation_methods(
+        self,
         observation_space,
         action_space,
-        head_config=head_config,
-    )
-    network.rng = dummy_rng
+        head_config,
+        dummy_rng,
+        request,
+    ):
+        observation_space = request.getfixturevalue(observation_space)
+        action_space = request.getfixturevalue(action_space)
 
-    for method in network.mutation_methods:
-        new_network = network.clone()
-        getattr(new_network, method)()
+        network = StochasticActor(
+            observation_space,
+            action_space,
+            head_config=head_config,
+        )
+        network.rng = dummy_rng
 
-        if "." in method and new_network.last_mutation_attr is not None:
-            net_name = method.split(".")[0]
-            mutated_module: EvolvableModule = getattr(new_network, net_name)
+        for method in network.mutation_methods:
+            new_network = network.clone()
+            getattr(new_network, method)()
 
-            exec_method = new_network.last_mutation_attr.split(".")[-1]
+            if "." in method and new_network.last_mutation_attr is not None:
+                net_name = method.split(".")[0]
+                mutated_module: EvolvableModule = getattr(new_network, net_name)
 
-            if isinstance(observation_space, (spaces.Tuple, spaces.Dict)):
-                mutated_attr = mutated_module.last_mutation_attr.split(".")[-1]
+                exec_method = new_network.last_mutation_attr.split(".")[-1]
+
+                if isinstance(observation_space, (spaces.Tuple, spaces.Dict)):
+                    mutated_attr = mutated_module.last_mutation_attr.split(".")[-1]
+                else:
+                    mutated_attr = mutated_module.last_mutation_attr
+
+                assert mutated_attr == exec_method
+
+            if new_network.last_mutation_attr is not None:
+                # Check that architecture has changed
+                assert_not_equal_state_dict(
+                    network.state_dict(), new_network.state_dict()
+                )
+
+                # Checks that parameters that are not mutated are the same
+                check_equal_params_ind(network, new_network)
             else:
-                mutated_attr = mutated_module.last_mutation_attr
+                raise ValueError(
+                    f"Last mutation attribute is None. Expected {method} to be applied."
+                )
 
-            assert mutated_attr == exec_method
 
-        if new_network.last_mutation_attr is not None:
-            # Check that architecture has changed
-            assert_not_equal_state_dict(network.state_dict(), new_network.state_dict())
+class TestStochasticActorForward:
+    @pytest.mark.parametrize(
+        "action_space",
+        ["vector_space", "discrete_space", "multidiscrete_space", "multibinary_space"],
+    )
+    @pytest.mark.parametrize(
+        "observation_space",
+        ["dict_space", "discrete_space", "vector_space", "image_space"],
+    )
+    def test_stochastic_actor_forward(
+        self,
+        observation_space: spaces.Space,
+        action_space: spaces.Space,
+        request,
+    ):
+        observation_space = request.getfixturevalue(observation_space)
+        action_space = request.getfixturevalue(action_space)
 
-            # Checks that parameters that are not mutated are the same
-            check_equal_params_ind(network, new_network)
-        else:
-            raise ValueError(
-                f"Last mutation attribute is None. Expected {method} to be applied."
+        # For continuous action spaces, we need to set squash_output=True to ensure actions are scaled
+        squash_output = isinstance(action_space, spaces.Box)
+
+        network = StochasticActor(
+            observation_space,
+            action_space,
+            squash_output=squash_output,
+        )
+
+        x_np = observation_space.sample()
+
+        if isinstance(observation_space, spaces.Discrete):
+            x_np = (
+                F.one_hot(torch.tensor(x_np), num_classes=observation_space.n)
+                .float()
+                .numpy()
             )
 
+        with torch.no_grad():
+            action, log_prob, entropy = network(x_np)
 
-@pytest.mark.parametrize(
-    "action_space",
-    ["vector_space", "discrete_space", "multidiscrete_space", "multibinary_space"],
-)
-@pytest.mark.parametrize(
-    "observation_space", ["dict_space", "discrete_space", "vector_space", "image_space"]
-)
-def test_stochastic_actor_forward(
-    observation_space: spaces.Space,
-    action_space: spaces.Space,
-    request,
-):
-    observation_space = request.getfixturevalue(observation_space)
-    action_space = request.getfixturevalue(action_space)
+        # Check action shape and values
+        assert isinstance(action, torch.Tensor)
 
-    # For continuous action spaces, we need to set squash_output=True to ensure actions are scaled
-    squash_output = isinstance(action_space, spaces.Box)
+        # For continuous action spaces
+        if isinstance(action_space, spaces.Box):
+            # Check that actions are within bounds
+            action_low = torch.tensor(action_space.low, device=action.device)
+            action_high = torch.tensor(action_space.high, device=action.device)
+            assert torch.all(action >= action_low)
+            assert torch.all(action <= action_high)
 
-    network = StochasticActor(
-        observation_space,
-        action_space,
-        squash_output=squash_output,
-    )
+        # For discrete action spaces
+        elif isinstance(action_space, spaces.Discrete):
+            assert action.shape == torch.Size([1])  # One scalar action
+            assert torch.all(action >= 0)
+            assert torch.all(action < action_space.n)
 
-    x_np = observation_space.sample()
+        # For multi-discrete action spaces
+        elif isinstance(action_space, spaces.MultiDiscrete):
+            assert action.shape == torch.Size([1, len(action_space.nvec)])
+            for i, n in enumerate(action_space.nvec):
+                assert torch.all(action[:, i] >= 0)
+                assert torch.all(action[:, i] < n)
 
-    if isinstance(observation_space, spaces.Discrete):
-        x_np = (
-            F.one_hot(torch.tensor(x_np), num_classes=observation_space.n)
-            .float()
-            .numpy()
+        # For multi-binary action spaces
+        elif isinstance(action_space, spaces.MultiBinary):
+            assert action.shape == torch.Size([1, action_space.n])
+            assert torch.all((action == 0) | (action == 1))
+
+        # Check log_prob
+        assert isinstance(log_prob, torch.Tensor)
+
+        # Check entropy - it might be None for some distribution types
+        if entropy is not None:
+            assert isinstance(entropy, torch.Tensor)
+
+        # Test with tensor inputs
+        if isinstance(observation_space, spaces.Dict):
+            x = {
+                key: torch.tensor(value).clone().detach() for key, value in x_np.items()
+            }
+        elif isinstance(observation_space, spaces.Tuple):
+            x = tuple(torch.tensor(value).clone().detach() for value in x_np)
+        else:
+            x = torch.tensor(x_np).clone().detach()
+
+        with torch.no_grad():
+            action, log_prob, entropy = network(x)
+
+        assert isinstance(action, torch.Tensor)
+        assert isinstance(log_prob, torch.Tensor)
+        # Entropy might be None
+        if entropy is not None:
+            assert isinstance(entropy, torch.Tensor)
+
+    def test_stochastic_actor_action_masking_discrete(self):
+        """Test action masking in StochasticActor with Discrete action space."""
+        # Create discrete action space (4 actions)
+        action_space = spaces.Discrete(4)
+        observation_space = spaces.Box(low=-1, high=1, shape=(8,))
+
+        # Create actor
+        actor = StochasticActor(
+            observation_space,
+            action_space,
         )
 
-    with torch.no_grad():
-        action, log_prob, entropy = network(x_np)
+        # Sample observation
+        obs = torch.tensor(observation_space.sample()).float().unsqueeze(0)
 
-    # Check action shape and values
-    assert isinstance(action, torch.Tensor)
+        # Create action mask that only allows actions 1 and 3
+        # True = valid action, False = masked action
+        action_mask = torch.tensor([[False, True, False, True]])
 
-    # For continuous action spaces
-    if isinstance(action_space, spaces.Box):
-        # Check that actions are within bounds
-        action_low = torch.tensor(action_space.low, device=action.device)
-        action_high = torch.tensor(action_space.high, device=action.device)
-        assert torch.all(action >= action_low)
-        assert torch.all(action <= action_high)
-
-    # For discrete action spaces
-    elif isinstance(action_space, spaces.Discrete):
-        assert action.shape == torch.Size([1])  # One scalar action
-        assert torch.all(action >= 0)
-        assert torch.all(action < action_space.n)
-
-    # For multi-discrete action spaces
-    elif isinstance(action_space, spaces.MultiDiscrete):
-        assert action.shape == torch.Size([1, len(action_space.nvec)])
-        for i, n in enumerate(action_space.nvec):
-            assert torch.all(action[:, i] >= 0)
-            assert torch.all(action[:, i] < n)
-
-    # For multi-binary action spaces
-    elif isinstance(action_space, spaces.MultiBinary):
-        assert action.shape == torch.Size([1, action_space.n])
-        assert torch.all((action == 0) | (action == 1))
-
-    # Check log_prob
-    assert isinstance(log_prob, torch.Tensor)
-
-    # Check entropy - it might be None for some distribution types
-    if entropy is not None:
-        assert isinstance(entropy, torch.Tensor)
-
-    # Test with tensor inputs
-    if isinstance(observation_space, spaces.Dict):
-        x = {key: torch.tensor(value).clone().detach() for key, value in x_np.items()}
-    elif isinstance(observation_space, spaces.Tuple):
-        x = tuple(torch.tensor(value).clone().detach() for value in x_np)
-    else:
-        x = torch.tensor(x_np).clone().detach()
-
-    with torch.no_grad():
-        action, log_prob, entropy = network(x)
-
-    assert isinstance(action, torch.Tensor)
-    assert isinstance(log_prob, torch.Tensor)
-    # Entropy might be None
-    if entropy is not None:
-        assert isinstance(entropy, torch.Tensor)
-
-
-@pytest.mark.parametrize(
-    "action_space",
-    ["vector_space", "discrete_space", "multidiscrete_space", "multibinary_space"],
-)
-@pytest.mark.parametrize(
-    "observation_space", ["dict_space", "discrete_space", "vector_space", "image_space"]
-)
-def test_stochastic_actor_clone(
-    observation_space: spaces.Space,
-    action_space: spaces.Space,
-    request,
-):
-    observation_space = request.getfixturevalue(observation_space)
-    action_space = request.getfixturevalue(action_space)
-
-    network = StochasticActor(
-        observation_space,
-        action_space,
-    )
-
-    original_net_dict = dict(network.named_parameters())
-    clone = network.clone()
-    assert isinstance(clone, EvolvableNetwork)
-
-    assert_close_dict(network.init_dict, clone.init_dict)
-
-    assert_state_dicts_equal(clone.state_dict(), network.state_dict())
-    for key, param in clone.named_parameters():
-        torch.testing.assert_close(param, original_net_dict[key])
-
-
-def test_stochastic_actor_scaling():
-    # Test the scale_action method with different squash_output values
-
-    # Create a continuous action space
-    action_space = spaces.Box(low=np.array([-2.0, -1.0]), high=np.array([2.0, 3.0]))
-
-    # Test with squash_output=True
-    actor = StochasticActor(
-        observation_space=spaces.Box(low=-1, high=1, shape=(2,)),
-        action_space=action_space,
-        squash_output=True,
-    )
-
-    # Test rescaling from [-1, 1] to [low, high]
-    # Use action with same dimension as action space (2)
-    action = torch.tensor([[-1.0, 0.0], [1.0, -1.0]])  # Batch of actions
-    scaled = actor.scale_action(action)
-
-    # Expected: For -1 -> low, for 0 -> middle, for 1 -> high
-    expected = torch.tensor([[-2.0, 1.0], [2.0, -1.0]])
-    torch.testing.assert_close(scaled, expected)
-
-    # Test with forward method when squash_output=True
-    obs = torch.tensor([[-0.5, 0.5]]).float()
-
-    # Mock the distribution to return a known action
-    original_forward = actor.head_net.forward
-
-    def mock_forward(x, mask=None):
-        return torch.tensor([[-0.5, 0.5]]), torch.tensor([0.0]), torch.tensor([1.0])
-
-    try:
-        actor.head_net.forward = mock_forward
-
-        # Get action from forward pass
+        # Run forward pass with mask
         with torch.no_grad():
-            action, _, _ = actor(obs)
+            action, log_prob, entropy = actor(obs, action_mask)
 
-        # Expected value based on rescaling from [-1,1] to action space
-        # For -0.5: low + (0.5 * (-0.5 + 1) * (high - low)) = low + 0.25 * (high - low)
-        # For 0.5: low + (0.5 * (0.5 + 1) * (high - low)) = low + 0.75 * (high - low)
-        expected = torch.tensor(
-            [[-1.0, 2.0]]
-        )  # Should be between low and middle, middle and high
-        torch.testing.assert_close(action, expected)
+        # Verify that the selected action is either 1 or 3 (unmasked)
+        assert action.item() in [1, 3]
 
-    finally:
-        # Restore original function
-        actor.head_net.forward = original_forward
+        # Run many times to ensure consistent masking
+        valid_actions = []
+        for _ in range(10):
+            with torch.no_grad():
+                action, _, _ = actor(obs, action_mask)
+            valid_actions.append(action.item())
 
-    # Test with discrete action space (no scaling needed)
-    discrete_space = spaces.Discrete(3)
-    actor = StochasticActor(
-        observation_space=spaces.Box(low=-1, high=1, shape=(2,)),
-        action_space=discrete_space,
-    )
+        # Verify only unmasked actions were selected
+        assert all(a in [1, 3] for a in valid_actions)
 
-    # For discrete spaces, no scaling is applied - verify by testing forward
-    def mock_discrete_forward(x, mask=None):
-        return torch.tensor([1]), torch.tensor([0.0]), torch.tensor([1.0])
-
-    try:
-        actor.head_net.forward = mock_discrete_forward
-
+        # The log probabilities of masked actions should be -inf
+        # This is hard to test directly without accessing the distribution
+        # but we can verify entropy is smaller with masks
         with torch.no_grad():
-            action, _, _ = actor(obs)
+            _, _, unmasked_entropy = actor(obs, None)  # No mask
+            _, _, masked_entropy = actor(obs, action_mask)  # With mask
 
-        # Action should remain unchanged
-        expected = torch.tensor([1])
-        torch.testing.assert_close(action, expected)
-    finally:
-        # Restore original function
-        actor.head_net.forward = mock_discrete_forward
+        # Entropy should be lower with mask (fewer options)
+        assert masked_entropy < unmasked_entropy
 
+    def test_stochastic_actor_action_masking_multidiscrete(self):
+        """Test action masking in StochasticActor with MultiDiscrete action space."""
+        # Create multi-discrete action space
+        action_space = spaces.MultiDiscrete([3, 2, 4])
+        observation_space = spaces.Box(low=-1, high=1, shape=(8,))
 
-@pytest.mark.parametrize(
-    "action_space",
-    ["vector_space", "discrete_space", "multidiscrete_space", "multibinary_space"],
-)
-def test_stochastic_actor_distribution_methods(action_space: spaces.Space, request):
-    """Test StochasticActor's distribution-related methods with different action spaces."""
-    action_space = request.getfixturevalue(action_space)
-    observation_space = spaces.Box(low=-1, high=1, shape=(8,))
-    network = StochasticActor(
-        observation_space,
-        action_space,
-    )
-
-    # Get a sample observation
-    obs = torch.tensor(observation_space.sample()).float().unsqueeze(0)
-
-    # Get action, log_prob, and entropy from forward pass
-    with torch.no_grad():
-        action, log_prob, entropy = network(obs)
-
-    # Test action_entropy matches the entropy from forward
-    manual_entropy = network.action_entropy()
-    torch.testing.assert_close(entropy, manual_entropy)
-
-    # Specific tests for each action space type
-    if isinstance(action_space, spaces.Box):
-        # For continuous spaces, log_prob should be scalar
-        assert log_prob.shape == torch.Size([1])
-        # Entropy should be positive for continuous distributions
-        assert torch.all(entropy > 0)
-
-    elif isinstance(action_space, spaces.Discrete):
-        # For discrete spaces, log_prob is scalar
-        assert log_prob.shape == torch.Size([1])
-        # Entropy should be positive and at most log(n)
-        assert torch.all(entropy > 0)
-        assert torch.all(
-            entropy <= torch.log(torch.tensor(action_space.n, dtype=torch.float))
+        # Create actor
+        actor = StochasticActor(
+            observation_space,
+            action_space,
         )
 
-    elif isinstance(action_space, spaces.MultiDiscrete):
-        # For multi-discrete spaces, log_prob is scalar (sum of log probs)
-        assert log_prob.shape == torch.Size([1])
-        # Entropy should be positive
-        assert torch.all(entropy > 0)
+        # Sample observation
+        obs = torch.tensor(observation_space.sample()).float().unsqueeze(0)
 
-    elif isinstance(action_space, spaces.MultiBinary):
-        # For multi-binary spaces, log_prob is scalar
-        assert log_prob.shape == torch.Size([1])
-        # Entropy should be positive
-        assert torch.all(entropy > 0)
-
-    # Test action_log_prob gives value for the chosen action
-    # Note: This may not give exactly the same value as from forward
-    # since the distribution is resampled, but we can check it has the right shape
-    manual_log_prob = network.action_log_prob(action)
-    assert manual_log_prob.shape == log_prob.shape
-
-
-def test_stochastic_actor_action_masking_discrete():
-    """Test action masking in StochasticActor with Discrete action space."""
-    # Create discrete action space (4 actions)
-    action_space = spaces.Discrete(4)
-    observation_space = spaces.Box(low=-1, high=1, shape=(8,))
-
-    # Create actor
-    actor = StochasticActor(
-        observation_space,
-        action_space,
-    )
-
-    # Sample observation
-    obs = torch.tensor(observation_space.sample()).float().unsqueeze(0)
-
-    # Create action mask that only allows actions 1 and 3
-    # True = valid action, False = masked action
-    action_mask = torch.tensor([[False, True, False, True]])
-
-    # Run forward pass with mask
-    with torch.no_grad():
-        action, log_prob, entropy = actor(obs, action_mask)
-
-    # Verify that the selected action is either 1 or 3 (unmasked)
-    assert action.item() in [1, 3]
-
-    # Run many times to ensure consistent masking
-    valid_actions = []
-    for _ in range(10):
-        with torch.no_grad():
-            action, _, _ = actor(obs, action_mask)
-        valid_actions.append(action.item())
-
-    # Verify only unmasked actions were selected
-    assert all(a in [1, 3] for a in valid_actions)
-
-    # The log probabilities of masked actions should be -inf
-    # This is hard to test directly without accessing the distribution
-    # but we can verify entropy is smaller with masks
-    with torch.no_grad():
-        _, _, unmasked_entropy = actor(obs, None)  # No mask
-        _, _, masked_entropy = actor(obs, action_mask)  # With mask
-
-    # Entropy should be lower with mask (fewer options)
-    assert masked_entropy < unmasked_entropy
-
-
-def test_stochastic_actor_action_masking_multidiscrete():
-    """Test action masking in StochasticActor with MultiDiscrete action space."""
-    # Create multi-discrete action space
-    action_space = spaces.MultiDiscrete([3, 2, 4])
-    observation_space = spaces.Box(low=-1, high=1, shape=(8,))
-
-    # Create actor
-    actor = StochasticActor(
-        observation_space,
-        action_space,
-    )
-
-    # Sample observation
-    obs = torch.tensor(observation_space.sample()).float().unsqueeze(0)
-
-    # Create action masks for each dimension
-    # Dimension 1: allow only action 0
-    # Dimension 2: allow only action 1
-    # Dimension 3: allow actions 1 and 3
-    # Format as a flat tensor that will be split by the distribution
-    action_mask = torch.tensor(
-        [
+        # Create action masks for each dimension
+        # Dimension 1: allow only action 0
+        # Dimension 2: allow only action 1
+        # Dimension 3: allow actions 1 and 3
+        # Format as a flat tensor that will be split by the distribution
+        action_mask = torch.tensor(
             [
-                True,
-                False,
-                False,  # 1st dimension (3 options)
-                False,
-                True,  # 2nd dimension (2 options)
-                False,
-                True,
-                False,
-                True,
-            ]  # 3rd dimension (4 options)
-        ]
+                [
+                    True,
+                    False,
+                    False,  # 1st dimension (3 options)
+                    False,
+                    True,  # 2nd dimension (2 options)
+                    False,
+                    True,
+                    False,
+                    True,
+                ]  # 3rd dimension (4 options)
+            ]
+        )
+
+        # Run forward pass with mask multiple times
+        valid_actions = []
+        for _ in range(10):
+            with torch.no_grad():
+                action, _, _ = actor(obs, action_mask)
+            valid_actions.append(action.squeeze().tolist())
+
+        # Verify all actions respect the mask
+        for action in valid_actions:
+            assert action[0] == 0  # 1st dimension must be 0
+            assert action[1] == 1  # 2nd dimension must be 1
+            assert action[2] in [1, 3]  # 3rd dimension must be 1 or 3
+
+    def test_stochastic_actor_action_masking_multibinary(self):
+        """Test action masking in StochasticActor with MultiBinary action space."""
+        # Create multi-binary action space
+        action_space = spaces.MultiBinary(4)
+        observation_space = spaces.Box(low=-1, high=1, shape=(8,))
+
+        # Create actor
+        actor = StochasticActor(
+            observation_space,
+            action_space,
+        )
+
+        # Sample observation
+        obs = torch.tensor(observation_space.sample()).float().unsqueeze(0)
+
+        # For MultiBinary, the mask should have the same shape as the action space
+        # True means this action is allowed, False means it's masked (forbidden)
+        # We'll mask the first and last bits to only allow action=0
+        action_mask = torch.tensor([[False, True, True, False]])
+
+        # Run forward pass with mask multiple times
+        valid_actions = []
+        for _ in range(10):
+            with torch.no_grad():
+                action, _, _ = actor(obs, action_mask)
+            valid_actions.append(action.squeeze().tolist())
+
+        # Verify all actions respect the mask
+        for action in valid_actions:
+            # The first and last bits should be 0 because we masked them to prevent 1
+            assert action[0] == 0
+            assert action[3] == 0
+            # Positions 1 and 2 can be either 0 or 1
+
+
+class TestStochasticActorClone:
+    @pytest.mark.parametrize(
+        "action_space",
+        ["vector_space", "discrete_space", "multidiscrete_space", "multibinary_space"],
     )
-
-    # Run forward pass with mask multiple times
-    valid_actions = []
-    for _ in range(10):
-        with torch.no_grad():
-            action, _, _ = actor(obs, action_mask)
-        valid_actions.append(action.squeeze().tolist())
-
-    # Verify all actions respect the mask
-    for action in valid_actions:
-        assert action[0] == 0  # 1st dimension must be 0
-        assert action[1] == 1  # 2nd dimension must be 1
-        assert action[2] in [1, 3]  # 3rd dimension must be 1 or 3
-
-
-def test_stochastic_actor_action_masking_multibinary():
-    """Test action masking in StochasticActor with MultiBinary action space."""
-    # Create multi-binary action space
-    action_space = spaces.MultiBinary(4)
-    observation_space = spaces.Box(low=-1, high=1, shape=(8,))
-
-    # Create actor
-    actor = StochasticActor(
-        observation_space,
-        action_space,
+    @pytest.mark.parametrize(
+        "observation_space",
+        ["dict_space", "discrete_space", "vector_space", "image_space"],
     )
+    def test_stochastic_actor_clone(
+        self,
+        observation_space: spaces.Space,
+        action_space: spaces.Space,
+        request,
+    ):
+        observation_space = request.getfixturevalue(observation_space)
+        action_space = request.getfixturevalue(action_space)
 
-    # Sample observation
-    obs = torch.tensor(observation_space.sample()).float().unsqueeze(0)
+        network = StochasticActor(
+            observation_space,
+            action_space,
+        )
 
-    # For MultiBinary, the mask should have the same shape as the action space
-    # True means this action is allowed, False means it's masked (forbidden)
-    # We'll mask the first and last bits to only allow action=0
-    action_mask = torch.tensor([[False, True, True, False]])
+        original_net_dict = dict(network.named_parameters())
+        clone = network.clone()
+        assert isinstance(clone, EvolvableNetwork)
 
-    # Run forward pass with mask multiple times
-    valid_actions = []
-    for _ in range(10):
+        assert_close_dict(network.init_dict, clone.init_dict)
+
+        assert_state_dicts_equal(clone.state_dict(), network.state_dict())
+        for key, param in clone.named_parameters():
+            torch.testing.assert_close(param, original_net_dict[key])
+
+
+class TestStochasticActorScaleAction:
+    def test_stochastic_actor_scaling(self):
+        # Test the scale_action method with different squash_output values
+
+        # Create a continuous action space
+        action_space = spaces.Box(low=np.array([-2.0, -1.0]), high=np.array([2.0, 3.0]))
+
+        # Test with squash_output=True
+        actor = StochasticActor(
+            observation_space=spaces.Box(low=-1, high=1, shape=(2,)),
+            action_space=action_space,
+            squash_output=True,
+        )
+
+        # Test rescaling from [-1, 1] to [low, high]
+        # Use action with same dimension as action space (2)
+        action = torch.tensor([[-1.0, 0.0], [1.0, -1.0]])  # Batch of actions
+        scaled = actor.scale_action(action)
+
+        # Expected: For -1 -> low, for 0 -> middle, for 1 -> high
+        expected = torch.tensor([[-2.0, 1.0], [2.0, -1.0]])
+        torch.testing.assert_close(scaled, expected)
+
+        # Test with forward method when squash_output=True
+        obs = torch.tensor([[-0.5, 0.5]]).float()
+
+        # Mock the distribution to return a known action
+        original_forward = actor.head_net.forward
+
+        def mock_forward(x, mask=None):
+            return torch.tensor([[-0.5, 0.5]]), torch.tensor([0.0]), torch.tensor([1.0])
+
+        try:
+            actor.head_net.forward = mock_forward
+
+            # Get action from forward pass
+            with torch.no_grad():
+                action, _, _ = actor(obs)
+
+            # Expected value based on rescaling from [-1,1] to action space
+            # For -0.5: low + (0.5 * (-0.5 + 1) * (high - low)) = low + 0.25 * (high - low)
+            # For 0.5: low + (0.5 * (0.5 + 1) * (high - low)) = low + 0.75 * (high - low)
+            expected = torch.tensor(
+                [[-1.0, 2.0]]
+            )  # Should be between low and middle, middle and high
+            torch.testing.assert_close(action, expected)
+
+        finally:
+            # Restore original function
+            actor.head_net.forward = original_forward
+
+        # Test with discrete action space (no scaling needed)
+        discrete_space = spaces.Discrete(3)
+        actor = StochasticActor(
+            observation_space=spaces.Box(low=-1, high=1, shape=(2,)),
+            action_space=discrete_space,
+        )
+
+        # For discrete spaces, no scaling is applied - verify by testing forward
+        def mock_discrete_forward(x, mask=None):
+            return torch.tensor([1]), torch.tensor([0.0]), torch.tensor([1.0])
+
+        try:
+            actor.head_net.forward = mock_discrete_forward
+
+            with torch.no_grad():
+                action, _, _ = actor(obs)
+
+            # Action should remain unchanged
+            expected = torch.tensor([1])
+            torch.testing.assert_close(action, expected)
+        finally:
+            # Restore original function
+            actor.head_net.forward = mock_discrete_forward
+
+
+class TestStochasticActorDistributionMethods:
+    @pytest.mark.parametrize(
+        "action_space",
+        ["vector_space", "discrete_space", "multidiscrete_space", "multibinary_space"],
+    )
+    def test_stochastic_actor_distribution_methods(
+        self, action_space: spaces.Space, request
+    ):
+        """Test StochasticActor's distribution-related methods with different action spaces."""
+        action_space = request.getfixturevalue(action_space)
+        observation_space = spaces.Box(low=-1, high=1, shape=(8,))
+        network = StochasticActor(
+            observation_space,
+            action_space,
+        )
+
+        # Get a sample observation
+        obs = torch.tensor(observation_space.sample()).float().unsqueeze(0)
+
+        # Get action, log_prob, and entropy from forward pass
         with torch.no_grad():
-            action, _, _ = actor(obs, action_mask)
-        valid_actions.append(action.squeeze().tolist())
+            action, log_prob, entropy = network(obs)
 
-    # Verify all actions respect the mask
-    for action in valid_actions:
-        # The first and last bits should be 0 because we masked them to prevent 1
-        assert action[0] == 0
-        assert action[3] == 0
-        # Positions 1 and 2 can be either 0 or 1
+        # Test action_entropy matches the entropy from forward
+        manual_entropy = network.action_entropy()
+        torch.testing.assert_close(entropy, manual_entropy)
+
+        # Specific tests for each action space type
+        if isinstance(action_space, spaces.Box):
+            # For continuous spaces, log_prob should be scalar
+            assert log_prob.shape == torch.Size([1])
+            # Entropy should be positive for continuous distributions
+            assert torch.all(entropy > 0)
+
+        elif isinstance(action_space, spaces.Discrete):
+            # For discrete spaces, log_prob is scalar
+            assert log_prob.shape == torch.Size([1])
+            # Entropy should be positive and at most log(n)
+            assert torch.all(entropy > 0)
+            assert torch.all(
+                entropy <= torch.log(torch.tensor(action_space.n, dtype=torch.float))
+            )
+
+        elif isinstance(action_space, spaces.MultiDiscrete):
+            # For multi-discrete spaces, log_prob is scalar (sum of log probs)
+            assert log_prob.shape == torch.Size([1])
+            # Entropy should be positive
+            assert torch.all(entropy > 0)
+
+        elif isinstance(action_space, spaces.MultiBinary):
+            # For multi-binary spaces, log_prob is scalar
+            assert log_prob.shape == torch.Size([1])
+            # Entropy should be positive
+            assert torch.all(entropy > 0)
+
+        # Test action_log_prob gives value for the chosen action
+        # Note: This may not give exactly the same value as from forward
+        # since the distribution is resampled, but we can check it has the right shape
+        manual_log_prob = network.action_log_prob(action)
+        assert manual_log_prob.shape == log_prob.shape

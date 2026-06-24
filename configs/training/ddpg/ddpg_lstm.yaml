@@ -50,20 +50,20 @@ MUTATION_PARAMS:
     MAX_LEARN_STEP: 16
 
 NET_CONFIG:
-    latent_dim: 64
-    recurrent: true
+    latent_dim: 64                    # Latent representation dimension
+    recurrent: true                   # Use recurrent (LSTM) encoder
 
     encoder_config:
-        use_hidden_state: true
-        layer_norm: true
-        hidden_size: 64
-        min_mlp_nodes: 64
-        max_mlp_nodes: 500
+        use_hidden_state: true        # Use LSTM hidden state as output
+        layer_norm: true              # Apply layer normalization
+        hidden_size: 64               # LSTM hidden state size
+        min_mlp_nodes: 64             # Min MLP nodes for architecture mutation
+        max_mlp_nodes: 500            # Max MLP nodes for architecture mutation
 
     head_config:
-        hidden_size: [64]
-        activation: ReLU
-        min_hidden_layers: 1
-        max_hidden_layers: 3
-        min_mlp_nodes: 64
-        max_mlp_nodes: 500
+        hidden_size: [64]             # Head hidden layer sizes
+        activation: ReLU              # Activation function
+        min_hidden_layers: 1          # Min hidden layers for architecture mutation
+        max_hidden_layers: 3          # Max hidden layers for architecture mutation
+        min_mlp_nodes: 64             # Min MLP nodes for architecture mutation
+        max_mlp_nodes: 500            # Max MLP nodes for architecture mutation

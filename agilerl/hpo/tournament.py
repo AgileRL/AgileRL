@@ -1,7 +1,7 @@
 import numpy as np
 from accelerate.utils import broadcast_object_list
 
-from agilerl.algorithms.core.base import EvolvableAlgorithm
+from agilerl.algorithms.core.base import EvolvableAlgorithm, LLMAlgorithm
 
 PopulationType = list[EvolvableAlgorithm]
 
@@ -80,7 +80,7 @@ class TournamentSelection:
         :rtype: tuple[EvolvableAlgorithm, PopulationType]
         """
         if self.language_model is None:
-            self.language_model = population[0].algo == "GRPO"
+            self.language_model = isinstance(population[0], LLMAlgorithm)
 
         return (
             self._select_llm_agents(population)

@@ -8,6 +8,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_on_policy import train_on_policy
 from agilerl.utils.utils import (
+    _check_box2d_available,
     create_population,
     make_vect_envs,
     print_hyperparams,
@@ -24,6 +25,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("============ AgileRL ============")
     print(f"DEVICE: {device}, ENV: {INIT_HP['ENV_NAME']}")
+
+    _check_box2d_available(INIT_HP["ENV_NAME"])
 
     def make_env(**kwargs):
         env = gym.make(INIT_HP["ENV_NAME"])

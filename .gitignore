@@ -72,6 +72,9 @@ instance/
 # Sphinx documentation
 docs/_build/
 
+# Inter fonts (downloaded to user cache by agilerl.utils.plot_style)
+docs/_static/fonts/inter/
+
 # PyBuilder
 target/
 
@@ -106,6 +109,8 @@ celerybeat.pid
 # Environments
 .env
 .vscode/
+.cursor/
+.claude/
 .venv*/
 venv/
 env.bak/
@@ -141,3 +146,10 @@ data/wordle.zip
 
 # WandB
 wandb/
+
+# Cursor
+.cursor
+
+# AI assistant instructions
+CLAUDE.md
+AGENTS.md

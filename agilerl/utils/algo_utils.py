@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from functools import singledispatch
 from numbers import Number
-from typing import Any, ForwardRef, NoReturn, Union
+from typing import TYPE_CHECKING, Any, ForwardRef, NoReturn, Union
 
 import numpy as np
 import torch
@@ -40,6 +40,9 @@ from agilerl.typing import (
     SupportedObsSpaces,
     TorchObsType,
 )
+
+if TYPE_CHECKING:
+    from agilerl.algorithms.core.base import EvolvableAlgorithm
 
 if HAS_LLM_DEPENDENCIES:
     from peft import PeftModel, get_peft_model
@@ -897,16 +900,22 @@ def preprocess_observation(
 
     :param observation_space: The observation space of the environment, defaults to the agent's observation space
     :type observation_space: spaces.Space
+    :type observation_space: spaces.Space
     :param observation: Observations of environment
+    :type observation: ObservationType
     :type observation: ObservationType
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to "cpu"
     :type device: str | torch.device, optional
+    :type device: str | torch.device, optional
     :param normalize_images: Normalize images from [0. 255] to [0, 1], defaults to True
+    :type normalize_images: bool, optional
     :type normalize_images: bool, optional
     :param placeholder_value: The value to use as placeholder for missing observations, defaults to None.
     :type placeholder_value: Any | None, optional
+    :type placeholder_value: Any | None, optional
 
     :return: Preprocessed observations
+    :rtype: TorchObsType
     :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or tuple[torch.Tensor[float], ...]
     """
     msg = f"AgileRL currently doesn't support {type(observation_space)} spaces."
@@ -926,11 +935,17 @@ def preprocess_dict_observation(
     """Preprocess dictionary observations.
 
     :param observation: Dictionary observation
+    :type observation: dict[str, np.ndarray | torch.Tensor]
     :param observation_space: Dictionary observation space
+    :type observation_space: spaces.Dict
     :param device: Computing device
+    :type device: str | torch.device, optional
     :param normalize_images: Whether to normalize images
+    :type normalize_images: bool, optional
     :param placeholder_value: Value to replace NaNs with
+    :type placeholder_value: Any | None, optional
     :return: Preprocessed dictionary observation
+    :rtype: dict[str, TorchObsType]
     """
     assert isinstance(
         observation,
@@ -961,11 +976,17 @@ def preprocess_tuple_observation(
     """Preprocess tuple observations.
 
     :param observation: Tuple observation
+    :type observation: tuple[np.ndarray | torch.Tensor, ...]
     :param observation_space: Tuple observation space
+    :type observation_space: spaces.Tuple
     :param device: Computing device
+    :type device: str | torch.device, optional
     :param normalize_images: Whether to normalize images
+    :type normalize_images: bool, optional
     :param placeholder_value: Value to replace NaNs with
+    :type placeholder_value: Any | None, optional
     :return: Preprocessed tuple observation
+    :rtype: tuple[TorchObsType, ...]
     """
     if isinstance(observation, TensorDict):
         # Convert to tuple with values ordered by index at the end of key
@@ -1001,11 +1022,17 @@ def preprocess_box_observation(
     """Preprocess box observations (continuous spaces).
 
     :param observation: Box observation
+    :type observation: np.ndarray | torch.Tensor
     :param observation_space: Box observation space
+    :type observation_space: spaces.Box
     :param device: Computing device
+    :type device: str | torch.device, optional
     :param normalize_images: Whether to normalize images
+    :type normalize_images: bool, optional
     :param placeholder_value: Value to replace NaNs with
+    :type placeholder_value: Any | None, optional
     :return: Preprocessed box observation
+    :rtype: torch.Tensor
     """
     # Convert to tensor
     observation = obs_to_tensor(observation, device)
@@ -1033,11 +1060,17 @@ def preprocess_discrete_observation(
     """Preprocess discrete observations.
 
     :param observation: Discrete observation
+    :type observation: np.ndarray | torch.Tensor
     :param observation_space: Discrete observation space
+    :type observation_space: spaces.Discrete
     :param device: Computing device
+    :type device: str | torch.device, optional
     :param normalize_images: Whether to normalize images
+    :type normalize_images: bool, optional
     :param placeholder_value: Value to replace NaNs with
+    :type placeholder_value: Any | None, optional
     :return: Preprocessed discrete observation (one-hot encoded)
+    :rtype: torch.Tensor
     """
     # Convert to tensor
     observation = obs_to_tensor(observation, device)
@@ -1070,11 +1103,17 @@ def preprocess_multidiscrete_observation(
     """Preprocess multi-discrete observations.
 
     :param observation: Multi-discrete observation
+    :type observation: np.ndarray | torch.Tensor
     :param observation_space: Multi-discrete observation space
+    :type observation_space: spaces.MultiDiscrete
     :param device: Computing device
+    :type device: str | torch.device, optional
     :param normalize_images: Whether to normalize images
+    :type normalize_images: bool, optional
     :param placeholder_value: Value to replace NaNs with
+    :type placeholder_value: Any | None, optional
     :return: Preprocessed multi-discrete observation (one-hot encoded)
+    :rtype: torch.Tensor
     """
     # Convert to tensor
     observation = obs_to_tensor(observation, device)
@@ -1109,11 +1148,17 @@ def preprocess_multibinary_observation(
     """Preprocess multi-binary observations.
 
     :param observation: Multi-binary observation
+    :type observation: np.ndarray | torch.Tensor
     :param observation_space: Multi-binary observation space
+    :type observation_space: spaces.MultiBinary
     :param device: Computing device
+    :type device: str | torch.device, optional
     :param normalize_images: Whether to normalize images
+    :type normalize_images: bool, optional
     :param placeholder_value: Value to replace NaNs with
+    :type placeholder_value: Any | None, optional
     :return: Preprocessed multi-binary observation
+    :rtype: torch.Tensor
     """
     # Convert to tensor
     observation = obs_to_tensor(observation, device)
@@ -1412,33 +1457,144 @@ class CosineLRScheduleConfig:
 
 @dataclass
 class VLLMConfig:
-    """Data class to configure a VLLM client.
+    """Data class to configure a colocated vLLM instance.
 
-    Note: has the same defaults as the VLLMClient class from trl library.
+    :param tensor_parallel_size: Number of GPUs for tensor parallelism, defaults to 1.
+    :type tensor_parallel_size: int, optional
+    :param gpu_memory_utilization: Fraction of GPU memory to reserve for vLLM KV cache,
+        defaults to 0.3.
+    :type gpu_memory_utilization: float, optional
+    :param max_num_seqs: Maximum number of sequences processed concurrently.  For GRPO,
+        set this to at least ``group_size`` to avoid request queuing, defaults to 8.
+    :type max_num_seqs: int, optional
+    :param max_num_batched_tokens: Cap on tokens vLLM may process in one scheduler
+        iteration (prefill batching / compile profiling).  ``None`` uses
+        :func:`~agilerl.utils.llm_utils.resolve_vllm_max_num_batched_tokens`
+        (not ``max_num_seqs * max_model_len``, which OOMs long-context colocated
+        init).  Set explicitly when you need full parallel max-length prefills.
+    :type max_num_batched_tokens: int | None, optional
+    :param sleep_mode: Put vLLM to sleep between ``get_action`` calls to free GPU memory
+        for training.  Cannot be used with agent populations on a single device,
+        defaults to False.
+    :type sleep_mode: bool, optional
+    :param dtype: Model weight dtype passed to the vLLM ``LLM`` constructor
+        (e.g. ``"bfloat16"``, ``"float16"``).  ``None`` lets vLLM choose,
+        defaults to None.
+    :type dtype: str | None, optional
+    :param quantization: Quantization method passed to the vLLM ``LLM`` constructor
+        (e.g. ``"awq"``, ``"gptq"``).  ``None`` disables quantization, defaults to None.
+    :type quantization: str | None, optional
+    :param vllm_model_name_or_path: Optional HF id or path for the vLLM engine only.
+        When set, the trainer may use a different ``model_name`` (e.g. bnb NF4 base)
+        while rollout loads this checkpoint (e.g. an AWQ export).  ``None`` uses the
+        trainer model path, defaults to None.
+    :type vllm_model_name_or_path: str | None, optional
+    :param kv_cache_dtype: Bare passthrough to vLLM's ``kv_cache_dtype`` kwarg
+        (e.g. ``"fp8"`` on Hopper+ / Ada / Blackwell, ``"auto"``).  AgileRL does
+        not validate any value — the string is forwarded verbatim and vLLM
+        emits its own hardware errors / warnings.  ``None`` (the default) omits
+        the kwarg so vLLM keeps its own default.  FP8 KV requires compute
+        capability 8.9+; on A100 leave this unset.
+    :type kv_cache_dtype: str | None, optional
+    :param stop_sequences: List of strings that terminate generation early (e.g.
+        ``["</answer>"]``).  Passed as ``stop`` to ``SamplingParams``, defaults to None.
+    :type stop_sequences: list[str] | None, optional
+    :param presence_penalty: Penalise tokens that have already appeared in the output;
+        positive values discourage repetition.  Passed to ``SamplingParams``,
+        defaults to 0.0 (disabled).
+    :type presence_penalty: float, optional
+    :param frequency_penalty: Penalise tokens proportionally to how often they have
+        appeared so far.  Passed to ``SamplingParams``, defaults to 0.0 (disabled).
+    :type frequency_penalty: float, optional
+    :param max_lora_rank: Maximum LoRA rank passed to the vLLM ``LLM`` constructor.
+        Should be at least the trainer's ``lora_config.r``.  Defaults to 16.
+    :type max_lora_rank: int, optional
+    :param max_loras: Maximum number of LoRA adapters vLLM can hold concurrently.
+        Defaults to 1 (actor rollout only).
+    :type max_loras: int, optional
+    :param kv_cache_memory_bytes: Manually pin KV cache size in bytes instead of
+        letting vLLM auto-size from ``gpu_memory_utilization``.  When set, vLLM
+        uses this exact value for the KV cache and skips the auto-sizing path
+        in ``determine_available_memory`` — but ``gpu_memory_utilization`` is
+        **still honoured** by the upfront ``free_memory >= total_memory *
+        gpu_memory_utilization`` startup check in
+        ``vllm/v1/worker/gpu_worker.py:init_device``.  When running multiple
+        vLLM processes concurrently you must keep ``gpu_memory_utilization``
+        small enough that every worker's startup check passes.
 
-    :param base_url: Base URL of the VLLM server, defaults to None
-    :type base_url: str | None, optional
-    :param host: Host of the VLLM server, defaults to "0.0.0.0"
-    :type host: str, optional
-    :param server_port: Server port of the VLLM server, defaults to 8000
-    :type server_port: int, optional
-    :param group_port: Group port of the VLLM server, defaults to 51216
-    :type group_port: int, optional
+        **Required for safe parallel/colocated vLLM**: vLLM's startup
+        ``determine_available_memory`` profile run asserts that GPU free-memory
+        does not increase between the pre- and post-profile snapshots.  When
+        peer processes on the same GPU release memory mid-profile (concurrent
+        xdist workers, sibling CI containers sharing one GPU), the assertion
+        fires with ``Error in memory profiling. Initial free memory ... current
+        free memory ...``.  Setting ``kv_cache_memory_bytes`` triggers vLLM's
+        early-return path in ``determine_available_memory`` and skips that
+        assertion entirely.  CI tests set this to a small value (e.g. 32 MiB)
+        on the tiny test fixture; production deployments running a single
+        vLLM should leave it unset.  Defaults to None.
+    :type kv_cache_memory_bytes: int | None, optional
+    :param strip_multimodal_towers: Free the GPU memory held by a multimodal
+        base's unused towers after engine init (text-only RL). ``True`` strips
+        the standard HF attribute names (``vision_tower``, ``audio_tower``,
+        ``multi_modal_projector``, ``embed_vision``, ``embed_audio``); a list
+        of attribute names strips those instead, for models that mount
+        unwanted modalities elsewhere. Defaults to ``False``.
+    :type strip_multimodal_towers: bool | list[str], optional
+    :param lora_staging_dir: Directory where the trained LoRA adapter is
+        exported for vLLM to (re)load each sync. ``None`` (default) uses a
+        fresh process-private temporary directory, removed on ``clean_up``.
+        Set explicitly when the rollout engine must read the adapter from a
+        known path (e.g. orchestrated/arena deployments); user-supplied
+        directories are created if missing and never deleted by AgileRL.
+    :type lora_staging_dir: str | None, optional
     """
 
     # Colocate mode parameters
     tensor_parallel_size: int = 1
     gpu_memory_utilization: float = 0.3
     max_num_seqs: int = 8
+    max_num_batched_tokens: int | None = None
+    swap_space: float | None = None
+    enforce_eager: bool | None = None
     sleep_mode: bool = False
+    dtype: str | None = None
+    quantization: str | None = None
+    vllm_model_name_or_path: str | None = None
+    kv_cache_dtype: str | None = None
+    max_lora_rank: int = 16
+    max_loras: int = 1
+    strip_multimodal_towers: bool | list[str] = False
+    stop_sequences: list[str] | None = None
+    presence_penalty: float = 0.0
+    frequency_penalty: float = 0.0
+    # See class docstring above. Required to avoid vLLM's memory-profiling
+    # assertion when running multiple vLLM processes on a shared GPU.
+    kv_cache_memory_bytes: int | None = None
+    lora_staging_dir: str | None = None
 
     def __post_init__(self) -> None:
+        # sleep_mode toggles the native vLLM sleep/wake cycle (base backed up to
+        # host RAM, KV freed) between rollout and training for a single colocated
+        # agent; it is not usable with a population on one device.
         if self.sleep_mode:
             warnings.warn(
-                """VLLM sleep mode cannot be used with populations of agents on a single device. To use sleep mode, ensure,
-                you are training a single agent or, alternatively, use a different device for each agent.""",
+                "VLLM sleep mode cannot be used with populations of agents on a "
+                "single device. To use sleep mode, ensure you are training a "
+                "single agent or, alternatively, use a different device for "
+                "each agent.",
                 stacklevel=2,
             )
+            if self.gpu_memory_utilization <= 0.5:
+                warnings.warn(
+                    f"vLLM sleep_mode=True with gpu_memory_utilization="
+                    f"{self.gpu_memory_utilization} — conservative for rollout "
+                    f"after sleep, but vLLM still allocates its KV pool during "
+                    f"``LLM()`` init before ``sleep()`` frees GPU memory. On "
+                    f"smaller GPUs or long context, cap init with "
+                    f"kv_cache_memory_bytes or a lower gpu_memory_utilization.",
+                    stacklevel=2,
+                )
 
 
 def create_warmup_cosine_scheduler(
@@ -1683,6 +1839,23 @@ def is_peft_model(model: nn.Module) -> bool:
     return isinstance(model, PeftModel)
 
 
+def _rename_peft_primary_adapter_keys_in_state_dict(
+    state_dict: dict[str, torch.Tensor],
+    *,
+    old_adapter: str,
+    new_adapter: str,
+) -> dict[str, torch.Tensor]:
+    """Rewrite state-dict keys when the primary PEFT adapter is renamed (e.g. to ``actor``)."""
+    if old_adapter == new_adapter:
+        return state_dict
+    out: dict[str, torch.Tensor] = {}
+    for k, v in state_dict.items():
+        nk = k.replace(f".{old_adapter}.", f".{new_adapter}.")
+        nk = nk.replace(f"lora_{old_adapter}", f"lora_{new_adapter}")
+        out[nk] = v
+    return out
+
+
 def clone_llm(
     original_model: PreTrainedModelType | DummyEvolvable,
     zero_stage: int,
@@ -1712,7 +1885,7 @@ def clone_llm(
         model_config = original_model.config
         base_model = original_model.model
         model = type(base_model)(model_config)
-        # Get all adapter names
+        adapter_names: list[str] = []
 
         if hasattr(original_model, "peft_config"):
             adapter_names = list(original_model.peft_config.keys())
@@ -1722,10 +1895,10 @@ def clone_llm(
                     "Multiple adapters detected. Only the first adapter will be used for RL finetuning.",
                     stacklevel=2,
                 )
-            # Add first adapter using get_peft_model
+            # AgileRL standardizes on adapter name "actor" for the primary adapter.
             first_adapter = adapter_names[0]
             first_config = original_model.peft_config[first_adapter]
-            model = get_peft_model(model, first_config, adapter_name=first_adapter)
+            model = get_peft_model(model, first_config, adapter_name="actor")
 
             # Add remaining adapters using add_adapter
             for adapter_name in adapter_names[1:]:
@@ -1734,20 +1907,25 @@ def clone_llm(
             model.disable_adapter()
 
         if state_dict is not None:
-            model.load_state_dict(state_dict, strict=False)
+            sd = state_dict
+            if adapter_names and adapter_names[0] != "actor":
+                sd = _rename_peft_primary_adapter_keys_in_state_dict(
+                    sd,
+                    old_adapter=adapter_names[0],
+                    new_adapter="actor",
+                )
+            model.load_state_dict(sd, strict=False)
     return model
 
 
 class DummyOptimizer:
     """Placeholder optimizer class to pass to the OptimizerWrapper when the optimizer is defined in the deepspeed config."""
 
-    def __init__(self, params: list[torch.Tensor], lr: float, **kwargs) -> None:
+    def __init__(self, params: list[torch.Tensor], **kwargs) -> None:
         """Sentinel class to use for the optimizer when the optimizer is defined in the deepspeed config.
 
         :param params: Parameters to optimize.
         :type params: list[torch.Tensor]
-        :param lr: Learning rate.
-        :type lr: float
         """
 
     def step(self, closure: Callable[[], torch.Tensor] | None = None) -> NoReturn:
@@ -1850,3 +2028,63 @@ def apply_env_defined_actions(
         action[mask] = override[mask]
         action_dict[agent_id] = action
     return action_dict
+
+
+def _resolve_lr(
+    agent: "EvolvableAlgorithm", lr: str | tuple[str, str]
+) -> tuple[str, str]:
+    """Resolve the learning rate from a string or tuple of strings.
+
+    :param lr: Learning rate
+    :type lr: str | tuple[str, str]
+    :return: Learning rate
+    :rtype: tuple[str, str]
+    """
+    if isinstance(lr, tuple):
+        return getattr(agent, lr[0]), getattr(agent, lr[1])
+    return getattr(agent, lr), None
+
+
+def inherit_init_signature(
+    parent: type, fixed: set[str] | None = None
+) -> Callable[[type], type]:
+    """Class decorator giving a subclass its ``parent``'s ``__init__`` signature.
+
+    A subclass that pins some of its parent's constructor arguments via
+    ``*args``/``**kwargs`` loses its introspectable signature
+    (``inspect.signature`` would just report ``(self, *args, **kwargs)``).
+    AgileRL reads ``inspect.signature(agent.__init__).parameters`` to build the
+    clone/checkpoint ``init_dict`` (see :class:`EvolvableAlgorithm`), so this
+    restores the parent's real parameters — minus the ones the subclass fixes —
+    on both the class and its ``__init__``.
+
+    :param parent: Parent class whose ``__init__`` signature to inherit.
+    :type parent: type
+    :param fixed: Parameter names the subclass pins internally and therefore must
+        not accept (excluded from the inherited signature), defaults to ``None``.
+    :type fixed: set[str] | None, optional
+    :return: A class decorator.
+    :rtype: Callable[[type], type]
+    """
+    fixed = fixed or set()
+    parent_sig = inspect.signature(parent.__init__)
+    kept = [p for p in parent_sig.parameters.values() if p.name not in fixed]
+
+    def decorate(cls: type) -> type:
+        if "__init__" not in cls.__dict__:
+            msg = (
+                f"{cls.__name__} must define its own __init__ before "
+                "@inherit_init_signature (otherwise the parent's signature is "
+                "mutated)."
+            )
+            raise TypeError(msg)
+        # inspect.signature(cls) is the constructor *call* — drop ``self``.
+        cls.__signature__ = parent_sig.replace(
+            parameters=[p for p in kept if p.name != "self"]
+        )
+        # inspect.signature(cls.__init__) is the *method* — keep ``self``. This
+        # is the one EvolvableAlgorithm reads to build the clone/checkpoint dict.
+        cls.__init__.__signature__ = parent_sig.replace(parameters=kept)
+        return cls
+
+    return decorate

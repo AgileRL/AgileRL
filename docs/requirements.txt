@@ -1,4 +1,5 @@
 furo
+sphinx-tabs
 sphinx-toolbox
 sphinx-notfound-page
 sphinxcontrib-googleanalytics

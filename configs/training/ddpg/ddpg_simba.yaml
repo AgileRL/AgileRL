@@ -51,21 +51,21 @@ MUTATION_PARAMS:
     MAX_LEARN_STEP: 16
 
 NET_CONFIG:
-    latent_dim: 64
-    simba: true
+    latent_dim: 64                    # Latent representation dimension
+    simba: true                       # Use SimBa (Simplicity Bias) architecture
 
     encoder_config:
-        hidden_size: 128 # [128, 128]
-        num_blocks: 2
+        hidden_size: 128 # [128, 128] # SimBa block hidden size
+        num_blocks: 2                 # Number of SimBa residual blocks
         # activation: ReLU
-        min_mlp_nodes: 64
-        max_mlp_nodes: 500
+        min_mlp_nodes: 64             # Min MLP nodes for architecture mutation
+        max_mlp_nodes: 500            # Max MLP nodes for architecture mutation
 
     head_config:
-        hidden_size: [64]
-        activation: ReLU
-        output_activation: Tanh
-        min_hidden_layers: 1
-        max_hidden_layers: 2
-        min_mlp_nodes: 64
-        max_mlp_nodes: 500
+        hidden_size: [64]             # Head hidden layer sizes
+        activation: ReLU              # Activation function
+        output_activation: Tanh       # Output activation (bounds actions to [-1, 1])
+        min_hidden_layers: 1          # Min hidden layers for architecture mutation
+        max_hidden_layers: 2          # Max hidden layers for architecture mutation
+        min_mlp_nodes: 64             # Min MLP nodes for architecture mutation
+        max_mlp_nodes: 500            # Max MLP nodes for architecture mutation

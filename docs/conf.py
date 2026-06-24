@@ -22,6 +22,7 @@ extensions = [
     "sphinx.ext.autodoc",
     "sphinx.ext.autosummary",
     "sphinx.ext.intersphinx",
+    "sphinx_tabs.tabs",
     "sphinx_toolbox.collapse",
     "sphinx_github_changelog",
     "notfound.extension",

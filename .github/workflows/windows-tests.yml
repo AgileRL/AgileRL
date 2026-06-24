@@ -6,10 +6,20 @@ on:
         branches: [main, nightly]
         paths:
             - agilerl/**
+            - tests/**
+            - .github/workflows/**
+            - pyproject.toml
     pull_request:
         branches: [main, nightly]
         paths:
             - agilerl/**
+            - tests/**
+            - .github/workflows/**
+            - pyproject.toml
+
+concurrency:
+    group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+    cancel-in-progress: true
 
 permissions:
     contents: read
@@ -38,4 +48,4 @@ jobs:
 
             - name: Test with pytest
               run: |
-                  uv run pytest --exitfirst -m "not llm" --cov=agilerl --cov-report=term-missing
+                  uv run pytest --exitfirst -m "not llm" --cov=agilerl --cov-report=term-missing --durations=0 --durations-min=1.0

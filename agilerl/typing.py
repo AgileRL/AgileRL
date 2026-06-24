@@ -4,6 +4,7 @@ from numbers import Number
 from typing import (
     Any,
     ClassVar,
+    NamedTuple,
     Protocol,
     TypedDict,
     TypeVar,
@@ -35,12 +36,15 @@ class IsDataclass(Protocol):
     __dataclass_fields__: ClassVar[dict[str, Any]]
 
 
-# TODO ideally adjust the ReasoningGym to match the PreferencePrompts type (e.g the lists/btaching happens for the values of the
-# keys, not just returning a list of 'ReasoningPrompts')
 class ReasoningPrompts(TypedDict):
     input_ids: torch.Tensor
     attention_mask: torch.Tensor
-    text: str | None
+    question: str | list[str] | None
+    answer: str | list[str] | None
+    trajectory_input_ids: torch.Tensor | None
+    trajectory_attention_mask: torch.Tensor | None
+    initial_prompt_len: int | list[int] | torch.Tensor | None
+    stitch_prefix_ids: torch.Tensor | None
 
 
 class PreferencePrompts(TypedDict):
@@ -52,6 +56,21 @@ class PreferencePrompts(TypedDict):
     chosen_attention_mask: torch.Tensor
     rejected_input_ids: torch.Tensor
     rejected_attention_mask: torch.Tensor
+
+
+class SFTPrompts(TypedDict):
+    prompt: list[str]
+    prompt_lengths: list[int]
+    response: list[str]
+    input_ids: torch.Tensor
+    attention_mask: torch.Tensor
+
+
+class CheckpointInfo(TypedDict):
+    modules: dict[str, Module]
+    optimizers: dict[str, Optimizer]
+    network_names: list[str]
+    optimizer_names: list[str]
 
 
 class MultiAgentSetup(Enum):
@@ -93,7 +112,7 @@ KernelSizeType = int | tuple[int, ...]
 GymSpaceType = SupportedObsSpaces | list[SupportedObsSpaces]
 GymEnvType = str | gym.Env | gym.vector.VectorEnv | gym.vector.AsyncVectorEnv
 PzEnvType = str | ParallelEnv
-LLMObsType = list[ReasoningPrompts]
+LLMObsType = list[ReasoningPrompts] | ReasoningPrompts
 
 NumpyObsType = np.ndarray | ArrayDict | ArrayTuple
 TorchObsType = torch.Tensor | TensorDict | TensorTuple | StandardTensorDict
@@ -131,6 +150,7 @@ PopulationType = list[EvolvableAlgorithmProtocol]
 MutationMethod = Callable[[EvolvableAlgorithmProtocol], EvolvableAlgorithmProtocol]
 ConfigType = IsDataclass | NetConfigType
 StateDict = dict[str, Any] | dict[str, dict[str, Any]] | list[dict[str, Any]]
+LrNameType = str | tuple[str, str]
 
 
 class BatchDimension:
@@ -154,3 +174,18 @@ class BPTTSequenceType(Enum):
     FIFTY_PERCENT_OVERLAP = (
         "fifty_percent_overlap"  # Generate sequences with 50% overlap
     )
+
+
+class ActionResult(NamedTuple):
+    """Structured return of an LLM algorithm's :meth:`get_action`.
+
+    A tuple subclass, so callers may unpack positionally *or* (preferred, and
+    forward-compatible if fields are added) read by attribute. ``sampling_logps``
+    holds the per-completion vLLM sampling logprobs captured for the
+    sampling-mismatch correction, or ``None`` when not captured (HF generation,
+    evaluation, or correction disabled).
+    """
+
+    completion_ids: list[torch.Tensor]
+    action_masks: list[torch.Tensor]
+    sampling_logps: list[torch.Tensor | None] | None = None

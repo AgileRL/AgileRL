@@ -692,11 +692,11 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         """Sample a mutation method based on the mutation probabilities.
 
         :param new_layer_prob: The probability of selecting a layer mutation method.
-        type new_layer_prob: float
+        :type new_layer_prob: float
         :param rng: The random number generator.
-        type rng: Generator | None
-        return: The sampled mutation method.
-        rtype: MutationMethodProtocol
+        :type rng: Generator | None
+        :return: The sampled mutation method.
+        :rtype: MutationMethodProtocol
         """
         if not self.mutation_methods:
             msg = "No mutation methods available. Please use the @mutation decorator to register methods."

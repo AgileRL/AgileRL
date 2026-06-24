@@ -18,7 +18,7 @@ INIT_HP:
     TARGET_SCORE:          # Early training stop at avg score of last 100 episodes
     GAMMA: 0.95                # Discount factor
     MEMORY_SIZE: 100_000       # Max memory buffer size
-    POLICY_FREQ: 2
+    POLICY_FREQ: 2             # Policy update frequency (delayed policy updates)
     LEARN_STEP: 16            # Learning frequency
     TAU: 0.001                  # For soft update of target parameters
     TOURN_SIZE: 2              # Tournament size
@@ -29,7 +29,7 @@ INIT_HP:
     EVAL_LOOP: 1               # Evaluation episodes
     LEARNING_DELAY: 0      # Steps before learning
     WANDB: true               # Log with Weights and Biases
-    TORCH_COMPILE: default
+    TORCH_COMPILE: default    # torch.compile mode (default, reduce-overhead, max-autotune)
 
 MUTATION_PARAMS:
     NO_MUT: 0.4                            # No mutation
@@ -51,20 +51,20 @@ MUTATION_PARAMS:
     MAX_BATCH_SIZE: 512
 
 NET_CONFIG:
-    latent_dim: 64
+    latent_dim: 64                    # Latent representation dimension
 
     encoder_config:
-        hidden_size: [64]
-        activation: ReLU
-        min_mlp_nodes: 64
-        max_mlp_nodes: 500
+        hidden_size: [64]             # Encoder hidden layer sizes
+        activation: ReLU              # Activation function
+        min_mlp_nodes: 64             # Min MLP nodes for architecture mutation
+        max_mlp_nodes: 500            # Max MLP nodes for architecture mutation
 
     head_config:
-        hidden_size: [64]
-        activation: ReLU
-        min_hidden_layers: 1
-        max_hidden_layers: 2
-        min_mlp_nodes: 64
-        max_mlp_nodes: 500
+        hidden_size: [64]             # Head hidden layer sizes
+        activation: ReLU              # Activation function
+        min_hidden_layers: 1          # Min hidden layers for architecture mutation
+        max_hidden_layers: 2          # Max hidden layers for architecture mutation
+        min_mlp_nodes: 64             # Min MLP nodes for architecture mutation
+        max_mlp_nodes: 500            # Max MLP nodes for architecture mutation
 
-DISTRIBUTED_TRAINING: false
+DISTRIBUTED_TRAINING: false           # Enable distributed multi-GPU training

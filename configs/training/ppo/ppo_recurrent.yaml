@@ -40,7 +40,8 @@ MUTATION_PARAMS:
     RL_HP_MUT: 0.2                         # Learning HP mutation
     MUT_SD: 0.1                            # Mutation strength
     RAND_SEED: 42                          # Random seed
-    MIN_LR: 0.0001                         # Define max and min limits for mutating RL hyperparams
+    # Define max and min limits for mutating RL hyperparams
+    MIN_LR: 0.0001
     MAX_LR: 0.01
     MIN_BATCH_SIZE: 8
     MAX_BATCH_SIZE: 1024
@@ -50,15 +51,15 @@ MUTATION_PARAMS:
     MAX_ENT_COEF: 0.001
 
 NET_CONFIG:
-    latent_dim: 64
+    latent_dim: 64                    # Latent representation dimension
     encoder_config:
-        hidden_state_size: 64
-        num_layers: 1
+        hidden_state_size: 64         # LSTM hidden state size
+        num_layers: 1                 # Number of recurrent layers
 
     head_config:
-        hidden_size: [128]
-        activation: ReLU
-        min_hidden_layers: 1
-        max_hidden_layers: 2
-        min_mlp_nodes: 128
-        max_mlp_nodes: 500
+        hidden_size: [128]            # Head hidden layer sizes
+        activation: ReLU              # Activation function
+        min_hidden_layers: 1          # Min hidden layers for architecture mutation
+        max_hidden_layers: 2          # Max hidden layers for architecture mutation
+        min_mlp_nodes: 128            # Min MLP nodes for architecture mutation
+        max_mlp_nodes: 500            # Max MLP nodes for architecture mutation

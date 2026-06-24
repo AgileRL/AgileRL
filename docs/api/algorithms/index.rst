@@ -146,8 +146,42 @@ Bandit Algorithms
 LLM Algorithms
 --------------
 
+.. list-table::
+   :widths: 35 20 45
+   :header-rows: 1
+
+   * - Algorithm
+     - Training Mode
+     - Notes
+   * - :ref:`GRPO <grpo>`
+     - On-policy RL
+     - Group-relative policy optimization for LLMs.
+   * - :ref:`CISPO <cispo>`
+     - On-policy RL
+     - GRPO specialization with fixed CISPO loss objective.
+   * - :ref:`GSPO <gspo>`
+     - On-policy RL
+     - GRPO specialization with fixed GSPO sequence-level objective.
+   * - :ref:`DPO <dpo>`
+     - Preference optimization
+     - Offline preference learning without reward-model RL loop.
+   * - :ref:`SFT <sft>`
+     - Supervised fine-tuning
+     - Cross-entropy on response tokens; typical warm-up before DPO/RL.
+   * - :ref:`LLM PPO <llmppo>`
+     - On-policy RL
+     - PPO-style actor-critic objective for token-level trajectories.
+   * - :ref:`LLM REINFORCE <llmreinforce>`
+     - On-policy RL
+     - REINFORCE-style policy-gradient objective for LLM finetuning.
+
 .. toctree::
    :maxdepth: 1
 
    grpo
+   cispo
+   gspo
    dpo
+   sft
+   llmppo
+   llmreinforce
