@@ -170,7 +170,7 @@ class TestRainbowDQNInit:
             RainbowDQN(vector_space, discrete_space, actor_network=actor_network)
         assert (
             str(exc_info.value)
-            == f"'actor_network' argument is of type {type(actor_network)}, but must be of type nn.Module."
+            == f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule."
         )
 
     # Can initialize DQN with an actor network

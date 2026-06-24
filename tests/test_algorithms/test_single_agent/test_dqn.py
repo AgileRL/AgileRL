@@ -229,7 +229,7 @@ class TestDQNInit:
             DQN(vector_space, discrete_space, actor_network=actor_network)
         assert (
             str(exc_info.value)
-            == f"'actor_network' argument is of type {type(actor_network)}, but must be of type nn.Module."
+            == f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule."
         )
 
     def test_optimizer_updates_actor_parameters(self, vector_space, discrete_space):
