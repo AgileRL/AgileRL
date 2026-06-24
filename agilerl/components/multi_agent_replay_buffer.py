@@ -1,13 +1,12 @@
-import random
 from collections import deque, namedtuple
 from numbers import Number
-from typing import Any, NamedTuple
+from typing import Any
 
 import numpy as np
 import torch
+from tensordict import TensorDict
 
 from agilerl.typing import NumpyObsType
-from agilerl.utils.algo_utils import obs_to_tensor
 
 NpTransitionType = Number | np.ndarray | dict[str, np.ndarray]
 TorchTransitionType = torch.Tensor | dict[str, torch.Tensor]
@@ -46,13 +45,65 @@ class MultiAgentReplayBuffer:
         self.device: str | None = device
         self.agent_ids: list[str] = agent_ids
 
+        # TensorDict storage
+        self._storage: TensorDict | None = None
+        self._cursor = 0
+        self._size = 0
+        self._initialized = False
+
     def __len__(self) -> int:
         """Return the current size of internal memory.
 
         :return: Length of the memory
         :rtype: int
         """
-        return len(self.memory)
+        return self._size
+
+    def _init_storage(self, data: dict[str, dict[str, Any]]) -> None:
+        """Initialize the TensorDict storage given sample data.
+
+        :param data: Sample transition data
+        :type data: dict[str, dict[str, Any]]
+        """
+        storage_dict = {}
+        for field in self.field_names:
+            field_data = data[field]
+            agent_dict = {}
+            for agent_id in self.agent_ids:
+                agent_data = field_data[agent_id]
+                if isinstance(agent_data, torch.Tensor):
+                    tensor = agent_data.unsqueeze(0)  # Add batch dim
+                else:
+                    tensor = torch.tensor(agent_data, dtype=torch.float32).unsqueeze(0)
+                agent_dict[agent_id] = torch.zeros_like(
+                    tensor.expand((self.memory_size, *tensor.shape[1:]))
+                )
+            storage_dict[field] = TensorDict(agent_dict, batch_size=[self.memory_size])
+
+        self._storage = TensorDict(storage_dict, batch_size=[self.memory_size])
+        self._initialized = True
+
+    def _add_transition(self, data: dict[str, dict[str, Any]]) -> None:
+        """Add a transition to the TensorDict storage.
+
+        :param data: Transition data
+        :type data: dict[str, dict[str, Any]]
+        """
+        if not self._initialized:
+            self._init_storage(data)
+
+        for field in self.field_names:
+            for agent_id in self.agent_ids:
+                agent_data = data[field][agent_id]
+                if not isinstance(agent_data, torch.Tensor):
+                    agent_data = torch.tensor(agent_data, dtype=torch.float32)
+                if self.device is not None:
+                    agent_data = agent_data.to(self.device)
+                self._storage[field][agent_id][self._cursor] = agent_data
+
+        self._cursor = (self._cursor + 1) % self.memory_size
+        self._size = min(self._size + 1, self.memory_size)
+        self.counter += 1
 
     @staticmethod
     def stack_transitions(transitions: list[NumpyObsType]) -> NumpyObsType:
@@ -100,72 +151,6 @@ class MultiAgentReplayBuffer:
 
         return ts
 
-    def _add(self, *args: dict[str, NumpyObsType]) -> None:
-        """Add experience to memory.
-
-        :param args: Variable length argument list for experience fields
-        :type args: Any
-        """
-        e = self.experience(*args)
-        self.memory.append(e)
-
-    def _process_transition(
-        self,
-        experiences: list[NamedTuple],
-        np_array: bool = False,
-    ) -> dict[str, dict[str, Any]]:
-        """Return transition dictionary from experiences.
-
-        :param experiences: List of experiences
-        :type experiences: list[NamedTuple]
-        :param np_array: Flag to return numpy arrays instead of tensors, defaults to False
-        :type np_array: bool, optional
-        :return: Transition dictionary
-        :rtype: dict[str, dict[str, Any]]
-        """
-        transition = {field: {} for field in self.field_names}
-        experiences_filtered = [e for e in experiences if e is not None]
-
-        for field in self.field_names:
-            is_binary_field = field in [
-                "done",
-                "termination",
-                "terminated",
-                "truncation",
-                "truncated",
-            ]
-
-            for agent_id in self.agent_ids:
-                # Get field values for each agent
-                ts = [getattr(e, field)[agent_id] for e in experiences_filtered]
-
-                # Stack transitions if necessary
-                ts = MultiAgentReplayBuffer.stack_transitions(ts)
-
-                if is_binary_field and not np.isnan(ts).any():
-                    ts = ts.astype(np.uint8)
-
-                if not np_array:
-                    ts = obs_to_tensor(ts, self.device)
-
-                transition[field][agent_id] = ts
-
-        return transition
-
-    def sample(self, batch_size: int, *args: Any) -> tuple:
-        """Return sample of experiences from memory.
-
-        :param batch_size: Number of samples to return
-        :type batch_size: int
-        :param args: Additional arguments
-        :type args: Any
-        :return: Sampled experiences
-        :rtype: Tuple
-        """
-        experiences = random.sample(self.memory, k=batch_size)
-        transition = self._process_transition(experiences)
-        return tuple(transition.values())
-
     def save_to_memory_single_env(self, *args: dict[str, NumpyObsType]) -> None:
         """Save experience to memory.
 
@@ -173,8 +158,24 @@ class MultiAgentReplayBuffer:
             e.g. state, action, reward, next_state, done
         :type args: Any
         """
-        self._add(*args)
-        self.counter += 1
+        # Convert to the internal format
+        transition_data = {field: args[i] for i, field in enumerate(self.field_names)}
+        self._add_transition(transition_data)
+
+    def save_to_memory_vect_envs(self, *args: dict[str, NumpyObsType]) -> None:
+        """Save multiple experiences to memory.
+
+        :param args: Variable length argument list. Contains batched transition elements in consistent order,
+            e.g. states, actions, rewards, next_states, dones
+        :type args: Any
+        """
+        # Reorganize batched data
+        args = self._reorganize_dicts(*args)
+        for transition in zip(*args, strict=False):
+            transition_data = {
+                field: transition[i] for i, field in enumerate(self.field_names)
+            }
+            self._add_transition(transition_data)
 
     def _reorganize_dicts(
         self,
@@ -210,33 +211,33 @@ class MultiAgentReplayBuffer:
 
         return tuple(results)
 
-    def save_to_memory_vect_envs(self, *args: dict[str, NumpyObsType]) -> None:
-        """Save multiple experiences to memory.
+    def sample(self, batch_size: int, *args: Any) -> tuple:
+        """Return sample of experiences from memory.
 
-        :param args: Variable length argument list. Contains batched transition elements in consistent order,
-            e.g. states, actions, rewards, next_states, dones
+        :param batch_size: Number of samples to return
+        :type batch_size: int
+        :param args: Additional arguments
         :type args: Any
+        :return: Sampled experiences
+        :rtype: Tuple
         """
-        args = self._reorganize_dicts(*args)
-        for transition in zip(*args, strict=False):
-            self._add(*transition)
-            self.counter += 1
+        if self._size == 0:
+            return tuple({} for _ in self.field_names)
 
-    def save_to_memory(
-        self,
-        *args: dict[str, NumpyObsType],
-        is_vectorised: bool = False,
-    ) -> None:
-        """Apply appropriate save_to_memory function depending on whether
-        the environment is vectorized or not.
+        # Sample indices
+        indices = torch.randperm(self._size)[:batch_size]
 
-        :param args: Variable length argument list. Contains batched or unbatched transition elements in consistent order,
-            e.g. states, actions, rewards, next_states, dones
-        :type args: Any
-        :param is_vectorised: Boolean flag indicating if the environment has been vectorized
-        :type is_vectorised: bool
-        """
-        if is_vectorised:
-            self.save_to_memory_vect_envs(*args)
-        else:
-            self.save_to_memory_single_env(*args)
+        # Sample from TensorDict
+        sampled = self._storage[indices]
+
+        # Convert back to the expected format
+        transition = {}
+        for field in self.field_names:
+            field_dict = {}
+            for agent_id in self.agent_ids:
+                agent_data = sampled[field][agent_id]
+                # Convert to numpy for compatibility
+                field_dict[agent_id] = agent_data.cpu().numpy()
+            transition[field] = field_dict
+
+        return tuple(transition.values())
