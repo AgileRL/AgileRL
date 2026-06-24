@@ -22,10 +22,16 @@ dependencies = [
 arena = "agilerl.arena.cli:main"
 
 [build-system]
-requires = ["setuptools>=69", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["agilerl.arena*"]
-namespaces = true
+[tool.hatch.build]
+# Root .gitignore lists /agilerl/arena for the dev symlink; hatch's VCS
+# file selection still filters agilerl/arena paths unless this is disabled.
+ignore-vcs = true
+
+[tool.hatch.build.targets.wheel]
+only-include = ["agilerl/arena"]
+
+[tool.hatch.build.targets.sdist]
+only-include = ["agilerl/arena", "README.md"]

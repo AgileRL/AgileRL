@@ -1,5 +1,5 @@
-# Symlink for Pylance/Pyright type checking of namespace package
-agilerl/arena
+# Symlink for Pylance/Pyright type checking of namespace package (repo root only)
+/agilerl/arena
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -162,5 +162,5 @@ wandb/
 CLAUDE.md
 AGENTS.md
 
-# Simlink for type-checking
-agilerl/arena/
+# Symlink for type-checking (repo root only)
+/agilerl/arena/

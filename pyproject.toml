@@ -94,12 +94,6 @@ docs = [
     "sphinxcontrib-googleanalytics>=0.5",
 ]
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["agilerl*"]
-exclude = ["agilerl.arena*"]
-namespaces = true
-
 [tool.uv.workspace]
 members = ["agilerl-arena"]
 
@@ -178,10 +172,11 @@ override-dependencies = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["agilerl"]
+exclude = ["agilerl/arena"]
 
 [tool.hatch.build.targets.sdist]
 include = ["agilerl", "README.md", "LICENSE", "pyproject.toml"]
-exclude = ["agilerl-arena"]
+exclude = ["agilerl-arena", "agilerl/arena"]
 
 [tool.ruff]
 target-version = "py310"
