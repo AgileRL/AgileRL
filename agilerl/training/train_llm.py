@@ -986,7 +986,7 @@ def train_llm_rollout(
     Collects token-level episodes (``reset`` returns ``(obs, info)``,
     repeated ``get_action`` / ``step`` (full completion tensor), then
     ``get_episode_data``), then runs turn-level PPO updates. For
-    ``RolloutEnvWrapper`` with ``max_model_len`` set, a trajectory whose
+    ``RolloutEnv`` with ``max_model_len`` set, a trajectory whose
     cumulative prompt would overflow the context is stopped with
     ``truncated=True``.
 

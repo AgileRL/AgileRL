@@ -19,7 +19,7 @@ from transformers.modeling_utils import PreTrainedModel
 
 from agilerl.algorithms.core import ActionResult
 from agilerl.algorithms.reinforce_llm import REINFORCE
-from agilerl.llm_envs import RolloutEnvWrapper
+from agilerl.llm_envs import RolloutEnv
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.utils import (
@@ -339,9 +339,9 @@ class _RebnStub:
 
 
 def _minimal_reasoning_rollout_env(device: str, vocab_size: int, input_size: int):
-    """Single-turn reasoning ``RolloutEnvWrapper`` stub (the folded reasoning case)."""
+    """Single-turn reasoning ``RolloutEnv`` stub (the folded reasoning case)."""
 
-    class _SingleTurnReasoning(RolloutEnvWrapper):
+    class _SingleTurnReasoning(RolloutEnv):
         max_turns = 1
 
         def __init__(self):
@@ -1013,7 +1013,7 @@ class TestREINFORCETest:
         assert out.item() == pytest.approx(1.0)
 
     def test_test_method_multiturn_episode_env_branch(self):
-        class DummyMultiTurnEpisodeEnv(RolloutEnvWrapper):
+        class DummyMultiTurnEpisodeEnv(RolloutEnv):
             max_turns = 2
 
             def __init__(self):
@@ -1066,22 +1066,23 @@ class TestREINFORCETest:
 
     def test_test_method_unknown_env_typeerror(self):
         rf = _cpu_llmreinforce()
-        with pytest.raises(TypeError, match="env must be a RolloutEnvWrapper"):
+        with pytest.raises(TypeError, match="env must be a RolloutEnv"):
             rf.test(object(), loop=1)
 
     def test_test_method_token_observation_wrapper_branch(self):
         from transformers import AutoTokenizer
 
         from agilerl.utils.probe_envs_llm import ConstantTargetEnv
-        from agilerl.llm_envs import RolloutEnvWrapper
+        from agilerl.llm_envs import RolloutEnv, local_transport
 
         tok = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
         if tok.pad_token_id is None:
             tok.pad_token = tok.eos_token
-        env = RolloutEnvWrapper(
-            ConstantTargetEnv(target_digit="1", prompt="1"),
+        env = RolloutEnv(
+            None,
             tok,
             max_turns=1,
+            transport=local_transport(ConstantTargetEnv(target_digit="1", prompt="1")),
             pad_id=tok.pad_token_id,
             apply_chat_template=False,
             max_model_len=128,

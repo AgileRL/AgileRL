@@ -1,4 +1,4 @@
-"""Tests for RolloutEnvWrapper prompt fields and context-overflow handling."""
+"""Tests for RolloutEnv prompt fields and context-overflow handling."""
 
 from __future__ import annotations
 
@@ -10,7 +10,8 @@ import torch
 
 from agilerl.llm_envs import (
     BatchRolloutEnv,
-    RolloutEnvWrapper,
+    RolloutEnv,
+    local_transport,
 )
 
 # The boundary marker is a per-render ``uuid4().hex`` (32 lowercase hex chars);
@@ -23,8 +24,8 @@ class _StubTokenizer:
         return "x" * len(ids)
 
 
-def _bare_wrapper() -> RolloutEnvWrapper:
-    w = RolloutEnvWrapper.__new__(RolloutEnvWrapper)
+def _bare_wrapper() -> RolloutEnv:
+    w = RolloutEnv.__new__(RolloutEnv)
     w.tools = None  # optional config; __init__ default, read by the tokenize paths
     w.sampling_logps = []  # read by get_episode_data
     return w
@@ -67,14 +68,15 @@ class _RecordingGemEnv:
         return "", 1.0, True, False, {}
 
 
-class TestRolloutEnvWrapperReset:
+class TestRolloutEnvReset:
     def test_reset_returns_tuple_with_text_and_sets_prompt_len(self) -> None:
         inner = _RecordingGemEnv()
-        w = RolloutEnvWrapper(
-            inner,
+        w = RolloutEnv(
+            None,
             _ChrTokenizer(),
             max_turns=3,
             pad_id=None,
+            transport=local_transport(inner),
             apply_chat_template=False,
         )
         obs, info = w.reset()
@@ -84,14 +86,15 @@ class TestRolloutEnvWrapperReset:
         assert w._last_full_prompt_token_len == obs["input_ids"].shape[1]
 
 
-class TestRolloutEnvWrapperStep:
+class TestRolloutEnvStep:
     def test_step_from_full_completion_slices_generation(self) -> None:
         inner = _RecordingGemEnv()
-        w = RolloutEnvWrapper(
-            inner,
+        w = RolloutEnv(
+            None,
             _ChrTokenizer(),
             max_turns=3,
             pad_id=None,
+            transport=local_transport(inner),
             apply_chat_template=False,
         )
         obs, _ = w.reset()
@@ -111,11 +114,12 @@ class TestRolloutEnvWrapperStep:
 
     def test_chat_template_paths_and_nonterminal_step_feedback_append(self) -> None:
         env = _NonTerminalEnv()
-        w = RolloutEnvWrapper(
-            env,
+        w = RolloutEnv(
+            None,
             _ChatTokenizer(),
             max_turns=2,
             pad_id=None,
+            transport=local_transport(env),
             apply_chat_template=True,
         )
         obs, _ = w.reset()
@@ -134,11 +138,12 @@ class TestRolloutEnvWrapperStep:
 
     def test_non_chat_feedback_tokenization_path(self) -> None:
         env = _NonTerminalEnv()
-        w = RolloutEnvWrapper(
-            env,
+        w = RolloutEnv(
+            None,
             _ChrTokenizer(),
             max_turns=2,
             pad_id=None,
+            transport=local_transport(env),
             apply_chat_template=False,
         )
         obs, _ = w.reset()
@@ -158,11 +163,12 @@ class TestRolloutEnvWrapperStep:
         env = _NonTerminalEnv()
         # Tiny budget: 20 - 4 = 16 prompt tokens. Initial prompt "P:hello\nS"
         # is 9 char-tokens; +2 gen +12 feedback ("F:feedback\nT") => 23 > 16.
-        w = RolloutEnvWrapper(
-            env,
+        w = RolloutEnv(
+            None,
             _ChrTokenizer(),
             max_turns=4,
             pad_id=None,
+            transport=local_transport(env),
             apply_chat_template=False,
             max_model_len=20,
             max_output_tokens=4,
@@ -184,7 +190,7 @@ class TestRolloutEnvWrapperStep:
         assert overflow["full_prompt_len"] > overflow["max_prompt_tokens"]
 
 
-class TestRolloutEnvWrapperChatTemplateBoundary:
+class TestRolloutEnvChatTemplateBoundary:
     """Verify the assistant→user→assistant boundary is computed via the
     tokenizer's chat template rather than hard-coded ChatML markers."""
 
@@ -391,7 +397,7 @@ class _ChrTokenizerWithChatTemplateBroken(_ChrTokenizer):
     """Has no apply_chat_template at all, so the boundary diff path errors."""
 
 
-class TestRolloutEnvWrapperPolicyObservationFromState:
+class TestRolloutEnvPolicyObservationFromState:
     def test_policy_observation_returns_current_prompt_fields(self) -> None:
         """The policy observation carries the current ``input_ids`` directly."""
         w = _bare_wrapper()
@@ -712,7 +718,7 @@ class _NestedChatTokenizer(_ChatTokenizer):
         return out
 
 
-class TestRolloutEnvWrapperTokenizeInitialPrompt:
+class TestRolloutEnvTokenizeInitialPrompt:
     def test_initial_prompt_unwraps_batched_token_id_lists(self) -> None:
         """Tokenizers returning ``[[ids]]`` (batch dim) and ``[ids]`` (flat)
         from ``apply_chat_template`` must produce identical ``(1, T)``
@@ -747,16 +753,13 @@ class _NonTerminalEnv:
         return "done", 1.0, True, False, {}
 
 
-class TestRolloutEnvWrapperFormatObs:
+class TestRolloutEnvFormatObs:
     def test_format_obs_prefix_suffix_and_empty_info(self) -> None:
-        assert RolloutEnvWrapper._format_obs("x", None) == "x"
-        assert (
-            RolloutEnvWrapper._format_obs("x", {"prefix": "A:", "suffix": "B"})
-            == "A:x\nB"
-        )
+        assert RolloutEnv._format_obs("x", None) == "x"
+        assert RolloutEnv._format_obs("x", {"prefix": "A:", "suffix": "B"}) == "A:x\nB"
 
 
-class TestRolloutEnvWrapperGetEpisodeData:
+class TestRolloutEnvGetEpisodeData:
     def test_get_episode_data_padding_and_pad_mask(self) -> None:
         w = _bare_wrapper()
         w.pad_id = 0
@@ -779,7 +782,7 @@ class TestRolloutEnvWrapperGetEpisodeData:
             w.get_episode_data()
 
 
-class TestRolloutEnvWrapperGetDebugInfo:
+class TestRolloutEnvGetDebugInfo:
     def test_get_debug_info_paths(self) -> None:
         w = _bare_wrapper()
         w.full_ids = None

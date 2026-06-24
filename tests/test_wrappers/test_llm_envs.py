@@ -15,6 +15,7 @@ from transformers.tokenization_utils_base import BatchEncoding
 from agilerl.llm_envs import (
     DatasetEnv,
     LLMEnv,
+    ReasoningEnv,
     RolloutEnv,
     apply_chat_template,
 )
@@ -780,23 +781,29 @@ def test_batch_rollout_env_shuffle_is_group_consistent_full_permutation():
     questions = [f"q{i}" for i in range(dataset_size)]
     answers = [f"a{i}" for i in range(dataset_size)]
 
-    class _RowRecordingEnv(RolloutEnv):
-        # Conform to the pooled-env contract BatchRolloutEnv reads (this test
-        # exercises only reset/cursor, so a minimal current_prompt is enough).
+    class _RowRecordingEnv:
+        """Minimal pooled env recording the ``row_index`` BatchRolloutEnv assigns.
+
+        This test exercises only the shuffle / cursor, so it needs the
+        ``dataset_size`` BatchRolloutEnv shuffles over and a ``reset`` that records
+        its row — not the full token machinery.
+        """
+
+        def __init__(self):
+            self.dataset_size = dataset_size
+            self._last_row = None
+            self.done = False
+            self.current_prompt = {}
+
         def reset(self, seed=None, *, row_index=None):
-            prompt, info = super().reset(seed=seed, row_index=row_index)
+            del seed
             self._last_row = row_index
             self.done = False
             self.current_prompt = {}
-            return prompt, info
+            return self.current_prompt, {}
 
     def _factory():
-        return _RowRecordingEnv(
-            questions=list(questions),
-            answers=list(answers),
-            reward_fn=lambda c, a, q: 0.0,
-            prompt_builder=lambda q: q,
-        )
+        return _RowRecordingEnv()
 
     # batch_size * resets spans two full epochs of the 6-row dataset.
     batch_size, group_size = 3, 2
@@ -837,7 +844,7 @@ def test_rollout_prompt_is_templated_and_reward_scores_once():
     def prompt_builder(question):
         return f"Q: {question}\nA:"
 
-    env = RolloutEnv(
+    env = ReasoningEnv(
         max_turns=1,
         questions=questions,
         answers=answers,
@@ -864,7 +871,7 @@ def test_rollout_prompt_is_templated_and_reward_scores_once():
 
 def test_rollout_eval_mode_draws_from_held_out_split():
     """Under eval_mode the env serves the test split, restoring the train split after."""
-    env = RolloutEnv(
+    env = ReasoningEnv(
         max_turns=1,
         questions=["train-q"],
         answers=["train-a"],
@@ -884,7 +891,7 @@ def test_rollout_eval_mode_draws_from_held_out_split():
 def test_rollout_standalone_cursor_walks_split_and_resets_on_switch():
     """With no ``row_index`` the env walks its active split via an internal cursor,
     resetting the cursor when the train/eval split changes."""
-    env = RolloutEnv(
+    env = ReasoningEnv(
         questions=["q0", "q1"],
         answers=["a0", "a1"],
         reward_fn=lambda c, a, q: 0.0,

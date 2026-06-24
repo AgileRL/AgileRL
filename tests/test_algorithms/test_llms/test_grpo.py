@@ -36,7 +36,7 @@ from vllm import LLM
 
 from agilerl.algorithms import CISPO, GRPO, GSPO
 from agilerl.algorithms.core import ActionResult
-from agilerl.llm_envs import RolloutEnvWrapper
+from agilerl.llm_envs import RolloutEnv
 from agilerl.algorithms.core.base import (
     EvolvableAlgorithm,
     LLMAlgorithm,
@@ -191,8 +191,8 @@ class DummyMLPPreTrainedModel(PreTrainedModel, GenerationMixin):
         return
 
 
-class DummyReasoningEnv(RolloutEnvWrapper):
-    """Single-turn reasoning ``RolloutEnvWrapper`` stub for ``test()`` coverage."""
+class DummyReasoningEnv(RolloutEnv):
+    """Single-turn reasoning ``RolloutEnv`` stub for ``test()`` coverage."""
 
     max_turns = 1
 
@@ -4670,7 +4670,7 @@ class TestGRPOTest:
         accelerator_factory,
         model_factory,
     ):
-        class DummyMultiTurnEpisodeEnv(RolloutEnvWrapper):
+        class DummyMultiTurnEpisodeEnv(RolloutEnv):
             max_turns = 2
 
             def __init__(self):
@@ -4738,7 +4738,7 @@ class TestGRPOTest:
         grpo = _make_cpu_grpo_for_branch_tests()
         with pytest.raises(
             TypeError,
-            match=re.escape("env must be a RolloutEnvWrapper"),
+            match=re.escape("env must be a RolloutEnv"),
         ):
             grpo.test(object(), loop=1)
         grpo.clean_up()

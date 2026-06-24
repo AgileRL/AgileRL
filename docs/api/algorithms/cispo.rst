@@ -50,16 +50,16 @@ of the same function.
 
 .. code-block:: python
 
-  from agilerl.llm_envs import RolloutEnv, RolloutHarness
+  from agilerl.llm_envs import ReasoningEnv, RolloutEnv, local_transport
   from agilerl.training.train_llm import train_llm_rollout
 
   def reward_fn(completion: str, answer: str, question: str) -> float:
       del question
       return float(answer.lower() in completion.lower())
 
-  # 1) Single-turn / reasoning datasets (RolloutEnv with max_turns=1)
+  # 1) Single-turn / reasoning datasets (ReasoningEnv driven by RolloutEnv, max_turns=1)
   def env_factory(evaluation_mode: bool = False):
-      raw_env = RolloutEnv(
+      raw_env = ReasoningEnv(
           max_turns=1,
           questions=["2+2?", "Capital of France?"],
           answers=["4", "Paris"],
@@ -69,10 +69,11 @@ of the same function.
           test_answers=["6"],
       )
       raw_env.evaluation_mode = evaluation_mode
-      return RolloutHarness(
-          raw_env,
+      return RolloutEnv(
+          None,
           tokenizer=tokenizer,
           max_turns=1,
+          transport=local_transport(raw_env),
           pad_id=tokenizer.eos_token_id,
           apply_chat_template=True,
           max_model_len=1024,
@@ -97,10 +98,11 @@ of the same function.
           return "Done.", reward, True, False, {"correct": bool(reward)}
 
   def env_factory():
-      return RolloutHarness(
-          env=ToyMultiTurnEnv(),
+      return RolloutEnv(
+          None,
           tokenizer=tokenizer,
           max_turns=4,
+          transport=local_transport(ToyMultiTurnEnv()),
           pad_id=tokenizer.eos_token_id,
           max_model_len=1024,
           max_output_tokens=128,

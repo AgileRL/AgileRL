@@ -118,7 +118,7 @@ Dependencies
     from agilerl.utils.algo_utils import VLLMConfig
     from agilerl.utils.llm_utils import create_llm_accelerator
     from agilerl.utils.utils import create_population
-    from agilerl.llm_envs import RolloutHarness
+    from agilerl.llm_envs import RolloutEnv, local_transport
 
 Shared setup
 ------------
@@ -127,7 +127,7 @@ All runs use:
 
 * Environment: ``game:GuessTheNumber-v0-easy``
 * Model: ``Qwen/Qwen2.5-0.5B-Instruct``
-* Wrapper: :class:`RolloutHarness <agilerl.llm_envs.RolloutHarness>`
+* Driver: :class:`RolloutEnv <agilerl.llm_envs.RolloutEnv>` (over the OpenEnv interface)
 * Training loop: :meth:`train_llm_rollout() <agilerl.training.train_llm.train_llm_rollout>`
 * Population size: ``1``
 * Evolution/HPO: disabled
@@ -150,10 +150,11 @@ All runs use:
 
         def env_factory():
             env = gem.make(ENV_NAME)
-            return RolloutHarness(
-                env=env,
+            return RolloutEnv(
+                None,
                 tokenizer=tokenizer,
                 max_turns=max_turns,
+                transport=local_transport(env),
                 pad_id=tokenizer.pad_token_id,
                 apply_chat_template=True,
                 max_model_len=INIT_HP.get("MAX_MODEL_LEN"),

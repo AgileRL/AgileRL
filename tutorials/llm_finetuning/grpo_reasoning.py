@@ -10,8 +10,9 @@ from agilerl.algorithms import GRPO
 from agilerl.training.train_llm import train_llm_rollout
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.llm_envs import (
+    ReasoningEnv,
     RolloutEnv,
-    RolloutHarness,
+    local_transport,
 )
 
 MODEL_PATH = "Qwen/Qwen2.5-0.5B"
@@ -142,7 +143,7 @@ def main():
             list(test_dataset["question"]),
             list(test_dataset["answer"]),
         )
-        raw_env = RolloutEnv(
+        raw_env = ReasoningEnv(
             max_turns=1,
             questions=train_questions,
             answers=train_answers,
@@ -152,16 +153,15 @@ def main():
             test_answers=test_answers,
         )
         raw_env.evaluation_mode = evaluation_mode
-        wrapper = RolloutHarness(
-            raw_env,
+        return RolloutEnv(
+            None,
             tokenizer=tokenizer,
             max_turns=1,
+            transport=local_transport(raw_env),
             pad_id=getattr(tokenizer, "pad_token_id", None),
             apply_chat_template=True,
             max_model_len=MAX_CONTEXT_LENGTH,
         )
-        wrapper.eval_mode = raw_env.eval_mode
-        return wrapper
 
     # Define the LoRA configuration
     lora_config = LoraConfig(

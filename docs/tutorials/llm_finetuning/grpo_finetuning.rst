@@ -47,8 +47,9 @@ Dependencies
     from agilerl.algorithms import GRPO
     from agilerl.training.train_llm import train_llm_rollout
     from agilerl.llm_envs import (
+        ReasoningEnv,
         RolloutEnv,
-        RolloutHarness,
+        local_transport,
     )
 
 
@@ -176,9 +177,9 @@ Now we have defined our reward functions, we must also design our prompt. This f
 to the agent and provides the context necessary to complete the task. This is a task-specific feature,
 and different reasoning problems will require different conversation templates, although they can follow a similar
 format. We define the conversation template as follows (using ``question`` and ``answer`` as placeholders for the question and answer data)
-and then build a single-turn :class:`RolloutEnv <agilerl.llm_envs.RolloutEnv>` from the question and answer
-columns of our dataset, wrapping it in a :class:`RolloutHarness <agilerl.llm_envs.RolloutHarness>`
-inside an ``env_factory``.
+and then build a single-turn :class:`ReasoningEnv <agilerl.llm_envs.ReasoningEnv>` from the question and answer
+columns of our dataset, driving it at the token level with a :class:`RolloutEnv <agilerl.llm_envs.RolloutEnv>`
+(over the in-process :func:`local_transport <agilerl.llm_envs.local_transport>`) inside an ``env_factory``.
 
 .. collapse:: Build the Single-Turn Rollout Environment
 
@@ -218,7 +219,7 @@ inside an ``env_factory``.
                 list(test_dataset["question"]),
                 list(test_dataset["answer"]),
             )
-            raw_env = RolloutEnv(
+            raw_env = ReasoningEnv(
                 max_turns=1,
                 questions=train_questions,
                 answers=train_answers,
@@ -228,10 +229,11 @@ inside an ``env_factory``.
                 test_answers=test_answers,
             )
             raw_env.evaluation_mode = evaluation_mode
-            return RolloutHarness(
-                raw_env,
+            return RolloutEnv(
+                None,
                 tokenizer=tokenizer,
                 max_turns=1,
+                transport=local_transport(raw_env),
                 pad_id=tokenizer.pad_token_id,
                 apply_chat_template=True,
                 max_model_len=1024,

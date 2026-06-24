@@ -1,7 +1,12 @@
-"""Environment for generative LLM tasks, e.g. multi-turn agentic tasks or single-turn reasoning.
+"""Token-level rollout env for generative LLM tasks (multi-turn agentic or single-turn reasoning).
 
-A :class:`RolloutEnv`, produces prompts (usually backed by a dataset) that are sent to the model, which generates a completion, that is scored by the env's ``reward_fn``. Reasoning is the ``max_turns=1`` configuration.
-``BatchRolloutEnv`` is a wrapper to maintain independent groups of rollouts on batches of prompts.
+A :class:`RolloutEnv` owns the tokenisation + turn loop and talks to its env over
+the OpenEnv HTTP API: it is constructed with a ``url`` and drives that endpoint's
+``reset`` / ``step`` through an internal
+:class:`~agilerl.llm_envs.openenv.OpenEnvClient` client. Any env — a prompt dataset,
+plain Python functions, a sandboxed VM — is reached the same way once wrapped in an
+:class:`~agilerl.llm_envs.openenv.OpenEnvServer`. ``BatchRolloutEnv`` maintains
+independent groups of these rollouts over a batch.
 """
 
 from __future__ import annotations
@@ -13,126 +18,26 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from agilerl.llm_envs.base import LLMEnv
+from agilerl.llm_envs.openenv import (
+    DEFAULT_HTTP_TIMEOUT_S,
+    OpenEnvClient,
+    local_transport,
+)
+from agilerl.llm_envs.reasoning_env import ReasoningEnv
 from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
 
 if TYPE_CHECKING:
     from agilerl.typing import RolloutPrompts
 
 
-class RolloutEnv(LLMEnv):
-    """Generation rollout env: dataset-seeded prompt in, scored text out.
+class RolloutEnv:
+    """Token-level rollout env: tokenisation + turn loop over an OpenEnv URL.
 
-    Text observation / text action. With ``max_turns=1`` (the default) this is the
-    reasoning env: the model produces one completion to a dataset-seeded prompt and
-    the env scores it via ``reward_fn(completion, answer, question)`` on the decoded
-    generation.
-
-    :param max_turns: Number of generation turns before the episode terminates.
-    :type max_turns: int
-    :param tools: Optional tool schemas available to the policy.
-    :type tools: list | None
-    :param questions: Per-row question strings.
-    :type questions: list[str] | None
-    :param answers: Per-row training answer strings.
-    :type answers: list[str] | None
-    :param reward_fn: ``(completion, answer, question) -> float`` scorer.
-    :type reward_fn: Callable[[str, str, str], float] | None
-    :param prompt_builder: Maps a question to the prompt text shown to the model.
-    :type prompt_builder: Callable[[str], str] | None
-    :param test_questions: Held-out question strings used under ``eval_mode``.
-    :type test_questions: list[str] | None
-    :param test_answers: Held-out answer strings used under ``eval_mode``.
-    :type test_answers: list[str] | None
-    """
-
-    def __init__(
-        self,
-        *,
-        max_turns: int = 1,
-        tools: list | None = None,
-        questions: list[str] | None = None,
-        answers: list[str] | None = None,
-        reward_fn: Callable[[str, str, str], float] | None = None,
-        prompt_builder: Callable[[str], str] | None = None,
-        test_questions: list[str] | None = None,
-        test_answers: list[str] | None = None,
-    ) -> None:
-        self.max_turns = max_turns
-        self.tools = list(tools) if tools else []
-        self.questions = questions
-        self.answers = answers
-        self.reward_fn = reward_fn
-        self.prompt_builder = prompt_builder
-        self.test_questions = test_questions
-        self.test_answers = test_answers
-        self.evaluation_mode = False
-        self._turn = 0
-        self._question: str = ""
-        self._answer: str = ""
-        # Dataset cursor owned by ``BatchRolloutEnv`` when batched; on the
-        # standalone / eval path the env walks its active split sequentially.
-        self._cursor = 0
-        self._cursor_split = ""
-
-    @property
-    def dataset_size(self) -> int:
-        """Number of training rows backing this env (0 when not dataset-backed)."""
-        return len(self.questions) if self.questions else 0
-
-    def _active_rows(self) -> tuple[list[str], list[str]]:
-        """Return the (questions, answers) for the current train/eval split."""
-        if self.evaluation_mode and self.test_questions is not None:
-            return self.test_questions, self.test_answers
-        return self.questions, self.answers
-
-    def reset(
-        self,
-        seed: int | None = None,
-        *,
-        row_index: int | None = None,
-    ) -> tuple[str, dict[str, Any]]:
-        """Select a dataset row and return its prompt text plus info.
-
-        :param seed: Optional reset seed (unused on the standalone path, which
-            walks its split sequentially).
-        :type seed: int | None
-        :param row_index: Dataset row chosen by the owning ``BatchRolloutEnv``;
-            when ``None`` the env resolves a row from its own per-split cursor.
-        :type row_index: int | None
-        """
-        self._turn = 0
-        questions, answers = self._active_rows()
-        if row_index is None:
-            split = (
-                "eval"
-                if self.evaluation_mode and self.test_questions is not None
-                else "train"
-            )
-            if split != self._cursor_split:
-                self._cursor = 0
-                self._cursor_split = split
-            row_index = self._cursor
-            self._cursor += 1
-        row = row_index % len(questions)
-        self._question = questions[row]
-        self._answer = answers[row]
-        return self.prompt_builder(self._question), {}
-
-    def step(self, action: str) -> tuple[str, float, bool, bool, dict[str, Any]]:
-        """Score the completion against the current row; terminate at ``max_turns``."""
-        self._turn += 1
-        reward = float(self.reward_fn(action, self._answer, self._question))
-        terminated = self._turn >= self.max_turns
-        return "", reward, terminated, False, {}
-
-
-class RolloutEnvWrapper:
-    """Token-level wrapper around a text :class:`RolloutEnv`.
-
-    The *wrapper* is the adapter that lets a model which produces tokens interact
-    with a text-based environment. The wrapped :class:`RolloutEnv` speaks strings
-    (``reset()`` -> prompt text, ``step(action_text)`` -> reward); this wrapper
+    It lets a model that produces tokens interact with a text world reached over the
+    OpenEnv HTTP API: ``reset`` pulls the initial prompt from the env endpoint and
+    ``step`` posts the decoded action and reads back the next observation + reward —
+    the env may score it, run a tool, hit a sandbox, or be any local env wrapped in
+    an :class:`~agilerl.llm_envs.openenv.OpenEnvServer`. On top of that endpoint it
     exposes the token contract the trainer / rollout engine drive:
 
     * ``reset()`` / ``step(completion_ids, sampling_logps=None)`` return a
@@ -154,16 +59,20 @@ class RolloutEnvWrapper:
 
     def __init__(
         self,
-        env: RolloutEnv,
+        url: str | None,
         tokenizer: Any,
-        max_turns: int,
+        max_turns: int = 1,
+        *,
+        headers: dict[str, str] | None = None,
+        timeout_s: float = DEFAULT_HTTP_TIMEOUT_S,
+        transport: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
         pad_id: int | None = None,
         apply_chat_template: bool = True,
         max_model_len: int | None = None,
         max_output_tokens: int | None = None,
         tools: list[dict[str, Any]] | None = None,
     ) -> None:
-        """Wrap ``env`` so it can be driven at the token level.
+        """Drive the OpenEnv endpoint at ``url`` at the token level.
 
         When ``max_model_len`` is set, the cumulative prompt is never
         truncated: if appending the next turn's feedback would push the prompt
@@ -171,13 +80,22 @@ class RolloutEnvWrapper:
         with ``truncated=True`` and an ``agilerl_context_overflow`` breadcrumb
         in ``info`` (generation stops rather than dropping older turns).
 
-        :param env: The text-level rollout environment to wrap.
-        :type env: RolloutEnv
+        :param url: Base URL of the OpenEnv env server (a hosted Space or a local
+            :class:`~agilerl.llm_envs.openenv.OpenEnvServer`). May be ``None`` only
+            when ``transport`` is supplied (the in-process test seam).
+        :type url: str | None
         :param tokenizer: Tokenizer used to encode prompts/feedback and apply the
             chat template.
         :type tokenizer: Any
         :param max_turns: Maximum number of generation turns per episode.
         :type max_turns: int
+        :param headers: Optional HTTP headers (e.g. auth) sent on every request.
+        :type headers: dict[str, str] | None
+        :param timeout_s: Per-request timeout for the OpenEnv client.
+        :type timeout_s: float
+        :param transport: ``(path, payload) -> dict`` injection seam used in place
+            of real HTTP (so unit tests need no socket), defaults to ``None``.
+        :type transport: Callable | None
         :param pad_id: Padding token id used when assembling token tensors,
             defaults to ``None``.
         :type pad_id: int | None
@@ -192,8 +110,8 @@ class RolloutEnvWrapper:
         :type max_output_tokens: int | None
         :param tools: Optional OpenAI/JSON tool schemas forwarded to the chat
             template (``tools=``) so the policy can emit tool calls. ``None``
-            (default) preserves the exact pre-tool behaviour (no ``tools=`` kwarg
-            is passed).
+            (default) falls back to whatever the env advertises over the API; no
+            tools means no ``tools=`` kwarg is passed.
         :type tools: list[dict] | None
         :ivar full_ids: The episode's running token sequence (prompt + each
             generation + each feedback turn), or ``None`` before ``reset``.
@@ -214,11 +132,22 @@ class RolloutEnvWrapper:
         :vartype sampling_logps: list[torch.Tensor]
         """
         self.max_turns = max_turns
-        self._env = env
+        self._backend = OpenEnvClient(
+            base_url=url,
+            headers=headers,
+            timeout_s=timeout_s,
+            transport=transport,
+        )
         self.tokenizer = tokenizer
         self.pad_id = pad_id
         self.apply_chat_template = apply_chat_template
-        self.tools = tools
+        # Tools default to whatever the env advertises over the OpenEnv API (its
+        # ``/info`` tool schemas); an empty list means no ``tools=`` is passed.
+        self.tools = (
+            tools
+            if tools is not None
+            else (getattr(self._backend, "tools", None) or None)
+        )
         self._max_model_len = max_model_len
         self._max_output_tokens = max_output_tokens
         self.full_ids: torch.Tensor | None = None
@@ -233,6 +162,57 @@ class RolloutEnvWrapper:
         self.done: bool = False
         self.current_prompt: dict[str, Any] = {}
         self.sampling_logps: list[torch.Tensor] = []
+
+    @classmethod
+    def from_dataset(
+        cls,
+        questions: list[str],
+        answers: list[str],
+        reward_fn: Callable[[str, str, str], float],
+        tokenizer: Any,
+        *,
+        prompt_builder: Callable[[str], str] | None = None,
+        test_questions: list[str] | None = None,
+        test_answers: list[str] | None = None,
+        max_turns: int = 1,
+        **kwargs: Any,
+    ) -> RolloutEnv:
+        """Build a reasoning ``RolloutEnv`` over an in-process prompt dataset.
+
+        Wraps a :class:`~agilerl.llm_envs.reasoning_env.ReasoningEnv` in the
+        socket-free :func:`~agilerl.llm_envs.openenv.local_transport`, so the env is
+        driven over the OpenEnv interface with no HTTP cost — the common local case.
+        For an out-of-process / remote dataset env, :func:`~agilerl.llm_envs.openenv.serve`
+        a ``ReasoningEnv`` and pass its URL to the constructor instead.
+
+        :param questions: Per-row question strings (training split).
+        :param answers: Per-row training answers, aligned with ``questions``.
+        :param reward_fn: ``(completion, answer, question) -> float`` scorer.
+        :param tokenizer: Tokenizer for the token-level loop.
+        :param prompt_builder: Maps a question to prompt text (identity default).
+        :param test_questions: Held-out questions served under :meth:`eval_mode`.
+        :param test_answers: Held-out answers served under :meth:`eval_mode`.
+        :param max_turns: Generation turns per episode (``1`` = single-turn).
+        :param kwargs: Forwarded to :class:`RolloutEnv` (e.g. ``pad_id``,
+            ``apply_chat_template``, ``max_model_len``).
+        :rtype: RolloutEnv
+        """
+        env = ReasoningEnv(
+            questions=questions,
+            answers=answers,
+            reward_fn=reward_fn,
+            prompt_builder=prompt_builder,
+            test_questions=test_questions,
+            test_answers=test_answers,
+            max_turns=max_turns,
+        )
+        return cls(
+            None,
+            tokenizer,
+            max_turns=max_turns,
+            transport=local_transport(env),
+            **kwargs,
+        )
 
     @staticmethod
     def _format_obs(obs: str, info: dict[str, Any] | None) -> str:
@@ -401,23 +381,23 @@ class RolloutEnvWrapper:
 
     @property
     def dataset_size(self) -> int:
-        """Number of training rows backing the wrapped env (0 if not dataset-backed)."""
-        return getattr(self._env, "dataset_size", 0)
+        """Number of rows in the backend (0 if not dataset-backed)."""
+        return getattr(self._backend, "dataset_size", 0)
 
     @property
     def evaluation_mode(self) -> bool:
-        """Whether the wrapped env is currently serving its held-out split."""
-        return bool(getattr(self._env, "evaluation_mode", False))
+        """Whether the backend is currently serving its held-out split."""
+        return bool(getattr(self._backend, "evaluation_mode", False))
 
     @evaluation_mode.setter
     def evaluation_mode(self, value: bool) -> None:
-        if hasattr(self._env, "evaluation_mode"):
-            self._env.evaluation_mode = value
+        if hasattr(self._backend, "evaluation_mode"):
+            self._backend.evaluation_mode = value
 
     @contextmanager
     def eval_mode(self):
-        """Serve the wrapped env's held-out split for the duration of the block."""
-        inner = getattr(self._env, "eval_mode", None)
+        """Serve the backend's held-out split for the duration of the block."""
+        inner = getattr(self._backend, "eval_mode", None)
         if callable(inner):
             with inner():
                 yield
@@ -433,20 +413,17 @@ class RolloutEnvWrapper:
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Create a fresh episode and return the policy-ready observation plus info.
 
-        ``seed`` is forwarded to the wrapped env; ``row_index`` is forwarded only
-        when set, so non-dataset envs (e.g. constant/probe envs whose ``reset``
-        takes no ``row_index``) still work — they are never assigned a row.
+        ``seed`` and ``row_index`` are forwarded to ``backend.reset``: a
+        dataset-backed backend uses ``row_index`` to select its row, while an env
+        that picks its own task (e.g. a remote OpenEnv server) ignores it.
 
-        :param seed: Optional reset seed forwarded to the wrapped env.
+        :param seed: Optional reset seed forwarded to the backend.
         :type seed: int | None
         :param row_index: Dataset row chosen by the owning ``BatchRolloutEnv``,
-            forwarded to the wrapped env's ``reset`` only when not ``None``.
+            forwarded to ``backend.reset``.
         :type row_index: int | None
         """
-        reset_kwargs: dict[str, Any] = {"seed": seed}
-        if row_index is not None:
-            reset_kwargs["row_index"] = row_index
-        obs_text, info = self._env.reset(**reset_kwargs)
+        obs_text, info = self._backend.reset(seed=seed, row_index=row_index)
         obs_text = self._format_obs(obs_text, info)
 
         encoded = self._tokenize_initial_prompt(obs_text)
@@ -475,7 +452,7 @@ class RolloutEnvWrapper:
         self.turn_boundaries.append((prompt_len, gen_end, self._turn_idx))
         self._gen_texts.append(gen_text)
 
-        next_obs, reward, terminated, truncated, info = self._env.step(gen_text)
+        next_obs, reward, terminated, truncated, info = self._backend.step(gen_text)
         self.turn_rewards.append(float(reward))
         self._turn_idx += 1
 
@@ -530,7 +507,7 @@ class RolloutEnvWrapper:
         if self._last_full_prompt_token_len is None:
             msg = (
                 "step() requires a prior reset() or step() "
-                "that built a policy observation"
+                "that built a input context observation"
             )
             raise RuntimeError(msg)
         pl = self._last_full_prompt_token_len
@@ -588,9 +565,9 @@ class RolloutEnvWrapper:
         )
 
     def close(self) -> None:
-        """Close the wrapped environment when supported."""
-        if hasattr(self._env, "close"):
-            self._env.close()
+        """Close the backend when it supports it."""
+        if hasattr(self._backend, "close"):
+            self._backend.close()
 
     def get_debug_info(self) -> dict[str, Any]:
         """Return a dict of human-readable debug information for the episode."""
@@ -645,7 +622,7 @@ class RolloutEnvWrapper:
 class BatchRolloutEnv:
     """Batched in-process collector of LLM rollout episodes.
 
-    Holds ``batch_size * group_size`` independent :class:`RolloutEnvWrapper`
+    Holds ``batch_size * group_size`` independent :class:`RolloutEnv`
     instances in ``self.envs`` (laid out group-contiguous, position implicit in
     list order) and steps all active ones in lock-step using policy completions.
     Each wrapper owns its own in-flight episode state — transcript, ``done``,
@@ -654,15 +631,15 @@ class BatchRolloutEnv:
 
     def __init__(
         self,
-        env_factory: Callable[..., RolloutEnvWrapper],
+        env_factory: Callable[..., RolloutEnv],
         batch_size: int,
         group_size: int,
         env_config: dict[str, Any] | None = None,
     ):
         """Create ``batch_size * group_size`` independent env wrappers.
 
-        :param env_factory: Factory that builds one :class:`RolloutEnvWrapper`.
-        :type env_factory: Callable[..., RolloutEnvWrapper]
+        :param env_factory: Factory that builds one :class:`RolloutEnv`.
+        :type env_factory: Callable[..., RolloutEnv]
         :param batch_size: Number of logical batch items.
         :type batch_size: int
         :param group_size: Number of grouped rollouts per batch item.
@@ -683,7 +660,7 @@ class BatchRolloutEnv:
         self.num_envs = batch_size * group_size
         self.batch_size = batch_size
         self.group_size = group_size
-        self.envs: list[RolloutEnvWrapper] = []
+        self.envs: list[RolloutEnv] = []
         self._dataset_size = 0
         self._epoch_order: list[int] = []
         self._pos = 0
@@ -705,7 +682,7 @@ class BatchRolloutEnv:
         """``True`` once every env slot has been created."""
         return len(self.envs) == self.num_envs
 
-    def _active_envs(self) -> list[RolloutEnvWrapper]:
+    def _active_envs(self) -> list[RolloutEnv]:
         """Non-terminal envs, in their stable batch/group (list) order."""
         return [env for env in self.envs if not env.done]
 

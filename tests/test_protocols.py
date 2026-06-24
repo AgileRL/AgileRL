@@ -566,32 +566,35 @@ def test_protocol_type_aliases_importable():
 
 
 class TestLLMEnvHierarchy:
-    """The LLM env contract lives in :mod:`agilerl.llm_envs` as concrete bases.
+    """The LLM env contract lives in :mod:`agilerl.llm_envs`.
 
-    ``LLMEnv`` is the abstract base every LLM env shares; ``RolloutEnv`` is the
-    concrete generation subtype, and ``RolloutEnvWrapper`` composes (wraps) a
-    ``RolloutEnv`` rather than subclassing it — the algorithms'
-    ``isinstance(env, RolloutEnvWrapper)`` checks key on the harness they drive.
+    ``LLMEnv`` is the abstract base for the teacher-forced ``DatasetEnv``;
+    ``RolloutEnv`` is the token rollout env (an OpenEnv client driven by a URL),
+    and ``ReasoningEnv`` is a plain local env reached over the same OpenEnv
+    interface — neither subclasses ``LLMEnv``.
     """
 
-    def test_rollout_env_is_concrete_llm_env_subtype(self):
+    def test_llm_env_hierarchy(self):
         pytest.importorskip("datasets", reason="LLM dependencies not installed")
-        from agilerl.llm_envs import LLMEnv, RolloutEnv, RolloutEnvWrapper
+        from agilerl.llm_envs import DatasetEnv, LLMEnv, ReasoningEnv, RolloutEnv
 
-        assert issubclass(RolloutEnv, LLMEnv)
-        # The harness composes (wraps) a RolloutEnv rather than subclassing it.
-        assert not issubclass(RolloutEnvWrapper, RolloutEnv)
+        # DatasetEnv is the abstract LLMEnv's concrete teacher-forced subtype.
+        assert issubclass(DatasetEnv, LLMEnv)
+        # RolloutEnv is the token rollout env (an OpenEnv client), not an LLMEnv.
+        assert not issubclass(RolloutEnv, LLMEnv)
+        # ReasoningEnv is a plain local env driven over the OpenEnv interface.
+        assert not issubclass(ReasoningEnv, LLMEnv)
         # The env contract no longer lives on agilerl.protocols.
         import agilerl.protocols as protocols
 
         assert not hasattr(protocols, "RolloutEnv")
         assert not hasattr(protocols, "LLMEnv")
 
-    def test_rollout_env_default_is_single_turn_reasoning(self):
+    def test_reasoning_env_default_is_single_turn(self):
         pytest.importorskip("datasets", reason="LLM dependencies not installed")
-        from agilerl.llm_envs import RolloutEnv
+        from agilerl.llm_envs import ReasoningEnv
 
-        env = RolloutEnv(
+        env = ReasoningEnv(
             questions=["2+2"],
             answers=["4"],
             reward_fn=lambda completion, answer, question: float(answer in completion),

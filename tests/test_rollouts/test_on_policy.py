@@ -9,7 +9,8 @@ from agilerl.algorithms.core import ActionResult
 from agilerl.rollouts.on_policy import collect_rollouts_llm
 from agilerl.llm_envs import (
     BatchRolloutEnv,
-    RolloutEnvWrapper,
+    RolloutEnv,
+    local_transport,
 )
 from agilerl.algorithms.ppo import PPO
 from agilerl.rollouts.on_policy import (
@@ -103,10 +104,11 @@ class TestCollectRolloutsLlm:
         tokenizer = _TinyTokenizer()
 
         def env_fn():
-            return RolloutEnvWrapper(
-                _SingleTurnTextEnv(),
+            return RolloutEnv(
+                None,
                 tokenizer=tokenizer,
                 max_turns=1,
+                transport=local_transport(_SingleTurnTextEnv()),
                 pad_id=tokenizer.pad_token_id,
                 apply_chat_template=False,
                 max_model_len=128,
