@@ -171,7 +171,7 @@ class TestLoraConfigDict:
 
 class TestLLMAlgorithmValidators:
     @pytest.mark.parametrize(
-        "spec_cls, kwargs",
+        ("spec_cls", "kwargs"),
         [
             (GRPOSpec, {"group_size": 2, "pretrained_model_name_or_path": "gpt2"}),
             (LLMPPOSpec, {"pretrained_model_name_or_path": "gpt2"}),

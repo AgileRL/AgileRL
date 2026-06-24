@@ -7,8 +7,6 @@ from collections.abc import Callable
 from unittest.mock import MagicMock, patch
 
 import click
-from click.testing import CliRunner
-
 from agilerl.arena.config import CommandConfig
 from agilerl.arena.on_prem import build_install_command, register_on_prem_install
 from agilerl.arena.on_prem.commands import (
@@ -16,6 +14,7 @@ from agilerl.arena.on_prem.commands import (
     build_down_command,
     build_teardown_command,
 )
+from click.testing import CliRunner
 
 
 def test_install_command_parses_workers_and_delegates(

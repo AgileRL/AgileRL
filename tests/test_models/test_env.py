@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 import numpy as np
+import pytest
+from pydantic import ValidationError
 
-from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.models.env import (
     BanditEnvSpec,
     GymEnvSpec,
@@ -344,11 +343,11 @@ class TestLLMEnvSpec:
         assert spec.dataset == "data/train.parquet"
 
     def test_train_test_split_bounds(self):
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             LLMEnvSpec(
                 env_type=LLMEnvType.REASONING, dataset="ds", train_test_split=1.5
             )
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             LLMEnvSpec(
                 env_type=LLMEnvType.REASONING, dataset="ds", train_test_split=-0.1
             )
@@ -609,7 +608,7 @@ class TestLLMEnvSpecSFT:
 
 
 # ---------------------------------------------------------------------------
-# GymEnvSpec – make_single_env + extra_wrappers
+# GymEnvSpec - make_single_env + extra_wrappers
 # ---------------------------------------------------------------------------
 class TestGymEnvSpecSingleEnv:
     def test_make_single_env_registered(self):
@@ -651,7 +650,7 @@ class SingleEnv:
 
 
 # ---------------------------------------------------------------------------
-# PzEnvSpec – make_single_env + error paths + extra_wrappers
+# PzEnvSpec - make_single_env + error paths + extra_wrappers
 # ---------------------------------------------------------------------------
 class TestPzEnvSpecSingleEnv:
     def test_make_single_env_custom(self, tmp_path):
@@ -749,7 +748,7 @@ class TestOfflineEnvSpec:
 
 
 # ---------------------------------------------------------------------------
-# BanditEnvSpec – parquet loading + serializer
+# BanditEnvSpec - parquet loading + serializer
 # ---------------------------------------------------------------------------
 class TestBanditEnvSpecExtended:
     def test_parquet_loading(self, tmp_path):

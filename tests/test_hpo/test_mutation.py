@@ -2108,7 +2108,7 @@ class TestMutationsActivationMutation:
         muts = Mutations(0, 0, 0, 0, 1, 0, 0.1, device=device)
         with pytest.warns(
             UserWarning,
-            match=f"Activation mutations are not supported for {algo}",
+            match=f"Activation mutations are not supported for {algo_cls.__name__}",
         ):
             out = muts.activation_mutation(pop[0].clone(wrap=False))
         assert out.mut == "None"
@@ -2143,7 +2143,8 @@ class TestMutationsActivationMutation:
         assert out.mut == "None"
 
     @pytest.mark.skipif(
-        not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed"
+        not (HAS_VLLM and HAS_DEEPSPEED),
+        reason="Need to install agilerl with deepspeed + vllm",
     )
     @pytest.mark.parametrize("algo", ["GRPO", "DPO"])
     def test_warns_for_llm_algorithms(self, algo, grpo_hp_config, vector_space, device):

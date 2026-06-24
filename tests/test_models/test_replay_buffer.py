@@ -21,7 +21,6 @@ from agilerl.models.algorithms.maddpg import MADDPGSpec
 from agilerl.models.algorithms.rainbow_dqn import RainbowDQNSpec
 from agilerl.models.training import NStepBufferArgs, PerBufferArgs, ReplayBufferSpec
 
-
 # ============================================================================
 # NStepBufferArgs
 # ============================================================================
@@ -81,7 +80,7 @@ class TestPerBufferArgs:
 
 
 # ============================================================================
-# ReplayBufferSpec – field defaults and Pydantic validation
+# ReplayBufferSpec - field defaults and Pydantic validation
 # ============================================================================
 
 
@@ -152,7 +151,7 @@ class TestReplayBufferSpecValidation:
 
 
 # ============================================================================
-# ReplayBufferSpec.init_buffer – standard (single-agent) path
+# ReplayBufferSpec.init_buffer - standard (single-agent) path
 # ============================================================================
 
 
@@ -185,7 +184,7 @@ class TestInitBufferStandard:
 
 
 # ============================================================================
-# ReplayBufferSpec.init_buffer – n-step path
+# ReplayBufferSpec.init_buffer - n-step path
 # ============================================================================
 
 
@@ -232,12 +231,12 @@ class TestInitBufferNStep:
         algo = MagicMock(spec=["agent_type"])
         algo.agent_type = AgentType.SingleAgent
         spec = ReplayBufferSpec(n_step_buffer=True)
-        with pytest.raises(ValueError, match="[Gg]amma"):
+        with pytest.raises(ValueError, match=r"[Gg]amma"):
             spec.init_buffer(algo)
 
 
 # ============================================================================
-# ReplayBufferSpec.init_buffer – PER path
+# ReplayBufferSpec.init_buffer - PER path
 # ============================================================================
 
 
@@ -281,7 +280,7 @@ class TestInitBufferPER:
 
 
 # ============================================================================
-# ReplayBufferSpec.init_buffer – multi-agent path
+# ReplayBufferSpec.init_buffer - multi-agent path
 # ============================================================================
 
 
@@ -295,7 +294,8 @@ class TestInitBufferMultiAgent:
 
     def test_multi_agent_ignores_n_step_flag(self):
         """Even with ``n_step_buffer=True``, multi-agent gets a plain
-        ``ReplayBuffer``."""
+        ``ReplayBuffer``.
+        """
         spec = ReplayBufferSpec(n_step_buffer=True)
         buf = spec.init_buffer(MADDPGSpec())
         assert isinstance(buf, ReplayBuffer)
@@ -303,7 +303,8 @@ class TestInitBufferMultiAgent:
 
     def test_multi_agent_ignores_per_flag(self):
         """Even with ``per_buffer=True``, multi-agent gets a plain
-        ``ReplayBuffer``."""
+        ``ReplayBuffer``.
+        """
         spec = ReplayBufferSpec(per_buffer=True)
         buf = spec.init_buffer(MADDPGSpec())
         assert isinstance(buf, ReplayBuffer)
@@ -322,14 +323,15 @@ class TestInitBufferMultiAgent:
 
 
 # ============================================================================
-# ReplayBufferSpec.init_buffer – priority between flags
+# ReplayBufferSpec.init_buffer - priority between flags
 # ============================================================================
 
 
 class TestInitBufferFlagPriority:
     """When multiple flags are set, per takes precedence for the main memory
     (the n-step buffer is built separately by ``init_n_step_buffer``).
-    Standard is the fallback when neither is set."""
+    Standard is the fallback when neither is set.
+    """
 
     def test_per_takes_precedence_over_n_step(self):
         spec = ReplayBufferSpec(n_step_buffer=True, per_buffer=True)

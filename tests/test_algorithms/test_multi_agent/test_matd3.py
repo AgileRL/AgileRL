@@ -25,8 +25,8 @@ from tests.helper_functions import (
     skip_torch_compile_on_windows_cpu,
 )
 from tests.helpers.algorithm_coverage import (
-    assert_swap_channels_called,
-    patch_obs_channels_to_first,
+    assert_transpose_image_observation_called,
+    patch_transpose_image_observation,
 )
 from tests.pz_vector_test_utils import make_sync_multi_agent_vec_env
 from tests.test_algorithms.test_multi_agent.test_maddpg import DummyMultiEnv
@@ -2136,11 +2136,13 @@ class TestMATD3Test:
         env.close()
         matd3.clean_up()
 
-    def test_with_swap_channels_path(
-        self, ma_image_space, ma_discrete_space, monkeypatch
-    ):
+    def test_with_swap_channels_path(self, ma_discrete_space, monkeypatch):
+        channels_last_box = spaces.Box(
+            low=0, high=255, shape=(32, 32, 3), dtype=np.uint8
+        )
+        ma_image_space = [channels_last_box] * 3
         env = DummyMultiEnv(ma_image_space[0], ma_discrete_space)
-        spy = patch_obs_channels_to_first(monkeypatch, "agilerl.algorithms.matd3")
+        spy = patch_transpose_image_observation(monkeypatch)
         matd3 = MATD3(
             observation_spaces=ma_image_space,
             action_spaces=ma_discrete_space,
@@ -2148,11 +2150,10 @@ class TestMATD3Test:
             device="cpu",
             torch_compiler=None,
         )
-        mean_score = matd3.test(
-            env, swap_channels=True, max_steps=1, loop=1, sum_scores=True
-        )
+        assert matd3.swap_channels is True
+        mean_score = matd3.test(env, max_steps=1, loop=1, sum_scores=True)
         assert isinstance(mean_score, float)
-        assert_swap_channels_called(spy)
+        assert_transpose_image_observation_called(spy)
         env.close()
         matd3.clean_up()
 

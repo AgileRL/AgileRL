@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
@@ -14,7 +16,7 @@ class DummyImageEnv(gym.Env):
     heavy external packages (ALE, MuJoCo, etc.).
     """
 
-    metadata = {"render_modes": []}
+    metadata: ClassVar[dict[str, list]] = {"render_modes": []}
 
     def __init__(self, **kwargs):
         super().__init__()

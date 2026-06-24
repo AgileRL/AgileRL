@@ -205,7 +205,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"{agilerl,agilerl-arena/agilerl}/**" = [
+"{agilerl,agilerl-arena/agilerl,tests,agilerl-arena/tests}/**" = [
     "D1",            # missing docstrings in public modules/classes/methods/packages
     "D205",          # 1 blank line between summary and description
     "D4",            # first line punctuation/period (conflicts with multi-line)
@@ -224,4 +224,4 @@ ignore = [
     "PIE790",        # unnecessary ...
     "PD011",         # .values -> .to_numpy()
 ]
-"{tests,benchmarking,demos,tutorials,agilerl-arena/tests}/**" = ["ALL"]
+"{benchmarking,demos,tutorials}/**" = ["ALL"]

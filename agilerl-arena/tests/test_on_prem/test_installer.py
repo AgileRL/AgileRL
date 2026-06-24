@@ -6,8 +6,6 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from click import ClickException
-
 from agilerl.arena.client import ArenaClient
 from agilerl.arena.on_prem import OnPremApi
 from agilerl.arena.on_prem.installer import (
@@ -26,6 +24,7 @@ from agilerl.arena.on_prem.installer import (
 )
 from agilerl.arena.on_prem.scripts import BundleScriptRunner, StageFailed
 from agilerl.arena.on_prem.ssh import SshExecutor
+from click import ClickException
 
 
 @pytest.fixture
@@ -373,7 +372,7 @@ class TestHelmInstaller:
         self, api: OnPremApi, tmp_path: Path
     ) -> None:
         inst = HelmInstaller(api, name="pool")
-        with pytest.raises(ClickException, match="no setup.sh"):
+        with pytest.raises(ClickException, match=r"no setup\.sh"):
             inst.install_cluster(tmp_path)
 
     def test_install_cluster_requires_helm_on_path(

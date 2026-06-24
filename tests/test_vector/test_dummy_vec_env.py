@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -10,7 +10,6 @@ import pytest
 from gymnasium import spaces
 
 from agilerl.vector.dummy_vec_env import DummyVecEnv, PzDummyVecEnv, _pz_placeholder
-
 
 # ---------------------------------------------------------------------------
 # Lightweight fake environments (no external dependency)
@@ -102,9 +101,9 @@ class FakePzEnv:
             a: np.full(3, float(actions.get(a, 0)), dtype=np.float32)
             for a in self.agents
         }
-        rewards = {a: 1.0 for a in self.agents}
-        terminated = {a: done for a in self.agents}
-        truncated = {a: False for a in self.agents}
+        rewards = dict.fromkeys(self.agents, 1.0)
+        terminated = dict.fromkeys(self.agents, done)
+        truncated = dict.fromkeys(self.agents, False)
         info = {a: {} for a in self.agents}
         return obs, rewards, terminated, truncated, info
 
@@ -150,7 +149,7 @@ class TestDummyVecEnvInit:
 class TestDummyVecEnvReset:
     def test_obs_has_batch_dim(self):
         env = DummyVecEnv(FakeGymEnv(obs_shape=(4,)))
-        obs, info = env.reset()
+        obs, _info = env.reset()
         assert obs.shape == (1, 4)
 
     def test_obs_values(self):
@@ -168,7 +167,7 @@ class TestDummyVecEnvStep:
     def test_output_shapes(self):
         env = DummyVecEnv(FakeGymEnv(obs_shape=(4,)))
         env.reset()
-        obs, reward, done, trunc, info = env.step(np.array([1]))
+        obs, reward, done, trunc, _info = env.step(np.array([1]))
         assert obs.shape == (1, 4)
         assert reward.shape == (1,)
         assert done.shape == (1,)
@@ -287,7 +286,7 @@ class TestDummyVecEnvMisc:
 
 
 class TestPzPlaceholder:
-    OBS_SPACES = {
+    OBS_SPACES: ClassVar[dict] = {
         "a0": spaces.Box(low=0, high=1, shape=(3,), dtype=np.float32),
         "a1": spaces.Box(low=0, high=1, shape=(5,), dtype=np.float64),
     }
@@ -349,7 +348,7 @@ class TestPzDummyVecEnvInit:
 class TestPzDummyVecEnvReset:
     def test_obs_is_per_agent_dict(self):
         env = PzDummyVecEnv(FakePzEnv())
-        obs, info = env.reset()
+        obs, _info = env.reset()
         assert set(obs.keys()) == {"agent_0", "agent_1"}
 
     def test_obs_has_batch_dim(self):
@@ -401,7 +400,7 @@ class TestPzDummyVecEnvStep:
         env = self._make_env()
         env.reset()
         actions = {"agent_0": np.array([0]), "agent_1": np.array([1])}
-        obs, rew, term, trunc, info = env.step(actions)
+        obs, rew, term, trunc, _info = env.step(actions)
 
         assert set(obs.keys()) == {"agent_0", "agent_1"}
         assert set(rew.keys()) == {"agent_0", "agent_1"}
@@ -561,7 +560,7 @@ class TestPzDummyVecEnvStepAsyncWait:
         env = PzDummyVecEnv(FakePzEnv())
         env.reset()
         env.step_async([{"agent_0": 0, "agent_1": 1}])
-        obs, rew, term, trunc, info = env.step_wait()
+        obs, rew, _term, _trunc, _info = env.step_wait()
 
         assert obs["agent_0"].shape == (1, 3)
         assert rew["agent_0"].shape == (1,)

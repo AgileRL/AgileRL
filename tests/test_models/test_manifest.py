@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from agilerl import HAS_ARENA_DEPENDENCIES, HAS_LLM_DEPENDENCIES
 from agilerl.models.algorithms.cqn import CQNSpec
@@ -45,7 +46,7 @@ from agilerl.models.networks import (
     StochasticActorSpec,
 )
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
-from agilerl.training.trainer import LocalTrainer, Trainer
+from agilerl.training.trainer import LocalTrainer
 
 if HAS_LLM_DEPENDENCIES:
     from agilerl.models.algorithms.dpo import DPOSpec
@@ -87,7 +88,6 @@ def _make_manifest(algo: dict, env: dict | None = None, **sections) -> dict:
 
 def test_get_validated_json_omits_unset_optional_sections() -> None:
     """JSON omits optional sections when they are not present."""
-
     raw = {
         "algorithm": {
             "name": "DQN",
@@ -183,7 +183,7 @@ IPPO_CNN_MANIFEST = _load("ippo_cnn")
 
 
 # ============================================================================
-# TestTrainingManifest – manifest parsing and validation
+# TestTrainingManifest - manifest parsing and validation
 # ============================================================================
 
 
@@ -193,7 +193,7 @@ class TestTrainingManifest:
     # -- Algorithm dispatch -------------------------------------------------
 
     @pytest.mark.parametrize(
-        "name, expected_cls",
+        ("name", "expected_cls"),
         [
             ("DQN", DQNSpec),
             ("PPO", PPOSpec),
@@ -215,7 +215,7 @@ class TestTrainingManifest:
 
     @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
     @pytest.mark.parametrize(
-        "name, extra_fields, expected_cls",
+        ("name", "extra_fields", "expected_cls"),
         [
             ("GRPO", {"group_size": 6, "temperature": 0.9}, GRPOSpec),
             ("DPO", {}, DPOSpec),
@@ -268,7 +268,7 @@ class TestTrainingManifest:
             TrainingManifest.model_validate(data)
 
     @pytest.mark.parametrize(
-        "arch, encoder_kwargs, expected_encoder_cls",
+        ("arch", "encoder_kwargs", "expected_encoder_cls"),
         [
             ("mlp", {"hidden_size": [64]}, MlpSpec),
             (
@@ -347,7 +347,7 @@ class TestTrainingManifest:
 
     def test_environment_required(self):
         data = {"algorithm": {"name": "DQN"}, "training": _TRAINING}
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             TrainingManifest.model_validate(data)
 
     def test_training_section_optional(self):
@@ -394,7 +394,7 @@ class TestTrainingManifest:
 
 
 # ============================================================================
-# TestLocalTrainerSingleAgent – Gymnasium (single-agent) scenarios
+# TestLocalTrainerSingleAgent - Gymnasium (single-agent) scenarios
 # ============================================================================
 
 
@@ -405,7 +405,8 @@ class TestLocalTrainerSingleAgent:
     def _patch_heavy_init(self):
         """Avoid spawning real AsyncVectorEnv subprocesses and building
         real neural-network populations; these tests only verify manifest
-        parsing and trainer construction."""
+        parsing and trainer construction.
+        """
         with (
             patch.object(LocalTrainer, "_make_env", return_value=MagicMock()),
             patch(
@@ -418,7 +419,7 @@ class TestLocalTrainerSingleAgent:
     # -- Parametrized: all single-agent algorithms --------------------------
 
     @pytest.mark.parametrize(
-        "manifest, expected_algo_cls, expected_encoder_cls",
+        ("manifest", "expected_algo_cls", "expected_encoder_cls"),
         [
             (DQN_MANIFEST, DQNSpec, MlpSpec),
             (RAINBOW_MANIFEST, RainbowDQNSpec, MlpSpec),
@@ -459,7 +460,7 @@ class TestLocalTrainerSingleAgent:
         )
 
     @pytest.mark.parametrize(
-        "manifest, expected_algo_cls",
+        ("manifest", "expected_algo_cls"),
         [
             (NEURAL_TS_MANIFEST, NeuralTSSpec),
             (NEURAL_UCB_MANIFEST, NeuralUCBSpec),
@@ -626,7 +627,7 @@ class TestLocalTrainerSingleAgent:
 
 
 # ============================================================================
-# TestLocalTrainerMultiAgent – PettingZoo (multi-agent) scenarios
+# TestLocalTrainerMultiAgent - PettingZoo (multi-agent) scenarios
 # ============================================================================
 
 
@@ -646,7 +647,7 @@ class TestLocalTrainerMultiAgent:
             yield
 
     @pytest.mark.parametrize(
-        "manifest, expected_algo_cls",
+        ("manifest", "expected_algo_cls"),
         [
             (MADDPG_MANIFEST, MADDPGSpec),
             (MATD3_MANIFEST, MATD3Spec),
@@ -702,7 +703,7 @@ class TestLocalTrainerMultiAgent:
 
 
 # ============================================================================
-# TrainingManifest – Arena bridge helpers
+# TrainingManifest - Arena bridge helpers
 # ============================================================================
 
 requires_arena = pytest.mark.skipif(
@@ -771,7 +772,7 @@ class TestTrainingManifestArenaBridge:
 
 
 # ============================================================================
-# Trainer.get_validated_manifest – LLM ``network`` section
+# Trainer.get_validated_manifest - LLM ``network`` section
 # ============================================================================
 
 
@@ -857,7 +858,7 @@ class TestTrainerGetValidatedManifestLLMNetwork:
 
 
 # ============================================================================
-# TestLocalTrainerLLM – LLM fine-tuning scenarios
+# TestLocalTrainerLLM - LLM fine-tuning scenarios
 # ============================================================================
 
 
@@ -969,7 +970,8 @@ class TestLocalTrainerLLM:
 
     def test_grpo_env_type_injected_from_algo(self):
         """When ``env_type`` is not in the environment section, it should be
-        injected from ``LLMAlgorithmSpec.env_type``."""
+        injected from ``LLMAlgorithmSpec.env_type``.
+        """
         manifest = self._grpo_manifest()
         manifest["environment"].pop("env_type", None)
         trainer = LocalTrainer.from_manifest(manifest)
@@ -1026,7 +1028,7 @@ class TestLocalTrainerLLM:
 
 
 # ============================================================================
-# TestFromConfigFiles – integration tests loading actual YAML configs
+# TestFromConfigFiles - integration tests loading actual YAML configs
 # ============================================================================
 
 _SINGLE_AGENT_CONFIGS = [
@@ -1062,12 +1064,14 @@ _MULTI_AGENT_CONFIGS = [
 
 class TestFromConfigFiles:
     """Load every YAML config under ``configs/training/`` and verify that
-    ``LocalTrainer.from_manifest()`` produces the expected types."""
+    ``LocalTrainer.from_manifest()`` produces the expected types.
+    """
 
     @pytest.fixture(autouse=True)
     def _patch_heavy_init(self):
         """Avoid spawning real environments and populations for config
-        file integration tests."""
+        file integration tests.
+        """
         with (
             patch.object(LocalTrainer, "_make_env", return_value=MagicMock()),
             patch(
@@ -1078,7 +1082,7 @@ class TestFromConfigFiles:
             yield
 
     @pytest.mark.parametrize(
-        "rel_path, expected_algo_cls, expected_encoder_cls",
+        ("rel_path", "expected_algo_cls", "expected_encoder_cls"),
         _SINGLE_AGENT_CONFIGS,
         ids=[p for p, *_ in _SINGLE_AGENT_CONFIGS],
     )
@@ -1101,7 +1105,7 @@ class TestFromConfigFiles:
             )
 
     @pytest.mark.parametrize(
-        "rel_path, expected_algo_cls, expected_encoder_cls",
+        ("rel_path", "expected_algo_cls", "expected_encoder_cls"),
         _OFFLINE_CONFIGS,
         ids=[p for p, *_ in _OFFLINE_CONFIGS],
     )
@@ -1122,7 +1126,7 @@ class TestFromConfigFiles:
             )
 
     @pytest.mark.parametrize(
-        "rel_path, expected_algo_cls, expected_encoder_cls",
+        ("rel_path", "expected_algo_cls", "expected_encoder_cls"),
         _BANDIT_CONFIGS,
         ids=[p for p, *_ in _BANDIT_CONFIGS],
     )
@@ -1143,7 +1147,7 @@ class TestFromConfigFiles:
             )
 
     @pytest.mark.parametrize(
-        "rel_path, expected_algo_cls",
+        ("rel_path", "expected_algo_cls"),
         _MULTI_AGENT_CONFIGS,
         ids=[p for p, _ in _MULTI_AGENT_CONFIGS],
     )
@@ -1159,14 +1163,15 @@ class TestFromConfigFiles:
 
     @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
     @pytest.mark.parametrize(
-        "rel_path, expected_algo_cls",
+        ("rel_path", "expected_algo_cls"),
         [("grpo.yaml", GRPOSpec), ("dpo.yaml", DPOSpec)],
         ids=["grpo", "dpo"],
     )
     def test_llm_config_parses_as_manifest(self, rel_path, expected_algo_cls):
         """LLM configs need runtime-supplied fields (model path, LoRA
         config, etc.) before they fully validate.  This test merges
-        those fields in, mirroring what the benchmarking script does."""
+        those fields in, mirroring what the benchmarking script does.
+        """
         from peft import LoraConfig
 
         config_path = CONFIGS_DIR / rel_path

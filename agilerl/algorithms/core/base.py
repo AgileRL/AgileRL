@@ -35,7 +35,7 @@ from torch.nn.utils import clip_grad_norm_
 from torch.optim import AdamW
 from typing_extensions import Self
 
-from agilerl import HAS_DEEPSPEED, HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES, HAS_VLLM
+from agilerl import HAS_DEEPSPEED, HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
 
 if HAS_LIGER_KERNEL:
     from liger_kernel.transformers import _apply_liger_kernel_to_instance
@@ -164,16 +164,19 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
 if TYPE_CHECKING or HAS_DEEPSPEED:
     from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 
-if TYPE_CHECKING or HAS_VLLM:
+if TYPE_CHECKING:
     from vllm import LLM, CompletionOutput, SamplingParams
+else:
+    try:
+        from vllm import LLM, CompletionOutput, SamplingParams
+    except ImportError:
+        LLM = CompletionOutput = SamplingParams = None
 
 __all__ = ["ActionResult", "EvolvableAlgorithm", "MultiAgentRLAlgorithm", "RLAlgorithm"]
 
 logger = logging.getLogger(__name__)
 
 SelfAgentWrapper = TypeVar("SelfAgentWrapper", bound=AgentWrapperProtocol)
-
-logger = logging.getLogger(__name__)
 
 
 class _RegistryMeta(type):

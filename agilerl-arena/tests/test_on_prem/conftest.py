@@ -9,7 +9,6 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-
 from agilerl.arena.client import ArenaClient
 from agilerl.arena.config import CommandConfig
 from agilerl.arena.on_prem import OnPremApi

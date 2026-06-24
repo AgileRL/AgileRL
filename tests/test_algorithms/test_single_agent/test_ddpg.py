@@ -20,8 +20,8 @@ from tests.helper_functions import (
     get_sample_from_space,
 )
 from tests.helpers.algorithm_coverage import (
-    assert_swap_channels_called,
-    patch_obs_channels_to_first,
+    assert_transpose_image_observation_called,
+    patch_transpose_image_observation,
 )
 
 
@@ -588,15 +588,18 @@ class TestDDPGTest:
         assert isinstance(mean_score, float)
         agent.clean_up()
 
-    def test_swap_channels_path(self, image_space, monkeypatch, request):
+    def test_swap_channels_path(self, monkeypatch):
+        channels_last_box = spaces.Box(
+            low=0, high=255, shape=(32, 32, 3), dtype=np.uint8
+        )
         action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
-        observation_space = request.getfixturevalue("image_space")
-        env = DummyEnv(state_size=observation_space.shape, vect=False, num_envs=1)
-        spy = patch_obs_channels_to_first(monkeypatch, "agilerl.algorithms.ddpg")
-        agent = DDPG(observation_space=observation_space, action_space=action_space)
-        mean_score = agent.test(env, swap_channels=True, max_steps=1, loop=1)
+        env = DummyEnv(state_size=channels_last_box.shape, vect=False, num_envs=1)
+        spy = patch_transpose_image_observation(monkeypatch)
+        agent = DDPG(observation_space=channels_last_box, action_space=action_space)
+        assert agent.swap_channels is True
+        mean_score = agent.test(env, max_steps=1, loop=1)
         assert isinstance(mean_score, float)
-        assert_swap_channels_called(spy)
+        assert_transpose_image_observation_called(spy)
         agent.clean_up()
 
 

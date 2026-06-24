@@ -369,7 +369,8 @@ class TestReplayBufferSample:
 
 class TestReplayBufferAdaptiveSampling:
     """`sample` draws without replacement for small buffers and switches to
-    (faster) with-replacement once duplicates become unlikely."""
+    (faster) with-replacement once duplicates become unlikely.
+    """
 
     @staticmethod
     def _fill(buf: ReplayBuffer, n: int) -> None:
@@ -419,7 +420,8 @@ class TestReplayBufferAdaptiveSampling:
         s = buf.sample(8, return_idx=True)
         assert used == ["randint"]
         assert s["idxs"].shape == (8,)
-        assert (s["idxs"] >= 0).all() and (s["idxs"] < buf.size).all()
+        assert (s["idxs"] >= 0).all()
+        assert (s["idxs"] < buf.size).all()
 
     def test_sample_more_than_size_returns_size(self):
         buf = ReplayBuffer(max_size=50)
@@ -1837,7 +1839,7 @@ class TestMultiAgentReplayBufferEdgeCases:
 
     def test_add_batch_size_one_repeatedly(self):
         buf = ReplayBuffer(3)
-        for i in range(5):
+        for _i in range(5):
             buf.add(_make_ma_td(MA_AGENTS, batch_size=1))
         assert len(buf) == 3
         assert buf.counter == 5

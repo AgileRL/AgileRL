@@ -102,7 +102,13 @@ if HAS_DEEPSPEED and HAS_VLLM:
     from tests.test_algorithms.test_llms.test_grpo import deepspeed_config_stage_2
 
 if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
-    from peft import LoraConfig, get_peft_model
+    from peft import LoraConfig
+
+_LLM_DEPS_SKIP = pytest.mark.skipif(
+    not HAS_LLM_DEPENDENCIES, reason="agilerl[llm] not installed"
+)
+
+_VLLM_SKIP = pytest.mark.skipif(not HAS_VLLM, reason="vLLM not installed")
 
 
 @pytest.fixture
@@ -6358,6 +6364,7 @@ class TestLLMBackwardPassDeepSpeedScheduler:
         assert agent.lr == 3e-4
 
 
+@_VLLM_SKIP
 @_LLM_DEPS_SKIP
 class TestLLMMoveLoraToVllmErrors:
     def test_raises_when_lora_config_missing(self):
@@ -6443,6 +6450,7 @@ class TestLLMMoveLoraToVllmErrors:
             agent._move_lora_to_vllm()
 
 
+@_VLLM_SKIP
 @_LLM_DEPS_SKIP
 class TestLLMGenerateWithVllmColocateErrors:
     def test_raises_when_prompt_exceeds_max_model_len(self):
@@ -6462,7 +6470,14 @@ class TestLLMGenerateWithVllmColocateErrors:
         agent.llm = MagicMock()
 
         prompts = [{"input_ids": torch.tensor([[1, 2, 3, 4, 5]]), "text": "hello"}]
-        with pytest.raises(ValueError, match="Model prompt length"):
+        with (
+            patch(
+                "agilerl.algorithms.core.base.SamplingParams",
+                return_value=MagicMock(),
+                create=True,
+            ),
+            pytest.raises(ValueError, match="Model prompt length"),
+        ):
             agent._generate_with_vllm_colocate(prompts, group_size=1, temperature=1.0)
 
     def test_tp_slice_sampling_logps_when_capture_enabled(self):

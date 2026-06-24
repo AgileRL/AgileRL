@@ -39,7 +39,7 @@ class TestTournamentSelectionInit:
         assert ts.population_size == population_size
 
     @pytest.mark.parametrize(
-        "tournament_size,elitism,population_size,match",
+        ("tournament_size", "elitism", "population_size", "match"),
         [
             (0, True, 4, "greater than zero"),
             (2, "invalid", 4, "boolean"),
@@ -484,7 +484,7 @@ class TestScalarFitness:
         assert isinstance(result, float)
 
     @pytest.mark.parametrize(
-        "fitness,expected",
+        ("fitness", "expected"),
         [
             ([1.0, 2.0, 3.0], 2.0),
             ((4.0, 6.0), 5.0),

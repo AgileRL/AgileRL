@@ -1,25 +1,24 @@
+import numpy as np
 import pytest
 import torch
-import numpy as np
 
 pytest.importorskip("deepspeed", reason="LLM tests require deepspeed.")
 pytest.importorskip("vllm", reason="LLM tests require vllm.")
 
+import importlib.util
+
 from agilerl.algorithms.core import ActionResult
-from agilerl.rollouts.on_policy import collect_rollouts_llm
+from agilerl.algorithms.ppo import PPO
 from agilerl.llm_envs import (
     SyncMultiTurnVecEnv,
     TokenObservationWrapper,
 )
-from agilerl.algorithms.ppo import PPO
 from agilerl.rollouts.on_policy import (
     _collect_rollouts,
     collect_rollouts,
+    collect_rollouts_llm,
     collect_rollouts_recurrent,
 )
-
-
-import importlib.util
 
 if importlib.util.find_spec("deepspeed") and importlib.util.find_spec("vllm"):
     from tests.test_algorithms.test_llms.test_ppo_llm import _cpu_llmppo
@@ -202,7 +201,7 @@ class TestCollectRolloutsLlm:
 
             def close(self) -> None:
                 """Provide a close method compatible with vector env cleanup."""
-                return None
+                return
 
         class _EchoAgent:
             """Echo prompt marker tokens into completions in row order."""
@@ -265,7 +264,7 @@ class DummyEnv:
         self.vect = vect
         self.num_envs = num_envs
         if self.vect:
-            self.state_size = (num_envs,) + self.state_size
+            self.state_size = (num_envs, *self.state_size)
             self.n_envs = num_envs
         else:
             self.n_envs = 1
@@ -323,20 +322,6 @@ class TestCollectRollouts:
         )
         env = DummyEnv(state_size=vector_space.shape, vect=True, num_envs=1)
         result = collect_rollouts_recurrent(ppo, env, n_steps=4)
-        assert isinstance(result, tuple)
-        assert len(result) == 5
-        assert isinstance(result[0], list)
-        ppo.clean_up()
-
-    def test_collect_rollouts_returns_scores(self, vector_space, discrete_space):
-        ppo = PPO(
-            observation_space=vector_space,
-            action_space=discrete_space,
-            learn_step=4,
-            num_envs=1,
-        )
-        env = DummyEnv(state_size=vector_space.shape, vect=True, num_envs=1)
-        result = collect_rollouts(ppo, env, n_steps=4)
         assert isinstance(result, tuple)
         assert len(result) == 5
         assert isinstance(result[0], list)

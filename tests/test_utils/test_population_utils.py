@@ -1,7 +1,5 @@
 """Tests for agilerl.utils.population_utils formatting helpers."""
 
-import pytest
-
 from agilerl.utils.population_utils import ScalarMetricRow, fmt_value
 
 

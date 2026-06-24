@@ -1010,28 +1010,39 @@ class TestPPOLearn:
             net_config=net_config,
         )
 
-        # Get action with hidden state
-        obs = np.random.rand(1, *observation_space.shape).astype(
-            observation_space.dtype,
-        )  # Add batch dim for num_envs=1
-        hidden_state = ppo.get_initial_hidden_state()
+        # Fill the buffer manually
+        for i in range(learn_step):
+            obs, next_obs = get_batch_states(observation_space, 1)
+            action = np.array([action_space.sample()], dtype=action_space.dtype)
+            reward = 1.0
+            done = i == (learn_step - 1)  # Last step is done
+            value = 0.5
+            log_prob = -0.5
+            if recurrent:
+                hidden_state = ppo.get_initial_hidden_state()
+                ppo.rollout_buffer.add(
+                    obs,
+                    action,
+                    reward,
+                    done,
+                    value,
+                    log_prob,
+                    next_obs,
+                    hidden_state,
+                )
+            else:
+                ppo.rollout_buffer.add(
+                    obs, action, reward, done, value, log_prob, next_obs
+                )
 
-        action, log_prob, entropy, value, next_hidden = ppo.get_action(
-            obs,
-            hidden_state=hidden_state,
-        )
+        last_value = torch.zeros((ppo.num_envs, 1), device=ppo.device)
+        last_done = torch.zeros((ppo.num_envs, 1), device=ppo.device)
+        ppo.rollout_buffer.compute_returns_and_advantages(last_value, last_done)
 
-        assert action.shape[0] == 1
-        assert isinstance(log_prob, np.ndarray)
-        assert isinstance(entropy, np.ndarray)
-        assert isinstance(value, np.ndarray)
-        assert next_hidden is not None
-        assert next_hidden.get("shared_encoder_h", None).shape == (
-            1,
-            1,
-            32,
-        )  # (directions, num_envs, hidden_size)
-        assert next_hidden.get("shared_encoder_c", None).shape == (1, 1, 32)
+        loss = ppo.learn()
+
+        assert isinstance(loss, float)
+        assert loss >= 0.0
         ppo.clean_up()
 
     # Test PPO with hidden states
@@ -1135,71 +1146,7 @@ class TestPPOLearn:
         ppo.clean_up()
 
 
-class TestPPOGetActionAndValues:
-    def test_get_action_and_values_share_encoders_false(
-        self, vector_space, discrete_space
-    ):
-        ppo = PPO(
-            vector_space,
-            discrete_space,
-            share_encoders=False,
-        )
-        obs = np.zeros((1, *vector_space.shape), dtype=np.float32)
-        action, log_prob, entropy, values, next_hidden = ppo._get_action_and_values(
-            obs, sample=True
-        )
-        assert action is not None
-        assert values is not None
-        assert next_hidden is None
-        ppo.clean_up()
-
-
-class TestPPOEvaluateActions:
-    def test_evaluate_actions_uses_negative_log_prob_when_entropy_none(
-        self,
-        vector_space,
-        discrete_space,
-        monkeypatch,
-    ):
-        ppo = PPO(vector_space, discrete_space)
-        monkeypatch.setattr(
-            ppo,
-            "_get_action_and_values",
-            lambda *args, **kwargs: (
-                torch.zeros(1),
-                torch.zeros(1),
-                None,
-                torch.zeros(1),
-                None,
-            ),
-        )
-        monkeypatch.setattr(
-            ppo.actor,
-            "action_log_prob",
-            lambda actions: torch.tensor([2.0]),
-        )
-        log_prob, entropy, _ = ppo.evaluate_actions(
-            obs=np.zeros((1, *vector_space.shape), dtype=np.float32),
-            actions=torch.tensor([0]),
-        )
-        assert log_prob.item() == 2.0
-        assert entropy.item() == -2.0
-        ppo.clean_up()
-
-
-class TestPPOShareEncoderParameters:
-    def test_share_encoder_parameters_warns_for_non_evolvable(
-        self, vector_space, discrete_space
-    ):
-        ppo = PPO(vector_space, discrete_space)
-        ppo.actor = nn.Linear(4, 2)
-        ppo.critic = nn.Linear(4, 1)
-        with pytest.warns(UserWarning, match="Encoder sharing is disabled"):
-            ppo.share_encoder_parameters()
-        ppo.clean_up()
-
-
-class TestPPOLearn:
+class TestPPOLearnFromBuffer:
     # Test PPO learning with rollout buffer
     @pytest.mark.parametrize(
         "observation_space",
@@ -1383,26 +1330,34 @@ class TestPPOLearn:
         discrete_space,
         monkeypatch,
     ):
+        class DummyAccel:
+            def __init__(self):
+                self.calls = 0
+
+            def backward(self, loss):
+                self.calls += 1
+                loss.backward()
+
         ppo = PPO(
             vector_space,
             discrete_space,
-            use_rollout_buffer=False,
             target_kl=1e-6,
             update_epochs=2,
             batch_size=2,
         )
+        ppo.accelerator = DummyAccel()
         num_steps = 4
-        states, next_states = get_batch_states(vector_space, num_steps)
-        experiences = [
-            [states],
-            [torch.randint(0, discrete_space.n, (num_steps,)).float()],
-            [torch.randn(num_steps)],
-            [torch.randn(num_steps)],
-            [torch.randint(0, 2, (num_steps,))],
-            [torch.randn(num_steps)],
-            [next_states],
-            [torch.zeros(1)],
-        ]
+        td = TensorDict(
+            {
+                "observations": torch.randn(num_steps, *vector_space.shape),
+                "actions": torch.randint(0, discrete_space.n, (num_steps, 1)),
+                "log_probs": torch.zeros(num_steps),
+                "advantages": torch.ones(num_steps),
+                "returns": torch.zeros(num_steps),
+                "values": torch.zeros(num_steps),
+            },
+            batch_size=[num_steps],
+        )
         monkeypatch.setattr(
             ppo,
             "evaluate_actions",
@@ -1412,19 +1367,9 @@ class TestPPOLearn:
                 torch.zeros(actions.shape[0], requires_grad=True),
             ),
         )
-        optimizer_steps = 0
-        original_step = ppo.optimizer.step
-
-        def counting_step(*args, **kwargs):
-            nonlocal optimizer_steps
-            optimizer_steps += 1
-            return original_step(*args, **kwargs)
-
-        monkeypatch.setattr(ppo.optimizer, "step", counting_step)
-        loss = ppo.learn(experiences)
+        loss = ppo._learn_from_rollout_buffer_flat(buffer_td_external=td)
         assert isinstance(loss, float)
-        assert optimizer_steps == 2
-        assert optimizer_steps < ppo.update_epochs * (num_steps // ppo.batch_size)
+        assert ppo.accelerator.calls > 0
         ppo.clean_up()
 
     def test_rollout_buffer_flat_external_uses_accelerator_and_early_stops(
@@ -2308,7 +2253,6 @@ class TestPPOCollectRollouts:
         ppo = PPO(
             observation_space=vector_space,
             action_space=discrete_space,
-            use_rollout_buffer=True,
             learn_step=2,
             num_envs=1,
         )

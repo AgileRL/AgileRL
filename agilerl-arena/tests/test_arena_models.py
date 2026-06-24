@@ -196,14 +196,14 @@ def test_training_spec_rejects_invalid_eval_steps() -> None:
 
 def test_training_spec_rejects_evo_steps_above_max_steps() -> None:
     with pytest.raises(
-        ValueError, match="evo_steps .* must be less than or equal to max_steps"
+        ValueError, match=r"evo_steps .* must be less than or equal to max_steps"
     ):
         TrainingSpec(max_steps=100, evo_steps=200)
 
 
 def test_training_spec_rejects_eps_start_below_eps_end() -> None:
     with pytest.raises(
-        ValueError, match="eps_start .* must be greater than or equal to eps_end"
+        ValueError, match=r"eps_start .* must be greater than or equal to eps_end"
     ):
         TrainingSpec(eps_start=0.1, eps_end=0.9)
 

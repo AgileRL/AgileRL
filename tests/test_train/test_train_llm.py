@@ -1,7 +1,6 @@
 from contextlib import contextmanager
 from unittest.mock import ANY, MagicMock, Mock, call, patch
 
-import numpy as np
 import pytest
 import torch
 from accelerate import Accelerator
@@ -287,7 +286,8 @@ class TestFinetuneLlmReasoning:
             # finetune_llm_* must return (population, fitnesses) — same contract
             # as the non-LLM train fns — so the `agilerl train` CLI can unpack
             # the result (otherwise it raises ValueError on a 1-element return).
-            assert isinstance(result, tuple) and len(result) == 2
+            assert isinstance(result, tuple)
+            assert len(result) == 2
             agents, fitnesses = result
             assert mock_agent in agents
             assert isinstance(fitnesses, list)
@@ -441,22 +441,22 @@ class TestFinetuneLlmReasoning:
                 "agilerl.training.train_llm.tournament_selection_and_mutation",
                 return_value=[mock_agent],
             ),
-            pytest.warns(
-                UserWarning,
-                match="checkpoint_steps.*evolution is active",
-            ),
         ):
             mock_pbar_fn.return_value = MagicMock()
             mock_agg.return_value = 0.5
-            finetune_llm_reasoning(
-                pop=[mock_agent],
-                env=mock_env,
-                evaluation_interval=2,
-                evo_steps=1,
-                tournament=Mock(),
-                mutation=mutation,
-                checkpoint_steps=3,
-            )
+            with pytest.warns(
+                UserWarning,
+                match=r"checkpoint_steps.*evolution is active",
+            ):
+                finetune_llm_reasoning(
+                    pop=[mock_agent],
+                    env=mock_env,
+                    evaluation_interval=2,
+                    evo_steps=1,
+                    tournament=Mock(),
+                    mutation=mutation,
+                    checkpoint_steps=3,
+                )
 
     def test_finetune_llm_reasoning_saves_elite_at_end(self):
         weaker = _mock_grpo_agent()
@@ -494,7 +494,7 @@ class TestFinetuneLlmReasoning:
         [finetune_llm_reasoning, finetune_llm_preference],
     )
     def test_finetune_llm_reasoning_evo_steps_not_set(self, finetune_fn):
-        with pytest.raises(ValueError) as exc_info:
+        with pytest.raises(ValueError, match="evo_steps"):
             finetune_fn(
                 pop=[
                     MagicMock(
@@ -507,27 +507,6 @@ class TestFinetuneLlmReasoning:
                 tournament=MagicMock(),
                 mutation=MagicMock(),
             )
-        assert "evo_steps" in str(exc_info.value)
-
-    @pytest.mark.parametrize(
-        "finetune_fn",
-        [finetune_llm_reasoning, finetune_llm_preference],
-    )
-    def test_finetune_llm_reasoning_value_error_if_evo_steps_not_set(self, finetune_fn):
-        with pytest.raises(ValueError) as exc_info:
-            finetune_llm_reasoning(
-                pop=[
-                    MagicMock(
-                        spec=(GRPO if finetune_fn == finetune_llm_reasoning else DPO),
-                    ),
-                ],
-                env=MagicMock(),
-                evo_steps=None,
-                accelerator=None,
-                tournament=MagicMock(),
-                mutation=MagicMock(),
-            )
-        assert "evo_steps" in str(exc_info.value)
 
     def test_finetune_llm_reasoning_warning_num_epochs_and_max_steps(self):
         mock_agent = _mock_grpo_agent()
@@ -1230,7 +1209,8 @@ class TestFinetuneLlmMultiturn:
 
     def test_finetune_llm_multiturn_forwards_sampling_logps_to_learn(self):
         """When the rollout captures sampling logps, they're forwarded to
-        ``learn(..., sampling_logps=...)`` for GRPO/PPO/REINFORCE agents."""
+        ``learn(..., sampling_logps=...)`` for GRPO/PPO/REINFORCE agents.
+        """
         mock_agent = _make_multiturn_mock_agent(spec=GRPO)
         sampling_logps = [torch.zeros(1, 8)]
         rollout_return = (
@@ -1432,7 +1412,7 @@ class TestFinetuneLlmMultiturn:
         mock_agent.algo = "DPO"
         mock_agent.batch_size = 16
         mock_agent.batch_size_per_process = 16
-        with pytest.raises(ValueError, match="LLMPPO.*LLMREINFORCE.*GRPO"):
+        with pytest.raises(ValueError, match=r"LLMPPO.*LLMREINFORCE.*GRPO"):
             finetune_llm_multiturn(
                 pop=[mock_agent],
                 env_factory=MagicMock(),
@@ -1753,7 +1733,7 @@ def test_finetune_llm_checkpoint_triggering_non_divisible_steps(finetune_fn):
 
 
 @pytest.mark.parametrize(
-    "finetune_fn, agent_spec",
+    ("finetune_fn", "agent_spec"),
     [
         (finetune_llm_reasoning, GRPO),
         (finetune_llm_preference, DPO),

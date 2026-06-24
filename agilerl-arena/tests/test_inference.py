@@ -84,7 +84,7 @@ class TestSerializeDeserialize:
         assert isinstance(encoded, tuple)
         decoded = Agent.deserialize(encoded, batched=False)
         assert isinstance(decoded, tuple)
-        for orig, dec in zip(data, decoded):
+        for orig, dec in zip(data, decoded, strict=False):
             np.testing.assert_array_equal(dec, orig)
 
     def test_none_passthrough(self):
@@ -406,7 +406,7 @@ class TestAgentInit:
         mock_resp.json.return_value = STATUS_BODY
         mock_client.request.return_value = mock_resp
 
-        agent = Agent("http://endpoint", api_key="abc")
+        Agent("http://endpoint", api_key="abc")
         call_kwargs = mock_http_cls.call_args[1]
         assert call_kwargs["headers"]["Authorization"] == "Bearer abc"
 
@@ -675,28 +675,28 @@ class TestSerializeDeserializeComplex:
 
 class TestLoadBinding:
     @patch("agilerl.arena.inference.cache._load_store", return_value={})
-    def test_no_deployment_key(self, _mock):
+    def test_no_deployment_key(self, mock_load_store):
         assert load_binding("my-dep") is None
 
     @patch(
         "agilerl.arena.inference.cache._load_store",
         return_value={"deployments": "not-a-dict"},
     )
-    def test_deployment_key_not_dict(self, _mock):
+    def test_deployment_key_not_dict(self, mock_load_store):
         assert load_binding("my-dep") is None
 
     @patch(
         "agilerl.arena.inference.cache._load_store",
         return_value={"deployments": {}},
     )
-    def test_missing_entry(self, _mock):
+    def test_missing_entry(self, mock_load_store):
         assert load_binding("missing") is None
 
     @patch(
         "agilerl.arena.inference.cache._load_store",
         return_value={"deployments": {"my-dep": "not-a-dict"}},
     )
-    def test_entry_not_dict(self, _mock):
+    def test_entry_not_dict(self, mock_load_store):
         assert load_binding("my-dep") is None
 
     @patch(
@@ -705,7 +705,7 @@ class TestLoadBinding:
             "deployments": {"my-dep": {"url": "https://x.com", "api_key": "key123"}}
         },
     )
-    def test_valid_entry(self, _mock):
+    def test_valid_entry(self, mock_load_store):
         result = load_binding("my-dep")
         assert result == ("https://x.com", "key123")
 
@@ -713,28 +713,28 @@ class TestLoadBinding:
         "agilerl.arena.inference.cache._load_store",
         return_value={"deployments": {"my-dep": {"url": 123, "api_key": "key"}}},
     )
-    def test_url_not_string(self, _mock):
+    def test_url_not_string(self, mock_load_store):
         assert load_binding("my-dep") is None
 
     @patch(
         "agilerl.arena.inference.cache._load_store",
         return_value={"deployments": {"my-dep": {"url": "http://x", "api_key": None}}},
     )
-    def test_api_key_not_string(self, _mock):
+    def test_api_key_not_string(self, mock_load_store):
         assert load_binding("my-dep") is None
 
     @patch(
         "agilerl.arena.inference.cache._load_store",
         return_value={"deployments": {"my-dep": {"url": "", "api_key": "key"}}},
     )
-    def test_empty_url(self, _mock):
+    def test_empty_url(self, mock_load_store):
         assert load_binding("my-dep") is None
 
     @patch(
         "agilerl.arena.inference.cache._load_store",
         return_value={"deployments": {"my-dep": {"url": "http://x", "api_key": "  "}}},
     )
-    def test_whitespace_only_api_key(self, _mock):
+    def test_whitespace_only_api_key(self, mock_load_store):
         assert load_binding("my-dep") is None
 
     @patch(
@@ -743,7 +743,7 @@ class TestLoadBinding:
             "deployments": {"my-dep": {"url": "  http://x  ", "api_key": " key "}}
         },
     )
-    def test_strips_whitespace(self, _mock):
+    def test_strips_whitespace(self, mock_load_store):
         result = load_binding("my-dep")
         assert result == ("http://x", "key")
 
@@ -751,7 +751,7 @@ class TestLoadBinding:
         "agilerl.arena.inference.cache._load_store",
         return_value={"deployments": {"my-dep": {"url": "http://x"}}},
     )
-    def test_missing_api_key_field(self, _mock):
+    def test_missing_api_key_field(self, mock_load_store):
         assert load_binding("my-dep") is None
 
 
@@ -954,14 +954,14 @@ class TestNormalizedDeploymentName:
 
 class TestActiveAgent:
     @patch("agilerl.arena.inference.cache._load_store", return_value={})
-    def test_load_missing(self, _mock):
+    def test_load_missing(self, mock_load_store):
         assert load_active_agent() is None
 
     @patch(
         "agilerl.arena.inference.cache._load_store",
         return_value={"active_agent": "not-a-dict"},
     )
-    def test_load_invalid_section(self, _mock):
+    def test_load_invalid_section(self, mock_load_store):
         assert load_active_agent() is None
 
     @patch("agilerl.arena.inference.cache._write_store")
@@ -969,7 +969,7 @@ class TestActiveAgent:
         "agilerl.arena.inference.cache._load_store",
         return_value={},
     )
-    def test_save_and_load(self, _mock_load, mock_write):
+    def test_save_and_load(self, mock_load_store_fn, mock_write):
         save_active_agent("my-dep", experiment_name="exp1", project_name="proj1")
         written = mock_write.call_args[0][0]
         assert written["active_agent"] == {
@@ -988,7 +988,7 @@ class TestActiveAgent:
             }
         },
     )
-    def test_load_strips_fields(self, _mock):
+    def test_load_strips_fields(self, mock_load_store):
         result = load_active_agent()
         assert result == ActiveAgentSelection(
             deployment_name="my-dep",

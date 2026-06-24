@@ -7,8 +7,6 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from click import ClickException
-
 from agilerl.arena.on_prem.scripts import (
     BundleScriptRunner,
     StageFailed,
@@ -16,6 +14,7 @@ from agilerl.arena.on_prem.scripts import (
     stage_failure,
     swarm_script_env,
 )
+from click import ClickException
 
 
 class TestSwarmScriptEnv:

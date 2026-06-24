@@ -662,7 +662,11 @@ class PPO(RLAlgorithm):
         buffer_td["advantages"] = normalized_advantages
 
         batch_size = self.batch_size
-        num_samples = self.rollout_buffer.size()
+        num_samples = (
+            int(buffer_td.batch_size[0])
+            if buffer_td_external is not None
+            else self.rollout_buffer.size()
+        )
         indices = np.arange(num_samples)
         learn_metrics = {
             "loss": 0.0,

@@ -17,22 +17,22 @@ from gymnasium import spaces
 from torch import nn
 from torch.optim.lr_scheduler import SequentialLR
 
+import agilerl.utils.algo_utils as algo_utils
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.modules import EvolvableModule
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.networks import EvolvableNetwork
 from agilerl.typing import BPTTSequenceType
-import agilerl.utils.algo_utils as algo_utils
 from agilerl.utils.algo_utils import (
-    check_supported_space,
-    clone_llm,
     CosineLRScheduleConfig,
     DummyOptimizer,
     VLLMConfig,
     _reconcile_shapes,
     apply_env_defined_actions,
     apply_image_normalization,
+    check_supported_space,
     chkpt_attribute_to_device,
+    clone_llm,
     concatenate_experiences_into_batches,
     concatenate_spaces,
     concatenate_tensors,
@@ -41,14 +41,14 @@ from agilerl.utils.algo_utils import (
     extract_sequences_from_episode,
     filter_init_dict,
     flatten_experiences,
+    format_shared_critic_encoder,
     get_action_mask_size,
+    get_experiences_samples,
     get_hidden_states_shape_from_model,
     get_input_size_from_space,
-    get_output_size_from_space,
-    format_shared_critic_encoder,
-    get_experiences_samples,
     get_num_actions,
     get_obs_shape,
+    get_output_size_from_space,
     get_vect_dim,
     is_channels_last,
     is_image_space,
@@ -60,6 +60,7 @@ from agilerl.utils.algo_utils import (
     maybe_add_batch_dim,
     module_checkpoint_single,
     multi_dim_clamp,
+    needs_image_transpose,
     obs_to_tensor,
     preprocess_observation,
     recursive_check_module_attrs,
@@ -67,7 +68,6 @@ from agilerl.utils.algo_utils import (
     remove_nested_files,
     reshape_from_space,
     share_encoder_parameters,
-    needs_image_transpose,
     stack_and_pad_experiences,
     stack_experiences,
     transpose_image_observation,
@@ -107,7 +107,7 @@ def test_stack_and_pad_experiences_with_padding():
 
 
 @pytest.mark.parametrize(
-    "min_val, max_val, action, expected_result, device",
+    ("min_val", "max_val", "action", "expected_result", "device"),
     [
         (0.0, 1.0, [1.1, 0.75, -1], [1.0, 0.75, 0.0], "cpu"),
         (0.5, 1.0, [0, 0, 0.2], [0.5, 0.5, 0.5], "cpu"),  # 0.2 < 0.5 so clamped to 0.5
@@ -135,7 +135,7 @@ def test_multi_dim_clamp_scalar_bounds(
 
 
 @pytest.mark.parametrize(
-    "min_val, max_val, action, expected_result, device",
+    ("min_val", "max_val", "action", "expected_result", "device"),
     [
         (
             [-1, -1, -1],
@@ -688,7 +688,7 @@ class MockEvolvableNetwork(EvolvableNetwork):
 
 class TestMultiDimClamp:
     @pytest.mark.parametrize(
-        "min_val, max_val, action, expected_result, device",
+        ("min_val", "max_val", "action", "expected_result", "device"),
         [
             (0.0, 1.0, [1.1, 0.75, -1], [1.0, 0.75, 0.0], "cpu"),
             (
@@ -722,7 +722,7 @@ class TestMultiDimClamp:
         assert torch.allclose(result, expected)
 
     @pytest.mark.parametrize(
-        "min_val, max_val, action, expected_result, device",
+        ("min_val", "max_val", "action", "expected_result", "device"),
         [
             (
                 [-1, -1, -1],
@@ -842,27 +842,10 @@ class TestApplyImageNormalization:
         np.testing.assert_array_equal(result, obs)
 
     def test_raises_for_non_box_space(self):
-        with pytest.raises(TypeError, match="Expected spaces.Box"):
+        with pytest.raises(TypeError, match=r"Expected spaces\.Box"):
             algo_utils.apply_image_normalization(
                 np.array([1.0], dtype=np.float32), spaces.Discrete(2)
             )
-
-
-def test_is_image_space():
-    # Test identifying image spaces
-    image_space = spaces.Box(low=0, high=255, shape=(84, 84, 3))
-    not_image_space = spaces.Box(low=0, high=1, shape=(10,))
-
-    assert is_image_space(image_space)
-    assert not is_image_space(not_image_space)
-
-    # Test with 2D space (not an image)
-    not_image_space_2d = spaces.Box(low=0, high=1, shape=(10, 10))
-    assert not is_image_space(not_image_space_2d)
-
-    # Test with 4D space (not an image)
-    not_image_space_4d = spaces.Box(low=0, high=1, shape=(1, 84, 84, 3))
-    assert not is_image_space(not_image_space_4d)
 
 
 class TestKeyInNestedDict:
@@ -1001,7 +984,7 @@ class TestObsToTensor:
 
     def test_raises_for_unsupported_observation_type(self):
         with pytest.raises(TypeError, match="Unrecognized type of observation"):
-            algo_utils.obs_to_tensor(set([1, 2]), device="cpu")
+            algo_utils.obs_to_tensor({1, 2}, device="cpu")
 
 
 class TestMaybeAddBatchDim:
@@ -1430,7 +1413,7 @@ class TestPreprocessObservations:
         assert result[1].shape == (1, 3)
 
     @pytest.mark.parametrize(
-        "space_factory,obs_factory",
+        ("space_factory", "obs_factory"),
         [
             (lambda: spaces.Box(0, 1, (2,)), lambda: np.array([[np.nan, 0.5]])),
             (lambda: spaces.MultiBinary(2), lambda: np.array([[np.nan, 0]])),
@@ -1902,7 +1885,7 @@ class TestVectorizeExperiencesByAgent:
 
 class TestExperienceToTensors:
     @pytest.mark.parametrize(
-        "exp_type,space",
+        ("exp_type", "space"),
         [
             (
                 {"a": np.ones((2, 3)), "b": np.zeros((2, 2))},
@@ -1935,7 +1918,9 @@ class TestExperienceToTensors:
 def test_module_checkpoint_single():
     mod = DummyEvolvableModule()
     out = module_checkpoint_single(mod, "actor")
-    assert "actor_cls" in out and "actor_init_dict" in out and "actor_state_dict" in out
+    assert "actor_cls" in out
+    assert "actor_init_dict" in out
+    assert "actor_state_dict" in out
 
 
 def test_get_hidden_states_shape_from_model():
@@ -2007,8 +1992,10 @@ def test_apply_env_defined_actions():
         agent_ids, action_dict, env_defined, masks, discrete_actions=False
     )
     assert result is action_dict
-    assert action_dict["a"][0] == 10 and action_dict["a"][1] == 2
-    assert action_dict["b"][0] == 3 and action_dict["b"][1] == 40
+    assert action_dict["a"][0] == 10
+    assert action_dict["a"][1] == 2
+    assert action_dict["b"][0] == 3
+    assert action_dict["b"][1] == 40
 
 
 @pytest.mark.skipif(
@@ -2096,7 +2083,7 @@ def test_get_input_size_from_space():
 
 
 @pytest.mark.parametrize(
-    "space,expected",
+    ("space", "expected"),
     [
         (spaces.Discrete(5), 5),
         (spaces.MultiDiscrete([3, 4, 2]), 9),

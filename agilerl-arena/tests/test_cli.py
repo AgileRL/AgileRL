@@ -157,8 +157,9 @@ class TestArenaClientContextManager:
         )
         with patch("agilerl.arena.config.build_client", return_value=mock_client):
             with patch("agilerl.arena.config.handle_error") as mock_handle:
-                with arena_client(cfg) as client:
-                    raise ArenaAPIError("boom", status_code=500)
+                with arena_client(cfg):
+                    msg = "boom"
+                    raise ArenaAPIError(msg, status_code=500)
                 mock_handle.assert_called_once()
         mock_client.close.assert_called_once()
 
@@ -173,9 +174,14 @@ class TestArenaClientContextManager:
             upload_timeout=300,
         )
         with patch("agilerl.arena.config.build_client", return_value=mock_client):
+
+            def _raise_unexpected():
+                msg = "unexpected"
+                with arena_client(cfg):
+                    raise RuntimeError(msg)
+
             with pytest.raises(RuntimeError, match="unexpected"):
-                with arena_client(cfg) as client:
-                    raise RuntimeError("unexpected")
+                _raise_unexpected()
         mock_client.close.assert_called_once()
 
 

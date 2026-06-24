@@ -3,19 +3,20 @@ import random
 import shutil
 from copy import deepcopy
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import ANY, MagicMock, patch
 
 import dill
 import numpy as np
 import pytest
 import torch
-import agilerl
-import agilerl.rollouts.on_policy
 from accelerate import Accelerator
 from gymnasium.spaces import Box, Dict, Discrete
 from pettingzoo import ParallelEnv
 from tensordict import TensorDict
 
+import agilerl
+import agilerl.rollouts.on_policy
 from agilerl.algorithms import (
     CQN,
     DDPG,
@@ -25,24 +26,23 @@ from agilerl.algorithms import (
     MATD3,
     PPO,
     TD3,
-    NeuralTS,
     NeuralUCB,
     RainbowDQN,
 )
+from agilerl.algorithms.core.base import MultiAgentRLAlgorithm
 from agilerl.components.data import Transition
 from agilerl.components.replay_buffer import (
     MultiStepReplayBuffer,
     PrioritizedReplayBuffer,
     ReplayBuffer,
 )
-from agilerl.algorithms.core.base import MultiAgentRLAlgorithm
 from agilerl.metrics import AgentMetrics, MultiAgentMetrics
+from agilerl.population import Population
 from agilerl.training.train_bandits import train_bandits
 from agilerl.training.train_multi_agent_off_policy import train_multi_agent_off_policy
 from agilerl.training.train_multi_agent_on_policy import train_multi_agent_on_policy
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.training.train_offline import train_offline
-from agilerl.population import Population
 from agilerl.training.train_on_policy import train_on_policy
 from agilerl.utils.utils import make_multi_agent_vect_envs
 
@@ -82,7 +82,7 @@ class DummyEnv:
         self.action_space = Box(-1.0, 1.0, (action_size,))
         self.vect = vect
         if self.vect:
-            self.state_size = (num_envs,) + self.state_size
+            self.state_size = (num_envs, *self.state_size)
             self.num_envs = num_envs
             self.n_envs = num_envs
         else:
@@ -112,7 +112,7 @@ class DummyEnv:
 class DummyBanditEnv:
     def __init__(self, state_size, arms):
         self.arms = arms
-        self.state_size = (arms,) + state_size
+        self.state_size = (arms, *state_size)
         self.action_size = 1
         self.observation_space = Box(0.0, 1.0, self.state_size)
         self.action_space = Discrete(self.action_size)
@@ -1201,7 +1201,7 @@ def mocked_env(state_size, action_size, vect=True, num_envs=2):
     mock_env.action_size = action_size
     mock_env.vect = vect
     if mock_env.vect:
-        mock_env.state_size = (num_envs,) + mock_env.state_size
+        mock_env.state_size = (num_envs, *mock_env.state_size)
         mock_env.num_envs = num_envs
     else:
         mock_env.num_envs = 1
@@ -1228,7 +1228,7 @@ def mocked_env(state_size, action_size, vect=True, num_envs=2):
 @pytest.fixture
 def mocked_bandit_env(state_size, action_size):
     mock_env = MagicMock()
-    mock_env.state_size = (action_size,) + state_size
+    mock_env.state_size = (action_size, *state_size)
     mock_env.action_size = 1
     mock_env.num_envs = 1
 
@@ -1354,7 +1354,7 @@ def dummy_h5py_data(action_size, state_size):
 
 
 class TestTrainOffPolicy:
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_BOTH)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_BOTH)
     def test_train_off_policy(
         self, env, population_off_policy, tournament, mutations, memory
     ):
@@ -1379,9 +1379,9 @@ class TestTrainOffPolicy:
         assert len(pop) == len(population_off_policy)
 
     @pytest.mark.parametrize(
-        "algo, num_envs, learn_step", [(DQN, 2, 1), (DDPG, 2, 1), (TD3, 1, 2)]
+        ("algo", "num_envs", "learn_step"), [(DQN, 2, 1), (DDPG, 2, 1), (TD3, 1, 2)]
     )
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_BOTH)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_BOTH)
     def test_train_off_policy_agent_calls_made(
         self,
         env,
@@ -1402,9 +1402,9 @@ class TestTrainOffPolicy:
             if env.vect:
                 env.num_envs = num_envs
                 env.n_envs = num_envs
-                env.state_size = (num_envs,) + env._single_state_size
+                env.state_size = (num_envs, *env._single_state_size)
 
-            pop, _ = train_off_policy(
+            _pop, _ = train_off_policy(
                 env,
                 "env_name",
                 "algo",
@@ -1436,10 +1436,10 @@ class TestTrainOffPolicy:
                 mocked_agent_off_policy.wrap_models.assert_called()
                 mocked_agent_off_policy.unwrap_models.assert_called()
 
-    @pytest.mark.parametrize("per, n_step", [(False, True), (True, True)])
-    @pytest.mark.parametrize("num_envs, learn_step", [(2, 1)])
+    @pytest.mark.parametrize(("per", "n_step"), [(False, True), (True, True)])
+    @pytest.mark.parametrize(("num_envs", "learn_step"), [(2, 1)])
     @pytest.mark.parametrize("algo", [RainbowDQN])
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_BOTH)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_BOTH)
     def test_train_off_policy_agent_calls_made_rainbow(
         self,
         env,
@@ -1462,10 +1462,10 @@ class TestTrainOffPolicy:
         if env.vect:
             env.num_envs = num_envs
             env.n_envs = num_envs
-            env.state_size = (num_envs,) + env._single_state_size
+            env.state_size = (num_envs, *env._single_state_size)
         buf = DummyPrioritizedMemory() if per else memory
 
-        pop, _ = train_off_policy(
+        _pop, _ = train_off_policy(
             env,
             "env_name",
             "Rainbow DQN",
@@ -1491,7 +1491,7 @@ class TestTrainOffPolicy:
         mocked_agent_off_policy.learn.assert_called()
         mocked_agent_off_policy.test.assert_called()
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_NOVECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_NOVECT)
     def test_train_off_policy_save_elite_warning(
         self,
         env,
@@ -1505,7 +1505,7 @@ class TestTrainOffPolicy:
                       be saved unless 'save_elite' is set to True."
         )
         with pytest.warns(match=warning_string):
-            pop, _ = train_off_policy(
+            _pop, _ = train_off_policy(
                 env,
                 "env_name",
                 "algo",
@@ -1524,7 +1524,7 @@ class TestTrainOffPolicy:
                 elite_path="path",
             )
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_NOVECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_NOVECT)
     def test_train_off_policy_checkpoint_warning(
         self,
         env,
@@ -1538,7 +1538,7 @@ class TestTrainOffPolicy:
                       be saved unless 'checkpoint' is defined."
         )
         with pytest.warns(match=warning_string):
-            pop, _ = train_off_policy(
+            _pop, _ = train_off_policy(
                 env,
                 "env_name",
                 "algo",
@@ -1557,7 +1557,7 @@ class TestTrainOffPolicy:
                 checkpoint_path="path",
             )
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_NOVECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_NOVECT)
     def test_actions_histogram(
         self, env, population_off_policy, tournament, mutations, memory
     ):
@@ -1581,7 +1581,7 @@ class TestTrainOffPolicy:
         assert len(pop) == len(population_off_policy)
         assert len(pop) == len(population_off_policy)
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_off_policy_replay_buffer_calls(
         self,
         mocked_memory,
@@ -1590,7 +1590,7 @@ class TestTrainOffPolicy:
         tournament,
         mutations,
     ):
-        pop, _ = train_off_policy(
+        _pop, _ = train_off_policy(
             env,
             "env_name",
             "algo",
@@ -1610,7 +1610,7 @@ class TestTrainOffPolicy:
         mocked_memory.sample.assert_called()
 
     @pytest.mark.parametrize("per", [False, True])
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_off_policy_alternate_buffer_calls(
         self,
         env,
@@ -1623,7 +1623,7 @@ class TestTrainOffPolicy:
         per,
     ):
         mocked_memory = mocked_memory if not per else mocked_per_memory
-        pop, _ = train_off_policy(
+        _pop, _ = train_off_policy(
             env,
             "env_name",
             "algo",
@@ -1647,7 +1647,7 @@ class TestTrainOffPolicy:
         else:
             mocked_memory.sample.assert_called()
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_off_policy_env_calls(
         self,
         mocked_env,
@@ -1656,7 +1656,7 @@ class TestTrainOffPolicy:
         tournament,
         mutations,
     ):
-        pop, _ = train_off_policy(
+        _pop, _ = train_off_policy(
             mocked_env,
             "env_name",
             "algo",
@@ -1675,7 +1675,7 @@ class TestTrainOffPolicy:
         mocked_env.step.assert_called()
         mocked_env.reset.assert_called()
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_off_policy_tourn_mut_calls(
         self,
         env,
@@ -1684,7 +1684,7 @@ class TestTrainOffPolicy:
         mocked_tournament,
         mocked_mutations,
     ):
-        pop, _ = train_off_policy(
+        _pop, _ = train_off_policy(
             env,
             "env_name",
             "algo",
@@ -1703,7 +1703,7 @@ class TestTrainOffPolicy:
         mocked_mutations.mutation.assert_called()
         mocked_tournament.select.assert_called()
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _IMG_NOVECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _IMG_NOVECT)
     def test_train_off_policy_rgb_input(
         self,
         env,
@@ -1733,7 +1733,7 @@ class TestTrainOffPolicy:
         assert len(pop) == len(population_off_policy)
 
     @pytest.mark.parametrize("per", [False, True])
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_off_policy_using_alternate_buffers(
         self,
         env,
@@ -1765,7 +1765,7 @@ class TestTrainOffPolicy:
         assert len(pop) == len(population_off_policy)
         assert len(pop) == len(population_off_policy)
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _IMG_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _IMG_VECT)
     def test_train_off_policy_using_alternate_buffers_rgb(
         self,
         env,
@@ -1795,7 +1795,7 @@ class TestTrainOffPolicy:
         assert len(pop) == len(population_off_policy)
         assert len(pop) == len(population_off_policy)
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_off_policy_distributed(
         self,
         env,
@@ -1826,7 +1826,7 @@ class TestTrainOffPolicy:
         assert len(pop) == len(population_off_policy)
         assert len(pop) == len(population_off_policy)
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_wandb_init_log(
         self, env, population_off_policy, tournament, mutations, memory
     ):
@@ -1884,7 +1884,7 @@ class TestTrainOffPolicy:
             mock_wandb_finish.assert_called()
 
     @pytest.mark.parametrize("accelerator", [False, True])
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_wandb_init_log_distributed(
         self,
         env,
@@ -1949,7 +1949,7 @@ class TestTrainOffPolicy:
             # Assert that wandb.finish was called
             mock_wandb_finish.assert_called()
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_early_stop_wandb(
         self, env, population_off_policy, tournament, mutations, memory
     ):
@@ -1998,7 +1998,7 @@ class TestTrainOffPolicy:
             # Assert that wandb.finish was called
             mock_wandb_finish.assert_called()
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_off_policy_save_elite(
         self,
         env,
@@ -2009,7 +2009,7 @@ class TestTrainOffPolicy:
         tmp_path,
     ):
         elite_path = str(tmp_path / "checkpoint.pt")
-        pop, _ = train_off_policy(
+        _pop, _ = train_off_policy(
             env,
             "env_name",
             "algo",
@@ -2030,7 +2030,7 @@ class TestTrainOffPolicy:
         assert os.path.isfile(elite_path)
 
     @pytest.mark.parametrize("accelerator_flag", [False, True])
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_save_checkpoint(
         self,
         env,
@@ -2043,7 +2043,7 @@ class TestTrainOffPolicy:
     ):
         accelerator = Accelerator() if accelerator_flag else None
         checkpoint_path = str(Path(tmpdir) / "checkpoint")
-        pop, _ = train_off_policy(
+        _pop, _ = train_off_policy(
             env,
             "env_name",
             "algo",
@@ -2065,7 +2065,7 @@ class TestTrainOffPolicy:
         for i in range(6):  # iterate through the population indices
             assert os.path.isfile(f"{checkpoint_path}_{i}_{50}.pt")
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_off_policy_wandb_kwargs_update(self, env, memory):
         agent = DummyAgentOffPolicy(5, env, 0.4)
 
@@ -2092,7 +2092,7 @@ class TestTrainOffPolicy:
         assert kwargs["project"] == "custom_project"
         assert kwargs["name"] == "custom_run"
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_off_policy_per_nstep_none_branches(self, env):
         class CapturingPerAgent(DummyAgentOffPolicy):
             def __init__(self, batch_size, env):
@@ -2133,7 +2133,7 @@ class TestTrainOffPolicy:
         )
         assert any(item is None for item in agent_le.captured)
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_off_policy_wandb_dqn_and_ddpg_loss_branches(self, env, monkeypatch):
         class DQNLossAgent(DummyAgentOffPolicy):
             def get_action(self, *args, **kwargs):
@@ -2193,7 +2193,7 @@ class TestTrainOffPolicy:
             assert "eval/mean_fitness" in ddpg_log
             assert "train/mean_score" in ddpg_log
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_off_policy_early_stop_wb_branch(self, env):
         agent = DummyAgentOffPolicy(5, env, 0.4)
         agent.steps = 0
@@ -2226,7 +2226,7 @@ class TestTrainTargetEarlyReturn:
     def _population_with_min_evo(agents: list) -> Population:
         return Population(agents=agents, min_evo_steps=0)
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_off_policy_returns_when_target_met(self, env):
         agent = DummyAgentOffPolicy(5, env, 0.4)
         agent.fitness = [100.0]
@@ -2259,7 +2259,7 @@ class TestTrainTargetEarlyReturn:
         assert fitnesses == population.last_fitnesses
         mock_finish.assert_called_once()
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_on_policy_returns_when_target_met(self, env):
         agent = DummyAgentOnPolicy(5, env)
         agent.fitness = [100.0]
@@ -2291,7 +2291,7 @@ class TestTrainTargetEarlyReturn:
         assert fitnesses == population.last_fitnesses
         mock_finish.assert_called_once()
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_offline_returns_when_target_met(self, env, dummy_h5py_data):
         agent = DummyAgentOffPolicy(5, env, 0.4)
         agent.fitness = [100.0]
@@ -2335,7 +2335,7 @@ class TestTrainTargetEarlyReturn:
         assert fitnesses == population.last_fitnesses
         mock_finish.assert_called_once()
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_offline_requires_dataset_or_minari(self, env):
         agent = DummyAgentOffPolicy(5, env, 0.4)
         memory = DummyMemory()
@@ -2357,7 +2357,7 @@ class TestTrainTargetEarlyReturn:
 
 class TestTrainOnPolicy:
     @pytest.mark.parametrize(
-        "state_size, action_size, vect, algo", [((6,), 2, True, PPO)]
+        ("state_size", "action_size", "vect", "algo"), [((6,), 2, True, PPO)]
     )
     def test_train_on_policy_agent_calls_made(
         self,
@@ -2370,7 +2370,7 @@ class TestTrainOnPolicy:
         for accelerator_flag in [True, False]:
             accelerator = Accelerator() if accelerator_flag else None
             mock_population = [mocked_agent_on_policy for _ in range(6)]
-            pop, _ = train_on_policy(
+            _pop, _ = train_on_policy(
                 env,
                 "env_name",
                 "algo",
@@ -2399,7 +2399,7 @@ class TestTrainOnPolicy:
                 mocked_agent_on_policy.wrap_models.assert_called()
                 mocked_agent_on_policy.unwrap_models.assert_called()
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_NOVECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_NOVECT)
     def test_train_on_policy_save_elite_warning(
         self,
         env,
@@ -2412,7 +2412,7 @@ class TestTrainOnPolicy:
                       be saved unless 'save_elite' is set to True."
         )
         with pytest.warns(match=warning_string):
-            pop, _ = train_on_policy(
+            _pop, _ = train_on_policy(
                 env,
                 "env_name",
                 "algo",
@@ -2429,7 +2429,7 @@ class TestTrainOnPolicy:
                 elite_path="path",
             )
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_NOVECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_NOVECT)
     def test_train_on_policy_checkpoint_warning(
         self,
         env,
@@ -2442,7 +2442,7 @@ class TestTrainOnPolicy:
                       be saved unless 'checkpoint' is defined."
         )
         with pytest.warns(match=warning_string):
-            pop, _ = train_on_policy(
+            _pop, _ = train_on_policy(
                 env,
                 "env_name",
                 "algo",
@@ -2459,7 +2459,7 @@ class TestTrainOnPolicy:
                 checkpoint_path="path",
             )
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_on_policy_env_calls(
         self,
         mocked_env,
@@ -2467,7 +2467,7 @@ class TestTrainOnPolicy:
         tournament,
         mutations,
     ):
-        pop, _ = train_on_policy(
+        _pop, _ = train_on_policy(
             mocked_env,
             "env_name",
             "algo",
@@ -2484,7 +2484,7 @@ class TestTrainOnPolicy:
         mocked_env.step.assert_called()
         mocked_env.reset.assert_called()
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_on_policy_tourn_mut_calls(
         self,
         env,
@@ -2492,7 +2492,7 @@ class TestTrainOnPolicy:
         mocked_tournament,
         mocked_mutations,
     ):
-        pop, _ = train_on_policy(
+        _pop, _ = train_on_policy(
             env,
             "env_name",
             "algo",
@@ -2509,7 +2509,7 @@ class TestTrainOnPolicy:
         mocked_mutations.mutation.assert_called()
         mocked_tournament.select.assert_called()
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_on_policy(
         self,
         env,
@@ -2535,7 +2535,7 @@ class TestTrainOnPolicy:
         assert len(pop) == len(population_on_policy)
         assert len(pop) == len(population_on_policy)
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _IMG_NOVECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _IMG_NOVECT)
     def test_train_on_policy_rgb_input(
         self, env, population_on_policy, tournament, mutations
     ):
@@ -2557,7 +2557,7 @@ class TestTrainOnPolicy:
         assert len(pop) == len(population_on_policy)
         assert len(pop) == len(population_on_policy)
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_on_policy_distributed(
         self, env, population_on_policy, tournament, mutations
     ):
@@ -2582,7 +2582,7 @@ class TestTrainOnPolicy:
         assert len(pop) == len(population_on_policy)
 
     @pytest.mark.parametrize("accelerator", [False, True])
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_wandb_init_log_on_policy(
         self,
         env,
@@ -2653,7 +2653,7 @@ class TestTrainOnPolicy:
             # Assert that wandb.finish was called
             mock_wandb_finish.assert_called()
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_early_stop_wandb_on_policy(
         self, env, population_on_policy, tournament, mutations
     ):
@@ -2701,7 +2701,7 @@ class TestTrainOnPolicy:
             mock_wandb_finish.assert_called()
 
     @pytest.mark.parametrize("accelerator_flag", [False, True])
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_on_policy_save_elite(
         self,
         env,
@@ -2713,7 +2713,7 @@ class TestTrainOnPolicy:
     ):
         accelerator = Accelerator() if accelerator_flag else None
         elite_path = str(tmp_path / "elite")
-        pop, _ = train_on_policy(
+        _pop, _ = train_on_policy(
             env,
             "env_name",
             "algo",
@@ -2733,7 +2733,7 @@ class TestTrainOnPolicy:
         assert os.path.isfile(f"{elite_path}.pt")
 
     @pytest.mark.parametrize("accelerator_flag", [False, True])
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_on_policy_save_checkpoint(
         self,
         env,
@@ -2745,7 +2745,7 @@ class TestTrainOnPolicy:
     ):
         accelerator = Accelerator() if accelerator_flag else None
         checkpoint_path = str(Path(tmpdir) / "checkpoint")
-        pop, _ = train_on_policy(
+        _pop, _ = train_on_policy(
             env,
             "env_name",
             "algo",
@@ -2765,7 +2765,7 @@ class TestTrainOnPolicy:
         for i in range(6):  # iterate through the population indices
             assert os.path.isfile(f"{checkpoint_path}_{i}_{512}.pt")
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_on_policy_wandb_kwargs_update(self, env):
         agent = DummyAgentOnPolicy(5, env)
         with (
@@ -2789,7 +2789,7 @@ class TestTrainOnPolicy:
         assert kwargs["project"] == "custom_project"
         assert kwargs["name"] == "custom_run"
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_on_policy_recurrent_collect_rollouts_import_branch(
         self, env, monkeypatch
     ):
@@ -2869,7 +2869,7 @@ class TestTrainOnPolicy:
             verbose=False,
         )
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_on_policy_early_stop_wb_branch(self, env):
         agent = DummyAgentOnPolicy(5, env)
         agent.steps = 0
@@ -2896,7 +2896,7 @@ class TestTrainOnPolicy:
 class TestTrainMultiAgentOffPolicy:
     @pytest.mark.parametrize("sum_scores", [True, False])
     @pytest.mark.parametrize("on_policy", [False])
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_agent_off_policy(
         self,
         multi_env,
@@ -2926,7 +2926,7 @@ class TestTrainMultiAgentOffPolicy:
         assert len(pop) == len(population_multi_agent)
 
     @pytest.mark.parametrize("on_policy", [False])
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_agent_off_policy_distributed(
         self,
         multi_env,
@@ -2959,11 +2959,8 @@ class TestTrainMultiAgentOffPolicy:
     def test_train_multi_agent_off_policy_agent_masking(self):
         pass
 
-    def test_train_multi_agent_off_policy_agent_masking(self):
-        pass
-
     @pytest.mark.parametrize("on_policy", [False])
-    @pytest.mark.parametrize("state_size, action_size", _IMG)
+    @pytest.mark.parametrize(("state_size", "action_size"), _IMG)
     def test_train_multi_agent_off_policy_rgb(
         self,
         multi_env,
@@ -2992,7 +2989,7 @@ class TestTrainMultiAgentOffPolicy:
         assert len(pop) == len(population_multi_agent)
 
     @pytest.mark.parametrize("on_policy", [False])
-    @pytest.mark.parametrize("state_size, action_size", _IMG)
+    @pytest.mark.parametrize(("state_size", "action_size"), _IMG)
     def test_train_multi_agent_off_policy_rgb_vectorized(
         self,
         multi_env,
@@ -3032,7 +3029,7 @@ class TestTrainMultiAgentOffPolicy:
         env.close()
 
     @pytest.mark.parametrize("on_policy", [False])
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_save_elite_warning(
         self,
         multi_env,
@@ -3047,7 +3044,7 @@ class TestTrainMultiAgentOffPolicy:
                       be saved unless 'save_elite' is set to True."
         )
         with pytest.warns(match=warning_string):
-            pop, _ = train_multi_agent_off_policy(
+            _pop, _ = train_multi_agent_off_policy(
                 multi_env,
                 "env_name",
                 "algo",
@@ -3065,7 +3062,7 @@ class TestTrainMultiAgentOffPolicy:
             )
 
     @pytest.mark.parametrize("on_policy", [False])
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_checkpoint_warning(
         self,
         multi_env,
@@ -3080,7 +3077,7 @@ class TestTrainMultiAgentOffPolicy:
                       be saved unless 'checkpoint' is defined."
         )
         with pytest.warns(match=warning_string):
-            pop, _ = train_multi_agent_off_policy(
+            _pop, _ = train_multi_agent_off_policy(
                 multi_env,
                 "env_name",
                 "algo",
@@ -3099,7 +3096,7 @@ class TestTrainMultiAgentOffPolicy:
 
     @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("on_policy", [False])
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_wandb_init_log(
         self,
         multi_env,
@@ -3182,7 +3179,7 @@ class TestTrainMultiAgentOffPolicy:
             mock_wandb_finish.assert_called()
 
     @pytest.mark.parametrize("on_policy", [False])
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_multi_agent_early_stop(
         self,
         multi_env,
@@ -3242,7 +3239,7 @@ class TestTrainMultiAgentOffPolicy:
     @pytest.mark.parametrize("algo", [MADDPG])
     @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("on_policy", [False])
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_agent_off_policy_calls(
         self,
         multi_env,
@@ -3258,7 +3255,7 @@ class TestTrainMultiAgentOffPolicy:
         mock_population = [mocked_multi_agent for _ in range(6)]
         mock_population = [mocked_multi_agent for _ in range(6)]
 
-        pop, _ = train_multi_agent_off_policy(
+        _pop, _ = train_multi_agent_off_policy(
             multi_env,
             "env_name",
             "algo",
@@ -3291,7 +3288,7 @@ class TestTrainMultiAgentOffPolicy:
                 agent.unwrap_models.assert_called()
 
     @pytest.mark.parametrize("on_policy", [False])
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_env_calls(
         self,
         mocked_multi_env,
@@ -3301,7 +3298,7 @@ class TestTrainMultiAgentOffPolicy:
         tournament,
         mutations,
     ):
-        pop, _ = train_multi_agent_off_policy(
+        _pop, _ = train_multi_agent_off_policy(
             mocked_multi_env,
             "env_name",
             "algo",
@@ -3320,7 +3317,7 @@ class TestTrainMultiAgentOffPolicy:
         mocked_multi_env.reset.assert_called()
 
     @pytest.mark.parametrize("on_policy", [False])
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_tourn_mut_calls(
         self,
         multi_env,
@@ -3330,7 +3327,7 @@ class TestTrainMultiAgentOffPolicy:
         mocked_tournament,
         mocked_mutations,
     ):
-        pop, _ = train_multi_agent_off_policy(
+        _pop, _ = train_multi_agent_off_policy(
             multi_env,
             "env_name",
             "algo",
@@ -3349,7 +3346,7 @@ class TestTrainMultiAgentOffPolicy:
         mocked_mutations.mutation.assert_called()
 
     @pytest.mark.parametrize("on_policy", [False])
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_memory_calls(
         self,
         multi_env,
@@ -3359,7 +3356,7 @@ class TestTrainMultiAgentOffPolicy:
         tournament,
         mutations,
     ):
-        pop, _ = train_multi_agent_off_policy(
+        _pop, _ = train_multi_agent_off_policy(
             multi_env,
             "env_name",
             "algo",
@@ -3379,7 +3376,7 @@ class TestTrainMultiAgentOffPolicy:
 
     @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("on_policy", [False])
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_save_elite(
         self,
         multi_env,
@@ -3393,7 +3390,7 @@ class TestTrainMultiAgentOffPolicy:
     ):
         accelerator = Accelerator() if accelerator_flag else None
         elite_path = str(tmp_path / "elite")
-        pop, _ = train_multi_agent_off_policy(
+        _pop, _ = train_multi_agent_off_policy(
             multi_env,
             "env_name",
             "algo",
@@ -3415,7 +3412,7 @@ class TestTrainMultiAgentOffPolicy:
 
     @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("on_policy", [False])
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_save_checkpoint(
         self,
         multi_env,
@@ -3429,7 +3426,7 @@ class TestTrainMultiAgentOffPolicy:
     ):
         accelerator = Accelerator() if accelerator_flag else None
         checkpoint_path = str(Path(tmpdir) / "checkpoint")
-        pop, _ = train_multi_agent_off_policy(
+        _pop, _ = train_multi_agent_off_policy(
             multi_env,
             "env_name",
             "algo",
@@ -3450,7 +3447,7 @@ class TestTrainMultiAgentOffPolicy:
         for i in range(6):  # iterate through the population indices
             assert os.path.isfile(f"{checkpoint_path}_{i}_{50}.pt")
 
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_agent_off_policy_learn_step_branch_and_early_stop(
         self,
         multi_env,
@@ -3482,8 +3479,8 @@ class TestTrainMultiAgentOffPolicy:
 
     def test_train_multi_agent_off_policy_empty_population_rejected(self, multi_memory):
         class EmptyAgentEnv:
-            agents = []
-            possible_agents = []
+            agents: ClassVar[list] = []
+            possible_agents: ClassVar[list] = []
 
         with pytest.raises(ValueError, match="at least one agent"):
             train_multi_agent_off_policy(
@@ -3504,7 +3501,7 @@ class TestTrainMultiAgentOnPolicy:
     @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("sum_scores", [True, False])
     @pytest.mark.parametrize("on_policy", [True])
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_agent_on_policy(
         self,
         multi_env,
@@ -3535,7 +3532,7 @@ class TestTrainMultiAgentOnPolicy:
         assert len(pop) == len(population_multi_agent)
 
     @pytest.mark.parametrize("on_policy", [True])
-    @pytest.mark.parametrize("state_size, action_size", _IMG)
+    @pytest.mark.parametrize(("state_size", "action_size"), _IMG)
     def test_train_multi_agent_on_policy_rgb_vectorized(
         self,
         multi_env,
@@ -3574,7 +3571,7 @@ class TestTrainMultiAgentOnPolicy:
         env.close()
 
     @pytest.mark.parametrize("on_policy", [True])
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_save_elite_warning_on_policy(
         self,
         multi_env,
@@ -3589,7 +3586,7 @@ class TestTrainMultiAgentOnPolicy:
                       be saved unless 'save_elite' is set to True."
         )
         with pytest.warns(match=warning_string):
-            pop, _ = train_multi_agent_on_policy(
+            _pop, _ = train_multi_agent_on_policy(
                 multi_env,
                 "env_name",
                 "algo",
@@ -3606,7 +3603,7 @@ class TestTrainMultiAgentOnPolicy:
             )
 
     @pytest.mark.parametrize("on_policy", [True])
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_checkpoint_warning_on_policy(
         self,
         multi_env,
@@ -3621,7 +3618,7 @@ class TestTrainMultiAgentOnPolicy:
                       be saved unless 'checkpoint' is defined."
         )
         with pytest.warns(match=warning_string):
-            pop, _ = train_multi_agent_on_policy(
+            _pop, _ = train_multi_agent_on_policy(
                 multi_env,
                 "env_name",
                 "algo",
@@ -3639,7 +3636,7 @@ class TestTrainMultiAgentOnPolicy:
 
     @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("on_policy", [True])
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_wandb_init_log_on_policy(
         self,
         multi_env,
@@ -3711,7 +3708,7 @@ class TestTrainMultiAgentOnPolicy:
             mock_wandb_finish.assert_called()
 
     @pytest.mark.parametrize("on_policy", [True])
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_multi_agent_early_stop_on_policy(
         self,
         multi_env,
@@ -3768,7 +3765,7 @@ class TestTrainMultiAgentOnPolicy:
     @pytest.mark.parametrize("algo", [IPPO])
     @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("on_policy", [True])
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_agent_onpolicy_calls(
         self,
         multi_env,
@@ -3783,7 +3780,7 @@ class TestTrainMultiAgentOnPolicy:
 
         mock_population = [mocked_multi_agent for _ in range(6)]
 
-        pop, _ = train_multi_agent_on_policy(
+        _pop, _ = train_multi_agent_on_policy(
             multi_env,
             "env_name",
             "algo",
@@ -3808,7 +3805,7 @@ class TestTrainMultiAgentOnPolicy:
                 agent.unwrap_models.assert_called()
 
     @pytest.mark.parametrize("on_policy", [True])
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_env_calls_on_policy(
         self,
         mocked_multi_env,
@@ -3818,7 +3815,7 @@ class TestTrainMultiAgentOnPolicy:
         tournament,
         mutations,
     ):
-        pop, _ = train_multi_agent_on_policy(
+        _pop, _ = train_multi_agent_on_policy(
             mocked_multi_env,
             "env_name",
             "algo",
@@ -3836,7 +3833,7 @@ class TestTrainMultiAgentOnPolicy:
         mocked_multi_env.reset.assert_called()
 
     @pytest.mark.parametrize("on_policy", [True])
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_tourn_mut_calls_on_policy(
         self,
         multi_env,
@@ -3846,7 +3843,7 @@ class TestTrainMultiAgentOnPolicy:
         mocked_tournament,
         mocked_mutations,
     ):
-        pop, _ = train_multi_agent_on_policy(
+        _pop, _ = train_multi_agent_on_policy(
             multi_env,
             "env_name",
             "algo",
@@ -3865,7 +3862,7 @@ class TestTrainMultiAgentOnPolicy:
 
     @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("on_policy", [True])
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_save_elite_on_policy(
         self,
         multi_env,
@@ -3879,7 +3876,7 @@ class TestTrainMultiAgentOnPolicy:
     ):
         accelerator = Accelerator() if accelerator_flag else None
         elite_path = str(tmp_path / "elite")
-        pop, _ = train_multi_agent_on_policy(
+        _pop, _ = train_multi_agent_on_policy(
             multi_env,
             "env_name",
             "algo",
@@ -3900,7 +3897,7 @@ class TestTrainMultiAgentOnPolicy:
 
     @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("on_policy", [True])
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_save_checkpoint_on_policy(
         self,
         multi_env,
@@ -3914,7 +3911,7 @@ class TestTrainMultiAgentOnPolicy:
     ):
         accelerator = Accelerator() if accelerator_flag else None
         checkpoint_path = str(Path(tmpdir) / "checkpoint")
-        pop, _ = train_multi_agent_on_policy(
+        _pop, _ = train_multi_agent_on_policy(
             multi_env,
             "env_name",
             "algo",
@@ -3934,7 +3931,7 @@ class TestTrainMultiAgentOnPolicy:
         for i in range(6):  # iterate through the population indices
             assert os.path.isfile(f"{checkpoint_path}_{i}_{50}.pt")
 
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_agent_on_policy_compiled_clip_and_early_stop(
         self,
         multi_env,
@@ -3977,7 +3974,7 @@ class TestTrainMultiAgentOnPolicy:
             )
         mock_wandb_finish.assert_called()
 
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_agent_on_policy_compiled_clip_with_squash(
         self,
         multi_env,
@@ -4012,7 +4009,7 @@ class TestTrainMultiAgentOnPolicy:
             verbose=False,
         )
 
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_agent_on_policy_nan_mean_score_branch(
         self, multi_env, monkeypatch
     ):
@@ -4072,7 +4069,7 @@ class TestTrainMultiAgentOnPolicy:
 
 
 class TestTrainOffline:
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_offline(
         self,
         env,
@@ -4107,7 +4104,7 @@ class TestTrainOffline:
             assert len(pop) == len(population_off_policy)
             assert len(pop) == len(population_off_policy)
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_offline_save_elite_warning(
         self,
         env,
@@ -4123,7 +4120,7 @@ class TestTrainOffline:
                       be saved unless 'save_elite' is set to True."
         )
         with pytest.warns(match=warning_string):
-            pop, _ = train_offline(
+            _pop, _ = train_offline(
                 env,
                 "env_name",
                 "algo",
@@ -4142,7 +4139,7 @@ class TestTrainOffline:
                 elite_path="path",
             )
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_offline_save_checkpoint_warning(
         self,
         env,
@@ -4158,7 +4155,7 @@ class TestTrainOffline:
                       be saved unless 'checkpoint' is defined."
         )
         with pytest.warns(match=warning_string):
-            pop, _ = train_offline(
+            _pop, _ = train_offline(
                 env,
                 "env_name",
                 "algo",
@@ -4178,7 +4175,7 @@ class TestTrainOffline:
             )
 
     @pytest.mark.parametrize("accelerator_flag", [False, True])
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_offline_wandb_calls(
         self,
         env,
@@ -4246,7 +4243,7 @@ class TestTrainOffline:
             # Assert that wandb.finish was called
             mock_wandb_finish.assert_called()
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_offline_early_stop(
         self,
         env,
@@ -4297,7 +4294,7 @@ class TestTrainOffline:
                 mock_wandb_finish.assert_called()
 
     @pytest.mark.parametrize("algo", [DQN])
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_offline_agent_calls(
         self,
         env,
@@ -4313,7 +4310,7 @@ class TestTrainOffline:
             accelerator = Accelerator() if accelerator_flag else None
             mock_population = [mocked_agent_off_policy for _ in range(6)]
 
-            pop, _ = train_offline(
+            _pop, _ = train_offline(
                 env,
                 "env_name",
                 "algo",
@@ -4342,7 +4339,7 @@ class TestTrainOffline:
                 mocked_agent_off_policy.wrap_models.assert_called()
                 mocked_agent_off_policy.unwrap_models.assert_called()
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_offline_memory_calls(
         self,
         env,
@@ -4355,7 +4352,7 @@ class TestTrainOffline:
     ):
         for accelerator_flag in [True, False]:
             accelerator = Accelerator() if accelerator_flag else None
-            pop, _ = train_offline(
+            _pop, _ = train_offline(
                 env,
                 "env_name",
                 "algo",
@@ -4375,7 +4372,7 @@ class TestTrainOffline:
             mocked_memory.add.assert_called()
             mocked_memory.sample.assert_called()
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_offline_mut_tourn_calls(
         self,
         env,
@@ -4389,7 +4386,7 @@ class TestTrainOffline:
         for accelerator_flag in [True, False]:
             accelerator = Accelerator() if accelerator_flag else None
 
-            pop, _ = train_offline(
+            _pop, _ = train_offline(
                 env,
                 "env_name",
                 "algo",
@@ -4410,7 +4407,7 @@ class TestTrainOffline:
             mocked_mutations.mutation.assert_called()
 
     @pytest.mark.parametrize("accelerator_flag", [False, True])
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_offline_save_elite(
         self,
         env,
@@ -4425,7 +4422,7 @@ class TestTrainOffline:
     ):
         accelerator = Accelerator() if accelerator_flag else None
         elite_path = str(tmp_path / "elite")
-        pop, _ = train_offline(
+        _pop, _ = train_offline(
             env,
             "env_name",
             "algo",
@@ -4447,7 +4444,7 @@ class TestTrainOffline:
         assert os.path.isfile(f"{elite_path}.pt")
 
     @pytest.mark.parametrize("accelerator_flag", [False, True])
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_offline_save_checkpoint(
         self,
         env,
@@ -4462,7 +4459,7 @@ class TestTrainOffline:
     ):
         accelerator = Accelerator() if accelerator_flag else None
         checkpoint_path = str(Path(tmpdir) / "checkpoint")
-        pop, _ = train_offline(
+        _pop, _ = train_offline(
             env,
             "env_name",
             "algo",
@@ -4484,7 +4481,7 @@ class TestTrainOffline:
         for i in range(6):  # iterate through the population indices
             assert os.path.isfile(f"{checkpoint_path}_{i}_{50}.pt")
 
-    @pytest.mark.parametrize("state_size, action_size, vect", _FLAT_VECT)
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_offline_minari_branch_and_early_stop(self, env, memory):
         agent = DummyAgentOffPolicy(5, env, 0.4)
         agent.steps = 0
@@ -4529,7 +4526,7 @@ class TestTrainOffline:
 
 
 class TestTrainBandits:
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_bandit(
         self,
         bandit_env,
@@ -4560,7 +4557,7 @@ class TestTrainBandits:
         assert len(pop) == len(population_bandit)
 
     @pytest.mark.parametrize("algo", [NeuralUCB])
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_bandit_agent_calls_made(
         self,
         bandit_env,
@@ -4573,7 +4570,7 @@ class TestTrainBandits:
             accelerator = Accelerator() if accelerator_flag else None
             mock_population = [mocked_bandit for _ in range(6)]
 
-            pop, _ = train_bandits(
+            _pop, _ = train_bandits(
                 bandit_env,
                 "bandit_env_name",
                 "algo",
@@ -4606,7 +4603,7 @@ class TestTrainBandits:
                 mocked_bandit.wrap_models.assert_called()
                 mocked_bandit.unwrap_models.assert_called()
 
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_bandit_save_elite_warning(
         self,
         bandit_env,
@@ -4620,7 +4617,7 @@ class TestTrainBandits:
                       be saved unless 'save_elite' is set to True."
         )
         with pytest.warns(match=warning_string):
-            pop, _ = train_bandits(
+            _pop, _ = train_bandits(
                 bandit_env,
                 "bandit_env_name",
                 "algo",
@@ -4640,7 +4637,7 @@ class TestTrainBandits:
                 elite_path="path",
             )
 
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_bandit_checkpoint_warning(
         self,
         bandit_env,
@@ -4654,7 +4651,7 @@ class TestTrainBandits:
                       be saved unless 'checkpoint' is defined."
         )
         with pytest.warns(match=warning_string):
-            pop, _ = train_bandits(
+            _pop, _ = train_bandits(
                 bandit_env,
                 "bandit_env_name",
                 "algo",
@@ -4674,7 +4671,7 @@ class TestTrainBandits:
                 checkpoint_path="path",
             )
 
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_bandit_actions_histogram(
         self,
         bandit_env,
@@ -4704,7 +4701,7 @@ class TestTrainBandits:
         assert len(pop) == len(population_bandit)
         assert len(pop) == len(population_bandit)
 
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_bandit_replay_buffer_calls(
         self,
         mocked_bandit_memory,
@@ -4713,7 +4710,7 @@ class TestTrainBandits:
         tournament,
         mutations,
     ):
-        pop, _ = train_bandits(
+        _pop, _ = train_bandits(
             bandit_env,
             "bandit_env_name",
             "algo",
@@ -4733,7 +4730,7 @@ class TestTrainBandits:
         mocked_bandit_memory.add.assert_called()
         mocked_bandit_memory.sample.assert_called()
 
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_bandit_bandit_env_calls(
         self,
         mocked_bandit_env,
@@ -4742,7 +4739,7 @@ class TestTrainBandits:
         tournament,
         mutations,
     ):
-        pop, _ = train_bandits(
+        _pop, _ = train_bandits(
             mocked_bandit_env,
             "bandit_env_name",
             "algo",
@@ -4762,7 +4759,7 @@ class TestTrainBandits:
         mocked_bandit_env.step.assert_called()
         mocked_bandit_env.reset.assert_called()
 
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_bandit_tourn_mut_calls(
         self,
         bandit_env,
@@ -4771,7 +4768,7 @@ class TestTrainBandits:
         mocked_tournament,
         mocked_mutations,
     ):
-        pop, _ = train_bandits(
+        _pop, _ = train_bandits(
             bandit_env,
             "bandit_env_name",
             "algo",
@@ -4791,7 +4788,7 @@ class TestTrainBandits:
         mocked_mutations.mutation.assert_called()
         mocked_tournament.select.assert_called()
 
-    @pytest.mark.parametrize("state_size, action_size", _IMG)
+    @pytest.mark.parametrize(("state_size", "action_size"), _IMG)
     def test_train_bandit_rgb_input(
         self,
         bandit_env,
@@ -4821,7 +4818,7 @@ class TestTrainBandits:
         assert len(pop) == len(population_bandit)
         assert len(pop) == len(population_bandit)
 
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_bandit_using_alternate_buffers(
         self,
         bandit_env,
@@ -4851,7 +4848,7 @@ class TestTrainBandits:
         assert len(pop) == len(population_bandit)
         assert len(pop) == len(population_bandit)
 
-    @pytest.mark.parametrize("state_size, action_size", _IMG_SQUARE)
+    @pytest.mark.parametrize(("state_size", "action_size"), _IMG_SQUARE)
     def test_train_bandit_using_alternate_buffers_rgb(
         self,
         bandit_env,
@@ -4881,7 +4878,7 @@ class TestTrainBandits:
         assert len(pop) == len(population_bandit)
         assert len(pop) == len(population_bandit)
 
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_bandit_distributed(
         self,
         bandit_env,
@@ -4913,7 +4910,7 @@ class TestTrainBandits:
         assert len(pop) == len(population_bandit)
         assert len(pop) == len(population_bandit)
 
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_bandit_wandb_init_log(
         self,
         bandit_env,
@@ -4978,7 +4975,7 @@ class TestTrainBandits:
             mock_wandb_finish.assert_called()
 
     @pytest.mark.parametrize("accelerator", [False, True])
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_bandit_wandb_init_log_distributed(
         self,
         bandit_env,
@@ -5045,7 +5042,7 @@ class TestTrainBandits:
             # Assert that wandb.finish was called
             mock_wandb_finish.assert_called()
 
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_bandit_early_stop_wandb(
         self,
         bandit_env,
@@ -5101,7 +5098,7 @@ class TestTrainBandits:
             # Assert that wandb.finish was called
             mock_wandb_finish.assert_called()
 
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_bandit_save_elite(
         self,
         bandit_env,
@@ -5112,7 +5109,7 @@ class TestTrainBandits:
         tmp_path,
     ):
         elite_path = str(tmp_path / "checkpoint.pt")
-        pop, _ = train_bandits(
+        _pop, _ = train_bandits(
             bandit_env,
             "bandit_env_name",
             "algo",
@@ -5134,7 +5131,7 @@ class TestTrainBandits:
         assert os.path.isfile(elite_path)
 
     @pytest.mark.parametrize("accelerator_flag", [False, True])
-    @pytest.mark.parametrize("state_size, action_size", _FLAT)
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_bandit_train_save_checkpoint(
         self,
         bandit_env,
@@ -5147,7 +5144,7 @@ class TestTrainBandits:
     ):
         accelerator = Accelerator() if accelerator_flag else None
         checkpoint_path = str(Path(tmpdir) / "checkpoint")
-        pop, _ = train_bandits(
+        _pop, _ = train_bandits(
             bandit_env,
             "bandit_env_name",
             "algo",
@@ -5172,6 +5169,18 @@ class TestTrainBandits:
                 assert os.path.isfile(f"{checkpoint_path}_{i}_{10 * (s + 1)}.pt")
 
 
-def test_remove_saved_models():
-    if os.path.exists("models"):
+def _try_remove_models_dir() -> bool:
+    try:
         shutil.rmtree("models")
+        return True
+    except OSError:
+        return not os.path.exists("models")
+
+
+def test_remove_saved_models():
+    if not os.path.exists("models"):
+        return
+    for _ in range(3):
+        if _try_remove_models_dir():
+            return
+    shutil.rmtree("models", ignore_errors=True)

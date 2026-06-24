@@ -276,6 +276,15 @@ class NeuralUCB(RLAlgorithm):
 
         return action
 
+    def _greedy_test_action(self, obs: ObservationType) -> int:
+        """Greedy arm for evaluation: preprocess obs, no UCB bonus or posterior update."""
+        with torch.no_grad():
+            obs_tensor = self.preprocess_observation(obs)
+            mu_raw = self.actor(obs_tensor).reshape(-1)
+            if mu_raw.numel() == 1 and self.action_dim > 1:
+                mu_raw = mu_raw.repeat(self.action_dim)
+            return int(np.argmax(mu_raw.cpu().numpy()))
+
     def learn(self, experiences: ExperiencesType) -> float:
         """Update agent network parameters to learn from experiences.
 
@@ -324,7 +333,11 @@ class NeuralUCB(RLAlgorithm):
         max_steps: int = 100,
         loop: int = 1,
     ) -> float:
-        """Return mean test score of agent in environment with epsilon-greedy policy.
+        """Return mean greedy test score in the environment.
+
+        Uses :meth:`preprocess_observation` and a greedy forward pass only —
+        unlike :meth:`get_action`, this does not apply the UCB bonus or update
+        ``sigma_inv``.
 
         :param env: The bandit environment to be tested in
         :type env: BanditEnvProtocol
@@ -343,9 +356,7 @@ class NeuralUCB(RLAlgorithm):
                 obs = env.reset()
                 score = 0
                 for _ in range(max_steps):
-                    obs = torch.from_numpy(obs).float()
-                    obs = obs.to(self.device)
-                    action = np.argmax(self.actor(obs).cpu().numpy())
+                    action = self._greedy_test_action(obs)
                     obs, reward = env.step(action)
                     score += reward
                 rewards.append(score)

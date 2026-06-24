@@ -7,8 +7,6 @@ from unittest.mock import MagicMock, patch
 
 import click
 import pytest
-from click.testing import CliRunner
-
 from agilerl.arena.cli_manifest import (
     _manifest_spec_to_click_option,
     _parse_json_cli_value,
@@ -20,6 +18,7 @@ from agilerl.arena.cli_manifest import (
 from agilerl.arena.client import ArenaClient
 from agilerl.arena.config import CommandConfig
 from agilerl.arena.exceptions import ArenaValidationError
+from click.testing import CliRunner
 
 
 def _command_config() -> CommandConfig:
@@ -101,7 +100,8 @@ class TestGetCliCapabilities:
 
     def test_uses_bounded_timeout(self, api_key_client: ArenaClient) -> None:
         """Capability checks gate ``--help``; the request must not block on the
-        full request timeout when the API is slow."""
+        full request timeout when the API is slow.
+        """
         api_key_client._request_timeout = 30
         resp = MagicMock()
         resp.status_code = 404
@@ -270,7 +270,7 @@ class TestWriteBinaryAtomic:
         with patch(
             "agilerl.arena.cli_manifest.os.replace", side_effect=OSError("nope")
         ):
-            with pytest.raises(OSError):
+            with pytest.raises(OSError, match="nope"):
                 write_binary_atomic(dest, b"data")
         assert not dest.with_name(dest.name + ".tmp").exists()
         assert not dest.exists()
@@ -282,7 +282,7 @@ class TestWriteBinaryAtomic:
             patch("agilerl.arena.cli_manifest.os.replace", side_effect=OSError("nope")),
             patch.object(Path, "unlink", side_effect=OSError("locked")),
         ):
-            with pytest.raises(OSError):
+            with pytest.raises(OSError, match="nope"):
                 write_binary_atomic(dest, b"data")
 
 
@@ -481,7 +481,7 @@ class TestParseJsonCliValue:
         assert _parse_json_cli_value(f"@{f}") == {"k": [1, 2, 3]}
 
 
-class TestManifestCommandCallback:
+class TestManifestCommandCallbackBinary:
     @staticmethod
     def _binary_get_command() -> click.Command:
         invoke = {

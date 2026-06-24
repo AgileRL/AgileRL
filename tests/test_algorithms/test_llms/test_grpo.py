@@ -5079,12 +5079,12 @@ class TestGRPOPreprocessObservation:
         use_separate_reference_adapter,
     ):
         accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-        with pytest.warns(UserWarning):
-            gc.collect()
-            vocab_size = 1000
-            input_size = 10
-            max_tokens = 20
-            group_size = 5
+        vocab_size = 1000
+        input_size = 10
+        max_tokens = 20
+        group_size = 5
+        gc.collect()
+        with pytest.warns(UserWarning, match=r"DeepSpeed ZeRO Stage 3"):
             grpo = GRPO(
                 actor_network=create_module(
                     input_size=input_size,

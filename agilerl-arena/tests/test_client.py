@@ -73,8 +73,7 @@ class TestTokenStore:
 def api_key_client():
     """ArenaClient with a static API key (no OAuth, no session restore)."""
     with patch("agilerl.arena.auth.KeycloakOpenID"):
-        client = ArenaClient(api_key="test-key")
-    return client
+        return ArenaClient(api_key="test-key")
 
 
 @pytest.fixture
@@ -103,19 +102,19 @@ def unauthenticated_client():
 
 class TestArenaClientInit:
     @patch("agilerl.arena.auth.KeycloakOpenID")
-    def test_with_explicit_api_key(self, _kc):
+    def test_with_explicit_api_key(self, mock_keycloak):
         client = ArenaClient(api_key="my-key")
         assert client._api_key == "my-key"
         assert client.is_authenticated
 
     @patch("agilerl.arena.auth.KeycloakOpenID")
-    def test_with_env_var(self, _kc):
+    def test_with_env_var(self, mock_keycloak):
         with patch.dict(os.environ, {"ARENA_API_KEY": "env-key"}):
             client = ArenaClient()
         assert client._api_key == "env-key"
 
     @patch("agilerl.arena.auth.KeycloakOpenID")
-    def test_without_key_calls_restore_session(self, _kc):
+    def test_without_key_calls_restore_session(self, mock_keycloak):
         with patch.dict(os.environ, {}, clear=False):
             env = os.environ.copy()
             env.pop("ARENA_API_KEY", None)
@@ -125,13 +124,13 @@ class TestArenaClientInit:
                 mock_restore.assert_called_once()
 
     @patch("agilerl.arena.auth.KeycloakOpenID")
-    def test_http_client_config(self, _kc):
+    def test_http_client_config(self, mock_keycloak):
         client = ArenaClient(api_key="k", request_timeout=60)
         assert client._request_timeout == 60
         assert client._upload_timeout == 300  # default
 
     @patch("agilerl.arena.auth.KeycloakOpenID")
-    def test_base_url_env_override(self, _kc):
+    def test_base_url_env_override(self, mock_keycloak):
         with patch.dict(os.environ, {"ARENA_BASE_URL": "https://arena.example.com/"}):
             client = ArenaClient(api_key="k")
         assert client._base_url == "https://arena.example.com"
@@ -233,7 +232,7 @@ class TestArenaClientLogin:
     @patch("agilerl.arena.client.load_credentials")
     @patch("agilerl.arena.auth.KeycloakOpenID")
     def test_restore_session_proactively_refreshes_expired_jwt(
-        self, _kc, mock_load_credentials
+        self, mock_keycloak, mock_load_credentials
     ):
         past = int(time.time()) - 120
         mock_load_credentials.return_value = {
@@ -833,7 +832,7 @@ class TestRepr:
 
 class TestTryRestoreSession:
     @patch("agilerl.arena.auth.KeycloakOpenID")
-    def test_restores_from_credentials(self, _kc, tmp_path):
+    def test_restores_from_credentials(self, mock_keycloak, tmp_path):
         cred_file = tmp_path / "creds.json"
         cred_file.write_text(
             json.dumps({"access_token": "saved_at", "refresh_token": "saved_rt"}),
@@ -856,7 +855,7 @@ class TestTryRestoreSession:
             ArenaOAuth2.CREDENTIALS_FILE = orig
 
     @patch("agilerl.arena.auth.KeycloakOpenID")
-    def test_restores_access_token_only(self, _kc, tmp_path):
+    def test_restores_access_token_only(self, mock_keycloak, tmp_path):
         """Credentials file with access_token but no refresh_token."""
         cred_file = tmp_path / "creds.json"
         cred_file.write_text(
@@ -1360,7 +1359,7 @@ class TestPreviewExperimentMetricsCsv:
         api_key_client._request_raw = MagicMock(
             return_value=(b"col1,col2\n1,2\n", "text/csv", None)
         )
-        payload, ct, disp = api_key_client.preview_experiment_metrics_csv(
+        payload, _ct, _disp = api_key_client.preview_experiment_metrics_csv(
             "exp1", preview_rows=10
         )
         call_kwargs = api_key_client._request_raw.call_args[1]

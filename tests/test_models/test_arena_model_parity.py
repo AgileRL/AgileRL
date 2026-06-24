@@ -204,7 +204,7 @@ class TestArenaSharedAlgorithmSpecParity:
 @requires_arena
 class TestArenaSharedSupportModelParity:
     @pytest.mark.parametrize(
-        "label,core_cls,arena_import,arena_attr",
+        ("label", "core_cls", "arena_import", "arena_attr"),
         [
             ("TrainingSpec", TrainingSpec, "agilerl.arena.models", "TrainingSpec"),
             (

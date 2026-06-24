@@ -24,8 +24,13 @@ class TestArenaError:
         assert issubclass(ArenaError, Exception)
 
     def test_can_be_raised_and_caught(self):
+        msg = "boom"
+
+        def _raise():
+            raise ArenaError(msg)
+
         with pytest.raises(ArenaError, match="boom"):
-            raise ArenaError("boom")
+            _raise()
 
 
 class TestArenaAuthError:
@@ -33,8 +38,13 @@ class TestArenaAuthError:
         assert issubclass(ArenaAuthError, ArenaError)
 
     def test_caught_by_arena_error_handler(self):
-        with pytest.raises(ArenaError):
-            raise ArenaAuthError("auth failed")
+        msg = "auth failed"
+
+        def _raise():
+            raise ArenaAuthError(msg)
+
+        with pytest.raises(ArenaError, match="auth failed"):
+            _raise()
 
 
 class TestArenaConfigError:
@@ -106,8 +116,13 @@ class TestArenaTimeoutError:
         assert issubclass(ArenaTimeoutError, ArenaError)
 
     def test_caught_by_auth_error_handler(self):
-        with pytest.raises(ArenaAuthError):
-            raise ArenaTimeoutError("timed out")
+        msg = "timed out"
+
+        def _raise():
+            raise ArenaTimeoutError(msg)
+
+        with pytest.raises(ArenaAuthError, match="timed out"):
+            _raise()
 
 
 class TestArenaValidationError:

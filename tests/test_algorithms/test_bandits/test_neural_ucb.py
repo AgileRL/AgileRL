@@ -14,8 +14,8 @@ from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import assert_state_dicts_equal
 from tests.helpers.algorithm_coverage import (
-    assert_swap_channels_called,
-    patch_obs_channels_to_first,
+    assert_transpose_image_observation_called,
+    patch_transpose_image_observation,
 )
 
 
@@ -333,17 +333,28 @@ class TestNeuralUCBTest:
         assert isinstance(mean_score, float)
         agent.clean_up()
 
-    def test_algorithm_test_loop_swap_channels(
-        self, image_space, discrete_space, monkeypatch
-    ):
-        spy = patch_obs_channels_to_first(
-            monkeypatch, "agilerl.algorithms.neural_ucb_bandit"
+    def test_algorithm_test_loop_swap_channels(self, discrete_space, monkeypatch):
+        channels_last_box = spaces.Box(
+            low=0, high=255, shape=(32, 32, 3), dtype=np.uint8
         )
-        env = DummyBanditEnv(state_size=image_space.shape, arms=discrete_space.n)
-        agent = NeuralUCB(observation_space=image_space, action_space=discrete_space)
-        mean_score = agent.test(env, swap_channels=True, max_steps=1, loop=1)
+        spy = patch_transpose_image_observation(monkeypatch)
+        agent = NeuralUCB(
+            observation_space=channels_last_box, action_space=discrete_space
+        )
+        assert agent.swap_channels is True
+        env = DummyBanditEnv(state_size=channels_last_box.shape, arms=discrete_space.n)
+        mean_score = agent.test(env, max_steps=1, loop=1)
         assert isinstance(mean_score, float)
-        assert_swap_channels_called(spy)
+        assert_transpose_image_observation_called(spy)
+        agent.clean_up()
+
+    def test_greedy_test_does_not_update_sigma_inv(self, vector_space, discrete_space):
+        env = DummyBanditEnv(state_size=vector_space.shape, arms=discrete_space.n)
+        agent = NeuralUCB(observation_space=vector_space, action_space=discrete_space)
+        sigma_before = agent.sigma_inv.clone()
+        mean_score = agent.test(env, max_steps=5, loop=2)
+        assert isinstance(mean_score, float)
+        assert torch.equal(agent.sigma_inv, sigma_before)
         agent.clean_up()
 
 

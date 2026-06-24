@@ -1,7 +1,7 @@
 import copy
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, Mock, call, patch
 
-from typing import TYPE_CHECKING
 import gymnasium as gym
 import numpy as np
 import pytest
@@ -9,6 +9,7 @@ import torch
 from accelerate import Accelerator, DeepSpeedPlugin
 from gymnasium import spaces
 from peft import LoraConfig
+
 from agilerl import HAS_DEEPSPEED, HAS_LLM_DEPENDENCIES, HAS_VLLM
 from agilerl.algorithms import (
     CQN,
@@ -17,19 +18,20 @@ from agilerl.algorithms import (
     IPPO,
     MADDPG,
     MATD3,
-    NeuralTS,
-    NeuralUCB,
     PPO,
     TD3,
+    NeuralTS,
+    NeuralUCB,
     RainbowDQN,
 )
 from agilerl.algorithms.core import EvolvableAlgorithm, LLMAlgorithm
 
 if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
     from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE
-from agilerl.typing import BatchDimension
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.typing import BatchDimension
+from agilerl.utils.algo_utils import CosineLRScheduleConfig
 from agilerl.utils.llm_utils import (
     aggregate_metrics_across_gpus,
     gather_tensor,
@@ -40,6 +42,7 @@ from agilerl.utils.utils import (
     create_population,
     default_progress_bar,
     get_env_defined_actions,
+    init_wandb,
     make_multi_agent_vect_envs,
     make_skill_vect_envs,
     make_vect_envs,
@@ -48,9 +51,7 @@ from agilerl.utils.utils import (
     save_population_checkpoint,
     suppress_verbose_logging,
     tournament_selection_and_mutation,
-    init_wandb,
 )
-from agilerl.utils.algo_utils import CosineLRScheduleConfig
 from agilerl.wrappers.learning import Skill
 
 create_module = None
@@ -177,7 +178,7 @@ class TestSavePopulationCheckpoint:
             MagicMock(spec=EvolvableAlgorithm),
             MagicMock(spec=EvolvableAlgorithm),
         ]
-        for i, agent in enumerate(pop):
+        for _i, agent in enumerate(pop):
             agent.steps = 200
             agent.save_checkpoint = MagicMock()
         save_path = str(tmp_path / "ckpt")
@@ -365,7 +366,7 @@ class TestCreatePopulation:
         reason="Need to install agilerl with deepspeed + vllm",
     )
     @pytest.mark.parametrize(
-        "algo,expected_type",
+        ("algo", "expected_type"),
         [
             ("GRPO", GRPO),
             ("LLMPPO", LLMPPO),
@@ -401,24 +402,24 @@ class TestCreatePopulation:
             vocab_size=1000,
             device=device,
         )
-        common_kw = dict(
-            algo=algo,
-            observation_space=vector_space,
-            action_space=copy.deepcopy(vector_space),
-            net_config=None,
-            INIT_HP=init_hp,
-            hp_config=None,
-            population_size=population_size,
-            device=device,
-            accelerator=None,
-            actor_network=actor,
-            algo_kwargs={
+        common_kw = {
+            "algo": algo,
+            "observation_space": vector_space,
+            "action_space": copy.deepcopy(vector_space),
+            "net_config": None,
+            "INIT_HP": init_hp,
+            "hp_config": None,
+            "population_size": population_size,
+            "device": device,
+            "accelerator": None,
+            "actor_network": actor,
+            "algo_kwargs": {
                 "lora_config": LoraConfig(**lora_kw),
                 "pad_token_id": 1000 - 1,
                 "pad_token": "<pad>",
                 "use_vllm": False,
             },
-        )
+        }
 
         if expected_type is LLMPPO:
             mock_agent = MagicMock(spec=LLMPPO)
@@ -637,7 +638,7 @@ class TestCreatePopulation:
         reason="agilerl[llm] not installed",
     )
     @pytest.mark.parametrize(
-        "algo,patch_target",
+        ("algo", "patch_target"),
         [
             ("GRPO", "agilerl.utils.utils.GRPO"),
             ("LLMPPO", "agilerl.utils.utils.LLMPPO"),
@@ -649,7 +650,8 @@ class TestCreatePopulation:
     ):
         """``USE_LIGER_LOSS`` / ``CAST_LOGPROBS_TO_FP32`` are forwarded from
         ``INIT_HP`` to the algo constructor for every LLM RL branch in
-        ``create_population`` (GRPO/CISPO/GSPO, LLMPPO, LLMREINFORCE)."""
+        ``create_population`` (GRPO/CISPO/GSPO, LLMPPO, LLMREINFORCE).
+        """
         init_hp = {
             "BATCH_SIZE": 2,
             "LR": 1e-5,
@@ -1211,7 +1213,7 @@ class TestConsolidateMutations:
     def test_warning_if_not_llm_algorithm(self):
         """Test consolidate_mutations"""
         population = [Mock() for _ in range(3)]
-        with pytest.warns(UserWarning):
+        with pytest.warns(UserWarning, match="Consolidate mutations is only supported"):
             consolidate_mutations(population)
 
     @pytest.mark.skipif(
@@ -1354,7 +1356,8 @@ class TestPrepareLlmAlgoKwargs:
 
     def test_attn_implementation_injected_into_model_config(self):
         """A non-"auto" ATTN_IMPLEMENTATION lands in model_config so the
-        algorithm's create_model treats it as authoritative."""
+        algorithm's create_model treats it as authoritative.
+        """
         from agilerl.utils.utils import _prepare_llm_algo_kwargs
 
         merged = _prepare_llm_algo_kwargs(
@@ -1371,8 +1374,9 @@ class TestPrepareLlmAlgoKwargs:
     def test_attn_implementation_auto_or_absent_leaves_model_config_alone(
         self, attn_impl
     ):
-        """ "auto" (or no key) must not create model_config — the algorithm's
-        auto-pick path stays in charge."""
+        r"""\"auto\" (or no key) must not create model_config - the algorithm's
+        auto-pick path stays in charge.
+        """
         from agilerl.utils.utils import _prepare_llm_algo_kwargs
 
         init_hp = self._init_hp()
@@ -1390,7 +1394,8 @@ class TestPrepareLlmAlgoKwargs:
 
     def test_attn_implementation_does_not_override_explicit_model_config(self):
         """A caller-supplied model_config attn_implementation wins over the
-        INIT_HP value; sibling model_config keys are preserved."""
+        INIT_HP value; sibling model_config keys are preserved.
+        """
         from agilerl.utils.utils import _prepare_llm_algo_kwargs
 
         merged = _prepare_llm_algo_kwargs(
@@ -1483,7 +1488,8 @@ class TestPrepareLlmAlgoKwargsLoraDefaults:
     def test_init_hp_lora_modules_build_default_lora_config(self):
         """When no ``lora_config`` is supplied and INIT_HP carries Lora keys, the
         helper should build a fresh ``LoraConfig`` and stash it under
-        ``lora_config``."""
+        ``lora_config``.
+        """
         from agilerl.utils.utils import _prepare_llm_algo_kwargs
 
         merged = _prepare_llm_algo_kwargs(
@@ -1531,7 +1537,8 @@ class TestPrepareLlmAlgoKwargsLoraDefaults:
 )
 class TestCreatePopulationLlmTorchCompiler:
     """``create_population`` should forward ``torch_compiler`` into every LLM
-    branch's kwargs (GRPO/CISPO/GSPO, SFT, DPO, LLMPPO, LLMREINFORCE)."""
+    branch's kwargs (GRPO/CISPO/GSPO, SFT, DPO, LLMPPO, LLMREINFORCE).
+    """
 
     @pytest.fixture
     def actor(self):
@@ -1551,7 +1558,7 @@ class TestCreatePopulationLlmTorchCompiler:
         }
 
     @pytest.mark.parametrize(
-        "algo,patch_target",
+        ("algo", "patch_target"),
         [
             ("GRPO", "agilerl.utils.utils.GRPO"),
             ("CISPO", "agilerl.utils.utils.CISPO"),
@@ -1623,10 +1630,11 @@ class TestCreatePopulationLlmTorchCompiler:
 class TestCreatePopulationLlmDepGuard:
     """When ``agilerl[llm]`` is not installed, every LLM-algo branch in
     ``create_population`` should raise a clear ImportError instead of failing
-    deep inside the algorithm import path."""
+    deep inside the algorithm import path.
+    """
 
     @pytest.mark.parametrize(
-        "algo,match",
+        ("algo", "match"),
         [
             ("GRPO", "GRPO/CISPO/GSPO require optional LLM dependencies"),
             ("CISPO", "GRPO/CISPO/GSPO require optional LLM dependencies"),

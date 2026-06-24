@@ -13,12 +13,13 @@ from __future__ import annotations
 import contextlib
 import importlib
 import types
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 import pytest
 from gymnasium.spaces import Box, Discrete
 
-from agilerl import AgentType, HAS_ARENA_DEPENDENCIES, HAS_LLM_DEPENDENCIES
+from agilerl import HAS_ARENA_DEPENDENCIES, HAS_LLM_DEPENDENCIES, AgentType
 from agilerl.components.replay_buffer import MultiStepReplayBuffer, ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -28,17 +29,16 @@ from agilerl.models import (
     DQNSpec,
     PPOSpec,
     TD3Spec,
-    RLAlgorithmSpec,
 )
 from agilerl.models.algo import LLMAlgorithmSpec
-from agilerl.models.networks import MlpSpec, QNetworkSpec, StochasticActorSpec
 from agilerl.models.hpo import (
     MutationProbabilities,
     MutationSpec,
     TournamentSelectionSpec,
 )
+from agilerl.models.networks import MlpSpec, QNetworkSpec, StochasticActorSpec
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
-from agilerl.training.trainer import ArenaTrainer, LocalTrainer, Trainer
+from agilerl.training.trainer import ArenaTrainer, LocalTrainer
 from agilerl.utils.trainer_utils import (
     build_mutations_from_spec,
     build_replay_buffer_from_spec,
@@ -96,12 +96,12 @@ class DummyEnv:
         return "DummyEnv"
 
 
-@pytest.fixture()
+@pytest.fixture
 def env():
     return DummyEnv()
 
 
-@pytest.fixture()
+@pytest.fixture
 def ppo_spec() -> PPOSpec:
     return PPOSpec(
         learn_step=128,
@@ -112,17 +112,17 @@ def ppo_spec() -> PPOSpec:
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 def ddpg_spec() -> DDPGSpec:
     return DDPGSpec()
 
 
-@pytest.fixture()
+@pytest.fixture
 def training_spec() -> TrainingSpec:
     return TrainingSpec(max_steps=500, pop_size=2, evo_steps=100)
 
 
-@pytest.fixture()
+@pytest.fixture
 def mutation_spec() -> MutationSpec:
     return MutationSpec(
         probabilities=MutationProbabilities(no_mut=0.5, params_mut=0.3, rl_hp_mut=0.2),
@@ -130,24 +130,23 @@ def mutation_spec() -> MutationSpec:
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 def tournament_spec() -> TournamentSelectionSpec:
     return TournamentSelectionSpec(tournament_size=3, elitism=True)
 
 
-@pytest.fixture()
+@pytest.fixture
 def buffer_spec() -> ReplayBufferSpec:
     return ReplayBufferSpec(memory_size=5_000)
 
 
-@pytest.fixture()
+@pytest.fixture
 def mock_population():
     """Return a list of mock agents that quack like EvolvableAlgorithm."""
-    agents = [MagicMock(algo="PPO") for _ in range(2)]
-    return agents
+    return [MagicMock(algo="PPO") for _ in range(2)]
 
 
-@pytest.fixture()
+@pytest.fixture
 def mock_client():
     client = MagicMock()
     client.submit_experiment.return_value = {
@@ -207,7 +206,7 @@ class TestBuildReplayBuffer:
 
 
 class TestGetTrainingKwargs:
-    @pytest.fixture()
+    @pytest.fixture
     def gym_env_spec(self):
         from agilerl.models.env import GymEnvSpec
 
@@ -890,7 +889,7 @@ class TestArenaTrainerFromManifest:
 
 
 class TestAlgoRegistry:
-    EXPECTED_ALGOS = {
+    EXPECTED_ALGOS: ClassVar[set[str]] = {
         "PPO",
         "DQN",
         "DDPG",
@@ -917,7 +916,8 @@ class TestAlgoRegistry:
 class VectorizedDummyEnv(DummyEnv):
     """DummyEnv that exposes vectorized-env *attributes* (not methods) for
     ``single_observation_space`` / ``single_action_space`` so that
-    ``get_spaces_from_env`` can read them directly."""
+    ``get_spaces_from_env`` can read them directly.
+    """
 
     def __init__(self, *, continuous: bool = False) -> None:
         super().__init__()
@@ -929,12 +929,13 @@ class VectorizedDummyEnv(DummyEnv):
 
 class TestLocalTrainerCustomNetworks:
     """Verify that custom EvolvableMLP networks passed to algorithm specs
-    are propagated to every individual in the LocalTrainer population."""
+    are propagated to every individual in the LocalTrainer population.
+    """
 
     OBS_DIM = 4
     DISCRETE_ACTIONS = 2
     CONTINUOUS_ACTIONS = 2
-    HIDDEN = [64, 64]
+    HIDDEN: ClassVar[list[int]] = [64, 64]
     POP_SIZE = 3
 
     @staticmethod
@@ -1064,7 +1065,8 @@ except ImportError:
 
 class FakeLoraConfig:
     """Lightweight stand-in for ``peft.LoraConfig`` used when the real peft
-    package is not installed."""
+    package is not installed.
+    """
 
     def __init__(self, **kwargs):
         for k, v in kwargs.items():
@@ -1073,7 +1075,8 @@ class FakeLoraConfig:
 
 def _make_lora_config(**kwargs):
     """Create a LoraConfig using the real peft class when available,
-    falling back to FakeLoraConfig otherwise."""
+    falling back to FakeLoraConfig otherwise.
+    """
     if _HAS_PEFT:
         return _LoraConfig(
             r=kwargs.get("lora_r", 8),
@@ -1118,29 +1121,30 @@ def _rebuild_llm_specs():
 
 _DPOSpec, _GRPOSpec = _rebuild_llm_specs()
 
-_LLM_COMMON_KWARGS = dict(
-    update_epochs=1,
-    lora_config=_make_lora_config(lora_r=8, lora_alpha=16, lora_dropout=0.1),
-    max_model_len=512,
-    use_separate_reference_adapter=False,
-    pretrained_model_name_or_path="gpt2",
-    calc_position_embeddings=False,
-)
+_LLM_COMMON_KWARGS = {
+    "update_epochs": 1,
+    "lora_config": _make_lora_config(lora_r=8, lora_alpha=16, lora_dropout=0.1),
+    "max_model_len": 512,
+    "use_separate_reference_adapter": False,
+    "pretrained_model_name_or_path": "gpt2",
+    "calc_position_embeddings": False,
+}
 
 
-@pytest.fixture()
+@pytest.fixture
 def dpo_spec():
     return _DPOSpec(**_LLM_COMMON_KWARGS)
 
 
-@pytest.fixture()
+@pytest.fixture
 def grpo_spec():
     return _GRPOSpec(group_size=4, **_LLM_COMMON_KWARGS)
 
 
 class TestLLMSpecConstruction:
     """Verify that DPOSpec / GRPOSpec can be constructed and expose the
-    expected class-level attributes."""
+    expected class-level attributes.
+    """
 
     def test_dpo_spec_fields(self, dpo_spec):
         assert dpo_spec.name == "DPO"
@@ -1178,7 +1182,8 @@ class TestLLMSpecConstruction:
 
 class TestLLMGetTrainingKwargs:
     """Verify the LLM-specific early-return path in
-    ``AlgorithmSpec.get_training_kwargs``."""
+    ``AlgorithmSpec.get_training_kwargs``.
+    """
 
     def test_llm_kwargs_defaults(self, dpo_spec):
         env_spec = MagicMock(max_reward=None)
@@ -1213,7 +1218,8 @@ class TestLLMGetTrainingKwargs:
 
 class TestLLMBuildAlgorithm:
     """Verify that ``LLMAlgorithmSpec.build_algorithm`` calls the algo class
-    constructor with the right arguments."""
+    constructor with the right arguments.
+    """
 
     def test_dpo_build_algorithm(self, dpo_spec):
         mock_algo = MagicMock()
@@ -1222,7 +1228,7 @@ class TestLLMBuildAlgorithm:
         mock_tokenizer.eos_token = "<|endoftext|>"
 
         with patch.object(type(dpo_spec), "_algo_class_cache", mock_algo):
-            agent = dpo_spec.build_algorithm(tokenizer=mock_tokenizer, index=0)
+            dpo_spec.build_algorithm(tokenizer=mock_tokenizer, index=0)
 
         mock_algo.assert_called_once()
         call_kwargs = mock_algo.call_args[1]
@@ -1238,7 +1244,7 @@ class TestLLMBuildAlgorithm:
         mock_tokenizer.eos_token = "<|endoftext|>"
 
         with patch.object(type(grpo_spec), "_algo_class_cache", mock_algo):
-            agent = grpo_spec.build_algorithm(tokenizer=mock_tokenizer, index=1)
+            grpo_spec.build_algorithm(tokenizer=mock_tokenizer, index=1)
 
         mock_algo.assert_called_once()
         call_kwargs = mock_algo.call_args[1]
@@ -1631,8 +1637,8 @@ class TestLocalTrainerIntegration:
         import numpy as np
         import pandas as pd
 
-        from agilerl.models.env import BanditEnvSpec
         from agilerl.models import NeuralUCBSpec
+        from agilerl.models.env import BanditEnvSpec
 
         rng = np.random.default_rng(42)
         features = pd.DataFrame(rng.standard_normal((100, 4)).astype(np.float32))
@@ -1711,6 +1717,7 @@ class TestLocalTrainerIntegration:
         """CQL (offline) on CartPole with a dummy HDF5 dataset."""
         import h5py
         import numpy as np
+
         from agilerl.models import CQNSpec
         from agilerl.models.env import OfflineEnvSpec
 
@@ -1766,6 +1773,7 @@ class TestLocalTrainerIntegration:
         """
         try:
             from peft import LoraConfig
+
             from agilerl.models.env import LLMEnvSpec, LLMEnvType
         except ImportError:
             pytest.skip("LLM dependencies not installed")
@@ -1848,6 +1856,7 @@ class TestLocalTrainerIntegration:
         """
         try:
             from peft import LoraConfig
+
             from agilerl.models.env import LLMEnvSpec, LLMEnvType
         except ImportError:
             pytest.skip("LLM dependencies not installed")
@@ -1912,12 +1921,14 @@ class TestLocalTrainerIntegration:
 class TestStringEnvironmentResolution:
     """Verify that passing a plain string as the ``environment`` parameter
     produces the correct env spec and that the constructed environment
-    corresponds to the requested gym / PettingZoo id."""
+    corresponds to the requested gym / PettingZoo id.
+    """
 
     @patch("agilerl.training.trainer.create_population_from_spec")
     def test_gym_env_from_string(self, mock_create_pop, training_spec):
         """A string environment for a single-agent algo resolves to GymEnvSpec
-        and the constructed env matches the requested id."""
+        and the constructed env matches the requested id.
+        """
         from agilerl.models.env import GymEnvSpec
 
         mock_create_pop.return_value = [MagicMock()]
@@ -1933,7 +1944,7 @@ class TestStringEnvironmentResolution:
 
     @patch("agilerl.training.trainer.LocalTrainer._make_env", return_value=MagicMock())
     @patch("agilerl.training.trainer.create_population_from_spec")
-    def test_pz_env_from_string(self, mock_create_pop, _mock_make_env, training_spec):
+    def test_pz_env_from_string(self, mock_create_pop, mock_make_env, training_spec):
         """A string environment for a multi-agent algo resolves to PzEnvSpec."""
         from agilerl.models.env import PzEnvSpec
 

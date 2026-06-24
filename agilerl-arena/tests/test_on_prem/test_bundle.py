@@ -7,14 +7,13 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-from click import ClickException
-
 from agilerl.arena.on_prem.bundle import (
     extract_bundle,
     parse_helm_release_ids,
     resolve_bundle_root,
     validate_wireguard_bundle,
 )
+from click import ClickException
 
 
 class TestExtractBundle:
@@ -82,7 +81,7 @@ class TestValidateWireguardBundle:
         (swarm_bundle / "config.d" / "tun0.conf").write_text(
             "[Interface]\n", encoding="utf-8"
         )
-        with pytest.raises(ClickException, match="Invalid tun0.conf"):
+        with pytest.raises(ClickException, match=r"Invalid tun0\.conf"):
             validate_wireguard_bundle(swarm_bundle, "dockerSwarm")
 
     def test_rejects_stack_without_wireguard_mount(self, swarm_bundle: Path) -> None:
@@ -101,7 +100,7 @@ class TestValidateWireguardBundle:
 
     def test_rejects_helm_bundle_missing_values_yaml(self, helm_bundle: Path) -> None:
         (helm_bundle / "chart" / "values.yaml").unlink()
-        with pytest.raises(ClickException, match="missing chart/values.yaml"):
+        with pytest.raises(ClickException, match=r"missing chart/values\.yaml"):
             validate_wireguard_bundle(helm_bundle, "helm")
 
     def test_rejects_swarm_bundle_missing_tun0(self, swarm_bundle: Path) -> None:
@@ -111,7 +110,7 @@ class TestValidateWireguardBundle:
 
     def test_rejects_swarm_bundle_missing_stack_yaml(self, swarm_bundle: Path) -> None:
         (swarm_bundle / "arena-stack.yaml").unlink()
-        with pytest.raises(ClickException, match="missing arena-stack.yaml"):
+        with pytest.raises(ClickException, match=r"missing arena-stack\.yaml"):
             validate_wireguard_bundle(swarm_bundle, "dockerSwarm")
 
 

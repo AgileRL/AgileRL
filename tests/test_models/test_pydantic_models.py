@@ -9,10 +9,9 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-from agilerl.models.env import BanditEnvSpec, LLMEnvSpec, LLMEnvType
 from pydantic import ValidationError
 
+from agilerl.models.env import BanditEnvSpec, LLMEnvSpec, LLMEnvType
 from agilerl.models.hpo import MutationSpec
 from agilerl.models.networks import (
     CnnSpec,
@@ -311,7 +310,7 @@ class TestLLMEnvSpec:
             patch("agilerl.models.env.pd.read_parquet", return_value=mock_df),
             patch("datasets.Dataset.from_pandas", return_value=mock_hf_ds),
         ):
-            train, test = spec._load_dataset_file()
+            _train, _test = spec._load_dataset_file()
 
         mock_df.rename.assert_called_once_with(columns={"old": "new"})
 
@@ -322,7 +321,7 @@ class TestLLMEnvSpec:
             dataset="some/hf/dataset",
         )
         with patch.object(spec, "_load_dataset_hf", return_value=("t", "v")) as m:
-            train, test = spec._load_dataset()
+            _train, _test = spec._load_dataset()
         m.assert_called_once()
 
     def test_make_env_invalid_type(self):
@@ -572,7 +571,7 @@ class TestAlgoSpecClassVars:
         mock_algo = MagicMock()
         mock_algo_cls.return_value = mock_algo
         with patch.object(type(spec), "algo_class", return_value=mock_algo_cls):
-            result = spec.build_algorithm(
+            spec.build_algorithm(
                 observation_space=MagicMock(),
                 action_space=MagicMock(),
                 index=0,
@@ -589,7 +588,7 @@ class TestAlgoSpecClassVars:
         mock_algo = MagicMock()
         mock_algo_cls.return_value = mock_algo
         with patch.object(type(spec), "algo_class", return_value=mock_algo_cls):
-            result = spec.build_algorithm(
+            spec.build_algorithm(
                 observation_spaces={"a": MagicMock()},
                 action_spaces={"a": MagicMock()},
                 index=0,

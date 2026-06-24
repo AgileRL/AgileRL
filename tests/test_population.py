@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -12,35 +12,35 @@ from agilerl.population import MetricsReport, Population, PopulationMetrics
 
 def _make_scalar_metrics(**overrides) -> PopulationMetrics:
     """Build a PopulationMetrics with sensible scalar defaults."""
-    defaults = dict(
-        fitnesses=[1.0, 2.0],
-        scores=[10.0, 20.0],
-        steps=[100, 200],
-        steps_per_second=[50.0, 60.0],
-        mutations=["none", "gauss"],
-        indices=[0, 1],
-        additional_metrics=[{"loss": 0.5}, {"loss": 0.3}],
-        hyperparameters=[{"lr": 0.001}, {"lr": 0.002}],
-    )
+    defaults = {
+        "fitnesses": [1.0, 2.0],
+        "scores": [10.0, 20.0],
+        "steps": [100, 200],
+        "steps_per_second": [50.0, 60.0],
+        "mutations": ["none", "gauss"],
+        "indices": [0, 1],
+        "additional_metrics": [{"loss": 0.5}, {"loss": 0.3}],
+        "hyperparameters": [{"lr": 0.001}, {"lr": 0.002}],
+    }
     defaults.update(overrides)
     return PopulationMetrics(**defaults)
 
 
 def _make_nested_metrics(**overrides) -> PopulationMetrics:
     """Build a PopulationMetrics with nested (multi-agent) fitnesses/scores."""
-    defaults = dict(
-        fitnesses=[{"a0": 1.0, "a1": 3.0}, {"a0": 2.0, "a1": 4.0}],
-        scores=[{"a0": 10.0, "a1": 30.0}, {"a0": 20.0, "a1": 40.0}],
-        steps=[100, 200],
-        steps_per_second=[50.0, 60.0],
-        mutations=["none", "gauss"],
-        indices=[0, 1],
-        additional_metrics=[
+    defaults = {
+        "fitnesses": [{"a0": 1.0, "a1": 3.0}, {"a0": 2.0, "a1": 4.0}],
+        "scores": [{"a0": 10.0, "a1": 30.0}, {"a0": 20.0, "a1": 40.0}],
+        "steps": [100, 200],
+        "steps_per_second": [50.0, 60.0],
+        "mutations": ["none", "gauss"],
+        "indices": [0, 1],
+        "additional_metrics": [
             {"reward/a0": 1.0, "reward/a1": 2.0},
             {"reward/a0": 3.0, "reward/a1": 4.0},
         ],
-        hyperparameters=[{"lr": 0.001}, {"lr": 0.002}],
-    )
+        "hyperparameters": [{"lr": 0.001}, {"lr": 0.002}],
+    }
     defaults.update(overrides)
     return PopulationMetrics(**defaults)
 

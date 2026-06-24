@@ -5,9 +5,8 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
-from click import ClickException
-
 from agilerl.arena.on_prem.ssh import SshExecutor, SshTarget
+from click import ClickException
 
 
 class TestSshTarget:
@@ -87,7 +86,8 @@ class TestSshExecutor:
             )
         cmd = run_mock.call_args.args[0]
         assert cmd[0] == "ssh"
-        assert "-p" in cmd and "2222" in cmd
+        assert "-p" in cmd
+        assert "2222" in cmd
         assert "-v" in cmd  # extra opts split in
         assert "ubuntu@host" in cmd
         assert cmd[-1] == "echo hi"  # remote command is a single argv entry

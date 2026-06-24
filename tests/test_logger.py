@@ -57,9 +57,14 @@ class TestOnMainProcess:
 
         acc = MagicMock()
         acc.is_main_process = True
-        with pytest.raises(RuntimeError):
+
+        def _raise_in_context():
+            msg = "boom"
             with Logger.on_main_process(acc):
-                raise RuntimeError("boom")
+                raise RuntimeError(msg)
+
+        with pytest.raises(RuntimeError):
+            _raise_in_context()
         assert acc.wait_for_everyone.call_count == 2
 
 
