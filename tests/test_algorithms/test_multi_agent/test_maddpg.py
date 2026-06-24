@@ -1113,9 +1113,13 @@ class TestMADDPGGetAction:
             agent_ids=agent_ids,
             device=device,
         )
-        with pytest.raises(AssertionError):
+
+        def _get_action_in_eval_mode():
             maddpg.set_training_mode(training)
             _, _raw_action = maddpg.get_action(state)
+
+        with pytest.raises(AssertionError):
+            _get_action_in_eval_mode()
         maddpg.clean_up()
 
     @pytest.mark.gpu

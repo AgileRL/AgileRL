@@ -166,13 +166,12 @@ class TestRainbowDQNInit:
     ):
         actor_network = "dummy"
 
-        with pytest.raises(TypeError) as a:
-            dqn = RainbowDQN(vector_space, discrete_space, actor_network=actor_network)
-            assert dqn
-            assert (
-                str(a.value)
-                == f"'actor_network' argument is of type {type(actor_network)}, but must be of type nn.Module."
-            )
+        with pytest.raises(TypeError) as exc_info:
+            RainbowDQN(vector_space, discrete_space, actor_network=actor_network)
+        assert (
+            str(exc_info.value)
+            == f"'actor_network' argument is of type {type(actor_network)}, but must be of type nn.Module."
+        )
 
     # Can initialize DQN with an actor network
     # TODO: This will be deprecated in the future

@@ -266,7 +266,9 @@ class TestBC_LMForward:
         prefix_embs = torch.randn(2, 3, 64)
         prefix_attn_mask = torch.ones(2, 3, dtype=torch.float)
         # Trigger prefix-position handling path with long position ids.
-        try:
+        with pytest.raises(
+            (RuntimeError, TypeError, AssertionError, ValueError)
+        ) as exc_info:
             bc_lm(
                 tokens,
                 attn_mask,
@@ -274,12 +276,11 @@ class TestBC_LMForward:
                 prefix_attn_mask,
                 remove_prefix_position_embs=True,
             )
-        except Exception as e:
-            # Accept any exception due to model internals, but ensure code is executed
-            assert "position" in str(e) or isinstance(
-                e,
-                (RuntimeError, TypeError, AssertionError),
-            )
+        # Accept any exception due to model internals, but ensure code is executed
+        assert "position" in str(exc_info.value) or isinstance(
+            exc_info.value,
+            (RuntimeError, TypeError, AssertionError),
+        )
 
     def test_bc_lm_empty_batch(self, bc_lm):
         """Test BC_LM with empty batch."""

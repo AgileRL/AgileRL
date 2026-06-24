@@ -1473,9 +1473,13 @@ class TestMATD3GetAction:
             agent_ids=agent_ids,
             device=device,
         )
-        with pytest.raises(AssertionError):
+
+        def _get_action_in_eval_mode():
             matd3.set_training_mode(training)
             _, _raw_action = matd3.get_action(state)
+
+        with pytest.raises(AssertionError):
+            _get_action_in_eval_mode()
 
     @pytest.mark.gpu
     @pytest.mark.parametrize("training", [False, True])
@@ -1947,7 +1951,7 @@ class TestMATD3Clone:
         policy_freq = 2
         device = "cpu"
         accelerator = Accelerator(device_placement=False) if accelerator_flag else None
-        # MATD3 default net config builds 18 (3-agent × 6-network) MLPs with
+        # MATD3 default net config builds 18 (3-agent x 6-network) MLPs with
         # hidden_size=[64]; with ``torch_compiler='default'`` each of those is
         # individually compiled which dominates the test runtime. A tiny config
         # shrinks the compile graph without affecting the cloning logic under test.

@@ -652,7 +652,10 @@ class TestRSNormLearn:
             ddpg.scores.append(0)
             actor_loss, critic_loss = ddpg.learn(experiences)
 
-        with pytest.raises(ValueError):
+        with pytest.raises(
+            ValueError,
+            match="Experiences must be provided if not using a rollout buffer",
+        ):
             ddpg.learn()
 
         assert isinstance(actor_loss, float)
@@ -1878,7 +1881,7 @@ class TestAsyncAgentsWrapperLearn:
         )
         async_agent = AsyncAgentsWrapper(agent)
 
-        observations, infos = env.reset()
+        observations, _infos = env.reset()
 
         states = {agent_id: [] for agent_id in agent_ids}
         actions = {agent_id: [] for agent_id in agent_ids}

@@ -3,6 +3,7 @@ import random
 import shutil
 from copy import deepcopy
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import ANY, MagicMock, patch
 
 import dill
@@ -3588,7 +3589,7 @@ class TestTrainMultiAgentOffPolicy:
         self, multi_memory, monkeypatch
     ):
         class EmptyAgentEnv:
-            agents = []
+            agents: ClassVar[list] = []
 
         class DummyPbar:
             def update(self, *args, **kwargs):
@@ -5495,7 +5496,7 @@ def test_remove_saved_models():
         try:
             shutil.rmtree("models")
             return
-        except OSError:
+        except OSError:  # noqa: PERF203 — retry loop tolerates xdist races on models/
             if not os.path.exists("models"):
                 return
     shutil.rmtree("models", ignore_errors=True)

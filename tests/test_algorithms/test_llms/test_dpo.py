@@ -306,7 +306,7 @@ class TestDPOInit:
     ):
         with pytest.raises(
             ValueError,
-            match="At least one of model_name or actor_network must be provided.",
+            match=r"At least one of model_name or actor_network must be provided\.",
         ):
             DPO(
                 actor_network=None,

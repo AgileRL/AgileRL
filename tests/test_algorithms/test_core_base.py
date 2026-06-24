@@ -7,7 +7,7 @@ There are 16 cells we care about, defined by the grid
     lora_only:       True / False
     save_optimizer:  True / False
     use_deepspeed:   True / False
-× {save, load}.
+x {save, load}.
 
 Expected behaviour per cell (the spec this file enforces):
 
@@ -306,13 +306,19 @@ class TestCopyAttributes:
 
 class TestDeprecatedMethods:
     def test_get_state_dim_deprecation(self, vector_space):
-        with pytest.warns(DeprecationWarning):
+        with pytest.warns(
+            DeprecationWarning,
+            match=r"This method is deprecated\. Use get_input_size_from_space instead\.",
+        ):
             dim = EvolvableAlgorithm.get_state_dim(vector_space)
         assert dim == (4,)
 
     def test_get_action_dim_deprecation(self):
         action_space = spaces.Discrete(5)
-        with pytest.warns(DeprecationWarning):
+        with pytest.warns(
+            DeprecationWarning,
+            match=r"This method is deprecated\. Use get_output_size_from_space instead\.",
+        ):
             dim = EvolvableAlgorithm.get_action_dim(action_space)
         assert dim == (5,)
 
@@ -529,7 +535,7 @@ class TestLoadErrorPaths:
         chkpt = torch.load(path, weights_only=False, pickle_module=dill)
         del chkpt["network_info"]["modules"]["dummy_actor_init_dict"]
         torch.save(chkpt, path, pickle_module=dill)
-        with pytest.raises(ValueError, match="Init dict.*not found"):
+        with pytest.raises(ValueError, match=r"Init dict.*not found"):
             DummyRLAlgorithm.load(path)
 
 
@@ -2295,9 +2301,9 @@ class TestGetLmHeadParentAndPatch:
 
     def test_patch_restores_on_exception(self) -> None:
         agent, original = self._agent_with_real_lm_head()
+        msg = "boom"
         with pytest.raises(RuntimeError, match="boom"):
             with agent._patch_lm_head_to_identity():
-                msg = "boom"
                 raise RuntimeError(msg)
         assert agent.actor.base_model.model.lm_head is original
 
@@ -2544,7 +2550,7 @@ class TestLLMConfigureBatchSize:
         with (
             pytest.raises(
                 ValueError,
-                match="micro_batch_size_per_gpu is equal to zero, which is not allowed.",
+                match=r"micro_batch_size_per_gpu is equal to zero, which is not allowed\.",
             ),
             patch.object(LLMAlgorithm, "_initialize_actors"),
             patch.object(LLMAlgorithm, "_configure_vllm"),
@@ -2845,7 +2851,7 @@ class TestLLMSetReferencePolicy:
         ):
             with pytest.raises(
                 ValueError,
-                match="Target adapter 'reference' is missing 1 LoRA tensors present in source adapter 'actor'.",
+                match=r"Target adapter 'reference' is missing 1 LoRA tensors present in source adapter 'actor'\.",
             ):
                 agent.set_reference_policy(1)
 
@@ -3025,7 +3031,7 @@ def llm_simple_checkpoint(request, grpo_factory, tmp_path_factory):
 
 
 class TestLLMSimpleCheckpointSave:
-    """Each test runs 4× (one per SAVE_LOAD_OPTIONS param) against a pre-saved
+    """Each test runs 4x (one per SAVE_LOAD_OPTIONS param) against a pre-saved
     checkpoint. Assertions are phrased as truth tables over
     ``plain_saved.lora_only`` / ``plain_saved.save_optimizer``.
     """
@@ -3595,7 +3601,7 @@ def llm_deepspeed_checkpoint_save(
     )
 
 
-class TestLLMDeepspeedCheckpointSave:
+class TestLLMDeepspeedCheckpointSaveE2E:
     """Real DeepSpeed save → assertions against bytes on disk (no spies).
 
     All artefact assertions in a single parametrised test to keep the number
@@ -3893,7 +3899,7 @@ class TestLLMConfigureBatchSizeNoDeepSpeedPlugin:
         acc = self._accelerator_without_deepspeed()
         with pytest.raises(
             ValueError,
-            match="DeepSpeed plugin is not initialized. If using an accelerator,",
+            match=r"DeepSpeed plugin is not initialized\. If using an accelerator,",
         ):
             _make_llm_agent(
                 accelerator=acc,

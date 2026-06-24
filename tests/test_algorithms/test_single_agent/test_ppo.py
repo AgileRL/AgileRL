@@ -316,13 +316,12 @@ class TestPPOInit:
         actor_network = "dummy"
         critic_network = "dummy"
         with pytest.raises(TypeError):
-            ppo = PPO(
+            PPO(
                 vector_space,
                 discrete_space,
                 actor_network=actor_network,
                 critic_network=critic_network,
             )
-            assert ppo
 
     # Can initialize ppo with an actor network but no critic - should trigger warning
     @pytest.mark.parametrize(
@@ -440,7 +439,7 @@ class TestPPOInit:
             pytest.skip("Recurrent PPO with non-vector space is not supported yet!")
 
         # Build an encoder configuration that matches the observation space type
-        if len(observation_space.shape) == 3:  # Image observations – use CNN
+        if len(observation_space.shape) == 3:  # Image observations - use CNN
             base_net_config = {
                 "encoder_config": {
                     "channel_size": [16, 32],
@@ -450,7 +449,7 @@ class TestPPOInit:
             }
             expected_shared = {}
             expected_separate = {}
-        else:  # Vector observations – use LSTM
+        else:  # Vector observations - use LSTM
             base_net_config = {
                 "encoder_config": {
                     "hidden_state_size": 64,
@@ -753,7 +752,9 @@ class TestPPOGetAction:
         if use_rollout_buffer:
             ppo = make_ppo()
         else:
-            with pytest.raises(ValueError):
+            with pytest.raises(
+                ValueError, match=r"use_rollout_buffer must be True if recurrent=True\."
+            ):
                 make_ppo()
             return
 

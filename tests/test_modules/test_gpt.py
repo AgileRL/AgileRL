@@ -180,7 +180,7 @@ class TestEvolvableGPTForward:
         model = tiny_gpt
         input_sequence = torch.randint(0, model.vocab_size, (1, model.block_size))
         target_sequence = torch.randint(0, model.vocab_size, (1, model.block_size))
-        logits, all_hidden_states, presents, loss = model(
+        logits, _all_hidden_states, _presents, loss = model(
             input_sequence,
             targets=target_sequence,
         )

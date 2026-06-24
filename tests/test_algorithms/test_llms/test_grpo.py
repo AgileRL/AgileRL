@@ -997,7 +997,10 @@ class TestGRPOInit:
         use_vllm,
         pretrained_model_name_or_path,
     ):
-        with pytest.warns(UserWarning):
+        with pytest.warns(
+            UserWarning,
+            match=r"No LoRA config provided\.\s+AgileRL can only be used to finetune adapters at present\.",
+        ):
             GRPO(
                 actor_network=model_factory(pretrained_model_name_or_path),
                 pad_token_id=vocab_size - 1,
@@ -1045,7 +1048,10 @@ class TestGRPOInit:
     ):
         accelerator = accelerator_factory(use_deepspeed_optimizer, config)
         with (
-            pytest.raises(ValueError),
+            pytest.raises(
+                ValueError,
+                match=r"Batch size \(17\) must be divisible by the number of processes \(2\)\.",
+            ),
             patch(
                 "accelerate.Accelerator.num_processes",
                 new_callable=PropertyMock,
@@ -1261,17 +1267,20 @@ class TestGRPOInit:
         micro_batch_size_per_gpu,
     ):
         accelerator = accelerator_factory(use_deepspeed_optimizer, config)
+        accelerator.state.deepspeed_plugin.deepspeed_config[
+            "gradient_accumulation_steps"
+        ] = 7
         with (
-            pytest.raises(ValueError),
+            pytest.raises(
+                ValueError,
+                match=r"Batch size \(16\) must be divisible by the product of the number of processes \(2\) and gradient accumulation steps \(7\)\.",
+            ),
             patch(
                 "accelerate.Accelerator.num_processes",
                 new_callable=PropertyMock,
                 return_value=2,
             ),
         ):
-            accelerator.state.deepspeed_plugin.deepspeed_config[
-                "gradient_accumulation_steps"
-            ] = 7
             GRPO(
                 actor_network=model_factory(pretrained_model_name_or_path),
                 pad_token_id=vocab_size - 1,
@@ -1381,12 +1390,15 @@ class TestGRPOInit:
         use_separate_reference_adapter,
     ):
         accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-        with pytest.warns(UserWarning):
-            gc.collect()
-            vocab_size = 1000
-            input_size = 10
-            max_tokens = 20
-            group_size = 5
+        gc.collect()
+        vocab_size = 1000
+        input_size = 10
+        max_tokens = 20
+        group_size = 5
+        with pytest.warns(
+            UserWarning,
+            match=r"DeepSpeed ZeRO Stage 3 is nascent and may not work as expected",
+        ):
             grpo = GRPO(
                 actor_network=create_module(
                     input_size=input_size,
@@ -1430,19 +1442,22 @@ class TestGRPOInit:
         use_separate_reference_adapter,
     ):
         accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-        with pytest.warns(UserWarning):
-            gc.collect()
-            vocab_size = 1000
-            input_size = 10
-            max_tokens = 20
-            group_size = 5
-            lora_config = LoraConfig(
-                r=16,
-                lora_alpha=64,
-                target_modules=["linear_1"],
-                task_type="CAUSAL_LM",
-                lora_dropout=0.05,
-            )
+        gc.collect()
+        vocab_size = 1000
+        input_size = 10
+        max_tokens = 20
+        group_size = 5
+        lora_config = LoraConfig(
+            r=16,
+            lora_alpha=64,
+            target_modules=["linear_1"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.05,
+        )
+        with pytest.warns(
+            UserWarning,
+            match=r"Argument 'max_grad_norm' will overwrite the equivalent value set for 'gradient_clipping'",
+        ):
             grpo = GRPO(
                 actor_network=create_module(
                     input_size=input_size,
@@ -1482,19 +1497,22 @@ class TestGRPOInit:
         use_separate_reference_adapter,
     ):
         accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-        with pytest.warns(UserWarning):
-            gc.collect()
-            vocab_size = 1000
-            input_size = 10
-            max_tokens = 20
-            group_size = 5
-            lora_config = LoraConfig(
-                r=16,
-                lora_alpha=64,
-                target_modules=["linear_1"],
-                task_type="CAUSAL_LM",
-                lora_dropout=0.05,
-            )
+        gc.collect()
+        vocab_size = 1000
+        input_size = 10
+        max_tokens = 20
+        group_size = 5
+        lora_config = LoraConfig(
+            r=16,
+            lora_alpha=64,
+            target_modules=["linear_1"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.05,
+        )
+        with pytest.warns(
+            UserWarning,
+            match=r"Argument 'max_grad_norm' will overwrite the equivalent value set for 'gradient_clipping'",
+        ):
             GRPO(
                 actor_network=create_module(
                     input_size=input_size,
@@ -1531,19 +1549,22 @@ class TestGRPOInit:
         use_separate_reference_adapter,
     ):
         accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-        with pytest.warns(UserWarning):
-            gc.collect()
-            vocab_size = 1000
-            input_size = 10
-            max_tokens = 20
-            group_size = 5
-            lora_config = LoraConfig(
-                r=16,
-                lora_alpha=64,
-                target_modules=["linear_1"],
-                task_type="CAUSAL_LM",
-                lora_dropout=0.05,
-            )
+        gc.collect()
+        vocab_size = 1000
+        input_size = 10
+        max_tokens = 20
+        group_size = 5
+        lora_config = LoraConfig(
+            r=16,
+            lora_alpha=64,
+            target_modules=["linear_1"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.05,
+        )
+        with pytest.warns(
+            UserWarning,
+            match=r"Cannot specify the optimizer in the DeepSpeed config and use AgileRL's LR scheduler",
+        ):
             GRPO(
                 actor_network=create_module(
                     input_size=input_size,
@@ -1583,19 +1604,22 @@ class TestGRPOInit:
         batch_size,
     ):
         accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-        with pytest.raises(ValueError) as e:
-            gc.collect()
-            vocab_size = 1000
-            input_size = 10
-            max_tokens = 20
-            group_size = 5
-            lora_config = LoraConfig(
-                r=16,
-                lora_alpha=64,
-                target_modules=["linear_1"],
-                task_type="CAUSAL_LM",
-                lora_dropout=0.05,
-            )
+        gc.collect()
+        vocab_size = 1000
+        input_size = 10
+        max_tokens = 20
+        group_size = 5
+        lora_config = LoraConfig(
+            r=16,
+            lora_alpha=64,
+            target_modules=["linear_1"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.05,
+        )
+        with pytest.raises(
+            ValueError,
+            match=r"When specifying micro_batch_size_per_gpu, batch_size \(16\) must be divisible by the product of the number of processes",
+        ):
             GRPO(
                 actor_network=create_module(
                     input_size=input_size,
@@ -1619,10 +1643,6 @@ class TestGRPOInit:
                 use_separate_reference_adapter=use_separate_reference_adapter,
                 micro_batch_size_per_gpu=micro_batch_size_per_gpu,
             )
-        assert (
-            f"When specifying micro_batch_size_per_gpu, batch_size ({batch_size}) must be divisible by the product of the number of processes ({accelerator.num_processes}) and micro_batch_size_per_gpu ({micro_batch_size_per_gpu})."
-            in str(e.value)
-        )
 
     @pytest.mark.gpu
     @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
@@ -1635,15 +1655,15 @@ class TestGRPOInit:
         use_deepspeed_optimizer,
     ):
         accelerator = accelerator_factory(use_deepspeed_optimizer, config)
+        gc.collect()
+        vocab_size = 1000
+        input_size = 10
+        max_tokens = 20
+        group_size = 5
         with pytest.warns(
             UserWarning,
             match=r"No LoRA config provided\.\s+AgileRL can only be used to finetune adapters at present\.\s+Using default LoRA configuration for RL finetuning:",
         ):
-            gc.collect()
-            vocab_size = 1000
-            input_size = 10
-            max_tokens = 20
-            group_size = 5
             GRPO(
                 actor_network=create_module(
                     input_size=input_size,
@@ -2798,12 +2818,11 @@ class TestGRPOCalculateAdvantage:
         rewards,
     ):
         stub = _GrpoMathStub(group_size=group_size)
-        with pytest.raises(ValueError) as e:
+        with pytest.raises(
+            ValueError,
+            match=r"Rewards must have a total element count divisible by group_size",
+        ):
             stub._calculate_advantage(rewards)
-        assert (
-            f"Rewards must have a total element count divisible by group_size ({group_size}); got {rewards.numel()} elements."
-            in str(e.value)
-        )
 
     def test_calculate_advantage_mean_only_branch(self):
         stub = _GrpoMathStub(group_size=2, adv_norm="mean_only")
@@ -3845,10 +3864,9 @@ class TestGRPOLearn:
 
         with (
             patch.object(grpo, "_loss", side_effect=mock_grpo_loss),
-            pytest.raises(ValueError) as value_error,
+            pytest.raises(ValueError, match=r"Loss is not finite"),
         ):
             grpo.learn((completions, action_masks, rewards))
-        assert "Loss is not finite" in str(value_error.value)
         grpo.clean_up()
 
     def test_grpo_learn_raises_when_loss_not_finite(
@@ -4284,10 +4302,16 @@ class TestGRPOSaveLoadDistributedActor:
             micro_batch_size_per_gpu,
         )
         checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-        with pytest.warns(UserWarning):
+        with pytest.warns(
+            UserWarning,
+            match=r"Distributed actor save not supported for non-distributed training\.",
+        ):
             grpo._save_distributed_actor(checkpoint_path)
 
-        with pytest.warns(UserWarning):
+        with pytest.warns(
+            UserWarning,
+            match=r"Distributed actor load not supported for non-distributed training\.",
+        ):
             grpo._load_distributed_actor(checkpoint_path)
         grpo.clean_up()
 
@@ -4926,9 +4950,10 @@ class TestCloneLlm:
         assert cloned_model.peft_config[cloned_model.active_adapter] == peft_config
 
     def test_clone_llm_peft_raises_error(self):
-        with pytest.raises(ValueError) as e:
+        with pytest.raises(
+            ValueError, match=r"Invalid 'original_model' type: <class 'int'>"
+        ):
             clone_llm(1, 1)
-        assert "Invalid 'original_model' type: <class 'int'>" in str(e.value)
 
 
 class TestGRPOCleanUp:

@@ -235,13 +235,12 @@ class TestCQNInit:
         action_space = spaces.Discrete(2)
         actor_network = "String"
 
-        with pytest.raises(TypeError) as e:
-            cqn = CQN(vector_space, action_space, actor_network=actor_network)
-            assert cqn
-            assert (
-                e
-                == f"'actor_network' argument is of type {type(actor_network)}, but must be of type nn.Module."
-            )
+        with pytest.raises(TypeError) as exc_info:
+            CQN(vector_space, action_space, actor_network=actor_network)
+        assert (
+            str(exc_info.value)
+            == f"'actor_network' argument is of type {type(actor_network)}, but must be of type nn.Module."
+        )
 
 
 class TestCQNGetAction:

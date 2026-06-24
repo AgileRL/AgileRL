@@ -487,8 +487,11 @@ class TestReasoningGymReset:
             conversation_template=DUMMY_CONVERSATION_TEMPLATE,
             data_batch_size_per_gpu=data_batch_size,
         )
-        with pytest.warns():
-            env.reset()
+        env.reset()
+        with pytest.warns(
+            UserWarning,
+            match=r"env\.reset\(\) called more than once sequentially",
+        ):
             env.reset()
 
 
@@ -1304,7 +1307,7 @@ class TestLlmUtilsDeprecatedReexports:
         import agilerl.utils.llm_utils as llm_utils_module
 
         with pytest.raises(AttributeError, match="has no attribute"):
-            llm_utils_module._nope_definitely_not_here
+            _ = llm_utils_module._nope_definitely_not_here
 
     def test_dir_includes_deprecated_names(self):
         import agilerl.utils.llm_utils as llm_utils_module

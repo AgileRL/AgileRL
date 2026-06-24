@@ -147,16 +147,12 @@ class TestNeuralUCBInit:
             nn.Linear(vector_space.shape[0], discrete_space.n)
         )
 
-        with pytest.raises(TypeError) as e:
-            bandit = NeuralUCB(
-                vector_space, discrete_space, actor_network=actor_network
-            )
-
-            assert bandit
-            assert (
-                e
-                == "'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule."
-            )
+        with pytest.raises(TypeError) as exc_info:
+            NeuralUCB(vector_space, discrete_space, actor_network=actor_network)
+        assert (
+            str(exc_info.value)
+            == f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule."
+        )
 
     def test_initialize_bandit_with_evo_nets(self, vector_space, discrete_space):
         actor_network = EvolvableMLP(
@@ -190,15 +186,12 @@ class TestNeuralUCBInit:
         discrete_space,
     ):
         actor_network = "dummy"
-        with pytest.raises(TypeError) as a:
-            bandit = NeuralUCB(
-                vector_space, discrete_space, actor_network=actor_network
-            )
-            assert bandit
-            assert (
-                str(a.value)
-                == f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
-            )
+        with pytest.raises(TypeError) as exc_info:
+            NeuralUCB(vector_space, discrete_space, actor_network=actor_network)
+        assert (
+            str(exc_info.value)
+            == f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
+        )
 
     def test_init_raises_on_invalid_learn_step(self, vector_space, discrete_space):
         with pytest.raises(

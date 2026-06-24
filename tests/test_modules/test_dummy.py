@@ -42,9 +42,10 @@ class TestDummyEvolvableInit:
         assert module.module.weight.shape == (2, 6)
 
     def test_raises(self):
-        with pytest.raises(ValueError) as e:
+        with pytest.raises(
+            ValueError, match="Either module or module_fn must be provided"
+        ):
             DummyEvolvable(module_fn=None, module=None, device="cpu")
-        assert "Either module or module_fn must be provided." in str(e.value)
 
     def test_from_module_fn_and_kwargs(self):
         module = DummyEvolvable(

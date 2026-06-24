@@ -1231,10 +1231,12 @@ class TestReinforceLossLiger:
             patch(
                 "agilerl.algorithms.reinforce_llm.apply_fused_policy_loss"
             ) as mock_apply,
-            pytest.warns(UserWarning, match="NOT memory-bounded"),
         ):
             mock_apply.return_value = (torch.tensor(0.4, requires_grad=True), fake_aux)
-            rf._reinforce_loss_liger(ids, mask, zeros, zeros, adv, turn_ids=turn_ids)
+            with pytest.warns(UserWarning, match="NOT memory-bounded"):
+                rf._reinforce_loss_liger(
+                    ids, mask, zeros, zeros, adv, turn_ids=turn_ids
+                )
 
         call = mock_apply.call_args
         # Per-turn means: row 0 -> [mean(1, 3), mean(5, 7)]; row 1 ->
@@ -1267,10 +1269,10 @@ class TestReinforceLossLiger:
             patch(
                 "agilerl.algorithms.reinforce_llm.apply_fused_policy_loss"
             ) as mock_apply,
-            pytest.warns(UserWarning, match="NOT memory-bounded"),
         ):
             mock_apply.return_value = (torch.tensor(0.4, requires_grad=True), fake_aux)
-            rf._reinforce_loss_liger(ids, mask, zeros, zeros, adv)
+            with pytest.warns(UserWarning, match="NOT memory-bounded"):
+                rf._reinforce_loss_liger(ids, mask, zeros, zeros, adv)
 
         call = mock_apply.call_args
         # Masked means: row 0 -> (1 + 3 + 5) / 3 = 3; row 1 -> 20 / 4 = 5.

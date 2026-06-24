@@ -1,3 +1,4 @@
+from typing import ClassVar
 from unittest.mock import Mock
 
 import numpy as np
@@ -19,7 +20,7 @@ from agilerl.protocols import MutationType
 
 class MockMethod:
     _mutation_type = MutationType.NODE
-    _recreate_kwargs = {}
+    _recreate_kwargs: ClassVar[dict[str, object]] = {}
 
     def __call__(self, *args, **kwargs):
         return {"mutation": "mock"}

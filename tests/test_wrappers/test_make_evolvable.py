@@ -465,7 +465,7 @@ class TestMakeEvolvableDetectArchitecture:
             nn.Linear(16, 1),
             nn.LogSoftmax(dim=-1),
         )
-        with pytest.raises(Exception):  # noqa: B017
+        with pytest.raises(TypeError, match=r"not currently supported"):
             MakeEvolvable(net, torch.randn(1, 4), device=device)
 
     @pytest.mark.gpu

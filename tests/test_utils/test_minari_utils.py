@@ -161,8 +161,8 @@ class TestLoadMinariDataset:
         # test load a dataset absent in remote
         with pytest.raises(
             KeyError,
-            match="Enter a valid remote Minari Dataset ID. check https://minari.farama.org/ "
-            "for more details.",
+            match=r"Enter a valid remote Minari Dataset ID. check https://minari.farama.org/ "
+            r"for more details.",
         ):
             minari_utils.load_minari_dataset(dataset_id, remote=True)
 

@@ -245,14 +245,13 @@ class TestDDPGInit:
         actor_network = "dummy"
         critic_network = "dummy"
         with pytest.raises(TypeError):
-            ddpg = DDPG(
+            DDPG(
                 vector_space,
                 action_space,
                 expl_noise=np.zeros((1, action_space.shape[0])),
                 actor_network=actor_network,
                 critic_network=critic_network,
             )
-            assert ddpg
 
     def test_rejects_non_evolvable_critic_network(self, vector_space, simple_mlp):
         action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)

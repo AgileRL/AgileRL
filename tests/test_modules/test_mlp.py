@@ -42,7 +42,7 @@ class TestEvolvableMLPInit:
     def test_incorrect_instantiation(
         self, num_inputs, num_outputs, hidden_size, device
     ):
-        with pytest.raises(Exception):  # noqa: B017
+        with pytest.raises(AssertionError):
             EvolvableMLP(
                 num_inputs=num_inputs,
                 num_outputs=num_outputs,

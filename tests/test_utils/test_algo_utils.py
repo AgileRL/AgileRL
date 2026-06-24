@@ -293,7 +293,7 @@ class TestApplyImageNormalization:
         np.testing.assert_array_equal(result, obs)
 
     def test_raises_for_non_box_space(self):
-        with pytest.raises(TypeError, match="Expected spaces.Box"):
+        with pytest.raises(TypeError, match=r"Expected spaces\.Box"):
             algo_utils.apply_image_normalization(
                 np.array([1.0], dtype=np.float32), spaces.Discrete(2)
             )
@@ -426,7 +426,7 @@ class TestObsChannelsToFirst:
 
     def test_obs_channels_to_first_unsupported_type(self):
         """obs_channels_to_first raises for non-ndarray/dict."""
-        with pytest.raises(TypeError, match="Expected np.ndarray or dict"):
+        with pytest.raises(TypeError, match=r"Expected np\.ndarray or dict"):
             obs_channels_to_first("invalid")
 
 

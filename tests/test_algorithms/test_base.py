@@ -497,12 +497,11 @@ class TestRLAlgorithmInit:
 
     def test_incorrect_hp_config(self, vector_space, discrete_space):
         with pytest.raises(AttributeError):
-            hp_config = HyperparameterConfig(lr_actor=RLParameter(min=0.1, max=0.2))
             _ = DummyRLAlgorithm(
                 vector_space,
                 discrete_space,
                 index=0,
-                hp_config=hp_config,
+                hp_config=HyperparameterConfig(lr_actor=RLParameter(min=0.1, max=0.2)),
             )
 
 

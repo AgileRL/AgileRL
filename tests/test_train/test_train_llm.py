@@ -325,7 +325,10 @@ class TestFinetuneLlmReasoning:
     )
     def test_finetune_llm_reasoning_evo_steps_not_set(self, finetune_fn):
         """Test that finetune_llm_reasoning raises a ValueError if evo_steps is not set."""
-        with pytest.raises(ValueError) as evo_steps_not_set_error:
+        with pytest.raises(
+            ValueError,
+            match=r"'evo_steps' must be set if 'tournament' and 'mutation' are not None\.",
+        ):
             finetune_fn(
                 pop=[
                     MagicMock(
@@ -338,10 +341,6 @@ class TestFinetuneLlmReasoning:
                 tournament=MagicMock(),
                 mutation=MagicMock(),
             )
-            assert (
-                "'evo_steps' is set but at least one of 'tournament' or 'mutation' is set to None. Evolution will not take place."
-                in str(evo_steps_not_set_error.value)
-            )
 
     @pytest.mark.parametrize(
         "finetune_fn",
@@ -349,7 +348,10 @@ class TestFinetuneLlmReasoning:
     )
     def test_finetune_llm_reasoning_value_error_if_evo_steps_not_set(self, finetune_fn):
         """Test that finetune_llm_reasoning raises a warning if evo_steps is not set."""
-        with pytest.raises(ValueError) as evo_steps_not_set_error:
+        with pytest.raises(
+            ValueError,
+            match=r"'evo_steps' must be set if 'tournament' and 'mutation' are not None\.",
+        ):
             finetune_llm_reasoning(
                 pop=[
                     MagicMock(
@@ -361,10 +363,6 @@ class TestFinetuneLlmReasoning:
                 accelerator=None,
                 tournament=MagicMock(),
                 mutation=MagicMock(),
-            )
-            assert (
-                "'evo_steps' must be set if 'tournament' and 'mutation' are not None."
-                in str(evo_steps_not_set_error.value)
             )
 
     def test_finetune_llm_reasoning_warning_num_epochs_and_max_steps(self):
@@ -406,7 +404,10 @@ class TestFinetuneLlmReasoning:
             mock_tournament_selection_and_mutation.return_value = [mock_agent]
 
             mock_agg.return_value = 0.5
-            with pytest.warns(UserWarning) as num_epochs_and_max_steps_warning:
+            with pytest.warns(
+                UserWarning,
+                match=r"'num_epochs' is set but 'max_steps' is also set",
+            ) as num_epochs_and_max_steps_warning:
                 finetune_llm_reasoning(
                     pop=[mock_agent],
                     env=mock_env,
@@ -416,10 +417,10 @@ class TestFinetuneLlmReasoning:
                     max_steps=100,
                     evo_steps=None,
                 )
-                assert (
-                    "'num_epochs' is set but 'max_steps' is also set. 'num_epochs' will take precedence over 'max_steps'."
-                    in str(num_epochs_and_max_steps_warning[0].message)
-                )
+            assert (
+                "'num_epochs' is set but 'max_steps' is also set. 'num_epochs' will take precedence over 'max_steps'."
+                in str(num_epochs_and_max_steps_warning[0].message)
+            )
 
     def test_finetune_llm_reasoning_max_steps_set_from_num_epochs(self):
         # Create mock agent
@@ -1083,7 +1084,10 @@ class TestFinetuneLlmPreference:
             mock_tournament_selection_and_mutation.return_value = [mock_agent]
 
             mock_agg.return_value = 0.5
-            with pytest.warns(UserWarning) as num_epochs_and_max_steps_warning:
+            with pytest.warns(
+                UserWarning,
+                match=r"'num_epochs' is set but 'max_steps' is also set",
+            ) as num_epochs_and_max_steps_warning:
                 finetune_llm_preference(
                     pop=[mock_agent],
                     env=mock_env,
@@ -1092,10 +1096,10 @@ class TestFinetuneLlmPreference:
                     max_steps=100,
                     evo_steps=None,
                 )
-                assert (
-                    "'num_epochs' is set but 'max_steps' is also set. 'num_epochs' will take precedence over 'max_steps'."
-                    in str(num_epochs_and_max_steps_warning[0].message)
-                )
+            assert (
+                "'num_epochs' is set but 'max_steps' is also set. 'num_epochs' will take precedence over 'max_steps'."
+                in str(num_epochs_and_max_steps_warning[0].message)
+            )
 
     def test_finetune_llm_preference_break_on_num_epochs(self):
         # Create mock agent
@@ -1168,7 +1172,7 @@ class TestFinetuneLlmPreference:
         mock_agent.scores = [0.0]
         with pytest.raises(
             ValueError,
-            match="The algorithm must be DPO for preference-based reinforcement learning.",
+            match=r"The algorithm must be DPO for preference-based reinforcement learning.",
         ):
             finetune_llm_preference(
                 pop=[mock_agent],
@@ -1240,7 +1244,7 @@ class TestFinetuneLlmPreference:
         assert agent_b.learn.call_args.args[0] == {"prompt": ["b"]}
 
     def test_finetune_llm_preference_csv_logging_without_wandb(self, tmp_path, capsys):
-        """DPO: csv_check only path; teardown closes CSV and prints path (train_llm.py ~858–860)."""
+        """DPO: csv_check only path; teardown closes CSV and prints path (train_llm.py ~858-860)."""
         mock_agent = MagicMock(spec=DPO)
         mock_agent.algo = "DPO"
         mock_agent.fitness = [0.0]
@@ -1529,7 +1533,10 @@ class TestFinetuneLlmSft:
             mock_safe_agg.side_effect = lambda acc, val: (
                 float(val) if not isinstance(val, float) else val
             )
-            with pytest.warns(UserWarning) as num_epochs_and_max_steps_warning:
+            with pytest.warns(
+                UserWarning,
+                match=r"'num_epochs' is set but 'max_steps' is also set",
+            ) as num_epochs_and_max_steps_warning:
                 finetune_llm_sft(
                     pop=[mock_agent],
                     env=mock_env,
@@ -1538,8 +1545,8 @@ class TestFinetuneLlmSft:
                     max_steps=100,
                     evo_steps=None,
                 )
-                assert "num_epochs" in str(num_epochs_and_max_steps_warning[0].message)
-                assert "max_steps" in str(num_epochs_and_max_steps_warning[0].message)
+            assert "num_epochs" in str(num_epochs_and_max_steps_warning[0].message)
+            assert "max_steps" in str(num_epochs_and_max_steps_warning[0].message)
 
     def test_finetune_llm_sft_break_on_num_epochs(self):
         """Test that finetune_llm_sft breaks when num_epochs is reached."""
@@ -1667,7 +1674,7 @@ class TestFinetuneLlmSft:
         assert agent1.learn.call_count >= 1
 
     def test_finetune_llm_sft_csv_logging_without_wandb(self, tmp_path, capsys):
-        """SFT: csv_check only; teardown closes CSV and prints path (train_llm.py ~1094–1096)."""
+        """SFT: csv_check only; teardown closes CSV and prints path (train_llm.py ~1094-1096)."""
         mock_agent = MagicMock(spec=SFT)
         mock_agent.algo = "SFT"
         mock_agent.registry = MagicMock()

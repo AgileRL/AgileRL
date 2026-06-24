@@ -1216,7 +1216,10 @@ class TestConsolidateMutations:
     def test_warning_if_not_llm_algorithm(self):
         """Test consolidate_mutations."""
         population = [Mock() for _ in range(3)]
-        with pytest.warns(UserWarning):
+        with pytest.warns(
+            UserWarning,
+            match="Consolidate mutations is only supported for LLMAlgorithm",
+        ):
             consolidate_mutations(population)
 
     @pytest.mark.skipif(
@@ -1375,7 +1378,7 @@ class TestPrepareLlmAlgoKwargs:
     def test_attn_implementation_auto_or_absent_leaves_model_config_alone(
         self, attn_impl
     ):
-        """ "auto" (or no key) must not create model_config — the algorithm's
+        r"""\"auto\" (or no key) must not create model_config - the algorithm's
         auto-pick path stays in charge.
         """
         from agilerl.utils.utils import _prepare_llm_algo_kwargs

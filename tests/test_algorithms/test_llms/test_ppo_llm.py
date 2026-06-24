@@ -1471,20 +1471,20 @@ class TestPPOLossLiger:
         with (
             patch("agilerl.algorithms.ppo_llm.HAS_LIGER_KERNEL", True),
             patch("agilerl.algorithms.ppo_llm.apply_fused_policy_loss") as mock_fn,
-            pytest.warns(UserWarning, match="NOT memory-bounded"),
         ):
             mock_fn.return_value = (torch.tensor(0.5, requires_grad=True), fake_aux)
-            ppo._ppo_loss_liger(
-                ids,
-                mask,
-                zeros,
-                zeros,
-                zeros,
-                adv,
-                zeros,
-                turn_ids,
-                "token",
-            )
+            with pytest.warns(UserWarning, match="NOT memory-bounded"):
+                ppo._ppo_loss_liger(
+                    ids,
+                    mask,
+                    zeros,
+                    zeros,
+                    zeros,
+                    adv,
+                    zeros,
+                    turn_ids,
+                    "token",
+                )
 
         call = mock_fn.call_args
         # Masked means: row 0 -> (1 + 3 + 5) / 3 = 3; row 1 -> 20 / 4 = 5.

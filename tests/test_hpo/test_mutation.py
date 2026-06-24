@@ -1,6 +1,6 @@
 import copy
 import gc
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 import pytest
@@ -291,7 +291,7 @@ class TestMutationsArchitectureMutateSingle:
     @pytest.mark.gpu
     def test_no_methods_sets_none(self, monkeypatch, device):
         class DummyPolicy:
-            mutation_methods = []
+            mutation_methods: ClassVar[list[str]] = []
 
         class DummyIndividual:
             def __init__(self):
@@ -314,7 +314,7 @@ class TestMutationsArchitectureMutateMulti:
     @pytest.mark.gpu
     def test_no_methods_sets_none(self, monkeypatch, device):
         class DummyPolicy:
-            mutation_methods = []
+            mutation_methods: ClassVar[list[str]] = []
 
         class DummyIndividual:
             def __init__(self):
@@ -335,10 +335,13 @@ class TestMutationsArchitectureMutateMulti:
     @pytest.mark.gpu
     def test_none_applied_mutation_branch(self, monkeypatch, device):
         class DummySubmodule:
-            mutation_methods = ["add_node"]
+            mutation_methods: ClassVar[list[str]] = ["add_node"]
 
         class DummyPolicyDict(dict):
-            mutation_methods = ["agent_0.add_node", "agent_1.add_node"]
+            mutation_methods: ClassVar[list[str]] = [
+                "agent_0.add_node",
+                "agent_1.add_node",
+            ]
 
             def sample_mutation_method(self, *_args, **_kwargs):
                 return "agent_0.add_node"
@@ -373,11 +376,11 @@ class TestMutationsArchitectureMutateMulti:
     @pytest.mark.gpu
     def test_raises_when_no_analogous(self, monkeypatch, device):
         class DummyEval:
-            mutation_methods = ["agent_9.other_mut"]
+            mutation_methods: ClassVar[list[str]] = ["agent_9.other_mut"]
             last_mutation_attr = None
 
         class DummyPolicy(dict):
-            mutation_methods = ["agent_0.add_node"]
+            mutation_methods: ClassVar[list[str]] = ["agent_0.add_node"]
 
             def sample_mutation_method(self, *_args, **_kwargs):
                 return "agent_0.add_node"
@@ -1571,7 +1574,7 @@ class TestMutationsMutation:
             for individual in mutated_population:
                 individual.mut = "None"
         else:
-            with pytest.warns(UserWarning):
+            with pytest.warns(UserWarning, match="mutations are not supported"):
                 mutated_population = mutations.mutation(
                     new_population, pre_training_mut
                 )
@@ -2140,7 +2143,7 @@ class TestGetExpLayer:
     def test_raises_for_non_evolvable_module(self):
         """get_exp_layer raises TypeError when offspring is not an EvolvableModule."""
         with pytest.raises(
-            TypeError, match="Bandit algorithm architecture.*not supported"
+            TypeError, match=r"Bandit algorithm architecture.*not supported"
         ):
             get_exp_layer(torch.nn.Linear(2, 2))
 

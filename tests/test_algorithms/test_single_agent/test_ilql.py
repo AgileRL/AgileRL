@@ -37,7 +37,7 @@ class TestILQLInit:
     def test_ilql_init(self):
         """Use a tiny EvolvableGPT config (same spirit as TINY_LLM_FIXTURE_PATH for HF tests).
 
-        net_config=None builds GPT-2–scale networks (three EvolvableGPT stacks); that is too
+        net_config=None builds GPT-2-scale networks (three EvolvableGPT stacks); that is too
         slow for default CI and is not needed to assert hyperparameter wiring.
         """
         List_RL_Dataset.__abstractmethods__ = set()

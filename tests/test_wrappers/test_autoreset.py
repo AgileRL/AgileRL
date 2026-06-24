@@ -1,4 +1,5 @@
 import functools
+from typing import ClassVar
 from unittest.mock import patch
 
 import gymnasium
@@ -28,7 +29,10 @@ REWARD_MAP = {
 
 
 class RPSParallelEnv(ParallelEnv):
-    metadata = {"render_modes": ["human"], "name": "rps_v2"}
+    metadata: ClassVar[dict[str, list[str] | str]] = {
+        "render_modes": ["human"],
+        "name": "rps_v2",
+    }
 
     def __init__(self, render_mode=None):
         """The init method takes in environment arguments and should define the following attributes:

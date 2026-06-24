@@ -425,9 +425,7 @@ def _render_gemma_chat(messages, add_generation_prompt: bool) -> str:
 
 
 def _render_chatml(messages, add_generation_prompt: bool) -> str:
-    parts = []
-    for m in messages:
-        parts.append(f"<|im_start|>{m['role']}\n{m['content']}<|im_end|>\n")
+    parts = [f"<|im_start|>{m['role']}\n{m['content']}<|im_end|>\n" for m in messages]
     if add_generation_prompt:
         parts.append("<|im_start|>assistant\n")
     return "".join(parts)
@@ -435,11 +433,10 @@ def _render_chatml(messages, add_generation_prompt: bool) -> str:
 
 def _render_llama(messages, add_generation_prompt: bool) -> str:
     parts = ["<|begin_of_text|>"]
-    for m in messages:
-        parts.append(
-            f"<|start_header_id|>{m['role']}<|end_header_id|>\n\n"
-            f"{m['content']}<|eot_id|>"
-        )
+    parts.extend(
+        f"<|start_header_id|>{m['role']}<|end_header_id|>\n\n{m['content']}<|eot_id|>"
+        for m in messages
+    )
     if add_generation_prompt:
         parts.append("<|start_header_id|>assistant<|end_header_id|>\n\n")
     return "".join(parts)

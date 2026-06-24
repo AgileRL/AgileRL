@@ -142,7 +142,7 @@ class TestEvolvableLSTMForward:
         c0 = torch.zeros(1, 1, 32, device=device)
         x = torch.randn(10, device=device)  # 1D input is invalid
 
-        with pytest.raises(ValueError, match="Expected 2D .* or 3D .* input"):
+        with pytest.raises(ValueError, match=r"Expected 2D .* or 3D .* input"):
             lstm.forward(
                 x,
                 hidden_state={f"{lstm.name}_h": h0, f"{lstm.name}_c": c0},

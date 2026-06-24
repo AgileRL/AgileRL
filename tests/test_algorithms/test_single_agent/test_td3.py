@@ -442,13 +442,12 @@ class TestTD3Init:
         actor_network = "dummy"
         critic_networks = "dummy"
         with pytest.raises(AssertionError):
-            td3 = TD3(
+            TD3(
                 vector_space,
                 copy.deepcopy(vector_space),
                 actor_network=actor_network,
                 critic_networks=critic_networks,
             )
-            assert td3
 
 
 class TestTD3GetAction:
