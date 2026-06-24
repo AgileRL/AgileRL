@@ -24,7 +24,6 @@ from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.utils.algo_utils import concatenate_spaces
 from agilerl.utils.evolvable_networks import get_default_encoder_config
-from tests.pz_vector_test_utils import make_sync_multi_agent_vec_env
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
     assert_not_equal_state_dict,
@@ -35,6 +34,7 @@ from tests.helpers.algorithm_coverage import (
     assert_swap_channels_called,
     patch_obs_channels_to_first,
 )
+from tests.pz_vector_test_utils import make_sync_multi_agent_vec_env
 
 
 class DummyMultiEnv(ParallelEnv):
@@ -180,7 +180,7 @@ def get_network_id(agent, agent_id):
     return agent.get_group_id(agent_id) if agent.has_grouped_agents() else agent_id
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def mlp_actor(observation_spaces, action_spaces, request):
     observation_spaces = request.getfixturevalue(observation_spaces)
     action_spaces = request.getfixturevalue(action_spaces)
@@ -192,7 +192,7 @@ def mlp_actor(observation_spaces, action_spaces, request):
     )
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def mlp_critic(action_spaces, observation_spaces, request):
     observation_spaces = request.getfixturevalue(observation_spaces)
     action_spaces = request.getfixturevalue(action_spaces)
@@ -203,12 +203,12 @@ def mlp_critic(action_spaces, observation_spaces, request):
     )
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def cnn_actor():
     return MultiAgentCNNActor()
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def cnn_critic():
     return MultiAgentCNNCritic()
 
@@ -218,7 +218,7 @@ def mocked_accelerator():
     MagicMock(spec=Accelerator)
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def accelerated_experiences(
     batch_size,
     observation_spaces,
@@ -258,7 +258,7 @@ def accelerated_experiences(
     return states, actions, rewards, next_states, dones
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def experiences(
     batch_size,
     observation_spaces,
@@ -733,7 +733,7 @@ class TestMADDPGInit:
     @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("compile_mode", [None, "default"])
     @pytest.mark.parametrize(
-        "observation_spaces, encoder_cls",
+        ("observation_spaces", "encoder_cls"),
         [
             ("ma_vector_space", EvolvableMLP),
             ("ma_image_space", EvolvableCNN),
@@ -829,7 +829,7 @@ class TestMADDPGInit:
         maddpg.clean_up()
 
     @pytest.mark.parametrize(
-        "actor_networks,critic_networks,expected_error,error_match",
+        ("actor_networks", "critic_networks", "expected_error", "error_match"),
         [
             (
                 [],
@@ -912,7 +912,7 @@ class TestMADDPGInit:
     @pytest.mark.gpu
     @pytest.mark.parametrize(
         "mode",
-        (None, 0, False, "default", "reduce-overhead", "max-autotune"),
+        [None, 0, False, "default", "reduce-overhead", "max-autotune"],
     )
     def test_torch_compiler_no_error(
         self,
@@ -950,7 +950,7 @@ class TestMADDPGInit:
         maddpg.clean_up()
 
     @pytest.mark.gpu
-    @pytest.mark.parametrize("mode", (1, True, "max-autotune-no-cudagraphs"))
+    @pytest.mark.parametrize("mode", [1, True, "max-autotune-no-cudagraphs"])
     def test_torch_compiler_error(
         self,
         mode,
@@ -1113,9 +1113,13 @@ class TestMADDPGGetAction:
             agent_ids=agent_ids,
             device=device,
         )
-        with pytest.raises(AssertionError):
+
+        def _get_action_in_eval_mode():
             maddpg.set_training_mode(training)
-            _, raw_action = maddpg.get_action(state)
+            _, _raw_action = maddpg.get_action(state)
+
+        with pytest.raises(AssertionError):
+            _get_action_in_eval_mode()
         maddpg.clean_up()
 
     @pytest.mark.gpu
@@ -1437,7 +1441,7 @@ class TestMADDPGGetAction:
             device=device,
         )
         maddpg.set_training_mode(training)
-        action, raw_action = maddpg.get_action(state, infos=info)
+        action, _raw_action = maddpg.get_action(state, infos=info)
         if discrete_actions:
             assert np.array_equal(
                 action["agent_0"].squeeze(),

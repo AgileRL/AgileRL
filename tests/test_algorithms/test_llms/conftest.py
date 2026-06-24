@@ -1,4 +1,3 @@
-import gc
 import os
 import random
 from importlib.util import find_spec
@@ -7,8 +6,8 @@ import numpy as np
 import pytest
 import torch
 from accelerate.state import AcceleratorState
-from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 
+from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 from tests.utils import (
     force_gpu_memory_release,
     wait_for_gpu_memory_to_clear,
@@ -111,6 +110,6 @@ def generate_model(pretrained_model_name_or_path, add_value_head=False):
     return model
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def model_factory():
     return generate_model

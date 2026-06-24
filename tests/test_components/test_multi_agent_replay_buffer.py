@@ -267,9 +267,9 @@ class TestMultiAgentReplayBufferSample:
         transition = buffer.sample(batch_size)
 
         assert len(transition) == len(field_names)
-        assert transition[0]["agent1"].shape == (batch_size,) + state["agent1"].shape
-        assert transition[1]["agent1"].shape == (batch_size,) + action["agent1"].shape
-        assert transition[2]["agent1"].shape == (batch_size,) + reward["agent1"].shape
+        assert transition[0]["agent1"].shape == (batch_size, *state["agent1"].shape)
+        assert transition[1]["agent1"].shape == (batch_size, *action["agent1"].shape)
+        assert transition[2]["agent1"].shape == (batch_size, *reward["agent1"].shape)
 
     # Can sample experiences from memory using sample method
     def test_sample_experiences_from_memory_images(self):
@@ -292,9 +292,9 @@ class TestMultiAgentReplayBufferSample:
         transition = buffer.sample(batch_size)
 
         assert len(transition) == len(field_names)
-        assert transition[0]["agent1"].shape == (batch_size,) + state["agent1"].shape
-        assert transition[1]["agent1"].shape == (batch_size,) + action["agent1"].shape
-        assert transition[2]["agent1"].shape == (batch_size,) + reward["agent1"].shape
+        assert transition[0]["agent1"].shape == (batch_size, *state["agent1"].shape)
+        assert transition[1]["agent1"].shape == (batch_size, *action["agent1"].shape)
+        assert transition[2]["agent1"].shape == (batch_size, *reward["agent1"].shape)
 
     # Can sample experiences from memory using sample method
     def test_sample_experiences_from_memory_dict(self):
@@ -317,8 +317,8 @@ class TestMultiAgentReplayBufferSample:
         transition = buffer.sample(batch_size)
 
         assert len(transition) == len(field_names)
-        assert transition[1]["agent1"].shape == (batch_size,) + action["agent1"].shape
-        assert transition[2]["agent1"].shape == (batch_size,) + reward["agent1"].shape
+        assert transition[1]["agent1"].shape == (batch_size, *action["agent1"].shape)
+        assert transition[2]["agent1"].shape == (batch_size, *reward["agent1"].shape)
 
 
 class TestMultiAgentReplayBufferProcessTransition:

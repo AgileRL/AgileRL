@@ -18,7 +18,8 @@ class TestGumbelSoftmaxForward:
         assert output.shape == logits.shape
 
         # Check if output tensor is within the range [0, 1]
-        assert torch.all(output >= 0) and torch.all(output <= 1)
+        assert torch.all(output >= 0)
+        assert torch.all(output <= 1)
 
         # Check if output tensor sums up to 1 along the last dimension
         assert torch.all(

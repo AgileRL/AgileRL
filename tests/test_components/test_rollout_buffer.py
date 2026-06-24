@@ -1040,7 +1040,10 @@ class TestRolloutBufferSequences:
         if recurrent:
             buffer.prepare_sequence_tensors()
         else:
-            with pytest.raises(ValueError):
+            with pytest.raises(
+                ValueError,
+                match=r"prepare_sequence_tensors\(\) is only supported when recurrent=True",
+            ):
                 buffer.prepare_sequence_tensors()
             return
 
@@ -1296,7 +1299,10 @@ class TestRolloutBufferSequences:
         )
 
         # Try to prepare sequences with empty buffer
-        with pytest.raises(ValueError):
+        with pytest.raises(
+            ValueError,
+            match=r"Attempting to prepare sequences with empty buffer",
+        ):
             buffer.prepare_sequence_tensors()
 
     def test_sequence_preparation_with_dict_observations(self):
@@ -1836,7 +1842,10 @@ class TestRolloutBufferUtilities:
         if recurrent:
             buffer.prepare_sequence_tensors()
         else:
-            with pytest.raises(ValueError):
+            with pytest.raises(
+                ValueError,
+                match=r"prepare_sequence_tensors\(\) is only supported when recurrent=True",
+            ):
                 buffer.prepare_sequence_tensors()
 
             return

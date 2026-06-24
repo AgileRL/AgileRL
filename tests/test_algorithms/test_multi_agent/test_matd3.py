@@ -17,7 +17,6 @@ from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.utils.algo_utils import concatenate_spaces
 from agilerl.utils.evolvable_networks import get_default_encoder_config
-from tests.pz_vector_test_utils import make_sync_multi_agent_vec_env
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
     assert_not_equal_state_dict,
@@ -28,6 +27,7 @@ from tests.helpers.algorithm_coverage import (
     assert_swap_channels_called,
     patch_obs_channels_to_first,
 )
+from tests.pz_vector_test_utils import make_sync_multi_agent_vec_env
 from tests.test_algorithms.test_multi_agent.test_maddpg import DummyMultiEnv
 
 
@@ -136,7 +136,7 @@ def get_network_id(agent, agent_id):
     return agent.get_group_id(agent_id) if agent.has_grouped_agents() else agent_id
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def mlp_actor(observation_spaces, action_spaces, request):
     observation_spaces = request.getfixturevalue(observation_spaces)
     action_spaces = request.getfixturevalue(action_spaces)
@@ -148,7 +148,7 @@ def mlp_actor(observation_spaces, action_spaces, request):
     )
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def mlp_critic(action_spaces, observation_spaces, request):
     observation_spaces = request.getfixturevalue(observation_spaces)
     action_spaces = request.getfixturevalue(action_spaces)
@@ -159,17 +159,17 @@ def mlp_critic(action_spaces, observation_spaces, request):
     )
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def cnn_actor():
     return MultiAgentCNNActor()
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def cnn_critic():
     return MultiAgentCNNCritic()
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def accelerated_experiences(
     batch_size,
     observation_spaces,
@@ -209,7 +209,7 @@ def accelerated_experiences(
     return states, actions, rewards, next_states, dones
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def experiences(
     batch_size,
     observation_spaces,
@@ -748,7 +748,7 @@ class TestMATD3Init:
     @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("compile_mode", [None, "default"])
     @pytest.mark.parametrize(
-        "observation_spaces, encoder_cls",
+        ("observation_spaces", "encoder_cls"),
         [
             ("ma_vector_space", EvolvableMLP),
             ("ma_image_space", EvolvableCNN),
@@ -864,7 +864,7 @@ class TestMATD3Init:
         assert isinstance(matd3.criterion, nn.MSELoss)
 
     @pytest.mark.parametrize(
-        "actor_networks,critic_networks,expected_error,error_match",
+        ("actor_networks", "critic_networks", "expected_error", "error_match"),
         [
             (
                 [],
@@ -1473,9 +1473,13 @@ class TestMATD3GetAction:
             agent_ids=agent_ids,
             device=device,
         )
-        with pytest.raises(AssertionError):
+
+        def _get_action_in_eval_mode():
             matd3.set_training_mode(training)
-            _, raw_action = matd3.get_action(state)
+            _, _raw_action = matd3.get_action(state)
+
+        with pytest.raises(AssertionError):
+            _get_action_in_eval_mode()
 
     @pytest.mark.gpu
     @pytest.mark.parametrize("training", [False, True])
@@ -1544,7 +1548,8 @@ class TestMATD3Learn:
         """When every agent has a distinct group id (homogeneous observation
         spaces but unique ID prefixes), ``MATD3.learn`` should fill the loss
         dict per-agent rather than aggregating by group. This covers the
-        ``else: loss_dict[agent_id] = losses`` branch."""
+        ``else: loss_dict[agent_id] = losses`` branch.
+        """
         # Distinct prefixes => has_grouped_agents() returns False.
         agent_ids = ["adversary_0", "agent_0", "good_0"]
         batch_size = 8
@@ -1946,7 +1951,7 @@ class TestMATD3Clone:
         policy_freq = 2
         device = "cpu"
         accelerator = Accelerator(device_placement=False) if accelerator_flag else None
-        # MATD3 default net config builds 18 (3-agent × 6-network) MLPs with
+        # MATD3 default net config builds 18 (3-agent x 6-network) MLPs with
         # hidden_size=[64]; with ``torch_compiler='default'`` each of those is
         # individually compiled which dominates the test runtime. A tiny config
         # shrinks the compile graph without affecting the cloning logic under test.

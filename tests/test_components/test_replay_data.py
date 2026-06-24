@@ -89,8 +89,8 @@ class TestTransitionPostInit:
             done=False,
         )
         obs_td = transition.obs
-        assert "tuple_obs_0" in obs_td.keys()
-        assert "tuple_obs_1" in obs_td.keys()
+        assert "tuple_obs_0" in obs_td
+        assert "tuple_obs_1" in obs_td
 
     def test_transition_tuple_observation_invalid_element_raises(self):
         with pytest.raises(AssertionError, match="Expected all elements of the tuple"):
@@ -110,8 +110,8 @@ class TestTransitionPostInit:
             next_obs={"vec": np.array([3.0, 4.0])},
             done=False,
         )
-        assert "vec" in transition.obs.keys()
-        assert "vec" in transition.next_obs.keys()
+        assert "vec" in transition.obs
+        assert "vec" in transition.next_obs
 
     def test_transition_scalar_reward_done_unsqueezed(self):
         transition = Transition(
@@ -128,14 +128,14 @@ class TestTransitionPostInit:
 class TestToTensordict:
     def test_to_tensordict_tuple(self):
         td = to_tensordict((np.array([1.0, 2.0]), 3.0))
-        assert "tuple_obs_0" in td.keys()
-        assert "tuple_obs_1" in td.keys()
+        assert "tuple_obs_0" in td
+        assert "tuple_obs_1" in td
         assert td["tuple_obs_1"].dtype == torch.float32
 
     def test_to_tensordict_dict(self):
         td = to_tensordict({"a": np.array([1.0]), "b": torch.tensor([2.0])})
-        assert "a" in td.keys()
-        assert "b" in td.keys()
+        assert "a" in td
+        assert "b" in td
         assert td.dtype == torch.float32
 
     def test_to_tensordict_dict_invalid_value_raises(self):

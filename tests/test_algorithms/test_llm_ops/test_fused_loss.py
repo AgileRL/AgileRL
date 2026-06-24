@@ -26,12 +26,13 @@ if not HAS_LIGER_KERNEL:
 from liger_kernel.chunked_loss.fused_linear_preference import (
     LigerFusedLinearPreferenceBase,
 )
+
 from agilerl.algorithms.core.llm_ops.fused_loss import (
+    LigerDPOWithAlpha,
+    LigerFusedLinearPolicyLossFunction,
     apply_fused_policy_loss,
     flatten_tokens_for_fused_loss,
     llm_policy_loss_fn,
-    LigerFusedLinearPolicyLossFunction,
-    LigerDPOWithAlpha,
 )
 
 
@@ -58,7 +59,8 @@ def test_llm_ops_package_init_sets_symbols_to_none_without_liger() -> None:
     its Liger-only re-exports to ``None`` so callers can use ``is None``
     guards without an ImportError. Exercised by reloading the package
     with the flag flipped — the always-available ``fused_lora`` helpers
-    must remain re-exported."""
+    must remain re-exported.
+    """
     import agilerl
     import agilerl.algorithms.core.llm_ops as llm_ops_pkg
 
@@ -77,7 +79,7 @@ def test_llm_ops_package_init_sets_symbols_to_none_without_liger() -> None:
 
 
 @pytest.mark.parametrize(
-    "module_path,symbol",
+    ("module_path", "symbol"),
     [
         ("agilerl.algorithms.grpo", "LigerFusedLinearGRPOFunction"),
         ("agilerl.algorithms.ppo_llm", "LigerFusedLinearPolicyLossFunction"),
@@ -115,7 +117,8 @@ def test_llm_policy_loss_fn_with_old_per_token_logps_none_falls_back_to_detached
     """``llm_policy_loss_fn`` allows ``old_per_token_logps=None`` for callers
     that forgot to pass it — fallback uses the current logprobs detached
     (ratio == 1, gradient still well-defined). Covers the
-    ``if old_per_token_logps is None`` branch in the math fn."""
+    ``if old_per_token_logps is None`` branch in the math fn.
+    """
     torch.manual_seed(0)
     B, T, V = 2, 4, 16
     raw = torch.randn(B, T, V, requires_grad=True)
@@ -232,7 +235,8 @@ class TestLlmPpoLossFn:
 
     def test_matches_unfused_beta_zero_reinforce_style(self) -> None:
         """REINFORCE folds KL into advantages upstream and runs with beta=0.
-        KL must still be reported as a metric for monitoring."""
+        KL must still be reported as a metric for monitoring.
+        """
         torch.manual_seed(1)
         B, T, V = 3, 6, 64
         log_probs = torch.log_softmax(torch.randn(B, T, V), dim=-1)
@@ -272,7 +276,8 @@ class TestLlmPpoLossFn:
     def test_vllm_is_ratio_identity_and_scaling(self) -> None:
         """The fused vLLM correction multiplies the per-token policy loss:
         a unit ratio is a no-op and a constant ratio ``c`` scales the loss by
-        ``c`` at ``beta=0`` (matching the standard path's reweight)."""
+        ``c`` at ``beta=0`` (matching the standard path's reweight).
+        """
         torch.manual_seed(3)
         B, T, V = 2, 5, 48
         log_probs = torch.log_softmax(torch.randn(B, T, V), dim=-1)
@@ -306,7 +311,8 @@ class TestLlmPpoLossFn:
     def test_chunk_accumulation_recovers_global_loss(self) -> None:
         """Splitting the batch and summing chunk losses must equal the
         single-shot loss — this is the invariant Liger's base class relies on
-        when accumulating over chunks."""
+        when accumulating over chunks.
+        """
         torch.manual_seed(2)
         B, T, V = 6, 5, 64
         log_probs = torch.log_softmax(torch.randn(B, T, V), dim=-1)
@@ -371,7 +377,8 @@ class TestLlmPpoLossFn:
 
     def test_clip_engaged_reports_nonzero_clipfrac(self) -> None:
         """When ratios force clipping, clipfrac must be > 0 (sanity check on
-        the metric path)."""
+        the metric path).
+        """
         torch.manual_seed(4)
         B, T, V = 2, 4, 16
         log_probs = torch.log_softmax(torch.randn(B, T, V), dim=-1)
@@ -401,7 +408,8 @@ class TestLlmPpoLossFn:
     def test_token_mode_rejects_stray_turn_ids(self) -> None:
         """The level is authoritative: turn_ids alongside the (default)
         token level almost certainly means the caller wanted turn pooling,
-        and per-turn advantages would silently mis-broadcast — fail loudly."""
+        and per-turn advantages would silently mis-broadcast — fail loudly.
+        """
         torch.manual_seed(5)
         log_probs = torch.log_softmax(torch.randn(2, 4, 16), dim=-1)
         with pytest.raises(ValueError, match="importance_sampling_level='turn'"):
@@ -418,7 +426,8 @@ class TestLlmPpoLossFn:
 
     def test_unknown_importance_sampling_level_raises(self) -> None:
         """An unrecognized level name (e.g. the pre-rename "sequence") must
-        raise rather than silently fall through to some default pooling."""
+        raise rather than silently fall through to some default pooling.
+        """
         torch.manual_seed(6)
         log_probs = torch.log_softmax(torch.randn(2, 4, 16), dim=-1)
         with pytest.raises(ValueError, match="Unknown importance_sampling_level"):
@@ -458,7 +467,7 @@ def _unfused_turn_reference(
     # Sum-pool token log-ratios into per-turn log-ratios.
     masked_token_log_ratio = token_log_ratio * token_mask.float()
     safe_turn_ids = turn_ids.clamp(min=0)
-    B, T = per_token_logps.shape
+    B, _T = per_token_logps.shape
     max_turns = turn_mask.shape[1]
     turn_log_ratio_sum = torch.zeros(B, max_turns, dtype=token_log_ratio.dtype)
     turn_log_ratio_sum.scatter_add_(1, safe_turn_ids, masked_token_log_ratio)
@@ -506,7 +515,8 @@ class TestLlmPpoLossFnTurnMode:
     @staticmethod
     def _build_turn_inputs(B: int, T: int, V: int, max_turns: int, seed: int):
         """Random batch where each sample has all max_turns active turns
-        contiguously distributed over T tokens (deterministic, simple)."""
+        contiguously distributed over T tokens (deterministic, simple).
+        """
         torch.manual_seed(seed)
         log_probs = torch.log_softmax(torch.randn(B, T, V), dim=-1)
         target_ids = torch.randint(0, V, (B, T))
@@ -582,7 +592,8 @@ class TestLlmPpoLossFnTurnMode:
 
     def test_turn_mode_sum_reduction_runs(self) -> None:
         """``turn_log_ratio_reduction="sum"`` (product-ratio) takes the else
-        branch of the per-turn pooling and yields a finite loss."""
+        branch of the per-turn pooling and yields a finite loss.
+        """
         B, T, V, max_turns = 2, 8, 16, 2
         (
             log_probs,
@@ -620,8 +631,8 @@ class TestLlmPpoLossFnTurnMode:
             turn_ids,
             turn_adv,
             turn_mask,
-            old_lp,
-            ref_lp,
+            _old_lp,
+            _ref_lp,
         ) = self._build_turn_inputs(B, T, V, max_turns, seed=3)
         with pytest.raises(ValueError, match="turn_log_ratio_reduction must be one of"):
             llm_policy_loss_fn(
@@ -639,7 +650,8 @@ class TestLlmPpoLossFnTurnMode:
 
     def test_chunk_accumulation_recovers_global_loss_turn_mode(self) -> None:
         """Splitting along B and summing chunk losses must equal the
-        single-shot turn-mode loss — Liger's chunk loop relies on this."""
+        single-shot turn-mode loss — Liger's chunk loop relies on this.
+        """
         B, T, V, max_turns = 6, 12, 64, 4
         (
             log_probs,
@@ -688,7 +700,8 @@ class TestLlmPpoLossFnTurnMode:
     def test_uneven_turns_per_sample(self) -> None:
         """Samples with fewer than ``max_turns`` active turns must
         contribute only their active turns to the reduction (uses
-        ``full_turn_mask`` to gate)."""
+        ``full_turn_mask`` to gate).
+        """
         torch.manual_seed(12)
         B, T, V, max_turns = 3, 9, 32, 3
         log_probs = torch.log_softmax(torch.randn(B, T, V), dim=-1)
@@ -739,7 +752,8 @@ class TestLlmPpoLossFnTurnMode:
 
     def test_raises_when_turn_args_incomplete(self) -> None:
         """Passing ``turn_ids`` without ``max_turns`` / ``full_turn_mask``
-        is a programming error and should raise."""
+        is a programming error and should raise.
+        """
         log_probs = torch.log_softmax(torch.randn(2, 4, 16), dim=-1)
         with pytest.raises(ValueError, match="turn-level"):
             llm_policy_loss_fn(
@@ -815,7 +829,8 @@ class TestLlmPpoLossFnTrajectoryMode:
     """Trajectory mode (GSPO) must length-normalize token log-ratios over
     the whole completion, clip at the trajectory level, and normalize by
     the number of active trajectories — matching the unfused reference —
-    while preserving the chunk-accumulation invariant."""
+    while preserving the chunk-accumulation invariant.
+    """
 
     @staticmethod
     def _build_inputs(B: int, T: int, V: int, seed: int):
@@ -860,7 +875,8 @@ class TestLlmPpoLossFnTrajectoryMode:
         """Splitting along B and summing chunk losses must equal the
         single-shot trajectory-mode loss — the active-trajectory denominator
         comes from the GLOBAL ``full_attention_mask``, so chunks containing
-        inactive rows contribute zero rather than skewing the mean."""
+        inactive rows contribute zero rather than skewing the mean.
+        """
         B, T, V = 6, 6, 32
         log_probs, ids, mask, adv, old_lp, ref_lp = self._build_inputs(B, T, V, seed=21)
 
@@ -894,7 +910,8 @@ class TestLlmPpoLossFnTrajectoryMode:
 
 class TestLigerFusedLinearPolicyLossFunction:
     """Drive the autograd Function on tiny shapes and assert it matches the
-    unfused reference for both forward loss and backward gradient flow."""
+    unfused reference for both forward loss and backward gradient flow.
+    """
 
     @staticmethod
     def _build_inputs(B, T, V, H, *, with_ref):
@@ -1021,7 +1038,8 @@ class TestLigerFusedLinearPolicyLossFunction:
         """When the lm_head has a bias, the chunked backward must
         accumulate ``grad_bias`` alongside ``grad_input`` and
         ``grad_weight``. Covers the ``if grad_bias is not None`` branch
-        in the chunk-accumulator."""
+        in the chunk-accumulator.
+        """
         B, T, V, H = 2, 4, 16, 8
         hidden, weight, ids, mask, adv, old_lp, _ = self._build_inputs(
             B, T, V, H, with_ref=False
@@ -1055,7 +1073,8 @@ class TestLigerFusedLinearPolicyLossFunction:
     def test_temperature_scaling_matches_unfused_reference(self) -> None:
         """``temperature != 1.0`` must divide the per-chunk logits before the
         log-softmax — verified against the unfused reference computed on the
-        temperature-scaled logits (and distinct from the unscaled loss)."""
+        temperature-scaled logits (and distinct from the unscaled loss).
+        """
         B, T, V, H = 2, 4, 16, 8
         hidden, weight, ids, mask, adv, old_lp, ref_lp = self._build_inputs(
             B, T, V, H, with_ref=True
@@ -1103,7 +1122,8 @@ class TestLigerFusedLinearPolicyLossFunction:
 
 class TestFusedLossHelpers:
     """Pure-helper coverage: token chunk-size resolution and the
-    ``(B, T, ...) -> (B*T, 1, ...)`` token flattening reshape."""
+    ``(B, T, ...) -> (B*T, 1, ...)`` token flattening reshape.
+    """
 
     def test_flatten_tokens_for_fused_loss_shapes_and_layout(self) -> None:
         B, T, H = 2, 3, 4
@@ -1142,7 +1162,8 @@ class TestFusedLossHelpers:
 class TestApplyFusedPolicyLoss:
     """The dispatch wrapper must produce the same loss/metrics as the
     unfused reference whichever path it takes — token-flattened (token
-    level) or one-sequence-per-chunk batch (turn/trajectory levels)."""
+    level) or one-sequence-per-chunk batch (turn/trajectory levels).
+    """
 
     @staticmethod
     def _build_inputs(B, T, V, H, seed=0):
@@ -1160,7 +1181,8 @@ class TestApplyFusedPolicyLoss:
         """Token level flattens to ``(B*T, 1, H)`` and chunks over tokens;
         the global token-count denominator makes the result exact vs the
         single-shot reference. ``token_chunk_size=3`` forces several chunks
-        so the accumulation really runs."""
+        so the accumulation really runs.
+        """
         B, T, V, H = 2, 5, 32, 8
         hidden, weight, ids, mask, old_lp, ref_lp = self._build_inputs(B, T, V, H)
         adv = torch.randn(B, T) * 0.1
@@ -1206,7 +1228,8 @@ class TestApplyFusedPolicyLoss:
     def test_trajectory_level_batch_path_matches_unfused_reference(self) -> None:
         """Trajectory pooling couples a completion's tokens, so the wrapper
         must keep the batch path (one sequence per chunk) — and still match
-        the single-shot trajectory-mode reference."""
+        the single-shot trajectory-mode reference.
+        """
         B, T, V, H = 3, 4, 16, 8
         hidden, weight, ids, mask, old_lp, ref_lp = self._build_inputs(
             B, T, V, H, seed=1
