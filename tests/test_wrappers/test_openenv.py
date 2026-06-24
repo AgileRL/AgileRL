@@ -1,9 +1,9 @@
-"""The OpenEnv env interface: client + server, resolver, reasoning env, from_dataset.
+"""The OpenEnv env interface: client + server, resolver, from_dataset.
 
 Every LLM-training env is reached the same way — text in, text out, over the small
 OpenEnv HTTP protocol. These cover both halves (``OpenEnvServer`` host +
-``OpenEnvClient`` client), the socket-free ``local_transport``, the spec resolver, the
-``ReasoningEnv`` dataset env, and ``RolloutEnv.from_dataset``.
+``OpenEnvClient`` client), the socket-free ``local_transport``, the spec resolver, and
+``RolloutEnv.from_dataset`` (the in-process prompt-dataset case).
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ import torch
 from agilerl.llm_envs import (
     OpenEnvClient,
     OpenEnvServer,
-    ReasoningEnv,
     RolloutEnv,
     local_transport,
     resolve_env,
@@ -156,50 +155,34 @@ def test_normalize_reset_accepts_bare_observation() -> None:
     assert _normalize_reset("obs") == ("obs", {})
 
 
-# --- ReasoningEnv ----------------------------------------------------------
-def _reasoning() -> ReasoningEnv:
-    return ReasoningEnv(
-        questions=["q0", "q1", "q2"],
-        answers=["a0", "a1", "a2"],
-        reward_fn=lambda c, a, q: 1.0 if c == a else 0.0,
+# --- RolloutEnv.from_dataset (reasoning over local_transport) ---------------
+def test_from_dataset_cursor_and_eval_split() -> None:
+    """reset() with no row walks the split; evaluation routes to the held-out split."""
+    env = RolloutEnv.from_dataset(
+        ["q0", "q1", "q2"],
+        ["a0", "a1", "a2"],
+        lambda c, a, q: 0.0,
+        _MiniTok(),
         prompt_builder=lambda q: f"P:{q}",
         test_questions=["t0"],
         test_answers=["ta0"],
+        apply_chat_template=False,
     )
-
-
-def test_reasoning_env_row_index_and_scoring() -> None:
-    env = _reasoning()
-    assert env.dataset_size == 3
-    prompt, info = env.reset(row_index=1)
-    assert prompt == "P:q1" and info == {}
-    _, reward, terminated, truncated, _ = env.step("a1")
-    assert reward == 1.0 and terminated is True and truncated is False
-    assert env.step("a1")  # callable again after re-bind
-    env.reset(row_index=2)
-    assert env.step("wrong")[1] == 0.0
-
-
-def test_reasoning_env_eval_split_and_cursor() -> None:
-    env = _reasoning()
     # Standalone cursor walks the active split sequentially.
-    assert env.reset()[0] == "P:q0"
-    assert env.reset()[0] == "P:q1"
-    # evaluation=True serves the held-out split (and resets the cursor).
-    assert env.reset(evaluation=True)[0] == "P:t0"
-    # The evaluation_mode attribute is honoured when reset omits the flag.
+    env.reset()
+    assert env._prompt_text == "P:q0"
+    env.reset()
+    assert env._prompt_text == "P:q1"
+    # evaluation routes to the held-out split (and resets the cursor).
+    with env.eval_mode():
+        env.reset()
+        assert env._prompt_text == "P:t0"
+    # The evaluation_mode flag is honoured when reset omits the row.
     env.evaluation_mode = True
-    assert env.reset(row_index=0)[0] == "P:t0"
+    env.reset(row_index=0)
+    assert env._prompt_text == "P:t0"
 
 
-def test_reasoning_env_defaults_are_lenient() -> None:
-    """Missing reward_fn/prompt_builder default to zero-reward / identity."""
-    env = ReasoningEnv(questions=["x"], answers=["y"])
-    assert env.reset(row_index=0)[0] == "x"
-    assert env.step("anything")[1] == 0.0
-
-
-# --- RolloutEnv.from_dataset (reasoning over local_transport) ---------------
 def test_from_dataset_dataset_size_and_row_pinning() -> None:
     a = RolloutEnv.from_dataset(
         ["q0", "q1", "q2"],
@@ -285,8 +268,13 @@ def test_resolve_env_url_is_used_raw() -> None:
 
 def test_resolve_env_entrypoint_hosts_locally() -> None:
     url, server = resolve_env(
-        "agilerl.llm_envs.rollout_env:ReasoningEnv",
-        {"questions": ["q"], "answers": ["a"], "prompt_builder": (lambda q: f"P:{q}")},
+        "agilerl.llm_envs.rollout_env:_PromptDatasetEnv",
+        {
+            "questions": ["q"],
+            "answers": ["a"],
+            "reward_fn": (lambda c, a, q: 0.0),
+            "prompt_builder": (lambda q: f"P:{q}"),
+        },
     )
     try:
         client = OpenEnvClient(base_url=url)

@@ -9,11 +9,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_llm import train_llm_rollout
 from agilerl.utils.algo_utils import VLLMConfig
-from agilerl.llm_envs import (
-    ReasoningEnv,
-    RolloutEnv,
-    local_transport,
-)
+from agilerl.llm_envs import RolloutEnv
 from agilerl.utils.utils import create_population
 
 if HAS_LLM_DEPENDENCIES:
@@ -137,33 +133,21 @@ def main(init_hp, mut_p):
     # owns the dataset cursor, keeping each GRPO group's dataset order
     # deterministic and consistent.
     def env_factory(evaluation_mode: bool = False):
-        train_questions, train_answers = (
-            list(train_dataset["question"]),
-            list(train_dataset["answer"]),
-        )
-        test_questions, test_answers = (
-            list(test_dataset["question"]),
-            list(test_dataset["answer"]),
-        )
-        raw_env = ReasoningEnv(
-            max_turns=1,
-            questions=train_questions,
-            answers=train_answers,
+        env = RolloutEnv.from_dataset(
+            questions=list(train_dataset["question"]),
+            answers=list(train_dataset["answer"]),
             reward_fn=combined_rewards,
-            prompt_builder=prompt_builder,
-            test_questions=test_questions,
-            test_answers=test_answers,
-        )
-        raw_env.evaluation_mode = evaluation_mode
-        return RolloutEnv(
-            None,
             tokenizer=tokenizer,
+            prompt_builder=prompt_builder,
+            test_questions=list(test_dataset["question"]),
+            test_answers=list(test_dataset["answer"]),
             max_turns=1,
-            transport=local_transport(raw_env),
             pad_id=getattr(tokenizer, "pad_token_id", None),
             apply_chat_template=True,
             max_model_len=init_hp["MAX_MODEL_LEN"],
         )
+        env.evaluation_mode = evaluation_mode
+        return env
 
     hp_config = HyperparameterConfig(
         beta=RLParameter(min=mut_p["MIN_BETA"], max=mut_p["MAX_BETA"]),

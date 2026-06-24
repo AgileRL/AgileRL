@@ -15,13 +15,11 @@ both ways, so there are no per-env codecs.
 
 * :class:`~agilerl.llm_envs.RolloutEnv` — the token-level rollout env: it owns
   tokenisation, the multi-turn loop and the provenance mask, and talks to the env
-  over the OpenEnv API (``reset`` / ``step``). Constructed with a ``url`` (or with
-  :meth:`~agilerl.llm_envs.RolloutEnv.from_dataset` for the reasoning case).
+  over the OpenEnv API (``reset`` / ``step``). Constructed with a ``url``, or with
+  :meth:`~agilerl.llm_envs.RolloutEnv.from_dataset` for an in-process prompt dataset
+  scored by a ``reward_fn`` (the canonical reasoning task).
 * :class:`~agilerl.llm_envs.BatchRolloutEnv` — runs independent groups of
   ``RolloutEnv`` rollouts over a batch (the dataset shuffle + GRPO group pinning).
-* :class:`~agilerl.llm_envs.ReasoningEnv` — a dataset of prompts scored by a
-  ``reward_fn`` (the canonical reasoning task); a plain local env, served like any
-  other.
 * :class:`~agilerl.llm_envs.DatasetEnv` — the teacher-forced supervised
   fine-tuning and preference-optimization regimes.
 * :class:`~agilerl.llm_envs.OpenEnvServer` / :func:`~agilerl.llm_envs.serve` host a
@@ -39,7 +37,6 @@ contract so it can be served / driven like any local env.
 
 .. autoclass:: agilerl.llm_envs.RolloutEnv
 .. autoclass:: agilerl.llm_envs.BatchRolloutEnv
-.. autoclass:: agilerl.llm_envs.ReasoningEnv
 .. autoclass:: agilerl.llm_envs.DatasetEnv
 .. autoclass:: agilerl.llm_envs.GymEnvironment
 .. autoclass:: agilerl.llm_envs.TextAction

@@ -19,15 +19,12 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from agilerl.llm_envs.openenv import (
-    DEFAULT_HTTP_TIMEOUT_S,
     OpenEnvClient,
     local_transport,
 )
 from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-
     from agilerl.typing import RolloutPrompts
 
 
@@ -65,7 +62,7 @@ class RolloutEnv:
         max_turns: int = 1,
         *,
         headers: dict[str, str] | None = None,
-        timeout_s: float = DEFAULT_HTTP_TIMEOUT_S,
+        timeout_s: float | None = None,
         transport: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
         pad_id: int | None = None,
         apply_chat_template: bool = True,
@@ -92,8 +89,10 @@ class RolloutEnv:
         :type max_turns: int
         :param headers: Optional HTTP headers (e.g. auth) sent on every request.
         :type headers: dict[str, str] | None
-        :param timeout_s: Per-request timeout for the OpenEnv client.
-        :type timeout_s: float
+        :param timeout_s: Per-request timeout in seconds for the OpenEnv client.
+            ``None`` (the default) leaves requests unbounded; supply the value from
+            the run manifest.
+        :type timeout_s: float | None
         :param transport: ``(path, payload) -> dict`` injection seam used in place
             of real HTTP (so unit tests need no socket), defaults to ``None``.
         :type transport: Callable | None
@@ -180,11 +179,11 @@ class RolloutEnv:
     ) -> RolloutEnv:
         """Build a reasoning ``RolloutEnv`` over an in-process prompt dataset.
 
-        Wraps a :class:`~agilerl.llm_envs.ReasoningEnv` in the
-        socket-free :func:`~agilerl.llm_envs.openenv.local_transport`, so the env is
-        driven over the OpenEnv interface with no HTTP cost — the common local case.
-        For an out-of-process / remote dataset env, :func:`~agilerl.llm_envs.openenv.serve`
-        a ``ReasoningEnv`` and pass its URL to the constructor instead.
+        Wraps an in-process prompt-dataset env in the socket-free
+        :func:`~agilerl.llm_envs.openenv.local_transport`, so it is driven over the
+        OpenEnv interface with no HTTP cost — the common local case. For an
+        out-of-process / remote dataset env, :func:`~agilerl.llm_envs.openenv.serve`
+        your own env and pass its URL to the constructor instead.
 
         :param questions: Per-row question strings (training split).
         :param answers: Per-row training answers, aligned with ``questions``.
@@ -198,7 +197,7 @@ class RolloutEnv:
             ``apply_chat_template``, ``max_model_len``).
         :rtype: RolloutEnv
         """
-        env = ReasoningEnv(
+        env = _PromptDatasetEnv(
             questions=questions,
             answers=answers,
             reward_fn=reward_fn,
@@ -886,84 +885,49 @@ class BatchRolloutEnv:
         )
 
 
-class ReasoningEnv:
-    """Dataset-seeded prompt in, reward-scored text out.
+class _PromptDatasetEnv:
+    """Private prompt-dataset env backing :meth:`RolloutEnv.from_dataset`.
 
-    The canonical RL-for-LLM task — a row of the dataset seeds the prompt, the model
-    produces a completion, and ``reward_fn(completion, answer, question)`` scores it.
-    With ``max_turns=1`` (default) this is single-turn reasoning. A plain local env
-    (the gym / gem text contract) driven like any other: :meth:`RolloutEnv.from_dataset`
-    wires it over :func:`~agilerl.llm_envs.local_transport`, or serve it for a URL.
-
-    ``reset`` accepts a ``row_index`` (so the owning ``BatchRolloutEnv`` can pin a
-    group to one prompt — the variance reduction GRPO relies on) and an ``evaluation``
-    flag (to serve the held-out split); both arrive over the OpenEnv API.
-
-    :param questions: Per-row question strings (the training split).
-    :param answers: Per-row training answer strings, aligned with ``questions``.
-    :param reward_fn: ``(completion, answer, question) -> float`` scorer.
-    :param prompt_builder: Maps a question to the prompt text (identity default).
-    :param test_questions: Held-out question strings used under ``evaluation``.
-    :param test_answers: Held-out answer strings used under ``evaluation``.
-    :param max_turns: Number of generation turns before the episode terminates.
-    :param tools: Optional tool schemas advertised to the policy.
+    A row of ``(questions, answers)`` seeds the prompt; ``reward_fn(completion,
+    answer, question)`` scores the completion. ``reset`` takes a ``row_index`` — so
+    the owning :class:`BatchRolloutEnv` can pin a GRPO group to one prompt (the
+    variance reduction GRPO relies on) — and an ``evaluation`` flag to serve the
+    held-out split; both arrive over the OpenEnv interface from the owning
+    :class:`RolloutEnv`. It is an implementation detail of ``from_dataset``; define
+    and :func:`~agilerl.llm_envs.openenv.serve` your own env for anything richer.
     """
 
     def __init__(
         self,
-        questions: list[str] | None = None,
-        answers: list[str] | None = None,
-        reward_fn: Callable[[str, str, str], float] | None = None,
+        questions: list[str],
+        answers: list[str],
+        reward_fn: Callable[[str, str, str], float],
         *,
         prompt_builder: Callable[[str], str] | None = None,
         test_questions: list[str] | None = None,
         test_answers: list[str] | None = None,
         max_turns: int = 1,
-        tools: list[Any] | None = None,
     ) -> None:
-        """Build a reasoning env over ``(questions, answers)`` scored by ``reward_fn``."""
         self.questions = questions
         self.answers = answers
-        self.reward_fn = reward_fn if reward_fn is not None else (lambda *_: 0.0)
+        self.reward_fn = reward_fn
         self.prompt_builder = (
             prompt_builder if prompt_builder is not None else (lambda q: q)
         )
         self.test_questions = test_questions
         self.test_answers = test_answers
         self.max_turns = max_turns
-        self.tools = list(tools) if tools else []
-        self.evaluation_mode = False
         self._turn = 0
-        self._question: str = ""
-        self._answer: str = ""
+        self._question = ""
+        self._answer = ""
         # Cursor for the standalone path (the batch path always passes a row_index):
         self._cursor = 0
         self._cursor_split = ""
 
     @property
     def dataset_size(self) -> int:
-        """Number of training rows backing this env (``0`` when not dataset-backed)."""
+        """Number of training rows backing this env."""
         return len(self.questions) if self.questions else 0
-
-    def _active_rows(self, evaluation: bool) -> tuple[list[str], list[str]]:
-        """Return the ``(questions, answers)`` for the requested split."""
-        if evaluation and self.test_questions is not None:
-            return self.test_questions, self.test_answers
-        return self.questions, self.answers
-
-    @contextmanager
-    def eval_mode(self) -> Iterator[None]:
-        """Serve the held-out split for the duration of the block (standalone use).
-
-        Over the OpenEnv interface a client sends ``evaluation`` per reset instead;
-        this is the convenience for driving the env directly.
-        """
-        previous = self.evaluation_mode
-        self.evaluation_mode = True
-        try:
-            yield
-        finally:
-            self.evaluation_mode = previous
 
     def reset(
         self,
@@ -972,33 +936,24 @@ class ReasoningEnv:
         row_index: int | None = None,
         evaluation: bool | None = None,
     ) -> tuple[str, dict[str, Any]]:
-        """Select a dataset row and return its prompt text plus info.
-
-        :param seed: Unused (the row, not a seed, determines the prompt).
-        :param row_index: Row to serve; when ``None`` the env walks its active split
-            sequentially from a per-split cursor (the standalone path).
-        :param evaluation: Serve the held-out split; ``None`` falls back to
-            :attr:`evaluation_mode`.
-        """
+        """Select a dataset row and return its prompt text plus an empty info dict."""
         del seed
         self._turn = 0
-        use_eval = self.evaluation_mode if evaluation is None else bool(evaluation)
-        questions, answers = self._active_rows(use_eval)
+        if evaluation and self.test_questions is not None:
+            questions, answers, split = self.test_questions, self.test_answers, "eval"
+        else:
+            questions, answers, split = self.questions, self.answers, "train"
         if row_index is None:
-            split = "eval" if use_eval and self.test_questions is not None else "train"
             if split != self._cursor_split:
-                self._cursor = 0
-                self._cursor_split = split
+                self._cursor, self._cursor_split = 0, split
             row_index = self._cursor
             self._cursor += 1
         row = row_index % len(questions)
-        self._question = questions[row]
-        self._answer = answers[row]
+        self._question, self._answer = questions[row], answers[row]
         return self.prompt_builder(self._question), {}
 
     def step(self, action: str) -> tuple[str, float, bool, bool, dict[str, Any]]:
         """Score the completion against the current row; terminate at ``max_turns``."""
         self._turn += 1
         reward = float(self.reward_fn(action, self._answer, self._question))
-        terminated = self._turn >= self.max_turns
-        return "", reward, terminated, False, {}
+        return "", reward, self._turn >= self.max_turns, False, {}

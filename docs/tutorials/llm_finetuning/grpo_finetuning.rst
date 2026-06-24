@@ -46,11 +46,7 @@ Dependencies
     from transformers import AutoTokenizer
     from agilerl.algorithms import GRPO
     from agilerl.training.train_llm import train_llm_rollout
-    from agilerl.llm_envs import (
-        ReasoningEnv,
-        RolloutEnv,
-        local_transport,
-    )
+    from agilerl.llm_envs import RolloutEnv
 
 
 Defining our base model and dataset
@@ -177,9 +173,9 @@ Now we have defined our reward functions, we must also design our prompt. This f
 to the agent and provides the context necessary to complete the task. This is a task-specific feature,
 and different reasoning problems will require different conversation templates, although they can follow a similar
 format. We define the conversation template as follows (using ``question`` and ``answer`` as placeholders for the question and answer data)
-and then build a single-turn :class:`ReasoningEnv <agilerl.llm_envs.ReasoningEnv>` from the question and answer
-columns of our dataset, driving it at the token level with a :class:`RolloutEnv <agilerl.llm_envs.RolloutEnv>`
-(over the in-process :func:`local_transport <agilerl.llm_envs.local_transport>`) inside an ``env_factory``.
+and then build a single-turn rollout env from the question and answer
+columns of our dataset with :meth:`RolloutEnv.from_dataset <agilerl.llm_envs.RolloutEnv.from_dataset>`
+inside an ``env_factory``.
 
 .. collapse:: Build the Single-Turn Rollout Environment
 
@@ -219,25 +215,21 @@ columns of our dataset, driving it at the token level with a :class:`RolloutEnv 
                 list(test_dataset["question"]),
                 list(test_dataset["answer"]),
             )
-            raw_env = ReasoningEnv(
-                max_turns=1,
+            env = RolloutEnv.from_dataset(
                 questions=train_questions,
                 answers=train_answers,
                 reward_fn=combined_rewards,
+                tokenizer=tokenizer,
                 prompt_builder=prompt_builder,
                 test_questions=test_questions,
                 test_answers=test_answers,
-            )
-            raw_env.evaluation_mode = evaluation_mode
-            return RolloutEnv(
-                None,
-                tokenizer=tokenizer,
                 max_turns=1,
-                transport=local_transport(raw_env),
                 pad_id=tokenizer.pad_token_id,
                 apply_chat_template=True,
                 max_model_len=1024,
             )
+            env.evaluation_mode = evaluation_mode
+            return env
 
 Create a GRPO Agent
 -------------------

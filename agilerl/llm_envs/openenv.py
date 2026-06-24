@@ -38,8 +38,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_HTTP_TIMEOUT_S = 30.0
-
 
 # --- standard text contract ------------------------------------------------
 class TextAction(Action):
@@ -307,7 +305,8 @@ class OpenEnvClient:
 
     :param base_url: Root URL of the env server. ``None`` only with a ``transport``.
     :param headers: Optional HTTP headers sent on every request.
-    :param timeout_s: Per-request timeout.
+    :param timeout_s: Per-request timeout in seconds. ``None`` (the default) leaves
+        requests unbounded; the value is supplied from the run manifest.
     :param transport: ``(path, payload) -> dict`` injection seam in place of real HTTP
         (so unit tests — and :func:`local_transport` — need no socket).
     """
@@ -317,7 +316,7 @@ class OpenEnvClient:
         base_url: str | None = None,
         *,
         headers: dict[str, str] | None = None,
-        timeout_s: float = DEFAULT_HTTP_TIMEOUT_S,
+        timeout_s: float | None = None,
         transport: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
     ) -> None:
         """Build a client for the env server at ``base_url`` (or an injected transport)."""
@@ -440,7 +439,7 @@ def _urllib_post(
     payload: dict[str, Any],
     *,
     headers: dict[str, str] | None = None,
-    timeout_s: float = DEFAULT_HTTP_TIMEOUT_S,
+    timeout_s: float | None = None,
 ) -> dict[str, Any]:
     """POST JSON via the stdlib and decode the object."""
     body = json.dumps(payload).encode("utf-8")
@@ -461,7 +460,7 @@ def _urllib_get(
     url: str,
     *,
     headers: dict[str, str] | None = None,
-    timeout_s: float = DEFAULT_HTTP_TIMEOUT_S,
+    timeout_s: float | None = None,
 ) -> dict[str, Any]:
     """GET JSON via the stdlib and decode the object."""
     request = urllib.request.Request(url, method="GET")
@@ -493,7 +492,8 @@ class OpenEnvHTTPEnv:
     :param arg: MCP argument name carrying the text (default ``"message"``).
     :param instruction: Prompt returned from reset when the env's reset obs is empty.
     :param headers: Optional HTTP headers (e.g. auth) sent on every request.
-    :param timeout_s: Per-request timeout.
+    :param timeout_s: Per-request timeout in seconds. ``None`` (the default) leaves
+        requests unbounded; the value is supplied from the run manifest.
     """
 
     def __init__(
@@ -504,7 +504,7 @@ class OpenEnvHTTPEnv:
         arg: str = "message",
         instruction: str = "",
         headers: dict[str, str] | None = None,
-        timeout_s: float = DEFAULT_HTTP_TIMEOUT_S,
+        timeout_s: float | None = None,
     ) -> None:
         """Build an adapter for the external OpenEnv server at ``base_url``."""
         self._base_url = base_url.rstrip("/")

@@ -569,45 +569,20 @@ class TestLLMEnvHierarchy:
     """The LLM env contract lives in :mod:`agilerl.llm_envs`.
 
     ``LLMEnv`` is the abstract base for the teacher-forced ``DatasetEnv``;
-    ``RolloutEnv`` is the token rollout env (an OpenEnv client driven by a URL),
-    and ``ReasoningEnv`` is a plain local env reached over the same OpenEnv
-    interface — neither subclasses ``LLMEnv``.
+    ``RolloutEnv`` is the token rollout env (an OpenEnv client driven by a URL)
+    and does not subclass ``LLMEnv``.
     """
 
     def test_llm_env_hierarchy(self):
         pytest.importorskip("datasets", reason="LLM dependencies not installed")
-        from agilerl.llm_envs import DatasetEnv, LLMEnv, ReasoningEnv, RolloutEnv
+        from agilerl.llm_envs import DatasetEnv, LLMEnv, RolloutEnv
 
         # DatasetEnv is the abstract LLMEnv's concrete teacher-forced subtype.
         assert issubclass(DatasetEnv, LLMEnv)
         # RolloutEnv is the token rollout env (an OpenEnv client), not an LLMEnv.
         assert not issubclass(RolloutEnv, LLMEnv)
-        # ReasoningEnv is a plain local env driven over the OpenEnv interface.
-        assert not issubclass(ReasoningEnv, LLMEnv)
         # The env contract no longer lives on agilerl.protocols.
         import agilerl.protocols as protocols
 
         assert not hasattr(protocols, "RolloutEnv")
         assert not hasattr(protocols, "LLMEnv")
-
-    def test_reasoning_env_default_is_single_turn(self):
-        pytest.importorskip("datasets", reason="LLM dependencies not installed")
-        from agilerl.llm_envs import ReasoningEnv
-
-        env = ReasoningEnv(
-            questions=["2+2"],
-            answers=["4"],
-            reward_fn=lambda completion, answer, question: float(answer in completion),
-            prompt_builder=lambda question: f"Q: {question}",
-        )
-        assert env.max_turns == 1
-        assert env.tools == []
-
-        prompt, info = env.reset(seed=0, row_index=0)
-        assert prompt == "Q: 2+2"
-        assert info == {}
-
-        _, reward, terminated, truncated, _ = env.step("the answer is 4")
-        assert reward == 1.0
-        assert terminated is True
-        assert truncated is False

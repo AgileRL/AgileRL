@@ -13,14 +13,15 @@ from typing import Any
 import pytest
 import torch
 
-from agilerl.llm_envs import ReasoningEnv, RolloutEnv, local_transport
+from agilerl.llm_envs import RolloutEnv, local_transport
+from agilerl.llm_envs.rollout_env import _PromptDatasetEnv
 
 _WIP = "pending tool-path wiring (engine / _align_sampling_logprobs)"
 
 
-def _reasoning_env() -> ReasoningEnv:
+def _reasoning_env() -> _PromptDatasetEnv:
     """A tiny dataset-backed reasoning env with a held-out split."""
-    return ReasoningEnv(
+    return _PromptDatasetEnv(
         questions=["train-q"],
         answers=["train-a"],
         reward_fn=lambda c, a, q: 0.0,
@@ -196,7 +197,7 @@ class _MiniTokenizer:
 
 def test_reset_forwards_row_index_to_served_env() -> None:
     """``reset`` passes ``row_index`` through to the served env, selecting that row."""
-    inner = ReasoningEnv(
+    inner = _PromptDatasetEnv(
         questions=["q0", "q1"],
         answers=["a0", "a1"],
         reward_fn=lambda c, a, q: 0.0,

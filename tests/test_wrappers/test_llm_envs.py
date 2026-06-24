@@ -15,10 +15,10 @@ from transformers.tokenization_utils_base import BatchEncoding
 from agilerl.llm_envs import (
     DatasetEnv,
     LLMEnv,
-    ReasoningEnv,
     RolloutEnv,
     apply_chat_template,
 )
+from agilerl.llm_envs.rollout_env import _PromptDatasetEnv
 from tests import TINY_LLM_FIXTURE_PATH
 
 
@@ -844,7 +844,7 @@ def test_rollout_prompt_is_templated_and_reward_scores_once():
     def prompt_builder(question):
         return f"Q: {question}\nA:"
 
-    env = ReasoningEnv(
+    env = _PromptDatasetEnv(
         max_turns=1,
         questions=questions,
         answers=answers,
@@ -871,7 +871,7 @@ def test_rollout_prompt_is_templated_and_reward_scores_once():
 
 def test_rollout_eval_mode_draws_from_held_out_split():
     """Under eval_mode the env serves the test split, restoring the train split after."""
-    env = ReasoningEnv(
+    env = _PromptDatasetEnv(
         max_turns=1,
         questions=["train-q"],
         answers=["train-a"],
@@ -880,8 +880,7 @@ def test_rollout_eval_mode_draws_from_held_out_split():
         test_questions=["eval-q"],
         test_answers=["eval-a"],
     )
-    with env.eval_mode():
-        eval_prompt, _ = env.reset(seed=0, row_index=0)
+    eval_prompt, _ = env.reset(seed=0, row_index=0, evaluation=True)
     assert eval_prompt == "eval-q"
 
     train_prompt, _ = env.reset(seed=1, row_index=0)
@@ -891,7 +890,7 @@ def test_rollout_eval_mode_draws_from_held_out_split():
 def test_rollout_standalone_cursor_walks_split_and_resets_on_switch():
     """With no ``row_index`` the env walks its active split via an internal cursor,
     resetting the cursor when the train/eval split changes."""
-    env = ReasoningEnv(
+    env = _PromptDatasetEnv(
         questions=["q0", "q1"],
         answers=["a0", "a1"],
         reward_fn=lambda c, a, q: 0.0,
@@ -906,8 +905,7 @@ def test_rollout_standalone_cursor_walks_split_and_resets_on_switch():
     assert env.reset()[0] == "q0"  # wrapped back to the start of the split
 
     # Switching to the eval split resets the per-split cursor to its start.
-    with env.eval_mode():
-        assert env.reset()[0] == "e0"
+    assert env.reset(evaluation=True)[0] == "e0"
 
     # Back on the train split the cursor restarts from the beginning.
     assert env.reset()[0] == "q0"

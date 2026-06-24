@@ -16,12 +16,7 @@ from datasets import load_dataset
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer
 
-from agilerl.llm_envs import (
-    ReasoningEnv,
-    RolloutEnv,
-    local_transport,
-    serve,
-)
+from agilerl.llm_envs import RolloutEnv
 from agilerl.training.train_llm import train_llm_rollout
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import create_llm_accelerator
@@ -132,40 +127,33 @@ def main(init_hp, mut_p):
     # owns the dataset cursor, keeping each GRPO group's dataset order
     # deterministic and consistent.
     def env_factory(evaluation_mode: bool = False):
-        train_questions, train_answers = (
-            list(train_dataset["question"]),
-            list(train_dataset["answer"]),
-        )
-        test_questions, test_answers = (
-            list(test_dataset["question"]),
-            list(test_dataset["answer"]),
-        )
-        raw_env = ReasoningEnv(
-            max_turns=1,
-            questions=train_questions,
-            answers=train_answers,
-            reward_fn=combined_rewards,
-            prompt_builder=prompt_builder,
-            test_questions=test_questions,
-            test_answers=test_answers,
-        )
-        raw_env.evaluation_mode = evaluation_mode
         rollout_kwargs = {
-            "tokenizer": tokenizer,
-            "max_turns": 1,
             "pad_id": getattr(tokenizer, "pad_token_id", None),
             "apply_chat_template": True,
             "max_model_len": init_hp["MAX_MODEL_LEN"],
+            # Per-request timeout comes from the run manifest (None = unbounded).
+            "timeout_s": init_hp.get("OPENENV_TIMEOUT_S"),
         }
-        # AGILERL_OPENENV_URL=<url> drives an env hosted on a *separate* OpenEnv
-        # server (e.g. scripts/local/serve_openenv_reasoning.py); AGILERL_OPENENV_HTTP=1
-        # hosts this env on its own server (one per rollout); else in-process.
+        # AGILERL_OPENENV_URL=<url> drives an env hosted on a *separate* OpenEnv server
+        # (e.g. scripts/local/serve_openenv_reasoning.py); otherwise the dataset is
+        # driven in-process over the OpenEnv interface (socket-free).
         external_url = os.environ.get("AGILERL_OPENENV_URL")
         if external_url:
-            return RolloutEnv(external_url, **rollout_kwargs)
-        if os.environ.get("AGILERL_OPENENV_HTTP"):
-            return RolloutEnv(serve(raw_env).base_url, **rollout_kwargs)
-        return RolloutEnv(None, transport=local_transport(raw_env), **rollout_kwargs)
+            env = RolloutEnv(external_url, tokenizer, max_turns=1, **rollout_kwargs)
+        else:
+            env = RolloutEnv.from_dataset(
+                questions=list(train_dataset["question"]),
+                answers=list(train_dataset["answer"]),
+                reward_fn=combined_rewards,
+                tokenizer=tokenizer,
+                prompt_builder=prompt_builder,
+                test_questions=list(test_dataset["question"]),
+                test_answers=list(test_dataset["answer"]),
+                max_turns=1,
+                **rollout_kwargs,
+            )
+        env.evaluation_mode = evaluation_mode
+        return env
 
     use_vllm = bool(init_hp.get("USE_VLLM", True))
     vllm_config = (

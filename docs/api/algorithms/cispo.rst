@@ -50,34 +50,30 @@ of the same function.
 
 .. code-block:: python
 
-  from agilerl.llm_envs import ReasoningEnv, RolloutEnv, local_transport
+  from agilerl.llm_envs import RolloutEnv, local_transport
   from agilerl.training.train_llm import train_llm_rollout
 
   def reward_fn(completion: str, answer: str, question: str) -> float:
       del question
       return float(answer.lower() in completion.lower())
 
-  # 1) Single-turn / reasoning datasets (ReasoningEnv driven by RolloutEnv, max_turns=1)
+  # 1) Single-turn / reasoning datasets (a prompt dataset driven by RolloutEnv, max_turns=1)
   def env_factory(evaluation_mode: bool = False):
-      raw_env = ReasoningEnv(
-          max_turns=1,
+      env = RolloutEnv.from_dataset(
           questions=["2+2?", "Capital of France?"],
           answers=["4", "Paris"],
           reward_fn=reward_fn,
+          tokenizer=tokenizer,
           prompt_builder=lambda question: f"Q: {question}\nA:",
           test_questions=["3+3?"],
           test_answers=["6"],
-      )
-      raw_env.evaluation_mode = evaluation_mode
-      return RolloutEnv(
-          None,
-          tokenizer=tokenizer,
           max_turns=1,
-          transport=local_transport(raw_env),
           pad_id=tokenizer.eos_token_id,
           apply_chat_template=True,
           max_model_len=1024,
       )
+      env.evaluation_mode = evaluation_mode
+      return env
 
   trained_pop = train_llm_rollout(
       pop=[agent],

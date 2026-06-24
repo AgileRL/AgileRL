@@ -18,7 +18,6 @@ from agilerl.llm_envs.openenv import (
 )
 from agilerl.llm_envs.rollout_env import (
     BatchRolloutEnv,
-    ReasoningEnv,
     RolloutEnv,
 )
 
@@ -30,7 +29,6 @@ __all__ = [
     "OpenEnvClient",
     "OpenEnvHTTPEnv",
     "OpenEnvServer",
-    "ReasoningEnv",
     "RolloutEnv",
     "TextAction",
     "TextObservation",

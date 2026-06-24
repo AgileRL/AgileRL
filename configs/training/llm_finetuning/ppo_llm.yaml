@@ -26,6 +26,8 @@ INIT_HP:
     TEMPERATURE: 0.9
     MAX_MODEL_LEN: 2048
     MAX_OUTPUT_TOKENS: 64
+    # Per-request timeout (seconds) for the OpenEnv env client; null = unbounded.
+    OPENENV_TIMEOUT_S: 30.0
     TOURN_SIZE: 2
     GAMMA: 0.99
     VF_COEF: 0.5

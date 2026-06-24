@@ -9,11 +9,7 @@ from transformers import AutoTokenizer
 from agilerl.algorithms import GRPO
 from agilerl.training.train_llm import train_llm_rollout
 from agilerl.utils.algo_utils import VLLMConfig
-from agilerl.llm_envs import (
-    ReasoningEnv,
-    RolloutEnv,
-    local_transport,
-)
+from agilerl.llm_envs import RolloutEnv
 
 MODEL_PATH = "Qwen/Qwen2.5-0.5B"
 DATASET = "Jiayi-Pan/Countdown-Tasks-3to4"
@@ -135,33 +131,21 @@ def main():
     # dataset cursor, giving each GRPO group a deterministic, group-consistent
     # dataset order.
     def env_factory(evaluation_mode: bool = False):
-        train_questions, train_answers = (
-            list(train_dataset["question"]),
-            list(train_dataset["answer"]),
-        )
-        test_questions, test_answers = (
-            list(test_dataset["question"]),
-            list(test_dataset["answer"]),
-        )
-        raw_env = ReasoningEnv(
-            max_turns=1,
-            questions=train_questions,
-            answers=train_answers,
+        env = RolloutEnv.from_dataset(
+            questions=list(train_dataset["question"]),
+            answers=list(train_dataset["answer"]),
             reward_fn=combined_rewards,
-            prompt_builder=prompt_builder,
-            test_questions=test_questions,
-            test_answers=test_answers,
-        )
-        raw_env.evaluation_mode = evaluation_mode
-        return RolloutEnv(
-            None,
             tokenizer=tokenizer,
+            prompt_builder=prompt_builder,
+            test_questions=list(test_dataset["question"]),
+            test_answers=list(test_dataset["answer"]),
             max_turns=1,
-            transport=local_transport(raw_env),
             pad_id=getattr(tokenizer, "pad_token_id", None),
             apply_chat_template=True,
             max_model_len=MAX_CONTEXT_LENGTH,
         )
+        env.evaluation_mode = evaluation_mode
+        return env
 
     # Define the LoRA configuration
     lora_config = LoraConfig(
