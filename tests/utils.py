@@ -8,9 +8,10 @@ import os
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import torch
 from typing_extensions import ParamSpec
@@ -137,9 +138,8 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
         try:
             returned.check_returncode()
         except subprocess.CalledProcessError as err:
-            raise RuntimeError(
-                f"Error in subprocess:\nstdout:\n{returned.stdout.decode()}\nstderr:\n{returned.stderr.decode()}"
-            ) from err
+            msg = f"Error in subprocess:\nstdout:\n{returned.stdout.decode()}\nstderr:\n{returned.stderr.decode()}"
+            raise RuntimeError(msg) from err
 
         return None
 
@@ -147,8 +147,7 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
 
 
 def get_physical_device_indices(devices: list[int]) -> list[int]:
-    """
-    Map logical CUDA device indices to physical device indices.
+    """Map logical CUDA device indices to physical device indices.
 
     When CUDA_VISIBLE_DEVICES is set, the logical device indices (0, 1, ...)
     may not match the physical GPU indices. This function performs the mapping.
@@ -158,12 +157,13 @@ def get_physical_device_indices(devices: list[int]) -> list[int]:
 
     Returns:
         List of corresponding physical device indices.
+
     """
     visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
     if visible_devices is None:
         return devices
     visible_indices = [int(x) for x in visible_devices.split(",")]
-    index_mapping = {i: physical for i, physical in enumerate(visible_indices)}
+    index_mapping = dict(enumerate(visible_indices))
     return [index_mapping[i] for i in devices if i in index_mapping]
 
 
@@ -224,8 +224,7 @@ def make_mock_vllm_instance(llm_spec: type[Any] | None = None) -> Any:
 
 
 def force_gpu_memory_release() -> None:
-    """
-    Aggressively release GPU memory using all available methods.
+    """Aggressively release GPU memory using all available methods.
 
     This combines multiple cleanup strategies used by vLLM and DeepSpeed:
     1. Unfreeze GC to allow collection of frozen objects
@@ -271,8 +270,7 @@ def wait_for_gpu_memory_to_clear(
     threshold_ratio: float | None = None,
     timeout_s: float = 60,
 ) -> None:
-    """
-    Wait for GPU memory to be cleared below a threshold.
+    """Wait for GPU memory to be cleared below a threshold.
 
     Uses NVML for accurate memory measurement instead of PyTorch's view,
     which can be inaccurate due to caching and delayed deallocation.
@@ -294,6 +292,7 @@ def wait_for_gpu_memory_to_clear(
     Example:
         >>> wait_for_gpu_memory_to_clear(threshold_ratio=0.4, timeout_s=30)
         >>> wait_for_gpu_memory_to_clear(threshold_bytes=5 * 2**30)  # 5 GiB
+
     """
     if not torch.cuda.is_available():
         return
@@ -363,10 +362,11 @@ def wait_for_gpu_memory_to_clear(
                     f"GPU{d}: {u:.2f}/{t:.2f} GiB ({u / t:.0%})"
                     for d, (u, t) in memory_status.items()
                 )
-                raise ValueError(
+                msg = (
                     f"GPU memory not cleared after {timeout_s}s. "
                     f"Status: {status_str}. Threshold: {threshold_str}"
                 )
+                raise ValueError(msg)
 
             time.sleep(2)
     finally:

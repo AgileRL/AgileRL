@@ -3,8 +3,8 @@ import math
 import numpy as np
 import pytest
 import torch
-import torch.nn as nn
 from gymnasium import spaces
+from torch import nn
 
 from agilerl.utils.torch_utils import (
     entropy_from_space,
@@ -145,9 +145,12 @@ class TestSampleFromSpace:
         logits = torch.randn(batch_size, 9)
         action = sample_from_space(action_space, logits=logits)
         assert action.shape == (batch_size, 3)
-        assert torch.all(action[:, 0] >= 0) and torch.all(action[:, 0] < 3)
-        assert torch.all(action[:, 1] >= 0) and torch.all(action[:, 1] < 2)
-        assert torch.all(action[:, 2] >= 0) and torch.all(action[:, 2] < 4)
+        assert torch.all(action[:, 0] >= 0)
+        assert torch.all(action[:, 0] < 3)
+        assert torch.all(action[:, 1] >= 0)
+        assert torch.all(action[:, 1] < 2)
+        assert torch.all(action[:, 2] >= 0)
+        assert torch.all(action[:, 2] < 4)
 
     @pytest.mark.parametrize("batch_size", [1, 4])
     def test_sample_from_space_multi_binary(self, batch_size):

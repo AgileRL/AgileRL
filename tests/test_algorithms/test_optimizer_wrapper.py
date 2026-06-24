@@ -162,7 +162,7 @@ class MockMultiAgentAlgorithm(MultiAgentRLAlgorithm):
 
 class TestOptimizerWrapper:
     @pytest.mark.parametrize(
-        "invalid_networks,error_match",
+        ("invalid_networks", "error_match"),
         [
             (None, "Expected a single / list of torch.nn.Module objects"),
             ({}, "Expected a single / list of torch.nn.Module objects"),
@@ -214,13 +214,13 @@ class TestOptimizerWrapper:
                 "_infer_lr_name",
                 return_value="lr",
             ),
+            pytest.raises(AssertionError, match="No networks found"),
         ):
-            with pytest.raises(AssertionError, match="No networks found"):
-                OptimizerWrapper(
-                    torch.optim.Adam,
-                    network,
-                    0.001,
-                )
+            OptimizerWrapper(
+                torch.optim.Adam,
+                network,
+                0.001,
+            )
 
     def test_init_single_network(self):
         """Test initializing with a single network like in DQN."""
@@ -473,7 +473,7 @@ class TestOptimizerWrapper:
         assert wrapper.optimizer.defaults["eps"] == 1e-8
 
     @pytest.mark.parametrize(
-        "invalid_access,expected_error",
+        ("invalid_access", "expected_error"),
         [
             (lambda w: w["agent_0"], TypeError),
             (lambda w: w.items(), TypeError),
@@ -1081,7 +1081,7 @@ class TestOptimizerWrapper:
         assert len(items) == 2
         keys = [k for k, _ in items]
         assert set(keys) == {"net_0", "net_1"}
-        for k, opt in items:
+        for _k, opt in items:
             assert isinstance(opt, torch.optim.Adam)
 
     def test_iteration_multiagent(self):

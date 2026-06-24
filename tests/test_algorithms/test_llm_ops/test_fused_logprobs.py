@@ -7,6 +7,7 @@ import torch
 
 from agilerl.algorithms.core.llm_ops.fused_logprobs import (
     _FUSED_LOGPROB_COMPILE_STATE,
+    FusedLinearLogProbsFunction,
     _fused_logprob_chunk,
     _fused_logprob_chunk_dispatch,
 )
@@ -31,7 +32,8 @@ def _args():
 
 def test_fused_logprob_chunk_applies_bias_and_temperature():
     """Exercise the optional lm_head bias and temperature!=1 branches and
-    confirm the result matches a plain log-softmax of the scaled, biased logits."""
+    confirm the result matches a plain log-softmax of the scaled, biased logits.
+    """
     torch.manual_seed(0)
     h = torch.randn(4, 8)
     w = torch.randn(16, 8)
@@ -67,7 +69,8 @@ class TestFusedLogprobChunkDispatch:
 
     def test_compiled_failure_latches_eager_fallback(self):
         def boom(*args, **kwargs):
-            raise RuntimeError("triton backend exploded")
+            msg = "triton backend exploded"
+            raise RuntimeError(msg)
 
         expected = _fused_logprob_chunk(*_args())
         with patch("torch.compile", side_effect=lambda fn, **kw: boom):
@@ -79,3 +82,23 @@ class TestFusedLogprobChunkDispatch:
             again = _fused_logprob_chunk_dispatch(torch.device("cuda"), *_args())
         mock_compile.assert_not_called()
         assert torch.allclose(again, expected)
+
+
+def test_fused_logprob_backward_skips_when_no_inputs_require_grad():
+    hidden = torch.randn(1, 4, 8)
+    weight = torch.randn(16, 8)
+    targets = torch.randint(0, 16, (1, 4))
+
+    class Ctx:
+        needs_hidden_grad = False
+        needs_weight_grad = False
+        needs_bias_grad = False
+        chunk_rows = 2
+        temperature = 1.0
+        cast_to_fp32 = True
+        saved_tensors = (hidden, weight, None, targets)
+
+    grad_output = torch.ones(1, 4)
+    grads = FusedLinearLogProbsFunction.backward(Ctx(), grad_output)
+    assert grads[0] is None
+    assert grads[1] is None

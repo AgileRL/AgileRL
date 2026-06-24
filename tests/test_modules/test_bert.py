@@ -143,7 +143,7 @@ class TestEvolvableBERTRemoveDecoderLayer:
 
 class TestEvolvableBERTAddNode:
     @pytest.mark.parametrize(
-        "network, hidden_layer, numb_new_nodes",
+        ("network", "hidden_layer", "numb_new_nodes"),
         [
             (None, 0, None),
             ("encoder", 0, None),
@@ -177,7 +177,7 @@ class TestEvolvableBERTAddNode:
 
 class TestEvolvableBERTRemoveNode:
     @pytest.mark.parametrize(
-        "network, hidden_layer, numb_new_nodes",
+        ("network", "hidden_layer", "numb_new_nodes"),
         [
             (None, 0, None),
             ("encoder", 0, None),
@@ -235,6 +235,61 @@ class TestEvolvableBERTEncode:
         )
         assert encoder_output.shape == (1, 4, 512)
 
+    def test_encode_convert_to_nested(self):
+        """Covers encode convert_to_nested branch."""
+        from unittest.mock import MagicMock, patch
+
+        src = torch.LongTensor([[1, 2, 4, 5]])
+        model = EvolvableBERT([4], [4], norm_first=True, batch_first=True)
+        model.eval()
+        kp_mask = torch.zeros(1, 4)
+        layer_key = model.encoder_keys[0]
+        nested = MagicMock()
+        nested.to_padded_tensor.return_value = torch.zeros(1, 4, 512)
+
+        with (
+            patch.object(
+                model,
+                "check_encoder_sparsity_fast_path",
+                return_value=(torch.zeros(1, 4, 512), True, None),
+            ),
+            patch.object(
+                model.encoder[layer_key],
+                "forward",
+                return_value=nested,
+            ),
+        ):
+            encoder_output, _ = model.encode(
+                src,
+                src_key_padding_mask=kp_mask,
+            )
+        nested.to_padded_tensor.assert_called_once_with(0.0)
+        assert encoder_output.shape == (1, 4, 512)
+
+    def test_encode_encoder_norm_branch(self):
+        """Covers encode encoder_norm_0 branch."""
+        from unittest.mock import patch
+
+        src = torch.LongTensor([[1, 2, 4, 5]])
+        model = EvolvableBERT([4], [4], norm_first=True, batch_first=True)
+        model.eval()
+        kp_mask = torch.zeros(1, 4)
+        norm_layer = model.encoder[model.encoder_keys[-1]]
+        model.encoder["encoder_norm_0"] = norm_layer
+        model.encoder_keys = [*model.encoder_keys, "encoder_norm_0"]
+
+        with patch.object(
+            model,
+            "check_encoder_sparsity_fast_path",
+            return_value=(torch.zeros(1, 4, 512), False, kp_mask),
+        ):
+            encoder_output, all_hidden_states = model.encode(
+                src,
+                src_key_padding_mask=kp_mask,
+            )
+        assert encoder_output.shape == (1, 4, 512)
+        assert len(all_hidden_states) > 0
+
 
 class TestEvolvableBERTCheckEncoderSparsityFastPath:
     def test_check_sparsity_fast_path(self):
@@ -278,7 +333,15 @@ class TestEvolvableBERTCheckEncoderSparsityFastPath:
 
 class TestCanonicalMask:
     @pytest.mark.parametrize(
-        "mask, mask_name, other_type, other_name, target_type, check_other, error",
+        (
+            "mask",
+            "mask_name",
+            "other_type",
+            "other_name",
+            "target_type",
+            "check_other",
+            "error",
+        ),
         [
             (torch.zeros(4, 1), "mask", "na", "other", "int", True, None),
             (torch.zeros(4, 1).bool(), "mask", "na", "other", torch.float, True, None),
@@ -363,8 +426,21 @@ class TestEvolvableBERTDecode:
         decoder_out, _ = model.decode(tgt, memory)
         assert decoder_out.shape == (1, 4, 512)
 
+    def test_decode_with_decoder_norm_branch(self):
+        """Covers decode path when decoder_norm_0 is in decoder_keys."""
+        src = torch.LongTensor([[1, 2, 4, 5]])
+        tgt = torch.LongTensor([[1, 2, 4, 5]])
+        model = EvolvableBERT([4, 4], [4, 4], encoder_norm=True, decoder_norm=True)
+        model.eval()
+        norm_layer = model.decoder[model.decoder_keys[-1]]
+        model.decoder["decoder_norm_0"] = norm_layer
+        model.decoder_keys = [*model.decoder_keys, "decoder_norm_0"]
+        memory = model.encode(src)[0]
+        decoder_out, all_hidden_states = model.decode(tgt, memory)
+        assert decoder_out.shape == (1, 4, 512)
+        assert len(all_hidden_states) > 0
 
-#### TESTING NONE OR DTYPE FUNCTION ####
+
 class TestNoneOrDtype:
     def test_non_or_dtype(self):
         func_input = None

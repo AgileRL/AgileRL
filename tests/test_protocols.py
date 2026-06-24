@@ -46,8 +46,8 @@ from agilerl.protocols import (
     OptimizerConfig,
     OptimizerLikeClass,
     PeftModelProtocol,
-    PreTrainedModelProtocol,
     PretrainedConfigProtocol,
+    PreTrainedModelProtocol,
 )
 from tests.helper_functions import (
     generate_dict_or_tuple_space,
@@ -73,7 +73,7 @@ class TestEvolvableAlgorithmProtocol:
     """Test that classes implement the EvolvableAlgorithm protocol."""
 
     @pytest.mark.parametrize(
-        "algorithm_cls, algo_action_space",
+        ("algorithm_cls", "algo_action_space"),
         [
             (CQN, generate_discrete_space(2)),
             (DQN, generate_discrete_space(2)),
@@ -122,7 +122,7 @@ class TestEvolvableAlgorithmProtocol:
         assert isinstance(instance, EvolvableAlgorithmProtocol)
 
     @pytest.mark.parametrize(
-        "algo_cls,obs,act",
+        ("algo_cls", "obs", "act"),
         [
             (
                 DQN,
@@ -149,7 +149,7 @@ class TestEvolvableAlgorithmProtocol:
         EvolvableAlgorithmProtocol.mutation_hook(inst)
 
     @pytest.mark.parametrize(
-        "algo_cls,obs,act",
+        ("algo_cls", "obs", "act"),
         [
             (
                 DQN,
@@ -395,6 +395,7 @@ class TestPreTrainedModelProtocol:
         )
         PeftModelProtocol.eval(peft_model)
         PeftModelProtocol.train(peft_model, True)
+        PeftModelProtocol.forward(peft_model, torch.randint(0, 100, (1, 4)))
         PeftModelProtocol.parameters(peft_model)
         _ = PeftModelProtocol.state_dict(peft_model)
         PeftModelProtocol.load_state_dict(
@@ -460,6 +461,8 @@ class TestOptimizerConfig:
     def test_optimizer_config_and_registry_protocols_executed(self):
         from agilerl.algorithms.core.registry import (
             MutationRegistry,
+        )
+        from agilerl.algorithms.core.registry import (
             OptimizerConfig as RegistryOptimizerConfig,
         )
 
@@ -553,11 +556,7 @@ class TestMutationType:
 
 def test_protocol_type_aliases_importable():
     from agilerl.protocols import (
-        DeviceType,
-        EvolvableAttributeDict,
-        EvolvableNetworkDict,
         NumpyObsType,
-        ObservationType,
         TorchObsType,
     )
 
@@ -569,7 +568,8 @@ class TestMultiTurnEnvProtocol:
     """Cover the ``pass`` bodies of :class:`agilerl.protocols.MultiTurnEnv`
     protocol methods. A subclass that doesn't override them inherits the
     base implementation (the bare ``pass``), so invoking the inherited
-    methods runs those statements and registers coverage."""
+    methods runs those statements and registers coverage.
+    """
 
     def test_protocol_default_method_bodies_execute(self):
         from agilerl.protocols import MultiTurnEnv

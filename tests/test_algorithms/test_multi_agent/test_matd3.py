@@ -18,13 +18,17 @@ from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.utils.algo_utils import concatenate_spaces
 from agilerl.utils.evolvable_networks import get_default_encoder_config
-from tests.pz_vector_test_utils import make_sync_multi_agent_vec_env
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
     assert_not_equal_state_dict,
     assert_state_dicts_equal,
     skip_torch_compile_on_windows_cpu,
 )
+from tests.helpers.algorithm_coverage import (
+    assert_swap_channels_called,
+    patch_obs_channels_to_first,
+)
+from tests.pz_vector_test_utils import make_sync_multi_agent_vec_env
 from tests.test_algorithms.test_multi_agent.test_maddpg import DummyMultiEnv
 
 
@@ -133,7 +137,7 @@ def get_network_id(agent, agent_id):
     return agent.get_group_id(agent_id) if agent.has_grouped_agents() else agent_id
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def mlp_actor(observation_spaces, action_spaces, request):
     observation_spaces = request.getfixturevalue(observation_spaces)
     action_spaces = request.getfixturevalue(action_spaces)
@@ -145,7 +149,7 @@ def mlp_actor(observation_spaces, action_spaces, request):
     )
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def mlp_critic(action_spaces, observation_spaces, request):
     observation_spaces = request.getfixturevalue(observation_spaces)
     action_spaces = request.getfixturevalue(action_spaces)
@@ -156,17 +160,17 @@ def mlp_critic(action_spaces, observation_spaces, request):
     )
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def cnn_actor():
     return MultiAgentCNNActor()
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def cnn_critic():
     return MultiAgentCNNCritic()
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def accelerated_experiences(
     batch_size,
     observation_spaces,
@@ -215,7 +219,7 @@ def accelerated_experiences(
     )
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def experiences(
     batch_size,
     observation_spaces,
@@ -681,10 +685,81 @@ class TestMATD3Init:
         assert isinstance(matd3.criterion, nn.MSELoss)
 
     @pytest.mark.gpu
+    @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
+    @pytest.mark.parametrize("action_spaces", ["ma_discrete_space"])
+    def test_with_list_actor_critic_networks(
+        self,
+        mlp_actor,
+        mlp_critic,
+        observation_spaces,
+        action_spaces,
+        device,
+        request,
+    ):
+        observation_spaces = request.getfixturevalue(observation_spaces)
+        action_spaces = request.getfixturevalue(action_spaces)
+        agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+        network_ids = list(get_group_index_map(agent_ids).keys())
+        evo_actors = [
+            MakeEvolvable(
+                network=mlp_actor,
+                input_tensor=torch.randn(1, observation_spaces[0].shape[0]),
+                device=device,
+            )
+            for _ in network_ids
+        ]
+        evo_critics = [
+            [
+                MakeEvolvable(
+                    network=mlp_critic,
+                    input_tensor=torch.randn(
+                        1,
+                        observation_spaces[0].shape[0] + action_spaces[0].n,
+                    ),
+                    device=device,
+                )
+                for _ in network_ids
+            ]
+            for _ in range(2)
+        ]
+        matd3 = MATD3(
+            observation_spaces=observation_spaces,
+            action_spaces=action_spaces,
+            agent_ids=agent_ids,
+            actor_networks=evo_actors,
+            critic_networks=evo_critics,
+            device=device,
+        )
+        assert set(matd3.actors.keys()) == set(network_ids)
+        assert set(matd3.critics_1.keys()) == set(network_ids)
+        assert set(matd3.critics_2.keys()) == set(network_ids)
+        matd3.clean_up()
+
+    def test_with_valid_list_actors_invalid_critic_1_raises_type_error(
+        self,
+        ma_vector_space,
+        ma_discrete_space,
+    ):
+        actors = [EvolvableMLP(6, 2, [32]) for _ in range(2)]
+        critics = [
+            [nn.Linear(8, 1) for _ in range(2)],
+            [nn.Linear(8, 1) for _ in range(2)],
+        ]
+        with pytest.raises(TypeError, match="All critic networks must be instances"):
+            MATD3(
+                observation_spaces=ma_vector_space,
+                action_spaces=ma_discrete_space,
+                agent_ids=["agent_0", "agent_1", "other_agent_0"],
+                actor_networks=actors,
+                critic_networks=critics,
+                torch_compiler=None,
+            )
+
+    @pytest.mark.gpu
     @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("compile_mode", [None, "default"])
     @pytest.mark.parametrize(
-        "observation_spaces, encoder_cls",
+        ("observation_spaces", "encoder_cls"),
         [
             ("ma_vector_space", EvolvableMLP),
             ("ma_image_space", EvolvableCNN),
@@ -947,7 +1022,7 @@ class TestMATD3Init:
         assert set(loss.keys()) == set(agent_ids)
 
     @pytest.mark.parametrize(
-        "actor_networks,critic_networks,expected_error,error_match",
+        ("actor_networks", "critic_networks", "expected_error", "error_match"),
         [
             (
                 [],
@@ -1138,6 +1213,34 @@ class TestMATD3Init:
                 device=device,
                 torch_compiler=mode,
             )
+
+
+class TestMATD3ActionNoise:
+    def test_gaussian_action_noise(self, ma_vector_space, ma_discrete_space):
+        matd3 = MATD3(
+            observation_spaces=ma_vector_space,
+            action_spaces=ma_discrete_space,
+            agent_ids=["agent_0", "agent_1", "other_agent_0"],
+            O_U_noise=False,
+            device="cpu",
+        )
+        agent_id = matd3.agent_ids[0]
+        noise = matd3.action_noise(agent_id)
+        assert noise.shape == matd3.sample_gaussian[agent_id].shape
+        matd3.clean_up()
+
+    def test_reset_action_noise(self, ma_vector_space, ma_discrete_space):
+        matd3 = MATD3(
+            observation_spaces=ma_vector_space,
+            action_spaces=ma_discrete_space,
+            agent_ids=["agent_0", "agent_1", "other_agent_0"],
+            device="cpu",
+        )
+        agent_id = matd3.agent_ids[0]
+        matd3.current_noise[agent_id].fill_(1.0)
+        matd3.reset_action_noise([0])
+        assert torch.all(matd3.current_noise[agent_id][0, :] == 0)
+        matd3.clean_up()
 
 
 class TestMATD3GetAction:
@@ -1582,9 +1685,13 @@ class TestMATD3GetAction:
             agent_ids=agent_ids,
             device=device,
         )
-        with pytest.raises(AssertionError):
+
+        def _get_action_in_eval_mode():
             matd3.set_training_mode(training)
-            _, raw_action = matd3.get_action(state)
+            _, _raw_action = matd3.get_action(state)
+
+        with pytest.raises(AssertionError):
+            _get_action_in_eval_mode()
 
     @pytest.mark.gpu
     @pytest.mark.parametrize("training", [False, True])
@@ -2029,6 +2136,26 @@ class TestMATD3Test:
         env.close()
         matd3.clean_up()
 
+    def test_with_swap_channels_path(
+        self, ma_image_space, ma_discrete_space, monkeypatch
+    ):
+        env = DummyMultiEnv(ma_image_space[0], ma_discrete_space)
+        spy = patch_obs_channels_to_first(monkeypatch, "agilerl.algorithms.matd3")
+        matd3 = MATD3(
+            observation_spaces=ma_image_space,
+            action_spaces=ma_discrete_space,
+            agent_ids=["agent_0", "agent_1", "other_agent_0"],
+            device="cpu",
+            torch_compiler=None,
+        )
+        mean_score = matd3.test(
+            env, swap_channels=True, max_steps=1, loop=1, sum_scores=True
+        )
+        assert isinstance(mean_score, float)
+        assert_swap_channels_called(spy)
+        env.close()
+        matd3.clean_up()
+
 
 class TestMATD3Clone:
     @pytest.mark.parametrize("observation_spaces", ["ma_vector_space"])
@@ -2062,7 +2189,7 @@ class TestMATD3Clone:
         policy_freq = 2
         device = "cpu"
         accelerator = Accelerator(device_placement=False) if accelerator_flag else None
-        # MATD3 default net config builds 18 (3-agent × 6-network) MLPs with
+        # MATD3 default net config builds 18 (3-agent x 6-network) MLPs with
         # hidden_size=[64]; with ``torch_compiler='default'`` each of those is
         # individually compiled which dominates the test runtime. A tiny config
         # shrinks the compile graph without affecting the cloning logic under test.

@@ -10,8 +10,8 @@ from torch import nn, optim
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
     MutationRegistry,
-    NetworkGroup,
     NetworkConfig,
+    NetworkGroup,
     OptimizerConfig,
     RLParameter,
     make_network_group,
@@ -563,6 +563,38 @@ class TestNetworkGroup:
         assert group.eval_network == "actor"
         assert group.shared_networks == ["target_actor"]
         assert group.policy is True
+
+    def test_network_group_post_init_shared_list_type_check(self):
+        from torch import nn
+
+        class DummyAlgo:
+            def __init__(self) -> None:
+                self.actor = nn.Linear(4, 2)
+                self.target_actor = nn.Linear(4, 2)
+                self.target_critic = nn.Linear(4, 2)
+                self.group = NetworkGroup(
+                    eval_network=self.actor,
+                    shared_networks=[self.target_actor, self.target_critic],
+                    policy=True,
+                )
+
+        algo = DummyAlgo()
+        assert algo.group.shared_networks == ["target_actor", "target_critic"]
+
+    def test_network_group_post_init_rejects_heterogeneous_shared_list(self):
+        class DummyAlgo:
+            def __init__(self) -> None:
+                self.actor = nn.Linear(4, 2)
+                self.target_actor = nn.Linear(4, 2)
+                self.other_module = nn.Conv2d(1, 1, 1)
+
+        algo = DummyAlgo()
+        with pytest.raises(AssertionError, match="Expected a list of"):
+            NetworkGroup(
+                eval_network=algo.actor,
+                shared_networks=[algo.target_actor, algo.other_module],
+                policy=True,
+            )
 
     def test_network_group_hash_and_eq_non_matching_type(self):
         group = object.__new__(NetworkGroup)

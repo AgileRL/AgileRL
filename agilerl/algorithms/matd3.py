@@ -297,16 +297,7 @@ class MATD3(MultiAgentRLAlgorithm):
                 raise TypeError(
                     msg,
                 )
-            if not all(
-                isinstance(net, EvolvableModule) for net in critic_networks[0].values()
-            ):
-                msg = "All critic networks must be instances of EvolvableModule"
-                raise TypeError(
-                    msg,
-                )
-            if not all(
-                isinstance(net, EvolvableModule) for net in critic_networks[1].values()
-            ):
+            if not all(isinstance(net, EvolvableModule) for net in critics_list):
                 msg = "All critic networks must be instances of EvolvableModule"
                 raise TypeError(
                     msg,

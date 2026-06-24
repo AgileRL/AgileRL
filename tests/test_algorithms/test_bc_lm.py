@@ -181,7 +181,7 @@ def bc_lm_none_max_len(dataset_none_max_len, net_config):
 
 class TestBC_LMInit:
     def test_initialization(self, dataset, net_config):
-        """Test BC_LM initialization"""
+        """Test BC_LM initialization."""
         bc_lm = BC_LM(dataset, net_config, device="cpu", transition_weight=0.1)
 
         assert bc_lm.dataset == dataset
@@ -194,7 +194,7 @@ class TestBC_LMInit:
 
 class TestBC_LMForward:
     def test_forward_with_tokens_only(self, bc_lm):
-        """Test forward pass with only tokens"""
+        """Test forward pass with only tokens."""
         tokens = torch.randint(0, 9, (2, 5))
         attn_mask = torch.ones(2, 5)
 
@@ -205,7 +205,7 @@ class TestBC_LMForward:
 
     @pytest.mark.skip(reason="Position embedding issues with prefix embeddings")
     def test_forward_with_prefix_embs(self, bc_lm):
-        """Test forward pass with prefix embeddings"""
+        """Test forward pass with prefix embeddings."""
         tokens = torch.randint(0, 9, (2, 5))
         attn_mask = torch.ones(2, 5)
         prefix_embs = torch.randn(2, 3, 64)  # batch, prefix_len, hidden_dim
@@ -223,7 +223,7 @@ class TestBC_LMForward:
 
     @pytest.mark.skip(reason="Position embedding issues with prefix embeddings")
     def test_forward_with_position_ids(self, bc_lm):
-        """Test forward pass with position IDs"""
+        """Test forward pass with position IDs."""
         tokens = torch.randint(0, 9, (2, 5))
         attn_mask = torch.ones(2, 5)
         prefix_embs = torch.randn(2, 3, 64)
@@ -241,7 +241,7 @@ class TestBC_LMForward:
 
     @pytest.mark.skip(reason="Position embedding issues with prefix embeddings")
     def test_forward_remove_prefix_position_embs(self, bc_lm):
-        """Test forward pass with prefix position embedding removal"""
+        """Test forward pass with prefix position embedding removal."""
         tokens = torch.randint(0, 9, (2, 5))
         attn_mask = torch.ones(2, 5)
         prefix_embs = torch.randn(2, 3, 64)
@@ -266,7 +266,9 @@ class TestBC_LMForward:
         prefix_embs = torch.randn(2, 3, 64)
         prefix_attn_mask = torch.ones(2, 3, dtype=torch.float)
         # Trigger prefix-position handling path with long position ids.
-        try:
+        with pytest.raises(
+            (RuntimeError, TypeError, AssertionError, ValueError)
+        ) as exc_info:
             bc_lm(
                 tokens,
                 attn_mask,
@@ -274,15 +276,14 @@ class TestBC_LMForward:
                 prefix_attn_mask,
                 remove_prefix_position_embs=True,
             )
-        except Exception as e:
-            # Accept any exception due to model internals, but ensure code is executed
-            assert "position" in str(e) or isinstance(
-                e,
-                (RuntimeError, TypeError, AssertionError),
-            )
+        # Accept any exception due to model internals, but ensure code is executed
+        assert "position" in str(exc_info.value) or isinstance(
+            exc_info.value,
+            (RuntimeError, TypeError, AssertionError),
+        )
 
     def test_bc_lm_empty_batch(self, bc_lm):
-        """Test BC_LM with empty batch"""
+        """Test BC_LM with empty batch."""
         tokens = torch.empty(0, 5, dtype=torch.long)
         attn_mask = torch.empty(0, 5)
 
@@ -293,7 +294,7 @@ class TestBC_LMForward:
         assert isinstance(past_key_values, tuple)
 
     def test_bc_lm_large_sequence(self, bc_lm):
-        """Test BC_LM with sequence longer than block_size"""
+        """Test BC_LM with sequence longer than block_size."""
         tokens = torch.randint(0, 9, (2, 15))  # Longer than block_size=10
         attn_mask = torch.ones(2, 15)
 
@@ -302,7 +303,7 @@ class TestBC_LMForward:
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     def test_cuda_device(self, dataset, net_config):
-        """Test BC_LM with CUDA device"""
+        """Test BC_LM with CUDA device."""
         bc_lm = BC_LM(dataset, net_config, device="cuda", transition_weight=0.1)
 
         tokens = torch.randint(0, 9, (2, 5)).cuda()
@@ -314,7 +315,7 @@ class TestBC_LMForward:
         assert isinstance(past_key_values, tuple)
 
     def test_device_consistency(self, bc_lm):
-        """Test device consistency across components"""
+        """Test device consistency across components."""
         tokens = torch.randint(0, 9, (2, 5))
         attn_mask = torch.ones(2, 5)
 
@@ -322,14 +323,14 @@ class TestBC_LMForward:
         tokens = tokens.to(bc_lm.device)
         attn_mask = attn_mask.to(bc_lm.device)
 
-        logits, past_key_values = bc_lm(tokens, attn_mask)
+        logits, _past_key_values = bc_lm(tokens, attn_mask)
 
         assert logits.device == tokens.device
         # The device should be a torch.device object, not a string
         assert logits.device == torch.device(bc_lm.device)
 
     def test_memory_cleanup_after_forward(self, bc_lm):
-        """Test memory cleanup after forward pass"""
+        """Test memory cleanup after forward pass."""
         tokens = torch.randint(0, 9, (2, 5))
         attn_mask = torch.ones(2, 5)
 
@@ -342,7 +343,7 @@ class TestBC_LMForward:
         assert True
 
     def test_large_batch_handling(self, bc_lm):
-        """Test handling of large batches"""
+        """Test handling of large batches."""
         tokens = torch.randint(0, 9, (16, 8))  # Larger batch
         attn_mask = torch.ones(16, 8)
 
@@ -395,7 +396,7 @@ class TestBC_LMGetWeights:
         assert torch.all(weights[0, 1:] == 0.1)
 
     def test_get_weights_empty_action_idxs(self, bc_lm):
-        """Test get_weights method with empty action indices"""
+        """Test get_weights method with empty action indices."""
         tokens = torch.randint(0, 9, (2, 5))
         action_idxs = torch.empty(2, 0)
 
@@ -429,7 +430,7 @@ class TestBC_LMGetWeights:
 
 class TestBC_LMAwacLoss:
     def test_awac_loss(self, bc_lm):
-        """Test AWAC loss calculation"""
+        """Test AWAC loss calculation."""
         tokens = torch.randint(0, 9, (2, 5))
         attn_mask = torch.ones(2, 5)
         logits = torch.randn(2, 5, 9, requires_grad=True)  # Ensure requires_grad=True
@@ -444,7 +445,7 @@ class TestBC_LMAwacLoss:
 
 class TestBC_LMGetLoss:
     def test_get_loss(self, bc_lm):
-        """Test get_loss method"""
+        """Test get_loss method."""
         items = {
             "tokens": torch.randint(0, 9, (2, 5)),
             "attn_mask": torch.ones(2, 5),
@@ -460,7 +461,7 @@ class TestBC_LMGetLoss:
         assert len(logs["loss"]) == 2
 
     def test_full_training_loop(self, bc_lm):
-        """Test a complete training loop"""
+        """Test a complete training loop."""
         # Prepare training data
         items = {
             "tokens": torch.randint(0, 9, (4, 6)),
@@ -481,7 +482,7 @@ class TestBC_LMGetLoss:
 
 class TestBC_LMPrepareInputs:
     def test_prepare_inputs_dict(self, bc_lm):
-        """Test prepare_inputs with dictionary input"""
+        """Test prepare_inputs with dictionary input."""
         items = {"test": "data"}
 
         result = bc_lm.prepare_inputs(items)
@@ -489,7 +490,7 @@ class TestBC_LMPrepareInputs:
         assert result == items
 
     def test_prepare_inputs_list(self, bc_lm):
-        """Test prepare_inputs with list input"""
+        """Test prepare_inputs with list input."""
         items = [MagicMock(), MagicMock()]
 
         with patch.object(bc_lm.dataset, "collate") as mock_collate:
@@ -502,7 +503,7 @@ class TestBC_LMPrepareInputs:
 
 class TestBC_LMScore:
     def test_score(self, bc_lm):
-        """Test score method"""
+        """Test score method."""
         tokens = torch.randint(0, 9, (2, 5))
         attn_mask = torch.ones(2, 5)
 
@@ -515,7 +516,7 @@ class TestBC_LMScore:
 
 class TestBC_LMGetScores:
     def test_get_scores(self, bc_lm):
-        """Test get_scores method"""
+        """Test get_scores method."""
         items = {
             "tokens": torch.randint(0, 9, (2, 5)),
             "attn_mask": torch.ones(2, 5),
@@ -529,7 +530,7 @@ class TestBC_LMGetScores:
 
 class TestBC_LMInitialScore:
     def test_initial_score(self, bc_lm):
-        """Test initial_score method"""
+        """Test initial_score method."""
         items = {
             "tokens": torch.randint(0, 9, (2, 5)),
             "attn_mask": torch.ones(2, 5),
@@ -554,7 +555,7 @@ class TestBC_LMInitialScore:
 
 class TestBC_LMNextScore:
     def test_next_score(self, bc_lm):
-        """Test next_score method"""
+        """Test next_score method."""
         tokens = torch.randint(0, 9, (2,))
         # Create proper past_key_values structure for 2 layers
         obs = tuple(
@@ -586,7 +587,7 @@ class TestBC_LMNextScore:
 
 class TestBC_PolicyInit:
     def test_initialization(self, bc_lm):
-        """Test BC_Policy initialization"""
+        """Test BC_Policy initialization."""
         policy = BC_Policy(bc_lm, "sample", temp=0.5)
 
         assert policy.bc_lm == bc_lm
@@ -594,7 +595,7 @@ class TestBC_PolicyInit:
         assert policy.generation_kwargs == {"temp": 0.5}
 
     def test_initialization_invalid_kind(self, bc_lm):
-        """Test BC_Policy initialization with invalid kind"""
+        """Test BC_Policy initialization with invalid kind."""
         with pytest.raises(AssertionError):
             BC_Policy(bc_lm, "invalid")
 
@@ -606,7 +607,7 @@ def bc_policy(bc_lm):
 
 class TestBC_PolicySampleRaw:
     def test_sample_raw(self, bc_policy):
-        """Test sample_raw method"""
+        """Test sample_raw method."""
         tokens = torch.randint(0, 9, (2, 5))
         attn_mask = torch.ones(2, 5)
 
@@ -627,7 +628,7 @@ class TestBC_PolicySampleRaw:
 
     @pytest.mark.skip(reason="Position embedding issues with prefix embeddings")
     def test_sample_raw_with_prefix(self, bc_policy):
-        """Test sample_raw method with prefix embeddings"""
+        """Test sample_raw method with prefix embeddings."""
         tokens = torch.randint(0, 9, (2, 5))
         attn_mask = torch.ones(2, 5)
         prefix_embs = torch.randn(2, 3, 64)
@@ -682,7 +683,7 @@ class TestBC_PolicySampleRaw:
         )
 
     def test_sample_raw_none_max_len(self, bc_lm_none_max_len):
-        """Test sample_raw when dataset.max_len is None"""
+        """Test sample_raw when dataset.max_len is None."""
         policy = BC_Policy(bc_lm_none_max_len, "sample")
         tokens = torch.randint(0, 9, (1, 1), dtype=torch.long)
         attn_mask = torch.ones(1, 1, dtype=torch.float)
@@ -702,7 +703,7 @@ class TestBC_PolicySampleRaw:
 
 class TestBC_PolicyBeamRaw:
     def test_beam_raw(self, bc_policy):
-        """Test beam_raw method"""
+        """Test beam_raw method."""
         tokens = torch.randint(0, 9, (2, 5))
         attn_mask = torch.ones(2, 5)
 
@@ -723,7 +724,7 @@ class TestBC_PolicyBeamRaw:
 
     @pytest.mark.skip(reason="Position embedding issues with prefix embeddings")
     def test_beam_raw_with_prefix(self, bc_policy):
-        """Test beam_raw method with prefix embeddings"""
+        """Test beam_raw method with prefix embeddings."""
         tokens = torch.randint(0, 9, (2, 5))
         attn_mask = torch.ones(2, 5)
         prefix_embs = torch.randn(2, 3, 64)
@@ -772,7 +773,7 @@ class TestBC_PolicyBeamRaw:
         bc_policy.beam_raw(tokens, attn_mask, term, beam_width=1, max_generation_len=5)
 
     def test_beam_raw_termination_mask_update_guaranteed(self, bc_policy):
-        """Guaranteed test to hit termination_mask update in beam search"""
+        """Guaranteed test to hit termination_mask update in beam search."""
         tokens = torch.randint(0, 9, (1, 1), dtype=torch.long)
         attn_mask = torch.ones(1, 1, dtype=torch.float)
 
@@ -785,7 +786,7 @@ class TestBC_PolicyBeamRaw:
         bc_policy.beam_raw(tokens, attn_mask, term, beam_width=1, max_generation_len=3)
 
     def test_beam_raw_none_max_len(self, bc_lm_none_max_len):
-        """Test beam_raw when dataset.max_len is None"""
+        """Test beam_raw when dataset.max_len is None."""
         policy = BC_Policy(bc_lm_none_max_len, "beam")
         tokens = torch.randint(0, 9, (1, 1), dtype=torch.long)
         attn_mask = torch.ones(1, 1, dtype=torch.float)
@@ -799,7 +800,7 @@ class TestBC_PolicyBeamRaw:
 
 class TestBC_PolicyGenerate:
     def test_generate_sample(self, bc_policy):
-        """Test generate method with sample kind"""
+        """Test generate method with sample kind."""
         items = {
             "tokens": torch.randint(0, 9, (2, 5)),
             "attn_mask": torch.ones(2, 5),
@@ -818,7 +819,7 @@ class TestBC_PolicyGenerate:
         assert isinstance(probs, torch.Tensor)
 
     def test_generate_beam(self, bc_lm):
-        """Test generate method with beam kind"""
+        """Test generate method with beam kind."""
         policy = BC_Policy(bc_lm, "beam", beam_width=2)
         items = {
             "tokens": torch.randint(0, 9, (2, 5)),
@@ -834,7 +835,7 @@ class TestBC_PolicyGenerate:
         assert isinstance(scores, torch.Tensor)
 
     def test_generate_invalid_kind(self, bc_lm):
-        """Test generate method with invalid kind"""
+        """Test generate method with invalid kind."""
         policy = BC_Policy(bc_lm, "sample")
         items = {
             "tokens": torch.randint(0, 9, (2, 5)),
@@ -845,7 +846,7 @@ class TestBC_PolicyGenerate:
             return "end" in text
 
         # This should not raise an error since we're using "sample"
-        generations, probs = policy.generate(items, termination_condition)
+        generations, _probs = policy.generate(items, termination_condition)
         assert isinstance(generations, list)
 
     def test_generate_invalid_kind_raises(self, bc_lm):
@@ -914,7 +915,7 @@ class TestBC_PolicyGenerate:
         assert probs is not None
 
     def test_generate_sample_return_guaranteed(self, bc_policy):
-        """Guaranteed test to hit return statement in generate for sample generation"""
+        """Guaranteed test to hit return statement in generate for sample generation."""
         tokens = torch.randint(0, 9, (1, 1), dtype=torch.long)
         attn_mask = torch.ones(1, 1, dtype=torch.float)
 
@@ -930,7 +931,7 @@ class TestBC_PolicyGenerate:
         assert probs is not None
 
     def test_generate_beam_return_guaranteed(self, bc_lm):
-        """Guaranteed test to hit return statement in generate for beam generation"""
+        """Guaranteed test to hit return statement in generate for beam generation."""
         policy = BC_Policy(bc_lm, "beam", beam_width=1)
         tokens = torch.randint(0, 9, (1, 1), dtype=torch.long)
         attn_mask = torch.ones(1, 1, dtype=torch.float)
@@ -947,7 +948,7 @@ class TestBC_PolicyGenerate:
         assert probs is not None
 
     def test_full_generation_loop(self, bc_lm):
-        """Test a complete generation loop"""
+        """Test a complete generation loop."""
         policy = BC_Policy(bc_lm, "sample", temp=0.5, top_k=3)
 
         # Prepare input
@@ -971,7 +972,7 @@ class TestBC_PolicyGenerate:
         assert isinstance(log_probs, torch.Tensor)
 
     def test_policy_invalid_termination_condition(self, bc_lm):
-        """Test policy with invalid termination condition"""
+        """Test policy with invalid termination condition."""
         policy = BC_Policy(bc_lm, "sample")
 
         # The termination condition is called during generation, so we need to mock the generation process
@@ -982,7 +983,7 @@ class TestBC_PolicyGenerate:
 
 class TestBC_PolicyAct:
     def test_act(self, bc_policy):
-        """Test act method"""
+        """Test act method."""
         obs = MockLanguageObservation()
 
         with patch.object(bc_policy, "generate") as mock_generate:
@@ -1009,7 +1010,7 @@ class TestBC_PolicyAct:
 
 class TestBC_PolicyTrainEval:
     def test_train_eval(self, bc_policy):
-        """Test train and eval methods"""
+        """Test train and eval methods."""
         # Test train mode
         bc_policy.train()
         assert bc_policy.bc_lm.training
@@ -1021,7 +1022,7 @@ class TestBC_PolicyTrainEval:
 
 class TestBC_EvaluatorInit:
     def test_initialization(self, bc_lm):
-        """Test BC_Evaluator initialization"""
+        """Test BC_Evaluator initialization."""
         env = MockLanguageEnvironment()
         evaluator = BC_Evaluator(env, verbose=True, kind="beam", beam_width=2)
 
@@ -1039,7 +1040,7 @@ def bc_evaluator(bc_lm):
 
 class TestBC_EvaluatorEvaluate:
     def test_evaluate(self, bc_evaluator, bc_lm):
-        """Test evaluate method"""
+        """Test evaluate method."""
         items = [
             DataPoint(
                 raw_str="test",
@@ -1066,7 +1067,7 @@ class TestBC_EvaluatorEvaluate:
         assert len(results["env_reward"]) == 2
 
     def test_evaluate_verbose(self, bc_lm):
-        """Test evaluate method with verbose output"""
+        """Test evaluate method with verbose output."""
         env = MockLanguageEnvironment()
         evaluator = BC_Evaluator(env, verbose=True, kind="sample", temp=0.5)
 
@@ -1090,7 +1091,7 @@ class TestBC_EvaluatorEvaluate:
         assert isinstance(results, dict)
 
     def test_full_evaluation_loop(self, bc_lm):
-        """Test a complete evaluation loop"""
+        """Test a complete evaluation loop."""
         env = MockLanguageEnvironment()
         evaluator = BC_Evaluator(env, verbose=False, kind="sample", temp=0.5)
 
@@ -1118,7 +1119,7 @@ class TestBC_EvaluatorEvaluate:
         assert "env_reward" in results
 
     def test_evaluator_empty_items(self, bc_lm):
-        """Test evaluator with empty items list"""
+        """Test evaluator with empty items list."""
         env = MockLanguageEnvironment()
         evaluator = BC_Evaluator(env, verbose=False, kind="sample", temp=0.5)
         items = []
@@ -1133,7 +1134,7 @@ class TestBC_EvaluatorEvaluate:
 
 
 def test_to_function():
-    """Test to function for device conversion"""
+    """Test to function for device conversion."""
     data = {
         "tensor": torch.tensor([1, 2, 3]),
         "numpy": np.array([4, 5, 6]),
@@ -1150,7 +1151,7 @@ def test_to_function():
 
 class TestMapPytree:
     def test_map_pytree_dict(self):
-        """Test map_pytree with dictionary"""
+        """Test map_pytree with dictionary."""
         data = {
             "a": torch.tensor([1, 2]),
             "b": np.array([3, 4]),
@@ -1168,7 +1169,7 @@ class TestMapPytree:
         assert np.all(result["b"] == np.array([6, 8]))
 
     def test_map_pytree_list(self):
-        """Test map_pytree with list"""
+        """Test map_pytree with list."""
         data = [torch.tensor([1, 2]), np.array([3, 4])]
 
         def f(x):
@@ -1183,7 +1184,7 @@ class TestMapPytree:
         assert np.all(result[1] == np.array([6, 8]))
 
     def test_map_pytree_tuple(self):
-        """Test map_pytree with tuple"""
+        """Test map_pytree with tuple."""
         data = (torch.tensor([1, 2]), np.array([3, 4]))
 
         def f(x):
@@ -1198,7 +1199,7 @@ class TestMapPytree:
         assert np.all(result[1] == np.array([6, 8]))
 
     def test_map_pytree_tensor(self):
-        """Test map_pytree with tensor"""
+        """Test map_pytree with tensor."""
         data = torch.tensor([1, 2, 3])
 
         def f(x):
@@ -1210,7 +1211,7 @@ class TestMapPytree:
         assert torch.all(result == torch.tensor([2, 4, 6]))
 
     def test_map_pytree_numpy(self):
-        """Test map_pytree with numpy array"""
+        """Test map_pytree with numpy array."""
         data = np.array([1, 2, 3])
 
         def f(x):
@@ -1222,7 +1223,7 @@ class TestMapPytree:
         assert np.all(result == np.array([2, 4, 6]))
 
     def test_map_pytree_other(self):
-        """Test map_pytree with other types"""
+        """Test map_pytree with other types."""
         data = "string"
 
         def f(x):

@@ -279,7 +279,11 @@ to wrap their non-evolvable networks in a manner compatible with our mutations f
           "output_size": 2  # Output size
       }
 
-      actor = DummyEvolvable(BasicNetActor, actor_kwargs, device=device)
+      actor = DummyEvolvable(
+          device=device,
+          module_fn=BasicNetActorDQN,
+          module_kwargs=actor_kwargs,
+      )
 
       # Use the actor in an algorithm
       observation_space = ...

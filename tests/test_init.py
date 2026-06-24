@@ -3,7 +3,7 @@ import pytest
 import agilerl
 
 
-@pytest.mark.parametrize("package,extra", [("agilerl", "llm")])
+@pytest.mark.parametrize(("package", "extra"), [("agilerl", "llm")])
 def test_get_extra_dependencies(package, extra):
     result = agilerl.get_extra_dependencies(package, extra)
     assert isinstance(result, list)

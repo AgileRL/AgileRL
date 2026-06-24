@@ -1,3 +1,4 @@
+import contextlib
 import os
 import shutil
 from pathlib import Path
@@ -64,10 +65,8 @@ def create_dataset_return_timesteps(dataset_id: str, env_id: str) -> int:
     buffer = []
 
     # Delete the test dataset if it already exists (registry or filesystem).
-    try:
+    with contextlib.suppress(Exception):
         minari.delete_dataset(dataset_id)
-    except Exception:
-        pass
 
     env = gym.make(env_id)
 
@@ -115,7 +114,7 @@ def create_dataset_return_timesteps(dataset_id: str, env_id: str) -> int:
 
 
 @pytest.mark.parametrize(
-    "dataset_id,env_id",
+    ("dataset_id", "env_id"),
     [("cartpole/test-v0", "CartPole-v1")],
 )
 def test_minari_to_agile_dataset(dataset_id: str, env_id: str) -> None:
@@ -128,7 +127,7 @@ def test_minari_to_agile_dataset(dataset_id: str, env_id: str) -> None:
 
 @pytest.mark.gpu
 @pytest.mark.parametrize(
-    "dataset_id,env_id",
+    ("dataset_id", "env_id"),
     [("cartpole/test-v0", "CartPole-v1")],
 )
 def test_minari_to_agile_buffer(dataset_id: str, env_id: str) -> None:
@@ -201,6 +200,17 @@ class TestLoadMinariDataset:
 
             result = minari_utils.load_minari_dataset(dataset_id, remote=True)
             assert result is mock_ds
+
+    def test_load_minari_dataset_remote_list_missing_dataset_raises(self):
+        dataset_id = "missing/dataset-v0"
+        with (
+            patch(
+                "agilerl.utils.minari_utils.minari.list_remote_datasets",
+                return_value={"other/dataset-v0": {}},
+            ),
+            pytest.raises(KeyError, match="Enter a valid remote Minari Dataset ID"),
+        ):
+            minari_utils.load_minari_dataset(dataset_id, remote=True)
 
     def test_load_minari_dataset_remote_no_accelerator_download(self):
         """Remote download when accelerator is None (else branch)."""

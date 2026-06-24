@@ -497,12 +497,11 @@ class TestRLAlgorithmInit:
 
     def test_incorrect_hp_config(self, vector_space, discrete_space):
         with pytest.raises(AttributeError):
-            hp_config = HyperparameterConfig(lr_actor=RLParameter(min=0.1, max=0.2))
             _ = DummyRLAlgorithm(
                 vector_space,
                 discrete_space,
                 index=0,
-                hp_config=hp_config,
+                hp_config=HyperparameterConfig(lr_actor=RLParameter(min=0.1, max=0.2)),
             )
 
 
@@ -599,7 +598,7 @@ class TestMultiAgentRLAlgorithmInit:
         assert agent is not None
 
     @pytest.mark.parametrize(
-        "observation_spaces, action_spaces, error_match",
+        ("observation_spaces", "action_spaces", "error_match"),
         [
             (42, 42, "Observation spaces must be a list or dictionary"),
             (
@@ -647,7 +646,7 @@ class TestRLAlgorithmPopulation:
             assert agent.index == i
 
     def test_population_with_wrapper_cls(self, vector_space, discrete_space):
-        """population classmethod returns wrapped agents when wrapper_cls is provided."""
+        """Population classmethod returns wrapped agents when wrapper_cls is provided."""
 
         class SimpleWrapper:
             def __init__(self, agent, label="wrapped"):
@@ -1273,7 +1272,7 @@ print("SUCCESS: GPU-saved checkpoint loaded via load_checkpoint in no-CUDA envir
 class TestMultiAgentRLAlgorithmLoadCheckpoint:
     @pytest.mark.parametrize("with_hp_config", [False, True])
     @pytest.mark.parametrize(
-        "observation_spaces, encoder_cls",
+        ("observation_spaces", "encoder_cls"),
         [
             ("ma_vector_space", EvolvableMLP),
             ("ma_image_space", EvolvableCNN),
@@ -1454,9 +1453,11 @@ print("SUCCESS: GPU-saved multi-agent checkpoint loaded via load_checkpoint in n
 
 
 class TestRLAlgorithmLoad:
-    @pytest.mark.parametrize("device, with_hp_config", [("cpu", False), ("cpu", True)])
     @pytest.mark.parametrize(
-        "observation_space, encoder_cls",
+        ("device", "with_hp_config"), [("cpu", False), ("cpu", True)]
+    )
+    @pytest.mark.parametrize(
+        ("observation_space", "encoder_cls"),
         [
             ("vector_space", EvolvableMLP),
             ("discrete_space", EvolvableMLP),
@@ -1600,9 +1601,11 @@ print("SUCCESS: GPU-saved checkpoint loaded successfully in no-CUDA environment"
 
 
 class TestMultiAgentRLAlgorithmLoad:
-    @pytest.mark.parametrize("device, with_hp_config", [("cpu", False), ("cpu", True)])
     @pytest.mark.parametrize(
-        "observation_spaces, encoder_cls",
+        ("device", "with_hp_config"), [("cpu", False), ("cpu", True)]
+    )
+    @pytest.mark.parametrize(
+        ("observation_spaces", "encoder_cls"),
         [
             ("ma_vector_space", EvolvableMLP),
             ("ma_image_space", EvolvableCNN),

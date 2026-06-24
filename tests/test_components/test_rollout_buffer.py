@@ -1,4 +1,5 @@
 import warnings
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -1039,7 +1040,10 @@ class TestRolloutBufferSequences:
         if recurrent:
             buffer.prepare_sequence_tensors()
         else:
-            with pytest.raises(ValueError):
+            with pytest.raises(
+                ValueError,
+                match=r"prepare_sequence_tensors\(\) is only supported when recurrent=True",
+            ):
                 buffer.prepare_sequence_tensors()
             return
 
@@ -1295,7 +1299,10 @@ class TestRolloutBufferSequences:
         )
 
         # Try to prepare sequences with empty buffer
-        with pytest.raises(ValueError):
+        with pytest.raises(
+            ValueError,
+            match=r"Attempting to prepare sequences with empty buffer",
+        ):
             buffer.prepare_sequence_tensors()
 
     def test_sequence_preparation_with_dict_observations(self):
@@ -1630,6 +1637,28 @@ class TestRolloutBufferUtilities:
             assert "vec" in np_dict["observations"]
             assert isinstance(np_dict["observations"]["vec"], np.ndarray)
 
+    def test_convert_td_to_np_dict_observations_plain_dict_items(self):
+        """Force the observations dict branch when TensorDict stores plain dicts."""
+        obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        action_space = spaces.Discrete(2)
+        buffer = RolloutBuffer(
+            capacity=5,
+            observation_space=obs_space,
+            action_space=action_space,
+            num_envs=1,
+            device="cpu",
+        )
+        td = MagicMock()
+        td.items.return_value = [
+            ("observations", {"vec": torch.randn(2, 2)}),
+            ("next_observations", {"vec": torch.randn(2, 2)}),
+            ("actions", torch.randn(2, 1)),
+        ]
+        np_dict = buffer._convert_td_to_np_dict(td)
+        assert isinstance(np_dict["observations"], dict)
+        assert isinstance(np_dict["observations"]["vec"], np.ndarray)
+        assert isinstance(np_dict["next_observations"]["vec"], np.ndarray)
+
     def test_sequence_preparation_with_multiple_episodes_per_env(self):
         """Test sequence preparation with multiple episodes per environment."""
         obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
@@ -1813,7 +1842,10 @@ class TestRolloutBufferUtilities:
         if recurrent:
             buffer.prepare_sequence_tensors()
         else:
-            with pytest.raises(ValueError):
+            with pytest.raises(
+                ValueError,
+                match=r"prepare_sequence_tensors\(\) is only supported when recurrent=True",
+            ):
                 buffer.prepare_sequence_tensors()
 
             return

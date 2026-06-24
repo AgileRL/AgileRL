@@ -19,6 +19,10 @@ from tests.helper_functions import (
     get_experiences_batch,
     get_sample_from_space,
 )
+from tests.helpers.algorithm_coverage import (
+    assert_swap_channels_called,
+    patch_obs_channels_to_first,
+)
 
 
 class DummyDDPG(DDPG):
@@ -33,7 +37,7 @@ class DummyEnv:
         self.state_size = state_size
         self.vect = vect
         if self.vect:
-            self.state_size = (num_envs,) + self.state_size
+            self.state_size = (num_envs, *self.state_size)
             self.n_envs = num_envs
             self.num_envs = num_envs
         else:
@@ -96,7 +100,7 @@ class SimpleCNN(nn.Module):
 class TestDDPGInit:
     # initialize ddpg with valid parameters
     @pytest.mark.parametrize(
-        "observation_space, encoder_cls",
+        ("observation_space", "encoder_cls"),
         [
             ("vector_space", EvolvableMLP),
             ("image_space", EvolvableCNN),
@@ -142,7 +146,13 @@ class TestDDPGInit:
     # Can initialize ddpg with an actor network
     # TODO: This will be deprecated in the future
     @pytest.mark.parametrize(
-        "observation_space, actor_network, critic_network, input_tensor, input_tensor_critic",
+        (
+            "observation_space",
+            "actor_network",
+            "critic_network",
+            "input_tensor",
+            "input_tensor_critic",
+        ),
         [
             (
                 "vector_space",
@@ -235,18 +245,35 @@ class TestDDPGInit:
         actor_network = "dummy"
         critic_network = "dummy"
         with pytest.raises(TypeError):
-            ddpg = DDPG(
+            DDPG(
                 vector_space,
                 action_space,
                 expl_noise=np.zeros((1, action_space.shape[0])),
                 actor_network=actor_network,
                 critic_network=critic_network,
             )
-            assert ddpg
+
+    def test_rejects_non_evolvable_critic_network(self, vector_space, simple_mlp):
+        action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        actor_network = MakeEvolvable(simple_mlp, torch.randn(1, 4))
+        critic_network = nn.Linear(6, 1)
+        with pytest.raises(TypeError, match="critic_network"):
+            DDPG(
+                vector_space,
+                action_space,
+                actor_network=actor_network,
+                critic_network=critic_network,
+            )
 
     # Can initialize ddpg with an actor network but no critic - should trigger warning
     @pytest.mark.parametrize(
-        "observation_space, actor_network, critic_network, input_tensor, input_tensor_critic",
+        (
+            "observation_space",
+            "actor_network",
+            "critic_network",
+            "input_tensor",
+            "input_tensor_critic",
+        ),
         [
             (
                 "vector_space",
@@ -559,6 +586,17 @@ class TestDDPGTest:
         )
         mean_score = agent.test(env, max_steps=10)
         assert isinstance(mean_score, float)
+        agent.clean_up()
+
+    def test_swap_channels_path(self, image_space, monkeypatch, request):
+        action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        observation_space = request.getfixturevalue("image_space")
+        env = DummyEnv(state_size=observation_space.shape, vect=False, num_envs=1)
+        spy = patch_obs_channels_to_first(monkeypatch, "agilerl.algorithms.ddpg")
+        agent = DDPG(observation_space=observation_space, action_space=action_space)
+        mean_score = agent.test(env, swap_channels=True, max_steps=1, loop=1)
+        assert isinstance(mean_score, float)
+        assert_swap_channels_called(spy)
         agent.clean_up()
 
 

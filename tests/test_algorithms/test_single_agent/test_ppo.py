@@ -37,7 +37,8 @@ def get_eval_action_for_space(action_space: spaces.Space, device: torch.device):
         return torch.randint(0, 2, (1, n), device=device).float()
     if isinstance(action_space, spaces.Box):
         return torch.zeros(1, *action_space.shape, device=device)
-    raise NotImplementedError(f"Unsupported action space: {type(action_space)}")
+    msg = f"Unsupported action space: {type(action_space)}"
+    raise NotImplementedError(msg)
 
 
 def get_batch_states(observation_space, num_steps) -> tuple[torch.Tensor, torch.Tensor]:
@@ -79,9 +80,8 @@ def get_batch_states(observation_space, num_steps) -> tuple[torch.Tensor, torch.
             torch.rand(1, *space.shape) for space in observation_space.spaces
         )
     else:
-        raise NotImplementedError(
-            f"Unsupported observation space: {type(observation_space)}"
-        )
+        msg = f"Unsupported observation space: {type(observation_space)}"
+        raise NotImplementedError(msg)
     return states, next_states
 
 
@@ -135,7 +135,7 @@ class DummyEnv:
         self.vect = vect
         self.num_envs = num_envs
         if self.vect:
-            self.state_size = (num_envs,) + self.state_size
+            self.state_size = (num_envs, *self.state_size)
             self.n_envs = num_envs
         else:
             self.n_envs = 1
@@ -194,7 +194,7 @@ class SimpleCNN(nn.Module):
         return self.relu3(self.linear2(x))
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def build_ppo(observation_space, action_space, recurrent, accelerator_flag, request):
     accelerator = Accelerator() if accelerator_flag else None
     observation_space = request.getfixturevalue(observation_space)
@@ -210,7 +210,7 @@ def build_ppo(observation_space, action_space, recurrent, accelerator_flag, requ
 class TestPPOInit:
     # Initializes all necessary attributes with default values
     @pytest.mark.parametrize(
-        "observation_space, encoder_cls",
+        ("observation_space", "encoder_cls"),
         [
             ("vector_space", EvolvableMLP),
             ("image_space", EvolvableCNN),
@@ -275,7 +275,14 @@ class TestPPOInit:
     # Can initialize ppo with an actor network
     # TODO: Will be deprecated in the future
     @pytest.mark.parametrize(
-        "obs_space, action_space, actor_network, critic_network, input_tensor, input_tensor_critic",
+        (
+            "obs_space",
+            "action_space",
+            "actor_network",
+            "critic_network",
+            "input_tensor",
+            "input_tensor_critic",
+        ),
         [
             (
                 "vector_space",
@@ -341,17 +348,22 @@ class TestPPOInit:
         actor_network = "dummy"
         critic_network = "dummy"
         with pytest.raises(TypeError):
-            ppo = PPO(
+            PPO(
                 vector_space,
                 discrete_space,
                 actor_network=actor_network,
                 critic_network=critic_network,
             )
-            assert ppo
 
     # Can initialize ppo with an actor network but no critic - should trigger warning
     @pytest.mark.parametrize(
-        "observation_space, actor_network, critic_network, input_tensor, input_tensor_critic",
+        (
+            "observation_space",
+            "actor_network",
+            "critic_network",
+            "input_tensor",
+            "input_tensor_critic",
+        ),
         [
             (
                 "vector_space",
@@ -457,7 +469,7 @@ class TestPPOInit:
             pytest.skip("Recurrent PPO with non-vector space is not supported yet!")
 
         # Build an encoder configuration that matches the observation space type
-        if len(observation_space.shape) == 3:  # Image observations – use CNN
+        if len(observation_space.shape) == 3:  # Image observations - use CNN
             base_net_config = {
                 "encoder_config": {
                     "channel_size": [16, 32],
@@ -467,7 +479,7 @@ class TestPPOInit:
             }
             expected_shared = {}
             expected_separate = {}
-        else:  # Vector observations – use LSTM
+        else:  # Vector observations - use LSTM
             base_net_config = {
                 "encoder_config": {
                     "hidden_state_size": 64,
@@ -566,7 +578,7 @@ class TestPPOInit:
             batch_size=8,
         )
 
-        assert "action_masks" not in ppo.rollout_buffer.buffer.keys(), (
+        assert "action_masks" not in ppo.rollout_buffer.buffer, (
             "Continuous action spaces should not have action_masks in the buffer"
         )
         ppo.clean_up()
@@ -608,12 +620,14 @@ class TestPPOGetAction:
         if isinstance(action_space, spaces.Discrete):
             for act in action:
                 assert act.is_integer()
-                assert act >= 0 and act < action_space.n
+                assert act >= 0
+                assert act < action_space.n
         elif isinstance(action_space, spaces.MultiDiscrete):
             assert len(action[0]) == len(action_space.nvec)
             for i, act in enumerate(action[0]):
                 assert act.is_integer()
-                assert act >= 0 and act < action_space.nvec[i]
+                assert act >= 0
+                assert act < action_space.nvec[i]
         elif isinstance(action_space, spaces.MultiBinary):
             assert len(action[0]) == action_space.n
             for act in action[0]:
@@ -683,12 +697,14 @@ class TestPPOGetAction:
         if isinstance(action_space, spaces.Discrete):
             for act in action:
                 assert act.is_integer()
-                assert act >= 0 and act < action_space.n
+                assert act >= 0
+                assert act < action_space.n
         elif isinstance(action_space, spaces.MultiDiscrete):
             assert len(action[0]) == len(action_space.nvec)
             for i, act in enumerate(action[0]):
                 assert act.is_integer()
-                assert act >= 0 and act < action_space.nvec[i]
+                assert act >= 0
+                assert act < action_space.nvec[i]
         elif isinstance(action_space, spaces.MultiBinary):
             assert len(action[0]) == action_space.n
             for act in action[0]:
@@ -839,6 +855,33 @@ class TestPPOGetAction:
         assert np.all(action >= -1.0)
         ppo.clean_up()
 
+    def test_get_action_scales_squashed_box_actions(self, vector_space):
+        box_action = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
+        ppo = PPO(vector_space, box_action)
+        ppo.set_training_mode(False)
+        ppo.actor.squash_output = True
+        scaled_calls = []
+
+        def _scale_action(action_np):
+            scaled_calls.append(True)
+            return np.clip(action_np, -1.0, 1.0)
+
+        ppo.actor.scale_action = _scale_action
+        ppo._get_action_and_values = lambda *args, **kwargs: (
+            torch.tensor([[0.5, -0.5]]),
+            torch.tensor([0.0]),
+            torch.tensor([0.0]),
+            torch.tensor([0.0]),
+            None,
+        )
+        action, *_ = ppo.get_action(
+            np.zeros((1, vector_space.shape[0]), dtype=np.float32)
+        )
+        assert scaled_calls
+        assert np.all(action <= 1.0)
+        assert np.all(action >= -1.0)
+        ppo.clean_up()
+
 
 class TestPPOGetActionAndValues:
     def test_get_action_and_values_share_encoders_false(
@@ -850,7 +893,7 @@ class TestPPOGetActionAndValues:
             share_encoders=False,
         )
         obs = np.zeros((1, *vector_space.shape), dtype=np.float32)
-        action, log_prob, entropy, values, next_hidden = ppo._get_action_and_values(
+        action, _log_prob, _entropy, values, next_hidden = ppo._get_action_and_values(
             obs, sample=True
         )
         assert action is not None
@@ -1334,6 +1377,56 @@ class TestPPOLearn:
         assert loss == 0.0
         ppo.clean_up()
 
+    def test_learn_experiences_early_stops_on_target_kl(
+        self,
+        vector_space,
+        discrete_space,
+        monkeypatch,
+    ):
+        ppo = PPO(
+            vector_space,
+            discrete_space,
+            use_rollout_buffer=False,
+            target_kl=1e-6,
+            update_epochs=2,
+            batch_size=2,
+        )
+        num_steps = 4
+        states, next_states = get_batch_states(vector_space, num_steps)
+        experiences = [
+            [states],
+            [torch.randint(0, discrete_space.n, (num_steps,)).float()],
+            [torch.randn(num_steps)],
+            [torch.randn(num_steps)],
+            [torch.randint(0, 2, (num_steps,))],
+            [torch.randn(num_steps)],
+            [next_states],
+            [torch.zeros(1)],
+        ]
+        monkeypatch.setattr(
+            ppo,
+            "evaluate_actions",
+            lambda obs, actions, hidden_state=None, action_mask=None: (
+                torch.full((actions.shape[0],), 10.0, requires_grad=True),
+                torch.ones(actions.shape[0], requires_grad=True),
+                torch.zeros(actions.shape[0], requires_grad=True),
+            ),
+        )
+        optimizer_steps = 0
+        original_step = ppo.optimizer.step
+
+        def counting_step(*args, **kwargs):
+            nonlocal optimizer_steps
+            optimizer_steps += 1
+            return original_step(*args, **kwargs)
+
+        monkeypatch.setattr(ppo.optimizer, "step", counting_step)
+        loss = ppo.learn(experiences)
+        assert isinstance(loss, float)
+        assert optimizer_steps == 2
+        assert optimizer_steps < ppo.update_epochs * (num_steps // ppo.batch_size)
+        ppo.clean_up()
+
     def test_rollout_buffer_flat_external_uses_accelerator_and_early_stops(
         self,
         vector_space,
@@ -1587,7 +1680,7 @@ class TestPPOLearn:
 
         # Verify action masks are stored in the buffer
         buffer_td = ppo.rollout_buffer.get_tensor_batch(device=ppo.device)
-        assert "action_masks" in buffer_td.keys(), (
+        assert "action_masks" in buffer_td, (
             "action_masks should be stored in rollout buffer"
         )
 
@@ -1850,6 +1943,45 @@ class TestPPOTest:
         )
         assert len(callback_calls) == 1
         assert "final_info" in callback_calls[0][1]
+        ppo.clean_up()
+
+    def test_vectorized_mask_stack_failure_and_callback_info(
+        self, vector_space, discrete_space
+    ):
+        class VecEnv:
+            def __init__(self):
+                self.num_envs = 2
+                self._steps = 0
+
+            def reset(self):
+                self._steps = 0
+                obs = np.zeros((self.num_envs, *vector_space.shape), dtype=np.float32)
+                info = [
+                    {"action_mask": np.array([1, 0])},
+                    {"action_mask": np.array([1, 0, 1])},
+                ]
+                return obs, info
+
+            def step(self, _action):
+                self._steps += 1
+                obs = np.zeros((self.num_envs, *vector_space.shape), dtype=np.float32)
+                reward = np.array([1.0, 1.0])
+                done = np.array([True, True])
+                trunc = np.array([False, False])
+                info = [{"step": 1}, {"step": 2}]
+                return obs, reward, done, trunc, info
+
+        ppo = PPO(vector_space, discrete_space)
+        callback_calls = []
+        with pytest.warns(UserWarning, match="Could not stack action masks"):
+            _ = ppo.test(
+                VecEnv(),
+                vectorized=True,
+                loop=1,
+                callback=lambda score, info: callback_calls.append((score, info)),
+            )
+        assert len(callback_calls) == 1
+        assert callback_calls[0][1] == {"step": 1}
         ppo.clean_up()
 
 
@@ -2154,4 +2286,42 @@ class TestPPOCollectRollouts:
         )
         env = DummyEnv(state_size=vector_space.shape, vect=True, num_envs=1)
         collect_rollouts(ppo, env, n_steps=5)
+        ppo.clean_up()
+
+    def test_collect_rollouts_scalar_terminal_flags(self, vector_space, discrete_space):
+        from agilerl.rollouts.on_policy import _collect_rollouts
+
+        class ScalarTermEnv:
+            def reset(self):
+                return np.random.rand(*vector_space.shape), {}
+
+            def step(self, action):
+                del action
+                return (
+                    np.random.rand(*vector_space.shape),
+                    1.0,
+                    True,
+                    False,
+                    {},
+                )
+
+        ppo = PPO(
+            observation_space=vector_space,
+            action_space=discrete_space,
+            use_rollout_buffer=True,
+            learn_step=2,
+            num_envs=1,
+        )
+        env = ScalarTermEnv()
+        result = _collect_rollouts(
+            ppo,
+            env,
+            n_steps=1,
+            last_obs=None,
+            last_done=None,
+            last_scores=None,
+            last_info=None,
+            recurrent=False,
+        )
+        assert isinstance(result, tuple)
         ppo.clean_up()

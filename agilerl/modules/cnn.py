@@ -558,7 +558,7 @@ class EvolvableCNN(EvolvableModule):
 
     def reset_noise(self) -> None:
         """Reset noise of the model layers."""
-        EvolvableModule.reset_noise(self.model)
+        super().reset_noise()
 
     def forward(self, x: ArrayOrTensor) -> torch.Tensor:
         """Return output of neural network.
