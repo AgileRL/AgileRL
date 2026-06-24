@@ -95,6 +95,9 @@ class PPO(LLMAlgorithm):
     :type max_grad_norm: float, optional
     :param update_epochs: Number of PPO epochs per update.
     :type update_epochs: int, optional
+    :param critic_wram_up_Steps: Number of initial ``learn`` calls during which
+        only the critic/value loss is optimized (policy/KL terms disabled).
+    :type critic_wram_up_Steps: int, optional
     :param temperature: Sampling temperature for generation.
     :type temperature: float, optional
     :param repetition_penalty: Repetition penalty used during generation.
@@ -268,6 +271,7 @@ class PPO(LLMAlgorithm):
         lr_critic: float | None = 5e-5,
         max_grad_norm: float = 1.0,
         update_epochs: int = 1,
+        critic_wram_up_Steps: int = 0,
         temperature: float = 1.0,
         repetition_penalty: float = 1.0,
         top_p: float = 1.0,
@@ -359,7 +363,13 @@ class PPO(LLMAlgorithm):
             vllm_importance_sampling_cap=vllm_importance_sampling_cap,
         )
         self._validate_core_args(
-            batch_size, lr_actor, clip_coef, update_epochs, actor_network, clone
+            batch_size,
+            lr_actor,
+            clip_coef,
+            update_epochs,
+            critic_wram_up_Steps,
+            actor_network,
+            clone,
         )
         self.beta = beta
         self.vf_coef = vf_coef
@@ -371,6 +381,8 @@ class PPO(LLMAlgorithm):
         self.lr_actor = lr_actor
         self.lr_critic = lr_critic if lr_critic is not None else lr_actor
         self.update_epochs = update_epochs
+        self.critic_wram_up_Steps = critic_wram_up_Steps
+        self._learn_step_count = 0
         self.temperature = temperature
         self.repetition_penalty = repetition_penalty
         self.top_p = top_p
@@ -535,6 +547,7 @@ class PPO(LLMAlgorithm):
                 if rewards_2d.dim() == 1:
                     rewards_2d = rewards_2d.unsqueeze(-1)
             ppo_granularity = self._resolve_advantage_granularity(turn_ids)
+            critic_warmup_active = self._learn_step_count < self.critic_wram_up_Steps
 
             del rewards
 
@@ -660,6 +673,7 @@ class PPO(LLMAlgorithm):
                             batch_turn_ids,
                             ppo_granularity,
                             batch_sampling_log_probs,
+                            critic_only=critic_warmup_active,
                         )
                         self._backward_pass(total_loss)
                         clear_fused_adapter_routing(self._get_unwrapped_actor())
@@ -680,39 +694,54 @@ class PPO(LLMAlgorithm):
                     batch_log_probs = torch.masked_fill(
                         batch_log_probs, ~batch_mask_bool, 1.0
                     )
-                    kl = calculate_k3_kl(batch_log_probs, batch_reference_log_probs)
-                    masked_entropy = masked_mean(
-                        -batch_log_probs.detach(), batch_action_mask
-                    )
+                    if critic_warmup_active:
+                        pg_loss = torch.zeros(
+                            (), device=batch_ids.device, dtype=batch_log_probs.dtype
+                        )
+                        clipfrac = torch.zeros(
+                            (), device=batch_ids.device, dtype=batch_log_probs.dtype
+                        )
+                        kl_loss = torch.zeros(
+                            (), device=batch_ids.device, dtype=batch_log_probs.dtype
+                        )
+                        masked_entropy = torch.zeros(
+                            (), device=batch_ids.device, dtype=batch_log_probs.dtype
+                        )
+                    else:
+                        kl = calculate_k3_kl(batch_log_probs, batch_reference_log_probs)
+                        masked_entropy = masked_mean(
+                            -batch_log_probs.detach(), batch_action_mask
+                        )
 
                     batch_values = torch.masked_fill(
                         batch_values, ~batch_mask_bool, 0.0
                     )
-                    token_log_ratio = batch_log_probs - batch_old_log_probs
-                    is_level = self._resolve_is_level(ppo_granularity)
+                    if not critic_warmup_active:
+                        token_log_ratio = batch_log_probs - batch_old_log_probs
+                        is_level = self._resolve_is_level(ppo_granularity)
 
-                    # Truncated importance sampling: reweight each token's
-                    # surrogate by the (detached, clamped) trainer/vLLM ratio to
-                    # correct for the rollout being drawn from vLLM rather than
-                    # the trainer policy. Applies only to the policy surrogate,
-                    # not the value/KL terms.
-                    loss_weight = None
-                    if batch_sampling_log_probs is not None:
-                        with torch.no_grad():
-                            mask_f = batch_action_mask.to(token_log_ratio.dtype)
-                            loss_weight = torch.exp(
-                                (batch_old_log_probs - batch_sampling_log_probs)
-                                * mask_f
-                            ).clamp(max=self.vllm_importance_sampling_cap)
+                        # Truncated importance sampling: reweight each token's
+                        # surrogate by the (detached, clamped) trainer/vLLM ratio to
+                        # correct for the rollout being drawn from vLLM rather than
+                        # the trainer policy. Applies only to the policy surrogate,
+                        # not the value/KL terms.
+                        loss_weight = None
+                        if batch_sampling_log_probs is not None:
+                            with torch.no_grad():
+                                mask_f = batch_action_mask.to(token_log_ratio.dtype)
+                                loss_weight = torch.exp(
+                                    (batch_old_log_probs - batch_sampling_log_probs)
+                                    * mask_f
+                                ).clamp(max=self.vllm_importance_sampling_cap)
 
-                    pg_loss, clipfrac = self._ppo_policy_surrogate(
-                        token_log_ratio,
-                        batch_advantages,
-                        batch_action_mask,
-                        batch_turn_ids,
-                        is_level,
-                        loss_weight=loss_weight,
-                    )
+                        pg_loss, clipfrac = self._ppo_policy_surrogate(
+                            token_log_ratio,
+                            batch_advantages,
+                            batch_action_mask,
+                            batch_turn_ids,
+                            is_level,
+                            loss_weight=loss_weight,
+                        )
 
                     # Value loss granularity follows the GAE advantage axis
                     # (``ppo_granularity``), independent of the IS level.
@@ -756,8 +785,11 @@ class PPO(LLMAlgorithm):
                             batch_action_mask,
                         )
 
-                    kl_loss = masked_mean(kl, batch_action_mask)
-                    total_loss = pg_loss + vf_loss + self.beta * kl_loss
+                    if not critic_warmup_active:
+                        kl_loss = masked_mean(kl, batch_action_mask)
+                        total_loss = pg_loss + vf_loss + self.beta * kl_loss
+                    else:
+                        total_loss = vf_loss
 
                     self._backward_pass(total_loss)
                     clear_fused_adapter_routing(self._get_unwrapped_actor())
@@ -776,6 +808,7 @@ class PPO(LLMAlgorithm):
         # Sampling-mismatch metrics are computed once over the full batch, so
         # they bypass the per-update averaging above.
         result.update(is_metrics)
+        self._learn_step_count += 1
         return result
 
     def test(
@@ -852,6 +885,7 @@ class PPO(LLMAlgorithm):
         lr: float,
         clip_coef: float,
         update_epochs: int,
+        critic_wram_up_Steps: int,
         actor_network: Any | None,
         clone: bool,
     ) -> None:
@@ -871,6 +905,12 @@ class PPO(LLMAlgorithm):
         )
         assert update_epochs >= 1, (
             "Policy update epochs must be greater than or equal to one."
+        )
+        assert isinstance(critic_wram_up_Steps, int), (
+            "critic_wram_up_Steps must be an integer."
+        )
+        assert critic_wram_up_Steps >= 0, (
+            "critic_wram_up_Steps must be greater than or equal to zero."
         )
         if clone and actor_network is not None:
             assert isinstance(
@@ -1195,6 +1235,7 @@ class PPO(LLMAlgorithm):
         batch_turn_ids: torch.Tensor,
         ppo_granularity: str,
         sampling_log_probs: torch.Tensor | None = None,
+        critic_only: bool = False,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """PPO loss via the fused-linear PPO Function (token + turn modes).
 
@@ -1293,57 +1334,66 @@ class PPO(LLMAlgorithm):
                     (old_log_probs - sampling_log_probs.to(self.device)) * mask_f
                 ).clamp(max=self.vllm_importance_sampling_cap)
 
-        # ---- Actor pass (Liger fused policy + KL) ----
-        # Identity-patch lm_head so the actor forward outputs the last hidden
-        # state (B, T, H) directly instead of computing the full (B, T, V)
-        # logits only to discard them. lm_head_weight is passed separately to
-        # LigerFusedLinearPolicyLossFunction which handles the matmul and its grad.
-        lm_head = self._get_lm_head()
-        lm_head_weight = lm_head.weight
-        lm_head_bias = lm_head.bias
+        if critic_only:
+            loss_pg_kl = torch.zeros((), device=self.device, dtype=returns.dtype)
+            kl_metric = 0.0
+            clipfrac_metric = 0.0
+            pg_loss_metric = 0.0
+            entropy_metric = 0.0
+        else:
+            # ---- Actor pass (Liger fused policy + KL) ----
+            # Identity-patch lm_head so the actor forward outputs the last hidden
+            # state (B, T, H) directly instead of computing the full (B, T, V)
+            # logits only to discard them. lm_head_weight is passed separately to
+            # LigerFusedLinearPolicyLossFunction which handles the matmul and its grad.
+            lm_head = self._get_lm_head()
+            lm_head_weight = lm_head.weight
+            lm_head_bias = lm_head.bias
 
-        with (
-            self._patch_lm_head_to_identity(),
-            self.select_adapter("actor"),
-            self._amp_ctx(),
-        ):
-            self.actor.train()
-            actor_output = self.actor(**kwargs)
-        policy_hidden = (
-            actor_output[0] if isinstance(actor_output, tuple) else actor_output.logits
-        )  # (B, T, H)
+            with (
+                self._patch_lm_head_to_identity(),
+                self.select_adapter("actor"),
+                self._amp_ctx(),
+            ):
+                self.actor.train()
+                actor_output = self.actor(**kwargs)
+            policy_hidden = (
+                actor_output[0]
+                if isinstance(actor_output, tuple)
+                else actor_output.logits
+            )  # (B, T, H)
 
-        target_ids = batch_ids[:, 1:].contiguous()
-        # Token level token-flattens the hidden states so the fused kernel
-        # chunks tokens (bounded); turn/sequence keep the batch path. See
-        # :func:`apply_fused_policy_loss`.
-        loss_pg_kl, aux = apply_fused_policy_loss(
-            policy_hidden[:, :-1],
-            lm_head_weight,
-            lm_head_bias,
-            target_ids,
-            mask,
-            adv_for_liger,
-            ref_log_probs,
-            old_log_probs,
-            self.beta,
-            self.clip_coef,  # epsilon_low
-            self.clip_coef,  # epsilon_high
-            self.temperature,
-            is_level,
-            turn_ids=turn_ids_arg,
-            full_turn_mask=full_turn_mask,
-            max_turns=max_turns,
-            token_chunk_size=self._resolve_fused_chunk_rows(
-                lm_head_weight.shape[0], self.fused_loss_chunk_rows
-            ),
-            turn_log_ratio_reduction=self.turn_ratio_pooling,
-            vllm_is_ratio=vllm_is_ratio,
-        )
-        kl_metric = float(aux[0].item())
-        clipfrac_metric = float(aux[1].item())
-        pg_loss_metric = float(aux[2].item())
-        entropy_metric = float(aux[3].item())
+            target_ids = batch_ids[:, 1:].contiguous()
+            # Token level token-flattens the hidden states so the fused kernel
+            # chunks tokens (bounded); turn/sequence keep the batch path. See
+            # :func:`apply_fused_policy_loss`.
+            loss_pg_kl, aux = apply_fused_policy_loss(
+                policy_hidden[:, :-1],
+                lm_head_weight,
+                lm_head_bias,
+                target_ids,
+                mask,
+                adv_for_liger,
+                ref_log_probs,
+                old_log_probs,
+                self.beta,
+                self.clip_coef,  # epsilon_low
+                self.clip_coef,  # epsilon_high
+                self.temperature,
+                is_level,
+                turn_ids=turn_ids_arg,
+                full_turn_mask=full_turn_mask,
+                max_turns=max_turns,
+                token_chunk_size=self._resolve_fused_chunk_rows(
+                    lm_head_weight.shape[0], self.fused_loss_chunk_rows
+                ),
+                turn_log_ratio_reduction=self.turn_ratio_pooling,
+                vllm_is_ratio=vllm_is_ratio,
+            )
+            kl_metric = float(aux[0].item())
+            clipfrac_metric = float(aux[1].item())
+            pg_loss_metric = float(aux[2].item())
+            entropy_metric = float(aux[3].item())
 
         # ---- Critic pass (unfused — value tensor is small) ----
         # Identity-patch lm_head here too: only critic_output[2] (the value
@@ -1398,7 +1448,7 @@ class PPO(LLMAlgorithm):
                 batch_values, old_values, returns, mask
             )
 
-        total_loss = loss_pg_kl + vf_loss
+        total_loss = vf_loss if critic_only else loss_pg_kl + vf_loss
         metrics = {
             "kl": kl_metric,
             "clipfrac": clipfrac_metric,

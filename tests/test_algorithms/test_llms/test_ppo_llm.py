@@ -1070,6 +1070,63 @@ class TestPPOLearn:
         rewards = torch.tensor([[1.0], [-1.0]], dtype=torch.float32)
         ppo.learn((completions, masks, rewards))
 
+    def test_learn_critic_warmup_updates_only_critic_then_actor(self):
+        ppo = _cpu_llmppo(
+            lr_actor=0.05,
+            lr_critic=0.05,
+            update_epochs=1,
+            critic_wram_up_Steps=1,
+        )
+        vocab, inp, mtok = 100, 10, 8
+        seq_len = inp + mtok
+        completions = [torch.randint(0, vocab, (1, seq_len)) for _ in range(2)]
+        action_masks = [torch.ones(1, seq_len - 1, dtype=torch.bool) for _ in range(2)]
+        rewards = torch.tensor([[1.0], [-0.5]], dtype=torch.float32)
+
+        before_first = {
+            name: param.clone().detach() for name, param in ppo.actor.named_parameters()
+        }
+        first_metrics = ppo.learn((completions, action_masks, rewards))
+        assert first_metrics["mean_pg_loss"] == pytest.approx(0.0)
+        assert first_metrics["mean_kl"] == pytest.approx(0.0)
+        assert first_metrics["mean_clipfrac"] == pytest.approx(0.0)
+
+        actor_lora_changed_first = False
+        critic_lora_changed_first = False
+        for param_name, param in ppo.actor.named_parameters():
+            before = before_first[param_name]
+            if (
+                "actor" in param_name
+                and "lora" in param_name
+                and not torch.equal(param, before)
+            ):
+                actor_lora_changed_first = True
+            if (
+                "critic" in param_name
+                and "lora" in param_name
+                and not torch.equal(param, before)
+            ):
+                critic_lora_changed_first = True
+
+        assert actor_lora_changed_first is False
+        assert critic_lora_changed_first is True
+
+        before_second = {
+            name: param.clone().detach() for name, param in ppo.actor.named_parameters()
+        }
+        ppo.learn((completions, action_masks, rewards))
+
+        actor_lora_changed_second = False
+        for param_name, param in ppo.actor.named_parameters():
+            if (
+                "actor" in param_name
+                and "lora" in param_name
+                and not torch.equal(param, before_second[param_name])
+            ):
+                actor_lora_changed_second = True
+
+        assert actor_lora_changed_second is True
+
 
 class TestPPOFusedNoGradBaseRoutedReference:
     """With ``use_separate_reference_adapter=False``, ``_fused_forward_no_grad``
