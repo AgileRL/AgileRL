@@ -16,9 +16,9 @@ from agilerl.llm_envs.openenv import (
     resolve_env,
     serve,
 )
-from agilerl.llm_envs.reasoning_env import ReasoningEnv
 from agilerl.llm_envs.rollout_env import (
     BatchRolloutEnv,
+    ReasoningEnv,
     RolloutEnv,
 )
 

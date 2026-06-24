@@ -157,8 +157,12 @@ def main(init_hp, mut_p):
             "apply_chat_template": True,
             "max_model_len": init_hp["MAX_MODEL_LEN"],
         }
-        # AGILERL_OPENENV_HTTP=1 hosts the env on the real OpenEnv HTTP server and
-        # drives it over the wire (verifies the server path); otherwise in-process.
+        # AGILERL_OPENENV_URL=<url> drives an env hosted on a *separate* OpenEnv
+        # server (e.g. scripts/local/serve_openenv_reasoning.py); AGILERL_OPENENV_HTTP=1
+        # hosts this env on its own server (one per rollout); else in-process.
+        external_url = os.environ.get("AGILERL_OPENENV_URL")
+        if external_url:
+            return RolloutEnv(external_url, **rollout_kwargs)
         if os.environ.get("AGILERL_OPENENV_HTTP"):
             return RolloutEnv(serve(raw_env).base_url, **rollout_kwargs)
         return RolloutEnv(None, transport=local_transport(raw_env), **rollout_kwargs)

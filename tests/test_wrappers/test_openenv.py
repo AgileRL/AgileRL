@@ -285,7 +285,7 @@ def test_resolve_env_url_is_used_raw() -> None:
 
 def test_resolve_env_entrypoint_hosts_locally() -> None:
     url, server = resolve_env(
-        "agilerl.llm_envs.reasoning_env:ReasoningEnv",
+        "agilerl.llm_envs.rollout_env:ReasoningEnv",
         {"questions": ["q"], "answers": ["a"], "prompt_builder": (lambda q: f"P:{q}")},
     )
     try:
