@@ -17,15 +17,13 @@ import torch
 
 pytest.importorskip("vllm", reason="LLM tests require vllm.")
 import vllm
-from peft import LoraConfig, LoraModel, PeftModel, get_peft_model
+from peft import LoraConfig, PeftModel, get_peft_model
 from torch import nn
 from torch.optim.lr_scheduler import SequentialLR
-from transformers import AutoTokenizer
 from transformers.configuration_utils import PretrainedConfig
 from transformers.generation.configuration_utils import GenerationConfig
-from transformers.modeling_utils import PreTrainedModel
 from transformers.generation.utils import GenerationMixin
-from vllm import LLM
+from transformers.modeling_utils import PreTrainedModel
 
 from agilerl.algorithms import CISPO, GRPO, GSPO
 from agilerl.algorithms.core import ActionResult
@@ -37,13 +35,13 @@ from agilerl.algorithms.core.base import (
 from agilerl.algorithms.grpo import HAS_LIGER_KERNEL
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig, clone_llm
 from agilerl.utils.distributed import FSDPConfig, resolve_device
+from agilerl.utils.llm_utils import ReasoningGym
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.utils import (
     assert_vllm_get_action_contract,
     make_mock_vllm_instance,
     spawn_new_process_for_each_test,
 )
-from agilerl.utils.llm_utils import ReasoningGym
 
 
 class DummyConfig(PretrainedConfig):
@@ -208,7 +206,7 @@ class DummyVLLM:
             all_prompts_text,
             sampling_params=sampling_params,
             use_tqdm=True,
-        )  # Change this to False
+        )  # Change this to False.
 
         completion_ids = [
             output.token_ids for outputs in all_outputs for output in outputs.outputs
@@ -235,7 +233,7 @@ class DummyVLLM:
         return all_outputs
 
     def reset_prefix_cache(self):
-        """Reset the prefix cache - dummy implementation"""
+        """Reset the prefix cache - dummy implementation."""
 
     def sleep(self, *args, **kwargs):
         pass
@@ -350,34 +348,33 @@ def generate_grpo(
     # ``_initialize_actors`` uses it directly (the trainer-first ordering and
     # any real base load are skipped). The vLLM engine is mocked by the caller.
     share_from_name = from_name
-    grpo_kwargs = dict(
-        actor_network=actor if not share_from_name else None,
-        model_name=pretrained_model_name_or_path if share_from_name else None,
-        lr=1e-5,
-        pad_token_id=vocab_size - 1,
-        pad_token="<pad>",
-        device="cuda" if torch.cuda.is_available() else "cpu",
-        group_size=group_size,
-        lora_config=lora_config,
-        fsdp_config=FSDPConfig() if dist_mode == "fsdp2" else None,
-        cosine_lr_schedule_config=(
+    grpo_kwargs = {
+        "actor_network": actor if not share_from_name else None,
+        "model_name": pretrained_model_name_or_path if share_from_name else None,
+        "lr": 1e-5,
+        "pad_token_id": vocab_size - 1,
+        "pad_token": "<pad>",
+        "device": "cuda" if torch.cuda.is_available() else "cpu",
+        "group_size": group_size,
+        "lora_config": lora_config,
+        "fsdp_config": FSDPConfig() if dist_mode == "fsdp2" else None,
+        "cosine_lr_schedule_config": (
             None
             if dist_mode is not None
             else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
         ),
-        use_separate_reference_adapter=use_separate_reference_adapter,
-        use_vllm=use_vllm,
-        vllm_config=vllm_config,
-        max_output_tokens=max_tokens,
-        max_model_len=max_tokens + 5,
-        micro_batch_size_per_gpu=micro_batch_size_per_gpu,
-        use_liger_loss=use_liger_loss,
-    )
-    grpo = GRPO(**grpo_kwargs)
-    return grpo
+        "use_separate_reference_adapter": use_separate_reference_adapter,
+        "use_vllm": use_vllm,
+        "vllm_config": vllm_config,
+        "max_output_tokens": max_tokens,
+        "max_model_len": max_tokens + 5,
+        "micro_batch_size_per_gpu": micro_batch_size_per_gpu,
+        "use_liger_loss": use_liger_loss,
+    }
+    return GRPO(**grpo_kwargs)
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def grpo_factory():
     return generate_grpo
 
@@ -623,7 +620,7 @@ class TestGRPOInit:
         [False, True],
     )
     @pytest.mark.parametrize(
-        "use_vllm, pretrained_model_name_or_path",
+        ("use_vllm", "pretrained_model_name_or_path"),
         [
             (False, TINY_LLM_FIXTURE_PATH),
             (True, TINY_LLM_FIXTURE_PATH),
@@ -886,7 +883,7 @@ class TestGRPOInit:
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False])
     @pytest.mark.parametrize(
-        "use_vllm, pretrained_model_name_or_path",
+        ("use_vllm", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -899,7 +896,10 @@ class TestGRPOInit:
         use_vllm,
         pretrained_model_name_or_path,
     ):
-        with pytest.warns(UserWarning):
+        with pytest.warns(
+            UserWarning,
+            match=r"No LoRA config provided\.\s+AgileRL can only be used to finetune adapters at present\.",
+        ):
             GRPO(
                 actor_network=model_factory(pretrained_model_name_or_path),
                 pad_token_id=vocab_size - 1,
@@ -922,7 +922,7 @@ class TestGRPOInit:
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False])
     @pytest.mark.parametrize(
-        "use_vllm, pretrained_model_name_or_path",
+        ("use_vllm", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -943,7 +943,10 @@ class TestGRPOInit:
     ):
         dist_mode_factory(dist_mode)
         with (
-            pytest.raises(ValueError),
+            pytest.raises(
+                ValueError,
+                match=r"Batch size \(17\) must be divisible by the number of processes \(2\)\.",
+            ),
             patch(
                 "agilerl.algorithms.core.base.get_world_size",
                 return_value=2,
@@ -971,7 +974,7 @@ class TestGRPOInit:
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False])
     @pytest.mark.parametrize(
-        "use_vllm, pretrained_model_name_or_path",
+        ("use_vllm", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -1064,7 +1067,8 @@ class TestGRPOInit:
 
     def test_init_gspo_overrides_non_trajectory_is_level_with_warning(self):
         """loss_type='gspo' is trajectory-level by definition: an explicit
-        non-trajectory importance_sampling_level is overridden with a warning."""
+        non-trajectory importance_sampling_level is overridden with a warning.
+        """
         with pytest.warns(
             UserWarning, match="loss_type='gspo' implies trajectory-level"
         ):
@@ -1088,7 +1092,7 @@ class TestGRPOInit:
         grpo.clean_up()
 
     @pytest.mark.parametrize(
-        "loss_type,is_level,expected_supported",
+        ("loss_type", "is_level", "expected_supported"),
         [
             ("grpo", None, True),  # token level -> fused kernel
             ("grpo", "turn", False),  # no fused turn mode
@@ -1101,7 +1105,8 @@ class TestGRPOInit:
         self, loss_type, is_level, expected_supported
     ):
         """``_liger_level_supported`` routes ``_loss``: only token/trajectory
-        GRPO and token-level CISPO have a fused Liger kernel."""
+        GRPO and token-level CISPO have a fused Liger kernel.
+        """
         grpo = _make_cpu_grpo_for_branch_tests(
             loss_type=loss_type,
             importance_sampling_level=is_level,
@@ -1128,7 +1133,7 @@ class TestGRPOInit:
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False])
     @pytest.mark.parametrize(
-        "use_vllm, pretrained_model_name_or_path",
+        ("use_vllm", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -1149,7 +1154,10 @@ class TestGRPOInit:
     ):
         dist_mode_factory(dist_mode)
         with (
-            pytest.raises(ValueError),
+            pytest.raises(
+                ValueError,
+                match=r"Batch size \(16\) must be divisible by the product of the number of processes \(2\) and gradient accumulation steps \(7\)\.",
+            ),
             patch(
                 "agilerl.algorithms.core.base.get_world_size",
                 return_value=2,
@@ -1179,7 +1187,7 @@ class TestGRPOInit:
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
     @pytest.mark.parametrize(
-        "use_vllm, pretrained_model_name_or_path",
+        ("use_vllm", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -1274,19 +1282,26 @@ class TestGRPOInit:
         batch_size,
     ):
         dist_mode_factory(dist_mode)
-        with pytest.raises(ValueError) as e:
-            gc.collect()
-            vocab_size = 1000
-            input_size = 10
-            max_tokens = 20
-            group_size = 5
-            lora_config = LoraConfig(
-                r=16,
-                lora_alpha=64,
-                target_modules=["linear_1"],
-                task_type="CAUSAL_LM",
-                lora_dropout=0.05,
-            )
+        gc.collect()
+        vocab_size = 1000
+        input_size = 10
+        max_tokens = 20
+        group_size = 5
+        lora_config = LoraConfig(
+            r=16,
+            lora_alpha=64,
+            target_modules=["linear_1"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.05,
+        )
+        with pytest.raises(
+            ValueError,
+            match=re.escape(
+                f"When specifying micro_batch_size_per_gpu, batch_size ({batch_size}) "
+                "must be divisible by the product of the number of processes (1) and "
+                f"micro_batch_size_per_gpu ({micro_batch_size_per_gpu})."
+            ),
+        ):
             GRPO(
                 actor_network=create_module(
                     input_size=input_size,
@@ -1309,10 +1324,6 @@ class TestGRPOInit:
                 use_separate_reference_adapter=use_separate_reference_adapter,
                 micro_batch_size_per_gpu=micro_batch_size_per_gpu,
             )
-        assert (
-            f"When specifying micro_batch_size_per_gpu, batch_size ({batch_size}) must be divisible by the product of the number of processes (1) and micro_batch_size_per_gpu ({micro_batch_size_per_gpu})."
-            in str(e.value)
-        )
 
     @pytest.mark.gpu
     @pytest.mark.parametrize("dist_mode", [None])
@@ -1322,15 +1333,15 @@ class TestGRPOInit:
         dist_mode,
     ):
         dist_mode_factory(dist_mode)
+        gc.collect()
+        vocab_size = 1000
+        input_size = 10
+        max_tokens = 20
+        group_size = 5
         with pytest.warns(
             UserWarning,
             match=r"No LoRA config provided\.\s+AgileRL can only be used to finetune adapters at present\.\s+Using default LoRA configuration for RL finetuning:",
         ):
-            gc.collect()
-            vocab_size = 1000
-            input_size = 10
-            max_tokens = 20
-            group_size = 5
             GRPO(
                 actor_network=create_module(
                     input_size=input_size,
@@ -1357,7 +1368,8 @@ class TestGRPOInit:
         dist_mode,
     ):
         """use_separate_reference_adapter=True is the supported way to keep an
-        updating reference policy and must not emit a DeprecationWarning."""
+        updating reference policy and must not emit a DeprecationWarning.
+        """
         dist_mode_factory(dist_mode)
         vocab_size = 1000
         input_size = 10
@@ -1483,7 +1495,8 @@ class TestGRPOClipCoefTuple:
     """Cover the ``clip_coef`` tuple/list unpacking branch in
     :meth:`GRPO.__init__` (``clip_coef_min = float(clip_coef[0])`` etc).
     Default tests pass ``clip_coef`` as a single float, so this branch
-    was otherwise uncovered."""
+    was otherwise uncovered.
+    """
 
     def test_tuple_clip_coef_unpacks_into_min_and_max(self) -> None:
         grpo = _make_cpu_grpo_for_branch_tests(clip_coef=(0.15, 0.25))
@@ -1579,10 +1592,16 @@ class TestGRPOLigerLossDispatch:
     ``importance_sampling_level`` / ``epsilon_*`` differently. We don't
     care about the actual Liger call result — patch ``_get_lm_head`` and
     ``LigerFusedLinearGRPOFunction.apply`` so the test stays CPU-only and
-    runs whether or not ``liger-kernel`` is installed."""
+    runs whether or not ``liger-kernel`` is installed.
+    """
 
     @pytest.mark.parametrize(
-        "loss_type,expected_liger_loss_type,expected_is_level,expected_eps_high",
+        (
+            "loss_type",
+            "expected_liger_loss_type",
+            "expected_is_level",
+            "expected_eps_high",
+        ),
         [
             ("cispo", "cispo", "token", "clip_coef_max"),
             ("gspo", "grpo", "trajectory", "clip_coef_max - 1.0"),
@@ -1648,7 +1667,8 @@ class TestGRPOLigerLossDispatch:
 
     def test_token_level_sampling_logps_fuse_vllm_is_ratio(self) -> None:
         """token-level Liger + captured vLLM logprobs fuses the clamped
-        trainer/vLLM ratio into the kernel (``vllm_is_ratio`` arg, pos 24)."""
+        trainer/vLLM ratio into the kernel (``vllm_is_ratio`` arg, pos 24).
+        """
         grpo = _make_cpu_grpo_for_branch_tests(loss_type="grpo", beta=0.0)
         fake_lm_head = nn.Linear(8, 16, bias=True)
         fake_aux = (torch.tensor(0.1), torch.tensor(0.0))
@@ -1731,7 +1751,8 @@ class TestGRPOLigerLossDispatch:
         """``advantage_granularity='turn'`` broadcasts per-turn advantages to a
         per-token ``(batch, n_act)`` tensor upstream; the token-flatten Liger
         path must reshape it to ``(batch * n_act,)`` alongside the hidden
-        states (and not broadcast it like the per-trajectory shapes)."""
+        states (and not broadcast it like the per-trajectory shapes).
+        """
         grpo = _make_cpu_grpo_for_branch_tests(loss_type="grpo", beta=0.0)
         fake_lm_head = nn.Linear(8, 16, bias=True)
         fake_loss = torch.tensor(0.5, requires_grad=True)
@@ -1775,7 +1796,8 @@ class TestGRPOLigerLossDispatch:
 
     def test_token_level_unexpected_advantage_shape_raises(self) -> None:
         """A per-token advantage whose token dim disagrees with ``n_act`` is
-        unmappable to the flattened layout and must be rejected."""
+        unmappable to the flattened layout and must be rejected.
+        """
         grpo = _make_cpu_grpo_for_branch_tests(loss_type="grpo", beta=0.0)
         fake_lm_head = nn.Linear(8, 16, bias=True)
 
@@ -1819,7 +1841,7 @@ class _CtxFreeActor(nn.Module):
         self.embed = nn.Embedding(vocab, hidden)
         self.last_input_shape: tuple[int, ...] | None = None
 
-    def forward(self, input_ids=None, **kwargs):  # noqa: D401 - test stub
+    def forward(self, input_ids=None, **kwargs):
         self.last_input_shape = tuple(input_ids.shape)
         return SimpleNamespace(logits=self.embed(input_ids))
 
@@ -1856,7 +1878,7 @@ class TestGRPOLigerSequencePacking:
     """
 
     @pytest.mark.parametrize(
-        "loss_type,expected_level",
+        ("loss_type", "expected_level"),
         [("grpo", "token"), ("cispo", "token"), ("gspo", "trajectory")],
     )
     def test_packed_liger_matches_padded(self, loss_type, expected_level):
@@ -1926,12 +1948,14 @@ class TestGRPOLigerSequencePacking:
         assert packed_shape == (1, sum(lengths))
 
         # The masked loss must be unchanged by packing, and non-trivial.
-        assert torch.isfinite(loss_padded) and loss_padded.abs() > 0
+        assert torch.isfinite(loss_padded)
+        assert loss_padded.abs() > 0
         assert torch.allclose(loss_packed, loss_padded, atol=1e-5)
 
     def test_packing_disabled_on_dense_backend_falls_back(self):
         """An unsupported (dense) backend disables packing: the forward stays
-        padded even with ``use_sequence_packing=True``."""
+        padded even with ``use_sequence_packing=True``.
+        """
         grpo = _make_cpu_grpo_for_branch_tests(loss_type="grpo", beta=0.0)
         grpo.pad_token_id = 0
         vocab, hidden = 16, 8
@@ -2042,7 +2066,8 @@ class TestGRPOGetAction:
         ``stitch_prefix_ids`` tensor, the HF generate path must repeat the stitch
         prefix to match the grouped batch dimension. Otherwise downstream
         ``stitch_completion_after_windowed_hf_generate`` would receive a [1, N]
-        prefix against a [group_size, T] completion."""
+        prefix against a [group_size, T] completion.
+        """
         grpo = _make_cpu_grpo_for_branch_tests(group_size=3)
         seq_len = 4
         prompts = [
@@ -2092,7 +2117,7 @@ class TestGRPOGetAction:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [2])
     @pytest.mark.parametrize(
-        "use_vllm, pretrained_model_name_or_path",
+        ("use_vllm", "pretrained_model_name_or_path"),
         [
             (True, TINY_LLM_FIXTURE_PATH),
         ],
@@ -2178,7 +2203,7 @@ class TestGRPOGetAction:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        "use_vllm, pretrained_model_name_or_path",
+        ("use_vllm", "pretrained_model_name_or_path"),
         [(True, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.gpu
@@ -2243,7 +2268,7 @@ class TestGRPOMoveModelToVllm:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        "use_vllm, pretrained_model_name_or_path",
+        ("use_vllm", "pretrained_model_name_or_path"),
         [(True, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -2451,12 +2476,11 @@ class TestGRPOCalculateAdvantage:
         rewards,
     ):
         stub = _GrpoMathStub(group_size=group_size)
-        with pytest.raises(ValueError) as e:
+        with pytest.raises(
+            ValueError,
+            match=r"Rewards must have a total element count divisible by group_size",
+        ):
             stub._calculate_advantage(rewards)
-        assert (
-            f"Rewards must have a total element count divisible by group_size ({group_size}); got {rewards.numel()} elements."
-            in str(e.value)
-        )
 
     def test_calculate_advantage_mean_only_branch(self):
         stub = _GrpoMathStub(group_size=2, adv_norm="mean_only")
@@ -2601,15 +2625,15 @@ class TestGRPOTurnLevel:
     """
 
     def _stub(self, **kwargs):
-        defaults = dict(
-            clip_coef_min=0.8,
-            clip_coef_max=1.2,
-            beta=0.04,
-            use_kl_advantage_shaping=False,
-            importance_sampling_level="turn",
-            group_size=2,
-            adv_norm="mean_std",
-        )
+        defaults = {
+            "clip_coef_min": 0.8,
+            "clip_coef_max": 1.2,
+            "beta": 0.04,
+            "use_kl_advantage_shaping": False,
+            "importance_sampling_level": "turn",
+            "group_size": 2,
+            "adv_norm": "mean_std",
+        }
         defaults.update(kwargs)
         return _GrpoLossStub(**defaults)
 
@@ -2736,7 +2760,8 @@ class TestGRPOTurnLevel:
 
 class TestGRPOAdvantageGranularityDecoupling:
     """advantage granularity (advantage_granularity) is independent of the IS /
-    ratio-pooling level (importance_sampling_level) for the GRPO family."""
+    ratio-pooling level (importance_sampling_level) for the GRPO family.
+    """
 
     @staticmethod
     def _stub(advantage_granularity, importance_sampling_level):
@@ -2750,7 +2775,7 @@ class TestGRPOAdvantageGranularityDecoupling:
         )
 
     @pytest.mark.parametrize(
-        "advantage_granularity,is_level,expected",
+        ("advantage_granularity", "is_level", "expected"),
         [
             ("auto", "token", "trajectory"),
             ("auto", "turn", "turn"),
@@ -2768,13 +2793,14 @@ class TestGRPOAdvantageGranularityDecoupling:
         assert stub._resolve_advantage_granularity() == expected
 
     @pytest.mark.parametrize(
-        "is_level,adv_shape",
+        ("is_level", "adv_shape"),
         [("token", "turn"), ("trajectory", "turn"), ("turn", "trajectory")],
     )
     def test_decoupled_advantage_is_combos_run(self, is_level, adv_shape):
         """Any (advantage granularity, IS level) pairing produces a finite
         loss — the surrogate broadcasts a per-turn (B,T) or per-trajectory
-        (B,1) advantage against a token/turn/trajectory-pooled ratio."""
+        (B,1) advantage against a token/turn/trajectory-pooled ratio.
+        """
         stub = self._stub("auto", is_level)
         torch.manual_seed(0)
         B, T = 4, 6
@@ -2797,7 +2823,8 @@ class TestGRPOAdvantageGranularityDecoupling:
         loss, kl = stub._grpo_loss_standard(
             mask, log_probs, old, ref, advantages, loss_turn_ids
         )
-        assert torch.isfinite(loss) and torch.isfinite(kl)
+        assert torch.isfinite(loss)
+        assert torch.isfinite(kl)
 
     def test_invalid_token_advantage_rejected(self):
         """GRPO has no token-level advantage; the constructor must reject it."""
@@ -2808,7 +2835,8 @@ class TestGRPOAdvantageGranularityDecoupling:
 def _adv_stub(group_size: int = 2, adv_norm: str = "mean_only"):
     """Loss stub configured for the advantage-branch helpers extracted from
     ``learn`` (``_turn_broadcast_advantages`` / ``_trajectory_advantages``).
-    ``mean_only`` keeps the hand-traced expectations integer-clean."""
+    ``mean_only`` keeps the hand-traced expectations integer-clean.
+    """
     return _GrpoLossStub(
         clip_coef_min=0.8,
         clip_coef_max=1.2,
@@ -2821,7 +2849,8 @@ def _adv_stub(group_size: int = 2, adv_norm: str = "mean_only"):
 
 class TestGRPOTurnBroadcastAdvantages:
     """``_turn_broadcast_advantages``: per-turn group-relative advantages
-    gathered onto token positions via ``turn_ids`` and masked to actions."""
+    gathered onto token positions via ``turn_ids`` and masked to actions.
+    """
 
     def test_broadcasts_per_turn_advantages_to_tokens(self):
         stub = _adv_stub()
@@ -2869,7 +2898,8 @@ class TestGRPOTurnBroadcastAdvantages:
 
 class TestGRPOTrajectoryAdvantages:
     """``_trajectory_advantages``: collapse per-turn rewards to episode
-    returns, then per-trajectory group-relative advantage ``(B, 1)``."""
+    returns, then per-trajectory group-relative advantage ``(B, 1)``.
+    """
 
     def test_collapses_per_turn_rewards_to_episode_returns(self):
         stub = _adv_stub()
@@ -2909,7 +2939,8 @@ class TestGRPOTrajectoryAdvantages:
 class TestGRPOWhitenAdvantages:
     """``_whiten_advantages``: shape-aware whitening over (B, 1) per-trajectory
     and (B, T-1) per-token advantages, with active-sample masking and a
-    <=1-active guard (variance undefined)."""
+    <=1-active guard (variance undefined).
+    """
 
     @staticmethod
     def _stub():
@@ -3049,7 +3080,7 @@ class TestGRPOLoss:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        "use_vllm, pretrained_model_name_or_path",
+        ("use_vllm", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -3120,7 +3151,7 @@ class TestGRPOLearn:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [6])
     @pytest.mark.parametrize(
-        "use_vllm, pretrained_model_name_or_path",
+        ("use_vllm", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -3416,7 +3447,7 @@ class TestGRPOLearn:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        "use_vllm, pretrained_model_name_or_path",
+        ("use_vllm", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -3478,10 +3509,9 @@ class TestGRPOLearn:
 
         with (
             patch.object(grpo, "_loss", side_effect=mock_grpo_loss),
-            pytest.raises(ValueError) as value_error,
+            pytest.raises(ValueError, match=r"Loss is not finite"),
         ):
             grpo.learn((completions, action_masks, rewards))
-        assert "Loss is not finite" in str(value_error.value)
         grpo.clean_up()
 
     def test_grpo_learn_raises_when_loss_not_finite(
@@ -3616,7 +3646,7 @@ class TestGRPOGetLogprobs:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        "use_vllm, pretrained_model_name_or_path",
+        ("use_vllm", "pretrained_model_name_or_path"),
         [
             (False, TINY_LLM_FIXTURE_PATH),
             (False, None),
@@ -3671,7 +3701,7 @@ class TestGRPOBackwardPass:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        "use_vllm, pretrained_model_name_or_path",
+        ("use_vllm", "pretrained_model_name_or_path"),
         [(False, None)],
     )
     @pytest.mark.vllm
@@ -3728,7 +3758,7 @@ class TestGRPOSaveLoadCheckpoint:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        "use_vllm, pretrained_model_name_or_path",
+        ("use_vllm", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -3853,7 +3883,7 @@ class TestGRPOSaveLoadCheckpointResume:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        "use_vllm, pretrained_model_name_or_path",
+        ("use_vllm", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -3935,7 +3965,7 @@ class TestGRPOSaveLoadCheckpointResume:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        "use_vllm, pretrained_model_name_or_path",
+        ("use_vllm", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -3982,7 +4012,7 @@ class TestGRPOClone:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        "use_vllm, pretrained_model_name_or_path",
+        ("use_vllm", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -4070,7 +4100,7 @@ class TestGRPOClone:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        "use_vllm, pretrained_model_name_or_path",
+        ("use_vllm", "pretrained_model_name_or_path"),
         [(True, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -4161,7 +4191,7 @@ class TestGRPOTest:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        "use_vllm, pretrained_model_name_or_path",
+        ("use_vllm", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -4335,9 +4365,10 @@ class TestCloneLlm:
         assert cloned_model.peft_config[cloned_model.active_adapter] == peft_config
 
     def test_clone_llm_peft_raises_error(self):
-        with pytest.raises(ValueError) as e:
+        with pytest.raises(
+            ValueError, match=r"Invalid 'original_model' type: <class 'int'>"
+        ):
             clone_llm(1, 1)
-        assert "Invalid 'original_model' type: <class 'int'>" in str(e.value)
 
 
 class TestGRPOCleanUp:
@@ -4348,7 +4379,7 @@ class TestGRPOCleanUp:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        "use_vllm, pretrained_model_name_or_path",
+        ("use_vllm", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -4397,7 +4428,7 @@ class TestGRPOPreprocessObservation:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        "use_vllm, pretrained_model_name_or_path",
+        ("use_vllm", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -4447,7 +4478,7 @@ class TestGRPOUpdateLr:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        "use_vllm, pretrained_model_name_or_path",
+        ("use_vllm", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -4512,7 +4543,7 @@ class TestGRPOSetReferencePolicy:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        "use_vllm, pretrained_model_name_or_path",
+        ("use_vllm", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -4576,7 +4607,7 @@ class TestGRPOSetReferencePolicy:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [5])
     @pytest.mark.parametrize(
-        "use_vllm, pretrained_model_name_or_path",
+        ("use_vllm", "pretrained_model_name_or_path"),
         [(False, TINY_LLM_FIXTURE_PATH)],
     )
     @pytest.mark.vllm
@@ -4657,7 +4688,7 @@ class TestGRPORecompile:
     @pytest.mark.parametrize("max_tokens", [20])
     @pytest.mark.parametrize("group_size", [2])
     @pytest.mark.parametrize(
-        "use_vllm, pretrained_model_name_or_path",
+        ("use_vllm", "pretrained_model_name_or_path"),
         [
             (False, TINY_LLM_FIXTURE_PATH),
         ],
@@ -4708,15 +4739,15 @@ class TestGRPOVLLMSamplingCorrection:
     """
 
     def _stub(self, **kwargs):
-        defaults = dict(
-            clip_coef_min=0.8,
-            clip_coef_max=1.2,
-            beta=0.0,
-            use_kl_advantage_shaping=False,
-            importance_sampling_level="token",
-            group_size=2,
-            adv_norm="mean_std",
-        )
+        defaults = {
+            "clip_coef_min": 0.8,
+            "clip_coef_max": 1.2,
+            "beta": 0.0,
+            "use_kl_advantage_shaping": False,
+            "importance_sampling_level": "token",
+            "group_size": 2,
+            "adv_norm": "mean_std",
+        }
         defaults.update(kwargs)
         return _GrpoLossStub(**defaults)
 
@@ -4751,7 +4782,7 @@ class TestGRPOVLLMSamplingCorrection:
         assert _vllm_sampled_token_logprobs(out2) == [0.0, 0.0, 0.0]
 
     def test_unit_ratio_when_sampling_equals_old(self):
-        """sampling == old -> ratio exp(0)=1 -> loss identical to baseline."""
+        """Sampling == old -> ratio exp(0)=1 -> loss identical to baseline."""
         stub = self._stub()
         torch.manual_seed(0)
         mask = torch.ones(2, 3)
@@ -4911,7 +4942,8 @@ class TestGRPOVLLMSamplingCorrection:
 
     def test_aligned_and_metrics_skipped_rows_warns_and_sets_metric(self):
         """A row whose captured token count disagrees with the action mask is
-        skipped (ratio 1 fallback), counted in the metrics, and warned once."""
+        skipped (ratio 1 fallback), counted in the metrics, and warned once.
+        """
         stub = self._stub(vllm_importance_sampling_cap=2.0)
         masks = torch.ones(2, 2, dtype=torch.bool)
         old = torch.tensor([[-1.0, -1.0], [-2.0, -2.0]])
@@ -4931,7 +4963,8 @@ class TestGRPOVLLMSamplingCorrection:
         """token-level use_liger_loss=True + captured vLLM logprobs: the
         correction is fused into the kernel (``vllm_is_ratio``), so ``_loss``
         keeps the Liger path and threads ``sampling_log_probs`` through —
-        no fallback warning."""
+        no fallback warning.
+        """
         monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
         monkeypatch.setattr("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True)
         grpo = _make_cpu_grpo_for_branch_tests(
@@ -4985,7 +5018,8 @@ class TestGRPOVLLMSamplingCorrection:
         """trajectory-level (GSPO) use_liger_loss=True + captured vLLM logprobs:
         the per-token reweight can't be pooled into the sequence ratio, so the
         correction warns once and runs the standard path (``_liger_loss`` not
-        called)."""
+        called).
+        """
         monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
         monkeypatch.setattr("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True)
         grpo = _make_cpu_grpo_for_branch_tests(
@@ -5057,7 +5091,8 @@ class TestGRPORealLigerVllmCorrection:
     def test_real_liger_kernel_vllm_is_ratio_gpu(self, loss_type):
         """ratio==1 is a no-op and a constant ratio ``c`` scales the loss by
         ``c`` at ``beta=0`` — the truncated-IS reweight the standard path also
-        applies, here proven through the installed fused kernel."""
+        applies, here proven through the installed fused kernel.
+        """
         from agilerl.algorithms.grpo import LigerFusedLinearGRPOFunction
 
         torch.manual_seed(0)
@@ -5121,7 +5156,7 @@ class TestGRPOInitWarnings:
         grpo.clean_up()
 
     @pytest.mark.parametrize(
-        "level,algo_name", [("turn", "GRPO"), ("trajectory", "GSPO")]
+        ("level", "algo_name"), [("turn", "GRPO"), ("trajectory", "GSPO")]
     )
     def test_init_liger_non_token_level_warns_memory_unbounded(self, level, algo_name):
         with (
@@ -5175,7 +5210,8 @@ class TestGRPOTurnAdvantageLearnPath:
 
     def test_learn_turn_advantage_path_end_to_end(self):
         """Per-turn rewards + turn_ids route learn() through the turn-broadcast
-        advantage branch (and stack turn_ids into the minibatches)."""
+        advantage branch (and stack turn_ids into the minibatches).
+        """
         grpo = _make_cpu_grpo_for_branch_tests(
             group_size=2, update_epochs=1, advantage_granularity="turn"
         )
@@ -5193,7 +5229,8 @@ class TestGRPOTurnAdvantageLearnPath:
 
     def test_learn_liger_turn_level_falls_back_to_standard_path(self):
         """Liger + turn-level IS has no fused kernel: learn() must warn and
-        run the standard path (turn_ids stacked into the minibatches)."""
+        run the standard path (turn_ids stacked into the minibatches).
+        """
         with (
             patch("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True),
             patch("agilerl.algorithms.grpo.HAS_LIGER_KERNEL", True),

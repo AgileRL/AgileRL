@@ -35,7 +35,7 @@ class DummyEnv:
         self.state_size = state_size
         self.vect = vect
         if self.vect:
-            self.state_size = (num_envs,) + self.state_size
+            self.state_size = (num_envs, *self.state_size)
             self.n_envs = num_envs
             self.num_envs = num_envs
         else:
@@ -99,7 +99,7 @@ class TestTD3Init:
     # initialize td3 with valid parameters
     # Initializes all necessary attributes with default values
     @pytest.mark.parametrize(
-        "observation_space, encoder_cls",
+        ("observation_space", "encoder_cls"),
         [
             ("vector_space", EvolvableMLP),
             ("image_space", EvolvableCNN),
@@ -149,7 +149,14 @@ class TestTD3Init:
     # Can initialize td3 with an actor network
     # TODO: This will be deprecated in the future
     @pytest.mark.parametrize(
-        "observation_space, actor_network, critic_1_network, critic_2_network, input_tensor, input_tensor_critic",
+        (
+            "observation_space",
+            "actor_network",
+            "critic_1_network",
+            "critic_2_network",
+            "input_tensor",
+            "input_tensor_critic",
+        ),
         [
             (
                 "vector_space",
@@ -209,7 +216,7 @@ class TestTD3Init:
         td3.clean_up()
 
     @pytest.mark.parametrize(
-        "invalid_kind, error_match",
+        ("invalid_kind", "error_match"),
         [
             ("non_evolvable_actor", "actor network is of type"),
             ("non_evolvable_critic_0", "critic network at index 0"),
@@ -253,7 +260,14 @@ class TestTD3Init:
     # Can initialize td3 with an actor network
     # TODO: This will be deprecated in the future
     @pytest.mark.parametrize(
-        "observation_space, actor_network, critic_1_network, critic_2_network, input_tensor, input_tensor_critic",
+        (
+            "observation_space",
+            "actor_network",
+            "critic_1_network",
+            "critic_2_network",
+            "input_tensor",
+            "input_tensor_critic",
+        ),
         [
             (
                 "vector_space",
@@ -313,7 +327,7 @@ class TestTD3Init:
     # Can initialize td3 with an actor network
     # TODO: This will be deprecated in the future
     @pytest.mark.parametrize(
-        "observation_space, actor_network, input_tensor",
+        ("observation_space", "actor_network", "input_tensor"),
         [
             (
                 "image_space",
@@ -418,13 +432,12 @@ class TestTD3Init:
         actor_network = "dummy"
         critic_networks = "dummy"
         with pytest.raises(AssertionError):
-            td3 = TD3(
+            TD3(
                 vector_space,
                 copy.deepcopy(vector_space),
                 actor_network=actor_network,
                 critic_networks=critic_networks,
             )
-            assert td3
 
 
 class TestTD3GetAction:
@@ -517,7 +530,7 @@ class TestTD3Learn:
         ["vector_space", "image_space", "dict_space"],
     )
     @pytest.mark.parametrize(
-        "min_action, max_action",
+        ("min_action", "max_action"),
         [(-1, 1), ([-1, 0], [1, 1]), ([-1, -1], [0, 1]), ([-1, -2], [1, 0])],
     )
     def test_learns_from_experiences(

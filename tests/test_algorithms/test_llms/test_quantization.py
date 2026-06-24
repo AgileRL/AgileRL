@@ -20,8 +20,8 @@ and verify quantization actually happened. Validates that:
 
 from __future__ import annotations
 
-import types
 import json
+import types
 from unittest import mock
 
 import pytest
@@ -37,36 +37,36 @@ pytest.importorskip(
     reason="quantization tests require bitsandbytes (linux-only optional dep).",
 )
 
-import bitsandbytes as bnb  # noqa: E402
-import torch  # noqa: E402
-from peft import LoraConfig  # noqa: E402
-from transformers import BitsAndBytesConfig  # noqa: E402
+import bitsandbytes as bnb
+import torch
+from peft import LoraConfig
+from transformers import BitsAndBytesConfig
 
-from agilerl.utils.algo_utils import VLLMConfig  # noqa: E402
-from agilerl.utils.llm_utils import (  # noqa: E402
+from agilerl.algorithms.core.base import LLMAlgorithm
+from agilerl.algorithms.reinforce_llm import REINFORCE
+from agilerl.utils.algo_utils import VLLMConfig
+from agilerl.utils.llm_utils import (
+    _json_safe_value,
     adapt_lora_config_for_model,
-    cuda_tensor_bytes_in_module,
-    offload_colocated_trainer_from_gpu,
     build_bnb_quantization_config,
     build_clippable_linear_lora_target_regex,
     build_clippable_linear_lora_target_suffixes,
     build_scoped_lora_target_regex,
     build_vllm_llm_init_kwargs,
     build_vllm_rollout_lora_request,
-    resolve_vllm_max_num_batched_tokens,
     create_model_from_name_or_path,
-    list_peft_matched_module_keys,
-    peft_target_key_matches,
-    _json_safe_value,
+    cuda_tensor_bytes_in_module,
     filter_peft_state_dict_for_vllm_lora,
+    list_peft_matched_module_keys,
+    offload_colocated_trainer_from_gpu,
+    peft_target_key_matches,
     remap_peft_lora_key_for_vllm,
     resolve_peft_adapter_export_dir,
     resolve_vllm_max_lora_rank,
+    resolve_vllm_max_num_batched_tokens,
 )
-from agilerl.algorithms.core.base import LLMAlgorithm  # noqa: E402
-from agilerl.algorithms.reinforce_llm import REINFORCE  # noqa: E402
-from agilerl.utils.utils import _prepare_llm_algo_kwargs  # noqa: E402
-from tests import TINY_LLM_FIXTURE_PATH  # noqa: E402
+from agilerl.utils.utils import _prepare_llm_algo_kwargs
+from tests import TINY_LLM_FIXTURE_PATH
 
 
 class TestCreateModelFromNameOrPath:

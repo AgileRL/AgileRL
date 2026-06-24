@@ -10,8 +10,8 @@ from torch import nn, optim
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
     MutationRegistry,
-    NetworkGroup,
     NetworkConfig,
+    NetworkGroup,
     OptimizerConfig,
     RLParameter,
     make_network_group,

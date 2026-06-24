@@ -41,7 +41,7 @@ class DummyNeuralTS(NeuralTS):
 class DummyBanditEnv:
     def __init__(self, state_size, arms):
         self.arms = arms
-        self.state_size = (arms,) + state_size
+        self.state_size = (arms, *state_size)
         self.n_envs = 1
 
     def reset(self):
@@ -57,7 +57,7 @@ class DummyBanditEnv:
 class TestNeuralTSInit:
     # initialize NeuralTS with valid parameters
     @pytest.mark.parametrize(
-        "observation_space, encoder_cls",
+        ("observation_space", "encoder_cls"),
         [
             ("vector_space", EvolvableMLP),
             ("image_space", EvolvableCNN),
@@ -92,7 +92,7 @@ class TestNeuralTSInit:
     # Can initialize NeuralTS with an actor network
     # TODO: Will be deprecated in the future
     @pytest.mark.parametrize(
-        "observation_space, actor_network, input_tensor",
+        ("observation_space", "actor_network", "input_tensor"),
         [
             ("vector_space", "simple_mlp", torch.randn(1, 4)),
             ("image_space", "simple_cnn", torch.randn(1, 3, 32, 32)),
@@ -168,13 +168,12 @@ class TestNeuralTSInit:
     ):
         actor_network = "dummy"
 
-        with pytest.raises(TypeError) as a:
-            bandit = NeuralTS(vector_space, discrete_space, actor_network=actor_network)
-            assert bandit
-            assert (
-                str(a.value)
-                == f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule"
-            )
+        with pytest.raises(TypeError) as exc_info:
+            NeuralTS(vector_space, discrete_space, actor_network=actor_network)
+        assert (
+            str(exc_info.value)
+            == f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule."
+        )
 
     def test_init_raises_on_invalid_learn_step(self, vector_space, discrete_space):
         with pytest.raises(
@@ -205,7 +204,8 @@ class TestNeuralTSGetAction:
         action = bandit.get_action(state, action_mask)
 
         assert action.is_integer()
-        assert action >= 0 and action < discrete_space.n
+        assert action >= 0
+        assert action < discrete_space.n
         bandit.clean_up()
 
     # Returns the expected action when given a state observation and action mask.
@@ -391,7 +391,7 @@ class TestNeuralTSClone:
 
     # TODO: Will be deprecated in the future
     @pytest.mark.parametrize(
-        "observation_space, actor_network, input_tensor",
+        ("observation_space", "actor_network", "input_tensor"),
         [("vector_space", "simple_mlp", torch.randn(1, 4))],
     )
     def test_clone_with_make_evo(

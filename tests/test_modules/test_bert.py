@@ -143,7 +143,7 @@ class TestEvolvableBERTRemoveDecoderLayer:
 
 class TestEvolvableBERTAddNode:
     @pytest.mark.parametrize(
-        "network, hidden_layer, numb_new_nodes",
+        ("network", "hidden_layer", "numb_new_nodes"),
         [
             (None, 0, None),
             ("encoder", 0, None),
@@ -177,7 +177,7 @@ class TestEvolvableBERTAddNode:
 
 class TestEvolvableBERTRemoveNode:
     @pytest.mark.parametrize(
-        "network, hidden_layer, numb_new_nodes",
+        ("network", "hidden_layer", "numb_new_nodes"),
         [
             (None, 0, None),
             ("encoder", 0, None),
@@ -247,20 +247,22 @@ class TestEvolvableBERTEncode:
         nested = MagicMock()
         nested.to_padded_tensor.return_value = torch.zeros(1, 4, 512)
 
-        with patch.object(
-            model,
-            "check_encoder_sparsity_fast_path",
-            return_value=(torch.zeros(1, 4, 512), True, None),
-        ):
-            with patch.object(
+        with (
+            patch.object(
+                model,
+                "check_encoder_sparsity_fast_path",
+                return_value=(torch.zeros(1, 4, 512), True, None),
+            ),
+            patch.object(
                 model.encoder[layer_key],
                 "forward",
                 return_value=nested,
-            ):
-                encoder_output, _ = model.encode(
-                    src,
-                    src_key_padding_mask=kp_mask,
-                )
+            ),
+        ):
+            encoder_output, _ = model.encode(
+                src,
+                src_key_padding_mask=kp_mask,
+            )
         nested.to_padded_tensor.assert_called_once_with(0.0)
         assert encoder_output.shape == (1, 4, 512)
 
@@ -331,7 +333,15 @@ class TestEvolvableBERTCheckEncoderSparsityFastPath:
 
 class TestCanonicalMask:
     @pytest.mark.parametrize(
-        "mask, mask_name, other_type, other_name, target_type, check_other, error",
+        (
+            "mask",
+            "mask_name",
+            "other_type",
+            "other_name",
+            "target_type",
+            "check_other",
+            "error",
+        ),
         [
             (torch.zeros(4, 1), "mask", "na", "other", "int", True, None),
             (torch.zeros(4, 1).bool(), "mask", "na", "other", torch.float, True, None),

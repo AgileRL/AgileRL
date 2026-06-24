@@ -1,6 +1,8 @@
-import pytest
+from typing import ClassVar
 from unittest.mock import Mock
+
 import numpy as np
+import pytest
 import torch
 from torch import nn
 
@@ -18,7 +20,7 @@ from agilerl.protocols import MutationType
 
 class MockMethod:
     _mutation_type = MutationType.NODE
-    _recreate_kwargs = {}
+    _recreate_kwargs: ClassVar[dict[str, object]] = {}
 
     def __call__(self, *args, **kwargs):
         return {"mutation": "mock"}
@@ -238,7 +240,7 @@ class TestEvolvableModuleDisableMutations:
         assert module.node_mutation_methods == []
 
     @pytest.mark.parametrize(
-        "mut_type, expect_error", [(99, ValueError), ("invalid", ValueError)]
+        ("mut_type", "expect_error"), [(99, ValueError), ("invalid", ValueError)]
     )
     def test_evolvable_module_disable_mutations_invalid_type(
         self, mut_type, expect_error
@@ -970,5 +972,7 @@ class TestModuleDictFilterMutationMethods:
         assert "m1.mut" in methods
         md.change_activation("Sigmoid", output=False)
         md.filter_mutation_methods("mut")
-        assert md["m1"].changed and md["m2"].changed
-        assert md["m1"].filtered and md["m2"].filtered
+        assert md["m1"].changed
+        assert md["m2"].changed
+        assert md["m1"].filtered
+        assert md["m2"].filtered

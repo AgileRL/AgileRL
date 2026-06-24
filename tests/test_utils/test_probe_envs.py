@@ -47,7 +47,14 @@ from agilerl.utils.probe_envs import (
 
 
 @pytest.mark.parametrize(
-    "env_class, exp_state, exp_reward, exp_terminated, exp_truncated, exp_info",
+    (
+        "env_class",
+        "exp_state",
+        "exp_reward",
+        "exp_terminated",
+        "exp_truncated",
+        "exp_info",
+    ),
     [
         (ConstantRewardEnv, 0, 1, True, False, {}),
         (ConstantRewardImageEnv, 0, 1, True, False, {}),
@@ -94,7 +101,14 @@ def test_constant_reward_envs(
 
 
 @pytest.mark.parametrize(
-    "env_class, exp_state, exp_reward, exp_terminated, exp_truncated, exp_info",
+    (
+        "env_class",
+        "exp_state",
+        "exp_reward",
+        "exp_terminated",
+        "exp_truncated",
+        "exp_info",
+    ),
     [
         (ObsDependentRewardEnv, 0, -1, True, False, {}),
         (ObsDependentRewardEnv, 1, 1, True, False, {}),
@@ -174,7 +188,7 @@ def test_observation_dependent_reward_envs(
 
 
 @pytest.mark.parametrize(
-    "env_class, exp_state, exp_reward, exp_truncated, exp_info",
+    ("env_class", "exp_state", "exp_reward", "exp_truncated", "exp_info"),
     [
         (DiscountedRewardEnv, 0, 0, False, {}),
         (DiscountedRewardEnv, 1, 1, False, {}),
@@ -228,7 +242,15 @@ def test_discounted_reward_envs(
 
 
 @pytest.mark.parametrize(
-    "env_class, exp_state, exp_action, exp_reward, exp_terminated, exp_truncated, exp_info",
+    (
+        "env_class",
+        "exp_state",
+        "exp_action",
+        "exp_reward",
+        "exp_terminated",
+        "exp_truncated",
+        "exp_info",
+    ),
     [
         (FixedObsPolicyEnv, 0, 0, -1, True, False, {}),
         (FixedObsPolicyEnv, 0, 1, 1, True, False, {}),
@@ -270,7 +292,14 @@ def test_discrete_actions_fixed_observation_policy_reward_envs(
 
 
 @pytest.mark.parametrize(
-    "env_class, exp_state, exp_action, exp_terminated, exp_truncated, exp_info",
+    (
+        "env_class",
+        "exp_state",
+        "exp_action",
+        "exp_terminated",
+        "exp_truncated",
+        "exp_info",
+    ),
     [
         (FixedObsPolicyContActionsEnv, 0, 1, True, False, {}),
         (FixedObsPolicyContActionsImageEnv, 0, 1, True, False, {}),
@@ -314,7 +343,14 @@ def test_continuous_actions_fixed_observation_policy_reward_envs(
 
 
 @pytest.mark.parametrize(
-    "env_class, same_reward, diff_reward, exp_terminated, exp_truncated, exp_info",
+    (
+        "env_class",
+        "same_reward",
+        "diff_reward",
+        "exp_terminated",
+        "exp_truncated",
+        "exp_info",
+    ),
     [
         (PolicyEnv, 1, -1, True, False, {}),
         (PolicyImageEnv, 1, -1, True, False, {}),
@@ -358,7 +394,14 @@ def test_discrete_actions_policy_envs(
 
 
 @pytest.mark.parametrize(
-    "env_class, reward_goal_0, reward_goal_1, exp_terminated, exp_truncated, exp_info",
+    (
+        "env_class",
+        "reward_goal_0",
+        "reward_goal_1",
+        "exp_terminated",
+        "exp_truncated",
+        "exp_info",
+    ),
     [
         (PolicyContActionsEnv, 0, 1, True, False, {}),
         (PolicyContActionsImageEnv, 0, 1, True, False, {}),
@@ -413,7 +456,14 @@ def test_continuous_actions_policy_envs(
 
 
 @pytest.mark.parametrize(
-    "env_class, reward_goal_0, reward_goal_1, exp_terminated, exp_truncated, exp_info",
+    (
+        "env_class",
+        "reward_goal_0",
+        "reward_goal_1",
+        "exp_terminated",
+        "exp_truncated",
+        "exp_info",
+    ),
     [
         (PolicyContActionsImageEnvSimple, 1, 0, True, False, {}),
     ],

@@ -16,13 +16,13 @@ from agilerl.networks.actors import StochasticActor
 from agilerl.networks.value_networks import ValueNetwork
 from agilerl.utils.evolvable_networks import get_default_encoder_config
 from agilerl.wrappers.make_evolvable import MakeEvolvable
-from tests.pz_vector_test_utils import make_sync_multi_agent_vec_env
 from tests.helper_functions import (
     assert_not_equal_state_dict,
     assert_state_dicts_equal,
     get_sample_from_space,
     skip_torch_compile_on_windows_cpu,
 )
+from tests.pz_vector_test_utils import make_sync_multi_agent_vec_env
 
 
 class DummyMultiEnv(ParallelEnv):
@@ -120,7 +120,7 @@ class MultiAgentCNNCritic(nn.Module):
         return self.fc2(x)
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def mlp_actor(observation_spaces, action_spaces, request):
     observation_spaces = request.getfixturevalue(observation_spaces)
     action_spaces = request.getfixturevalue(action_spaces)
@@ -132,7 +132,7 @@ def mlp_actor(observation_spaces, action_spaces, request):
     )
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def mlp_critic(observation_spaces, request):
     observation_spaces = request.getfixturevalue(observation_spaces)
     return nn.Sequential(
@@ -142,17 +142,17 @@ def mlp_critic(observation_spaces, request):
     )
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def cnn_actor():
     return MultiAgentCNNActor()
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def cnn_critic():
     return MultiAgentCNNCritic()
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def experiences(
     batch_size,
     observation_spaces,
@@ -204,7 +204,7 @@ def experiences(
     return states, actions, log_probs, rewards, dones, values, next_state, next_done
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def vectorized_experiences(
     batch_size,
     vect_dim,
@@ -274,7 +274,7 @@ def vectorized_experiences(
 class TestIPPOInit:
     @pytest.mark.parametrize(
         "mode",
-        (None, 0, False, "default", "reduce-overhead", "max-autotune"),
+        [None, 0, False, "default", "reduce-overhead", "max-autotune"],
     )
     def test_torch_compiler_no_error(self, ma_vector_space, ma_discrete_space, mode):
         ippo = IPPO(
@@ -299,7 +299,7 @@ class TestIPPOInit:
         ippo.clean_up()
 
     @pytest.mark.gpu
-    @pytest.mark.parametrize("mode", (1, True, "max-autotune-no-cudagraphs"))
+    @pytest.mark.parametrize("mode", [1, True, "max-autotune-no-cudagraphs"])
     def test_torch_compiler_error(
         self,
         mode,
@@ -604,7 +604,7 @@ class TestIPPOInit:
 
     @pytest.mark.gpu
     @pytest.mark.parametrize(
-        "observation_spaces, net",
+        ("observation_spaces", "net"),
         [
             ("ma_image_space", "cnn"),
             ("ma_vector_space", "mlp"),
@@ -735,7 +735,7 @@ class TestIPPOInit:
             )
 
     @pytest.mark.parametrize(
-        "observation_spaces, action_spaces, actors, critics",
+        ("observation_spaces", "action_spaces", "actors", "critics"),
         [
             (
                 "ma_vector_space",

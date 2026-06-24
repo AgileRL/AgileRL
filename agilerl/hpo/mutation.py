@@ -36,6 +36,10 @@ BanditAlgorithm = NeuralUCB | NeuralTS
 torch._dynamo.config.cache_size_limit = 64
 torch._logging.set_logs(dynamo=logging.FATAL)
 
+_UNSUPPORTED_ACTIVATION_MUTATION_ALGOS = frozenset(
+    {"PPO", "DDPG", "TD3", "IPPO", "MADDPG", "MATD3"},
+)
+
 
 def set_global_seed(seed: int | None) -> None:
     """Set the global seed for random number generators.
@@ -464,16 +468,16 @@ class Mutations:
         # NOTE: Could set up an algorithm registry to make algo checks more robust
         # OR perform activation mutations within evolvable modules directly and disable
         # on an algorithm basis
-        if isinstance(individual, LLMAlgorithm) or individual.algo in [
-            "PPO",
-            "DDPG",
-            "TD3",
-            "IPPO",
-            "MADDPG",
-            "MATD3",
-        ]:
+        if isinstance(individual, LLMAlgorithm) or (
+            individual.algo in _UNSUPPORTED_ACTIVATION_MUTATION_ALGOS
+        ):
+            label = (
+                "LLM algorithms"
+                if isinstance(individual, LLMAlgorithm)
+                else individual.algo
+            )
             warnings.warn(
-                f"Activation mutations are not supported for {individual.algo}.",
+                f"Activation mutations are not supported for {label}. Skipping mutation.",
                 stacklevel=2,
             )
             individual.mut = "None"

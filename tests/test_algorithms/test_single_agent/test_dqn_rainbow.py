@@ -34,7 +34,7 @@ class DummyEnv:
         self.state_size = state_size
         self.vect = vect
         if self.vect:
-            self.state_size = (num_envs,) + self.state_size
+            self.state_size = (num_envs, *self.state_size)
             self.n_envs = num_envs
             self.num_envs = num_envs
         else:
@@ -56,7 +56,7 @@ class DummyEnv:
 class TestRainbowDQNInit:
     # initialize DQN with valid parameters
     @pytest.mark.parametrize(
-        "observation_space, encoder_cls",
+        ("observation_space", "encoder_cls"),
         [
             ("vector_space", EvolvableMLP),
             ("image_space", EvolvableCNN),
@@ -95,7 +95,7 @@ class TestRainbowDQNInit:
         dqn.clean_up()
 
     @pytest.mark.parametrize(
-        "observation_space, encoder_cls",
+        ("observation_space", "encoder_cls"),
         [
             ("vector_space", EvolvableMLP),
         ],
@@ -151,18 +151,17 @@ class TestRainbowDQNInit:
     ):
         actor_network = "dummy"
 
-        with pytest.raises(TypeError) as a:
-            dqn = RainbowDQN(vector_space, discrete_space, actor_network=actor_network)
-            assert dqn
-            assert (
-                str(a.value)
-                == f"'actor_network' argument is of type {type(actor_network)}, but must be of type nn.Module."
-            )
+        with pytest.raises(TypeError) as exc_info:
+            RainbowDQN(vector_space, discrete_space, actor_network=actor_network)
+        assert (
+            str(exc_info.value)
+            == f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule."
+        )
 
     # Can initialize DQN with an actor network
     # TODO: This will be deprecated in the future
     @pytest.mark.parametrize(
-        "observation_space, actor_network, input_tensor",
+        ("observation_space", "actor_network", "input_tensor"),
         [
             ("vector_space", "simple_mlp", torch.randn(1, 4)),
             (
@@ -229,7 +228,8 @@ class TestRainbowDQNGetAction:
         action = dqn.get_action(state, action_mask)[0]
 
         assert action.is_integer()
-        assert action >= 0 and action < discrete_space.n
+        assert action >= 0
+        assert action < discrete_space.n
 
         action_mask = np.array([0, 1])
 

@@ -13,6 +13,7 @@ from peft import LoraConfig
 from torch import nn
 from transformers.configuration_utils import PretrainedConfig
 from transformers.generation.configuration_utils import GenerationConfig
+from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 
 from agilerl.algorithms.core import ActionResult
@@ -26,7 +27,6 @@ from tests.utils import (
     assert_vllm_get_action_contract,
     make_mock_vllm_instance,
 )
-from transformers.modeling_outputs import CausalLMOutputWithPast
 
 
 class DummyConfig(PretrainedConfig):
@@ -47,7 +47,8 @@ class DummyConfig(PretrainedConfig):
 
 class DummyCausalInner(PreTrainedModel):
     """Tiny causal LM used as ``pretrained_model`` inside
-    :class:`~agilerl.utils.ppo_value_head.AutoModelForCausalLMWithValueHead`."""
+    :class:`~agilerl.utils.ppo_value_head.AutoModelForCausalLMWithValueHead`.
+    """
 
     config_class = DummyConfig
     base_model_prefix = "dummy_inner"
@@ -247,7 +248,7 @@ def generate_ppo(
         )
         vllm_config = None
 
-    ppo = LLMPPO(
+    return LLMPPO(
         actor_network=actor if not from_name else None,
         model_name=pretrained_model_name_or_path if from_name else None,
         lr_actor=lr_actor,
@@ -276,10 +277,9 @@ def generate_ppo(
         # regardless of liger-kernel availability.
         use_liger_loss=False,
     )
-    return ppo
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def ppo_factory():
     return generate_ppo
 
@@ -494,7 +494,8 @@ class TestPPOInit:
 
     def test_init_action_granularity_deprecated_warns_and_overrides(self):
         """The legacy ``action_granularity`` kwarg warns and is carried over
-        into ``advantage_granularity``."""
+        into ``advantage_granularity``.
+        """
         with pytest.warns(DeprecationWarning, match="action_granularity is deprecated"):
             ppo = _cpu_llmppo(action_granularity="turn")
         assert ppo.advantage_granularity == "turn"
@@ -505,7 +506,8 @@ class TestPPOInit:
     ):
         """Liger + an explicit non-token IS level is permitted but not
         memory-bounded; the constructor emits the canonical warning once via
-        the base helper."""
+        the base helper.
+        """
         monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
         monkeypatch.setattr("agilerl.algorithms.ppo_llm.HAS_LIGER_KERNEL", True)
         with pytest.warns(UserWarning, match="NOT memory-bounded"):
@@ -1202,8 +1204,8 @@ class TestPPOTest:
     def test_llmppo_test_method_token_observation_wrapper_branch(self):
         from transformers import AutoTokenizer
 
-        from agilerl.utils.probe_envs_llm import ConstantTargetEnv
         from agilerl.llm_envs import TokenObservationWrapper
+        from agilerl.utils.probe_envs_llm import ConstantTargetEnv
 
         tok = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
         if tok.pad_token_id is None:
@@ -1232,7 +1234,8 @@ class TestPPOLossLiger:
 
     def test_raises_when_liger_unavailable(self) -> None:
         """``_ppo_loss_liger`` raises ImportError when HAS_LIGER_KERNEL is
-        False, with a message instructing the user to disable the flag."""
+        False, with a message instructing the user to disable the flag.
+        """
         ppo = _cpu_llmppo()
         ids = torch.randint(0, 50, (2, 5), dtype=torch.long)
         mask = torch.ones(2, 4, dtype=torch.float32)
@@ -1263,7 +1266,8 @@ class TestPPOLossLiger:
     def test_token_mode_drives_actor_and_critic_forwards(self) -> None:
         """End-to-end: with the Liger Function mocked, ``_ppo_loss_liger``
         runs both the actor pre-hook capture and the critic forward, and
-        returns the right metric dict shape."""
+        returns the right metric dict shape.
+        """
         ppo = _cpu_llmppo(beta=0.01, clip_coef=0.2, vf_coef=0.5)
         B, T = 2, 5
         ids = torch.randint(1, 50, (B, T), dtype=torch.long)
@@ -1351,7 +1355,8 @@ class TestPPOLossLiger:
 
     def test_turn_mode_passes_turn_args_to_liger(self) -> None:
         """Turn-granularity passes ``turn_ids`` and ``max_turns`` into the
-        Liger Function and uses pooled per-turn advantages."""
+        Liger Function and uses pooled per-turn advantages.
+        """
         ppo = _cpu_llmppo(beta=0.0, advantage_granularity="turn")
         B, T = 2, 6
         ids = torch.randint(1, 50, (B, T), dtype=torch.long)
@@ -1395,7 +1400,8 @@ class TestPPOLossLiger:
 
     def test_token_mode_fuses_vllm_is_ratio(self) -> None:
         """token-level IS with captured vLLM logprobs fuses the clamped
-        trainer/vLLM ratio into the kernel via the ``vllm_is_ratio`` kwarg."""
+        trainer/vLLM ratio into the kernel via the ``vllm_is_ratio`` kwarg.
+        """
         ppo = _cpu_llmppo(beta=0.0)
         B, T = 2, 6
         ids = torch.randint(1, 50, (B, T), dtype=torch.long)
@@ -1432,7 +1438,8 @@ class TestPPOLossLiger:
     def test_trajectory_is_level_pools_advantages_to_per_sample_scalar(self) -> None:
         """An explicit trajectory IS level pools the per-token advantages to a
         masked per-completion mean ``(B, 1)`` for the Liger Function (and emits
-        the canonical not-memory-bounded warning at loss time)."""
+        the canonical not-memory-bounded warning at loss time).
+        """
         ppo = _cpu_llmppo(beta=0.0, importance_sampling_level="trajectory")
         B, T = 2, 5
         ids = torch.randint(1, 50, (B, T), dtype=torch.long)
@@ -1447,20 +1454,20 @@ class TestPPOLossLiger:
         with (
             patch("agilerl.algorithms.ppo_llm.HAS_LIGER_KERNEL", True),
             patch("agilerl.algorithms.ppo_llm.apply_fused_policy_loss") as mock_fn,
-            pytest.warns(UserWarning, match="NOT memory-bounded"),
         ):
             mock_fn.return_value = (torch.tensor(0.5, requires_grad=True), fake_aux)
-            ppo._ppo_loss_liger(
-                ids,
-                mask,
-                zeros,
-                zeros,
-                zeros,
-                adv,
-                zeros,
-                turn_ids,
-                "token",
-            )
+            with pytest.warns(UserWarning, match="NOT memory-bounded"):
+                ppo._ppo_loss_liger(
+                    ids,
+                    mask,
+                    zeros,
+                    zeros,
+                    zeros,
+                    adv,
+                    zeros,
+                    turn_ids,
+                    "token",
+                )
 
         call = mock_fn.call_args
         # Masked means: row 0 -> (1 + 3 + 5) / 3 = 3; row 1 -> 20 / 4 = 5.
@@ -1475,7 +1482,8 @@ class TestPPOLearnWithLiger:
     The branch calls ``_ppo_loss_liger`` once per minibatch, runs
     backward, and accumulates the four ``aux`` metrics + ``vf_loss``.
     We stub ``_ppo_loss_liger`` to a fake (loss, metrics) tuple so the
-    test stays CPU-only and doesn't require ``liger-kernel``."""
+    test stays CPU-only and doesn't require ``liger-kernel``.
+    """
 
     def test_learn_use_liger_loss_drives_ppo_loss_liger(self, monkeypatch):
         # ``use_liger_loss=True`` would normally trip the construct-time
@@ -1528,7 +1536,8 @@ class TestPPOLearnWithLiger:
     def test_learn_liger_token_with_sampling_logps_uses_fused_kernel(self, monkeypatch):
         """token-level use_liger_loss=True + captured vLLM logprobs: the
         correction is fused into the kernel (``vllm_is_ratio``), so learn()
-        keeps the fused path and threads ``sampling_log_probs`` through."""
+        keeps the fused path and threads ``sampling_log_probs`` through.
+        """
         monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
         monkeypatch.setattr("agilerl.algorithms.ppo_llm.HAS_LIGER_KERNEL", True)
         # Force token-level IS so the fused correction path is exercised
@@ -1585,7 +1594,8 @@ class TestPPOLearnWithLiger:
     ):
         """trajectory-level use_liger_loss=True + captured vLLM logprobs: the
         per-token reweight can't be pooled into the sequence ratio, so learn()
-        warns once and routes the minibatch through the standard PyTorch path."""
+        warns once and routes the minibatch through the standard PyTorch path.
+        """
         monkeypatch.setattr("agilerl.algorithms.core.base.HAS_LIGER_KERNEL", True)
         monkeypatch.setattr("agilerl.algorithms.ppo_llm.HAS_LIGER_KERNEL", True)
         ppo = _cpu_llmppo(
@@ -1679,7 +1689,7 @@ class _CtxFreeValueActor(nn.Module):
         self.value_head = nn.Linear(hidden, 1)
         self.last_input_shape: tuple[int, ...] | None = None
 
-    def forward(self, input_ids=None, **kwargs):  # noqa: D401 - test stub
+    def forward(self, input_ids=None, **kwargs):
         self.last_input_shape = tuple(input_ids.shape)
         h = self.embed(input_ids)  # (rows, S, H)
         value = self.value_head(h).squeeze(-1)  # (rows, S)
@@ -1775,7 +1785,8 @@ class TestPPOSequencePacking:
 
 class TestPPOSaveLoadValueHead:
     """PPO differs from the non-critic LLM algos: it carries a value head
-    (``v_head`` Linear) that must survive a checkpoint round-trip."""
+    (``v_head`` Linear) that must survive a checkpoint round-trip.
+    """
 
     @staticmethod
     def _build(model_factory):
@@ -1805,7 +1816,8 @@ class TestPPOSaveLoadValueHead:
         self, tmp_path, model_factory
     ):
         """save_checkpoint -> load_checkpoint must restore the value head and the
-        actor LoRA adapter (and not crash on optimizer metadata)."""
+        actor LoRA adapter (and not crash on optimizer metadata).
+        """
         ppo = self._build(model_factory)
         unwrapped = ppo._get_unwrapped_actor()
         # Make the value head + actor LoRA clearly non-default before saving.

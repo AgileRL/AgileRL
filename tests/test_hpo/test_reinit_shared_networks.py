@@ -1,4 +1,4 @@
-import pytest
+from typing import ClassVar
 
 from agilerl.hpo.mutation import Mutations, reinit_shared_networks
 from agilerl.modules.mlp import EvolvableMLP
@@ -8,7 +8,7 @@ class TestReinitSharedNetworksDecorator:
     def test_recompiles_and_reinits_shared_networks(self, monkeypatch, device):
         class DummyGroup:
             eval_network = "actor"
-            shared_networks = ["target_actor"]
+            shared_networks: ClassVar[list[str]] = ["target_actor"]
 
         class DummyIndividual:
             mut = "arch"

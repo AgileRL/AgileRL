@@ -1,5 +1,6 @@
 import os
 import sys
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -183,7 +184,7 @@ class TestApplyFsdp2:
                 self.lin = nn.Linear(2, 2)
 
         class Model(nn.Module):
-            _no_split_modules = ["Block"]
+            _no_split_modules: ClassVar = ["Block"]
 
             def __init__(self):
                 super().__init__()

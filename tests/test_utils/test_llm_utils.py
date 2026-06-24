@@ -1,4 +1,3 @@
-from contextlib import contextmanager
 import json
 import logging
 import re
@@ -6,7 +5,6 @@ import sys
 import types
 from pathlib import Path
 from types import SimpleNamespace
-
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -17,9 +15,9 @@ pytest.importorskip("datasets", reason="LLM dependencies not installed")
 
 from datasets import Dataset as Datasets
 from torch import nn
-from transformers import AutoTokenizer
 from torch.utils.data import DataLoader
-from tests import TINY_LLM_FIXTURE_PATH
+from transformers import AutoTokenizer
+
 from agilerl.utils import llm_utils as llm_utils_module
 from agilerl.utils.distributed import (
     FSDPConfig,
@@ -42,8 +40,10 @@ from agilerl.utils.llm_utils import (
     build_scoped_lora_target_regex,
     build_vllm_llm_init_kwargs,
     build_vllm_rollout_lora_request,
+    calculate_k3_kl,
     clipped_is_surrogate,
     collect_trainable_param_stats,
+    compare_responses,
     create_model_from_name_or_path,
     cuda_tensor_bytes_in_module,
     discover_clippable_inner_linear_module_keys,
@@ -74,14 +74,13 @@ from agilerl.utils.llm_utils import (
     resolve_peft_adapter_export_dir,
     resolve_vllm_max_lora_rank,
     resolve_vllm_max_num_batched_tokens,
+    sample_eval_prompts,
     save_peft_adapter_for_vllm_rollout,
     stitch_completion_after_windowed_hf_generate,
     stitch_completion_after_windowed_vllm_generate,
-    compare_responses,
-    sample_eval_prompts,
-    calculate_k3_kl,
     validate_importance_sampling_level,
 )
+from tests import TINY_LLM_FIXTURE_PATH
 
 DUMMY_CONVERSATION_TEMPLATE = [
     {
@@ -480,8 +479,11 @@ class TestReasoningGymReset:
             conversation_template=DUMMY_CONVERSATION_TEMPLATE,
             data_batch_size_per_gpu=data_batch_size,
         )
-        with pytest.warns():
-            env.reset()
+        env.reset()
+        with pytest.warns(
+            UserWarning,
+            match=r"env\.reset\(\) called more than once sequentially",
+        ):
             env.reset()
 
 
@@ -829,7 +831,7 @@ class TestCompareResponses:
 
         mock_input.assert_not_called()
 
-    @pytest.mark.parametrize("do_sample,temperature", [(False, 1.0), (True, 0.7)])
+    @pytest.mark.parametrize(("do_sample", "temperature"), [(False, 1.0), (True, 0.7)])
     def test_compare_responses_generation_kwargs_forwarded(
         self, do_sample, temperature
     ):
@@ -1155,7 +1157,7 @@ class TestLlmUtilsDeprecatedReexports:
         import agilerl.utils.llm_utils as llm_utils_module
 
         with pytest.raises(AttributeError, match="has no attribute"):
-            llm_utils_module._nope_definitely_not_here
+            _ = llm_utils_module._nope_definitely_not_here
 
     def test_dir_includes_deprecated_names(self):
         import agilerl.utils.llm_utils as llm_utils_module
@@ -1279,7 +1281,8 @@ class TestPoolLogRatioByLevelBadReduction:
 class TestClippedIsSurrogate:
     """The shared token/turn/sequence clipped surrogate used by the non-Liger
     PPO and REINFORCE paths. token/turn/sequence are points on one
-    ratio-pooling axis, so the level collapses cleanly at the limits."""
+    ratio-pooling axis, so the level collapses cleanly at the limits.
+    """
 
     @staticmethod
     def _setup():
@@ -1316,7 +1319,8 @@ class TestClippedIsSurrogate:
 
     def test_sequence_pools_ratio_and_advantage(self):
         """Trajectory level uses the length-normalized mean log-ratio and the
-        mean advantage over a completion's action tokens."""
+        mean advantage over a completion's action tokens.
+        """
         tlr = torch.tensor([[0.2, 0.4, 1.0, -5.0]])
         adv = torch.tensor([[1.0, 3.0, 2.0, 99.0]])
         mask = torch.tensor([[1.0, 1.0, 1.0, 0.0]])  # last token non-action
@@ -1331,7 +1335,8 @@ class TestClippedIsSurrogate:
     def test_turn_sum_reduction_pools_ratio_by_product_but_advantage_by_mean(self):
         """With ``turn_reduction="sum"`` the turn ratio is the product of token
         ratios (nightly/Turn-PPO), while the (broadcast) advantage is still
-        recovered by the turn mean — i.e. it is *not* rescaled by turn length."""
+        recovered by the turn mean — i.e. it is *not* rescaled by turn length.
+        """
         # One sample, one turn, two action tokens; advantage is the per-turn
         # value broadcast across both tokens (as the GAE code produces).
         tlr = torch.tensor([[0.1, 0.2]])
@@ -1367,11 +1372,13 @@ class TestClippedIsSurrogate:
             tlr = tlr.clone().requires_grad_(True)
             pg, _ = clipped_is_surrogate(tlr, adv, mask, turn_ids, level, 0.2)
             pg.backward()
-            assert tlr.grad is not None and torch.isfinite(tlr.grad).all()
+            assert tlr.grad is not None
+            assert torch.isfinite(tlr.grad).all()
 
     def test_loss_weight_scales_per_unit_surrogate(self):
         """A detached per-token loss weight reweights the surrogate; uniform
-        weights of 1 are a no-op and uniform weights of w scale pg_loss by w."""
+        weights of 1 are a no-op and uniform weights of w scale pg_loss by w.
+        """
         tlr, adv, mask, _B, _T = self._setup()
         pg_base, cf_base = clipped_is_surrogate(tlr, adv, mask, None, "token", 0.2)
         pg_ones, cf_ones = clipped_is_surrogate(
@@ -1387,7 +1394,8 @@ class TestClippedIsSurrogate:
 
 class TestCreateModelFromNameOrPathValueHead:
     """``create_model_from_name_or_path`` should route through ``AutoModelForCausalLMWithValueHead``
-    when a value head is requested."""
+    when a value head is requested.
+    """
 
     def test_add_value_head_calls_value_head_loader(self) -> None:
         from agilerl.utils import llm_utils as llm_utils_module
@@ -2382,21 +2390,21 @@ class TestResolvePeftAdapterExportDir:
 
 def _vllm_config(**overrides):
     """SimpleNamespace mirroring the VLLMConfig fields read by the builder."""
-    base = dict(
-        vllm_model_name_or_path=None,
-        tensor_parallel_size=1,
-        gpu_memory_utilization=0.8,
-        max_num_seqs=8,
-        sleep_mode=True,
-        dtype=None,
-        quantization=None,
-        kv_cache_dtype=None,
-        kv_cache_memory_bytes=None,
-        enforce_eager=None,
-        max_lora_rank=16,
-        max_loras=1,
-        max_num_batched_tokens=None,
-    )
+    base = {
+        "vllm_model_name_or_path": None,
+        "tensor_parallel_size": 1,
+        "gpu_memory_utilization": 0.8,
+        "max_num_seqs": 8,
+        "sleep_mode": True,
+        "dtype": None,
+        "quantization": None,
+        "kv_cache_dtype": None,
+        "kv_cache_memory_bytes": None,
+        "enforce_eager": None,
+        "max_lora_rank": 16,
+        "max_loras": 1,
+        "max_num_batched_tokens": None,
+    }
     base.update(overrides)
     return SimpleNamespace(**base)
 

@@ -347,8 +347,11 @@ class TestReasoningGymReset:
             conversation_template=DUMMY_CONVERSATION_TEMPLATE,
             data_batch_size_per_gpu=data_batch_size,
         )
-        with pytest.warns():
-            env.reset()
+        env.reset()
+        with pytest.warns(
+            UserWarning,
+            match=r"env\.reset\(\) called more than once sequentially",
+        ):
             env.reset()
 
 
@@ -620,7 +623,7 @@ class TestPreferenceGymInit:
         data_batch_size = 8
         with pytest.raises(
             ValueError,
-            match="No samples left in the train dataset after filtering by the max context length constraint, use a larger max context length.",
+            match=r"No samples left in the train dataset after filtering by the max context length constraint, use a larger max context length.",
         ):
             PreferenceGym(
                 train_dataset=train_dataset,
@@ -855,11 +858,11 @@ class TestPreferenceGymReset:
             tokenizer=tokenizer,
             data_batch_size_per_gpu=data_batch_size,
         )
+        env.reset_called = True
         with pytest.warns(
             UserWarning,
             match=r"env\.reset\(\) called more than once sequentially, it should typically follow with env\.step\(\)\.",
         ):
-            env.reset_called = True
             prompts = env.reset()
         assert len(prompts["prompt"]) == data_batch_size
         assert isinstance(prompts, dict)
@@ -1108,11 +1111,11 @@ class TestSFTGymReset:
         ):
             env.reset(reset_dataloaders=True)
 
+        env.reset_called = True
         with pytest.warns(
             UserWarning,
             match=r"env\.reset\(\) called more than once sequentially",
         ):
-            env.reset_called = True
             env.reset()
 
     def test_sft_gym_response_column_chosen(self):

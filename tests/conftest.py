@@ -66,7 +66,10 @@ import torch.distributed as dist  # noqa: E402
 from gymnasium import spaces  # noqa: E402
 from torch import nn  # noqa: E402
 
-from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter  # noqa: E402
+from agilerl.algorithms.core.registry import (  # noqa: E402
+    HyperparameterConfig,
+    RLParameter,
+)
 from tests.helper_functions import (  # noqa: E402
     gen_multi_agent_dict_or_tuple_spaces,
     generate_dict_or_tuple_space,
@@ -162,7 +165,7 @@ def pytest_collection_modifyitems(config, items):
 
 
 # Only clear CUDA cache when actually needed
-@pytest.fixture(autouse=True, scope="function")
+@pytest.fixture(autouse=True)
 def cleanup():
     # Destroy any leaked ``torch.distributed`` process group **before** every
     # test. Once a test initialises a process group (e.g. via the
@@ -301,7 +304,7 @@ def ma_dict_space_small():
 
 
 # Simple network fixtures (function-scoped to avoid state issues)
-@pytest.fixture(scope="function")
+@pytest.fixture
 def simple_mlp():
     return nn.Sequential(
         nn.Linear(4, 20),
@@ -313,7 +316,7 @@ def simple_mlp():
     )
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def simple_mlp_critic():
     return nn.Sequential(
         nn.Linear(6, 20),
@@ -325,7 +328,7 @@ def simple_mlp_critic():
     )
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def simple_cnn():
     return nn.Sequential(
         nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1),

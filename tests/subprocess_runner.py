@@ -155,23 +155,22 @@ def resolve_fixtures(fixture_names, test_module, test_name):
 
             fixtures[name] = generate_model
         elif name == "grpo_factory":
-            fixtures[name] = getattr(test_module, "generate_grpo")
+            fixtures[name] = test_module.generate_grpo
         elif name == "ppo_factory":
-            fixtures[name] = getattr(test_module, "generate_ppo")
+            fixtures[name] = test_module.generate_ppo
         elif name == "reinforce_factory":
-            fixtures[name] = getattr(test_module, "generate_reinforce")
+            fixtures[name] = test_module.generate_reinforce
         elif name == "dpo_factory":
-            fixtures[name] = getattr(test_module, "generate_dpo")
+            fixtures[name] = test_module.generate_dpo
         elif name == "preference_dataset_factory":
-            fixtures[name] = getattr(test_module, "make_preference_gym")
+            fixtures[name] = test_module.make_preference_gym
         elif name == "request":
             fixtures[name] = _RequestStub(test_name)
         elif name == "tmpdir":
             fixtures[name] = tempfile.mkdtemp()
         else:
-            raise ValueError(
-                f"Unknown fixture '{name}'. Register it in subprocess_runner.py"
-            )
+            msg = f"Unknown fixture '{name}'. Register it in subprocess_runner.py"
+            raise ValueError(msg)
 
     return fixtures
 

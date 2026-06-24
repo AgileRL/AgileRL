@@ -6,7 +6,7 @@ and FSDP2 runs, so the grid is
 
     lora_only:       True / False
     save_optimizer:  True / False
-× {save, load}.
+x {save, load}.
 
 Expected behaviour per cell (the spec this file enforces):
 
@@ -32,16 +32,16 @@ Test organisation:
 """
 
 from __future__ import annotations
-import copy
+
 import inspect
 import logging
 import os
 import re
 import shutil
+import warnings
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock, PropertyMock, patch
-import warnings
+from unittest.mock import MagicMock, patch
 
 import dill
 import numpy as np
@@ -61,20 +61,18 @@ from agilerl.algorithms.core.base import (
 )
 from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
 from agilerl.algorithms.core.registry import NetworkGroup
+from agilerl.algorithms.grpo import GRPO
+from agilerl.modules import EvolvableMLP
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.distributed import FSDPConfig
-from agilerl.modules import EvolvableMLP
-from agilerl.algorithms.grpo import GRPO
-
 from tests.test_algorithms.test_base import DummyMARLAlgorithm, DummyRLAlgorithm
 from tests.test_algorithms.test_llms.test_grpo import create_module
-
 
 pytest.importorskip("peft", reason="LLM checkpoint tests require peft.")
 pytest.importorskip("transformers", reason="LLM checkpoint tests require transformers.")
 
 if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
-    from peft import LoraConfig, get_peft_model
+    from peft import LoraConfig
 
 _LLM_DEPS_SKIP = pytest.mark.skipif(
     not HAS_LLM_DEPENDENCIES,
@@ -279,13 +277,19 @@ class TestCopyAttributes:
 
 class TestDeprecatedMethods:
     def test_get_state_dim_deprecation(self, vector_space):
-        with pytest.warns(DeprecationWarning):
+        with pytest.warns(
+            DeprecationWarning,
+            match=r"This method is deprecated\. Use get_input_size_from_space instead\.",
+        ):
             dim = EvolvableAlgorithm.get_state_dim(vector_space)
         assert dim == (4,)
 
     def test_get_action_dim_deprecation(self):
         action_space = spaces.Discrete(5)
-        with pytest.warns(DeprecationWarning):
+        with pytest.warns(
+            DeprecationWarning,
+            match=r"This method is deprecated\. Use get_output_size_from_space instead\.",
+        ):
             dim = EvolvableAlgorithm.get_action_dim(action_space)
         assert dim == (5,)
 
@@ -421,7 +425,7 @@ class TestEvolvableAlgorithmInitAssertions:
         return InitStub
 
     @pytest.mark.parametrize(
-        "bad_index,msg", [(1.5, "integer"), ("x", "integer"), ([], "integer")]
+        ("bad_index", "msg"), [(1.5, "integer"), ("x", "integer"), ([], "integer")]
     )
     def test_index_must_be_int(self, bad_index, msg):
         Stub = self._make_stub()
@@ -485,7 +489,7 @@ class TestLoadErrorPaths:
         chkpt = torch.load(path, weights_only=False, pickle_module=dill)
         del chkpt["network_info"]["modules"]["dummy_actor_init_dict"]
         torch.save(chkpt, path, pickle_module=dill)
-        with pytest.raises(ValueError, match="Init dict.*not found"):
+        with pytest.raises(ValueError, match=r"Init dict.*not found"):
             DummyRLAlgorithm.load(path)
 
 
@@ -584,7 +588,8 @@ class TestCopyAttributesTensorRuntimeError:
 
         def deepcopy_raise_for_tensors(x):
             if isinstance(x, torch.Tensor):
-                raise RuntimeError("tensor copy failed")
+                msg = "tensor copy failed"
+                raise RuntimeError(msg)
             return real_deepcopy(x)
 
         with patch(
@@ -808,7 +813,8 @@ class TestLoadWithWrapperCls:
         chkpt["wrapper_attrs"] = {}
         torch.save(chkpt, path, pickle_module=dill)
         loaded = DummyRLAlgorithm.load(path)
-        assert hasattr(loaded, "agent") and hasattr(loaded, "label")
+        assert hasattr(loaded, "agent")
+        assert hasattr(loaded, "label")
         assert loaded.label == "custom"
         assert loaded.agent.dummy_attribute == dummy_agent.dummy_attribute
 
@@ -863,7 +869,6 @@ class TestGetCheckpointDictOptimizedModule:
 
 class TestRegistryInitEvolvableNotInRegistry:
     def test_registry_init_raises_when_evolvable_not_in_registry(self, vector_space):
-        from agilerl.algorithms.core.registry import NetworkGroup
 
         class OrphanNetworkAlgo(DummyRLAlgorithm):
             def __init__(self, obs_space, act_space, index=0):
@@ -926,7 +931,6 @@ class TestReinitOptimizersMultiNetworkPath:
 
 class TestReinitOptimizersWithExplicitConfig:
     def test_reinit_optimizers_with_explicit_optimizer_config(self, dummy_agent):
-        from agilerl.algorithms.core.registry import OptimizerConfig
 
         config = dummy_agent.registry.optimizers[0]
         dummy_agent.reinit_optimizers(optimizer=config)
@@ -971,7 +975,7 @@ class TestExtractAgentMasksEdgeCases:
             "agent_0": {"env_defined_actions": None},
             "agent_1": {"env_defined_actions": np.array([1.0])},
         }
-        env_acts, agent_masks = ma_agent.extract_agent_masks(infos)
+        env_acts, _agent_masks = ma_agent.extract_agent_masks(infos)
         assert env_acts is not None
         assert np.isnan(env_acts["agent_0"]).all() or env_acts["agent_0"].size == 1
 
@@ -1217,7 +1221,6 @@ class TestPopulationWithWrapperKwargsEmpty:
 
 class TestSetAttrOptimizerRegistration:
     def test_setattr_registers_new_optimizer_wrapper(self, vector_space):
-        from agilerl.algorithms.core.registry import OptimizerConfig
 
         class AlgoWithLateOptimizer(DummyRLAlgorithm):
             def __init__(self, obs_space, act_space, index=0):
@@ -1615,7 +1618,8 @@ class TestLLMUpdateLr:
 class TestLLMWrapModels:
     def test_wrap_models_applies_fsdp2_when_configured(self):
         """FSDP2 sharding swaps params in place, so the optimizer (and LR
-        scheduler) are rebuilt after ``apply_fsdp2``."""
+        scheduler) are rebuilt after ``apply_fsdp2``.
+        """
         with patch("agilerl.algorithms.core.base.init_distributed", return_value=True):
             agent = _make_llm_agent(fsdp_config=FSDPConfig())
         agent.gradient_checkpointing = True
@@ -1715,7 +1719,7 @@ class TestLLMLogprobsFromLogits:
         assert torch.allclose(result, expected)
 
     @pytest.mark.parametrize(
-        "batch_rows,chunk_rows",
+        ("batch_rows", "chunk_rows"),
         [
             # B=1 hits the fast path (B <= chunk_rows), B=17 forces the chunked loop.
             (1, 8),
@@ -1769,7 +1773,8 @@ class TestLLMLogprobsFromLogits:
         self,
     ) -> None:
         """``cast_to_fp32=False`` runs the reduction in input dtype throughout
-        and matches a hand-rolled bf16 ``gather - logsumexp``."""
+        and matches a hand-rolled bf16 ``gather - logsumexp``.
+        """
         torch.manual_seed(0)
         seq, vocab = 7, 2048
         logits_bf16 = torch.randn(3, seq, vocab, dtype=torch.bfloat16)
@@ -1797,7 +1802,8 @@ class TestLogprobsFromHiddenFused:
 
     def test_matches_log_softmax_reference_fp32(self) -> None:
         """fp32 reduction matches a stock ``log_softmax + gather`` over
-        the materialized logits within bf16 quantisation noise."""
+        the materialized logits within bf16 quantisation noise.
+        """
         torch.manual_seed(0)
         B, T, H, V = 4, 11, 64, 8192
         hidden = torch.randn(B, T, H, dtype=torch.bfloat16)
@@ -1830,7 +1836,8 @@ class TestLogprobsFromHiddenFused:
     def test_keeps_input_dtype_when_cast_disabled(self) -> None:
         """``cast_to_fp32=False`` keeps bf16 throughout — the reduction
         runs in input dtype, matching a hand-rolled bf16
-        ``gather - logsumexp``."""
+        ``gather - logsumexp``.
+        """
         torch.manual_seed(1)
         B, T, H, V = 4, 7, 64, 4096
         hidden = torch.randn(B, T, H, dtype=torch.bfloat16)
@@ -1861,7 +1868,8 @@ class TestLogprobsFromHiddenFused:
 
     def test_chunked_matches_unchunked(self) -> None:
         """Output is independent of ``_chunk_rows`` — covers the loop
-        boundary path."""
+        boundary path.
+        """
         torch.manual_seed(2)
         B, T, H, V = 3, 9, 32, 2048
         hidden = torch.randn(B, T, H, dtype=torch.bfloat16)
@@ -1890,7 +1898,8 @@ class TestLogprobsFromHiddenFused:
 
     def test_no_bias_path_fp32(self) -> None:
         """``bias=None`` skips the add and still matches a stock
-        log_softmax + gather reference."""
+        log_softmax + gather reference.
+        """
         torch.manual_seed(3)
         B, T, H, V = 2, 5, 16, 512
         hidden = torch.randn(B, T, H, dtype=torch.float32)
@@ -1941,7 +1950,8 @@ class TestFusedLinearLogProbsGrad:
         """The grad path's forward value is bit-identical to the no-grad
         fused path, so old/ref logprobs (computed no-grad) and policy
         logprobs (computed under grad) stay consistent — the first-step
-        ratio is exactly 1."""
+        ratio is exactly 1.
+        """
         torch.manual_seed(0)
         B, T, H, V = 3, 9, 32, 4096
         hidden = torch.randn(B, T, H, dtype=torch.bfloat16, requires_grad=True)
@@ -1961,7 +1971,8 @@ class TestFusedLinearLogProbsGrad:
 
     def test_hidden_grad_matches_naive_autograd(self) -> None:
         """Gradient w.r.t. hidden matches autograd through a materialized
-        ``log_softmax`` to fp32 tolerance."""
+        ``log_softmax`` to fp32 tolerance.
+        """
         torch.manual_seed(1)
         B, T, H, V = 4, 6, 24, 1024
         weight = torch.randn(V, H)
@@ -2009,7 +2020,8 @@ class TestFusedLinearLogProbsGrad:
         """Forward value and hidden gradient are independent of
         ``_chunk_rows`` (single chunk vs many) up to fp32 matmul-tiling
         noise — chunking only partitions rows, it changes nothing about
-        each row's reduction."""
+        each row's reduction.
+        """
         torch.manual_seed(3)
         B, T, H, V = 3, 7, 20, 2048
         weight = torch.randn(V, H)
@@ -2038,7 +2050,8 @@ class TestFusedLinearLogProbsGrad:
 
     def test_no_grad_when_inputs_detached(self) -> None:
         """With no input requiring grad the output is detached and the
-        bounded backward simply isn't exercised."""
+        bounded backward simply isn't exercised.
+        """
         torch.manual_seed(4)
         B, T, H, V = 2, 4, 12, 256
         hidden = torch.randn(B, T, H)
@@ -2099,9 +2112,10 @@ class TestGetLmHeadParentAndPatch:
 
     def test_patch_restores_on_exception(self) -> None:
         agent, original = self._agent_with_real_lm_head()
+        msg = "boom"
         with pytest.raises(RuntimeError, match="boom"):
             with agent._patch_lm_head_to_identity():
-                raise RuntimeError("boom")
+                raise RuntimeError(msg)
         assert agent.actor.base_model.model.lm_head is original
 
 
@@ -2196,7 +2210,8 @@ class TestFusedLinearLogprobsIntegration:
 
     def test_no_grad_fused_method_skipped_when_grad_enabled(self) -> None:
         """Under grad, ``_get_logprobs`` uses the gradient-aware fused fn, so
-        the no-grad ``_logprobs_from_hidden_fused`` static is not called."""
+        the no-grad ``_logprobs_from_hidden_fused`` static is not called.
+        """
         torch.manual_seed(1)
         B, T, H, V = 2, 5, 8, 128
         agent, _ = self._build_agent(V, H)
@@ -2214,21 +2229,22 @@ class TestFusedLinearLogprobsIntegration:
         self, cast_to_fp32: bool
     ) -> None:
         """``self.cast_logprobs_to_fp32`` flows into the fused-no-grad
-        kernel call so toggling it controls the reduction precision."""
+        kernel call so toggling it controls the reduction precision.
+        """
         torch.manual_seed(2)
         B, T, H, V = 2, 4, 8, 64
         agent, _ = self._build_agent(V, H)
         agent.cast_logprobs_to_fp32 = cast_to_fp32
         ids = torch.randint(1, V, (B, T))
-        with patch.object(
-            LLMAlgorithm,
-            "_logprobs_from_hidden_fused",
-            wraps=LLMAlgorithm._logprobs_from_hidden_fused,
-        ) as spy:
-            with torch.no_grad():
-                agent._get_logprobs(
-                    ids, batch_size=B, use_reference=False, eval_mode=True
-                )
+        with (
+            patch.object(
+                LLMAlgorithm,
+                "_logprobs_from_hidden_fused",
+                wraps=LLMAlgorithm._logprobs_from_hidden_fused,
+            ) as spy,
+            torch.no_grad(),
+        ):
+            agent._get_logprobs(ids, batch_size=B, use_reference=False, eval_mode=True)
         assert spy.called
         assert spy.call_args.kwargs["cast_to_fp32"] is cast_to_fp32
 
@@ -2238,7 +2254,8 @@ class TestFusedLinearLogprobsIntegration:
     ) -> None:
         """``self.cast_logprobs_to_fp32`` also flows through the other
         call site (``_fused_model_pass``), which is what
-        ``_fused_forward`` / ``_fused_forward_no_grad`` go through."""
+        ``_fused_forward`` / ``_fused_forward_no_grad`` go through.
+        """
         torch.manual_seed(4)
         B, T, H, V = 2, 4, 8, 64
         agent, _ = self._build_agent(V, H)
@@ -2262,9 +2279,9 @@ class TestFusedLinearLogprobsIntegration:
                 "_logprobs_from_hidden_fused",
                 wraps=LLMAlgorithm._logprobs_from_hidden_fused,
             ) as spy,
+            torch.no_grad(),
         ):
-            with torch.no_grad():
-                agent._fused_model_pass(fused_ids, fused_mask, routing)
+            agent._fused_model_pass(fused_ids, fused_mask, routing)
         assert spy.called
         assert spy.call_args.kwargs["cast_to_fp32"] is cast_to_fp32
 
@@ -2307,32 +2324,32 @@ class TestLLMConfigureBatchSize:
             _make_llm_agent(clone=False, micro_batch_size_per_gpu=3)
 
     def test_auto_micro_batch_zero_raises(self):
-        with pytest.raises(
-            ValueError,
-            match="micro_batch_size_per_gpu is equal to zero, which is not allowed.",
+        with (
+            pytest.raises(
+                ValueError,
+                match=r"micro_batch_size_per_gpu is equal to zero, which is not allowed\.",
+            ),
+            patch.object(LLMAlgorithm, "_initialize_actors"),
+            patch.object(LLMAlgorithm, "_configure_vllm"),
+            patch.object(LLMAlgorithm, "wrap_models"),
+            patch.object(EvolvableAlgorithm, "_registry_init"),
         ):
-            with (
-                patch.object(LLMAlgorithm, "_initialize_actors"),
-                patch.object(LLMAlgorithm, "_configure_vllm"),
-                patch.object(LLMAlgorithm, "wrap_models"),
-                patch.object(EvolvableAlgorithm, "_registry_init"),
-            ):
-                _StubLLMAlgorithm(
-                    index=0,
-                    batch_size=0,
-                    lr=1e-4,
-                    max_grad_norm=0.0,
-                    clone=False,
-                    calc_position_embeddings=False,
-                    seed=42,
-                    pad_token_id=0,
-                    pad_token="<pad>",
-                    use_liger_loss=False,
-                    lora_config=MagicMock(),
-                    actor_network=_make_mock_peft_actor(),
-                    device="cpu",
-                    micro_batch_size_per_gpu=0,
-                )
+            _StubLLMAlgorithm(
+                index=0,
+                batch_size=0,
+                lr=1e-4,
+                max_grad_norm=0.0,
+                clone=False,
+                calc_position_embeddings=False,
+                seed=42,
+                pad_token_id=0,
+                pad_token="<pad>",
+                use_liger_loss=False,
+                lora_config=MagicMock(),
+                actor_network=_make_mock_peft_actor(),
+                device="cpu",
+                micro_batch_size_per_gpu=0,
+            )
 
     def test_batch_not_divisible_by_grad_accum_raises(self):
         with pytest.raises(ValueError, match="gradient accumulation"):
@@ -2491,31 +2508,31 @@ class TestLLMSetReferencePolicy:
 
     def test_set_reference_raises_on_no_source_params(self):
         agent = _make_llm_agent(use_separate_reference_adapter=True)
-        with patch.object(
-            type(agent.actor),
-            "named_parameters",
-            return_value=[
-                ("not_lora.weight", torch.tensor([1.0])),
-            ],
+        with (
+            patch.object(
+                type(agent.actor),
+                "named_parameters",
+                return_value=[
+                    ("not_lora.weight", torch.tensor([1.0])),
+                ],
+            ),
+            pytest.raises(ValueError, match="No LoRA tensors found for source adapter"),
         ):
-            with pytest.raises(
-                ValueError, match="No LoRA tensors found for source adapter"
-            ):
-                agent.set_reference_policy(1)
+            agent.set_reference_policy(1)
 
     def test_set_reference_raises_on_no_target_params(self):
         agent = _make_llm_agent(use_separate_reference_adapter=True)
-        with patch.object(
-            type(agent.actor),
-            "named_parameters",
-            return_value=[
-                ("lora.actor.weight", torch.tensor([1.0])),
-            ],
+        with (
+            patch.object(
+                type(agent.actor),
+                "named_parameters",
+                return_value=[
+                    ("lora.actor.weight", torch.tensor([1.0])),
+                ],
+            ),
+            pytest.raises(ValueError, match="No LoRA tensors found for target adapter"),
         ):
-            with pytest.raises(
-                ValueError, match="No LoRA tensors found for target adapter"
-            ):
-                agent.set_reference_policy(1)
+            agent.set_reference_policy(1)
 
     def test_set_reference_missing_params(self):
         agent = _make_llm_agent(use_separate_reference_adapter=True)
@@ -2530,13 +2547,14 @@ class TestLLMSetReferencePolicy:
         ):
             with pytest.raises(
                 ValueError,
-                match="Target adapter 'reference' is missing 1 LoRA tensors present in source adapter 'actor'.",
+                match=r"Target adapter 'reference' is missing 1 LoRA tensors present in source adapter 'actor'\.",
             ):
                 agent.set_reference_policy(1)
 
     def test_set_reference_without_separate_adapter_warns_and_keeps_base(self):
         """Base weights are immutable: the implicit reference cannot move, so an
-        update request warns once and only advances the tracker."""
+        update request warns once and only advances the tracker.
+        """
         agent = _make_llm_agent(use_separate_reference_adapter=False)
         with patch.object(LLMAlgorithm, "_copy_adapter_weights") as mock_copy:
             with pytest.warns(UserWarning, match="stays the initial base policy"):
@@ -2600,13 +2618,15 @@ def get_param_by_name(agent, substring: str) -> tuple[str, torch.nn.Parameter]:
     for name, param in agent.actor.named_parameters():
         if substring in name:
             return name, param
-    raise KeyError(f"no actor param matching {substring!r}")
+    msg = f"no actor param matching {substring!r}"
+    raise KeyError(msg)
 
 
 def find_exp_avg_in_opt_state(agent) -> torch.Tensor | None:
     """Return a reference to the first Adam ``exp_avg`` tensor in agent.optimizer.
 
-    Returns None if optimizer.state is empty (e.g. before any step)."""
+    Returns None if optimizer.state is empty (e.g. before any step).
+    """
     for state in agent.optimizer.optimizer.state.values():
         if "exp_avg" in state:
             return state["exp_avg"]
@@ -2659,7 +2679,12 @@ def generate_tiny_grpo() -> GRPO:
     )
 
 
-@pytest.fixture(scope="function")
+def _grpo_from_template(template: GRPO) -> GRPO:
+    """Copy the session template so checkpoint tests do not mutate it."""
+    return template.clone(index=0, wrap=False)
+
+
+@pytest.fixture(scope="session")
 def grpo_factory():
     """Expensive PEFT-wrapped GRPO, built once per test."""
     tiny_grpo = generate_tiny_grpo()
@@ -2672,12 +2697,13 @@ def grpo_factory():
 # --------------------------------------------------------------------------- #
 
 
-@pytest.fixture(scope="function", params=SAVE_LOAD_OPTIONS)
+@pytest.fixture(params=SAVE_LOAD_OPTIONS)
 def llm_simple_checkpoint(request, grpo_factory, tmp_path_factory):
     """One saved plain-path checkpoint per cell, shared across all tests that
-    only *read* the output."""
+    only *read* the output.
+    """
     lora_only, save_optimizer = request.param
-    agent = grpo_factory
+    agent = _grpo_from_template(grpo_factory)
     tmp_path = tmp_path_factory.mktemp(
         f"plain_save_lora={lora_only}_optim={save_optimizer}"
     )
@@ -2697,9 +2723,10 @@ def llm_simple_checkpoint(request, grpo_factory, tmp_path_factory):
 
 
 class TestLLMSimpleCheckpointSave:
-    """Each test runs 4× (one per SAVE_LOAD_OPTIONS param) against a pre-saved
+    """Each test runs 4x (one per SAVE_LOAD_OPTIONS param) against a pre-saved
     checkpoint. Assertions are phrased as truth tables over
-    ``plain_saved.lora_only`` / ``plain_saved.save_optimizer``."""
+    ``plain_saved.lora_only`` / ``plain_saved.save_optimizer``.
+    """
 
     def test_llm_simple_checkpoint_save_attributes_pt_always_written(
         self, llm_simple_checkpoint
@@ -2757,9 +2784,10 @@ class TestLLMSimpleCheckpointSave:
 @pytest.fixture(params=SAVE_LOAD_OPTIONS)
 def llm_simple_checkpoint_load(request, grpo_factory, tmp_path):
     """Fresh agent per test (load tests mutate state: stamp sentinels, step
-    optimizer). Cheap because deepcopy of the template is near-instant."""
+    optimizer). Cheap because deepcopy of the template is near-instant.
+    """
     lora_only, save_optimizer = request.param
-    agent = grpo_factory
+    agent = _grpo_from_template(grpo_factory)
     return SimpleNamespace(
         agent=agent,
         path=tmp_path,
@@ -2771,7 +2799,8 @@ def llm_simple_checkpoint_load(request, grpo_factory, tmp_path):
 class TestLLMSimpleCheckpointLoad:
     """Roundtrip: stamp sentinels on tracked state → save → clobber → load →
     assert sentinels restored. Specifically catches 'load silently
-    reinitialised a fresh optimizer / fresh weights'."""
+    reinitialised a fresh optimizer / fresh weights'.
+    """
 
     def test_simple_checkpoint_load_adapter_weights_roundtrip(
         self, llm_simple_checkpoint_load
@@ -2872,7 +2901,8 @@ class TestLLMSimpleCheckpointLoad:
 @pytest.fixture(params=SAVE_LOAD_OPTIONS)
 def llm_distributed_checkpoint(request, dist_mode_factory, tmp_path):
     """Save per cell under a real (world-size-1) process group; same unified
-    format as the plain path."""
+    format as the plain path.
+    """
     lora_only, save_optimizer = request.param
     dist_mode_factory("dist")
     agent = generate_tiny_grpo()
@@ -2895,7 +2925,8 @@ def llm_distributed_checkpoint(request, dist_mode_factory, tmp_path):
 class TestLLMDistributedCheckpointSaveLoad:
     """The distributed path writes the SAME artifacts as the plain path:
     adapter dirs when lora_only, actor/optimizer state inside attributes.pt,
-    and never an engine tag directory."""
+    and never an engine tag directory.
+    """
 
     def test_distributed_save_attributes_pt_always_written(
         self, llm_distributed_checkpoint
@@ -2975,7 +3006,8 @@ def _build_grpo_with_lora(lora_config: LoraConfig) -> GRPO:
 
 class TestStrictLoraConfigLoading:
     """lora-only checkpoints must be loaded by an agent built with a matching
-    LoRA config; mismatches raise instead of being reconciled."""
+    LoRA config; mismatches raise instead of being reconciled.
+    """
 
     def test_mismatched_config_raises(self, tmp_path):
         saver = _build_grpo_with_lora(
@@ -3004,7 +3036,8 @@ class TestStrictLoraConfigLoading:
 class TestLLMClone:
     """LLMAlgorithm.clone requires full model infrastructure (real model
     weights etc.), so we test it indirectly via `_configure_batch_size`
-    with `clone=True` to verify the clone-mode branch."""
+    with `clone=True` to verify the clone-mode branch.
+    """
 
     def test_clone_mode_skips_batch_config(self):
         agent = _make_llm_agent(clone=True)
@@ -3114,14 +3147,14 @@ def _setup_agent_for_vllm_lora_sync(agent, peft_ref):
 class TestEnsureVllmLoraStagingDir:
     """``_ensure_vllm_lora_staging_dir`` resolves the rollout-adapter export
     dir once, honouring a configured ``VLLMConfig.lora_staging_dir`` (e.g. an
-    NFS path for colocated Ray rollouts) and never deleting it."""
+    NFS path for colocated Ray rollouts) and never deleting it.
+    """
 
     def _agent(self, lora_staging_dir):
-        agent = SimpleNamespace(
+        return SimpleNamespace(
             vllm_config=VLLMConfig(lora_staging_dir=lora_staging_dir),
             _vllm_lora_staging_dir=None,
         )
-        return agent
 
     def test_uses_configured_dir_and_marks_persistent(self, tmp_path):
         target = tmp_path / "nfs" / "agilerl_lora"  # not yet created
@@ -3148,7 +3181,8 @@ class TestEnsureVllmLoraStagingDir:
 
     def test_cleanup_preserves_configured_dir(self, tmp_path):
         """A configured (non-temp) staging dir survives ``clean_up``'s rmtree
-        guard; a temp one would be removed."""
+        guard; a temp one would be removed.
+        """
         target = tmp_path / "nfs_lora"
         agent = self._agent(str(target))
         LLMAlgorithm._ensure_vllm_lora_staging_dir(agent)
@@ -3290,7 +3324,7 @@ class TestMultiAgentExtractAgentMasksContinuousNan:
             "agent_0": {"env_defined_actions": None},
             "agent_1": {"env_defined_actions": np.array([1.0, 2.0])},
         }
-        env_acts, agent_masks = agent.extract_agent_masks(infos)
+        env_acts, _agent_masks = agent.extract_agent_masks(infos)
         assert np.isnan(env_acts["agent_0"]).all()
         assert env_acts["agent_0"].shape == (2,)
 
@@ -3565,7 +3599,8 @@ class TestBuildNetConfigDefaultFallback:
 
 class TestLLMBackwardPassDistributed:
     """Without an FSDP wrapper, data-parallel runs average the (LoRA-sized)
-    trainable gradients explicitly at the step boundary."""
+    trainable gradients explicitly at the step boundary.
+    """
 
     def test_backward_pass_syncs_grads_when_distributed_without_fsdp(self):
         agent = _make_llm_agent()
@@ -3709,7 +3744,8 @@ class TestLLMMoveModelToVllmAdapterReload:
 
 class TestLLMClonePlain:
     """LLMAlgorithm.clone transfers optimizer state via gathered state dicts
-    (no engine-checkpoint disk roundtrip)."""
+    (no engine-checkpoint disk roundtrip).
+    """
 
     def test_clone_copies_optimizer_state(self):
         agent = _make_llm_agent(clone=True)
@@ -4108,7 +4144,8 @@ class TestLLMCloneActorNetwork:
 
 class TestLLMMemoryEfficientParams:
     """_memory_efficient_params context manager moves params on/off GPU when
-    the actor is not FSDP-sharded."""
+    the actor is not FSDP-sharded.
+    """
 
     def test_sharded_actor_warns_and_yields_without_moving_params(self):
         agent = _make_llm_agent()
@@ -4316,7 +4353,8 @@ class TestLLMConfigureVllmPaths:
 
 class TestLLMReinitOptFromConfig:
     """_reinit_opt_from_config dispatches to LLMAlgorithm.update_lr with the
-    wrapper's own optimizer (no engine-optimizer fallback)."""
+    wrapper's own optimizer (no engine-optimizer fallback).
+    """
 
     def test_reinit_opt_from_config_llm(self):
         agent = _make_llm_agent()
@@ -4573,7 +4611,7 @@ class TestLLMGenerateWithVllmColocateBarrier:
             ),
             patch("agilerl.algorithms.core.base.barrier") as mock_barrier,
         ):
-            completion_ids, action_masks, _ = agent._generate_with_vllm_colocate(
+            completion_ids, _action_masks, _ = agent._generate_with_vllm_colocate(
                 prompts, group_size=2, temperature=0.9
             )
         mock_barrier.assert_called()
@@ -4630,7 +4668,7 @@ class TestLLMGenerateWithVllmColocateTP:
             patch("torch.distributed.all_gather_object", side_effect=fake_all_gather),
             patch("torch.distributed.get_rank", return_value=0),
         ):
-            completion_ids, action_masks, _ = agent._generate_with_vllm_colocate(
+            completion_ids, _action_masks, _ = agent._generate_with_vllm_colocate(
                 prompts, group_size=2, temperature=0.9
             )
         assert len(completion_ids) == 1
@@ -4925,7 +4963,7 @@ class TestLLMFusedForwardPaths:
     def test_fused_forward_without_value_head(self):
         agent = _make_llm_agent()
         agent.use_value_head = False
-        B, T, V, H = 2, 5, 32, 8
+        B, T, V, _H = 2, 5, 32, 8
         ids = torch.randint(1, V, (B, T))
         agent._packing_mode = MagicMock(return_value=None)
         agent._fused_model_pass = MagicMock(
@@ -4972,7 +5010,7 @@ class TestLLMFusedForwardPaths:
             ) as packed_fwd,
             torch.enable_grad(),
         ):
-            log_probs, values = agent._fused_forward(ids, batch_size=B)
+            _log_probs, values = agent._fused_forward(ids, batch_size=B)
 
         packed_fwd.assert_called_once()
         assert values is None

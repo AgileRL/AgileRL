@@ -34,7 +34,7 @@ class DummyEnv:
         self.observation_space = observation_space.shape
         self.vect = vect
         if self.vect:
-            self.observation_space = (num_envs,) + self.observation_space
+            self.observation_space = (num_envs, *self.observation_space)
             self.n_envs = num_envs
             self.num_envs = num_envs
         else:
@@ -55,7 +55,7 @@ class DummyEnv:
 
 class TestDQNInit:
     @pytest.mark.parametrize(
-        "observation_space, encoder_cls",
+        ("observation_space", "encoder_cls"),
         [
             ("vector_space", EvolvableMLP),
             ("image_space", EvolvableCNN),
@@ -116,7 +116,7 @@ class TestDQNInit:
 
     # TODO: Deprecated path; remove when MakeEvolvable is dropped.
     @pytest.mark.parametrize(
-        "observation_space, actor_network, input_tensor",
+        ("observation_space", "actor_network", "input_tensor"),
         [
             ("vector_space", "simple_mlp", torch.randn(1, 4)),
             (
@@ -160,7 +160,7 @@ class TestDQNInit:
         dqn.clean_up()
 
     @pytest.mark.parametrize(
-        "observation_space, net_type",
+        ("observation_space", "net_type"),
         [
             ("vector_space", "mlp"),
             ("image_space", "cnn"),
@@ -215,14 +215,12 @@ class TestDQNInit:
     def test_rejects_invalid_actor_type(self, vector_space, discrete_space):
         actor_network = "dummy"
 
-        with pytest.raises(TypeError) as a:
-            dqn = DQN(vector_space, discrete_space, actor_network=actor_network)
-
-            assert dqn
-            assert (
-                str(a.value)
-                == f"'actor_network' argument is of type {type(actor_network)}, but must be of type nn.Module."
-            )
+        with pytest.raises(TypeError) as exc_info:
+            DQN(vector_space, discrete_space, actor_network=actor_network)
+        assert (
+            str(exc_info.value)
+            == f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule."
+        )
 
     def test_optimizer_updates_actor_parameters(self, vector_space, discrete_space):
         """Sanity-check that the registered optimizer is wired to the actor params."""
@@ -282,13 +280,15 @@ class TestDQNGetAction:
         action = dqn.get_action(state, epsilon, action_mask)[0]
 
         assert action.is_integer()
-        assert action >= 0 and action < action_space.n
+        assert action >= 0
+        assert action < action_space.n
 
         epsilon = 1
         action = dqn.get_action(state, epsilon, action_mask)[0]
 
         assert action.is_integer()
-        assert action >= 0 and action < action_space.n
+        assert action >= 0
+        assert action < action_space.n
         dqn.clean_up()
 
     def test_respects_action_mask(self, vector_space, discrete_space):

@@ -1,8 +1,9 @@
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import torch
 import pytest
+import torch
+
 from agilerl.algorithms.ilql import (
     ILQL,
     ILQL_Evaluator,
@@ -36,7 +37,7 @@ class TestILQLInit:
     def test_ilql_init(self):
         """Use a tiny EvolvableGPT config (same spirit as TINY_LLM_FIXTURE_PATH for HF tests).
 
-        net_config=None builds GPT-2–scale networks (three EvolvableGPT stacks); that is too
+        net_config=None builds GPT-2-scale networks (three EvolvableGPT stacks); that is too
         slow for default CI and is not needed to assert hyperparameter wiring.
         """
         List_RL_Dataset.__abstractmethods__ = set()
@@ -1137,7 +1138,6 @@ class TestILQLPolicyBeamRaw:
         attn_mask = torch.tensor([[1, 1, 1]]).bool()
         state_idxs = torch.tensor([[0, 1, 2]])
         action_idxs = torch.tensor([[0, 1, 2]])
-        tokenizer = algo.dataset.tokenizer
 
         monkeypatch.setattr(
             torch.distributions.categorical.Categorical,

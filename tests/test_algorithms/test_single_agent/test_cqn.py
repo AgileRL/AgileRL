@@ -32,7 +32,7 @@ class DummyEnv:
         self.state_size = state_size
         self.vect = vect
         if self.vect:
-            self.state_size = (num_envs,) + self.state_size
+            self.state_size = (num_envs, *self.state_size)
             self.n_envs = num_envs
             self.num_envs = num_envs
         else:
@@ -93,7 +93,7 @@ def simple_cnn():
 
 class TestCQNInit:
     @pytest.mark.parametrize(
-        "observation_space, encoder_cls",
+        ("observation_space", "encoder_cls"),
         [
             ("vector_space", EvolvableMLP),
             ("image_space", EvolvableCNN),
@@ -128,7 +128,7 @@ class TestCQNInit:
     # Can initialize cqn with an actor network
     # TODO: This will be deprecated in the future
     @pytest.mark.parametrize(
-        "observation_space, actor_network, input_tensor",
+        ("observation_space", "actor_network", "input_tensor"),
         [
             ("vector_space", "simple_mlp", torch.randn(1, 4)),
             (
@@ -170,7 +170,7 @@ class TestCQNInit:
         cqn.clean_up()
 
     @pytest.mark.parametrize(
-        "observation_space, net_type",
+        ("observation_space", "net_type"),
         [
             ("vector_space", "mlp"),
             ("image_space", "cnn"),
@@ -224,13 +224,12 @@ class TestCQNInit:
         action_space = spaces.Discrete(2)
         actor_network = "String"
 
-        with pytest.raises(TypeError) as e:
-            cqn = CQN(vector_space, action_space, actor_network=actor_network)
-            assert cqn
-            assert (
-                e
-                == f"'actor_network' argument is of type {type(actor_network)}, but must be of type nn.Module."
-            )
+        with pytest.raises(TypeError) as exc_info:
+            CQN(vector_space, action_space, actor_network=actor_network)
+        assert (
+            str(exc_info.value)
+            == f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule."
+        )
 
 
 class TestCQNGetAction:
@@ -247,13 +246,15 @@ class TestCQNGetAction:
         action = cqn.get_action(state, epsilon, action_mask)[0]
 
         assert action.is_integer()
-        assert action >= 0 and action < action_space.n
+        assert action >= 0
+        assert action < action_space.n
 
         epsilon = 1
         action = cqn.get_action(state, epsilon, action_mask)[0]
 
         assert action.is_integer()
-        assert action >= 0 and action < action_space.n
+        assert action >= 0
+        assert action < action_space.n
         cqn.clean_up()
 
     # Returns the expected action when given a state observation and action mask.

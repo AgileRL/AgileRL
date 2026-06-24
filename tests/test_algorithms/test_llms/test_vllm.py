@@ -5,7 +5,6 @@ import torch
 
 pytest.importorskip("vllm", reason="LLM tests require vllm.")
 
-from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import ReasoningGym
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.test_algorithms.test_llms.test_reinforce_llm import (
@@ -19,7 +18,7 @@ from tests.utils import (
 pytestmark = pytest.mark.vllm
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def reinforce_factory():
     return generate_reinforce
 

@@ -57,7 +57,7 @@ def generate_distributed_mode(mode):
     return True
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def dist_mode_factory(request):
     """Factory fixture wrapping :func:`generate_distributed_mode`.
 
