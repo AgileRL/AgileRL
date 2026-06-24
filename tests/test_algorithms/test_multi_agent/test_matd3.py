@@ -12,7 +12,6 @@ from torch._dynamo import OptimizedModule
 
 from agilerl.algorithms.matd3 import MATD3
 from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput, ModuleDict
-from agilerl.modules.base import EvolvableModule
 from agilerl.modules.custom_components import GumbelSoftmax
 from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.q_networks import ContinuousQNetwork

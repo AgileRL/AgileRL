@@ -1,5 +1,3 @@
-import pytest
-
 from agilerl.hpo.mutation import Mutations, reinit_shared_networks
 from agilerl.modules.mlp import EvolvableMLP
 

@@ -1,7 +1,6 @@
 """CPU-only CNN module tests (no GPU mark)."""
 
 import numpy as np
-import pytest
 import torch
 from unittest.mock import MagicMock, patch
 

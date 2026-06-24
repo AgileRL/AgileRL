@@ -1137,7 +1137,6 @@ class TestILQLPolicyBeamRaw:
         attn_mask = torch.tensor([[1, 1, 1]]).bool()
         state_idxs = torch.tensor([[0, 1, 2]])
         action_idxs = torch.tensor([[0, 1, 2]])
-        tokenizer = algo.dataset.tokenizer
 
         monkeypatch.setattr(
             torch.distributions.categorical.Categorical,
