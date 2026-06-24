@@ -2470,7 +2470,7 @@ class TestLLMCreatePromptMasks:
         assert mask[1, 6].item()
 
 
-@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed")
+@_LLM_DEPS_SKIP
 class TestLLMConfigureBatchSize:
     def test_clone_mode_sets_batch_size_directly(self):
         agent = _make_llm_agent(clone=True)
@@ -2573,7 +2573,7 @@ class TestLLMConfigureBatchSize:
             _make_llm_agent(accelerator=acc, clone=False)
 
 
-@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed")
+@_LLM_DEPS_SKIP
 class TestLLMInitWarnings:
     def test_cosine_lr_with_accelerator_warns_and_nullifies(self):
         acc = _make_mock_accelerator()
@@ -3860,7 +3860,7 @@ class TestLLMClone:
         assert agent.batch_size_per_process == 4
 
 
-@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed")
+@_LLM_DEPS_SKIP
 class TestLLMConfigureBatchSizeNoDeepSpeedPlugin:
     """``_configure_batch_size`` when ``accelerator.state.deepspeed_plugin`` is None."""
 
@@ -4214,7 +4214,7 @@ class TestLLMPreprocessObservation:
         assert result == obs
 
 
-@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed")
+@_LLM_DEPS_SKIP
 class TestLLMInitMissingDeps:
     def test_raises_when_no_llm_deps(self):
         with patch("agilerl.algorithms.core.base.HAS_LLM_DEPENDENCIES", False):

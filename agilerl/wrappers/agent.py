@@ -229,12 +229,6 @@ class RSNorm(AgentWrapper[AgentType]):
     The normalization statistics are only updated when the agent is in training mode. This can be
     disabled during inference through ``agent.set_training_mode(False)``.
 
-    .. warning::
-        This wrapper is currently only supported for off-policy algorithms since it relies on
-        passed experiences to be formatted as a tuple of PyTorch tensors. Currently
-        AgileRL does not use a Buffer class to store experiences for on-policy algorithms, albeit this
-        will be released in a soon-to-come update!
-
     :param agent: Agent to be wrapped
     :type agent: RLAlgorithm, MultiAgentRLAlgorithm
     :param epsilon: Small value to avoid division by zero, defaults to 1e-4
