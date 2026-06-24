@@ -1,19 +1,7 @@
-"""Generation rollout envs, with reasoning as the one-turn case.
+"""Environment for generative LLM tasks, e.g. multi-turn agentic tasks or single-turn reasoning.
 
-A :class:`RolloutEnv` is the generation half of the env taxonomy: the model
-generates a completion to a dataset-seeded prompt and the env scores it with a
-``reward_fn``. Reasoning is the degenerate ``max_turns=1`` configuration — a
-plain :class:`RolloutEnv` instance, no subclass. Callers wrap it in
-:class:`~agilerl.llm_envs.rollout_harness.RolloutHarness` so it plugs
-into ``BatchRolloutEnv`` like any other rollout env.
-
-Dataset order is deterministic: a ``BatchRolloutEnv`` owns the shared dataset
-cursor across its trajectories, re-drawing a seeded per-epoch shuffle
-(:func:`dataloader_shuffle_order`) at each epoch boundary so a per-row seed
-selects one reproducible dataset row for every trajectory in its group. Batch/row
-order need only be deterministic and group-consistent, which is what
-grouped-advantage training relies on. A standalone (eval) env owns no batch
-cursor and walks its active split sequentially.
+A :class:`RolloutEnv`, produces prompts (usually backed by a dataset) that are sent to the model, which generates a completion, that is scored by the env's ``reward_fn``. Reasoning is the ``max_turns=1`` configuration.
+``BatchRolloutEnv`` is a wrapper to maintain independent groups of rollouts on batches of prompts.
 """
 
 from __future__ import annotations
