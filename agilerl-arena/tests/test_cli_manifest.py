@@ -438,6 +438,25 @@ class TestManifestCommandCallback:
         _invoke, parsed = client._invoke_manifest_command.call_args.args
         assert parsed == {"name": "pool"}
 
+    def test_missing_required_param_raises_usage_error(self) -> None:
+        """The callback's defensive guard rejects a required param left as None.
+
+        Invoking the callback without parsing (``ctx.params`` empty) bypasses
+        Click's own required-option check, exercising the in-callback guard.
+        """
+        invoke = {
+            "method": "GET",
+            "path": "/api/cli/v1/on-prem/classes/get",
+            "responseKind": "json",
+            "params": [_param_spec("name", in_="query", required=True)],
+        }
+        cmd = build_manifest_click_command("get", "help", invoke)
+        ctx = click.Context(cmd, obj=_command_config())
+        with pytest.raises(
+            click.UsageError, match="Missing required option for 'name'"
+        ):
+            cmd.invoke(ctx)
+
     def test_binary_command_writes_output_file(self, tmp_path: Path) -> None:
         dest = tmp_path / "bundle.zip"
         invoke = {

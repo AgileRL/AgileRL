@@ -129,6 +129,39 @@ class TestCommandConfig:
             )
 
 
+class TestResolveRootCommandConfig:
+    def test_returns_existing_command_config_unchanged(self):
+        from agilerl.arena.config import _resolve_root_command_config
+
+        cfg = CommandConfig(
+            api_key="key",
+            base_url="http://api",
+            keycloak_url="http://kc",
+            realm="realm",
+            client_id="cli",
+            request_timeout=10,
+            upload_timeout=60,
+        )
+        ctx = click.Context(click.Command("root"))
+        ctx.obj = cfg
+        assert _resolve_root_command_config(ctx) is cfg
+
+    def test_non_dict_params_fall_back_to_defaults(self):
+        """When ctx.obj is unset and ctx.params is not a dict, defaults are used."""
+        from agilerl.arena.config import _resolve_root_command_config
+
+        ctx = click.Context(click.Command("root"))
+        ctx.obj = None
+        ctx.params = None  # type: ignore[assignment]
+
+        cfg = _resolve_root_command_config(ctx)
+        assert isinstance(cfg, CommandConfig)
+        assert cfg.api_key is None
+        assert cfg.base_url is None
+        assert cfg.request_timeout == 30
+        assert cfg.upload_timeout == 300
+
+
 class TestArenaClientContextManager:
     def test_yields_client_and_closes(self, mock_client):
         cfg = CommandConfig(
