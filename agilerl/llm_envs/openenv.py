@@ -4,14 +4,13 @@ Every LLM-training env is hosted + reached through the OpenEnv server and protoc
 (https://github.com/meta-pytorch/OpenEnv): an env is wrapped in a
 :class:`OpenEnvWrapper` (an OpenEnv ``Environment``), served by OpenEnv's
 ``HTTPEnvServer`` (:func:`serve`), and ``RolloutEnv`` drives it over the OpenEnv wire
-(``POST /reset`` / ``/step``). A standard text contract — :class:`TextAction`
-(``message``) and :class:`TextObservation` (``prompt``) — carries the model's text
-both ways, so there are no per-env codecs. :func:`local_transport` drives the very
-same ``OpenEnvWrapper`` in-process (socket-free) for the common local case, and
-:func:`resolve_env` turns a URL or a ``module:Class`` entrypoint into a hosted env.
+(``POST /reset`` / ``/step``) with an :class:`OpenEnvClient`. A standard text contract
+— :class:`TextAction` (``message``) and :class:`TextObservation` (``prompt``) — carries
+the model's text both ways, so there are no per-env codecs; :func:`resolve_env` turns a
+URL or a ``module:Class`` entrypoint into a hosted env.
 
-This module is the AgileRL <-> OpenEnv seam: ``openenv`` (the ``[llm]`` extra) owns
-the server/protocol; we own the text contract + the gym/gem wrapper + the sync client.
+This module is the AgileRL <-> OpenEnv seam: ``openenv`` owns the server/protocol;
+we own the text contract + the gym wrapper + the HTTP client.
 """
 
 from __future__ import annotations
@@ -20,14 +19,13 @@ import contextlib
 import importlib
 import importlib.util
 import inspect
-import json
 import logging
 import os
 import threading
 import time
-import urllib.request
 from typing import TYPE_CHECKING, Any
 
+import httpx
 from openenv.core.env_server.http_server import create_app
 from openenv.core.env_server.interfaces import Environment, EnvironmentMetadata
 from openenv.core.env_server.types import Action, Observation, State
@@ -57,9 +55,8 @@ class TextObservation(Observation):
     prompt: str = ""
 
 
-# --- the universal wrapper: any local env -> an OpenEnv Environment ---------
 class OpenEnvWrapper(Environment):
-    """Wrap any local env (the gym / gem text contract) as an OpenEnv ``Environment``.
+    """Wrap any local env as an OpenEnv ``Environment``.
 
     ``inner`` provides ``reset(seed=None[, row_index, evaluation]) -> (prompt, info)``
     and ``step(action_text) -> (prompt, reward, terminated, truncated, info)``. The
@@ -178,16 +175,6 @@ def _fold(text: str, info: dict[str, Any] | None) -> str:
     return text
 
 
-def _obs_to_wire(obs: TextObservation) -> dict[str, Any]:
-    """Shape a ``TextObservation`` like the OpenEnv server's reset/step response."""
-    return {
-        "observation": {"prompt": obs.prompt},
-        "reward": obs.reward,
-        "done": obs.done,
-    }
-
-
-# --- serve: host a local env via OpenEnv's HTTPEnvServer --------------------
 class OpenEnvServer:
     """Host a local env over HTTP via OpenEnv's ``HTTPEnvServer`` (uvicorn in a thread).
 
@@ -283,76 +270,50 @@ def serve(
     return OpenEnvServer(env, host=host, port=port, env_name=env_name).start()
 
 
-def local_transport(env: Any) -> Callable[[str, dict[str, Any]], dict[str, Any]]:
-    """Return an in-process ``(path, payload) -> dict`` transport driving ``env``.
-
-    The socket-free counterpart to :class:`OpenEnvServer`: it runs the same
-    :class:`OpenEnvWrapper` the server would, shaping responses like the OpenEnv wire,
-    so a local env is driven with no HTTP cost. Pass it as
-    ``RolloutEnv(..., transport=local_transport(env))`` (this is what
-    :meth:`RolloutEnv.from_dataset` does) or to :class:`OpenEnvClient` directly.
-    """
-    gym = OpenEnvWrapper(env)
-
-    def transport(path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        route = path.split("?", 1)[0].rstrip("/") or "/"
-        payload = payload or {}
-        if route == "/reset":
-            return _obs_to_wire(
-                gym.reset(
-                    seed=payload.get("seed"),
-                    row_index=payload.get("row_index"),
-                    evaluation=payload.get("evaluation"),
-                )
-            )
-        if route == "/step":
-            action = TextAction(**(payload.get("action") or {}))
-            return _obs_to_wire(gym.step(action))
-        if route == "/state":
-            return gym.state.model_dump()
-        if route == "/close":
-            gym.close()
-            return {}
-        msg = f"unknown OpenEnv route {route!r}"
-        raise ValueError(msg)
-
-    return transport
-
-
-# --- client: drive an OpenEnv env over the wire (REST or in-process) --------
 class OpenEnvClient:
-    """Sync client that drives an OpenEnv env over its REST wire (or a transport).
+    """HTTP client for an OpenEnv env server (text in, text out).
 
-    ``reset`` / ``step`` speak the standard text contract: the action is the model's
-    text (``{"message": ...}``) and the observation is the next prompt. ``dataset_size``
-    and ``tools`` come from the env's ``/state``; ``row_index`` / ``evaluation`` are
-    sent on reset so a ``BatchRolloutEnv`` can pin a group to one prompt / select the
-    held-out split.
+    Drives any env hosted as an OpenEnv server — our own :class:`OpenEnvServer` or a
+    third-party Space — over its REST wire via a single :class:`httpx.Client`.
+    ``reset`` / ``step`` speak the standard text contract (the action is the model's
+    text, the observation is the next prompt); ``dataset_size`` / ``tools`` come from
+    ``/state``; ``row_index`` / ``evaluation`` ride on reset so a ``BatchRolloutEnv``
+    can pin a group to one prompt / select the held-out split.
 
-    :param base_url: Root URL of the env server. ``None`` only with a ``transport``.
-    :param headers: Optional HTTP headers sent on every request.
+    For an external server whose env exposes an MCP tool rather than the plain text
+    contract, pass ``mcp_tool``: the model's text is sent as
+    ``call_tool(mcp_tool, {arg: text})`` and the tool result rendered back to text.
+
+    :param base_url: Root URL of the env server.
+    :param headers: Optional HTTP headers (e.g. auth) sent on every request.
     :param timeout_s: Per-request timeout in seconds. ``None`` (the default) leaves
         requests unbounded; the value is supplied from the run manifest.
-    :param transport: ``(path, payload) -> dict`` injection seam in place of real HTTP
-        (so unit tests — and :func:`local_transport` — need no socket).
+    :param mcp_tool: When set, send the model's text as an MCP ``call_tool`` to this
+        tool (for external MCP servers); when ``None``, send ``{"message": text}``.
+    :param arg: MCP argument name carrying the text (default ``"message"``).
+    :param instruction: Prompt returned from reset when the env's reset obs is empty.
     """
 
     def __init__(
         self,
-        base_url: str | None = None,
+        base_url: str,
         *,
         headers: dict[str, str] | None = None,
         timeout_s: float | None = None,
-        transport: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
+        mcp_tool: str | None = None,
+        arg: str = "message",
+        instruction: str = "",
     ) -> None:
-        """Build a client for the env server at ``base_url`` (or an injected transport)."""
-        if not base_url and transport is None:
-            msg = "OpenEnvClient requires a base_url (or an injected transport)"
+        """Build a client for the OpenEnv server at ``base_url``."""
+        if not base_url:
+            msg = "OpenEnvClient requires a base_url"
             raise ValueError(msg)
-        self._base_url = (base_url or "").rstrip("/")
-        self._headers = headers
-        self._timeout_s = timeout_s
-        self._transport = transport
+        self._http = httpx.Client(
+            base_url=base_url.rstrip("/"), headers=headers or {}, timeout=timeout_s
+        )
+        self._mcp_tool = mcp_tool
+        self._arg = arg
+        self._instruction = instruction
         self._evaluation_mode = False
         self._state: dict[str, Any] | None = None
 
@@ -370,16 +331,24 @@ class OpenEnvClient:
             payload["row_index"] = int(row_index)
         if self._evaluation_mode:
             payload["evaluation"] = True
-        data = self._request("/reset", payload)
-        return _prompt(data), {}
+        data = self._post("/reset", payload)
+        return (_observation_text(data.get("observation")) or self._instruction), {}
 
     def step(self, action: Any) -> tuple[str, float, bool, bool, dict[str, Any]]:
         """Forward one action (model text) to the env and return the Gym 5-tuple."""
         text = action if isinstance(action, str) else str(action)
-        data = self._request("/step", {"action": {"message": text}})
+        if self._mcp_tool:
+            act: dict[str, Any] = {
+                "type": "call_tool",
+                "tool_name": self._mcp_tool,
+                "arguments": {self._arg: text},
+            }
+        else:
+            act = {"message": text}
+        data = self._post("/step", {"action": act})
         reward = data.get("reward")
         return (
-            _prompt(data),
+            _observation_text(data.get("observation")),
             float(reward) if reward is not None else 0.0,
             bool(data.get("done", False)),
             False,
@@ -387,9 +356,10 @@ class OpenEnvClient:
         )
 
     def close(self) -> None:
-        """Best-effort ``/close`` (routes to the env's close over a transport)."""
+        """Best-effort ``/close``, then release the HTTP connection pool."""
         with contextlib.suppress(Exception):
-            self._request("/close", {})
+            self._post("/close", {})
+        self._http.close()
 
     @property
     def dataset_size(self) -> int:
@@ -425,166 +395,31 @@ class OpenEnvClient:
         if self._state is None:
             self._state = {}
             with contextlib.suppress(Exception):
-                resp = self._request("/state", {}, method="GET")
-                if isinstance(resp, dict):
-                    self._state = resp
+                response = self._http.get("/state")
+                response.raise_for_status()
+                body = response.json()
+                if isinstance(body, dict):
+                    self._state = body
         return self._state
 
-    def _request(
-        self, path: str, payload: dict[str, Any], *, method: str = "POST"
-    ) -> dict[str, Any]:
-        """Dispatch over the injected transport or real HTTP."""
-        if self._transport is not None:
-            return self._transport(path, payload)
-        if method == "GET":
-            return _urllib_get(
-                f"{self._base_url}{path}",
-                headers=self._headers,
-                timeout_s=self._timeout_s,
-            )
-        return _urllib_post(
-            f"{self._base_url}{path}",
-            payload,
-            headers=self._headers,
-            timeout_s=self._timeout_s,
-        )
+    def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """POST JSON to the server and decode the object response."""
+        response = self._http.post(path, json=payload)
+        response.raise_for_status()
+        body = response.json()
+        if not isinstance(body, dict):
+            msg = f"OpenEnv {path} returned a non-object payload: {type(body)!r}"
+            raise TypeError(msg)
+        return body
 
 
-def _prompt(data: dict[str, Any]) -> str:
-    """Pull the prompt text out of an OpenEnv response."""
-    obs = data.get("observation")
-    if isinstance(obs, dict):
-        prompt = obs.get("prompt")
-        if isinstance(prompt, str):
-            return prompt
-    return obs if isinstance(obs, str) else ""
+def _observation_text(obs: Any) -> str:
+    """Render an OpenEnv observation to prompt text.
 
-
-def _urllib_post(
-    url: str,
-    payload: dict[str, Any],
-    *,
-    headers: dict[str, str] | None = None,
-    timeout_s: float | None = None,
-) -> dict[str, Any]:
-    """POST JSON via the stdlib and decode the object."""
-    body = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(url, data=body, method="POST")
-    request.add_header("content-type", "application/json")
-    request.add_header("accept", "application/json")
-    for key, value in (headers or {}).items():
-        request.add_header(key, value)
-    with urllib.request.urlopen(request, timeout=timeout_s) as response:
-        decoded = json.loads(response.read().decode("utf-8"))
-    if not isinstance(decoded, dict):
-        msg = f"OpenEnv {url} returned a non-object payload: {type(decoded)!r}"
-        raise TypeError(msg)
-    return decoded
-
-
-def _urllib_get(
-    url: str,
-    *,
-    headers: dict[str, str] | None = None,
-    timeout_s: float | None = None,
-) -> dict[str, Any]:
-    """GET JSON via the stdlib and decode the object."""
-    request = urllib.request.Request(url, method="GET")
-    request.add_header("accept", "application/json")
-    for key, value in (headers or {}).items():
-        request.add_header(key, value)
-    with urllib.request.urlopen(request, timeout=timeout_s) as response:
-        decoded = json.loads(response.read().decode("utf-8"))
-    return decoded if isinstance(decoded, dict) else {}
-
-
-# --- adapter: drive a real *external* OpenEnv server as a local env ---------
-class OpenEnvHTTPEnv:
-    """A local env that proxies a real, *external* OpenEnv REST server.
-
-    Our envs speak the :class:`TextAction` / :class:`TextObservation` text contract,
-    but a third-party OpenEnv env (e.g. the echo HF Space) has its own typed schema.
-    This bridges one such env to the text contract, so it is driven by ``RolloutEnv``
-    via :func:`local_transport` / :func:`serve` like any local env. ``mcp_tool`` handles
-    MCP tool envs (the echo Space): the model's text is sent as
-    ``call_tool(mcp_tool, {arg: text})`` and the tool result rendered back to text.
-
-    For full OpenEnv compatibility (WebSocket sessions, container Spaces, production
-    MCP) use the ``openenv`` package's own client instead.
-
-    :param base_url: Root URL of the external OpenEnv server.
-    :param mcp_tool: When set, send the text as an MCP ``call_tool`` to this tool;
-        when ``None``, send it as ``{"message": text}``.
-    :param arg: MCP argument name carrying the text (default ``"message"``).
-    :param instruction: Prompt returned from reset when the env's reset obs is empty.
-    :param headers: Optional HTTP headers (e.g. auth) sent on every request.
-    :param timeout_s: Per-request timeout in seconds. ``None`` (the default) leaves
-        requests unbounded; the value is supplied from the run manifest.
+    Handles our text contract (``{"prompt": ...}`` or a bare string) and a third-party
+    typed / MCP observation (tool-result content blocks, or a ``text`` / ``message``
+    field), so one client drives both our servers and external ones.
     """
-
-    def __init__(
-        self,
-        base_url: str,
-        *,
-        mcp_tool: str | None = None,
-        arg: str = "message",
-        instruction: str = "",
-        headers: dict[str, str] | None = None,
-        timeout_s: float | None = None,
-    ) -> None:
-        """Build an adapter for the external OpenEnv server at ``base_url``."""
-        self._base_url = base_url.rstrip("/")
-        self._mcp_tool = mcp_tool
-        self._arg = arg
-        self._instruction = instruction
-        self._headers = headers
-        self._timeout_s = timeout_s
-
-    def reset(self, seed: int | None = None) -> tuple[str, dict[str, Any]]:
-        """Reset the external env and return ``(prompt, info)``."""
-        payload: dict[str, Any] = {}
-        if seed is not None and int(seed) >= 0:
-            payload["seed"] = int(seed)
-        data = _urllib_post(
-            f"{self._base_url}/reset",
-            payload,
-            headers=self._headers,
-            timeout_s=self._timeout_s,
-        )
-        return (_render_external(data.get("observation")) or self._instruction), {}
-
-    def step(self, action: Any) -> tuple[str, float, bool, bool, dict[str, Any]]:
-        """Forward one action (model text) to the external env; return the Gym 5-tuple."""
-        text = action if isinstance(action, str) else str(action)
-        if self._mcp_tool:
-            act: dict[str, Any] = {
-                "type": "call_tool",
-                "tool_name": self._mcp_tool,
-                "arguments": {self._arg: text},
-            }
-        else:
-            act = {"message": text}
-        data = _urllib_post(
-            f"{self._base_url}/step",
-            {"action": act},
-            headers=self._headers,
-            timeout_s=self._timeout_s,
-        )
-        reward = data.get("reward")
-        return (
-            _render_external(data.get("observation")),
-            float(reward) if reward is not None else 0.0,
-            bool(data.get("done", False)),
-            False,
-            {},
-        )
-
-    def close(self) -> None:
-        """No-op: the OpenEnv REST API holds no per-client session to close."""
-
-
-def _render_external(obs: Any) -> str:
-    """Render an external OpenEnv observation (MCP tool result or a text field) to text."""
     if isinstance(obs, str):
         return obs
     if not isinstance(obs, dict):
@@ -609,7 +444,6 @@ def _render_external(obs: Any) -> str:
     return f"Error: {error}" if error else ""
 
 
-# --- env resolution: a spec -> a URL ---------------------------------------
 def resolve_env(
     spec: str,
     env_config: dict[str, Any] | None = None,

@@ -10,7 +10,6 @@ import torch
 from agilerl.llm_envs import (
     BatchRolloutEnv,
     RolloutEnv,
-    local_transport,
 )
 
 # The boundary marker is a per-render ``uuid4().hex`` (32 lowercase hex chars);
@@ -68,14 +67,13 @@ class _RecordingGemEnv:
 
 
 class TestRolloutEnvReset:
-    def test_reset_returns_tuple_with_text_and_sets_prompt_len(self) -> None:
+    def test_reset_returns_tuple_with_text_and_sets_prompt_len(self, serve_env) -> None:
         inner = _RecordingGemEnv()
         w = RolloutEnv(
-            None,
+            serve_env(inner),
             _ChrTokenizer(),
             max_turns=3,
             pad_id=None,
-            transport=local_transport(inner),
             apply_chat_template=False,
         )
         obs, info = w.reset()
@@ -86,14 +84,13 @@ class TestRolloutEnvReset:
 
 
 class TestRolloutEnvStep:
-    def test_step_from_full_completion_slices_generation(self) -> None:
+    def test_step_from_full_completion_slices_generation(self, serve_env) -> None:
         inner = _RecordingGemEnv()
         w = RolloutEnv(
-            None,
+            serve_env(inner),
             _ChrTokenizer(),
             max_turns=3,
             pad_id=None,
-            transport=local_transport(inner),
             apply_chat_template=False,
         )
         obs, _ = w.reset()
@@ -111,14 +108,15 @@ class TestRolloutEnvStep:
         with pytest.raises(RuntimeError, match="requires a prior reset"):
             w.step(torch.ones(1, 2, dtype=torch.long))
 
-    def test_chat_template_paths_and_nonterminal_step_feedback_append(self) -> None:
+    def test_chat_template_paths_and_nonterminal_step_feedback_append(
+        self, serve_env
+    ) -> None:
         env = _NonTerminalEnv()
         w = RolloutEnv(
-            None,
+            serve_env(env),
             _ChatTokenizer(),
             max_turns=2,
             pad_id=None,
-            transport=local_transport(env),
             apply_chat_template=True,
         )
         obs, _ = w.reset()
@@ -136,14 +134,13 @@ class TestRolloutEnvStep:
         assert next_obs["input_ids"].shape[1] > completion.shape[1]
         assert w._feedback_texts[-1] == "F:feedback\nT"
 
-    def test_non_chat_feedback_tokenization_path(self) -> None:
+    def test_non_chat_feedback_tokenization_path(self, serve_env) -> None:
         env = _NonTerminalEnv()
         w = RolloutEnv(
-            None,
+            serve_env(env),
             _ChrTokenizer(),
             max_turns=2,
             pad_id=None,
-            transport=local_transport(env),
             apply_chat_template=False,
         )
         obs, _ = w.reset()
@@ -156,7 +153,7 @@ class TestRolloutEnvStep:
         assert not truncated
         assert next_obs["input_ids"].shape[1] > completion.shape[1]
 
-    def test_strict_mode_terminates_on_context_overflow(self) -> None:
+    def test_strict_mode_terminates_on_context_overflow(self, serve_env) -> None:
         """When the cumulative prompt would exceed
         ``max_model_len - max_output_tokens``, the trajectory ends with
         ``truncated=True`` and an ``agilerl_context_overflow`` breadcrumb in
@@ -166,11 +163,10 @@ class TestRolloutEnvStep:
         # Tiny budget: 20 - 4 = 16 prompt tokens. Initial prompt "P:hello\nS"
         # is 9 char-tokens; +2 gen +12 feedback ("F:feedback\nT") => 23 > 16.
         w = RolloutEnv(
-            None,
+            serve_env(env),
             _ChrTokenizer(),
             max_turns=4,
             pad_id=None,
-            transport=local_transport(env),
             apply_chat_template=False,
             max_model_len=20,
             max_output_tokens=4,

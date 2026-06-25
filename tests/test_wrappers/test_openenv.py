@@ -2,8 +2,8 @@
 
 Every LLM-training env is reached the same way — text in, text out, over the small
 OpenEnv HTTP protocol. These cover both halves (``OpenEnvServer`` host +
-``OpenEnvClient`` client), the socket-free ``local_transport``, the spec resolver, and
-``RolloutEnv.from_dataset`` (the in-process prompt-dataset case).
+``OpenEnvClient`` client over httpx), the spec resolver, and
+``RolloutEnv.from_dataset`` (which hosts the prompt dataset on its own server).
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ from agilerl.llm_envs import (
     OpenEnvServer,
     OpenEnvWrapper,
     RolloutEnv,
-    local_transport,
     resolve_env,
     serve,
 )
@@ -110,31 +109,10 @@ def test_info_reports_dataset_size_and_tools() -> None:
         server.stop()
 
 
-def test_base_url_or_transport_required() -> None:
-    """The client needs a URL or an injected transport."""
+def test_base_url_required() -> None:
+    """The client needs a non-empty base URL."""
     with pytest.raises(ValueError, match="base_url"):
-        OpenEnvClient()
-
-
-# --- local_transport: socket-free parity -----------------------------------
-def test_local_transport_matches_http() -> None:
-    """``local_transport`` drives the same ``OpenEnvWrapper`` as the server, no socket."""
-    client = OpenEnvClient(transport=local_transport(_CountingEnv(target=1)))
-    prompt, _ = client.reset()
-    obs, reward, terminated, _, _ = client.step("go")
-    assert prompt == "Start.\nReply 'go'."
-    assert (obs, reward, terminated) == (
-        "turn 1",
-        1.0,
-        True,
-    )
-
-
-def test_local_transport_unknown_route_raises() -> None:
-    """An unknown route is an error (surfaced as a 500 over HTTP)."""
-    transport = local_transport(_CountingEnv())
-    with pytest.raises(ValueError, match="unknown OpenEnv route"):
-        transport("/nope", {})
+        OpenEnvClient("")
 
 
 # --- gym-tuple normalisation -----------------------------------------------
@@ -176,7 +154,7 @@ def test_name_from_spec_takes_trailing_identifier() -> None:
     assert _name_from_spec("plainname") == "plainname"
 
 
-# --- RolloutEnv.from_dataset (reasoning over local_transport) ---------------
+# --- RolloutEnv.from_dataset (reasoning over a hosted server) ---------------
 def test_from_dataset_cursor_and_eval_split() -> None:
     """reset() with no row walks the split; evaluation routes to the held-out split."""
     env = RolloutEnv.from_dataset(
@@ -189,19 +167,22 @@ def test_from_dataset_cursor_and_eval_split() -> None:
         test_answers=["ta0"],
         apply_chat_template=False,
     )
-    # Standalone cursor walks the active split sequentially.
-    env.reset()
-    assert env._prompt_text == "P:q0"
-    env.reset()
-    assert env._prompt_text == "P:q1"
-    # evaluation routes to the held-out split (and resets the cursor).
-    with env.eval_mode():
+    try:
+        # Standalone cursor walks the active split sequentially.
         env.reset()
+        assert env._prompt_text == "P:q0"
+        env.reset()
+        assert env._prompt_text == "P:q1"
+        # evaluation routes to the held-out split (and resets the cursor).
+        with env.eval_mode():
+            env.reset()
+            assert env._prompt_text == "P:t0"
+        # The evaluation_mode flag is honoured when reset omits the row.
+        env.evaluation_mode = True
+        env.reset(row_index=0)
         assert env._prompt_text == "P:t0"
-    # The evaluation_mode flag is honoured when reset omits the row.
-    env.evaluation_mode = True
-    env.reset(row_index=0)
-    assert env._prompt_text == "P:t0"
+    finally:
+        env.close()
 
 
 def test_from_dataset_dataset_size_and_row_pinning() -> None:
@@ -221,11 +202,15 @@ def test_from_dataset_dataset_size_and_row_pinning() -> None:
         prompt_builder=lambda q: f"P:{q}",
         apply_chat_template=False,
     )
-    assert a.dataset_size == 3
-    # Same row_index -> same prompt (a GRPO group sees one prompt).
-    a.reset(row_index=2)
-    b.reset(row_index=2)
-    assert a._prompt_text == b._prompt_text == "P:q2"
+    try:
+        assert a.dataset_size == 3
+        # Same row_index -> same prompt (a GRPO group sees one prompt).
+        a.reset(row_index=2)
+        b.reset(row_index=2)
+        assert a._prompt_text == b._prompt_text == "P:q2"
+    finally:
+        a.close()
+        b.close()
 
 
 def test_from_dataset_eval_mode_routes_split() -> None:
@@ -239,13 +224,16 @@ def test_from_dataset_eval_mode_routes_split() -> None:
         test_answers=["ta0"],
         apply_chat_template=False,
     )
-    env.reset(row_index=0)
-    assert env._prompt_text == "P:q0"
-    with env.eval_mode():
+    try:
         env.reset(row_index=0)
-        assert env._prompt_text == "P:t0"
-    env.reset(row_index=0)
-    assert env._prompt_text == "P:q0"
+        assert env._prompt_text == "P:q0"
+        with env.eval_mode():
+            env.reset(row_index=0)
+            assert env._prompt_text == "P:t0"
+        env.reset(row_index=0)
+        assert env._prompt_text == "P:q0"
+    finally:
+        env.close()
 
 
 def test_from_dataset_full_step_loop_scores_and_terminates() -> None:
@@ -258,14 +246,17 @@ def test_from_dataset_full_step_loop_scores_and_terminates() -> None:
         max_turns=1,
         apply_chat_template=False,
     )
-    env.reset(row_index=0)
-    _, reward, terminated, _, _ = env.step(
-        torch.tensor([[1, 2, 3, 7, 7]], dtype=torch.long)
-    )
-    assert reward == 1.0  # decode() -> "go"
-    assert terminated is True
-    _full_ids, _action_mask, _turn_ids, turn_rewards, _ = env.get_episode_data()
-    assert turn_rewards.tolist() == [1.0]
+    try:
+        env.reset(row_index=0)
+        _, reward, terminated, _, _ = env.step(
+            torch.tensor([[1, 2, 3, 7, 7]], dtype=torch.long)
+        )
+        assert reward == 1.0  # decode() -> "go"
+        assert terminated is True
+        _full_ids, _action_mask, _turn_ids, turn_rewards, _ = env.get_episode_data()
+        assert turn_rewards.tolist() == [1.0]
+    finally:
+        env.close()
 
 
 # --- serving: one OpenEnv server instance per rollout ----------------------
@@ -280,7 +271,7 @@ def test_serving_hosts_owns_and_stops_its_server() -> None:
 
 
 def test_from_dataset_serve_hosts_a_per_instance_server() -> None:
-    """``from_dataset(serve=True)`` owns a server instead of using local_transport."""
+    """``from_dataset`` hosts the prompt dataset on its own per-instance server."""
     env = RolloutEnv.from_dataset(
         ["q0"],
         ["a0"],
@@ -288,7 +279,6 @@ def test_from_dataset_serve_hosts_a_per_instance_server() -> None:
         _MiniTok(),
         prompt_builder=lambda q: f"P:{q}",
         apply_chat_template=False,
-        serve=True,
     )
     assert env._owned_server is not None
     assert env.dataset_size == 1

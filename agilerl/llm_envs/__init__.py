@@ -7,12 +7,10 @@ from agilerl.llm_envs.base import (
 from agilerl.llm_envs.dataset_env import DatasetEnv
 from agilerl.llm_envs.openenv import (
     OpenEnvClient,
-    OpenEnvHTTPEnv,
     OpenEnvServer,
     OpenEnvWrapper,
     TextAction,
     TextObservation,
-    local_transport,
     resolve_env,
     serve,
 )
@@ -26,14 +24,12 @@ __all__ = [
     "DatasetEnv",
     "LLMEnv",
     "OpenEnvClient",
-    "OpenEnvHTTPEnv",
     "OpenEnvServer",
     "OpenEnvWrapper",
     "RolloutEnv",
     "TextAction",
     "TextObservation",
     "apply_chat_template",
-    "local_transport",
     "resolve_env",
     "serve",
 ]

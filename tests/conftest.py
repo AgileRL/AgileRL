@@ -537,3 +537,25 @@ def deepspeed_env():
                 os.environ[key] = existing_vars[key]
             else:
                 os.environ.pop(key, None)
+
+
+@pytest.fixture
+def serve_env():
+    """Host local envs over OpenEnv HTTP for a test, stopping them all at teardown.
+
+    ``url = serve_env(MyEnv())`` returns a base URL to hand to ``OpenEnvClient`` /
+    ``RolloutEnv``; the server (and any others served in the same test) is shut down
+    when the test finishes, so individual tests stay free of start/stop boilerplate.
+    """
+    from agilerl.llm_envs import serve
+
+    servers = []
+
+    def _serve(env):
+        server = serve(env)
+        servers.append(server)
+        return server.base_url
+
+    yield _serve
+    for server in servers:
+        server.stop()

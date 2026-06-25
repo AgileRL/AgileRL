@@ -21,7 +21,6 @@ import torch
 from agilerl.llm_envs.openenv import (
     OpenEnvClient,
     OpenEnvServer,
-    local_transport,
     serve,
 )
 from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
@@ -59,13 +58,13 @@ class RolloutEnv:
 
     def __init__(
         self,
-        url: str | None,
+        url: str,
         tokenizer: Any,
         max_turns: int = 1,
         *,
         headers: dict[str, str] | None = None,
         timeout_s: float | None = None,
-        transport: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
+        mcp_tool: str | None = None,
         pad_id: int | None = None,
         apply_chat_template: bool = True,
         max_model_len: int | None = None,
@@ -81,9 +80,8 @@ class RolloutEnv:
         in ``info`` (generation stops rather than dropping older turns).
 
         :param url: Base URL of the OpenEnv env server (a hosted Space or a local
-            :class:`~agilerl.llm_envs.openenv.OpenEnvServer`). May be ``None`` only
-            when ``transport`` is supplied (the in-process test seam).
-        :type url: str | None
+            :class:`~agilerl.llm_envs.openenv.OpenEnvServer`).
+        :type url: str
         :param tokenizer: Tokenizer used to encode prompts/feedback and apply the
             chat template.
         :type tokenizer: Any
@@ -95,9 +93,9 @@ class RolloutEnv:
             ``None`` (the default) leaves requests unbounded; supply the value from
             the run manifest.
         :type timeout_s: float | None
-        :param transport: ``(path, payload) -> dict`` injection seam used in place
-            of real HTTP (so unit tests need no socket), defaults to ``None``.
-        :type transport: Callable | None
+        :param mcp_tool: For an external MCP server, the tool the model's text is sent
+            to as a ``call_tool``; ``None`` (default) uses the plain text contract.
+        :type mcp_tool: str | None
         :param pad_id: Padding token id used when assembling token tensors,
             defaults to ``None``.
         :type pad_id: int | None
@@ -135,13 +133,13 @@ class RolloutEnv:
         """
         self.max_turns = max_turns
         self._backend = OpenEnvClient(
-            base_url=url,
+            url,
             headers=headers,
             timeout_s=timeout_s,
-            transport=transport,
+            mcp_tool=mcp_tool,
         )
-        # Set by ``serving`` / ``from_dataset(serve=True)`` when this env hosts its
-        # own OpenEnv server; stopped on ``close`` so per-rollout servers don't leak.
+        # Set by ``serving`` (and ``from_dataset``) when this env hosts its own
+        # OpenEnv server; stopped on ``close`` so per-rollout servers don't leak.
         self._owned_server: OpenEnvServer | None = None
         self.tokenizer = tokenizer
         self.pad_id = pad_id
@@ -180,17 +178,14 @@ class RolloutEnv:
         test_questions: list[str] | None = None,
         test_answers: list[str] | None = None,
         max_turns: int = 1,
-        serve: bool = False,
         **kwargs: Any,
     ) -> RolloutEnv:
-        """Build a reasoning ``RolloutEnv`` over an in-process prompt dataset.
+        """Build a reasoning ``RolloutEnv`` over a prompt dataset.
 
-        Wraps an in-process prompt-dataset env in the socket-free
-        :func:`~agilerl.llm_envs.openenv.local_transport`, so it is driven over the
-        OpenEnv interface with no HTTP cost — the common local case. Pass
-        ``serve=True`` to instead host the dataset env on its own OpenEnv server (see
-        :meth:`serving`) — used as the per-rollout factory when you want one
-        process-isolated server per concurrent rollout.
+        Hosts the prompt-dataset env on its own OpenEnv server (via :meth:`serving`)
+        and drives it over HTTP — the common single-turn / reasoning case. As the
+        per-rollout ``env_factory`` this gives a :class:`BatchRolloutEnv` one isolated
+        server per concurrent rollout.
 
         :param questions: Per-row question strings (training split).
         :param answers: Per-row training answers, aligned with ``questions``.
@@ -200,10 +195,6 @@ class RolloutEnv:
         :param test_questions: Held-out questions served under :meth:`eval_mode`.
         :param test_answers: Held-out answers served under :meth:`eval_mode`.
         :param max_turns: Generation turns per episode (``1`` = single-turn).
-        :param serve: Host the dataset env on its own OpenEnv server (one per call,
-            owned and stopped on :meth:`close`) instead of driving it in-process. As
-            the per-rollout factory this gives a :class:`BatchRolloutEnv` one
-            isolated server per concurrent rollout.
         :param kwargs: Forwarded to :class:`RolloutEnv` (e.g. ``pad_id``,
             ``apply_chat_template``, ``max_model_len``).
         :rtype: RolloutEnv
@@ -220,15 +211,7 @@ class RolloutEnv:
                 max_turns=max_turns,
             )
 
-        if serve:
-            return cls.serving(make_env, tokenizer, max_turns=max_turns, **kwargs)
-        return cls(
-            None,
-            tokenizer,
-            max_turns=max_turns,
-            transport=local_transport(make_env()),
-            **kwargs,
-        )
+        return cls.serving(make_env, tokenizer, max_turns=max_turns, **kwargs)
 
     @classmethod
     def serving(
@@ -251,9 +234,8 @@ class RolloutEnv:
 
         ``BatchRolloutEnv`` calls the factory ``batch_size * group_size`` times, so the
         number of servers is determined by the batch (one OS thread + port each). For
-        an in-process env prefer :meth:`from_dataset` / ``local_transport`` (already
-        isolated, no socket); for an already-running external server pass its ``url``
-        to the constructor.
+        an already-running external server (a hosted Space), pass its ``url`` to the
+        :class:`RolloutEnv` constructor directly.
 
         :param make_env: Zero-arg factory returning a fresh local env to host.
         :param tokenizer: Tokenizer for the token-level loop.

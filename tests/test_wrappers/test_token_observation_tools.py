@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 import torch
 
-from agilerl.llm_envs import RolloutEnv, local_transport
+from agilerl.llm_envs import RolloutEnv
 from agilerl.llm_envs.rollout_env import _PromptDatasetEnv
 
 _WIP = "pending tool-path wiring (engine / _align_sampling_logprobs)"
@@ -32,12 +32,14 @@ def _reasoning_env() -> _PromptDatasetEnv:
 
 
 def _wrap(inner: object) -> RolloutEnv:
-    """Drive ``inner`` at the token level over the socket-free OpenEnv transport."""
-    return RolloutEnv(
-        None,
+    """Drive ``inner`` at the token level over its own hosted OpenEnv server.
+
+    The returned env owns the server, so callers must ``close()`` it.
+    """
+    return RolloutEnv.serving(
+        lambda: inner,
         _MiniTokenizer(),
         max_turns=1,
-        transport=local_transport(inner),
         apply_chat_template=False,
     )
 
@@ -155,37 +157,44 @@ def test_format_obs_applies_prefix_and_suffix_from_info() -> None:
 def test_dataset_size_reflects_served_env() -> None:
     """``dataset_size`` reports the served env's training-row count (via /info)."""
     w = _wrap(_reasoning_env())
-    assert w.dataset_size == 1
+    try:
+        assert w.dataset_size == 1
+    finally:
+        w.close()
 
 
 def test_evaluation_mode_setter_routes_eval_split() -> None:
     """Setting ``evaluation_mode`` routes resets to the env's held-out split."""
     w = _wrap(_reasoning_env())
+    try:
+        assert w.evaluation_mode is False
+        w.reset(row_index=0)
+        assert w._prompt_text == "train-q"
 
-    assert w.evaluation_mode is False
-    w.reset(row_index=0)
-    assert w._prompt_text == "train-q"
+        w.evaluation_mode = True
+        w.reset(row_index=0)
+        assert w._prompt_text == "eval-q"
 
-    w.evaluation_mode = True
-    w.reset(row_index=0)
-    assert w._prompt_text == "eval-q"
-
-    w.evaluation_mode = False
-    w.reset(row_index=0)
-    assert w._prompt_text == "train-q"
+        w.evaluation_mode = False
+        w.reset(row_index=0)
+        assert w._prompt_text == "train-q"
+    finally:
+        w.close()
 
 
 def test_eval_mode_serves_wrapped_env_eval_split() -> None:
     """``eval_mode()`` routes resets to the held-out split, restoring after."""
     w = _wrap(_reasoning_env())
-
-    with w.eval_mode():
-        assert w.evaluation_mode is True
+    try:
+        with w.eval_mode():
+            assert w.evaluation_mode is True
+            w.reset(row_index=0)
+            assert w._prompt_text == "eval-q"
+        assert w.evaluation_mode is False
         w.reset(row_index=0)
-        assert w._prompt_text == "eval-q"
-    assert w.evaluation_mode is False
-    w.reset(row_index=0)
-    assert w._prompt_text == "train-q"
+        assert w._prompt_text == "train-q"
+    finally:
+        w.close()
 
 
 class _MiniTokenizer:
@@ -210,9 +219,12 @@ def test_reset_forwards_row_index_to_served_env() -> None:
         prompt_builder=lambda q: f"P:{q}",
     )
     w = _wrap(inner)
-    w.reset(row_index=1)
-    assert inner._question == "q1"
-    assert inner._answer == "a1"
+    try:
+        w.reset(row_index=1)
+        assert inner._question == "q1"
+        assert inner._answer == "a1"
+    finally:
+        w.close()
 
 
 def test_dataset_size_falls_back_when_env_lacks_it() -> None:
@@ -226,11 +238,14 @@ def test_dataset_size_falls_back_when_env_lacks_it() -> None:
             return "", 0.0, True, False, {}
 
     w = _wrap(_NoDataset())
-    assert w.dataset_size == 0
-    assert w.evaluation_mode is False
-    with w.eval_mode():
-        assert w.evaluation_mode is True
-    assert w.evaluation_mode is False
+    try:
+        assert w.dataset_size == 0
+        assert w.evaluation_mode is False
+        with w.eval_mode():
+            assert w.evaluation_mode is True
+        assert w.evaluation_mode is False
+    finally:
+        w.close()
 
 
 @pytest.mark.skip(reason=_WIP)

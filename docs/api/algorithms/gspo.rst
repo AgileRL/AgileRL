@@ -46,7 +46,7 @@ entry points such as ``train_llm_rollout``. Single-turn reasoning is the
 
 .. code-block:: python
 
-  from agilerl.llm_envs import RolloutEnv, local_transport
+  from agilerl.llm_envs import RolloutEnv
   from agilerl.training.train_llm import train_llm_rollout
 
   def reward_fn(completion: str, answer: str, question: str) -> float:
@@ -79,7 +79,7 @@ entry points such as ``train_llm_rollout``. Single-turn reasoning is the
       evaluation_interval=50,
   )
 
-  # 2) Multi-turn text environments (factory + wrapper)
+  # 2) Multi-turn text environments (a factory hosted on its own OpenEnv server)
   class ToyMultiTurnEnv:
       def reset(self, seed=None):
           del seed
@@ -90,11 +90,10 @@ entry points such as ``train_llm_rollout``. Single-turn reasoning is the
           return "Done.", reward, True, False, {"correct": bool(reward)}
 
   def env_factory():
-      return RolloutEnv(
-          None,
-          tokenizer=tokenizer,
+      return RolloutEnv.serving(
+          ToyMultiTurnEnv,
+          tokenizer,
           max_turns=4,
-          transport=local_transport(ToyMultiTurnEnv()),
           pad_id=tokenizer.eos_token_id,
           max_model_len=1024,
           max_output_tokens=128,

@@ -1073,26 +1073,29 @@ class TestREINFORCETest:
     def test_test_method_token_observation_wrapper_branch(self):
         from transformers import AutoTokenizer
 
-        from agilerl.llm_envs import RolloutEnv, local_transport
+        from agilerl.llm_envs import RolloutEnv, serve
         from agilerl.utils.probe_envs_llm import ConstantTargetEnv
 
         tok = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
         if tok.pad_token_id is None:
             tok.pad_token = tok.eos_token
-        env = RolloutEnv(
-            None,
-            tok,
-            max_turns=1,
-            transport=local_transport(ConstantTargetEnv(target_digit="1", prompt="1")),
-            pad_id=tok.pad_token_id,
-            apply_chat_template=False,
-            max_model_len=128,
-            max_output_tokens=8,
-        )
-        rf = _cpu_llmreinforce(max_model_len=128, max_output_tokens=8)
-        out = rf.test(env, loop=1)
-        assert out.shape == ()
-        assert rf.fitness[-1] == pytest.approx(float(out))
+        server = serve(ConstantTargetEnv(target_digit="1", prompt="1"))
+        try:
+            env = RolloutEnv(
+                server.base_url,
+                tok,
+                max_turns=1,
+                pad_id=tok.pad_token_id,
+                apply_chat_template=False,
+                max_model_len=128,
+                max_output_tokens=8,
+            )
+            rf = _cpu_llmreinforce(max_model_len=128, max_output_tokens=8)
+            out = rf.test(env, loop=1)
+            assert out.shape == ()
+            assert rf.fitness[-1] == pytest.approx(float(out))
+        finally:
+            server.stop()
 
 
 class TestReinforceLossLiger:

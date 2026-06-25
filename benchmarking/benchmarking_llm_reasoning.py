@@ -135,10 +135,8 @@ def main(init_hp, mut_p):
             "timeout_s": init_hp.get("OPENENV_TIMEOUT_S"),
         }
         # AGILERL_OPENENV_URL=<url> drives an env hosted on a *separate* OpenEnv server
-        # (e.g. scripts/local/serve_openenv_reasoning.py); else the dataset is driven
-        # in-process. AGILERL_OPENENV_SERVE=1 instead hosts the dataset env on its own
-        # OpenEnv server *per rollout*, so BatchRolloutEnv gets batch_size*group_size
-        # isolated servers (a served env handles one episode at a time).
+        # (e.g. scripts/local/serve_openenv_reasoning.py); else from_dataset hosts the
+        # dataset env on its own OpenEnv server per rollout.
         external_url = os.environ.get("AGILERL_OPENENV_URL")
         if external_url:
             env = RolloutEnv(external_url, tokenizer, max_turns=1, **rollout_kwargs)
@@ -152,7 +150,6 @@ def main(init_hp, mut_p):
                 test_questions=list(test_dataset["question"]),
                 test_answers=list(test_dataset["answer"]),
                 max_turns=1,
-                serve=bool(os.environ.get("AGILERL_OPENENV_SERVE")),
                 **rollout_kwargs,
             )
         env.evaluation_mode = evaluation_mode

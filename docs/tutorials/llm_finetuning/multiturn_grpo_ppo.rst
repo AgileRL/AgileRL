@@ -118,7 +118,7 @@ Dependencies
     from agilerl.utils.algo_utils import VLLMConfig
     from agilerl.utils.llm_utils import create_llm_accelerator
     from agilerl.utils.utils import create_population
-    from agilerl.llm_envs import RolloutEnv, local_transport
+    from agilerl.llm_envs import RolloutEnv
 
 Shared setup
 ------------
@@ -149,12 +149,10 @@ All runs use:
             env_probe.close()
 
         def env_factory():
-            env = gem.make(ENV_NAME)
-            return RolloutEnv(
-                None,
+            return RolloutEnv.serving(
+                lambda: gem.make(ENV_NAME),
                 tokenizer=tokenizer,
                 max_turns=max_turns,
-                transport=local_transport(env),
                 pad_id=tokenizer.pad_token_id,
                 apply_chat_template=True,
                 max_model_len=INIT_HP.get("MAX_MODEL_LEN"),

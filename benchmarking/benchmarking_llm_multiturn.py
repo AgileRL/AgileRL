@@ -13,7 +13,7 @@ import yaml
 from transformers import AutoTokenizer
 
 from agilerl.algorithms import CISPO, GRPO, GSPO, LLMPPO, LLMREINFORCE
-from agilerl.llm_envs import RolloutEnv, local_transport
+from agilerl.llm_envs import RolloutEnv
 from agilerl.training.train_llm import train_llm_rollout
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import (
@@ -70,17 +70,19 @@ def main(init_hp, mut_p):
     base_env = gem.make(ENV_NAME)
     rollout_max_turns = init_hp.get("MAX_TURNS", getattr(base_env, "max_turns", 32))
 
-    def env_factory():
+    def make_env():
         env = gem.make(ENV_NAME)
         if "sudoku" in ENV_NAME.lower():
             # Fix gem's Sudoku instruction-prompt bugs (subgrid wording + an
             # out-of-range worked example on the easy/4x4 board).
             env.reset = _patch_sudoku_prompt(env.reset)
-        return RolloutEnv(
-            None,
+        return env
+
+    def env_factory():
+        return RolloutEnv.serving(
+            make_env,
             tokenizer,
             rollout_max_turns,
-            transport=local_transport(env),
             pad_id=tokenizer.pad_token_id,
             max_model_len=init_hp.get("MAX_MODEL_LEN", None),
             max_output_tokens=init_hp.get("MAX_OUTPUT_TOKENS", None),
