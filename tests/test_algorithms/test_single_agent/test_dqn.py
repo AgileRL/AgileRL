@@ -15,11 +15,9 @@ from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
     assert_state_dicts_equal,
+    assert_transpose_image_observation_called,
     get_experiences_batch,
     get_sample_from_space,
-)
-from tests.helpers.algorithm_coverage import (
-    assert_transpose_image_observation_called,
     patch_transpose_image_observation,
 )
 

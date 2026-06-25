@@ -2269,3 +2269,16 @@ class TestPPOCollectRollouts:
         )
         assert isinstance(result, tuple)
         ppo.clean_up()
+
+
+class TestPPOBpttSequenceTypeCoercion:
+    def test_coerces_string_bptt_sequence_type(self, vector_space, discrete_space):
+        ppo = PPO(
+            observation_space=vector_space,
+            action_space=discrete_space,
+            recurrent=True,
+            max_seq_len=5,
+            bptt_sequence_type="chunked",
+        )
+        assert ppo.bptt_sequence_type == BPTTSequenceType.CHUNKED
+        ppo.clean_up()

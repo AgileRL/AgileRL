@@ -38,7 +38,7 @@ from agilerl.models.hpo import (
 )
 from agilerl.models.networks import MlpSpec, QNetworkSpec, StochasticActorSpec
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
-from agilerl.training.trainer import ArenaTrainer, LocalTrainer
+from agilerl.training.trainer import ArenaTrainer, LocalTrainer, Trainer
 from agilerl.utils.trainer_utils import (
     build_mutations_from_spec,
     build_replay_buffer_from_spec,
@@ -430,6 +430,44 @@ class TestLocalTrainerConstruction:
         assert trainer.mutation_spec is mutation_spec
         assert trainer.tournament_selection_spec is tournament_spec
         assert trainer.replay_buffer_spec is buffer_spec
+
+
+class TestLocalTrainerFromManifest:
+    @patch("agilerl.training.trainer.create_population_from_spec")
+    def test_from_dict_manifest(self, mock_create_pop):
+        from agilerl.models.env import GymEnvSpec
+
+        mock_create_pop.return_value = [MagicMock()]
+        data = {
+            "algorithm": {"name": "PPO", "learn_step": 128},
+            "environment": {"name": "CartPole-v1", "num_envs": 1},
+            "training": {"max_steps": 100, "evo_steps": 10, "pop_size": 2},
+        }
+        with patch.object(LocalTrainer, "_make_env", return_value=MagicMock()):
+            trainer = LocalTrainer.from_manifest(data)
+
+        assert isinstance(trainer, LocalTrainer)
+        assert isinstance(trainer.env_spec, GymEnvSpec)
+        assert trainer.env_spec.name == "CartPole-v1"
+        assert trainer.training_spec.max_steps == 100
+
+    @patch("agilerl.training.trainer.create_population_from_spec")
+    def test_from_validated_manifest_instance(self, mock_create_pop):
+        from agilerl.models.manifest import TrainingManifest
+
+        mock_create_pop.return_value = [MagicMock()]
+        data = {
+            "algorithm": {"name": "DQN", "learn_step": 1},
+            "environment": {"name": "CartPole-v1", "num_envs": 1},
+            "training": {"max_steps": 50, "evo_steps": 5, "pop_size": 2},
+        }
+        manifest = TrainingManifest.get_validated(data, mode="python")
+        with patch.object(LocalTrainer, "_make_env", return_value=MagicMock()):
+            trainer = LocalTrainer.from_manifest(manifest)
+
+        assert isinstance(trainer, LocalTrainer)
+        assert trainer.algorithm_spec.name == "DQN"
+        assert trainer.training_spec.max_steps == 50
 
 
 class TestLocalTrainerTrain:
@@ -1477,6 +1515,33 @@ class TestLLMLocalTrainer:
                     environment=MagicMock(),
                     training=self._training(),
                 )
+
+    def test_make_tokenizer_missing_auto_tokenizer_raises(self, dpo_spec):
+        trainer = LocalTrainer.__new__(LocalTrainer)
+        trainer.algorithm_spec = dpo_spec
+        with patch("agilerl.training.trainer.AutoTokenizer", None):
+            with pytest.raises(ImportError, match="LLM dependencies"):
+                trainer._make_tokenizer()
+
+
+class TestTrainerBaseNotImplemented:
+    def test_resolve_env_spec_raises(self):
+        manifest = MagicMock()
+        with pytest.raises(NotImplementedError, match="_resolve_env_spec"):
+            Trainer._resolve_env_spec(manifest)
+
+    def test_train_raises(self):
+        with pytest.raises(NotImplementedError, match="train method"):
+            Trainer.train(MagicMock())
+
+
+@requires_arena
+class TestArenaTrainerResolveEnvSpec:
+    def test_missing_environment_name_raises(self):
+        manifest = MagicMock()
+        manifest.environment = {"num_envs": 4}
+        with pytest.raises(ValueError, match="Environment name is required"):
+            ArenaTrainer._resolve_env_spec(manifest)
 
 
 class TestLLMAlgoRegistry:

@@ -672,6 +672,25 @@ class PzSingleEnv:
         env = spec.make_single_env()
         assert env.size == 7
 
+    def test_make_single_env_module_with_parallel_env(self, tmp_path, monkeypatch):
+        _write_module(
+            tmp_path,
+            "pz_parallel_single",
+            """\
+class DummyPzEnv:
+    def __init__(self, value=0):
+        self.value = value
+
+def parallel_env(value=0):
+    return DummyPzEnv(value=value)
+""",
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        spec = PzEnvSpec(name="pz_parallel_single", config={"value": 99})
+        env = spec.make_single_env()
+        assert env.value == 99
+
     def test_make_single_env_module_missing_parallel_env(self, tmp_path, monkeypatch):
         _write_module(
             tmp_path,
@@ -992,3 +1011,25 @@ class TestLLMEnvSpecMultiturn:
             env_name="game:Test-v0",
         )
         assert spec.dataset is None
+
+
+class TestRequireDatasets:
+    """_require_datasets ImportError when HuggingFace datasets is missing."""
+
+    def test_require_datasets_import_error(self, monkeypatch):
+        import builtins
+
+        from agilerl.models.env import _require_datasets
+
+        real_import = builtins.__import__
+
+        def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "datasets":
+                message = "No module named 'datasets'"
+                raise ImportError(message)
+            return real_import(name, globals, locals, fromlist, level)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+
+        with pytest.raises(ImportError, match="pip install 'agilerl\\[llm\\]'"):
+            _require_datasets()

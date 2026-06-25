@@ -4,7 +4,7 @@ import multiprocessing as mp
 import os
 import signal
 from typing import ClassVar
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import gymnasium as gym
 import numpy as np
@@ -780,6 +780,27 @@ class TestAsyncPettingZooVecEnvCloseExtras:
 
         for p in env.processes:
             assert not p.is_alive()
+
+    @pytest.mark.parametrize(
+        "env_fns",
+        [[speaker_listener_like_env for _ in range(2)]],
+    )
+    def test_close_extras_join_timeout_terminates_stuck_process(self, env_fns):
+        env = AsyncPettingZooVecEnv(env_fns)
+        env.reset()
+
+        stuck_processes = []
+        for _ in env.processes:
+            stuck = MagicMock()
+            stuck.is_alive.return_value = True
+            stuck_processes.append(stuck)
+
+        with patch.object(env, "processes", stuck_processes):
+            env.close_extras(terminate=False)
+
+        for stuck in stuck_processes:
+            stuck.terminate.assert_called_once()
+            stuck.join.assert_called()
 
 
 class TestAsyncPettingZooVecEnvPollPipeEnvs:

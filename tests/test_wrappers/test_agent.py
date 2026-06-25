@@ -339,6 +339,25 @@ class TestRSNormNormalizeObservation:
 
 
 class TestRSNormUpdateStatistics:
+    def test_update_statistics_multi_agent(self, setup_rs_norm_multi_agent):
+        wrapper, _ = setup_rs_norm_multi_agent
+        obs = {
+            "agent_1": torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
+            "other_agent_1": torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
+        }
+        wrapper.update_statistics(obs)
+
+        assert torch.allclose(
+            wrapper.obs_rms["agent_1"].mean,
+            torch.tensor([2.5, 3.5, 4.5]),
+            atol=1e-2,
+        )
+        assert torch.allclose(
+            wrapper.obs_rms["other_agent_1"].mean,
+            torch.tensor([2.0, 3.0]),
+            atol=1e-2,
+        )
+
     def test_update_statistics(self, setup_rs_norm):
         wrapper, _ = setup_rs_norm
         obs = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
@@ -825,6 +844,18 @@ class TestRSNormBuildRms:
         assert isinstance(rms, dict)
         assert set(rms) == {"sensor1", "sensor2", "other"}
 
+    def test_rsnorm_build_rms_dict_filters_norm_obs_keys(self):
+        obs_space = spaces.Dict(
+            {
+                "sensor1": spaces.Box(low=-1.0, high=1.0, shape=(2,)),
+                "sensor2": spaces.Box(low=-1.0, high=1.0, shape=(3,)),
+                "other": spaces.Box(low=-1.0, high=1.0, shape=(1,)),
+            }
+        )
+        rms = RSNorm.build_rms(obs_space, norm_obs_keys=["sensor1"], device="cpu")
+        assert set(rms) == {"sensor1"}
+        assert rms["sensor1"].mean.shape == (2,)
+
     def test_rsnorm_build_rms_tuple_space(self):
         obs_space = spaces.Tuple(
             (
@@ -863,6 +894,21 @@ class TestAgentWrapperGetActionLearn:
         experiences = get_experiences_batch(vector_space, vector_space, 4, "cpu")
         result = wrapper.learn(experiences)
         assert result is not None
+
+    def test_agent_wrapper_learn_without_experiences(self, vector_space):
+        from agilerl.wrappers.agent import AgentWrapper
+
+        class MinimalWrapper(AgentWrapper):
+            pass
+
+        agent = DDPG(vector_space, copy.deepcopy(vector_space), batch_size=4)
+        wrapper = MinimalWrapper(agent)
+        wrapper.wrapped_learn = MagicMock(return_value={"loss": 0.0})
+
+        result = wrapper.learn()
+
+        wrapper.wrapped_learn.assert_called_once_with()
+        assert result == {"loss": 0.0}
 
 
 class TestAgentWrapperSetattr:
@@ -1057,7 +1103,266 @@ class TestAsyncAgentsWrapperExtractInactiveAgents:
         assert "agent_0" in filtered
 
 
+class TestAsyncAgentsWrapperInsertPlaceholderActions:
+    def test_insert_placeholder_skips_missing_agent_id(
+        self, ma_vector_space, ma_discrete_space
+    ):
+        agent = IPPO(
+            observation_spaces=ma_vector_space[:2],
+            action_spaces=ma_discrete_space[:2],
+            agent_ids=["agent_0", "agent_1"],
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        action_dict = {"agent_0": np.array([[1.0, 2.0]], dtype=np.float32)}
+        inactive_agents = {"agent_1": np.array([0])}
+
+        result = wrapper._insert_placeholder_actions(action_dict, inactive_agents)
+
+        assert np.array_equal(result["agent_0"], action_dict["agent_0"])
+        assert "agent_1" not in result
+
+    def test_insert_placeholder_skips_none_action(
+        self, ma_vector_space, ma_discrete_space
+    ):
+        agent = IPPO(
+            observation_spaces=ma_vector_space[:1],
+            action_spaces=ma_discrete_space[:1],
+            agent_ids=["agent_0"],
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        action_dict = {"agent_0": None}
+        inactive_agents = {"agent_0": np.array([0])}
+
+        result = wrapper._insert_placeholder_actions(action_dict, inactive_agents)
+
+        assert result["agent_0"] is None
+
+    def test_insert_placeholder_1d_integer_actions(
+        self, ma_vector_space, ma_discrete_space
+    ):
+        agent = IPPO(
+            observation_spaces=ma_vector_space[:1],
+            action_spaces=ma_discrete_space[:1],
+            agent_ids=["agent_0"],
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        action_dict = {"agent_0": np.array([1, 2, 3], dtype=np.int32)}
+        inactive_agents = {"agent_0": np.array([1])}
+
+        result = wrapper._insert_placeholder_actions(action_dict, inactive_agents)
+
+        assert result["agent_0"].shape == (4,)
+        assert result["agent_0"].tolist() == [1, 0, 2, 3]
+
+
+class TestAsyncAgentsWrapperAlignExperiences:
+    def test_align_skips_agent_with_missing_fields(self, ma_vector_space):
+        from gymnasium import spaces as gym_spaces
+
+        from agilerl.algorithms import MADDPG
+
+        agent_ids = ["agent_0"]
+        action_spaces = [
+            gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+        ]
+        agent = MADDPG(
+            observation_spaces=ma_vector_space[:1],
+            action_spaces=action_spaces,
+            agent_ids=agent_ids,
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        experiences = {
+            "obs": {"agent_0": np.array([[1.0, 2.0, 3.0]])},
+            "action": {"agent_0": np.array([[0.1, 0.2]])},
+            "reward": {},
+            "next_obs": {"agent_0": np.array([[1.0, 2.0, 3.0]])},
+            "done": {"agent_0": np.array([[0.0]])},
+        }
+
+        aligned = wrapper._align_async_off_policy_experiences(experiences)
+
+        assert "agent_0" not in aligned["obs"]
+
+    def test_align_skips_single_obs_when_next_obs_missing(self, ma_vector_space):
+        from gymnasium import spaces as gym_spaces
+
+        from agilerl.algorithms import MADDPG
+
+        agent = MADDPG(
+            observation_spaces=ma_vector_space[:1],
+            action_spaces=[
+                gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+            ],
+            agent_ids=["agent_0"],
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        experiences = {
+            "obs": {"agent_0": np.array([[1.0, 2.0, 3.0]])},
+            "action": {"agent_0": np.array([[0.1, 0.2]])},
+            "reward": {"agent_0": np.array([[1.0]])},
+            "next_obs": {"agent_0": None},
+            "done": {"agent_0": np.array([[0.0]])},
+        }
+
+        aligned = wrapper._align_async_off_policy_experiences(experiences)
+
+        assert "agent_0" not in aligned["obs"]
+
+    def test_align_infers_next_obs_from_state_sequence(self, ma_vector_space):
+        from gymnasium import spaces as gym_spaces
+
+        from agilerl.algorithms import MADDPG
+
+        agent = MADDPG(
+            observation_spaces=ma_vector_space[:1],
+            action_spaces=[
+                gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+            ],
+            agent_ids=["agent_0"],
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        obs = np.array(
+            [[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [7.0, 8.0, 9.0, 10.0, 11.0, 12.0]]
+        )
+        experiences = {
+            "obs": {"agent_0": obs},
+            "action": {
+                "agent_0": np.array([[0.1, 0.2], [0.3, 0.4]], dtype=np.float32),
+            },
+            "reward": {"agent_0": np.array([[1.0], [2.0]], dtype=np.float32)},
+            "next_obs": {"agent_0": np.full_like(obs, np.nan)},
+            "done": {"agent_0": np.array([[0.0], [1.0]], dtype=np.float32)},
+        }
+
+        aligned = wrapper._align_async_off_policy_experiences(experiences)
+
+        assert len(aligned["obs"]["agent_0"]) == 1
+        assert len(aligned["next_obs"]["agent_0"]) == 1
+        np.testing.assert_array_equal(aligned["obs"]["agent_0"], obs[:-1])
+        np.testing.assert_array_equal(aligned["next_obs"]["agent_0"], obs[1:])
+
+    def test_align_trims_mismatched_lengths(self, ma_vector_space):
+        from gymnasium import spaces as gym_spaces
+
+        from agilerl.algorithms import MADDPG
+
+        agent = MADDPG(
+            observation_spaces=ma_vector_space[:1],
+            action_spaces=[
+                gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+            ],
+            agent_ids=["agent_0"],
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        experiences = {
+            "obs": {
+                "agent_0": np.arange(15).reshape(5, 3).astype(np.float32),
+            },
+            "action": {
+                "agent_0": np.arange(8).reshape(4, 2).astype(np.float32),
+            },
+            "reward": {
+                "agent_0": np.arange(3).reshape(3, 1).astype(np.float32),
+            },
+            "next_obs": {
+                "agent_0": np.arange(12).reshape(4, 3).astype(np.float32),
+            },
+            "done": {
+                "agent_0": np.zeros((4, 1), dtype=np.float32),
+            },
+        }
+
+        aligned = wrapper._align_async_off_policy_experiences(experiences)
+
+        assert len(aligned["obs"]["agent_0"]) == 3
+        assert len(aligned["action"]["agent_0"]) == 3
+        assert len(aligned["reward"]["agent_0"]) == 3
+        assert len(aligned["next_obs"]["agent_0"]) == 3
+        assert len(aligned["done"]["agent_0"]) == 3
+
+    def test_align_skips_when_min_len_is_zero(self, ma_vector_space):
+        from gymnasium import spaces as gym_spaces
+
+        from agilerl.algorithms import MADDPG
+
+        agent = MADDPG(
+            observation_spaces=ma_vector_space[:1],
+            action_spaces=[
+                gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+            ],
+            agent_ids=["agent_0"],
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        experiences = {
+            "obs": {"agent_0": np.empty((0, 6), dtype=np.float32)},
+            "action": {"agent_0": np.array([[0.1, 0.2]], dtype=np.float32)},
+            "reward": {"agent_0": np.array([[1.0]], dtype=np.float32)},
+            "next_obs": {
+                "agent_0": np.array([[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]], dtype=np.float32),
+            },
+            "done": {"agent_0": np.array([[0.0]], dtype=np.float32)},
+        }
+
+        aligned = wrapper._align_async_off_policy_experiences(experiences)
+
+        assert "agent_0" not in aligned["obs"]
+
+
 class TestAsyncAgentsWrapperGetAction:
+    def test_async_get_action_maddpg_non_tuple_return(self, ma_vector_space):
+        from gymnasium import spaces as gym_spaces
+
+        from agilerl.algorithms import MADDPG
+
+        agent = MADDPG(
+            observation_spaces=ma_vector_space[:1],
+            action_spaces=[
+                gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+            ],
+            agent_ids=["agent_0"],
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        expected = {"agent_0": np.array([[0.1, 0.2]], dtype=np.float32)}
+        wrapper.wrapped_get_action = MagicMock(return_value=expected)
+
+        result = wrapper.get_action(
+            {"agent_0": np.array([[1.0] * 6], dtype=np.float32)}
+        )
+
+        assert result is expected
+        wrapper.wrapped_get_action.assert_called_once()
+
+    def test_async_get_action_ippo_non_tuple_return(
+        self, ma_vector_space, ma_discrete_space
+    ):
+        agent = IPPO(
+            observation_spaces=ma_vector_space[:1],
+            action_spaces=ma_discrete_space[:1],
+            agent_ids=["agent_0"],
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        expected = {"agent_0": np.array([1], dtype=np.int64)}
+        wrapper.wrapped_get_action = MagicMock(return_value=expected)
+
+        result = wrapper.get_action(
+            {"agent_0": np.array([[1.0] * 6], dtype=np.float32)},
+            {"agent_0": {}},
+        )
+
+        assert isinstance(result, dict)
+        assert "agent_0" in result
+        assert result["agent_0"].shape[0] == 1
+
     def test_async_get_action_with_inactive_float_actions(
         self, ma_vector_space, ma_discrete_space
     ):
