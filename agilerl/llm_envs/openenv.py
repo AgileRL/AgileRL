@@ -2,12 +2,12 @@
 
 Every LLM-training env is hosted + reached through the OpenEnv server and protocol
 (https://github.com/meta-pytorch/OpenEnv): an env is wrapped in a
-:class:`GymEnvironment` (an OpenEnv ``Environment``), served by OpenEnv's
+:class:`OpenEnvWrapper` (an OpenEnv ``Environment``), served by OpenEnv's
 ``HTTPEnvServer`` (:func:`serve`), and ``RolloutEnv`` drives it over the OpenEnv wire
 (``POST /reset`` / ``/step``). A standard text contract — :class:`TextAction`
 (``message``) and :class:`TextObservation` (``prompt``) — carries the model's text
 both ways, so there are no per-env codecs. :func:`local_transport` drives the very
-same ``GymEnvironment`` in-process (socket-free) for the common local case, and
+same ``OpenEnvWrapper`` in-process (socket-free) for the common local case, and
 :func:`resolve_env` turns a URL or a ``module:Class`` entrypoint into a hosted env.
 
 This module is the AgileRL <-> OpenEnv seam: ``openenv`` (the ``[llm]`` extra) owns
@@ -51,14 +51,14 @@ class TextObservation(Observation):
 
     Inherits ``reward`` / ``done`` / ``metadata`` from ``Observation``. (The OpenEnv
     server round-trips ``prompt`` / ``reward`` / ``done`` but not ``metadata``, so any
-    prefix/suffix is folded into ``prompt`` by :class:`GymEnvironment`.)
+    prefix/suffix is folded into ``prompt`` by :class:`OpenEnvWrapper`.)
     """
 
     prompt: str = ""
 
 
 # --- the universal wrapper: any local env -> an OpenEnv Environment ---------
-class GymEnvironment(Environment):
+class OpenEnvWrapper(Environment):
     """Wrap any local env (the gym / gem text contract) as an OpenEnv ``Environment``.
 
     ``inner`` provides ``reset(seed=None[, row_index, evaluation]) -> (prompt, info)``
@@ -69,7 +69,7 @@ class GymEnvironment(Environment):
 
     :param inner: The local env to host.
     :param env_name: Name reported in the env's OpenEnv metadata; defaults to
-        ``inner``'s class name (so a client sees the real env, not ``GymEnvironment``).
+        ``inner``'s class name (so a client sees the real env, not ``OpenEnvWrapper``).
     """
 
     def __init__(self, inner: Any, *, env_name: str | None = None) -> None:
@@ -81,7 +81,7 @@ class GymEnvironment(Environment):
         self._state = State()
 
     def get_metadata(self) -> EnvironmentMetadata:
-        """Report the wrapped env's name in OpenEnv metadata, not ``GymEnvironment``."""
+        """Report the wrapped env's name in OpenEnv metadata, not ``OpenEnvWrapper``."""
         name = self._env_name or type(self._inner).__name__
         return EnvironmentMetadata(
             name=name, description=f"{name} environment", version="1.0.0"
@@ -191,7 +191,7 @@ def _obs_to_wire(obs: TextObservation) -> dict[str, Any]:
 class OpenEnvServer:
     """Host a local env over HTTP via OpenEnv's ``HTTPEnvServer`` (uvicorn in a thread).
 
-    Wraps ``env`` in a :class:`GymEnvironment` and serves it, so any OpenEnv client —
+    Wraps ``env`` in a :class:`OpenEnvWrapper` and serves it, so any OpenEnv client —
     ``RolloutEnv``, OpenEnv's own async client, a HF Space consumer — reaches it by
     URL. Start it in training-loop setup; ``port=0`` (default) binds a free port read
     back from :attr:`base_url`.
@@ -233,7 +233,7 @@ class OpenEnvServer:
         import uvicorn
 
         app = create_app(
-            lambda: GymEnvironment(self._env, env_name=self._env_name),
+            lambda: OpenEnvWrapper(self._env, env_name=self._env_name),
             TextAction,
             TextObservation,
             env_name=self._env_name or type(self._env).__name__,
@@ -287,12 +287,12 @@ def local_transport(env: Any) -> Callable[[str, dict[str, Any]], dict[str, Any]]
     """Return an in-process ``(path, payload) -> dict`` transport driving ``env``.
 
     The socket-free counterpart to :class:`OpenEnvServer`: it runs the same
-    :class:`GymEnvironment` the server would, shaping responses like the OpenEnv wire,
+    :class:`OpenEnvWrapper` the server would, shaping responses like the OpenEnv wire,
     so a local env is driven with no HTTP cost. Pass it as
     ``RolloutEnv(..., transport=local_transport(env))`` (this is what
     :meth:`RolloutEnv.from_dataset` does) or to :class:`OpenEnvClient` directly.
     """
-    gym = GymEnvironment(env)
+    gym = OpenEnvWrapper(env)
 
     def transport(path: str, payload: dict[str, Any]) -> dict[str, Any]:
         route = path.split("?", 1)[0].rstrip("/") or "/"

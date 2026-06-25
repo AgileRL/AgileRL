@@ -6,10 +6,10 @@ from agilerl.llm_envs.base import (
 )
 from agilerl.llm_envs.dataset_env import DatasetEnv
 from agilerl.llm_envs.openenv import (
-    GymEnvironment,
     OpenEnvClient,
     OpenEnvHTTPEnv,
     OpenEnvServer,
+    OpenEnvWrapper,
     TextAction,
     TextObservation,
     local_transport,
@@ -24,11 +24,11 @@ from agilerl.llm_envs.rollout_env import (
 __all__ = [
     "BatchRolloutEnv",
     "DatasetEnv",
-    "GymEnvironment",
     "LLMEnv",
     "OpenEnvClient",
     "OpenEnvHTTPEnv",
     "OpenEnvServer",
+    "OpenEnvWrapper",
     "RolloutEnv",
     "TextAction",
     "TextObservation",

@@ -4,7 +4,7 @@ LLM environments
 Every LLM-training environment is hosted and reached through `OpenEnv
 <https://github.com/meta-pytorch/OpenEnv>`_ (the ``[llm]`` extra): whatever backs an
 env — a prompt dataset, plain Python functions, an imported gem / AxonRL env, or a
-sandboxed VM — it is wrapped in a :class:`~agilerl.llm_envs.GymEnvironment` (an
+sandboxed VM — it is wrapped in a :class:`~agilerl.llm_envs.OpenEnvWrapper` (an
 OpenEnv ``Environment``), served by OpenEnv's ``HTTPEnvServer`` via
 :class:`~agilerl.llm_envs.OpenEnvServer` / :func:`~agilerl.llm_envs.serve` (or driven
 in-process by the socket-free :func:`~agilerl.llm_envs.local_transport`), and a
@@ -50,7 +50,7 @@ default) already gives each rollout its own env, no socket.
 .. autoclass:: agilerl.llm_envs.RolloutEnv
 .. autoclass:: agilerl.llm_envs.BatchRolloutEnv
 .. autoclass:: agilerl.llm_envs.DatasetEnv
-.. autoclass:: agilerl.llm_envs.GymEnvironment
+.. autoclass:: agilerl.llm_envs.OpenEnvWrapper
 .. autoclass:: agilerl.llm_envs.TextAction
 .. autoclass:: agilerl.llm_envs.TextObservation
 .. autoclass:: agilerl.llm_envs.OpenEnvServer

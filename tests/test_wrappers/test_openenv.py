@@ -15,9 +15,9 @@ import torch
 
 from agilerl.llm_envs import (
     BatchRolloutEnv,
-    GymEnvironment,
     OpenEnvClient,
     OpenEnvServer,
+    OpenEnvWrapper,
     RolloutEnv,
     local_transport,
     resolve_env,
@@ -118,7 +118,7 @@ def test_base_url_or_transport_required() -> None:
 
 # --- local_transport: socket-free parity -----------------------------------
 def test_local_transport_matches_http() -> None:
-    """``local_transport`` drives the same ``GymEnvironment`` as the server, no socket."""
+    """``local_transport`` drives the same ``OpenEnvWrapper`` as the server, no socket."""
     client = OpenEnvClient(transport=local_transport(_CountingEnv(target=1)))
     prompt, _ = client.reset()
     obs, reward, terminated, _, _ = client.step("go")
@@ -160,11 +160,11 @@ def test_normalize_reset_accepts_bare_observation() -> None:
 
 
 # --- env identity: the served env's real name in OpenEnv metadata ----------
-def test_gym_environment_metadata_reports_real_env_name() -> None:
-    """The wrapped env is identified by its own name, not ``GymEnvironment``."""
-    assert GymEnvironment(_CountingEnv()).get_metadata().name == "_CountingEnv"
+def test_openenv_wrapper_metadata_reports_real_env_name() -> None:
+    """The wrapped env is identified by its own name, not ``OpenEnvWrapper``."""
+    assert OpenEnvWrapper(_CountingEnv()).get_metadata().name == "_CountingEnv"
     assert (
-        GymEnvironment(_CountingEnv(), env_name="counting").get_metadata().name
+        OpenEnvWrapper(_CountingEnv(), env_name="counting").get_metadata().name
         == "counting"
     )
 
