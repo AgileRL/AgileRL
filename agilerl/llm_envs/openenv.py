@@ -194,11 +194,12 @@ class OpenEnvServer:
 
     Why this rather than OpenEnv's host helpers directly: OpenEnv builds the FastAPI
     app (``create_app``), but its hosting is meant to be a standalone, blocking process
-    (a HF Space, a container, ``python -m openenv``). A trainer needs to start a server
-    and stop it programmatically — often one per rollout — so this wraps the same
-    ``create_app`` in a uvicorn **daemon thread**, binds an ephemeral port (``port=0``)
-    read back from :attr:`base_url`, and exposes ``start`` / ``stop`` (and the
-    context-manager protocol). The env is wrapped in :class:`OpenEnvWrapper`, so any
+    (a HF Space, a container, ``python -m openenv``). A trainer needs to start servers
+    and stop them programmatically from its own process — one per concurrent rollout,
+    all created once and reused for the whole run (not per episode), and torn down at
+    the end — so this wraps the same ``create_app`` in a uvicorn **daemon thread**,
+    binds an ephemeral port (``port=0``) read back from :attr:`base_url`, and exposes
+    ``start`` / ``stop`` (and the context-manager protocol). The env is wrapped in :class:`OpenEnvWrapper`, so any
     OpenEnv client — :class:`OpenEnvClient`, OpenEnv's own async client, a HF Space
     consumer — reaches it by URL.
 
