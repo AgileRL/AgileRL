@@ -206,9 +206,9 @@ Now we have defined our reward functions, we must also design our prompt. This f
 to the agent and provides the context necessary to complete the task. This is a task-specific feature,
 and different reasoning problems will require different conversation templates, although they can follow a similar
 format. We define the conversation template as follows (using ``question`` and ``answer`` as placeholders for the question and answer data)
-and then build a single-turn rollout env from the question and answer
-columns of our dataset with :meth:`RolloutEnv.from_dataset <agilerl.llm_envs.RolloutEnv.from_dataset>`
-inside an ``env_factory``.
+and then host a single-turn rollout env over the question and answer
+columns of our dataset with :meth:`RolloutEnv.serving <agilerl.llm_envs.RolloutEnv.serving>`
+inside an ``env_factory`` (a prompt dataset is just an environment we host).
 
 .. collapse:: Build the Single-Turn Rollout Environment
 
@@ -236,24 +236,48 @@ inside an ``env_factory``.
             ]
             return "\n".join(p for p in parts if p)
 
-        # Build a single-turn rollout environment from the dataset
+        # A single-turn rollout environment from the dataset — a prompt dataset is
+        # just an env, hosted on its own server by RolloutEnv.serving.
+        class PromptDataset:
+            """Single-turn dataset env: serve a question on reset, score it on step."""
+
+            def __init__(self, questions, answers, reward_fn, prompt_builder,
+                         test_questions=None, test_answers=None):
+                self.questions, self.answers = questions, answers
+                self.test_questions, self.test_answers = test_questions, test_answers
+                self.reward_fn, self.prompt_builder = reward_fn, prompt_builder
+                self._cursor, self._split = 0, ""
+
+            @property
+            def dataset_size(self) -> int:
+                return len(self.questions)
+
+            def reset(self, seed=None, *, row_index=None, evaluation=None):
+                if evaluation and self.test_questions is not None:
+                    qs, ans, split = self.test_questions, self.test_answers, "eval"
+                else:
+                    qs, ans, split = self.questions, self.answers, "train"
+                if row_index is None:
+                    if split != self._split:
+                        self._cursor, self._split = 0, split
+                    row_index, self._cursor = self._cursor, self._cursor + 1
+                self._q, self._a = qs[row_index % len(qs)], ans[row_index % len(ans)]
+                return self.prompt_builder(self._q), {}
+
+            def step(self, action):
+                return "", float(self.reward_fn(action, self._a, self._q)), True, False, {}
+
         def env_factory(evaluation_mode: bool = False):
-            train_questions, train_answers = (
-                list(train_dataset["question"]),
-                list(train_dataset["answer"]),
-            )
-            test_questions, test_answers = (
-                list(test_dataset["question"]),
-                list(test_dataset["answer"]),
-            )
-            env = RolloutEnv.from_dataset(
-                questions=train_questions,
-                answers=train_answers,
-                reward_fn=combined_rewards,
-                tokenizer=tokenizer,
-                prompt_builder=prompt_builder,
-                test_questions=test_questions,
-                test_answers=test_answers,
+            env = RolloutEnv.serving(
+                lambda: PromptDataset(
+                    questions=list(train_dataset["question"]),
+                    answers=list(train_dataset["answer"]),
+                    reward_fn=combined_rewards,
+                    prompt_builder=prompt_builder,
+                    test_questions=list(test_dataset["question"]),
+                    test_answers=list(test_dataset["answer"]),
+                ),
+                tokenizer,
                 max_turns=1,
                 pad_id=tokenizer.pad_token_id,
                 apply_chat_template=True,

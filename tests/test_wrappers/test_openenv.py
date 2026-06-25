@@ -1,9 +1,8 @@
-"""The OpenEnv env interface: client + server, resolver, from_dataset.
+"""The OpenEnv env interface: client + server, resolver.
 
 Every LLM-training env is reached the same way — text in, text out, over the small
 OpenEnv HTTP protocol. These cover both halves (``OpenEnvServer`` host +
-``OpenEnvClient`` client over httpx), the spec resolver, and
-``RolloutEnv.from_dataset`` (which hosts the prompt dataset on its own server).
+``OpenEnvClient`` client over httpx) and the spec resolver.
 """
 
 from __future__ import annotations
@@ -14,7 +13,6 @@ import pytest
 import torch
 
 from agilerl.llm_envs import (
-    AsyncOpenEnvClient,
     BatchRolloutEnv,
     OpenEnvClient,
     OpenEnvServer,
@@ -67,6 +65,47 @@ class _MiniTok:
         return [7, 7]
 
 
+class _DatasetEnv:
+    """A tiny dataset-backed env, imported by its ``module:Class`` path to exercise
+    ``resolve_env``'s entrypoint loading: ``reset`` serves a row's prompt, ``step``
+    scores the completion.
+    """
+
+    def __init__(
+        self,
+        questions: list[str],
+        answers: list[str],
+        reward_fn: Any,
+        *,
+        prompt_builder: Any = None,
+    ) -> None:
+        self.questions = questions
+        self.answers = answers
+        self.reward_fn = reward_fn
+        self.prompt_builder = prompt_builder or (lambda q: q)
+        self._answer = ""
+
+    @property
+    def dataset_size(self) -> int:
+        return len(self.questions)
+
+    def reset(
+        self,
+        seed: int | None = None,
+        *,
+        row_index: int = 0,
+        evaluation: bool | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        del seed, evaluation
+        row = (row_index or 0) % len(self.questions)
+        self._answer = self.answers[row]
+        return self.prompt_builder(self.questions[row]), {}
+
+    def step(self, action: str) -> tuple[str, float, bool, bool, dict[str, Any]]:
+        reward = float(self.reward_fn(action, self._answer, ""))
+        return "", reward, True, False, {}
+
+
 # --- server + client over real localhost HTTP ------------------------------
 def test_server_and_client_round_trip_over_http() -> None:
     """``OpenEnvServer`` serves a local env; ``OpenEnvClient`` drives it over HTTP."""
@@ -83,7 +122,9 @@ def test_server_and_client_round_trip_over_http() -> None:
         assert (obs1, r1, term1, trunc1) == ("turn 1", 1.0, False, False)
         assert (obs2, r2, term2) == ("turn 2", 0.0, True)
         client.close()
-        assert env.closed is True
+        # not closed per request or on client close — only once when the server stops
+        assert env.closed is False
+    assert env.closed is True
 
 
 def test_serve_helper_starts_immediately() -> None:
@@ -113,29 +154,6 @@ def test_base_url_required() -> None:
     """The client needs a non-empty base URL."""
     with pytest.raises(ValueError, match="base_url"):
         OpenEnvClient("")
-
-
-def test_async_client_drives_server_over_httpx() -> None:
-    """``AsyncOpenEnvClient`` drives the same server async (same wire, coroutines)."""
-    import asyncio
-
-    server = OpenEnvServer(_CountingEnv(target=1)).start()
-
-    async def _drive() -> tuple[str, tuple, dict]:
-        client = AsyncOpenEnvClient(server.base_url)
-        prompt, _ = await client.reset()
-        step = await client.step("go")
-        state = await client.state()
-        await client.aclose()
-        return prompt, step, state
-
-    try:
-        prompt, step, state = asyncio.run(_drive())
-    finally:
-        server.stop()
-    assert prompt == "Start.\nReply 'go'."
-    assert step[:3] == ("turn 1", 1.0, True)
-    assert state.get("dataset_size") == 0
 
 
 # --- gym-tuple normalisation -----------------------------------------------
@@ -177,111 +195,6 @@ def test_name_from_spec_takes_trailing_identifier() -> None:
     assert _name_from_spec("plainname") == "plainname"
 
 
-# --- RolloutEnv.from_dataset (reasoning over a hosted server) ---------------
-def test_from_dataset_cursor_and_eval_split() -> None:
-    """reset() with no row walks the split; evaluation routes to the held-out split."""
-    env = RolloutEnv.from_dataset(
-        ["q0", "q1", "q2"],
-        ["a0", "a1", "a2"],
-        lambda c, a, q: 0.0,
-        _MiniTok(),
-        prompt_builder=lambda q: f"P:{q}",
-        test_questions=["t0"],
-        test_answers=["ta0"],
-        apply_chat_template=False,
-    )
-    try:
-        # Standalone cursor walks the active split sequentially.
-        env.reset()
-        assert env._prompt_text == "P:q0"
-        env.reset()
-        assert env._prompt_text == "P:q1"
-        # evaluation routes to the held-out split (and resets the cursor).
-        with env.eval_mode():
-            env.reset()
-            assert env._prompt_text == "P:t0"
-        # The evaluation_mode flag is honoured when reset omits the row.
-        env.evaluation_mode = True
-        env.reset(row_index=0)
-        assert env._prompt_text == "P:t0"
-    finally:
-        env.close()
-
-
-def test_from_dataset_dataset_size_and_row_pinning() -> None:
-    a = RolloutEnv.from_dataset(
-        ["q0", "q1", "q2"],
-        ["a0", "a1", "a2"],
-        lambda c, a_, q: 0.0,
-        _MiniTok(),
-        prompt_builder=lambda q: f"P:{q}",
-        apply_chat_template=False,
-    )
-    b = RolloutEnv.from_dataset(
-        ["q0", "q1", "q2"],
-        ["a0", "a1", "a2"],
-        lambda c, a_, q: 0.0,
-        _MiniTok(),
-        prompt_builder=lambda q: f"P:{q}",
-        apply_chat_template=False,
-    )
-    try:
-        assert a.dataset_size == 3
-        # Same row_index -> same prompt (a GRPO group sees one prompt).
-        a.reset(row_index=2)
-        b.reset(row_index=2)
-        assert a._prompt_text == b._prompt_text == "P:q2"
-    finally:
-        a.close()
-        b.close()
-
-
-def test_from_dataset_eval_mode_routes_split() -> None:
-    env = RolloutEnv.from_dataset(
-        ["q0"],
-        ["a0"],
-        lambda c, a, q: 0.0,
-        _MiniTok(),
-        prompt_builder=lambda q: f"P:{q}",
-        test_questions=["t0"],
-        test_answers=["ta0"],
-        apply_chat_template=False,
-    )
-    try:
-        env.reset(row_index=0)
-        assert env._prompt_text == "P:q0"
-        with env.eval_mode():
-            env.reset(row_index=0)
-            assert env._prompt_text == "P:t0"
-        env.reset(row_index=0)
-        assert env._prompt_text == "P:q0"
-    finally:
-        env.close()
-
-
-def test_from_dataset_full_step_loop_scores_and_terminates() -> None:
-    env = RolloutEnv.from_dataset(
-        ["q0"],
-        ["a0"],
-        lambda c, a, q: 1.0 if c == "go" else 0.0,
-        _MiniTok(),
-        prompt_builder=lambda q: q,
-        max_turns=1,
-        apply_chat_template=False,
-    )
-    try:
-        env.reset(row_index=0)
-        _, reward, terminated, _, _ = env.step(
-            torch.tensor([[1, 2, 3, 7, 7]], dtype=torch.long)
-        )
-        assert reward == 1.0  # decode() -> "go"
-        assert terminated is True
-        _full_ids, _action_mask, _turn_ids, turn_rewards, _ = env.get_episode_data()
-        assert turn_rewards.tolist() == [1.0]
-    finally:
-        env.close()
-
-
 # --- serving: one OpenEnv server instance per rollout ----------------------
 def test_serving_hosts_owns_and_stops_its_server() -> None:
     """``serving`` hosts a fresh env on its own server and stops it on close."""
@@ -291,24 +204,6 @@ def test_serving_hosts_owns_and_stops_its_server() -> None:
     assert env._prompt_text == "Start.\nReply 'go'."
     env.close()
     assert env._owned_server is None  # server stopped + released
-
-
-def test_from_dataset_serve_hosts_a_per_instance_server() -> None:
-    """``from_dataset`` hosts the prompt dataset on its own per-instance server."""
-    env = RolloutEnv.from_dataset(
-        ["q0"],
-        ["a0"],
-        lambda c, a, q: 0.0,
-        _MiniTok(),
-        prompt_builder=lambda q: f"P:{q}",
-        apply_chat_template=False,
-    )
-    assert env._owned_server is not None
-    assert env.dataset_size == 1
-    env.reset(row_index=0)
-    assert env._prompt_text == "P:q0"
-    env.close()
-    assert env._owned_server is None
 
 
 def test_batch_serving_factory_gives_one_server_per_env() -> None:
@@ -356,7 +251,7 @@ def test_resolve_env_url_is_used_raw() -> None:
 
 def test_resolve_env_entrypoint_hosts_locally() -> None:
     url, server = resolve_env(
-        "agilerl.llm_envs.rollout_env:_PromptDatasetEnv",
+        "tests.test_wrappers.test_openenv:_DatasetEnv",
         {
             "questions": ["q"],
             "answers": ["a"],

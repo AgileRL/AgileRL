@@ -17,7 +17,6 @@ from agilerl.llm_envs import (
     LLMEnv,
     apply_chat_template,
 )
-from agilerl.llm_envs.rollout_env import _PromptDatasetEnv
 from tests import TINY_LLM_FIXTURE_PATH
 
 
@@ -829,84 +828,6 @@ def test_batch_rollout_env_shuffle_is_group_consistent_full_permutation():
     )
     other = _collect_batch_rows(vec_other, num_resets=4, seed=8)
     assert other != per_reset_rows
-
-
-def test_rollout_prompt_is_templated_and_reward_scores_once():
-    """reset() returns the templated prompt; step() scores via reward_fn and ends."""
-    questions, answers = ["2+2", "3+5"], ["4", "8"]
-
-    def reward_fn(completion, answer, _question):
-        return 1.0 if answer in completion else 0.0
-
-    def prompt_builder(question):
-        return f"Q: {question}\nA:"
-
-    env = _PromptDatasetEnv(
-        max_turns=1,
-        questions=questions,
-        answers=answers,
-        reward_fn=reward_fn,
-        prompt_builder=prompt_builder,
-    )
-
-    prompt, info = env.reset(seed=0, row_index=0)
-    assert prompt == "Q: 2+2\nA:"
-    assert info == {}
-
-    _, reward, terminated, truncated, _ = env.step("the answer is 4")
-    assert reward == 1.0
-    assert terminated is True
-    assert truncated is False
-
-    # A wrong completion on the next row scores zero, still one turn.
-    next_prompt, _ = env.reset(seed=1, row_index=1)
-    assert next_prompt == "Q: 3+5\nA:"
-    _, wrong_reward, terminated, _, _ = env.step("definitely 99")
-    assert wrong_reward == 0.0
-    assert terminated is True
-
-
-def test_rollout_eval_mode_draws_from_held_out_split():
-    """Under eval_mode the env serves the test split, restoring the train split after."""
-    env = _PromptDatasetEnv(
-        max_turns=1,
-        questions=["train-q"],
-        answers=["train-a"],
-        reward_fn=lambda c, a, q: 0.0,
-        prompt_builder=lambda q: q,
-        test_questions=["eval-q"],
-        test_answers=["eval-a"],
-    )
-    eval_prompt, _ = env.reset(seed=0, row_index=0, evaluation=True)
-    assert eval_prompt == "eval-q"
-
-    train_prompt, _ = env.reset(seed=1, row_index=0)
-    assert train_prompt == "train-q"
-
-
-def test_rollout_standalone_cursor_walks_split_and_resets_on_switch():
-    """With no ``row_index`` the env walks its active split via an internal cursor,
-    resetting the cursor when the train/eval split changes.
-    """
-    env = _PromptDatasetEnv(
-        questions=["q0", "q1"],
-        answers=["a0", "a1"],
-        reward_fn=lambda c, a, q: 0.0,
-        prompt_builder=lambda q: q,
-        test_questions=["e0"],
-        test_answers=["ea0"],
-    )
-    # Standalone resets (row_index omitted) consume the train split sequentially,
-    # wrapping modulo the split length.
-    assert env.reset()[0] == "q0"
-    assert env.reset()[0] == "q1"
-    assert env.reset()[0] == "q0"  # wrapped back to the start of the split
-
-    # Switching to the eval split resets the per-split cursor to its start.
-    assert env.reset(evaluation=True)[0] == "e0"
-
-    # Back on the train split the cursor restarts from the beginning.
-    assert env.reset()[0] == "q0"
 
 
 def test_llm_env_close_is_a_noop_by_default():

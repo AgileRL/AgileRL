@@ -14,14 +14,64 @@ import pytest
 import torch
 
 from agilerl.llm_envs import RolloutEnv
-from agilerl.llm_envs.rollout_env import _PromptDatasetEnv
 
 _WIP = "pending tool-path wiring (engine / _align_sampling_logprobs)"
 
 
-def _reasoning_env() -> _PromptDatasetEnv:
+class _DatasetEnv:
+    """A tiny dataset-backed env (questions/answers + reward_fn) used to drive
+    ``RolloutEnv``'s dataset_size / eval-split / row-index plumbing over a hosted
+    server. ``reset`` pins a row (routing to the held-out split under
+    ``evaluation``); ``step`` scores the completion and ends the turn.
+    """
+
+    def __init__(
+        self,
+        questions: list[str],
+        answers: list[str],
+        reward_fn: Any,
+        *,
+        prompt_builder: Any = None,
+        test_questions: list[str] | None = None,
+        test_answers: list[str] | None = None,
+    ) -> None:
+        self.questions = questions
+        self.answers = answers
+        self.reward_fn = reward_fn
+        self.prompt_builder = prompt_builder or (lambda q: q)
+        self.test_questions = test_questions
+        self.test_answers = test_answers
+        self._question = ""
+        self._answer = ""
+
+    @property
+    def dataset_size(self) -> int:
+        return len(self.questions)
+
+    def reset(
+        self,
+        seed: int | None = None,
+        *,
+        row_index: int = 0,
+        evaluation: bool | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        del seed
+        if evaluation and self.test_questions is not None:
+            questions, answers = self.test_questions, self.test_answers
+        else:
+            questions, answers = self.questions, self.answers
+        row = (row_index or 0) % len(questions)
+        self._question, self._answer = questions[row], answers[row]
+        return self.prompt_builder(self._question), {}
+
+    def step(self, action: str) -> tuple[str, float, bool, bool, dict[str, Any]]:
+        reward = float(self.reward_fn(action, self._answer, self._question))
+        return "", reward, True, False, {}
+
+
+def _reasoning_env() -> _DatasetEnv:
     """A tiny dataset-backed reasoning env with a held-out split."""
-    return _PromptDatasetEnv(
+    return _DatasetEnv(
         questions=["train-q"],
         answers=["train-a"],
         reward_fn=lambda c, a, q: 0.0,
@@ -212,7 +262,7 @@ class _MiniTokenizer:
 
 def test_reset_forwards_row_index_to_served_env() -> None:
     """``reset`` passes ``row_index`` through to the served env, selecting that row."""
-    inner = _PromptDatasetEnv(
+    inner = _DatasetEnv(
         questions=["q0", "q1"],
         answers=["a0", "a1"],
         reward_fn=lambda c, a, q: 0.0,

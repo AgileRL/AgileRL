@@ -67,6 +67,7 @@ This example demonstrates how to use the GRPO algorithm to fine-tune a LLM on a 
    :maxdepth: 1
    :caption: Topics
 
+   environments
    fused_logprobs
    quantization
    llm_checkpoints

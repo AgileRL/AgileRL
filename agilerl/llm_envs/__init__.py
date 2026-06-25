@@ -6,24 +6,27 @@ from agilerl.llm_envs.base import (
 )
 from agilerl.llm_envs.dataset_env import DatasetEnv
 from agilerl.llm_envs.openenv import (
-    AsyncOpenEnvClient,
+    LocalEnvClient,
     OpenEnvClient,
     OpenEnvServer,
     OpenEnvWrapper,
     TextAction,
     TextObservation,
+    load_env,
     resolve_env,
 )
 from agilerl.llm_envs.rollout_env import (
+    BatchPointer,
     BatchRolloutEnv,
     RolloutEnv,
 )
 
 __all__ = [
-    "AsyncOpenEnvClient",
+    "BatchPointer",
     "BatchRolloutEnv",
     "DatasetEnv",
     "LLMEnv",
+    "LocalEnvClient",
     "OpenEnvClient",
     "OpenEnvServer",
     "OpenEnvWrapper",
@@ -31,5 +34,6 @@ __all__ = [
     "TextAction",
     "TextObservation",
     "apply_chat_template",
+    "load_env",
     "resolve_env",
 ]

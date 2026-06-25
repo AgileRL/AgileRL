@@ -53,16 +53,47 @@ entry points such as ``train_llm_rollout``. Single-turn reasoning is the
       del question
       return float(answer.lower() in completion.lower())
 
-  # 1) Single-turn / reasoning datasets (a prompt dataset driven by RolloutEnv, max_turns=1)
+  # 1) Single-turn / reasoning datasets (a prompt dataset is just an env, max_turns=1)
+  class PromptDataset:
+      """Single-turn dataset env: serve a question on reset, score it on step."""
+
+      def __init__(self, questions, answers, reward_fn, prompt_builder,
+                   test_questions=None, test_answers=None):
+          self.questions, self.answers = questions, answers
+          self.test_questions, self.test_answers = test_questions, test_answers
+          self.reward_fn, self.prompt_builder = reward_fn, prompt_builder
+          self._cursor, self._split = 0, ""
+
+      @property
+      def dataset_size(self) -> int:
+          return len(self.questions)
+
+      def reset(self, seed=None, *, row_index=None, evaluation=None):
+          if evaluation and self.test_questions is not None:
+              qs, ans, split = self.test_questions, self.test_answers, "eval"
+          else:
+              qs, ans, split = self.questions, self.answers, "train"
+          if row_index is None:
+              if split != self._split:
+                  self._cursor, self._split = 0, split
+              row_index, self._cursor = self._cursor, self._cursor + 1
+          self._q, self._a = qs[row_index % len(qs)], ans[row_index % len(ans)]
+          return self.prompt_builder(self._q), {}
+
+      def step(self, action):
+          return "", float(self.reward_fn(action, self._a, self._q)), True, False, {}
+
   def env_factory(evaluation_mode: bool = False):
-      env = RolloutEnv.from_dataset(
-          questions=["2+2?", "Capital of France?"],
-          answers=["4", "Paris"],
-          reward_fn=reward_fn,
-          tokenizer=tokenizer,
-          prompt_builder=lambda question: f"Q: {question}\nA:",
-          test_questions=["3+3?"],
-          test_answers=["6"],
+      env = RolloutEnv.serving(
+          lambda: PromptDataset(
+              questions=["2+2?", "Capital of France?"],
+              answers=["4", "Paris"],
+              reward_fn=reward_fn,
+              prompt_builder=lambda question: f"Q: {question}\nA:",
+              test_questions=["3+3?"],
+              test_answers=["6"],
+          ),
+          tokenizer,
           max_turns=1,
           pad_id=tokenizer.eos_token_id,
           apply_chat_template=True,

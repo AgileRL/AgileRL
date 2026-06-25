@@ -127,18 +127,56 @@ def main():
         ]
         return "\n".join(p for p in parts if p)
 
-    # Reasoning is a single-turn rollout env. The BatchRolloutEnv owns the
-    # dataset cursor, giving each GRPO group a deterministic, group-consistent
-    # dataset order.
+    # Reasoning is a single-turn rollout env: a prompt dataset is just an env.
+    # The BatchRolloutEnv owns the dataset cursor, giving each GRPO group a
+    # deterministic, group-consistent dataset order.
+    class PromptDataset:
+        """Single-turn dataset env: serve a question on reset, score it on step."""
+
+        def __init__(
+            self,
+            questions,
+            answers,
+            reward_fn,
+            prompt_builder,
+            test_questions=None,
+            test_answers=None,
+        ):
+            self.questions, self.answers = questions, answers
+            self.test_questions, self.test_answers = test_questions, test_answers
+            self.reward_fn, self.prompt_builder = reward_fn, prompt_builder
+            self._cursor, self._split = 0, ""
+
+        @property
+        def dataset_size(self) -> int:
+            return len(self.questions)
+
+        def reset(self, seed=None, *, row_index=None, evaluation=None):
+            if evaluation and self.test_questions is not None:
+                qs, ans, split = self.test_questions, self.test_answers, "eval"
+            else:
+                qs, ans, split = self.questions, self.answers, "train"
+            if row_index is None:
+                if split != self._split:
+                    self._cursor, self._split = 0, split
+                row_index, self._cursor = self._cursor, self._cursor + 1
+            self._q, self._a = qs[row_index % len(qs)], ans[row_index % len(ans)]
+            return self.prompt_builder(self._q), {}
+
+        def step(self, action):
+            return "", float(self.reward_fn(action, self._a, self._q)), True, False, {}
+
     def env_factory(evaluation_mode: bool = False):
-        env = RolloutEnv.from_dataset(
-            questions=list(train_dataset["question"]),
-            answers=list(train_dataset["answer"]),
-            reward_fn=combined_rewards,
-            tokenizer=tokenizer,
-            prompt_builder=prompt_builder,
-            test_questions=list(test_dataset["question"]),
-            test_answers=list(test_dataset["answer"]),
+        env = RolloutEnv.serving(
+            lambda: PromptDataset(
+                questions=list(train_dataset["question"]),
+                answers=list(train_dataset["answer"]),
+                reward_fn=combined_rewards,
+                prompt_builder=prompt_builder,
+                test_questions=list(test_dataset["question"]),
+                test_answers=list(test_dataset["answer"]),
+            ),
+            tokenizer,
             max_turns=1,
             pad_id=getattr(tokenizer, "pad_token_id", None),
             apply_chat_template=True,

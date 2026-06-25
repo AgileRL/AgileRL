@@ -1,27 +1,29 @@
-"""The AgileRL <-> OpenEnv seam: host any local env as a server, hit it as a client.
+"""The OpenEnv seam: reach any text env the same way — over HTTP or in-process.
 
-Every LLM-training env is reached the same way — text in, text out, over OpenEnv's
-HTTP protocol (https://github.com/meta-pytorch/OpenEnv). Three thin wrappers sit
-between AgileRL and the ``openenv`` package; each exists for a concrete reason
-OpenEnv's own classes don't cover for our use:
+Every LLM-training env speaks the same text-in / text-out contract — :class:`TextAction`
+(``message``) / :class:`TextObservation` (``prompt``) — and a ``RolloutEnv`` reaches it
+through a **backend**: an :class:`OpenEnvClient` when the env is hosted over a URL (a
+remote Space, or a local :class:`OpenEnvServer`), or a :class:`LocalEnvClient` when the
+env runs in the same process (no HTTP). One env is reached per backend — each concurrent
+rollout gets its own.
 
-* :class:`OpenEnvWrapper` adapts an AgileRL local env (the ``reset`` / ``step`` text
-  contract) to OpenEnv's typed ``Environment`` ABC — the glue that lets OpenEnv host
-  our envs at all.
-* :class:`OpenEnvServer` runs OpenEnv's app (``create_app``) on uvicorn *inside the
-  training process* (a daemon thread on an ephemeral port, with ``start`` / ``stop``),
-  because OpenEnv's own host story is a standalone blocking process (a Space, a
-  container) — not something a trainer spins up and tears down per rollout.
-* :class:`OpenEnvClient` is a small *synchronous* httpx client, because OpenEnv's own
-  client is async + WebSocket-first; the rollout loop drives ``reset`` / ``step``
-  synchronously, so a plain sync client hitting the (async) server is simpler than
-  threading an event loop through the trainer.
+The wrappers here exist because OpenEnv's own classes don't cover this use directly:
 
-A standard text contract — :class:`TextAction` (``message``) / :class:`TextObservation`
-(``prompt``) — carries the model's text both ways, so there are no per-env codecs;
-:func:`resolve_env` turns a URL or a ``module:Class`` entrypoint into a hosted env.
-Because our server speaks the standard OpenEnv wire, OpenEnv's own async client can
-drive it too (e.g. the async Ray rollout path).
+* :class:`OpenEnvWrapper` adapts an env's plain ``reset`` / ``step`` text contract to
+  OpenEnv's typed ``Environment`` ABC — the glue that lets OpenEnv host it at all.
+* :class:`OpenEnvServer` runs OpenEnv's app (``create_app``) on uvicorn *in-process*
+  (a daemon thread on an ephemeral port, with ``start`` / ``stop``), because OpenEnv's
+  own host story is a standalone blocking process (a Space, a container) — not
+  something a trainer starts and stops itself. It closes the hosted env once, on stop.
+* :class:`OpenEnvClient` is a small *synchronous* httpx client for an env over a URL: the
+  rollout loop drives ``reset`` / ``step`` synchronously, and an async caller (e.g. a Ray
+  actor) gets its concurrency from the actor boundary, not the client.
+* :class:`LocalEnvClient` is the in-process sibling: the same surface, but it calls a
+  local env's ``reset`` / ``step`` directly (no server, no socket).
+
+:func:`resolve_env` turns a URL or a ``module:Class`` entrypoint into a hosted ``(url,
+server)``; :func:`load_env` just builds an entrypoint env (no hosting) for the in-process
+path.
 """
 
 from __future__ import annotations
@@ -67,15 +69,16 @@ class TextObservation(Observation):
 
 
 class OpenEnvWrapper(Environment):
-    """Adapt an AgileRL local env to OpenEnv's typed ``Environment`` ABC.
+    """Adapt an env to OpenEnv's typed ``Environment`` ABC.
 
-    The required interop glue: an AgileRL env speaks a plain text contract, not
+    A typical env speaks a plain text contract, not
     OpenEnv's typed ``Action`` / ``Observation`` / ``State``, so this bridges the two —
-    letting OpenEnv's server (or ours) host any local env unchanged. ``inner`` provides
-    ``reset(seed=None[, row_index, evaluation]) -> (prompt, info)`` and
-    ``step(action_text) -> (prompt, reward, terminated, truncated, info)``. The env's
-    ``dataset_size`` / ``tools`` are surfaced on the OpenEnv ``state`` so a client can
-    read them; ``info``'s ``prefix`` / ``suffix`` are folded into the prompt (OpenEnv
+    letting OpenEnv's server host any local env unchanged.
+    ``inner`` provides ``reset(seed=None[, row_index, evaluation]) -> (prompt, info)`` and
+    ``step(action_text) -> (prompt, reward, terminated, truncated, info)``.
+    The env's ``dataset_size`` / ``tools`` are surfaced on the OpenEnv ``state``
+    so a client can read them.
+    ``info``'s ``prefix`` / ``suffix`` are folded into the prompt (OpenEnv
     does not round-trip observation metadata).
 
     :param inner: The local env to host.
@@ -144,10 +147,7 @@ class OpenEnvWrapper(Environment):
         )
 
     def close(self) -> None:
-        """Close the inner env when it supports it."""
-        closer = getattr(self._inner, "close", None)
-        if callable(closer):
-            closer()
+        """No-op: the wrapper is a per-request adapter and does not own the env."""
 
 
 def _normalize_reset(result: Any) -> tuple[str, dict[str, Any]]:
@@ -190,18 +190,12 @@ def _fold(text: str, info: dict[str, Any] | None) -> str:
 
 
 class OpenEnvServer:
-    """Run OpenEnv's app on uvicorn *inside the training process*.
+    """Run OpenEnv's app on uvicorn in-process.
 
-    Why this rather than OpenEnv's host helpers directly: OpenEnv builds the FastAPI
-    app (``create_app``), but its hosting is meant to be a standalone, blocking process
-    (a HF Space, a container, ``python -m openenv``). A trainer needs to start servers
-    and stop them programmatically from its own process — one per concurrent rollout,
-    all created once and reused for the whole run (not per episode), and torn down at
-    the end — so this wraps the same ``create_app`` in a uvicorn **daemon thread**,
-    binds an ephemeral port (``port=0``) read back from :attr:`base_url`, and exposes
-    ``start`` / ``stop`` (and the context-manager protocol). The env is wrapped in :class:`OpenEnvWrapper`, so any
-    OpenEnv client — :class:`OpenEnvClient`, OpenEnv's own async client, a HF Space
-    consumer — reaches it by URL.
+    OpenEnv builds the FastAPI app (``create_app``), but its hosting is meant to be a standalone, blocking process e.g. (a HF Space, a container, ``python -m openenv``).
+    To enable envs to be served in-process, this class wraps the same ``create_app`` in a uvicorn **daemon thread**, binds an ephemeral port (``port=0``) read back from :attr:`base_url`, and exposes ``start`` / ``stop`` (and the context-manager protocol).
+    Any OpenEnv client can then reach it by URL.
+    This class also enables env servers to be hosted by Ray actors in their own process.
 
     :param env: The local env to serve.
     :param host: Interface to bind (default loopback).
@@ -226,6 +220,7 @@ class OpenEnvServer:
         self._server: Any = None
         self._thread: threading.Thread | None = None
         self._bound_port: int | None = None
+        self._env_closed = False
 
     @property
     def base_url(self) -> str:
@@ -263,7 +258,10 @@ class OpenEnvServer:
         return self
 
     def stop(self) -> None:
-        """Stop serving and release the socket (idempotent)."""
+        """Stop serving, release the socket, and close the hosted env once.
+
+        Idempotent. The env is closed exactly once when the server is torn down.
+        """
         if self._server is not None:
             self._server.should_exit = True
         if self._thread is not None:
@@ -271,6 +269,12 @@ class OpenEnvServer:
             self._thread = None
         self._server = None
         self._bound_port = None
+        if not self._env_closed:
+            self._env_closed = True
+            closer = getattr(self._env, "close", None)
+            if callable(closer):
+                with contextlib.suppress(Exception):
+                    closer()
 
     def __enter__(self) -> Self:
         return self.start()
@@ -283,20 +287,15 @@ class OpenEnvClient:
     """Synchronous httpx client for an OpenEnv env server (text in, text out).
 
     Why this rather than OpenEnv's own client: OpenEnv ships an async, WebSocket-first
-    ``EnvClient``. The rollout loop drives ``reset`` / ``step`` synchronously (token by
-    token), so a plain **sync** httpx client hitting the (async) FastAPI server is
-    simpler than threading an event loop through the trainer — and since our server
-    speaks the standard OpenEnv wire, OpenEnv's own async client can still drive it
-    (e.g. the async Ray path) when that is wanted.
+    ``EnvClient``, but our rollout loop drives ``reset`` / ``step`` synchronously,
+    so a plain **sync** httpx client hitting the (async) FastAPI server is
+    simpler than threading an event loop through the trainer.
+    This client can still be used asynchronously by having the client itself sit inside an async process, like a Ray actor!
 
     Drives any env hosted as an OpenEnv server — our own :class:`OpenEnvServer` or a
-    third-party Space — over its REST wire via a single :class:`httpx.Client`.
-    ``reset`` / ``step`` speak the standard text contract (the action is the model's
-    text, the observation is the next prompt); ``dataset_size`` / ``tools`` come from
-    ``/state``; ``row_index`` / ``evaluation`` ride on reset so a ``BatchRolloutEnv``
-    can pin a group to one prompt / select the held-out split.
+    third-party one.
 
-    For an external server whose env exposes an MCP tool rather than the plain text
+    For an external server whose env is exposed as an MCP tool rather than the plain text
     contract, pass ``mcp_tool``: the model's text is sent as
     ``call_tool(mcp_tool, {arg: text})`` and the tool result rendered back to text.
 
@@ -429,110 +428,96 @@ class OpenEnvClient:
         return body
 
 
-class AsyncOpenEnvClient:
-    """Asynchronous httpx client for an OpenEnv env server — the async sibling.
+class LocalEnvClient:
+    """In-process backend for a local env — the no-HTTP sibling of :class:`OpenEnvClient`.
 
-    Same wire and text contract as :class:`OpenEnvClient` (including ``mcp_tool=``), but
-    ``reset`` / ``step`` / ``state`` are coroutines and the connection pool is released
-    with ``aclose``. Use this in the *disaggregated* rollout path — e.g. a Ray actor
-    proxying an env, or any caller already inside an event loop that wants to overlap
-    many concurrent env round-trips. The synchronous in-process training loop uses
-    :class:`OpenEnvClient`, which needs no event loop.
+    Drives a local env's ``reset`` / ``step`` text contract **directly** (no server, no
+    socket), exposing the same surface a :class:`RolloutEnv` consumes (``reset`` /
+    ``step`` / ``close`` / ``dataset_size`` / ``tools`` / ``eval_mode``). Use it (via
+    :meth:`RolloutEnv.local` / :meth:`RolloutEnv.from_spec`) when the env lives in the
+    same process — e.g. inside a Ray actor — so there is no pointless loopback HTTP;
+    :class:`OpenEnvClient` is the sibling for an env reached over a URL. The prefix /
+    suffix folding and reset-arg matching that :class:`OpenEnvWrapper` does server-side
+    happen here instead, so both backends hand ``RolloutEnv`` the same shape.
 
-    :param base_url: Root URL of the env server.
-    :param headers: Optional HTTP headers (e.g. auth) sent on every request.
-    :param timeout_s: Per-request timeout in seconds (``None`` = unbounded).
-    :param mcp_tool: When set, send the model's text as an MCP ``call_tool`` to this
-        tool (for external MCP servers); when ``None``, send ``{"message": text}``.
-    :param arg: MCP argument name carrying the text (default ``"message"``).
+    :param env: The local env: ``reset(seed=None[, row_index, evaluation]) ->
+        (prompt, info)`` and ``step(text) -> (obs, reward, terminated, truncated, info)``.
     :param instruction: Prompt returned from reset when the env's reset obs is empty.
     """
 
-    def __init__(
-        self,
-        base_url: str,
-        *,
-        headers: dict[str, str] | None = None,
-        timeout_s: float | None = None,
-        mcp_tool: str | None = None,
-        arg: str = "message",
-        instruction: str = "",
-    ) -> None:
-        """Build an async client for the OpenEnv server at ``base_url``."""
-        if not base_url:
-            msg = "AsyncOpenEnvClient requires a base_url"
-            raise ValueError(msg)
-        self._http = httpx.AsyncClient(
-            base_url=base_url.rstrip("/"), headers=headers or {}, timeout=timeout_s
-        )
-        self._mcp_tool = mcp_tool
-        self._arg = arg
+    def __init__(self, env: Any, *, instruction: str = "") -> None:
+        """Wrap a local ``env`` as an in-process backend."""
+        self._env = env
         self._instruction = instruction
-        self.evaluation_mode = False
+        self._reset_params = set(inspect.signature(env.reset).parameters)
+        self._evaluation_mode = False
 
-    async def reset(
+    def reset(
         self,
         seed: int | None = None,
         *,
         row_index: int | None = None,
     ) -> tuple[str, dict[str, Any]]:
-        """Reset the env and return ``(prompt, info)``."""
-        payload: dict[str, Any] = {}
-        if seed is not None and int(seed) >= 0:
-            payload["seed"] = int(seed)
-        if row_index is not None:
-            payload["row_index"] = int(row_index)
-        if self.evaluation_mode:
-            payload["evaluation"] = True
-        data = await self._post("/reset", payload)
-        return (_observation_text(data.get("observation")) or self._instruction), {}
+        """Reset the local env and return ``(prompt, info)`` (prefix/suffix folded in)."""
+        call: dict[str, Any] = {}
+        if seed is not None and "seed" in self._reset_params:
+            call["seed"] = seed
+        if row_index is not None and "row_index" in self._reset_params:
+            call["row_index"] = row_index
+        if self._evaluation_mode and "evaluation" in self._reset_params:
+            call["evaluation"] = True
+        prompt, info = _normalize_reset(self._env.reset(**call))
+        return (_fold(prompt, info) or self._instruction), {}
 
-    async def step(self, action: Any) -> tuple[str, float, bool, bool, dict[str, Any]]:
-        """Forward one action (model text) to the env and return the Gym 5-tuple."""
+    def step(self, action: Any) -> tuple[str, float, bool, bool, dict[str, Any]]:
+        """Step the local env with the action text and return the Gym 5-tuple."""
         text = action if isinstance(action, str) else str(action)
-        if self._mcp_tool:
-            act: dict[str, Any] = {
-                "type": "call_tool",
-                "tool_name": self._mcp_tool,
-                "arguments": {self._arg: text},
-            }
-        else:
-            act = {"message": text}
-        data = await self._post("/step", {"action": act})
-        reward = data.get("reward")
+        prompt, reward, terminated, truncated, info = _normalize_step(
+            self._env.step(text)
+        )
         return (
-            _observation_text(data.get("observation")),
+            _fold(prompt, info),
             float(reward) if reward is not None else 0.0,
-            bool(data.get("done", False)),
-            False,
+            terminated,
+            truncated,
             {},
         )
 
-    async def state(self) -> dict[str, Any]:
-        """Fetch the env's ``/state`` (carries ``dataset_size`` / ``tools``)."""
-        with contextlib.suppress(Exception):
-            response = await self._http.get("/state")
-            response.raise_for_status()
-            body = response.json()
-            if isinstance(body, dict):
-                return body
-        return {}
+    def close(self) -> None:
+        """Close the wrapped env when it supports it (best-effort)."""
+        closer = getattr(self._env, "close", None)
+        if callable(closer):
+            with contextlib.suppress(Exception):
+                closer()
 
-    async def aclose(self) -> None:
-        """Best-effort ``/close``, then release the async connection pool."""
-        with contextlib.suppress(Exception):
-            await self._post("/close", {})
-        await self._http.aclose()
+    @property
+    def dataset_size(self) -> int:
+        """Dataset rows the env serves (``0`` if not dataset-backed)."""
+        return int(getattr(self._env, "dataset_size", 0) or 0)
 
-    async def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        """POST JSON to the server and decode the object response."""
-        response = await self._http.post(path, json=payload)
-        response.raise_for_status()
-        body = response.json()
-        if not isinstance(body, dict):
-            msg = f"OpenEnv {path} returned a non-object payload: {type(body)!r}"
-            raise TypeError(msg)
-        return body
+    @property
+    def tools(self) -> list[Any]:
+        """Tool schemas the env advertises (empty when none)."""
+        return list(getattr(self._env, "tools", None) or [])
+
+    @property
+    def evaluation_mode(self) -> bool:
+        """Whether resets are currently flagged for the held-out split."""
+        return self._evaluation_mode
+
+    @evaluation_mode.setter
+    def evaluation_mode(self, value: bool) -> None:
+        self._evaluation_mode = bool(value)
+
+    @contextlib.contextmanager
+    def eval_mode(self) -> Iterator[None]:
+        """Flag resets for the env's held-out split within the block."""
+        previous = self._evaluation_mode
+        self._evaluation_mode = True
+        try:
+            yield
+        finally:
+            self._evaluation_mode = previous
 
 
 def _observation_text(obs: Any) -> str:
@@ -595,6 +580,22 @@ def resolve_env(
         env, host=host, port=port, env_name=_name_from_spec(spec)
     ).start()
     return server.base_url, server
+
+
+def load_env(spec: str, env_config: dict[str, Any] | None = None) -> Any:
+    """Load a ``module:Class`` / ``path.py:Class`` entrypoint and build the env (no hosting).
+
+    The in-process counterpart to :func:`resolve_env` (which hosts the env on an
+    :class:`OpenEnvServer`): returns the constructed env object so a caller can drive it
+    directly — e.g. :meth:`RolloutEnv.local` / :meth:`RolloutEnv.from_spec` wrapping it in
+    a :class:`LocalEnvClient`.
+    """
+    return _load_entrypoint(spec)(**(env_config or {}))
+
+
+def is_url(spec: str) -> bool:
+    """Whether ``spec`` is an HTTP(S) URL (already hosted) rather than an env to load."""
+    return _is_url(spec)
 
 
 def _is_url(spec: str) -> bool:
