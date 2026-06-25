@@ -2091,17 +2091,22 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     :param lora_target_scope: Optional PEFT LoRA path scope for multimodal models
         (e.g. ``"language_model"``). Passed to :func:`adapt_lora_config_for_model`.
     :type lora_target_scope: str | None, optional
+    :param chunk_rows: Primary chunk-size knob for fused logit tiles. When set,
+        it provides the default row count for both standard fused-logprob and
+        Liger fused-loss paths; backend-specific args can still override.
+    :type chunk_rows: int | None, optional
     :param fused_logprobs_chunk_rows: Standard (non-Liger) path only. Rows
         (tokens) per ``(chunk_rows, vocab)`` logit tile when computing per-token
         log-probs via the fused-linear-logprob path. Peak logits memory is
         ``O(chunk_rows * vocab)`` regardless of batch/sequence length. ``None``
-        (default) auto-tunes to a ~256 MB fp32 tile.
+        (default) inherits ``chunk_rows`` when set; otherwise auto-tunes to a
+        ~256 MB fp32 tile.
     :type fused_logprobs_chunk_rows: int | None, optional
     :param fused_loss_chunk_rows: Rows per ``(chunk_rows, vocab)`` logit tile in
         the token-level Liger fused policy loss. ``None`` (default) auto-tunes to
         a ~256 MB fp32 logit workspace — the same heuristic as
-        ``fused_logprobs_chunk_rows`` on the standard path; pass an int to
-        override.
+        ``fused_logprobs_chunk_rows`` on the standard path; ``None`` inherits
+        ``chunk_rows`` when set.
     :type fused_loss_chunk_rows: int | None, optional
     :param vllm_importance_sampling_correction: When ``True`` (default) and
         ``use_vllm=True``, correct the rollout/trainer log-prob mismatch by
@@ -2191,6 +2196,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         activation_offload: bool = False,
         use_sequence_packing: bool = False,
         lora_target_scope: str | None = None,
+        chunk_rows: int | None = None,
         fused_logprobs_chunk_rows: int | None = None,
         fused_loss_chunk_rows: int | None = None,
         vllm_importance_sampling_correction: bool = True,
@@ -2355,10 +2361,42 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.wrap = wrap
         self.use_separate_reference_adapter = use_separate_reference_adapter
         self.cast_logprobs_to_fp32 = cast_logprobs_to_fp32
-        # Per-chunk row count for the fused-linear-logprob workspace. ``None``
-        # uses a vocab-aware ~256 MB-workspace heuristic;
-        # set explicitly to trade kernel-launch count vs ``rows * vocab`` peak.
-        self.fused_logprobs_chunk_rows = fused_logprobs_chunk_rows
+        if chunk_rows is not None and chunk_rows <= 0:
+            msg = f"chunk_rows must be a positive int or None, got {chunk_rows}."
+            raise ValueError(msg)
+        if fused_logprobs_chunk_rows is not None and fused_logprobs_chunk_rows <= 0:
+            msg = (
+                "fused_logprobs_chunk_rows must be a positive int or None, "
+                f"got {fused_logprobs_chunk_rows}."
+            )
+            raise ValueError(msg)
+        if fused_loss_chunk_rows is not None and fused_loss_chunk_rows <= 0:
+            msg = (
+                f"fused_loss_chunk_rows must be a positive int or None, "
+                f"got {fused_loss_chunk_rows}."
+            )
+            raise ValueError(msg)
+        if fused_logprobs_chunk_rows is not None:
+            warnings.warn(
+                "fused_logprobs_chunk_rows is an advanced override; prefer "
+                "chunk_rows for the primary chunk-size knob.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        if fused_loss_chunk_rows is not None:
+            warnings.warn(
+                "fused_loss_chunk_rows is an advanced override; prefer "
+                "chunk_rows for the primary chunk-size knob.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        # Resolved per-path chunk rows. Backend-specific knobs override
+        # ``chunk_rows`` when explicitly set.
+        self.fused_logprobs_chunk_rows = (
+            fused_logprobs_chunk_rows
+            if fused_logprobs_chunk_rows is not None
+            else chunk_rows
+        )
         # vLLM sampling-mismatch correction (truncated importance sampling).
         # The rollout is drawn from vLLM but the loss treats the trainer's
         # recomputed ``old_log_probs`` as the behaviour policy; the two differ
@@ -2374,13 +2412,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         # Kept on even when use_vllm=False: decoupled rollouts still sample
         # from a separate vLLM engine.
         self._is_correction_liger_warned = False
-        if fused_loss_chunk_rows is not None and fused_loss_chunk_rows <= 0:
-            msg = (
-                f"fused_loss_chunk_rows must be a positive int or None, "
-                f"got {fused_loss_chunk_rows}."
-            )
-            raise ValueError(msg)
-        self.fused_loss_chunk_rows = fused_loss_chunk_rows
+        self.fused_loss_chunk_rows = (
+            fused_loss_chunk_rows if fused_loss_chunk_rows is not None else chunk_rows
+        )
         # Warn-once flag for the canonical Liger + non-token importance-sampling
         # "not memory-bounded" warning (see :meth:`_warn_liger_non_token_is`).
         self._liger_non_token_warned = False

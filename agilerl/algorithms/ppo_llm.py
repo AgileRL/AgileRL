@@ -197,11 +197,16 @@ class PPO(LLMAlgorithm):
         it in the input dtype, saving a little memory at the cost of a per-token
         bf16 quantisation error that can bias importance-sampling ratios.
     :type cast_logprobs_to_fp32: bool, optional
+    :param chunk_rows: Primary chunk-size knob for fused logit tiles. Applies
+        to both standard and Liger paths unless a backend-specific override is
+        set.
+    :type chunk_rows: int | None, optional
     :param fused_logprobs_chunk_rows: Standard (non-Liger) path only. Rows
         (tokens) per ``(chunk_rows, vocab)`` logit tile when computing per-token
         log-probs via the fused-linear-logprob path. Peak logits memory is
         ``O(chunk_rows * vocab)`` regardless of batch/sequence length. ``None``
-        (default) auto-tunes to a ~256 MB fp32 tile.
+        (default) inherits ``chunk_rows`` when set; otherwise auto-tunes to a
+        ~256 MB fp32 tile.
     :type fused_logprobs_chunk_rows: int | None, optional
     :param use_liger_loss: Use the Liger fused policy loss, defaults to ``False``
         (requires ``liger-kernel``). **Recommended for PPO**: via AgileRL's
@@ -224,8 +229,8 @@ class PPO(LLMAlgorithm):
     :param fused_loss_chunk_rows: Rows per ``(chunk_rows, vocab)`` logit tile in
         the token-level Liger fused policy loss. ``None`` (default) auto-tunes to
         a ~256 MB fp32 logit workspace — the same heuristic as
-        ``fused_logprobs_chunk_rows`` on the standard path; pass an int to
-        override.
+        ``fused_logprobs_chunk_rows`` on the standard path; ``None`` inherits
+        ``chunk_rows`` when set.
     :type fused_loss_chunk_rows: int | None, optional
     :param vllm_importance_sampling_correction: When ``True`` (default) and
         ``use_vllm=True``, correct the rollout/trainer log-prob mismatch by
@@ -303,6 +308,7 @@ class PPO(LLMAlgorithm):
         torch_compiler: str | None = None,
         reduce_memory_peak: bool = False,
         cast_logprobs_to_fp32: bool = True,
+        chunk_rows: int | None = None,
         fused_logprobs_chunk_rows: int | None = None,
         use_liger_loss: bool = False,
         quantization_config: BitsAndBytesConfig | None = None,
@@ -349,6 +355,7 @@ class PPO(LLMAlgorithm):
             torch_compiler=torch_compiler,
             reduce_memory_peak=reduce_memory_peak,
             cast_logprobs_to_fp32=cast_logprobs_to_fp32,
+            chunk_rows=chunk_rows,
             fused_logprobs_chunk_rows=fused_logprobs_chunk_rows,
             quantization_config=quantization_config,
             activation_offload=activation_offload,

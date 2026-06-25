@@ -510,8 +510,24 @@ class TestPPOInit:
             )
 
     def test_init_stores_fused_loss_chunk_rows(self):
-        ppo = _cpu_llmppo(fused_loss_chunk_rows=256)
+        with pytest.warns(DeprecationWarning, match="advanced override"):
+            ppo = _cpu_llmppo(fused_loss_chunk_rows=256)
         assert ppo.fused_loss_chunk_rows == 256
+
+    def test_init_chunk_rows_sets_both_fused_chunk_knobs(self):
+        ppo = _cpu_llmppo(chunk_rows=256)
+        assert ppo.fused_logprobs_chunk_rows == 256
+        assert ppo.fused_loss_chunk_rows == 256
+
+    def test_init_specific_fused_chunk_knobs_override_chunk_rows(self):
+        with pytest.warns(DeprecationWarning, match="advanced override"):
+            ppo = _cpu_llmppo(
+                chunk_rows=512,
+                fused_logprobs_chunk_rows=128,
+                fused_loss_chunk_rows=64,
+            )
+        assert ppo.fused_logprobs_chunk_rows == 128
+        assert ppo.fused_loss_chunk_rows == 64
 
     def test_init_action_granularity_deprecated_warns_and_overrides(self):
         """The legacy ``action_granularity`` kwarg warns and is carried over
