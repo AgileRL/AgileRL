@@ -29,7 +29,7 @@ import urllib.request
 from typing import TYPE_CHECKING, Any
 
 from openenv.core.env_server.http_server import create_app
-from openenv.core.env_server.interfaces import Environment
+from openenv.core.env_server.interfaces import Environment, EnvironmentMetadata
 from openenv.core.env_server.types import Action, Observation, State
 
 if TYPE_CHECKING:
@@ -68,14 +68,24 @@ class GymEnvironment(Environment):
     prompt (OpenEnv does not round-trip observation metadata).
 
     :param inner: The local env to host.
+    :param env_name: Name reported in the env's OpenEnv metadata; defaults to
+        ``inner``'s class name (so a client sees the real env, not ``GymEnvironment``).
     """
 
-    def __init__(self, inner: Any) -> None:
+    def __init__(self, inner: Any, *, env_name: str | None = None) -> None:
         """Wrap ``inner`` as an OpenEnv environment."""
         super().__init__()
         self._inner = inner
+        self._env_name = env_name
         self._reset_params = set(inspect.signature(inner.reset).parameters)
         self._state = State()
+
+    def get_metadata(self) -> EnvironmentMetadata:
+        """Report the wrapped env's name in OpenEnv metadata, not ``GymEnvironment``."""
+        name = self._env_name or type(self._inner).__name__
+        return EnvironmentMetadata(
+            name=name, description=f"{name} environment", version="1.0.0"
+        )
 
     def reset(
         self,
@@ -189,13 +199,23 @@ class OpenEnvServer:
     :param env: The local env to serve.
     :param host: Interface to bind (default loopback).
     :param port: TCP port; ``0`` lets the OS pick one.
+    :param env_name: Name advertised in the env's OpenEnv metadata / schema; defaults
+        to the env's class name.
     """
 
-    def __init__(self, env: Any, *, host: str = "127.0.0.1", port: int = 0) -> None:
+    def __init__(
+        self,
+        env: Any,
+        *,
+        host: str = "127.0.0.1",
+        port: int = 0,
+        env_name: str | None = None,
+    ) -> None:
         """Build (but do not start) a server hosting ``env``."""
         self._env = env
         self._host = host
         self._port = port
+        self._env_name = env_name
         self._server: Any = None
         self._thread: threading.Thread | None = None
         self._bound_port: int | None = None
@@ -213,10 +233,10 @@ class OpenEnvServer:
         import uvicorn
 
         app = create_app(
-            lambda: GymEnvironment(self._env),
+            lambda: GymEnvironment(self._env, env_name=self._env_name),
             TextAction,
             TextObservation,
-            env_name="agilerl",
+            env_name=self._env_name or type(self._env).__name__,
         )
         config = uvicorn.Config(
             app, host=self._host, port=self._port, log_level="warning"
@@ -252,9 +272,15 @@ class OpenEnvServer:
         self.stop()
 
 
-def serve(env: Any, *, host: str = "127.0.0.1", port: int = 0) -> OpenEnvServer:
+def serve(
+    env: Any,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 0,
+    env_name: str | None = None,
+) -> OpenEnvServer:
     """Wrap ``env`` in an :class:`OpenEnvServer` and start it; returns the running server."""
-    return OpenEnvServer(env, host=host, port=port).start()
+    return OpenEnvServer(env, host=host, port=port, env_name=env_name).start()
 
 
 def local_transport(env: Any) -> Callable[[str, dict[str, Any]], dict[str, Any]]:
@@ -609,13 +635,22 @@ def resolve_env(
         )
         raise ValueError(msg)
     env = _load_entrypoint(spec)(**(env_config or {}))
-    server = serve(env, host=host, port=port)
+    server = serve(env, host=host, port=port, env_name=_name_from_spec(spec))
     return server.base_url, server
 
 
 def _is_url(spec: str) -> bool:
     """Whether ``spec`` is an HTTP(S) URL (already hosted) rather than an env to load."""
     return isinstance(spec, str) and spec.startswith(("http://", "https://"))
+
+
+def _name_from_spec(spec: str) -> str:
+    """A label for a hosted env spec: the trailing identifier of the entrypoint / path.
+
+    ``"game:GuessTheNumber-v0"`` -> ``"GuessTheNumber-v0"``,
+    ``"/path/to/file.py:Env"`` -> ``"Env"``, a bare name passes through unchanged.
+    """
+    return spec.rsplit(":", 1)[-1].rsplit("/", 1)[-1] or spec
 
 
 def _load_entrypoint(target: str) -> Callable[..., Any]:

@@ -15,6 +15,7 @@ import torch
 
 from agilerl.llm_envs import (
     BatchRolloutEnv,
+    GymEnvironment,
     OpenEnvClient,
     OpenEnvServer,
     RolloutEnv,
@@ -22,7 +23,7 @@ from agilerl.llm_envs import (
     resolve_env,
     serve,
 )
-from agilerl.llm_envs.openenv import _normalize_reset, _normalize_step
+from agilerl.llm_envs.openenv import _name_from_spec, _normalize_reset, _normalize_step
 
 
 class _CountingEnv:
@@ -156,6 +157,23 @@ def test_normalize_step_rejects_non_tuple() -> None:
 def test_normalize_reset_accepts_bare_observation() -> None:
     """An env returning just an observation gets an empty info dict."""
     assert _normalize_reset("obs") == ("obs", {})
+
+
+# --- env identity: the served env's real name in OpenEnv metadata ----------
+def test_gym_environment_metadata_reports_real_env_name() -> None:
+    """The wrapped env is identified by its own name, not ``GymEnvironment``."""
+    assert GymEnvironment(_CountingEnv()).get_metadata().name == "_CountingEnv"
+    assert (
+        GymEnvironment(_CountingEnv(), env_name="counting").get_metadata().name
+        == "counting"
+    )
+
+
+def test_name_from_spec_takes_trailing_identifier() -> None:
+    """An env spec's label is the trailing identifier of the entrypoint / path."""
+    assert _name_from_spec("game:GuessTheNumber-v0") == "GuessTheNumber-v0"
+    assert _name_from_spec("/pkg/file.py:Env") == "Env"
+    assert _name_from_spec("plainname") == "plainname"
 
 
 # --- RolloutEnv.from_dataset (reasoning over local_transport) ---------------
