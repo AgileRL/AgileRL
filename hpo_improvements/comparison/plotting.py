@@ -10,9 +10,18 @@ Two figures, both built with rliable (Agarwal et al. 2021):
   point estimate with its stratified-bootstrap confidence interval, against the
   50% "No preference" reference.
 
-Both share the harness house style: a full box, a grid, default numeric ticks,
+A third, composite figure overlays the two benchmarks directly:
+
+* :func:`plot_aggregate_and_profile`: a side-by-side figure whose left panel
+  overlays the studied and baseline aggregate IQM of the best normalised fitness
+  over per-agent environment steps, and whose right panel overlays their
+  rliable performance profiles of the final best normalised fitness. Each panel
+  has its own ``Studied``/``Baseline`` legend (plus the random/expert references).
+
+All share the harness house style: a full box, a grid, default numeric ticks,
 bold titles/labels, a blue main marker, and a top-right legend listing only the
-reference line. Text is in UK English.
+reference line. The studied series is blue and the baseline orange. Text is in
+UK English.
 """
 
 from __future__ import annotations
@@ -25,16 +34,36 @@ mpl.use("Agg")  # headless backend for saving figures
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
 import numpy as np
+from rliable import library as rly
 from rliable import plot_utils as rly_plot
+
+# Reuse the harness's rliable IQM-with-CI helper and bootstrap settings so the
+# studied/baseline aggregate curves are built exactly like the benchmarks' own.
+from hpo_improvements.benchmarking import plotting as bench_plotting
 
 if TYPE_CHECKING:
     from analysis import ComparisonResult
 
 MAIN_COLOR = "tab:blue"
 
+# The two overlaid series in the studied-vs-baseline figure. The studied curve
+# keeps the harness's blue; the baseline is drawn in orange for contrast.
+STUDIED_COLOR = "tab:blue"
+BASELINE_COLOR = "tab:orange"
+
+# Random/expert reference lines, matching the benchmarking harness house style.
+RANDOM_COLOR = "red"
+EXPERT_COLOR = "green"
+
+X_LABEL = "Per-agent environment steps"
+
 
 def _finalize_axis(
-    ax, *, legend_handles: list | None = None, grid_axis: str = "both"
+    ax,
+    *,
+    legend_handles: list | None = None,
+    grid_axis: str = "both",
+    legend_loc: str = "upper right",
 ) -> None:
     """Apply the shared house style to *ax*.
 
@@ -46,6 +75,7 @@ def _finalize_axis(
     :param ax: The axes to style.
     :param legend_handles: Reference-line handles for the legend, or None.
     :param grid_axis: Which gridlines to draw (``"both"``/``"x"``/``"y"``).
+    :param legend_loc: Location passed to ``ax.legend`` when a legend is drawn.
     """
     for spine in ax.spines.values():
         spine.set_visible(True)
@@ -68,7 +98,7 @@ def _finalize_axis(
     ax.xaxis.label.set_fontweight("bold")
     ax.yaxis.label.set_fontweight("bold")
     if legend_handles:
-        ax.legend(handles=legend_handles, loc="upper right")
+        ax.legend(handles=legend_handles, loc=legend_loc)
 
 
 def plot_iqm_difference(result: ComparisonResult, out_path: str) -> None:
@@ -150,6 +180,144 @@ def plot_probability_of_improvement(result: ComparisonResult, out_path: str) -> 
         fontsize="small",
     )
     _finalize_axis(ax, legend_handles=[ref], grid_axis="x")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
+def _plot_aggregate_panel(ax, result: ComparisonResult) -> None:
+    """Draw the overlaid studied/baseline aggregate normalised-fitness curves.
+
+    Left panel of :func:`plot_aggregate_and_profile`. For both the studied and
+    the baseline benchmark the IQM of the best normalised fitness is computed
+    over **all shared ``(seed, env)`` pairs** at each per-agent step (the same
+    rliable IQM-with-CI the harness's own ``plot_aggregate`` uses), and the two
+    curves are overlaid with their stratified-bootstrap 95% confidence bands.
+
+    :param ax: The axes to draw on.
+    :param result: The populated comparison result.
+    """
+    if result.x.size == 0 or result.studied_scores.size == 0:
+        ax.set_title(f"{result.algo}: aggregate normalised fitness (no shared range)")
+        ax.set_xlabel(X_LABEL)
+        _finalize_axis(ax)
+        return
+
+    point, cis = bench_plotting._iqm_interval_estimates(
+        {"studied": result.studied_scores, "baseline": result.baseline_scores},
+        reps=result.reps,
+    )
+    rly_plot.plot_sample_efficiency_curve(
+        result.x,
+        point,
+        cis,
+        algorithms=["studied", "baseline"],
+        colors={"studied": STUDIED_COLOR, "baseline": BASELINE_COLOR},
+        ax=ax,
+        marker="",
+        xlabel=X_LABEL,
+        ylabel="IQM of the best normalised fitness",
+        labelsize="medium",
+        ticklabelsize="medium",
+    )
+    # rliable labels the curves but draws no legend; collect the curve handles
+    # and append the random/expert reference lines so the legend lists all four.
+    curve_handles, _ = ax.get_legend_handles_labels()
+    rnd = ax.axhline(
+        0.0, color=RANDOM_COLOR, linestyle="--", linewidth=1.0, label="random"
+    )
+    exp = ax.axhline(
+        1.0, color=EXPERT_COLOR, linestyle="--", linewidth=1.0, label="expert"
+    )
+    ax.set_title(f"{result.algo}: IQM of the best normalised fitness")
+    _finalize_axis(
+        ax, legend_handles=[*curve_handles, rnd, exp], legend_loc="lower right"
+    )
+
+
+def _plot_profile_panel(ax, result: ComparisonResult) -> None:
+    """Draw the overlaid studied/baseline performance profiles.
+
+    Right panel of :func:`plot_aggregate_and_profile`. From the **final** best
+    normalised fitness of every shared ``(seed, env)`` pair (an
+    ``(n_runs, n_tasks)`` matrix for each benchmark) the rliable score
+    distribution is built: for each threshold ``tau`` the curve is the fraction
+    of runs whose final normalised fitness exceeds ``tau``. Studied and baseline
+    are overlaid with their stratified-bootstrap 95% confidence bands.
+
+    :param ax: The axes to draw on.
+    :param result: The populated comparison result.
+    """
+    studied_final = result.studied_final
+    baseline_final = result.baseline_final
+    finite = np.concatenate(
+        [
+            studied_final[np.isfinite(studied_final)].ravel(),
+            baseline_final[np.isfinite(baseline_final)].ravel(),
+        ]
+    )
+    if finite.size == 0:
+        ax.set_title(f"{result.algo}: performance profile (no finite scores)")
+        _finalize_axis(ax)
+        return
+
+    tau_max = max(1.0, float(np.max(finite)))
+    tau_list = np.linspace(0.0, tau_max, 100)
+
+    # create_performance_profile draws from NumPy's global RNG (it has no
+    # random_state argument), so seed it to keep the band reproducible.
+    np.random.seed(bench_plotting._BOOTSTRAP_SEED)
+    distributions, distribution_cis = rly.create_performance_profile(
+        {"studied": studied_final, "baseline": baseline_final},
+        tau_list,
+        reps=result.reps,
+    )
+    rly_plot.plot_performance_profiles(
+        distributions,
+        tau_list,
+        performance_profile_cis=distribution_cis,
+        colors={"studied": STUDIED_COLOR, "baseline": BASELINE_COLOR},
+        ax=ax,
+        xlabel="Last best normalised fitness",
+        ylabel=r"Fraction of runs with $\tau_{run} > \tau$",
+        # Match the left panel's axis-label/tick size (rliable defaults to a
+        # larger 'x-large' here, which would make the four labels mismatch).
+        labelsize="medium",
+        ticklabelsize="medium",
+    )
+    curve_handles, _ = ax.get_legend_handles_labels()
+    rnd = ax.axvline(
+        0.0, color=RANDOM_COLOR, linestyle="--", linewidth=1.0, label="random"
+    )
+    exp = ax.axvline(
+        1.0, color=EXPERT_COLOR, linestyle="--", linewidth=1.0, label="expert"
+    )
+    ax.set_title(f"{result.algo}: Performance profile")
+    _finalize_axis(ax, legend_handles=[*curve_handles, rnd, exp])
+
+
+def plot_aggregate_and_profile(result: ComparisonResult, out_path: str) -> None:
+    """Save the side-by-side studied-vs-baseline aggregate + profile figure.
+
+    One figure with two panels in the harness house style:
+
+    * **left** -- the aggregate IQM of the best normalised fitness over per-agent
+      environment steps, with the studied (blue) and baseline (orange) curves
+      overlaid (:func:`_plot_aggregate_panel`);
+    * **right** -- the rliable performance profile of the final best normalised
+      fitness, again with studied and baseline overlaid
+      (:func:`_plot_profile_panel`).
+
+    Each panel carries its own legend listing ``Studied`` and ``Baseline`` (plus
+    the random/expert reference lines) so the two benchmarks are directly
+    comparable. Text is in UK English.
+
+    :param result: The populated comparison result.
+    :param out_path: Destination ``.png`` path.
+    """
+    fig, (ax_left, ax_right) = plt.subplots(1, 2, figsize=(16, 6))
+    _plot_aggregate_panel(ax_left, result)
+    _plot_profile_panel(ax_right, result)
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)

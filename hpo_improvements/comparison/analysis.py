@@ -78,6 +78,13 @@ class ComparisonResult:
     studied_final: np.ndarray
     baseline_final: np.ndarray
 
+    # Full per-pair normalized-fitness tensors over the shared x-grid, each of
+    # shape (n_seeds, n_envs, n_frames). These feed the side-by-side aggregate
+    # (IQM over all pairs per frame) and performance-profile overlay of studied
+    # vs baseline. Empty when the pairs share no common per-agent range.
+    studied_scores: np.ndarray
+    baseline_scores: np.ndarray
+
     # Probability of improvement P(studied > baseline) and its CI.
     prob_improvement: float
     prob_ci_low: float
@@ -252,6 +259,8 @@ def compare_benchmarks(
         # Final value at the largest shared per-agent step (identical budget).
         studied_final = studied_t[..., -1]
         baseline_final = baseline_t[..., -1]
+        studied_scores = studied_t
+        baseline_scores = baseline_t
         diff_iqm, diff_lo, diff_hi = _iqm_with_ci(studied_t - baseline_t, reps)
     else:
         # No globally shared range: evaluate the finals at each pair's own last
@@ -270,6 +279,7 @@ def compare_benchmarks(
                 xs, ys, xb, yb, _, hi = pair_curves[(env, s)]
                 studied_final[i, j] = float(np.interp(hi, xs, ys))
                 baseline_final[i, j] = float(np.interp(hi, xb, yb))
+        studied_scores = baseline_scores = np.empty((n_seeds, n_tasks, 0))
         diff_iqm = diff_lo = diff_hi = np.array([])
 
     prob, prob_lo, prob_hi = _probability_of_improvement(
@@ -285,6 +295,8 @@ def compare_benchmarks(
         n_pairs=n_seeds * n_tasks,
         studied_final=studied_final,
         baseline_final=baseline_final,
+        studied_scores=studied_scores,
+        baseline_scores=baseline_scores,
         prob_improvement=prob,
         prob_ci_low=prob_lo,
         prob_ci_high=prob_hi,

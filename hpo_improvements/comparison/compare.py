@@ -11,6 +11,9 @@ benchmark, restricts attention to the ``(environment, seed)`` pairs they share
   difference) the probability is computed from.
 * ``iqm_difference.csv`` — the IQM of the per-pair difference and its CI per x.
 * ``iqm_difference.png`` / ``probability_of_improvement.png`` — the two figures.
+* ``aggregate_and_profile.png`` — a side-by-side figure overlaying the studied
+  and baseline aggregate normalized-fitness curves (left) and their performance
+  profiles (right), each with a ``Studied``/``Baseline`` legend.
 
 Run from this folder::
 
@@ -143,6 +146,9 @@ def save_results(result: ComparisonResult, out_dir: Path) -> None:
     plotting.plot_iqm_difference(result, str(out_dir / "iqm_difference.png"))
     plotting.plot_probability_of_improvement(
         result, str(out_dir / "probability_of_improvement.png")
+    )
+    plotting.plot_aggregate_and_profile(
+        result, str(out_dir / "aggregate_and_profile.png")
     )
 
 
