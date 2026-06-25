@@ -21,7 +21,13 @@ _DEFAULT_ACCESS_SKEW_SECONDS = 60
 
 
 def oauth_access_token_expires_at(access_token: str | None) -> float | None:
-    """Return JWT ``exp`` claim as Unix timestamp, or ``None`` if not a decodable JWT."""
+    """Return JWT ``exp`` claim as Unix timestamp, or ``None`` if not a decodable JWT.
+
+    :param access_token: The access token to decode.
+    :type access_token: str | None
+    :returns: The Unix timestamp of the JWT ``exp`` claim, or ``None`` if not a decodable JWT.
+    :rtype: float | None
+    """
     if not access_token or "." not in access_token:
         return None
     try:
@@ -48,7 +54,15 @@ def is_oauth_access_token_valid(
     *,
     skew_seconds: int = _DEFAULT_ACCESS_SKEW_SECONDS,
 ) -> bool:
-    """True if *access_token* is a JWT and ``exp`` is after now (plus *skew_seconds*)."""
+    """True if *access_token* is a JWT and ``exp`` is after now (plus *skew_seconds*).
+
+    :param access_token: The access token to check.
+    :type access_token: str | None
+    :param skew_seconds: The number of seconds to add to the current time to allow for clock skew.
+    :type skew_seconds: int
+    :returns: True if the access token is valid, False otherwise.
+    :rtype: bool
+    """
     exp = oauth_access_token_expires_at(access_token)
     if exp is None:
         return False
@@ -62,6 +76,11 @@ def load_credentials_payload(
 
     Used when merging OAuth tokens with other persisted keys.
     Deployment bindings live in ``~/.arena/inference.json``.
+
+    :param credentials_path: The path to the credentials file.
+    :type credentials_path: Path | os.PathLike[str] | None
+    :returns: The raw JSON object from the credentials file.
+    :rtype: dict[str, Any]
     """
     path = (
         Path(os.fspath(credentials_path)).expanduser().resolve()
@@ -84,7 +103,6 @@ def load_credentials(
 
     :param credentials_path: The path to the credentials file.
     :type credentials_path: Path | os.PathLike[str]
-
     :returns: Token dictionary, or ``None`` if absent or malformed.
     :rtype: dict[str, Any] | None
     """
@@ -109,10 +127,7 @@ class ArenaOAuth2:
     CREDENTIALS_DIR = Path.home() / ".arena"
     CREDENTIALS_FILE = CREDENTIALS_DIR / "credentials.json"
 
-    # TODO: Remove this once we have a production URL
-    # KEYCLOAK_URL = "https://auth.arena.agilerl.com"
-    # KEYCLOAK_URL = "https://arena-dev-auth.agilerl.rlops.ai/"
-    KEYCLOAK_URL = "http://localhost:8023"
+    KEYCLOAK_URL = "https://auth.arena.agilerl.com"
     REALM = "arena"
     CLIENT_ID = "arena-cli"
 

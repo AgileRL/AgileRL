@@ -60,11 +60,6 @@ ManifestParamSpec = TypedDict(
     },
     total=False,
 )
-"""One on-prem command parameter as described by the server manifest.
-
-The server is the source of truth for these specs, so every field is optional
-here; the CLI validates required keys at runtime.
-"""
 
 
 class ManifestInvoke(TypedDict, total=False):
@@ -126,10 +121,7 @@ class ArenaClient:
     :rtype: None
     """
 
-    # TODO: Remove this once we have a production URL
-    # BASE_URL: ClassVar[str] = "https://arena.agilerl.com"
-    # BASE_URL: ClassVar[str] = "https://arena-dev.agilerl.rlops.ai"
-    BASE_URL: ClassVar[str] = "http://localhost:3001"
+    BASE_URL: ClassVar[str] = "https://arena.agilerl.com"
     CONFIG_DIR: ClassVar[Path] = Path.home() / ".arena"
     CONFIG_FILE: ClassVar[Path] = CONFIG_DIR / "config.json"
 
@@ -955,7 +947,6 @@ class ArenaClient:
             json={"experiment_name": experiment_name, "max_steps": max_steps},
         )
 
-    # TODO: Check this works
     def list_checkpoints(self, experiment_name: str) -> list[dict[str, Any]]:
         """List all checkpoints for an experiment.
 
@@ -970,7 +961,6 @@ class ArenaClient:
             params={"experiment_name": experiment_name},
         )
 
-    # TODO: Check this works
     def preview_experiment_metrics_csv(
         self,
         experiment_name: str,
