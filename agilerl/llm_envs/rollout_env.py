@@ -68,7 +68,6 @@ class RolloutEnv:
         apply_chat_template: bool = True,
         max_model_len: int | None = None,
         max_output_tokens: int | None = None,
-        tools: list[dict[str, Any]] | None = None,
     ) -> None:
         """Drive the OpenEnv endpoint at ``url`` at the token level.
 
@@ -107,11 +106,6 @@ class RolloutEnv:
         :param max_output_tokens: Generation budget reserved under
             ``max_model_len`` when checking for overflow, defaults to ``None``.
         :type max_output_tokens: int | None
-        :param tools: Optional OpenAI/JSON tool schemas forwarded to the chat
-            template (``tools=``) so the policy can emit tool calls. ``None``
-            (default) falls back to whatever the env advertises over the API; no
-            tools means no ``tools=`` kwarg is passed.
-        :type tools: list[dict] | None
         :ivar full_ids: The episode's running token sequence (prompt + each
             generation + each feedback turn), or ``None`` before ``reset``.
         :vartype full_ids: torch.Tensor | None
@@ -143,13 +137,9 @@ class RolloutEnv:
         self.tokenizer = tokenizer
         self.pad_id = pad_id
         self.apply_chat_template = apply_chat_template
-        # Tools default to whatever the env advertises over the OpenEnv API (its
-        # ``/info`` tool schemas); an empty list means no ``tools=`` is passed.
-        self.tools = (
-            tools
-            if tools is not None
-            else (getattr(self._backend, "tools", None) or None)
-        )
+        # Tool schemas come from whatever the env advertises over the OpenEnv API
+        # (its ``/state`` tools); an empty list means no ``tools=`` is passed.
+        self.tools = self._backend.tools or None
         self._max_model_len = max_model_len
         self._max_output_tokens = max_output_tokens
         self.full_ids: torch.Tensor | None = None
