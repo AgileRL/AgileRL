@@ -14,6 +14,7 @@ import pytest
 import torch
 
 from agilerl.llm_envs import (
+    AsyncOpenEnvClient,
     BatchRolloutEnv,
     OpenEnvClient,
     OpenEnvServer,
@@ -112,6 +113,29 @@ def test_base_url_required() -> None:
     """The client needs a non-empty base URL."""
     with pytest.raises(ValueError, match="base_url"):
         OpenEnvClient("")
+
+
+def test_async_client_drives_server_over_httpx() -> None:
+    """``AsyncOpenEnvClient`` drives the same server async (same wire, coroutines)."""
+    import asyncio
+
+    server = OpenEnvServer(_CountingEnv(target=1)).start()
+
+    async def _drive() -> tuple[str, tuple, dict]:
+        client = AsyncOpenEnvClient(server.base_url)
+        prompt, _ = await client.reset()
+        step = await client.step("go")
+        state = await client.state()
+        await client.aclose()
+        return prompt, step, state
+
+    try:
+        prompt, step, state = asyncio.run(_drive())
+    finally:
+        server.stop()
+    assert prompt == "Start.\nReply 'go'."
+    assert step[:3] == ("turn 1", 1.0, True)
+    assert state.get("dataset_size") == 0
 
 
 # --- gym-tuple normalisation -----------------------------------------------

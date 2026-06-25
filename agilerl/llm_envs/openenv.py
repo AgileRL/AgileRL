@@ -429,6 +429,112 @@ class OpenEnvClient:
         return body
 
 
+class AsyncOpenEnvClient:
+    """Asynchronous httpx client for an OpenEnv env server — the async sibling.
+
+    Same wire and text contract as :class:`OpenEnvClient` (including ``mcp_tool=``), but
+    ``reset`` / ``step`` / ``state`` are coroutines and the connection pool is released
+    with ``aclose``. Use this in the *disaggregated* rollout path — e.g. a Ray actor
+    proxying an env, or any caller already inside an event loop that wants to overlap
+    many concurrent env round-trips. The synchronous in-process training loop uses
+    :class:`OpenEnvClient`, which needs no event loop.
+
+    :param base_url: Root URL of the env server.
+    :param headers: Optional HTTP headers (e.g. auth) sent on every request.
+    :param timeout_s: Per-request timeout in seconds (``None`` = unbounded).
+    :param mcp_tool: When set, send the model's text as an MCP ``call_tool`` to this
+        tool (for external MCP servers); when ``None``, send ``{"message": text}``.
+    :param arg: MCP argument name carrying the text (default ``"message"``).
+    :param instruction: Prompt returned from reset when the env's reset obs is empty.
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        timeout_s: float | None = None,
+        mcp_tool: str | None = None,
+        arg: str = "message",
+        instruction: str = "",
+    ) -> None:
+        """Build an async client for the OpenEnv server at ``base_url``."""
+        if not base_url:
+            msg = "AsyncOpenEnvClient requires a base_url"
+            raise ValueError(msg)
+        self._http = httpx.AsyncClient(
+            base_url=base_url.rstrip("/"), headers=headers or {}, timeout=timeout_s
+        )
+        self._mcp_tool = mcp_tool
+        self._arg = arg
+        self._instruction = instruction
+        self.evaluation_mode = False
+
+    async def reset(
+        self,
+        seed: int | None = None,
+        *,
+        row_index: int | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        """Reset the env and return ``(prompt, info)``."""
+        payload: dict[str, Any] = {}
+        if seed is not None and int(seed) >= 0:
+            payload["seed"] = int(seed)
+        if row_index is not None:
+            payload["row_index"] = int(row_index)
+        if self.evaluation_mode:
+            payload["evaluation"] = True
+        data = await self._post("/reset", payload)
+        return (_observation_text(data.get("observation")) or self._instruction), {}
+
+    async def step(self, action: Any) -> tuple[str, float, bool, bool, dict[str, Any]]:
+        """Forward one action (model text) to the env and return the Gym 5-tuple."""
+        text = action if isinstance(action, str) else str(action)
+        if self._mcp_tool:
+            act: dict[str, Any] = {
+                "type": "call_tool",
+                "tool_name": self._mcp_tool,
+                "arguments": {self._arg: text},
+            }
+        else:
+            act = {"message": text}
+        data = await self._post("/step", {"action": act})
+        reward = data.get("reward")
+        return (
+            _observation_text(data.get("observation")),
+            float(reward) if reward is not None else 0.0,
+            bool(data.get("done", False)),
+            False,
+            {},
+        )
+
+    async def state(self) -> dict[str, Any]:
+        """Fetch the env's ``/state`` (carries ``dataset_size`` / ``tools``)."""
+        with contextlib.suppress(Exception):
+            response = await self._http.get("/state")
+            response.raise_for_status()
+            body = response.json()
+            if isinstance(body, dict):
+                return body
+        return {}
+
+    async def aclose(self) -> None:
+        """Best-effort ``/close``, then release the async connection pool."""
+        with contextlib.suppress(Exception):
+            await self._post("/close", {})
+        await self._http.aclose()
+
+    async def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """POST JSON to the server and decode the object response."""
+        response = await self._http.post(path, json=payload)
+        response.raise_for_status()
+        body = response.json()
+        if not isinstance(body, dict):
+            msg = f"OpenEnv {path} returned a non-object payload: {type(body)!r}"
+            raise TypeError(msg)
+        return body
+
+
 def _observation_text(obs: Any) -> str:
     """Render an OpenEnv observation to prompt text.
 

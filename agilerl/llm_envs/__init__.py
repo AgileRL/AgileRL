@@ -6,6 +6,7 @@ from agilerl.llm_envs.base import (
 )
 from agilerl.llm_envs.dataset_env import DatasetEnv
 from agilerl.llm_envs.openenv import (
+    AsyncOpenEnvClient,
     OpenEnvClient,
     OpenEnvServer,
     OpenEnvWrapper,
@@ -19,6 +20,7 @@ from agilerl.llm_envs.rollout_env import (
 )
 
 __all__ = [
+    "AsyncOpenEnvClient",
     "BatchRolloutEnv",
     "DatasetEnv",
     "LLMEnv",
