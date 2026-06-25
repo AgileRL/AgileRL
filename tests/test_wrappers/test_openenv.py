@@ -76,7 +76,8 @@ def test_server_and_client_round_trip_over_http() -> None:
         client = OpenEnvClient(base_url=server.base_url)
         prompt, info = client.reset()
         # The env's info['suffix'] is folded into the prompt (OpenEnv drops obs metadata).
-        assert prompt == "Start.\nReply 'go'." and info == {}
+        assert prompt == "Start.\nReply 'go'."
+        assert info == {}
         obs1, r1, term1, trunc1, _ = client.step("go now")
         obs2, r2, term2, _, _ = client.step("stop")
         assert (obs1, r1, term1, trunc1) == ("turn 1", 1.0, False, False)
@@ -120,7 +121,8 @@ def test_local_transport_matches_http() -> None:
     client = OpenEnvClient(transport=local_transport(_CountingEnv(target=1)))
     prompt, _ = client.reset()
     obs, reward, terminated, _, _ = client.step("go")
-    assert prompt == "Start.\nReply 'go'." and (obs, reward, terminated) == (
+    assert prompt == "Start.\nReply 'go'."
+    assert (obs, reward, terminated) == (
         "turn 1",
         1.0,
         True,
@@ -242,8 +244,9 @@ def test_from_dataset_full_step_loop_scores_and_terminates() -> None:
     _, reward, terminated, _, _ = env.step(
         torch.tensor([[1, 2, 3, 7, 7]], dtype=torch.long)
     )
-    assert reward == 1.0 and terminated is True  # decode() -> "go"
-    full_ids, action_mask, turn_ids, turn_rewards, _ = env.get_episode_data()
+    assert reward == 1.0  # decode() -> "go"
+    assert terminated is True
+    _full_ids, _action_mask, _turn_ids, turn_rewards, _ = env.get_episode_data()
     assert turn_rewards.tolist() == [1.0]
 
 
@@ -316,7 +319,8 @@ def test_rollout_env_drives_url_and_applies_suffix() -> None:
 # --- resolve_env -----------------------------------------------------------
 def test_resolve_env_url_is_used_raw() -> None:
     url, server = resolve_env("https://example.invalid/openenv")
-    assert url == "https://example.invalid/openenv" and server is None
+    assert url == "https://example.invalid/openenv"
+    assert server is None
 
 
 def test_resolve_env_entrypoint_hosts_locally() -> None:

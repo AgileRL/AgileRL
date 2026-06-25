@@ -12,7 +12,7 @@ pytestmark = pytest.mark.gpu
 
 class TestEvolvableLSTMInit:
     @pytest.mark.parametrize(
-        "input_size, hidden_size, num_outputs, num_layers",
+        ("input_size", "hidden_size", "num_outputs", "num_layers"),
         [(10, 64, 5, 1), (2, 32, 1, 2), (100, 128, 3, 3)],
     )
     def test_instantiation(
@@ -28,7 +28,7 @@ class TestEvolvableLSTMInit:
         assert isinstance(evolvable_lstm, EvolvableLSTM)
 
     @pytest.mark.parametrize(
-        "input_size, hidden_size, num_outputs, num_layers",
+        ("input_size", "hidden_size", "num_outputs", "num_layers"),
         [(0, 64, 5, 1), (10, 0, 5, 1), (10, 64, 0, 1), (10, 64, 5, 0)],
     )
     def test_incorrect_instantiation(
@@ -142,7 +142,7 @@ class TestEvolvableLSTMForward:
         c0 = torch.zeros(1, 1, 32, device=device)
         x = torch.randn(10, device=device)  # 1D input is invalid
 
-        with pytest.raises(ValueError, match="Expected 2D .* or 3D .* input"):
+        with pytest.raises(ValueError, match=r"Expected 2D .* or 3D .* input"):
             lstm.forward(
                 x,
                 hidden_state={f"{lstm.name}_h": h0, f"{lstm.name}_c": c0},
@@ -185,7 +185,7 @@ class TestEvolvableLSTMForward:
 
 class TestEvolvableLSTMAddLayer:
     @pytest.mark.parametrize(
-        "input_size, hidden_size, num_outputs, num_layers",
+        ("input_size", "hidden_size", "num_outputs", "num_layers"),
         [(10, 64, 5, 1), (2, 32, 1, 2), (100, 128, 3, 1)],
     )
     def test_add_layer(self, input_size, hidden_size, num_outputs, num_layers, device):
@@ -241,7 +241,7 @@ class TestEvolvableLSTMAddLayer:
 
 class TestEvolvableLSTMRemoveLayer:
     @pytest.mark.parametrize(
-        "input_size, hidden_size, num_outputs, num_layers",
+        ("input_size", "hidden_size", "num_outputs", "num_layers"),
         [(10, 64, 5, 2), (2, 32, 1, 3), (100, 128, 3, 2)],
     )
     def test_remove_layer(
@@ -299,7 +299,7 @@ class TestEvolvableLSTMRemoveLayer:
 
 class TestEvolvableLSTMAddNode:
     @pytest.mark.parametrize(
-        "input_size, hidden_size, num_outputs, num_layers, numb_new_nodes",
+        ("input_size", "hidden_size", "num_outputs", "num_layers", "numb_new_nodes"),
         [
             (10, 64, 5, 1, 32),
             (2, 32, 1, 2, None),
@@ -344,7 +344,7 @@ class TestEvolvableLSTMAddNode:
 
 class TestEvolvableLSTMRemoveNode:
     @pytest.mark.parametrize(
-        "input_size, hidden_size, num_outputs, num_layers, numb_new_nodes",
+        ("input_size", "hidden_size", "num_outputs", "num_layers", "numb_new_nodes"),
         [
             (10, 256, 5, 1, 32),
             (2, 128, 1, 2, None),
@@ -421,7 +421,7 @@ class TestEvolvableLSTMChangeActivation:
 
 class TestEvolvableLSTMClone:
     @pytest.mark.parametrize(
-        "input_size, hidden_size, num_outputs, num_layers",
+        ("input_size", "hidden_size", "num_outputs", "num_layers"),
         [(10, 64, 5, 1), (2, 32, 1, 2), (100, 128, 3, 3)],
     )
     def test_clone_instance(

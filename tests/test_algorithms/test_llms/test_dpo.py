@@ -2,13 +2,15 @@ import copy
 import gc
 import tempfile
 from unittest import mock
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import numpy as np
 import pytest
 import torch
 
 pytest.importorskip("deepspeed", reason="LLM tests require deepspeed.")
+import contextlib
+
 from accelerate import Accelerator
 from accelerate.state import AcceleratorState
 from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
@@ -20,7 +22,6 @@ from transformers import AutoTokenizer
 
 from agilerl.algorithms.core.base import (
     EvolvableAlgorithm,
-    LLMAlgorithm,
     OptimizerWrapper,
 )
 from agilerl.algorithms.dpo import DPO
@@ -119,7 +120,7 @@ def generate_dpo(
         task_type="CAUSAL_LM",
         lora_dropout=0.05,
     )
-    dpo = DPO(
+    return DPO(
         actor_network=actor if not from_name else None,
         model_name=pretrained_model_name_or_path if from_name else None,
         pad_token_id=vocab_size - 1,
@@ -131,10 +132,9 @@ def generate_dpo(
         micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         use_liger_loss=use_liger_loss,
     )
-    return dpo
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def dpo_factory():
     return generate_dpo
 
@@ -307,7 +307,7 @@ class TestDPOInit:
     ):
         with pytest.raises(
             ValueError,
-            match="At least one of model_name or actor_network must be provided.",
+            match=r"At least one of model_name or actor_network must be provided\.",
         ):
             DPO(
                 actor_network=None,
@@ -333,7 +333,7 @@ class TestDPOGetAction:
 
 class TestDPOLearn:
     @pytest.mark.parametrize(
-        "config, use_deepspeed_optimizer",
+        ("config", "use_deepspeed_optimizer"),
         [
             (deepspeed_config_stage_2, True),
             (deepspeed_config_stage_2, False),
@@ -450,7 +450,7 @@ class TestDPOLearn:
 
 class TestDPOTest:
     @pytest.mark.parametrize(
-        "config, use_deepspeed_optimizer",
+        ("config", "use_deepspeed_optimizer"),
         [
             (deepspeed_config_stage_2, True),
             (deepspeed_config_stage_2, False),
@@ -608,7 +608,7 @@ class TestDPOLoad:
 
 class TestDPOCleanUp:
     @pytest.mark.parametrize(
-        "config, use_deepspeed_optimizer",
+        ("config", "use_deepspeed_optimizer"),
         [(None, False)],
     )
     @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
@@ -655,7 +655,7 @@ class TestDPOCleanUp:
 
 class TestDPOSaveLoadCheckpoint:
     @pytest.mark.parametrize(
-        "config, use_deepspeed_optimizer",
+        ("config", "use_deepspeed_optimizer"),
         [(None, False)],
     )
     @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
@@ -768,7 +768,7 @@ class TestDPOSaveLoadCheckpoint:
 
 class TestDPORecompile:
     @pytest.mark.parametrize(
-        "config, use_deepspeed_optimizer",
+        ("config", "use_deepspeed_optimizer"),
         [(None, False)],
     )
     @pytest.mark.parametrize("use_separate_reference_adapter", [False])
@@ -927,7 +927,6 @@ class TestDPOLearnMpsCacheClear:
     """
 
     def test_mps_empty_cache_called_when_mps_available(self):
-        from unittest.mock import patch
 
         dpo = _make_cpu_dpo_for_branch_tests()
         # Build a minimal experiences dict that will reach the cache-clear lines
@@ -946,10 +945,8 @@ class TestDPOLearnMpsCacheClear:
             ):
                 # ``learn`` will eventually fail downstream (no real model
                 # forward set up here), but the cache-clear at L212 fires first.
-                try:
+                with contextlib.suppress(Exception):
                     dpo.learn(experiences)
-                except Exception:
-                    pass
                 mock_empty_cache.assert_called()
         finally:
             dpo.clean_up()

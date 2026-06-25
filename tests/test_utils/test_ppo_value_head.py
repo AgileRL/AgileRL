@@ -52,12 +52,11 @@ class DummyPretrainedModel(PreTrainedModel):
         self._saved_kwargs = None
         self._forward_kwargs = None
 
-    def save_pretrained(self, *args, **kwargs):  # noqa: ANN001
+    def save_pretrained(self, *args, **kwargs):
         self._saved_args = args
         self._saved_kwargs = kwargs
-        return None
 
-    def prepare_inputs_for_generation(self, *args, **kwargs):  # noqa: ANN001
+    def prepare_inputs_for_generation(self, *args, **kwargs):
         return {}
 
     def forward(
@@ -92,7 +91,7 @@ class DummyPretrainedModel(PreTrainedModel):
             past_key_values=past_key_values,
         )
 
-    def generate(self, *args, **kwargs):  # noqa: ANN001
+    def generate(self, *args, **kwargs):
         input_ids = kwargs.get("input_ids")
         if input_ids is None:
             msg = "input_ids must be provided"

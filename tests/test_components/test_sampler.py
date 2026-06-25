@@ -4,13 +4,13 @@ from accelerate import Accelerator
 from tensordict import TensorDict
 from torch.utils.data import DataLoader
 
+import agilerl.components.sampler as sampler_module
 from agilerl.components.data import ReplayDataset
 from agilerl.components.replay_buffer import (
     MultiStepReplayBuffer,
     PrioritizedReplayBuffer,
     ReplayBuffer,
 )
-import agilerl.components.sampler as sampler_module
 
 Sampler = sampler_module.Sampler
 
@@ -31,12 +31,10 @@ class TestSamplerInit:
         assert sampler.dataloader is None
 
     @pytest.mark.parametrize(
-        "memory, dataset, dataloader",
+        ("memory", "dataset", "dataloader"),
         [
             (0, None, None),
             (None, 0, 0),
-            (0, None, None),
-            (0, None, None),
         ],
     )
     def test_warnings_in_constructor(self, memory, dataset, dataloader):

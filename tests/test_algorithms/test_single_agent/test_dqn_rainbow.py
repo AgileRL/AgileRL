@@ -18,6 +18,10 @@ from tests.helper_functions import (
     get_experiences_batch,
     get_sample_from_space,
 )
+from tests.helpers.algorithm_coverage import (
+    assert_swap_channels_called,
+    patch_obs_channels_to_first,
+)
 
 
 class DummyRainbowDQN(RainbowDQN):
@@ -32,7 +36,7 @@ class DummyEnv:
         self.state_size = state_size
         self.vect = vect
         if self.vect:
-            self.state_size = (num_envs,) + self.state_size
+            self.state_size = (num_envs, *self.state_size)
             self.n_envs = num_envs
             self.num_envs = num_envs
         else:
@@ -54,7 +58,7 @@ class DummyEnv:
 class TestRainbowDQNInit:
     # initialize DQN with valid parameters
     @pytest.mark.parametrize(
-        "observation_space, encoder_cls",
+        ("observation_space", "encoder_cls"),
         [
             ("vector_space", EvolvableMLP),
             ("image_space", EvolvableCNN),
@@ -98,7 +102,7 @@ class TestRainbowDQNInit:
         dqn.clean_up()
 
     @pytest.mark.parametrize(
-        "observation_space, encoder_cls",
+        ("observation_space", "encoder_cls"),
         [
             ("vector_space", EvolvableMLP),
         ],
@@ -162,18 +166,17 @@ class TestRainbowDQNInit:
     ):
         actor_network = "dummy"
 
-        with pytest.raises(TypeError) as a:
-            dqn = RainbowDQN(vector_space, discrete_space, actor_network=actor_network)
-            assert dqn
-            assert (
-                str(a.value)
-                == f"'actor_network' argument is of type {type(actor_network)}, but must be of type nn.Module."
-            )
+        with pytest.raises(TypeError) as exc_info:
+            RainbowDQN(vector_space, discrete_space, actor_network=actor_network)
+        assert (
+            str(exc_info.value)
+            == f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule."
+        )
 
     # Can initialize DQN with an actor network
     # TODO: This will be deprecated in the future
     @pytest.mark.parametrize(
-        "observation_space, actor_network, input_tensor",
+        ("observation_space", "actor_network", "input_tensor"),
         [
             ("vector_space", "simple_mlp", torch.randn(1, 4)),
             (
@@ -244,7 +247,8 @@ class TestRainbowDQNGetAction:
         action = dqn.get_action(state, action_mask)[0]
 
         assert action.is_integer()
-        assert action >= 0 and action < discrete_space.n
+        assert action >= 0
+        assert action < discrete_space.n
 
         action_mask = np.array([0, 1])
 
@@ -576,6 +580,46 @@ class TestRainbowDQNLearn:
         dqn.clean_up()
 
 
+class TestRainbowDQNLearnErrors:
+    def test_per_learn_raises_when_elementwise_loss_missing(
+        self, vector_space, discrete_space, monkeypatch
+    ):
+        dqn = RainbowDQN(vector_space, discrete_space, combined_reward=False)
+        batch_size = 4
+        experiences = TensorDict(
+            {
+                "obs": torch.randn(batch_size, vector_space.shape[0]),
+                "action": torch.randint(0, discrete_space.n, (batch_size, 1)),
+                "reward": torch.randn(batch_size, 1),
+                "next_obs": torch.randn(batch_size, vector_space.shape[0]),
+                "done": torch.randint(0, 2, (batch_size, 1)),
+                "weights": torch.rand(batch_size),
+                "idxs": torch.arange(batch_size),
+            },
+            batch_size=[batch_size],
+        )
+        monkeypatch.setattr(dqn, "_dqn_loss", lambda *args, **kwargs: None)
+        with pytest.raises(
+            RuntimeError,
+            match="Elementwise loss was not computed for prioritized replay",
+        ):
+            dqn.learn(experiences, per=True)
+        dqn.clean_up()
+
+    def test_non_per_learn_raises_when_elementwise_loss_missing(
+        self, vector_space, discrete_space, monkeypatch
+    ):
+        dqn = RainbowDQN(vector_space, discrete_space, combined_reward=False)
+        batch_size = 4
+        experiences = get_experiences_batch(
+            vector_space, discrete_space, batch_size, dqn.device
+        )
+        monkeypatch.setattr(dqn, "_dqn_loss", lambda *args, **kwargs: None)
+        with pytest.raises(RuntimeError, match="Elementwise loss was not computed"):
+            dqn.learn(experiences, per=False)
+        dqn.clean_up()
+
+
 class TestRainbowDQNSoftUpdate:
     # Updates target network parameters with soft update
     def test_soft_update(self, vector_space, discrete_space):
@@ -644,6 +688,20 @@ class TestRainbowDQNTest:
         )
         mean_score = agent.test(env, max_steps=10)
         assert isinstance(mean_score, float)
+        agent.clean_up()
+
+    def test_swap_channels_path(
+        self, image_space, discrete_space, monkeypatch, request
+    ):
+        observation_space = request.getfixturevalue("image_space")
+        env = DummyEnv(state_size=observation_space.shape, vect=False, num_envs=1)
+        spy = patch_obs_channels_to_first(monkeypatch, "agilerl.algorithms.dqn_rainbow")
+        agent = RainbowDQN(
+            observation_space=observation_space, action_space=discrete_space
+        )
+        mean_score = agent.test(env, swap_channels=True, max_steps=1, loop=1)
+        assert isinstance(mean_score, float)
+        assert_swap_channels_called(spy)
         agent.clean_up()
 
 

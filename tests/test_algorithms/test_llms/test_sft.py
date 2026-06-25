@@ -114,7 +114,7 @@ def generate_sft(
         task_type="CAUSAL_LM",
         lora_dropout=0.05,
     )
-    sft = SFT(
+    return SFT(
         actor_network=actor if not from_name else None,
         model_name=pretrained_model_name_or_path if from_name else None,
         pad_token_id=vocab_size - 1,
@@ -126,17 +126,16 @@ def generate_sft(
         use_liger_loss=use_liger_loss,
         update_epochs=update_epochs,
     )
-    return sft
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def sft_factory():
     return generate_sft
 
 
 class TestSFTInit:
     @pytest.mark.parametrize(
-        "config, use_deepspeed_optimizer",
+        ("config", "use_deepspeed_optimizer"),
         [
             (None, False),
             (deepspeed_config_stage_1, True),
@@ -228,7 +227,7 @@ class TestSFTInit:
     ):
         with pytest.raises(
             ValueError,
-            match="At least one of model_name or actor_network must be provided.",
+            match=r"At least one of model_name or actor_network must be provided\.",
         ):
             SFT(
                 actor_network=None,
@@ -245,7 +244,7 @@ class TestSFTInit:
 
 class TestSFTGetAction:
     @pytest.mark.parametrize(
-        "config, use_deepspeed_optimizer",
+        ("config", "use_deepspeed_optimizer"),
         [
             (None, False),
             (deepspeed_config_stage_2, True),
@@ -298,7 +297,7 @@ class TestSFTGetAction:
 
 class TestSFTLearn:
     @pytest.mark.parametrize(
-        "config, use_deepspeed_optimizer",
+        ("config", "use_deepspeed_optimizer"),
         [
             (deepspeed_config_stage_2, True),
             (deepspeed_config_stage_2, False),
@@ -438,7 +437,7 @@ class TestSFTLearn:
 
 class TestSFTTest:
     @pytest.mark.parametrize(
-        "config, use_deepspeed_optimizer",
+        ("config", "use_deepspeed_optimizer"),
         [
             (deepspeed_config_stage_2, True),
             (deepspeed_config_stage_2, False),
@@ -578,7 +577,7 @@ class TestSFTLoad:
 
 class TestSFTCleanUp:
     @pytest.mark.parametrize(
-        "config, use_deepspeed_optimizer",
+        ("config", "use_deepspeed_optimizer"),
         [(None, False)],
     )
     @pytest.mark.parametrize("vocab_size", [100])
@@ -622,7 +621,7 @@ class TestSFTCleanUp:
 
 class TestSFTSaveLoadCheckpoint:
     @pytest.mark.parametrize(
-        "config, use_deepspeed_optimizer",
+        ("config", "use_deepspeed_optimizer"),
         [(None, False)],
     )
     @pytest.mark.parametrize("vocab_size", [100])
@@ -729,7 +728,7 @@ class TestSFTSaveLoadCheckpoint:
 
 class TestSFTRecompile:
     @pytest.mark.parametrize(
-        "config, use_deepspeed_optimizer",
+        ("config", "use_deepspeed_optimizer"),
         [(None, False)],
     )
     @pytest.mark.parametrize("vocab_size", [100])
@@ -798,7 +797,7 @@ class TestSFTNoLLMDependencies:
 
 class TestSFTGetLogprobs:
     @pytest.mark.parametrize(
-        "config, use_deepspeed_optimizer",
+        ("config", "use_deepspeed_optimizer"),
         [(None, False)],
     )
     @pytest.mark.parametrize("vocab_size", [100])
@@ -847,7 +846,7 @@ class TestSFTGetLogprobs:
 
 class TestSFTBackwardPass:
     @pytest.mark.parametrize(
-        "config, use_deepspeed_optimizer",
+        ("config", "use_deepspeed_optimizer"),
         [(None, False)],
     )
     @pytest.mark.parametrize("vocab_size", [100])
@@ -896,7 +895,7 @@ class TestSFTBackwardPass:
 
 class TestSFTPreprocessObservation:
     @pytest.mark.parametrize(
-        "config, use_deepspeed_optimizer",
+        ("config", "use_deepspeed_optimizer"),
         [(None, False)],
     )
     @pytest.mark.parametrize("vocab_size", [100])

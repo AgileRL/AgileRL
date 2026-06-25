@@ -5486,8 +5486,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             return
 
         ds_plugin = getattr(self.accelerator.state, "deepspeed_plugin", None)
-        if ds_plugin is None:
-            return
 
         ds_config = ds_plugin.deepspeed_config
         if "gradient_clipping" not in ds_config:

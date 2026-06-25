@@ -12,7 +12,7 @@ pytestmark = pytest.mark.gpu
 
 class TestEvolvableCNNInit:
     @pytest.mark.parametrize(
-        "input_shape, channel_size, kernel_size, stride_size, num_outputs",
+        ("input_shape", "channel_size", "kernel_size", "stride_size", "num_outputs"),
         [
             ([1, 16, 16], [32], [3], [1], 10),
             ([1, 16, 16], [32], [(3, 3)], [(1, 1)], 10),
@@ -42,7 +42,14 @@ class TestEvolvableCNNInit:
         assert isinstance(evolvable_cnn, EvolvableCNN)
 
     @pytest.mark.parametrize(
-        "input_shape, channel_size, kernel_size, stride_size, num_outputs, explicit_block_type",
+        (
+            "input_shape",
+            "channel_size",
+            "kernel_size",
+            "stride_size",
+            "num_outputs",
+            "explicit_block_type",
+        ),
         [
             (
                 [1, 16, 16],
@@ -113,7 +120,15 @@ class TestEvolvableCNNInit:
             )
 
     @pytest.mark.parametrize(
-        "input_shape, channel_size, kernel_size, stride_size, num_outputs, block_type, error_match",
+        (
+            "input_shape",
+            "channel_size",
+            "kernel_size",
+            "stride_size",
+            "num_outputs",
+            "block_type",
+            "error_match",
+        ),
         [
             (
                 [1, 16, 16],
@@ -168,7 +183,7 @@ class TestEvolvableCNNInit:
             )
 
     @pytest.mark.parametrize(
-        "input_shape, channel_size, kernel_size, stride_size, num_outputs",
+        ("input_shape", "channel_size", "kernel_size", "stride_size", "num_outputs"),
         [([1, 16, 16], [3, 32], [3, 3], [2, 2], 10)],  # input_shape is (C, D, H, W)
     )
     def test_instantiation_for_multi_agents(
@@ -195,7 +210,14 @@ class TestEvolvableCNNInit:
         assert isinstance(evolvable_cnn, EvolvableCNN)
 
     @pytest.mark.parametrize(
-        "input_shape, channel_size, kernel_size, stride_size, sample_input, num_outputs",
+        (
+            "input_shape",
+            "channel_size",
+            "kernel_size",
+            "stride_size",
+            "sample_input",
+            "num_outputs",
+        ),
         [
             ([1, 16, 16], [3, 32], [3, 3], [2, 2], "tensor", 10),
             ([1, 16, 16], [3, 32], [3, 3], [2, 2], None, 10),
@@ -229,7 +251,14 @@ class TestEvolvableCNNInit:
 
 class TestEvolvableCNNForward:
     @pytest.mark.parametrize(
-        "input_shape, channel_size, kernel_size, stride_size, num_outputs, output_shape",
+        (
+            "input_shape",
+            "channel_size",
+            "kernel_size",
+            "stride_size",
+            "num_outputs",
+            "output_shape",
+        ),
         [
             ([1, 16, 16], [32], [3], [1], 10, (1, 10)),
             ([1, 16, 16], [32], [(3, 3)], [(1, 1)], 10, (1, 10)),
@@ -277,8 +306,14 @@ class TestEvolvableCNNForward:
         assert output_array.shape == output_shape
 
     @pytest.mark.parametrize(
-        "input_shape, channel_size, kernel_size, stride_size, \
-            num_outputs, output_shape",
+        (
+            "input_shape",
+            "channel_size",
+            "kernel_size",
+            "stride_size",
+            "num_outputs",
+            "output_shape",
+        ),
         [([1, 16, 16], [3, 32], [3, 3], [2, 2], 10, (1, 10))],  # input_shape (C,H,W)
     )
     def test_forward_multi(
@@ -328,7 +363,7 @@ class TestEvolvableCNNForward:
 
 class TestEvolvableCNNAddLayer:
     @pytest.mark.parametrize(
-        "input_shape, channel_size, kernel_size, stride_size, num_outputs",
+        ("input_shape", "channel_size", "kernel_size", "stride_size", "num_outputs"),
         [
             ([1, 16, 16], [32], [3], [1], 10),
             ([3, 128, 128], [8, 8, 8], [2, 2, 2], [2, 2, 2], 1),
@@ -368,7 +403,7 @@ class TestEvolvableCNNAddLayer:
             assert len(evolvable_cnn.channel_size) == initial_channel_num
 
     @pytest.mark.parametrize(
-        "input_shape, channel_size, kernel_size, stride_size, num_outputs",
+        ("input_shape", "channel_size", "kernel_size", "stride_size", "num_outputs"),
         [
             ([1, 16, 16], [32, 32], [5, 5], [2, 2], 10),  # invalid output size
             (
@@ -447,26 +482,12 @@ class TestEvolvableCNNAddLayer:
         evolvable_cnn.add_layer()
         assert len(evolvable_cnn.channel_size) >= initial_channels
 
-    def test_add_layer_revert_max_s_new_lt_1(self, device):
-        """Covers add_layer revert when max_s_new < 1."""
-        evolvable_cnn = EvolvableCNN(
-            input_shape=[1, 4, 4],
-            channel_size=[32],
-            kernel_size=[4],
-            stride_size=[1],
-            num_outputs=4,
-            max_hidden_layers=3,
-            device=device,
-            random_seed=0,
-        )
-        evolvable_cnn.add_layer()
-        output = evolvable_cnn(torch.ones(1, 1, 4, 4, device=device))
-        assert output.shape[1] == 4
+    # add_layer revert when max_s_new < 1: see test_cnn_cpu.py
 
 
 class TestEvolvableCNNRemoveLayer:
     @pytest.mark.parametrize(
-        "input_shape, channel_size, kernel_size, stride_size, num_outputs",
+        ("input_shape", "channel_size", "kernel_size", "stride_size", "num_outputs"),
         [
             ([3, 84, 84], [8, 8], [2, 2], [2, 2], 10),  # exceeds max-layer limit
             ([1, 128], [16, 16], [3, 3], [2, 2], 10),  # Conv1D case
@@ -523,7 +544,7 @@ class TestEvolvableCNNRemoveLayer:
         assert len(evolvable_cnn.mut_kernel_size) == len(evolvable_cnn.channel_size)
 
     @pytest.mark.parametrize(
-        "input_shape, channel_size, kernel_size, stride_size, num_outputs",
+        ("input_shape", "channel_size", "kernel_size", "stride_size", "num_outputs"),
         [
             ([1, 16, 16], [32], [3], [1], 10),
             ([3, 128, 128], [8, 8, 8], [2, 2, 2], [2, 2, 2], 1),
@@ -568,7 +589,14 @@ class TestEvolvableCNNRemoveLayer:
 
 class TestEvolvableCNNAddChannel:
     @pytest.mark.parametrize(
-        "input_shape, channel_size, kernel_size, stride_size, num_outputs, layer_index",
+        (
+            "input_shape",
+            "channel_size",
+            "kernel_size",
+            "stride_size",
+            "num_outputs",
+            "layer_index",
+        ),
         [
             ([1, 16, 16], [32], [3], [1], 10, 0),
             ([3, 128, 128], [8, 8, 8], [2, 2, 2], [2, 2, 2], 1, None),
@@ -607,7 +635,15 @@ class TestEvolvableCNNAddChannel:
 
 class TestEvolvableCNNRemoveChannel:
     @pytest.mark.parametrize(
-        "input_shape, channel_size, kernel_size, stride_size, num_outputs, layer_index, numb_new_channels",
+        (
+            "input_shape",
+            "channel_size",
+            "kernel_size",
+            "stride_size",
+            "num_outputs",
+            "layer_index",
+            "numb_new_channels",
+        ),
         [
             ([1, 16, 16], [256], [3], [1], 10, None, None),
             ([3, 128, 128], [8, 8, 8], [2, 2, 2], [2, 2, 2], 1, 0, 2),
@@ -817,7 +853,7 @@ class TestEvolvableCNNChangeKernel:
 
 class TestEvolvableCNNClone:
     @pytest.mark.parametrize(
-        "input_shape, channel_size, kernel_size, stride_size, num_outputs",
+        ("input_shape", "channel_size", "kernel_size", "stride_size", "num_outputs"),
         [
             ([1, 16, 16], [32], [3], [1], 10),
             ([3, 128, 128], [8, 8, 8], [2, 2, 2], [2, 2, 2], 1),
@@ -971,7 +1007,7 @@ class TestEvolvableCNNNetConfig:
 
 
 def test_assert_correct_kernel_sizes_conv3d(device):
-    from agilerl.modules.cnn import MutableKernelSizes, _assert_correct_kernel_sizes
+    from agilerl.modules.cnn import _assert_correct_kernel_sizes
 
     _assert_correct_kernel_sizes([(1, 3, 3), (1, 2, 2)], "Conv3d")
 
@@ -988,3 +1024,41 @@ class TestMutableKernelSizesAddLayer:
         )
         mut.add_layer(5)
         assert mut.sizes[-1] == (5,)
+
+
+class TestEvolvableCNNRngAndNoise:
+    def test_reset_noise(self, device):
+        cnn = EvolvableCNN(
+            input_shape=[1, 16, 16],
+            channel_size=[32],
+            kernel_size=[3],
+            stride_size=[1],
+            num_outputs=4,
+            device=device,
+        )
+        cnn.reset_noise()
+
+    def test_rng_propagates_to_nested_modules(self, device):
+        parent = EvolvableCNN(
+            input_shape=[1, 16, 16],
+            channel_size=[32],
+            kernel_size=[3],
+            stride_size=[1],
+            num_outputs=4,
+            device=device,
+            name="parent",
+        )
+        child = EvolvableCNN(
+            input_shape=[1, 16, 16],
+            channel_size=[32],
+            kernel_size=[3],
+            stride_size=[1],
+            num_outputs=4,
+            device=device,
+            name="child",
+        )
+        parent.nested = child
+        new_rng = np.random.default_rng(42)
+        parent.rng = new_rng
+        assert parent.rng is new_rng
+        assert child.rng is new_rng

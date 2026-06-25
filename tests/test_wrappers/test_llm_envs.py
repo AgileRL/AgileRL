@@ -15,7 +15,6 @@ from transformers.tokenization_utils_base import BatchEncoding
 from agilerl.llm_envs import (
     DatasetEnv,
     LLMEnv,
-    RolloutEnv,
     apply_chat_template,
 )
 from agilerl.llm_envs.rollout_env import _PromptDatasetEnv
@@ -72,7 +71,7 @@ class DummySFTDataset(Dataset):
         }
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def accelerator_factory():
     def generate_accelerator(use_accelerator: bool):
         AcceleratorState._reset_state(True)
@@ -157,7 +156,7 @@ class TestDatasetEnvPreferenceInit:
         data_batch_size = 8
         with pytest.raises(
             ValueError,
-            match="No samples left in the train dataset after filtering by the max context length constraint, use a larger max context length.",
+            match=r"No samples left in the train dataset after filtering by the max context length constraint, use a larger max context length.",
         ):
             DatasetEnv(
                 train_dataset=train_dataset,
@@ -416,11 +415,11 @@ class TestDatasetEnvPreferenceReset:
             data_batch_size_per_gpu=data_batch_size,
             accelerator=accelerator_factory(use_accelerator),
         )
+        env.reset_called = True
         with pytest.warns(
             UserWarning,
             match=r"env\.reset\(\) called more than once sequentially, it should typically follow with env\.step\(\)\.",
         ):
-            env.reset_called = True
             prompts = env.reset()
         assert len(prompts["prompt"]) == data_batch_size
         assert isinstance(prompts, dict)
@@ -698,11 +697,11 @@ class TestDatasetEnvSFTReset:
         ):
             env.reset(reset_dataloaders=True)
 
+        env.reset_called = True
         with pytest.warns(
             UserWarning,
             match=r"env\.reset\(\) called more than once sequentially",
         ):
-            env.reset_called = True
             env.reset()
 
     def test_sft_response_column_chosen(self):
@@ -778,8 +777,6 @@ def test_batch_rollout_env_shuffle_is_group_consistent_full_permutation():
     from agilerl.llm_envs import BatchRolloutEnv
 
     dataset_size = 6
-    questions = [f"q{i}" for i in range(dataset_size)]
-    answers = [f"a{i}" for i in range(dataset_size)]
 
     class _RowRecordingEnv:
         """Minimal pooled env recording the ``row_index`` BatchRolloutEnv assigns.
@@ -889,7 +886,8 @@ def test_rollout_eval_mode_draws_from_held_out_split():
 
 def test_rollout_standalone_cursor_walks_split_and_resets_on_switch():
     """With no ``row_index`` the env walks its active split via an internal cursor,
-    resetting the cursor when the train/eval split changes."""
+    resetting the cursor when the train/eval split changes.
+    """
     env = _PromptDatasetEnv(
         questions=["q0", "q1"],
         answers=["a0", "a1"],
@@ -926,7 +924,8 @@ def test_llm_env_close_is_a_noop_by_default():
 
 def test_dataset_env_len_and_eval_mode_preserve_tokenized_prompts():
     """``__len__`` reflects the active split and ``eval_mode`` saves/restores
-    ``last_tokenized_prompts`` around the held-out block."""
+    ``last_tokenized_prompts`` around the held-out block.
+    """
     train_dataset = DummyPreferenceDataset(6)
     test_dataset = DummyPreferenceDataset(2)
     tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)

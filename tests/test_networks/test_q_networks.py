@@ -31,7 +31,7 @@ def head_config():
 
 class TestQNetworkInit:
     @pytest.mark.parametrize(
-        "observation_space, action_space, expect_error",
+        ("observation_space", "action_space", "expect_error"),
         [
             ("vector_space", "discrete_space", None),
             ("dict_space", "discrete_space", None),
@@ -60,8 +60,16 @@ class TestQNetworkInit:
             network = QNetwork(observation_space, action_space)
             assert network.observation_space == observation_space
 
+    def test_q_network_rejects_box_action_space(self, vector_space):
+        action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype="float32")
+        with pytest.raises(
+            ValueError,
+            match="Action space must be either Discrete or MultiDiscrete",
+        ):
+            QNetwork(vector_space, action_space)
+
     @pytest.mark.parametrize(
-        "observation_space, encoder_type",
+        ("observation_space", "encoder_type"),
         [
             ("dict_space", "multi_input"),
             ("discrete_space", "mlp"),
@@ -237,8 +245,17 @@ class TestQNetworkClone:
 
 
 class TestRainbowQNetworkInit:
+    def test_rainbow_q_network_rejects_box_action_space(self, vector_space):
+        support = torch.linspace(-10, 10, 51)
+        action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype="float32")
+        with pytest.raises(
+            ValueError,
+            match="Action space must be either Discrete or MultiDiscrete",
+        ):
+            RainbowQNetwork(vector_space, action_space, support)
+
     @pytest.mark.parametrize(
-        "observation_space, encoder_type",
+        ("observation_space", "encoder_type"),
         [
             ("dict_space", "multi_input"),
             ("discrete_space", "mlp"),
@@ -433,7 +450,7 @@ class TestRainbowQNetworkClone:
 
 class TestContinuousQNetworkInit:
     @pytest.mark.parametrize(
-        "observation_space, encoder_type",
+        ("observation_space", "encoder_type"),
         [
             ("dict_space", "multi_input"),
             ("discrete_space", "mlp"),

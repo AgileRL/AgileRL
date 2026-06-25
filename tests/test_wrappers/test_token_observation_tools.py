@@ -65,7 +65,8 @@ def _mask_wrapper() -> RolloutEnv:
 
 def test_action_mask_excludes_appended_feedback() -> None:
     """Tool-result / feedback tokens (appended after each generated span) are
-    masked 0 — locks the provenance guarantee that tool results never train."""
+    masked 0 — locks the provenance guarantee that tool results never train.
+    """
     _full, action_mask, _turn_ids, _rewards, _logps = _mask_wrapper().get_episode_data()
     # Mask is over positions [1 .. seq_len-1]; True only on generated spans.
     assert action_mask[0].tolist() == [False, True, True, False, False, True, True]
@@ -73,7 +74,8 @@ def test_action_mask_excludes_appended_feedback() -> None:
 
 def test_turn_ids_track_generation_spans_only() -> None:
     """turn_ids hold the turn index on each generated span and -1 elsewhere
-    (prompt, feedback / tool-result, pad)."""
+    (prompt, feedback / tool-result, pad).
+    """
     _full, _action_mask, turn_ids, _rewards, _logps = _mask_wrapper().get_episode_data()
     assert turn_ids[0].tolist() == [-1, 0, 0, -1, -1, 1, 1]
 
@@ -106,7 +108,8 @@ _TOOLS = [
 
 def test_tool_schema_injected_into_prompt() -> None:
     """When ``tools`` is set, they are forwarded to ``apply_chat_template`` so the
-    template renders the schemas into the initial prompt."""
+    template renders the schemas into the initial prompt.
+    """
     w = _bare_wrapper()
     w.apply_chat_template = True
     w.tools = _TOOLS
@@ -117,7 +120,8 @@ def test_tool_schema_injected_into_prompt() -> None:
 
 def test_tools_none_is_backward_compatible() -> None:
     """With ``tools=None`` (default) no ``tools=`` kwarg is forwarded, preserving
-    the exact pre-tool behaviour."""
+    the exact pre-tool behaviour.
+    """
     w = _bare_wrapper()
     w.apply_chat_template = True
     w.tools = None
@@ -129,7 +133,8 @@ def test_tools_none_is_backward_compatible() -> None:
 def test_tool_schema_injected_into_feedback_boundary() -> None:
     """``tools`` are forwarded to ``apply_chat_template`` on the multi-turn
     feedback-boundary render (``_chat_template_boundary_ids``), not only the
-    initial prompt."""
+    initial prompt.
+    """
     w = _bare_wrapper()
     w.tools = _TOOLS
     w.tokenizer = _RecordingTokenizer()
@@ -139,7 +144,8 @@ def test_tool_schema_injected_into_feedback_boundary() -> None:
 
 def test_format_obs_applies_prefix_and_suffix_from_info() -> None:
     """``_format_obs`` wraps the observation with the info prefix/suffix; an empty
-    or absent info leaves the text untouched."""
+    or absent info leaves the text untouched.
+    """
     assert RolloutEnv._format_obs("body", None) == "body"
     assert RolloutEnv._format_obs("body", {}) == "body"
     decorated = RolloutEnv._format_obs("body", {"prefix": "PRE:", "suffix": "SUF"})
@@ -231,7 +237,8 @@ def test_dataset_size_falls_back_when_env_lacks_it() -> None:
 def test_sampling_logps_align_across_tool_turns() -> None:
     """Per-row sampling_logps line up 1:1 with action_mask==1 positions across a
     2-tool-call episode (incl. pad_id==eos_id); guards the silent row-skip in
-    ``_align_sampling_logprobs``."""
+    ``_align_sampling_logprobs``.
+    """
     ...
 
 
@@ -244,5 +251,6 @@ def test_prompt_prefix_stable_across_tool_turn() -> None:
 @pytest.mark.skip(reason=_WIP)
 def test_multiple_tool_calls_in_one_turn() -> None:
     """Parallel tool calls in one turn -> one contiguous trained span; the single
-    appended result span is masked."""
+    appended result span is masked.
+    """
     ...

@@ -76,7 +76,7 @@ class TestTournamentSelectionInit:
         assert ts.eval_loop == eval_loop
 
     @pytest.mark.parametrize(
-        "tournament_size,elitism,population_size,eval_loop,match",
+        ("tournament_size", "elitism", "population_size", "eval_loop", "match"),
         [
             (0, True, 4, 2, "greater than zero"),
             (2, "invalid", 4, 2, "boolean"),
@@ -473,7 +473,7 @@ class TestTournamentSelectionSelect:
 
 class TestTournamentSelectionTournament:
     @pytest.mark.parametrize(
-        "fitness_values,tournament_size",
+        ("fitness_values", "tournament_size"),
         [
             ([1.0, 2.0, 3.0], 2),
             ([10.0, 5.0, 0.0], 3),
@@ -496,7 +496,6 @@ class TestTournamentSelectionTournament:
 
 class TestTournamentSelectionElitism:
     def test_returns_elite_rank_max_id(self):
-        import numpy as np
 
         observation_space = generate_random_box_space((4,))
         discrete_action_space = generate_discrete_space(2)

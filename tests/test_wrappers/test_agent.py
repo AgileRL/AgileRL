@@ -15,12 +15,12 @@ from agilerl.algorithms.core import MultiAgentRLAlgorithm, RLAlgorithm
 from agilerl.modules import EvolvableMLP
 from agilerl.rollouts.on_policy import collect_rollouts
 from agilerl.wrappers.agent import AsyncAgentsWrapper, RSNorm
-from tests.pz_vector_test_utils import make_sync_multi_agent_vec_env
 from tests.helper_functions import (
     assert_not_equal_state_dict,
     assert_state_dicts_equal,
     get_experiences_batch,
 )
+from tests.pz_vector_test_utils import make_sync_multi_agent_vec_env
 
 
 class DummyMultiEnvAsync(ParallelEnv):
@@ -124,7 +124,7 @@ class DummyEnv:
         self.vect = vect
         self.num_envs = num_envs
         if self.vect:
-            self.state_size = (num_envs,) + self.state_size
+            self.state_size = (num_envs, *self.state_size)
             self.n_envs = num_envs
         else:
             self.n_envs = 1
@@ -142,7 +142,7 @@ class DummyEnv:
         )
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def setup_rs_norm():
     observation_space = spaces.Box(low=-1.0, high=1.0, shape=(3,))
     mock_agent = MagicMock(spec=RLAlgorithm)
@@ -155,7 +155,7 @@ def setup_rs_norm():
     return wrapper, mock_agent
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def setup_rs_norm_dict():
     observation_space = spaces.Dict(
         {
@@ -173,7 +173,7 @@ def setup_rs_norm_dict():
     return wrapper, mock_agent
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def setup_rs_norm_tuple():
     observation_space = spaces.Tuple(
         (
@@ -191,11 +191,40 @@ def setup_rs_norm_tuple():
     return wrapper, mock_agent
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def setup_rs_norm_multi_agent():
     observation_space = {
         "agent_1": spaces.Box(low=-1.0, high=1.0, shape=(3,)),
         "other_agent_1": spaces.Box(low=-1.0, high=1.0, shape=(2,)),
+    }
+    mock_agent = MagicMock(spec=MultiAgentRLAlgorithm)
+    mock_agent.observation_space = observation_space
+    mock_agent.action_space = {
+        "agent_1": spaces.Discrete(2),
+        "other_agent_1": spaces.Discrete(2),
+    }
+    mock_agent.device = "cpu"
+    mock_agent.training = True
+
+    wrapper = RSNorm(mock_agent)
+    return wrapper, mock_agent
+
+
+@pytest.fixture
+def setup_rs_norm_multi_agent_dict():
+    observation_space = {
+        "agent_1": spaces.Dict(
+            {
+                "sensor1": spaces.Box(low=-1.0, high=1.0, shape=(3,)),
+                "sensor2": spaces.Box(low=-1.0, high=1.0, shape=(2,)),
+            },
+        ),
+        "other_agent_1": spaces.Dict(
+            {
+                "sensor1": spaces.Box(low=-1.0, high=1.0, shape=(4,)),
+                "sensor2": spaces.Box(low=-1.0, high=1.0, shape=(1,)),
+            },
+        ),
     }
     mock_agent = MagicMock(spec=MultiAgentRLAlgorithm)
     mock_agent.observation_space = observation_space
@@ -314,7 +343,7 @@ class TestRSNormNormalizeObservation:
         wrapper.obs_rms["other_agent_1"].var = torch.tensor([1.0, 1.0])
         wrapper.obs_rms["other_agent_1"].epsilon = 1e-4
 
-        normalized_obs = wrapper._normalize_observation(obs)
+        normalized_obs = wrapper.normalize_observation(obs)
         expected_obs = {
             "agent_1": (obs["agent_1"] - wrapper.obs_rms["agent_1"].mean)
             / torch.sqrt(
@@ -336,6 +365,55 @@ class TestRSNormNormalizeObservation:
             expected_obs["other_agent_1"],
             atol=1e-2,
         )
+
+    def test_normalize_observation_multi_agent_dict(
+        self, setup_rs_norm_multi_agent_dict
+    ):
+        wrapper, _ = setup_rs_norm_multi_agent_dict
+        obs = {
+            "agent_1": {
+                "sensor1": torch.tensor([1.0, 2.0, 3.0]),
+                "sensor2": torch.tensor([1.0, 2.0]),
+            },
+            "other_agent_1": {
+                "sensor1": torch.tensor([1.0, 2.0, 3.0, 4.0]),
+                "sensor2": torch.tensor([1.0]),
+            },
+        }
+        wrapper.obs_rms["agent_1"]["sensor1"].mean = torch.tensor([1.0, 1.0, 1.0])
+        wrapper.obs_rms["agent_1"]["sensor1"].var = torch.tensor([1.0, 1.0, 1.0])
+        wrapper.obs_rms["agent_1"]["sensor1"].epsilon = 1e-4
+        wrapper.obs_rms["agent_1"]["sensor2"].mean = torch.tensor([1.0, 1.0])
+        wrapper.obs_rms["agent_1"]["sensor2"].var = torch.tensor([1.0, 1.0])
+        wrapper.obs_rms["agent_1"]["sensor2"].epsilon = 1e-4
+        wrapper.obs_rms["other_agent_1"]["sensor1"].mean = torch.tensor(
+            [1.0, 1.0, 1.0, 1.0]
+        )
+        wrapper.obs_rms["other_agent_1"]["sensor1"].var = torch.tensor(
+            [1.0, 1.0, 1.0, 1.0]
+        )
+        wrapper.obs_rms["other_agent_1"]["sensor1"].epsilon = 1e-4
+        wrapper.obs_rms["other_agent_1"]["sensor2"].mean = torch.tensor([1.0])
+        wrapper.obs_rms["other_agent_1"]["sensor2"].var = torch.tensor([1.0])
+        wrapper.obs_rms["other_agent_1"]["sensor2"].epsilon = 1e-4
+
+        normalized_obs = wrapper.normalize_observation(obs)
+
+        for agent_id, sensor_key in (
+            ("agent_1", "sensor1"),
+            ("agent_1", "sensor2"),
+            ("other_agent_1", "sensor1"),
+            ("other_agent_1", "sensor2"),
+        ):
+            agent_rms = wrapper.obs_rms[agent_id][sensor_key]
+            expected = (obs[agent_id][sensor_key] - agent_rms.mean) / torch.sqrt(
+                agent_rms.var + agent_rms.epsilon,
+            )
+            assert torch.allclose(
+                normalized_obs[agent_id][sensor_key],
+                expected,
+                atol=1e-2,
+            )
 
 
 class TestRSNormUpdateStatistics:
@@ -384,6 +462,90 @@ class TestRSNormUpdateStatistics:
             atol=1e-2,
         )
 
+    def test_update_statistics_multi_agent(self, setup_rs_norm_multi_agent):
+        wrapper, _ = setup_rs_norm_multi_agent
+        obs = {
+            "agent_1": torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
+            "other_agent_1": torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
+        }
+        wrapper.update_statistics(obs)
+
+        assert torch.allclose(
+            wrapper.obs_rms["agent_1"].mean,
+            torch.tensor([2.5, 3.5, 4.5]),
+            atol=1e-2,
+        )
+        assert torch.allclose(
+            wrapper.obs_rms["agent_1"].var,
+            torch.tensor([2.25, 2.25, 2.25]),
+            atol=1e-2,
+        )
+        assert torch.allclose(
+            wrapper.obs_rms["other_agent_1"].mean,
+            torch.tensor([2.0, 3.0]),
+            atol=1e-2,
+        )
+        assert torch.allclose(
+            wrapper.obs_rms["other_agent_1"].var,
+            torch.tensor([1.0, 1.0]),
+            atol=1e-2,
+        )
+
+    def test_update_statistics_multi_agent_dict(self, setup_rs_norm_multi_agent_dict):
+        wrapper, _ = setup_rs_norm_multi_agent_dict
+        obs = {
+            "agent_1": {
+                "sensor1": torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
+                "sensor2": torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
+            },
+            "other_agent_1": {
+                "sensor1": torch.tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]]),
+                "sensor2": torch.tensor([[1.0], [2.0]]),
+            },
+        }
+        wrapper.update_statistics(obs)
+
+        assert torch.allclose(
+            wrapper.obs_rms["agent_1"]["sensor1"].mean,
+            torch.tensor([2.5, 3.5, 4.5]),
+            atol=1e-2,
+        )
+        assert torch.allclose(
+            wrapper.obs_rms["agent_1"]["sensor1"].var,
+            torch.tensor([2.25, 2.25, 2.25]),
+            atol=1e-2,
+        )
+        assert torch.allclose(
+            wrapper.obs_rms["agent_1"]["sensor2"].mean,
+            torch.tensor([2.0, 3.0]),
+            atol=1e-2,
+        )
+        assert torch.allclose(
+            wrapper.obs_rms["agent_1"]["sensor2"].var,
+            torch.tensor([1.0, 1.0]),
+            atol=1e-2,
+        )
+        assert torch.allclose(
+            wrapper.obs_rms["other_agent_1"]["sensor1"].mean,
+            torch.tensor([3.0, 4.0, 5.0, 6.0]),
+            atol=1e-2,
+        )
+        assert torch.allclose(
+            wrapper.obs_rms["other_agent_1"]["sensor1"].var,
+            torch.tensor([4.0, 4.0, 4.0, 4.0]),
+            atol=1e-2,
+        )
+        assert torch.allclose(
+            wrapper.obs_rms["other_agent_1"]["sensor2"].mean,
+            torch.tensor([1.5]),
+            atol=1e-2,
+        )
+        assert torch.allclose(
+            wrapper.obs_rms["other_agent_1"]["sensor2"].var,
+            torch.tensor([0.25]),
+            atol=1e-2,
+        )
+
     def test_update_statistics_tuple(self, setup_rs_norm_tuple):
         wrapper, _ = setup_rs_norm_tuple
         obs = (
@@ -412,7 +574,7 @@ class TestRSNormUpdateStatistics:
 
 class TestRSNormGetAction:
     def test_get_action(self, setup_rs_norm):
-        wrapper, mock_agent = setup_rs_norm
+        wrapper, _mock_agent = setup_rs_norm
         obs = torch.tensor([1.0, 2.0, 3.0])
         wrapper.get_action(obs)
 
@@ -424,7 +586,7 @@ class TestRSNormGetAction:
         wrapper = RSNorm(agent)
         obs = wrapper.observation_space.sample()
         action = wrapper.get_action(obs)
-        assert action.shape == (1,) + agent.action_space.shape
+        assert action.shape == (1, *agent.action_space.shape)
 
     def test_rsnorm_get_action_skips_stats_when_not_training(self, setup_rs_norm):
         wrapper, mock_agent = setup_rs_norm
@@ -436,7 +598,7 @@ class TestRSNormGetAction:
 
 class TestRSNormLearn:
     def test_learn(self, setup_rs_norm):
-        wrapper, mock_agent = setup_rs_norm
+        wrapper, _mock_agent = setup_rs_norm
         experiences = (
             torch.tensor([1.0, 2.0, 3.0]),  # State
             torch.tensor([0]),  # Action
@@ -490,7 +652,10 @@ class TestRSNormLearn:
             ddpg.scores.append(0)
             actor_loss, critic_loss = ddpg.learn(experiences)
 
-        with pytest.raises(ValueError):
+        with pytest.raises(
+            ValueError,
+            match="Experiences must be provided if not using a rollout buffer",
+        ):
             ddpg.learn()
 
         assert isinstance(actor_loss, float)
@@ -538,7 +703,7 @@ class TestRSNormLearn:
             batch_size=[batch],
         )
         loss_info = wrapper.learn(td)
-        assert isinstance(loss_info, (tuple, dict)) or isinstance(loss_info, float)
+        assert isinstance(loss_info, (tuple, dict, float))
 
     def test_rsnorm_learn_rollout_buffer_full(self, vector_space):
         obs_space = vector_space
@@ -846,6 +1011,21 @@ class TestRSNormBuildRms:
         assert isinstance(rms, dict)
         assert set(rms) == {"sensor1", "sensor2"}
 
+    def test_rsnorm_build_rms_dict_norm_obs_keys_filter(self):
+        obs_space = spaces.Dict(
+            {
+                "sensor1": spaces.Box(low=-1.0, high=1.0, shape=(2,)),
+                "sensor2": spaces.Box(low=-1.0, high=1.0, shape=(3,)),
+                "other": spaces.Box(low=-1.0, high=1.0, shape=(1,)),
+            }
+        )
+        rms = RSNorm.build_rms(
+            obs_space,
+            norm_obs_keys=["sensor1", "sensor2"],
+            device="cpu",
+        )
+        assert set(rms) == {"sensor1", "sensor2"}
+
 
 class TestAgentWrapperGetActionLearn:
     def test_agent_wrapper_base_get_action_learn(self, vector_space):
@@ -866,7 +1046,7 @@ class TestAgentWrapperGetActionLearn:
 
 class TestAgentWrapperSetattr:
     @pytest.mark.parametrize(
-        "attr_name,on_agent", [("wrapper_only_attr", False), ("batch_size", True)]
+        ("attr_name", "on_agent"), [("wrapper_only_attr", False), ("batch_size", True)]
     )
     def test_agent_wrapper_setattr_delegates_correctly(
         self, vector_space, attr_name, on_agent
@@ -883,7 +1063,8 @@ class TestAgentWrapperRepr:
         agent = DDPG(vector_space, copy.deepcopy(vector_space))
         wrapper = RSNorm(agent)
         r = repr(wrapper)
-        assert "RSNorm" in r and "DDPG" in r
+        assert "RSNorm" in r
+        assert "DDPG" in r
 
 
 class TestAgentWrapperGetattr:
@@ -896,6 +1077,7 @@ class TestAgentWrapperGetattr:
 class TestAsyncAgentsWrapperInit:
     def test_async_wrapper_allows_maddpg(self, ma_vector_space):
         from gymnasium import spaces as gym_spaces
+
         from agilerl.algorithms import MADDPG
 
         agent_ids = ["agent_0", "agent_1"]
@@ -916,6 +1098,7 @@ class TestAsyncAgentsWrapperInit:
 
     def test_async_wrapper_allows_matd3(self, ma_vector_space):
         from gymnasium import spaces as gym_spaces
+
         from agilerl.algorithms import MATD3
 
         agent_ids = ["agent_0", "agent_1"]
@@ -959,7 +1142,7 @@ class TestAsyncAgentsWrapperExtractInactiveAgents:
                 "vec": np.array([[1.0, 1.0], [np.nan, np.nan]], dtype=np.float32),
             }
         }
-        inactive, filtered = wrapper.extract_inactive_agents(obs)
+        inactive, _filtered = wrapper.extract_inactive_agents(obs)
         assert "agent_0" in inactive
 
     def test_async_extract_inactive_agents_all_inactive(
@@ -979,7 +1162,7 @@ class TestAsyncAgentsWrapperExtractInactiveAgents:
             "agent_1": np.full((2, 6), np.nan),
             "other_agent_0": np.full((2, 6), np.nan),
         }
-        inactive_agents, filtered_obs = wrapper.extract_inactive_agents(obs)
+        _inactive_agents, filtered_obs = wrapper.extract_inactive_agents(obs)
         assert len(filtered_obs) == 0
 
     def test_async_extract_inactive_agents_ndarray_obs(
@@ -1092,10 +1275,63 @@ class TestAsyncAgentsWrapperGetAction:
             "agent_1": np.array([[1.0] * 6]),
         }
         action_dict, _, _, _ = wrapper.get_action(obs, {a: {} for a in obs})
-        assert "agent_0" in action_dict and "agent_1" in action_dict
+        assert "agent_0" in action_dict
+        assert "agent_1" in action_dict
+
+    def test_async_get_action_non_tuple_return(
+        self, ma_vector_space, ma_discrete_space
+    ):
+        agent = IPPO(
+            observation_spaces=ma_vector_space[:2],
+            action_spaces=ma_discrete_space[:2],
+            agent_ids=["agent_0", "agent_1"],
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        active_action = np.zeros((1, 1), dtype=np.int64)
+        wrapper.wrapped_get_action = lambda obs, *a, **kw: {
+            "agent_0": active_action,
+        }
+        obs = {
+            "agent_0": np.array([[1.0] * 6, [np.nan] * 6], dtype=np.float32),
+        }
+
+        result = wrapper.get_action(obs)
+
+        # On-policy bare-dict return path (not a tuple of log_probs / values).
+        assert isinstance(result, dict)
+        assert not isinstance(result, tuple)
+        assert tuple(result.keys()) == ("agent_0",)
+        assert result["agent_0"].shape == (2, 1)
+        assert result["agent_0"].dtype == np.int64
+        assert np.array_equal(result["agent_0"][0], active_action[0])
+        assert result["agent_0"][1, 0] == 0
+
+    def test_async_get_action_non_tuple_with_inactive_agents(
+        self, ma_vector_space, ma_discrete_space
+    ):
+        agent = IPPO(
+            observation_spaces=ma_vector_space[:2],
+            action_spaces=ma_discrete_space[:2],
+            agent_ids=["agent_0", "agent_1"],
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        wrapper.wrapped_get_action = lambda obs, *a, **kw: {
+            "agent_0": np.zeros((1, 1), dtype=np.int64),
+        }
+        obs = {
+            "agent_0": np.array([[1.0] * 6, [np.nan] * 6], dtype=np.float32),
+        }
+
+        result = wrapper.get_action(obs)
+
+        assert isinstance(result, dict)
+        assert result["agent_0"].shape == (2, 1)
 
     def test_async_get_action_with_inactive_off_policy_agents(self, ma_vector_space):
         from gymnasium import spaces as gym_spaces
+
         from agilerl.algorithms import MADDPG
 
         agent_ids = ["agent_0", "agent_1"]
@@ -1306,7 +1542,7 @@ class TestAsyncAgentsWrapperAlignAsyncOffPolicyExperiences:
 
         (
             aligned_states,
-            aligned_actions,
+            _aligned_actions,
             aligned_rewards,
             aligned_next,
             aligned_dones,
@@ -1569,7 +1805,7 @@ class TestAsyncAgentsWrapperLearn:
                 ):
                     if all(agent_dones):
                         if not vectorized:
-                            observations, info = env.reset()
+                            observations, _info = env.reset()
 
                         done = {
                             agent_id: np.zeros(num_envs) for agent_id in agent.agent_ids
@@ -1612,6 +1848,7 @@ class TestAsyncAgentsWrapperLearn:
         num_envs,
     ):
         from gymnasium import spaces as gym_spaces
+
         from agilerl.algorithms import MADDPG
 
         vectorized = num_envs > 1
@@ -1644,7 +1881,7 @@ class TestAsyncAgentsWrapperLearn:
         )
         async_agent = AsyncAgentsWrapper(agent)
 
-        observations, infos = env.reset()
+        observations, _infos = env.reset()
 
         states = {agent_id: [] for agent_id in agent_ids}
         actions = {agent_id: [] for agent_id in agent_ids}
@@ -1667,7 +1904,7 @@ class TestAsyncAgentsWrapperLearn:
         for _ in range(max_steps):
             env_action_dict, raw_action_dict = async_agent.get_action(observations)
 
-            next_observations, reward_dict, terminated, truncated, next_infos = (
+            next_observations, reward_dict, terminated, truncated, _next_infos = (
                 env.step(env_action_dict)
             )
 
@@ -1722,13 +1959,12 @@ class TestAsyncAgentsWrapperLearn:
 
             observations = next_observations
             done = next_dones
-            infos = next_infos
 
             if next_dones:
                 for agent_dones in zip(*next_dones.values(), strict=False):
                     if all(agent_dones):
                         if not vectorized:
-                            observations, infos = env.reset()
+                            observations, _infos = env.reset()
                         done = {
                             agent_id: np.zeros((num_envs,), dtype=np.int8)
                             if vectorized

@@ -1,4 +1,4 @@
-import agilerl.utils.probe_envs_llm as probe_envs_llm
+from agilerl.utils import probe_envs_llm
 
 
 class TestConstantTargetEnvReset:

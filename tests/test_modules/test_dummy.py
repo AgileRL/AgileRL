@@ -2,7 +2,15 @@ import pytest
 import torch
 from torch import nn
 
-from agilerl.modules.dummy import DummyEvolvable
+from agilerl.modules.dummy import DummyEvolvable, to_evolvable
+
+
+class TestToEvolvable:
+    def test_to_evolvable(self):
+        module = to_evolvable(lambda: nn.Linear(10, 10), {}, "cpu")
+        assert isinstance(module, DummyEvolvable)
+        assert module.module.weight.shape == (10, 10)
+        assert module.module.bias.shape == (10,)
 
 
 class TestDummyEvolvableInit:
@@ -34,9 +42,10 @@ class TestDummyEvolvableInit:
         assert module.module.weight.shape == (2, 6)
 
     def test_raises(self):
-        with pytest.raises(ValueError) as e:
+        with pytest.raises(
+            ValueError, match="Either module or module_fn must be provided"
+        ):
             DummyEvolvable(module_fn=None, module=None, device="cpu")
-        assert "Either module or module_fn must be provided." in str(e.value)
 
     def test_from_module_fn_and_kwargs(self):
         module = DummyEvolvable(
@@ -53,7 +62,7 @@ class TestDummyEvolvableGetattr:
         """Covers __getattr__ when name == 'module'."""
         module = DummyEvolvable(module=nn.Linear(4, 4), device="cpu")
         assert module.module.weight.shape == (4, 4)
-        m = getattr(module, "module")
+        m = module.module
         assert m is module.module
 
     def test_getattr_delegates_to_inner(self):

@@ -1,25 +1,23 @@
+import numpy as np
 import pytest
 import torch
-import numpy as np
 
 pytest.importorskip("deepspeed", reason="LLM tests require deepspeed.")
 pytest.importorskip("vllm", reason="LLM tests require vllm.")
 
 from agilerl.algorithms.core import ActionResult
-from agilerl.rollouts.on_policy import collect_rollouts_llm
+from agilerl.algorithms.ppo import PPO
 from agilerl.llm_envs import (
     BatchRolloutEnv,
     RolloutEnv,
     local_transport,
 )
-from agilerl.algorithms.ppo import PPO
 from agilerl.rollouts.on_policy import (
     _collect_rollouts,
     collect_rollouts,
+    collect_rollouts_llm,
     collect_rollouts_recurrent,
 )
-
-
 from tests.test_algorithms.test_llms.test_ppo_llm import _cpu_llmppo
 from tests.test_algorithms.test_llms.test_reinforce_llm import _cpu_llmreinforce
 
@@ -210,7 +208,7 @@ class TestCollectRolloutsLlm:
 
             def close(self) -> None:
                 """Provide a close method compatible with vector env cleanup."""
-                return None
+                return
 
         class _EchoAgent:
             """Echo prompt marker tokens into completions in row order."""
@@ -273,7 +271,7 @@ class DummyEnv:
         self.vect = vect
         self.num_envs = num_envs
         if self.vect:
-            self.state_size = (num_envs,) + self.state_size
+            self.state_size = (num_envs, *self.state_size)
             self.n_envs = num_envs
         else:
             self.n_envs = 1

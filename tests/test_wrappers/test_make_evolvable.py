@@ -9,7 +9,6 @@ from agilerl.modules.custom_components import NoisyLinear
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import assert_state_dicts_equal, unpack_network
 
-
 # Tiny shapes used for the multi-input Conv3d fixture. Kept large enough that
 # ``calc_max_kernel_sizes`` (height_out * 0.2) yields >=3 on the final conv,
 # so ``change_cnn_kernel`` can actually pick a different kernel and the test's
@@ -163,7 +162,7 @@ def device():
 class TestMakeEvolvableInit:
     # The class can be instantiated with all the required parameters and no errors occur.
     @pytest.mark.parametrize(
-        "network, input_tensor",
+        ("network", "input_tensor"),
         [
             ("simple_mlp", torch.randn(1, 10)),
             ("simple_cnn", torch.randn(1, 3, 32, 32)),
@@ -247,7 +246,7 @@ class TestMakeEvolvableInit:
 class TestMakeEvolvableForward:
     @pytest.mark.gpu
     @pytest.mark.parametrize(
-        "network, input_tensor, secondary_input_tensor, expected_result",
+        ("network", "input_tensor", "secondary_input_tensor", "expected_result"),
         [
             ("simple_mlp", torch.randn(1, 10), None, (1, 1)),
             ("simple_cnn", torch.randn(1, 3, 32, 32), None, (1, 1)),
@@ -291,7 +290,7 @@ class TestMakeEvolvableForward:
 
     @pytest.mark.gpu
     @pytest.mark.parametrize(
-        "network, input_tensor, secondary_input_tensor, expected_result",
+        ("network", "input_tensor", "secondary_input_tensor", "expected_result"),
         [
             ("simple_mlp", torch.randn(1, 10), None, (1, 1)),
             ("simple_cnn", torch.randn(1, 3, 32, 32), None, (1, 1)),
@@ -442,7 +441,7 @@ class TestMakeEvolvableDetectArchitecture:
     # Test if network after detect arch has the same arch as original network
     @pytest.mark.gpu
     @pytest.mark.parametrize(
-        "network, input_tensor",
+        ("network", "input_tensor"),
         [
             ("simple_mlp", torch.randn(1, 10)),
             ("simple_cnn", torch.randn(1, 3, 32, 32)),
@@ -466,7 +465,7 @@ class TestMakeEvolvableDetectArchitecture:
             nn.Linear(16, 1),
             nn.LogSoftmax(dim=-1),
         )
-        with pytest.raises(Exception):  # noqa: B017
+        with pytest.raises(TypeError, match=r"not currently supported"):
             MakeEvolvable(net, torch.randn(1, 4), device=device)
 
     @pytest.mark.gpu
@@ -1174,7 +1173,7 @@ class TestMakeEvolvableClone:
     # The clone() method successfully creates a deep copy of the model.
     @pytest.mark.gpu
     @pytest.mark.parametrize(
-        "network, input_tensor, secondary_input_tensor",
+        ("network", "input_tensor", "secondary_input_tensor"),
         [
             ("simple_mlp", torch.randn(1, 10), None),
             ("simple_cnn", torch.randn(1, 3, 32, 32), None),
@@ -1240,6 +1239,10 @@ def cnn_net():
 
 
 class TestMakeEvolvableChangeActivation:
+    def test_activation_property(self, mlp_net, device):
+        evolvable = MakeEvolvable(mlp_net, torch.randn(1, 10), device=device)
+        assert evolvable.activation == evolvable.mlp_activation
+
     @pytest.mark.gpu
     def test_change_activation_output_false(self, mlp_net, device):
         evolvable = MakeEvolvable(mlp_net, torch.randn(1, 10), device=device)
@@ -1252,6 +1255,44 @@ class TestMakeEvolvableChangeActivation:
         evolvable.change_activation("LeakyReLU", output=True)
         assert evolvable.mlp_activation == "LeakyReLU"
         assert evolvable.mlp_output_activation == "LeakyReLU"
+
+
+class TestMakeEvolvableForwardErrors:
+    def test_forward_rainbow_cnn_missing_value_stream(self, cnn_net, device):
+        evolvable = MakeEvolvable(
+            cnn_net,
+            torch.randn(1, 3, 32, 32),
+            support=torch.linspace(-10, 10, 51),
+            rainbow=True,
+            device=device,
+        )
+        null_value_net = torch.nn.Linear(1, 1)
+
+        def _null_forward(_x):
+            return None
+
+        null_value_net.forward = _null_forward  # type: ignore[method-assign]
+        object.__setattr__(evolvable, "value_net", null_value_net)
+        with pytest.raises(
+            RuntimeError, match="Rainbow value stream is not initialized"
+        ):
+            evolvable.forward(torch.randn(1, 3, 32, 32))
+
+    def test_forward_cnn_missing_value_stream(self, cnn_net, device):
+        evolvable = MakeEvolvable(
+            cnn_net,
+            torch.randn(1, 3, 32, 32),
+            device=device,
+        )
+        null_value_net = torch.nn.Linear(1, 1)
+
+        def _null_forward(_x):
+            return None
+
+        null_value_net.forward = _null_forward  # type: ignore[method-assign]
+        object.__setattr__(evolvable, "value_net", null_value_net)
+        with pytest.raises(RuntimeError, match="Value stream is not initialized"):
+            evolvable.forward(torch.randn(1, 3, 32, 32))
 
 
 class TestMakeEvolvableInitWeightsGaussian:

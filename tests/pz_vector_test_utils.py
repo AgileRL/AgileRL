@@ -1,10 +1,12 @@
+import contextlib
 import types
 from collections.abc import Callable
+from typing import ClassVar
 
 import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
-from gymnasium.spaces import Box, Discrete, MultiDiscrete
+from gymnasium.spaces import Box, Discrete
 from pettingzoo import ParallelEnv
 
 
@@ -18,7 +20,10 @@ class SpeakerListenerLikeEnv(ParallelEnv):
     most ``test_vector`` tests.
     """
 
-    metadata = {"render_modes": ["human", "rgb_array"], "name": "speaker_listener_like"}
+    metadata: ClassVar[dict[str, str | list[str]]] = {
+        "render_modes": ["human", "rgb_array"],
+        "name": "speaker_listener_like",
+    }
 
     def __init__(self, render_mode=None, continuous_actions=True):
         self.possible_agents = ["speaker_0", "listener_0"]
@@ -230,10 +235,8 @@ class SyncMultiAgentVecEnv:
         for env in self.envs:
             close = getattr(env, "close", None)
             if callable(close):
-                try:
+                with contextlib.suppress(Exception):
                     close()
-                except Exception:
-                    pass
 
 
 def make_sync_multi_agent_vec_env(
@@ -264,7 +267,10 @@ REWARD_MAP = {
 
 
 class term_env(ParallelEnv):
-    metadata = {"render_modes": ["human"], "name": "rps_v2"}
+    metadata: ClassVar[dict[str, str | list[str]]] = {
+        "render_modes": ["human"],
+        "name": "rps_v2",
+    }
 
     def __init__(self, render_mode=None):
         self.possible_agents = ["player_" + str(r) for r in range(2)]

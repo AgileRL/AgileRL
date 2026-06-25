@@ -68,7 +68,7 @@ def default_mlp_config():
 ######### Test instantiation #########
 class TestEvolvableMultiInputInit:
     @pytest.mark.parametrize(
-        "observation_space, num_outputs",
+        ("observation_space", "num_outputs"),
         [
             (generate_dict_or_tuple_space(2, 3), 10),
             (generate_dict_or_tuple_space(2, 3), 1),
@@ -92,7 +92,7 @@ class TestEvolvableMultiInputInit:
         assert isinstance(evolvable_composed, EvolvableMultiInput)
 
     @pytest.mark.parametrize(
-        "observation_space, num_outputs",
+        ("observation_space", "num_outputs"),
         [
             (generate_dict_or_tuple_space(2, 3), 0),  # Invalid num_outputs
             (
@@ -119,7 +119,7 @@ class TestEvolvableMultiInputInit:
             )
 
     @pytest.mark.parametrize(
-        "observation_space, num_outputs",
+        ("observation_space", "num_outputs"),
         [
             (generate_dict_or_tuple_space(2, 3, dict_space=True), 10),
         ],
@@ -142,7 +142,7 @@ class TestEvolvableMultiInputInit:
         assert isinstance(evolvable_composed, EvolvableMultiInput)
 
     @pytest.mark.parametrize(
-        "observation_space, num_outputs, sample_input",
+        ("observation_space", "num_outputs", "sample_input"),
         [
             (generate_dict_or_tuple_space(2, 3, dict_space=False), 10, None),
             (generate_dict_or_tuple_space(2, 3, dict_space=True), 10, None),
@@ -170,7 +170,7 @@ class TestEvolvableMultiInputInit:
 ######### Test forward #########
 class TestEvolvableMultiInputForward:
     @pytest.mark.parametrize(
-        "observation_space, num_outputs, output_shape",
+        ("observation_space", "num_outputs", "output_shape"),
         [
             (generate_dict_or_tuple_space(2, 3), 10, (1, 10)),
             (generate_dict_or_tuple_space(2, 3), 1, (1, 1)),
@@ -211,7 +211,7 @@ class TestEvolvableMultiInputForward:
         assert output_array.shape == output_shape
 
     @pytest.mark.parametrize(
-        "observation_space, num_outputs, output_shape",
+        ("observation_space", "num_outputs", "output_shape"),
         [
             (generate_dict_or_tuple_space(2, 3, dict_space=True), 10, (1, 10)),
         ],
@@ -248,7 +248,7 @@ class TestEvolvableMultiInputForward:
         assert output.shape == output_shape
 
     @pytest.mark.parametrize(
-        "observation_space, num_outputs",
+        ("observation_space", "num_outputs"),
         [
             (generate_dict_or_tuple_space(2, 3), 10),
             (generate_dict_or_tuple_space(2, 3), 1),
@@ -288,7 +288,7 @@ class TestEvolvableMultiInputForward:
 ######### Test add_mlp_layer #########
 class TestEvolvableMultiInputAddMlpLayer:
     @pytest.mark.parametrize(
-        "observation_space, num_outputs",
+        ("observation_space", "num_outputs"),
         [
             (generate_dict_or_tuple_space(2, 3), 10),
             (generate_dict_or_tuple_space(2, 3), 1),
@@ -354,7 +354,7 @@ class TestEvolvableMultiInputAddMlpLayer:
 ######### Test remove_mlp_layer #########
 class TestEvolvableMultiInputRemoveMlpLayer:
     @pytest.mark.parametrize(
-        "observation_space, num_outputs",
+        ("observation_space", "num_outputs"),
         [
             (generate_dict_or_tuple_space(2, 3), 10),
             (generate_dict_or_tuple_space(2, 3), 1),
@@ -406,7 +406,7 @@ class TestEvolvableMultiInputRemoveMlpLayer:
 ######### Test add_mlp_node #########
 class TestEvolvableMultiInputAddMlpNode:
     @pytest.mark.parametrize(
-        "observation_space, num_outputs, layer_index",
+        ("observation_space", "num_outputs", "layer_index"),
         [
             (generate_dict_or_tuple_space(2, 3), 10, None),
             (generate_dict_or_tuple_space(2, 3), 1, 1),
@@ -448,7 +448,7 @@ class TestEvolvableMultiInputAddMlpNode:
 ######### Test remove_mlp_node #########
 class TestEvolvableMultiInputRemoveMlpNode:
     @pytest.mark.parametrize(
-        "observation_space, num_outputs, layer_index, numb_new_nodes",
+        ("observation_space", "num_outputs", "layer_index", "numb_new_nodes"),
         [
             (generate_dict_or_tuple_space(2, 3), 10, 1, None),
             (generate_dict_or_tuple_space(2, 3), 1, None, 4),
@@ -534,7 +534,7 @@ class TestEvolvableMultiInputChangeActivation:
         evolvable.change_activation("Tanh", output=True)
 
     @pytest.mark.parametrize(
-        "observation_space, num_outputs",
+        ("observation_space", "num_outputs"),
         [
             (generate_dict_or_tuple_space(2, 3), 10),
             (generate_dict_or_tuple_space(2, 3), 1),
@@ -565,7 +565,7 @@ class TestEvolvableMultiInputChangeActivation:
 ######### Test add_cnn_layer #########
 class TestEvolvableMultiInputAddCnnLayer:
     @pytest.mark.parametrize(
-        "observation_space, num_outputs",
+        ("observation_space", "num_outputs"),
         [
             (generate_dict_or_tuple_space(2, 3, image_shape=(3, 128, 128)), 10),
             (generate_dict_or_tuple_space(2, 3, image_shape=(3, 128, 128)), 1),
@@ -604,7 +604,7 @@ class TestEvolvableMultiInputAddCnnLayer:
             )
 
     @pytest.mark.parametrize(
-        "observation_space, num_outputs",
+        ("observation_space", "num_outputs"),
         [
             (generate_dict_or_tuple_space(2, 3), 10),  # exceeds max layer limit
         ],
@@ -634,7 +634,7 @@ class TestEvolvableMultiInputAddCnnLayer:
         )
 
     @pytest.mark.parametrize(
-        "observation_space, num_outputs",
+        ("observation_space", "num_outputs"),
         [
             (generate_dict_or_tuple_space(2, 3), 10),  # exceeds max-layer limit
         ],
@@ -711,7 +711,7 @@ class TestEvolvableMultiInputAddCnnLayer:
 ######### Test remove_cnn_layer #########
 class TestEvolvableMultiInputRemoveCnnLayer:
     @pytest.mark.parametrize(
-        "observation_space, num_outputs",
+        ("observation_space", "num_outputs"),
         [
             (generate_dict_or_tuple_space(2, 3), 10),
             (generate_dict_or_tuple_space(2, 3), 1),
@@ -757,7 +757,7 @@ class TestEvolvableMultiInputRemoveCnnLayer:
 ######### Test add_cnn_channel #########
 class TestEvolvableMultiInputAddChannel:
     @pytest.mark.parametrize(
-        "observation_space, num_outputs, layer_index",
+        ("observation_space", "num_outputs", "layer_index"),
         [
             (generate_dict_or_tuple_space(2, 3), 10, 0),
             (generate_dict_or_tuple_space(2, 3), 1, None),
@@ -794,7 +794,7 @@ class TestEvolvableMultiInputAddChannel:
 ######### Test remove_cnn_channel #########
 class TestEvolvableMultiInputRemoveChannel:
     @pytest.mark.parametrize(
-        "observation_space, num_outputs, layer_index, numb_new_channels",
+        ("observation_space", "num_outputs", "layer_index", "numb_new_channels"),
         [
             (generate_dict_or_tuple_space(2, 3), 10, None, None),
             (generate_dict_or_tuple_space(2, 3), 1, 0, 2),
@@ -960,7 +960,7 @@ class TestEvolvableMultiInputChangeKernel:
 ######### Test clone #########
 class TestEvolvableMultiInputClone:
     @pytest.mark.parametrize(
-        "observation_space, num_outputs",
+        ("observation_space", "num_outputs"),
         [
             (generate_dict_or_tuple_space(2, 3), 10),
             (generate_dict_or_tuple_space(2, 3), 1),
@@ -998,7 +998,7 @@ class TestEvolvableMultiInputClone:
 
 class TestEvolvableMultiInputAddLatentNode:
     @pytest.mark.parametrize(
-        "observation_space, num_outputs",
+        ("observation_space", "num_outputs"),
         [
             (generate_dict_or_tuple_space(2, 3), 10),
             (generate_dict_or_tuple_space(2, 3), 1),
@@ -1030,7 +1030,7 @@ class TestEvolvableMultiInputAddLatentNode:
 
 class TestEvolvableMultiInputRemoveLatentNode:
     @pytest.mark.parametrize(
-        "observation_space, num_outputs",
+        ("observation_space", "num_outputs"),
         [
             (generate_dict_or_tuple_space(2, 3), 10),
             (generate_dict_or_tuple_space(2, 3), 1),
@@ -1060,7 +1060,7 @@ class TestEvolvableMultiInputRemoveLatentNode:
         assert evolvable_composed.latent_dim < initial_latent_dim
 
     @pytest.mark.parametrize(
-        "observation_space, num_outputs",
+        ("observation_space", "num_outputs"),
         [
             (generate_dict_or_tuple_space(2, 3), 10),
             (generate_dict_or_tuple_space(2, 3), 1),

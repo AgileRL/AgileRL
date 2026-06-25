@@ -1,6 +1,7 @@
 import copy
 import glob
 import importlib
+import inspect
 import sys
 import types
 from collections import OrderedDict
@@ -21,17 +22,17 @@ from agilerl.modules import EvolvableModule
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.networks import EvolvableNetwork
 from agilerl.typing import BPTTSequenceType
-import agilerl.utils.algo_utils as algo_utils
+from agilerl.utils import algo_utils
 from agilerl.utils.algo_utils import (
-    check_supported_space,
-    clone_llm,
     CosineLRScheduleConfig,
     DummyOptimizer,
     VLLMConfig,
     _reconcile_shapes,
     apply_env_defined_actions,
     apply_image_normalization,
+    check_supported_space,
     chkpt_attribute_to_device,
+    clone_llm,
     concatenate_experiences_into_batches,
     concatenate_spaces,
     concatenate_tensors,
@@ -40,14 +41,14 @@ from agilerl.utils.algo_utils import (
     extract_sequences_from_episode,
     filter_init_dict,
     flatten_experiences,
+    format_shared_critic_encoder,
     get_action_mask_size,
+    get_experiences_samples,
     get_hidden_states_shape_from_model,
     get_input_size_from_space,
-    get_output_size_from_space,
-    format_shared_critic_encoder,
-    get_experiences_samples,
     get_num_actions,
     get_obs_shape,
+    get_output_size_from_space,
     get_vect_dim,
     is_image_space,
     is_peft_model,
@@ -138,7 +139,7 @@ class MockEvolvableNetwork(EvolvableNetwork):
 
 class TestMultiDimClamp:
     @pytest.mark.parametrize(
-        "min_val, max_val, action, expected_result, device",
+        ("min_val", "max_val", "action", "expected_result", "device"),
         [
             (0.0, 1.0, [1.1, 0.75, -1], [1.0, 0.75, 0.0], "cpu"),
             (
@@ -172,7 +173,7 @@ class TestMultiDimClamp:
         assert torch.allclose(result, expected)
 
     @pytest.mark.parametrize(
-        "min_val, max_val, action, expected_result, device",
+        ("min_val", "max_val", "action", "expected_result", "device"),
         [
             (
                 [-1, -1, -1],
@@ -292,7 +293,7 @@ class TestApplyImageNormalization:
         np.testing.assert_array_equal(result, obs)
 
     def test_raises_for_non_box_space(self):
-        with pytest.raises(TypeError, match="Expected spaces.Box"):
+        with pytest.raises(TypeError, match=r"Expected spaces\.Box"):
             algo_utils.apply_image_normalization(
                 np.array([1.0], dtype=np.float32), spaces.Discrete(2)
             )
@@ -425,7 +426,7 @@ class TestObsChannelsToFirst:
 
     def test_obs_channels_to_first_unsupported_type(self):
         """obs_channels_to_first raises for non-ndarray/dict."""
-        with pytest.raises(TypeError, match="Expected np.ndarray or dict"):
+        with pytest.raises(TypeError, match=r"Expected np\.ndarray or dict"):
             obs_channels_to_first("invalid")
 
 
@@ -486,7 +487,7 @@ class TestObsToTensor:
 
     def test_raises_for_unsupported_observation_type(self):
         with pytest.raises(TypeError, match="Unrecognized type of observation"):
-            algo_utils.obs_to_tensor(set([1, 2]), device="cpu")
+            algo_utils.obs_to_tensor({1, 2}, device="cpu")
 
 
 class TestMaybeAddBatchDim:
@@ -897,7 +898,7 @@ class TestPreprocessObservations:
             preprocess_observation(spaces.Text(5), "hello", "cpu")
 
     def test_preprocess_dict_observation_assert_non_dict(self):
-        """assert dict/TensorDict for preprocess_dict."""
+        """Assert dict/TensorDict for preprocess_dict."""
         dict_space = spaces.Dict({"a": spaces.Box(0, 1, (2,))})
         with pytest.raises(AssertionError, match="Expected dict"):
             preprocess_observation(dict_space, "not_a_dict", "cpu")
@@ -915,7 +916,7 @@ class TestPreprocessObservations:
         assert result[1].shape == (1, 3)
 
     @pytest.mark.parametrize(
-        "space_factory,obs_factory",
+        ("space_factory", "obs_factory"),
         [
             (lambda: spaces.Box(0, 1, (2,)), lambda: np.array([[np.nan, 0.5]])),
             (lambda: spaces.MultiBinary(2), lambda: np.array([[np.nan, 0]])),
@@ -1073,7 +1074,7 @@ class TestStackExperiences:
             stack_experiences([[b"bytes"], [b"bytes"]])  # bytes not in supported types
 
     def test_stack_experiences_tuple_branch(self):
-        """stack tuple experiences with to_torch."""
+        """Stack tuple experiences with to_torch."""
         tuple_exps = [
             (np.ones(3), np.zeros(2)),
             (np.ones(3) * 0.5, np.ones(2) * 0.5),
@@ -1122,7 +1123,7 @@ class TestFlattenExperiences:
         assert f2.shape == (50, 4)
 
     def test_flatten_experiences_numpy(self):
-        """flatten numpy array experiences."""
+        """Flatten numpy array experiences."""
         np_exp = np.ones((5, 10, 8))
         (flat,) = flatten_experiences(np_exp)
         assert isinstance(flat, np.ndarray)
@@ -1195,7 +1196,7 @@ class TestStackAndPadExperiences:
         assert result.shape[0] == 3
 
     def test_stack_and_pad_experiences_with_device(self):
-        """device arg moves stacked tensor to device."""
+        """Device arg moves stacked tensor to device."""
         tensors = [torch.tensor([[1, 2]]), torch.tensor([[3, 4, 5]])]
         (result,) = stack_and_pad_experiences(
             tensors, padding_values=[0], device="cpu", padding_side="right"
@@ -1387,7 +1388,7 @@ class TestVectorizeExperiencesByAgent:
 
 class TestExperienceToTensors:
     @pytest.mark.parametrize(
-        "exp_type,space",
+        ("exp_type", "space"),
         [
             (
                 {"a": np.ones((2, 3)), "b": np.zeros((2, 2))},
@@ -1420,7 +1421,9 @@ class TestExperienceToTensors:
 def test_module_checkpoint_single():
     mod = DummyEvolvableModule()
     out = module_checkpoint_single(mod, "actor")
-    assert "actor_cls" in out and "actor_init_dict" in out and "actor_state_dict" in out
+    assert "actor_cls" in out
+    assert "actor_init_dict" in out
+    assert "actor_state_dict" in out
 
 
 def test_get_hidden_states_shape_from_model():
@@ -1438,7 +1441,7 @@ def test_get_hidden_states_shape_from_model():
 
 
 def test_filter_init_dict():
-    """filter init dict to valid params."""
+    """Filter init dict to valid params."""
 
     class Foo:
         def __init__(self, a: int, b: int):
@@ -1492,8 +1495,10 @@ def test_apply_env_defined_actions():
         agent_ids, action_dict, env_defined, masks, discrete_actions=False
     )
     assert result is action_dict
-    assert action_dict["a"][0] == 10 and action_dict["a"][1] == 2
-    assert action_dict["b"][0] == 3 and action_dict["b"][1] == 40
+    assert action_dict["a"][0] == 10
+    assert action_dict["a"][1] == 2
+    assert action_dict["b"][0] == 3
+    assert action_dict["b"][1] == 40
 
 
 @pytest.mark.skipif(
@@ -1563,7 +1568,7 @@ def test_get_input_size_from_space():
 
 
 @pytest.mark.parametrize(
-    "space,expected",
+    ("space", "expected"),
     [
         (spaces.Discrete(5), 5),
         (spaces.MultiDiscrete([3, 4, 2]), 9),
@@ -1963,3 +1968,42 @@ class TestResolveLr:
         primary, secondary = algo_utils._resolve_lr(agent, ("lr_actor", "lr_critic"))
         assert primary == 1e-4
         assert secondary == 1e-3
+
+
+class TestInheritInitSignature:
+    class _Parent:
+        def __init__(self, a, b=2, *, loss_type="x", c=3):
+            self.a, self.b, self.loss_type, self.c = a, b, loss_type, c
+
+    def test_inherits_parent_signature_minus_fixed(self):
+        class Child(self._Parent):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, loss_type="fixed", **kwargs)
+
+        algo_utils.inherit_init_signature(self._Parent, fixed={"loss_type"})(Child)
+        # __init__ signature (read by EvolvableAlgorithm) keeps ``self``.
+        assert set(inspect.signature(Child.__init__).parameters) == {
+            "self",
+            "a",
+            "b",
+            "c",
+        }
+        # The constructor-call signature drops ``self`` and the fixed param.
+        assert set(inspect.signature(Child).parameters) == {"a", "b", "c"}
+        assert "loss_type" not in inspect.signature(Child).parameters
+        assert "self" not in inspect.signature(Child).parameters
+
+    def test_keeps_all_params_when_no_fixed_given(self):
+        class Child(self._Parent):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+
+        algo_utils.inherit_init_signature(self._Parent)(Child)
+        assert "loss_type" in inspect.signature(Child).parameters
+
+    def test_raises_when_subclass_has_no_own_init(self):
+        class NoInit(self._Parent):
+            pass
+
+        with pytest.raises(TypeError, match="must define its own __init__"):
+            algo_utils.inherit_init_signature(self._Parent)(NoInit)

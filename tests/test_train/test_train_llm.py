@@ -386,7 +386,10 @@ class TestFinetuneLlmPreference:
             mock_tournament_selection_and_mutation.return_value = [mock_agent]
 
             mock_agg.return_value = 0.5
-            with pytest.warns(UserWarning) as num_epochs_and_max_steps_warning:
+            with pytest.warns(
+                UserWarning,
+                match=r"'num_epochs' will take precedence over 'max_steps'",
+            ) as num_epochs_and_max_steps_warning:
                 train_llm_dataset(
                     pop=[mock_agent],
                     env=mock_env,
@@ -395,10 +398,10 @@ class TestFinetuneLlmPreference:
                     max_steps=100,
                     evo_steps=None,
                 )
-                assert (
-                    "'num_epochs' is set but 'max_steps' is also set. 'num_epochs' will take precedence over 'max_steps'."
-                    in str(num_epochs_and_max_steps_warning[0].message)
-                )
+            assert (
+                "'num_epochs' is set but 'max_steps' is also set. 'num_epochs' will take precedence over 'max_steps'."
+                in str(num_epochs_and_max_steps_warning[0].message)
+            )
 
     def test_finetune_llm_preference_break_on_num_epochs(self):
         # Create mock agent
@@ -471,7 +474,7 @@ class TestFinetuneLlmPreference:
         mock_agent.scores = [0.0]
         with pytest.raises(
             ValueError,
-            match="The algorithm must be DPO .preference. or SFT .supervised.",
+            match=r"The algorithm must be DPO .preference. or SFT .supervised.",
         ):
             train_llm_dataset(
                 pop=[mock_agent],
@@ -543,7 +546,7 @@ class TestFinetuneLlmPreference:
         assert agent_b.learn.call_args.args[0] == {"prompt": ["b"]}
 
     def test_finetune_llm_preference_csv_logging_without_wandb(self, tmp_path, capsys):
-        """DPO: csv_check only path; teardown closes CSV and prints path (train_llm.py ~858–860)."""
+        """DPO: csv_check only path; teardown closes CSV and prints path (train_llm.py ~858-860)."""
         mock_agent = MagicMock(spec=DPO)
         mock_agent.algo = "DPO"
         mock_agent.fitness = [0.0]
@@ -636,7 +639,7 @@ class TestFinetuneLlmPreference:
                 "agilerl.training.train_llm.aggregate_metrics_across_gpus"
             ) as mock_agg,
             patch("agilerl.training.train_llm.save_llm_checkpoint"),
-            patch("agilerl.training.train_llm.wandb") as mock_wandb,
+            patch("agilerl.training.train_llm.wandb"),
         ):
             mock_agg.return_value = 0.5
             train_llm_dataset(
@@ -832,7 +835,10 @@ class TestFinetuneLlmSft:
             mock_safe_agg.side_effect = lambda acc, val: (
                 float(val) if not isinstance(val, float) else val
             )
-            with pytest.warns(UserWarning) as num_epochs_and_max_steps_warning:
+            with pytest.warns(
+                UserWarning,
+                match=r"'num_epochs' will take precedence over 'max_steps'",
+            ) as num_epochs_and_max_steps_warning:
                 train_llm_dataset(
                     pop=[mock_agent],
                     env=mock_env,
@@ -841,8 +847,8 @@ class TestFinetuneLlmSft:
                     max_steps=100,
                     evo_steps=None,
                 )
-                assert "num_epochs" in str(num_epochs_and_max_steps_warning[0].message)
-                assert "max_steps" in str(num_epochs_and_max_steps_warning[0].message)
+            assert "num_epochs" in str(num_epochs_and_max_steps_warning[0].message)
+            assert "max_steps" in str(num_epochs_and_max_steps_warning[0].message)
 
     def test_finetune_llm_sft_break_on_num_epochs(self):
         """Test that finetune_llm_sft breaks when num_epochs is reached."""
@@ -900,7 +906,7 @@ class TestFinetuneLlmSft:
         mock_agent.scores = [0.0]
         with pytest.raises(
             ValueError,
-            match="The algorithm must be DPO .preference. or SFT .supervised.",
+            match=r"The algorithm must be DPO .preference. or SFT .supervised.",
         ):
             train_llm_dataset(
                 pop=[mock_agent],
@@ -970,7 +976,7 @@ class TestFinetuneLlmSft:
         assert agent1.learn.call_count >= 1
 
     def test_finetune_llm_sft_csv_logging_without_wandb(self, tmp_path, capsys):
-        """SFT: csv_check only; teardown closes CSV and prints path (train_llm.py ~1094–1096)."""
+        """SFT: csv_check only; teardown closes CSV and prints path (train_llm.py ~1094-1096)."""
         mock_agent = MagicMock(spec=SFT)
         mock_agent.algo = "SFT"
         mock_agent.registry = MagicMock()
@@ -1045,7 +1051,7 @@ class TestFinetuneLlmSft:
             patch("agilerl.training.train_llm.trange"),
             patch("agilerl.utils.utils.safe_aggregate_metrics") as mock_safe_agg,
             patch("agilerl.training.train_llm.save_llm_checkpoint"),
-            patch("agilerl.training.train_llm.wandb") as mock_wandb,
+            patch("agilerl.training.train_llm.wandb"),
         ):
             mock_safe_agg.side_effect = lambda acc, val: (
                 float(val) if not isinstance(val, float) else val
@@ -1114,7 +1120,8 @@ class TestFinetuneLlmMultiturn:
 
     def test_finetune_llm_multiturn_forwards_sampling_logps_to_learn(self):
         """When the rollout captures sampling logps, they're forwarded to
-        ``learn(..., sampling_logps=...)`` for GRPO/PPO/REINFORCE agents."""
+        ``learn(..., sampling_logps=...)`` for GRPO/PPO/REINFORCE agents.
+        """
         mock_agent = _make_multiturn_mock_agent(spec=GRPO)
         mock_env = _make_multiturn_mock_env(turn_boundaries_len=3)
         sampling_logps = [torch.zeros(1, 7)]
@@ -1566,7 +1573,8 @@ class TestFinetuneLlmMultiturn:
 
     def test_finetune_llm_multiturn_accelerator_syncs_after_test(self):
         """Covers accelerator.wait_for_everyone() after distributed eval aggregation
-        that follows the ``agent.test`` call."""
+        that follows the ``agent.test`` call.
+        """
         mock_agent = _make_multiturn_mock_agent()
         mock_agent.test.return_value = np.array(0.1, dtype=np.float32)
         mock_env = _make_multiturn_mock_env(turn_boundaries_len=3)
@@ -1807,7 +1815,8 @@ class TestBuildEvalWandbDict:
 
     def test_build_eval_wandb_dict_reasoning_reward_and_accuracy(self):
         """Default reasoning mode aggregates Eval/Reward, plus Eval/Accuracy when
-        ``max_reward`` is set, across the population."""
+        ``max_reward`` is set, across the population.
+        """
         pop = _make_pop_for_wandb_dict(size=2)
         metrics = {
             "agent_0/test_metrics": {"Eval/Reward": 1.0, "Eval/Accuracy": 0.8},
@@ -2129,7 +2138,7 @@ def test_init_llm_wandb_passes_entity_and_run_name():
 
 
 @pytest.mark.parametrize(
-    "finetune_fn, agent_spec",
+    ("finetune_fn", "agent_spec"),
     [
         (train_llm_dataset, DPO),
         (train_llm_dataset, SFT),
@@ -2213,14 +2222,16 @@ def test_open_csv_log_and_log_row(tmp_path):
     from agilerl.training.train_llm import _log_csv_row, _open_csv_log
 
     csv_file, writer = _open_csv_log(str(tmp_path), ["step"], None)
-    assert csv_file is not None and writer is not None
+    assert csv_file is not None
+    assert writer is not None
     _log_csv_row(writer, csv_file, {"step": 1}, None)
     csv_file.close()
 
     non_main = MagicMock()
     non_main.is_main_process = False
     csv_file_none, writer_none = _open_csv_log(str(tmp_path), ["step"], non_main)
-    assert csv_file_none is None and writer_none is None
+    assert csv_file_none is None
+    assert writer_none is None
 
     writer_mock = MagicMock()
     file_mock = MagicMock()

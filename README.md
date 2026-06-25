@@ -7,6 +7,7 @@
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Documentation Status](https://readthedocs.org/projects/agilerl/badge/?version=latest)](https://docs.agilerl.com/en/latest/?badge=latest)
+[![Coverage](https://codecov.io/gh/AgileRL/AgileRL/graph/badge.svg?token=20SOBJFVYL)](https://codecov.io/gh/AgileRL/AgileRL)
 [![Linux](https://github.com/AgileRL/AgileRL/actions/workflows/linux-tests.yml/badge.svg)](https://github.com/AgileRL/AgileRL/actions/workflows/linux-tests.yml)
 [![macOS](https://github.com/AgileRL/AgileRL/actions/workflows/macos-tests.yml/badge.svg)](https://github.com/AgileRL/AgileRL/actions/workflows/macos-tests.yml)
 [![Windows](https://github.com/AgileRL/AgileRL/actions/workflows/windows-tests.yml/badge.svg)](https://github.com/AgileRL/AgileRL/actions/workflows/windows-tests.yml)
@@ -22,7 +23,7 @@ AgileRL is a Deep Reinforcement Learning library focused on improving developmen
 
 This library is initially focused on reducing the time taken for training models and hyperparameter optimization (HPO) by pioneering [evolutionary HPO techniques](https://docs.agilerl.com/en/latest/evo_hyperparam_opt/index.html) for reinforcement learning.<br>
 Evolutionary HPO has been shown to drastically reduce overall training times by automatically converging on optimal hyperparameters, without requiring numerous training runs.<br>
-We are constantly adding more algorithms and features. AgileRL already includes state-of-the-art evolvable [on-policy](https://docs.agilerl.com/en/latest/on_policy/index.html), [off-policy](https://docs.agilerl.com/en/latest/off_policy/index.html), [offline](https://docs.agilerl.com/en/latest/offline_training/index.html), [multi-agent](https://docs.agilerl.com/en/latest/multi_agent_training/index.html) and [contextual multi-armed bandit](https://docs.agilerl.com/en/latest/bandits/index.html) reinforcement learning algorithms with [distributed training](https://docs.agilerl.com/en/latest/distributed_training/index.html).
+We are constantly adding more algorithms and features. AgileRL already includes state-of-the-art evolvable [LLM fine-tuning](https://docs.agilerl.com/en/latest/llm_finetuning/index.html), [on-policy](https://docs.agilerl.com/en/latest/on_policy/index.html), [off-policy](https://docs.agilerl.com/en/latest/off_policy/index.html), [offline](https://docs.agilerl.com/en/latest/offline_training/index.html), [multi-agent](https://docs.agilerl.com/en/latest/multi_agent_training/index.html) and [contextual multi-armed bandit](https://docs.agilerl.com/en/latest/bandits/index.html) reinforcement learning algorithms with [distributed training](https://docs.agilerl.com/en/latest/distributed_training/index.html).
 
 <p align="center">
   <img src=https://user-images.githubusercontent.com/47857277/236407686-21363eb3-ffcf-419f-b019-0be4ddf1ed4a.gif width="100%" max-width="900">
@@ -68,6 +69,17 @@ pip install git+https://github.com/AgileRL/AgileRL.git@nightly
 ```
 
 ## Benchmarks
+
+### LLM Fine-tuning benchmarks
+
+AgileRL's multi-turn LLM training enables state-of-the-art performance on long-horizon tasks with small models. In the following example, AgileRL's CISPO was benchmarked against ART and TRL on the <a href="https://github.com/axon-rl/gem">GEM</a> Sudoku Hard task. This is a difficult multi-turn problem, which requires a context length of 32k tokens and up to 50 turns per rollout. The sync AgileRL run is a single agent using the AgileRL framework. The async and HPO runs were performed on <a href="https://arena.agilerl.com">Arena</a>, AgileRL's RLOps platform. All runs used the same starting hyperparameters. AgileRL runs were run on A100 40GB nodes, whereas ART and TRL required A100 80GB nodes due to a lack of optimizations. AgileRL runs significantly outperformed those using the ART and TRL frameworks.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/AgileRL/AgileRL/main/docs/_static/multi_turn_llm_benchmarks.png" min-width="100%" width="700">
+</p>
+
+
+### Classic RL benchmarks
 
 Reinforcement learning algorithms and libraries are usually benchmarked once the optimal hyperparameters for training are known, but it often takes hundreds or thousands of experiments to discover these. This is unrealistic and does not reflect the true, total time taken for training. What if we could remove the need to conduct all these prior experiments?
 

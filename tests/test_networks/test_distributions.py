@@ -3,12 +3,11 @@
 import numpy as np
 import pytest
 import torch
-import torch.nn as nn
 from gymnasium import spaces
+from torch import nn
 
 from agilerl.modules.base import EvolvableModule
 from agilerl.networks.distributions import EvolvableDistribution, TorchDistribution
-
 
 # --------------------------------------------------------------------------- #
 # Helper: minimal EvolvableModule for testing EvolvableDistribution
@@ -41,7 +40,8 @@ class TestTorchDistributionSample:
 
         action = dist.sample()
         assert action.shape == (batch_size,)
-        assert torch.all(action >= 0) and torch.all(action < 5)
+        assert torch.all(action >= 0)
+        assert torch.all(action < 5)
 
         lp = dist.log_prob(action)
         assert lp.shape == (batch_size,)
@@ -66,7 +66,8 @@ class TestTorchDistributionSample:
 
         action = dist.sample()
         assert action.shape == (batch_size, 2)
-        assert torch.all(action >= -1.0) and torch.all(action <= 1.0)
+        assert torch.all(action >= -1.0)
+        assert torch.all(action <= 1.0)
 
         lp = dist.log_prob(action)
         assert lp.shape == (batch_size,)
@@ -198,7 +199,7 @@ class TestEvolvableDistributionApplyMask:
 
 class TestEvolvableDistributionForward:
     def test_evolvable_distribution_forward_list_action_mask(self):
-        """forward handles action_mask given as a list of numpy arrays."""
+        """Forward handles action_mask given as a list of numpy arrays."""
         action_space = spaces.Discrete(3)
         net = _DummyModule(4, 3)
         ed = EvolvableDistribution(action_space=action_space, network=net)
@@ -211,7 +212,7 @@ class TestEvolvableDistributionForward:
         assert torch.all(torch.isfinite(entropy))
 
     def test_evolvable_distribution_forward_object_array_action_mask(self):
-        """forward handles action_mask given as a numpy object array."""
+        """Forward handles action_mask given as a numpy object array."""
         action_space = spaces.Discrete(3)
         net = _DummyModule(4, 3)
         ed = EvolvableDistribution(action_space=action_space, network=net)
@@ -241,7 +242,7 @@ class TestEvolvableDistributionForward:
         ed = EvolvableDistribution(action_space=action_space, network=net)
         latent = torch.randn(2, 4)
         bad_mask = [np.array([1, 0, 1]), np.array([1, 0])]  # non-uniform lengths
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError, match="expected sequence of length 3 at dim 1"):
             ed(latent, action_mask=bad_mask)
 
 
