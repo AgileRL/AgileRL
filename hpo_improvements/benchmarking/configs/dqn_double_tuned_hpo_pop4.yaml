@@ -1,22 +1,24 @@
 ---
-# TUNED Double DQN WITH HPO + CROSSOVER (population of 16, elitism, activation +
-# architecture + RL-hyperparameter mutations) on the Atari 2600 suite.
+# TUNED Double DQN WITH HPO (population of 4, elitism, activation + architecture
+# + RL-hyperparameter mutations) on the Atari 2600 suite.
 #
-# This is the crossover-operator variant of dqn_double_tuned_hpo.yaml: identical in
-# every respect except that the `tournament_selection` block is replaced by a
-# `crossover` block. The new evolution procedure is: evaluate fitness -> recombine
-# the population by two-point crossover -> mutate as usual. Crossover recombines
-# each agent's hyperparameters freely while keeping architecture+weights+activations
-# as one inseparable gene. See dqn_double_tuned_hpo.yaml for the full derivation of
-# the base hyperparameters, the mutation block and the architecture search space.
+# This is the HPO counterpart of dqn_double_tuned_no_hpo.yaml. The base
+# hyperparameters, the Mnih et al. (2015) -> AgileRL mapping, and the tuned
+# Double DQN deltas from van Hasselt, Guez & Silver (2016) are all unchanged --
+# see dqn_double_tuned_no_hpo.yaml for the full derivation (epsilon decay,
+# tau = 1/30000, reward clipping, replay-buffer sizing, etc.). The only additions
+# here are the `mutation` / `tournament_selection` blocks (and pop_size = 4),
+# which switch this same training script into an evolutionary HPO regime: a
+# population of agents is trained, periodically mutated, and re-selected by
+# tournament instead of a single never-mutated agent.
 #
-# Crossover additions over dqn_double_tuned_hpo.yaml:
-#   crossover.num_parents = 8 (top half of pop_size = 16 form the recombination
-#     pool -- stronger truncation selection than the paper's ~80%)
-#   crossover.swap_prob = 0.333333 (per-section hyperparameter-exchange probability;
-#     lower than the paper's 0.7 to reduce churn so good combinations persist)
-#   crossover.elitism = true (the single best agent is cloned unchanged)
-#   tournament_selection block removed (crossover replaces tournament selection)
+# HPO additions over dqn_double_tuned_no_hpo.yaml:
+#   pop_size = 4, elitism = true, tournament_size = 2
+#   activation mutations ON (act_mut = 0.2) alongside arch / params / rl_hp muts
+#   rl_hp_selection mutates the highest-leverage, well-behaved DQN hyperparameters
+#     (lr, batch_size, learn_step), each with grow/shrink factors scaled to its
+#     sensitivity; gamma and tau are deliberately held fixed (see rl_hp_selection)
+#   network min/max bounds now actively define the architecture search space
 
 algorithm:
     name: DQN
@@ -139,23 +141,19 @@ replay_buffer:
     # 300,000 (not the paper's 1,000,000): AgileRL keeps the buffer on the
     # training device and stores full 4-frame stacks for obs and next_obs, so 1M
     # would need ~53 GiB of GPU memory. See dqn_double_tuned_no_hpo.yaml for details.
-    # NOTE: this buffer is allocated per agent, so a population of 16 needs ~16x
+    # NOTE: this buffer is allocated per agent, so a population of 4 needs ~4x
     # the replay memory of the single-agent no-HPO run.
     max_size: 300_000
 
-crossover:
-    num_parents: 8    # top half of pop_size = 16 form the recombination pool (stronger truncation selection)
-    swap_prob: 0.333333  # per-section hyperparameter-exchange probability (lower churn so good combos persist)
-    elitism: true     # the top number_of_elites agents are cloned unchanged into the next generation (preserved unmutated, since mutate_elite is false above)
-    number_of_elites: 1  # number of highest-fitness agents preserved exactly each generation
-    number_of_crossover_points: 2  # cut points splitting each chromosome into number_of_crossover_points + 1 swappable sections (2 = two-point; min 1, max = number of genes so every section is one gene)
-    rand_seed: 42
+tournament_selection:
+    tournament_size: 2
+    elitism: true  # the single best agent is cloned into the next generation each step (preserved unmutated, since mutate_elite is false above)
 
 training:
     max_steps: 6_250_000
     target_score:
-    pop_size: 16
-    evo_steps: 100_000  # env steps between evolution events (mutate + crossover)
+    pop_size: 4
+    evo_steps: 100_000  # env steps between evolution events (mutate + tournament select)
     eval_steps:
     eval_loop: 1
     dormant_tau: 0.1  # tau threshold for the dormant-neuron metric (Sokar et al. 2023)

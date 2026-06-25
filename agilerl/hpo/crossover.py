@@ -21,7 +21,7 @@ BUNDLE = "__bundle__"
 
 
 class Crossover:
-    """Two-point recombination operator for evolutionary HPO, an alternative to
+    """Multi-point recombination operator for evolutionary HPO, an alternative to
     :class:`TournamentSelection <agilerl.hpo.tournament.TournamentSelection>`.
 
     Calling :func:`Crossover.crossover` on a population returns the elite agent and
@@ -29,9 +29,10 @@ class Crossover:
     *chromosome*: a (reproducibly shuffled) list of its mutable RL-hyperparameter
     genes followed by a single :data:`BUNDLE` gene holding its
     architecture/weights/activations. Two parents drawn from the top-fitness pool
-    are split at two crossover points into three sections, and each section is
-    independently swapped between the two chromosomes with probability
-    ``swap_prob``. The recombined chromosomes are assembled back into two offspring.
+    are split at ``number_of_crossover_points`` crossover points into
+    ``number_of_crossover_points + 1`` sections, and each section is independently
+    swapped between the two chromosomes with probability ``swap_prob``. The
+    recombined chromosomes are assembled back into two offspring.
 
     The new evolution procedure is: evaluate fitness → ``crossover`` the population
     → mutate the population (unchanged). Crossover is *not* applied to the single
@@ -54,6 +55,14 @@ class Crossover:
         elite *returned* by :func:`crossover` is always a clone of the single best
         agent regardless of this value. Defaults to 1.
     :type number_of_elites: int
+    :param number_of_crossover_points: Number of crossover points used to split
+        each chromosome into swappable sections. ``k`` points yield ``k + 1``
+        sections, so larger values recombine the parents in finer pieces. Must be
+        at least 1; its maximum (validated in :func:`crossover`, where the
+        chromosome length is known) is the chromosome length minus one — the value
+        that makes every section a single gene (the :data:`BUNDLE` counts as one
+        gene). Defaults to 2 (two-point crossover).
+    :type number_of_crossover_points: int
     :param rand_seed: Random seed for reproducible recombination.
     :type rand_seed: int
     """
@@ -65,6 +74,7 @@ class Crossover:
         elitism: bool,
         population_size: int,
         number_of_elites: int = 1,
+        number_of_crossover_points: int = 2,
         rand_seed: int = 42,
     ) -> None:
         assert population_size > 0, "Population size must be greater than zero."
@@ -78,12 +88,16 @@ class Crossover:
         assert number_of_elites <= population_size, (
             "Number of elites cannot exceed the population size."
         )
+        assert number_of_crossover_points >= 1, (
+            "Number of crossover points must be at least one."
+        )
 
         self.num_parents = num_parents
         self.swap_prob = swap_prob
         self.elitism = elitism
         self.population_size = population_size
         self.number_of_elites = number_of_elites
+        self.number_of_crossover_points = number_of_crossover_points
         # A single, never-reseeded Generator: determinism comes from constructing
         # it once and consuming the stream across calls (mirrors Mutations'
         # rand_seed, and is deliberately isolated from the global np.random that
@@ -110,6 +124,24 @@ class Crossover:
         :return: Elite agent and new population.
         :rtype: tuple[EvolvableAlgorithm, PopulationT]
         """
+        # The chromosome is the agent's mutable HP genes plus the single BUNDLE
+        # gene; every agent shares the same HP names (same algorithm), so its
+        # length is constant across the population. With ``k`` crossover points the
+        # chromosome splits into ``k + 1`` sections, so all sections can be a single
+        # gene only when ``k + 1 <= len(chromosome)``; beyond that the request is
+        # unsatisfiable. Validated here (not in __init__) because the chromosome
+        # length is unknown until a population is available.
+        chromosome_len = len(population[0].registry.hp_config.names()) + 1  # + BUNDLE
+        max_points = chromosome_len - 1
+        if self.number_of_crossover_points > max_points:
+            msg = (
+                f"number_of_crossover_points ({self.number_of_crossover_points}) "
+                f"cannot exceed {max_points} (the chromosome length "
+                f"{chromosome_len} minus one), the value at which every swappable "
+                f"section is a single gene."
+            )
+            raise ValueError(msg)
+
         fitnesses = [self._scalar_fitness(indi.fitness[-1]) for indi in population]
         max_id = max(ind.index for ind in population)
 
@@ -182,9 +214,15 @@ class Crossover:
         chromosome = [*hp_names, BUNDLE]
         n = len(chromosome)
 
-        # Two crossover points split each chromosome into three sections.
-        cuts = sorted(int(c) for c in self.rng.integers(0, n + 1, size=2))
-        sections = [(0, cuts[0]), (cuts[0], cuts[1]), (cuts[1], n)]
+        # ``number_of_crossover_points`` cut points split each chromosome into that
+        # many sections plus one. (With the default of 2 this reproduces the
+        # original two-point, three-section behaviour, including the RNG draw.)
+        cuts = sorted(
+            int(c)
+            for c in self.rng.integers(0, n + 1, size=self.number_of_crossover_points)
+        )
+        bounds = [0, *cuts, n]
+        sections = [(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1)]
 
         # For each section, independently decide whether to swap it. Offspring 1
         # defaults to parent_a's genes (swapped sections take parent_b's);

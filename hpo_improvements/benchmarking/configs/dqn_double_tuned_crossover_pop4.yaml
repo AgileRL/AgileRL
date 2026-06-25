@@ -1,5 +1,5 @@
 ---
-# TUNED Double DQN WITH HPO + CROSSOVER (population of 16, elitism, activation +
+# TUNED Double DQN WITH HPO + CROSSOVER (population of 4, elitism, activation +
 # architecture + RL-hyperparameter mutations) on the Atari 2600 suite.
 #
 # This is the crossover-operator variant of dqn_double_tuned_hpo.yaml: identical in
@@ -11,7 +11,7 @@
 # the base hyperparameters, the mutation block and the architecture search space.
 #
 # Crossover additions over dqn_double_tuned_hpo.yaml:
-#   crossover.num_parents = 8 (top half of pop_size = 16 form the recombination
+#   crossover.num_parents = 2 (top half of pop_size = 4 form the recombination
 #     pool -- stronger truncation selection than the paper's ~80%)
 #   crossover.swap_prob = 0.333333 (per-section hyperparameter-exchange probability;
 #     lower than the paper's 0.7 to reduce churn so good combinations persist)
@@ -139,12 +139,12 @@ replay_buffer:
     # 300,000 (not the paper's 1,000,000): AgileRL keeps the buffer on the
     # training device and stores full 4-frame stacks for obs and next_obs, so 1M
     # would need ~53 GiB of GPU memory. See dqn_double_tuned_no_hpo.yaml for details.
-    # NOTE: this buffer is allocated per agent, so a population of 16 needs ~16x
+    # NOTE: this buffer is allocated per agent, so a population of 4 needs ~4x
     # the replay memory of the single-agent no-HPO run.
     max_size: 300_000
 
 crossover:
-    num_parents: 8    # top half of pop_size = 16 form the recombination pool (stronger truncation selection)
+    num_parents: 2    # top half of pop_size = 4 form the recombination pool (stronger truncation selection)
     swap_prob: 0.333333  # per-section hyperparameter-exchange probability (lower churn so good combos persist)
     elitism: true     # the top number_of_elites agents are cloned unchanged into the next generation (preserved unmutated, since mutate_elite is false above)
     number_of_elites: 1  # number of highest-fitness agents preserved exactly each generation
@@ -154,7 +154,7 @@ crossover:
 training:
     max_steps: 6_250_000
     target_score:
-    pop_size: 16
+    pop_size: 4
     evo_steps: 100_000  # env steps between evolution events (mutate + crossover)
     eval_steps:
     eval_loop: 1

@@ -100,6 +100,20 @@ class TestCrossoverInit:
         )
         assert cx.number_of_elites == 3
 
+    def test_number_of_crossover_points_defaults_to_two(self):
+        cx = Crossover(num_parents=3, swap_prob=0.7, elitism=True, population_size=8)
+        assert cx.number_of_crossover_points == 2
+
+    def test_number_of_crossover_points_stored(self):
+        cx = Crossover(
+            num_parents=3,
+            swap_prob=0.7,
+            elitism=True,
+            population_size=8,
+            number_of_crossover_points=4,
+        )
+        assert cx.number_of_crossover_points == 4
+
     @pytest.mark.parametrize(
         "num_parents,swap_prob,elitism,population_size,number_of_elites,match",
         [
@@ -122,6 +136,21 @@ class TestCrossoverInit:
                 elitism=elitism,
                 population_size=population_size,
                 number_of_elites=number_of_elites,
+            )
+
+    @pytest.mark.parametrize("number_of_crossover_points", [0, -1])
+    def test_number_of_crossover_points_below_one_raises(
+        self, number_of_crossover_points
+    ):
+        with pytest.raises(
+            AssertionError, match="crossover points must be at least one"
+        ):
+            Crossover(
+                num_parents=3,
+                swap_prob=0.7,
+                elitism=True,
+                population_size=8,
+                number_of_crossover_points=number_of_crossover_points,
             )
 
 
@@ -176,6 +205,55 @@ class TestCrossoverSelect:
         )
         _, new_population = cx.crossover(population)
         assert len(new_population) == population_size
+
+    @pytest.mark.parametrize("number_of_crossover_points", [1, 3])
+    def test_number_of_crossover_points_runs(self, number_of_crossover_points):
+        # Fewer or more crossover points than the default both produce a valid
+        # population of the right size.
+        population_size = 6
+        population = _make_population("DQN", population_size)
+        cx = Crossover(
+            num_parents=4,
+            swap_prob=0.7,
+            elitism=True,
+            population_size=population_size,
+            number_of_crossover_points=number_of_crossover_points,
+        )
+        _, new_population = cx.crossover(population)
+        assert len(new_population) == population_size
+        assert len({a.index for a in new_population}) == population_size
+
+    def test_number_of_crossover_points_at_max_runs(self):
+        # The maximum value (chromosome length - 1, i.e. number of HP genes) makes
+        # every swappable section a single gene; it must be accepted.
+        population_size = 4
+        population = _make_population("DQN", population_size)
+        n_genes = len(population[0].registry.hp_config.names()) + 1  # + BUNDLE
+        cx = Crossover(
+            num_parents=3,
+            swap_prob=0.7,
+            elitism=False,
+            population_size=population_size,
+            number_of_crossover_points=n_genes - 1,
+        )
+        _, new_population = cx.crossover(population)
+        assert len(new_population) == population_size
+
+    def test_number_of_crossover_points_above_max_raises(self):
+        # One above the maximum (chromosome length) cannot make all sections a
+        # single gene, so it is rejected when the chromosome length is known.
+        population_size = 4
+        population = _make_population("DQN", population_size)
+        n_genes = len(population[0].registry.hp_config.names()) + 1  # + BUNDLE
+        cx = Crossover(
+            num_parents=3,
+            swap_prob=0.7,
+            elitism=False,
+            population_size=population_size,
+            number_of_crossover_points=n_genes,
+        )
+        with pytest.raises(ValueError, match="number_of_crossover_points"):
+            cx.crossover(population)
 
     def test_parents_drawn_from_top_pool(self):
         population_size = 6
@@ -405,6 +483,7 @@ class TestBuildCrossoverFromSpec:
             swap_prob=0.6,
             elitism=False,
             number_of_elites=2,
+            number_of_crossover_points=3,
             rand_seed=7,
         )
         cx = build_crossover_from_spec(spec, TrainingSpec(pop_size=8))
@@ -414,6 +493,7 @@ class TestBuildCrossoverFromSpec:
         assert cx.elitism is False
         assert cx.population_size == 8
         assert cx.number_of_elites == 2
+        assert cx.number_of_crossover_points == 3
 
     def test_num_parents_exceeds_pop_size_raises(self):
         spec = CrossoverSpec(num_parents=16)
@@ -434,6 +514,7 @@ class TestCrossoverSpec:
             {"swap_prob": 1.5},
             {"swap_prob": -0.1},
             {"number_of_elites": 0},
+            {"number_of_crossover_points": 0},
             {"rand_seed": -1},
         ],
     )
@@ -447,4 +528,5 @@ class TestCrossoverSpec:
         assert spec.swap_prob == 0.7
         assert spec.elitism is True
         assert spec.number_of_elites == 1
+        assert spec.number_of_crossover_points == 2
         assert spec.rand_seed == 42

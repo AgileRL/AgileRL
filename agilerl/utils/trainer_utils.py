@@ -333,6 +333,7 @@ def build_crossover_from_spec(
         elitism=crossover_spec.elitism,
         population_size=training_spec.pop_size,
         number_of_elites=crossover_spec.number_of_elites,
+        number_of_crossover_points=crossover_spec.number_of_crossover_points,
         rand_seed=crossover_spec.rand_seed,
     )
 

@@ -1,22 +1,25 @@
 ---
-# PPO WITH HPO + CROSSOVER (population of 16, elitism, architecture +
-# RL-hyperparameter mutations; activation mutations OFF) on Gymnasium MuJoCo.
+# PPO WITH HPO (population of 4, elitism, architecture + RL-hyperparameter
+# mutations; activation mutations OFF) on Gymnasium MuJoCo.
 #
-# This is the crossover-operator variant of ppo_relu_hpo.yaml: identical in every
-# respect except that the `tournament_selection` block is replaced by a `crossover`
-# block. The new evolution procedure is: evaluate fitness -> recombine the
-# population by two-point crossover -> mutate as usual. Crossover recombines each
-# agent's hyperparameters freely while keeping architecture+weights+activations as
-# one inseparable gene. See ppo_relu_hpo.yaml for the full derivation of the base
-# hyperparameters, the mutation block and the architecture search space.
+# This is the HPO counterpart of ppo_relu_no_hpo.yaml. The base hyperparameters,
+# the "ReLU to the Rescue" (Jesson et al., 2024) mapping, and the 1-env -> 16-env
+# CleanRL scaling (learn_step = 16 x 2048 = 32768, batch_size = 32768/32 = 1024)
+# are unchanged -- see ppo_relu_no_hpo.yaml for the full derivation -- with one
+# deliberate exception: ent_coef is raised from the paper's 0.0 to 0.001 so HPO can
+# mutate it (the multiplicative mutation cannot move a 0.0 base off zero). The other
+# additions here are the `mutation` / `tournament_selection` blocks (and
+# pop_size = 4), which switch this same training script into an evolutionary HPO
+# regime: a population of agents is trained, periodically mutated, and re-selected
+# by tournament instead of a single never-mutated agent.
 #
-# Crossover additions over ppo_relu_hpo.yaml:
-#   crossover.num_parents = 8 (top half of pop_size = 16 form the recombination
-#     pool -- stronger truncation selection than the paper's ~80%)
-#   crossover.swap_prob = 0.333333 (per-section hyperparameter-exchange probability;
-#     lower than the paper's 0.7 to reduce churn so good combinations persist)
-#   crossover.elitism = true (the single best agent is cloned unchanged)
-#   tournament_selection block removed (crossover replaces tournament selection)
+# HPO additions over ppo_relu_no_hpo.yaml:
+#   pop_size = 4, elitism = true, tournament_size = 2
+#   activation mutations OFF (act_mut = 0.0); arch / new_layer / params / rl_hp on
+#   rl_hp_selection mutates the highest-leverage, well-behaved PPO hyperparameters
+#     (lr, clip_coef, update_epochs, batch_size, learn_step, ent_coef), each with
+#     grow/shrink factors scaled to its sensitivity
+#   network min/max bounds now actively define the architecture search space
 
 algorithm:
     name: PPO
@@ -166,18 +169,14 @@ network:
         output_vanish: true
         layer_norm: false
 
-crossover:
-    num_parents: 8    # top half of pop_size = 16 form the recombination pool (stronger truncation selection)
-    swap_prob: 0.333333  # per-section hyperparameter-exchange probability (lower churn so good combos persist)
-    elitism: true     # the top number_of_elites agents are cloned unchanged into the next generation (preserved unmutated, since mutate_elite is false above)
-    number_of_elites: 1  # number of highest-fitness agents preserved exactly each generation
-    number_of_crossover_points: 2  # cut points splitting each chromosome into number_of_crossover_points + 1 swappable sections (2 = two-point; min 1, max = number of genes so every section is one gene)
-    rand_seed: 42
+tournament_selection:
+    tournament_size: 2
+    elitism: true  # the single best agent is cloned into the next generation each step (preserved unmutated, since mutate_elite is false above)
 
 training:
     max_steps: 6_000_000
     target_score:
-    pop_size: 16
+    pop_size: 4
     # Env steps each agent trains between evolution events. Set to 5 x the base
     # rollout (5 x 32768 = 163840), a multiple of learn_step so agents complete
     # whole collect->update cycles. Five full PPO updates per generation is enough

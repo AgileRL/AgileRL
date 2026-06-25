@@ -1,21 +1,11 @@
 ---
-# IPPO on cooperative MPE (MPEv2) WITH evolutionary HPO + CROSSOVER (a population is
-# recombined, mutated and selected each generation). This is the crossover-operator
-# variant of ippo_mpe_hpo.yaml: identical in every respect except that the
-# `tournament_selection` block is replaced by a `crossover` block. The new evolution
-# procedure is: evaluate fitness -> recombine the population by two-point crossover ->
-# mutate as usual. Crossover recombines each agent's hyperparameters freely while
-# keeping architecture+weights+activations as one inseparable gene. See
-# ippo_mpe_hpo.yaml (and ippo_mpe_no_hpo.yaml) for the full mapping and rollout-sizing
-# notes.
-#
-# Crossover additions over ippo_mpe_hpo.yaml:
-#   crossover.num_parents = 8 (top half of pop_size = 16 form the recombination
-#     pool -- stronger truncation selection than the paper's ~80%)
-#   crossover.swap_prob = 0.333333 (per-section hyperparameter-exchange probability;
-#     lower than the paper's 0.7 to reduce churn so good combinations persist)
-#   crossover.elitism = true (the single best agent is cloned unchanged)
-#   tournament_selection block removed (crossover replaces tournament selection)
+# IPPO on cooperative MPE (MPEv2) WITH evolutionary HPO (a population is mutated
+# and selected each generation). The base hyperparameters match ippo_mpe_no_hpo.yaml
+# (AgileRL's canonical multi-agent IPPO/MPE recipe -- low lr, few PPO epochs, tight
+# gradient clipping, high entropy bonus); see that file for the full mapping and
+# rollout-sizing notes. The `mutation` + `tournament_selection` blocks below are what
+# turn this into an HPO run, and HPO is free to mutate away from this base (e.g. lower
+# ent_coef, raise lr) on the high-leverage knobs listed in rl_hp_selection.
 
 algorithm:
     name: IPPO
@@ -150,18 +140,14 @@ network:
         output_vanish: true
         layer_norm: false
 
-crossover:
-    num_parents: 8    # top half of pop_size = 16 form the recombination pool (stronger truncation selection)
-    swap_prob: 0.333333  # per-section hyperparameter-exchange probability (lower churn so good combos persist)
-    elitism: true     # the top number_of_elites agents are cloned unchanged into the next generation
-    number_of_elites: 1  # number of highest-fitness agents preserved exactly each generation
-    number_of_crossover_points: 2  # cut points splitting each chromosome into number_of_crossover_points + 1 swappable sections (2 = two-point; min 1, max = number of genes so every section is one gene)
-    rand_seed: 42
+tournament_selection:
+    tournament_size: 2
+    elitism: true  # the single best agent is cloned into the next generation each step
 
 training:
     max_steps: 2_000_000
     target_score:
-    pop_size: 16
+    pop_size: 4
     # ~195 evolution generations over the budget (10240 = 5 x the 2048-step base
     # rollout, so every agent completes whole collect->update cycles between
     # evolution events).

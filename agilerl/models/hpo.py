@@ -103,6 +103,12 @@ class CrossoverSpec(BaseModel):
         when ``elitism`` is True. The elite returned for checkpointing is always
         the single best agent regardless of this value. Defaults to 1.
     :type number_of_elites: int
+    :param number_of_crossover_points: Number of crossover points used to split
+        each chromosome into swappable sections. Must be at least 1; its maximum
+        (the chromosome length minus one, where every section is a single gene) is
+        validated when the :class:`Crossover` runs, where the chromosome length is
+        known. Defaults to 2 (two-point crossover) for backwards compatibility.
+    :type number_of_crossover_points: int
     :param rand_seed: Random seed for reproducible recombination.
     :type rand_seed: int
     """
@@ -113,4 +119,5 @@ class CrossoverSpec(BaseModel):
     swap_prob: float = Field(default=0.7, ge=0.0, le=1.0)
     elitism: bool = True
     number_of_elites: int = Field(default=1, ge=1)
+    number_of_crossover_points: int = Field(default=2, ge=1)
     rand_seed: int = Field(default=42, ge=0)

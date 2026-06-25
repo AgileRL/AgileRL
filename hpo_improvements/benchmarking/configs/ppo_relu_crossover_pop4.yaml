@@ -1,5 +1,5 @@
 ---
-# PPO WITH HPO + CROSSOVER (population of 16, elitism, architecture +
+# PPO WITH HPO + CROSSOVER (population of 4, elitism, architecture +
 # RL-hyperparameter mutations; activation mutations OFF) on Gymnasium MuJoCo.
 #
 # This is the crossover-operator variant of ppo_relu_hpo.yaml: identical in every
@@ -11,7 +11,7 @@
 # hyperparameters, the mutation block and the architecture search space.
 #
 # Crossover additions over ppo_relu_hpo.yaml:
-#   crossover.num_parents = 8 (top half of pop_size = 16 form the recombination
+#   crossover.num_parents = 2 (top half of pop_size = 4 form the recombination
 #     pool -- stronger truncation selection than the paper's ~80%)
 #   crossover.swap_prob = 0.333333 (per-section hyperparameter-exchange probability;
 #     lower than the paper's 0.7 to reduce churn so good combinations persist)
@@ -167,7 +167,7 @@ network:
         layer_norm: false
 
 crossover:
-    num_parents: 8    # top half of pop_size = 16 form the recombination pool (stronger truncation selection)
+    num_parents: 2    # top half of pop_size = 4 form the recombination pool (stronger truncation selection)
     swap_prob: 0.333333  # per-section hyperparameter-exchange probability (lower churn so good combos persist)
     elitism: true     # the top number_of_elites agents are cloned unchanged into the next generation (preserved unmutated, since mutate_elite is false above)
     number_of_elites: 1  # number of highest-fitness agents preserved exactly each generation
@@ -177,7 +177,7 @@ crossover:
 training:
     max_steps: 6_000_000
     target_score:
-    pop_size: 16
+    pop_size: 4
     # Env steps each agent trains between evolution events. Set to 5 x the base
     # rollout (5 x 32768 = 163840), a multiple of learn_step so agents complete
     # whole collect->update cycles. Five full PPO updates per generation is enough
