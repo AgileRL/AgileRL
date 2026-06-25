@@ -547,12 +547,12 @@ def serve_env():
     ``RolloutEnv``; the server (and any others served in the same test) is shut down
     when the test finishes, so individual tests stay free of start/stop boilerplate.
     """
-    from agilerl.llm_envs import serve
+    from agilerl.llm_envs import OpenEnvServer
 
     servers = []
 
     def _serve(env):
-        server = serve(env)
+        server = OpenEnvServer(env).start()
         servers.append(server)
         return server.base_url
 

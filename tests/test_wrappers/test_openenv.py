@@ -20,7 +20,6 @@ from agilerl.llm_envs import (
     OpenEnvWrapper,
     RolloutEnv,
     resolve_env,
-    serve,
 )
 from agilerl.llm_envs.openenv import _name_from_spec, _normalize_reset, _normalize_step
 
@@ -88,7 +87,7 @@ def test_server_and_client_round_trip_over_http() -> None:
 
 def test_serve_helper_starts_immediately() -> None:
     """``serve`` returns an already-running server."""
-    server = serve(_CountingEnv())
+    server = OpenEnvServer(_CountingEnv()).start()
     try:
         assert (
             OpenEnvClient(base_url=server.base_url).reset()[0] == "Start.\nReply 'go'."
@@ -100,7 +99,7 @@ def test_serve_helper_starts_immediately() -> None:
 def test_info_reports_dataset_size_and_tools() -> None:
     """``/state`` carries dataset size and advertised tool schemas to the client."""
     tools = [{"type": "function", "function": {"name": "calc", "parameters": {}}}]
-    server = serve(_CountingEnv(tools=tools))
+    server = OpenEnvServer(_CountingEnv(tools=tools)).start()
     try:
         client = OpenEnvClient(base_url=server.base_url)
         assert client.dataset_size == 0  # _CountingEnv has no dataset_size
@@ -312,7 +311,7 @@ def test_batch_serving_factory_gives_one_server_per_env() -> None:
 
 # --- RolloutEnv(url) over a real server ------------------------------------
 def test_rollout_env_drives_url_and_applies_suffix() -> None:
-    server = serve(_CountingEnv())
+    server = OpenEnvServer(_CountingEnv()).start()
     try:
         env = RolloutEnv(
             server.base_url, _MiniTok(), max_turns=2, apply_chat_template=False

@@ -1,16 +1,27 @@
-"""OpenEnv-backed env interface for ``RolloutEnv`` (text in, text out).
+"""The AgileRL <-> OpenEnv seam: host any local env as a server, hit it as a client.
 
-Every LLM-training env is hosted + reached through the OpenEnv server and protocol
-(https://github.com/meta-pytorch/OpenEnv): an env is wrapped in a
-:class:`OpenEnvWrapper` (an OpenEnv ``Environment``), served by OpenEnv's
-``HTTPEnvServer`` (:func:`serve`), and ``RolloutEnv`` drives it over the OpenEnv wire
-(``POST /reset`` / ``/step``) with an :class:`OpenEnvClient`. A standard text contract
-— :class:`TextAction` (``message``) and :class:`TextObservation` (``prompt``) — carries
-the model's text both ways, so there are no per-env codecs; :func:`resolve_env` turns a
-URL or a ``module:Class`` entrypoint into a hosted env.
+Every LLM-training env is reached the same way — text in, text out, over OpenEnv's
+HTTP protocol (https://github.com/meta-pytorch/OpenEnv). Three thin wrappers sit
+between AgileRL and the ``openenv`` package; each exists for a concrete reason
+OpenEnv's own classes don't cover for our use:
 
-This module is the AgileRL <-> OpenEnv seam: ``openenv`` owns the server/protocol;
-we own the text contract + the gym wrapper + the HTTP client.
+* :class:`OpenEnvWrapper` adapts an AgileRL local env (the ``reset`` / ``step`` text
+  contract) to OpenEnv's typed ``Environment`` ABC — the glue that lets OpenEnv host
+  our envs at all.
+* :class:`OpenEnvServer` runs OpenEnv's app (``create_app``) on uvicorn *inside the
+  training process* (a daemon thread on an ephemeral port, with ``start`` / ``stop``),
+  because OpenEnv's own host story is a standalone blocking process (a Space, a
+  container) — not something a trainer spins up and tears down per rollout.
+* :class:`OpenEnvClient` is a small *synchronous* httpx client, because OpenEnv's own
+  client is async + WebSocket-first; the rollout loop drives ``reset`` / ``step``
+  synchronously, so a plain sync client hitting the (async) server is simpler than
+  threading an event loop through the trainer.
+
+A standard text contract — :class:`TextAction` (``message``) / :class:`TextObservation`
+(``prompt``) — carries the model's text both ways, so there are no per-env codecs;
+:func:`resolve_env` turns a URL or a ``module:Class`` entrypoint into a hosted env.
+Because our server speaks the standard OpenEnv wire, OpenEnv's own async client can
+drive it too (e.g. the async Ray rollout path).
 """
 
 from __future__ import annotations
@@ -56,13 +67,16 @@ class TextObservation(Observation):
 
 
 class OpenEnvWrapper(Environment):
-    """Wrap any local env as an OpenEnv ``Environment``.
+    """Adapt an AgileRL local env to OpenEnv's typed ``Environment`` ABC.
 
-    ``inner`` provides ``reset(seed=None[, row_index, evaluation]) -> (prompt, info)``
-    and ``step(action_text) -> (prompt, reward, terminated, truncated, info)``. The
-    env's ``dataset_size`` / ``tools`` are surfaced on the OpenEnv ``state`` so a
-    client can read them; ``info``'s ``prefix`` / ``suffix`` are folded into the
-    prompt (OpenEnv does not round-trip observation metadata).
+    The required interop glue: an AgileRL env speaks a plain text contract, not
+    OpenEnv's typed ``Action`` / ``Observation`` / ``State``, so this bridges the two —
+    letting OpenEnv's server (or ours) host any local env unchanged. ``inner`` provides
+    ``reset(seed=None[, row_index, evaluation]) -> (prompt, info)`` and
+    ``step(action_text) -> (prompt, reward, terminated, truncated, info)``. The env's
+    ``dataset_size`` / ``tools`` are surfaced on the OpenEnv ``state`` so a client can
+    read them; ``info``'s ``prefix`` / ``suffix`` are folded into the prompt (OpenEnv
+    does not round-trip observation metadata).
 
     :param inner: The local env to host.
     :param env_name: Name reported in the env's OpenEnv metadata; defaults to
@@ -176,12 +190,17 @@ def _fold(text: str, info: dict[str, Any] | None) -> str:
 
 
 class OpenEnvServer:
-    """Host a local env over HTTP via OpenEnv's ``HTTPEnvServer`` (uvicorn in a thread).
+    """Run OpenEnv's app on uvicorn *inside the training process*.
 
-    Wraps ``env`` in a :class:`OpenEnvWrapper` and serves it, so any OpenEnv client —
-    ``RolloutEnv``, OpenEnv's own async client, a HF Space consumer — reaches it by
-    URL. Start it in training-loop setup; ``port=0`` (default) binds a free port read
-    back from :attr:`base_url`.
+    Why this rather than OpenEnv's host helpers directly: OpenEnv builds the FastAPI
+    app (``create_app``), but its hosting is meant to be a standalone, blocking process
+    (a HF Space, a container, ``python -m openenv``). A trainer needs to start a server
+    and stop it programmatically — often one per rollout — so this wraps the same
+    ``create_app`` in a uvicorn **daemon thread**, binds an ephemeral port (``port=0``)
+    read back from :attr:`base_url`, and exposes ``start`` / ``stop`` (and the
+    context-manager protocol). The env is wrapped in :class:`OpenEnvWrapper`, so any
+    OpenEnv client — :class:`OpenEnvClient`, OpenEnv's own async client, a HF Space
+    consumer — reaches it by URL.
 
     :param env: The local env to serve.
     :param host: Interface to bind (default loopback).
@@ -259,19 +278,15 @@ class OpenEnvServer:
         self.stop()
 
 
-def serve(
-    env: Any,
-    *,
-    host: str = "127.0.0.1",
-    port: int = 0,
-    env_name: str | None = None,
-) -> OpenEnvServer:
-    """Wrap ``env`` in an :class:`OpenEnvServer` and start it; returns the running server."""
-    return OpenEnvServer(env, host=host, port=port, env_name=env_name).start()
-
-
 class OpenEnvClient:
-    """HTTP client for an OpenEnv env server (text in, text out).
+    """Synchronous httpx client for an OpenEnv env server (text in, text out).
+
+    Why this rather than OpenEnv's own client: OpenEnv ships an async, WebSocket-first
+    ``EnvClient``. The rollout loop drives ``reset`` / ``step`` synchronously (token by
+    token), so a plain **sync** httpx client hitting the (async) FastAPI server is
+    simpler than threading an event loop through the trainer — and since our server
+    speaks the standard OpenEnv wire, OpenEnv's own async client can still drive it
+    (e.g. the async Ray path) when that is wanted.
 
     Drives any env hosted as an OpenEnv server — our own :class:`OpenEnvServer` or a
     third-party Space — over its REST wire via a single :class:`httpx.Client`.
@@ -469,7 +484,9 @@ def resolve_env(
         )
         raise ValueError(msg)
     env = _load_entrypoint(spec)(**(env_config or {}))
-    server = serve(env, host=host, port=port, env_name=_name_from_spec(spec))
+    server = OpenEnvServer(
+        env, host=host, port=port, env_name=_name_from_spec(spec)
+    ).start()
     return server.base_url, server
 
 

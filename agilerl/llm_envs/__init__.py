@@ -12,7 +12,6 @@ from agilerl.llm_envs.openenv import (
     TextAction,
     TextObservation,
     resolve_env,
-    serve,
 )
 from agilerl.llm_envs.rollout_env import (
     BatchRolloutEnv,
@@ -31,5 +30,4 @@ __all__ = [
     "TextObservation",
     "apply_chat_template",
     "resolve_env",
-    "serve",
 ]

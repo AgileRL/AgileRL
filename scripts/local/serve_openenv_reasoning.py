@@ -22,7 +22,7 @@ OpenEnv WebSocket sessions for per-session isolation.
 
 import time
 
-from agilerl.llm_envs import serve
+from agilerl.llm_envs import OpenEnvServer
 
 QUESTIONS = ["What is 2+2?", "Capital of France?", "What is 10-3?"]
 ANSWERS = ["4", "Paris", "7"]
@@ -57,7 +57,7 @@ class ReasoningServerEnv:
 
 def main() -> None:
     """Serve a tiny reasoning env over OpenEnv and block until Ctrl-C."""
-    server = serve(ReasoningServerEnv(QUESTIONS, ANSWERS))
+    server = OpenEnvServer(ReasoningServerEnv(QUESTIONS, ANSWERS)).start()
     print(f"OpenEnv server hosting a reasoning env at {server.base_url}", flush=True)
     print(
         "Set AGILERL_OPENENV_URL to this and run the trainer; Ctrl-C to stop.",

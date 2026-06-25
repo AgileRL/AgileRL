@@ -21,7 +21,6 @@ import torch
 from agilerl.llm_envs.openenv import (
     OpenEnvClient,
     OpenEnvServer,
-    serve,
 )
 from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
 
@@ -244,7 +243,7 @@ class RolloutEnv:
             ``apply_chat_template``, ``max_model_len``, ``timeout_s``).
         :rtype: RolloutEnv
         """
-        server = serve(make_env())
+        server = OpenEnvServer(make_env()).start()
         env = cls(server.base_url, tokenizer, max_turns=max_turns, **kwargs)
         env._owned_server = server
         return env

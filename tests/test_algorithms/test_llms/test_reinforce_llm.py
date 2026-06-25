@@ -1073,13 +1073,13 @@ class TestREINFORCETest:
     def test_test_method_token_observation_wrapper_branch(self):
         from transformers import AutoTokenizer
 
-        from agilerl.llm_envs import RolloutEnv, serve
+        from agilerl.llm_envs import OpenEnvServer, RolloutEnv
         from agilerl.utils.probe_envs_llm import ConstantTargetEnv
 
         tok = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
         if tok.pad_token_id is None:
             tok.pad_token = tok.eos_token
-        server = serve(ConstantTargetEnv(target_digit="1", prompt="1"))
+        server = OpenEnvServer(ConstantTargetEnv(target_digit="1", prompt="1")).start()
         try:
             env = RolloutEnv(
                 server.base_url,
