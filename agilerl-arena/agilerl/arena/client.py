@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, ClassVar, TypedDict
 
 import httpx
+from typing_extensions import Self
+
 from agilerl.arena.auth import (
     ArenaOAuth2,
     is_oauth_access_token_valid,
@@ -40,7 +42,6 @@ from agilerl.arena.utils import (
     prepare_env_upload,
     prepare_file_upload,
 )
-from typing_extensions import Self
 
 logger = logging.getLogger(__name__)
 
@@ -122,10 +123,7 @@ class ArenaClient:
     :rtype: None
     """
 
-    # TODO: Remove this once we have a production URL
-    # BASE_URL: ClassVar[str] = "https://arena.agilerl.com"
-    # BASE_URL: ClassVar[str] = "https://arena-dev.agilerl.rlops.ai"
-    BASE_URL: ClassVar[str] = "http://localhost:3001"
+    BASE_URL: ClassVar[str] = "https://arena.agilerl.com"
     CONFIG_DIR: ClassVar[Path] = Path.home() / ".arena"
     CONFIG_FILE: ClassVar[Path] = CONFIG_DIR / "config.json"
 
