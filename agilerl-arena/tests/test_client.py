@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -10,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
+
 from agilerl.arena.auth import ArenaOAuth2
 from agilerl.arena.client import ArenaClient, _TokenStore
 from agilerl.arena.exceptions import (
@@ -1555,15 +1557,18 @@ class TestProjectMethods:
 
 
 class TestInferenceDeployments:
-    def test_deploy_agent(self, api_key_client):
+    def test_deploy_agent(self, api_key_client, caplog):
         api_key_client._request = MagicMock(return_value={"deployed": True})
-        result = api_key_client.deploy_agent("exp1", checkpoint="step_100")
+        with caplog.at_level(logging.INFO, logger="agilerl.arena.client"):
+            result = api_key_client.deploy_agent("exp1", checkpoint="step_100")
         api_key_client._request.assert_called_once_with(
             "POST",
             "/api/cli/v1/inference/deploy",
             json={"experiment_name": "exp1", "checkpoint": "step_100"},
         )
         assert result == {"deployed": True}
+        assert "deployed successfully" in caplog.text
+        assert "step_100" in caplog.text
 
     def test_deploy_agent_no_checkpoint(self, api_key_client):
         api_key_client._request = MagicMock(return_value={"deployed": True})

@@ -3,8 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import agilerl.arena  # noqa: F401 — configure package logging before submodules
 import click
+
+import agilerl.arena  # noqa: F401 — configure package logging before submodules
 from agilerl.arena.cli_manifest import handle_help_option
 from agilerl.arena.config import CommandConfig, arena_client
 from agilerl.arena.exceptions import ArenaError
@@ -641,7 +642,8 @@ def experiment_checkpoints(
 ) -> None:
     """List checkpoints for an experiment."""
     with arena_client(config) as client:
-        emit_result(client.list_checkpoints(experiment_name=experiment_name))
+        rows = client.list_checkpoints(experiment_name=experiment_name)
+        emit_result(_format_checkpoint_rows_for_display(rows))
 
 
 @experiment.command("metrics")
@@ -713,6 +715,25 @@ def _redact_agent_rows_for_display(
             spec_copy.pop("api_key", None)
             copy_row["spec"] = spec_copy
         out.append(copy_row)
+    return out
+
+
+def _format_checkpoint_rows_for_display(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Put ``steps`` first and round ``size_mb`` to two decimals for the table."""
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        ordered: dict[str, Any] = {}
+        if "steps" in row:
+            ordered["steps"] = row["steps"]
+        for key, value in row.items():
+            if key == "steps":
+                continue
+            if key == "size_mb" and isinstance(value, (int, float)):
+                value = f"{value:.2f}"
+            ordered[key] = value
+        out.append(ordered)
     return out
 
 
@@ -814,13 +835,6 @@ def agent_deploy(
     """Deploy an agent from an experiment checkpoint."""
     with arena_client(config) as client:
         client.deploy_agent(experiment_name=experiment_name, checkpoint=checkpoint)
-        emit_result(
-            {
-                "deployed": True,
-                "experiment_name": experiment_name,
-                "checkpoint": checkpoint,
-            }
-        )
 
 
 @agent_cli.command("run")

@@ -1183,11 +1183,20 @@ class ArenaClient:
         :returns: A dictionary containing the deployment result.
         :rtype: dict[str, Any]
         """
-        return self._request(
+        result = self._request(
             "POST",
             "/api/cli/v1/inference/deploy",
             json={"experiment_name": experiment_name, "checkpoint": checkpoint},
         )
+        checkpoint_suffix = (
+            f" (checkpoint {checkpoint})" if checkpoint else " (best checkpoint)"
+        )
+        logger.info(
+            "Agent deployed successfully from experiment %s%s.",
+            experiment_name,
+            checkpoint_suffix,
+        )
+        return result
 
     def list_inference_deployments(
         self,

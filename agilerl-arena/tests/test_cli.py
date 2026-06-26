@@ -7,6 +7,8 @@ from unittest.mock import MagicMock, patch
 
 import click
 import pytest
+from click.testing import CliRunner
+
 from agilerl.arena.cli import (
     _redact_agent_rows_for_display,
     arena_client,
@@ -14,7 +16,6 @@ from agilerl.arena.cli import (
 )
 from agilerl.arena.config import CommandConfig, build_client
 from agilerl.arena.exceptions import ArenaAPIError
-from click.testing import CliRunner
 
 
 @pytest.fixture
@@ -753,6 +754,25 @@ class TestExperimentCheckpointsCommand:
             result = runner.invoke(main, ["experiments", "checkpoints", "my-exp"])
         assert result.exit_code == 0
         mock_client.list_checkpoints.assert_called_once_with(experiment_name="my-exp")
+
+    def test_checkpoints_orders_steps_first_and_rounds_size(self, runner, mock_client):
+        mock_client.list_checkpoints.return_value = [
+            {
+                "evaluation_score": None,
+                "size_mb": 0.8336706161499023,
+                "steps": 2080000,
+                "training_score": None,
+            }
+        ]
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["experiments", "checkpoints", "my-exp"])
+        assert result.exit_code == 0
+        # steps header precedes the other columns, size_mb is two decimals.
+        output = result.output.replace("\n", " ")
+        assert output.index("steps") < output.index("evaluation_score")
+        assert output.index("steps") < output.index("size_mb")
+        assert "0.83" in output
+        assert "0.8336706161499023" not in output
 
 
 class TestExperimentMetricsCommand:
