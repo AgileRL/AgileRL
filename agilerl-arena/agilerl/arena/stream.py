@@ -38,6 +38,8 @@ class StatusEvent:
     :type raw: dict[str, Any]
     :param kind: The envelope ``kind`` field (``"status"`` or ``"warning"``).
     :type kind: str
+    :param level: The envelope ``level`` field. .
+    :type level: str | None
     """
 
     stage: str
@@ -46,6 +48,7 @@ class StatusEvent:
     detail: dict[str, Any]
     raw: dict[str, Any]
     kind: str = "status"
+    level: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +144,7 @@ def parse_ndjson_line(line: str) -> StreamEvent:
                 message=_sanitize_detail(message), extras=extras, raw=payload
             )
 
+        level = payload.get("level")
         return StatusEvent(
             stage=str(payload.get("stage", "-")),
             status=status,
@@ -148,6 +152,7 @@ def parse_ndjson_line(line: str) -> StreamEvent:
             detail=detail,
             raw=payload,
             kind=kind,
+            level=str(level) if level is not None else None,
         )
 
     # This is unique to environment validation checks

@@ -19,6 +19,7 @@ from agilerl.arena.stream import (
     StreamEvent,
 )
 from rich.live import Live
+from rich.markup import escape
 from rich.table import Table
 from typing_extensions import Self
 
@@ -233,6 +234,8 @@ class StreamRichRenderer:
                 self.close()
             if event.kind == "warning":
                 logger.warning("%s", event.message)
+            elif event.level == "secondary-info":
+                logger.info("  [dim]%s[/dim]", escape(event.message))
             else:
                 logger.info("%s", event.message)
             return

@@ -416,18 +416,31 @@ class TestEnvValidateCommand:
         src_dir = tmp_path / "envdir"
         src_dir.mkdir()
         with _patched_arena_client(mock_client):
-            result = runner.invoke(main, ["env", "validate", "--source", str(src_dir)])
+            result = runner.invoke(
+                main, ["env", "validate", "my-env", "--source", str(src_dir)]
+            )
         assert result.exit_code == 0
         mock_client.validate_environment.assert_called_once()
         call_kwargs = mock_client.validate_environment.call_args.kwargs
-        assert call_kwargs["name"] == "envdir"
+        assert call_kwargs["name"] == "my-env"
         assert call_kwargs["source"] == src_dir
 
-    def test_validate_no_name_no_source_errors(self, runner, mock_client):
+    def test_validate_source_without_name_errors(self, runner, mock_client, tmp_path):
+        # The name is never inferred from --source; it must be passed explicitly.
+        src_dir = tmp_path / "envdir"
+        src_dir.mkdir()
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(main, ["env", "validate", "--source", str(src_dir)])
+        assert result.exit_code != 0
+        assert "Missing argument" in result.output
+        mock_client.validate_environment.assert_not_called()
+
+    def test_validate_no_name_errors(self, runner, mock_client):
         with _patched_arena_client(mock_client):
             result = runner.invoke(main, ["env", "validate"])
         assert result.exit_code != 0
-        assert "Provide a name" in result.output or "Usage" in result.output
+        assert "Missing argument" in result.output
+        mock_client.validate_environment.assert_not_called()
 
     def test_validate_multi_agent_with_rollouts(self, runner, mock_client):
         with _patched_arena_client(mock_client):

@@ -69,6 +69,62 @@ def _tar_to_tempfile(add_entries) -> BinaryIO:
     return buf
 
 
+_ENV_CONFIG_NAMES: tuple[str, ...] = (
+    "env_config.yaml",
+    "env_config.yml",
+    "env_config.json",
+)
+
+
+def discover_env_sidecars(
+    source: str | os.PathLike[str] | bytes,
+    *,
+    requirements: str | os.PathLike[str] | None,
+    env_config: str | os.PathLike[str] | None,
+) -> tuple[str | os.PathLike[str] | None, str | os.PathLike[str] | None]:
+    """Auto-detect ``requirements`` and ``env_config`` sidecars in a source dir.
+
+    When *source* is a directory, its top level is inspected for a
+    ``requirements.txt`` and an ``env_config.{yaml,yml,json}`` file (in that
+    precedence) so callers need not pass them explicitly. An explicitly provided
+    argument always wins and short-circuits detection for that slot. Non-directory
+    sources (single files, ``.tar.gz`` paths, or raw bytes) are passed through
+    unchanged.
+
+    :param source: The environment source.
+    :type source: str | os.PathLike[str] | bytes
+    :param requirements: Explicit requirements path, or ``None`` to auto-detect.
+    :type requirements: str | os.PathLike[str] | None
+    :param env_config: Explicit env-config path, or ``None`` to auto-detect.
+    :type env_config: str | os.PathLike[str] | None
+    :returns: The resolved ``(requirements, env_config)`` pair.
+    :rtype: tuple[str | os.PathLike[str] | None, str | os.PathLike[str] | None]
+    """
+    if requirements is not None and env_config is not None:
+        return requirements, env_config
+
+    if isinstance(source, bytes):
+        return requirements, env_config
+
+    path = Path(os.fspath(source)).expanduser().resolve()
+    if not path.is_dir():
+        return requirements, env_config
+
+    if requirements is None:
+        candidate = path / "requirements.txt"
+        if candidate.is_file():
+            requirements = candidate
+
+    if env_config is None:
+        for name in _ENV_CONFIG_NAMES:
+            candidate = path / name
+            if candidate.is_file():
+                env_config = candidate
+                break
+
+    return requirements, env_config
+
+
 def prepare_env_upload(
     source: str | os.PathLike[str] | bytes,
 ) -> tuple[str, BinaryIO | bytes]:

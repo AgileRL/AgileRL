@@ -72,6 +72,80 @@ class TestParseNdjsonLine:
         assert event.detail["accepted"] is True
         assert event.detail["experiment_id"] == 42
 
+    def test_status_event_without_level_is_none(self):
+        line = json.dumps(
+            {
+                "kind": "status",
+                "stage": "upload",
+                "status": "running",
+                "message": "Uploading environment",
+            }
+        )
+        event = parse_ndjson_line(line)
+        assert isinstance(event, StatusEvent)
+        assert event.level is None
+
+    def test_install_progress_carries_secondary_info_level(self):
+        line = json.dumps(
+            {
+                "kind": "status",
+                "stage": "validation",
+                "status": "running",
+                "level": "secondary-info",
+                "message": "Installed rich 14.3.3 (5/5)",
+                "detail": {
+                    "package": "rich",
+                    "version": "14.3.3",
+                    "count": 5,
+                    "total": 5,
+                },
+            }
+        )
+        event = parse_ndjson_line(line)
+        assert isinstance(event, StatusEvent)
+        assert event.level == "secondary-info"
+        assert event.status == "running"
+        assert event.detail["count"] == 5
+        assert event.detail["total"] == 5
+
+    def test_install_success_carries_info_level(self):
+        line = json.dumps(
+            {
+                "kind": "status",
+                "stage": "validation",
+                "status": "running",
+                "level": "info",
+                "message": "Installed 5 package(s)",
+                "detail": {"installed": 5},
+            }
+        )
+        event = parse_ndjson_line(line)
+        assert isinstance(event, StatusEvent)
+        assert event.level == "info"
+        assert event.status == "running"
+
+    def test_install_failure_becomes_error_event_with_reason_and_package(self):
+        line = json.dumps(
+            {
+                "kind": "status",
+                "stage": "validation",
+                "status": "failed",
+                "level": "error",
+                "message": "numpy conflicts with the validation environment",
+                "detail": {
+                    "reason": "incompatible",
+                    "error_code": "INSTALL_FAILED",
+                    "package": "numpy",
+                },
+            }
+        )
+        event = parse_ndjson_line(line)
+        assert isinstance(event, ErrorEvent)
+        assert event.message == "numpy conflicts with the validation environment"
+        assert event.extras["reason"] == "incompatible"
+        assert event.extras["package"] == "numpy"
+        assert "error_code" not in event.extras
+
     def test_status_failed_becomes_error_event(self):
         line = json.dumps(
             {

@@ -233,8 +233,7 @@ def env_entrypoints(
 
 
 @env.command("validate")
-@click.argument("name", required=False, default=None, type=str)
-@click.option("--name", "name_opt", default=None, hidden=True)
+@click.argument("name", type=str)
 @click.option("--version", default=None, show_default=True)
 @click.option(
     "--source",
@@ -275,8 +274,7 @@ def env_entrypoints(
 @click.pass_obj
 def env_validate(
     config: CommandConfig,
-    name: str | None,
-    name_opt: str | None,
+    name: str,
     version: str | None,
     source: Path | None,
     env_config: Path | None,
@@ -289,18 +287,13 @@ def env_validate(
 ) -> None:
     """Validate an environment on Arena.
 
-    Pass 'name' to validate an already-registered environment.  Pass --source
-    to register and validate in one step.  When using --source without a positional
-    'name', the source directory/file name is used by default.
+    Pass NAME to validate an already-registered environment.  Pass --source
+    to register and validate in one step.  NAME is always required and is never
+    inferred from --source.
     """
-    env_name = name or name_opt or (source.stem if source else None)
-    if env_name is None:
-        msg = "Provide a name of an already-registered environment or use --source to upload and validate from scratch."
-        raise click.UsageError(msg)
-
     with arena_client(config) as client:
         client.validate_environment(
-            name=env_name,
+            name=name,
             version=version,
             source=source,
             env_config=env_config,

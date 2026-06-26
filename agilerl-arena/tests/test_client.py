@@ -601,8 +601,9 @@ class TestEnvironmentListMethods:
 
 
 class TestValidateEnvironment:
-    def test_requires_name_or_source(self, api_key_client):
-        with pytest.raises(ArenaValidationError, match="must be provided"):
+    def test_name_is_required(self, api_key_client):
+        # ``name`` is mandatory and is never inferred from ``source``.
+        with pytest.raises(TypeError):
             api_key_client.validate_environment()
 
     def test_no_source_collects_by_default(self, api_key_client):
@@ -735,6 +736,54 @@ class TestValidateEnvironment:
                 source=archive,
                 requirements=tmp_path / "missing.txt",
             )
+
+    def test_directory_autodetects_sidecar_files(self, api_key_client, tmp_path):
+        env_dir = tmp_path / "my_env"
+        env_dir.mkdir()
+        (env_dir / "env.py").write_text("class MyEnv: pass")
+        (env_dir / "requirements.txt").write_text("numpy")
+        (env_dir / "env_config.yaml").write_text("key: val")
+
+        mock_stream = _mock_ndjson_stream({"status": "ok"})
+        api_key_client._open_stream = MagicMock(return_value=mock_stream)
+        # Neither requirements nor env_config passed explicitly.
+        api_key_client.validate_environment(name="MyEnv", source=env_dir)
+        files = api_key_client._open_stream.call_args[1]["files"]
+        # Real files were uploaded, not the empty placeholders (which are bytes).
+        assert files["requirements"][0] == "requirements.txt"
+        assert not isinstance(files["requirements"][1], bytes)
+        assert files["env_config"][0] == "env_config.yaml"
+        assert files["env_config"][2] == "application/x-yaml"
+        assert not isinstance(files["env_config"][1], bytes)
+
+    def test_directory_autodetects_json_env_config(self, api_key_client, tmp_path):
+        env_dir = tmp_path / "my_env"
+        env_dir.mkdir()
+        (env_dir / "env.py").write_text("class MyEnv: pass")
+        (env_dir / "env_config.json").write_text("{}")
+
+        mock_stream = _mock_ndjson_stream({"status": "ok"})
+        api_key_client._open_stream = MagicMock(return_value=mock_stream)
+        api_key_client.validate_environment(name="MyEnv", source=env_dir)
+        files = api_key_client._open_stream.call_args[1]["files"]
+        assert files["env_config"][0] == "env_config.json"
+        assert files["env_config"][2] == "application/json"
+
+    def test_explicit_args_override_directory_sidecars(self, api_key_client, tmp_path):
+        env_dir = tmp_path / "my_env"
+        env_dir.mkdir()
+        (env_dir / "env.py").write_text("x = 1")
+        (env_dir / "requirements.txt").write_text("numpy")
+        explicit = tmp_path / "explicit-reqs.txt"
+        explicit.write_text("torch")
+
+        mock_stream = _mock_ndjson_stream({"status": "ok"})
+        api_key_client._open_stream = MagicMock(return_value=mock_stream)
+        api_key_client.validate_environment(
+            name="MyEnv", source=env_dir, requirements=explicit
+        )
+        files = api_key_client._open_stream.call_args[1]["files"]
+        assert files["requirements"][0] == "explicit-reqs.txt"
 
 
 class TestDefaultProjectConfig:

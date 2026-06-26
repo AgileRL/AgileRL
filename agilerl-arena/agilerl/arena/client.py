@@ -33,6 +33,7 @@ from agilerl.arena.models import TrainingManifest
 from agilerl.arena.output import StreamRichRenderer
 from agilerl.arena.stream import NDJsonStream, StreamEvent
 from agilerl.arena.utils import (
+    discover_env_sidecars,
     extract_filename,
     multipart_text_fields,
     order_dataset_fields,
@@ -121,7 +122,10 @@ class ArenaClient:
     :rtype: None
     """
 
-    BASE_URL: ClassVar[str] = "https://arena.agilerl.com"
+    # TODO: Remove this once we have a production URL
+    # BASE_URL: ClassVar[str] = "https://arena.agilerl.com"
+    # BASE_URL: ClassVar[str] = "https://arena-dev.agilerl.rlops.ai"
+    BASE_URL: ClassVar[str] = "http://localhost:3001"
     CONFIG_DIR: ClassVar[Path] = Path.home() / ".arena"
     CONFIG_FILE: ClassVar[Path] = CONFIG_DIR / "config.json"
 
@@ -407,7 +411,7 @@ class ArenaClient:
     def validate_environment(
         self,
         *,
-        name: str | None = None,
+        name: str,
         version: str | None = None,
         source: str | os.PathLike[str] | bytes | None = None,
         env_config: str | os.PathLike[str] | None = None,
@@ -425,16 +429,20 @@ class ArenaClient:
         already-registered environment is validated by name/version.
 
         :param name: Environment name.
-        :type name: str | None
+        :type name: str
         :param version: Environment version. If creating an environment from scratch, defaults to "v1",
             if validating an already-registered environment, defaults to None, which resolves to the latest version.
         :type version: str | None
         :param source: Environment source — a directory path (compressed
             automatically), a ``.tar.gz`` file path, or raw ``bytes``.
         :type source: str | os.PathLike[str] | bytes | None
-        :param env_config: Path to the environment configuration file containing the environment parameters. Default is None.
+        :param env_config: Path to the environment configuration file containing the environment parameters.
+            When *source* is a directory and this is None, a top-level ``env_config.yaml``, ``env_config.yml``,
+            or ``env_config.json`` (in that order) is picked up automatically. Default is None.
         :type env_config: str | os.PathLike[str] | None
-        :param requirements: Path to additional dependencies needed for the environment. Default is None.
+        :param requirements: Path to additional dependencies needed for the environment.
+            When *source* is a directory and this is None, a top-level ``requirements.txt`` is picked up
+            automatically. Default is None.
         :type requirements: str | os.PathLike[str] | None
         :param entrypoint: Optional entrypoint override. Default is None.
         :type entrypoint: str | None
@@ -453,13 +461,6 @@ class ArenaClient:
         :returns: A dictionary containing the validation result.
         :rtype: dict[str, Any]
         """
-        if name is None and source is None:
-            msg = (
-                "To validate an environment on Arena, either the name of an already "
-                "registered environment or the source of a custom environment must be provided."
-            )
-            raise ArenaValidationError(msg)
-
         if source is not None:
             if version is None:
                 logger.info("No version specified, defaulting to v1.")
@@ -1391,6 +1392,12 @@ class ArenaClient:
         do_rollouts: bool,
     ) -> NDJsonStream:
         """Upload, create, and validate an environment."""
+        # When source is a directory, pick up requirements.txt / env_config.*
+        # sidecars from it unless the caller passed them explicitly.
+        requirements, env_config = discover_env_sidecars(
+            source, requirements=requirements, env_config=env_config
+        )
+
         # Resolve the environment source into a streamable upload payload
         archive_name, archive_payload = prepare_env_upload(source)
         data: dict[str, str] = {
@@ -1411,10 +1418,11 @@ class ArenaClient:
 
         # Check env_config and resolve for upload
         if env_config is not None:
+            is_json = Path(os.fspath(env_config)).suffix.lower() == ".json"
             files["env_config"] = prepare_file_upload(
                 env_config,
-                default_name="env_config.yaml",
-                content_type="application/x-yaml",
+                default_name="env_config.json" if is_json else "env_config.yaml",
+                content_type="application/json" if is_json else "application/x-yaml",
             )
         else:
             files["env_config"] = ("env_config.yaml", b"", "application/x-yaml")

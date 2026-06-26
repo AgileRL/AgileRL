@@ -146,6 +146,55 @@ class TestRendererStatusEvent:
 
         mock_logger.info.assert_called_once_with("%s", "Uploading environment")
 
+    @patch("agilerl.arena.output.logger")
+    def test_secondary_info_logs_dimmed_and_indented(self, mock_logger):
+        renderer = StreamRichRenderer()
+        event = StatusEvent(
+            stage="validation",
+            status="running",
+            message="Downloading pygments",
+            detail={"package": "pygments"},
+            raw={},
+            level="secondary-info",
+        )
+        renderer.handle_event(event)
+
+        mock_logger.info.assert_called_once_with(
+            "  [dim]%s[/dim]", "Downloading pygments"
+        )
+
+    @patch("agilerl.arena.output.logger")
+    def test_secondary_info_escapes_markup_in_message(self, mock_logger):
+        renderer = StreamRichRenderer()
+        event = StatusEvent(
+            stage="validation",
+            status="running",
+            message="Downloading uvicorn[standard]",
+            detail={},
+            raw={},
+            level="secondary-info",
+        )
+        renderer.handle_event(event)
+
+        logged = mock_logger.info.call_args[0][1]
+        # The opening bracket is backslash-escaped so Rich treats it literally.
+        assert r"\[standard]" in logged
+
+    @patch("agilerl.arena.output.logger")
+    def test_install_success_info_level_logs_normally(self, mock_logger):
+        renderer = StreamRichRenderer()
+        event = StatusEvent(
+            stage="validation",
+            status="running",
+            message="Installed 5 package(s)",
+            detail={"installed": 5},
+            raw={},
+            level="info",
+        )
+        renderer.handle_event(event)
+
+        mock_logger.info.assert_called_once_with("%s", "Installed 5 package(s)")
+
     def test_status_does_not_add_rows(self):
         renderer = StreamRichRenderer()
         event = StatusEvent(

@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from agilerl.arena.exceptions import ArenaFileNotFoundError
 from agilerl.arena.utils import (
+    discover_env_sidecars,
     extract_filename,
     multipart_text_fields,
     order_dataset_fields,
@@ -198,3 +199,88 @@ class TestPrepareFileUpload:
                 default_name="default.txt",
                 content_type="text/plain",
             )
+
+
+class TestDiscoverEnvSidecars:
+    def _dir(self, tmp_path: Path, *files: str) -> Path:
+        src = tmp_path / "env"
+        src.mkdir()
+        (src / "env.py").write_text("x = 1")
+        for f in files:
+            (src / f).write_text("data")
+        return src
+
+    def test_detects_requirements_txt_at_top_level(self, tmp_path: Path):
+        src = self._dir(tmp_path, "requirements.txt")
+        requirements, env_config = discover_env_sidecars(
+            src, requirements=None, env_config=None
+        )
+        assert Path(requirements) == src / "requirements.txt"
+        assert env_config is None
+
+    def test_detects_env_config_yaml(self, tmp_path: Path):
+        src = self._dir(tmp_path, "env_config.yaml")
+        _, env_config = discover_env_sidecars(src, requirements=None, env_config=None)
+        assert Path(env_config) == src / "env_config.yaml"
+
+    def test_detects_env_config_json(self, tmp_path: Path):
+        src = self._dir(tmp_path, "env_config.json")
+        _, env_config = discover_env_sidecars(src, requirements=None, env_config=None)
+        assert Path(env_config) == src / "env_config.json"
+
+    def test_env_config_precedence_yaml_over_yml_over_json(self, tmp_path: Path):
+        src = self._dir(
+            tmp_path, "env_config.json", "env_config.yml", "env_config.yaml"
+        )
+        _, env_config = discover_env_sidecars(src, requirements=None, env_config=None)
+        assert Path(env_config) == src / "env_config.yaml"
+
+    def test_explicit_requirements_takes_precedence(self, tmp_path: Path):
+        src = self._dir(tmp_path, "requirements.txt")
+        explicit = tmp_path / "other-reqs.txt"
+        explicit.write_text("numpy")
+        requirements, _ = discover_env_sidecars(
+            src, requirements=explicit, env_config=None
+        )
+        assert requirements == explicit
+
+    def test_explicit_env_config_takes_precedence(self, tmp_path: Path):
+        src = self._dir(tmp_path, "env_config.yaml")
+        explicit = tmp_path / "other-cfg.json"
+        explicit.write_text("{}")
+        _, env_config = discover_env_sidecars(
+            src, requirements=None, env_config=explicit
+        )
+        assert env_config == explicit
+
+    def test_no_sidecars_returns_none(self, tmp_path: Path):
+        src = self._dir(tmp_path)
+        requirements, env_config = discover_env_sidecars(
+            src, requirements=None, env_config=None
+        )
+        assert requirements is None
+        assert env_config is None
+
+    def test_only_top_level_not_nested(self, tmp_path: Path):
+        src = self._dir(tmp_path)
+        nested = src / "pkg"
+        nested.mkdir()
+        (nested / "requirements.txt").write_text("numpy")
+        requirements, _ = discover_env_sidecars(src, requirements=None, env_config=None)
+        assert requirements is None
+
+    def test_non_directory_source_is_passthrough(self, tmp_path: Path):
+        single = tmp_path / "env.py"
+        single.write_text("x = 1")
+        requirements, env_config = discover_env_sidecars(
+            single, requirements=None, env_config=None
+        )
+        assert requirements is None
+        assert env_config is None
+
+    def test_bytes_source_is_passthrough(self):
+        requirements, env_config = discover_env_sidecars(
+            b"raw", requirements=None, env_config=None
+        )
+        assert requirements is None
+        assert env_config is None
