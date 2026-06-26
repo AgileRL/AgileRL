@@ -29,11 +29,9 @@ from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
     assert_not_equal_state_dict,
     assert_state_dicts_equal,
-    skip_torch_compile_on_windows_cpu,
-)
-from tests.helpers.algorithm_coverage import (
     assert_transpose_image_observation_called,
     patch_transpose_image_observation,
+    skip_torch_compile_on_windows_cpu,
 )
 from tests.pz_vector_test_utils import make_sync_multi_agent_vec_env
 

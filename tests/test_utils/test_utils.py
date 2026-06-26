@@ -42,6 +42,7 @@ from agilerl.utils.utils import (
     create_population,
     default_progress_bar,
     get_env_defined_actions,
+    init_loggers,
     init_wandb,
     make_multi_agent_vect_envs,
     make_skill_vect_envs,
@@ -976,6 +977,29 @@ class TestInitWandb:
                 mutation_hyperparams={"MUT_1": 0.5},
             )
             assert mock_wandb.init.call_args[1]["config"].get("MUT_1") == 0.5
+
+
+class TestInitLoggers:
+    def test_tensorboard_and_csv_loggers(self, tmp_path):
+        from agilerl.logger import CSVLogger, TensorboardLogger
+
+        mock_sw = MagicMock()
+        pbar = MagicMock()
+        with patch("agilerl.logger.SummaryWriter", mock_sw):
+            loggers = init_loggers(
+                algo="PPO",
+                env_name="CartPole-v1",
+                pbar=pbar,
+                verbose=False,
+                tensorboard=True,
+                csv=True,
+                tensorboard_log_dir=str(tmp_path / "tb"),
+                csv_log_dir=str(tmp_path / "csv"),
+            )
+        assert len(loggers) == 2
+        assert isinstance(loggers[0], TensorboardLogger)
+        assert isinstance(loggers[1], CSVLogger)
+        mock_sw.assert_called_once()
 
 
 class TestTournamentSelectionAndMutation:

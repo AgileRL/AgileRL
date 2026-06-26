@@ -11,8 +11,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pydantic import ValidationError
 
-from agilerl.models.env import BanditEnvSpec, LLMEnvSpec, LLMEnvType
+from agilerl import HAS_ARENA_DEPENDENCIES, HAS_LLM_DEPENDENCIES
+from agilerl.models.algorithms.ppo import PPOSpec
+from agilerl.models.env import BanditEnvSpec, GymEnvSpec, LLMEnvSpec, LLMEnvType
 from agilerl.models.hpo import MutationSpec
+from agilerl.models.manifest import TrainingManifest
 from agilerl.models.networks import (
     CnnSpec,
     FinetuningNetworkSpec,
@@ -26,6 +29,10 @@ from agilerl.models.networks import (
     normalize_manifest_network,
 )
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
+
+requires_arena = pytest.mark.skipif(
+    not HAS_ARENA_DEPENDENCIES, reason="agilerl-arena is not installed"
+)
 
 
 class TestNormalizeManifestNetwork:
@@ -178,17 +185,98 @@ class TestCnnSpec:
 
 
 class TestFinetuningNetworkSpec:
-    """Lines 397, 409-410, 421, 423, 425 of networks.py."""
+    """PEFT LoRA coercion, resolution, and serialization in networks.py."""
 
     def test_coerce_non_dict_passthrough(self):
-        """_coerce_peft_lora with non-dict data."""
-        # A raw FinetuningNetworkSpec constructed normally still works
+        """_coerce_peft_lora with non-dict data returns input unchanged."""
+        payload = "not-a-dict"
+        assert FinetuningNetworkSpec._coerce_peft_lora(payload) is payload
+
+    @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
+    def test_coerce_peft_lora_config_instance(self):
+        """PEFT LoraConfig is converted before Pydantic validation."""
+        from types import SimpleNamespace
+
+        from peft import LoraConfig, TaskType
+
+        from agilerl.models.networks import _peft_lora_config_to_manifest_dict
+
+        peft_lora = LoraConfig(
+            r=8,
+            lora_alpha=16,
+            lora_dropout=0.1,
+            target_modules=["q_proj", "v_proj"],
+            task_type=TaskType.CAUSAL_LM,
+        )
+        manifest_dict = _peft_lora_config_to_manifest_dict(peft_lora)
+        assert manifest_dict["target_modules"] == ["q_proj", "v_proj"]
+        assert manifest_dict["task_type"] == "CAUSAL_LM"
+
+        enum_task = SimpleNamespace(value="SEQ_CLS")
+        manifest_dict = _peft_lora_config_to_manifest_dict(
+            SimpleNamespace(
+                r=4,
+                lora_alpha=8,
+                lora_dropout=0.0,
+                target_modules={"b", "a"},
+                task_type=enum_task,
+            )
+        )
+        assert manifest_dict["task_type"] == "SEQ_CLS"
+        assert manifest_dict["target_modules"] == ["a", "b"]
+
         spec = FinetuningNetworkSpec(
             pretrained_model_name_or_path="gpt2",
             max_context_length=512,
-            lora_config=None,
+            lora_config=peft_lora,
         )
-        assert spec.pretrained_model_name_or_path == "gpt2"
+        assert spec.lora_config is not None
+        assert spec.lora_config.r == 8
+
+    @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
+    def test_coerce_peft_lora_none_target_modules(self):
+        """PEFT LoraConfig with target_modules=None maps to all-linear."""
+        from peft import LoraConfig, TaskType
+
+        peft_lora = LoraConfig(
+            r=4,
+            lora_alpha=8,
+            target_modules=None,
+            task_type=TaskType.CAUSAL_LM,
+        )
+        spec = FinetuningNetworkSpec(
+            pretrained_model_name_or_path="gpt2",
+            max_context_length=512,
+            lora_config=peft_lora,
+        )
+        dumped = spec.model_dump(mode="json")
+        assert dumped["lora_config"]["target_modules"] == "all-linear"
+
+    def test_resolve_lora_config_without_llm_dependencies(self):
+        """LoraConfigDict resolution raises when LLM extras are absent."""
+        with patch("agilerl.models.networks.HAS_LLM_DEPENDENCIES", False):
+            with pytest.raises(ImportError, match="LLM dependencies are required"):
+                FinetuningNetworkSpec(
+                    pretrained_model_name_or_path="gpt2",
+                    max_context_length=512,
+                    lora_config=LoraConfigDict(),
+                )
+
+    @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
+    def test_serialize_lora_config_non_json_mode(self):
+        """_serialize_lora_config returns the live object outside json mode."""
+        from peft import LoraConfig, TaskType
+
+        peft_lora = LoraConfig(r=4, lora_alpha=8, task_type=TaskType.CAUSAL_LM)
+        spec = FinetuningNetworkSpec(
+            pretrained_model_name_or_path="gpt2",
+            max_context_length=512,
+            lora_config=peft_lora,
+        )
+        result = FinetuningNetworkSpec._serialize_lora_config(
+            spec, peft_lora, MagicMock(mode="python")
+        )
+        assert result is peft_lora
 
     def test_serialize_lora_none(self):
         """_serialize_lora_config with None value."""
@@ -321,6 +409,16 @@ class TestLLMEnvSpec:
             dataset="some/hf/dataset",
         )
         with patch.object(spec, "_load_dataset_hf", return_value=("t", "v")) as m:
+            _train, _test = spec._load_dataset()
+        m.assert_called_once()
+
+    def test_load_dataset_dispatches_parquet(self):
+        """_load_dataset dispatches to the parquet loader for .parquet paths."""
+        spec = LLMEnvSpec(
+            env_type=LLMEnvType.PREFERENCE,
+            dataset="data/train.parquet",
+        )
+        with patch.object(spec, "_load_dataset_file", return_value=("t", "v")) as m:
             _train, _test = spec._load_dataset()
         m.assert_called_once()
 
@@ -562,6 +660,30 @@ class TestAlgoSpecClassVars:
         assert kwargs["minari_dataset_id"] == "cart-v0"
         assert kwargs["remote"] is True
 
+    def test_offline_spec_dataset_path_uses_h5py(self, tmp_path):
+        """get_training_kwargs opens an offline HDF5 dataset when no Minari id."""
+        from agilerl.models.algo import RLAlgorithmSpec, offline
+
+        @offline()
+        class _OffSpec(RLAlgorithmSpec):
+            pass
+
+        dataset_path = tmp_path / "offline.h5"
+        dataset_path.write_bytes(b"")
+        spec = _OffSpec()
+        env_spec = MagicMock()
+        env_spec.name = "test"
+        env_spec.minari_dataset_id = None
+        env_spec.dataset_path = str(dataset_path)
+        training = TrainingSpec()
+        mock_file = MagicMock()
+
+        with patch("h5py.File", return_value=mock_file) as mock_h5:
+            kwargs = spec.get_training_kwargs(training=training, env_spec=env_spec)
+
+        mock_h5.assert_called_once_with(str(dataset_path), "r")
+        assert kwargs["dataset"] is mock_file
+
     def test_rl_spec_resume_from_checkpoint(self):
         """RLAlgorithmSpec.build_algorithm with resume."""
         from agilerl.models.algo import RLAlgorithmSpec
@@ -735,6 +857,31 @@ class TestLLMAlgorithmSpecBuild:
 
         mock_vllm.assert_called_once_with(tensor_parallel_size=1)
 
+    @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
+    def test_build_algorithm_quantization_and_attn_implementation(self):
+        """build_algorithm resolves nf4 quantization and attn_implementation."""
+        from agilerl.models.algorithms.grpo import GRPOSpec
+        from agilerl.utils.llm_utils import build_bnb_quantization_config
+
+        spec = GRPOSpec(
+            pretrained_model_name_or_path="gpt2",
+            group_size=4,
+            quantization="nf4",
+            attn_implementation="sdpa",
+        )
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.eos_token_id = 0
+        mock_tokenizer.eos_token = "<|endoftext|>"
+        mock_algo_cls = MagicMock()
+
+        with patch.object(type(spec), "algo_class", return_value=mock_algo_cls):
+            spec.build_algorithm(tokenizer=mock_tokenizer, index=0)
+
+        kwargs = mock_algo_cls.call_args.kwargs
+        assert "quantization" not in kwargs
+        assert kwargs["quantization_config"] == build_bnb_quantization_config("nf4")
+        assert kwargs["model_config"] == {"attn_implementation": "sdpa"}
+
     def test_resume_from_checkpoint(self):
         """build_algorithm with resume_from_checkpoint."""
         from agilerl.models.algo import LLMAlgorithmSpec
@@ -794,6 +941,75 @@ class TestManifestResolveAlgorithm:
         with patch("agilerl.models.manifest.HAS_LLM_DEPENDENCIES", False):
             with pytest.raises(ImportError, match="LLM dependencies"):
                 _resolve_algorithm({"name": "GRPO", "group_size": 4})
+
+
+class TestManifestHelpers:
+    """Helper resolvers and trainer-spec coercion in manifest.py."""
+
+    def test_coerce_environment_invalid_type(self):
+        from agilerl.models.manifest import _coerce_environment
+
+        with pytest.raises(TypeError, match="Expected a dict or environment spec"):
+            _coerce_environment(42)
+
+    def test_resolve_network_finetuning_spec(self):
+        from agilerl.models.manifest import _resolve_network
+
+        network = FinetuningNetworkSpec(
+            pretrained_model_name_or_path="gpt2",
+            max_context_length=512,
+        )
+        resolved = _resolve_network(network)
+        assert resolved["pretrained_model_name_or_path"] == "gpt2"
+        assert resolved["max_context_length"] == 512
+
+    @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
+    def test_network_from_algorithm_llm_agent(self):
+        from agilerl.models.algorithms.grpo import GRPOSpec
+        from agilerl.models.manifest import TrainingManifest
+
+        manifest = TrainingManifest.from_trainer_specs(
+            algorithm=GRPOSpec(
+                group_size=4,
+                pretrained_model_name_or_path="gpt2",
+                max_model_len=256,
+            ),
+            environment=GymEnvSpec(name="dummy"),
+            training=TrainingSpec(max_steps=10),
+        )
+        assert manifest.network is not None
+        assert manifest.network["pretrained_model_name_or_path"] == "gpt2"
+        assert manifest.network["max_context_length"] == 256
+
+
+@requires_arena
+class TestManifestFromTrainerSpecsForeignModels:
+    """Foreign BaseModel inputs are dumped before manifest validation."""
+
+    def test_from_trainer_specs_coerces_foreign_training_model(self):
+        from agilerl.arena.models.env import EnvSpec as ArenaEnvSpec
+        from pydantic import BaseModel
+
+        class ForeignTraining(BaseModel):
+            max_steps: int = 300
+            evo_steps: int = 50
+            pop_size: int = 2
+
+        manifest = TrainingManifest.from_trainer_specs(
+            algorithm=PPOSpec(learn_step=64),
+            environment=ArenaEnvSpec(name="CartPole-v1"),
+            training=ForeignTraining(),
+        )
+        assert manifest.training.max_steps == 300
+
+    def test_resolve_foreign_arena_algorithm(self):
+        from agilerl.arena.models.algorithms.ppo import PPOSpec as ArenaPPOSpec
+
+        from agilerl.models.manifest import _resolve_algorithm
+
+        resolved = _resolve_algorithm(ArenaPPOSpec(learn_step=48))
+        assert isinstance(resolved, PPOSpec)
+        assert resolved.learn_step == 48
 
 
 class TestTrainingSpec:
@@ -863,6 +1079,14 @@ class TestLLMPPOSpec:
         with pytest.raises(ValueError, match="VLLM config is not set"):
             LLMPPOSpec(use_vllm=True, vllm_config=None)
 
+    def test_vllm_config_accepted_when_use_vllm(self):
+        from agilerl.models.algorithms.llmppo import LLMPPOSpec
+        from agilerl.utils.algo_utils import VLLMConfig
+
+        spec = LLMPPOSpec(use_vllm=True, vllm_config=VLLMConfig())
+        assert spec.use_vllm is True
+        assert spec.vllm_config is not None
+
     def test_get_training_fn_multiturn(self):
         from agilerl.models.algorithms.llmppo import LLMPPOSpec
 
@@ -888,6 +1112,14 @@ class TestLLMREINFORCESpec:
 
         with pytest.raises(ValueError, match="VLLM config is not set"):
             LLMREINFORCESpec(use_vllm=True, vllm_config=None)
+
+    def test_vllm_config_accepted_when_use_vllm(self):
+        from agilerl.models.algorithms.llmreinforce import LLMREINFORCESpec
+        from agilerl.utils.algo_utils import VLLMConfig
+
+        spec = LLMREINFORCESpec(use_vllm=True, vllm_config=VLLMConfig())
+        assert spec.use_vllm is True
+        assert spec.vllm_config is not None
 
     def test_get_training_fn_multiturn(self):
         from agilerl.models.algorithms.llmreinforce import LLMREINFORCESpec

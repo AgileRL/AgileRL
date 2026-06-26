@@ -54,10 +54,12 @@ right branch was taken with the right kwargs.
 
 from __future__ import annotations
 
+import importlib
 import inspect
 import logging
 import re
 import shutil
+import sys
 import warnings
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -109,6 +111,23 @@ _LLM_DEPS_SKIP = pytest.mark.skipif(
 )
 
 _VLLM_SKIP = pytest.mark.skipif(not HAS_VLLM, reason="vLLM not installed")
+
+
+def test_core_base_vllm_types_none_when_vllm_not_installed():
+    """vLLM symbols are None when HAS_VLLM is false at import time."""
+    original_module = sys.modules.pop("agilerl.algorithms.core.base", None)
+
+    try:
+        with patch("agilerl.HAS_VLLM", False):
+            reloaded = importlib.import_module("agilerl.algorithms.core.base")
+            assert reloaded.LLM is None
+            assert reloaded.CompletionOutput is None
+            assert reloaded.SamplingParams is None
+    finally:
+        sys.modules["agilerl.algorithms.core.base"] = original_module
+        import agilerl.algorithms.core as _core_pkg
+
+        _core_pkg.base = original_module
 
 
 @pytest.fixture

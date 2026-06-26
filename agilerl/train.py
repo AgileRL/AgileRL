@@ -155,5 +155,5 @@ def main() -> None:
     logger.info("Training complete. Best fitness: %.4f", max(last_fitnesses))
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__":  # pragma: no cover
+    main()  # pragma: no cover

@@ -14,10 +14,8 @@ from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
     assert_not_equal_state_dict,
     assert_state_dicts_equal,
-    get_experiences_batch,
-)
-from tests.helpers.algorithm_coverage import (
     assert_transpose_image_observation_called,
+    get_experiences_batch,
     patch_transpose_image_observation,
 )
 

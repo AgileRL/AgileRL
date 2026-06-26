@@ -2335,6 +2335,93 @@ class TestTrainTargetEarlyReturn:
         assert fitnesses == population.last_fitnesses
         mock_finish.assert_called_once()
 
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
+    def test_train_multi_agent_off_policy_returns_when_target_met(
+        self,
+        multi_env,
+        multi_memory,
+    ):
+        agent = DummyMultiAgent(1, multi_env, on_policy=False)
+        agent.fitness = [100.0]
+        population = self._population_with_min_evo([agent])
+        should_stop_results: list[bool] = []
+
+        def should_stop_spy(target):
+            result = Population.should_stop(population, target)
+            should_stop_results.append(result)
+            return result
+
+        with (
+            patch(
+                "agilerl.training.train_multi_agent_off_policy.Population",
+                return_value=population,
+            ),
+            patch("agilerl.utils.utils.init_wandb"),
+            patch("agilerl.logger.wandb.run", new=MagicMock()),
+            patch("agilerl.logger.wandb.log"),
+            patch.object(population, "finish") as mock_finish,
+            patch.object(population, "should_stop", side_effect=should_stop_spy),
+        ):
+            agents, fitnesses = train_multi_agent_off_policy(
+                multi_env,
+                "env_name",
+                "algo",
+                [agent],
+                multi_memory,
+                max_steps=100,
+                evo_steps=2,
+                target=-1.0,
+                wb=True,
+                verbose=False,
+            )
+
+        assert agents is population.agents
+        assert fitnesses == population.last_fitnesses
+        mock_finish.assert_called_once()
+        assert should_stop_results == [True]
+        assert agent.steps < 100
+
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
+    def test_train_multi_agent_on_policy_returns_when_target_met(self, multi_env):
+        agent = DummyMultiAgent(1, multi_env, on_policy=True)
+        agent.fitness = [100.0]
+        population = self._population_with_min_evo([agent])
+        should_stop_results: list[bool] = []
+
+        def should_stop_spy(target):
+            result = Population.should_stop(population, target)
+            should_stop_results.append(result)
+            return result
+
+        with (
+            patch(
+                "agilerl.training.train_multi_agent_on_policy.Population",
+                return_value=population,
+            ),
+            patch("agilerl.utils.utils.init_wandb"),
+            patch("agilerl.logger.wandb.run", new=MagicMock()),
+            patch("agilerl.logger.wandb.log"),
+            patch.object(population, "finish") as mock_finish,
+            patch.object(population, "should_stop", side_effect=should_stop_spy),
+        ):
+            agents, fitnesses = train_multi_agent_on_policy(
+                multi_env,
+                "env_name",
+                "algo",
+                [agent],
+                max_steps=100,
+                evo_steps=2,
+                target=-1.0,
+                wb=True,
+                verbose=False,
+            )
+
+        assert agents is population.agents
+        assert fitnesses == population.last_fitnesses
+        mock_finish.assert_called_once()
+        assert should_stop_results == [True]
+        assert agent.steps < 100
+
     @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_offline_requires_dataset_or_minari(self, env):
         agent = DummyAgentOffPolicy(5, env, 0.4)
@@ -2894,6 +2981,30 @@ class TestTrainOnPolicy:
 
 
 class TestTrainMultiAgentOffPolicy:
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
+    def test_wraps_env_without_num_envs(self, state_size, action_size, multi_memory):
+        env = DummyMultiEnv(state_size, action_size)
+        del env.num_envs
+        agent = DummyMultiAgent(1, env, on_policy=False)
+        wrapped = DummyMultiEnv(state_size, action_size)
+
+        with patch(
+            "agilerl.training.train_multi_agent_off_policy.PzDummyVecEnv",
+            return_value=wrapped,
+        ) as mock_wrap:
+            train_multi_agent_off_policy(
+                env,
+                "env_name",
+                "algo",
+                [agent],
+                multi_memory,
+                max_steps=2,
+                evo_steps=2,
+                verbose=False,
+            )
+
+        mock_wrap.assert_called_once_with(env)
+
     @pytest.mark.parametrize("sum_scores", [True, False])
     @pytest.mark.parametrize("on_policy", [False])
     @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
@@ -3498,6 +3609,29 @@ class TestTrainMultiAgentOffPolicy:
 
 
 class TestTrainMultiAgentOnPolicy:
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
+    def test_wraps_env_without_num_envs(self, state_size, action_size):
+        env = DummyMultiEnv(state_size, action_size)
+        del env.num_envs
+        agent = DummyMultiAgent(1, env, on_policy=True)
+        wrapped = DummyMultiEnv(state_size, action_size)
+
+        with patch(
+            "agilerl.training.train_multi_agent_on_policy.PzDummyVecEnv",
+            return_value=wrapped,
+        ) as mock_wrap:
+            train_multi_agent_on_policy(
+                env,
+                "env_name",
+                "algo",
+                [agent],
+                max_steps=2,
+                evo_steps=2,
+                verbose=False,
+            )
+
+        mock_wrap.assert_called_once_with(env)
+
     @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("sum_scores", [True, False])
     @pytest.mark.parametrize("on_policy", [True])

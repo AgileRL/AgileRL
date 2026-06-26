@@ -746,6 +746,17 @@ class TestTrainingManifestArenaBridge:
         assert manifest.environment["name"] == "CartPole-v1"
         assert isinstance(manifest.algorithm, PPOSpec)
 
+    def test_from_trainer_specs_passthrough_plain_dict_mutation(self):
+        """Plain dict mutation hits the _coerce passthrough branch."""
+        manifest = TrainingManifest.from_trainer_specs(
+            algorithm=PPOSpec(learn_step=64),
+            environment=ArenaEnvSpec(name="CartPole-v1"),
+            training=TrainingSpec(max_steps=200),
+            mutation={"mutation_sd": 0.05},
+        )
+        assert manifest.mutation is not None
+        assert manifest.mutation.mutation_sd == 0.05
+
     def test_to_arena_manifest_from_dict_payload(self):
         data = {
             "algorithm": {"name": "PPO", "learn_step": 128},
@@ -769,6 +780,36 @@ class TestTrainingManifestArenaBridge:
         submission = TrainingManifest.to_arena_manifest(core)
         assert submission["algorithm"]["name"] == "PPO"
         assert submission["environment"]["name"] == "CartPole-v1"
+
+    def test_to_arena_manifest_from_yaml_path(self, tmp_path):
+        manifest_path = tmp_path / "manifest.yaml"
+        manifest_path.write_text(
+            yaml.safe_dump(
+                {
+                    "algorithm": {"name": "PPO", "learn_step": 32},
+                    "environment": {"name": "CartPole-v1", "num_envs": 2},
+                    "training": {"max_steps": 100, "evo_steps": 50, "pop_size": 2},
+                    "network": {
+                        "encoder_config": {"arch": "mlp", "hidden_size": [32]},
+                        "head_config": {"arch": "mlp", "hidden_size": [32]},
+                    },
+                }
+            )
+        )
+        submission = TrainingManifest.to_arena_manifest(manifest_path)
+        assert submission["algorithm"]["learn_step"] == 32
+        assert submission["environment"]["num_envs"] == 2
+
+
+class TestTrainingManifestArenaBridgeWithoutDeps:
+    """Arena bridge import guard when agilerl-arena is absent."""
+
+    def test_to_arena_manifest_requires_arena_dependencies(self):
+        with patch("agilerl.models.manifest.HAS_ARENA_DEPENDENCIES", False):
+            with pytest.raises(
+                ImportError, match="Arena dependencies are not installed"
+            ):
+                TrainingManifest.to_arena_manifest({"algorithm": {"name": "PPO"}})
 
 
 # ============================================================================

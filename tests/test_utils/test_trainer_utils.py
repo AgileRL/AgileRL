@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -14,6 +16,24 @@ class TestAutoTokenizerGuard:
         assert hasattr(trainer_utils, "AutoTokenizer")
 
 
+def test_trainer_utils_fallback_auto_tokenizer_when_no_llm_dependencies():
+    """Test that trainer_utils sets AutoTokenizer to None when HAS_LLM_DEPENDENCIES is False."""
+    original_module = sys.modules.pop("agilerl.utils.trainer_utils", None)
+
+    try:
+        with patch("agilerl.HAS_LLM_DEPENDENCIES", False):
+            trainer_utils_reloaded = importlib.import_module(
+                "agilerl.utils.trainer_utils"
+            )
+
+            assert trainer_utils_reloaded.AutoTokenizer is None
+    finally:
+        sys.modules["agilerl.utils.trainer_utils"] = original_module
+        import agilerl.utils as _utils_pkg
+
+        _utils_pkg.trainer_utils = original_module
+
+
 class TestHpConfigFromMutationSpec:
     def test_returns_none_when_empty(self):
         from agilerl.models.hpo import MutationSpec
@@ -21,6 +41,22 @@ class TestHpConfigFromMutationSpec:
 
         spec = MutationSpec(rl_hp_selection={})
         assert hp_config_from_mutation_spec(spec) is None
+
+    def test_returns_hyperparameter_config_from_selection(self):
+        from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
+        from agilerl.models.hpo import MutationSpec, RLHyperparameter
+        from agilerl.utils.trainer_utils import hp_config_from_mutation_spec
+
+        spec = MutationSpec(
+            rl_hp_selection={
+                "lr": RLHyperparameter(min=1e-4, max=1e-2, grow_factor=1.2),
+            },
+        )
+        config = hp_config_from_mutation_spec(spec)
+        assert isinstance(config, HyperparameterConfig)
+        assert isinstance(config.lr, RLParameter)
+        assert config.lr.min == 1e-4
+        assert config.lr.max == 1e-2
 
 
 class TestGetSpacesFromEnv:
