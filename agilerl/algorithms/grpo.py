@@ -233,12 +233,9 @@ class GRPO(LLMAlgorithm):
         it in the input dtype, saving a little memory at the cost of a per-token
         bf16 quantisation error that can bias importance-sampling ratios.
     :type cast_logprobs_to_fp32: bool, optional
-    :param fused_logprobs_chunk_rows: Standard (non-Liger) path only. Rows
-        (tokens) per ``(chunk_rows, vocab)`` logit tile when computing per-token
-        log-probs via the fused-linear-logprob path. Peak logits memory is
-        ``O(chunk_rows * vocab)`` regardless of batch/sequence length. ``None``
-        (default) auto-tunes to a ~256 MB fp32 tile.
-    :type fused_logprobs_chunk_rows: int | None, optional
+    :param chunk_rows: Primary chunk-size knob for fused logit tiles. Applies to
+        both standard and Liger paths.
+    :type chunk_rows: int | None, optional
     :param quantization_config: Optional ``transformers.BitsAndBytesConfig`` for
         loading the base model in 4-/8-bit (QLoRA). ``lm_head`` is kept
         unquantized so the fused-linear-logprob path stays numerically exact.
@@ -253,12 +250,6 @@ class GRPO(LLMAlgorithm):
         (e.g. ``"language_model"``). Passed to
         :func:`adapt_lora_config_for_model`.
     :type lora_target_scope: str | None, optional
-    :param fused_loss_chunk_rows: Rows per ``(chunk_rows, vocab)`` logit tile in
-        the token-level Liger fused policy loss. ``None`` (default) auto-tunes to
-        a ~256 MB fp32 logit workspace — the same heuristic as
-        ``fused_logprobs_chunk_rows`` on the standard path; pass an int to
-        override.
-    :type fused_loss_chunk_rows: int | None, optional
     :param vllm_importance_sampling_correction: When ``True`` (default) and
         ``use_vllm=True``, correct the rollout/trainer log-prob mismatch by
         weighting each training token by ``clamp(exp(trainer - sampling),
@@ -330,11 +321,9 @@ class GRPO(LLMAlgorithm):
         reduce_memory_peak: bool = False,
         cast_logprobs_to_fp32: bool = True,
         chunk_rows: int | None = None,
-        fused_logprobs_chunk_rows: int | None = None,
         quantization_config: BitsAndBytesConfig | None = None,
         activation_offload: bool = False,
         lora_target_scope: str | None = None,
-        fused_loss_chunk_rows: int | None = None,
         vllm_importance_sampling_correction: bool = True,
         vllm_importance_sampling_cap: float = 2.0,
         use_sequence_packing: bool = False,
@@ -381,12 +370,10 @@ class GRPO(LLMAlgorithm):
             reduce_memory_peak=reduce_memory_peak,
             cast_logprobs_to_fp32=cast_logprobs_to_fp32,
             chunk_rows=chunk_rows,
-            fused_logprobs_chunk_rows=fused_logprobs_chunk_rows,
             quantization_config=quantization_config,
             activation_offload=activation_offload,
             use_sequence_packing=use_sequence_packing,
             lora_target_scope=lora_target_scope,
-            fused_loss_chunk_rows=fused_loss_chunk_rows,
             vllm_importance_sampling_correction=vllm_importance_sampling_correction,
             vllm_importance_sampling_cap=vllm_importance_sampling_cap,
         )

@@ -150,18 +150,28 @@ def _prepare_llm_algo_kwargs(
             "MICRO_BATCH_SIZE_PER_GPU",
             batch_size,
         )  # NOTE we should take a look into deepspeed auto batch-sizing
+    removed_chunk_keys = ("FUSED_LOGPROBS_CHUNK_ROWS", "FUSED_LOSS_CHUNK_ROWS")
+    for removed_key in removed_chunk_keys:
+        if removed_key in INIT_HP:
+            msg = (
+                f"{removed_key} has been removed. Use CHUNK_ROWS instead "
+                "(single chunk-size knob for all fused paths)."
+            )
+            raise ValueError(msg)
+        if removed_key.lower() in merged:
+            msg = (
+                f"{removed_key.lower()} has been removed. Use chunk_rows instead "
+                "(single chunk-size knob for all fused paths)."
+            )
+            raise ValueError(msg)
     # Plain passthroughs: (merged_key, init_hp_key, caster, present_when_truthy).
     # reduce_memory_peak/activation_offload fire on key membership (so an explicit
-    # False is honoured); lora_target_scope/chunk rows fire only on a truthy value.
-    # ``chunk_rows`` is the primary fused-tile knob; backend-specific chunk args
-    # override it for standard fused-logprob / Liger fused-loss paths.
+    # False is honoured); lora_target_scope/chunk_rows fire only on a truthy value.
     _passthroughs = (
         ("reduce_memory_peak", "REDUCE_MEMORY_PEAK", bool, False),
         ("activation_offload", "ACTIVATION_OFFLOAD", bool, False),
         ("lora_target_scope", "LORA_TARGET_SCOPE", lambda v: v, True),
         ("chunk_rows", "CHUNK_ROWS", int, True),
-        ("fused_logprobs_chunk_rows", "FUSED_LOGPROBS_CHUNK_ROWS", int, True),
-        ("fused_loss_chunk_rows", "FUSED_LOSS_CHUNK_ROWS", int, True),
     )
     for merged_key, init_hp_key, caster, present_when_truthy in _passthroughs:
         present = (
@@ -1039,8 +1049,6 @@ def create_population(
                 turn_value_reduction=INIT_HP.get("TURN_VALUE_REDUCTION", "final_value"),
                 whiten_advantages=INIT_HP.get("WHITEN_ADVANTAGES", True),
                 chunk_rows=INIT_HP.get("CHUNK_ROWS"),
-                fused_logprobs_chunk_rows=INIT_HP.get("FUSED_LOGPROBS_CHUNK_ROWS"),
-                fused_loss_chunk_rows=INIT_HP.get("FUSED_LOSS_CHUNK_ROWS"),
                 lr_actor=INIT_HP.get("LR_ACTOR", INIT_HP.get("LR", 5e-6)),
                 lr_critic=INIT_HP.get("LR_CRITIC"),
                 max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 1.0),

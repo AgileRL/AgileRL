@@ -82,22 +82,9 @@ class DPO(LLMAlgorithm):
         to ``False`` otherwise). When ``training=False`` the standard
         path is always used regardless of this flag.
     :type use_liger_loss: bool, optional
-    :param fused_loss_chunk_rows: **Liger path only** (``use_liger_loss=True``).
-        Number of *sequences* per chunk for the Liger fused DPO kernel — the DPO
-        preference loss couples a sequence's tokens (it needs the per-sequence
-        summed log-prob), so this kernel chunks over sequences, not tokens, and
-        gives *no* token-level memory bound (peak scales with the longest
-        sequence's ``(seq_len, vocab)`` logits). ``None`` (default) keeps the
-        previous one-sequence-per-chunk behaviour; raise it to trade memory for
-        fewer, larger chunks.
-    :type fused_loss_chunk_rows: int | None, optional
-    :param fused_logprobs_chunk_rows: **Standard (non-liger) path only.** Rows
-        (tokens) per ``(chunk_rows, vocab)`` logit tile when computing per-token
-        log-probs via the fused-linear-logprob path. This is the memory-bounded
-        knob: peak logits memory is ``O(chunk_rows * vocab)`` regardless of
-        batch/sequence length, so it is the way to tune DPO's peak memory by
-        token budget. ``None`` (default) auto-tunes to a ~256 MB fp32 tile.
-    :type fused_logprobs_chunk_rows: int | None, optional
+    :param chunk_rows: Primary chunk-size knob for fused logit tiles used by
+        both standard and Liger paths.
+    :type chunk_rows: int | None, optional
     :param reduce_memory_peak: Deprecated and ignored; previously hinted
         peak-memory batching. Configure ``micro_batch_size_per_gpu`` instead.
     :type reduce_memory_peak: bool, optional
@@ -156,8 +143,6 @@ class DPO(LLMAlgorithm):
         torch_compiler: str | None = None,
         use_liger_loss: bool = False,
         chunk_rows: int | None = None,
-        fused_loss_chunk_rows: int | None = None,
-        fused_logprobs_chunk_rows: int | None = None,
         reduce_memory_peak: bool = False,
         cast_logprobs_to_fp32: bool = True,
         use_separate_reference_adapter: bool = True,
@@ -188,8 +173,6 @@ class DPO(LLMAlgorithm):
             pad_token=pad_token,
             use_liger_loss=use_liger_loss,
             chunk_rows=chunk_rows,
-            fused_loss_chunk_rows=fused_loss_chunk_rows,
-            fused_logprobs_chunk_rows=fused_logprobs_chunk_rows,
             lora_config=lora_config,
             model_name=model_name,
             actor_network=actor_network,
