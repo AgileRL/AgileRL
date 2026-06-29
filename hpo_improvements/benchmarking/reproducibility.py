@@ -39,6 +39,27 @@ def seed_everything(seed: int, *, deterministic: bool = True) -> None:
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
+    # Pin CPU threading so results are invariant to the host's core count and
+    # parallel load. Without this, PyTorch's intra-op parallelism splits float
+    # reductions (matmuls, sums) across however many threads the host defaults
+    # to, and that accumulation order is *not* identical across different thread
+    # counts -- so a solo sequential run (all cores) and a Ray job under
+    # concurrency (fewer effective threads), or two hosts with different core
+    # counts, diverge from the first gradient step, and the evolutionary HPO loop
+    # amplifies that sub-1% perturbation into large fitness gaps. Single-threaded
+    # torch is deterministic regardless of host; for the small MLPs used here it
+    # is also no slower (often faster) than the multi-threaded default. (Note this
+    # does NOT give cross-architecture identity -- ARM vs x86 round floats
+    # differently regardless of thread count.) ``set_num_threads`` is safe to call
+    # repeatedly; ``set_num_interop_threads`` may only be set before any inter-op
+    # work, so it is best-effort (a second call -- e.g. seed_everything per
+    # (env, seed) in the sequential runner -- would raise).
+    torch.set_num_threads(1)
+    try:
+        torch.set_num_interop_threads(1)
+    except RuntimeError:
+        pass
+
     if deterministic:
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False

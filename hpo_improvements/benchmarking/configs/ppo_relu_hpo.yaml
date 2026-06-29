@@ -174,7 +174,7 @@ tournament_selection:
     elitism: true  # the single best agent is cloned into the next generation each step (preserved unmutated, since mutate_elite is false above)
 
 training:
-    max_steps: 6_000_000
+    max_steps: 12_000_000
     target_score:
     pop_size: 16
     # Env steps each agent trains between evolution events. Set to 5 x the base
@@ -182,7 +182,7 @@ training:
     # whole collect->update cycles. Five full PPO updates per generation is enough
     # for a mutation's effect (a new lr, clip_coef, architecture, ...) to show up
     # in fitness rather than being judged on a single noisy update, while still
-    # giving ~36 evolution generations over the 6M-step budget. With learn_step
+    # giving ~72 evolution generations over the 12M-step budget. With learn_step
     # bounded to 16384 .. 65536 above, every agent completes between ~2.5 and ~10
     # updates per generation, keeping the comparison fair.
     evo_steps: 163840

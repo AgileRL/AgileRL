@@ -37,6 +37,22 @@ from typing import Any
 # It is a no-op on CUDA and CPU devices.
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
+# Pin the BLAS/OpenMP backends to a single thread before torch/numpy are
+# imported (they read these only at load time). This complements
+# reproducibility.seed_everything's torch.set_num_threads(1): together they make
+# CPU runs bit-reproducible regardless of the host's core count, so the
+# sequential and Ray paths agree on matched hardware/builds. setdefault lets an
+# explicit user override win. (Also runs in the Ray training task: it imports
+# this module -- run_training's home -- before torch, so the pin lands there too;
+# runtime-env.yaml additionally sets them at worker startup.)
+for _thread_env in (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+):
+    os.environ.setdefault(_thread_env, "1")
+
 # Allow running as a plain script: make sibling modules importable.
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -1256,6 +1272,35 @@ def _silence_wandb_service_teardown() -> None:
     cls.teardown = _safe_teardown
 
 
+def _finish_active_wandb_run() -> None:
+    """Finish the process-global W&B run if one is still active.
+
+    AgileRL opens a W&B run per learning run and closes it (``wandb.finish()``)
+    via ``population.finish()`` only at the *normal* end of ``trainer.train()``.
+    If training raises partway, that close is skipped and the run stays open.
+    Because the sequential runner reuses **one process** and W&B permits only one
+    active run per process, an orphaned run blocks the *next* seed's
+    ``wandb.init()`` from starting its backend service -- its ``debug.log`` never
+    reaches "starting backend", no ``.wandb`` history is written, and every
+    ``wandb.log()`` for that seed silently goes nowhere (the run is then dropped
+    from the over-seeds aggregate). Calling this in ``run_training``'s ``finally``
+    guarantees the run is always finished before control returns to the seed loop.
+
+    Idempotent: a no-op on the normal path, where ``population.finish()`` has
+    already cleared ``wandb.run``. Teardown-time errors are swallowed (mirroring
+    :func:`_silence_wandb_service_teardown`) so this never masks the real training
+    exception propagating out of the ``finally``.
+    """
+    import wandb  # noqa: PLC0415
+
+    if getattr(wandb, "run", None) is None:
+        return
+    try:
+        wandb.finish()
+    except Exception as exc:  # noqa: BLE001 - finalization must never mask the real error
+        logger.warning("Failed to finish active W&B run cleanly: %s", exc)
+
+
 def _sync_offline_wandb_run(
     wandb_dir: Path,
     *,
@@ -1477,6 +1522,11 @@ def run_training(
             )
     finally:
         set_mutation_history_dir(None)
+        # Guarantee the W&B run is closed even if trainer.train() raised: an
+        # orphaned (unfinished) run blocks the *next* seed's wandb.init() in this
+        # shared process, silently losing that seed's history (see
+        # _finish_active_wandb_run). On the normal path this is a no-op.
+        _finish_active_wandb_run()
 
     # Save the best agent of the final population (works with or without HPO).
     def _last_fitness(agent: Any) -> float:
