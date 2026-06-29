@@ -1475,15 +1475,18 @@ class TestListResources:
 class TestDownloadExperimentMetrics:
     def test_default_output_path(self, api_key_client, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        api_key_client._request_raw = MagicMock(
+        api_key_client.preview_experiment_metrics_csv = MagicMock(
             return_value=(b"csv-data", "text/csv", None)
         )
         result = api_key_client.download_experiment_metrics("exp1")
         assert result == Path("exp1_metrics.csv")
         assert result.read_bytes() == b"csv-data"
+        api_key_client.preview_experiment_metrics_csv.assert_called_once_with(
+            "exp1", preview_rows=50_000, metrics=None
+        )
 
     def test_output_path_as_directory(self, api_key_client, tmp_path):
-        api_key_client._request_raw = MagicMock(
+        api_key_client.preview_experiment_metrics_csv = MagicMock(
             return_value=(b"data", "text/csv", 'attachment; filename="custom.csv"')
         )
         result = api_key_client.download_experiment_metrics(
@@ -1493,7 +1496,7 @@ class TestDownloadExperimentMetrics:
         assert result.read_bytes() == b"data"
 
     def test_output_path_as_directory_no_disposition(self, api_key_client, tmp_path):
-        api_key_client._request_raw = MagicMock(
+        api_key_client.preview_experiment_metrics_csv = MagicMock(
             return_value=(b"data", "text/csv", None)
         )
         result = api_key_client.download_experiment_metrics(
@@ -1505,18 +1508,29 @@ class TestDownloadExperimentMetrics:
         monkeypatch.chdir(tmp_path)
         existing = tmp_path / "exp1_metrics.csv"
         existing.write_text("old")
-        api_key_client._request_raw = MagicMock(return_value=(b"new", "text/csv", None))
+        api_key_client.preview_experiment_metrics_csv = MagicMock(
+            return_value=(b"new", "text/csv", None)
+        )
         with pytest.raises(FileExistsError, match="already exists"):
             api_key_client.download_experiment_metrics("exp1")
 
     def test_metrics_param_forwarded(self, api_key_client, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        api_key_client._request_raw = MagicMock(
+        api_key_client.preview_experiment_metrics_csv = MagicMock(
             return_value=(b"data", "text/csv", None)
         )
         api_key_client.download_experiment_metrics("exp1", metrics=["loss"])
-        call_kwargs = api_key_client._request_raw.call_args[1]
-        assert call_kwargs["json"] == {"metrics": ["loss"]}
+        api_key_client.preview_experiment_metrics_csv.assert_called_once_with(
+            "exp1", preview_rows=50_000, metrics=["loss"]
+        )
+
+    def test_rejects_non_csv_response(self, api_key_client, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        api_key_client.preview_experiment_metrics_csv = MagicMock(
+            return_value=(b"<!DOCTYPE html>", "text/html", None)
+        )
+        with pytest.raises(ArenaAPIError):
+            api_key_client.download_experiment_metrics("exp1")
 
 
 class TestProjectMethods:

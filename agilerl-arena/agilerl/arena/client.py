@@ -1062,11 +1062,19 @@ class ArenaClient:
         :rtype: Path
         :raises FileExistsError: If the resolved output path already exists.
         """
-        payload, _, disposition = self._request_raw(
-            "POST",
-            f"/api/cli/v1/experiments/{experiment_name}/metrics",
-            json={"metrics": metrics},
+        # Platform serves CSV via GET /api/cli/v1/experiments/metrics?preview_rows=…
+        # (not POST …/experiments/{name}/metrics — that path 404s to Loco's HTML fallback).
+        payload, content_type, disposition = self.preview_experiment_metrics_csv(
+            experiment_name,
+            preview_rows=50_000,
+            metrics=metrics,
         )
+        if not (content_type or "").startswith("text/csv"):
+            body_preview = payload.decode("utf-8", errors="replace")[:500]
+            raise ArenaAPIError.from_response_body(
+                body_preview,
+                status_code=None,
+            )
 
         if output_path is None:
             path = Path(f"{experiment_name}_metrics.csv")
