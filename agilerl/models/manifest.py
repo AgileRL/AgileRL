@@ -16,7 +16,7 @@ from agilerl.models.algo import (
     AlgoSpecT,
     LLMAlgorithmSpec,
 )
-from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
+from agilerl.models.hpo import MFPBTSpec, MutationSpec, TournamentSelectionSpec
 from agilerl.models.networks import (
     FinetuningNetworkSpec,
     NetworkSpec,
@@ -235,6 +235,42 @@ class TrainingManifest(BaseModel):
     mutation: MutationSpec | None = Field(default=None)
     replay_buffer: ReplayBufferSpec | None = Field(default=None)
     tournament_selection: TournamentSelectionSpec | None = Field(default=None)
+    mf_pbt: MFPBTSpec | None = Field(default=None)
+
+    @model_validator(mode="after")
+    def _validate_hpo_regime(self) -> Self:
+        """Enforce MF-PBT's mutual exclusivity and derive ``pop_size``.
+
+        ``mf_pbt`` cannot be combined with ``tournament_selection``. ``pop_size`` is
+        derived as ``n_subpopulations * n_individuals_per_subpopulation`` and should
+        be omitted from the manifest; a *conflicting* explicit value is rejected, but
+        a matching one is tolerated so the manifest round-trips through
+        :meth:`Trainer.to_manifest` (which re-emits the derived ``pop_size``).
+        """
+        if self.mf_pbt is None:
+            return self
+
+        if self.tournament_selection is not None:
+            msg = "Cannot set both 'tournament_selection' and 'mf_pbt'."
+            raise ValueError(msg)
+
+        derived = (
+            self.mf_pbt.n_subpopulations * self.mf_pbt.n_individuals_per_subpopulation
+        )
+        pop_size_set = (
+            "pop_size" in self.training.model_fields_set
+            or "population_size" in self.training.model_fields_set
+        )
+        if pop_size_set and self.training.pop_size != derived:
+            msg = (
+                f"'pop_size' ({self.training.pop_size}) conflicts with the MF-PBT "
+                "derived value n_subpopulations * n_individuals_per_subpopulation "
+                f"= {derived}. Omit 'pop_size' when 'mf_pbt' is configured; it is "
+                "derived automatically."
+            )
+            raise ValueError(msg)
+        self.training.pop_size = derived
+        return self
 
     @model_validator(mode="after")
     def _process_manifest(self) -> Self:

@@ -235,6 +235,7 @@ class _EnvPoolLocalTrainer(LocalTrainer):
                 training=validated.training,
                 mutation=validated.mutation,
                 tournament=validated.tournament_selection,
+                mf_pbt=validated.mf_pbt,
                 replay_buffer=validated.replay_buffer,
                 device=device,
             )
@@ -1576,6 +1577,29 @@ def _sync_offline_wandb_run(
     return False
 
 
+def derive_pop_size(manifest: dict) -> int:
+    """Resolve the population size from a raw (unvalidated) manifest dict.
+
+    HPO / no-HPO configs set ``training.pop_size`` explicitly, but MF-PBT configs
+    omit it -- the manifest validator derives it as
+    ``n_subpopulations * n_individuals_per_subpopulation`` and never writes it back
+    into the raw dict. This mirrors that derivation so the harness (which reads the
+    raw dict, not the validated manifest) gets the right pop_size for the x-axis
+    normalisation. Falls back to 1 only when neither source is available.
+
+    :param manifest: Raw manifest dict (as loaded from YAML).
+    :return: Population size.
+    :rtype: int
+    """
+    explicit = manifest.get("training", {}).get("pop_size")
+    if explicit:
+        return int(explicit)
+    mf = manifest.get("mf_pbt")
+    if mf:
+        return int(mf["n_subpopulations"]) * int(mf["n_individuals_per_subpopulation"])
+    return 1
+
+
 def run_training(
     *,
     base_manifest: dict[str, Any],
@@ -1625,7 +1649,7 @@ def run_training(
 
     manifest = copy.deepcopy(base_manifest)
     manifest["environment"]["name"] = env_name
-    pop_size = int(manifest.get("training", {}).get("pop_size", 1) or 1)
+    pop_size = derive_pop_size(manifest)
 
     # Multi-agent (IPPO): the env is built from the manifest's PzEnvSpec via a custom
     # adapter entrypoint (e.g. mpe_adapter), so point its `config` at the selected task

@@ -9,6 +9,7 @@ from gymnasium import spaces
 from pettingzoo import ParallelEnv
 
 from agilerl.algorithms import IPPO
+from agilerl.hpo.mf_pbt import MFPBT
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks import StochasticActor
@@ -53,6 +54,7 @@ def train_multi_agent_on_policy(
     dormant_tau: float = 0.0,
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
+    mf_pbt: MFPBT | None = None,
     checkpoint: int | None = None,
     checkpoint_path: str | None = None,
     overwrite_checkpoints: bool = False,
@@ -409,6 +411,19 @@ def train_multi_agent_on_policy(
                     algo=algo,
                     elite_path=elite_path,
                     save_elite=save_elite,
+                    accelerator=accelerator,
+                ),
+            )
+        # MF-PBT evolution (multiple-frequencies population-based training)
+        elif mf_pbt is not None and mutation is not None:
+            population.update(
+                mf_pbt.evolve_population(
+                    population.agents,
+                    mutation=mutation,
+                    env_name=env_name,
+                    algo=algo,
+                    save_elite=save_elite,
+                    elite_path=elite_path,
                     accelerator=accelerator,
                 ),
             )

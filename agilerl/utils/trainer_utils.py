@@ -27,6 +27,7 @@ from agilerl.components.replay_buffer import (
     PrioritizedReplayBuffer,
     ReplayBuffer,
 )
+from agilerl.hpo.mf_pbt import MFPBT
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.llm_envs import PreferenceGym, ReasoningGym, SFTGym
@@ -35,7 +36,7 @@ from agilerl.models.algo import (
     MultiAgentRLAlgorithmSpec,
     RLAlgorithmSpec,
 )
-from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
+from agilerl.models.hpo import MFPBTSpec, MutationSpec, TournamentSelectionSpec
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
 from agilerl.typing import GymEnvType, PzEnvType
 from agilerl.wrappers.learning import BanditEnv
@@ -138,6 +139,7 @@ def create_population_from_spec(
     resume_from_checkpoint: str | None = None,
     accelerator: Accelerator | None = None,
     tokenizer: AutoTokenizer | None = None,
+    mf_pbt_spec: MFPBTSpec | None = None,
 ) -> PopulationT:
     """Instantiate a population of agents from an algorithm spec.
 
@@ -159,6 +161,9 @@ def create_population_from_spec(
     :type accelerator: Accelerator | None
     :param tokenizer: Pre-loaded HuggingFace tokenizer for LLM algorithms.
     :type tokenizer: AutoTokenizer | None
+    :param mf_pbt_spec: Optional MF-PBT spec; when set, agents are tagged with their
+        ``subpopulation`` (``index // n_individuals_per_subpopulation``).
+    :type mf_pbt_spec: MFPBTSpec | None
     :returns: A list of algorithm instances.
     :rtype: PopulationT
     """
@@ -187,7 +192,7 @@ def create_population_from_spec(
         ):
             algo_spec.n_step = replay_buffer_spec.n_step_buffer_args.n_step
 
-        return [
+        population = [
             algo_spec.build_algorithm(
                 observation_space,
                 action_space,
@@ -198,6 +203,8 @@ def create_population_from_spec(
             )
             for i in range(population_size)
         ]
+        _assign_subpopulations(population, mf_pbt_spec)
+        return population
 
     # LLM algorithms — build agent 0 fully, then clone the actor for agents 1..N.
     # Each agent beyond the first gets a fresh Accelerator to avoid sharing the
@@ -235,7 +242,19 @@ def create_population_from_spec(
                 actor_network=cloned_actor,
             )
         )
+    _assign_subpopulations(population, mf_pbt_spec)
     return population
+
+
+def _assign_subpopulations(
+    population: PopulationT, mf_pbt_spec: MFPBTSpec | None
+) -> None:
+    """Tag each agent with its MF-PBT ``subpopulation`` (a no-op when off)."""
+    if mf_pbt_spec is None:
+        return
+    n_ind = mf_pbt_spec.n_individuals_per_subpopulation
+    for agent in population:
+        agent.subpopulation = agent.index // n_ind
 
 
 def build_mutations_from_spec(
@@ -293,6 +312,34 @@ def build_tournament_from_spec(
         tournament_size=tournament_spec.tournament_size,
         elitism=tournament_spec.elitism,
         population_size=training_spec.pop_size,
+    )
+
+
+def build_mf_pbt_from_spec(
+    mf_pbt_spec: MFPBTSpec | None,
+    training_spec: TrainingSpec,
+) -> MFPBT | None:
+    """Convert an :class:`MFPBTSpec` into an :class:`MFPBT` instance.
+
+    :param mf_pbt_spec: MF-PBT specification.
+    :type mf_pbt_spec: MFPBTSpec | None
+    :param training_spec: Training specification (carries the derived ``pop_size``).
+    :type training_spec: TrainingSpec
+    :returns: An :class:`MFPBT` instance, or ``None`` if *mf_pbt_spec* is ``None``.
+    :rtype: MFPBT | None
+    """
+    if mf_pbt_spec is None:
+        return None
+
+    return MFPBT(
+        n_subpopulations=mf_pbt_spec.n_subpopulations,
+        n_individuals_per_subpopulation=mf_pbt_spec.n_individuals_per_subpopulation,
+        evolution_frequency_ratios=mf_pbt_spec.evolution_frequency_ratios,
+        n_winners=mf_pbt_spec.n_winners,
+        n_survivors=mf_pbt_spec.n_survivors,
+        n_open_for_migration=mf_pbt_spec.n_open_for_migration,
+        n_losers=mf_pbt_spec.n_losers,
+        rand_seed=mf_pbt_spec.rand_seed,
     )
 
 

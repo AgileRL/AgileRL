@@ -20,6 +20,7 @@ from agilerl.models import (
     AlgoSpecT,
     FinetuningNetworkSpec,
     LLMAlgorithmSpec,
+    MFPBTSpec,
     MutationSpec,
     ReplayBufferSpec,
     TournamentSelectionSpec,
@@ -37,6 +38,7 @@ from agilerl.models.env import (
 )
 from agilerl.utils.trainer_utils import (
     EnvironmentT,
+    build_mf_pbt_from_spec,
     build_mutations_from_spec,
     build_replay_buffer_from_spec,
     build_tournament_from_spec,
@@ -102,6 +104,7 @@ class Trainer(ABC):
         training: TrainingSpec | None = None,
         mutation: MutationSpec | None = None,
         tournament: TournamentSelectionSpec | None = None,
+        mf_pbt: MFPBTSpec | None = None,
         replay_buffer: ReplayBufferT | None = None,
         *,
         resume_from_checkpoint: str | None = None,
@@ -122,6 +125,7 @@ class Trainer(ABC):
         self.training_spec = training or TrainingSpec()
         self.mutation_spec = mutation
         self.tournament_selection_spec = tournament
+        self.mf_pbt_spec = mf_pbt
         self.replay_buffer_spec = replay_buffer
         self.device = device
         self.accelerator = accelerator
@@ -195,6 +199,7 @@ class Trainer(ABC):
             training=validated_manifest.training,
             mutation=validated_manifest.mutation,
             tournament=validated_manifest.tournament_selection,
+            mf_pbt=validated_manifest.mf_pbt,
             replay_buffer=validated_manifest.replay_buffer,
             resume_from_checkpoint=resume_from_checkpoint,
             device=device,
@@ -224,6 +229,7 @@ class Trainer(ABC):
             mutation=self.mutation_spec,
             replay_buffer=self.replay_buffer_spec,
             tournament_selection=self.tournament_selection_spec,
+            mf_pbt=self.mf_pbt_spec,
         )
         return manifest.model_dump(mode="json", exclude_none=True)
 
@@ -296,6 +302,7 @@ class LocalTrainer(Trainer):
         training: TrainingSpec | None = None,
         mutation: MutationSpec | None = None,
         tournament: TournamentSelectionSpec | None = None,
+        mf_pbt: MFPBTSpec | None = None,
         replay_buffer: ReplayBufferT | None = None,
         *,
         resume_from_checkpoint: str | None = None,
@@ -310,18 +317,21 @@ class LocalTrainer(Trainer):
             training=training,
             mutation=mutation,
             tournament=tournament,
+            mf_pbt=mf_pbt,
             replay_buffer=replay_buffer,
             resume_from_checkpoint=resume_from_checkpoint,
             device=device,
             accelerator=accelerator,
         )
 
-        # If HPO is enabled, use default mutation probabilities, tournament selection, and RL hyperparameters to mutate
+        # If HPO is enabled, use default mutation probabilities, tournament selection, and RL hyperparameters to mutate.
+        # MF-PBT replaces tournament selection, so do not synthesise a tournament spec when it is set.
         if hpo:
             self.mutation_spec = self.mutation_spec or MutationSpec()
-            self.tournament_selection_spec = (
-                self.tournament_selection_spec or TournamentSelectionSpec()
-            )
+            if self.mf_pbt_spec is None:
+                self.tournament_selection_spec = (
+                    self.tournament_selection_spec or TournamentSelectionSpec()
+                )
 
         # LLM algorithms require a DeepSpeed-aware accelerator
         if (
@@ -356,6 +366,7 @@ class LocalTrainer(Trainer):
             accelerator=self.accelerator,
             tokenizer=self.tokenizer,
             resume_from_checkpoint=self._resume_checkpoint,
+            mf_pbt_spec=self.mf_pbt_spec,
         )
         self.mutations = build_mutations_from_spec(
             self.mutation_spec, self.device, accelerator=self.accelerator
@@ -363,6 +374,7 @@ class LocalTrainer(Trainer):
         self.tournament_selection = build_tournament_from_spec(
             self.tournament_selection_spec, self.training_spec
         )
+        self.mf_pbt = build_mf_pbt_from_spec(self.mf_pbt_spec, self.training_spec)
         self.memory = build_replay_buffer_from_spec(
             self.algorithm_spec, self.replay_buffer_spec, self.device
         )
@@ -541,6 +553,12 @@ class LocalTrainer(Trainer):
             "wandb_api_key": wandb_api_key,
             "wandb_kwargs": wandb_kwargs,
         }
+
+        # MF-PBT is only supported by the on/off-policy and multi-agent-on-policy
+        # trainers; inject it only when configured so other train functions that
+        # do not accept it are unaffected.
+        if self.mf_pbt is not None:
+            kwargs["mf_pbt"] = self.mf_pbt
 
         if self._multiturn:
             kwargs["env_factory"] = self.env_factory
