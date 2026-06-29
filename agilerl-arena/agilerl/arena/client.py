@@ -23,7 +23,6 @@ from agilerl.arena.exceptions import (
     ArenaTrainingError,
     ArenaValidationError,
 )
-from agilerl.arena.inference import Agent
 from agilerl.arena.inference.cache import (
     load_binding,
     normalized_deployment_name,
@@ -41,6 +40,8 @@ from agilerl.arena.utils import (
     prepare_file_upload,
 )
 from typing_extensions import Self
+
+from agilerl.arena.inference import Agent
 
 logger = logging.getLogger(__name__)
 
@@ -1163,7 +1164,7 @@ class ArenaClient:
     # -------------------------------------------------------------------------
 
     @staticmethod
-    def _inference_deployments_list_params(
+    def _deployment_lookup_params(
         *,
         name: str | None = None,
         experiment_name: str | None = None,
@@ -1223,7 +1224,7 @@ class ArenaClient:
         :returns: A list of deployments.
         :rtype: list[dict[str, Any]]
         """
-        q = self._inference_deployments_list_params(
+        q = self._deployment_lookup_params(
             name=name,
             experiment_name=experiment_name,
             project_name=project_name,
@@ -1328,37 +1329,35 @@ class ArenaClient:
         experiment_name: str | None = None,
         project_name: str | None = None,
     ) -> dict[str, Any]:
-        """Load deployments visible to the user; expects exactly one row for *deployment_name*."""
-        params = self._inference_deployments_list_params(
+        """Fetch one deployment detail row for inference binding."""
+        params = self._deployment_lookup_params(
             name=normalized_deployment_name(deployment_name),
             experiment_name=experiment_name,
             project_name=project_name,
         )
+        if "name" not in params:
+            msg = "deployment name is required."
+            raise ArenaAPIError(msg)
 
-        rows = self._request(
-            "GET",
-            "/api/cli/v1/inference/deployments/list",
-            params=params,
-        )
-        if not isinstance(rows, list):
-            rows = []
-
-        hint = (
-            "Pass --experiment-name and/or --project-name when multiple deployments "
-            "share this deployment name."
-        )
-        if len(rows) == 0:
-            msg = f"No deployment found named {deployment_name!r}."
-            raise ArenaAPIError(msg, cli_hint=hint)
-        if len(rows) > 1:
-            msg = (
-                f"Multiple deployments named {deployment_name!r} ({len(rows)} matches)."
+        try:
+            row = self._request(
+                "GET",
+                "/api/cli/v1/inference/deployments/one",
+                params=params,
             )
-            raise ArenaAPIError(msg, cli_hint=hint)
+        except ArenaAPIError as exc:
+            hint = (
+                "Pass --experiment-name and/or --project-name when multiple deployments "
+                "share this deployment name."
+            )
+            if not exc.cli_hint:
+                raise ArenaAPIError(
+                    exc.detail, cli_hint=hint, status_code=exc.status_code
+                ) from exc
+            raise
 
-        row = rows[0]
         if not isinstance(row, dict):
-            msg = "Unexpected deployment list response shape."
+            msg = "Unexpected deployment detail response shape."
             raise ArenaAPIError(msg)
         return row
 

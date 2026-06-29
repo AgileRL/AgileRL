@@ -1610,33 +1610,49 @@ class TestInferenceDeployments:
 
     def test_fetch_deployment_for_inference_single_match(self, api_key_client):
         api_key_client._request = MagicMock(
-            return_value=[{"name": "my-dep", "spec": {"url": "http://x"}}]
+            return_value={
+                "name": "my-dep",
+                "spec": {"url": "http://x"},
+                "api_key": "key",
+            }
         )
         result = api_key_client._fetch_deployment_for_inference("my-dep")
-        assert result == {"name": "my-dep", "spec": {"url": "http://x"}}
+        assert result == {
+            "name": "my-dep",
+            "spec": {"url": "http://x"},
+            "api_key": "key",
+        }
+        api_key_client._request.assert_called_once_with(
+            "GET",
+            "/api/cli/v1/inference/deployments/one",
+            params={"name": "my-dep"},
+        )
 
     def test_fetch_deployment_for_inference_no_match_raises(self, api_key_client):
-        api_key_client._request = MagicMock(return_value=[])
-        with pytest.raises(ArenaAPIError, match="No deployment found"):
+        api_key_client._request = MagicMock(
+            side_effect=ArenaAPIError("not found", status_code=404)
+        )
+        with pytest.raises(ArenaAPIError, match="not found"):
             api_key_client._fetch_deployment_for_inference("missing")
 
     def test_fetch_deployment_for_inference_multiple_raises(self, api_key_client):
-        api_key_client._request = MagicMock(return_value=[{"name": "d"}, {"name": "d"}])
-        with pytest.raises(ArenaAPIError, match="Multiple deployments"):
+        api_key_client._request = MagicMock(
+            side_effect=ArenaAPIError("ambiguous", status_code=400)
+        )
+        with pytest.raises(ArenaAPIError, match="ambiguous"):
             api_key_client._fetch_deployment_for_inference("d")
 
-    def test_fetch_deployment_for_inference_non_list_raises(self, api_key_client):
-        api_key_client._request = MagicMock(return_value="not a list")
-        with pytest.raises(ArenaAPIError, match="No deployment found"):
+    def test_fetch_deployment_for_inference_non_dict_raises(self, api_key_client):
+        api_key_client._request = MagicMock(return_value="not a dict")
+        with pytest.raises(ArenaAPIError, match="Unexpected deployment detail"):
             api_key_client._fetch_deployment_for_inference("dep")
 
-    def test_fetch_deployment_for_inference_non_dict_row_raises(self, api_key_client):
-        api_key_client._request = MagicMock(return_value=["not-a-dict"])
-        with pytest.raises(ArenaAPIError, match="Unexpected deployment"):
-            api_key_client._fetch_deployment_for_inference("dep")
+    def test_fetch_deployment_for_inference_empty_name_raises(self, api_key_client):
+        with pytest.raises(ArenaAPIError, match="deployment name is required"):
+            api_key_client._fetch_deployment_for_inference("   ")
 
-    def test_inference_deployment_list_params(self):
-        params = ArenaClient._inference_deployments_list_params(
+    def test_deployment_lookup_params(self):
+        params = ArenaClient._deployment_lookup_params(
             name=" dep ",
             experiment_name=" exp ",
             project_name=" proj ",

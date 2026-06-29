@@ -3,18 +3,19 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import agilerl.arena  # noqa: F401 — configure package logging before submodules
 import click
 from agilerl.arena.cli_manifest import handle_help_option
 from agilerl.arena.config import CommandConfig, arena_client
 from agilerl.arena.exceptions import ArenaError
 from agilerl.arena.inference.cache import load_active_agent, save_active_agent
-from agilerl.arena.on_prem import ArenaRootGroup, register_on_prem_manifest_group
 from agilerl.arena.output import (
     emit_csv_preview,
     emit_result,
 )
 from agilerl.arena.utils import sort_dataset_search_by_downloads
+
+import agilerl.arena  # noqa: F401 — configure package logging before submodules
+from agilerl.arena.on_prem import ArenaRootGroup, register_on_prem_manifest_group
 
 ArenaError.enable_cli_mode()
 

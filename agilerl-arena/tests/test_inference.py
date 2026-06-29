@@ -9,13 +9,6 @@ import httpx
 import numpy as np
 import pytest
 from agilerl.arena.exceptions import ArenaAuthError, ArenaInferenceError
-from agilerl.arena.inference import (
-    Agent,
-    LLMParams,
-    LLMResults,
-    PredictResult,
-    StatusResponse,
-)
 from agilerl.arena.inference.cache import (
     ActiveAgentSelection,
     load_active_agent,
@@ -23,6 +16,14 @@ from agilerl.arena.inference.cache import (
     normalized_deployment_name,
     save_active_agent,
     save_binding,
+)
+
+from agilerl.arena.inference import (
+    Agent,
+    LLMParams,
+    LLMResults,
+    PredictResult,
+    StatusResponse,
 )
 
 STATUS_BODY = {

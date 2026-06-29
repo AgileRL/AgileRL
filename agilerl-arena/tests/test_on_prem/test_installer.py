@@ -7,7 +7,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from agilerl.arena.client import ArenaClient
-from agilerl.arena.on_prem import OnPremApi
 from agilerl.arena.on_prem.installer import (
     HelmInstaller,
     SwarmInstaller,
@@ -25,6 +24,8 @@ from agilerl.arena.on_prem.installer import (
 from agilerl.arena.on_prem.scripts import BundleScriptRunner, StageFailed
 from agilerl.arena.on_prem.ssh import SshExecutor
 from click import ClickException
+
+from agilerl.arena.on_prem import OnPremApi
 
 
 @pytest.fixture
