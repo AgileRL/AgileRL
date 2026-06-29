@@ -21,22 +21,62 @@ from agilerl.hpo.mf_pbt import MFPBT
 # --------------------------------------------------------------------------- #
 # Test doubles
 # --------------------------------------------------------------------------- #
+class _FakeParam:
+    """RLParameter-like stand-in carrying a mutable ``value``."""
+
+    def __init__(self, value=None):
+        self.value = value
+
+
 class FakeHPConfig:
-    """Mimics ``HyperparameterConfig`` (iterates names, exposes ``names()``)."""
+    """Mimics ``HyperparameterConfig`` (iterates names, exposes ``names()`` /
+    ``__getitem__`` / ``__bool__``, with a per-name RLParameter-like object whose
+    ``value`` is what ``rl_hyperparam_mutation`` reads)."""
 
     def __init__(self, names):
-        self._names = list(names)
+        self._params = {name: _FakeParam() for name in names}
 
     def __iter__(self):
-        return iter(self._names)
+        return iter(self._params)
+
+    def __bool__(self):
+        return bool(self._params)
 
     def names(self):
-        return list(self._names)
+        return list(self._params)
+
+    def __getitem__(self, key):
+        return self._params[key]
+
+
+class FakeTorchOptimizer:
+    """Mimics a ``torch.optim.Optimizer`` (only ``param_groups`` is exercised)."""
+
+    def __init__(self, lr):
+        self.param_groups = [{"lr": lr}]
+
+
+class FakeOptimizerWrapper:
+    """Mimics ``OptimizerWrapper``: an ``lr`` mirror plus the wrapped optimizer."""
+
+    def __init__(self, lr):
+        self.lr = lr
+        self.optimizer = FakeTorchOptimizer(lr)
+
+
+class FakeOptConfig:
+    """Mimics ``OptimizerConfig``: ``lr`` is the LR *attribute name*, ``name`` the
+    optimizer-wrapper attribute name."""
+
+    def __init__(self, lr="lr", name="optimizer"):
+        self.lr = lr
+        self.name = name
 
 
 class FakeRegistry:
     def __init__(self, hp_names):
         self.hp_config = FakeHPConfig(hp_names)
+        self.optimizers = [FakeOptConfig(lr="lr", name="optimizer")]
 
 
 class FakeAgent:
@@ -52,6 +92,7 @@ class FakeAgent:
         self.lr = lr
         self.batch_size = batch_size
         self.registry = FakeRegistry(["lr", "batch_size"])
+        self.optimizer = FakeOptimizerWrapper(lr)
         self.reinit_called = False
         self.perturbed = False
 
@@ -64,6 +105,11 @@ class FakeAgent:
             lr=self.lr,
             batch_size=self.batch_size,
         )
+        # Mirror real clone(): hp_config values are deep-copied across (never reset),
+        # so any stale value carried here is exactly what _migrate_reset_hp's sync
+        # must overwrite.
+        for name in self.registry.hp_config.names():
+            new.registry.hp_config[name].value = self.registry.hp_config[name].value
         return new
 
     def get_lr_names(self):
@@ -213,6 +259,8 @@ def test_migration_slow_to_fast_keeps_external_weights_but_elite_hps():
         if a.subpopulation == 0:
             a.weights = "EXT"
             a.lr = 0.5
+            a.optimizer = FakeOptimizerWrapper(0.5)
+            a.registry.hp_config["lr"].value = 0.5  # external's last-mutated lr
         else:
             a.lr = 0.001  # subpop-1 elite lr
 
@@ -225,7 +273,14 @@ def test_migration_slow_to_fast_keeps_external_weights_but_elite_hps():
     mover = movers[0]
     assert mover.weights == "EXT"  # external network params imported
     assert mover.lr == 0.001  # but HPs reset to the studied subpop's elite
-    assert mover.reinit_called is True  # optimizer reinitialised at the elite lr
+    # Optimizer LR updated *in place* to the elite value (Adam moments preserved) --
+    # never rebuilt, so reinit_optimizers is not called.
+    assert mover.reinit_called is False
+    assert mover.optimizer.lr == 0.001
+    assert mover.optimizer.optimizer.param_groups[0]["lr"] == 0.001
+    # hp_config value synced to the elite lr, not external's stale 0.5, so a later
+    # mutation of this migrant's lineage perturbs from 0.001.
+    assert mover.registry.hp_config["lr"].value == 0.001
 
 
 def test_migration_full_clone_when_external_not_faster():

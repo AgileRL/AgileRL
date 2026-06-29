@@ -9,6 +9,14 @@
 # MF-PBT runs subpopulations at different evolution frequencies to curb greediness
 # while keeping fine-grained schedules; the mutation block is still free to move away
 # from this base (e.g. lower ent_coef, raise lr) on the knobs in rl_hp_selection.
+#
+# MF-PBT additions over ippo_mpe_no_hpo.yaml:
+#   mf_pbt: 2 subpopulations x 8 individuals (pop_size = 16, derived),
+#     evolution_frequency_ratios = [1, 5], brackets 2/0/2/4
+#   evolution interval evo_steps = 4096 (= 2 x the 2048-step base rollout), shortened
+#     from the 5 x rollout the single-frequency configs use so MF-PBT gets many
+#     fine-grained generations (~488 over the 2M-step budget) across its two
+#     frequencies -- same sizing reasoning as ppo_relu_mfpbt.yaml
 
 algorithm:
     name: IPPO
@@ -42,8 +50,8 @@ environment:
 
 mutation:
     probabilities:
-        # no_mut is set to 0.0 so that every perturbed agent -- in MF-PBT, every
-        # loser-replacement clone -- is actually mutated: MF-PBT's exploit-explore
+        # no_mut is set to 0.0 so that every perturbed agent -- in MF-PBT, each of the
+        # 4 loser-replacement clones -- is actually mutated: MF-PBT's exploit-explore
         # always perturbs a clone, and a passed-through clone would be an exact
         # duplicate of the winner it was cloned from, collapsing diversity.
         no_mut: 0.0
@@ -149,26 +157,33 @@ network:
 
 mf_pbt:
     # Multiple-Frequencies Population-Based Training (Doulazmi et al.) replaces
-    # tournament selection. 4 subpopulations of 4 agents each (pop_size = 16, derived),
-    # evolving at frequencies delta_i in {1, 2, 4, 8} cycles. Each subpopulation is
-    # ranked by fitness into one winner / survivor / open-for-migration / loser; the
+    # tournament selection. 2 subpopulations of 8 agents each (pop_size = 16, derived),
+    # evolving at frequencies delta_i in {1, 5} cycles. Each subpopulation is
+    # ranked by fitness into 2 winners / 0 survivors / 2 open-for-migration / 4 losers; the
     # mutation block above supplies the perturbation operator for evolution-clones.
-    n_subpopulations: 4
-    n_individuals_per_subpopulation: 4
-    evolution_frequency_ratios: [1, 2, 4, 8]
-    n_winners: 1
-    n_survivors: 1
-    n_open_for_migration: 1
-    n_losers: 1
+    n_subpopulations: 2
+    n_individuals_per_subpopulation: 8
+    evolution_frequency_ratios: [1, 5]
+    n_winners: 2
+    n_survivors: 0
+    n_open_for_migration: 2
+    n_losers: 4
     rand_seed: 42
 
 training:
     max_steps: 2_000_000
     target_score:
-    # ~195 evolution generations over the budget (10240 = 5 x the 2048-step base
-    # rollout, so every agent completes whole collect->update cycles between
-    # evolution events).
-    evo_steps: 10240
+    # Env steps each agent trains between evolution events. Set to 2 x the 2048-step
+    # base rollout (4096), a multiple of learn_step so agents complete whole
+    # collect->update cycles. Two full base IPPO updates per generation keep a
+    # mutation's effect (a new lr, clip_coef, architecture, ...) visible in fitness
+    # rather than judged on a single noisy update, while the short interval over the
+    # 2M-step budget yields many fine-grained evolution generations (~488). With
+    # learn_step bounded to 1024 .. 4096 above, every agent completes between ~1 and
+    # ~4 updates per generation, keeping the comparison fair. This shortens the
+    # interval from the 5 x rollout (10240) the single-frequency configs use, matching
+    # ppo_relu_mfpbt.yaml's evo_steps sizing.
+    evo_steps: 4096
     eval_steps:
     eval_loop: 1
     dormant_tau: 0.1  # tau threshold for the dormant-neuron metric (Sokar et al. 2023)

@@ -116,6 +116,34 @@ def test_zero_winners_with_open_for_migration_rejected():
         MFPBTSpec(**bad)
 
 
+def test_open_for_migration_exceeding_winners_plus_survivors_rejected():
+    # The paper limits migration to no more slots than a subpopulation preserves
+    # natively: n_open_for_migration must be <= n_winners + n_survivors.
+    bad = {
+        **VALID_MF_PBT,
+        "n_winners": 1,
+        "n_survivors": 0,
+        "n_open_for_migration": 2,
+        "n_losers": 1,
+    }  # sum 4, but 2 > 1 + 0
+    with pytest.raises(ValidationError, match="n_open_for_migration"):
+        MFPBTSpec(**bad)
+
+
+def test_open_for_migration_equal_to_winners_plus_survivors_allowed():
+    # The bound is inclusive (<=); equality is the PPO benchmark config's case.
+    spec = MFPBTSpec(
+        **{
+            **VALID_MF_PBT,
+            "n_winners": 1,
+            "n_survivors": 1,
+            "n_open_for_migration": 2,
+            "n_losers": 0,
+        }  # sum 4, and 2 == 1 + 1
+    )
+    assert spec.n_open_for_migration == 2
+
+
 # --------------------------------------------------------------------------- #
 # TrainingManifest integration
 # --------------------------------------------------------------------------- #

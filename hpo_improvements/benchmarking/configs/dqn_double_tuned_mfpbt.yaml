@@ -15,9 +15,17 @@
 # (Doulazmi et al.) runs subpopulations at different evolution frequencies to curb
 # the greediness of single-frequency PBT while keeping fine-grained schedules.
 #
+# The training budget is 6.25M steps and the evolution interval is evo_steps = 60_000,
+# set just above the 50_000-step learning_delay so the first generation still trains
+# on a learned (not random-init) policy before the first evolution; over the budget
+# this gives ~104 fine-grained evolution generations. The two subpopulations evolve
+# at the widely-spread frequencies delta_i in {1, 5} cycles. (DQN has no rollout
+# buffer, so the PPO/IPPO "2 x base rollout" evo_steps sizing does not transfer; the
+# interval is set in env-step terms against the Atari budget and warmup instead.)
+#
 # MF-PBT additions over dqn_double_tuned_no_hpo.yaml:
-#   mf_pbt: 4 subpopulations x 4 individuals (pop_size = 16, derived),
-#     evolution_frequency_ratios = [1, 2, 4, 8], brackets 1/1/1/1
+#   mf_pbt: 2 subpopulations x 8 individuals (pop_size = 16, derived),
+#     evolution_frequency_ratios = [1, 5], brackets 2/0/2/4
 #   activation mutations ON (act_mut = 0.2) alongside arch / params / rl_hp muts
 #   rl_hp_selection mutates the highest-leverage, well-behaved DQN hyperparameters
 #     (lr, batch_size, learn_step), each with grow/shrink factors scaled to its
@@ -43,7 +51,7 @@ mutation:
     # enabled. no_mut is the relative weight of "leave this agent unchanged"; the
     # remaining five are the relative weights of each mutation kind (renormalised
     # internally). no_mut is set to 0.0 so that every perturbed agent -- in MF-PBT,
-    # every loser-replacement clone -- is actually mutated: MF-PBT's exploit-explore
+    # each of the 4 loser-replacement clones -- is actually mutated: MF-PBT's exploit-explore
     # always perturbs a clone, and a passed-through clone would be an exact duplicate
     # of the winner it was cloned from, wasting the slot and collapsing diversity.
     probabilities:
@@ -153,23 +161,31 @@ replay_buffer:
 
 mf_pbt:
     # Multiple-Frequencies Population-Based Training (Doulazmi et al.) replaces
-    # tournament selection. 4 subpopulations of 4 agents each (pop_size = 16, derived),
-    # evolving at frequencies delta_i in {1, 2, 4, 8} cycles. Each subpopulation is
-    # ranked by fitness into one winner / survivor / open-for-migration / loser; the
+    # tournament selection. 2 subpopulations of 8 agents each (pop_size = 16, derived),
+    # evolving at frequencies delta_i in {1, 5} cycles. Each subpopulation is
+    # ranked by fitness into 2 winners / 0 survivors / 2 open-for-migration / 4 losers; the
     # mutation block above supplies the perturbation operator for evolution-clones.
-    n_subpopulations: 4
-    n_individuals_per_subpopulation: 4
-    evolution_frequency_ratios: [1, 2, 4, 8]
-    n_winners: 1
-    n_survivors: 1
-    n_open_for_migration: 1
-    n_losers: 1
+    n_subpopulations: 2
+    n_individuals_per_subpopulation: 8
+    evolution_frequency_ratios: [1, 5]
+    n_winners: 2
+    n_survivors: 0
+    n_open_for_migration: 2
+    n_losers: 4
     rand_seed: 42
 
 training:
     max_steps: 6_250_000
     target_score:
-    evo_steps: 100_000  # env steps between evolution events (MF-PBT evolution + migration)
+    # Env steps each agent trains between evolution events (MF-PBT evolution +
+    # migration). Set to 60_000, just above the 50_000-step learning_delay: no
+    # gradient updates happen during the warmup, so a shorter interval would judge
+    # the first generation on pre-learning (random-init) policies; 60_000 gives the
+    # first generation ~10_000 steps of actual learning before the first evolution.
+    # Short over the 6.25M-step budget (~104 generations), giving MF-PBT many
+    # fine-grained generations across its two frequencies. (Unlike PPO/IPPO, DQN has
+    # no rollout buffer to size this as a multiple of -- see the header note.)
+    evo_steps: 60_000
     eval_steps:
     eval_loop: 1
     dormant_tau: 0.1  # tau threshold for the dormant-neuron metric (Sokar et al. 2023)

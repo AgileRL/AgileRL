@@ -220,8 +220,9 @@ class MFPBT:
         advance). Otherwise the external agent migrates in: if it comes from a
         *faster*-evolving subpopulation (smaller ``delta``) only its
         networks/optimizer are imported while its mutable hyperparameters are
-        reset to the studied subpopulation's elite (with the optimizer reinitialised
-        at the elite learning rate); otherwise it is cloned in full.
+        reset to the studied subpopulation's elite (the optimizer learning rate is
+        updated in place to the elite value, preserving its Adam moments); otherwise
+        it is cloned in full.
 
         :return: A new population list with migrants substituted in place.
         :rtype: list
@@ -264,19 +265,71 @@ class MFPBT:
     def _migrate_reset_hp(self, external: Any, elite: Any, subpop: int) -> Any:
         """Clone *external*'s networks but reset mutable HPs to *elite*'s values."""
         migrant = external.clone(index=self._next_index(), wrap=False)
+        hp_config = migrant.registry.hp_config
         changed = []
         for name in elite.registry.hp_config:
-            setattr(migrant, name, copy.deepcopy(getattr(elite, name)))
+            new_value = copy.deepcopy(getattr(elite, name))
+            setattr(migrant, name, new_value)
+            # Keep the RLParameter value in sync with the plain attribute. clone()
+            # deepcopies hp_config (so the migrant carries *external*'s last-mutated
+            # value), and rl_hyperparam_mutation only re-derives that value from the
+            # attribute when it is None -- so without this a later mutation of this
+            # migrant's lineage would perturb from external's stale value, not the
+            # reset elite value. Mirrors the crossover operator.
+            if hp_config and name in hp_config.names():
+                hp_config[name].value = new_value
             changed.append(name)
         # Re-run the registered mutation hooks so HP-derived state is rebuilt for the
         # new values (e.g. PPO sizes its rollout buffer from learn_step via a hook);
         # this mirrors what Mutations.mutation does after a hyperparameter mutation.
         migrant.mutation_hook()
-        if set(migrant.get_lr_names()) & set(changed):
-            migrant.reinit_optimizers()
+        # The networks were cloned whole from *external* (architecture unchanged),
+        # so the optimizers never need rebuilding -- only the step size changes when
+        # the elite's learning rate differs. Update it in place to preserve the Adam
+        # moment estimates (PBT-faithful exploit), mirroring the crossover operator;
+        # reinit_optimizers would instead discard that state.
+        changed_set = set(changed)
+        for opt_config in migrant.registry.optimizers:
+            lr_attr = opt_config.lr
+            lr_attr_names = lr_attr if isinstance(lr_attr, tuple) else (lr_attr,)
+            if any(name in changed_set for name in lr_attr_names):
+                self._set_optimizer_lr(migrant, opt_config)
         migrant.subpopulation = subpop
         migrant.fitness = [NEG_INF]
         return migrant
+
+    @staticmethod
+    def _set_optimizer_lr(agent: Any, opt_config: Any) -> None:
+        """Update an optimizer's learning rate in place, preserving its state.
+
+        The networks are unchanged by migration (cloned whole from the external
+        agent), so only the step size needs updating; the Adam moment estimates
+        carried over by the clone are kept intact. Mirrors the crossover operator's
+        ``_set_optimizer_lr`` so the two HPO improvements treat optimizer state
+        identically.
+
+        :param agent: The migrant agent whose optimizer is updated.
+        :type agent: EvolvableAlgorithm
+        :param opt_config: The optimizer configuration to update.
+        :type opt_config: OptimizerConfig
+        """
+        # Tuple LR names only occur for split LLM optimizers, which the benchmark
+        # suites (PPO/DQN/IPPO) never use; fall back to a rebuild in that case.
+        if isinstance(opt_config.lr, tuple):
+            agent.reinit_optimizers(optimizer=opt_config)
+            return
+
+        new_lr = getattr(agent, opt_config.lr)
+        wrapper = getattr(agent, opt_config.name)
+        wrapper.lr = new_lr
+        optimizers = (
+            wrapper.optimizer.values()
+            if isinstance(wrapper.optimizer, dict)
+            else [wrapper.optimizer]
+        )
+        for optimizer in optimizers:
+            for group in optimizer.param_groups:
+                group["lr"] = new_lr
 
     # ------------------------------------------------------------------ #
     # Orchestration

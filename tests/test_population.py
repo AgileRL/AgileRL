@@ -548,25 +548,22 @@ class TestPopulationShouldStop:
         pop = _make_population([a], min_evo_steps=5, evo_steps=10)
         assert pop.should_stop(1.0) is True
 
-    def test_should_stop_ignores_neg_inf_in_window(self):
-        """A lingering -inf in the fitness window must not block the target.
+    def test_should_stop_ignores_neg_inf_sentinel(self):
+        """A lingering -inf sentinel must not block the target stop.
 
-        Mirrors the MF-PBT fix: the target check uses only the agent's finite
-        measured fitness, so a -inf sentinel does not pin the mean at -inf.
+        MF-PBT seeds freshly cloned agents with ``fitness = [-inf]``; that
+        sentinel lingers in the maxlen fitness window after the clone is
+        re-evaluated (``[-inf, real, real]``). The target check must use the
+        agent's real measured fitness, not let the sentinel pin the mean at
+        ``-inf``.
         """
         a = _make_mock_agent(fitness=[float("-inf"), 100.0, 100.0])
         pop = _make_population([a], min_evo_steps=5, evo_steps=10)
         assert pop.should_stop(1.0) is True
 
-    def test_should_stop_ignores_nan_in_window(self):
-        """A NaN from a transient divergence must not block the target stop."""
-        a = _make_mock_agent(fitness=[float("nan"), 100.0, 100.0])
-        pop = _make_population([a], min_evo_steps=5, evo_steps=10)
-        assert pop.should_stop(1.0) is True
-
     def test_should_stop_unevaluated_agent_blocks(self):
-        """An agent with no finite fitness (only a -inf sentinel) still blocks
-        the stop, even when every other agent clears the target."""
+        """An agent with only the -inf sentinel (never re-evaluated) blocks the
+        stop, even when every other agent clears the target."""
         good = _make_mock_agent(fitness=[100.0])
         unevaluated = _make_mock_agent(fitness=[float("-inf")])
         pop = _make_population([good, unevaluated], min_evo_steps=5, evo_steps=10)

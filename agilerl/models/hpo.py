@@ -93,7 +93,9 @@ class MFPBTSpec(BaseModel):
     agents each (so ``pop_size`` is derived, not configured). Each subpopulation
     ``i`` evolves every ``evolution_frequency_ratios[i]`` cycles, and is partitioned
     by fitness rank into four brackets whose sizes must sum to the per-subpopulation
-    individual count.
+    individual count. Following the paper, ``n_open_for_migration`` must not exceed
+    ``n_winners + n_survivors`` so migration fills no more slots than the
+    subpopulation preserves natively.
 
     :param n_subpopulations: Number of subpopulations.
     :type n_subpopulations: int
@@ -160,6 +162,17 @@ class MFPBTSpec(BaseModel):
                 "n_winners must be >= 1 when n_losers > 0 (winner-clones replace "
                 "losers) or n_open_for_migration > 0 (the top winner is the "
                 "subpopulation elite used for migration)."
+            )
+            raise ValueError(msg)
+        # Migration may fill at most as many slots as the subpopulation preserves
+        # natively (winners + survivors), so cross-frequency migration cannot replace
+        # more of a subpopulation than it keeps -- the bracketing of the MF-PBT paper.
+        if self.n_open_for_migration > self.n_winners + self.n_survivors:
+            msg = (
+                f"n_open_for_migration ({self.n_open_for_migration}) must be <= "
+                f"n_winners + n_survivors ({self.n_winners} + {self.n_survivors} = "
+                f"{self.n_winners + self.n_survivors}) so that migration fills no more "
+                f"slots than the subpopulation preserves natively (MF-PBT paper)."
             )
             raise ValueError(msg)
         return self

@@ -571,13 +571,11 @@ class Population(Generic[AgentT]):
             return False
 
         def _finite_mean(fitness: list[float]) -> float:
-            # Ignore non-finite values in the fitness window when measuring how
-            # close an agent is to the target. A diverged agent can leave a NaN
-            # (training instability) or a -inf sentinel (e.g. a freshly cloned,
-            # not-yet-re-evaluated migrant) lingering in the maxlen window;
-            # either would otherwise pin the mean and permanently block the
-            # target stop. An agent with no finite fitness yet stays -inf,
-            # correctly blocking. No-op for the all-finite path.
+            # Ignore the -inf sentinel that MF-PBT assigns to freshly cloned,
+            # not-yet-re-evaluated agents; it lingers in the maxlen fitness
+            # window after re-evaluation and would otherwise pin the mean at
+            # -inf. An agent with no finite fitness yet stays -inf, correctly
+            # blocking the stop. No-op for the all-finite (non-MF-PBT) path.
             finite = [f for f in fitness if np.isfinite(f)]
             return float(np.mean(finite)) if finite else float("-inf")
 
