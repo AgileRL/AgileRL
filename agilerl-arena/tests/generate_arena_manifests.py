@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, get_args
 
 import yaml
+from agilerl.arena import AgentType
 from agilerl.arena.models import TrainingManifest as ArenaManifest
 from agilerl.arena.models.algo import ARENA_REGISTRY, LLMAlgorithmSpec
 from agilerl.arena.models.env import EnvSpec as ArenaEnvSpec
@@ -26,8 +27,6 @@ from agilerl.arena.models.networks import (
     StochasticActorSpec,
 )
 from agilerl.arena.models.training import ReplayBufferSpec, TrainingSpec
-
-from agilerl.arena import AgentType
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _TINY_LLM = str(_REPO_ROOT / "tests" / "assets" / "tiny_llm")

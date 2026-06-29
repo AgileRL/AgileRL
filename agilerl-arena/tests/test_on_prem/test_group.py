@@ -8,18 +8,17 @@ import click
 import pytest
 from agilerl.arena.client import ArenaClient
 from agilerl.arena.config import CommandConfig
-from agilerl.arena.on_prem.group import (
-    _ON_PREM_ENSURED_META_KEY,
-    OnPremDynamicGroup,
-)
-from click.testing import CliRunner
-
 from agilerl.arena.on_prem import (
     ArenaRootGroup,
     capabilities_show_on_prem_root,
     caps_allow_on_prem_at_root,
     register_on_prem_manifest_group,
 )
+from agilerl.arena.on_prem.group import (
+    _ON_PREM_ENSURED_META_KEY,
+    OnPremDynamicGroup,
+)
+from click.testing import CliRunner
 
 
 class TestCapsAllowOnPremAtRoot:

@@ -12,9 +12,8 @@ from typing import Any
 
 from agilerl.arena.client import ArenaClient
 from agilerl.arena.exceptions import ArenaAPIError
-from agilerl.arena.on_prem.endpoints import SetupKind
-
 from agilerl.arena.on_prem import endpoints
+from agilerl.arena.on_prem.endpoints import SetupKind
 
 logger = logging.getLogger("agilerl.arena.on_prem")
 

@@ -6,9 +6,8 @@ from unittest.mock import MagicMock
 
 import pytest
 from agilerl.arena.exceptions import ArenaAPIError
-from agilerl.arena.on_prem.api import class_by_name
-
 from agilerl.arena.on_prem import OnPremApi
+from agilerl.arena.on_prem.api import class_by_name
 
 
 class TestClassByName:

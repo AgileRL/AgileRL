@@ -23,6 +23,7 @@ from agilerl.arena.exceptions import (
     ArenaTrainingError,
     ArenaValidationError,
 )
+from agilerl.arena.inference import Agent
 from agilerl.arena.inference.cache import (
     load_binding,
     normalized_deployment_name,
@@ -40,8 +41,6 @@ from agilerl.arena.utils import (
     prepare_file_upload,
 )
 from typing_extensions import Self
-
-from agilerl.arena.inference import Agent
 
 logger = logging.getLogger(__name__)
 
