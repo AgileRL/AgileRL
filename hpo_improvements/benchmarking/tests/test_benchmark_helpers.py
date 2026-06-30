@@ -144,7 +144,7 @@ class TestResolveDevice:
 
 
 # --------------------------------------------------------------------------- #
-# load_manifest_dict / _read_mutation_history                                 #
+# load_manifest_dict                                                          #
 # --------------------------------------------------------------------------- #
 class TestFileHelpers:
     def test_load_manifest_dict(self, tmp_path):
@@ -155,20 +155,6 @@ class TestFileHelpers:
         out = benchmark.load_manifest_dict(p)
         assert out["algorithm"]["name"] == "PPO"
         assert out["x"] == [1, 2]
-
-    def test_read_mutation_history_present(self, tmp_path):
-        df = pd.DataFrame({"generation": [0, 1], "agent_id": [0, 1]})
-        df.to_csv(tmp_path / benchmark.MUTATION_HISTORY_FILENAME, index=False)
-        out = benchmark._read_mutation_history(tmp_path)
-        assert out is not None
-        assert len(out) == 2
-
-    def test_read_mutation_history_absent(self, tmp_path):
-        assert benchmark._read_mutation_history(tmp_path) is None
-
-    def test_read_mutation_history_empty(self, tmp_path):
-        (tmp_path / benchmark.MUTATION_HISTORY_FILENAME).write_text("")
-        assert benchmark._read_mutation_history(tmp_path) is None
 
 
 # --------------------------------------------------------------------------- #

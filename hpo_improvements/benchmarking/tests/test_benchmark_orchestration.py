@@ -200,7 +200,6 @@ def run_training_seams(monkeypatch):
         return agent
 
     monkeypatch.setattr(benchmark, "RSNorm", fake_rsnorm)
-    monkeypatch.setattr(benchmark, "set_mutation_history_dir", lambda d: None)
     monkeypatch.setattr(benchmark, "tee_to_file", lambda p: contextlib.nullcontext())
     monkeypatch.setattr(benchmark, "_finish_active_wandb_run", lambda: None)
     monkeypatch.setattr(
@@ -373,7 +372,6 @@ def fetch_and_plot_seams(monkeypatch):
         "normalization_scores",
         lambda algo, env: SimpleNamespace(normalize=lambda f: f / 10.0),
     )
-    monkeypatch.setattr(benchmark, "_read_mutation_history", lambda d: None)
     for name in [
         "plot_fitness",
         "plot_mutation_schedule",
@@ -381,9 +379,6 @@ def fetch_and_plot_seams(monkeypatch):
         "plot_diversity",
         "plot_population_hp_trajectory",
         "plot_hp_fitness",
-        "plot_mechanism_efficacy",
-        "plot_mechanism_efficacy_distribution",
-        "plot_mechanism_population",
     ]:
         monkeypatch.setattr(benchmark.plotting, name, lambda *a, **k: None)
 
@@ -514,61 +509,6 @@ class TestDiversityAggregates:
 
 
 # --------------------------------------------------------------------------- #
-# plot_mechanism_aggregates                                                   #
-# --------------------------------------------------------------------------- #
-class TestMechanismAggregates:
-    def test_empty_tree_warns_no_crash(self, monkeypatch, tmp_path):
-        # No config.yaml, no env dirs -> nothing usable, must not raise.
-        benchmark.plot_mechanism_aggregates(tmp_path, "L", "S")
-
-    def test_real_tree_calls_plotters(self, monkeypatch, tmp_path):
-        import yaml
-
-        (tmp_path / "config.yaml").write_text(
-            yaml.safe_dump({"algorithm": {"name": "PPO"}})
-        )
-        seed_dir = tmp_path / "Ant-v4" / "s1"
-        seed_dir.mkdir(parents=True)
-        # An informative-lineage mutation history with the columns the
-        # selection/turnover path needs (incl. agent_slot).
-        pd.DataFrame(
-            {
-                "generation": [0, 0, 1, 1],
-                "parent_id": [0, 1, 0, 0],
-                "agent_id": [0, 1, 0, 1],
-                "agent_slot": [0, 1, 0, 1],
-                "mutation_category": [
-                    "no mutation",
-                    "no mutation",
-                    "parameter",
-                    "parameter",
-                ],
-                "fitness_before": [np.nan, np.nan, 1.0, 1.0],
-                "fitness_after": [np.nan, np.nan, 2.0, 0.5],
-                "global_step": [0, 0, 400, 400],
-            }
-        ).to_csv(seed_dir / benchmark.MUTATION_HISTORY_FILENAME, index=False)
-
-        called = set()
-        for name in [
-            "plot_mechanism_efficacy_over_seeds",
-            "plot_mechanism_efficacy_distribution_over_seeds",
-            "plot_mechanism_population_over_seeds",
-            "plot_mechanism_efficacy_aggregate",
-            "plot_mechanism_efficacy_distribution_aggregate",
-            "plot_mechanism_population_aggregate",
-        ]:
-            monkeypatch.setattr(
-                benchmark.plotting,
-                name,
-                (lambda n: lambda *a, **k: called.add(n) or {})(name),
-            )
-        benchmark.plot_mechanism_aggregates(tmp_path, "L", "S")
-        assert "plot_mechanism_efficacy_over_seeds" in called
-        assert "plot_mechanism_efficacy_aggregate" in called
-
-
-# --------------------------------------------------------------------------- #
 # main                                                                        #
 # --------------------------------------------------------------------------- #
 class TestMain:
@@ -609,7 +549,7 @@ class TestMain:
                 None,
             ),
         )
-        called = {"seed": 0, "mech": 0}
+        called = {"seed": 0}
         monkeypatch.setattr(
             benchmark,
             "plot_seed_aggregates",
@@ -618,14 +558,9 @@ class TestMain:
         monkeypatch.setattr(
             benchmark, "plot_diversity_aggregates", lambda *a, **k: None
         )
-        monkeypatch.setattr(
-            benchmark,
-            "plot_mechanism_aggregates",
-            lambda *a, **k: called.__setitem__("mech", 1),
-        )
         cfg = self._write_manifest(tmp_path)
         benchmark.main(self._argv(cfg))
-        assert called == {"seed": 1, "mech": 1}
+        assert called == {"seed": 1}
         # the persisted config.yaml carries a benchmark metadata block.
         import yaml
 
@@ -646,9 +581,6 @@ class TestMain:
             ),
         )
         monkeypatch.setattr(benchmark, "plot_seed_aggregates", lambda *a, **k: None)
-        monkeypatch.setattr(
-            benchmark, "plot_mechanism_aggregates", lambda *a, **k: None
-        )
         cfg = self._write_manifest(tmp_path, extra_training={"evo_steps": 100})
         benchmark.main(self._argv(cfg, **{"--max-steps": "50"}))
         training = seen["manifest"]["training"]
@@ -672,9 +604,6 @@ class TestMain:
             benchmark,
             "plot_seed_aggregates",
             lambda *a, **k: agg.__setitem__("called", 1),
-        )
-        monkeypatch.setattr(
-            benchmark, "plot_mechanism_aggregates", lambda *a, **k: None
         )
         cfg = self._write_manifest(tmp_path)
         # the exception inside the loop must not propagate.
