@@ -59,6 +59,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import gymnasium as gym  # noqa: E402
+import mechanism  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 import plotting  # noqa: E402
@@ -1030,6 +1031,25 @@ def render_best_multi_agent(
 # --------------------------------------------------------------------------- #
 # W&B fetch + plotting (shared with the Ray orchestrator)
 # --------------------------------------------------------------------------- #
+def _read_mutation_history(env_dir: Path) -> pd.DataFrame | None:
+    """Load a run's ``mutation_history.csv`` if present and non-empty.
+
+    :param env_dir: The per-seed run directory.
+    :return: The parsed dataframe, or None when the file is absent or unreadable
+        (no-HPO and some regimes still write it; the mechanism plots degrade to a
+        placeholder when it is missing).
+    """
+    path = env_dir / MUTATION_HISTORY_FILENAME
+    if not path.is_file():
+        return None
+    try:
+        df = pd.read_csv(path)
+    except (OSError, ValueError, pd.errors.ParserError) as exc:
+        logger.warning("Could not read %s: %s", path, exc)
+        return None
+    return df if not df.empty else None
+
+
 def fetch_and_plot(
     *,
     project: str,
@@ -1103,6 +1123,36 @@ def fetch_and_plot(
         history, env_name, pop_size, str(env_dir / "dormant_fraction.png")
     )
     plotting.plot_diversity(history, env_name, pop_size, str(env_dir / "diversity.png"))
+
+    # Evolutionary-mechanism diagnostics. The hyperparameter trajectory/landscape
+    # come from the W&B history; the efficacy and population-dynamics figures come
+    # from the per-generation mutation-history CSV (downloaded above for the Ray
+    # path, already present for the sequential path). All degrade to a placeholder
+    # when their input is missing or degenerate.
+    plotting.plot_population_hp_trajectory(
+        history,
+        env_name,
+        pop_size,
+        str(env_dir / "mechanism_hp_population.png"),
+        hp_names=hp_names,
+    )
+    plotting.plot_hp_fitness(
+        history,
+        env_name,
+        pop_size,
+        str(env_dir / "mechanism_hp_fitness.png"),
+        hp_names=hp_names,
+    )
+    mut_df = _read_mutation_history(env_dir)
+    plotting.plot_mechanism_efficacy(
+        mut_df, env_name, str(env_dir / "mechanism_efficacy.png")
+    )
+    plotting.plot_mechanism_efficacy_distribution(
+        mut_df, env_name, str(env_dir / "mechanism_efficacy_distribution.png")
+    )
+    plotting.plot_mechanism_population(
+        mut_df, env_name, pop_size, str(env_dir / "mechanism_population.png")
+    )
 
     # Build the per-env normalized curve for the aggregate plot.
     data = history.dropna(
@@ -1215,6 +1265,155 @@ def plot_diversity_aggregates(
         suite_name=suite_name,
     )
     logger.info("Saved diversity aggregate across %d environments.", len(curves))
+
+
+def plot_mechanism_aggregates(
+    bench_dir: Path,
+    algo_label: str,
+    suite_name: str,
+) -> None:
+    """Draw the per-environment over-seeds and cross-environment aggregate figures.
+
+    Self-contained: it re-reads each finished seed's ``mutation_history.csv`` from
+    disk (every per-seed run already wrote one) rather than threading mechanism
+    data through :func:`fetch_and_plot`'s return value, so it adds nothing to the
+    contract the sequential and Ray paths share. For each environment it writes an
+    ``over_seeds`` figure pooling that environment's seeds, then the suite
+    aggregate over every environment -- mirroring the fitness/diversity layout:
+
+    * ``<env>/mechanism_efficacy_over_seeds.png`` and
+      ``aggregate_mechanism_efficacy.png`` -- per-category win-rate and mean
+      change (rliable bootstrap CIs). The over-seeds figure uses raw episodic
+      return; the suite aggregate uses the change in **expert-normalised** fitness
+      (per-env, so a high-return env does not dominate the cross-env pool).
+    * ``<env>/mechanism_efficacy_distribution_over_seeds.png`` and
+      ``aggregate_mechanism_efficacy_distribution.png`` -- the per-category
+      probability density of the per-cycle change (raw per env, normalised for the
+      suite aggregate).
+    * ``<env>/mechanism_population_over_seeds.png`` and
+      ``aggregate_mechanism_population.png`` -- the IQM (with stratified-bootstrap
+      band) of selection pressure and turnover over per-agent steps. Only
+      lineage-informative seeds contribute (see
+      :func:`mechanism.lineage_is_informative`); regimes that record no lineage
+      (no-HPO, MF-PBT) simply yield no curve.
+
+    :param bench_dir: Benchmark output directory (the per-env/per-seed tree).
+    :param algo_label: Display label for the algorithm + HPO method.
+    :param suite_name: Human-readable environment-suite name (for titles).
+    """
+    suite_deltas: dict[str, list[np.ndarray]] = {}
+    per_metric: dict[str, dict[str, tuple[np.ndarray, np.ndarray]]] = {}
+    drew_any = False
+
+    # Algorithm name (read from the persisted manifest), used to expert-normalise
+    # the suite-level deltas per environment so a high-return env does not dominate
+    # the cross-environment pool. The per-env over-seeds figures stay in raw units.
+    algo = None
+    config_path = bench_dir / "config.yaml"
+    if config_path.is_file():
+        try:
+            algo = load_manifest_dict(config_path).get("algorithm", {}).get("name")
+        except (OSError, ValueError, KeyError) as exc:
+            logger.warning("Could not read algorithm from %s: %s", config_path, exc)
+
+    for env_dir in sorted(p for p in bench_dir.iterdir() if p.is_dir()):
+        env_name = env_dir.name
+        env_deltas: dict[str, list[np.ndarray]] = {}
+        sel_curves: list[tuple[np.ndarray, np.ndarray]] = []
+        tur_curves: list[tuple[np.ndarray, np.ndarray]] = []
+
+        # Expert-normalisation for this env's suite-level deltas (None -> raw
+        # fitness when the env has no registered random/expert baseline).
+        normalize = None
+        if algo is not None:
+            try:
+                normalize = normalization_scores(algo, env_name).normalize
+            except (KeyError, ValueError):
+                logger.warning(
+                    "No normalisation baseline for %s/%s; aggregate uses raw deltas.",
+                    algo,
+                    env_name,
+                )
+
+        for seed_dir in sorted(env_dir.glob("s*")):
+            mut_df = _read_mutation_history(seed_dir)
+            if mut_df is None:
+                continue
+            for cat, d in mechanism.category_deltas(mut_df).items():
+                env_deltas.setdefault(cat, []).append(d)  # raw, for over-seeds
+            for cat, d in mechanism.category_deltas(
+                mut_df, transform=normalize
+            ).items():
+                suite_deltas.setdefault(cat, []).append(d)  # normalised, for suite
+            if not mechanism.lineage_is_informative(mut_df):
+                continue
+            pop_size = max(int(mut_df["agent_slot"].nunique()), 1)
+            sx, sy = mechanism.selection_pressure(mut_df, pop_size)
+            tx, ty = mechanism.turnover(mut_df, pop_size)
+            if sx.size:
+                sel_curves.append((sx, sy))
+            if tx.size:
+                tur_curves.append((tx, ty))
+
+        if not env_deltas and not sel_curves and not tur_curves:
+            continue
+        drew_any = True
+
+        # Per-environment over-seeds figures (pool this env's seeds, raw units).
+        if env_deltas:
+            env_pooled = {cat: np.concatenate(a) for cat, a in env_deltas.items()}
+            plotting.plot_mechanism_efficacy_over_seeds(
+                env_pooled,
+                env_name,
+                str(env_dir / "mechanism_efficacy_over_seeds.png"),
+            )
+            plotting.plot_mechanism_efficacy_distribution_over_seeds(
+                env_pooled,
+                env_name,
+                str(env_dir / "mechanism_efficacy_distribution_over_seeds.png"),
+            )
+
+        stacks = plotting.plot_mechanism_population_over_seeds(
+            sel_curves,
+            tur_curves,
+            env_name,
+            str(env_dir / "mechanism_population_over_seeds.png"),
+            algo_label=algo_label,
+        )
+        for key, grid_stack in stacks.items():
+            per_metric.setdefault(key, {})[env_name] = grid_stack
+
+    # Suite-level aggregates over every environment.
+    if suite_deltas:
+        pooled = {cat: np.concatenate(a) for cat, a in suite_deltas.items()}
+        plotting.plot_mechanism_efficacy_aggregate(
+            pooled,
+            str(bench_dir / "aggregate_mechanism_efficacy.png"),
+            algo_label=algo_label,
+            suite_name=suite_name,
+        )
+        plotting.plot_mechanism_efficacy_distribution_aggregate(
+            pooled,
+            str(bench_dir / "aggregate_mechanism_efficacy_distribution.png"),
+            algo_label=algo_label,
+            suite_name=suite_name,
+        )
+    if per_metric:
+        plotting.plot_mechanism_population_aggregate(
+            per_metric,
+            str(bench_dir / "aggregate_mechanism_population.png"),
+            algo_label=algo_label,
+            suite_name=suite_name,
+        )
+
+    if drew_any:
+        logger.info(
+            "Saved mechanism over-seeds and aggregate figures under %s.", bench_dir
+        )
+    else:
+        logger.warning(
+            "No run wrote usable mutation history; skipping mechanism aggregate."
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -1741,6 +1940,10 @@ def main(argv: list[str] | None = None) -> None:
         logger.warning("No environment produced plottable data.")
     if diversity_curves:
         plot_diversity_aggregates(diversity_curves, bench_dir, algo_label, suite_name)
+    # Mechanism aggregates re-read the per-seed mutation-history CSVs from disk,
+    # so they run whenever any environment produced output.
+    if curves:
+        plot_mechanism_aggregates(bench_dir, algo_label, suite_name)
 
 
 if __name__ == "__main__":

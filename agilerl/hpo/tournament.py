@@ -42,12 +42,21 @@ class TournamentSelection:
         When ``sum_scores=False``, multi-agent algorithms store per-sub-agent
         fitness values.  Tournament selection needs a total ordering, so we
         collapse to the mean across sub-agents.
+
+        A diverged agent can carry a non-finite fitness (``NaN`` from training
+        instability, ``inf`` from overflow). ``np.argsort`` orders ``NaN`` as
+        the *largest* value, so an unguarded NaN fitness would be ranked best
+        and selected as the elite (and would win tournaments). We collapse any
+        non-finite result to ``-inf`` so the existing selection discards the
+        broken agent instead of promoting it.
         """
         if isinstance(fitness, dict):
-            return float(np.mean(list(fitness.values())))
-        if isinstance(fitness, (list, tuple, np.ndarray)):
-            return float(np.mean(fitness))
-        return float(fitness)
+            value = float(np.mean(list(fitness.values())))
+        elif isinstance(fitness, (list, tuple, np.ndarray)):
+            value = float(np.mean(fitness))
+        else:
+            value = float(fitness)
+        return value if np.isfinite(value) else float("-inf")
 
     def _tournament(self, fitness_values: list[float]) -> int:
         """Perform tournament selection given a list of fitness values.

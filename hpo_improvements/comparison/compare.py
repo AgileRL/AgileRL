@@ -110,6 +110,7 @@ def save_results(result: ComparisonResult, out_dir: Path) -> None:
         "baseline": result.baseline_name,
         "common_environments": result.common_envs,
         "common_seeds": result.common_seeds,
+        "per_environment_seeds": result.per_env_seeds,
         "n_pairs": result.n_pairs,
         "interpolated_grid": result.interpolated,
         "reps": result.reps,
@@ -123,13 +124,15 @@ def save_results(result: ComparisonResult, out_dir: Path) -> None:
     with open(out_dir / "probability_of_improvement.json", "w") as f:
         json.dump(summary, f, indent=2)
 
-    # Per-pair final normalized fitness the probability is computed from.
+    # Per-pair final normalized fitness the probability is computed from. Driven
+    # off the per-pair view so it is correct for both the rectangular and the
+    # ragged (per-environment-stratified) layouts.
     final_lines = ["env,seed,studied_final,baseline_final,difference"]
     final_lines += [
-        f"{env},{seed},{result.studied_final[i, j]},{result.baseline_final[i, j]},"
-        f"{result.studied_final[i, j] - result.baseline_final[i, j]}"
-        for j, env in enumerate(result.common_envs)
-        for i, seed in enumerate(result.common_seeds)
+        f"{env},{seed},{sf},{bf},{sf - bf}"
+        for (env, seed), sf, bf in zip(
+            result.pairs, result.studied_final_flat, result.baseline_final_flat
+        )
     ]
     (out_dir / "final_values.csv").write_text("\n".join(final_lines) + "\n")
 

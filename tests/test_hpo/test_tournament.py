@@ -513,3 +513,61 @@ class TestTournamentSelectionElitism:
         assert rank.shape == (4,)
         assert max_id == 3
         assert elite.index == 3
+
+
+class TestTournamentSelectionScalarFitnessGuard:
+    """A diverged agent (NaN/inf fitness) must rank *last*, never be promoted.
+
+    ``np.argsort`` orders NaN as the largest value, so without a guard a NaN
+    fitness gets the top rank and ``_elitism`` selects the broken agent as the
+    elite (carried over unchanged under elitism) and it wins tournaments. The
+    guard collapses any non-finite scalar fitness to ``-inf`` so the existing
+    selection discards it.
+    """
+
+    def test_nan_scalar_coerced_to_neg_inf(self):
+        assert TournamentSelection._scalar_fitness(float("nan")) == float("-inf")
+
+    def test_pos_inf_scalar_coerced_to_neg_inf(self):
+        # an overflowed (+inf) fitness must not be treated as the best agent
+        assert TournamentSelection._scalar_fitness(float("inf")) == float("-inf")
+
+    def test_finite_scalar_unchanged(self):
+        assert TournamentSelection._scalar_fitness(3.5) == 3.5
+
+    def test_nan_in_list_coerced(self):
+        assert TournamentSelection._scalar_fitness([1.0, float("nan")]) == float("-inf")
+
+    def test_nan_in_dict_coerced(self):
+        assert TournamentSelection._scalar_fitness(
+            {"a": 1.0, "b": float("nan")}
+        ) == float("-inf")
+
+    def test_nan_agent_not_selected_as_elite(self):
+        import numpy as np
+
+        observation_space = generate_random_box_space((4,))
+        discrete_action_space = generate_discrete_space(2)
+        net_config = {"encoder_config": {"hidden_size": [8, 8], "min_mlp_nodes": 7}}
+        population = create_population(
+            algo="DQN",
+            observation_space=observation_space,
+            action_space=discrete_action_space,
+            net_config=net_config,
+            INIT_HP=INIT_HP,
+            population_size=4,
+            device="cpu",
+        )
+        # Agent 3 diverged: its last fitness is NaN. Without the guard it would
+        # be ranked best and chosen as elite.
+        population[0].fitness = [1.0, 2.0]
+        population[1].fitness = [3.0, 4.0]
+        population[2].fitness = [5.0, 6.0]
+        population[3].fitness = [7.0, float("nan")]
+
+        ts = TournamentSelection(3, True, 4)
+        elite, rank, max_id = ts._elitism(population)
+        # The best *finite* agent (index 2) is the elite, not the NaN agent.
+        assert elite.index == 2
+        # The NaN agent is ranked last (rank 0).
+        assert rank[3] == 0

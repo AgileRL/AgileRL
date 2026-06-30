@@ -198,7 +198,7 @@ def _plot_aggregate_panel(ax, result: ComparisonResult) -> None:
     :param result: The populated comparison result.
     """
     if result.x.size == 0 or result.studied_scores.size == 0:
-        ax.set_title(f"{result.algo}: aggregate normalised fitness (no shared range)")
+        ax.set_title(f"{result.algo}: Aggregate normalised fitness (no shared range)")
         ax.set_xlabel(X_LABEL)
         _finalize_axis(ax)
         return
@@ -257,7 +257,7 @@ def _plot_profile_panel(ax, result: ComparisonResult) -> None:
         ]
     )
     if finite.size == 0:
-        ax.set_title(f"{result.algo}: performance profile (no finite scores)")
+        ax.set_title(f"{result.algo}: Performance profile (no finite scores)")
         _finalize_axis(ax)
         return
 
