@@ -2788,6 +2788,26 @@ class TestSavePeftAdapterForVllmRollout:
         assert not (tmp_path / "actor").exists()
         assert "adapter_name" not in calls
 
+    def test_non_main_process_can_export_when_all_ranks_enabled(
+        self, monkeypatch, tmp_path
+    ):
+        calls = self._install_fakes(
+            monkeypatch,
+            state={"model.layers.0.q_proj.lora_A.weight": torch.zeros(2)},
+        )
+        out = save_peft_adapter_for_vllm_rollout(
+            self._peft_model(),
+            tmp_path,
+            "actor",
+            target_modules=["q_proj"],
+            is_main_process=False,
+            export_on_all_ranks=True,
+        )
+        assert out == tmp_path / "actor"
+        assert (tmp_path / "actor" / "adapter_config.json").is_file()
+        assert (tmp_path / "actor" / "adapter_model.safetensors").is_file()
+        assert calls["adapter_name"] == "actor"
+
     def test_exports_filtered_remapped_adapter_with_config(self, monkeypatch, tmp_path):
         t_keep = torch.zeros(2)
         state = {

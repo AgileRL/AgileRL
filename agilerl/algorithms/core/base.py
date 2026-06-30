@@ -8,6 +8,7 @@ import os
 import pickle
 import shutil
 import tempfile
+import time
 import warnings
 from abc import ABC, ABCMeta, abstractmethod
 from collections import OrderedDict, defaultdict
@@ -4473,8 +4474,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         Honours ``VLLMConfig.lora_staging_dir`` when set — e.g. a shared/NFS
         path that a colocated Ray rollout worker reads the adapter from — by
         creating it (parents included) and marking it non-temporary so
-        ``clean_up`` never deletes it. Otherwise falls back to a process-private
-        ``mkdtemp`` that ``clean_up`` removes. Idempotent: both the colocated
+        ``clean_up`` never deletes it. In distributed runs, AgileRL appends a
+        rank-local subdirectory (``rank_<process_index>``) under that root so
+        each rank's colocated vLLM engine reads a stable per-rank adapter path.
+        Otherwise falls back to a process-private ``mkdtemp`` that ``clean_up``
+        removes. Idempotent: both the colocated
         init (``_configure_vllm``) and every adapter sync (``_move_lora_to_vllm``)
         call this, so the same directory is used throughout the agent's life.
 
@@ -4484,7 +4488,21 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         if self._vllm_lora_staging_dir is None:
             configured = getattr(self.vllm_config, "lora_staging_dir", None)
             if configured is not None:
-                self._vllm_lora_staging_dir = Path(configured)
+                configured_path = Path(configured)
+                use_per_rank_staging = (
+                    getattr(self.vllm_config, "lora_staging_per_rank", None)
+                    is not False
+                )
+                if (
+                    use_per_rank_staging
+                    and self.accelerator is not None
+                    and self.accelerator.num_processes > 1
+                    and not self._is_rank_staging_dir(configured_path)
+                ):
+                    configured_path = (
+                        configured_path / f"rank_{self.accelerator.process_index}"
+                    )
+                self._vllm_lora_staging_dir = configured_path
                 self._vllm_lora_staging_dir.mkdir(parents=True, exist_ok=True)
                 self._vllm_lora_staging_dir_is_temp = False
             else:
@@ -4493,6 +4511,17 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 )
                 self._vllm_lora_staging_dir_is_temp = True
         return self._vllm_lora_staging_dir
+
+    @staticmethod
+    def _is_rank_staging_dir(path: Path) -> bool:
+        """Whether ``path`` already points to a ``rank_<n>`` subdirectory."""
+        name = path.name
+        return name.startswith("rank_") and name[5:].isdigit()
+
+    def _is_per_rank_lora_staging_mode(self, staging_dir: Path) -> bool:
+        """Return ``True`` when adapter export/load should be rank-local."""
+        explicit = getattr(self.vllm_config, "lora_staging_per_rank", None)
+        return bool(explicit) or self._is_rank_staging_dir(staging_dir)
 
     def _move_lora_to_vllm(self) -> None:
         """Export the actor LoRA adapter to disk and register it with vLLM.
@@ -4513,6 +4542,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         # weights from disk, and the fixed id avoids per-sync CUDA-graph
         # accumulation that would grow GPU memory across iterations.
         staging_dir = self._ensure_vllm_lora_staging_dir()
+        per_rank_staging_mode = self._is_per_rank_lora_staging_mode(staging_dir)
+        is_distributed = (
+            self.accelerator is not None and self.accelerator.num_processes > 1
+        )
+        export_on_all_ranks = per_rank_staging_mode and is_distributed
         is_main_process = self.accelerator is None or self.accelerator.is_main_process
         with gather_if_zero3(self.zero_stage, list(peft_ref.parameters())):
             if self.lora_config is None:
@@ -4524,16 +4558,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 self._vllm_rollout_adapter,
                 target_modules=self.lora_config.target_modules,
                 is_main_process=is_main_process,
+                export_on_all_ranks=export_on_all_ranks,
             )
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
-        if not adapter_path.is_dir():
-            msg = (
-                f"PEFT adapter export for {self._vllm_rollout_adapter!r} not found under "
-                f"{staging_dir}. Expected {adapter_path} or adapter_config.json in "
-                f"{staging_dir}."
-            )
-            raise FileNotFoundError(msg)
 
         if is_main_process and logger.isEnabledFor(logging.DEBUG):
             # Sum of L2 norms of the trained-from-zero LoRA-B weights; a value
@@ -4558,13 +4586,97 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             adapter_path,
             load_inplace=self._vllm_lora_loaded,
         )
-        loaded = self.llm.llm_engine.add_lora(refresh_request)
-        if not loaded:
-            msg = (
-                f"vLLM failed to load LoRA adapter from {adapter_path}. "
-                "Check max_lora_rank / target module names match the trainer."
-            )
-            raise RuntimeError(msg)
+        deadline_raw = os.getenv("AGILERL_LORA_LOAD_DEADLINE_S", "20")
+        try:
+            deadline_s = max(0.0, float(deadline_raw))
+        except ValueError:
+            deadline_s = 20.0
+        started = time.monotonic()
+        attempts = 0
+        last_missing: list[str] = []
+        last_load_error: Exception | None = None
+        debug_every = 5
+
+        def _missing_adapter_files(path: Path) -> list[str]:
+            missing: list[str] = []
+            if not (path / "adapter_config.json").is_file():
+                missing.append("adapter_config.json")
+            if not (
+                (path / "adapter_model.safetensors").is_file()
+                or (path / "adapter_model.bin").is_file()
+            ):
+                missing.append("adapter_model.safetensors|adapter_model.bin")
+            return missing
+
+        def _safe_dir_listing(path: Path) -> list[str]:
+            if not path.exists():
+                return ["<missing>"]
+            if not path.is_dir():
+                return [f"<not-a-directory:{path.name}>"]
+            try:
+                return sorted(
+                    f"{entry.name}/" if entry.is_dir() else entry.name
+                    for entry in path.iterdir()
+                )
+            except OSError as exc:
+                return [f"<unreadable:{exc}>"]
+
+        while True:
+            attempts += 1
+            elapsed = time.monotonic() - started
+            last_missing = _missing_adapter_files(adapter_path)
+            if not last_missing:
+                try:
+                    loaded = self.llm.llm_engine.add_lora(refresh_request)
+                except Exception as exc:
+                    if exc.__class__.__name__ != "LoRAAdapterNotFoundError":
+                        raise
+                    last_load_error = exc
+                else:
+                    if loaded:
+                        if attempts > 1:
+                            logger.info(
+                                "vLLM LoRA load succeeded after retries: attempts=%d "
+                                "elapsed=%.3fs path=%s",
+                                attempts,
+                                elapsed,
+                                adapter_path,
+                            )
+                        break
+                    last_load_error = RuntimeError(
+                        f"vLLM failed to load LoRA adapter from {adapter_path}. "
+                        "Check max_lora_rank / target module names match the trainer."
+                    )
+
+            if elapsed >= deadline_s:
+                rank = (
+                    self.accelerator.process_index
+                    if self.accelerator is not None
+                    else 0
+                )
+                node = os.environ.get("RAY_NODE_ID", os.uname().nodename)
+                msg = (
+                    "Timed out waiting to load vLLM LoRA adapter "
+                    f"(deadline={deadline_s:.3f}s, elapsed={elapsed:.3f}s, retries={attempts}, "
+                    f"pid={os.getpid()}, rank={rank}, node={node}, path={adapter_path}, "
+                    f"staging_dir={staging_dir}, missing_files={last_missing}, "
+                    f"adapter_dir_listing={_safe_dir_listing(adapter_path)}, "
+                    f"staging_dir_listing={_safe_dir_listing(staging_dir)})."
+                )
+                raise RuntimeError(msg) from last_load_error
+
+            if attempts % debug_every == 0:
+                logger.debug(
+                    "vLLM LoRA load retry: attempt=%d elapsed=%.3fs path=%s "
+                    "missing=%s last_error=%s",
+                    attempts,
+                    elapsed,
+                    adapter_path,
+                    last_missing,
+                    type(last_load_error).__name__ if last_load_error else "None",
+                )
+            sleep_s = min(1.0, 0.1 * (2 ** (attempts - 1)))
+            time.sleep(sleep_s)
 
         # The request handed to ``generate()`` must NOT carry ``load_inplace``:
         # vLLM re-evaluates active LoRAs every decode step, and load_inplace would

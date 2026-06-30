@@ -1546,8 +1546,16 @@ class VLLMConfig:
         fresh process-private temporary directory, removed on ``clean_up``.
         Set explicitly when the rollout engine must read the adapter from a
         known path (e.g. orchestrated/arena deployments); user-supplied
-        directories are created if missing and never deleted by AgileRL.
+        directories are created if missing and never deleted by AgileRL. In
+        distributed runs, AgileRL appends ``rank_<process_index>`` under this
+        root unless ``lora_staging_per_rank`` is set to ``False``.
     :type lora_staging_dir: str | None, optional
+    :param lora_staging_per_rank: Optional override for distributed staging
+        layout when ``lora_staging_dir`` is set. ``True`` forces rank-local
+        subdirectories (``rank_<process_index>``); ``False`` keeps a shared
+        directory for all ranks; ``None`` (default) keeps the current behavior
+        and enables rank-local paths in distributed runs.
+    :type lora_staging_per_rank: bool | None, optional
     """
 
     # Colocate mode parameters
@@ -1572,6 +1580,7 @@ class VLLMConfig:
     # assertion when running multiple vLLM processes on a shared GPU.
     kv_cache_memory_bytes: int | None = None
     lora_staging_dir: str | None = None
+    lora_staging_per_rank: bool | None = None
 
     def __post_init__(self) -> None:
         # sleep_mode toggles the native vLLM sleep/wake cycle (base backed up to
