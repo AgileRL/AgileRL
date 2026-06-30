@@ -127,6 +127,7 @@ class TestEnvPoolLocalTrainer:
             training="T",
             mutation="M",
             tournament_selection="Tour",
+            crossover="Cross",
             replay_buffer="RB",
         )
         monkeypatch.setattr(
