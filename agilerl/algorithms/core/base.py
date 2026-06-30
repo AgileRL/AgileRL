@@ -4596,6 +4596,15 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         last_missing: list[str] = []
         last_load_error: Exception | None = None
         debug_every = 5
+        lora_device = torch.device(self.device)
+        use_device_guard = lora_device.type == "cuda"
+        if use_device_guard and logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "lora-sync: add_lora guard rank=%s self.device=%s current_device=cuda:%d",
+                getattr(getattr(self, "accelerator", None), "process_index", 0),
+                lora_device,
+                torch.cuda.current_device(),
+            )
 
         def _missing_adapter_files(path: Path) -> list[str]:
             missing: list[str] = []
@@ -4627,7 +4636,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             last_missing = _missing_adapter_files(adapter_path)
             if not last_missing:
                 try:
-                    loaded = self.llm.llm_engine.add_lora(refresh_request)
+                    if use_device_guard:
+                        with torch.cuda.device(lora_device):
+                            loaded = self.llm.llm_engine.add_lora(refresh_request)
+                    else:
+                        loaded = self.llm.llm_engine.add_lora(refresh_request)
                 except Exception as exc:
                     if exc.__class__.__name__ != "LoRAAdapterNotFoundError":
                         raise

@@ -6333,6 +6333,47 @@ class TestLLMMoveLoraToVllmErrors:
             agent._move_lora_to_vllm()
         assert agent.llm.llm_engine.add_lora.call_count == 2
 
+    def test_add_lora_uses_cuda_device_guard_when_agent_device_is_cuda(
+        self, tmp_path, monkeypatch
+    ):
+        acc = _make_mock_accelerator(is_main_process=True, process_index=1)
+        agent = _make_llm_agent(accelerator=acc)
+        peft_ref = MagicMock()
+        peft_ref.parameters.return_value = [torch.tensor([1.0])]
+        acc.unwrap_model = MagicMock(return_value=peft_ref)
+        _setup_agent_for_vllm_lora_sync(agent)
+        agent.device = "cuda:1"
+
+        adapter_path = tmp_path / "actor"
+        adapter_path.mkdir(parents=True, exist_ok=True)
+        (adapter_path / "adapter_config.json").write_text("{}")
+        (adapter_path / "adapter_model.safetensors").write_bytes(b"")
+        monkeypatch.setenv("AGILERL_LORA_LOAD_DEADLINE_S", "1")
+
+        device_guard = MagicMock()
+        device_guard.__enter__ = MagicMock(return_value=None)
+        device_guard.__exit__ = MagicMock(return_value=False)
+
+        with (
+            patch("agilerl.algorithms.core.base.gather_if_zero3", create=True),
+            patch(
+                "agilerl.algorithms.core.base.save_peft_adapter_for_vllm_rollout",
+                return_value=adapter_path,
+                create=True,
+            ),
+            patch(
+                "agilerl.algorithms.core.base.torch.cuda.current_device",
+                return_value=0,
+            ),
+            patch(
+                "agilerl.algorithms.core.base.torch.cuda.device",
+                return_value=device_guard,
+            ) as mock_cuda_device,
+        ):
+            agent._move_lora_to_vllm()
+        mock_cuda_device.assert_called_once_with(torch.device("cuda:1"))
+        agent.llm.llm_engine.add_lora.assert_called_once()
+
     def test_timeout_raises_actionable_runtime_error(self, tmp_path, monkeypatch):
         acc = _make_mock_accelerator(
             num_processes=2, is_main_process=False, process_index=1
