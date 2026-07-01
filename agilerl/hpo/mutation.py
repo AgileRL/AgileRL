@@ -26,6 +26,11 @@ from agilerl.typing import (
     MutationReturnType,
 )
 from agilerl.utils.algo_utils import remove_compile_prefix
+from agilerl.utils.dormant_neurons import (
+    _eval_networks,
+    capture_per_neuron_scores,
+    collect_observation_batch,
+)
 from agilerl.utils.evolvable_networks import compile_model
 from agilerl.wrappers.agent import AgentWrapper
 
@@ -36,6 +41,8 @@ BanditAlgorithm = NeuralUCB | NeuralTS
 
 torch._dynamo.config.cache_size_limit = 64
 torch._logging.set_logs(dynamo=logging.FATAL)
+
+logger = logging.getLogger(__name__)
 
 
 def set_global_seed(seed: int | None) -> None:
@@ -220,6 +227,9 @@ class Mutations:
         rand_seed: int | None = None,
         device: str = "cpu",
         accelerator: Accelerator | None = None,
+        param_mut_type: str = "original",
+        dormant_tau: float = 0.1,
+        overact_beta: float = 3.0,
     ) -> None:
         if activation_selection is None:
             activation_selection = ["ReLU", "ELU", "GELU"]
@@ -283,6 +293,14 @@ class Mutations:
         )
         if isinstance(rand_seed, int):
             assert rand_seed >= 0, "Random seed must be greater than or equal to zero."
+        assert param_mut_type in ("original", "reborn"), (
+            "param_mut_type must be either 'original' or 'reborn'."
+        )
+        assert dormant_tau > 0, "dormant_tau must be greater than zero."
+        assert overact_beta >= 0, "overact_beta must be non-negative."
+        assert overact_beta > dormant_tau, (
+            "overact_beta must be greater than dormant_tau."
+        )
 
         # Random seed for repeatability
         set_global_seed(rand_seed)
@@ -300,6 +318,15 @@ class Mutations:
         self.activation_selection = activation_selection  # Activation functions
         self.mutation_sd = mutation_sd  # Mutation strength
         self.mutate_elite = mutate_elite
+        # ReBorn parameter-mutation configuration (Qin et al.). When
+        # ``param_mut_type == "reborn"`` the parameter mutation recycles dormant /
+        # over-active neurons instead of adding Gaussian noise; ``mutation_sd`` is
+        # then unused. Detection needs an observation batch, supplied per-agent via
+        # ``self._reborn_env`` (set by :meth:`mutation`) during the main loop.
+        self.param_mut_type = param_mut_type
+        self.dormant_tau = dormant_tau
+        self.overact_beta = overact_beta
+        self._reborn_env: Any | None = None
         self.device = device
         self.accelerator = accelerator
 
@@ -312,6 +339,7 @@ class Mutations:
         self,
         population: PopulationType,
         pre_training_mut: bool = False,
+        env: Any | None = None,
     ) -> PopulationType:
         """Return a mutated population of agents. See :ref:`evo_hyperparam_opt` for more details.
 
@@ -319,10 +347,35 @@ class Mutations:
         :type population: list[EvolvableAlgorithm]
         :param pre_training_mut: Boolean flag indicating if the mutation is before the training loop
         :type pre_training_mut: bool, optional
+        :param env: Optional (vectorized) environment used by the ReBorn parameter
+            mutation to collect a fresh per-agent observation batch. When ``None``
+            (e.g. the pre-training mutation), a ReBorn-configured operator falls
+            back to the original Gaussian parameter mutation.
+        :type env: Any | None, optional
 
         :return: Mutated population
         :rtype: list[EvolvableAlgorithm]
         """
+        # Make the environment available to the (ReBorn) parameter mutation for the
+        # duration of this call only; reset afterwards so a later env-less call
+        # (e.g. pre-training) cannot accidentally reuse a stale handle.
+        self._reborn_env = env
+
+        # A ReBorn regime needs an environment to collect the observation batch it
+        # scores neurons on. When configured for ReBorn but called without one on a
+        # regular (non pre-training) mutation step -- e.g. a trainer that does not
+        # thread env, or the accelerator path -- the parameter mutation silently
+        # falls back to the Gaussian operator, which would misattribute results.
+        # The pre-training step is expected to run env-less, so it is exempt.
+        if self.param_mut_type == "reborn" and env is None and not pre_training_mut:
+            warnings.warn(
+                "param_mut_type='reborn' but no environment was provided to "
+                "mutation(); falling back to the Gaussian parameter mutation for "
+                "this step. ReBorn is only wired into the on-policy, off-policy and "
+                "multi-agent on-policy trainers running without an accelerator.",
+                stacklevel=2,
+            )
+
         # Create lists of possible mutation functions and their respective relative probabilities
         mutation_options = (
             self.pretraining_mut_options if pre_training_mut else self.mut_options
@@ -358,6 +411,9 @@ class Mutations:
                 individual = agent
 
             mutated_population.append(individual)
+
+        # Drop the environment handle so it is not held beyond this call.
+        self._reborn_env = None
 
         return mutated_population
 
@@ -561,6 +617,18 @@ class Mutations:
             individual.mut_details = {"category": "no mutation", "name": "none"}
             return individual
 
+        # ReBorn parameter mutation (Qin et al.): recycle dormant / over-active
+        # neurons instead of adding Gaussian noise. It needs an observation batch,
+        # collected fresh per-agent from the environment stashed by ``mutation``.
+        # If no environment is available (e.g. the pre-training mutation step), we
+        # fall back to the original Gaussian parameter mutation below.
+        if self.param_mut_type == "reborn" and self._reborn_env is not None:
+            multi_agent = isinstance(individual, MultiAgentRLAlgorithm)
+            obs_batch = collect_observation_batch(
+                self._reborn_env, individual, multi_agent=multi_agent
+            )
+            return self.reborn_parameter_mutation(individual, obs_batch)
+
         registry = individual.registry
 
         # We only apply parameter mutations to the evaluation policy network
@@ -609,6 +677,389 @@ class Mutations:
         }
 
         return individual
+
+    # ------------------------------------------------------------------ #
+    # ReBorn parameter mutation (Qin et al., "The Dormant Neuron          #
+    # Phenomenon in Multi-Agent RL Value Factorization")                 #
+    # ------------------------------------------------------------------ #
+    def reborn_parameter_mutation(
+        self, individual: IndividualType, obs_batch: Any
+    ) -> IndividualType:
+        """Recycle dormant / over-active neurons across every evaluation network.
+
+        For every measured layer of every evaluation network (actors, critics and
+        each multi-agent sub-policy), each over-active neuron is *reborn* into a
+        set of dormant neurons (a function-preserving neuron split), and dormant
+        neurons that are not claimed are Xavier-reset with their outgoing weights
+        zeroed. Detection uses the same per-neuron scoring as the dormant-neuron
+        diagnostic, evaluated on *obs_batch*.
+
+        :param individual: Individual agent from population.
+        :type individual: RLAlgorithm or MultiAgentRLAlgorithm
+        :param obs_batch: A batch of raw observations (array / dict / tuple, or a
+            ``{agent_id: observations}`` mapping for multi-agent algorithms).
+        :type obs_batch: Any
+        :return: The individual with ReBorn-recycled parameters.
+        :rtype: RLAlgorithm or MultiAgentRLAlgorithm
+        """
+        if isinstance(individual, LLMAlgorithm):
+            warnings.warn(
+                "Parameter mutations are not supported for LLM algorithms. Skipping mutation.",
+                stacklevel=2,
+            )
+            individual.mut = "None"
+            individual.mut_details = {"category": "no mutation", "name": "none"}
+            return individual
+
+        counts = {"reborn": 0, "xavier": 0, "overactive": 0, "dormant": 0}
+
+        pairs = _eval_networks(individual)
+        multi_agent = any(network_id is not None for network_id, _ in pairs)
+        try:
+            if multi_agent:
+                network_ids = list({network_id for network_id, _ in pairs})
+                preprocessed = individual.preprocess_observation(obs_batch, network_ids)
+            else:
+                preprocessed = individual.preprocess_observation(obs_batch)
+        except Exception as exc:  # never break training on a bad obs batch
+            logger.warning("ReBorn could not preprocess observations: %s", exc)
+            individual.mut = "param_reborn"
+            individual.mut_details = self._reborn_mut_details(counts)
+            return individual
+
+        for network_id, network in pairs:
+            obs = preprocessed if network_id is None else preprocessed[network_id]
+            try:
+                self._reborn_network_surgery(network, obs, counts)
+            except Exception as exc:  # keep this network untouched on failure
+                logger.warning("ReBorn surgery skipped for a network: %s", exc)
+
+        # Sync shared / target networks from the mutated eval networks, per group.
+        for group in individual.registry.groups:
+            if group.shared_networks:
+                eval_net = getattr(individual, group.eval_network)
+                for shared in group.shared_networks:
+                    shared_net = getattr(individual, shared)
+                    shared_net.load_state_dict(eval_net.state_dict(), strict=False)
+                    self._to_device_and_set_individual(individual, shared, shared_net)
+
+        individual.reinit_optimizers()
+        individual.mut = "param_reborn"
+        individual.mut_details = self._reborn_mut_details(counts)
+        return individual
+
+    @staticmethod
+    def _reborn_mut_details(counts: dict[str, int]) -> dict[str, Any]:
+        """Build the ``mut_details`` record for a ReBorn mutation."""
+        return {
+            "category": "reborn",
+            "name": "param_reborn",
+            "neurons_reborn": counts["reborn"],
+            "neurons_xavier_reset": counts["xavier"],
+            "overactive_count": counts["overactive"],
+            "dormant_count": counts["dormant"],
+        }
+
+    def _reborn_network_surgery(
+        self, network: nn.Module, obs: Any, counts: dict[str, int]
+    ) -> None:
+        """Apply ReBorn recycling to every measured layer of a single network."""
+        scores = capture_per_neuron_scores(network, obs)
+        if not scores:
+            return
+
+        encoder = getattr(network, "encoder", None)
+        head = getattr(network, "head_net", None)
+        enc_children = self._ordered_children(encoder)
+        head_children = self._ordered_children(head)
+        head_first_weight = self._first_weight_layer(head_children)
+        cnn_channels, cnn_spatial = self._cnn_output_dims(encoder)
+
+        for act_module, per_neuron in scores:
+            producer, next_layer, _is_encoder = self._resolve_producer_and_next(
+                act_module, enc_children, head_children, head_first_weight
+            )
+            if producer is None or next_layer is None:
+                continue
+
+            kind = self._boundary_kind(producer, next_layer)
+            if kind is None:
+                continue
+
+            self._apply_reborn_to_layer(
+                producer,
+                next_layer,
+                kind,
+                cnn_channels,
+                cnn_spatial,
+                per_neuron,
+                counts,
+            )
+
+    def _apply_reborn_to_layer(
+        self,
+        producer: nn.Module,
+        next_layer: nn.Module,
+        kind: str,
+        cnn_channels: int | None,
+        cnn_spatial: int | None,
+        per_neuron: torch.Tensor,
+        counts: dict[str, int],
+    ) -> None:
+        """Perform the ReBorn surgery on the neurons of one producing layer."""
+        prod_w = self._weight_param(producer).data
+        prod_b = self._bias_param(producer)
+        prod_b = prod_b.data if prod_b is not None else None
+
+        next_w = self._weight_param(next_layer).data
+
+        # For the conv -> flatten -> dense boundary, validate the column layout;
+        # skip (rather than corrupt weights) if the flattened size is unexpected.
+        if kind == "conv_dense":
+            if cnn_spatial is None or cnn_channels is None:
+                return
+            if next_w.shape[1] != cnn_channels * cnn_spatial:
+                return
+
+        # Normalised per-neuron scores (guarding NaN and a dead layer), mirroring
+        # ``_count_dormant`` in the dormant-neuron diagnostic.
+        scores = torch.nan_to_num(per_neuron.detach(), nan=0.0, posinf=0.0, neginf=0.0)
+        mean = float(scores.mean()) if scores.numel() else 0.0
+        if mean <= 0.0:
+            dormant_idx = list(range(scores.numel()))
+            overactive_idx: list[int] = []
+        else:
+            norm = scores / mean
+            dormant_idx = torch.nonzero(norm <= self.dormant_tau).flatten().tolist()
+            overactive_idx = torch.nonzero(norm >= self.overact_beta).flatten().tolist()
+
+        counts["dormant"] += len(dormant_idx)
+        counts["overactive"] += len(overactive_idx)
+        if not dormant_idx:
+            return
+
+        def get_out(n: int) -> torch.Tensor:
+            if kind == "conv_dense":
+                return next_w[:, n * cnn_spatial : (n + 1) * cnn_spatial].clone()
+            return next_w[:, n].clone()
+
+        def set_out(n: int, value: torch.Tensor) -> None:
+            if kind == "conv_dense":
+                next_w[:, n * cnn_spatial : (n + 1) * cnn_spatial] = value
+            else:
+                next_w[:, n] = value
+
+        mag_limit = 1_000_000
+
+        # Reproducibly shuffle the dormant pool and claim without replacement.
+        pool = list(self.rng.permutation(np.array(dormant_idx, dtype=np.int64)))
+        ptr = 0
+        claimed: set[int] = set()
+
+        for x in sorted(overactive_idx):
+            m_target = int(self.rng.integers(2, 6))
+            take = min(m_target, len(pool) - ptr)
+            if take <= 0:
+                break
+            partners = [int(p) for p in pool[ptr : ptr + take]]
+            ptr += take
+            claimed.update(partners)
+
+            betas = [float(b) for b in self.rng.uniform(0.5, 1.5, size=take + 1)]
+            alpha = self._softmax(self.rng.standard_normal(take + 1))
+
+            w_in_x = prod_w[x].clone()
+            b_x = prod_b[x].clone() if prod_b is not None else None
+            w_out_x = get_out(x)
+
+            # Function-preserving neuron split (net2net widening). Each copy j
+            # scales its incoming weights/bias by beta_j, so for a positively
+            # homogeneous activation (ReLU) its activation becomes beta_j * h_x.
+            # Scaling its outgoing weights by (alpha_j / beta_j) makes copy j's
+            # contribution alpha_j * w_out_x * h_x; since alpha is a softmax
+            # (sum_j alpha_j == 1), the copies together reproduce w_out_x * h_x.
+            # Over-active neuron x keeps a scaled copy of itself.
+            prod_w[x] = betas[0] * w_in_x
+            if prod_b is not None:
+                prod_b[x] = betas[0] * b_x
+            set_out(x, (alpha[0] / betas[0]) * w_out_x)
+
+            # Each claimed dormant neuron is reborn as a scaled copy of x.
+            for k, i in enumerate(partners):
+                beta_i = betas[k + 1]
+                alpha_i = alpha[k + 1]
+                prod_w[i] = beta_i * w_in_x
+                if prod_b is not None:
+                    prod_b[i] = beta_i * b_x
+                set_out(i, (alpha_i / beta_i) * w_out_x)
+
+            counts["reborn"] += take
+
+        # Unclaimed dormant neurons: Xavier-reset incoming, zero outgoing.
+        for i in dormant_idx:
+            if i in claimed:
+                continue
+            self._xavier_reset_row(prod_w, i)
+            if prod_b is not None:
+                prod_b[i] = 0.0
+            set_out(i, torch.zeros_like(get_out(i)))
+            counts["xavier"] += 1
+
+        # Defensive clamp + NaN scrub so ReBorn never introduces / propagates NaN.
+        prod_w.clamp_(-mag_limit, mag_limit).nan_to_num_()
+        if prod_b is not None:
+            prod_b.clamp_(-mag_limit, mag_limit).nan_to_num_()
+        next_w.clamp_(-mag_limit, mag_limit).nan_to_num_()
+
+    # --------------------------- ReBorn helpers --------------------------- #
+    @staticmethod
+    def _softmax(x: np.ndarray) -> np.ndarray:
+        """Numerically stable softmax over a 1-D numpy array."""
+        e = np.exp(x - np.max(x))
+        return e / e.sum()
+
+    @staticmethod
+    def _ordered_sequential(module: nn.Module | None) -> nn.Sequential | None:
+        """Return *module*'s underlying ordered ``nn.Sequential`` (or ``None``).
+
+        Unwraps :class:`EvolvableWrapper`/:class:`EvolvableDistribution` via
+        ``.wrapped``, then returns the ``.model`` sequential of MLP/CNN/SimBa
+        encoders and heads, falling back to the first ``nn.Sequential`` child.
+        """
+        if module is None:
+            return None
+        wrapped = getattr(module, "wrapped", None)
+        if wrapped is not None:
+            return Mutations._ordered_sequential(wrapped)
+        model = getattr(module, "model", None)
+        if isinstance(model, nn.Sequential):
+            return model
+        for child in module.children():
+            if isinstance(child, nn.Sequential):
+                return child
+        return None
+
+    @staticmethod
+    def _ordered_children(module: nn.Module | None) -> list[nn.Module]:
+        """Return the ordered child layers of *module*'s sequential (or ``[]``)."""
+        seq = Mutations._ordered_sequential(module)
+        return list(seq.children()) if seq is not None else []
+
+    @staticmethod
+    def _is_weight_layer(module: nn.Module) -> bool:
+        """Whether *module* carries recyclable weights (Linear / Conv / Noisy)."""
+        if isinstance(module, (nn.Linear, nn.Conv2d, nn.Conv3d)):
+            return True
+        return hasattr(module, "weight_mu") and hasattr(module, "bias_mu")
+
+    @staticmethod
+    def _weight_param(module: nn.Module) -> nn.Parameter:
+        """Return the (mean) weight parameter of a weight layer."""
+        if hasattr(module, "weight_mu"):
+            return module.weight_mu
+        return module.weight
+
+    @staticmethod
+    def _bias_param(module: nn.Module) -> nn.Parameter | None:
+        """Return the (mean) bias parameter of a weight layer, if any."""
+        if hasattr(module, "bias_mu"):
+            return module.bias_mu
+        return getattr(module, "bias", None)
+
+    @staticmethod
+    def _first_weight_layer(children: list[nn.Module]) -> nn.Module | None:
+        """Return the first weight-bearing layer in an ordered child list."""
+        for child in children:
+            if Mutations._is_weight_layer(child):
+                return child
+        return None
+
+    def _resolve_producer_and_next(
+        self,
+        act_module: nn.Module,
+        enc_children: list[nn.Module],
+        head_children: list[nn.Module],
+        head_first_weight: nn.Module | None,
+    ) -> tuple[nn.Module | None, nn.Module | None, bool]:
+        """Find the layer that produced *act_module*'s neurons and the next layer.
+
+        The producing layer's weight *rows* (and bias) are the neurons' incoming
+        weights; the next weight layer's *columns* are their outgoing weights.
+        Handles the encoder-output -> head boundary (the latent's outgoing weights
+        live in the head's first layer).
+        """
+        for children, is_encoder in ((enc_children, True), (head_children, False)):
+            idx = next(
+                (j for j, child in enumerate(children) if child is act_module), -1
+            )
+            if idx < 0:
+                continue
+
+            producer = None
+            for j in range(idx - 1, -1, -1):
+                if self._is_weight_layer(children[j]):
+                    producer = children[j]
+                    break
+
+            next_layer = None
+            for j in range(idx + 1, len(children)):
+                if self._is_weight_layer(children[j]):
+                    next_layer = children[j]
+                    break
+
+            if next_layer is None and is_encoder:
+                next_layer = head_first_weight
+
+            return producer, next_layer, is_encoder
+
+        return None, None, False
+
+    @staticmethod
+    def _boundary_kind(producer: nn.Module, next_layer: nn.Module) -> str | None:
+        """Classify the (producer, next_layer) pair for outgoing-weight indexing."""
+        prod_conv = isinstance(producer, (nn.Conv2d, nn.Conv3d))
+        next_conv = isinstance(next_layer, (nn.Conv2d, nn.Conv3d))
+        if prod_conv and next_conv:
+            return "conv_conv"
+        if prod_conv and not next_conv:
+            return "conv_dense"
+        if not prod_conv and not next_conv:
+            return "dense_dense"
+        return None  # a dense layer feeding a conv layer never occurs here
+
+    @staticmethod
+    def _cnn_output_dims(encoder: nn.Module | None) -> tuple[int | None, int | None]:
+        """Return ``(channels, spatial)`` of the encoder's pre-flatten conv output."""
+        shape = getattr(encoder, "cnn_output_size", None)
+        if shape is None or len(shape) < 3:
+            return None, None
+        channels = int(shape[1])
+        spatial = 1
+        for dim in shape[2:]:
+            spatial *= int(dim)
+        return channels, spatial
+
+    def _xavier_reset_row(self, weight: torch.Tensor, index: int) -> None:
+        """Xavier-uniform reset of one output neuron's incoming weights in place.
+
+        Uses ``self.rng`` so the reset is reproducible and thread-count invariant.
+        Handles both a Linear weight row and a conv filter slice.
+        """
+        row = weight[index]
+        fan_out = weight.shape[0]
+        if weight.dim() == 2:  # Linear: (out_features, in_features)
+            fan_in = weight.shape[1]
+        else:  # Conv: (out_channels, in_channels, *kernel)
+            receptive = 1
+            for dim in weight.shape[2:]:
+                receptive *= int(dim)
+            fan_in = int(weight.shape[1]) * receptive
+            fan_out = fan_out * receptive
+        bound = float(np.sqrt(6.0 / (fan_in + fan_out)))
+        sampled = self.rng.uniform(-bound, bound, size=tuple(row.shape))
+        weight[index] = torch.as_tensor(
+            sampled, dtype=weight.dtype, device=weight.device
+        )
 
     def _get_mutations_options(
         self,

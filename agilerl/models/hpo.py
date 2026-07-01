@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from typing_extensions import Self
 
 
 class RLHyperparameter(BaseModel):
@@ -60,6 +63,18 @@ class MutationSpec(BaseModel):
     :type rand_seed: int
     :param mutate_elite: Whether the elite member of the population is itself mutated.
     :type mutate_elite: bool
+    :param param_mut_type: Parameter-mutation strategy: ``"original"`` (Gaussian
+        weight noise) or ``"reborn"`` (dormant/over-active neuron recycling, Qin
+        et al.). ``mutation_sd`` is ignored when ``"reborn"`` is selected.
+    :type param_mut_type: Literal["original", "reborn"]
+    :param dormant_tau: ReBorn dormancy threshold (a neuron with normalised score
+        ``<= dormant_tau`` is dormant). Independent of the diagnostic
+        ``training.dormant_tau``; only used when ``param_mut_type == "reborn"``.
+    :type dormant_tau: float
+    :param overact_beta: ReBorn over-activity threshold (a neuron with normalised
+        score ``>= overact_beta`` is over-active). Must be greater than
+        ``dormant_tau``. Only used when ``param_mut_type == "reborn"``.
+    :type overact_beta: float
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -69,6 +84,20 @@ class MutationSpec(BaseModel):
     mutation_sd: float = Field(default=0.1, ge=0.0)
     rand_seed: int = Field(default=42, ge=0)
     mutate_elite: bool = False
+    param_mut_type: Literal["original", "reborn"] = "original"
+    dormant_tau: float = Field(default=0.1, gt=0.0)
+    overact_beta: float = Field(default=3.0, ge=0.0)
+
+    @model_validator(mode="after")
+    def _validate_reborn(self) -> Self:
+        """Enforce the ReBorn threshold constraint ``overact_beta > dormant_tau``."""
+        if self.overact_beta <= self.dormant_tau:
+            msg = (
+                f"overact_beta ({self.overact_beta}) must be greater than "
+                f"dormant_tau ({self.dormant_tau})."
+            )
+            raise ValueError(msg)
+        return self
 
 
 class TournamentSelectionSpec(BaseModel):

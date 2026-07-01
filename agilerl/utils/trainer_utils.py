@@ -268,6 +268,9 @@ def build_mutations_from_spec(
         mutation_sd=mutation_spec.mutation_sd,
         rand_seed=mutation_spec.rand_seed,
         mutate_elite=mutation_spec.mutate_elite,
+        param_mut_type=mutation_spec.param_mut_type,
+        dormant_tau=mutation_spec.dormant_tau,
+        overact_beta=mutation_spec.overact_beta,
         device=device,
         accelerator=accelerator,
     )

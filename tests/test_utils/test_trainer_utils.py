@@ -23,6 +23,32 @@ class TestHpConfigFromMutationSpec:
         assert hp_config_from_mutation_spec(spec) is None
 
 
+class TestBuildMutationsFromSpec:
+    def test_forwards_reborn_fields(self):
+        from agilerl.models.hpo import MutationSpec
+        from agilerl.utils.trainer_utils import build_mutations_from_spec
+
+        spec = MutationSpec(param_mut_type="reborn", dormant_tau=0.2, overact_beta=4.0)
+        mutations = build_mutations_from_spec(spec, device="cpu")
+        assert mutations.param_mut_type == "reborn"
+        assert mutations.dormant_tau == 0.2
+        assert mutations.overact_beta == 4.0
+
+    def test_defaults_forwarded(self):
+        from agilerl.models.hpo import MutationSpec
+        from agilerl.utils.trainer_utils import build_mutations_from_spec
+
+        mutations = build_mutations_from_spec(MutationSpec(), device="cpu")
+        assert mutations.param_mut_type == "original"
+        assert mutations.dormant_tau == 0.1
+        assert mutations.overact_beta == 3.0
+
+    def test_returns_none_when_spec_none(self):
+        from agilerl.utils.trainer_utils import build_mutations_from_spec
+
+        assert build_mutations_from_spec(None) is None
+
+
 class TestGetSpacesFromEnv:
     def test_fallback_raises_for_unsupported_type(self):
         from agilerl.utils.trainer_utils import get_spaces_from_env

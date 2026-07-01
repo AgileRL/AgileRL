@@ -1,5 +1,6 @@
 import copy
 import gc
+import warnings
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -2215,3 +2216,374 @@ def test_get_offspring_eval_modules_returns_policy_and_modules(
     assert isinstance(policy, dict)
     assert isinstance(offspring_evals, dict)
     assert len(policy) >= 1
+
+
+# --------------------------------------------------------------------------- #
+# ReBorn parameter mutation (Qin et al.)                                       #
+# --------------------------------------------------------------------------- #
+def _make_reborn_mutations(seed=42, param_mut_type="reborn"):
+    return Mutations(
+        no_mutation=0.0,
+        architecture=0.0,
+        new_layer_prob=0.0,
+        parameters=1.0,
+        activation=0.0,
+        rl_hp=0.0,
+        param_mut_type=param_mut_type,
+        dormant_tau=0.1,
+        overact_beta=3.0,
+        rand_seed=seed,
+        device="cpu",
+    )
+
+
+class TestRebornConstructorValidation:
+    def test_rejects_bad_param_mut_type(self):
+        with pytest.raises(AssertionError):
+            _make_reborn_mutations(param_mut_type="bogus")
+
+    def test_rejects_non_positive_dormant_tau(self):
+        with pytest.raises(AssertionError):
+            Mutations(
+                no_mutation=0.0,
+                architecture=0.0,
+                new_layer_prob=0.0,
+                parameters=1.0,
+                activation=0.0,
+                rl_hp=0.0,
+                param_mut_type="reborn",
+                dormant_tau=0.0,
+                overact_beta=3.0,
+            )
+
+    def test_rejects_overact_beta_below_dormant_tau(self):
+        with pytest.raises(AssertionError):
+            Mutations(
+                no_mutation=0.0,
+                architecture=0.0,
+                new_layer_prob=0.0,
+                parameters=1.0,
+                activation=0.0,
+                rl_hp=0.0,
+                param_mut_type="reborn",
+                dormant_tau=0.5,
+                overact_beta=0.4,
+            )
+
+
+class TestRebornLayerSurgery:
+    """Directly exercise the per-layer surgery on hand-built Linear layers."""
+
+    def _setup(self):
+        torch.manual_seed(0)
+        producer = torch.nn.Linear(3, 5)
+        next_layer = torch.nn.Linear(5, 2)
+        # Give distinct, non-zero rows so proportionality checks are meaningful.
+        with torch.no_grad():
+            producer.weight.copy_(
+                torch.arange(1, 16, dtype=torch.float32).reshape(5, 3)
+            )
+            producer.bias.copy_(torch.arange(1, 6, dtype=torch.float32))
+            next_layer.weight.copy_(
+                torch.arange(1, 11, dtype=torch.float32).reshape(2, 5)
+            )
+        # neuron 0 over-active (norm ~4.17), neurons 1-3 dormant (norm 0),
+        # neuron 4 normal (norm ~0.83).
+        per_neuron = torch.tensor([10.0, 0.0, 0.0, 0.0, 2.0])
+        return producer, next_layer, per_neuron
+
+    def test_counts_and_structure(self):
+        producer, next_layer, per_neuron = self._setup()
+        mut = _make_reborn_mutations(seed=7)
+        w_in_x = producer.weight.data[0].clone()
+        b_x = producer.bias.data[0].clone()
+        counts = {"reborn": 0, "xavier": 0, "overactive": 0, "dormant": 0}
+
+        mut._apply_reborn_to_layer(
+            producer, next_layer, "dense_dense", None, None, per_neuron, counts
+        )
+
+        assert counts["overactive"] == 1
+        assert counts["dormant"] == 3
+        # Every dormant neuron is either reborn as a partner or Xavier-reset.
+        assert counts["reborn"] + counts["xavier"] == 3
+        assert counts["reborn"] >= 2  # M in [2, 5], 3 dormant available
+
+        # Over-active row stays a positive scalar multiple of the original row.
+        ratio = producer.weight.data[0] / w_in_x
+        assert torch.allclose(ratio, ratio[0].expand_as(ratio), atol=1e-5)
+        beta_0 = float(ratio[0])
+        assert 0.5 <= beta_0 <= 1.5
+        # Bias scaled by the same beta_0.
+        assert torch.allclose(producer.bias.data[0], beta_0 * b_x, atol=1e-5)
+
+        # Nothing is NaN/inf after surgery.
+        assert torch.isfinite(producer.weight.data).all()
+        assert torch.isfinite(next_layer.weight.data).all()
+
+        # The normal neuron (index 4) is untouched.
+        assert torch.allclose(
+            producer.weight.data[4],
+            torch.tensor([13.0, 14.0, 15.0]),
+        )
+
+    def test_unclaimed_dormant_outgoing_zeroed(self):
+        # Force a single over-active neuron and exactly one dormant partner slot
+        # by making 4 dormant neurons but M capped so >=1 stays unclaimed is not
+        # guaranteed; instead check the invariant directly across the pool.
+        producer, next_layer, per_neuron = self._setup()
+        mut = _make_reborn_mutations(seed=1)
+        counts = {"reborn": 0, "xavier": 0, "overactive": 0, "dormant": 0}
+        mut._apply_reborn_to_layer(
+            producer, next_layer, "dense_dense", None, None, per_neuron, counts
+        )
+        # Any dormant neuron that was Xavier-reset (not a partner) has a zero
+        # outgoing column. Partners have a non-zero outgoing column. So the number
+        # of zero outgoing columns among dormant indices equals the xavier count.
+        zero_cols = sum(
+            int(torch.count_nonzero(next_layer.weight.data[:, i]) == 0)
+            for i in (1, 2, 3)
+        )
+        assert zero_cols == counts["xavier"]
+
+    def test_over_active_split_is_function_preserving_relu(self):
+        # net2net invariant: splitting an over-active neuron into dormant slots
+        # must leave the network's output unchanged for a ReLU network. The three
+        # dormant neurons have exactly-zero activation on the batch, so any that
+        # stay unclaimed (Xavier-reset with outgoing zeroed) also contribute zero.
+        producer = torch.nn.Linear(2, 4)
+        next_layer = torch.nn.Linear(4, 1)
+        with torch.no_grad():
+            producer.weight.copy_(
+                torch.tensor([[1.0, 1.0], [-1.0, -1.0], [-1.0, -1.0], [-1.0, -1.0]])
+            )
+            # Large negative bias keeps neurons 1-3 dead for any positive input.
+            producer.bias.copy_(torch.tensor([0.5, -5.0, -5.0, -5.0]))
+            next_layer.weight.copy_(torch.tensor([[2.0, 3.0, -1.0, 0.5]]))
+            next_layer.bias.copy_(torch.tensor([0.7]))
+
+        X = torch.tensor([[0.1, 0.2], [0.7, 0.3], [1.0, 0.0], [0.4, 0.9]])
+
+        def forward(x):
+            return next_layer(torch.relu(producer(x)))
+
+        # Neuron 0 fires; neurons 1-3 are dormant (exactly-zero activation).
+        hidden = torch.relu(producer(X))
+        assert torch.all(hidden[:, 0] > 0)
+        assert torch.all(hidden[:, 1:] == 0)
+
+        before = forward(X).clone()
+
+        mut = _make_reborn_mutations(seed=3)
+        # norm = [4, 0, 0, 0]: neuron 0 over-active (>=3), neurons 1-3 dormant.
+        per_neuron = torch.tensor([4.0, 0.0, 0.0, 0.0])
+        counts = {"reborn": 0, "xavier": 0, "overactive": 0, "dormant": 0}
+        mut._apply_reborn_to_layer(
+            producer, next_layer, "dense_dense", None, None, per_neuron, counts
+        )
+        assert counts["overactive"] == 1
+        assert counts["dormant"] == 3
+        assert counts["reborn"] + counts["xavier"] == 3
+
+        after = forward(X)
+        assert torch.isfinite(after).all()
+        assert torch.allclose(after, before, atol=1e-5), (before, after)
+
+
+class TestRebornEndToEnd:
+    def _ppo(self):
+        from agilerl.algorithms import PPO
+        from gymnasium import spaces
+
+        obs = spaces.Box(-1.0, 1.0, shape=(6,), dtype=np.float32)
+        act = spaces.Box(-1.0, 1.0, shape=(2,), dtype=np.float32)
+        cfg = {
+            "encoder_config": {
+                "hidden_size": [16],
+                "activation": "ReLU",
+                "output_activation": "Identity",
+            },
+            "head_config": {"hidden_size": [16], "activation": "ReLU"},
+        }
+        return PPO(obs, act, net_config=cfg, device="cpu")
+
+    def _dqn(self):
+        from agilerl.algorithms import DQN
+        from gymnasium import spaces
+
+        obs = spaces.Box(0, 255, shape=(4, 84, 84), dtype=np.uint8)
+        act = spaces.Discrete(6)
+        cfg = {
+            "encoder_config": {
+                "channel_size": [16, 32],
+                "kernel_size": [8, 4],
+                "stride_size": [4, 2],
+                "activation": "ReLU",
+            },
+            "head_config": {"hidden_size": [32], "activation": "ReLU"},
+        }
+        return DQN(obs, act, net_config=cfg, device="cpu")
+
+    def test_ppo_mlp_runs(self):
+        # Traverses the MLP encoder -> head boundary. ReBorn is a valid no-op if
+        # the (healthy) network has no dormant / over-active neurons, so we assert
+        # the operator runs cleanly and records its metadata rather than that
+        # weights necessarily change (the surgery math is covered by
+        # TestRebornLayerSurgery).
+        agent = self._ppo()
+        obs = np.random.RandomState(0).uniform(-1, 1, size=(32, 6)).astype(np.float32)
+        out = _make_reborn_mutations().reborn_parameter_mutation(agent, obs)
+        assert out.mut == "param_reborn"
+        assert out.mut_details["category"] == "reborn"
+        assert set(out.mut_details) >= {
+            "neurons_reborn",
+            "neurons_xavier_reset",
+            "overactive_count",
+            "dormant_count",
+        }
+        assert all(torch.isfinite(v).all() for v in out.actor.state_dict().values())
+
+    def test_dqn_cnn_runs_and_syncs_target(self):
+        agent = self._dqn()
+        obs = (
+            np.random.RandomState(1)
+            .randint(0, 255, size=(16, 4, 84, 84))
+            .astype(np.uint8)
+        )
+        out = _make_reborn_mutations().reborn_parameter_mutation(agent, obs)
+        assert out.mut == "param_reborn"
+        assert all(torch.isfinite(v).all() for v in out.actor.state_dict().values())
+        # DQN target network is synced from the mutated online network.
+        for k, v in out.actor.state_dict().items():
+            assert torch.equal(v, out.actor_target.state_dict()[k])
+
+    def test_reproducible_across_equal_agents(self):
+        a = self._ppo()
+        b = self._ppo()
+        b.actor.load_state_dict(a.actor.state_dict())
+        b.critic.load_state_dict(a.critic.state_dict())
+        obs = np.random.RandomState(2).uniform(-1, 1, size=(32, 6)).astype(np.float32)
+        ra = _make_reborn_mutations(seed=123).reborn_parameter_mutation(a, obs)
+        rb = _make_reborn_mutations(seed=123).reborn_parameter_mutation(b, obs)
+        for k in ra.actor.state_dict():
+            assert torch.equal(ra.actor.state_dict()[k], rb.actor.state_dict()[k])
+
+    def test_falls_back_to_gaussian_without_env(self):
+        # param_mut_type='reborn' but no env stashed -> Gaussian parameter mutation.
+        agent = self._ppo()
+        mut = _make_reborn_mutations()
+        assert mut._reborn_env is None
+        out = mut.parameter_mutation(agent)
+        assert out.mut == "param"  # not "param_reborn"
+
+    def test_dispatch_uses_reborn_when_env_supplied(self):
+        # The full mutation() dispatch collects a per-agent observation batch from
+        # the supplied env and routes the parameter mutation through ReBorn.
+        class _FakeVecEnv:
+            num_envs = 4
+
+            def reset(self, *args, **kwargs):
+                obs = np.zeros((self.num_envs, 6), dtype=np.float32)
+                return obs, {}
+
+            def step(self, action):
+                obs = np.zeros((self.num_envs, 6), dtype=np.float32)
+                return obs, np.zeros(4), np.zeros(4, bool), np.zeros(4, bool), {}
+
+        pop = [self._ppo(), self._ppo()]
+        mut = Mutations(
+            no_mutation=0.0,
+            architecture=0.0,
+            new_layer_prob=0.0,
+            parameters=1.0,
+            activation=0.0,
+            rl_hp=0.0,
+            param_mut_type="reborn",
+            dormant_tau=0.1,
+            overact_beta=3.0,
+            mutate_elite=True,
+            rand_seed=0,
+            device="cpu",
+        )
+        out = mut.mutation(pop, env=_FakeVecEnv())
+        assert all(agent.mut == "param_reborn" for agent in out)
+        # The env handle is released after the call.
+        assert mut._reborn_env is None
+
+    def test_dispatch_falls_back_without_env(self):
+        pop = [self._ppo(), self._ppo()]
+        mut = Mutations(
+            no_mutation=0.0,
+            architecture=0.0,
+            new_layer_prob=0.0,
+            parameters=1.0,
+            activation=0.0,
+            rl_hp=0.0,
+            param_mut_type="reborn",
+            mutate_elite=True,
+            rand_seed=0,
+            device="cpu",
+        )
+        out = mut.mutation(pop)  # no env -> Gaussian fallback
+        assert all(agent.mut == "param" for agent in out)
+
+    def _reborn_dispatch_mut(self):
+        return Mutations(
+            no_mutation=0.0,
+            architecture=0.0,
+            new_layer_prob=0.0,
+            parameters=1.0,
+            activation=0.0,
+            rl_hp=0.0,
+            param_mut_type="reborn",
+            dormant_tau=0.1,
+            overact_beta=3.0,
+            mutate_elite=True,
+            rand_seed=0,
+            device="cpu",
+        )
+
+    def test_eval_cycle_warns_when_reborn_configured_without_env(self):
+        # A reborn regime whose trainer does not thread env silently falls back to
+        # Gaussian, misattributing results; surface it with a warning.
+        pop = [self._ppo(), self._ppo()]
+        mut = self._reborn_dispatch_mut()
+        with pytest.warns(UserWarning, match="falling back to the Gaussian"):
+            mut.mutation(pop)  # eval-cycle mutation, no env
+
+    def test_no_warning_when_env_supplied(self):
+        class _FakeVecEnv:
+            num_envs = 4
+
+            def reset(self, *args, **kwargs):
+                return np.zeros((self.num_envs, 6), dtype=np.float32), {}
+
+            def step(self, action):
+                return (
+                    np.zeros((self.num_envs, 6), dtype=np.float32),
+                    np.zeros(4),
+                    np.zeros(4, bool),
+                    np.zeros(4, bool),
+                    {},
+                )
+
+        pop = [self._ppo(), self._ppo()]
+        mut = self._reborn_dispatch_mut()
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter("always")
+            mut.mutation(pop, env=_FakeVecEnv())
+        assert not [
+            w for w in record if "falling back to the Gaussian" in str(w.message)
+        ]
+
+    def test_pretraining_mutation_does_not_warn_without_env(self):
+        # The pre-training mutation step is expected to run env-less; the reborn
+        # fallback there is intended and must not warn.
+        pop = [self._ppo(), self._ppo()]
+        mut = self._reborn_dispatch_mut()
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter("always")
+            mut.mutation(pop, pre_training_mut=True)
+        assert not [
+            w for w in record if "falling back to the Gaussian" in str(w.message)
+        ]

@@ -822,6 +822,34 @@ class TestMutationSpecExtraForbid:
         assert spec.probabilities.no_mut == 0.5
 
 
+class TestMutationSpecReborn:
+    def test_defaults(self):
+        spec = MutationSpec()
+        assert spec.param_mut_type == "original"
+        assert spec.dormant_tau == 0.1
+        assert spec.overact_beta == 3.0
+
+    def test_valid_reborn(self):
+        spec = MutationSpec(param_mut_type="reborn", dormant_tau=0.1, overact_beta=3.0)
+        assert spec.param_mut_type == "reborn"
+
+    def test_invalid_param_mut_type(self):
+        with pytest.raises(ValidationError):
+            MutationSpec(param_mut_type="bogus")
+
+    def test_dormant_tau_must_be_positive(self):
+        with pytest.raises(ValidationError):
+            MutationSpec(dormant_tau=0.0)
+
+    def test_overact_beta_must_exceed_dormant_tau(self):
+        with pytest.raises(ValidationError):
+            MutationSpec(dormant_tau=0.5, overact_beta=0.4)
+
+    def test_overact_beta_non_negative(self):
+        with pytest.raises(ValidationError):
+            MutationSpec(overact_beta=-1.0)
+
+
 class TestNetworkSpecUpperBound:
     def test_latent_dim_exceeds_max(self):
         with pytest.raises(ValidationError):

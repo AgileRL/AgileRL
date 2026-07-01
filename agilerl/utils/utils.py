@@ -1142,6 +1142,7 @@ def tournament_selection_and_mutation(
     save_elite: bool = False,
     accelerator: Accelerator | None = None,
     language_model: bool | None = False,
+    env: Any | None = None,
 ) -> PopulationType:
     """Perform tournament selection and mutation on a population of agents.
 
@@ -1161,6 +1162,9 @@ def tournament_selection_and_mutation(
     :type accelerator: accelerate.Accelerator(), optional
     :param language_model: Flag to indicate if the environment is a language model, defaults to False
     :type language_model: bool, optional
+    :param env: Optional (vectorized) environment forwarded to the ReBorn parameter
+        mutation so it can collect a fresh per-agent observation batch, defaults to None
+    :type env: Any, optional
     :return: Population of agents after tournament selection and mutation
     :rtype: list[PopulationType]
     """
@@ -1210,7 +1214,7 @@ def tournament_selection_and_mutation(
     else:
         # Perform tournament selection and mutation
         elite, population = tournament.select(population)
-        population = mutation.mutation(population)
+        population = mutation.mutation(population, env=env)
 
     if save_elite and elite is not None:
         elite_save_path = (
