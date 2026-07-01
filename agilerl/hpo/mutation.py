@@ -811,6 +811,14 @@ class Mutations:
 
         for key in chosen_keys:
             W: torch.Tensor = model_params[key]
+            # A diverged agent can reach this operator carrying non-finite
+            # weights (NaN/inf) while still scoring a finite fitness, so it is
+            # not caught by the fitness-level tournament guard. ``abs(NaN)`` is
+            # ``NaN``, which fails ``torch.normal``'s ``std >= 0`` check and
+            # aborts the run. Scrub in place before sampling so the mutation
+            # repairs the weights instead of crashing; this is a no-op on the
+            # finite path, so seeded runs stay reproducible.
+            W.nan_to_num_(nan=0.0, posinf=mag_limit, neginf=-mag_limit)
             num_weights = W.shape[0] * W.shape[1]
             num_mutations = int(np.ceil(num_mutation_frac * num_weights))
             if num_mutations < 1:

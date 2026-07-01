@@ -285,6 +285,32 @@ class TestMutationsGaussianParameterMutation:
         out = muts._gaussian_parameter_mutation(mod)
         assert out is mod
 
+    def test_scrubs_nonfinite_weights(self):
+        # A diverged agent can reach parameter mutation carrying non-finite
+        # weights while still scoring a finite fitness (a stray NaN on an
+        # inactive path need not corrupt the rollout), so it slips past the
+        # fitness-level tournament guard. abs(NaN) fails torch.normal's
+        # ``std >= 0`` check, which used to abort the whole run. The operator
+        # must scrub the weights in place and return finite parameters.
+        class WeightModule(EvolvableModule):
+            def __init__(self):
+                super().__init__(device="cpu")
+                self.w = torch.nn.Parameter(torch.full((8, 8), float("nan")))
+
+            def forward(self, x):
+                return x
+
+            def recreate_network(self):
+                pass
+
+        muts = Mutations(0, 0, 0.5, 1, 0, 0, 0.1, device="cpu", rand_seed=0)
+        mod = WeightModule()
+
+        out = muts._gaussian_parameter_mutation(mod)
+
+        assert out is mod
+        assert torch.isfinite(mod.w).all()
+
 
 class TestMutationsArchitectureMutateSingle:
     @pytest.mark.gpu
