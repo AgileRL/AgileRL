@@ -4626,10 +4626,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                             adapter_path,
                         )
                     break
-                raise RuntimeError(
-                    f"vLLM failed to load LoRA adapter from {adapter_path}. "
-                    "Check max_lora_rank / target module names match the trainer."
+                msg = (
+                    "vLLM failed to load LoRA adapter from "
+                    f"{adapter_path}. Check max_lora_rank / target module "
+                    "names match the trainer."
                 )
+                raise RuntimeError(msg)
 
             if elapsed >= deadline_s:
                 rank = (
@@ -5754,11 +5756,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             and (self.accelerator is None or self.accelerator.is_main_process)
         ):
             torch.cuda.empty_cache()
-            device_index = (
-                self.accelerator.local_process_index
-                if self.accelerator is not None
-                else 0
-            )
             self.llm.wake_up()
             self._vllm_awake = True
             if self.accelerator is None or self.accelerator.is_main_process:
