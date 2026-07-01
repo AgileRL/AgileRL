@@ -132,7 +132,6 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.utils.llm_utils import (
         adapt_lora_config_for_model,
         create_model_from_name_or_path,
-        format_colocated_vllm_oom_hint,
         gather_if_zero3,
         log_cuda_memory_snapshot,
     )
@@ -4628,9 +4627,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                         )
                     break
                 raise RuntimeError(
-                        f"vLLM failed to load LoRA adapter from {adapter_path}. "
-                        "Check max_lora_rank / target module names match the trainer."
-                    )
+                    f"vLLM failed to load LoRA adapter from {adapter_path}. "
+                    "Check max_lora_rank / target module names match the trainer."
+                )
 
             if elapsed >= deadline_s:
                 rank = (
@@ -5726,8 +5725,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
     def _prepare_vllm_for_training(self) -> None:
         """Prepare vLLM for learning."""
-        if self.vllm_config.sleep_mode and self._vllm_awake and (
-            self.accelerator is None or self.accelerator.is_main_process
+        if (
+            self.vllm_config.sleep_mode
+            and self._vllm_awake
+            and (self.accelerator is None or self.accelerator.is_main_process)
         ):
             torch.cuda.empty_cache()
             self.llm.sleep(level=self.vllm_config.sleep_mode_level)
@@ -5747,8 +5748,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 log_cuda_memory_snapshot(
                     "trainer base offloaded to CPU (before vLLM wake)"
                 )
-        if self.vllm_config.sleep_mode and not self._vllm_awake and (
-            self.accelerator is None or self.accelerator.is_main_process
+        if (
+            self.vllm_config.sleep_mode
+            and not self._vllm_awake
+            and (self.accelerator is None or self.accelerator.is_main_process)
         ):
             torch.cuda.empty_cache()
             device_index = (

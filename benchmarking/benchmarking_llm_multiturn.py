@@ -23,7 +23,7 @@ from agilerl.utils.llm_utils import (
 from agilerl.utils.utils import create_population
 
 CONFIG_PATH = "configs/training/llm_finetuning/cispo_quant_bench.yaml"
-MODEL_PATH ="Qwen/Qwen2.5-0.5B-Instruct"#google/gemma-4-E4B-it"
+MODEL_PATH = "Qwen/Qwen2.5-0.5B-Instruct"  # google/gemma-4-E4B-it"
 ENV_NAME = "game:GuessTheNumber-v0-easy"
 
 ALGO_REGISTRY = {
