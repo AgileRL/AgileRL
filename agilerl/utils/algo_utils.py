@@ -1477,6 +1477,11 @@ class VLLMConfig:
         for training.  Cannot be used with agent populations on a single device,
         defaults to False.
     :type sleep_mode: bool, optional
+    :param sleep_mode_level: Sleep level passed to ``llm.sleep(level=...)`` when
+        ``sleep_mode`` is enabled. ``1`` offloads weights to CPU and drops KV
+        cache; ``2`` discards GPU allocations and is more robust in colocated
+        multi-process setups. Defaults to 2.
+    :type sleep_mode_level: int, optional
     :param dtype: Model weight dtype passed to the vLLM ``LLM`` constructor
         (e.g. ``"bfloat16"``, ``"float16"``).  ``None`` lets vLLM choose,
         defaults to None.
@@ -1542,7 +1547,8 @@ class VLLMConfig:
         unwanted modalities elsewhere. Defaults to ``False``.
     :type strip_multimodal_towers: bool | list[str], optional
     :param lora_staging_dir: Directory where the trained LoRA adapter is
-        exported for vLLM to (re)load each sync. ``None`` (default) uses a
+        exported for vLLM to (re)load each sync. ``"AgileRL"`` (default) uses
+        a stable project-local root; ``None`` uses a
         fresh process-private temporary directory, removed on ``clean_up``.
         Set explicitly when the rollout engine must read the adapter from a
         known path (e.g. orchestrated/arena deployments); user-supplied
@@ -1566,6 +1572,7 @@ class VLLMConfig:
     swap_space: float | None = None
     enforce_eager: bool | None = None
     sleep_mode: bool = False
+    sleep_mode_level: int = 2
     dtype: str | None = None
     quantization: str | None = None
     vllm_model_name_or_path: str | None = None
@@ -1579,10 +1586,17 @@ class VLLMConfig:
     # See class docstring above. Required to avoid vLLM's memory-profiling
     # assertion when running multiple vLLM processes on a shared GPU.
     kv_cache_memory_bytes: int | None = None
-    lora_staging_dir: str | None = None
+    lora_staging_dir: str | None = "AgileRL"
     lora_staging_per_rank: bool | None = None
 
     def __post_init__(self) -> None:
+        if self.sleep_mode_level not in (1, 2):
+            msg = (
+                "vllm sleep_mode_level must be either 1 or 2, got "
+                f"{self.sleep_mode_level}."
+            )
+            raise ValueError(msg)
+
         # sleep_mode toggles the native vLLM sleep/wake cycle (base backed up to
         # host RAM, KV freed) between rollout and training for a single colocated
         # agent; it is not usable with a population on one device.

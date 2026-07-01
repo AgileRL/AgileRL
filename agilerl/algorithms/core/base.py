@@ -4546,7 +4546,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         is_distributed = (
             self.accelerator is not None and self.accelerator.num_processes > 1
         )
-        export_on_all_ranks = per_rank_staging_mode and is_distributed
+        # In distributed runs, each rank needs a local adapter export when the
+        # staging dir is process-private (default mkdtemp path), otherwise
+        # non-main ranks can wait forever for files that only rank 0 wrote.
+        export_on_all_ranks = is_distributed and (
+            per_rank_staging_mode or self._vllm_lora_staging_dir_is_temp
+        )
         is_main_process = self.accelerator is None or self.accelerator.is_main_process
         with gather_if_zero3(self.zero_stage, list(peft_ref.parameters())):
             if self.lora_config is None:
@@ -4563,22 +4568,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
 
-        if is_main_process and logger.isEnabledFor(logging.DEBUG):
-            # Sum of L2 norms of the trained-from-zero LoRA-B weights; a value
-            # that changes across syncs confirms the trainer is exporting
-            # updated weights into the rollout adapter. Gated on the standard
-            # logging level (the norm reduction costs a GPU sync).
-            lora_b_sq = sum(
-                float(p.detach().float().pow(2).sum().item())
-                for n, p in peft_ref.named_parameters()
-                if "lora_B" in n and self._vllm_rollout_adapter in n
-            )
-            logger.debug(
-                "lora-sync: actor lora_B L2=%.6f path=%s",
-                lora_b_sq**0.5,
-                adapter_path,
-            )
-
         # One-shot refresh of the resident slot. ``load_inplace`` forces vLLM to
         # re-read the (updated) adapter weights from disk; required from the second
         # sync onward, when the slot already holds the previous step's adapter.
@@ -4586,25 +4575,13 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             adapter_path,
             load_inplace=self._vllm_lora_loaded,
         )
-        deadline_raw = os.getenv("AGILERL_LORA_LOAD_DEADLINE_S", "20")
-        try:
-            deadline_s = max(0.0, float(deadline_raw))
-        except ValueError:
-            deadline_s = 20.0
+        deadline_s = 20.0
         started = time.monotonic()
         attempts = 0
         last_missing: list[str] = []
-        last_load_error: Exception | None = None
         debug_every = 5
         lora_device = torch.device(self.device)
         use_device_guard = lora_device.type == "cuda"
-        if use_device_guard and logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                "lora-sync: add_lora guard rank=%s self.device=%s current_device=cuda:%d",
-                getattr(getattr(self, "accelerator", None), "process_index", 0),
-                lora_device,
-                torch.cuda.current_device(),
-            )
 
         def _missing_adapter_files(path: Path) -> list[str]:
             missing: list[str] = []
@@ -4635,28 +4612,22 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             elapsed = time.monotonic() - started
             last_missing = _missing_adapter_files(adapter_path)
             if not last_missing:
-                try:
-                    if use_device_guard:
-                        with torch.cuda.device(lora_device):
-                            loaded = self.llm.llm_engine.add_lora(refresh_request)
-                    else:
+                if use_device_guard:
+                    with torch.cuda.device(lora_device):
                         loaded = self.llm.llm_engine.add_lora(refresh_request)
-                except Exception as exc:
-                    if exc.__class__.__name__ != "LoRAAdapterNotFoundError":
-                        raise
-                    last_load_error = exc
                 else:
-                    if loaded:
-                        if attempts > 1:
-                            logger.info(
-                                "vLLM LoRA load succeeded after retries: attempts=%d "
-                                "elapsed=%.3fs path=%s",
-                                attempts,
-                                elapsed,
-                                adapter_path,
-                            )
-                        break
-                    last_load_error = RuntimeError(
+                    loaded = self.llm.llm_engine.add_lora(refresh_request)
+                if loaded:
+                    if attempts > 1:
+                        logger.info(
+                            "vLLM LoRA load succeeded after retries: attempts=%d "
+                            "elapsed=%.3fs path=%s",
+                            attempts,
+                            elapsed,
+                            adapter_path,
+                        )
+                    break
+                raise RuntimeError(
                         f"vLLM failed to load LoRA adapter from {adapter_path}. "
                         "Check max_lora_rank / target module names match the trainer."
                     )
@@ -4676,17 +4647,15 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     f"adapter_dir_listing={_safe_dir_listing(adapter_path)}, "
                     f"staging_dir_listing={_safe_dir_listing(staging_dir)})."
                 )
-                raise RuntimeError(msg) from last_load_error
+                raise RuntimeError(msg)
 
             if attempts % debug_every == 0:
                 logger.debug(
-                    "vLLM LoRA load retry: attempt=%d elapsed=%.3fs path=%s "
-                    "missing=%s last_error=%s",
+                    "vLLM LoRA load retry: attempt=%d elapsed=%.3fs path=%s missing=%s",
                     attempts,
                     elapsed,
                     adapter_path,
                     last_missing,
-                    type(last_load_error).__name__ if last_load_error else "None",
                 )
             sleep_s = min(1.0, 0.1 * (2 ** (attempts - 1)))
             time.sleep(sleep_s)
@@ -5627,10 +5596,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def _sleep_vllm_after_init(self) -> None:
         """Put the colocated engine to sleep once after construction.
 
-        Native ``sleep(level=1)``: vLLM backs its base up to host RAM and frees
-        the KV cache; ``wake_up()`` restores the base (dense or bnb 4-bit).
+        Native ``sleep(level=sleep_mode_level)``: vLLM cycles its allocator
+        state based on the configured sleep level; ``wake_up()`` restores the
+        engine allocations.
         """
-        self.llm.sleep(level=1)
+        self.llm.sleep(level=self.vllm_config.sleep_mode_level)
         self._vllm_awake = False
         if self.accelerator is None or self.accelerator.is_main_process:
             log_cuda_memory_snapshot("vLLM sleep complete")
@@ -5756,11 +5726,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
     def _prepare_vllm_for_training(self) -> None:
         """Prepare vLLM for learning."""
-        if self._vllm_awake and (
+        if self.vllm_config.sleep_mode and self._vllm_awake and (
             self.accelerator is None or self.accelerator.is_main_process
         ):
             torch.cuda.empty_cache()
-            self.llm.sleep(level=1)
+            self.llm.sleep(level=self.vllm_config.sleep_mode_level)
             self._vllm_awake = False
 
         if self.use_vllm:
@@ -5777,7 +5747,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 log_cuda_memory_snapshot(
                     "trainer base offloaded to CPU (before vLLM wake)"
                 )
-        if not self._vllm_awake and (
+        if self.vllm_config.sleep_mode and not self._vllm_awake and (
             self.accelerator is None or self.accelerator.is_main_process
         ):
             torch.cuda.empty_cache()
@@ -5786,26 +5756,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 if self.accelerator is not None
                 else 0
             )
-            try:
-                self.llm.wake_up()
-            except RuntimeError as err:  # pragma: no cover
-                err_text = str(err).lower()
-                if "out of memory" in err_text or "cuda error" in err_text:
-                    vcfg = self.vllm_config
-                    hint = format_colocated_vllm_oom_hint(
-                        device_index,
-                        kv_cache_memory_bytes=(
-                            vcfg.kv_cache_memory_bytes if vcfg is not None else None
-                        ),
-                        gpu_memory_utilization=(
-                            vcfg.gpu_memory_utilization if vcfg is not None else None
-                        ),
-                        max_model_len=getattr(self, "max_model_len", None),
-                        trainer_on_gpu=not self.use_memory_efficient_params,
-                    )
-                    msg = f"vLLM wake_up failed (GPU OOM).\n{hint}"
-                    raise RuntimeError(msg) from err
-                raise
+            self.llm.wake_up()
             self._vllm_awake = True
             if self.accelerator is None or self.accelerator.is_main_process:
                 log_cuda_memory_snapshot("vLLM base restored on GPU (after wake)")

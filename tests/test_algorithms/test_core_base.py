@@ -6265,7 +6265,7 @@ class TestLLMMoveLoraToVllmErrors:
         assert mock_save.call_args.kwargs["export_on_all_ranks"] is False
         agent.llm.llm_engine.add_lora.assert_called_once()
 
-    def test_retries_until_adapter_files_exist_then_loads(self, tmp_path, monkeypatch):
+    def test_retries_until_adapter_files_exist_then_loads(self, tmp_path):
         acc = _make_mock_accelerator(is_main_process=True)
         agent = _make_llm_agent(accelerator=acc)
         peft_ref = MagicMock()
@@ -6283,8 +6283,6 @@ class TestLLMMoveLoraToVllmErrors:
                 (adapter_path / "adapter_config.json").write_text("{}")
                 (adapter_path / "adapter_model.safetensors").write_bytes(b"")
 
-        monkeypatch.setenv("AGILERL_LORA_LOAD_DEADLINE_S", "1")
-
         with (
             patch("agilerl.algorithms.core.base.gather_if_zero3", create=True),
             patch(
@@ -6301,7 +6299,7 @@ class TestLLMMoveLoraToVllmErrors:
         assert sleep_calls["n"] >= 1
         agent.llm.llm_engine.add_lora.assert_called_once()
 
-    def test_retries_on_lora_adapter_not_found_error(self, tmp_path, monkeypatch):
+    def test_retries_on_lora_adapter_not_found_error(self, tmp_path):
         class LoRAAdapterNotFoundError(RuntimeError):
             pass
 
@@ -6319,8 +6317,6 @@ class TestLLMMoveLoraToVllmErrors:
         agent.llm.llm_engine.add_lora = MagicMock(
             side_effect=[LoRAAdapterNotFoundError("race"), True]
         )
-        monkeypatch.setenv("AGILERL_LORA_LOAD_DEADLINE_S", "1")
-
         with (
             patch("agilerl.algorithms.core.base.gather_if_zero3", create=True),
             patch(
@@ -6333,9 +6329,7 @@ class TestLLMMoveLoraToVllmErrors:
             agent._move_lora_to_vllm()
         assert agent.llm.llm_engine.add_lora.call_count == 2
 
-    def test_add_lora_uses_cuda_device_guard_when_agent_device_is_cuda(
-        self, tmp_path, monkeypatch
-    ):
+    def test_add_lora_uses_cuda_device_guard_when_agent_device_is_cuda(self, tmp_path):
         acc = _make_mock_accelerator(is_main_process=True, process_index=1)
         agent = _make_llm_agent(accelerator=acc)
         peft_ref = MagicMock()
@@ -6348,8 +6342,6 @@ class TestLLMMoveLoraToVllmErrors:
         adapter_path.mkdir(parents=True, exist_ok=True)
         (adapter_path / "adapter_config.json").write_text("{}")
         (adapter_path / "adapter_model.safetensors").write_bytes(b"")
-        monkeypatch.setenv("AGILERL_LORA_LOAD_DEADLINE_S", "1")
-
         device_guard = MagicMock()
         device_guard.__enter__ = MagicMock(return_value=None)
         device_guard.__exit__ = MagicMock(return_value=False)
@@ -6374,7 +6366,7 @@ class TestLLMMoveLoraToVllmErrors:
         mock_cuda_device.assert_called_once_with(torch.device("cuda:1"))
         agent.llm.llm_engine.add_lora.assert_called_once()
 
-    def test_timeout_raises_actionable_runtime_error(self, tmp_path, monkeypatch):
+    def test_timeout_raises_actionable_runtime_error(self, tmp_path):
         acc = _make_mock_accelerator(
             num_processes=2, is_main_process=False, process_index=1
         )
@@ -6384,8 +6376,6 @@ class TestLLMMoveLoraToVllmErrors:
         acc.unwrap_model = MagicMock(return_value=peft_ref)
         _setup_agent_for_vllm_lora_sync(agent)
         adapter_path = tmp_path / "actor"
-        monkeypatch.setenv("AGILERL_LORA_LOAD_DEADLINE_S", "0.2")
-
         with (
             patch("agilerl.algorithms.core.base.gather_if_zero3", create=True),
             patch(
@@ -6395,7 +6385,7 @@ class TestLLMMoveLoraToVllmErrors:
             ),
             patch(
                 "agilerl.algorithms.core.base.time.monotonic",
-                side_effect=[0.0, 0.0, 0.25],
+                side_effect=[0.0, 0.0, 20.25],
             ),
             patch("agilerl.algorithms.core.base.time.sleep", return_value=None),
             pytest.raises(
@@ -6404,33 +6394,6 @@ class TestLLMMoveLoraToVllmErrors:
             ),
         ):
             agent._move_lora_to_vllm()
-
-    def test_logs_debug_lora_norm_on_main_process(self, tmp_path, caplog):
-        acc = _make_mock_accelerator(is_main_process=True)
-        agent = _make_llm_agent(accelerator=acc)
-        lora_b = torch.nn.Parameter(torch.tensor([3.0, 4.0]))
-        peft_ref = MagicMock()
-        peft_ref.parameters.return_value = [lora_b]
-        peft_ref.named_parameters.return_value = [
-            ("lora.actor.lora_B.weight", lora_b),
-        ]
-        acc.unwrap_model = MagicMock(return_value=peft_ref)
-        _setup_agent_for_vllm_lora_sync(agent)
-
-        with (
-            patch("agilerl.algorithms.core.base.gather_if_zero3", create=True),
-            patch(
-                "agilerl.algorithms.core.base.save_peft_adapter_for_vllm_rollout",
-                side_effect=_fake_save_peft_adapter_for_vllm_rollout,
-                create=True,
-            ),
-            caplog.at_level(logging.DEBUG, logger="agilerl.algorithms.core.base"),
-        ):
-            agent._move_lora_to_vllm()
-
-        assert any(
-            "lora-sync: actor lora_B L2=" in rec.message for rec in caplog.records
-        )
 
     def test_raises_when_vllm_add_lora_fails(self, tmp_path):
         acc = _make_mock_accelerator()
@@ -6450,10 +6413,9 @@ class TestLLMMoveLoraToVllmErrors:
             ),
             patch(
                 "agilerl.algorithms.core.base.time.monotonic",
-                side_effect=[0.0, 0.0, 0.25],
+                side_effect=[0.0, 0.0, 20.25],
             ),
             patch("agilerl.algorithms.core.base.time.sleep", return_value=None),
-            patch.dict("os.environ", {"AGILERL_LORA_LOAD_DEADLINE_S": "0.2"}),
             pytest.raises(
                 RuntimeError, match="Timed out waiting to load vLLM LoRA adapter"
             ),

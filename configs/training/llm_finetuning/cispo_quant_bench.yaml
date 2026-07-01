@@ -47,9 +47,9 @@ INIT_HP:
     FILTER_ZERO_ADV: true
     LR: 0.00002
     MAX_GRAD_NORM: 1
-    MAX_MODEL_LEN: 32768
+    MAX_MODEL_LEN: 1024
     # Per-turn generation cap; must be < MAX_MODEL_LEN or prompt budget is 0.
-    MAX_OUTPUT_TOKENS: 2768
+    MAX_OUTPUT_TOKENS: 64
     # Sliding-window prompt truncation in the multi-turn rollout wrapper.
     # When false (default): trajectories that would push the cumulative
     # prompt past (MAX_MODEL_LEN - MAX_OUTPUT_TOKENS) terminate cleanly
@@ -65,19 +65,22 @@ INIT_HP:
     # HF activation offload; or use --trainer-activation-offload.
     ACTIVATION_OFFLOAD: true
     # For multimodal models, we may want to only apply LoRA to e.g. the language model part.
-    LORA_TARGET_SCOPE: language_model
+    # LORA_TARGET_SCOPE: language_model
     TARGET_MODULES:
-        - q_proj.linear
-        - k_proj.linear
-        - v_proj.linear
-        - o_proj.linear
-        - up_proj.linear
-        - down_proj.linear
-        - gate_proj.linear
+        - q_proj
+        - k_proj
+        - v_proj
+        - o_proj
+        - up_proj
+        - down_proj
+        - gate_proj
     TEMPERATURE: 1.0
     TOURN_SIZE: 1
     UPDATE_EPOCHS: 1
     USE_VLLM: true
+    # vLLM sleep level used when sleep_mode is enabled (1=offload weights,
+    # 2=discard GPU allocations; safer default for colocated multiprocess).
+    SLEEP_MODE_LEVEL: 2
     # Turn-level CISPO has no fused Liger kernel, so it runs on the standard
     # path (always memory-bounded via the fused-linear-logprob path); Liger
     # warns and falls back here.
