@@ -1499,15 +1499,18 @@ class TestListResources:
 class TestDownloadExperimentMetrics:
     def test_default_output_path(self, api_key_client, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        api_key_client._request_raw = MagicMock(
+        api_key_client.preview_experiment_metrics_csv = MagicMock(
             return_value=(b"csv-data", "text/csv", None)
         )
         result = api_key_client.download_experiment_metrics("exp1")
         assert result == Path("exp1_metrics.csv")
         assert result.read_bytes() == b"csv-data"
+        api_key_client.preview_experiment_metrics_csv.assert_called_once_with(
+            "exp1", preview_rows=50_000, metrics=None
+        )
 
     def test_output_path_as_directory(self, api_key_client, tmp_path):
-        api_key_client._request_raw = MagicMock(
+        api_key_client.preview_experiment_metrics_csv = MagicMock(
             return_value=(b"data", "text/csv", 'attachment; filename="custom.csv"')
         )
         result = api_key_client.download_experiment_metrics(
@@ -1517,7 +1520,7 @@ class TestDownloadExperimentMetrics:
         assert result.read_bytes() == b"data"
 
     def test_output_path_as_directory_no_disposition(self, api_key_client, tmp_path):
-        api_key_client._request_raw = MagicMock(
+        api_key_client.preview_experiment_metrics_csv = MagicMock(
             return_value=(b"data", "text/csv", None)
         )
         result = api_key_client.download_experiment_metrics(
@@ -1529,18 +1532,29 @@ class TestDownloadExperimentMetrics:
         monkeypatch.chdir(tmp_path)
         existing = tmp_path / "exp1_metrics.csv"
         existing.write_text("old")
-        api_key_client._request_raw = MagicMock(return_value=(b"new", "text/csv", None))
+        api_key_client.preview_experiment_metrics_csv = MagicMock(
+            return_value=(b"new", "text/csv", None)
+        )
         with pytest.raises(FileExistsError, match="already exists"):
             api_key_client.download_experiment_metrics("exp1")
 
     def test_metrics_param_forwarded(self, api_key_client, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        api_key_client._request_raw = MagicMock(
+        api_key_client.preview_experiment_metrics_csv = MagicMock(
             return_value=(b"data", "text/csv", None)
         )
         api_key_client.download_experiment_metrics("exp1", metrics=["loss"])
-        call_kwargs = api_key_client._request_raw.call_args[1]
-        assert call_kwargs["json"] == {"metrics": ["loss"]}
+        api_key_client.preview_experiment_metrics_csv.assert_called_once_with(
+            "exp1", preview_rows=50_000, metrics=["loss"]
+        )
+
+    def test_rejects_non_csv_response(self, api_key_client, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        api_key_client.preview_experiment_metrics_csv = MagicMock(
+            return_value=(b"<!DOCTYPE html>", "text/html", None)
+        )
+        with pytest.raises(ArenaAPIError):
+            api_key_client.download_experiment_metrics("exp1")
 
 
 class TestProjectMethods:
@@ -1618,27 +1632,51 @@ class TestInferenceDeployments:
         result = api_key_client.list_inference_deployments()
         assert result == [{"name": "dep1"}]
 
-    def test_fetch_deployment_for_inference_returns_row(self, api_key_client):
-        row = {"name": "my-dep", "url": "http://x", "api_key": "k"}
-        api_key_client._request = MagicMock(return_value=row)
-        result = api_key_client._fetch_deployment_for_inference("my-dep")
-        assert result == row
-
-    def test_fetch_deployment_for_inference_queries_one_endpoint(self, api_key_client):
-        api_key_client._request = MagicMock(return_value={"url": "http://x"})
-        api_key_client._fetch_deployment_for_inference(
-            "my-dep", experiment_name="exp", project_name="proj"
+    def test_fetch_deployment_for_inference_single_match(self, api_key_client):
+        api_key_client._request = MagicMock(
+            return_value={
+                "name": "my-dep",
+                "spec": {"url": "http://x"},
+                "api_key": "key",
+            }
         )
-        args, kwargs = api_key_client._request.call_args
-        assert args == ("GET", "/api/cli/v1/inference/deployments/one")
-        assert kwargs["params"] == {
+        result = api_key_client._fetch_deployment_for_inference("my-dep")
+        assert result == {
             "name": "my-dep",
-            "experimentName": "exp",
-            "projectName": "proj",
+            "spec": {"url": "http://x"},
+            "api_key": "key",
         }
+        api_key_client._request.assert_called_once_with(
+            "GET",
+            "/api/cli/v1/inference/deployments/one",
+            params={"name": "my-dep"},
+        )
 
-    def test_inference_deployment_list_params(self):
-        params = ArenaClient._inference_deployments_list_params(
+    def test_fetch_deployment_for_inference_no_match_raises(self, api_key_client):
+        api_key_client._request = MagicMock(
+            side_effect=ArenaAPIError("not found", status_code=404)
+        )
+        with pytest.raises(ArenaAPIError, match="not found"):
+            api_key_client._fetch_deployment_for_inference("missing")
+
+    def test_fetch_deployment_for_inference_multiple_raises(self, api_key_client):
+        api_key_client._request = MagicMock(
+            side_effect=ArenaAPIError("ambiguous", status_code=400)
+        )
+        with pytest.raises(ArenaAPIError, match="ambiguous"):
+            api_key_client._fetch_deployment_for_inference("d")
+
+    def test_fetch_deployment_for_inference_non_dict_raises(self, api_key_client):
+        api_key_client._request = MagicMock(return_value="not a dict")
+        with pytest.raises(ArenaAPIError, match="Unexpected deployment detail"):
+            api_key_client._fetch_deployment_for_inference("dep")
+
+    def test_fetch_deployment_for_inference_empty_name_raises(self, api_key_client):
+        with pytest.raises(ArenaAPIError, match="deployment name is required"):
+            api_key_client._fetch_deployment_for_inference("   ")
+
+    def test_deployment_lookup_params(self):
+        params = ArenaClient._deployment_lookup_params(
             name=" dep ",
             experiment_name=" exp ",
             project_name=" proj ",

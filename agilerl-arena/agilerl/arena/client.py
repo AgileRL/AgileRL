@@ -1063,11 +1063,19 @@ class ArenaClient:
         :rtype: Path
         :raises FileExistsError: If the resolved output path already exists.
         """
-        payload, _, disposition = self._request_raw(
-            "POST",
-            f"/api/cli/v1/experiments/{experiment_name}/metrics",
-            json={"metrics": metrics},
+        # Platform serves CSV via GET /api/cli/v1/experiments/metrics?preview_rows=…
+        # (not POST …/experiments/{name}/metrics — that path 404s to Loco's HTML fallback).
+        payload, content_type, disposition = self.preview_experiment_metrics_csv(
+            experiment_name,
+            preview_rows=50_000,
+            metrics=metrics,
         )
+        if not (content_type or "").startswith("text/csv"):
+            body_preview = payload.decode("utf-8", errors="replace")[:500]
+            raise ArenaAPIError.from_response_body(
+                body_preview,
+                status_code=None,
+            )
 
         if output_path is None:
             path = Path(f"{experiment_name}_metrics.csv")
@@ -1156,7 +1164,7 @@ class ArenaClient:
     # -------------------------------------------------------------------------
 
     @staticmethod
-    def _inference_deployments_list_params(
+    def _deployment_lookup_params(
         *,
         name: str | None = None,
         experiment_name: str | None = None,
@@ -1218,7 +1226,7 @@ class ArenaClient:
         :returns: A list of deployments.
         :rtype: list[dict[str, Any]]
         """
-        q = self._inference_deployments_list_params(
+        q = self._deployment_lookup_params(
             name=name,
             experiment_name=experiment_name,
             project_name=project_name,
@@ -1322,18 +1330,37 @@ class ArenaClient:
         experiment_name: str | None = None,
         project_name: str | None = None,
     ) -> dict[str, Any]:
-        """Fetch the single deployment row for *deployment_name* visible to the user."""
-        params = self._inference_deployments_list_params(
+        """Fetch one deployment detail row for inference binding."""
+        params = self._deployment_lookup_params(
             name=normalized_deployment_name(deployment_name),
             experiment_name=experiment_name,
             project_name=project_name,
         )
+        if "name" not in params:
+            msg = "deployment name is required."
+            raise ArenaAPIError(msg)
 
-        return self._request(
-            "GET",
-            "/api/cli/v1/inference/deployments/one",
-            params=params,
-        )
+        try:
+            row = self._request(
+                "GET",
+                "/api/cli/v1/inference/deployments/one",
+                params=params,
+            )
+        except ArenaAPIError as exc:
+            hint = (
+                "Pass --experiment-name and/or --project-name when multiple deployments "
+                "share this deployment name."
+            )
+            if not exc.cli_hint:
+                raise ArenaAPIError(
+                    exc.detail, cli_hint=hint, status_code=exc.status_code
+                ) from exc
+            raise
+
+        if not isinstance(row, dict):
+            msg = "Unexpected deployment detail response shape."
+            raise ArenaAPIError(msg)
+        return row
 
     def _ensure_inference_binding(
         self,
