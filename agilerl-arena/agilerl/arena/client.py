@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, ClassVar, TypedDict
 
 import httpx
+from typing_extensions import Self
+
 from agilerl.arena.auth import (
     ArenaOAuth2,
     is_oauth_access_token_valid,
@@ -40,7 +42,6 @@ from agilerl.arena.utils import (
     prepare_env_upload,
     prepare_file_upload,
 )
-from typing_extensions import Self
 
 logger = logging.getLogger(__name__)
 
@@ -372,7 +373,7 @@ class ArenaClient:
         :param name: Environment name.
         :type name: str
         :param version: Environment version. Defaults to None, which resolves to the latest version.
-        :type version: str
+        :type version: str | None
         :returns: True if the environment exists, False otherwise.
         :rtype: bool
         """
@@ -1172,7 +1173,9 @@ class ArenaClient:
             params["projectName"] = pn
         return params
 
-    def deploy_agent(self, experiment_name: str, checkpoint: str | None = None) -> Any:
+    def deploy_agent(
+        self, experiment_name: str, checkpoint: str | None = None
+    ) -> dict[str, Any]:
         """Create an inference deployment from an experiment checkpoint.
 
         :param experiment_name: The name of the experiment to deploy.
@@ -1246,11 +1249,13 @@ class ArenaClient:
         :type deployment_name: str
         :param refresh: Whether to refresh the deployment metadata.
         :type refresh: bool
-        :param experiment_name: The name of the experiment to list deployments for.
+        :param experiment_name: Experiment name to disambiguate when multiple deployments
+            share the same deployment name.
         :type experiment_name: str | None
-        :param project_name: The name of the project to list deployments for.
+        :param project_name: Project name to disambiguate when multiple deployments
+            share the same deployment name.
         :type project_name: str | None
-        :param timeout: The timeout for the request.
+        :param timeout: HTTP timeout in seconds for the returned agent's inference requests.
         :type timeout: int | None
         :returns: An :class:`~arena.inference.Agent` instance.
         :rtype: Agent
@@ -1287,13 +1292,10 @@ class ArenaClient:
 
     @staticmethod
     def _deployment_url_and_api_key(row: dict[str, Any]) -> tuple[str, str]:
-        """Parse ``spec.url`` and deployment ``api_key`` from an API deployment row."""
-        spec = row.get("spec")
-        if not isinstance(spec, dict):
-            spec = {}
-        url = spec.get("url")
+        """Parse ``url`` and deployment ``api_key`` from an API deployment row."""
+        url = row.get("url")
         if not isinstance(url, str) or not url.strip():
-            msg = "Deployment has no inference URL (spec.url)."
+            msg = "Deployment has no inference URL."
             raise ArenaAPIError(
                 msg,
                 cli_hint="Wait until provisioning completes, then retry with --refresh.",
@@ -1320,39 +1322,18 @@ class ArenaClient:
         experiment_name: str | None = None,
         project_name: str | None = None,
     ) -> dict[str, Any]:
-        """Load deployments visible to the user; expects exactly one row for *deployment_name*."""
+        """Fetch the single deployment row for *deployment_name* visible to the user."""
         params = self._inference_deployments_list_params(
             name=normalized_deployment_name(deployment_name),
             experiment_name=experiment_name,
             project_name=project_name,
         )
 
-        rows = self._request(
+        return self._request(
             "GET",
-            "/api/cli/v1/inference/deployments/list",
+            "/api/cli/v1/inference/deployments/one",
             params=params,
         )
-        if not isinstance(rows, list):
-            rows = []
-
-        hint = (
-            "Pass --experiment-name and/or --project-name when multiple deployments "
-            "share this deployment name."
-        )
-        if len(rows) == 0:
-            msg = f"No deployment found named {deployment_name!r}."
-            raise ArenaAPIError(msg, cli_hint=hint)
-        if len(rows) > 1:
-            msg = (
-                f"Multiple deployments named {deployment_name!r} ({len(rows)} matches)."
-            )
-            raise ArenaAPIError(msg, cli_hint=hint)
-
-        row = rows[0]
-        if not isinstance(row, dict):
-            msg = "Unexpected deployment list response shape."
-            raise ArenaAPIError(msg)
-        return row
 
     def _ensure_inference_binding(
         self,
@@ -1503,6 +1484,11 @@ class ArenaClient:
             cli_hint="Run 'arena login' to authenticate.",
         )
 
+    def _stream_timeout(self, timeout: int | None) -> httpx.Timeout:
+        """Build the httpx timeout for a streaming (NDJSON progress) request."""
+        base = timeout if timeout is not None else self._request_timeout
+        return httpx.Timeout(base, read=None)
+
     def _send(
         self,
         method: str,
@@ -1532,7 +1518,11 @@ class ArenaClient:
         try:
             if stream:
                 request = self._http.build_request(
-                    method, path, headers=headers, timeout=request_timeout, **kwargs
+                    method,
+                    path,
+                    headers=headers,
+                    timeout=self._stream_timeout(timeout),
+                    **kwargs,
                 )
                 resp = self._http.send(request, stream=True)
             else:

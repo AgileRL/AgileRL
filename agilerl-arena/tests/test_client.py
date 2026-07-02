@@ -456,6 +456,29 @@ class TestRequest:
         api_key_client._send("GET", "/api/test", timeout=77)
         assert api_key_client._http.request.call_args.kwargs["timeout"] == 77
 
+    def test_stream_disables_read_timeout(self, api_key_client):
+        """Streaming requests must not bound the idle gap between NDJSON chunks.
+
+        Slow server-side work (installing requirements, building images) goes
+        silent without emitting an event; a fixed read timeout aborts it with
+        httpx.ReadTimeout. Connect/write/pool stay bounded to the given value.
+        """
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.is_success = True
+
+        built_request = MagicMock()
+        api_key_client._http.build_request = MagicMock(return_value=built_request)
+        api_key_client._http.send = MagicMock(return_value=mock_resp)
+
+        api_key_client._send("POST", "/api/stream", stream=True, timeout=300)
+
+        timeout = api_key_client._http.build_request.call_args.kwargs["timeout"]
+        assert isinstance(timeout, httpx.Timeout)
+        assert timeout.read is None
+        assert timeout.connect == 300
+        assert timeout.write == 300
+
     def test_401_after_retry_raises_auth_error(self, token_client):
         mock_resp = MagicMock()
         mock_resp.status_code = 401
@@ -1595,32 +1618,24 @@ class TestInferenceDeployments:
         result = api_key_client.list_inference_deployments()
         assert result == [{"name": "dep1"}]
 
-    def test_fetch_deployment_for_inference_single_match(self, api_key_client):
-        api_key_client._request = MagicMock(
-            return_value=[{"name": "my-dep", "spec": {"url": "http://x"}}]
-        )
+    def test_fetch_deployment_for_inference_returns_row(self, api_key_client):
+        row = {"name": "my-dep", "url": "http://x", "api_key": "k"}
+        api_key_client._request = MagicMock(return_value=row)
         result = api_key_client._fetch_deployment_for_inference("my-dep")
-        assert result == {"name": "my-dep", "spec": {"url": "http://x"}}
+        assert result == row
 
-    def test_fetch_deployment_for_inference_no_match_raises(self, api_key_client):
-        api_key_client._request = MagicMock(return_value=[])
-        with pytest.raises(ArenaAPIError, match="No deployment found"):
-            api_key_client._fetch_deployment_for_inference("missing")
-
-    def test_fetch_deployment_for_inference_multiple_raises(self, api_key_client):
-        api_key_client._request = MagicMock(return_value=[{"name": "d"}, {"name": "d"}])
-        with pytest.raises(ArenaAPIError, match="Multiple deployments"):
-            api_key_client._fetch_deployment_for_inference("d")
-
-    def test_fetch_deployment_for_inference_non_list_raises(self, api_key_client):
-        api_key_client._request = MagicMock(return_value="not a list")
-        with pytest.raises(ArenaAPIError, match="No deployment found"):
-            api_key_client._fetch_deployment_for_inference("dep")
-
-    def test_fetch_deployment_for_inference_non_dict_row_raises(self, api_key_client):
-        api_key_client._request = MagicMock(return_value=["not-a-dict"])
-        with pytest.raises(ArenaAPIError, match="Unexpected deployment"):
-            api_key_client._fetch_deployment_for_inference("dep")
+    def test_fetch_deployment_for_inference_queries_one_endpoint(self, api_key_client):
+        api_key_client._request = MagicMock(return_value={"url": "http://x"})
+        api_key_client._fetch_deployment_for_inference(
+            "my-dep", experiment_name="exp", project_name="proj"
+        )
+        args, kwargs = api_key_client._request.call_args
+        assert args == ("GET", "/api/cli/v1/inference/deployments/one")
+        assert kwargs["params"] == {
+            "name": "my-dep",
+            "experimentName": "exp",
+            "projectName": "proj",
+        }
 
     def test_inference_deployment_list_params(self):
         params = ArenaClient._inference_deployments_list_params(
@@ -1637,33 +1652,33 @@ class TestInferenceDeployments:
 
 class TestDeploymentUrlAndApiKey:
     def test_happy_path(self):
-        row = {"spec": {"url": "http://inference.example.com"}, "api_key": "key123"}
+        row = {"url": "http://inference.example.com", "api_key": "key123"}
         url, key = ArenaClient._deployment_url_and_api_key(row)
         assert url == "http://inference.example.com"
         assert key == "key123"
 
-    def test_missing_spec_raises(self):
+    def test_missing_url_raises(self):
         row = {"api_key": "key123"}
         with pytest.raises(ArenaAPIError, match="no inference URL"):
             ArenaClient._deployment_url_and_api_key(row)
 
     def test_empty_url_raises(self):
-        row = {"spec": {"url": "  "}, "api_key": "key123"}
+        row = {"url": "  ", "api_key": "key123"}
         with pytest.raises(ArenaAPIError, match="no inference URL"):
             ArenaClient._deployment_url_and_api_key(row)
 
     def test_missing_api_key_raises(self):
-        row = {"spec": {"url": "http://x"}}
+        row = {"url": "http://x"}
         with pytest.raises(ArenaAPIError, match="no api_key"):
             ArenaClient._deployment_url_and_api_key(row)
 
     def test_empty_api_key_raises(self):
-        row = {"spec": {"url": "http://x"}, "api_key": "  "}
+        row = {"url": "http://x", "api_key": "  "}
         with pytest.raises(ArenaAPIError, match="api_key was empty"):
             ArenaClient._deployment_url_and_api_key(row)
 
     def test_strips_whitespace(self):
-        row = {"spec": {"url": " http://x "}, "api_key": " key "}
+        row = {"url": " http://x ", "api_key": " key "}
         url, key = ArenaClient._deployment_url_and_api_key(row)
         assert url == "http://x"
         assert key == "key"
@@ -1685,7 +1700,7 @@ class TestEnsureInferenceBinding:
     def test_fetches_and_caches_on_refresh(self, mock_load, mock_save, api_key_client):
         mock_load.return_value = ("http://cached", "cached_key")
         api_key_client._fetch_deployment_for_inference = MagicMock(
-            return_value={"spec": {"url": "http://new"}, "api_key": "new_key"}
+            return_value={"url": "http://new", "api_key": "new_key"}
         )
         result = api_key_client._ensure_inference_binding("my-dep", refresh=True)
         assert result == ("http://new", "new_key")
@@ -1696,7 +1711,7 @@ class TestEnsureInferenceBinding:
     def test_fetches_when_no_cache(self, mock_load, mock_save, api_key_client):
         mock_load.return_value = None
         api_key_client._fetch_deployment_for_inference = MagicMock(
-            return_value={"spec": {"url": "http://new"}, "api_key": "k"}
+            return_value={"url": "http://new", "api_key": "k"}
         )
         result = api_key_client._ensure_inference_binding("dep")
         assert result == ("http://new", "k")

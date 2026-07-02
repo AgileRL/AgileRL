@@ -41,6 +41,16 @@ We are constantly adding more algorithms and features. AgileRL already includes 
 
 ## Benchmarks
 
+### LLM Fine-tuning
+
+AgileRL's multi-turn LLM training enables state-of-the-art performance on long-horizon tasks with small models. In the following example, AgileRL's CISPO was benchmarked against ART and TRL on the <a href="https://github.com/axon-rl/gem">GEM</a> Sudoku Hard task. This is a difficult multi-turn problem, which requires a context length of 32k tokens and up to 50 turns per rollout. The sync AgileRL run is a single agent using the AgileRL framework. The async and HPO runs were performed on <a href="https://arena.agilerl.com">Arena</a>, AgileRL's RLOps platform. All runs used the same starting hyperparameters. AgileRL runs were run on A100 40GB nodes, whereas ART and TRL required A100 80GB nodes due to a lack of optimizations. AgileRL runs significantly outperformed those using the ART and TRL frameworks.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/AgileRL/AgileRL/main/docs/_static/multi_turn_llm_benchmarks.png" min-width="100%" width="700">
+</p>
+
+### Classic RL
+
 Reinforcement learning algorithms and libraries are usually benchmarked once the optimal hyperparameters for training are known, but it often takes hundreds or thousands of experiments to discover these. This is unrealistic and does not reflect the true, total time taken for training. What if we could remove the need to conduct all these prior experiments?
 
 In the charts below, a single AgileRL run, which automatically tunes hyperparameters, is benchmarked against Optuna's multiple training runs traditionally required for hyperparameter optimization, demonstrating the real time savings possible. Global steps is the sum of every step taken by any agent in the environment, including across an entire population.
@@ -94,15 +104,6 @@ pip install git+https://github.com/AgileRL/AgileRL.git@nightly
 
 AgileRL provides the tools to train RL algorithms in a variety of ways, focusing on flexibility and modularity as a stepping stone for efficiently training
 arbitrarily large populations of agents in a distributed manner on Arena.
-
-### LLM Fine-tuning benchmarks
-
-AgileRL's multi-turn LLM training enables state-of-the-art performance on long-horizon tasks with small models. In the following example, AgileRL's CISPO was benchmarked against ART and TRL on the <a href="https://github.com/axon-rl/gem">GEM</a> Sudoku Hard task. This is a difficult multi-turn problem, which requires a context length of 32k tokens and up to 50 turns per rollout. The sync AgileRL run is a single agent using the AgileRL framework. The async and HPO runs were performed on <a href="https://arena.agilerl.com">Arena</a>, AgileRL's RLOps platform. All runs used the same starting hyperparameters. AgileRL runs were run on A100 40GB nodes, whereas ART and TRL required A100 80GB nodes due to a lack of optimizations. AgileRL runs significantly outperformed those using the ART and TRL frameworks.
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/AgileRL/AgileRL/main/docs/_static/multi_turn_llm_benchmarks.png" min-width="100%" width="700">
-</p>
-
 
 ### Training a Single Agent without Evolutionary HPO
 
@@ -349,8 +350,8 @@ from agilerl.arena import ArenaClient
 client = ArenaClient()
 client.login()
 
-# Register and validate a custom environment
-client.validate_environment(source="path/to/my_env.py")
+# Upload and validate a custom environment
+client.validate_environment(name="my-custom-env", source="path/to/my_env.py")
 
 # Train on validated custom environment
 client.submit_experiment(
@@ -368,13 +369,13 @@ The same operations are available from the command line:
 arena login
 
 # Upload and validate
-arena env validate --source path/to/my_env.py
+arena env validate --name my-custom-env --source path/to/my_env.py
 
 # Train on validated custom environment
 arena experiments submit path/to/manifest.yaml --project my-project
 ```
 
-For the full CLI and Python SDK reference—including authentication, environment validation, experiments, and deployment—see the [Arena Client](https://docs.agilerl.com/en/latest/arena/index.html) documentation.
+For the full CLI and Python SDK reference, including authentication, environment validation, experiments, and deployment, see the [Arena Client](https://docs.agilerl.com/en/latest/arena/index.html) documentation.
 
 ## Tutorials
 

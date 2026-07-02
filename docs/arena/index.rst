@@ -115,13 +115,19 @@ file or directory containing the environment code. Multi-agent environments must
 Additionally, an entrypoint can be provided to the environment class to use, which is useful when multiple entrypoints exist in the same path.
 Please refer to the :meth:`ArenaClient.validate_environment <agilerl.arena.client.ArenaClient.validate_environment>` method documentation for more details.
 
+When you point ``source`` at a directory, Arena packages the whole folder and uploads it. A
+``requirements.txt`` in the folder is installed before your environment runs, and an
+``env_config.yaml`` is used to set the arguments passed to your environment's constructor. You
+can also pass these files explicitly with ``requirements`` and ``env_config`` (``--requirements``
+and ``--env-config`` on the CLI).
+
 Once your environment / dataset has been validated successfully, you will be able to view it in the **Environments / Datasets** section in Arena.
 
 RL Environments
 ^^^^^^^^^^^^^^^
 
-The following commands use ``acrobot.py``, which defines the ``AcrobotEnv`` class.
-See :ref:`tutorial_arena_end_to_end` for a full walkthrough.
+The following commands use the ``merge-env/`` directory, which contains a ``MergeEnv`` Gymnasium
+environment. See :ref:`tutorial_arena_end_to_end` for a full walkthrough.
 
 .. tab-set::
    :sync-group: interface
@@ -133,12 +139,12 @@ See :ref:`tutorial_arena_end_to_end` for a full walkthrough.
 
          # Upload, create, and validate in one step
          result = client.validate_environment(
-             source="acrobot.py",
-             name="acrobot-env",
+             source="merge-env/",
+             name="merge-env",
          )
 
          # Re-validate an already-registered environment
-         result = client.validate_environment(name="acrobot-env", version="v1")
+         result = client.validate_environment(name="merge-env", version="v1")
 
    .. tab-item:: CLI
       :sync: cli
@@ -147,11 +153,11 @@ See :ref:`tutorial_arena_end_to_end` for a full walkthrough.
 
          # Upload and validate in one step
          arena env validate \
-             --source acrobot.py \
-             --name acrobot-env
+             --source merge-env/ \
+             --name merge-env
 
          # Re-validate an already-registered environment
-         arena env validate acrobot-env --version v1
+         arena env validate merge-env --version v1
 
 LLM Datasets
 ^^^^^^^^^^^^^

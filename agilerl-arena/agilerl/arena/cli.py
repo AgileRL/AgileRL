@@ -816,7 +816,8 @@ def agent_list(
             experiment_name=experiment_name,
             project_name=project_name,
         )
-        emit_result(_redact_agent_rows_for_display(rows, show_api_keys=show_api_keys))
+        display_rows = _redact_agent_rows_for_display(rows, show_api_keys=show_api_keys)
+        emit_result(display_rows)
 
 
 @agent_cli.command("deploy")
@@ -848,7 +849,7 @@ def agent_run(
     experiment_name: str | None,
     project_name: str | None,
 ) -> None:
-    """Select a deployment as the active agent for ``arena agent generate``."""
+    """Select a deployment as the active agent to use for inference."""
     with arena_client(config) as client:
         client._ensure_inference_binding(
             deployment_name,
@@ -860,13 +861,6 @@ def agent_run(
             deployment_name,
             experiment_name=experiment_name,
             project_name=project_name,
-        )
-        emit_result(
-            {
-                "active_agent": deployment_name.strip(),
-                "experiment_name": experiment_name,
-                "project_name": project_name,
-            }
         )
 
 

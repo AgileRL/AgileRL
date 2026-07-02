@@ -26,6 +26,7 @@ def normalized_deployment_name(name: str) -> str:
 
 
 def _load_store() -> dict[str, Any]:
+    """Load the inference store from ``~/.arena/inference.json``."""
     if not INFERENCE_FILE.is_file():
         return {}
     try:
@@ -36,6 +37,7 @@ def _load_store() -> dict[str, Any]:
 
 
 def _write_store(data: dict[str, Any]) -> None:
+    """Write the inference store to ``~/.arena/inference.json``."""
     INFERENCE_FILE.parent.mkdir(parents=True, exist_ok=True)
     INFERENCE_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
     os.chmod(INFERENCE_FILE, stat.S_IRUSR | stat.S_IWUSR)
@@ -48,8 +50,8 @@ def load_binding(name: str) -> tuple[str, str] | None:
     :type name: str
     :return: The URL and API key of the deployment.
     :rtype: tuple[str, str] | None
-    If the deployment is not cached, return ``None``.
     """
+    # Load data from ~/.arena/inference.json
     data = _load_store()
     raw = data.get(DEPLOYMENTS_KEY)
     if not isinstance(raw, dict):
@@ -88,7 +90,15 @@ def save_binding(name: str, url: str, api_key: str) -> None:
 
 @dataclass(frozen=True)
 class ActiveAgentSelection:
-    """CLI-selected deployment used by ``arena agent generate`` without a name argument."""
+    """CLI-selected deployment used by ``arena agent generate`` without a name argument.
+
+    :param deployment_name: The name of the deployment.
+    :type deployment_name: str
+    :param experiment_name: The name of the experiment.
+    :type experiment_name: str | None
+    :param project_name: The name of the project.
+    :type project_name: str | None
+    """
 
     deployment_name: str
     experiment_name: str | None = None
@@ -101,7 +111,15 @@ def save_active_agent(
     experiment_name: str | None = None,
     project_name: str | None = None,
 ) -> None:
-    """Persist the default deployment for ``arena agent generate``."""
+    """Persist the default deployment for ``arena agent generate``.
+
+    :param name: The name of the deployment.
+    :type name: str
+    :param experiment_name: The name of the experiment.
+    :type experiment_name: str | None
+    :param project_name: The name of the project.
+    :type project_name: str | None
+    """
     data = _load_store()
     entry: dict[str, str] = {"deployment": normalized_deployment_name(name)}
     if experiment_name and experiment_name.strip():
@@ -113,7 +131,11 @@ def save_active_agent(
 
 
 def load_active_agent() -> ActiveAgentSelection | None:
-    """Return the active deployment selection, or ``None`` if unset."""
+    """Return the active deployment selection, or ``None`` if unset.
+
+    :return: The active deployment selection.
+    :rtype: ActiveAgentSelection | None
+    """
     data = _load_store()
     raw = data.get(ACTIVE_AGENT_KEY)
     if not isinstance(raw, dict):

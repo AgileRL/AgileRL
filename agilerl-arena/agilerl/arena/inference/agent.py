@@ -197,11 +197,16 @@ class Agent:
     type returns HTTP 400 from the server.
 
     :param endpoint: Base URL of the Arena inference deployment.
+    :type endpoint: str
     :param api_key: API key for ``Authorization: Bearer``.
+    :type api_key: str | None
     :param timeout: Request timeout in seconds.
+    :type timeout: int
     :param generate_params: Default LLM sampling parameters; defaults to
         :class:`LLMParams` when ``None``.
+    :type generate_params: LLMParams | None
     :param probe_on_init: If ``True``, fetch ``GET /status`` during ``__init__``.
+    :type probe_on_init: bool
     """
 
     def __init__(
@@ -352,21 +357,6 @@ class Agent:
                     detail=f"Prompt at index {index} is empty.",
                 )
 
-    def _merge_llm_params(
-        self,
-        params: LLMParams | dict[str, Any] | None,
-    ) -> dict[str, Any]:
-        merged = self.generate_params.model_dump()
-        if params is None:
-            return merged
-        overrides = (
-            params.model_dump(exclude_unset=True)
-            if isinstance(params, LLMParams)
-            else params
-        )
-        merged.update(overrides)
-        return merged
-
     @staticmethod
     def _multi_agent_mask(
         info: dict[str, RLData] | None,
@@ -382,6 +372,21 @@ class Agent:
             raise ArenaInferenceError(detail=msg)
         return mask
 
+    def _merge_llm_params(
+        self,
+        params: LLMParams | dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        merged = self.generate_params.model_dump()
+        if params is None:
+            return merged
+        overrides = (
+            params.model_dump(exclude_unset=True)
+            if isinstance(params, LLMParams)
+            else params
+        )
+        merged.update(overrides)
+        return merged
+
     def _build_payload(
         self,
         observation: RLData,
@@ -390,6 +395,7 @@ class Agent:
         info: dict[str, RLData] | None,
         env_defined_actions: dict[str, RLData] | None,
     ) -> dict[str, Any]:
+        """Build the payload for the POST /get_action request."""
         agent = self._agent_info()
         is_multi = agent.multi_agent
         batch_size = get_batch_size(observation) if batched else 1
@@ -428,10 +434,13 @@ class Agent:
             "obs": self.serialize(observation, batched),
             "batch_size": batch_size,
         }
+
+        # Optionally, include hidden state and action mask
         if agent.recurrent:
             payload["hidden_state"] = self.serialize(hidden_state, batched)
         if action_mask is not None:
             payload["action_mask"] = self.serialize(action_mask, batched)
+
         return payload
 
     @staticmethod
@@ -442,6 +451,7 @@ class Agent:
         multi_agent: bool,
         recurrent: bool,
     ) -> tuple[RLData, dict[str, np.ndarray] | None]:
+        """Parse the response from the POST /get_action request."""
         action_raw = response_json["action"]
         if multi_agent:
             if not isinstance(action_raw, dict):
