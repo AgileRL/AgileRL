@@ -638,16 +638,20 @@ class Mutations:
             individual,
             policy_group.eval_network,
         )
-        # Accumulate per-category weight counts across all mutated networks
+        # Accumulate per-category weight counts across all mutated networks.
+        # Under ReBorn this branch is only reached as the env-less fallback (e.g.
+        # the pre-training mutation step); there we drop the divergence-prone
+        # amplified noise too, keeping ReBorn amplified-noise-free everywhere.
+        include_amplified = self.param_mut_type == "original"
         counts = {"reset": 0, "ordinary": 0, "amplified": 0}
         if isinstance(offspring_policy, ModuleDict):
             for agent_id, module in offspring_policy.items():
                 offspring_policy[agent_id] = self._gaussian_parameter_mutation(
-                    module, counts=counts
+                    module, counts=counts, include_amplified=include_amplified
                 )
         else:
             offspring_policy = self._gaussian_parameter_mutation(
-                offspring_policy, counts=counts
+                offspring_policy, counts=counts, include_amplified=include_amplified
             )
 
         self._to_device_and_set_individual(
@@ -685,7 +689,7 @@ class Mutations:
     def reborn_parameter_mutation(
         self, individual: IndividualType, obs_batch: Any
     ) -> IndividualType:
-        """Recycle dormant / over-active neurons across every evaluation network.
+        """Recycle dormant / over-active neurons, then add a gentle Gaussian pass.
 
         For every measured layer of every evaluation network (actors, critics and
         each multi-agent sub-policy), each over-active neuron is *reborn* into a
@@ -693,6 +697,14 @@ class Mutations:
         neurons that are not claimed are Xavier-reset with their outgoing weights
         zeroed. Detection uses the same per-neuron scoring as the dormant-neuron
         diagnostic, evaluated on *obs_batch*.
+
+        After that surgery, the policy evaluation network additionally receives the
+        original Gaussian parameter mutation *minus* its amplified ("super") noise
+        band (reset + ordinary noise only), scaled by ``self.mutation_sd``. This
+        breaks the symmetry of the function-preserving split so the reborn units can
+        specialise; the amplified band is skipped because it tends to cause
+        divergence. It runs before the shared/target sync so those copies stay
+        consistent with the fully mutated policy.
 
         :param individual: Individual agent from population.
         :type individual: RLAlgorithm or MultiAgentRLAlgorithm
@@ -734,6 +746,31 @@ class Mutations:
             except Exception as exc:  # keep this network untouched on failure
                 logger.warning("ReBorn surgery skipped for a network: %s", exc)
 
+        # After recycling neurons, apply a gentle exploration pass to the policy
+        # network: the original reset + ordinary Gaussian noise, but *not* the
+        # amplified ("super") noise band, which tends to cause divergence. Running
+        # this after the ReBorn surgery breaks the symmetry of the function-
+        # preserving neuron split so the split units can specialise; running it
+        # before the shared/target sync below keeps those copies consistent with
+        # the fully mutated policy.
+        gauss_counts = {"reset": 0, "ordinary": 0, "amplified": 0}
+        policy_group = individual.registry.policy(return_group=True)
+        offspring_policy: EvolvableNetworkType = getattr(
+            individual, policy_group.eval_network
+        )
+        if isinstance(offspring_policy, ModuleDict):
+            for agent_id, module in offspring_policy.items():
+                offspring_policy[agent_id] = self._gaussian_parameter_mutation(
+                    module, counts=gauss_counts, include_amplified=False
+                )
+        else:
+            offspring_policy = self._gaussian_parameter_mutation(
+                offspring_policy, counts=gauss_counts, include_amplified=False
+            )
+        self._to_device_and_set_individual(
+            individual, policy_group.eval_network, offspring_policy
+        )
+
         # Sync shared / target networks from the mutated eval networks, per group.
         for group in individual.registry.groups:
             if group.shared_networks:
@@ -745,12 +782,21 @@ class Mutations:
 
         individual.reinit_optimizers()
         individual.mut = "param_reborn"
-        individual.mut_details = self._reborn_mut_details(counts)
+        individual.mut_details = self._reborn_mut_details(counts, gauss_counts)
         return individual
 
     @staticmethod
-    def _reborn_mut_details(counts: dict[str, int]) -> dict[str, Any]:
-        """Build the ``mut_details`` record for a ReBorn mutation."""
+    def _reborn_mut_details(
+        counts: dict[str, int], gauss_counts: dict[str, int] | None = None
+    ) -> dict[str, Any]:
+        """Build the ``mut_details`` record for a ReBorn mutation.
+
+        Includes both the neuron-recycling counts and the trailing Gaussian pass's
+        per-category weight counts (the amplified band is always ``0`` under ReBorn).
+        ``gauss_counts`` defaults to all-zero for the bad-obs early return, where no
+        surgery and no noise pass ran.
+        """
+        gauss_counts = gauss_counts or {"reset": 0, "ordinary": 0, "amplified": 0}
         return {
             "category": "reborn",
             "name": "param_reborn",
@@ -758,6 +804,9 @@ class Mutations:
             "neurons_xavier_reset": counts["xavier"],
             "overactive_count": counts["overactive"],
             "dormant_count": counts["dormant"],
+            "weights_reset": gauss_counts["reset"],
+            "weights_ordinary_noise": gauss_counts["ordinary"],
+            "weights_amplified_noise": gauss_counts["amplified"],
         }
 
     def _reborn_network_surgery(
@@ -1226,6 +1275,7 @@ class Mutations:
         self,
         network: EvolvableModule,
         counts: dict[str, int] | None = None,
+        include_amplified: bool = True,
     ) -> EvolvableModule:
         """Return network with mutated weights using a Gaussian distribution.
 
@@ -1234,6 +1284,12 @@ class Mutations:
         :param counts: Optional dict accumulating the number of weights mutated by
             category (``"reset"``, ``"ordinary"``, ``"amplified"``). Updated in place.
         :type counts: dict[str, int] | None
+        :param include_amplified: When ``False``, the amplified ("super") noise band
+            is skipped and its selected weights are left untouched; the reset and
+            ordinary-noise bands keep identical thresholds and RNG consumption, so
+            they behave byte-for-byte as they do with ``include_amplified=True``.
+            ReBorn uses ``False`` to avoid the divergence-prone amplified noise.
+        :type include_amplified: bool
         :return: Mutated network.
         :rtype: EvolvableModule
         """
@@ -1297,7 +1353,7 @@ class Mutations:
             mask_normal = rand_vals_tensor >= reset_prob
 
             # Super mutation: add noise with std proportional to the absolute current value times super_mut_strength
-            if mask_super.sum() > 0:
+            if include_amplified and mask_super.sum() > 0:
                 std_super = (super_mut_strength * current_vals[mask_super]).abs()
                 noise_super = torch.normal(
                     mean=torch.zeros_like(std_super),

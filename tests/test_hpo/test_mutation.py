@@ -2425,11 +2425,12 @@ class TestRebornEndToEnd:
         return DQN(obs, act, net_config=cfg, device="cpu")
 
     def test_ppo_mlp_runs(self):
-        # Traverses the MLP encoder -> head boundary. ReBorn is a valid no-op if
-        # the (healthy) network has no dormant / over-active neurons, so we assert
-        # the operator runs cleanly and records its metadata rather than that
-        # weights necessarily change (the surgery math is covered by
-        # TestRebornLayerSurgery).
+        # Traverses the MLP encoder -> head boundary. Even when the (healthy)
+        # network has no dormant / over-active neurons so the ReBorn surgery is a
+        # no-op, the trailing reset + ordinary Gaussian pass still runs, so the
+        # operator records both the neuron-recycling counts and the weight-noise
+        # counts. (The surgery math is covered by TestRebornLayerSurgery.) The
+        # amplified ("super") noise band is never applied under ReBorn.
         agent = self._ppo()
         obs = np.random.RandomState(0).uniform(-1, 1, size=(32, 6)).astype(np.float32)
         out = _make_reborn_mutations().reborn_parameter_mutation(agent, obs)
@@ -2440,7 +2441,12 @@ class TestRebornEndToEnd:
             "neurons_xavier_reset",
             "overactive_count",
             "dormant_count",
+            "weights_reset",
+            "weights_ordinary_noise",
+            "weights_amplified_noise",
         }
+        # ReBorn never fires the divergence-prone amplified noise band.
+        assert out.mut_details["weights_amplified_noise"] == 0
         assert all(torch.isfinite(v).all() for v in out.actor.state_dict().values())
 
     def test_dqn_cnn_runs_and_syncs_target(self):
@@ -2457,13 +2463,55 @@ class TestRebornEndToEnd:
         for k, v in out.actor.state_dict().items():
             assert torch.equal(v, out.actor_target.state_dict()[k])
 
+    def test_trailing_noise_changes_policy_weights(self):
+        # After the ReBorn surgery, the policy network receives the reset +
+        # ordinary Gaussian noise pass, so its weights change even when the surgery
+        # itself is a healthy no-op. The target is re-synced from the already-noised
+        # online network (noise runs before the sync), so the two stay identical.
+        agent = self._dqn()
+        before = {k: v.clone() for k, v in agent.actor.state_dict().items()}
+        obs = (
+            np.random.RandomState(1)
+            .randint(0, 255, size=(16, 4, 84, 84))
+            .astype(np.uint8)
+        )
+        out = _make_reborn_mutations().reborn_parameter_mutation(agent, obs)
+        after = out.actor.state_dict()
+        assert any(not torch.equal(before[k], after[k]) for k in before)
+        for k, v in after.items():
+            assert torch.equal(v, out.actor_target.state_dict()[k])
+
+    def test_gaussian_toggle_excludes_amplified(self):
+        # include_amplified=False must never populate the amplified band, while the
+        # reset + ordinary bands still run. This is exactly how ReBorn calls the
+        # Gaussian operator for its trailing pass.
+        mut = _make_reborn_mutations(seed=5)
+        agent = self._ppo()
+        counts = {"reset": 0, "ordinary": 0, "amplified": 0}
+        mut._gaussian_parameter_mutation(
+            agent.actor, counts=counts, include_amplified=False
+        )
+        assert counts["amplified"] == 0
+        assert counts["reset"] + counts["ordinary"] > 0
+
     def test_reproducible_across_equal_agents(self):
+        import copy
+
         a = self._ppo()
-        b = self._ppo()
-        b.actor.load_state_dict(a.actor.state_dict())
-        b.critic.load_state_dict(a.critic.state_dict())
+        # Deep-copy so *all* state matches (including non-persistent buffers such as
+        # observation-normaliser running stats, which a state_dict copy would miss
+        # and which feed the per-neuron scoring).
+        b = copy.deepcopy(a)
         obs = np.random.RandomState(2).uniform(-1, 1, size=(32, 6)).astype(np.float32)
+        # ReBorn draws from the global numpy RNG (surgery) and the global torch RNG
+        # (the trailing Gaussian noise pass), so pin both identically before each
+        # call. In a real run seed_everything pins these once and the whole mutation
+        # sequence replays deterministically; here we isolate the two calls.
+        np.random.seed(0)
+        torch.manual_seed(0)
         ra = _make_reborn_mutations(seed=123).reborn_parameter_mutation(a, obs)
+        np.random.seed(0)
+        torch.manual_seed(0)
         rb = _make_reborn_mutations(seed=123).reborn_parameter_mutation(b, obs)
         for k in ra.actor.state_dict():
             assert torch.equal(ra.actor.state_dict()[k], rb.actor.state_dict()[k])

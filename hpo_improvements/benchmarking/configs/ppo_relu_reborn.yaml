@@ -3,30 +3,33 @@
 # ReLU activations, activation mutation forced OFF, param_mut_type: reborn with
 # dormant_tau=0.1 / overact_beta=3.0: each parameter mutation reborns over-active
 # neurons into dormant ones (a function-preserving split) and Xavier-resets the
-# unclaimed dormant neurons. mutation_sd is unused under ReBorn. Paired with the
-# matching *_dormant.yaml (same config, original parameter mutation).
+# unclaimed dormant neurons, then applies a trailing reset + ordinary Gaussian
+# noise pass (strength = mutation_sd; the amplified "super" noise band is excluded
+# as divergence-prone). Paired with the matching *_dormant.yaml (same config,
+# original parameter mutation).
 #
-# PPO WITH HPO (population of 16, elitism, architecture + RL-hyperparameter
-# mutations; activation mutations OFF) on Gymnasium MuJoCo.
+# PPO WITH EVOLUTIONARY SELECTION (population of 4, elitism, tournament) on
+# Gymnasium MuJoCo -- run as a PARAMETER-OPERATOR ISOLATION: the ONLY active
+# mutation is the parameter operator (original Gaussian vs ReBorn -- see the top
+# comment and the `mutation` block); architecture, new-layer, activation and
+# RL-hyperparameter mutations are all OFF. No hyperparameter search happens.
 #
 # This is the HPO counterpart of ppo_relu_no_hpo.yaml. The base hyperparameters,
 # the "ReLU to the Rescue" (Jesson et al., 2024) mapping, and the 1-env -> 16-env
 # CleanRL scaling (learn_step = 16 x 2048 = 32768, batch_size = 32768/32 = 1024)
 # are unchanged -- see ppo_relu_no_hpo.yaml for the full derivation -- with one
-# deliberate exception: ent_coef is raised from the paper's 0.0 to 0.001 so HPO can
-# mutate it (the multiplicative mutation cannot move a 0.0 base off zero). The other
-# additions here are the `mutation` / `tournament_selection` blocks (and
-# pop_size = 16), which switch this same training script into an evolutionary HPO
-# regime: a population of agents is trained, periodically mutated, and re-selected
-# by tournament instead of a single never-mutated agent.
+# historical exception: ent_coef is raised from the paper's 0.0 to 0.001 (it was
+# made mutable in the full HPO regime; under this ablation rl_hp mutation is OFF,
+# so it simply stays at 0.001). The `mutation` / `tournament_selection` blocks
+# (and pop_size = 4) turn this into a population run: agents are trained,
+# periodically given a parameter mutation, and re-selected by tournament.
 #
-# HPO additions over ppo_relu_no_hpo.yaml:
-#   pop_size = 16, elitism = true, tournament_size = 2
-#   activation mutations OFF (act_mut = 0.0); arch / new_layer / params / rl_hp on
-#   rl_hp_selection mutates the highest-leverage, well-behaved PPO hyperparameters
-#     (lr, clip_coef, update_epochs, batch_size, learn_step, ent_coef), each with
-#     grow/shrink factors scaled to its sensitivity
-#   network min/max bounds now actively define the architecture search space
+# Isolation ablation vs the full HPO regime:
+#   pop_size = 4, elitism = true, tournament_size = 2
+#   ONLY the parameter mutation is active (params_mut); arch / new_layer / act /
+#     rl_hp mutations are all OFF
+#   rl_hp_selection below is retained for provenance but INERT (rl_hp_mut = 0.0)
+#   network min/max bounds are likewise inert (arch mutations OFF -- shape fixed)
 
 algorithm:
     name: PPO
@@ -54,16 +57,20 @@ mutation:
     # disabled (the paper's ReLU nets are kept; no permutation among activations).
     # no_mut is the relative weight of "leave this agent unchanged"; the remaining
     # weights are the relative weights of each mutation kind (renormalised
-    # internally), so each enabled non-trivial mutation fires on roughly 1/5 of
-    # agents per evolution step and ~40% are passed through untouched.
+    # internally). ABLATION: all operators except the parameter mutation are OFF so
+    # this isolates the parameter operator (Gaussian vs ReBorn) -- 50% of agents are
+    # passed through untouched (training-only control), 50% get a parameter mutation.
     probabilities:
-        no_mut: 0.4
-        arch_mut: 0.2    # add/remove hidden nodes within the bounds below
-        new_layer: 0.2   # add/remove a whole hidden layer (head) within the bounds below
-        params_mut: 0.5  # Gaussian noise on weights, strength = mutation_sd
+        no_mut: 0.5      # leave unchanged: rest/consolidation + training-only control for the efficacy diagnostic
+        arch_mut: 0.0    # OFF -- isolate the parameter operator (network shape fixed)
+        new_layer: 0.0   # OFF -- conditional within arch_mut, now inert
+        params_mut: 0.5  # the ONLY active operator: ReBorn neuron recycling, then reset + ordinary Gaussian noise (mutation_sd; no amplified)
         act_mut: 0.0     # OFF -- ReLU kept throughout so the dormant-neuron phenomenon (and ReBorn) stays visible
-        rl_hp_mut: 0.2   # grow/shrink one of the rl_hp_selection hyperparameters below
+        rl_hp_mut: 0.0   # OFF -- NB: no hyperparameter search happens under this ablation
     rl_hp_selection:
+        # INERT under this ablation (rl_hp_mut = 0.0): nothing here is mutated -- every
+        # agent keeps the base values from the `algorithm` block. Kept for provenance
+        # with the full HPO regime and to satisfy manifest validation.
         # The highest-leverage, well-behaved PPO hyperparameters, each centred on
         # this config's base value. grow/shrink factors are the multiplicative step
         # taken per mutation (value *= grow_factor or *= shrink_factor, clipped to
@@ -139,23 +146,19 @@ mutation:
         #
         # vf_coef / max_grad_norm: low-leverage and robust at their defaults
         # (0.5 / 0.5); left fixed to keep the search budget on the knobs above.
-    mutation_sd: 0.1  # std of the Gaussian weight perturbation for params_mut (typical)
+    mutation_sd: 0.1  # std of the ordinary Gaussian weight perturbation in the trailing pass after ReBorn (typical)
     rand_seed: 42
     mutate_elite: false  # keep the elite member unmutated so the best agent survives intact into the next generation
-    param_mut_type: reborn    # ReBorn recycling of dormant / over-active neurons (Qin et al.); mutation_sd unused
+    param_mut_type: reborn    # ReBorn recycling of dormant / over-active neurons (Qin et al.), then reset + ordinary Gaussian noise (mutation_sd; amplified excluded)
     dormant_tau: 0.1          # neuron is dormant when its normalised score <= this (ReBorn detection threshold)
     overact_beta: 3.0         # neuron is over-active when its normalised score >= this (must exceed dormant_tau)
 
 network:
-    # Paper architecture: width-64 ReLU MLP. Under HPO the min/max bounds below
-    # define the architecture search space that arch / new_layer mutations may
-    # explore -- they are no longer just there to satisfy manifest validation.
-    # The width bounds are centred on the base value (geometric centring, since
-    # node counts scale multiplicatively): base 64 sits at the geometric midpoint
-    # of 16 .. 256 (sqrt(16 x 256) = 64), so a mutation is equally likely to
-    # explore a narrower or a wider network -- the search is unbiased, not
-    # capacity-only. (Head depth is the one exception: 1 hidden layer is a hard
-    # structural floor, so depth can only grow, 1 .. 3.)
+    # Paper architecture: width-64 ReLU MLP. NB: under this parameter-operator
+    # isolation the architecture is FIXED (arch / new_layer mutations are OFF), so
+    # the min/max bounds below are INERT -- kept only to satisfy manifest validation
+    # and for provenance with the full HPO regime, not as an active search space.
+    # Every agent trains at the width-64 / single-hidden-layer base shape.
     latent_dim: 64
     min_latent_dim: 16     # encoder output projection: base 64 centred in 16 .. 256
     max_latent_dim: 256
@@ -186,15 +189,15 @@ tournament_selection:
 training:
     max_steps: 6_000_000
     target_score:
-    pop_size: 16
+    pop_size: 4
     # Env steps each agent trains between evolution events. Set to 5 x the base
     # rollout (5 x 32768 = 163840), a multiple of learn_step so agents complete
     # whole collect->update cycles. Five full PPO updates per generation is enough
-    # for a mutation's effect (a new lr, clip_coef, architecture, ...) to show up
-    # in fitness rather than being judged on a single noisy update, while still
-    # giving ~72 evolution generations over the 12M-step budget. With learn_step
-    # bounded to 16384 .. 65536 above, every agent completes between ~2.5 and ~10
-    # updates per generation, keeping the comparison fair.
+    # for a parameter mutation's effect to show up in fitness rather than being
+    # judged on a single noisy update, while still giving ~36 evolution generations
+    # over the 6M-step budget. (learn_step is fixed at 32768 under this ablation --
+    # rl_hp mutation is OFF -- so every agent completes exactly 5 updates per
+    # generation.)
     evo_steps: 163840
     eval_steps:
     eval_loop: 1

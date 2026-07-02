@@ -3,16 +3,20 @@
 # ReLU activations, activation mutation forced OFF, param_mut_type: reborn with
 # dormant_tau=0.1 / overact_beta=3.0: each parameter mutation reborns over-active
 # neurons into dormant ones (a function-preserving split) and Xavier-resets the
-# unclaimed dormant neurons. mutation_sd is unused under ReBorn. Paired with the
-# matching *_dormant.yaml (same config, original parameter mutation).
+# unclaimed dormant neurons, then applies a trailing reset + ordinary Gaussian
+# noise pass (strength = mutation_sd; the amplified "super" noise band is excluded
+# as divergence-prone). Paired with the matching *_dormant.yaml (same config,
+# original parameter mutation).
 #
-# IPPO on cooperative MPE (MPEv2) WITH evolutionary HPO (a population is mutated
-# and selected each generation). The base hyperparameters match ippo_mpe_no_hpo.yaml
+# IPPO on cooperative MPE (MPEv2) WITH evolutionary selection (a population of 4
+# is mutated and selected each generation) -- run as a PARAMETER-OPERATOR
+# ISOLATION: the ONLY active mutation is the parameter operator (original Gaussian
+# vs ReBorn -- see the top comment and the `mutation` block); architecture,
+# new-layer, activation and RL-hyperparameter mutations are all OFF, so no
+# hyperparameter search happens. The base hyperparameters match ippo_mpe_no_hpo.yaml
 # (AgileRL's canonical multi-agent IPPO/MPE recipe -- low lr, few PPO epochs, tight
 # gradient clipping, high entropy bonus); see that file for the full mapping and
-# rollout-sizing notes. The `mutation` + `tournament_selection` blocks below are what
-# turn this into an HPO run, and HPO is free to mutate away from this base (e.g. lower
-# ent_coef, raise lr) on the high-leverage knobs listed in rl_hp_selection.
+# rollout-sizing notes. rl_hp_selection below is retained for provenance but inert.
 
 algorithm:
     name: IPPO
@@ -45,16 +49,22 @@ environment:
     # learn these tasks. See mpe_adapter.make_mpe_parallel_env (separate_policies).
 
 mutation:
+    # ABLATION: all operators except the parameter mutation are OFF, isolating the
+    # parameter operator (Gaussian vs ReBorn) -- 50% of agents pass through untouched
+    # (training-only control), 50% get a parameter mutation. No HP search happens.
     probabilities:
-        no_mut: 0.4
-        arch_mut: 0.2
-        new_layer: 0.2
-        params_mut: 0.2
+        no_mut: 0.5      # leave unchanged: rest/consolidation + training-only control for the efficacy diagnostic
+        arch_mut: 0.0    # OFF -- isolate the parameter operator (network shape fixed)
+        new_layer: 0.0   # OFF -- conditional within arch_mut, now inert
+        params_mut: 0.5  # the ONLY active operator: ReBorn neuron recycling, then reset + ordinary Gaussian noise (mutation_sd; no amplified)
         act_mut: 0.0     # OFF -- ReLU kept throughout so the dormant-neuron phenomenon (and ReBorn) stays visible
-        rl_hp_mut: 0.2
+        rl_hp_mut: 0.0   # OFF -- NB: no hyperparameter search happens under this ablation
     rl_hp_selection:
-        # The RL hyperparameters HPO may mutate, each with a search range and the
-        # coarse multiplicative grow/shrink factors applied per mutation.
+        # INERT under this ablation (rl_hp_mut = 0.0): nothing here is mutated -- every
+        # agent keeps the base values from the `algorithm` block. Kept for provenance
+        # with the full HPO regime and to satisfy manifest validation.
+        # The RL hyperparameters the full HPO regime may mutate, each with a search
+        # range and the coarse multiplicative grow/shrink factors applied per mutation.
         lr:
             # Optimisation step size -- the most impactful knob. Base 1e-4 (the
             # canonical recipe's value) sits at the geometric midpoint of the range
@@ -114,19 +124,18 @@ mutation:
         # are cached by the rollout buffer at construction; vf_coef/max_grad_norm are
         # low-leverage at their canonical defaults (0.5 / 0.5). This keeps the search
         # budget on the high-leverage knobs above (now including ent_coef).
-    mutation_sd: 0.1  # std of the Gaussian weight perturbation for params_mut
+    mutation_sd: 0.1  # std of the ordinary Gaussian weight perturbation in the trailing pass after ReBorn
     rand_seed: 42
     mutate_elite: false  # keep the elite member unmutated so the best agent survives intact into the next generation
-    param_mut_type: reborn    # ReBorn recycling of dormant / over-active neurons (Qin et al.); mutation_sd unused
+    param_mut_type: reborn    # ReBorn recycling of dormant / over-active neurons (Qin et al.), then reset + ordinary Gaussian noise (mutation_sd; amplified excluded)
     dormant_tau: 0.1          # neuron is dormant when its normalised score <= this (ReBorn detection threshold)
     overact_beta: 3.0         # neuron is over-active when its normalised score >= this (must exceed dormant_tau)
 
 network:
-    # Same width-64 MLP as the no-HPO config, but with min/max bounds that define the
-    # architecture search space arch / new_layer / params mutations may explore. Width
-    # bounds are geometrically centred on 64 (sqrt(16 x 256) = 64) so mutation is
-    # equally likely to narrow or widen the network. Head depth can only grow (1 is the
-    # structural floor).
+    # Same width-64 MLP as the no-HPO config. NB: under this parameter-operator
+    # isolation the architecture is FIXED (arch / new_layer mutations are OFF), so the
+    # min/max bounds below are INERT -- kept only to satisfy manifest validation and
+    # for provenance with the full HPO regime, not as an active search space.
     latent_dim: 64
     min_latent_dim: 16
     max_latent_dim: 256
@@ -157,7 +166,7 @@ tournament_selection:
 training:
     max_steps: 2_000_000
     target_score:
-    pop_size: 16
+    pop_size: 4
     # ~195 evolution generations over the budget (10240 = 5 x the 2048-step base
     # rollout, so every agent completes whole collect->update cycles between
     # evolution events).
