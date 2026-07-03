@@ -123,12 +123,12 @@ def _patch_tensor_copy_for_set_lora(
     original_copy = torch.Tensor.copy_
 
     def wrapped_copy(dst: torch.Tensor, src: Any, *args: Any, **kwargs: Any) -> Any:
-        tracked_dst = _is_tracked_lora_dst(dst, module)
-        if tracked_dst:
-            _copy_debug_line(module, lora_id, src, dst)
-            if _device_safe_copy_enabled() and torch.is_tensor(src):
-                if src.device != dst.device:
-                    src = src.to(dst.device, non_blocking=True)
+        # Log all tensor copy operations executed inside set_lora so vLLM slice/
+        # view-based destinations are captured too (Ray colocated rank>0 debug).
+        _copy_debug_line(module, lora_id, src, dst)
+        if _device_safe_copy_enabled() and torch.is_tensor(src):
+            if src.device != dst.device:
+                src = src.to(dst.device, non_blocking=True)
         return original_copy(dst, src, *args, **kwargs)
 
     torch.Tensor.copy_ = wrapped_copy
