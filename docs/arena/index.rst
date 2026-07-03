@@ -9,8 +9,8 @@ evolutionary hyperparameter optimization. It provides managed cloud
 infrastructure purpose-built for RL workloads, so researchers and engineers can
 focus on algorithms and environments rather than cluster management.
 
-The Arena client — available as both a **CLI** (``arena``) and a **Python SDK**
-(:class:`~agilerl.arena.client.ArenaClient`) — allows registered users to do
+The Arena client, available as both a **CLI** (``arena``) and a **Python SDK**
+(:class:`~agilerl.arena.client.ArenaClient`), allows registered users to do
 everything from their own development environment: validate custom environments,
 submit training experiments, monitor progress, and deploy trained agents for
 inference.
@@ -36,10 +36,10 @@ Authentication
 Authentication is resolved automatically in priority order:
 
 1. **api_key argument** passed directly to the client or CLI.
-2. **ARENA_API_KEY environment variable** — if set, no login is needed.
+2. **ARENA_API_KEY environment variable**: if set, no login is needed.
 3. **Stored OAuth credentials** from ``~/.arena/credentials.json`` (persisted
    after a successful ``arena login``).
-4. **Interactive device login** — opens a browser for OAuth authorization.
+4. **Interactive device login**: opens a browser for OAuth authorization.
 
 The simplest approach for scripting and CI is to set the environment variable:
 
@@ -66,7 +66,7 @@ persists credentials locally so you only need to log in once per machine:
 
          from agilerl.arena.client import ArenaClient
 
-         # Option 1: Set ARENA_API_KEY env var — no login needed
+         # Option 1: Set ARENA_API_KEY env var, no login needed
          client = ArenaClient()
 
          # Option 2: Pass the key explicitly
@@ -93,8 +93,8 @@ persists credentials locally so you only need to log in once per machine:
 Custom Environments
 -------------------
 
-Before launching a training run a custom environment or dataset, Arena requires these to be **validated**
-— ensuring that the environment is importable, has the correct interface (e.g. Gymnasium or
+Before launching a training run a custom environment or dataset, Arena requires these to be **validated**,
+ensuring that the environment is importable, has the correct interface (e.g. Gymnasium or
 PettingZoo), and can be stepped without errors. After validation,
 environments are automatically **profiled** to determine their compute and
 memory footprint. This information is then used to estimate a ceiling on the resources
@@ -102,9 +102,9 @@ available for training, depending on the selected cluster tier.
 
 Users can register two types of environments on Arena:
 
-- **Custom Gymnasium/PettingZoo** — upload a source directory, file, or
+- **Custom Gymnasium/PettingZoo**: upload a source directory, file, or
   ``.tar.gz`` archive containing your environment code.
-- **LLM Datasets** — upload a dataset file or reference a HuggingFace
+- **LLM Datasets**: upload a dataset file or reference a HuggingFace
   dataset ID to create a language-model fine-tuning environment.
 
 Uploading and Validating
@@ -191,11 +191,11 @@ Additional Tools
 Here is a list of additional methods provided by the :class:`~agilerl.arena.client.ArenaClient` to help you navigate the custom environments workflow in Arena.
 You can find the analogous CLI commands by running ``arena env --help``.
 
-- :meth:`~agilerl.arena.client.ArenaClient.list_environments` — List all registered environments and their versions.
-- :meth:`~agilerl.arena.client.ArenaClient.list_environment_entrypoints` — List available entrypoints for a specific environment version.
-- :meth:`~agilerl.arena.client.ArenaClient.environment_exists` — Check whether an environment (and optionally a version) is registered.
-- :meth:`~agilerl.arena.client.ArenaClient.profile_environment` — Profile a validated environment to determine its resource requirements.
-- :meth:`~agilerl.arena.client.ArenaClient.delete_environment` — Delete one or all versions of a registered environment.
+- :meth:`~agilerl.arena.client.ArenaClient.list_environments`: List all registered environments and their versions.
+- :meth:`~agilerl.arena.client.ArenaClient.list_environment_entrypoints`: List available entrypoints for a specific environment version.
+- :meth:`~agilerl.arena.client.ArenaClient.environment_exists`: Check whether an environment (and optionally a version) is registered.
+- :meth:`~agilerl.arena.client.ArenaClient.profile_environment`: Profile a validated environment to determine its resource requirements.
+- :meth:`~agilerl.arena.client.ArenaClient.delete_environment`: Delete one or all versions of a registered environment.
 
 .. _arena_projects:
 
@@ -313,7 +313,7 @@ Example output from CLI command:
      - 165.0
      - 8.41
    * - arena-large-compute-96
-     - —
+     - N/A
      - 95
      - 180.0
      - 8.57
@@ -328,7 +328,7 @@ Example output from CLI command:
      - 370.0
      - 16.82
    * - arena-large-compute-192
-     - —
+     - N/A
      - 191
      - 370.0
      - 17.15
@@ -451,12 +451,12 @@ Additional Tools
 Here is a list of additional methods provided by the :class:`~agilerl.arena.client.ArenaClient` for managing experiments.
 You can find the analogous CLI commands by running ``arena experiments --help``.
 
-- :meth:`~agilerl.arena.client.ArenaClient.list_experiments` — List all experiments in a project.
-- :meth:`~agilerl.arena.client.ArenaClient.list_checkpoints` — List saved checkpoints for an experiment.
-- :meth:`~agilerl.arena.client.ArenaClient.resume_experiment` — Resume a stopped experiment with a new step budget.
-- :meth:`~agilerl.arena.client.ArenaClient.stop_experiment` — Stop a running experiment.
-- :meth:`~agilerl.arena.client.ArenaClient.download_experiment_metrics` — Download training metrics as CSV to a local file.
-- :meth:`~agilerl.arena.client.ArenaClient.deploy_agent` — Deploy a trained checkpoint to an inference endpoint.
+- :meth:`~agilerl.arena.client.ArenaClient.list_experiments`: List all experiments in a project.
+- :meth:`~agilerl.arena.client.ArenaClient.list_checkpoints`: List saved checkpoints for an experiment.
+- :meth:`~agilerl.arena.client.ArenaClient.resume_experiment`: Resume a stopped experiment with a new step budget.
+- :meth:`~agilerl.arena.client.ArenaClient.stop_experiment`: Stop a running experiment.
+- :meth:`~agilerl.arena.client.ArenaClient.download_experiment_metrics`: Download training metrics as CSV to a local file.
+- :meth:`~agilerl.arena.client.ArenaClient.deploy_agent`: Deploy a trained checkpoint to an inference endpoint.
 
 
 .. _arena_deployment:

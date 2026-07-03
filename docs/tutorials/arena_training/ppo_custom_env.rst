@@ -135,7 +135,7 @@ All available entrypoints in the specified environment source are automatically 
 If there are multiple available entrypoints in the same file, we need to provide the
 one we want to validate against to avoid ambiguity through the ``entrypoint`` parameter.
 The ``merge_env.py`` file defines a single Gymnasium environment class, ``MergeEnv``,
-so the ``entrypoint`` parameter is optional for this example.
+so the ``entrypoint`` parameter is unnecessary.
 
 If no version is specified when creating an environment from scratch, ``v1`` is used by default.
 
@@ -148,8 +148,8 @@ If no version is specified when creating an environment from scratch, ``v1`` is 
       .. code-block:: python
 
          result = client.validate_environment(
-             source="merge-env/",
              name="merge-env",
+             source="merge-env/",
          )
 
    .. tab-item:: CLI
@@ -157,9 +157,7 @@ If no version is specified when creating an environment from scratch, ``v1`` is 
 
       .. code-block:: bash
 
-         arena env validate \
-             --source merge-env/ \
-             --name merge-env
+         arena env validate --name merge-env --source merge-env/
 
 After validation succeeds, the environment is automatically profiled to determine its
 resource usage. You will be able to view it in the **Environments** section of the Arena
@@ -207,7 +205,7 @@ name as seen on Arena. If no version is specified, the latest one is used.
 
 For this example, we will train on the ``arena-medium`` resource, which has 1x nvidia-l4 GPU, 15x CPUs, and 55GB of RAM
 (costing around 2.41 credits/node-hour on Arena), and using 2 nodes for quicker results. Since we are training a population
-size of 8, Arena will train 4 agents on each of the nodes in parallel.
+size of 4, Arena will train 2 agents on each of the nodes in parallel.
 
 .. tip::
 

@@ -15,8 +15,5 @@ Pydantic models describing the environment for each training scenario.
 .. autoclass:: agilerl.models.env.LLMEnvSpec
    :members:
 
-.. autoclass:: agilerl.models.env.ArenaEnvSpec
-   :members:
-
 .. autoclass:: agilerl.models.env.BanditEnvSpec
    :members:

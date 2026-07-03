@@ -1666,6 +1666,20 @@ class TestInferenceDeployments:
         with pytest.raises(ArenaAPIError, match="ambiguous"):
             api_key_client._fetch_deployment_for_inference("d")
 
+    def test_fetch_deployment_for_inference_preserves_existing_hint(
+        self, api_key_client
+    ):
+        original = ArenaAPIError(
+            "boom", status_code=400, cli_hint="Run 'arena login' first."
+        )
+        api_key_client._request = MagicMock(side_effect=original)
+        with pytest.raises(ArenaAPIError) as exc_info:
+            api_key_client._fetch_deployment_for_inference("dep")
+        # An error that already carries a hint propagates unchanged, rather than
+        # being replaced with the disambiguation hint.
+        assert exc_info.value is original
+        assert exc_info.value.cli_hint == "Run 'arena login' first."
+
     def test_fetch_deployment_for_inference_non_dict_raises(self, api_key_client):
         api_key_client._request = MagicMock(return_value="not a dict")
         with pytest.raises(ArenaAPIError, match="Unexpected deployment detail"):

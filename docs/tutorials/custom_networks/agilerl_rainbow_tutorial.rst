@@ -12,7 +12,7 @@ Building a Dueling Distributional Q Network
 
 `Rainbow DQN <https://arxiv.org/abs/1710.02298>`_ is an extension of DQN that integrates multiple improvements and techniques to achieve state-of-the-art performance. The improvements pertaining to the Q network that is optimized during training are the following:
 
-    * **Dueling Networks**: Splits the Q-network into two separate streams — one for estimating the state value function and another for estimating the advantages for each action. They are then combined to produce Q-values.
+    * **Dueling Networks**: Splits the Q-network into two separate streams: one for estimating the state value function and another for estimating the advantages for each action. They are then combined to produce Q-values.
     * **Categorical DQN (C51)**: A specific form of distributional RL where the continuous range of possible cumulative future rewards is discretized into a fixed set of categories.
 
 In order to extend our implementation of :class:`QNetwork <agilerl.networks.q_networks.QNetwork>` to a Dueling Distributional Q Network, we need to make the following changes:

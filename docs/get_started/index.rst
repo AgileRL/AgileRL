@@ -297,7 +297,7 @@ The simplest way to train an RL agent with AgileRL is through the
 .. note::
 
    With no other arguments provided, ``LocalTrainer`` defaults to 1,000,000 steps with a
-   single agent and the algorithm's default hyperparameters — no evolutionary
+   single agent and the algorithm's default hyperparameters. No evolutionary
    HPO is applied.
 
 **Training a Population with Evolutionary HPO:**
@@ -415,7 +415,7 @@ Or via a YAML manifest:
          python -m agilerl.train dqn.yaml
 
 
-Every aspect of the training pipeline is customisable — from modifying
+Every aspect of the training pipeline is customisable: from modifying
 hyperparameters and mutation strategies in our off-the-shelf tools, to
 implementing your own :ref:`evolvable algorithms <custom_algorithms>`,
 :ref:`network architectures <evolvable_networks>`, and

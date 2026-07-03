@@ -17,7 +17,7 @@ Credit assignment: MDP vs bandit formulations
 The core difference between these algorithms is how they answer the question:
 *which actions caused the outcome?*
 
-MDP formulation — ``LLMPPO`` and ``LLMREINFORCE``
+MDP formulation: ``LLMPPO`` and ``LLMREINFORCE``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 These treat multi-turn interaction as a sequential decision process. Each
@@ -48,7 +48,7 @@ matters and that knowing you are at turn 3 of 5, having received a tool error
 at turn 2, is useful signal for the update. This is the right assumption for
 long agentic trajectories where early decisions constrain later ones.
 
-Bandit formulation — ``GRPO``
+Bandit formulation: ``GRPO``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 GRPO collapses the multi-turn trajectory into a single episode return and

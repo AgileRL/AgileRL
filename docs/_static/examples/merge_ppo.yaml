@@ -19,7 +19,7 @@ environment:
 training:
     max_steps: 1_000_000
     evo_steps: 10_000
-    pop_size: 8
+    pop_size: 4
 
 mutation:
     probabilities:

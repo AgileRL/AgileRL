@@ -17,7 +17,7 @@ modules through the shared ``agilerl.*`` namespace:
   :mod:`agilerl.arena.models`).
 
 After ``pip install agilerl-arena`` or ``pip install "agilerl[arena]"``, import
-Arena code as ``agilerl.arena`` — not as a top-level ``arena`` or
+Arena code as ``agilerl.arena``, not as a top-level ``arena`` or
 ``agilerl_arena`` module:
 
 .. code-block:: python

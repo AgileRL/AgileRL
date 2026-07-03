@@ -4,8 +4,8 @@ Trainers
 ========
 
 AgileRL provides a **Trainer** abstraction that encapsulates the full
-evolutionary training pipeline — environment creation, population management,
-mutation, tournament selection, and the training loop — behind a single,
+evolutionary training pipeline (environment creation, population management,
+mutation, tournament selection, and the training loop) behind a single,
 declarative interface. Instead of stitching these components together manually,
 you describe *what* to train and the trainer handles the
 *how*.
@@ -80,7 +80,7 @@ match the registered class name exactly.
 .. code-block:: yaml
 
    algorithm:
-     name: DQN   # Required — must match a registered algorithm name
+     name: DQN   # Required: must match a registered algorithm name
      # ... other fields depend on the algorithm
      lr: 6.3e-4
      batch_size: 128

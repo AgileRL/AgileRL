@@ -1496,6 +1496,7 @@ class ArenaClient:
         )
 
     def _auth_headers(self) -> dict[str, str]:
+        """Return the authentication headers for the request."""
         # If an API key is provided, use it for authentication.
         if self._api_key:
             return {"Authorization": f"Bearer {self._api_key}"}
