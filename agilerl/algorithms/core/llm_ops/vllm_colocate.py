@@ -165,7 +165,9 @@ def patch_vllm_lora_copy_path(llm: Any) -> int:
     for module in model.modules():
         if not hasattr(module, "set_lora"):
             continue
-        if not hasattr(module, "lora_a_stacked") and not hasattr(module, "lora_b_stacked"):
+        if not hasattr(module, "lora_a_stacked") and not hasattr(
+            module, "lora_b_stacked"
+        ):
             continue
         if getattr(module, "_agilerl_set_lora_copy_patched", False):
             continue

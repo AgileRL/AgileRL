@@ -5758,9 +5758,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             os.environ.get("AGILERL_VLLM_LORA_DEVICE_SAFE_COPY") == "1"
         )
         copy_patch_count = patch_vllm_lora_copy_path(self.llm)
-        if (
-            self.accelerator is None or self.accelerator.process_index == 0
-        ) and (copy_debug_enabled or device_safe_copy_enabled):
+        if (self.accelerator is None or self.accelerator.process_index == 0) and (
+            copy_debug_enabled or device_safe_copy_enabled
+        ):
             warnings.warn(
                 "colocated init: vLLM LoRA copy patch status "
                 f"(copy_debug={copy_debug_enabled}, "
