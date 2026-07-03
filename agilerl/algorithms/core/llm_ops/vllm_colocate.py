@@ -17,6 +17,10 @@ See ``docs/llm_finetuning/quantization.rst`` for the full colocated picture.
 from __future__ import annotations
 
 import gc
+import os
+import warnings
+from contextlib import contextmanager
+from functools import wraps
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -26,9 +30,173 @@ if TYPE_CHECKING:
 
 __all__ = [
     "get_vllm_internal_model",
+    "patch_vllm_lora_copy_path",
     "patch_vllm_lora_keep_resident",
     "patch_vllm_strip_multimodal_towers",
 ]
+
+_COPY_DEBUG_ENV = "AGILERL_VLLM_LORA_COPY_DEBUG"
+_DEVICE_SAFE_COPY_ENV = "AGILERL_VLLM_LORA_DEVICE_SAFE_COPY"
+_COPY_PATCH_WARNED = False
+
+
+def _copy_debug_enabled() -> bool:
+    return os.environ.get(_COPY_DEBUG_ENV) == "1"
+
+
+def _device_safe_copy_enabled() -> bool:
+    return os.environ.get(_DEVICE_SAFE_COPY_ENV) == "1"
+
+
+def _safe_cuda_current_device() -> int | str:
+    try:
+        if torch.cuda.is_initialized():
+            return torch.cuda.current_device()
+    except Exception:
+        return "error"
+    return "n/a"
+
+
+def _extract_lora_id(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
+    for key in ("lora_id", "adapter_id", "lora_int_id"):
+        value = kwargs.get(key)
+        if value is not None:
+            return str(value)
+    for arg in args:
+        for attr in ("lora_int_id", "adapter_id", "lora_id"):
+            value = getattr(arg, attr, None)
+            if value is not None:
+                return str(value)
+    return "n/a"
+
+
+def _is_tracked_lora_dst(dst: torch.Tensor, module: Any) -> bool:
+    tracked = (
+        getattr(module, "lora_a_stacked", None),
+        getattr(module, "lora_b_stacked", None),
+    )
+    for tensor in tracked:
+        if not torch.is_tensor(tensor):
+            continue
+        try:
+            if dst.untyped_storage().data_ptr() == tensor.untyped_storage().data_ptr():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _copy_debug_line(
+    module: Any,
+    lora_id: str,
+    src: Any,
+    dst: torch.Tensor,
+) -> None:
+    if not _copy_debug_enabled():
+        return
+    pid = os.getpid()
+    msg = (
+        f"[AGILERL_VLLM_LORA_COPY_DEBUG pid={pid}] "
+        f"rank={os.environ.get('RANK', 'unset')} "
+        f"local_rank={os.environ.get('LOCAL_RANK', 'unset')} "
+        f"world_size={os.environ.get('WORLD_SIZE', 'unset')} "
+        f"cuda_current_device={_safe_cuda_current_device()} "
+        f"lora_id={lora_id} "
+        f"module={type(module).__name__} "
+        f"src_device={getattr(src, 'device', 'n/a')} "
+        f"src_dtype={getattr(src, 'dtype', 'n/a')} "
+        f"src_shape={tuple(src.shape) if torch.is_tensor(src) else 'n/a'} "
+        f"src_contig={src.is_contiguous() if torch.is_tensor(src) else 'n/a'} "
+        f"dst_device={dst.device} "
+        f"dst_dtype={dst.dtype} "
+        f"dst_shape={tuple(dst.shape)} "
+        f"dst_contig={dst.is_contiguous()}"
+    )
+    print(msg, flush=True)
+
+
+@contextmanager
+def _patch_tensor_copy_for_set_lora(
+    module: Any,
+    lora_id: str,
+):
+    original_copy = torch.Tensor.copy_
+
+    def wrapped_copy(dst: torch.Tensor, src: Any, *args: Any, **kwargs: Any) -> Any:
+        tracked_dst = _is_tracked_lora_dst(dst, module)
+        if tracked_dst:
+            _copy_debug_line(module, lora_id, src, dst)
+            if _device_safe_copy_enabled() and torch.is_tensor(src):
+                if src.device != dst.device:
+                    src = src.to(dst.device, non_blocking=True)
+        return original_copy(dst, src, *args, **kwargs)
+
+    torch.Tensor.copy_ = wrapped_copy
+    try:
+        yield
+    finally:
+        torch.Tensor.copy_ = original_copy
+
+
+def patch_vllm_lora_copy_path(llm: Any) -> int:
+    """Patch vLLM LoRA ``set_lora`` copy path for colocated multi-GPU debug/safety.
+
+    Temporary diagnostics/mitigation for Ray colocated rank>0 LoRA activation
+    device mismatches where ``set_lora`` can copy CPU chunks into CUDA buffers
+    on a different device. Env-gated and idempotent.
+    """
+    global _COPY_PATCH_WARNED
+    debug = _copy_debug_enabled()
+    safe_copy = _device_safe_copy_enabled()
+    if not debug and not safe_copy:
+        return 0
+    try:
+        model = get_vllm_internal_model(llm)
+    except Exception:
+        if not _COPY_PATCH_WARNED:
+            warnings.warn(
+                "colocated init: vLLM LoRA copy patch skipped (model unavailable).",
+                stacklevel=2,
+            )
+            _COPY_PATCH_WARNED = True
+        return 0
+
+    patched = 0
+    for module in model.modules():
+        if not hasattr(module, "set_lora"):
+            continue
+        if not hasattr(module, "lora_a_stacked") and not hasattr(module, "lora_b_stacked"):
+            continue
+        if getattr(module, "_agilerl_set_lora_copy_patched", False):
+            continue
+        original = getattr(module, "set_lora", None)
+        if original is None or not callable(original):
+            continue
+
+        @wraps(original)
+        def wrapped_set_lora(
+            *args: Any,
+            _original: Any = original,
+            _module: Any = module,
+            **kwargs: Any,
+        ) -> Any:
+            lora_id = _extract_lora_id(args, kwargs)
+            with _patch_tensor_copy_for_set_lora(_module, lora_id):
+                return _original(*args, **kwargs)
+
+        module.set_lora = wrapped_set_lora
+        module._agilerl_set_lora_copy_patched = True
+        patched += 1
+
+    if patched == 0:
+        if not _COPY_PATCH_WARNED:
+            warnings.warn(
+                "colocated init: vLLM LoRA copy patch found no compatible set_lora modules; vLLM internals may have changed.",
+                stacklevel=2,
+            )
+            _COPY_PATCH_WARNED = True
+
+    return patched
 
 
 class _StrippedTower:

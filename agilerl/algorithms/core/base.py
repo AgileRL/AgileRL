@@ -149,6 +149,7 @@ if TYPE_CHECKING or HAS_VLLM:
         set_fused_adapter_routing,
     )
     from agilerl.algorithms.core.llm_ops.vllm_colocate import (
+        patch_vllm_lora_copy_path,
         patch_vllm_lora_keep_resident,
         patch_vllm_strip_multimodal_towers,
     )
@@ -5749,6 +5750,22 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             warnings.warn(
                 f"colocated init: kept {patched} vLLM LoRA slots resident "
                 "(works around vLLM zeroing the rollout adapter slot).",
+                stacklevel=2,
+            )
+
+        copy_debug_enabled = os.environ.get("AGILERL_VLLM_LORA_COPY_DEBUG") == "1"
+        device_safe_copy_enabled = (
+            os.environ.get("AGILERL_VLLM_LORA_DEVICE_SAFE_COPY") == "1"
+        )
+        copy_patch_count = patch_vllm_lora_copy_path(self.llm)
+        if (
+            self.accelerator is None or self.accelerator.process_index == 0
+        ) and (copy_debug_enabled or device_safe_copy_enabled):
+            warnings.warn(
+                "colocated init: vLLM LoRA copy patch status "
+                f"(copy_debug={copy_debug_enabled}, "
+                f"device_safe_copy={device_safe_copy_enabled}, "
+                f"patched_layers={copy_patch_count}).",
                 stacklevel=2,
             )
 
