@@ -8,6 +8,7 @@ import os
 import pickle
 import shutil
 import tempfile
+import threading
 import time
 import warnings
 from abc import ABC, ABCMeta, abstractmethod
@@ -4467,6 +4468,141 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         model_ref = self._get_unwrapped_actor()
         return model_ref.pretrained_model if self.use_value_head else model_ref
 
+    # Temporary diagnostics for Ray colocated vLLM LoRA device mismatch issues.
+    def _lora_debug_enabled(self) -> bool:
+        return os.environ.get("AGILERL_LORA_DEBUG") == "1"
+
+    @staticmethod
+    def _lora_debug_compact(value: Any, max_len: int = 240) -> str:
+        text = str(value)
+        return text if len(text) <= max_len else f"{text[: max_len - 3]}..."
+
+    def _lora_debug_log(self, event: str, **fields: Any) -> None:
+        if not self._lora_debug_enabled():
+            return
+
+        pid = os.getpid()
+        cuda_initialized = False
+        cuda_current_device: int | str = "n/a"
+        cuda_device_count: int | str = "n/a"
+        try:
+            cuda_initialized = torch.cuda.is_initialized()
+        except Exception:
+            cuda_initialized = False
+        try:
+            cuda_device_count = torch.cuda.device_count()
+        except Exception:
+            cuda_device_count = "error"
+        if cuda_initialized:
+            try:
+                cuda_current_device = torch.cuda.current_device()
+            except Exception:
+                cuda_current_device = "error"
+
+        context: OrderedDict[str, Any] = OrderedDict(
+            [
+                ("event", event),
+                ("rank", os.environ.get("RANK", "unset")),
+                ("local_rank", os.environ.get("LOCAL_RANK", "unset")),
+                ("world_size", os.environ.get("WORLD_SIZE", "unset")),
+                (
+                    "cuda_visible_devices",
+                    os.environ.get("CUDA_VISIBLE_DEVICES", "unset"),
+                ),
+                ("cuda_initialized", cuda_initialized),
+                ("cuda_current_device", cuda_current_device),
+                ("cuda_device_count", cuda_device_count),
+                ("thread", threading.current_thread().name),
+            ]
+        )
+        context.update(fields)
+        payload = " ".join(
+            f"{key}={self._lora_debug_compact(value)}" for key, value in context.items()
+        )
+        print(f"[AGILERL_LORA_DEBUG pid={pid}] {payload}", flush=True)
+
+    @staticmethod
+    def _collect_tensor_summaries(
+        tensors: Iterable[tuple[str, torch.Tensor]],
+        limit: int,
+    ) -> tuple[int, list[str]]:
+        total = 0
+        sample: list[str] = []
+        for name, tensor in tensors:
+            total += 1
+            if len(sample) >= limit:
+                continue
+            shape = tuple(tensor.shape)
+            sample.append(
+                f"{name}|shape={shape}|dtype={tensor.dtype}|device={tensor.device}|contig={tensor.is_contiguous()}"
+            )
+        return total, sample
+
+    @staticmethod
+    def _iter_named_tensors(module_like: Any) -> Iterable[tuple[str, torch.Tensor]]:
+        seen: set[str] = set()
+        named_parameters = getattr(module_like, "named_parameters", None)
+        if callable(named_parameters):
+            for name, tensor in named_parameters():
+                if torch.is_tensor(tensor):
+                    seen.add(name)
+                    yield name, tensor
+        named_buffers = getattr(module_like, "named_buffers", None)
+        if callable(named_buffers):
+            for name, tensor in named_buffers():
+                if name in seen:
+                    continue
+                if torch.is_tensor(tensor):
+                    yield name, tensor
+
+    def _source_lora_tensor_summary(
+        self,
+        peft_ref: Any,
+        limit: int,
+    ) -> tuple[int, list[str]]:
+        def _lora_only() -> Iterable[tuple[str, torch.Tensor]]:
+            for name, tensor in self._iter_named_tensors(peft_ref):
+                if "lora" in name.lower():
+                    yield name, tensor
+
+        return self._collect_tensor_summaries(_lora_only(), limit=limit)
+
+    def _vllm_destination_tensor_summary(
+        self,
+        per_path_limit: int,
+        path_limit: int = 3,
+    ) -> tuple[int, list[str]]:
+        path_samples: list[str] = []
+        total = 0
+        paths = [
+            "llm.llm_engine",
+            "llm.llm_engine.model_executor",
+            "llm.llm_engine.model_executor.driver_worker",
+            "llm.llm_engine.model_executor.driver_worker.model_runner",
+            "llm.llm_engine.model_executor.driver_worker.model_runner.model",
+        ]
+        sampled_paths = 0
+        for path in paths:
+            obj: Any = self
+            try:
+                for attr in path.split("."):
+                    obj = getattr(obj, attr)
+            except Exception:
+                continue
+            count, sample = self._collect_tensor_summaries(
+                self._iter_named_tensors(obj),
+                limit=per_path_limit,
+            )
+            if count == 0:
+                continue
+            total += count
+            if sampled_paths < path_limit:
+                path_samples.append(
+                    f"{path}[total={count};sample={' ; '.join(sample)}]"
+                )
+                sampled_paths += 1
+        return total, path_samples
+
     def _ensure_vllm_lora_staging_dir(self) -> Path:
         """Resolve (once) the dir the rollout LoRA adapter is exported to.
 
@@ -4574,6 +4710,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             adapter_path,
             load_inplace=self._vllm_lora_loaded,
         )
+        request_adapter_id = getattr(refresh_request, "adapter_id", "n/a")
+        request_int_id = getattr(refresh_request, "lora_int_id", "n/a")
+        request_path = getattr(refresh_request, "lora_path", adapter_path)
         deadline_s = 20.0
         started = time.monotonic()
         attempts = 0
@@ -4611,11 +4750,47 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             elapsed = time.monotonic() - started
             last_missing = _missing_adapter_files(adapter_path)
             if not last_missing:
-                if use_device_guard:
-                    with torch.cuda.device(lora_device):
+                source_total, source_sample = self._source_lora_tensor_summary(
+                    peft_ref,
+                    limit=8,
+                )
+                dest_total, dest_sample = self._vllm_destination_tensor_summary(
+                    per_path_limit=4,
+                )
+                self._lora_debug_log(
+                    "pre_add_lora",
+                    attempt=attempts,
+                    elapsed_s=f"{elapsed:.3f}",
+                    lora_request_adapter_id=request_adapter_id,
+                    lora_request_int_id=request_int_id,
+                    lora_request_path=request_path,
+                    source_lora_total=source_total,
+                    source_lora_sample=source_sample,
+                    destination_tensor_total=dest_total,
+                    destination_tensor_sample=dest_sample,
+                )
+                try:
+                    if use_device_guard:
+                        with torch.cuda.device(lora_device):
+                            loaded = self.llm.llm_engine.add_lora(refresh_request)
+                    else:
                         loaded = self.llm.llm_engine.add_lora(refresh_request)
-                else:
-                    loaded = self.llm.llm_engine.add_lora(refresh_request)
+                except Exception as exc:
+                    self._lora_debug_log(
+                        "add_lora_exception",
+                        exception_type=type(exc).__name__,
+                        exception_message=exc,
+                        attempt=attempts,
+                        elapsed_s=f"{elapsed:.3f}",
+                        lora_request_adapter_id=request_adapter_id,
+                        lora_request_int_id=request_int_id,
+                        lora_request_path=request_path,
+                        source_lora_total=source_total,
+                        source_lora_sample=source_sample,
+                        destination_tensor_total=dest_total,
+                        destination_tensor_sample=dest_sample,
+                    )
+                    raise
                 if loaded:
                     if attempts > 1:
                         logger.info(
@@ -4681,7 +4856,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         the wake path clears.
         """
         if self._vllm_moved:
+            self._lora_debug_log("sync_actor_to_vllm_skip_already_moved")
             return
+        self._lora_debug_log("sync_actor_to_vllm_start")
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
 
@@ -4689,6 +4866,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         self.llm.reset_prefix_cache()
         self._vllm_moved = True
+        self._lora_debug_log("sync_actor_to_vllm_done", vllm_moved=self._vllm_moved)
 
     def _generate_with_vllm_colocate(
         self,
@@ -5550,6 +5728,15 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 )
                 raise ValueError(msg) from err
             raise
+        self._lora_debug_log(
+            "vllm_llm_created",
+            llm_class=type(self.llm).__name__,
+            tensor_parallel_size=(
+                self.vllm_config.tensor_parallel_size if self.vllm_config else "n/a"
+            ),
+            max_num_seqs=(self.vllm_config.max_num_seqs if self.vllm_config else "n/a"),
+            max_model_len=self.max_model_len,
+        )
 
         # Keep the persistent rollout-adapter slot resident (vLLM V1 otherwise
         # zeroes it on dummy batches and never re-copies it, so the trained

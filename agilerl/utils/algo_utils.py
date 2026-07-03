@@ -1586,7 +1586,7 @@ class VLLMConfig:
     # See class docstring above. Required to avoid vLLM's memory-profiling
     # assertion when running multiple vLLM processes on a shared GPU.
     kv_cache_memory_bytes: int | None = None
-    lora_staging_dir: str | None = "AgileRL"
+    lora_staging_dir: str | None = None
     lora_staging_per_rank: bool | None = None
 
     def __post_init__(self) -> None:
