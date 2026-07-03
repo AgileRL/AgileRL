@@ -37,7 +37,10 @@ __all__ = [
 
 _COPY_DEBUG_ENV = "AGILERL_VLLM_LORA_COPY_DEBUG"
 _DEVICE_SAFE_COPY_ENV = "AGILERL_VLLM_LORA_DEVICE_SAFE_COPY"
+_SYNC_RETRY_ENV = "AGILERL_VLLM_LORA_COPY_SYNC_FALLBACK"
+_COPY_DEBUG_LIMIT_ENV = "AGILERL_VLLM_LORA_COPY_DEBUG_LIMIT"
 _COPY_PATCH_WARNED = False
+_COPY_DEBUG_LINES_EMITTED = 0
 
 
 def _copy_debug_enabled() -> bool:
@@ -46,6 +49,21 @@ def _copy_debug_enabled() -> bool:
 
 def _device_safe_copy_enabled() -> bool:
     return os.environ.get(_DEVICE_SAFE_COPY_ENV) == "1"
+
+
+def _sync_retry_enabled() -> bool:
+    return os.environ.get(_SYNC_RETRY_ENV) == "1"
+
+
+def _copy_debug_limit() -> int | None:
+    raw = os.environ.get(_COPY_DEBUG_LIMIT_ENV)
+    if raw is None:
+        return None
+    try:
+        limit = int(raw)
+    except ValueError:
+        return None
+    return max(limit, 0)
 
 
 def _safe_cuda_current_device() -> int | str:
@@ -92,7 +110,11 @@ def _copy_debug_line(
     src: Any,
     dst: torch.Tensor,
 ) -> None:
+    global _COPY_DEBUG_LINES_EMITTED
     if not _copy_debug_enabled():
+        return
+    limit = _copy_debug_limit()
+    if limit is not None and _COPY_DEBUG_LINES_EMITTED >= limit:
         return
     pid = os.getpid()
     msg = (
@@ -113,6 +135,115 @@ def _copy_debug_line(
         f"dst_contig={dst.is_contiguous()}"
     )
     print(msg, flush=True)
+    _COPY_DEBUG_LINES_EMITTED += 1
+
+
+def _copy_debug_failure_line(
+    lora_id: str,
+    src: Any,
+    dst: torch.Tensor,
+    exc: Exception,
+    non_blocking: Any,
+) -> None:
+    if not _copy_debug_enabled():
+        return
+
+    stream_repr: str = "n/a"
+    try:
+        if torch.cuda.is_initialized():
+            stream = torch.cuda.current_stream()
+            stream_id = getattr(stream, "cuda_stream", None)
+            stream_repr = (
+                f"{stream} cuda_stream={stream_id}"
+                if stream_id is not None
+                else repr(stream)
+            )
+    except Exception as stream_exc:
+        stream_repr = f"error:{stream_exc}"
+
+    src_is_pinned = "n/a"
+    if torch.is_tensor(src):
+        is_pinned = getattr(src, "is_pinned", None)
+        if callable(is_pinned):
+            try:
+                src_is_pinned = is_pinned()
+            except Exception:
+                src_is_pinned = "error"
+
+    msg = (
+        f"[AGILERL_VLLM_LORA_COPY_DEBUG_FAIL pid={os.getpid()}] "
+        f"rank={os.environ.get('RANK', 'unset')} "
+        f"local_rank={os.environ.get('LOCAL_RANK', 'unset')} "
+        f"world_size={os.environ.get('WORLD_SIZE', 'unset')} "
+        f"cuda_current_device={_safe_cuda_current_device()} "
+        f"lora_id={lora_id} "
+        f"exception_type={type(exc).__name__} "
+        f"exception_message={exc} "
+        f"non_blocking={non_blocking} "
+        f"src_device={getattr(src, 'device', 'n/a')} "
+        f"src_dtype={getattr(src, 'dtype', 'n/a')} "
+        f"src_shape={tuple(src.shape) if torch.is_tensor(src) else 'n/a'} "
+        f"src_contig={src.is_contiguous() if torch.is_tensor(src) else 'n/a'} "
+        f"src_is_pinned={src_is_pinned} "
+        f"dst_device={dst.device} "
+        f"dst_dtype={dst.dtype} "
+        f"dst_shape={tuple(dst.shape)} "
+        f"dst_contig={dst.is_contiguous()} "
+        f"dst_stride={tuple(dst.stride())} "
+        f"dst_storage_offset={dst.storage_offset()} "
+        f"dst_is_leaf={dst.is_leaf} "
+        f"dst_requires_grad={dst.requires_grad} "
+        f"cuda_stream={stream_repr}"
+    )
+    print(msg, flush=True)
+
+
+def _copy_debug_recovered_line(
+    lora_id: str,
+    src: Any,
+    dst: torch.Tensor,
+    first_exc: Exception,
+) -> None:
+    if not _copy_debug_enabled():
+        return
+    msg = (
+        f"[AGILERL_VLLM_LORA_COPY_DEBUG_RECOVERED pid={os.getpid()}] "
+        f"rank={os.environ.get('RANK', 'unset')} "
+        f"local_rank={os.environ.get('LOCAL_RANK', 'unset')} "
+        f"world_size={os.environ.get('WORLD_SIZE', 'unset')} "
+        f"cuda_current_device={_safe_cuda_current_device()} "
+        f"lora_id={lora_id} "
+        f"first_exception_type={type(first_exc).__name__} "
+        f"first_exception_message={first_exc} "
+        f"retry_non_blocking=False "
+        f"src_device={getattr(src, 'device', 'n/a')} "
+        f"dst_device={dst.device}"
+    )
+    print(msg, flush=True)
+
+
+def _copy_debug_retry_fail_line(
+    lora_id: str,
+    src: Any,
+    dst: torch.Tensor,
+    retry_exc: Exception,
+) -> None:
+    if not _copy_debug_enabled():
+        return
+    msg = (
+        f"[AGILERL_VLLM_LORA_COPY_DEBUG_RETRY_FAIL pid={os.getpid()}] "
+        f"rank={os.environ.get('RANK', 'unset')} "
+        f"local_rank={os.environ.get('LOCAL_RANK', 'unset')} "
+        f"world_size={os.environ.get('WORLD_SIZE', 'unset')} "
+        f"cuda_current_device={_safe_cuda_current_device()} "
+        f"lora_id={lora_id} "
+        f"retry_exception_type={type(retry_exc).__name__} "
+        f"retry_exception_message={retry_exc} "
+        f"retry_non_blocking=False "
+        f"src_device={getattr(src, 'device', 'n/a')} "
+        f"dst_device={dst.device}"
+    )
+    print(msg, flush=True)
 
 
 @contextmanager
@@ -129,7 +260,24 @@ def _patch_tensor_copy_for_set_lora(
         if _device_safe_copy_enabled() and torch.is_tensor(src):
             if src.device != dst.device:
                 src = src.to(dst.device, non_blocking=True)
-        return original_copy(dst, src, *args, **kwargs)
+        non_blocking = kwargs.get("non_blocking", args[0] if args else False)
+        try:
+            return original_copy(dst, src, *args, **kwargs)
+        except Exception as exc:
+            _copy_debug_failure_line(lora_id, src, dst, exc, non_blocking)
+            if not _sync_retry_enabled():
+                raise
+
+            retry_src = src
+            if torch.is_tensor(retry_src) and retry_src.device != dst.device:
+                retry_src = retry_src.to(dst.device, non_blocking=False)
+            try:
+                result = original_copy(dst, retry_src, non_blocking=False)
+            except Exception as retry_exc:
+                _copy_debug_retry_fail_line(lora_id, retry_src, dst, retry_exc)
+                raise
+            _copy_debug_recovered_line(lora_id, retry_src, dst, exc)
+            return result
 
     torch.Tensor.copy_ = wrapped_copy
     try:
@@ -148,7 +296,8 @@ def patch_vllm_lora_copy_path(llm: Any) -> int:
     global _COPY_PATCH_WARNED
     debug = _copy_debug_enabled()
     safe_copy = _device_safe_copy_enabled()
-    if not debug and not safe_copy:
+    sync_retry = _sync_retry_enabled()
+    if not debug and not safe_copy and not sync_retry:
         return 0
     try:
         model = get_vllm_internal_model(llm)
