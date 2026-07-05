@@ -68,7 +68,29 @@ class DatasetEnv(LLMEnv, gym.Env):
         min_completion_length: int | None = None,
         seed: int = 42,
     ) -> None:
-        """Build a teacher-forced dataset env for the given ``objective``."""
+        """Build a teacher-forced dataset env for the selected ``objective``.
+
+        :param train_dataset: Training split containing prompt/label rows.
+        :type train_dataset: Dataset
+        :param test_dataset: Held-out split used under :meth:`eval_mode`.
+        :type test_dataset: Dataset
+        :param tokenizer: Tokenizer used by the collate function.
+        :type tokenizer: AutoTokenizer
+        :param objective: Dataset objective: ``"preference"`` (DPO) or ``"sft"``.
+        :type objective: Literal["preference", "sft"]
+        :param response_column: Target column for SFT rows.
+        :type response_column: str
+        :param data_batch_size_per_gpu: Batch size used by train/test dataloaders.
+        :type data_batch_size_per_gpu: int
+        :param accelerator: Optional accelerator used to prepare dataloaders.
+        :type accelerator: Accelerator | None
+        :param max_context_length: Optional max prompt+completion token budget.
+        :type max_context_length: int | None
+        :param min_completion_length: Minimum reserved completion token budget.
+        :type min_completion_length: int | None
+        :param seed: Random seed used for dataloader shuffling.
+        :type seed: int
+        """
         if objective == "preference":
             required_columns = {"prompt", "chosen", "rejected"}
             collate_builder: CollateBuilder = preference_collate_builder
@@ -140,11 +162,38 @@ class DatasetEnv(LLMEnv, gym.Env):
         tokenizer: AutoTokenizer,
         max_context_length: int | None = None,
     ) -> Callable[[list[dict[str, Any]]], dict[str, Any]]:
-        """Delegate to the injected collate builder."""
+        """Build the row-collation callable for the current objective.
+
+        :param tokenizer: Tokenizer used to encode prompts and labels.
+        :type tokenizer: AutoTokenizer
+        :param max_context_length: Optional context-length override. Kept for API
+            compatibility; collation currently uses ``self.max_context_length``.
+        :type max_context_length: int | None
+        :return: Callable that maps raw dataset rows to a tensor batch dict.
+        :rtype: Callable[[list[dict[str, Any]]], dict[str, Any]]
+        """
+        if (
+            max_context_length is not None
+            and max_context_length != self.max_context_length
+        ):
+            warnings.warn(
+                "create_collate_fn(max_context_length=...) currently ignores this "
+                "override and uses env.max_context_length instead.",
+                stacklevel=2,
+            )
         return self._collate_builder(self, tokenizer, max_context_length)
 
     def reset(self, reset_dataloaders: bool = False) -> Any:
-        """Reset the environment and get the next batch from the dataloader."""
+        """Return the next batch, optionally rewinding dataloaders first.
+
+        ``DatasetEnv`` is teacher-forced, so ``reset`` advances to the next row
+        batch rather than creating per-episode simulator state.
+
+        :param reset_dataloaders: Whether to rewind train/test iterators first.
+        :type reset_dataloaders: bool
+        :return: Objective-specific collated batch from the active split.
+        :rtype: Any
+        """
         if reset_dataloaders:
             self._reset_dataloaders()
             warnings.warn(
@@ -162,11 +211,21 @@ class DatasetEnv(LLMEnv, gym.Env):
         return self._get_next_batch()
 
     def step(self, completions: torch.Tensor | None = None) -> Any:
-        """Advance the iterator and return the next batch (``completions`` unused)."""
+        """Advance one batch on the active split and return it.
+
+        The ``completions`` argument is accepted for trainer API parity but is
+        ignored for dataset-backed objectives.
+
+        :param completions: Unused completion tensor.
+        :type completions: torch.Tensor | None
+        :return: Objective-specific collated batch from the active split.
+        :rtype: Any
+        """
         self.reset_called = False
         return self._get_next_batch()
 
     def _get_next_batch(self) -> Any:
+        """Read one batch and cycle dataloaders at split boundaries."""
         try:
             batch = next(self.dataloader)
         except StopIteration:
@@ -181,7 +240,11 @@ class DatasetEnv(LLMEnv, gym.Env):
 
     @contextmanager
     def eval_mode(self) -> Generator[None, None, None]:
-        """Context manager to switch to evaluation mode."""
+        """Temporarily switch reads to the held-out split.
+
+        This also snapshots and restores ``last_tokenized_prompts`` when present,
+        so train-loop prompt caches survive evaluation probes.
+        """
         self.dataloader = self.test_dataloader_iter
         self.evaluation_mode = True
         last_tokenized_prompts = None
@@ -196,7 +259,7 @@ class DatasetEnv(LLMEnv, gym.Env):
                 self.last_tokenized_prompts = last_tokenized_prompts
 
     def __len__(self) -> int:
-        """Return the length of the dataset."""
+        """Return row count for the currently active split."""
         if self.evaluation_mode:
             return len(self.test_dataloader.dataset)
         return len(self.train_dataloader.dataset)
@@ -204,7 +267,7 @@ class DatasetEnv(LLMEnv, gym.Env):
     def _reset_dataloaders(
         self, reset_train: bool = True, reset_test: bool = True
     ) -> None:
-        """Reset the dataloaders to the beginning of the dataset."""
+        """Rebuild train/test iterators and refresh the active iterator pointer."""
         if reset_train:
             self.train_dataloader_iter = iter(self.train_dataloader)
         if reset_test:
@@ -220,7 +283,11 @@ class DatasetEnv(LLMEnv, gym.Env):
         dataset: Dataset,
         dataset_type: str | None = None,
     ) -> Dataset:
-        """Filter the dataset by the max context length."""
+        """Drop rows whose tokenized prompt would exceed the context budget.
+
+        The filter keeps rows where ``prompt_len <= max_context_length -
+        min_completion_length`` and warns when any rows are removed.
+        """
         dataset_type = "dataset" if dataset_type is None else dataset_type
         filter_keyword = "prompt" if "prompt" in dataset.features else "question"
         if self.max_context_length is None or not isinstance(
@@ -250,9 +317,10 @@ def preference_collate_builder(
     tokenizer: AutoTokenizer,
     max_context_length: int | None = None,
 ) -> Callable[[list[dict[str, str]]], dict[str, Any]]:
-    """Collate ``(prompt, chosen, rejected)`` preference triples (DPO)."""
+    """Build a collate function for ``(prompt, chosen, rejected)`` DPO rows."""
 
     def collate_fn(batch: list[dict[str, str]]) -> dict[str, Any]:
+        """Tokenize preference triples into chosen/rejected paired tensors."""
         prompts = [item["prompt"] for item in batch]
         chosen = [item["chosen"] for item in batch]
         rejected = [item["rejected"] for item in batch]
@@ -325,10 +393,11 @@ def sft_collate_builder(
     tokenizer: AutoTokenizer,
     max_context_length: int | None = None,
 ) -> Callable[[list[dict[str, Any]]], dict[str, Any]]:
-    """Collate ``(prompt, response)`` pairs (supervised fine-tuning)."""
+    """Build a collate function for ``(prompt, response)`` SFT rows."""
     response_column = env.response_column
 
     def collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
+        """Tokenize SFT prompt/response rows into a padded tensor batch."""
         prompts = [item["prompt"] for item in batch]
         responses = [item[response_column] for item in batch]
 
