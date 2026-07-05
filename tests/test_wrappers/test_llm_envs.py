@@ -130,7 +130,7 @@ class TestDatasetEnvPreferenceInit:
             "rejected_attention_mask",
         ]
         assert env.dataloader == env.train_dataloader_iter
-        assert not env.reset_called
+        assert not hasattr(env, "reset_called")
         assert not env.evaluation_mode
         assert env.data_batch_size_per_gpu == data_batch_size
 
@@ -230,13 +230,14 @@ class TestDatasetEnvPreferenceInit:
 class TestDatasetEnvPreferenceStep:
     @pytest.mark.parametrize("use_accelerator", [True, False])
     @pytest.mark.parametrize("num_samples", [20])
-    def test_preference_step(
+    def test_preference_step_is_noop(
         self,
         preference_dataset,
         accelerator_factory,
         use_accelerator,
         num_samples,
     ):
+        """``step`` returns ``None`` and never advances the dataset cursor."""
         train_dataset, test_dataset = preference_dataset
         tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
         data_batch_size = 8
@@ -248,37 +249,9 @@ class TestDatasetEnvPreferenceStep:
             data_batch_size_per_gpu=data_batch_size,
             accelerator=accelerator_factory(use_accelerator),
         )
-        prompts = env.step()
-        assert isinstance(prompts, dict)
-        assert set(prompts.keys()) == {
-            "prompt",
-            "prompt_lengths",
-            "chosen",
-            "rejected",
-            "chosen_input_ids",
-            "chosen_attention_mask",
-            "rejected_input_ids",
-            "rejected_attention_mask",
-        }
-        assert len(prompts["prompt"]) == data_batch_size
-        assert len(prompts["prompt_lengths"]) == data_batch_size
-        assert len(prompts["chosen"]) == data_batch_size
-        assert len(prompts["rejected"]) == data_batch_size
-        assert len(prompts["chosen_input_ids"]) == data_batch_size
-        assert len(prompts["chosen_attention_mask"]) == data_batch_size
-        assert len(prompts["rejected_input_ids"]) == data_batch_size
-        assert len(prompts["rejected_attention_mask"]) == data_batch_size
-        assert isinstance(prompts["prompt"], list)
-        assert isinstance(prompts["prompt"][0], str)
-        assert isinstance(prompts["prompt_lengths"][0], int)
-        assert isinstance(prompts["prompt_lengths"], list)
-        assert isinstance(prompts["chosen"], list)
-        assert isinstance(prompts["rejected"], list)
-        assert isinstance(prompts["chosen_input_ids"], torch.Tensor)
-        assert isinstance(prompts["chosen_attention_mask"], torch.Tensor)
-        assert isinstance(prompts["rejected_input_ids"], torch.Tensor)
-        assert isinstance(prompts["rejected_attention_mask"], torch.Tensor)
-        assert not env.reset_called
+        assert env.step() is None
+        assert env.step(completions=torch.zeros(1)) is None
+        assert env.num_epochs == 0  # step never advances the cursor
 
 
 class TestDatasetEnvPreferenceReset:
@@ -332,7 +305,6 @@ class TestDatasetEnvPreferenceReset:
         assert isinstance(prompts["chosen_attention_mask"], torch.Tensor)
         assert isinstance(prompts["rejected_input_ids"], torch.Tensor)
         assert isinstance(prompts["rejected_attention_mask"], torch.Tensor)
-        assert env.reset_called
 
     @pytest.mark.parametrize("use_accelerator", [True, False])
     @pytest.mark.parametrize("num_samples", [20])
@@ -355,8 +327,8 @@ class TestDatasetEnvPreferenceReset:
             accelerator=accelerator_factory(use_accelerator),
         )
         env.reset()
-        env.step()
-        env.step()
+        env.reset()
+        env.reset()
         with pytest.warns(
             UserWarning,
             match=r"env\.reset\(\) called with reset_dataloaders=True, this will reset the dataloaders to the beginning of the dataset, proceed with caution\.",
@@ -392,65 +364,6 @@ class TestDatasetEnvPreferenceReset:
         assert isinstance(prompts["chosen_attention_mask"], torch.Tensor)
         assert isinstance(prompts["rejected_input_ids"], torch.Tensor)
         assert isinstance(prompts["rejected_attention_mask"], torch.Tensor)
-        assert env.reset_called
-
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    @pytest.mark.parametrize("num_samples", [20])
-    def test_preference_reset_reset_called_warning(
-        self,
-        preference_dataset,
-        accelerator_factory,
-        use_accelerator,
-        num_samples,
-    ):
-        train_dataset, test_dataset = preference_dataset
-        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
-        data_batch_size = 1
-        env = DatasetEnv(
-            train_dataset=train_dataset,
-            test_dataset=test_dataset,
-            tokenizer=tokenizer,
-            objective="preference",
-            data_batch_size_per_gpu=data_batch_size,
-            accelerator=accelerator_factory(use_accelerator),
-        )
-        env.reset_called = True
-        with pytest.warns(
-            UserWarning,
-            match=r"env\.reset\(\) called more than once sequentially, it should typically follow with env\.step\(\)\.",
-        ):
-            prompts = env.reset()
-        assert len(prompts["prompt"]) == data_batch_size
-        assert isinstance(prompts, dict)
-        assert set(prompts.keys()) == {
-            "prompt",
-            "prompt_lengths",
-            "chosen",
-            "rejected",
-            "chosen_input_ids",
-            "chosen_attention_mask",
-            "rejected_input_ids",
-            "rejected_attention_mask",
-        }
-        assert len(prompts["prompt"]) == data_batch_size
-        assert len(prompts["prompt_lengths"]) == data_batch_size
-        assert len(prompts["chosen"]) == data_batch_size
-        assert len(prompts["rejected"]) == data_batch_size
-        assert len(prompts["chosen_input_ids"]) == data_batch_size
-        assert len(prompts["chosen_attention_mask"]) == data_batch_size
-        assert len(prompts["rejected_input_ids"]) == data_batch_size
-        assert len(prompts["rejected_attention_mask"]) == data_batch_size
-        assert isinstance(prompts["prompt"], list)
-        assert isinstance(prompts["prompt"][0], str)
-        assert isinstance(prompts["prompt_lengths"][0], int)
-        assert isinstance(prompts["prompt_lengths"], list)
-        assert isinstance(prompts["chosen"], list)
-        assert isinstance(prompts["rejected"], list)
-        assert isinstance(prompts["chosen_input_ids"], torch.Tensor)
-        assert isinstance(prompts["chosen_attention_mask"], torch.Tensor)
-        assert isinstance(prompts["rejected_input_ids"], torch.Tensor)
-        assert isinstance(prompts["rejected_attention_mask"], torch.Tensor)
-        assert env.reset_called
 
     @pytest.mark.parametrize("num_samples", [20])
     @pytest.mark.parametrize("use_accelerator", [True, False])
@@ -473,8 +386,35 @@ class TestDatasetEnvPreferenceReset:
             accelerator=accelerator_factory(use_accelerator),
         )
         while env.num_epochs == 0:
-            env.step()
+            env.reset()
         assert env.num_epochs == 1
+
+    @pytest.mark.parametrize("num_samples", [20])
+    def test_preference_reset_drives_epoch_rollover(
+        self,
+        preference_dataset,
+        num_samples,
+    ):
+        """Epoch rollover is driven purely by ``reset``: the (N+1)th fetch rolls."""
+        train_dataset, test_dataset = preference_dataset
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+        env = DatasetEnv(
+            train_dataset=train_dataset,
+            test_dataset=test_dataset,
+            tokenizer=tokenizer,
+            objective="preference",
+            data_batch_size_per_gpu=1,
+        )
+        batches_per_epoch = len(env.train_dataloader)
+        for _ in range(batches_per_epoch):
+            env.reset()
+        assert env.num_epochs == 0  # full epoch consumed, not yet rolled
+        # Inert calls must not advance the cursor or trip the rollover.
+        env.step()
+        env.step()
+        assert env.num_epochs == 0
+        env.reset()
+        assert env.num_epochs == 1  # (N+1)th fetch triggers rollover
 
 
 class TestDatasetEnvPreferenceCreateCollateFn:
@@ -545,7 +485,7 @@ class TestDatasetEnvSFTInit:
             "attention_mask",
         ]
         assert env.dataloader == env.train_dataloader_iter
-        assert not env.reset_called
+        assert not hasattr(env, "reset_called")
         assert env.data_batch_size_per_gpu == data_batch_size
 
     def test_sft_max_context_length_warning(self):
@@ -622,14 +562,14 @@ class TestDatasetEnvSFTStep:
             accelerator=accelerator_factory(use_accelerator),
         )
         while env.num_epochs == 0:
-            env.step()
+            env.reset()
         assert env.num_epochs == 1
 
 
 class TestDatasetEnvSFTReset:
     @pytest.mark.parametrize("use_accelerator", [True, False])
     @pytest.mark.parametrize("num_samples", [20])
-    def test_sft_step_and_reset(
+    def test_sft_reset_returns_batch_step_is_noop(
         self,
         sft_dataset,
         accelerator_factory,
@@ -647,7 +587,9 @@ class TestDatasetEnvSFTReset:
             data_batch_size_per_gpu=data_batch_size,
             accelerator=accelerator_factory(use_accelerator),
         )
-        batch = env.step()
+        assert env.step() is None
+
+        batch = env.reset()
         assert set(batch.keys()) == {
             "prompt",
             "prompt_lengths",
@@ -655,22 +597,11 @@ class TestDatasetEnvSFTReset:
             "input_ids",
             "attention_mask",
         }
-        assert not env.reset_called
-
-        batch2 = env.reset()
-        assert set(batch2.keys()) == {
-            "prompt",
-            "prompt_lengths",
-            "response",
-            "input_ids",
-            "attention_mask",
-        }
-        assert env.reset_called
-        assert len(batch2["prompt"]) == data_batch_size
+        assert len(batch["prompt"]) == data_batch_size
 
     @pytest.mark.parametrize("use_accelerator", [True, False])
     @pytest.mark.parametrize("num_samples", [20])
-    def test_sft_reset_warnings_match_iterable_base(
+    def test_sft_reset_dataloaders_warning(
         self,
         sft_dataset,
         accelerator_factory,
@@ -688,20 +619,12 @@ class TestDatasetEnvSFTReset:
             accelerator=accelerator_factory(use_accelerator),
         )
         env.reset()
-        env.step()
-        env.step()
+        env.reset()
         with pytest.warns(
             UserWarning,
             match=r"env\.reset\(\) called with reset_dataloaders=True",
         ):
             env.reset(reset_dataloaders=True)
-
-        env.reset_called = True
-        with pytest.warns(
-            UserWarning,
-            match=r"env\.reset\(\) called more than once sequentially",
-        ):
-            env.reset()
 
     def test_sft_response_column_chosen(self):
         """``response_column`` can point at a DPO-style ``chosen`` column."""

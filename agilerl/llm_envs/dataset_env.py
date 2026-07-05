@@ -153,7 +153,6 @@ class DatasetEnv(LLMEnv, gym.Env):
         self.train_dataloader_iter = iter(self.train_dataloader)
         self.test_dataloader_iter = iter(self.test_dataloader)
         self.dataloader = self.train_dataloader_iter
-        self.reset_called = False
         self.evaluation_mode = False
         self.num_epochs = 0
 
@@ -186,8 +185,10 @@ class DatasetEnv(LLMEnv, gym.Env):
     def reset(self, reset_dataloaders: bool = False) -> Any:
         """Return the next batch, optionally rewinding dataloaders first.
 
-        ``DatasetEnv`` is teacher-forced, so ``reset`` advances to the next row
-        batch rather than creating per-episode simulator state.
+        ``DatasetEnv`` is teacher-forced: ``reset`` is the sole data-advancing
+        call, returning the next collated batch from the active split. Calling it
+        repeatedly walks the dataset -- this is the expected training pattern,
+        mirroring how ``reset`` begins each iteration for a ``RolloutEnv``.
 
         :param reset_dataloaders: Whether to rewind train/test iterators first.
         :type reset_dataloaders: bool
@@ -201,28 +202,21 @@ class DatasetEnv(LLMEnv, gym.Env):
                 "the dataloaders to the beginning of the dataset, proceed with caution.",
                 stacklevel=2,
             )
-        if self.reset_called:
-            warnings.warn(
-                "env.reset() called more than once sequentially, it should typically "
-                "follow with env.step().",
-                stacklevel=2,
-            )
-        self.reset_called = True
         return self._get_next_batch()
 
-    def step(self, completions: torch.Tensor | None = None) -> Any:
-        """Advance one batch on the active split and return it.
+    def step(self, completions: torch.Tensor | None = None) -> None:
+        """No-op for teacher-forced dataset training.
 
-        The ``completions`` argument is accepted for trainer API parity but is
-        ignored for dataset-backed objectives.
+        ``DatasetEnv`` advances the dataset via :meth:`reset`; ``step`` exists
+        only to satisfy the :class:`~agilerl.llm_envs.base.LLMEnv` contract and
+        returns ``None``. ``completions`` is accepted for trainer API parity and
+        is ignored.
 
-        :param completions: Unused completion tensor.
+        :param completions: Unused; accepted for API parity.
         :type completions: torch.Tensor | None
-        :return: Objective-specific collated batch from the active split.
-        :rtype: Any
+        :return: Always ``None``.
+        :rtype: None
         """
-        self.reset_called = False
-        return self._get_next_batch()
 
     def _get_next_batch(self) -> Any:
         """Read one batch and cycle dataloaders at split boundaries."""

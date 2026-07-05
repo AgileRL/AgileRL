@@ -172,10 +172,10 @@ class TestFinetuneLlmPreference:
                 evaluation_interval=2,
                 accelerator=Accelerator() if use_accelerator else None,
             )
-            assert mock_env.reset.call_count == 1
-            assert mock_env.reset.call_args == call(reset_dataloaders=True)
+            assert mock_env.reset.call_count == 7
+            assert mock_env.reset.call_args_list[0] == call(reset_dataloaders=True)
             assert mock_agent.get_action.call_count == 0
-            assert mock_env.step.call_count == 6
+            assert mock_env.step.call_count == 0
             assert mock_agent.learn.call_count == 6
             expected_agg_calls = 21
             assert mock_agg.call_count == expected_agg_calls
@@ -324,9 +324,9 @@ class TestFinetuneLlmPreference:
                 tournament=Mock(),
                 mutation=mutation,
             )
-            assert mock_env.reset.call_count == 1
-            assert mock_env.reset.call_args == call(reset_dataloaders=True)
-            assert mock_env.step.call_count == 6
+            assert mock_env.reset.call_count == 7
+            assert mock_env.reset.call_args_list[0] == call(reset_dataloaders=True)
+            assert mock_env.step.call_count == 0
             assert mock_agent.learn.call_count == 6
             expected_agg_calls = 21
             assert mock_agg.call_count == expected_agg_calls
@@ -540,8 +540,10 @@ class TestFinetuneLlmPreference:
             )
 
         assert env_fn.call_count == 2
-        assert env_a.step.call_count == 1
-        assert env_b.step.call_count == 1
+        assert env_a.reset.call_count == 2
+        assert env_b.reset.call_count == 2
+        assert env_a.step.call_count == 0
+        assert env_b.step.call_count == 0
         assert agent_a.learn.call_args.args[0] == {"prompt": ["a"]}
         assert agent_b.learn.call_args.args[0] == {"prompt": ["b"]}
 
@@ -692,9 +694,9 @@ class TestFinetuneLlmSft:
                 evaluation_interval=2,
                 accelerator=None if use_accelerator else Accelerator(),
             )
-            assert mock_env.reset.call_count == 1
-            assert mock_env.reset.call_args == call(reset_dataloaders=True)
-            assert mock_env.step.call_count == 6
+            assert mock_env.reset.call_count == 7
+            assert mock_env.reset.call_args_list[0] == call(reset_dataloaders=True)
+            assert mock_env.step.call_count == 0
             assert mock_agent.learn.call_count == 6
             assert mock_agent.test.call_count == 3
 
@@ -802,9 +804,9 @@ class TestFinetuneLlmSft:
                 tournament=Mock(),
                 mutation=mutation,
             )
-            assert mock_env.reset.call_count == 1
-            assert mock_env.reset.call_args == call(reset_dataloaders=True)
-            assert mock_env.step.call_count == 6
+            assert mock_env.reset.call_count == 7
+            assert mock_env.reset.call_args_list[0] == call(reset_dataloaders=True)
+            assert mock_env.step.call_count == 0
             assert mock_agent.learn.call_count == 6
             assert mock_agent.test.call_count == 3
             assert mock_tournament_selection_and_mutation.call_count == 6

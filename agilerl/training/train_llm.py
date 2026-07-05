@@ -7,10 +7,10 @@ from typing import Any
 
 import numpy as np
 import torch
-import wandb
 from accelerate import Accelerator
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms import DPO, GRPO, LLMPPO, LLMREINFORCE, SFT
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -725,7 +725,7 @@ def train_llm_dataset(
                     learn_output=learn_output,
                     mode="preference",
                 )
-                next_prompts = training_env.step()
+                next_prompts = training_env.reset()
                 agg_metrics = {
                     metric_name: aggregate_metrics_across_gpus(accelerator, metric)
                     for metric_name, metric in metrics.items()
@@ -736,7 +736,7 @@ def train_llm_dataset(
                 )
             else:
                 learn_output = agent.learn(current_prompts)
-                next_prompts = training_env.step()
+                next_prompts = training_env.reset()
                 # SFT.learn returns a {"mean_loss", "mean_perplexity"} dict.
                 agg_metrics = [
                     safe_aggregate_metrics(accelerator, learn_output["mean_loss"]),

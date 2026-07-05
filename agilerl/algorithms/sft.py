@@ -378,12 +378,11 @@ class SFT(LLMAlgorithm):
         :rtype: np.ndarray
         """
         with env.eval_mode(), torch.no_grad():
-            prompts = env.reset()
             losses = []
             for _ in range(loop):
+                prompts = env.reset()
                 metrics = self.learn(prompts, training=False)
                 losses.append(metrics["mean_loss"])
-                prompts = env.step()
             mean_fit = -float(np.mean(losses))
         self.fitness.append(mean_fit)
         return np.array(mean_fit)

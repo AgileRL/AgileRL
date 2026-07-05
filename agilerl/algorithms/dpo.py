@@ -658,15 +658,14 @@ class DPO(LLMAlgorithm):
         :rtype: np.ndarray
         """
         with env.eval_mode(), torch.no_grad():
-            prompts = env.reset()
             rewards = []
             for _ in range(loop):
+                prompts = env.reset()
                 learn_result = self.learn(prompts, training=False)
                 chosen_reward = learn_result["mean_chosen_reward"]
                 rejected_reward = learn_result["mean_rejected_reward"]
                 reward_margin = chosen_reward - rejected_reward
                 rewards.append(np.asarray(reward_margin).item())
-                prompts = env.step()
             mean_fit = float(np.mean(rewards))
         self.fitness.append(mean_fit)
         return np.array(mean_fit)

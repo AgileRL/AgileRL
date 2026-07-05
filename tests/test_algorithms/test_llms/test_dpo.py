@@ -469,6 +469,7 @@ class TestDPOTest:
     @pytest.mark.gpu
     @pytest.mark.parametrize("data_batch_size", [2])
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
+    @pytest.mark.parametrize("loop", [1, 2])
     def test_dpo_test(
         self,
         deepspeed_env,
@@ -484,6 +485,7 @@ class TestDPOTest:
         max_tokens,
         data_batch_size,
         micro_batch_size_per_gpu,
+        loop,
     ):
         dpo = dpo_factory(
             accelerator_factory,
@@ -527,7 +529,7 @@ class TestDPOTest:
             data_batch_size_per_gpu=data_batch_size,
             accelerator=dpo.accelerator,
         )
-        fitness = dpo.test(env)
+        fitness = dpo.test(env, loop=loop)
         assert isinstance(fitness, np.ndarray)
         dpo.clean_up()
         AcceleratorState._reset_state(True)

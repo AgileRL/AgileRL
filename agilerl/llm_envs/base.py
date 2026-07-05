@@ -73,7 +73,12 @@ class LLMEnv(ABC):
 
     @abstractmethod
     def step(self, *args: Any, **kwargs: Any) -> Any:
-        """Advance the environment by one step."""
+        """Advance the environment by one step.
+
+        Generation envs consume an action and return the next observation;
+        teacher-forced dataset envs advance via :meth:`reset` and implement this
+        as a no-op.
+        """
 
     @contextmanager
     def eval_mode(self) -> Generator[None, None, None]:
