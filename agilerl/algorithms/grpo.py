@@ -3,7 +3,6 @@ from __future__ import annotations
 import gc
 import warnings
 from collections.abc import Callable
-from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
@@ -26,7 +25,6 @@ else:
 
 from agilerl.algorithms.core import ActionResult, LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.llm_envs import RolloutEnv
 from agilerl.protocols import (
     PeftModelProtocol,
     PreTrainedModelProtocol,
@@ -634,52 +632,6 @@ class GRPO(LLMAlgorithm):
         # Batch-level metrics: not divided by the update count above.
         result.update(is_metrics)
         return result
-
-    def test(
-        self,
-        env: RolloutEnv,
-        loop: int = 1,
-        *args: Any,
-        **kwargs: Any,
-    ) -> np.ndarray:
-        """Return fitness (test) score of llm on test sub-set.
-
-        :param env: Tokenized rollout episode environment (single- or multi-turn).
-        :type env: RolloutEnv
-        :param loop: Number of outer test iterations over ``reset`` / ``step``.
-        :type loop: int
-        :return: Concatenated reward tensor from the test loop.
-        :rtype: torch.Tensor
-        """
-        eval_context = getattr(env, "eval_mode", nullcontext)
-        with eval_context():
-            if not isinstance(env, RolloutEnv):
-                msg = f"env must be a RolloutEnv; got {type(env).__name__}"
-                raise TypeError(msg)
-            all_rewards: list[torch.Tensor] = []
-            for _ in range(loop):
-                prompt_dict, _info = env.reset()
-                terminated, truncated = False, False
-                while not terminated and not truncated:
-                    completion_ids = self.get_action(
-                        [prompt_dict],
-                        training=False,
-                    ).completion_ids
-                    full = completion_ids[0]
-                    prompt_dict, reward, terminated, truncated, _info = env.step(
-                        full,
-                    )
-                    all_rewards.append(
-                        torch.tensor(
-                            [float(reward)],
-                            dtype=torch.float32,
-                            device=full.device,
-                        )
-                    )
-            reward_tensor = torch.cat(all_rewards)
-        mean_fit = torch.mean(reward_tensor).item()
-        self.fitness.append(mean_fit)
-        return np.array(mean_fit)
 
     def _validate_core_args(
         self,

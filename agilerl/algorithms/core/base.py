@@ -118,6 +118,8 @@ if TYPE_CHECKING:
     from torch.optim.lr_scheduler import SequentialLR
     from transformers import BitsAndBytesConfig
 
+    from agilerl.llm_envs import RolloutEnv
+
 # Make imports visible to typechecker and import when required
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from peft import (
@@ -2436,6 +2438,66 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or tuple[torch.Tensor[float], ...]
         """
         return cast("TorchObsType", observation)
+
+    def test(
+        self,
+        env: RolloutEnv,
+        loop: int = 1,
+        *args: Any,
+        **kwargs: Any,
+    ) -> np.ndarray:
+        """Return fitness (test) score of the llm on the test sub-set.
+
+        Each of the ``loop`` episodes runs ``reset`` then repeated
+        ``get_action`` / ``step`` turns until the environment terminates or
+        truncates. A safety cap also ends the turn loop after
+        ``env.max_turns`` iterations (512 when the attribute is ``None``) so
+        a non-terminating environment cannot hang evaluation; rewards
+        collected up to the cap still count.
+
+        :param env: Tokenized rollout episode environment (single- or multi-turn).
+        :type env: RolloutEnv
+        :param loop: Number of outer test iterations (episodes).
+        :type loop: int
+        :return: Zero-dimensional array holding the mean per-step reward,
+            which is also appended to ``self.fitness``.
+        :rtype: np.ndarray
+        """
+        from agilerl.llm_envs import RolloutEnv
+
+        eval_context = getattr(env, "eval_mode", nullcontext)
+        with eval_context():
+            if not isinstance(env, RolloutEnv):
+                msg = f"env must be a RolloutEnv; got {type(env).__name__}"
+                raise TypeError(msg)
+            max_turns = getattr(env, "max_turns", None)
+            turn_cap = 512 if max_turns is None else max_turns
+            all_rewards: list[torch.Tensor] = []
+            for _ in range(loop):
+                prompt_dict, _info = env.reset()
+                terminated, truncated = False, False
+                turn = 0
+                while not terminated and not truncated and turn < turn_cap:
+                    completion_ids = self.get_action(
+                        [prompt_dict],
+                        training=False,
+                    ).completion_ids
+                    full = completion_ids[0]
+                    prompt_dict, reward, terminated, truncated, _info = env.step(
+                        full,
+                    )
+                    all_rewards.append(
+                        torch.tensor(
+                            [float(reward)],
+                            dtype=torch.float32,
+                            device=full.device,
+                        )
+                    )
+                    turn += 1
+            reward_tensor = torch.cat(all_rewards)
+        mean_fit = torch.mean(reward_tensor).item()
+        self.fitness.append(mean_fit)
+        return np.array(mean_fit)
 
     def save_checkpoint(
         self,

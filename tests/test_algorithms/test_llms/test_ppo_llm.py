@@ -1136,7 +1136,7 @@ def _minimal_reasoning_rollout_env(device: str, vocab_size: int, input_size: int
         max_turns = 1
 
         def __init__(self):
-            self._env = None
+            self._env_client = None
 
         def _prompt(self):
             return {
@@ -1192,7 +1192,7 @@ class TestPPOTest:
 
             def __init__(self):
                 self._step_count = 0
-                self._env = None
+                self._env_client = None
 
             def reset(self, seed=None):
                 del seed

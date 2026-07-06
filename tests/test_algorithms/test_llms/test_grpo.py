@@ -199,7 +199,7 @@ class DummyReasoningEnv(RolloutEnv):
         self.input_size = input_size
         self.data_batch_size = data_batch_size
         self.device = device
-        self._env = None
+        self._env_client = None
 
     def _prompt(self):
         return {
@@ -4727,7 +4727,7 @@ class TestGRPOTest:
 
             def __init__(self):
                 self._step_count = 0
-                self._env = None
+                self._env_client = None
 
             def reset(self, seed=None):
                 del seed
