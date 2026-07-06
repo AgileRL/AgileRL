@@ -47,22 +47,28 @@ mutation:
             max: 10
 
 network:
-    latent_dim: 64
-    max_latent_dim: 128
-    arch: mlp
+    latent_dim: 128
+    min_latent_dim: 64
+    max_latent_dim: 256
+    arch: multiinput
     encoder_config:
-        hidden_size:
-            - 64
-        activation: ReLU
-        min_mlp_nodes: 32
-        max_mlp_nodes: 256
+        vector_space_mlp: true
+        latent_dim: 128
+        min_latent_dim: 64
+        max_latent_dim: 256
+        mlp_config:
+            hidden_size:
+                - 128
+            activation: ReLU
+            min_mlp_nodes: 64
+            max_mlp_nodes: 256
     head_config:
         hidden_size:
-            - 64
+            - 128
         activation: ReLU
         min_hidden_layers: 1
         max_hidden_layers: 3
-        min_mlp_nodes: 32
+        min_mlp_nodes: 64
         max_mlp_nodes: 256
 
 tournament:
