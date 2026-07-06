@@ -2642,6 +2642,7 @@ class TestBuildVllmRolloutLoraRequest:
         monkeypatch.setitem(sys.modules, "vllm.lora.request", fake_mod)
 
         adapter_path = tmp_path / "adapter"
+        adapter_path.mkdir()
         req = build_vllm_rollout_lora_request(adapter_path, load_inplace=True)
         assert req.lora_name == "actor"
         assert req.lora_int_id == 1
