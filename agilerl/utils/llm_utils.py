@@ -3,12 +3,10 @@ from __future__ import annotations
 import copy
 import gc
 import logging
-import os
 import random
 import re
 import shutil
 import textwrap
-import time
 import warnings
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -1767,20 +1765,6 @@ def resolve_vllm_max_num_batched_tokens(
     return min(worst_case, concurrent_budget)
 
 
-def resolve_peft_adapter_export_dir(staging_dir: Path, adapter_name: str) -> Path:
-    """Return the directory vLLM expects for a PEFT adapter export.
-
-    ``PeftModel.save_pretrained(..., selected_adapters=[name])`` normally writes
-    ``staging_dir/name/``; some layouts write directly into ``staging_dir``.
-    """
-    nested = staging_dir / adapter_name
-    if nested.is_dir() and (nested / "adapter_config.json").is_file():
-        return nested
-    if (staging_dir / "adapter_config.json").is_file():
-        return staging_dir
-    return nested
-
-
 def build_vllm_llm_init_kwargs(
     vllm_config: Any,
     *,
@@ -1841,21 +1825,9 @@ def build_vllm_rollout_lora_request(
     load_inplace: bool = False,
     lora_name: str = "actor",
     lora_int_id: int = 1,
-    deadline_s: float = 30.0,
 ) -> Any:
     """Build a vLLM :class:`~vllm.lora.request.LoRARequest` for rollout."""
     from vllm.lora.request import LoRARequest
-
-    # Add while loop to wait for the lora to be loaded
-    # If it's not loaded after the deadline, raise an error
-    start_time = time.monotonic()
-    while time.monotonic() - start_time < deadline_s:
-        if os.path.exists(lora_path):
-            break
-        time.sleep(0.1)
-    else:
-        msg = f"LoRA not loaded after {deadline_s} seconds"
-        raise TimeoutError(msg)
 
     return LoRARequest(
         lora_name=lora_name,
@@ -1919,16 +1891,14 @@ def save_peft_adapter_for_vllm_rollout(
     adapter_name: str,
     *,
     target_modules: str | list[str],
-    is_main_process: bool = True,
-    export_on_all_ranks: bool = False,
 ) -> Path:
     """Export a PEFT adapter checkpoint that vLLM can load for colocated rollout.
 
     Keeps only tensors that match the same ``target_modules`` spec used for PEFT
     training (from :func:`adapt_lora_config_for_model`). Rewrites ClippableLinear
-    ``.linear`` suffixes in keys for vLLM. By default only the main process
-    writes adapter files; set ``export_on_all_ranks=True`` for rank-local
-    staging paths where each distributed rank must write its own adapter dir.
+    ``.linear`` suffixes in keys for vLLM. ``staging_dir`` must be
+    process-private (AgileRL stages per-rank when distributed): every caller
+    writes the adapter files.
     """
     if not HAS_LLM_DEPENDENCIES:
         msg = "save_peft_adapter_for_vllm_rollout requires peft and transformers."
@@ -1937,11 +1907,7 @@ def save_peft_adapter_for_vllm_rollout(
     from peft import get_peft_model_state_dict
     from safetensors.torch import save_file
 
-    staging = Path(staging_dir)
-    adapter_path = staging / adapter_name
-    if not is_main_process and not export_on_all_ranks:
-        return resolve_peft_adapter_export_dir(staging, adapter_name)
-
+    adapter_path = Path(staging_dir) / adapter_name
     state = get_peft_model_state_dict(peft_model, adapter_name=adapter_name)
     n_before = len(state)
     state = filter_peft_state_dict_for_vllm_lora(state, target_modules)

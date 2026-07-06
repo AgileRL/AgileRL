@@ -3955,8 +3955,6 @@ def _fake_save_peft_adapter_for_vllm_rollout(
     adapter_name,
     *,
     target_modules,
-    is_main_process=True,
-    export_on_all_ranks=False,
 ):
     from pathlib import Path
 
@@ -3993,7 +3991,6 @@ class TestEnsureVllmLoraStagingDir:
             vllm_config=VLLMConfig(lora_staging_dir=lora_staging_dir),
             _vllm_lora_staging_dir=None,
             accelerator=None,
-            _is_rank_staging_dir=LLMAlgorithm._is_rank_staging_dir,
         )
 
     def test_uses_configured_dir_and_marks_persistent(self, tmp_path):
@@ -6217,7 +6214,8 @@ class TestLLMMoveLoraToVllmErrors:
         ):
             agent._move_lora_to_vllm()
 
-    def test_per_rank_mode_non_main_exports_on_each_rank(self, tmp_path):
+    def test_non_main_rank_exports_and_loads_adapter(self, tmp_path):
+        """Every rank exports to its process-private staging dir and loads it."""
         acc = _make_mock_accelerator(
             num_processes=2, is_main_process=False, process_index=1
         )
@@ -6238,108 +6236,9 @@ class TestLLMMoveLoraToVllmErrors:
             ) as mock_save,
         ):
             agent._move_lora_to_vllm()
-        assert mock_save.call_args.kwargs["is_main_process"] is False
-        assert mock_save.call_args.kwargs["export_on_all_ranks"] is True
+        mock_save.assert_called_once()
+        assert mock_save.call_args.args[1] == tmp_path / "rank_1"
         agent.llm.llm_engine.add_lora.assert_called_once()
-
-    def test_shared_mode_non_main_keeps_main_only_export(self, tmp_path):
-        acc = _make_mock_accelerator(
-            num_processes=2, is_main_process=False, process_index=1
-        )
-        agent = _make_llm_agent(accelerator=acc)
-        peft_ref = MagicMock()
-        peft_ref.parameters.return_value = [torch.tensor([1.0])]
-        acc.unwrap_model = MagicMock(return_value=peft_ref)
-        _setup_agent_for_vllm_lora_sync(agent)
-        agent.vllm_config = VLLMConfig(
-            lora_staging_dir=str(tmp_path), lora_staging_per_rank=False
-        )
-        agent._vllm_lora_staging_dir = tmp_path
-
-        def _materialize_after_barrier():
-            adapter_dir = tmp_path / "actor"
-            adapter_dir.mkdir(parents=True, exist_ok=True)
-            (adapter_dir / "adapter_config.json").write_text("{}")
-            (adapter_dir / "adapter_model.safetensors").write_bytes(b"")
-
-        acc.wait_for_everyone = MagicMock(side_effect=_materialize_after_barrier)
-
-        with (
-            patch("agilerl.algorithms.core.base.gather_if_zero3", create=True),
-            patch(
-                "agilerl.algorithms.core.base.save_peft_adapter_for_vllm_rollout",
-                return_value=tmp_path / "actor",
-                create=True,
-            ) as mock_save,
-        ):
-            agent._move_lora_to_vllm()
-        assert mock_save.call_args.kwargs["is_main_process"] is False
-        assert mock_save.call_args.kwargs["export_on_all_ranks"] is False
-        agent.llm.llm_engine.add_lora.assert_called_once()
-
-    def test_retries_until_adapter_files_exist_then_loads(self, tmp_path):
-        acc = _make_mock_accelerator(is_main_process=True)
-        agent = _make_llm_agent(accelerator=acc)
-        peft_ref = MagicMock()
-        peft_ref.parameters.return_value = [torch.tensor([1.0])]
-        acc.unwrap_model = MagicMock(return_value=peft_ref)
-        _setup_agent_for_vllm_lora_sync(agent)
-
-        adapter_path = tmp_path / "actor"
-        sleep_calls = {"n": 0}
-
-        def _sleep_and_materialize(_seconds: float):
-            sleep_calls["n"] += 1
-            if sleep_calls["n"] == 1:
-                adapter_path.mkdir(parents=True, exist_ok=True)
-                (adapter_path / "adapter_config.json").write_text("{}")
-                (adapter_path / "adapter_model.safetensors").write_bytes(b"")
-
-        with (
-            patch("agilerl.algorithms.core.base.gather_if_zero3", create=True),
-            patch(
-                "agilerl.algorithms.core.base.save_peft_adapter_for_vllm_rollout",
-                return_value=adapter_path,
-                create=True,
-            ),
-            patch(
-                "agilerl.algorithms.core.base.time.sleep",
-                side_effect=_sleep_and_materialize,
-            ),
-        ):
-            agent._move_lora_to_vllm()
-        assert sleep_calls["n"] >= 1
-        agent.llm.llm_engine.add_lora.assert_called_once()
-
-    def test_retries_on_lora_adapter_not_found_error(self, tmp_path):
-        class LoRAAdapterNotFoundError(RuntimeError):
-            pass
-
-        acc = _make_mock_accelerator(is_main_process=True)
-        agent = _make_llm_agent(accelerator=acc)
-        peft_ref = MagicMock()
-        peft_ref.parameters.return_value = [torch.tensor([1.0])]
-        acc.unwrap_model = MagicMock(return_value=peft_ref)
-        _setup_agent_for_vllm_lora_sync(agent)
-
-        adapter_path = tmp_path / "actor"
-        adapter_path.mkdir(parents=True, exist_ok=True)
-        (adapter_path / "adapter_config.json").write_text("{}")
-        (adapter_path / "adapter_model.safetensors").write_bytes(b"")
-        agent.llm.llm_engine.add_lora = MagicMock(
-            side_effect=[LoRAAdapterNotFoundError("race"), True]
-        )
-        with (
-            patch("agilerl.algorithms.core.base.gather_if_zero3", create=True),
-            patch(
-                "agilerl.algorithms.core.base.save_peft_adapter_for_vllm_rollout",
-                return_value=adapter_path,
-                create=True,
-            ),
-            patch("agilerl.algorithms.core.base.time.sleep", return_value=None),
-        ):
-            agent._move_lora_to_vllm()
-        assert agent.llm.llm_engine.add_lora.call_count == 2
 
     def test_add_lora_uses_cuda_device_guard_when_agent_device_is_cuda(self, tmp_path):
         acc = _make_mock_accelerator(is_main_process=True, process_index=1)
@@ -6378,35 +6277,6 @@ class TestLLMMoveLoraToVllmErrors:
         mock_cuda_device.assert_called_once_with(torch.device("cuda:1"))
         agent.llm.llm_engine.add_lora.assert_called_once()
 
-    def test_timeout_raises_actionable_runtime_error(self, tmp_path):
-        acc = _make_mock_accelerator(
-            num_processes=2, is_main_process=False, process_index=1
-        )
-        agent = _make_llm_agent(accelerator=acc)
-        peft_ref = MagicMock()
-        peft_ref.parameters.return_value = [torch.tensor([1.0])]
-        acc.unwrap_model = MagicMock(return_value=peft_ref)
-        _setup_agent_for_vllm_lora_sync(agent)
-        adapter_path = tmp_path / "actor"
-        with (
-            patch("agilerl.algorithms.core.base.gather_if_zero3", create=True),
-            patch(
-                "agilerl.algorithms.core.base.save_peft_adapter_for_vllm_rollout",
-                return_value=adapter_path,
-                create=True,
-            ),
-            patch(
-                "agilerl.algorithms.core.base.time.monotonic",
-                side_effect=[0.0, 0.0, 20.25],
-            ),
-            patch("agilerl.algorithms.core.base.time.sleep", return_value=None),
-            pytest.raises(
-                RuntimeError,
-                match=r"missing_files=.*adapter_dir_listing=.*rank=1",
-            ),
-        ):
-            agent._move_lora_to_vllm()
-
     def test_raises_when_vllm_add_lora_fails(self, tmp_path):
         acc = _make_mock_accelerator()
         agent = _make_llm_agent(accelerator=acc)
@@ -6423,14 +6293,7 @@ class TestLLMMoveLoraToVllmErrors:
                 side_effect=_fake_save_peft_adapter_for_vllm_rollout,
                 create=True,
             ),
-            patch(
-                "agilerl.algorithms.core.base.time.monotonic",
-                side_effect=[0.0, 0.0, 20.25],
-            ),
-            patch("agilerl.algorithms.core.base.time.sleep", return_value=None),
-            pytest.raises(
-                RuntimeError, match="Timed out waiting to load vLLM LoRA adapter"
-            ),
+            pytest.raises(RuntimeError, match="vLLM failed to load LoRA adapter"),
         ):
             agent._move_lora_to_vllm()
 

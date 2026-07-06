@@ -8,7 +8,6 @@ import os
 import pickle
 import shutil
 import tempfile
-import time
 import warnings
 from abc import ABC, ABCMeta, abstractmethod
 from collections import OrderedDict, defaultdict
@@ -2391,6 +2390,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self._vllm_moved = False
         self._vllm_lora_loaded = False
         self._vllm_lora_staging_dir: Path | None = None
+        self._vllm_lora_staging_dir_is_temp = True
         self._vllm_rollout_lora_request: Any | None = None
         # Colocated vLLM (use_vllm=True) runs the rollout engine and the HF
         # trainer in one process. Each holds its OWN base: vLLM cycles its base
@@ -4469,16 +4469,17 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def _ensure_vllm_lora_staging_dir(self) -> Path:
         """Resolve (once) the dir the rollout LoRA adapter is exported to.
 
-        Honours ``VLLMConfig.lora_staging_dir`` when set — e.g. a shared/NFS
-        path that a colocated Ray rollout worker reads the adapter from — by
-        creating it (parents included) and marking it non-temporary so
-        ``clean_up`` never deletes it. In distributed runs, AgileRL appends a
-        rank-local subdirectory (``rank_<process_index>``) under that root so
-        each rank's colocated vLLM engine reads a stable per-rank adapter path.
-        Otherwise falls back to a process-private ``mkdtemp`` that ``clean_up``
-        removes. Idempotent: both the colocated
-        init (``_configure_vllm``) and every adapter sync (``_move_lora_to_vllm``)
-        call this, so the same directory is used throughout the agent's life.
+        The staging dir is always process-private: each rank exports its own
+        adapter copy and reads it back locally, so ranks never race on shared
+        files. Honours ``VLLMConfig.lora_staging_dir`` when set — e.g. a known
+        path that orchestrated deployments expect the adapter under — staging
+        in a ``rank_<process_index>`` subdirectory of that root when
+        distributed. The dir is created (parents included) and marked
+        non-temporary so ``clean_up`` never deletes it. Otherwise falls back
+        to a process-private ``mkdtemp`` that ``clean_up`` removes.
+        Idempotent: both the colocated init (``_configure_vllm``) and every
+        adapter sync (``_move_lora_to_vllm``) call this, so the same directory
+        is used throughout the agent's life.
 
         :return: The resolved staging directory.
         :rtype: pathlib.Path
@@ -4486,22 +4487,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         if self._vllm_lora_staging_dir is None:
             configured = getattr(self.vllm_config, "lora_staging_dir", None)
             if configured is not None:
-                configured_path = Path(configured)
-                use_per_rank_staging = (
-                    getattr(self.vllm_config, "lora_staging_per_rank", None)
-                    is not False
-                )
-                if (
-                    use_per_rank_staging
-                    and self.accelerator is not None
-                    and self.accelerator.num_processes > 1
-                    and not self._is_rank_staging_dir(configured_path)
-                ):
-                    configured_path = (
-                        configured_path / f"rank_{self.accelerator.process_index}"
-                    )
-                self._vllm_lora_staging_dir = configured_path
-                self._vllm_lora_staging_dir.mkdir(parents=True, exist_ok=True)
+                staging_dir = Path(configured)
+                if self.accelerator is not None and self.accelerator.num_processes > 1:
+                    staging_dir = staging_dir / f"rank_{self.accelerator.process_index}"
+                staging_dir.mkdir(parents=True, exist_ok=True)
+                self._vllm_lora_staging_dir = staging_dir
                 self._vllm_lora_staging_dir_is_temp = False
             else:
                 self._vllm_lora_staging_dir = Path(
@@ -4509,17 +4499,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 )
                 self._vllm_lora_staging_dir_is_temp = True
         return self._vllm_lora_staging_dir
-
-    @staticmethod
-    def _is_rank_staging_dir(path: Path) -> bool:
-        """Whether ``path`` already points to a ``rank_<n>`` subdirectory."""
-        name = path.name
-        return name.startswith("rank_") and name[5:].isdigit()
-
-    def _is_per_rank_lora_staging_mode(self, staging_dir: Path) -> bool:
-        """Return ``True`` when adapter export/load should be rank-local."""
-        explicit = getattr(self.vllm_config, "lora_staging_per_rank", None)
-        return bool(explicit) or self._is_rank_staging_dir(staging_dir)
 
     def _move_lora_to_vllm(self) -> None:
         """Export the actor LoRA adapter to disk and register it with vLLM.
@@ -4538,19 +4517,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         # Export to a fixed staging dir + id and refresh the resident rollout
         # slot in place: ``load_inplace`` (2nd sync onward) re-reads the updated
         # weights from disk, and the fixed id avoids per-sync CUDA-graph
-        # accumulation that would grow GPU memory across iterations.
+        # accumulation that would grow GPU memory across iterations. The
+        # staging dir is process-private (per-rank when distributed), so every
+        # rank exports its own adapter copy and the files are guaranteed
+        # present before ``add_lora`` reads them back.
         staging_dir = self._ensure_vllm_lora_staging_dir()
-        per_rank_staging_mode = self._is_per_rank_lora_staging_mode(staging_dir)
-        is_distributed = (
-            self.accelerator is not None and self.accelerator.num_processes > 1
-        )
-        # In distributed runs, each rank needs a local adapter export when the
-        # staging dir is process-private (default mkdtemp path), otherwise
-        # non-main ranks can wait forever for files that only rank 0 wrote.
-        export_on_all_ranks = is_distributed and (
-            per_rank_staging_mode or self._vllm_lora_staging_dir_is_temp
-        )
-        is_main_process = self.accelerator is None or self.accelerator.is_main_process
         with gather_if_zero3(self.zero_stage, list(peft_ref.parameters())):
             if self.lora_config is None:
                 msg = "lora_config is required for vLLM LoRA adapter export."
@@ -4560,8 +4531,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 staging_dir,
                 self._vllm_rollout_adapter,
                 target_modules=self.lora_config.target_modules,
-                is_main_process=is_main_process,
-                export_on_all_ranks=export_on_all_ranks,
             )
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
@@ -4573,92 +4542,21 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             adapter_path,
             load_inplace=self._vllm_lora_loaded,
         )
-        deadline_s = 20.0
-        started = time.monotonic()
-        attempts = 0
-        last_missing: list[str] = []
-        debug_every = 5
         lora_device = torch.device(self.device)
-        use_device_guard = lora_device.type == "cuda"
-
-        def _missing_adapter_files(path: Path) -> list[str]:
-            missing: list[str] = []
-            if not (path / "adapter_config.json").is_file():
-                missing.append("adapter_config.json")
-            if not (
-                (path / "adapter_model.safetensors").is_file()
-                or (path / "adapter_model.bin").is_file()
-            ):
-                missing.append("adapter_model.safetensors|adapter_model.bin")
-            return missing
-
-        def _safe_dir_listing(path: Path) -> list[str]:
-            if not path.exists():
-                return ["<missing>"]
-            if not path.is_dir():
-                return [f"<not-a-directory:{path.name}>"]
-            try:
-                return sorted(
-                    f"{entry.name}/" if entry.is_dir() else entry.name
-                    for entry in path.iterdir()
-                )
-            except OSError as exc:
-                return [f"<unreadable:{exc}>"]
-
-        while True:
-            attempts += 1
-            elapsed = time.monotonic() - started
-            last_missing = _missing_adapter_files(adapter_path)
-            if not last_missing:
-                if use_device_guard:
-                    with torch.cuda.device(lora_device):
-                        loaded = self.llm.llm_engine.add_lora(refresh_request)
-                else:
-                    loaded = self.llm.llm_engine.add_lora(refresh_request)
-                if loaded:
-                    if attempts > 1:
-                        logger.info(
-                            "vLLM LoRA load succeeded after retries: attempts=%d "
-                            "elapsed=%.3fs path=%s",
-                            attempts,
-                            elapsed,
-                            adapter_path,
-                        )
-                    break
-                msg = (
-                    "vLLM failed to load LoRA adapter from "
-                    f"{adapter_path}. Check max_lora_rank / target module "
-                    "names match the trainer."
-                )
-                raise RuntimeError(msg)
-
-            if elapsed >= deadline_s:
-                rank = (
-                    self.accelerator.process_index
-                    if self.accelerator is not None
-                    else 0
-                )
-                node = os.environ.get("RAY_NODE_ID", os.uname().nodename)
-                msg = (
-                    "Timed out waiting to load vLLM LoRA adapter "
-                    f"(deadline={deadline_s:.3f}s, elapsed={elapsed:.3f}s, retries={attempts}, "
-                    f"pid={os.getpid()}, rank={rank}, node={node}, path={adapter_path}, "
-                    f"staging_dir={staging_dir}, missing_files={last_missing}, "
-                    f"adapter_dir_listing={_safe_dir_listing(adapter_path)}, "
-                    f"staging_dir_listing={_safe_dir_listing(staging_dir)})."
-                )
-                raise RuntimeError(msg)
-
-            if attempts % debug_every == 0:
-                logger.debug(
-                    "vLLM LoRA load retry: attempt=%d elapsed=%.3fs path=%s missing=%s",
-                    attempts,
-                    elapsed,
-                    adapter_path,
-                    last_missing,
-                )
-            sleep_s = min(1.0, 0.1 * (2 ** (attempts - 1)))
-            time.sleep(sleep_s)
+        if lora_device.type == "cuda":
+            # Pin the CUDA context to this agent's device: vLLM's LoRA copy
+            # kernels otherwise launch on the process-default device.
+            with torch.cuda.device(lora_device):
+                loaded = self.llm.llm_engine.add_lora(refresh_request)
+        else:
+            loaded = self.llm.llm_engine.add_lora(refresh_request)
+        if not loaded:
+            msg = (
+                "vLLM failed to load LoRA adapter from "
+                f"{adapter_path}. Check max_lora_rank / target module "
+                "names match the trainer."
+            )
+            raise RuntimeError(msg)
 
         # The request handed to ``generate()`` must NOT carry ``load_inplace``:
         # vLLM re-evaluates active LoRAs every decode step, and load_inplace would

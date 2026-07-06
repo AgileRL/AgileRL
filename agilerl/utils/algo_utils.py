@@ -1548,22 +1548,15 @@ class VLLMConfig:
         of attribute names strips those instead, for models that mount
         unwanted modalities elsewhere. Defaults to ``False``.
     :type strip_multimodal_towers: bool | list[str], optional
-    :param lora_staging_dir: Directory where the trained LoRA adapter is
-        exported for vLLM to (re)load each sync. ``"AgileRL"`` (default) uses
-        a stable project-local root; ``None`` uses a
-        fresh process-private temporary directory, removed on ``clean_up``.
-        Set explicitly when the rollout engine must read the adapter from a
-        known path (e.g. orchestrated/arena deployments); user-supplied
-        directories are created if missing and never deleted by AgileRL. In
-        distributed runs, AgileRL appends ``rank_<process_index>`` under this
-        root unless ``lora_staging_per_rank`` is set to ``False``.
+    :param lora_staging_dir: Root directory where the trained LoRA adapter is
+        exported for vLLM to (re)load each sync. Staging is always
+        process-private: in distributed runs each rank stages under a
+        ``rank_<process_index>`` subdirectory of this root. Set explicitly
+        when the adapter must live at a known path (e.g. orchestrated/arena
+        deployments); user-supplied directories are created if missing and
+        never deleted by AgileRL. ``None`` (default) uses a fresh
+        process-private temporary directory, removed on ``clean_up``.
     :type lora_staging_dir: str | None, optional
-    :param lora_staging_per_rank: Optional override for distributed staging
-        layout when ``lora_staging_dir`` is set. ``True`` forces rank-local
-        subdirectories (``rank_<process_index>``); ``False`` keeps a shared
-        directory for all ranks; ``None`` (default) keeps the current behavior
-        and enables rank-local paths in distributed runs.
-    :type lora_staging_per_rank: bool | None, optional
     """
 
     # Colocate mode parameters
@@ -1589,7 +1582,6 @@ class VLLMConfig:
     # assertion when running multiple vLLM processes on a shared GPU.
     kv_cache_memory_bytes: int | None = None
     lora_staging_dir: str | None = None
-    lora_staging_per_rank: bool | None = None
 
     def __post_init__(self) -> None:
         if self.sleep_mode_level not in (1, 2):
