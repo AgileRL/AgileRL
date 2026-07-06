@@ -8,7 +8,6 @@ import os
 import pickle
 import shutil
 import tempfile
-import threading
 import time
 import warnings
 from abc import ABC, ABCMeta, abstractmethod
@@ -2353,7 +2352,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             raise ValueError(msg)
         # Shared chunk row budget used by both fused-logprob and Liger fused-loss
         # paths; each path keeps its own auto-tuned behavior when ``None``.
-        self.fused_logprobs_chunk_rows = chunk_rows
+        self.chunk_rows = chunk_rows
         # vLLM sampling-mismatch correction (truncated importance sampling).
         # The rollout is drawn from vLLM but the loss treats the trainer's
         # recomputed ``old_log_probs`` as the behaviour policy; the two differ
@@ -2369,7 +2368,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         # Kept on even when use_vllm=False: decoupled rollouts still sample
         # from a separate vLLM engine.
         self._is_correction_liger_warned = False
-        self.fused_loss_chunk_rows = chunk_rows
         # Warn-once flag for the canonical Liger + non-token importance-sampling
         # "not memory-bounded" warning (see :meth:`_warn_liger_non_token_is`).
         self._liger_non_token_warned = False
@@ -3977,7 +3975,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 fused_ids[start:end, 1:],
                 temperature=self.temperature,
                 cast_to_fp32=self.cast_logprobs_to_fp32,
-                _chunk_rows=self.fused_logprobs_chunk_rows,
+                _chunk_rows=self.chunk_rows,
             )
             del first
 
@@ -4152,7 +4150,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             packed.input_ids[:, 1:],
             temperature=self.temperature,
             cast_to_fp32=self.cast_logprobs_to_fp32,
-            _chunk_rows=self.fused_logprobs_chunk_rows,
+            _chunk_rows=self.chunk_rows,
         )
         log_probs = unpack_logprobs(packed_lp, packed)
 
@@ -4376,7 +4374,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                         packed.input_ids[:, 1:],
                         temperature=self.temperature,
                         cast_to_fp32=self.cast_logprobs_to_fp32,
-                        _chunk_rows=self.fused_logprobs_chunk_rows,
+                        _chunk_rows=self.chunk_rows,
                     )
                     # Map back to the dense (mb, T-1) frame so the loss path is
                     # unchanged; cross-segment boundary predictions are dropped.
@@ -4390,7 +4388,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                         batch_ids[:, 1:],
                         temperature=self.temperature,
                         cast_to_fp32=self.cast_logprobs_to_fp32,
-                        _chunk_rows=self.fused_logprobs_chunk_rows,
+                        _chunk_rows=self.chunk_rows,
                     )
 
                 first = None
@@ -4468,141 +4466,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """Unwrapped PEFT model used for vLLM weight / adapter sync."""
         model_ref = self._get_unwrapped_actor()
         return model_ref.pretrained_model if self.use_value_head else model_ref
-
-    # Temporary diagnostics for Ray colocated vLLM LoRA device mismatch issues.
-    def _lora_debug_enabled(self) -> bool:
-        return os.environ.get("AGILERL_LORA_DEBUG") == "1"
-
-    @staticmethod
-    def _lora_debug_compact(value: Any, max_len: int = 240) -> str:
-        text = str(value)
-        return text if len(text) <= max_len else f"{text[: max_len - 3]}..."
-
-    def _lora_debug_log(self, event: str, **fields: Any) -> None:
-        if not self._lora_debug_enabled():
-            return
-
-        pid = os.getpid()
-        cuda_initialized = False
-        cuda_current_device: int | str = "n/a"
-        cuda_device_count: int | str = "n/a"
-        try:
-            cuda_initialized = torch.cuda.is_initialized()
-        except Exception:
-            cuda_initialized = False
-        try:
-            cuda_device_count = torch.cuda.device_count()
-        except Exception:
-            cuda_device_count = "error"
-        if cuda_initialized:
-            try:
-                cuda_current_device = torch.cuda.current_device()
-            except Exception:
-                cuda_current_device = "error"
-
-        context: OrderedDict[str, Any] = OrderedDict(
-            [
-                ("event", event),
-                ("rank", os.environ.get("RANK", "unset")),
-                ("local_rank", os.environ.get("LOCAL_RANK", "unset")),
-                ("world_size", os.environ.get("WORLD_SIZE", "unset")),
-                (
-                    "cuda_visible_devices",
-                    os.environ.get("CUDA_VISIBLE_DEVICES", "unset"),
-                ),
-                ("cuda_initialized", cuda_initialized),
-                ("cuda_current_device", cuda_current_device),
-                ("cuda_device_count", cuda_device_count),
-                ("thread", threading.current_thread().name),
-            ]
-        )
-        context.update(fields)
-        payload = " ".join(
-            f"{key}={self._lora_debug_compact(value)}" for key, value in context.items()
-        )
-        print(f"[AGILERL_LORA_DEBUG pid={pid}] {payload}", flush=True)
-
-    @staticmethod
-    def _collect_tensor_summaries(
-        tensors: Iterable[tuple[str, torch.Tensor]],
-        limit: int,
-    ) -> tuple[int, list[str]]:
-        total = 0
-        sample: list[str] = []
-        for name, tensor in tensors:
-            total += 1
-            if len(sample) >= limit:
-                continue
-            shape = tuple(tensor.shape)
-            sample.append(
-                f"{name}|shape={shape}|dtype={tensor.dtype}|device={tensor.device}|contig={tensor.is_contiguous()}"
-            )
-        return total, sample
-
-    @staticmethod
-    def _iter_named_tensors(module_like: Any) -> Iterable[tuple[str, torch.Tensor]]:
-        seen: set[str] = set()
-        named_parameters = getattr(module_like, "named_parameters", None)
-        if callable(named_parameters):
-            for name, tensor in named_parameters():
-                if torch.is_tensor(tensor):
-                    seen.add(name)
-                    yield name, tensor
-        named_buffers = getattr(module_like, "named_buffers", None)
-        if callable(named_buffers):
-            for name, tensor in named_buffers():
-                if name in seen:
-                    continue
-                if torch.is_tensor(tensor):
-                    yield name, tensor
-
-    def _source_lora_tensor_summary(
-        self,
-        peft_ref: Any,
-        limit: int,
-    ) -> tuple[int, list[str]]:
-        def _lora_only() -> Iterable[tuple[str, torch.Tensor]]:
-            for name, tensor in self._iter_named_tensors(peft_ref):
-                if "lora" in name.lower():
-                    yield name, tensor
-
-        return self._collect_tensor_summaries(_lora_only(), limit=limit)
-
-    def _vllm_destination_tensor_summary(
-        self,
-        per_path_limit: int,
-        path_limit: int = 3,
-    ) -> tuple[int, list[str]]:
-        path_samples: list[str] = []
-        total = 0
-        paths = [
-            "llm.llm_engine",
-            "llm.llm_engine.model_executor",
-            "llm.llm_engine.model_executor.driver_worker",
-            "llm.llm_engine.model_executor.driver_worker.model_runner",
-            "llm.llm_engine.model_executor.driver_worker.model_runner.model",
-        ]
-        sampled_paths = 0
-        for path in paths:
-            obj: Any = self
-            try:
-                for attr in path.split("."):
-                    obj = getattr(obj, attr)
-            except Exception:
-                continue
-            count, sample = self._collect_tensor_summaries(
-                self._iter_named_tensors(obj),
-                limit=per_path_limit,
-            )
-            if count == 0:
-                continue
-            total += count
-            if sampled_paths < path_limit:
-                path_samples.append(
-                    f"{path}[total={count};sample={' ; '.join(sample)}]"
-                )
-                sampled_paths += 1
-        return total, path_samples
 
     def _ensure_vllm_lora_staging_dir(self) -> Path:
         """Resolve (once) the dir the rollout LoRA adapter is exported to.
