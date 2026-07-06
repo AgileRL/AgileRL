@@ -11,7 +11,7 @@ The key protocols include:
 - EvolvableNetworkProtocol: Interface for neural networks with encoder-decoder structure
 - MutationMethodProtocol: Interface for mutation operations on networks
 - OptimizerWrapperProtocol: Interface for optimizer management
-- TextEnvProtocol: Interface for local text envs (raw reset/step contract)
+- TextEnvProtocol: Interface for local text envs (raw reset/step)
 - EnvClientProtocol: Interface for OpenEnv HTTP and in-process env clients
 
 Type aliases are provided for common types used throughout the framework.
@@ -615,7 +615,7 @@ class PeftModelProtocol(Protocol):
 
 
 class TextEnvProtocol(Protocol):
-    """Structural contract for local text envs served or wrapped by OpenEnv.
+    """Structural type for local text envs served or wrapped by OpenEnv.
 
     Implementations must expose ``reset`` and ``step(action_text)``. Accepted
     return shapes are normalized at runtime by
@@ -636,7 +636,7 @@ class EnvClientProtocol(Protocol):
     :class:`~agilerl.llm_envs.openenv.ServedEnvClient`.
 
     A :class:`~agilerl.llm_envs.rollout_env.RolloutEnv` drives ``reset`` / ``step`` /
-    ``close`` through this contract — over HTTP or in-process. A backend owns
+    ``close`` through this interface — over HTTP or in-process. A backend owns
     whatever it builds (a served backend owns its server), released by ``close``.
     """
 

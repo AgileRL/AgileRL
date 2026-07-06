@@ -22,7 +22,6 @@ from agilerl.llm_envs import (
     OpenEnvClient,
     OpenEnvServer,
     OpenEnvWrapper,
-    PromptOverflowError,
     RolloutEnv,
     ServedEnvClient,
     resolve_env,
@@ -704,7 +703,7 @@ def test_reset_raises_prompt_overflow_for_over_budget_row() -> None:
     env = RolloutEnv.local(
         _VariedRowEnv(), _LenTok(), apply_chat_template=False, max_model_len=64
     )
-    with pytest.raises(PromptOverflowError, match="row_index=1"):
+    with pytest.raises(RuntimeError, match="row_index=1"):
         env.reset(row_index=1)
     obs, _ = env.reset(row_index=0)  # in-budget rows reset fine
     assert obs["input_ids"].shape[1] <= 63

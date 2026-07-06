@@ -1,10 +1,11 @@
-"""Dataset-backed (teacher-forced) LLM env — one class, selected by ``objective``.
+"""Dataset-backed LLM env for SFT and DPO — one class, selected by ``objective``.
 
-A ``DatasetEnv`` is the no-generation half of the env taxonomy: the completions are dataset
-labels, scored in a single teacher-forced forward (SFT cross-entropy, DPO preference) with
-no autoregressive rollout. The training regimes (preference / SFT) differ only by the
-*required columns* and the *collate function*, so they share one class and are picked with
-the ``objective`` argument rather than separate subclasses.
+A ``DatasetEnv`` serves batches straight from a labelled dataset: the model is scored
+on the dataset's own completions in a single forward pass (cross-entropy for SFT,
+chosen-vs-rejected preference for DPO), so nothing is generated — unlike a
+``RolloutEnv``, where the model produces the text being scored. SFT and DPO differ
+only by the *required columns* and the *collate function*, so they share one class and
+are picked with the ``objective`` argument rather than separate subclasses.
 """
 
 from __future__ import annotations
@@ -35,12 +36,13 @@ if TYPE_CHECKING:
 
 
 class DatasetEnv(LLMEnv, gym.Env):
-    """Teacher-forced, dataset-backed LLM env (no generation).
+    """Dataset-backed LLM env for SFT and DPO (no generation).
 
-    The no-generation half of the env taxonomy: completions are dataset labels
-    scored in a single teacher-forced forward (SFT cross-entropy, DPO preference)
-    with no autoregressive rollout. The training regimes differ only by the
-    *required columns* and the *collate function*, selected with ``objective``:
+    Serves batches straight from a labelled dataset: the model is scored on the
+    dataset's own completions in a single forward pass (cross-entropy for SFT,
+    chosen-vs-rejected preference for DPO) — nothing is generated. The two
+    objectives differ only by the *required columns* and the *collate function*,
+    selected with ``objective``:
 
     * ``objective="preference"`` (DPO) — requires ``prompt`` / ``chosen`` / ``rejected``.
     * ``objective="sft"`` — requires ``prompt`` and ``response_column`` (default
@@ -68,7 +70,7 @@ class DatasetEnv(LLMEnv, gym.Env):
         min_completion_length: int | None = None,
         seed: int = 42,
     ) -> None:
-        """Build a teacher-forced dataset env for the selected ``objective``.
+        """Build a dataset env for the selected ``objective``.
 
         :param train_dataset: Training split containing prompt/label rows.
         :type train_dataset: Dataset
@@ -174,10 +176,10 @@ class DatasetEnv(LLMEnv, gym.Env):
     def reset(self, reset_dataloaders: bool = False) -> Any:
         """Return the next batch, optionally rewinding dataloaders first.
 
-        ``DatasetEnv`` is teacher-forced: ``reset`` is the sole data-advancing
-        call, returning the next collated batch from the active split. Calling it
-        repeatedly walks the dataset -- this is the expected training pattern,
-        mirroring how ``reset`` begins each iteration for a ``RolloutEnv``.
+        ``reset`` is the sole data-advancing call, returning the next collated
+        batch from the active split. Calling it repeatedly walks the dataset --
+        this is the expected training pattern, mirroring how ``reset`` begins
+        each iteration for a ``RolloutEnv``.
 
         :param reset_dataloaders: Whether to rewind train/test iterators first.
         :type reset_dataloaders: bool
@@ -194,12 +196,11 @@ class DatasetEnv(LLMEnv, gym.Env):
         return self._get_next_batch()
 
     def step(self, completions: torch.Tensor | None = None) -> None:
-        """No-op for teacher-forced dataset training.
+        """No-op: dataset training advances via :meth:`reset`.
 
-        ``DatasetEnv`` advances the dataset via :meth:`reset`; ``step`` exists
-        only to satisfy the :class:`~agilerl.llm_envs.base.LLMEnv` contract and
-        returns ``None``. ``completions`` is accepted for trainer API parity and
-        is ignored.
+        ``step`` exists only because :class:`~agilerl.llm_envs.base.LLMEnv`
+        requires it, and returns ``None``. ``completions`` is accepted for
+        trainer API parity and is ignored.
 
         :param completions: Unused; accepted for API parity.
         :type completions: torch.Tensor | None
@@ -225,9 +226,10 @@ class DatasetEnv(LLMEnv, gym.Env):
     def eval_mode(self) -> Generator[None, None, None]:
         """Temporarily switch reads to the held-out split, restoring the prior mode.
 
-        Restores whatever mode was active on entry (the save/set/restore contract
-        of :meth:`LLMEnv.eval_mode`), so nested evaluation probes don't flip an
-        outer eval context back to the train split. This also snapshots and
+        Restores whatever mode was active on entry (matching
+        :meth:`LLMEnv.eval_mode`'s save/set/restore behaviour), so nested
+        evaluation probes don't flip an outer eval context back to the train
+        split. This also snapshots and
         restores ``last_tokenized_prompts`` when present, so train-loop prompt
         caches survive evaluation probes.
         """

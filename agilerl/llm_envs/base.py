@@ -53,13 +53,13 @@ def apply_chat_template(
 
 
 class LLMEnv(ABC):
-    """Base contract for teacher-forced dataset envs.
+    """Base class for dataset-backed LLM envs.
 
     The minimal ``reset`` / ``step`` / ``close`` surface the dataset trainer
     holds uniformly — :class:`~agilerl.llm_envs.dataset_env.DatasetEnv` is the
     concrete subtype. Generation envs
     (:class:`~agilerl.llm_envs.rollout_env.RolloutEnv`) deliberately do not
-    subclass this: they speak the token-level rollout contract instead, so
+    subclass this: they expose the token-level rollout interface instead, so
     ``isinstance(env, LLMEnv)`` selects the dataset family only.
     ``evaluation_mode`` flags whether the env is serving its held-out split;
     :meth:`eval_mode` toggles it for the duration of a block and restores the
@@ -80,8 +80,7 @@ class LLMEnv(ABC):
         """Advance the environment by one step.
 
         Generation envs consume an action and return the next observation;
-        teacher-forced dataset envs advance via :meth:`reset` and implement this
-        as a no-op.
+        dataset envs advance via :meth:`reset` and implement this as a no-op.
         """
 
     @contextmanager

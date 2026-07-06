@@ -589,14 +589,14 @@ def train_llm_dataset(
 ) -> PopulationType:
     """Train a population of DPO or SFT agents over a ``DatasetEnv`` dataloader.
 
-    Each training step draws a teacher-forced batch from the dataset environment.
+    Each training step draws a labelled batch from the dataset environment.
     The algorithm of ``pop[0]`` selects the regime: DPO minimises a pairwise
     preference loss over chosen/rejected pairs, while SFT minimises the response
     cross-entropy. Both share evolution, checkpointing, and console/W&B logging.
 
     :param pop: Population of DPO or SFT agents to finetune.
     :type pop: PopulationType
-    :param env: Shared dataset environment that yields teacher-forced batches.
+    :param env: Shared dataset environment that yields labelled batches.
     :type env: DatasetEnv | None
     :param env_fn: Optional factory that creates one dataset environment per agent.
     :type env_fn: Callable[[], DatasetEnv] | None

@@ -19,7 +19,6 @@ from agilerl.llm_envs.openenv import (
 from agilerl.llm_envs.rollout_env import (
     BatchPointer,
     BatchRolloutEnv,
-    PromptOverflowError,
     RolloutEnv,
 )
 
@@ -32,7 +31,6 @@ __all__ = [
     "OpenEnvClient",
     "OpenEnvServer",
     "OpenEnvWrapper",
-    "PromptOverflowError",
     "RolloutEnv",
     "ServedEnvClient",
     "TextAction",

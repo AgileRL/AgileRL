@@ -1,7 +1,7 @@
 """Token-level rollout env for generative LLM tasks (multi-turn agentic or single-turn reasoning).
 
 A :class:`RolloutEnv` owns the tokenisation + turn loop and talks to its env through an
-**env client** that speaks the OpenEnv ``reset`` / ``step`` text contract. The env client is
+**env client** exposing the OpenEnv ``reset`` / ``step`` calls. The env client is
 either an :class:`~agilerl.llm_envs.openenv.OpenEnvClient` (the env is hosted over a URL
 — a remote Space or a local :class:`~agilerl.llm_envs.openenv.OpenEnvServer`) or a
 :class:`~agilerl.llm_envs.openenv.LocalEnvClient` (the env runs in-process, no HTTP —
@@ -35,17 +35,6 @@ if TYPE_CHECKING:
     from agilerl.typing import RolloutPrompts
 
 
-class PromptOverflowError(RuntimeError):
-    """A freshly reset prompt already exceeds the context budget.
-
-    Raised by :meth:`RolloutEnv.reset` when ``max_model_len`` is set and the
-    initial prompt tokenises past the budget — before the row reaches the
-    generation engine, where the same condition would kill the run mid-training.
-    :class:`BatchRolloutEnv` catches it to skip the offending dataset row with a
-    warning.
-    """
-
-
 class RolloutEnv:
     """Token-level rollout env: tokenisation + turn loop over a text env client.
 
@@ -54,7 +43,7 @@ class RolloutEnv:
     in-process :class:`~agilerl.llm_envs.openenv.LocalEnvClient`: ``reset`` pulls the
     initial prompt and ``step`` sends the decoded action and reads back the next
     observation + reward — the env may score it, run a tool, or hit a sandbox. On top of
-    that it exposes the token contract the trainer / rollout engine drive:
+    that it exposes the token-level surface the trainer / rollout engine drive:
 
     * ``reset()`` / ``step(completion_ids, sampling_logps=None)`` return a
       tokenised **observation dict** (``input_ids`` / ``attention_mask``);
@@ -104,7 +93,7 @@ class RolloutEnv:
             the run manifest.
         :type timeout_s: float | None
         :param mcp_tool: For an external MCP server, the tool the model's text is sent
-            to as a ``call_tool``; ``None`` (default) uses the plain text contract.
+            to as a ``call_tool``; ``None`` (default) sends plain text actions.
         :type mcp_tool: str | None
         :param pad_id: Padding token id used when assembling token tensors,
             defaults to ``None``.
@@ -243,7 +232,7 @@ class RolloutEnv:
         inside a Ray actor), so there is no uvicorn thread, port, or loopback request.
         Reach for :meth:`serving` only when the env must actually be hosted over HTTP.
 
-        :param env: A local env (the ``reset`` / ``step`` text contract).
+        :param env: A local env (plain-text ``reset`` / ``step``).
         :param tokenizer: Tokenizer for the token-level loop.
         :param max_turns: Generation turns per episode.
         :param instruction: Prompt returned when the env's reset obs renders empty.
@@ -525,9 +514,11 @@ class RolloutEnv:
         :param row_index: Dataset row chosen by the owning ``BatchRolloutEnv``,
             forwarded to ``env_client.reset``.
         :type row_index: int | None
-        :raises PromptOverflowError: When ``max_model_len`` is set and the initial
+        :raises RuntimeError: When ``max_model_len`` is set and the initial
             prompt already exceeds the context budget (the owning
-            ``BatchRolloutEnv`` skips such rows with a warning).
+            ``BatchRolloutEnv`` skips such rows with a warning) — failing here
+            beats the same condition killing the run inside the generation
+            engine mid-training.
         """
         obs_text, info = self._env_client.reset(seed=seed, row_index=row_index)
 
@@ -543,7 +534,7 @@ class RolloutEnv:
                     + (f", row_index={row_index}" if row_index is not None else "")
                     + ")"
                 )
-                raise PromptOverflowError(msg)
+                raise RuntimeError(msg)
         self.full_ids = encoded["input_ids"]
         self.turn_boundaries = []
         self.turn_rewards = []
@@ -930,8 +921,7 @@ class BatchRolloutEnv:
         dataset-backed (``dataset_size == 0``) get seeds but no ``row_index``.
 
         A dataset row whose initial prompt exceeds the context budget
-        (:class:`PromptOverflowError`) is skipped with a warning and replaced by
-        the next row in the stream.
+        is skipped with a warning and replaced by the next row in the stream.
 
         If building the envs fails partway (e.g. a server fails to start), the
         already-built envs are closed and the batch is left empty, so a retried
@@ -980,10 +970,11 @@ class BatchRolloutEnv:
 
         Returns the row the group settles on (the assigned row, or the next
         in-budget row from the shared cursor). Re-raised when the env is not
-        dataset-backed (no cursor to advance) or every row overflows.
+        dataset-backed (no cursor to advance) or no in-budget row turns up
+        within 100 attempts.
         """
         assert self._pointer is not None
-        attempts = max(self._pointer.dataset_size, 1)
+        attempts = min(max(self._pointer.dataset_size, 1), 100)
         for _ in range(attempts):
             error = self._reset_or_overflow(env, seed, row_index)
             if error is None:
@@ -996,21 +987,23 @@ class BatchRolloutEnv:
             )
             row_index = self._pointer.next_row()
         msg = f"no dataset row fit the context budget after {attempts} attempts"
-        raise PromptOverflowError(msg) from error
+        raise RuntimeError(msg) from error
 
     @staticmethod
     def _reset_or_overflow(
         env: RolloutEnv,
         seed: int | None,
         row_index: int | None,
-    ) -> PromptOverflowError | None:
-        """Reset ``env``, returning a :class:`PromptOverflowError` instead of raising."""
+    ) -> RuntimeError | None:
+        """Reset ``env``, returning its ``RuntimeError`` (an over-budget prompt)
+        instead of raising, so the caller can skip the row.
+        """
         try:
             if row_index is not None:
                 env.reset(seed=seed, row_index=row_index)
             else:
                 env.reset(seed=seed)
-        except PromptOverflowError as exc:
+        except RuntimeError as exc:
             return exc
         return None
 

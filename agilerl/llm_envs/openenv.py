@@ -1,48 +1,39 @@
 """The OpenEnv seam: reach any text env the same way — over HTTP or in-process.
 
-Every LLM-training env speaks the same text-in / text-out contract — :class:`TextAction`
-(``message``) / :class:`TextObservation` (``prompt``) — and a ``RolloutEnv`` reaches it
-through a **backend**: an :class:`OpenEnvClient` when the env is hosted over a URL (a
-remote Space, or a local :class:`OpenEnvServer`), or a :class:`LocalEnvClient` when the
-env runs in the same process (no HTTP). One env is reached per backend — each concurrent
-rollout gets its own.
+Every LLM-training env is driven through the same two calls — ``reset()`` returns a
+prompt, ``step(text)`` returns the next prompt, a reward, and done flags — and a
+``RolloutEnv`` reaches it through a **backend**: an :class:`OpenEnvClient` when the env
+is hosted at a URL (a remote Space, or a local :class:`OpenEnvServer`), or a
+:class:`LocalEnvClient` when the env runs in the same process (no HTTP). One env is
+reached per backend — each concurrent rollout gets its own.
 
-The wrappers here exist because OpenEnv's own classes don't cover this use directly:
+The pieces here fill the gaps OpenEnv's own classes leave:
 
-* :class:`OpenEnvWrapper` adapts an env's plain ``reset`` / ``step`` text contract to
-  OpenEnv's typed ``Environment`` ABC — the glue that lets OpenEnv host it at all.
-* :class:`OpenEnvServer` runs OpenEnv's app (``create_app``) on uvicorn *in-process*
-  (a daemon thread on an ephemeral port, with ``start`` / ``stop``), because OpenEnv's
-  own host story is a standalone blocking process (a Space, a container) — not
-  something a trainer starts and stops itself. It closes the hosted env once, on stop.
-* :class:`OpenEnvClient` is a small *synchronous* httpx client for an env over a URL: the
-  rollout loop drives ``reset`` / ``step`` synchronously, and an async caller (e.g. a Ray
-  actor) gets its concurrency from the actor boundary, not the client.
-* :class:`LocalEnvClient` is the in-process sibling: the same surface, but it calls a
-  local env's ``reset`` / ``step`` directly (no server, no socket).
-* :class:`ServedEnvClient` composes the two hosting halves — it starts an
-  :class:`OpenEnvServer` for a local env and drives it through an
-  :class:`OpenEnvClient`, owning both so one ``close`` tears everything down.
+* :class:`OpenEnvWrapper` — presents a plain-text env as OpenEnv's typed
+  ``Environment`` so OpenEnv's server can host it.
+* :class:`OpenEnvServer` — runs OpenEnv's app on uvicorn *in-process* (a daemon thread
+  on an ephemeral port, ``start`` / ``stop``); OpenEnv's own hosting is a standalone
+  blocking process. Closes the hosted env once, on stop.
+* :class:`OpenEnvClient` — a small *synchronous* httpx client for an env at a URL; an
+  async caller (e.g. a Ray actor) gets concurrency from the actor boundary, not the
+  client.
+* :class:`LocalEnvClient` — the in-process sibling: same surface, direct calls, no
+  socket.
+* :class:`ServedEnvClient` — hosts a local env on an :class:`OpenEnvServer`, drives it
+  through an :class:`OpenEnvClient`, and owns both, so one ``close`` tears everything
+  down.
 
 :func:`resolve_env` turns a URL or a ``module:Class`` entrypoint into a hosted ``(url,
-server)``; :func:`load_env` just builds an entrypoint env (no hosting) for the in-process
-path.
+server)``; :func:`load_env` just builds an entrypoint env (no hosting) for the
+in-process path.
 
-Two constraints of the OpenEnv HTTP protocol worth knowing:
-
-* **Servers must run in SIMULATION mode.** OpenEnv registers ``/reset`` / ``/step`` /
-  ``/state`` only in simulation mode; a production-mode server exposes just
-  ``/health`` / ``/schema`` / ``/metadata`` / ``/ws`` / ``/mcp``, so
-  :class:`OpenEnvClient` cannot drive it. Servers hosted here (:class:`OpenEnvServer`)
-  are simulation-mode; check the mode of any external server before training against it.
-* **One REST server serves one episode at a time.** OpenEnv's REST handlers hold no
-  session, so a served env is stateful per server — hence one :class:`OpenEnvServer`
-  per concurrent rollout (see :meth:`RolloutEnv.serving`). OpenEnv's WebSocket path
-  does support many concurrent sessions per server (a fresh env per session,
-  ``max_concurrent_envs``, an idle-session reaper): a WebSocket-backed
-  ``EnvClientProtocol`` implementation is the intended evolution if the per-rollout
-  server fleet ever becomes the bottleneck. Today rollout concurrency comes from the
-  distributed (Ray) collector, so the sync REST backend stays the simple default.
+Two OpenEnv facts shape the design. Servers must run in **simulation mode**: production
+mode does not register ``/reset`` / ``/step`` / ``/state``, so the REST client cannot
+drive it. And REST holds no session state, so a served env handles one episode at a
+time — hence one server per concurrent rollout (see :meth:`RolloutEnv.serving`).
+OpenEnv's WebSocket path does support many sessions per server; a WebSocket-backed
+backend is the noted evolution if the per-rollout fleet ever becomes the bottleneck —
+today rollout concurrency comes from the distributed (Ray) collector.
 """
 
 from __future__ import annotations
@@ -73,7 +64,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# --- standard text contract ------------------------------------------------
 class TextAction(Action):
     """OpenEnv action carrying the policy's generated text."""
 
@@ -98,15 +88,14 @@ class TextObservation(Observation):
 class OpenEnvWrapper(Environment):
     """Adapt an env to OpenEnv's typed ``Environment`` ABC.
 
-    A typical env speaks a plain text contract, not
-    OpenEnv's typed ``Action`` / ``Observation`` / ``State``, so this bridges the two —
-    letting OpenEnv's server host any local env unchanged.
-    ``inner`` provides ``reset(seed=None[, row_index, evaluation]) -> (prompt, info)`` and
-    ``step(action_text) -> (prompt, reward, terminated, truncated, info)``.
-    The env's ``dataset_size`` / ``tools`` are surfaced on the OpenEnv ``state``
-    so a client can read them.
-    ``info``'s ``prefix`` / ``suffix`` are folded into the prompt (OpenEnv
-    does not round-trip observation metadata).
+    A typical env takes and returns plain strings —
+    ``reset(seed=None[, row_index, evaluation]) -> (prompt, info)`` and
+    ``step(action_text) -> (prompt, reward, terminated, truncated, info)`` — while
+    OpenEnv works with typed ``Action`` / ``Observation`` / ``State`` objects. This
+    class translates between the two, letting OpenEnv's server host any local env
+    unchanged. The env's ``dataset_size`` / ``tools`` are surfaced on the OpenEnv
+    ``state`` so a client can read them. ``info``'s ``prefix`` / ``suffix`` are folded
+    into the prompt (OpenEnv does not round-trip observation metadata).
 
     :param inner: The local env to host.
     :param env_name: Name reported in the env's OpenEnv metadata; defaults to
@@ -277,24 +266,24 @@ class OpenEnvServer:
         )
         self._thread.start()
         deadline = time.monotonic() + 30.0
-        try:
-            while not getattr(self._server, "started", False):
-                if not self._thread.is_alive():
-                    msg = (
-                        "OpenEnvServer thread exited during startup — the port may "
-                        f"be in use or the app failed to start "
-                        f"(host={self._host!r}, port={self._port})"
-                    )
-                    raise RuntimeError(msg)
-                if time.monotonic() > deadline:
-                    msg = "OpenEnvServer failed to start within 30s"
-                    raise RuntimeError(msg)
-                time.sleep(0.02)
-            self._bound_port = self._server.servers[0].sockets[0].getsockname()[1]
-        except Exception:
+        failure: str | None = None
+        while not getattr(self._server, "started", False):
+            if not self._thread.is_alive():
+                failure = (
+                    "OpenEnvServer thread exited during startup — the port may "
+                    f"be in use or the app failed to start "
+                    f"(host={self._host!r}, port={self._port})"
+                )
+                break
+            if time.monotonic() > deadline:
+                failure = "OpenEnvServer failed to start within 30s"
+                break
+            time.sleep(0.02)
+        if failure is not None:
             # A failed start must not leak the thread or the hosted env.
             self.stop()
-            raise
+            raise RuntimeError(failure)
+        self._bound_port = self._server.servers[0].sockets[0].getsockname()[1]
         return self
 
     def stop(self) -> None:
@@ -363,14 +352,14 @@ class OpenEnvClient(_EvalSplitMixin):
     Why this rather than OpenEnv's own client: OpenEnv ships an async, WebSocket-first
     ``EnvClient``, but our rollout loop drives ``reset`` / ``step`` synchronously,
     so a plain **sync** httpx client hitting the (async) FastAPI server is
-    simpler than threading an event loop through the trainer.
-    This client can still be used asynchronously by having the client itself sit inside an async process, like a Ray actor!
+    simpler than threading an event loop through the trainer. This client can still be
+    used asynchronously by sitting inside an async process, like a Ray actor.
 
     Drives any env hosted as an OpenEnv server — our own :class:`OpenEnvServer` or a
     third-party one.
 
-    For an external server whose env is exposed as an MCP tool rather than the plain text
-    contract, pass ``mcp_tool``: the model's text is sent as
+    For an external server whose env is exposed as an MCP tool rather than plain
+    ``{"message": text}`` actions, pass ``mcp_tool``: the model's text is sent as
     ``call_tool(mcp_tool, {arg: text})`` and the tool result rendered back to text.
     This is only a transport shim for MCP-only servers; it does not constrain how many
     tools the environment itself supports.
@@ -381,9 +370,9 @@ class OpenEnvClient(_EvalSplitMixin):
         requests unbounded; the value is supplied from the run manifest.
     :param mcp_tool: Optional MCP transport adapter for external servers that expect
         ``call_tool`` actions. When set, each step is sent as
-        ``call_tool(mcp_tool, {arg: text})``; when ``None``, send
-        ``{"message": text}`` (the normal text contract). Multi-tool behavior remains
-        environment-driven via the env's advertised ``tools`` schemas.
+        ``call_tool(mcp_tool, {arg: text})``; when ``None``, actions are sent as
+        ``{"message": text}``. Multi-tool behavior remains environment-driven via the
+        env's advertised ``tools`` schemas.
     :param arg: MCP argument name carrying the text (default ``"message"``).
     :param instruction: Prompt returned from reset when the env's reset obs is empty.
     """
@@ -559,7 +548,7 @@ class LocalEnvClient(_EvalSplitMixin):
     Implements :class:`~agilerl.protocols.EnvClientProtocol` for
     :class:`~agilerl.llm_envs.rollout_env.RolloutEnv`.
 
-    Drives a local env's ``reset`` / ``step`` text contract **directly** (no server, no
+    Calls a local env's ``reset`` / ``step`` **directly** (no server, no
     socket), exposing the same surface a :class:`RolloutEnv` consumes (``reset`` /
     ``step`` / ``close`` / ``dataset_size`` / ``tools`` / ``eval_mode``). Use it (via
     :meth:`RolloutEnv.local` / :meth:`RolloutEnv.from_spec`) when the env lives in the
@@ -650,7 +639,7 @@ class ServedEnvClient:
     server (letting one server host many concurrent rollouts) and release it in
     ``close`` — with ``RolloutEnv`` unchanged.
 
-    :param env: The local env to host (the ``reset`` / ``step`` text contract).
+    :param env: The local env to host (plain-text ``reset`` / ``step``).
     :param host: Interface the server binds (default loopback).
     :param port: Server TCP port; ``0`` lets the OS pick one.
     :param env_name: Name advertised in the env's OpenEnv metadata; defaults to the
@@ -747,7 +736,7 @@ class ServedEnvClient:
 def _observation_text(obs: Any) -> str:
     """Render an OpenEnv observation to prompt text.
 
-    Handles our text contract (``{"prompt": ...}`` or a bare string) and a third-party
+    Handles our own observations (``{"prompt": ...}`` or a bare string) and a third-party
     typed / MCP observation (tool-result content blocks, or a ``text`` / ``message``
     field), so one client drives both our servers and external ones.
     """
