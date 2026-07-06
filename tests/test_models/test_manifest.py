@@ -255,7 +255,7 @@ class TestTrainingManifest:
 
     # -- Network architecture injection -------------------------------------
 
-    def test_network_missing_arch_raises_helpful_error(self):
+    def test_network_missing_arch_defers_resolution(self):
         data = _make_manifest(
             algo={"name": "DQN"},
             network={
@@ -264,8 +264,12 @@ class TestTrainingManifest:
                 "head_config": {"hidden_size": [64]},
             },
         )
-        with pytest.raises(ValueError, match="Missing encoder architecture"):
-            TrainingManifest.model_validate(data)
+        manifest = TrainingManifest.model_validate(data)
+        # Deferred: no arch declared, so net_config is left as a raw dict for
+        # the trainer to resolve from the observation space (Task 3), rather
+        # than raising.
+        assert isinstance(manifest.algorithm.net_config, dict)
+        assert "arch" not in manifest.algorithm.net_config.get("encoder_config", {})
 
     @pytest.mark.parametrize(
         ("arch", "encoder_kwargs", "expected_encoder_cls"),
@@ -1240,3 +1244,39 @@ class TestFromConfigFiles:
 
         manifest = TrainingManifest.model_validate(data)
         assert isinstance(manifest.algorithm, expected_algo_cls)
+
+
+class TestArchOptional:
+    def test_arch_present_still_validates(self):
+        raw = {
+            "algorithm": {"name": "PPO"},
+            "environment": {"name": "CartPole-v1"},
+            "network": {
+                "arch": "mlp",
+                "encoder_config": {"hidden_size": [64]},
+                "head_config": {"hidden_size": [64]},
+            },
+        }
+        out = TrainingManifest.get_validated(raw, mode="json")
+        assert out["network"]["encoder_config"]["arch"] == "mlp"
+
+    def test_arch_absent_keeps_network_raw(self):
+        from agilerl.models.manifest import TrainingManifest as TM
+
+        raw = {
+            "algorithm": {"name": "PPO"},
+            "environment": {"name": "CartPole-v1"},
+            "network": {"latent_dim": 64, "encoder_config": {"hidden_size": [64]}},
+        }
+        manifest = TM.model_validate(raw)
+        # Deferred: net_config left as a raw dict, not a NetworkSpec.
+        assert isinstance(manifest.algorithm.net_config, dict)
+        assert "arch" not in manifest.algorithm.net_config.get("encoder_config", {})
+
+    def test_network_arch_is_resolvable(self):
+        from agilerl.models.networks import network_arch_is_resolvable
+
+        assert network_arch_is_resolvable({"arch": "mlp"})
+        assert network_arch_is_resolvable({"encoder_config": {"arch": "cnn"}})
+        assert not network_arch_is_resolvable({"encoder_config": {"hidden_size": [64]}})
+        assert not network_arch_is_resolvable({})

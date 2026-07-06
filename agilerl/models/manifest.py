@@ -19,6 +19,7 @@ from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
 from agilerl.models.networks import (
     FinetuningNetworkSpec,
     NetworkSpec,
+    network_arch_is_resolvable,
     normalize_manifest_network,
 )
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
@@ -129,6 +130,10 @@ def _resolve_network(data: Any) -> dict[str, Any]:
         return FinetuningNetworkSpec.model_validate(data).model_dump(mode="json")
 
     normalized = normalize_manifest_network(data)
+    if not network_arch_is_resolvable(normalized):
+        # Deferred: keep the raw network dict; the trainer resolves the arch
+        # from the observation space in Trainer.__init__.
+        return normalized
     spec = NetworkSpec.model_validate(normalized)
     data_dict = spec.model_dump()
     data_dict["encoder_config"]["arch"] = spec.encoder_config.arch
@@ -217,7 +222,14 @@ class TrainingManifest(BaseModel):
                     None,
                 )
                 if spec_cls is not None:
-                    self.algorithm.net_config = spec_cls.model_validate(self.network)
+                    if network_arch_is_resolvable(self.network):
+                        self.algorithm.net_config = spec_cls.model_validate(
+                            self.network
+                        )
+                    else:
+                        # Deferred: leave the raw dict for the trainer to resolve
+                        # once the observation space is known.
+                        self.algorithm.net_config = dict(self.network)
             # LLM algorithms expect a pretrained model
             elif issubclass(algo_spec_cls, LLMAlgorithmSpec):
                 llm_network = FinetuningNetworkSpec.model_validate(self.network)

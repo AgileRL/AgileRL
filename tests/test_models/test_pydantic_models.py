@@ -52,14 +52,16 @@ class TestNormalizeManifestNetwork:
         )
         assert normalized["encoder_config"] == {"arch": "mlp"}
 
-    def test_missing_arch_raises_helpful_error(self):
-        with pytest.raises(ValueError, match="Missing encoder architecture"):
-            normalize_manifest_network(
-                {
-                    "encoder_config": {"hidden_size": [64]},
-                    "head_config": {"hidden_size": [64]},
-                },
-            )
+    def test_missing_arch_deferred(self):
+        # Deferred: no arch declared anywhere, so the data is returned
+        # unchanged rather than raising; the trainer resolves the arch later.
+        data = {
+            "encoder_config": {"hidden_size": [64]},
+            "head_config": {"hidden_size": [64]},
+        }
+        normalized = normalize_manifest_network(data)
+        assert "arch" not in normalized["encoder_config"]
+        assert normalized == data
 
 
 class TestMinMaxValidator:
@@ -987,8 +989,9 @@ class TestManifestFromTrainerSpecsForeignModels:
     """Foreign BaseModel inputs are dumped before manifest validation."""
 
     def test_from_trainer_specs_coerces_foreign_training_model(self):
-        from agilerl.arena.models.env import EnvSpec as ArenaEnvSpec
         from pydantic import BaseModel
+
+        from agilerl.arena.models.env import EnvSpec as ArenaEnvSpec
 
         class ForeignTraining(BaseModel):
             max_steps: int = 300
@@ -1004,7 +1007,6 @@ class TestManifestFromTrainerSpecsForeignModels:
 
     def test_resolve_foreign_arena_algorithm(self):
         from agilerl.arena.models.algorithms.ppo import PPOSpec as ArenaPPOSpec
-
         from agilerl.models.manifest import _resolve_algorithm
 
         resolved = _resolve_algorithm(ArenaPPOSpec(learn_step=48))

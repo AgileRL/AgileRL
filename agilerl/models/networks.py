@@ -51,15 +51,28 @@ def infer_encoder_arch(
     return "mlp"
 
 
+def network_arch_is_resolvable(network: dict) -> bool:
+    """Return True if the manifest network section declares an ``arch``.
+
+    Checks the top level and the nested ``encoder_config``. When False, the
+    architecture must be inferred from the observation space at build time.
+    """
+    if not isinstance(network, dict):
+        return False
+    if network.get("arch"):
+        return True
+    encoder_config = network.get("encoder_config")
+    return isinstance(encoder_config, dict) and bool(encoder_config.get("arch"))
+
+
 def normalize_manifest_network(data: Any) -> Any:
-    """Move a top-level ``arch`` key into ``encoder_config.arch``.
+    """Move a top-level ``arch`` key into ``encoder_config.arch`` when present.
 
-    Raw YAML/JSON manifests place ``arch`` at the network section root,
-    but :class:`NetworkSpec` (a discriminated union) expects it nested
-    under ``encoder_config``.  This helper bridges the two representations.
-
-    :raises ValueError: If ``arch`` is missing from both the network root and
-        ``encoder_config``.
+    Raw YAML/JSON manifests place ``arch`` at the network section root, but
+    :class:`NetworkSpec` (a discriminated union) expects it nested under
+    ``encoder_config``. When ``arch`` is absent it is inferred later from the
+    observation space, so this helper leaves the data unchanged rather than
+    raising.
     """
     if not isinstance(data, dict):
         return data
@@ -73,12 +86,8 @@ def normalize_manifest_network(data: Any) -> Any:
     arch = top_level_arch or nested_arch
 
     if arch is None:
-        supported = ", ".join(_MANIFEST_ENCODER_ARCHS)
-        msg = (
-            "Missing encoder architecture in the manifest. "
-            f"Set 'arch' at the top level of 'network'. Supported values: {supported}."
-        )
-        raise ValueError(msg)
+        # Deferred: architecture inferred from the observation space later.
+        return data
 
     if encoder_config is None:
         data["encoder_config"] = {"arch": arch}
