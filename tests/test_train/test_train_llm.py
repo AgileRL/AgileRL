@@ -545,6 +545,127 @@ class TestFinetuneLlmPreference:
         assert agent_a.learn.call_args.args[0] == {"prompt": ["a"]}
         assert agent_b.learn.call_args.args[0] == {"prompt": ["b"]}
 
+    def test_finetune_llm_preference_learns_from_current_reset_batch(self):
+        # Arrange
+        agent = MagicMock(spec=DPO)
+        agent.algo = "DPO"
+        agent.fitness = [0.0]
+        agent.batch_size_per_process = 1
+        agent.batch_size = 1
+        agent.steps = [0]
+        agent.scores = [0.0]
+        agent.pretrained_model_name_or_path = "Qwen/Qwen2.5-0.5B"
+        agent.learn.return_value = {
+            "mean_chosen_reward": 0.7,
+            "mean_rejected_reward": 0.2,
+            "mean_kl": 0.1,
+        }
+
+        env = MagicMock()
+        env.__len__.return_value = 3
+        env.name = "mock_env"
+        env.data_batch_size_per_gpu = 1
+        env.num_epochs = 0
+        prompts = [{"prompt": ["p0"]}, {"prompt": ["p1"]}, {"prompt": ["p2"]}]
+        epoch_trackers = [0, 0, 1]
+        state = {"idx": 0}
+
+        def reset_side_effect():
+            idx = state["idx"]
+            env.num_epochs = epoch_trackers[idx]
+            state["idx"] += 1
+            return prompts[idx]
+
+        env.reset.side_effect = reset_side_effect
+
+        # Act
+        with (
+            patch("agilerl.training.train_llm.trange"),
+            patch(
+                "agilerl.training.train_llm.aggregate_metrics_across_gpus",
+                side_effect=lambda _acc, value: value,
+            ),
+            patch("agilerl.training.train_llm.save_llm_checkpoint"),
+        ):
+            train_llm_dataset(
+                pop=[agent],
+                env=env,
+                max_steps=3,
+                evaluation_interval=100,
+                verbose=False,
+                accelerator=None,
+            )
+
+        # Assert
+        assert env.reset.call_count == 3
+        assert [
+            call_args.args[0] for call_args in agent.learn.call_args_list
+        ] == prompts
+        assert [
+            call_args.args[0] for call_args in agent.set_reference_policy.call_args_list
+        ] == [0, 0, 1]
+
+    def test_finetune_llm_preference_env_fn_preserves_agent_batch_isolation(self):
+        # Arrange
+        def make_agent() -> MagicMock:
+            built_agent = MagicMock(spec=DPO)
+            built_agent.algo = "DPO"
+            built_agent.fitness = [0.0]
+            built_agent.batch_size_per_process = 1
+            built_agent.batch_size = 1
+            built_agent.steps = [0]
+            built_agent.scores = [0.0]
+            built_agent.pretrained_model_name_or_path = "Qwen/Qwen2.5-0.5B"
+            built_agent.learn.return_value = {
+                "mean_chosen_reward": 0.7,
+                "mean_rejected_reward": 0.2,
+                "mean_kl": 0.1,
+            }
+            return built_agent
+
+        agent_a = make_agent()
+        agent_b = make_agent()
+
+        env_a = MagicMock()
+        env_a.__len__.return_value = 1
+        env_a.name = "env_a"
+        env_a.data_batch_size_per_gpu = 1
+        env_a.num_epochs = 0
+        env_a.reset.return_value = {"prompt": ["a_only"]}
+
+        env_b = MagicMock()
+        env_b.__len__.return_value = 1
+        env_b.name = "env_b"
+        env_b.data_batch_size_per_gpu = 1
+        env_b.num_epochs = 0
+        env_b.reset.return_value = {"prompt": ["b_only"]}
+
+        env_fn = MagicMock(side_effect=[env_a, env_b])
+
+        # Act
+        with (
+            patch("agilerl.training.train_llm.trange"),
+            patch(
+                "agilerl.training.train_llm.aggregate_metrics_across_gpus",
+                side_effect=lambda _acc, value: value,
+            ),
+            patch("agilerl.training.train_llm.save_llm_checkpoint"),
+        ):
+            train_llm_dataset(
+                pop=[agent_a, agent_b],
+                env_fn=env_fn,
+                max_steps=2,
+                evaluation_interval=100,
+                verbose=False,
+                accelerator=None,
+            )
+
+        # Assert
+        assert env_a.reset.call_count == 1
+        assert env_b.reset.call_count == 1
+        assert agent_a.learn.call_args.args[0] == {"prompt": ["a_only"]}
+        assert agent_b.learn.call_args.args[0] == {"prompt": ["b_only"]}
+
     def test_finetune_llm_preference_csv_logging_without_wandb(self, tmp_path, capsys):
         """DPO: csv_check only path; teardown closes CSV and prints path (train_llm.py ~858-860)."""
         mock_agent = MagicMock(spec=DPO)
