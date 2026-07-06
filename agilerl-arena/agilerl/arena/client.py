@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, ClassVar, TypedDict
 
 import httpx
+from typing_extensions import Self
+
 from agilerl.arena.auth import (
     ArenaOAuth2,
     is_oauth_access_token_valid,
@@ -40,7 +42,6 @@ from agilerl.arena.utils import (
     prepare_env_upload,
     prepare_file_upload,
 )
-from typing_extensions import Self
 
 logger = logging.getLogger(__name__)
 
@@ -224,15 +225,19 @@ class ArenaClient:
         :type name: str
         :raises ArenaConfigError: If the project does not exist.
         """
+        # Validate that the project exists.
         existing = self.list_projects()
         names = [p["name"] for p in existing]
         if name not in names:
             hint = f"Available projects: {', '.join(names) or 'None'}. "
             msg = f"Project {name!r} not found."
             raise ArenaConfigError(msg, sdk_hint=hint, cli_hint=hint)
+
+        # Update ~/.arena/config.json with the new default project.
         config = self._read_config()
         config["default_project"] = name
         self._write_config(config)
+        logger.info("Default project set to %r.", name)
 
     def _resolve_project(self, project: str | None) -> str | None:
         """Return *project* if given, otherwise fall back to the stored default."""

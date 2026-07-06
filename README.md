@@ -348,7 +348,7 @@ Use the `ArenaClient` to interact with Arena programmatically from scripts or no
 from agilerl.arena import ArenaClient
 
 client = ArenaClient()
-client.login()
+client.login() # OAuth2 device-flow authentication
 
 # Upload and validate a custom environment
 client.validate_environment(name="my-custom-env", source="path/to/my_env.py")
@@ -369,7 +369,7 @@ The same operations are available from the command line:
 arena login
 
 # Upload and validate
-arena env validate --name my-custom-env --source path/to/my_env.py
+arena env validate my-custom-env --source path/to/my_env.py
 
 # Train on validated custom environment
 arena experiments submit path/to/manifest.yaml --project my-project

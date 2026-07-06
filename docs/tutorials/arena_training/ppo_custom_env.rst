@@ -157,7 +157,7 @@ If no version is specified when creating an environment from scratch, ``v1`` is 
 
       .. code-block:: bash
 
-         arena env validate --name merge-env --source merge-env/
+         arena env validate merge-env --source merge-env/
 
 After validation succeeds, the environment is automatically profiled to determine its
 resource usage. You will be able to view it in the **Environments** section of the Arena

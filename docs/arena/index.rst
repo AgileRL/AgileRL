@@ -152,9 +152,8 @@ environment. See :ref:`tutorial_arena_end_to_end` for a full walkthrough.
       .. code-block:: bash
 
          # Upload and validate in one step
-         arena env validate \
-             --source merge-env/ \
-             --name merge-env
+         arena env validate merge-env \
+             --source merge-env/
 
          # Re-validate an already-registered environment
          arena env validate merge-env --version v1

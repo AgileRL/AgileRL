@@ -3,8 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import agilerl.arena  # noqa: F401 — configure package logging before submodules
 import click
+
+import agilerl.arena  # noqa: F401 — configure package logging before submodules
 from agilerl.arena.cli_manifest import handle_help_option
 from agilerl.arena.config import CommandConfig, arena_client
 from agilerl.arena.exceptions import ArenaError
@@ -942,11 +943,7 @@ def projects_create(
     :rtype: dict[str, Any]
     """
     with arena_client(config) as client:
-        emit_result(
-            client.create_project(
-                name=name, description=description, llm_based=llm_based
-            )
-        )
+        client.create_project(name=name, description=description, llm_based=llm_based)
 
 
 @projects.command("delete")
@@ -965,7 +962,7 @@ def projects_delete(config: CommandConfig, name: str, yes: bool) -> None:
         return
 
     with arena_client(config) as client:
-        emit_result(client.delete_project(name=name))
+        client.delete_project(name=name)
 
 
 @projects.command("set-default")
@@ -975,7 +972,6 @@ def projects_set_default(config: CommandConfig, name: str) -> None:
     """Set the default project for commands that accept --project."""
     with arena_client(config) as client:
         client.set_default_project(name)
-    click.echo(f"Default project set to {name!r}.")
 
 
 @projects.command("get-default")
