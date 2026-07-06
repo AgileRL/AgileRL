@@ -1478,9 +1478,11 @@ class VLLMConfig:
         defaults to False.
     :type sleep_mode: bool, optional
     :param sleep_mode_level: Sleep level passed to ``llm.sleep(level=...)`` when
-        ``sleep_mode`` is enabled. ``1`` offloads weights to CPU and drops KV
-        cache; ``2`` discards GPU allocations and is more robust in colocated
-        multi-process setups. Defaults to 2.
+        ``sleep_mode`` is enabled. ``1`` backs the base weights up to CPU and
+        drops the KV cache; ``2`` discards the weights entirely, so it is only
+        safe when new base weights are pushed into vLLM after every wake. The
+        colocated LoRA-only sync never re-pushes the base, so it requires
+        level 1. Defaults to 1.
     :type sleep_mode_level: int, optional
     :param dtype: Model weight dtype passed to the vLLM ``LLM`` constructor
         (e.g. ``"bfloat16"``, ``"float16"``).  ``None`` lets vLLM choose,
@@ -1572,7 +1574,7 @@ class VLLMConfig:
     swap_space: float | None = None
     enforce_eager: bool | None = None
     sleep_mode: bool = False
-    sleep_mode_level: int = 2
+    sleep_mode_level: int = 1
     dtype: str | None = None
     quantization: str | None = None
     vllm_model_name_or_path: str | None = None
