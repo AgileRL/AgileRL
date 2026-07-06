@@ -5953,9 +5953,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     "trainer base offloaded to CPU (before vLLM wake)"
                 )
         # Every rank holds its own colocated engine, and _sleep_vllm_after_init
-        # slept them all; waking only the main process leaves the other ranks'
-        # engines unmapped, so their add_lora below dies with CUDA
-        # invalid-argument. Wake per rank.
+        # slept them all; we wake them all here.
         if self.vllm_config.sleep_mode and not self._vllm_awake:
             torch.cuda.empty_cache()
             self.llm.wake_up()
