@@ -34,6 +34,7 @@ import importlib.util
 import inspect
 import logging
 import os
+import re
 import threading
 import time
 from collections.abc import Iterator
@@ -618,16 +619,29 @@ def _name_from_spec(spec: str) -> str:
     ``"game:GuessTheNumber-v0"`` -> ``"GuessTheNumber-v0"``,
     ``"/path/to/file.py:Env"`` -> ``"Env"``, a bare name passes through unchanged.
     """
-    return spec.rsplit(":", 1)[-1].rsplit("/", 1)[-1] or spec
+    tail = spec.rsplit(":", 1)[-1]
+    return tail.rsplit("/", 1)[-1].rsplit("\\", 1)[-1] or spec
 
 
 def _load_entrypoint(target: str) -> Callable[..., Any]:
     """Import ``module:Class`` (or ``/path/to/file.py:Class``) and return ``Class``."""
-    module_part, _, attr = target.partition(":")
+    module_part, sep, attr = target.rpartition(":")
+    if not sep:
+        msg = f"env entrypoint {target!r} must be 'module:Class'"
+        raise ValueError(msg)
     if not attr:
         msg = f"env entrypoint {target!r} must be 'module:Class'"
         raise ValueError(msg)
-    if module_part.endswith(".py") or os.sep in module_part:
+    # Detect filesystem paths across platforms, including Windows-style paths
+    # parsed on non-Windows hosts (e.g. CI, cross-platform tests).
+    looks_like_path = (
+        module_part.endswith(".py")
+        or "/" in module_part
+        or "\\" in module_part
+        or os.sep in module_part
+        or bool(re.match(r"^[A-Za-z]:[\\/]", module_part))
+    )
+    if looks_like_path:
         module = _module_from_path(module_part)
     else:
         module = importlib.import_module(module_part)

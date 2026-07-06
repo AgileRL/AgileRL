@@ -22,7 +22,12 @@ from agilerl.llm_envs import (
     RolloutEnv,
     resolve_env,
 )
-from agilerl.llm_envs.openenv import _name_from_spec, _normalize_reset, _normalize_step
+from agilerl.llm_envs.openenv import (
+    _load_entrypoint,
+    _name_from_spec,
+    _normalize_reset,
+    _normalize_step,
+)
 
 
 class _CountingEnv:
@@ -230,7 +235,29 @@ def test_name_from_spec_takes_trailing_identifier() -> None:
     """An env spec's label is the trailing identifier of the entrypoint / path."""
     assert _name_from_spec("game:GuessTheNumber-v0") == "GuessTheNumber-v0"
     assert _name_from_spec("/pkg/file.py:Env") == "Env"
+    assert _name_from_spec(r"C:\pkg\file.py:Env") == "Env"
     assert _name_from_spec("plainname") == "plainname"
+
+
+def test_load_entrypoint_windows_style_path_uses_last_colon(monkeypatch: Any) -> None:
+    """``_load_entrypoint`` treats ``C:\\...\\file.py:Class`` as a path entrypoint."""
+
+    class _FakeModule:
+        DiskEnv = _DatasetEnv
+
+    captured: dict[str, str] = {}
+
+    def _fake_module_from_path(path: str) -> _FakeModule:
+        captured["path"] = path
+        return _FakeModule()
+
+    monkeypatch.setattr(
+        "agilerl.llm_envs.openenv._module_from_path",
+        _fake_module_from_path,
+    )
+    cls = _load_entrypoint(r"C:\tmp\disk_env.py:DiskEnv")
+    assert cls is _DatasetEnv
+    assert captured["path"] == r"C:\tmp\disk_env.py"
 
 
 # --- serving: one OpenEnv server instance per rollout ----------------------
