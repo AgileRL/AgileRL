@@ -36,6 +36,7 @@ import logging
 import os
 import threading
 import time
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -43,8 +44,10 @@ from openenv.core.env_server.http_server import create_app
 from openenv.core.env_server.interfaces import Environment, EnvironmentMetadata
 from openenv.core.env_server.types import Action, Observation, State
 
+from agilerl.protocols import TextEnvProtocol
+
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable
     from typing import Self
 
 logger = logging.getLogger(__name__)
@@ -86,7 +89,7 @@ class OpenEnvWrapper(Environment):
         ``inner``'s class name (so a client sees the real env, not ``OpenEnvWrapper``).
     """
 
-    def __init__(self, inner: Any, *, env_name: str | None = None) -> None:
+    def __init__(self, inner: TextEnvProtocol, *, env_name: str | None = None) -> None:
         """Wrap ``inner`` as an OpenEnv environment."""
         super().__init__()
         self._inner = inner
@@ -206,7 +209,7 @@ class OpenEnvServer:
 
     def __init__(
         self,
-        env: Any,
+        env: TextEnvProtocol,
         *,
         host: str = "127.0.0.1",
         port: int = 0,
@@ -286,6 +289,9 @@ class OpenEnvServer:
 class OpenEnvClient:
     """Synchronous httpx client for an OpenEnv env server (text in, text out).
 
+    Implements :class:`~agilerl.protocols.EnvClientProtocol` for
+    :class:`~agilerl.llm_envs.rollout_env.RolloutEnv`.
+
     Why this rather than OpenEnv's own client: OpenEnv ships an async, WebSocket-first
     ``EnvClient``, but our rollout loop drives ``reset`` / ``step`` synchronously,
     so a plain **sync** httpx client hitting the (async) FastAPI server is
@@ -298,13 +304,18 @@ class OpenEnvClient:
     For an external server whose env is exposed as an MCP tool rather than the plain text
     contract, pass ``mcp_tool``: the model's text is sent as
     ``call_tool(mcp_tool, {arg: text})`` and the tool result rendered back to text.
+    This is only a transport shim for MCP-only servers; it does not constrain how many
+    tools the environment itself supports.
 
     :param base_url: Root URL of the env server.
     :param headers: Optional HTTP headers (e.g. auth) sent on every request.
     :param timeout_s: Per-request timeout in seconds. ``None`` (the default) leaves
         requests unbounded; the value is supplied from the run manifest.
-    :param mcp_tool: When set, send the model's text as an MCP ``call_tool`` to this
-        tool (for external MCP servers); when ``None``, send ``{"message": text}``.
+    :param mcp_tool: Optional MCP transport adapter for external servers that expect
+        ``call_tool`` actions. When set, each step is sent as
+        ``call_tool(mcp_tool, {arg: text})``; when ``None``, send
+        ``{"message": text}`` (the normal text contract). Multi-tool behavior remains
+        environment-driven via the env's advertised ``tools`` schemas.
     :param arg: MCP argument name carrying the text (default ``"message"``).
     :param instruction: Prompt returned from reset when the env's reset obs is empty.
     """
@@ -431,6 +442,9 @@ class OpenEnvClient:
 class LocalEnvClient:
     """In-process backend for a local env — the no-HTTP sibling of :class:`OpenEnvClient`.
 
+    Implements :class:`~agilerl.protocols.EnvClientProtocol` for
+    :class:`~agilerl.llm_envs.rollout_env.RolloutEnv`.
+
     Drives a local env's ``reset`` / ``step`` text contract **directly** (no server, no
     socket), exposing the same surface a :class:`RolloutEnv` consumes (``reset`` /
     ``step`` / ``close`` / ``dataset_size`` / ``tools`` / ``eval_mode``). Use it (via
@@ -445,7 +459,7 @@ class LocalEnvClient:
     :param instruction: Prompt returned from reset when the env's reset obs is empty.
     """
 
-    def __init__(self, env: Any, *, instruction: str = "") -> None:
+    def __init__(self, env: TextEnvProtocol, *, instruction: str = "") -> None:
         """Wrap a local ``env`` as an in-process backend."""
         self._env = env
         self._instruction = instruction
@@ -567,7 +581,7 @@ def resolve_env(
       ``env_config``, hosted locally via :class:`OpenEnvServer`, and returned as
       ``(server.base_url, server)``.
     """
-    if _is_url(spec):
+    if is_url(spec):
         return spec, None
     if ":" not in spec:
         msg = (
@@ -582,7 +596,7 @@ def resolve_env(
     return server.base_url, server
 
 
-def load_env(spec: str, env_config: dict[str, Any] | None = None) -> Any:
+def load_env(spec: str, env_config: dict[str, Any] | None = None) -> TextEnvProtocol:
     """Load a ``module:Class`` / ``path.py:Class`` entrypoint and build the env (no hosting).
 
     The in-process counterpart to :func:`resolve_env` (which hosts the env on an
@@ -594,11 +608,6 @@ def load_env(spec: str, env_config: dict[str, Any] | None = None) -> Any:
 
 
 def is_url(spec: str) -> bool:
-    """Whether ``spec`` is an HTTP(S) URL (already hosted) rather than an env to load."""
-    return _is_url(spec)
-
-
-def _is_url(spec: str) -> bool:
     """Whether ``spec`` is an HTTP(S) URL (already hosted) rather than an env to load."""
     return isinstance(spec, str) and spec.startswith(("http://", "https://"))
 

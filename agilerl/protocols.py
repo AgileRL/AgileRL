@@ -11,11 +11,13 @@ The key protocols include:
 - EvolvableNetworkProtocol: Interface for neural networks with encoder-decoder structure
 - MutationMethodProtocol: Interface for mutation operations on networks
 - OptimizerWrapperProtocol: Interface for optimizer management
+- TextEnvProtocol: Interface for local text envs (raw reset/step contract)
+- EnvClientProtocol: Interface for OpenEnv HTTP and in-process env clients
 
 Type aliases are provided for common types used throughout the framework.
 """
 
-from collections.abc import Callable, Generator, Iterable
+from collections.abc import Callable, Generator, Iterable, Iterator
 from enum import Enum
 from typing import (
     Any,
@@ -610,3 +612,60 @@ class PeftModelProtocol(Protocol):
         **kwargs: Any,
     ) -> "PeftModelProtocol":
         pass
+
+
+class TextEnvProtocol(Protocol):
+    """Structural contract for local text envs served or wrapped by OpenEnv.
+
+    Implementations must expose ``reset`` and ``step(action_text)``. Accepted
+    return shapes are normalized at runtime by
+    :func:`~agilerl.llm_envs.openenv._normalize_reset` and
+    :func:`~agilerl.llm_envs.openenv._normalize_step`.
+    """
+
+    def reset(self, *args: Any, **kwargs: Any) -> Any:
+        """Reset and return observation (or ``(observation, info)``)."""
+
+    def step(self, action: str) -> Any:
+        """Step once from action text."""
+
+
+class EnvClientProtocol(Protocol):
+    """Backend surface shared by :class:`~agilerl.llm_envs.openenv.OpenEnvClient`
+    and :class:`~agilerl.llm_envs.openenv.LocalEnvClient`.
+
+    A :class:`~agilerl.llm_envs.rollout_env.RolloutEnv` drives ``reset`` / ``step`` /
+    ``close`` through this contract — over HTTP or in-process.
+    """
+
+    def reset(
+        self,
+        seed: int | None = None,
+        *,
+        row_index: int | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        """Reset and return ``(prompt, info)``."""
+
+    def step(self, action: Any) -> tuple[str, float, bool, bool, dict[str, Any]]:
+        """Step once and return the Gym 5-tuple."""
+
+    def close(self) -> None:
+        """Release backend resources."""
+
+    @property
+    def dataset_size(self) -> int:
+        """Dataset rows served (``0`` when not dataset-backed)."""
+
+    @property
+    def tools(self) -> list[Any]:
+        """Tool schemas advertised by the env (empty when none)."""
+
+    @property
+    def evaluation_mode(self) -> bool:
+        """Whether resets are flagged for the held-out split."""
+
+    @evaluation_mode.setter
+    def evaluation_mode(self, value: bool) -> None: ...
+
+    def eval_mode(self) -> Iterator[None]:
+        """Serve the held-out split for the duration of the context."""

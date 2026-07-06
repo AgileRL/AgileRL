@@ -1,7 +1,7 @@
 """Token-level rollout env for generative LLM tasks (multi-turn agentic or single-turn reasoning).
 
-A :class:`RolloutEnv` owns the tokenisation + turn loop and talks to its env through a
-**backend** that speaks the OpenEnv ``reset`` / ``step`` text contract. The backend is
+A :class:`RolloutEnv` owns the tokenisation + turn loop and talks to its env through an
+**env client** that speaks the OpenEnv ``reset`` / ``step`` text contract. The env client is
 either an :class:`~agilerl.llm_envs.openenv.OpenEnvClient` (the env is hosted over a URL
 — a remote Space or a local :class:`~agilerl.llm_envs.openenv.OpenEnvServer`) or a
 :class:`~agilerl.llm_envs.openenv.LocalEnvClient` (the env runs in-process, no HTTP —
@@ -26,6 +26,7 @@ from agilerl.llm_envs.openenv import (
     is_url,
     load_env,
 )
+from agilerl.protocols import EnvClientProtocol, TextEnvProtocol
 from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
 
 if TYPE_CHECKING:
@@ -33,10 +34,10 @@ if TYPE_CHECKING:
 
 
 class RolloutEnv:
-    """Token-level rollout env: tokenisation + turn loop over a text env backend.
+    """Token-level rollout env: tokenisation + turn loop over a text env client.
 
-    It lets a model that produces tokens interact with a text world reached through a
-    backend — an :class:`~agilerl.llm_envs.openenv.OpenEnvClient` over a URL, or an
+    It lets a model that produces tokens interact with a text world reached through an
+    env client — an :class:`~agilerl.llm_envs.openenv.OpenEnvClient` over a URL, or an
     in-process :class:`~agilerl.llm_envs.openenv.LocalEnvClient`: ``reset`` pulls the
     initial prompt and ``step`` sends the decoded action and reads back the next
     observation + reward — the env may score it, run a tool, or hit a sandbox. On top of
@@ -61,7 +62,7 @@ class RolloutEnv:
 
     def __init__(
         self,
-        backend: str | Any,
+        env_client: str | EnvClientProtocol,
         tokenizer: Any,
         max_turns: int = 1,
         *,
@@ -73,12 +74,12 @@ class RolloutEnv:
         max_model_len: int | None = None,
         max_output_tokens: int | None = None,
     ) -> None:
-        """Drive a text env at the token level over ``backend`` (a URL or a backend object).
+        """Drive a text env at the token level over ``env_client`` (a URL or a client object).
 
-        :param backend: A URL string (builds an HTTP ``OpenEnvClient``) or a backend
-            object — an ``OpenEnvClient`` / ``LocalEnvClient`` / injected double — used
-            as-is. See :meth:`local` / :meth:`from_spec` for the common cases.
-        :type backend: str | Any
+        :param env_client: A URL string (builds an HTTP ``OpenEnvClient``) or an
+            :class:`~agilerl.protocols.EnvClientProtocol` implementation
+            used as-is. See :meth:`local` / :meth:`from_spec` for the common cases.
+        :type env_client: str | EnvClientProtocol
         :param tokenizer: Tokenizer used to encode prompts/feedback and apply the
             chat template.
         :type tokenizer: Any
@@ -124,28 +125,28 @@ class RolloutEnv:
         :vartype sampling_logps: list[torch.Tensor]
         """
         self.max_turns = max_turns
-        # ``backend`` is either a URL string (build an HTTP client) or an already-built
-        # backend object (an ``OpenEnvClient`` / ``LocalEnvClient`` / injected double) —
+        # ``env_client`` is either a URL string (build an HTTP client) or an already-built
+        # client object (an ``OpenEnvClient`` / ``LocalEnvClient`` / injected double) —
         # the latter is how ``.local`` / ``.from_spec`` plug in an in-process or custom
         # transport. ``headers`` / ``timeout_s`` / ``mcp_tool`` apply only to the URL case.
-        if isinstance(backend, str):
-            self._backend = OpenEnvClient(
-                backend,
+        if isinstance(env_client, str):
+            self._env_client = OpenEnvClient(
+                env_client,
                 headers=headers,
                 timeout_s=timeout_s,
                 mcp_tool=mcp_tool,
             )
         else:
-            self._backend = backend
+            self._env_client = env_client
         # Set by ``serving`` when this env hosts its own OpenEnv server; stopped on
         # ``close`` so per-rollout servers don't leak.
         self._owned_server: OpenEnvServer | None = None
         self.tokenizer = tokenizer
         self.pad_id = pad_id
         self.apply_chat_template = apply_chat_template
-        # Tool schemas come from whatever the env advertises through the backend; an
+        # Tool schemas come from whatever the env advertises through the env client; an
         # empty list means no ``tools=`` is passed.
-        self.tools = self._backend.tools or None
+        self.tools = self._env_client.tools or None
         self._max_model_len = max_model_len
         self._max_output_tokens = max_output_tokens
         self.full_ids: torch.Tensor | None = None
@@ -200,7 +201,7 @@ class RolloutEnv:
     @classmethod
     def local(
         cls,
-        env: Any,
+        env: TextEnvProtocol,
         tokenizer: Any,
         max_turns: int = 1,
         *,
@@ -220,8 +221,8 @@ class RolloutEnv:
         :param kwargs: Forwarded to :class:`RolloutEnv` (e.g. ``pad_id``, ``max_model_len``).
         :rtype: RolloutEnv
         """
-        backend = LocalEnvClient(env, instruction=instruction)
-        return cls(backend, tokenizer, max_turns=max_turns, **kwargs)
+        env_client = LocalEnvClient(env, instruction=instruction)
+        return cls(env_client, tokenizer, max_turns=max_turns, **kwargs)
 
     @classmethod
     def from_spec(
@@ -243,7 +244,7 @@ class RolloutEnv:
           (no HTTP). Pass ``serve=True`` to instead host it on an in-process
           :class:`OpenEnvServer` (HTTP loopback) — e.g. to also expose it as a Space.
 
-        Owns whatever it builds (the local backend, or the served server); :meth:`close`
+        Owns whatever it builds (the local env client, or the served server); :meth:`close`
         releases it.
 
         :param spec: A URL or a ``module:Class`` / ``path.py:Class`` entrypoint.
@@ -428,23 +429,23 @@ class RolloutEnv:
 
     @property
     def dataset_size(self) -> int:
-        """Number of rows in the backend (0 if not dataset-backed)."""
-        return getattr(self._backend, "dataset_size", 0)
+        """Number of rows in the env client (0 if not dataset-backed)."""
+        return getattr(self._env_client, "dataset_size", 0)
 
     @property
     def evaluation_mode(self) -> bool:
-        """Whether the backend is currently serving its held-out split."""
-        return bool(getattr(self._backend, "evaluation_mode", False))
+        """Whether the env client is currently serving its held-out split."""
+        return bool(getattr(self._env_client, "evaluation_mode", False))
 
     @evaluation_mode.setter
     def evaluation_mode(self, value: bool) -> None:
-        if hasattr(self._backend, "evaluation_mode"):
-            self._backend.evaluation_mode = value
+        if hasattr(self._env_client, "evaluation_mode"):
+            self._env_client.evaluation_mode = value
 
     @contextmanager
     def eval_mode(self):
-        """Serve the backend's held-out split for the duration of the block."""
-        inner = getattr(self._backend, "eval_mode", None)
+        """Serve the env client's held-out split for the duration of the block."""
+        inner = getattr(self._env_client, "eval_mode", None)
         if callable(inner):
             with inner():
                 yield
@@ -460,17 +461,17 @@ class RolloutEnv:
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Create a fresh episode and return the policy-ready observation plus info.
 
-        ``seed`` and ``row_index`` are forwarded to ``backend.reset``: a
-        dataset-backed backend uses ``row_index`` to select its row, while an env
+        ``seed`` and ``row_index`` are forwarded to ``env_client.reset``: a
+        dataset-backed env client uses ``row_index`` to select its row, while an env
         that picks its own task (e.g. a remote OpenEnv server) ignores it.
 
-        :param seed: Optional reset seed forwarded to the backend.
+        :param seed: Optional reset seed forwarded to the env client.
         :type seed: int | None
         :param row_index: Dataset row chosen by the owning ``BatchRolloutEnv``,
-            forwarded to ``backend.reset``.
+            forwarded to ``env_client.reset``.
         :type row_index: int | None
         """
-        obs_text, info = self._backend.reset(seed=seed, row_index=row_index)
+        obs_text, info = self._env_client.reset(seed=seed, row_index=row_index)
         obs_text = self._format_obs(obs_text, info)
 
         encoded = self._tokenize_initial_prompt(obs_text)
@@ -499,7 +500,7 @@ class RolloutEnv:
         self.turn_boundaries.append((prompt_len, gen_end, self._turn_idx))
         self._gen_texts.append(gen_text)
 
-        next_obs, reward, terminated, truncated, info = self._backend.step(gen_text)
+        next_obs, reward, terminated, truncated, info = self._env_client.step(gen_text)
         self.turn_rewards.append(float(reward))
         self._turn_idx += 1
 
@@ -612,7 +613,7 @@ class RolloutEnv:
         )
 
     def close(self) -> None:
-        """Stop the owned server, or close the backend when there isn't one.
+        """Stop the owned server, or close the env client when there isn't one.
 
         When this env owns its server, stopping it tears the env down directly, so the
         client's ``/close`` round-trip to our own server is skipped — it is redundant
@@ -621,8 +622,8 @@ class RolloutEnv:
         if self._owned_server is not None:
             self._owned_server.stop()
             self._owned_server = None
-        elif hasattr(self._backend, "close"):
-            self._backend.close()
+        elif hasattr(self._env_client, "close"):
+            self._env_client.close()
 
     def get_debug_info(self) -> dict[str, Any]:
         """Return a dict of human-readable debug information for the episode."""
