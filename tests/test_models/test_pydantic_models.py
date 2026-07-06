@@ -884,3 +884,17 @@ except ImportError:
     @contextmanager
     def nullcontext():
         yield
+
+
+class TestMutationSpecArchMutType:
+    def test_default_is_original(self):
+        assert MutationSpec().arch_mut_type == "original"
+
+    def test_accepts_func_preserving(self):
+        assert MutationSpec(arch_mut_type="func_preserving").arch_mut_type == (
+            "func_preserving"
+        )
+
+    def test_rejects_invalid_value(self):
+        with pytest.raises(ValidationError):
+            MutationSpec(arch_mut_type="bogus")

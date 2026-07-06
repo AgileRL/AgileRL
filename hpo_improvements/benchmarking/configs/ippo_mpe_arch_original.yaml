@@ -1,0 +1,166 @@
+---
+# ippo_mpe -- ARCHITECTURE-MUTATION ABLATION (BASELINE: original AgileRL arch mutations).
+#
+# Derived from ippo_mpe_hpo.yaml. Population = 4; only no_mutation and architecture
+# mutations are active (no_mut / arch_mut / new_layer; params / act / rl_hp = 0),
+# so this isolates the architecture-mutation operator. arch_mut_type: original
+# uses AgileRL's default add/remove node/channel/layer. Its function-preserving
+# counterpart is ippo_mpe_func_preserv.yaml (identical except arch_mut_type).
+# IPPO on cooperative MPE (MPEv2) WITH evolutionary HPO (a population is mutated
+# and selected each generation). The base hyperparameters match ippo_mpe_no_hpo.yaml
+# (AgileRL's canonical multi-agent IPPO/MPE recipe -- low lr, few PPO epochs, tight
+# gradient clipping, high entropy bonus); see that file for the full mapping and
+# rollout-sizing notes. The `mutation` + `tournament_selection` blocks below are what
+# turn this into an HPO run. In this architecture-mutation ablation only the arch
+# operators fire (params / act / rl_hp mutations are off), so the rl_hp_selection
+# block below is retained only to define the (unused) HP search space.
+
+algorithm:
+    name: IPPO
+    batch_size: 128
+    lr: 0.0001
+    learn_step: 2048
+    gamma: 0.99
+    gae_lambda: 0.95
+    action_std_init: 0.0
+    clip_coef: 0.2
+    ent_coef: 0.05
+    vf_coef: 0.5
+    max_grad_norm: 0.5
+    target_kl:
+    update_epochs: 4
+    # torch_compiler deliberately omitted (was `default`): torch.compile's GPU
+    # Inductor/Triton kernels are nondeterministic across processes and bypass the
+    # cuDNN/cuBLAS deterministic flags set by reproducibility.seed_everything, which
+    # made IPPO runs non-reproducible at a fixed seed. Verified on the cluster:
+    # compile+GPU diverges, while no-compile+GPU and compile+CPU are both bitwise
+    # reproducible. PPO/DQN configs carry no torch_compiler for the same reason.
+
+environment:
+    name: simple_spread_v3
+    num_envs: 16
+    entrypoint: mpe_adapter:make_mpe_parallel_env
+    # `path` and `config` are filled by benchmark.run_training.
+    # NOTE: the adapter trains ONE policy PER AGENT (fully-independent IPPO) by
+    # default -- AgileRL's parameter-shared grouping of homogeneous agents does not
+    # learn these tasks. See mpe_adapter.make_mpe_parallel_env (separate_policies).
+
+mutation:
+    probabilities:
+        no_mut: 0.5
+        arch_mut: 0.5
+        new_layer: 0.2
+        params_mut: 0.0
+        act_mut: 0.0
+        rl_hp_mut: 0.0
+    rl_hp_selection:
+        # The RL hyperparameters HPO may mutate, each with a search range and the
+        # coarse multiplicative grow/shrink factors applied per mutation.
+        lr:
+            # Optimisation step size -- the most impactful knob. Base 1e-4 (the
+            # canonical recipe's value) sits at the geometric midpoint of the range
+            # (sqrt(2e-5 x 5e-4) = 1e-4), so HPO is equally free to lower or raise it.
+            min: 0.00002
+            max: 0.0005
+            grow_factor: 1.2
+            shrink_factor: 0.8
+        clip_coef:
+            # PPO trust-region width. Base 0.2 is the geometric midpoint of
+            # 0.1 .. 0.4 (sqrt(0.1 x 0.4) = 0.2), with gentle factors.
+            min: 0.1
+            max: 0.4
+            grow_factor: 1.1
+            shrink_factor: 0.9
+        learn_step:
+            # Rollout-buffer size (num_envs x per-env horizon) -- controls how
+            # on-policy the data is and the GAE bias/variance trade-off. Base 2048
+            # (the canonical recipe's value) is the geometric midpoint of 1024 .. 4096
+            # (sqrt(1024 x 4096) = 2048). This 2x-each-way spread keeps the number of
+            # update cycles an agent completes per evolution step within a bounded
+            # range across the population, keeping fitness comparisons fair (same
+            # reasoning as the PPO/MuJoCo config). Coarse factors.
+            min: 1024
+            max: 4096
+            grow_factor: 1.2
+            shrink_factor: 0.8
+        update_epochs:
+            # Passes over each rollout (sample reuse vs off-policy drift). Base 4 (the
+            # canonical recipe's value) is the geometric midpoint of 2 .. 8
+            # (sqrt(2 x 8) = 4). Integer knob, coarse factors are fine.
+            min: 2
+            max: 8
+            grow_factor: 1.2
+            shrink_factor: 0.8
+        batch_size:
+            # MINIBATCH size (num_minibatches = learn_step/batch_size). Base 128 (the
+            # canonical recipe's value -> 16 minibatches at the base 2048 learn_step)
+            # is the geometric midpoint of 32 .. 512 (sqrt(32 x 512) = 128). The max is
+            # kept <= the smallest mutated learn_step (1024) so a minibatch never
+            # exceeds the rollout buffer.
+            min: 32
+            max: 512
+            grow_factor: 1.2
+            shrink_factor: 0.8
+        ent_coef:
+            # Entropy bonus -- exploration vs policy sharpening. Base 0.05 (the
+            # canonical recipe's high value) is the geometric midpoint of 0.01 .. 0.25
+            # (sqrt(0.01 x 0.25) = 0.05), so HPO can sharpen the policy by lowering it
+            # toward / below the MAPPO default 0.01 or push it higher. Coarse factors.
+            min: 0.01
+            max: 0.25
+            grow_factor: 1.2
+            shrink_factor: 0.8
+        # gamma, gae_lambda, vf_coef and max_grad_norm are left fixed: gamma/gae_lambda
+        # sit near 1.0 where multiplicative mutation maps to coarse horizon swings and
+        # are cached by the rollout buffer at construction; vf_coef/max_grad_norm are
+        # low-leverage at their canonical defaults (0.5 / 0.5). This keeps the search
+        # budget on the high-leverage knobs above (now including ent_coef).
+    mutation_sd: 0.1  # std of the Gaussian weight perturbation for params_mut
+    rand_seed: 42
+    mutate_elite: false  # keep the elite member unmutated so the best agent survives intact into the next generation
+    arch_mut_type: original  # original | func_preserving architecture mutations
+
+network:
+    # Same width-64 MLP as the no-HPO config, but with min/max bounds that define the
+    # architecture search space arch / new_layer / params mutations may explore. Width
+    # bounds are geometrically centred on 64 (sqrt(16 x 256) = 64) so mutation is
+    # equally likely to narrow or widen the network. Head depth can only grow (1 is the
+    # structural floor).
+    latent_dim: 64
+    min_latent_dim: 16
+    max_latent_dim: 256
+    arch: mlp
+    encoder_config:
+        hidden_size:
+            - 64
+        activation: ReLU
+        output_activation: Identity
+        min_mlp_nodes: 16
+        max_mlp_nodes: 256
+        layer_norm: false
+    head_config:
+        hidden_size:
+            - 64
+        activation: ReLU
+        min_hidden_layers: 1
+        max_hidden_layers: 3
+        min_mlp_nodes: 16
+        max_mlp_nodes: 256
+        output_vanish: true
+        layer_norm: false
+
+tournament_selection:
+    tournament_size: 2
+    elitism: true  # the single best agent is cloned into the next generation each step
+
+training:
+    max_steps: 2_000_000
+    target_score:
+    pop_size: 4
+    # ~195 evolution generations over the budget (10240 = 5 x the 2048-step base
+    # rollout, so every agent completes whole collect->update cycles between
+    # evolution events).
+    evo_steps: 10240
+    eval_steps:
+    eval_loop: 1
+    dormant_tau: 0.1  # tau threshold for the dormant-neuron metric (Sokar et al. 2023)

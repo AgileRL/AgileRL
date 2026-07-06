@@ -1,5 +1,6 @@
 import copy
 import gc
+import warnings
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -2215,3 +2216,509 @@ def test_get_offspring_eval_modules_returns_policy_and_modules(
     assert isinstance(policy, dict)
     assert isinstance(offspring_evals, dict)
     assert len(policy) >= 1
+
+
+# --------------------------------------------------------------------------- #
+# Function-preserving architecture mutations (arch_mut_type="func_preserving")
+# --------------------------------------------------------------------------- #
+import agilerl.hpo.function_preserving as fp  # noqa: E402
+
+
+def _fp_dqn_pop(device="cpu", head_hidden=(32,)):
+    """A DQN population with a ReLU CNN encoder + MLP head, no norm layers."""
+    obs = spaces.Box(0, 255, shape=(4, 32, 32), dtype=np.uint8)
+    act = spaces.Discrete(4)
+    net_config = {
+        "latent_dim": 16,
+        "min_latent_dim": 8,
+        "max_latent_dim": 64,
+        "encoder_config": {
+            "channel_size": [8, 8],
+            "kernel_size": [3, 3],
+            "stride_size": [1, 1],
+            "activation": "ReLU",
+            "min_channel_size": 4,
+            "max_channel_size": 64,
+            "layer_norm": False,
+        },
+        "head_config": {
+            "hidden_size": list(head_hidden),
+            "activation": "ReLU",
+            "min_hidden_layers": 1,
+            "max_hidden_layers": 4,
+            "min_mlp_nodes": 4,
+            "max_mlp_nodes": 256,
+            "layer_norm": False,
+        },
+    }
+    return create_population(
+        algo="DQN",
+        observation_space=obs,
+        action_space=act,
+        net_config=net_config,
+        INIT_HP={
+            "POPULATION_SIZE": 1,
+            "BATCH_SIZE": 8,
+            "LR": 1e-3,
+            "GAMMA": 0.99,
+            "DOUBLE": True,
+            "LEARN_STEP": 1,
+            "TAU": 1e-3,
+        },
+        population_size=1,
+        device=device,
+    )
+
+
+def _fp_ppo_pop(activation="ReLU", device="cpu"):
+    """A PPO population with a ReLU/Tanh MLP encoder + head, no norm layers."""
+    obs = spaces.Box(-1, 1, shape=(6,), dtype=np.float32)
+    act = spaces.Box(-1, 1, shape=(2,), dtype=np.float32)
+    net_config = {
+        "latent_dim": 16,
+        "min_latent_dim": 4,
+        "max_latent_dim": 64,
+        "encoder_config": {
+            "hidden_size": [16, 16],
+            "activation": activation,
+            "output_activation": "Identity",
+            "min_mlp_nodes": 4,
+            "max_mlp_nodes": 256,
+            "layer_norm": False,
+        },
+        "head_config": {
+            "hidden_size": [16, 16],
+            "activation": activation,
+            "min_hidden_layers": 1,
+            "max_hidden_layers": 4,
+            "min_mlp_nodes": 4,
+            "max_mlp_nodes": 256,
+            "layer_norm": False,
+        },
+    }
+    return create_population(
+        algo="PPO",
+        observation_space=obs,
+        action_space=act,
+        net_config=net_config,
+        INIT_HP={
+            "POPULATION_SIZE": 1,
+            "BATCH_SIZE": 8,
+            "LR": 1e-3,
+            "GAMMA": 0.99,
+            "GAE_LAMBDA": 0.95,
+            "ACTION_STD_INIT": 0.0,
+            "CLIP_COEF": 0.2,
+            "ENT_COEF": 0.0,
+            "VF_COEF": 0.5,
+            "MAX_GRAD_NORM": 0.5,
+            "TARGET_KL": None,
+            "UPDATE_EPOCHS": 4,
+            "LEARN_STEP": 1,
+        },
+        population_size=1,
+        device=device,
+    )
+
+
+def _dqn_q(policy, obs):
+    policy.eval()
+    with torch.no_grad():
+        return policy(obs).clone()
+
+
+def _fp_muts(arch="func_preserving", seed=0):
+    return Mutations(
+        0.5, 0.5, 0.2, 0, 0, 0, 0.1, arch_mut_type=arch, rand_seed=seed, device="cpu"
+    )
+
+
+class TestFunctionPreservingMutations:
+    """Numeric + behavioural checks for arch_mut_type='func_preserving'."""
+
+    def test_add_node_head_preserves_function(self):
+        pop = _fp_dqn_pop()
+        ind = pop[0]
+        obs = np.random.randint(0, 255, size=(8, 4, 32, 32)).astype(np.uint8)
+        pre = ind.preprocess_observation(obs)
+        policy, _ = get_offspring_eval_modules(ind)
+        _n, po = next(iter(policy.items()))
+        q0 = _dqn_q(po, pre)
+        applied, _md = _fp_muts()._apply_arch_mutation(
+            po, "head_net.add_node", {"hidden_layer": 0, "numb_new_nodes": 16}
+        )
+        assert applied == "head_net.add_node"
+        assert torch.allclose(q0, _dqn_q(po, pre), atol=1e-5)
+
+    def test_add_channel_preserves_function_both_boundaries(self):
+        obs = np.random.randint(0, 255, size=(8, 4, 32, 32)).astype(np.uint8)
+        # hidden_layer 0 = conv->conv boundary; hidden_layer 1 = conv->linear_output.
+        for layer in (0, 1):
+            pop = _fp_dqn_pop()
+            ind = pop[0]
+            pre = ind.preprocess_observation(obs)
+            policy, _ = get_offspring_eval_modules(ind)
+            _n, po = next(iter(policy.items()))
+            q0 = _dqn_q(po, pre)
+            applied, _md = _fp_muts()._apply_arch_mutation(
+                po,
+                "encoder.add_channel",
+                {"hidden_layer": layer, "numb_new_channels": 8},
+            )
+            assert applied == "encoder.add_channel"
+            assert torch.allclose(q0, _dqn_q(po, pre), atol=1e-5), f"layer {layer}"
+
+    def test_add_layer_identity_preserves_function_relu(self):
+        pop = _fp_dqn_pop(head_hidden=(32,))
+        ind = pop[0]
+        obs = np.random.randint(0, 255, size=(8, 4, 32, 32)).astype(np.uint8)
+        pre = ind.preprocess_observation(obs)
+        policy, _ = get_offspring_eval_modules(ind)
+        _n, po = next(iter(policy.items()))
+        q0 = _dqn_q(po, pre)
+        applied, _md = _fp_muts()._apply_arch_mutation(po, "head_net.add_layer", {})
+        assert applied == "head_net.add_layer"
+        assert torch.allclose(q0, _dqn_q(po, pre), atol=1e-5)
+
+    def test_add_node_preserves_under_tanh_activation(self):
+        # add_node zeroes the fan-out, so it is function-preserving for ANY
+        # activation (only add_layer's identity needs ReLU/Identity).
+        pop = _fp_ppo_pop("Tanh")
+        ind = pop[0]
+        obs = np.random.randn(8, 6).astype(np.float32)
+        pre = ind.preprocess_observation(obs)
+        policy, _ = get_offspring_eval_modules(ind)
+        _n, po = next(iter(policy.items()))
+        po.eval()
+        with torch.no_grad():
+            y0 = po.head_net.wrapped(po.encoder(pre)).clone()
+        with warnings.catch_warnings():
+            # add_node under a non-ReLU activation (no norm) is preserving, so it
+            # must NOT emit the func-preservation caveat warning.
+            warnings.simplefilter("error")
+            _fp_muts()._apply_arch_mutation(
+                po, "head_net.add_node", {"hidden_layer": 0, "numb_new_nodes": 16}
+            )
+        with torch.no_grad():
+            y1 = po.head_net.wrapped(po.encoder(pre)).clone()
+        assert torch.allclose(y0, y1, atol=1e-5)
+
+    def test_add_layer_not_preserving_under_tanh_and_warns(self):
+        pop = _fp_ppo_pop("Tanh")
+        ind = pop[0]
+        policy, _ = get_offspring_eval_modules(ind)
+        _n, po = next(iter(policy.items()))
+        muts = _fp_muts()
+        with pytest.warns(UserWarning, match="function preservation cannot be"):
+            muts._apply_arch_mutation(po, "head_net.add_layer", {})
+
+    def test_remove_node_drops_lowest_activation(self):
+        # Make the FIRST 8 head units dead; positional removal keeps them and
+        # drops live units (changing the output), whereas the func-preserving
+        # removal ranks them last and drops them (preserving the output).
+        obs = np.random.randint(0, 255, size=(8, 4, 32, 32)).astype(np.uint8)
+
+        def build():
+            pop = _fp_dqn_pop(head_hidden=(32,))
+            ind = pop[0]
+            pre = ind.preprocess_observation(obs)
+            policy, _ = get_offspring_eval_modules(ind)
+            _n, po = next(iter(policy.items()))
+            head_layers = fp._ordered_weight_layers(po.head_net)
+            with torch.no_grad():  # kill units [0:8]
+                head_layers[0].weight.data[:8] = 0.0
+                head_layers[0].bias.data[:8] = 0.0
+            return ind, pre, po
+
+        ind, pre, po = build()
+        q0 = _dqn_q(po, pre)
+        _fp_muts()._apply_arch_mutation(
+            po,
+            "head_net.remove_node",
+            {"hidden_layer": 0, "numb_new_nodes": 8},
+            fp_obs=pre,
+        )
+        q_fp = _dqn_q(po, pre)
+        assert torch.allclose(q0, q_fp, atol=1e-4)  # dropped the dead units
+
+        # The original positional removal drops the *live* trailing units.
+        _ind2, pre2, po2 = build()
+        q0b = _dqn_q(po2, pre2)
+        _fp_muts(arch="original")._apply_arch_mutation(
+            po2, "head_net.remove_node", {"hidden_layer": 0, "numb_new_nodes": 8}
+        )
+        assert not torch.allclose(q0b, _dqn_q(po2, pre2), atol=1e-4)
+
+    def test_remove_channel_drops_lowest_activation(self):
+        obs = np.random.randint(0, 255, size=(8, 4, 32, 32)).astype(np.uint8)
+        pop = _fp_dqn_pop()
+        ind = pop[0]
+        pre = ind.preprocess_observation(obs)
+        policy, _ = get_offspring_eval_modules(ind)
+        _n, po = next(iter(policy.items()))
+        conv_layers = fp._ordered_weight_layers(po.encoder)
+        with torch.no_grad():  # kill the first 4 channels of conv layer 0
+            conv_layers[0].weight.data[:4] = 0.0
+            conv_layers[0].bias.data[:4] = 0.0
+        q0 = _dqn_q(po, pre)
+        _fp_muts()._apply_arch_mutation(
+            po,
+            "encoder.remove_channel",
+            {"hidden_layer": 0, "numb_new_channels": 4},
+            fp_obs=pre,
+        )
+        assert torch.allclose(q0, _dqn_q(po, pre), atol=1e-4)
+
+    def test_change_kernel_falls_back_and_warns_once(self):
+        pop = _fp_dqn_pop()
+        policy, _ = get_offspring_eval_modules(pop[0])
+        _n, po = next(iter(policy.items()))
+        muts = _fp_muts()
+        with pytest.warns(UserWarning, match="change_kernel cannot be made"):
+            muts._apply_arch_mutation(po, "encoder.change_kernel", {"hidden_layer": 0})
+        assert muts._fp_warned_kernel is True
+
+    def test_layernorm_warns_once(self):
+        # A head MLP with LayerNorm cannot guarantee preservation -> one warning.
+        obs = spaces.Box(-1, 1, shape=(6,), dtype=np.float32)
+        act = spaces.Discrete(3)
+        net_config = {
+            "latent_dim": 16,
+            "encoder_config": {
+                "hidden_size": [16],
+                "activation": "ReLU",
+                "layer_norm": True,
+                "min_mlp_nodes": 4,
+            },
+            "head_config": {
+                "hidden_size": [16],
+                "activation": "ReLU",
+                "layer_norm": True,
+                "min_mlp_nodes": 4,
+                "min_hidden_layers": 1,
+                "max_hidden_layers": 3,
+            },
+        }
+        pop = create_population(
+            algo="DQN",
+            observation_space=obs,
+            action_space=act,
+            net_config=net_config,
+            INIT_HP=SHARED_INIT_HP,
+            population_size=1,
+            device="cpu",
+        )
+        policy, _ = get_offspring_eval_modules(pop[0])
+        _n, po = next(iter(policy.items()))
+        muts = _fp_muts()
+        with pytest.warns(UserWarning, match="function preservation cannot be"):
+            muts._apply_arch_mutation(
+                po, "head_net.add_node", {"hidden_layer": 0, "numb_new_nodes": 8}
+            )
+        assert muts._fp_warned_layernorm is True
+        # Second add does not warn again (guarded).
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            muts._apply_arch_mutation(
+                po, "head_net.add_node", {"hidden_layer": 0, "numb_new_nodes": 8}
+            )
+
+    def test_original_mode_unaffected(self):
+        # arch_mut_type="original" must reproduce the stock behaviour exactly.
+        obs = np.random.randint(0, 255, size=(8, 4, 32, 32)).astype(np.uint8)
+
+        def run(arch):
+            pop = _fp_dqn_pop()
+            ind = pop[0]
+            pre = ind.preprocess_observation(obs)
+            policy, _ = get_offspring_eval_modules(ind)
+            _n, po = next(iter(policy.items()))
+            _fp_muts(arch=arch, seed=0)._apply_arch_mutation(
+                po, "head_net.add_node", {"hidden_layer": 0, "numb_new_nodes": 16}
+            )
+            return _ordered_head_weights(po)
+
+        # The func-preserving path zeroes the new fan-out; original does not.
+        w_orig = run("original")
+        w_fp = run("func_preserving")
+        # Original's new outgoing columns are non-zero; func-preserving's are zero.
+        assert w_orig.abs().sum() > 0
+        assert torch.count_nonzero(w_fp[:, -16:]) == 0
+
+    def test_reproducibility(self):
+        obs = np.random.randint(0, 255, size=(8, 4, 32, 32)).astype(np.uint8)
+
+        def run():
+            torch.manual_seed(0)
+            np.random.seed(0)
+            pop = _fp_dqn_pop()
+            ind = pop[0]
+            pre = ind.preprocess_observation(obs)
+            policy, _ = get_offspring_eval_modules(ind)
+            _n, po = next(iter(policy.items()))
+            _fp_muts(seed=0)._apply_arch_mutation(
+                po,
+                "head_net.remove_node",
+                {"hidden_layer": 0, "numb_new_nodes": 8},
+                fp_obs=pre,
+            )
+            return {k: v.clone() for k, v in po.state_dict().items()}
+
+        a, b = run(), run()
+        assert set(a) == set(b)
+        for k in a:
+            assert torch.equal(a[k], b[k]), k
+
+    def test_collect_obs_returns_none_without_env(self):
+        muts = _fp_muts()
+        muts._fp_env = None
+        assert (
+            muts._fp_collect_obs(object(), "head_net.remove_node", multi_agent=False)
+            is None
+        )
+
+    def test_collect_obs_returns_none_for_add(self):
+        muts = _fp_muts()
+        muts._fp_env = object()  # non-None, but add mutations never collect
+        assert (
+            muts._fp_collect_obs(object(), "head_net.add_node", multi_agent=False)
+            is None
+        )
+
+    def test_collect_obs_returns_preprocessed_batch_for_remove(self):
+        # The positive glue: a removal + an env yields a preprocessed obs batch.
+        pop = _fp_dqn_pop()
+        ind = pop[0]
+
+        class _FakeVecEnv:
+            def __init__(self):
+                self.obs = np.random.randint(0, 255, size=(8, 4, 32, 32)).astype(
+                    np.uint8
+                )
+
+            def reset(self):
+                return self.obs, {}
+
+            def step(self, _action):
+                n = len(self.obs)
+                z = np.zeros(n, dtype=np.float32)
+                return self.obs, z, z.astype(bool), z.astype(bool), {}
+
+        muts = _fp_muts()
+        muts._fp_env = _FakeVecEnv()
+        obs = muts._fp_collect_obs(ind, "encoder.remove_channel", multi_agent=False)
+        assert obs is not None
+        # A preprocessed batch the network can consume.
+        policy, _ = get_offspring_eval_modules(ind)
+        _n, po = next(iter(policy.items()))
+        po.eval()
+        with torch.no_grad():
+            po(obs)
+
+    def test_collect_obs_raises_on_collection_failure(self):
+        # Fail loud: a collection error must surface, not be swallowed into a
+        # silent positional-removal fallback (which would make the func_preserving
+        # regime quietly measure the original operator instead).
+        pop = _fp_dqn_pop()
+        ind = pop[0]
+
+        class _BrokenVecEnv:
+            def reset(self):
+                raise RuntimeError("env is broken")
+
+        muts = _fp_muts()
+        muts._fp_env = _BrokenVecEnv()
+        with pytest.raises(RuntimeError, match="func_preserving"):
+            muts._fp_collect_obs(ind, "encoder.remove_channel", multi_agent=False)
+
+
+def _ordered_head_weights(policy):
+    layers = fp._ordered_weight_layers(policy.head_net)
+    # Return the consumer weight of hidden layer 0 (where new fan-out lives).
+    return layers[1].weight.data.clone()
+
+
+def _ma_relu_config():
+    return {
+        "latent_dim": 16,
+        "min_latent_dim": 4,
+        "max_latent_dim": 64,
+        "encoder_config": {
+            "hidden_size": [16],
+            "activation": "ReLU",
+            "output_activation": "Identity",
+            "min_mlp_nodes": 4,
+            "max_mlp_nodes": 256,
+            "layer_norm": False,
+        },
+        "head_config": {
+            "hidden_size": [16],
+            "activation": "ReLU",
+            "min_hidden_layers": 1,
+            "max_hidden_layers": 4,
+            "min_mlp_nodes": 4,
+            "max_mlp_nodes": 256,
+            "layer_norm": False,
+        },
+    }
+
+
+class TestFunctionPreservingMultiAgent:
+    def test_ippo_add_node_zeroes_new_fanout_across_moduledict(
+        self, ma_vector_space, ma_discrete_space, monkeypatch
+    ):
+        # Verifies the func-preserving surgery reaches through the multi-agent
+        # ``ModuleDict`` dispatch: after a forced add_node on one sub-agent's head,
+        # the newly added units' outgoing (consumer) columns are exactly zero.
+        pop = create_population(
+            algo="IPPO",
+            observation_space=ma_vector_space,
+            action_space=ma_discrete_space,
+            net_config=_ma_relu_config(),
+            INIT_HP=SHARED_INIT_HP_MA,
+            population_size=1,
+            device="cpu",
+        )
+        ind = pop[0]
+        policy_attr = ind.registry.policy()
+        policy_md = getattr(ind, policy_attr)
+
+        first_id = next(iter(policy_md.keys()))
+        forced = f"{first_id}.head_net.add_node"
+        old_width = fp.hidden_widths(policy_md[first_id].head_net)[0]
+
+        # Force the sampled policy mutation to a specific sub-agent add_node.
+        monkeypatch.setattr(
+            ModuleDict,
+            "sample_mutation_method",
+            lambda _self, *_a, **_k: forced,
+            raising=False,
+        )
+
+        muts = _fp_muts()
+        muts._architecture_mutate_multi(ind)
+
+        assert ind.mut_details.get("arch_func_preserving") is True
+        mutated_head = getattr(ind, policy_attr)[first_id].head_net
+        consumer = fp._ordered_weight_layers(mutated_head)[1]
+        new_width = fp.hidden_widths(mutated_head)[0]
+        assert new_width > old_width
+        # The trailing (new) fan-out columns must be exactly zero.
+        assert torch.count_nonzero(consumer.weight.data[:, old_width:new_width]) == 0
+
+
+class TestCapturePerNeuronScores:
+    def test_returns_per_layer_scores_in_order(self):
+        from agilerl.utils.dormant_neurons import capture_per_neuron_scores
+
+        pop = _fp_dqn_pop(head_hidden=(32,))
+        ind = pop[0]
+        obs = np.random.randint(0, 255, size=(8, 4, 32, 32)).astype(np.uint8)
+        pre = ind.preprocess_observation(obs)
+        policy, _ = get_offspring_eval_modules(ind)
+        _n, po = next(iter(policy.items()))
+        scored = capture_per_neuron_scores(po, pre)
+        assert len(scored) >= 1
+        for _module, per_neuron in scored:
+            assert per_neuron.dim() == 1
+            assert torch.isfinite(per_neuron).all()

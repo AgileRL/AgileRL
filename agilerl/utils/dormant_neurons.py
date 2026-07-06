@@ -105,30 +105,55 @@ def _count_dormant(per_neuron: torch.Tensor, tau: float) -> tuple[int, int]:
     return dormant, total
 
 
-def _measure_network(network: nn.Module, obs: Any, tau: float) -> tuple[int, int]:
-    """Compute ``(dormant, total)`` neuron counts for a single network.
+def _target_activations(network: nn.Module) -> list[nn.Module]:
+    """Return the ordered post-activation sub-modules measured for a network.
+
+    The encoder's output activation *is* included (its latent is a hidden
+    representation), while the head network's final output activation is *not*
+    (those units have fixed semantics such as action logits or a state value).
 
     :param network: An ``EvolvableNetwork`` (encoder + ``head_net``).
-    :param obs: A preprocessed observation batch accepted by ``network``.
-    :param tau: Dormancy threshold.
-    :return: ``(dormant_count, total_count)`` summed over the measured layers.
+    :return: The activation sub-modules to hook, in forward order.
     """
     targets: list[nn.Module] = []
     if hasattr(network, "encoder"):
         targets += _activation_modules(network.encoder, include_output=True)
     if hasattr(network, "head_net"):
         targets += _activation_modules(network.head_net, include_output=False)
+    return targets
 
+
+def capture_per_neuron_scores(
+    network: nn.Module, obs: Any
+) -> list[tuple[nn.Module, torch.Tensor]]:
+    """Run one forward pass and capture ``E_x|h_i|`` per neuron per measured layer.
+
+    Registers forward hooks on exactly the activation sub-modules the dormant
+    diagnostic measures (see :func:`_target_activations`), runs a single
+    ``no_grad`` evaluation forward pass, and returns the per-neuron mean absolute
+    activation of each measured layer. Sharing this with the function-preserving
+    architecture mutation (which ranks neurons by activation before a removal)
+    guarantees both operate on the identical set of neurons.
+
+    :param network: An ``EvolvableNetwork`` (encoder + ``head_net``).
+    :param obs: A preprocessed observation batch accepted by ``network``.
+    :return: A list of ``(activation_module, per_neuron_tensor)`` pairs in forward
+        order (one entry per measured layer that fired).
+    """
+    targets = _target_activations(network)
     if not targets:
-        return 0, 0
+        return []
 
-    captured: list[torch.Tensor] = []
+    captured: dict[nn.Module, torch.Tensor] = {}
 
-    def _hook(_module: nn.Module, _inputs: Any, output: Any) -> None:
-        if isinstance(output, torch.Tensor):
-            captured.append(_per_neuron_score(output))
+    def _make_hook(module: nn.Module):
+        def _hook(_module: nn.Module, _inputs: Any, output: Any) -> None:
+            if isinstance(output, torch.Tensor):
+                captured[module] = _per_neuron_score(output)
 
-    handles = [module.register_forward_hook(_hook) for module in targets]
+        return _hook
+
+    handles = [module.register_forward_hook(_make_hook(module)) for module in targets]
     was_training = network.training
     try:
         network.eval()
@@ -139,8 +164,19 @@ def _measure_network(network: nn.Module, obs: Any, tau: float) -> tuple[int, int
             handle.remove()
         network.train(was_training)
 
+    return [(module, captured[module]) for module in targets if module in captured]
+
+
+def _measure_network(network: nn.Module, obs: Any, tau: float) -> tuple[int, int]:
+    """Compute ``(dormant, total)`` neuron counts for a single network.
+
+    :param network: An ``EvolvableNetwork`` (encoder + ``head_net``).
+    :param obs: A preprocessed observation batch accepted by ``network``.
+    :param tau: Dormancy threshold.
+    :return: ``(dormant_count, total_count)`` summed over the measured layers.
+    """
     dormant = total = 0
-    for per_neuron in captured:
+    for _module, per_neuron in capture_per_neuron_scores(network, obs):
         d, t = _count_dormant(per_neuron, tau)
         dormant += d
         total += t

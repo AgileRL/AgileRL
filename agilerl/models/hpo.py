@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -60,6 +62,12 @@ class MutationSpec(BaseModel):
     :type rand_seed: int
     :param mutate_elite: Whether the elite member of the population is itself mutated.
     :type mutate_elite: bool
+    :param arch_mut_type: Architecture-mutation strategy: ``"original"`` (AgileRL's
+        default add/remove node/channel/layer) or ``"func_preserving"``
+        (function-preserving Net2Net-style variants -- new units are added with
+        zero outgoing weights, removals drop the lowest-activation units, and new
+        head layers are identity-initialised). No extra hyperparameters are needed.
+    :type arch_mut_type: Literal["original", "func_preserving"]
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -69,6 +77,7 @@ class MutationSpec(BaseModel):
     mutation_sd: float = Field(default=0.1, ge=0.0)
     rand_seed: int = Field(default=42, ge=0)
     mutate_elite: bool = False
+    arch_mut_type: Literal["original", "func_preserving"] = "original"
 
 
 class TournamentSelectionSpec(BaseModel):
