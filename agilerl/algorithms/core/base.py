@@ -5931,11 +5931,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
     def _prepare_vllm_for_training(self) -> None:
         """Prepare vLLM for learning."""
-        if (
-            self.vllm_config.sleep_mode
-            and self._vllm_awake
-            and (self.accelerator is None or self.accelerator.is_main_process)
-        ):
+        # Every rank holds its own colocated engine (external_launcher), so
+        # every rank must sleep it — not just the main process.
+        if self.vllm_config.sleep_mode and self._vllm_awake:
             torch.cuda.empty_cache()
             self.llm.sleep(level=self.vllm_config.sleep_mode_level)
             self._vllm_awake = False
@@ -5954,11 +5952,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 log_cuda_memory_snapshot(
                     "trainer base offloaded to CPU (before vLLM wake)"
                 )
-        if (
-            self.vllm_config.sleep_mode
-            and not self._vllm_awake
-            and (self.accelerator is None or self.accelerator.is_main_process)
-        ):
+        # Every rank holds its own colocated engine, and _sleep_vllm_after_init
+        # slept them all; waking only the main process leaves the other ranks'
+        # engines unmapped, so their add_lora below dies with CUDA
+        # invalid-argument. Wake per rank.
+        if self.vllm_config.sleep_mode and not self._vllm_awake:
             torch.cuda.empty_cache()
             self.llm.wake_up()
             self._vllm_awake = True
