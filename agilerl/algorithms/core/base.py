@@ -2348,8 +2348,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         if chunk_rows is not None and chunk_rows <= 0:
             msg = f"chunk_rows must be a positive int or None, got {chunk_rows}."
             raise ValueError(msg)
-        # Shared chunk row budget used by both fused-logprob and Liger fused-loss
-        # paths; each path keeps its own auto-tuned behavior when ``None``.
         self.chunk_rows = chunk_rows
         # vLLM sampling-mismatch correction (truncated importance sampling).
         # The rollout is drawn from vLLM but the loss treats the trainer's
@@ -4514,13 +4512,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         peft_ref = self._get_peft_model_for_vllm_sync()
         peft_ref.set_adapter(self._vllm_rollout_adapter)
 
-        # Export to a fixed staging dir + id and refresh the resident rollout
-        # slot in place: ``load_inplace`` (2nd sync onward) re-reads the updated
-        # weights from disk, and the fixed id avoids per-sync CUDA-graph
-        # accumulation that would grow GPU memory across iterations. The
-        # staging dir is process-private (per-rank when distributed), so every
-        # rank exports its own adapter copy and the files are guaranteed
-        # present before ``add_lora`` reads them back.
         staging_dir = self._ensure_vllm_lora_staging_dir()
         with gather_if_zero3(self.zero_stage, list(peft_ref.parameters())):
             if self.lora_config is None:
