@@ -1,6 +1,7 @@
 from collections.abc import Callable
 from typing import Any, Literal, TypeVar
 
+from gymnasium import spaces
 from pydantic import (
     BaseModel,
     Field,
@@ -18,6 +19,36 @@ T = TypeVar("T", bound=BaseModel)
 
 
 _MANIFEST_ENCODER_ARCHS = ("mlp", "cnn", "lstm", "simba", "multiinput")
+
+
+def infer_encoder_arch(
+    observation_space: spaces.Space,
+    *,
+    recurrent: bool = False,
+    simba: bool = False,
+) -> Literal["mlp", "cnn", "lstm", "simba", "multiinput"]:
+    """Infer the encoder architecture from an observation space.
+
+    Mirrors the branch order in
+    :func:`agilerl.utils.evolvable_networks.get_default_encoder_config` and
+    :meth:`agilerl.networks.base.EvolvableNetwork._build_encoder` so the schema
+    used to validate ``encoder_config`` always matches the encoder that will be
+    built. ``simba`` takes precedence over ``recurrent``.
+
+    :param observation_space: The (single-agent or per-agent) observation space.
+    :param recurrent: Whether the algorithm requests a recurrent encoder.
+    :param simba: Whether the network requests a SimBa encoder.
+    :returns: One of ``"mlp"``, ``"cnn"``, ``"lstm"``, ``"simba"``, ``"multiinput"``.
+    """
+    if isinstance(observation_space, (spaces.Dict, spaces.Tuple)):
+        return "multiinput"
+    if isinstance(observation_space, spaces.Box) and len(observation_space.shape) == 3:
+        return "cnn"
+    if simba:
+        return "simba"
+    if recurrent:
+        return "lstm"
+    return "mlp"
 
 
 def normalize_manifest_network(data: Any) -> Any:

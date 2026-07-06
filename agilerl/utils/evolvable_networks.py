@@ -120,10 +120,10 @@ def config_from_dict(config_dict: NetConfigType) -> NetConfig:
     :rtype: NetConfig
     """
     config_keys = config_dict.keys()
-    if "hidden_size" in config_keys:
-        if "num_layers" in config_keys:
-            config_cls = LstmNetConfig
-        elif "num_blocks" in config_keys:
+    if "hidden_state_size" in config_keys:
+        config_cls = LstmNetConfig
+    elif "hidden_size" in config_keys:
+        if "num_blocks" in config_keys:
             config_cls = SimBaNetConfig
         else:
             config_cls = MlpNetConfig
