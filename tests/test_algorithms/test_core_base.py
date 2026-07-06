@@ -3992,6 +3992,8 @@ class TestEnsureVllmLoraStagingDir:
         return SimpleNamespace(
             vllm_config=VLLMConfig(lora_staging_dir=lora_staging_dir),
             _vllm_lora_staging_dir=None,
+            accelerator=None,
+            _is_rank_staging_dir=LLMAlgorithm._is_rank_staging_dir,
         )
 
     def test_uses_configured_dir_and_marks_persistent(self, tmp_path):
@@ -4028,6 +4030,16 @@ class TestEnsureVllmLoraStagingDir:
         is_temp = getattr(agent, "_vllm_lora_staging_dir_is_temp", True)
         assert is_temp is False
         assert target.is_dir()
+
+    def test_appends_rank_subdir_in_distributed_run(self, tmp_path):
+        """With >1 process, each rank gets its own ``rank_<index>`` subdir."""
+        target = tmp_path / "nfs_lora"
+        agent = self._agent(str(target))
+        agent.accelerator = SimpleNamespace(num_processes=2, process_index=1)
+        resolved = LLMAlgorithm._ensure_vllm_lora_staging_dir(agent)
+        assert resolved == target / "rank_1"
+        assert resolved.is_dir()
+        assert agent._vllm_lora_staging_dir_is_temp is False
 
 
 class TestLLMSyncActorToVllm:
