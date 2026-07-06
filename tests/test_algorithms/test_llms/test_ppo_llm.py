@@ -467,7 +467,7 @@ class TestPPOInit:
                 gradient_checkpointing=False,
             )
 
-    def test_init_fused_loss_chunk_rows_must_be_positive(self):
+    def test_init_chunk_rows_must_be_positive(self):
         actor = create_module(10, 8, 100, "cpu")
         lora = LoraConfig(
             r=4,
@@ -476,22 +476,20 @@ class TestPPOInit:
             task_type="CAUSAL_LM",
             modules_to_save=["summary"],
         )
-        with pytest.raises(
-            ValueError, match="fused_loss_chunk_rows must be a positive int"
-        ):
+        with pytest.raises(ValueError, match="chunk_rows must be a positive int"):
             LLMPPO(
                 actor_network=actor,
                 pad_token_id=99,
                 pad_token="<pad>",
                 lora_config=lora,
-                fused_loss_chunk_rows=0,
+                chunk_rows=0,
                 wrap=False,
                 gradient_checkpointing=False,
             )
 
-    def test_init_stores_fused_loss_chunk_rows(self):
-        ppo = _cpu_llmppo(fused_loss_chunk_rows=256)
-        assert ppo.fused_loss_chunk_rows == 256
+    def test_init_stores_chunk_rows(self):
+        ppo = _cpu_llmppo(chunk_rows=256)
+        assert ppo.chunk_rows == 256
 
     def test_init_action_granularity_deprecated_warns_and_overrides(self):
         """The legacy ``action_granularity`` kwarg warns and is carried over
@@ -1350,8 +1348,8 @@ class TestPPOLossLiger:
         # total_loss = fake_loss (0.5) + vf_loss (real, computed from values)
         assert isinstance(total_loss, torch.Tensor)
 
-    def test_token_mode_forwards_configured_fused_loss_chunk_rows(self) -> None:
-        ppo = _cpu_llmppo(fused_loss_chunk_rows=123)
+    def test_token_mode_forwards_configured_chunk_rows(self) -> None:
+        ppo = _cpu_llmppo(chunk_rows=123)
         B, T = 2, 5
         ids = torch.randint(1, 50, (B, T), dtype=torch.long)
         mask = torch.ones(B, T - 1, dtype=torch.float32)
@@ -1770,7 +1768,7 @@ class TestPPOSequencePacking:
             action_mask[b, : length - 1] = True
 
         def fake_fused_fn(
-            h, weight, bias, targets, *, temperature, cast_to_fp32, _chunk_rows
+            h, weight, bias, targets, *, temperature, cast_to_fp32, chunk_rows
         ):
             # Context-free per-token logprob over the (already next-token-
             # shifted) hidden features. Identical closed form padded or packed,

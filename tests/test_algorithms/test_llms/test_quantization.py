@@ -61,7 +61,6 @@ from agilerl.utils.llm_utils import (
     offload_colocated_trainer_from_gpu,
     peft_target_key_matches,
     remap_peft_lora_key_for_vllm,
-    resolve_peft_adapter_export_dir,
     resolve_vllm_max_lora_rank,
     resolve_vllm_max_num_batched_tokens,
 )
@@ -430,18 +429,6 @@ class TestResolveVllmMaxLoraRank:
     def test_takes_max_of_config_and_trainer(self):
         assert resolve_vllm_max_lora_rank(16, 32) == 32
         assert resolve_vllm_max_lora_rank(64, 16) == 64
-
-
-class TestResolvePeftAdapterExportDir:
-    def test_prefers_nested_adapter_subdir(self, tmp_path):
-        nested = tmp_path / "actor"
-        nested.mkdir()
-        (nested / "adapter_config.json").write_text("{}")
-        assert resolve_peft_adapter_export_dir(tmp_path, "actor") == nested
-
-    def test_flat_export_layout(self, tmp_path):
-        (tmp_path / "adapter_config.json").write_text("{}")
-        assert resolve_peft_adapter_export_dir(tmp_path, "actor") == tmp_path
 
 
 class TestConfigureVllmKwargs:

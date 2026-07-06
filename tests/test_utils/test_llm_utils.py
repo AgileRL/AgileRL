@@ -69,7 +69,6 @@ from agilerl.utils.llm_utils import (
     pool_log_ratio_by_level,
     remap_peft_lora_key_for_vllm,
     resolve_attn_implementation,
-    resolve_peft_adapter_export_dir,
     resolve_vllm_max_lora_rank,
     resolve_vllm_max_num_batched_tokens,
     sample_eval_prompts,
@@ -1868,21 +1867,6 @@ class TestResolveVllmMaxNumBatchedTokens:
         assert resolve_vllm_max_num_batched_tokens(1, 32768) == 32768
 
 
-class TestResolvePeftAdapterExportDir:
-    def test_nested_layout_preferred(self, tmp_path):
-        nested = tmp_path / "actor"
-        nested.mkdir()
-        (nested / "adapter_config.json").write_text("{}", encoding="utf-8")
-        assert resolve_peft_adapter_export_dir(tmp_path, "actor") == nested
-
-    def test_flat_layout_falls_back_to_staging_dir(self, tmp_path):
-        (tmp_path / "adapter_config.json").write_text("{}", encoding="utf-8")
-        assert resolve_peft_adapter_export_dir(tmp_path, "actor") == tmp_path
-
-    def test_defaults_to_nested_when_nothing_exists(self, tmp_path):
-        assert resolve_peft_adapter_export_dir(tmp_path, "actor") == tmp_path / "actor"
-
-
 def _vllm_config(**overrides):
     """SimpleNamespace mirroring the VLLMConfig fields read by the builder."""
     base = {
@@ -2106,21 +2090,6 @@ class TestSavePeftAdapterForVllmRollout:
             save_peft_adapter_for_vllm_rollout(
                 MagicMock(), tmp_path, "actor", target_modules=["q_proj"]
             )
-
-    def test_non_main_process_returns_export_dir_without_writing(
-        self, monkeypatch, tmp_path
-    ):
-        calls = self._install_fakes(monkeypatch, state={})
-        out = save_peft_adapter_for_vllm_rollout(
-            self._peft_model(),
-            tmp_path,
-            "actor",
-            target_modules=["q_proj"],
-            is_main_process=False,
-        )
-        assert out == tmp_path / "actor"
-        assert not (tmp_path / "actor").exists()
-        assert "adapter_name" not in calls
 
     def test_exports_filtered_remapped_adapter_with_config(self, monkeypatch, tmp_path):
         t_keep = torch.zeros(2)

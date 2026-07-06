@@ -513,7 +513,7 @@ class TestREINFORCEInit:
                 gradient_checkpointing=False,
             )
 
-    def test_init_fused_loss_chunk_rows_must_be_positive(self):
+    def test_init_chunk_rows_must_be_positive(self):
         actor = create_dummy_actor(10, 8, 100, "cpu")
         lora = LoraConfig(
             r=4,
@@ -521,22 +521,20 @@ class TestREINFORCEInit:
             target_modules=["lin"],
             task_type="CAUSAL_LM",
         )
-        with pytest.raises(
-            ValueError, match="fused_loss_chunk_rows must be a positive int"
-        ):
+        with pytest.raises(ValueError, match="chunk_rows must be a positive int"):
             REINFORCE(
                 actor_network=actor,
                 pad_token_id=99,
                 pad_token="<pad>",
                 lora_config=lora,
-                fused_loss_chunk_rows=0,
+                chunk_rows=0,
                 wrap=False,
                 gradient_checkpointing=False,
             )
 
-    def test_init_stores_fused_loss_chunk_rows(self):
-        rf = _cpu_llmreinforce(fused_loss_chunk_rows=256)
-        assert rf.fused_loss_chunk_rows == 256
+    def test_init_stores_chunk_rows(self):
+        rf = _cpu_llmreinforce(chunk_rows=256)
+        assert rf.chunk_rows == 256
 
     def test_init_turn_ratio_pooling_must_be_valid(self):
         actor = create_dummy_actor(10, 8, 100, "cpu")
@@ -1184,8 +1182,8 @@ class TestReinforceLossLiger:
         assert ratio is not None
         assert torch.all(ratio <= rf.vllm_importance_sampling_cap)
 
-    def test_forwards_configured_fused_loss_chunk_rows(self) -> None:
-        rf = _cpu_llmreinforce(fused_loss_chunk_rows=123)
+    def test_forwards_configured_chunk_rows(self) -> None:
+        rf = _cpu_llmreinforce(chunk_rows=123)
         B, T = 2, 5
         ids = torch.randint(1, 50, (B, T), dtype=torch.long)
         mask = torch.ones(B, T - 1, dtype=torch.float32)

@@ -2503,7 +2503,7 @@ class TestGRPOGspoLoss:
             targets,
             temperature=temperature,
             cast_to_fp32=True,
-            _chunk_rows=5,
+            chunk_rows=5,
         )
         loss_fused, kl_fused = stub._gspo_loss(
             mask,
@@ -2650,7 +2650,7 @@ class TestGRPOTurnLevel:
             targets,
             temperature=temperature,
             cast_to_fp32=True,
-            _chunk_rows=5,
+            chunk_rows=5,
         )
         loss_fused, _ = loss_fn(mask, fused, old, ref, advantages, turn_ids)
         loss_fused.backward()
