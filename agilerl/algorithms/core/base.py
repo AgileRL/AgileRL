@@ -4573,9 +4573,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             adapter_path,
             load_inplace=self._vllm_lora_loaded,
         )
-        request_adapter_id = getattr(refresh_request, "adapter_id", "n/a")
-        request_int_id = getattr(refresh_request, "lora_int_id", "n/a")
-        request_path = getattr(refresh_request, "lora_path", adapter_path)
         deadline_s = 20.0
         started = time.monotonic()
         attempts = 0
@@ -4613,47 +4610,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             elapsed = time.monotonic() - started
             last_missing = _missing_adapter_files(adapter_path)
             if not last_missing:
-                source_total, source_sample = self._source_lora_tensor_summary(
-                    peft_ref,
-                    limit=8,
-                )
-                dest_total, dest_sample = self._vllm_destination_tensor_summary(
-                    per_path_limit=4,
-                )
-                self._lora_debug_log(
-                    "pre_add_lora",
-                    attempt=attempts,
-                    elapsed_s=f"{elapsed:.3f}",
-                    lora_request_adapter_id=request_adapter_id,
-                    lora_request_int_id=request_int_id,
-                    lora_request_path=request_path,
-                    source_lora_total=source_total,
-                    source_lora_sample=source_sample,
-                    destination_tensor_total=dest_total,
-                    destination_tensor_sample=dest_sample,
-                )
-                try:
-                    if use_device_guard:
-                        with torch.cuda.device(lora_device):
-                            loaded = self.llm.llm_engine.add_lora(refresh_request)
-                    else:
+                if use_device_guard:
+                    with torch.cuda.device(lora_device):
                         loaded = self.llm.llm_engine.add_lora(refresh_request)
-                except Exception as exc:
-                    self._lora_debug_log(
-                        "add_lora_exception",
-                        exception_type=type(exc).__name__,
-                        exception_message=exc,
-                        attempt=attempts,
-                        elapsed_s=f"{elapsed:.3f}",
-                        lora_request_adapter_id=request_adapter_id,
-                        lora_request_int_id=request_int_id,
-                        lora_request_path=request_path,
-                        source_lora_total=source_total,
-                        source_lora_sample=source_sample,
-                        destination_tensor_total=dest_total,
-                        destination_tensor_sample=dest_sample,
-                    )
-                    raise
+                else:
+                    loaded = self.llm.llm_engine.add_lora(refresh_request)
                 if loaded:
                     if attempts > 1:
                         logger.info(
@@ -4719,9 +4680,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         the wake path clears.
         """
         if self._vllm_moved:
-            self._lora_debug_log("sync_actor_to_vllm_skip_already_moved")
             return
-        self._lora_debug_log("sync_actor_to_vllm_start")
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
 
@@ -4729,7 +4688,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         self.llm.reset_prefix_cache()
         self._vllm_moved = True
-        self._lora_debug_log("sync_actor_to_vllm_done", vllm_moved=self._vllm_moved)
 
     def _generate_with_vllm_colocate(
         self,
@@ -5591,15 +5549,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 )
                 raise ValueError(msg) from err
             raise
-        self._lora_debug_log(
-            "vllm_llm_created",
-            llm_class=type(self.llm).__name__,
-            tensor_parallel_size=(
-                self.vllm_config.tensor_parallel_size if self.vllm_config else "n/a"
-            ),
-            max_num_seqs=(self.vllm_config.max_num_seqs if self.vllm_config else "n/a"),
-            max_model_len=self.max_model_len,
-        )
 
         # Keep the persistent rollout-adapter slot resident (vLLM V1 otherwise
         # zeroes it on dummy batches and never re-copies it, so the trained
