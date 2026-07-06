@@ -2651,3 +2651,57 @@ def test_deferred_encoder_uses_spec_defaults_not_dataclass(tmp_path):
     enc = trainer.algorithm_spec.net_config.encoder_config
     assert enc.max_mlp_nodes == 256  # MlpSpec default (dataclass would be 500)
     assert enc.max_hidden_layers == 6  # MlpSpec default (dataclass would be 3)
+
+
+def test_from_manifest_multi_agent_heterogeneous_per_agent_encoders(tmp_path):
+    """Heterogeneous multi-agent env with no arch: per-agent encoders inferred."""
+    import yaml
+
+    from agilerl.modules.mlp import EvolvableMLP
+    from agilerl.modules.multi_input import EvolvableMultiInput
+    from agilerl.training.trainer import LocalTrainer
+
+    manifest = {
+        "algorithm": {"name": "IPPO", "learn_step": 64},
+        "environment": {
+            "name": "hetero-env",
+            "num_envs": 2,
+            "entrypoint": "tests.test_train._dummy_envs:HeteroParallelEnv",
+        },
+        "training": {"max_steps": 200, "evo_steps": 100, "pop_size": 1},
+        "network": {"latent_dim": 32, "head_config": {"hidden_size": [32]}},
+    }
+    path = tmp_path / "m.yaml"
+    path.write_text(yaml.safe_dump(manifest))
+
+    trainer = LocalTrainer.from_manifest(manifest=path, device="cpu")
+    agent = trainer.population[0]
+    encoders = {aid: net.encoder for aid, net in agent.actors.items()}
+    assert isinstance(encoders["dict_agent"], EvolvableMultiInput)
+    assert isinstance(encoders["vec_agent"], EvolvableMLP)
+
+
+def test_from_manifest_multi_agent_homogeneous(tmp_path):
+    """Homogeneous multi-agent env with no arch: shared MLP encoder per group."""
+    import yaml
+
+    from agilerl.modules.mlp import EvolvableMLP
+    from agilerl.training.trainer import LocalTrainer
+
+    manifest = {
+        "algorithm": {"name": "IPPO", "learn_step": 64},
+        "environment": {
+            "name": "pettingzoo.mpe.simple_spread_v3",
+            "num_envs": 2,
+        },
+        "training": {"max_steps": 200, "evo_steps": 100, "pop_size": 1},
+        "network": {"latent_dim": 32, "head_config": {"hidden_size": [32]}},
+    }
+    path = tmp_path / "m.yaml"
+    path.write_text(yaml.safe_dump(manifest))
+    trainer = LocalTrainer.from_manifest(manifest=path, device="cpu")
+    agent = trainer.population[0]
+    # simple_spread agents (agent_0/1/2) share a prefix -> one grouped policy.
+    assert len(agent.actors) >= 1
+    for net in agent.actors.values():
+        assert isinstance(net.encoder, EvolvableMLP)

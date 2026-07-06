@@ -384,30 +384,60 @@ class LocalTrainer(Trainer):
         if network_arch_is_resolvable(net_config):
             return
 
-        from typing import get_args
-
-        from agilerl.models.networks import NetworkSpec, encoder_spec_for_arch
-        from agilerl.utils.evolvable_networks import get_default_encoder_config
-
         observation_space, _ = get_spaces_from_env(self.algorithm_spec, self.env)
         simba = bool(net_config.get("simba", False))
         recurrent = bool(getattr(self.algorithm_spec, "recurrent", False))
 
         if isinstance(observation_space, dict):
-            # Multi-agent: handled in Task 4.
             self._resolve_deferred_net_config_multi_agent(
                 net_config, observation_space, simba, recurrent
             )
             return
 
+        encoder_config = self._resolve_encoder_config(
+            observation_space,
+            net_config.get("encoder_config"),
+            simba=simba,
+            recurrent=recurrent,
+        )
+        resolved = {**net_config, "encoder_config": encoder_config}
+        self.algorithm_spec.net_config = self._algo_net_spec_cls().model_validate(
+            resolved
+        )
+
+    def _resolve_encoder_config(
+        self,
+        observation_space: Any,
+        user_encoder_config: dict[str, Any] | None,
+        *,
+        simba: bool,
+        recurrent: bool,
+    ) -> dict[str, Any]:
+        """Build a resolved ``encoder_config`` for a single observation space.
+
+        ``arch`` alone isn't enough to validate: variant-specific fields (e.g.
+        ``MlpSpec.hidden_size``, ``CnnSpec.channel_size``) are REQUIRED with no
+        default. Seed ONLY those required fields from the default-config helper
+        the algorithms use; every OPTIONAL field must fall through to its
+        ``*Spec`` pydantic default so the deferred path resolves to the same HP
+        bounds as the eager (arch-declared) path. User-provided ``encoder_config``
+        keys overlay the seed, and ``arch`` is set last.
+
+        :param observation_space: The (per-agent) observation space.
+        :type observation_space: gymnasium.spaces.Space
+        :param user_encoder_config: The manifest-provided ``encoder_config``, if any.
+        :type user_encoder_config: dict[str, Any] | None
+        :param simba: Whether the network requests a SimBa encoder.
+        :type simba: bool
+        :param recurrent: Whether the algorithm requests a recurrent encoder.
+        :type recurrent: bool
+        :returns: A resolved ``encoder_config`` dict including its ``arch``.
+        :rtype: dict[str, Any]
+        """
+        from agilerl.models.networks import encoder_spec_for_arch
+        from agilerl.utils.evolvable_networks import get_default_encoder_config
+
         arch = infer_encoder_arch(observation_space, recurrent=recurrent, simba=simba)
-        # `arch` alone isn't enough to validate: variant-specific fields (e.g.
-        # ``MlpSpec.hidden_size``, ``CnnSpec.channel_size``) are REQUIRED with no
-        # default. Seed ONLY those required fields from the default-config helper
-        # the algorithms use; every OPTIONAL field must fall through to its
-        # ``*Spec`` pydantic default so the deferred path resolves to the same HP
-        # bounds as the eager (arch-declared) path. User-provided ``encoder_config``
-        # keys overlay the seed, and ``arch`` is set last.
         encoder_spec_cls = encoder_spec_for_arch(arch)
         required = {
             name
@@ -418,22 +448,79 @@ class LocalTrainer(Trainer):
             observation_space, simba=simba, recurrent=recurrent
         )
         seed = {k: v for k, v in default_encoder_config.items() if k in required}
-        user_encoder_config = net_config.get("encoder_config") or {}
-        encoder_config = {**seed, **user_encoder_config, "arch": arch}
-        resolved = {**net_config, "encoder_config": encoder_config}
+        return {**seed, **(user_encoder_config or {}), "arch": arch}
+
+    def _algo_net_spec_cls(self) -> type:
+        """Resolve the algorithm's concrete ``NetworkSpec`` subclass.
+
+        Picks the non-``None`` member of the ``net_config`` field's type
+        annotation (e.g. ``StochasticActorSpec`` for IPPO), falling back to the
+        base :class:`~agilerl.models.networks.NetworkSpec`.
+
+        :returns: The ``NetworkSpec`` subclass used to validate the network.
+        :rtype: type
+        """
+        from typing import get_args
+
+        from agilerl.models.networks import NetworkSpec
 
         net_config_field = type(self.algorithm_spec).model_fields.get("net_config")
-        spec_cls = next(
+        return next(
             (t for t in get_args(net_config_field.annotation) if t is not type(None)),
             NetworkSpec,
         )
-        self.algorithm_spec.net_config = spec_cls.model_validate(resolved)
 
     def _resolve_deferred_net_config_multi_agent(
-        self, net_config, observation_spaces, simba, recurrent
+        self,
+        net_config: dict[str, Any],
+        observation_spaces: dict[str, Any],
+        simba: bool,
+        recurrent: bool,
     ) -> None:
-        msg = "multi-agent deferred net_config: Task 4"
-        raise NotImplementedError(msg)
+        """Resolve a deferred multi-agent network section, per agent group.
+
+        Infers the encoder arch from each agent's own observation space and
+        builds a per-group nested ``net_config`` so heterogeneous agents each
+        get the right encoder while homogeneous agents share one. The manifest's
+        shared network settings (``latent_dim``, ``head_config``, ...) are
+        applied to every group; only ``encoder_config`` is resolved per group.
+
+        Agents are keyed by their shared-policy group id (the same
+        ``rsplit("_", 1)`` prefix the algorithm uses to group homogeneous
+        agents), because ``build_net_config`` rejects individual-agent keys in a
+        grouped setting yet resolves group-id keys for both grouped and
+        ungrouped environments.
+
+        :param net_config: The raw (deferred) network section from the manifest.
+        :type net_config: dict[str, Any]
+        :param observation_spaces: Per-agent observation spaces.
+        :type observation_spaces: dict[str, gymnasium.spaces.Space]
+        :param simba: Whether the network requests a SimBa encoder.
+        :type simba: bool
+        :param recurrent: Whether the algorithm requests a recurrent encoder.
+        :type recurrent: bool
+        """
+        spec_cls = self._algo_net_spec_cls()
+        shared_fields = {k: v for k, v in net_config.items() if k != "encoder_config"}
+        user_encoder_config = net_config.get("encoder_config")
+
+        resolved: dict[str, dict[str, Any]] = {}
+        for agent_id, observation_space in observation_spaces.items():
+            group_id = (
+                agent_id.rsplit("_", 1)[0] if isinstance(agent_id, str) else agent_id
+            )
+            if group_id in resolved:
+                continue
+            encoder_config = self._resolve_encoder_config(
+                observation_space,
+                user_encoder_config,
+                simba=simba,
+                recurrent=recurrent,
+            )
+            agent_net_config = {**shared_fields, "encoder_config": encoder_config}
+            resolved[group_id] = spec_cls.model_validate(agent_net_config).model_dump()
+
+        self.algorithm_spec.net_config = resolved
 
     def _make_tokenizer(self) -> AutoTokenizer:
         """Create the tokenizer for the LLM algorithm.
