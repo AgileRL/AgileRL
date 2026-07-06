@@ -5304,6 +5304,7 @@ class TestLLMConfigureVllmAcceleratorPaths:
         vllm_config.gpu_memory_utilization = 0.9
         vllm_config.max_num_seqs = 256
         vllm_config.sleep_mode = True
+        vllm_config.sleep_mode_level = 1
         agent.vllm_config = vllm_config
         agent.max_model_len = 512
         agent.pretrained_model_name_or_path = "mock-model"
