@@ -704,19 +704,13 @@ def train_llm_dataset(
     max_steps_checkpoint_saved = False
     mean_reward_margin = 0.0
 
-    if uses_env_fn:
-        prompts_by_agent = [
-            training_env.reset(reset_dataloaders=True) for training_env in envs
-        ]
-    else:
-        prompts = envs[0].reset(reset_dataloaders=True)
     for i in range(training_steps):
         agent_metrics_dict = {}
         for agent_idx, agent in enumerate(pop):
             if total_steps >= max_steps:
                 break
             training_env = envs[agent_idx] if uses_env_fn else envs[0]
-            current_prompts = prompts_by_agent[agent_idx] if uses_env_fn else prompts
+            current_prompts = training_env.reset()
             agent.set_reference_policy(training_env.num_epochs)
             if mode == "preference":
                 learn_output = agent.learn(current_prompts)
@@ -725,7 +719,6 @@ def train_llm_dataset(
                     learn_output=learn_output,
                     mode="preference",
                 )
-                next_prompts = training_env.reset()
                 agg_metrics = {
                     metric_name: aggregate_metrics_across_gpus(accelerator, metric)
                     for metric_name, metric in metrics.items()
@@ -736,7 +729,6 @@ def train_llm_dataset(
                 )
             else:
                 learn_output = agent.learn(current_prompts)
-                next_prompts = training_env.reset()
                 # SFT.learn returns a {"mean_loss", "mean_perplexity"} dict.
                 agg_metrics = [
                     safe_aggregate_metrics(accelerator, learn_output["mean_loss"]),
@@ -744,10 +736,6 @@ def train_llm_dataset(
                         accelerator, learn_output["mean_perplexity"]
                     ),
                 ]
-            if uses_env_fn:
-                prompts_by_agent[agent_idx] = next_prompts
-            else:
-                prompts = next_prompts
 
             agent.steps[-1] += effective_data_batch_size
             total_steps += effective_data_batch_size
