@@ -2628,3 +2628,26 @@ def test_from_manifest_wrong_arch_is_overridden_when_omitted(tmp_path):
     path.write_text(yaml.safe_dump(manifest))
     trainer = LocalTrainer.from_manifest(manifest=path, device="cpu")
     assert isinstance(trainer.population[0].actor.encoder, EvolvableMLP)
+
+
+def test_deferred_encoder_uses_spec_defaults_not_dataclass(tmp_path):
+    """A no-arch manifest must resolve encoder HP bounds from the pydantic
+    ``*Spec`` defaults, not the ``modules/configs`` dataclass defaults.
+    """
+    import yaml
+
+    from agilerl.training.trainer import LocalTrainer
+
+    manifest = {
+        "algorithm": {"name": "PPO", "learn_step": 64},
+        "environment": {"name": "CartPole-v1", "num_envs": 2},
+        "training": {"max_steps": 200, "evo_steps": 100, "pop_size": 1},
+        "network": {"latent_dim": 32, "head_config": {"hidden_size": [32]}},
+    }
+    path = tmp_path / "m.yaml"
+    path.write_text(yaml.safe_dump(manifest))
+    trainer = LocalTrainer.from_manifest(manifest=path, device="cpu")
+
+    enc = trainer.algorithm_spec.net_config.encoder_config
+    assert enc.max_mlp_nodes == 256  # MlpSpec default (dataclass would be 500)
+    assert enc.max_hidden_layers == 6  # MlpSpec default (dataclass would be 3)

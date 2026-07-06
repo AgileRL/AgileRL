@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from typing import Any, Literal, TypeVar
+from typing import Any, Literal, TypeVar, get_args
 
 from gymnasium import spaces
 from pydantic import (
@@ -348,6 +348,29 @@ class LstmSpec(BaseModel):
 
 
 EncoderType = MlpSpec | CnnSpec | LstmSpec | MultiInputSpec | SimbaSpec
+
+
+def encoder_spec_for_arch(arch: str) -> type[BaseModel]:
+    """Return the encoder spec class (``MlpSpec``, ``CnnSpec``, ...) for an arch literal.
+
+    Single source of truth mapping an ``arch`` string (as produced by
+    :func:`infer_encoder_arch`) to the concrete pydantic spec that validates
+    that encoder's ``encoder_config``.
+
+    :param arch: The encoder architecture literal (e.g. ``"mlp"``, ``"cnn"``).
+    :type arch: str
+    :returns: The encoder spec class whose ``arch`` field matches.
+    :rtype: type[BaseModel]
+    """
+    for member in get_args(EncoderType):
+        arch_field = member.model_fields["arch"]
+        member_arch = arch_field.default
+        if member_arch is None:
+            member_arch = get_args(arch_field.annotation)[0]
+        if member_arch == arch:
+            return member
+    msg = f"Unknown encoder arch: {arch!r}"
+    raise ValueError(msg)
 
 
 class NetworkSpec(BaseModel):

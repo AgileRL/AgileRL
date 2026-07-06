@@ -386,7 +386,7 @@ class LocalTrainer(Trainer):
 
         from typing import get_args
 
-        from agilerl.models.networks import NetworkSpec
+        from agilerl.models.networks import NetworkSpec, encoder_spec_for_arch
         from agilerl.utils.evolvable_networks import get_default_encoder_config
 
         observation_space, _ = get_spaces_from_env(self.algorithm_spec, self.env)
@@ -401,21 +401,26 @@ class LocalTrainer(Trainer):
             return
 
         arch = infer_encoder_arch(observation_space, recurrent=recurrent, simba=simba)
-        resolved = dict(net_config)
         # `arch` alone isn't enough to validate: variant-specific fields (e.g.
-        # ``MlpSpec.hidden_size``, ``CnnSpec.channel_size``) are required with
-        # no default. Seed them from the same default-config helper the
-        # algorithms themselves use (mirrors the same branch order as
-        # ``infer_encoder_arch``), then let any user-provided overrides win.
+        # ``MlpSpec.hidden_size``, ``CnnSpec.channel_size``) are REQUIRED with no
+        # default. Seed ONLY those required fields from the default-config helper
+        # the algorithms use; every OPTIONAL field must fall through to its
+        # ``*Spec`` pydantic default so the deferred path resolves to the same HP
+        # bounds as the eager (arch-declared) path. User-provided ``encoder_config``
+        # keys overlay the seed, and ``arch`` is set last.
+        encoder_spec_cls = encoder_spec_for_arch(arch)
+        required = {
+            name
+            for name, field in encoder_spec_cls.model_fields.items()
+            if field.is_required()
+        }
         default_encoder_config = get_default_encoder_config(
             observation_space, simba=simba, recurrent=recurrent
         )
-        encoder_config = {
-            **default_encoder_config,
-            **(resolved.get("encoder_config") or {}),
-        }
-        encoder_config["arch"] = arch
-        resolved["encoder_config"] = encoder_config
+        seed = {k: v for k, v in default_encoder_config.items() if k in required}
+        user_encoder_config = net_config.get("encoder_config") or {}
+        encoder_config = {**seed, **user_encoder_config, "arch": arch}
+        resolved = {**net_config, "encoder_config": encoder_config}
 
         net_config_field = type(self.algorithm_spec).model_fields.get("net_config")
         spec_cls = next(
