@@ -632,12 +632,23 @@ class LocalEnvClient(_EvalSplitMixin):
 class ServedEnvClient:
     """Backend that hosts a local env on its own :class:`OpenEnvServer` and owns both halves.
 
-    The env client behind :meth:`RolloutEnv.serving`: it starts a server for
-    ``env``, builds the :class:`OpenEnvClient` that drives it, and ties their
-    lifetimes together so ``close`` is a single call. Keeping ownership here keeps
-    ``RolloutEnv`` transport-agnostic — it holds exactly one
-    :class:`~agilerl.protocols.EnvClientProtocol` no matter who hosts the env, and
-    any future owning backend (e.g. a Ray-side served env) follows the same shape.
+    The env client behind :meth:`RolloutEnv.serving`. Ownership is the point: a
+    self-hosted env involves two transport objects — the server hosting it and
+    the client driving it — and whoever holds them must tear both down together.
+    Housing the pair behind one :class:`~agilerl.protocols.EnvClientProtocol`
+    backend keeps ``RolloutEnv`` transport-agnostic: it holds exactly one env
+    client no matter who hosts the env, and its ``close`` is a single
+    unconditional call — this class stops the server (which closes the hosted
+    env exactly once) and releases the client's connection pool. Both halves
+    stay useful on their own (:class:`OpenEnvClient` drives servers we don't
+    own, e.g. a remote Space; :class:`OpenEnvServer` hosts envs driven from
+    another process, via :func:`resolve_env`); this is the composition for the
+    common self-hosted case.
+
+    Any backend that owns transport infrastructure follows this shape: a future
+    WebSocket-session backend would likewise hold one session on a shared
+    server (letting one server host many concurrent rollouts) and release it in
+    ``close`` — with ``RolloutEnv`` unchanged.
 
     :param env: The local env to host (the ``reset`` / ``step`` text contract).
     :param host: Interface the server binds (default loopback).
