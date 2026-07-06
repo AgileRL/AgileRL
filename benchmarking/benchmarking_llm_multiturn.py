@@ -23,8 +23,8 @@ from agilerl.utils.llm_utils import (
 from agilerl.utils.utils import create_population
 
 CONFIG_PATH = "configs/training/llm_finetuning/cispo_quant_bench.yaml"
-MODEL_PATH = "Qwen/Qwen2.5-0.5B-Instruct"  # google/gemma-4-E4B-it"
-ENV_NAME = "game:GuessTheNumber-v0-easy"
+MODEL_PATH = "google/gemma-4-E4B-it"
+ENV_NAME = "game:Sudoku-v0-hard"
 
 ALGO_REGISTRY = {
     "LLMPPO": LLMPPO,
@@ -100,8 +100,7 @@ def main(init_hp, mut_p):
             tensor_parallel_size=1,
             gpu_memory_utilization=0.9,
             max_num_seqs=10,
-            sleep_mode=False,
-            sleep_mode_level=int(init_hp.get("SLEEP_MODE_LEVEL", 2)),
+            sleep_mode=init_hp.get("POP_SIZE", 1) == 1,
             quantization=("bitsandbytes" if quantization_config is not None else None),
             dtype="bfloat16",
             strip_multimodal_towers=True,
@@ -131,7 +130,7 @@ def main(init_hp, mut_p):
         max_turns=rollout_max_turns,
         env_factory=env_factory,
         init_hp=init_hp,
-        wb=False,
+        wb=True,
         # WANDB_API_KEY / WANDB_PROJECT / WANDB_ENTITY are the env vars wandb
         # itself documents; pass them through rather than invent config keys.
         wandb_api_key=os.environ.get("WANDB_API_KEY"),
