@@ -2584,3 +2584,47 @@ class TestLocalTrainerResolveEnvSpecBranches:
         result = LocalTrainer._resolve_env_spec(manifest)
         assert isinstance(result, LLMEnvSpec)
         assert result.env_type == LLMEnvType.REASONING
+
+
+def test_from_manifest_infers_multiinput_when_arch_absent(tmp_path):
+    """A Dict-obs env with NO arch builds an EvolvableMultiInput encoder."""
+    import yaml
+
+    from agilerl.modules.multi_input import EvolvableMultiInput
+    from agilerl.training.trainer import LocalTrainer
+
+    manifest = {
+        "algorithm": {"name": "PPO", "learn_step": 64},
+        "environment": {
+            "name": "dict-obs-env",
+            "num_envs": 2,
+            "entrypoint": "tests.test_train._dummy_envs:DictObsEnv",
+        },
+        "training": {"max_steps": 200, "evo_steps": 100, "pop_size": 1},
+        "network": {"latent_dim": 32, "head_config": {"hidden_size": [32]}},
+    }
+    path = tmp_path / "m.yaml"
+    path.write_text(yaml.safe_dump(manifest))
+
+    trainer = LocalTrainer.from_manifest(manifest=path, device="cpu")
+    encoder = trainer.population[0].actor.encoder
+    assert isinstance(encoder, EvolvableMultiInput)
+
+
+def test_from_manifest_wrong_arch_is_overridden_when_omitted(tmp_path):
+    """Vector-obs env with no arch builds an EvolvableMLP."""
+    import yaml
+
+    from agilerl.modules.mlp import EvolvableMLP
+    from agilerl.training.trainer import LocalTrainer
+
+    manifest = {
+        "algorithm": {"name": "PPO", "learn_step": 64},
+        "environment": {"name": "CartPole-v1", "num_envs": 2},
+        "training": {"max_steps": 200, "evo_steps": 100, "pop_size": 1},
+        "network": {"latent_dim": 32, "head_config": {"hidden_size": [32]}},
+    }
+    path = tmp_path / "m.yaml"
+    path.write_text(yaml.safe_dump(manifest))
+    trainer = LocalTrainer.from_manifest(manifest=path, device="cpu")
+    assert isinstance(trainer.population[0].actor.encoder, EvolvableMLP)

@@ -33,12 +33,14 @@ from agilerl.models.env import (
     OfflineEnvSpec,
     PzEnvSpec,
 )
+from agilerl.models.networks import infer_encoder_arch, network_arch_is_resolvable
 from agilerl.utils.trainer_utils import (
     EnvironmentT,
     build_mutations_from_spec,
     build_replay_buffer_from_spec,
     build_tournament_from_spec,
     create_population_from_spec,
+    get_spaces_from_env,
 )
 
 logger = logging.getLogger(__name__)
@@ -322,6 +324,7 @@ class LocalTrainer(Trainer):
 
         # Instantiate the training components from their specs.
         self.env = self._make_env()
+        self._resolve_deferred_net_config()
         self.population = create_population_from_spec(
             population_size=self.training_spec.pop_size,
             algo_spec=self.algorithm_spec,
@@ -365,6 +368,67 @@ class LocalTrainer(Trainer):
         else:
             self.env_factory = None
             self.train_fn = self.algorithm_spec.get_training_fn()
+
+    def _resolve_deferred_net_config(self) -> None:
+        """Resolve a manifest network section whose ``arch`` was omitted.
+
+        When the manifest did not declare ``arch``, ``net_config`` is left as a
+        raw dict by manifest validation. Now that the environment (hence the
+        observation space) exists, infer the arch and validate the network into
+        the algorithm's concrete ``NetworkSpec``. No-ops when ``net_config`` is
+        already a validated spec (programmatic construction) or None.
+        """
+        net_config = getattr(self.algorithm_spec, "net_config", None)
+        if not isinstance(net_config, dict):
+            return
+        if network_arch_is_resolvable(net_config):
+            return
+
+        from typing import get_args
+
+        from agilerl.models.networks import NetworkSpec
+        from agilerl.utils.evolvable_networks import get_default_encoder_config
+
+        observation_space, _ = get_spaces_from_env(self.algorithm_spec, self.env)
+        simba = bool(net_config.get("simba", False))
+        recurrent = bool(getattr(self.algorithm_spec, "recurrent", False))
+
+        if isinstance(observation_space, dict):
+            # Multi-agent: handled in Task 4.
+            self._resolve_deferred_net_config_multi_agent(
+                net_config, observation_space, simba, recurrent
+            )
+            return
+
+        arch = infer_encoder_arch(observation_space, recurrent=recurrent, simba=simba)
+        resolved = dict(net_config)
+        # `arch` alone isn't enough to validate: variant-specific fields (e.g.
+        # ``MlpSpec.hidden_size``, ``CnnSpec.channel_size``) are required with
+        # no default. Seed them from the same default-config helper the
+        # algorithms themselves use (mirrors the same branch order as
+        # ``infer_encoder_arch``), then let any user-provided overrides win.
+        default_encoder_config = get_default_encoder_config(
+            observation_space, simba=simba, recurrent=recurrent
+        )
+        encoder_config = {
+            **default_encoder_config,
+            **(resolved.get("encoder_config") or {}),
+        }
+        encoder_config["arch"] = arch
+        resolved["encoder_config"] = encoder_config
+
+        net_config_field = type(self.algorithm_spec).model_fields.get("net_config")
+        spec_cls = next(
+            (t for t in get_args(net_config_field.annotation) if t is not type(None)),
+            NetworkSpec,
+        )
+        self.algorithm_spec.net_config = spec_cls.model_validate(resolved)
+
+    def _resolve_deferred_net_config_multi_agent(
+        self, net_config, observation_spaces, simba, recurrent
+    ) -> None:
+        msg = "multi-agent deferred net_config: Task 4"
+        raise NotImplementedError(msg)
 
     def _make_tokenizer(self) -> AutoTokenizer:
         """Create the tokenizer for the LLM algorithm.
