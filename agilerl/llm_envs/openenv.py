@@ -20,10 +20,29 @@ The wrappers here exist because OpenEnv's own classes don't cover this use direc
   actor) gets its concurrency from the actor boundary, not the client.
 * :class:`LocalEnvClient` is the in-process sibling: the same surface, but it calls a
   local env's ``reset`` / ``step`` directly (no server, no socket).
+* :class:`ServedEnvClient` composes the two hosting halves — it starts an
+  :class:`OpenEnvServer` for a local env and drives it through an
+  :class:`OpenEnvClient`, owning both so one ``close`` tears everything down.
 
 :func:`resolve_env` turns a URL or a ``module:Class`` entrypoint into a hosted ``(url,
 server)``; :func:`load_env` just builds an entrypoint env (no hosting) for the in-process
 path.
+
+Two constraints of the OpenEnv HTTP protocol worth knowing:
+
+* **Servers must run in SIMULATION mode.** OpenEnv registers ``/reset`` / ``/step`` /
+  ``/state`` only in simulation mode; a production-mode server exposes just
+  ``/health`` / ``/schema`` / ``/metadata`` / ``/ws`` / ``/mcp``, so
+  :class:`OpenEnvClient` cannot drive it. Servers hosted here (:class:`OpenEnvServer`)
+  are simulation-mode; check the mode of any external server before training against it.
+* **One REST server serves one episode at a time.** OpenEnv's REST handlers hold no
+  session, so a served env is stateful per server — hence one :class:`OpenEnvServer`
+  per concurrent rollout (see :meth:`RolloutEnv.serving`). OpenEnv's WebSocket path
+  does support many concurrent sessions per server (a fresh env per session,
+  ``max_concurrent_envs``, an idle-session reaper): a WebSocket-backed
+  ``EnvClientProtocol`` implementation is the intended evolution if the per-rollout
+  server fleet ever becomes the bottleneck. Today rollout concurrency comes from the
+  distributed (Ray) collector, so the sync REST backend stays the simple default.
 """
 
 from __future__ import annotations
@@ -65,11 +84,15 @@ class TextObservation(Observation):
     """OpenEnv observation carrying the next prompt text.
 
     Inherits ``reward`` / ``done`` / ``metadata`` from ``Observation``. (The OpenEnv
-    server round-trips ``prompt`` / ``reward`` / ``done`` but not ``metadata``, so any
-    prefix/suffix is folded into ``prompt`` by :class:`OpenEnvWrapper`.)
+    server round-trips declared fields — ``prompt`` / ``truncated`` here, plus
+    ``reward`` / ``done`` — but not ``metadata``, so any prefix/suffix is folded into
+    ``prompt`` by :class:`OpenEnvWrapper`.) ``truncated`` distinguishes a time-limit
+    end from a natural termination inside ``done``, so the HTTP backend reports the
+    same Gym 5-tuple split as the in-process one.
     """
 
     prompt: str = ""
+    truncated: bool = False
 
 
 class OpenEnvWrapper(Environment):
@@ -138,6 +161,7 @@ class OpenEnvWrapper(Environment):
             prompt=_fold(prompt, info),
             reward=reward,
             done=bool(terminated or truncated),
+            truncated=bool(truncated),
         )
 
     @property
@@ -253,12 +277,24 @@ class OpenEnvServer:
         )
         self._thread.start()
         deadline = time.monotonic() + 30.0
-        while not getattr(self._server, "started", False):
-            if time.monotonic() > deadline:
-                msg = "OpenEnvServer failed to start within 30s"
-                raise RuntimeError(msg)
-            time.sleep(0.02)
-        self._bound_port = self._server.servers[0].sockets[0].getsockname()[1]
+        try:
+            while not getattr(self._server, "started", False):
+                if not self._thread.is_alive():
+                    msg = (
+                        "OpenEnvServer thread exited during startup — the port may "
+                        f"be in use or the app failed to start "
+                        f"(host={self._host!r}, port={self._port})"
+                    )
+                    raise RuntimeError(msg)
+                if time.monotonic() > deadline:
+                    msg = "OpenEnvServer failed to start within 30s"
+                    raise RuntimeError(msg)
+                time.sleep(0.02)
+            self._bound_port = self._server.servers[0].sockets[0].getsockname()[1]
+        except Exception:
+            # A failed start must not leak the thread or the hosted env.
+            self.stop()
+            raise
         return self
 
     def stop(self) -> None:
@@ -287,7 +323,38 @@ class OpenEnvServer:
         self.stop()
 
 
-class OpenEnvClient:
+class _EvalSplitMixin:
+    """Held-out-split flag shared by the env clients.
+
+    Provides the ``evaluation_mode`` property (read by each client's ``reset``) and
+    the ``eval_mode`` save/set/restore context manager, so every
+    :class:`~agilerl.protocols.EnvClientProtocol` implementation carries one
+    definition of the toggle.
+    """
+
+    _evaluation_mode: bool = False
+
+    @property
+    def evaluation_mode(self) -> bool:
+        """Whether resets are currently flagged for the held-out split."""
+        return self._evaluation_mode
+
+    @evaluation_mode.setter
+    def evaluation_mode(self, value: bool) -> None:
+        self._evaluation_mode = bool(value)
+
+    @contextlib.contextmanager
+    def eval_mode(self) -> Iterator[None]:
+        """Flag resets for the env's held-out split within the block."""
+        previous = self._evaluation_mode
+        self._evaluation_mode = True
+        try:
+            yield
+        finally:
+            self._evaluation_mode = previous
+
+
+class OpenEnvClient(_EvalSplitMixin):
     """Synchronous httpx client for an OpenEnv env server (text in, text out).
 
     Implements :class:`~agilerl.protocols.EnvClientProtocol` for
@@ -343,6 +410,7 @@ class OpenEnvClient:
         self._instruction = instruction
         self._evaluation_mode = False
         self._state: dict[str, Any] | None = None
+        self._mcp_tools: list[Any] | None = None
 
     def reset(
         self,
@@ -373,12 +441,20 @@ class OpenEnvClient:
         else:
             act = {"message": text}
         data = self._post("/step", {"action": act})
+        obs = data.get("observation")
         reward = data.get("reward")
+        done = bool(data.get("done", False))
+        # Our servers round-trip ``truncated`` inside the observation
+        # (:class:`TextObservation`); servers that don't send it report every end
+        # as a termination.
+        truncated = (
+            bool(obs.get("truncated", False)) if isinstance(obs, dict) else False
+        )
         return (
-            _observation_text(data.get("observation")),
+            _observation_text(obs),
             float(reward) if reward is not None else 0.0,
-            bool(data.get("done", False)),
-            False,
+            done and not truncated,
+            truncated,
             {},
         )
 
@@ -395,39 +471,76 @@ class OpenEnvClient:
 
     @property
     def tools(self) -> list[Any]:
-        """Tool schemas the env advertises via ``/state`` (empty when none)."""
-        return self._fetch_state().get("tools") or []
+        """Tool schemas the env advertises (``/state``, then MCP ``tools/list``).
 
-    @property
-    def evaluation_mode(self) -> bool:
-        """Whether reset requests are currently flagged for the held-out split."""
-        return self._evaluation_mode
-
-    @evaluation_mode.setter
-    def evaluation_mode(self, value: bool) -> None:
-        self._evaluation_mode = bool(value)
-
-    @contextlib.contextmanager
-    def eval_mode(self) -> Iterator[None]:
-        """Flag reset requests for the env's held-out split within the block."""
-        previous = self._evaluation_mode
-        self._evaluation_mode = True
-        try:
-            yield
-        finally:
-            self._evaluation_mode = previous
+        ``/state`` is our servers' channel; the MCP fallback covers external
+        OpenEnv servers that expose their tools only over ``/mcp``.
+        """
+        tools = self._fetch_state().get("tools") or []
+        if tools:
+            return tools
+        return self._fetch_mcp_tools()
 
     def _fetch_state(self) -> dict[str, Any]:
-        """Lazily fetch + cache the env's ``/state`` (dataset size + tool schemas)."""
-        if self._state is None:
-            self._state = {}
-            with contextlib.suppress(Exception):
+        """Fetch + cache the env's ``/state`` (dataset size + tool schemas).
+
+        This metadata changes training semantics — ``dataset_size`` drives batch
+        row pinning and ``tools`` reach the chat template — so transient
+        failures are retried and then raised, never silently treated as "no
+        dataset, no tools". A 404/405 means the server registers no ``/state``
+        route (e.g. a production-mode OpenEnv server) and caches as empty.
+        """
+        if self._state is not None:
+            return self._state
+        last_error: Exception | None = None
+        for backoff_s in (0.5, 1.0, 2.0, None):
+            try:
                 response = self._http.get("/state")
-                response.raise_for_status()
-                body = response.json()
-                if isinstance(body, dict):
-                    self._state = body
-        return self._state
+            except httpx.HTTPError as exc:
+                last_error = exc
+            else:
+                if response.status_code in (404, 405):
+                    self._state = {}
+                    return self._state
+                try:
+                    response.raise_for_status()
+                    body = response.json()
+                except (httpx.HTTPStatusError, ValueError) as exc:
+                    last_error = exc
+                else:
+                    self._state = body if isinstance(body, dict) else {}
+                    return self._state
+            if backoff_s is not None:
+                time.sleep(backoff_s)
+        msg = (
+            "could not fetch /state from the OpenEnv server at "
+            f"{self._http.base_url} — dataset size and tool schemas drive "
+            "training, so this is fatal rather than silently empty. Is the "
+            "server up and running in simulation mode?"
+        )
+        raise RuntimeError(msg) from last_error
+
+    def _fetch_mcp_tools(self) -> list[Any]:
+        """Tool schemas from the server's MCP channel (``tools/list`` on ``/mcp``).
+
+        Best-effort: a server without an MCP channel simply advertises no tools,
+        so failures here are not errors (unlike ``/state``, which is strict).
+        """
+        if self._mcp_tools is not None:
+            return self._mcp_tools
+        self._mcp_tools = []
+        with contextlib.suppress(Exception):
+            response = self._http.post(
+                "/mcp",
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+            )
+            response.raise_for_status()
+            body = response.json()
+            if isinstance(body, dict):
+                tools = (body.get("result") or {}).get("tools")
+                if isinstance(tools, list):
+                    self._mcp_tools = tools
+        return self._mcp_tools
 
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         """POST JSON to the server and decode the object response."""
@@ -440,7 +553,7 @@ class OpenEnvClient:
         return body
 
 
-class LocalEnvClient:
+class LocalEnvClient(_EvalSplitMixin):
     """In-process backend for a local env — the no-HTTP sibling of :class:`OpenEnvClient`.
 
     Implements :class:`~agilerl.protocols.EnvClientProtocol` for
@@ -515,24 +628,109 @@ class LocalEnvClient:
         """Tool schemas the env advertises (empty when none)."""
         return list(getattr(self._env, "tools", None) or [])
 
+
+class ServedEnvClient:
+    """Backend that hosts a local env on its own :class:`OpenEnvServer` and owns both halves.
+
+    The env client behind :meth:`RolloutEnv.serving`: it starts a server for
+    ``env``, builds the :class:`OpenEnvClient` that drives it, and ties their
+    lifetimes together so ``close`` is a single call. Keeping ownership here keeps
+    ``RolloutEnv`` transport-agnostic — it holds exactly one
+    :class:`~agilerl.protocols.EnvClientProtocol` no matter who hosts the env, and
+    any future owning backend (e.g. a Ray-side served env) follows the same shape.
+
+    :param env: The local env to host (the ``reset`` / ``step`` text contract).
+    :param host: Interface the server binds (default loopback).
+    :param port: Server TCP port; ``0`` lets the OS pick one.
+    :param env_name: Name advertised in the env's OpenEnv metadata; defaults to the
+        env's class name.
+    :param headers: Optional HTTP headers sent on every client request.
+    :param timeout_s: Per-request client timeout in seconds (``None`` = unbounded).
+    :param mcp_tool: Optional MCP transport adapter (see :class:`OpenEnvClient`).
+    :param arg: MCP argument name carrying the text (default ``"message"``).
+    :param instruction: Prompt returned from reset when the env's reset obs is empty.
+    """
+
+    def __init__(
+        self,
+        env: TextEnvProtocol,
+        *,
+        host: str = "127.0.0.1",
+        port: int = 0,
+        env_name: str | None = None,
+        headers: dict[str, str] | None = None,
+        timeout_s: float | None = None,
+        mcp_tool: str | None = None,
+        arg: str = "message",
+        instruction: str = "",
+    ) -> None:
+        """Host ``env`` on a fresh server and build the client driving it."""
+        self._server = OpenEnvServer(
+            env, host=host, port=port, env_name=env_name
+        ).start()
+        try:
+            self._client = OpenEnvClient(
+                self._server.base_url,
+                headers=headers,
+                timeout_s=timeout_s,
+                mcp_tool=mcp_tool,
+                arg=arg,
+                instruction=instruction,
+            )
+        except Exception:
+            self._server.stop()
+            raise
+
+    @property
+    def base_url(self) -> str:
+        """The URL the owned server is bound to."""
+        return self._server.base_url
+
+    def reset(
+        self,
+        seed: int | None = None,
+        *,
+        row_index: int | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        """Reset the served env and return ``(prompt, info)``."""
+        return self._client.reset(seed=seed, row_index=row_index)
+
+    def step(self, action: Any) -> tuple[str, float, bool, bool, dict[str, Any]]:
+        """Step the served env with the action text and return the Gym 5-tuple."""
+        return self._client.step(action)
+
+    def close(self) -> None:
+        """Stop the owned server and release the client's connection pool.
+
+        Idempotent. Stopping the server closes the hosted env directly, so the
+        client's ``/close`` round-trip to our own server is skipped — it would be
+        redundant and can stall teardown on a loaded process.
+        """
+        self._server.stop()
+        self._client._http.close()
+
+    @property
+    def dataset_size(self) -> int:
+        """Dataset rows the served env exposes (``0`` if not dataset-backed)."""
+        return self._client.dataset_size
+
+    @property
+    def tools(self) -> list[Any]:
+        """Tool schemas the served env advertises (empty when none)."""
+        return self._client.tools
+
     @property
     def evaluation_mode(self) -> bool:
         """Whether resets are currently flagged for the held-out split."""
-        return self._evaluation_mode
+        return self._client.evaluation_mode
 
     @evaluation_mode.setter
     def evaluation_mode(self, value: bool) -> None:
-        self._evaluation_mode = bool(value)
+        self._client.evaluation_mode = value
 
-    @contextlib.contextmanager
-    def eval_mode(self) -> Iterator[None]:
+    def eval_mode(self) -> Any:
         """Flag resets for the env's held-out split within the block."""
-        previous = self._evaluation_mode
-        self._evaluation_mode = True
-        try:
-            yield
-        finally:
-            self._evaluation_mode = previous
+        return self._client.eval_mode()
 
 
 def _observation_text(obs: Any) -> str:

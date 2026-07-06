@@ -14,6 +14,7 @@ import pytest
 import torch
 
 from agilerl.llm_envs import RolloutEnv
+from agilerl.llm_envs.openenv import _fold
 
 _WIP = "pending tool-path wiring (engine / _align_sampling_logprobs)"
 
@@ -95,7 +96,11 @@ def _wrap(inner: object) -> RolloutEnv:
 
 
 def _bare_wrapper() -> RolloutEnv:
-    return RolloutEnv.__new__(RolloutEnv)
+    w = RolloutEnv.__new__(RolloutEnv)
+    # boundary-frame cache; __init__ defaults, read by the feedback tokenize path
+    w._boundary_parts = None
+    w._boundary_parts_known = False
+    return w
 
 
 def _mask_wrapper() -> RolloutEnv:
@@ -194,14 +199,15 @@ def test_tool_schema_injected_into_feedback_boundary() -> None:
     assert w.tokenizer.last_tools == _TOOLS
 
 
-def test_format_obs_applies_prefix_and_suffix_from_info() -> None:
-    """``_format_obs`` wraps the observation with the info prefix/suffix; an empty
-    or absent info leaves the text untouched.
+def test_fold_applies_prefix_and_suffix_from_info() -> None:
+    """``_fold`` wraps the observation with the info prefix/suffix; an empty
+    or absent info leaves the text untouched. Folding is the env clients' job
+    (server-side in ``OpenEnvWrapper``, in-process in ``LocalEnvClient``), so
+    ``RolloutEnv`` consumes the prompt text as-is.
     """
-    assert RolloutEnv._format_obs("body", None) == "body"
-    assert RolloutEnv._format_obs("body", {}) == "body"
-    decorated = RolloutEnv._format_obs("body", {"prefix": "PRE:", "suffix": "SUF"})
-    assert decorated == "PRE:body\nSUF"
+    assert _fold("body", None) == "body"
+    assert _fold("body", {}) == "body"
+    assert _fold("body", {"prefix": "PRE:", "suffix": "SUF"}) == "PRE:body\nSUF"
 
 
 def test_dataset_size_reflects_served_env() -> None:

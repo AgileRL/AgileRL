@@ -580,7 +580,7 @@ class TestLLMEnvHierarchy:
         assert issubclass(DatasetEnv, LLMEnv)
         # RolloutEnv is the token rollout env (an OpenEnv client), not an LLMEnv.
         assert not issubclass(RolloutEnv, LLMEnv)
-        # The env contract no longer lives on agilerl.protocols.
+        # agilerl.protocols exposes no env classes (they live in agilerl.llm_envs).
         import agilerl.protocols as protocols
 
         assert not hasattr(protocols, "RolloutEnv")

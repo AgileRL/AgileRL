@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from transformers import AutoTokenizer
 
     CollateBuilder = Callable[
-        ["DatasetEnv", "AutoTokenizer", "int | None"],
+        ["DatasetEnv", "AutoTokenizer"],
         Callable[[list[dict[str, Any]]], dict[str, Any]],
     ]
 
@@ -159,28 +159,17 @@ class DatasetEnv(LLMEnv, gym.Env):
     def create_collate_fn(
         self,
         tokenizer: AutoTokenizer,
-        max_context_length: int | None = None,
     ) -> Callable[[list[dict[str, Any]]], dict[str, Any]]:
         """Build the row-collation callable for the current objective.
 
+        Collation reads the context budget from ``self.max_context_length``.
+
         :param tokenizer: Tokenizer used to encode prompts and labels.
         :type tokenizer: AutoTokenizer
-        :param max_context_length: Optional context-length override. Kept for API
-            compatibility; collation currently uses ``self.max_context_length``.
-        :type max_context_length: int | None
         :return: Callable that maps raw dataset rows to a tensor batch dict.
         :rtype: Callable[[list[dict[str, Any]]], dict[str, Any]]
         """
-        if (
-            max_context_length is not None
-            and max_context_length != self.max_context_length
-        ):
-            warnings.warn(
-                "create_collate_fn(max_context_length=...) currently ignores this "
-                "override and uses env.max_context_length instead.",
-                stacklevel=2,
-            )
-        return self._collate_builder(self, tokenizer, max_context_length)
+        return self._collate_builder(self, tokenizer)
 
     def reset(self, reset_dataloaders: bool = False) -> Any:
         """Return the next batch, optionally rewinding dataloaders first.
@@ -234,11 +223,15 @@ class DatasetEnv(LLMEnv, gym.Env):
 
     @contextmanager
     def eval_mode(self) -> Generator[None, None, None]:
-        """Temporarily switch reads to the held-out split.
+        """Temporarily switch reads to the held-out split, restoring the prior mode.
 
-        This also snapshots and restores ``last_tokenized_prompts`` when present,
-        so train-loop prompt caches survive evaluation probes.
+        Restores whatever mode was active on entry (the save/set/restore contract
+        of :meth:`LLMEnv.eval_mode`), so nested evaluation probes don't flip an
+        outer eval context back to the train split. This also snapshots and
+        restores ``last_tokenized_prompts`` when present, so train-loop prompt
+        caches survive evaluation probes.
         """
+        previous_mode = self.evaluation_mode
         self.dataloader = self.test_dataloader_iter
         self.evaluation_mode = True
         last_tokenized_prompts = None
@@ -247,8 +240,14 @@ class DatasetEnv(LLMEnv, gym.Env):
         try:
             yield
         finally:
-            self.dataloader = self.train_dataloader_iter
-            self.evaluation_mode = False
+            self.evaluation_mode = previous_mode
+            # Repoint at the live iterator for the restored mode (an inner reset
+            # may have rebuilt either iterator, so don't restore a stale object).
+            self.dataloader = (
+                self.test_dataloader_iter
+                if previous_mode
+                else self.train_dataloader_iter
+            )
             if last_tokenized_prompts is not None:
                 self.last_tokenized_prompts = last_tokenized_prompts
 
@@ -309,7 +308,6 @@ class DatasetEnv(LLMEnv, gym.Env):
 def preference_collate_builder(
     env: DatasetEnv,
     tokenizer: AutoTokenizer,
-    max_context_length: int | None = None,
 ) -> Callable[[list[dict[str, str]]], dict[str, Any]]:
     """Build a collate function for ``(prompt, chosen, rejected)`` DPO rows."""
 
@@ -385,7 +383,6 @@ def preference_collate_builder(
 def sft_collate_builder(
     env: DatasetEnv,
     tokenizer: AutoTokenizer,
-    max_context_length: int | None = None,
 ) -> Callable[[list[dict[str, Any]]], dict[str, Any]]:
     """Build a collate function for ``(prompt, response)`` SFT rows."""
     response_column = env.response_column

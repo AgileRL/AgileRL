@@ -13,6 +13,7 @@ rollouts over a batch, sharing a :class:`BatchPointer` dataset cursor.
 from __future__ import annotations
 
 import uuid
+import warnings
 from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
 from typing import TYPE_CHECKING, Any
@@ -22,7 +23,8 @@ import torch
 from agilerl.llm_envs.openenv import (
     LocalEnvClient,
     OpenEnvClient,
-    OpenEnvServer,
+    ServedEnvClient,
+    _name_from_spec,
     is_url,
     load_env,
 )
@@ -31,6 +33,17 @@ from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
 
 if TYPE_CHECKING:
     from agilerl.typing import RolloutPrompts
+
+
+class PromptOverflowError(RuntimeError):
+    """A freshly reset prompt already exceeds the context budget.
+
+    Raised by :meth:`RolloutEnv.reset` when ``max_model_len`` is set and the
+    initial prompt tokenises past the budget — before the row reaches the
+    generation engine, where the same condition would kill the run mid-training.
+    :class:`BatchRolloutEnv` catches it to skip the offending dataset row with a
+    warning.
+    """
 
 
 class RolloutEnv:
@@ -44,8 +57,7 @@ class RolloutEnv:
     that it exposes the token contract the trainer / rollout engine drive:
 
     * ``reset()`` / ``step(completion_ids, sampling_logps=None)`` return a
-      tokenised **observation dict** (``input_ids`` / ``attention_mask`` /
-      ``text``);
+      tokenised **observation dict** (``input_ids`` / ``attention_mask``);
     * it assembles the multi-turn **transcript** (``full_ids`` = prompt + gen0 +
       feedback0 + ... with per-turn ``turn_boundaries``);
     * it builds the **provenance mask** and the complete per-episode row via
@@ -138,15 +150,14 @@ class RolloutEnv:
             )
         else:
             self._env_client = env_client
-        # Set by ``serving`` when this env hosts its own OpenEnv server; stopped on
-        # ``close`` so per-rollout servers don't leak.
-        self._owned_server: OpenEnvServer | None = None
         self.tokenizer = tokenizer
         self.pad_id = pad_id
         self.apply_chat_template = apply_chat_template
-        # Tool schemas come from whatever the env advertises through the env client; an
-        # empty list means no ``tools=`` is passed.
-        self.tools = self._env_client.tools or None
+        # Tool schemas come from whatever the env advertises through the env client,
+        # fetched lazily on first use (see :attr:`tools`) so construction never
+        # requires a live server.
+        self._tools: list[Any] | None = None
+        self._tools_known = False
         self._max_model_len = max_model_len
         self._max_output_tokens = max_output_tokens
         self.full_ids: torch.Tensor | None = None
@@ -157,6 +168,10 @@ class RolloutEnv:
         self._gen_texts: list[str] = []
         self._feedback_texts: list[str] = []
         self._last_full_prompt_token_len: int | None = None
+        # Cached chat-template frame around a feedback turn (rendered lazily once;
+        # the frame is constant for a given tokenizer/template).
+        self._boundary_parts: tuple[str, str] | None = None
+        self._boundary_parts_known = False
         # Per-episode state owned by this wrapper (the in-flight row builder):
         self.done: bool = False
         self.current_prompt: dict[str, Any] = {}
@@ -168,16 +183,21 @@ class RolloutEnv:
         make_env: Callable[[], Any],
         tokenizer: Any,
         max_turns: int = 1,
+        *,
+        headers: dict[str, str] | None = None,
+        timeout_s: float | None = None,
+        mcp_tool: str | None = None,
+        env_name: str | None = None,
         **kwargs: Any,
     ) -> RolloutEnv:
         """Host one OpenEnv server for a fresh env and drive it over HTTP.
 
-        Calls ``make_env()`` for a fresh local env, serves it on its own
-        :class:`~agilerl.llm_envs.openenv.OpenEnvServer`, and returns a ``RolloutEnv``
-        bound to that server — which it **owns** and stops on :meth:`close`. A served
-        env handles one episode at a time, so use this as the per-rollout
-        ``env_factory`` to give a :class:`BatchRolloutEnv` one isolated server per
-        concurrent rollout::
+        Calls ``make_env()`` for a fresh local env and binds the ``RolloutEnv`` to a
+        :class:`~agilerl.llm_envs.openenv.ServedEnvClient` — a backend that hosts the
+        env on its own :class:`~agilerl.llm_envs.openenv.OpenEnvServer` and owns the
+        whole server+client pair, torn down by :meth:`close`. A served env handles
+        one episode at a time, so use this as the per-rollout ``env_factory`` to give
+        a :class:`BatchRolloutEnv` one isolated server per concurrent rollout::
 
             env_factory = lambda: RolloutEnv.serving(make_env, tokenizer, max_turns=4)
 
@@ -189,14 +209,23 @@ class RolloutEnv:
         :param make_env: Zero-arg factory returning a fresh local env to host.
         :param tokenizer: Tokenizer for the token-level loop.
         :param max_turns: Generation turns per episode.
+        :param headers: Optional HTTP headers sent on every client request.
+        :param timeout_s: Per-request client timeout in seconds (``None`` = unbounded).
+        :param mcp_tool: Optional MCP transport adapter (see
+            :class:`~agilerl.llm_envs.openenv.OpenEnvClient`).
+        :param env_name: Name advertised in the served env's OpenEnv metadata.
         :param kwargs: Forwarded to :class:`RolloutEnv` (e.g. ``pad_id``,
-            ``apply_chat_template``, ``max_model_len``, ``timeout_s``).
+            ``apply_chat_template``, ``max_model_len``).
         :rtype: RolloutEnv
         """
-        server = OpenEnvServer(make_env()).start()
-        env = cls(server.base_url, tokenizer, max_turns=max_turns, **kwargs)
-        env._owned_server = server
-        return env
+        env_client = ServedEnvClient(
+            make_env(),
+            env_name=env_name,
+            headers=headers,
+            timeout_s=timeout_s,
+            mcp_tool=mcp_tool,
+        )
+        return cls(env_client, tokenizer, max_turns=max_turns, **kwargs)
 
     @classmethod
     def local(
@@ -259,22 +288,14 @@ class RolloutEnv:
             return cls(spec, tokenizer, max_turns=max_turns, **kwargs)
         env = load_env(spec, env_config)
         if serve:
-            return cls.serving(lambda: env, tokenizer, max_turns=max_turns, **kwargs)
+            return cls.serving(
+                lambda: env,
+                tokenizer,
+                max_turns=max_turns,
+                env_name=_name_from_spec(spec),
+                **kwargs,
+            )
         return cls.local(env, tokenizer, max_turns=max_turns, **kwargs)
-
-    @staticmethod
-    def _format_obs(obs: str, info: dict[str, Any] | None) -> str:
-        """Apply prefix/suffix from info dict to an observation string."""
-        text = str(obs)
-        if not info:
-            return text
-        prefix = info.get("prefix", "")
-        suffix = info.get("suffix", "")
-        if prefix:
-            text = f"{prefix}{text}"
-        if suffix:
-            text = f"{text}\n{suffix}"
-        return text
 
     def _tokenize_initial_prompt(self, obs_text: str) -> dict[str, torch.Tensor]:
         """Tokenize the initial observation, optionally with chat template."""
@@ -317,13 +338,11 @@ class RolloutEnv:
     def _tokenize_feedback(self, feedback_text: str) -> torch.Tensor:
         """Tokenize the assistant→user→assistant boundary plus feedback text.
 
-        Uses ``tokenizer.apply_chat_template`` to compute the boundary so this
-        works for any chat-templated model (Gemma, Llama, Qwen, Mistral, ...).
-        We render two short conversations — one ending after a placeholder
-        assistant turn, one continuing with the new user feedback turn and a
-        fresh generation prompt — then take the suffix difference. Falling
-        back to ChatML markers preserves prior behaviour for tokenizers whose
-        templates don't preserve the prefix string (rare).
+        Uses the tokenizer's chat template (via the cached frame from
+        :meth:`_feedback_boundary_parts`) so this works for any chat-templated
+        model (Gemma, Llama, Qwen, Mistral, ...), with ChatML markers as the
+        fallback for tokenizers whose templates don't render the placeholders
+        verbatim (rare).
         """
         if not self.apply_chat_template:
             return torch.tensor(
@@ -346,31 +365,32 @@ class RolloutEnv:
             dtype=torch.long,
         )
 
-    def _chat_template_boundary_ids(
-        self,
-        feedback_text: str,
-    ) -> torch.Tensor | None:
-        """Compute boundary token ids via the tokenizer's chat template.
+    def _feedback_boundary_parts(self) -> tuple[str, str] | None:
+        """The ``(prefix, suffix)`` strings the chat template wraps a feedback turn in.
 
-        Renders ``[user("."), assistant(placeholder), user(feedback)]`` with
-        ``add_generation_prompt=True`` and slices the rendered string from
-        the end of ``placeholder`` to the end. This yields exactly the bytes
-        that close the assistant turn, write a user turn containing
-        ``feedback_text``, and open the next assistant turn — for whatever
-        chat template the tokenizer carries. The dummy leading user message
-        keeps strict-alternation templates (e.g. some Mistral variants)
-        happy. The placeholder is a per-render unique token (a ``uuid4`` hex)
-        chosen so it renders verbatim and cannot collide with anything the
-        template or ``feedback_text`` might already contain.
+        Rendered once per env and cached — the frame around the feedback text is
+        constant for a given tokenizer/template, so per-turn work reduces to one
+        ``encode``. The render is ``[user("."), assistant(placeholder),
+        user(placeholder)]`` with ``add_generation_prompt=True``, using two
+        per-render unique tokens (``uuid4`` hexes) that render verbatim and cannot
+        collide with template text: slicing at them yields exactly the bytes that
+        close the assistant turn (``prefix`` up to the feedback slot) and close the
+        user turn / open the next assistant turn (``suffix``). The dummy leading
+        user message keeps strict-alternation templates (e.g. some Mistral
+        variants) happy.
 
-        Returns ``None`` if the placeholder cannot be located in the render
-        (caller should fall back to ChatML markers).
+        Returns ``None`` when the placeholders cannot be located in the render
+        (caller falls back to ChatML markers).
         """
-        placeholder = uuid.uuid4().hex
+        if self._boundary_parts_known:
+            return self._boundary_parts
+        self._boundary_parts_known = True
+        assistant_ph = uuid.uuid4().hex
+        feedback_ph = uuid.uuid4().hex
         messages = [
             {"role": "user", "content": "."},
-            {"role": "assistant", "content": placeholder},
-            {"role": "user", "content": feedback_text},
+            {"role": "assistant", "content": assistant_ph},
+            {"role": "user", "content": feedback_ph},
         ]
         chat_template_kwargs: dict[str, Any] = {}
         if self.tools is not None:
@@ -384,19 +404,38 @@ class RolloutEnv:
             )
         except Exception:
             return None
-
         if not isinstance(rendered, str):
             return None
 
-        idx = rendered.rfind(placeholder)
-        if idx < 0:
+        assistant_end = rendered.rfind(assistant_ph)
+        feedback_start = rendered.rfind(feedback_ph)
+        if assistant_end < 0 or feedback_start <= assistant_end:
             return None
-
-        boundary_text = rendered[idx + len(placeholder) :]
-        if not boundary_text:
+        assistant_end += len(assistant_ph)
+        prefix = rendered[assistant_end:feedback_start]
+        suffix = rendered[feedback_start + len(feedback_ph) :]
+        if not prefix or not suffix:
             return None
+        self._boundary_parts = (prefix, suffix)
+        return self._boundary_parts
 
-        encoded = self.tokenizer.encode(boundary_text, add_special_tokens=False)
+    def _chat_template_boundary_ids(
+        self,
+        feedback_text: str,
+    ) -> torch.Tensor | None:
+        """Token ids for the templated turn boundary carrying ``feedback_text``.
+
+        Wraps the feedback in the cached chat-template frame from
+        :meth:`_feedback_boundary_parts` and encodes it. Returns ``None`` when the
+        frame is unavailable (caller falls back to ChatML markers).
+        """
+        parts = self._feedback_boundary_parts()
+        if parts is None:
+            return None
+        prefix, suffix = parts
+        encoded = self.tokenizer.encode(
+            prefix + feedback_text + suffix, add_special_tokens=False
+        )
         if not encoded:
             return None
         return torch.tensor([encoded], dtype=torch.long)
@@ -416,16 +455,32 @@ class RolloutEnv:
             msg = "No prompt: reset() was never called"
             raise RuntimeError(msg)
         self._last_full_prompt_token_len = int(self.full_ids.shape[1])
-        prompt_ids_1d = self.full_ids[0]
-        obs: dict[str, Any] = {
+        return {
             "input_ids": self.full_ids,
             "attention_mask": torch.ones_like(self.full_ids),
-            "text": self.tokenizer.decode(
-                prompt_ids_1d.tolist(),
-                skip_special_tokens=True,
-            ),
         }
-        return obs
+
+    @property
+    def tools(self) -> list[Any] | None:
+        """Tool schemas the env advertises (``None`` when none) — passed to the
+        chat template as ``tools=``.
+
+        Fetched from the env client on first access and cached; over HTTP the
+        fetch is strict (see
+        :meth:`~agilerl.llm_envs.openenv.OpenEnvClient._fetch_state`), so a
+        broken server fails loudly here rather than silently training without
+        tool schemas.
+        """
+        if not self._tools_known:
+            self._tools = getattr(self._env_client, "tools", None) or None
+            self._tools_known = True
+        return self._tools
+
+    @tools.setter
+    def tools(self, value: list[Any] | None) -> None:
+        """Override the advertised tool schemas (``None`` / ``[]`` -> no ``tools=``)."""
+        self._tools = value or None
+        self._tools_known = True
 
     @property
     def dataset_size(self) -> int:
@@ -470,11 +525,25 @@ class RolloutEnv:
         :param row_index: Dataset row chosen by the owning ``BatchRolloutEnv``,
             forwarded to ``env_client.reset``.
         :type row_index: int | None
+        :raises PromptOverflowError: When ``max_model_len`` is set and the initial
+            prompt already exceeds the context budget (the owning
+            ``BatchRolloutEnv`` skips such rows with a warning).
         """
         obs_text, info = self._env_client.reset(seed=seed, row_index=row_index)
-        obs_text = self._format_obs(obs_text, info)
 
         encoded = self._tokenize_initial_prompt(obs_text)
+        if (max_pt := self._prompt_budget()) is not None:
+            prompt_len = int(encoded["input_ids"].shape[1])
+            if prompt_len > max_pt:
+                msg = (
+                    f"initial prompt is {prompt_len} tokens but the context budget "
+                    f"allows at most {max_pt} "
+                    f"(max_model_len={self._max_model_len}, "
+                    f"max_output_tokens={self._max_output_tokens}"
+                    + (f", row_index={row_index}" if row_index is not None else "")
+                    + ")"
+                )
+                raise PromptOverflowError(msg)
         self.full_ids = encoded["input_ids"]
         self.turn_boundaries = []
         self.turn_rewards = []
@@ -504,9 +573,16 @@ class RolloutEnv:
         self.turn_rewards.append(float(reward))
         self._turn_idx += 1
 
+        # The env may be happy to continue, but this episode's turn budget is
+        # spent: truncate here so no driver (eval loop, external collector) has
+        # to impose the cap itself — and no dangling feedback turn is appended.
+        if not (terminated or truncated) and self._turn_idx >= self.max_turns:
+            truncated = True
+            info = {**info, "agilerl_max_turns_reached": int(self.max_turns)}
+
         prompt_dict: dict[str, Any] = {}
         if not (terminated or truncated):
-            feedback_text = self._format_obs(next_obs, info)
+            feedback_text = next_obs
             self._feedback_texts.append(feedback_text)
             feedback_ids = self._tokenize_feedback(feedback_text).to(
                 self.full_ids.device
@@ -613,16 +689,16 @@ class RolloutEnv:
         )
 
     def close(self) -> None:
-        """Stop the owned server, or close the env client when there isn't one.
+        """Close the env client, releasing whatever backend it owns.
 
-        When this env owns its server, stopping it tears the env down directly, so the
-        client's ``/close`` round-trip to our own server is skipped — it is redundant
-        and can stall teardown on a loaded process (one timeout per env).
+        Ownership lives in the client: a
+        :class:`~agilerl.llm_envs.openenv.ServedEnvClient` stops its server and
+        releases its connection pool, an
+        :class:`~agilerl.llm_envs.openenv.OpenEnvClient` sends ``/close`` and
+        releases its pool, a :class:`~agilerl.llm_envs.openenv.LocalEnvClient`
+        closes the wrapped env.
         """
-        if self._owned_server is not None:
-            self._owned_server.stop()
-            self._owned_server = None
-        elif hasattr(self._env_client, "close"):
+        if hasattr(self._env_client, "close"):
             self._env_client.close()
 
     def get_debug_info(self) -> dict[str, Any]:
@@ -692,6 +768,9 @@ class BatchPointer:
     def __init__(self, dataset_size: int, *, seed: int | None = None) -> None:
         """Build a cursor over ``dataset_size`` rows with a seeded per-epoch shuffle."""
         self.dataset_size = int(dataset_size)
+        #: Completed full passes over the dataset rows (drives e.g. the trainer's
+        #: per-epoch reference-policy refresh).
+        self.num_epochs = 0
         self._generator = torch.Generator().manual_seed(
             seed if seed is not None else 42
         )
@@ -701,6 +780,8 @@ class BatchPointer:
     def next_row(self) -> int:
         """Next dataset row in an infinite reshuffled stream (full perm per epoch)."""
         if self._pos >= len(self._epoch_order):  # epoch boundary (and first call)
+            if self._epoch_order:
+                self.num_epochs += 1
             self._epoch_order = torch.randperm(
                 self.dataset_size, generator=self._generator
             ).tolist()
@@ -736,13 +817,19 @@ class BatchPointer:
 
 
 class BatchRolloutEnv:
-    """Batched in-process collector of LLM rollout episodes.
+    """Batched in-process collector of LLM rollout episodes — the colocated path.
 
     Holds ``batch_size * group_size`` independent :class:`RolloutEnv`
     instances in ``self.envs`` (laid out group-contiguous, position implicit in
     list order) and steps all active ones in lock-step using policy completions.
     Each wrapper owns its own in-flight episode state — transcript, ``done``,
     ``current_prompt`` and ``sampling_logps``.
+
+    Envs are stepped sequentially, so per-turn latency is the sum of the envs'
+    step times — negligible for in-process backends, but a real cost for
+    high-latency HTTP envs. Rollout concurrency is the distributed (Ray)
+    collector's job; this class is the simple colocated counterpart sharing the
+    same :class:`BatchPointer` semantics.
     """
 
     def __init__(
@@ -777,15 +864,21 @@ class BatchRolloutEnv:
         self.batch_size = batch_size
         self.group_size = group_size
         self.envs: list[RolloutEnv] = []
-        # Shared dataset cursor, built lazily from the first dataset-backed env. The same
-        # :class:`BatchPointer` drives the distributed ``RayBatchRolloutEnv``, so dataset
-        # order + group pinning match across the colocated and async paths.
+        # Shared dataset cursor, built on the first reset from the first env's
+        # ``dataset_size`` (0 -> it only derives per-item seeds, no row pinning). The
+        # same :class:`BatchPointer` drives the distributed ``RayBatchRolloutEnv``, so
+        # dataset order + group pinning match across the colocated and async paths.
         self._pointer: BatchPointer | None = None
 
     @property
     def _is_initialized(self) -> bool:
         """``True`` once every env slot has been created."""
         return len(self.envs) == self.num_envs
+
+    @property
+    def num_epochs(self) -> int:
+        """Completed passes over the dataset rows (``0`` when not dataset-backed)."""
+        return self._pointer.num_epochs if self._pointer is not None else 0
 
     def _active_envs(self) -> list[RolloutEnv]:
         """Non-terminal envs, in their stable batch/group (list) order."""
@@ -829,52 +922,97 @@ class BatchRolloutEnv:
     ) -> list[RolloutPrompts] | None:
         """Reset all env wrappers, building them on the first call.
 
-        Seeds are assigned per batch row (same seed across groups). The shared
-        dataset cursor resolves a single ``row_index`` per batch row (advancing
-        once per row, re-shuffling each epoch), and every group env of that row is
-        reset with both the row seed and that one row, so the group is
-        row-consistent. Prompts are returned in stable list (batch/group) order.
-        Envs that are not dataset-backed (``dataset_size == 0``) skip the cursor
-        entirely.
+        Seed/row assignment is delegated to :meth:`BatchPointer.assign` — the one
+        policy shared with the distributed collector: one seed per batch row (same
+        across the row's group) and one dataset row per batch row (advancing once
+        per row, re-shuffling each epoch), so every group is row-consistent.
+        Prompts are returned in stable list (batch/group) order. Envs that are not
+        dataset-backed (``dataset_size == 0``) get seeds but no ``row_index``.
+
+        A dataset row whose initial prompt exceeds the context budget
+        (:class:`PromptOverflowError`) is skipped with a warning and replaced by
+        the next row in the stream.
+
+        If building the envs fails partway (e.g. a server fails to start), the
+        already-built envs are closed and the batch is left empty, so a retried
+        ``reset`` starts clean.
 
         :param seed: Optional base seed for deterministic rollouts.
         :type seed: int | None
         :return: Active prompt dictionaries after reset.
         :rtype: list[RolloutPrompts] | None
         """
-        seed_base = seed
+        if not self._is_initialized:
+            try:
+                while len(self.envs) < self.num_envs:
+                    self.envs.append(self.env_factory(**self.env_config))
+            except Exception:
+                self.close()
+                self.envs = []
+                raise
+            self._pointer = BatchPointer(
+                int(getattr(self.envs[0], "dataset_size", 0) or 0), seed=seed
+            )
+
+        assignments = self._pointer.assign(
+            self.batch_size, self.group_size, base_seed=seed
+        )
         for batch_idx in range(self.batch_size):
-            batch_seed = None if seed_base is None else seed_base + batch_idx
-            row_index: int | None = None
-            for group_idx in range(self.group_size):
-                env_idx = batch_idx * self.group_size + group_idx
-                if not self._is_initialized:
-                    env_i = self.env_factory(**self.env_config)
-                    # Build the shared cursor from the first dataset-backed env, before
-                    # resolving any row, so all rows draw from one permutation stream.
-                    # Envs that aren't dataset-backed (``dataset_size`` 0/absent) get no
-                    # cursor and a reset without a ``row_index``.
-                    if self._pointer is None:
-                        ds_size = getattr(env_i, "dataset_size", 0)
-                        if ds_size > 0:
-                            self._pointer = BatchPointer(ds_size, seed=seed)
-                    if group_idx == 0 and self._pointer is not None:
-                        row_index = self._pointer.next_row()
-                    if row_index is not None:
-                        env_i.reset(seed=batch_seed, row_index=row_index)
-                    else:
-                        env_i.reset(seed=batch_seed)
-                    self.envs.append(env_i)
+            lead_idx = batch_idx * self.group_size
+            env_seed, row_index = assignments[lead_idx]
+            row_index = self._reset_lead(self.envs[lead_idx], env_seed, row_index)
+            for group_idx in range(1, self.group_size):
+                env = self.envs[lead_idx + group_idx]
+                if row_index is not None:
+                    env.reset(seed=env_seed, row_index=row_index)
                 else:
-                    if group_idx == 0 and self._pointer is not None:
-                        row_index = self._pointer.next_row()
-                    self._reset_env(
-                        env_idx=env_idx,
-                        seed=batch_seed,
-                        row_index=row_index,
-                    )
+                    env.reset(seed=env_seed)
 
         return self._get_prompts()
+
+    def _reset_lead(
+        self,
+        env: RolloutEnv,
+        seed: int | None,
+        row_index: int | None,
+    ) -> int | None:
+        """Reset a group-lead env, skipping over-budget dataset rows with a warning.
+
+        Returns the row the group settles on (the assigned row, or the next
+        in-budget row from the shared cursor). Re-raised when the env is not
+        dataset-backed (no cursor to advance) or every row overflows.
+        """
+        assert self._pointer is not None
+        attempts = max(self._pointer.dataset_size, 1)
+        for _ in range(attempts):
+            error = self._reset_or_overflow(env, seed, row_index)
+            if error is None:
+                return row_index
+            if row_index is None:
+                raise error
+            warnings.warn(
+                f"Skipping dataset row {row_index}: {error}",
+                stacklevel=2,
+            )
+            row_index = self._pointer.next_row()
+        msg = f"no dataset row fit the context budget after {attempts} attempts"
+        raise PromptOverflowError(msg) from error
+
+    @staticmethod
+    def _reset_or_overflow(
+        env: RolloutEnv,
+        seed: int | None,
+        row_index: int | None,
+    ) -> PromptOverflowError | None:
+        """Reset ``env``, returning a :class:`PromptOverflowError` instead of raising."""
+        try:
+            if row_index is not None:
+                env.reset(seed=seed, row_index=row_index)
+            else:
+                env.reset(seed=seed)
+        except PromptOverflowError as exc:
+            return exc
+        return None
 
     def step(
         self,

@@ -26,6 +26,9 @@ def _bare_wrapper() -> RolloutEnv:
     w = RolloutEnv.__new__(RolloutEnv)
     w.tools = None  # optional config; __init__ default, read by the tokenize paths
     w.sampling_logps = []  # read by get_episode_data
+    # boundary-frame cache; __init__ defaults, read by the feedback tokenize path
+    w._boundary_parts = None
+    w._boundary_parts_known = False
     return w
 
 
@@ -78,8 +81,8 @@ class TestRolloutEnvReset:
         )
         obs, info = w.reset()
         assert isinstance(info, dict)
-        assert set(obs.keys()) >= {"input_ids", "attention_mask", "text"}
-        assert obs["text"] == "hello"
+        assert set(obs.keys()) >= {"input_ids", "attention_mask"}
+        assert w._prompt_text == "hello"
         assert w._last_full_prompt_token_len == obs["input_ids"].shape[1]
 
 
@@ -403,7 +406,7 @@ class TestRolloutEnvPolicyObservationFromState:
         w.full_ids = torch.tensor([[0, 1, 2, 3]], dtype=torch.long)
         w.turn_boundaries = []
         obs = w._policy_observation_from_state()
-        assert set(obs.keys()) >= {"input_ids", "attention_mask", "text"}
+        assert set(obs.keys()) == {"input_ids", "attention_mask"}
         assert obs["input_ids"].shape[1] == 4
 
     def test_policy_observation_raises_without_full_ids(self) -> None:
@@ -753,12 +756,6 @@ class _NonTerminalEnv:
         if self.calls == 1:
             return "feedback", 0.5, False, False, {"prefix": "F:", "suffix": "T"}
         return "done", 1.0, True, False, {}
-
-
-class TestRolloutEnvFormatObs:
-    def test_format_obs_prefix_suffix_and_empty_info(self) -> None:
-        assert RolloutEnv._format_obs("x", None) == "x"
-        assert RolloutEnv._format_obs("x", {"prefix": "A:", "suffix": "B"}) == "A:x\nB"
 
 
 class TestRolloutEnvGetEpisodeData:

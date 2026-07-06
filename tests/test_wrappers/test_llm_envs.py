@@ -797,6 +797,29 @@ def test_dataset_env_len_and_eval_mode_preserve_tokenized_prompts():
     assert torch.equal(env.last_tokenized_prompts["input_ids"], sentinel["input_ids"])
 
 
+def test_dataset_env_eval_mode_restores_prior_mode_when_nested():
+    """``eval_mode`` restores the mode active on entry, so a nested probe
+    (e.g. ``agent.test`` inside an outer eval context) doesn't flip the env
+    back to the train split early.
+    """
+    tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+    env = DatasetEnv(
+        train_dataset=DummyPreferenceDataset(6),
+        test_dataset=DummyPreferenceDataset(2),
+        tokenizer=tokenizer,
+        objective="preference",
+        data_batch_size_per_gpu=2,
+    )
+    with env.eval_mode():
+        with env.eval_mode():
+            assert env.evaluation_mode is True
+        # Inner exit stays on the held-out split for the outer block.
+        assert env.evaluation_mode is True
+        assert env.dataloader is env.test_dataloader_iter
+    assert env.evaluation_mode is False
+    assert env.dataloader is env.train_dataloader_iter
+
+
 def test_dataset_env_rejects_unknown_kind():
     """``objective`` must be ``"preference"`` or ``"sft"``; anything else raises."""
     tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)

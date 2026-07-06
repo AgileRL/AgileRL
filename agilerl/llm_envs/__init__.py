@@ -10,6 +10,7 @@ from agilerl.llm_envs.openenv import (
     OpenEnvClient,
     OpenEnvServer,
     OpenEnvWrapper,
+    ServedEnvClient,
     TextAction,
     TextObservation,
     load_env,
@@ -18,6 +19,7 @@ from agilerl.llm_envs.openenv import (
 from agilerl.llm_envs.rollout_env import (
     BatchPointer,
     BatchRolloutEnv,
+    PromptOverflowError,
     RolloutEnv,
 )
 
@@ -30,7 +32,9 @@ __all__ = [
     "OpenEnvClient",
     "OpenEnvServer",
     "OpenEnvWrapper",
+    "PromptOverflowError",
     "RolloutEnv",
+    "ServedEnvClient",
     "TextAction",
     "TextObservation",
     "apply_chat_template",

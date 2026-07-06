@@ -53,13 +53,17 @@ def apply_chat_template(
 
 
 class LLMEnv(ABC):
-    """Base contract shared by every LLM env (rollout and dataset).
+    """Base contract for teacher-forced dataset envs.
 
-    The minimal ``reset`` / ``step`` / ``close`` surface the trainer holds
-    uniformly. Generation envs (:class:`~agilerl.llm_envs.rollout_env.RolloutEnv`)
-    and teacher-forced dataset envs both subclass this. ``evaluation_mode`` flags
-    whether the env is serving its held-out split; :meth:`eval_mode` toggles it for
-    the duration of a block and restores the prior value.
+    The minimal ``reset`` / ``step`` / ``close`` surface the dataset trainer
+    holds uniformly — :class:`~agilerl.llm_envs.dataset_env.DatasetEnv` is the
+    concrete subtype. Generation envs
+    (:class:`~agilerl.llm_envs.rollout_env.RolloutEnv`) deliberately do not
+    subclass this: they speak the token-level rollout contract instead, so
+    ``isinstance(env, LLMEnv)`` selects the dataset family only.
+    ``evaluation_mode`` flags whether the env is serving its held-out split;
+    :meth:`eval_mode` toggles it for the duration of a block and restores the
+    prior value.
 
     :ivar evaluation_mode: Whether the env is currently serving the held-out split.
     :vartype evaluation_mode: bool

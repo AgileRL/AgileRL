@@ -631,11 +631,13 @@ class TextEnvProtocol(Protocol):
 
 
 class EnvClientProtocol(Protocol):
-    """Backend surface shared by :class:`~agilerl.llm_envs.openenv.OpenEnvClient`
-    and :class:`~agilerl.llm_envs.openenv.LocalEnvClient`.
+    """Backend surface shared by :class:`~agilerl.llm_envs.openenv.OpenEnvClient`,
+    :class:`~agilerl.llm_envs.openenv.LocalEnvClient` and
+    :class:`~agilerl.llm_envs.openenv.ServedEnvClient`.
 
     A :class:`~agilerl.llm_envs.rollout_env.RolloutEnv` drives ``reset`` / ``step`` /
-    ``close`` through this contract — over HTTP or in-process.
+    ``close`` through this contract — over HTTP or in-process. A backend owns
+    whatever it builds (a served backend owns its server), released by ``close``.
     """
 
     def reset(
@@ -644,10 +646,14 @@ class EnvClientProtocol(Protocol):
         *,
         row_index: int | None = None,
     ) -> tuple[str, dict[str, Any]]:
-        """Reset and return ``(prompt, info)``."""
+        """Reset and return ``(prompt, info)``.
+
+        ``prompt`` arrives fully rendered — any prefix/suffix folding is the
+        client's job, so ``RolloutEnv`` consumes the text as-is.
+        """
 
     def step(self, action: Any) -> tuple[str, float, bool, bool, dict[str, Any]]:
-        """Step once and return the Gym 5-tuple."""
+        """Step once and return the Gym 5-tuple (observation text fully rendered)."""
 
     def close(self) -> None:
         """Release backend resources."""

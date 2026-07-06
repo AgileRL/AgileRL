@@ -7,8 +7,11 @@ OpenEnv HTTP protocol. These cover both halves (``OpenEnvServer`` host +
 
 from __future__ import annotations
 
+import socket
+import time
 from typing import Any
 
+import httpx
 import pytest
 import torch
 
@@ -19,9 +22,12 @@ from agilerl.llm_envs import (
     OpenEnvClient,
     OpenEnvServer,
     OpenEnvWrapper,
+    PromptOverflowError,
     RolloutEnv,
+    ServedEnvClient,
     resolve_env,
 )
+from agilerl.llm_envs import openenv as openenv_module
 from agilerl.llm_envs.openenv import (
     _load_entrypoint,
     _name_from_spec,
@@ -240,7 +246,7 @@ def test_name_from_spec_takes_trailing_identifier() -> None:
 
 
 def test_load_entrypoint_windows_style_path_uses_last_colon(monkeypatch: Any) -> None:
-    """``_load_entrypoint`` treats ``C:\\...\\file.py:Class`` as a path entrypoint."""
+    r"""``_load_entrypoint`` treats ``C:\...\file.py:Class`` as a path entrypoint."""
 
     class _FakeModule:
         DiskEnv = _DatasetEnv
@@ -262,13 +268,14 @@ def test_load_entrypoint_windows_style_path_uses_last_colon(monkeypatch: Any) ->
 
 # --- serving: one OpenEnv server instance per rollout ----------------------
 def test_serving_hosts_owns_and_stops_its_server() -> None:
-    """``serving`` hosts a fresh env on its own server and stops it on close."""
+    """``serving`` binds a ``ServedEnvClient`` whose server ``close`` stops."""
     env = RolloutEnv.serving(_CountingEnv, _MiniTok(), apply_chat_template=False)
-    assert env._owned_server is not None
+    assert isinstance(env._env_client, ServedEnvClient)
     env.reset()  # reachable over real HTTP
     assert env._prompt_text == "Start.\nReply 'go'."
     env.close()
-    assert env._owned_server is None  # server stopped + released
+    with pytest.raises(RuntimeError):
+        _ = env._env_client.base_url  # server stopped + released
 
 
 def test_batch_serving_factory_gives_one_server_per_env() -> None:
@@ -286,11 +293,13 @@ def test_batch_serving_factory_gives_one_server_per_env() -> None:
         group_size=1,
     )
     batch.reset(seed=0)
-    urls = [env._owned_server.base_url for env in batch.envs]
+    urls = [env._env_client.base_url for env in batch.envs]
     assert len(batch.envs) == 2
     assert len(set(urls)) == 2  # distinct server instances
     batch.close()
-    assert all(env._owned_server is None for env in batch.envs)
+    for env in batch.envs:
+        with pytest.raises(RuntimeError):
+            _ = env._env_client.base_url
 
 
 # --- RolloutEnv(url) over a real server ------------------------------------
@@ -301,7 +310,7 @@ def test_rollout_env_drives_url_and_applies_suffix() -> None:
             server.base_url, _MiniTok(), max_turns=2, apply_chat_template=False
         )
         env.reset()
-        # reset prompt + info["suffix"] are stitched by _format_obs.
+        # reset prompt + info["suffix"] are folded server-side by OpenEnvWrapper.
         assert env._prompt_text == "Start.\nReply 'go'."
     finally:
         server.stop()
@@ -403,7 +412,6 @@ class TestRolloutEnvLocal:
             _RowDatasetEnv(), _MiniTok(), max_turns=1, apply_chat_template=False
         )
         assert isinstance(env._env_client, LocalEnvClient)
-        assert env._owned_server is None
         obs, _ = env.reset(row_index=2)
         assert "input_ids" in obs
         assert env.dataset_size == 3
@@ -426,7 +434,6 @@ class TestRolloutEnvFromSpec:
             spec, {"prefix": "Q"}, _MiniTok(), max_turns=1, apply_chat_template=False
         )
         assert isinstance(env._env_client, LocalEnvClient)
-        assert env._owned_server is None
         obs, _ = env.reset(row_index=0)
         assert "input_ids" in obs
         env.close()
@@ -455,3 +462,320 @@ class TestBatchPointer:
     def test_without_dataset_yields_no_rows(self) -> None:
         """A non-dataset env (size 0) gets ``row_index=None`` for every slot."""
         assert BatchPointer(0).assign(2, 2) == [(None, None)] * 4
+
+
+# --- /state strictness + MCP tools/list fallback ----------------------------
+class _StubResponse:
+    """Minimal httpx-response stand-in for driving ``_fetch_state`` branches."""
+
+    def __init__(self, status_code: int = 200, body: Any = None) -> None:
+        self.status_code = status_code
+        self._body = body if body is not None else {}
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            msg = "boom"
+            raise httpx.HTTPStatusError(msg, request=None, response=None)
+
+    def json(self) -> Any:
+        return self._body
+
+
+class _StubHTTP:
+    """Scripted httpx.Client stand-in: one queued result per GET, a table for POSTs."""
+
+    def __init__(
+        self,
+        get_results: list[Any],
+        post_results: dict[str, Any] | None = None,
+    ) -> None:
+        self._get_results = list(get_results)
+        self._post_results = post_results or {}
+        self.base_url = "http://stub.invalid"
+        self.is_closed = False
+
+    def get(self, path: str) -> Any:
+        del path
+        result = self._get_results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    def post(self, path: str, json: Any = None) -> Any:
+        del json
+        result = self._post_results[path]
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    def close(self) -> None:
+        self.is_closed = True
+
+
+def _stubbed_client(
+    get_results: list[Any],
+    post_results: dict[str, Any] | None = None,
+) -> OpenEnvClient:
+    client = OpenEnvClient("http://stub.invalid")
+    client._http = _StubHTTP(get_results, post_results)
+    return client
+
+
+class TestStateFetchStrictness:
+    """``/state`` drives row pinning + tool schemas, so it is fetched strictly."""
+
+    def test_transient_failure_then_success(self, monkeypatch: Any) -> None:
+        """A cold-start hiccup is retried; the eventual state is served + cached."""
+        monkeypatch.setattr(openenv_module.time, "sleep", lambda _s: None)
+        client = _stubbed_client(
+            [
+                httpx.ConnectError("cold start"),
+                _StubResponse(200, {"dataset_size": 5, "tools": [{"name": "t"}]}),
+            ]
+        )
+        assert client.dataset_size == 5
+        assert client.tools == [{"name": "t"}]  # cached: no further GETs queued
+
+    def test_persistent_failure_raises(self, monkeypatch: Any) -> None:
+        """A server that never answers /state fails the run loudly, not silently."""
+        monkeypatch.setattr(openenv_module.time, "sleep", lambda _s: None)
+        client = _stubbed_client([httpx.ConnectError("down")] * 4)
+        with pytest.raises(RuntimeError, match="/state"):
+            _ = client.dataset_size
+
+    def test_missing_route_is_empty_not_fatal(self) -> None:
+        """404/405 = no /state route (e.g. production mode): empty, no retries."""
+        client = _stubbed_client([_StubResponse(404)])
+        assert client.dataset_size == 0
+
+    def test_mcp_tools_list_fallback(self) -> None:
+        """Tools absent from /state are discovered via MCP ``tools/list``."""
+        mcp_tools = [{"name": "echo", "inputSchema": {}}]
+        client = _stubbed_client(
+            [_StubResponse(200, {"dataset_size": 0})],
+            {"/mcp": _StubResponse(200, {"result": {"tools": mcp_tools}})},
+        )
+        assert client.tools == mcp_tools
+
+    def test_no_mcp_channel_means_no_tools(self) -> None:
+        """A server with neither /state tools nor an MCP channel yields []."""
+        client = _stubbed_client(
+            [_StubResponse(200, {})],
+            {"/mcp": httpx.ConnectError("no mcp")},
+        )
+        assert client.tools == []
+
+
+# --- truncated round-trips over HTTP ----------------------------------------
+class _TruncatingEnv:
+    """Env whose first step ends the episode by truncation, not termination."""
+
+    def reset(self, seed: int | None = None) -> tuple[str, dict[str, Any]]:
+        del seed
+        return "start", {}
+
+    def step(self, action: str) -> tuple[str, float, bool, bool, dict[str, Any]]:
+        del action
+        return "", 0.5, False, True, {}
+
+
+def test_truncated_round_trips_over_http() -> None:
+    """The HTTP backend reports the same terminated/truncated split as local."""
+    with OpenEnvServer(_TruncatingEnv()) as server:
+        client = OpenEnvClient(server.base_url)
+        client.reset()
+        _obs, reward, terminated, truncated, _info = client.step("a")
+        client.close()
+    assert reward == 0.5
+    assert truncated is True
+    assert terminated is False
+
+
+# --- ServedEnvClient: one owner for the server + client pair ----------------
+def test_served_env_client_owns_server_and_pool() -> None:
+    """``close`` stops the server, closes the hosted env, and releases the pool."""
+    inner = _CountingEnv()
+    client = ServedEnvClient(inner)
+    prompt, _ = client.reset()
+    assert prompt == "Start.\nReply 'go'."
+    http = client._client._http
+    client.close()
+    assert inner.closed  # server teardown closed the hosted env
+    assert http.is_closed  # connection pool released without a /close round-trip
+    with pytest.raises(RuntimeError):
+        _ = client.base_url
+    client.close()  # idempotent
+
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+def test_server_start_fails_fast_when_port_is_taken() -> None:
+    """A dead uvicorn thread is detected immediately (no 30s spin), env released."""
+    inner = _CountingEnv()
+    blocker = socket.socket()
+    blocker.bind(("127.0.0.1", 0))
+    blocker.listen(1)
+    port = blocker.getsockname()[1]
+    try:
+        started = time.monotonic()
+        with pytest.raises(RuntimeError, match="during startup"):
+            OpenEnvServer(inner, port=port).start()
+        assert time.monotonic() - started < 10.0
+        assert inner.closed  # the failed start did not leak the hosted env
+    finally:
+        blocker.close()
+
+
+# --- max_turns is enforced by the env itself --------------------------------
+class _EndlessEnv:
+    """Env that never terminates on its own."""
+
+    def reset(self, seed: int | None = None) -> tuple[str, dict[str, Any]]:
+        del seed
+        return "start", {}
+
+    def step(self, action: str) -> tuple[str, float, bool, bool, dict[str, Any]]:
+        del action
+        return "more", 0.0, False, False, {}
+
+
+def test_rollout_env_truncates_at_max_turns() -> None:
+    """The episode self-truncates at ``max_turns`` — no external cap needed, and
+    no dangling feedback turn is appended after the final generation.
+    """
+    env = RolloutEnv.local(
+        _EndlessEnv(), _MiniTok(), max_turns=2, apply_chat_template=False
+    )
+    env.reset()
+    _obs, _r, terminated, truncated, _info = env.step(
+        torch.tensor([[1, 2, 3, 4]], dtype=torch.long)
+    )
+    assert not terminated
+    assert not truncated
+    seq_len = env.full_ids.shape[1]
+    _obs, _r, terminated, truncated, info = env.step(
+        torch.ones((1, seq_len + 1), dtype=torch.long)
+    )
+    assert truncated
+    assert not terminated
+    assert env.done
+    assert info["agilerl_max_turns_reached"] == 2
+    assert env.full_ids.shape[1] == seq_len + 1  # generation only, no feedback
+    env.close()
+
+
+# --- context budget: over-budget rows fail fast / are skipped ---------------
+class _LenTok(_MiniTok):
+    """Tokenizer whose token count tracks the text length (for budget tests)."""
+
+    def __call__(self, texts: list[str], **_: Any) -> dict[str, torch.Tensor]:
+        ids = torch.ones((1, max(1, len(texts[0]))), dtype=torch.long)
+        return {"input_ids": ids, "attention_mask": torch.ones_like(ids)}
+
+
+class _VariedRowEnv:
+    """Dataset env with one row that tokenizes far past any small budget."""
+
+    def __init__(self) -> None:
+        self.prompts = ["aa", "b" * 300, "cc"]
+
+    @property
+    def dataset_size(self) -> int:
+        return len(self.prompts)
+
+    def reset(
+        self,
+        seed: int | None = None,
+        *,
+        row_index: int | None = None,
+        evaluation: bool | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        del seed, evaluation
+        return self.prompts[(row_index or 0) % len(self.prompts)], {}
+
+    def step(self, action: str) -> tuple[str, float, bool, bool, dict[str, Any]]:
+        del action
+        return "", 1.0, True, False, {}
+
+
+def test_reset_raises_prompt_overflow_for_over_budget_row() -> None:
+    """An over-budget initial prompt fails at reset with a clear error, not
+    hours later inside the generation engine.
+    """
+    env = RolloutEnv.local(
+        _VariedRowEnv(), _LenTok(), apply_chat_template=False, max_model_len=64
+    )
+    with pytest.raises(PromptOverflowError, match="row_index=1"):
+        env.reset(row_index=1)
+    obs, _ = env.reset(row_index=0)  # in-budget rows reset fine
+    assert obs["input_ids"].shape[1] <= 63
+    env.close()
+
+
+def test_batch_reset_skips_over_budget_rows_with_warning() -> None:
+    """The batch collector warns and advances the cursor past over-budget rows."""
+    batch = BatchRolloutEnv(
+        lambda **_: RolloutEnv.local(
+            _VariedRowEnv(), _LenTok(), apply_chat_template=False, max_model_len=64
+        ),
+        batch_size=3,
+        group_size=2,
+    )
+    with pytest.warns(UserWarning, match="Skipping dataset row"):
+        prompts = batch.reset(seed=0)
+    assert prompts is not None
+    assert all(p["input_ids"].shape[1] <= 63 for p in prompts)
+    batch.close()
+
+
+# --- epoch counter + partial-init hardening ----------------------------------
+def test_batch_pointer_counts_completed_epochs() -> None:
+    """``num_epochs`` counts completed passes, not the first epoch's start."""
+    pointer = BatchPointer(2, seed=0)
+    pointer.next_row()
+    pointer.next_row()
+    assert pointer.num_epochs == 0
+    pointer.next_row()  # crosses into the second epoch
+    assert pointer.num_epochs == 1
+
+
+def test_batch_rollout_env_exposes_num_epochs() -> None:
+    """The collector surfaces the cursor's epoch count (e.g. for KL refresh)."""
+    batch = BatchRolloutEnv(
+        lambda **_: RolloutEnv.local(
+            _RowDatasetEnv(n=2), _MiniTok(), apply_chat_template=False
+        ),
+        batch_size=2,
+        group_size=1,
+    )
+    assert batch.num_epochs == 0
+    batch.reset(seed=0)  # consumes the full 2-row epoch
+    batch.reset(seed=0)  # draws again -> the first pass is complete
+    assert batch.num_epochs == 1
+    batch.close()
+
+
+def test_batch_reset_cleans_up_after_partial_init_failure() -> None:
+    """A factory failure mid-build closes the built envs and empties the batch,
+    so a retried reset starts clean instead of misaligning slots.
+    """
+    inners: list[_CountingEnv] = []
+    calls = {"n": 0}
+
+    def factory(**_: Any) -> RolloutEnv:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            msg = "boom"
+            raise RuntimeError(msg)
+        inner = _CountingEnv()
+        inners.append(inner)
+        return RolloutEnv.local(inner, _MiniTok(), apply_chat_template=False)
+
+    batch = BatchRolloutEnv(factory, batch_size=2, group_size=1)
+    with pytest.raises(RuntimeError, match="boom"):
+        batch.reset(seed=0)
+    assert batch.envs == []
+    assert inners[0].closed
+    prompts = batch.reset(seed=0)  # retry rebuilds from scratch
+    assert prompts is not None
+    assert len(batch.envs) == 2
+    batch.close()
