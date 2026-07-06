@@ -24,6 +24,7 @@ from agilerl.typing import PopulationType
 from agilerl.utils.algo_utils import stack_and_pad_experiences
 from agilerl.utils.llm_utils import collect_trainable_param_stats
 from agilerl.utils.utils import (
+    _distributed_rank,
     _distributed_world_size,
     aggregate_metrics_across_gpus,
     init_wandb,
@@ -194,10 +195,13 @@ def _normalize_learn_metrics(
     """Normalize algorithm-specific learn outputs into a common metric dict."""
     if isinstance(learn_output, dict):
         normalized = dict(learn_output)
-        # Preference reports loss under the short "loss" key downstream; DPO.learn
-        # returns it as "mean_loss" (matching the rollout algos), so translate.
-        if mode == "preference" and "mean_loss" in normalized:
+        # The dataset modes report loss under short keys downstream ("Train/Loss",
+        # "Train/Perplexity"); DPO/SFT.learn return "mean_"-prefixed keys (matching
+        # the rollout algos), so translate.
+        if mode in ("preference", "sft") and "mean_loss" in normalized:
             normalized["loss"] = normalized.pop("mean_loss")
+        if mode == "sft" and "mean_perplexity" in normalized:
+            normalized["perplexity"] = normalized.pop("mean_perplexity")
         return normalized
     if not isinstance(learn_output, tuple):
         msg = f"Expected learn() to return dict or tuple, got {type(learn_output)}."
@@ -696,8 +700,8 @@ def train_llm_dataset(
 
     csv_logger = _CsvAggregateLogger(elite_path, log_csv, accelerator)
 
-    agg_metrics: Any = []
-    agg_test_metrics = None
+    agg_metrics: dict[str, Any] = {}
+    agg_test_metrics: dict[str, Any] | None = None
     total_steps = 0
     displayed_steps = 0
     next_checkpoint_step = checkpoint_steps
@@ -712,30 +716,21 @@ def train_llm_dataset(
             training_env = envs[agent_idx] if uses_env_fn else envs[0]
             current_prompts = training_env.reset()
             agent.set_reference_policy(training_env.num_epochs)
+            learn_output = agent.learn(current_prompts)
+            metrics = _normalize_learn_metrics(
+                agent=agent,
+                learn_output=learn_output,
+                mode=mode,
+            )
+            agg_metrics = {
+                metric_name: safe_aggregate_metrics(accelerator, metric)
+                for metric_name, metric in metrics.items()
+            }
             if mode == "preference":
-                learn_output = agent.learn(current_prompts)
-                metrics = _normalize_learn_metrics(
-                    agent=agent,
-                    learn_output=learn_output,
-                    mode="preference",
-                )
-                agg_metrics = {
-                    metric_name: aggregate_metrics_across_gpus(accelerator, metric)
-                    for metric_name, metric in metrics.items()
-                }
                 mean_reward_margin = (
                     agg_metrics["mean_chosen_reward"]
                     - agg_metrics["mean_rejected_reward"]
                 )
-            else:
-                learn_output = agent.learn(current_prompts)
-                # SFT.learn returns a {"mean_loss", "mean_perplexity"} dict.
-                agg_metrics = [
-                    safe_aggregate_metrics(accelerator, learn_output["mean_loss"]),
-                    safe_aggregate_metrics(
-                        accelerator, learn_output["mean_perplexity"]
-                    ),
-                ]
 
             agent.steps[-1] += effective_data_batch_size
             total_steps += effective_data_batch_size
@@ -743,46 +738,29 @@ def train_llm_dataset(
 
             if (i + 1) % evaluation_interval == 0:
                 test_score = agent.test(training_env)
-                if mode == "preference":
-                    test_metrics = {"mean_reward_margin": test_score}
-                    agg_test_metrics = {
-                        metric_name: aggregate_metrics_across_gpus(accelerator, metric)
-                        for metric_name, metric in test_metrics.items()
-                    }
-                else:
-                    agg_test_metrics = [safe_aggregate_metrics(accelerator, test_score)]
+                # The eval fitness differs by objective: preference reports the
+                # chosen-vs-rejected reward margin, SFT the negated held-out loss.
+                eval_metric_name = (
+                    "Eval/Mean Reward Margin"
+                    if mode == "preference"
+                    else "Eval/Negative loss (fitness)"
+                )
+                agg_test_metrics = {
+                    eval_metric_name: safe_aggregate_metrics(accelerator, test_score)
+                }
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
 
             if _is_main_process(accelerator):
+                metrics_dict = _format_prefixed_metrics(agg_metrics, "Train")
+                metrics_dict["global_step"] = total_steps
                 if mode == "preference":
-                    metrics_dict = _format_prefixed_metrics(agg_metrics, "Train")
-                    metrics_dict["global_step"] = total_steps
                     metrics_dict["Train/Mean Reward Margin"] = mean_reward_margin
-
-                    agent_metrics_dict[f"agent_{agent_idx}/train_metrics"] = (
-                        metrics_dict
+                agent_metrics_dict[f"agent_{agent_idx}/train_metrics"] = metrics_dict
+                if agg_test_metrics is not None:
+                    agent_metrics_dict[f"agent_{agent_idx}/test_metrics"] = dict(
+                        agg_test_metrics
                     )
-                    if agg_test_metrics is not None:
-                        test_metrics_dict = _format_prefixed_metrics(
-                            agg_test_metrics, "Eval"
-                        )
-                        agent_metrics_dict[f"agent_{agent_idx}/test_metrics"] = (
-                            test_metrics_dict
-                        )
-                else:
-                    per_agent_train = {
-                        "global_step": total_steps,
-                        "Train/Loss": agg_metrics[0],
-                        "Train/Perplexity": agg_metrics[1],
-                    }
-                    agent_metrics_dict[f"agent_{agent_idx}/train_metrics"] = (
-                        per_agent_train
-                    )
-                    if agg_test_metrics is not None:
-                        agent_metrics_dict[f"agent_{agent_idx}/test_metrics"] = {
-                            "Eval/Negative loss (fitness)": agg_test_metrics[0],
-                        }
                 increment = min(
                     effective_data_batch_size,
                     max_steps - displayed_steps,
@@ -794,15 +772,17 @@ def train_llm_dataset(
                     agent.scores.append(mean_reward_margin)
                 else:
                     pbar.set_postfix(
-                        loss=f"{agg_metrics[0]:.4f}",
-                        ppl=f"{agg_metrics[1]:.2f}",
+                        loss=f"{agg_metrics['loss']:.4f}",
+                        ppl=f"{agg_metrics['perplexity']:.2f}",
                         **(
-                            {"eval_loss": f"{-agg_test_metrics[0]:.4f}"}
+                            {
+                                "eval_loss": f"{-agg_test_metrics['Eval/Negative loss (fitness)']:.4f}"
+                            }
                             if agg_test_metrics is not None
                             else {}
                         ),
                     )
-                    agent.scores.append(-agg_metrics[0])
+                    agent.scores.append(-agg_metrics["loss"])
         if accelerator is not None:
             accelerator.wait_for_everyone()
 
@@ -845,19 +825,12 @@ def train_llm_dataset(
                 agent=agent if mode == "preference" else pop[0],
                 mode=mode,
             )
-            if mode == "preference":
-                if agg_test_metrics is not None:
-                    wandb_dict |= build_eval_wandb_dict(
-                        agent_metrics_dict=agent_metrics_dict,
-                        pop=pop,
-                        mode="preference",
-                    )
-            else:
-                wandb_dict |= build_eval_wandb_dict(
-                    agent_metrics_dict=agent_metrics_dict,
-                    pop=pop,
-                    mode="sft",
-                )
+            # Collects nothing when no eval ran this iteration.
+            wandb_dict |= build_eval_wandb_dict(
+                agent_metrics_dict=agent_metrics_dict,
+                pop=pop,
+                mode=mode,
+            )
         if wandb_dict and wb and _is_main_process(accelerator):
             wandb.log(wandb_dict)
         csv_logger.maybe_write(wandb_dict)
@@ -963,6 +936,7 @@ def train_llm_rollout(
     wandb_entity: str | None = None,
     wandb_run_name: str | None = None,
     evaluation_interval: int = 50,
+    eval_loop: int = 8,
     max_reward: float | None = None,
     verbose: bool = True,
     accelerator: Accelerator | None = None,
@@ -984,7 +958,7 @@ def train_llm_rollout(
     :type max_turns: int
     :param env_factory: Factory that returns a fresh multi-turn env for each
         trajectory rollout. Required to ensure trajectory state isolation.
-    :type env_factory: Callable[[], GemEnv]
+    :type env_factory: Callable[[], RolloutEnv]
     :param env_config: Configuration for the environment factory.
     :type env_config: dict[str, Any], optional
     :param init_hp: Initial hyperparameters (e.g. ``BATCH_SIZE``, ``ALGO``).
@@ -1010,6 +984,10 @@ def train_llm_rollout(
     :param evaluation_interval: How often to call ``agent.test`` on a fresh
         environment from ``env_factory`` and emit verbose banners.
     :type evaluation_interval: int, optional
+    :param eval_loop: Episodes per evaluation — the fitness driving HPO selection
+        is the mean over this many episodes, so 1 makes tournament selection
+        single-sample noise; defaults to 8.
+    :type eval_loop: int, optional
     :param max_reward: If set, adds accuracy metric vs this threshold.
     :type max_reward: float, optional
     :param verbose: Progress bar and periodic train summaries, defaults to True.
@@ -1077,7 +1055,12 @@ def train_llm_rollout(
     total_steps = 0
     agg_metrics: dict[str, Any] = {}
     agg_eval_score: float | None = None
-    group_seed = np.random.randint(0, 1000000)
+    # Fold the rank into the seed so data-parallel ranks draw decorrelated
+    # dataset rows and env tasks — the step accounting below multiplies by the
+    # world size, which is only honest when each rank contributes distinct data.
+    group_seed = int(np.random.randint(0, 1000000)) + _distributed_rank(accelerator) * (
+        1 << 31
+    )
     i = 0
     next_checkpoint_step = checkpoint_steps
     max_steps_checkpoint_saved = False
@@ -1085,279 +1068,290 @@ def train_llm_rollout(
     rollout_env = BatchRolloutEnv(env_factory, batch_size, group_size, env_config)
     # ``agent.test`` expects a single ``RolloutEnv``; ``rollout_env`` is a
     # ``BatchRolloutEnv`` wrapping N inner envs whose state is mid-rollout
-    # during training. Build a separate test env so evaluation is isolated.
-    # NOTE: this means one extra env is held for the run's lifetime. Future
-    # refactor could share a subset of the rollout envs (e.g. lease one of the
-    # vec env's inner ``RolloutEnv`` instances when no trajectory is active)
-    # to avoid the duplication for heavy env setups.
-    test_env = env_factory(**(env_config or {}))
-    wall_deadline = (
-        time.monotonic() + max_wall_seconds
-        if max_wall_seconds is not None and max_wall_seconds > 0
-        else None
-    )
-    while total_steps < max_steps:
-        if wall_deadline is not None and time.monotonic() >= wall_deadline:
-            if accelerator is None or accelerator.is_main_process:
-                print(
-                    f"\nStopping multiturn training: wall time limit ({max_wall_seconds}s) reached.",
+    # during training. A separate test env keeps evaluation isolated; it is
+    # built lazily on the first evaluation, so runs that never reach
+    # ``evaluation_interval`` don't pay for an extra env (or its server).
+    test_env: RolloutEnv | None = None
+    try:
+        wall_deadline = (
+            time.monotonic() + max_wall_seconds
+            if max_wall_seconds is not None and max_wall_seconds > 0
+            else None
+        )
+        while total_steps < max_steps:
+            if wall_deadline is not None and time.monotonic() >= wall_deadline:
+                if accelerator is None or accelerator.is_main_process:
+                    print(
+                        f"\nStopping multiturn training: wall time limit ({max_wall_seconds}s) reached.",
+                    )
+                break
+            agent_metrics_dict = {}
+            iteration_steps = 0
+            for agent_idx, agent in enumerate(pop):
+                # Refresh the KL reference once per completed pass over the dataset
+                # rows (the rollout counterpart of the dataset path's per-epoch
+                # refresh); a non-dataset env keeps ``num_epochs == 0``, leaving the
+                # anchor at the initial policy.
+                agent.set_reference_policy(rollout_env.num_epochs)
+                (
+                    completion_ids_list,
+                    action_masks_list,
+                    all_turn_ids,
+                    all_rewards,
+                    batch_steps,
+                    group_seed,
+                    all_sampling_logps,
+                ) = collect_rollouts_llm(
+                    agent=agent,
+                    env=rollout_env,
+                    n_steps=max_turns,
+                    batch_size=batch_size,
+                    group_size=group_size,
+                    group_seed=group_seed,
                 )
-            break
-        agent_metrics_dict = {}
-        iteration_steps = 0
-        for agent_idx, agent in enumerate(pop):
-            (
-                completion_ids_list,
-                action_masks_list,
-                all_turn_ids,
-                all_rewards,
-                batch_steps,
-                group_seed,
-                all_sampling_logps,
-            ) = collect_rollouts_llm(
-                agent=agent,
-                env=rollout_env,
-                n_steps=max_turns,
-                batch_size=batch_size,
-                group_size=group_size,
-                group_seed=group_seed,
-            )
 
-            # Normalize rewards to 2D [1, n_turns] per trajectory so padding
-            # stacks into [batch, max_turns] rather than flattening to 1D.
-            normalized_rewards = [
-                reward.unsqueeze(0) if reward.dim() == 1 else reward
-                for reward in all_rewards
-            ]
-            (turn_ids_padded,) = stack_and_pad_experiences(
-                all_turn_ids,
-                padding_values=[-1],
-            )
-            (rewards_2d,) = stack_and_pad_experiences(
-                normalized_rewards,
-                padding_values=[0.0],
-            )
-            rewards_2d = rewards_2d.float()
-            completion_lengths = np.mean([x.shape[1] for x in completion_ids_list])
-            episode_scores = (
-                rewards_2d.sum(dim=1) if rewards_2d.dim() > 1 else rewards_2d
-            )
-            mean_score = episode_scores.mean().to(agent.device)
-
-            experiences = (
-                completion_ids_list,
-                action_masks_list,
-                rewards_2d,
-            )
-
-            # Pass turn_ids to every multi-turn RL agent that accepts it
-            # (LLMPPO/LLMREINFORCE, and the GRPO family — GRPO/CISPO/GSPO —
-            # which use it for turn-level importance sampling + per-turn
-            # group-relative advantages). Agents that don't need it (e.g.
-            # token/sequence levels, GSPO) simply ignore it.
-            learn_kwargs = (
-                {"turn_ids": turn_ids_padded}
-                if isinstance(agent, (LLMREINFORCE, LLMPPO, GRPO))
-                else {}
-            )
-            if all_sampling_logps is not None and isinstance(
-                agent, (GRPO, LLMPPO, LLMREINFORCE)
-            ):
-                learn_kwargs["sampling_logps"] = all_sampling_logps
-            learn_output = agent.learn(experiences, **learn_kwargs)
-            metrics = _normalize_learn_metrics(
-                agent=agent,
-                learn_output=learn_output,
-                mode="multiturn",
-            )
-            metrics["mean_score"] = mean_score
-            metrics["completion_length"] = torch.tensor(
-                completion_lengths, dtype=torch.float32, device=agent.device
-            )
-            if max_reward is not None:
-                accuracy = (
-                    (episode_scores >= max_reward).float().mean().to(agent.device)
+                # Normalize rewards to 2D [1, n_turns] per trajectory so padding
+                # stacks into [batch, max_turns] rather than flattening to 1D.
+                normalized_rewards = [
+                    reward.unsqueeze(0) if reward.dim() == 1 else reward
+                    for reward in all_rewards
+                ]
+                (turn_ids_padded,) = stack_and_pad_experiences(
+                    all_turn_ids,
+                    padding_values=[-1],
                 )
-                metrics["accuracy"] = accuracy
-            agg_metrics = {
-                metric_name: aggregate_metrics_across_gpus(accelerator, metric)
-                for metric_name, metric in metrics.items()
-            }
-
-            effective_batch_steps = batch_steps * data_increment
-            agent.steps[-1] += effective_batch_steps
-            total_steps += effective_batch_steps
-            iteration_steps += effective_batch_steps
-            agg_eval_score = None
-
-            if (i + 1) % evaluation_interval == 0:
-                eval_score = agent.test(test_env)
-                eval_tensor = torch.tensor(
-                    eval_score, dtype=torch.float32, device=agent.device
+                (rewards_2d,) = stack_and_pad_experiences(
+                    normalized_rewards,
+                    padding_values=[0.0],
                 )
-                agg_eval_score = aggregate_metrics_across_gpus(accelerator, eval_tensor)
-                if accelerator is not None:
-                    accelerator.wait_for_everyone()
-
-            if accelerator is None or accelerator.is_main_process:
-                metrics_dict = _format_prefixed_metrics(agg_metrics, "Train")
-                metrics_dict["global_step"] = total_steps
-                agent_metrics_dict[f"agent_{agent_idx}/train_metrics"] = metrics_dict
-                if agg_eval_score is not None:
-                    agent_metrics_dict[f"agent_{agent_idx}/test_metrics"] = {
-                        "Eval/Score": agg_eval_score,
-                    }
-                agent.scores.append(agg_metrics["mean_score"])
-
-        if (
-            verbose
-            and (i + 1) % evaluation_interval == 0
-            and (accelerator is None or accelerator.is_main_process)
-        ):
-            banner_text = f"Step {i + 1}  ({total_steps} samples)"
-            banner_width = max(len(banner_text) + 8, 40)
-            border = "=" * banner_width
-            lines = [
-                f"\n{border}",
-                banner_text.center(banner_width),
-                border,
-                f"Train score:\t\t{agg_metrics['mean_score']:.3f}",
-                f"Loss:\t\t\t{agg_metrics['mean_loss']:.4f}",
-                f"KL-divergence:\t\t{agg_metrics['mean_kl']:.4f}",
-            ]
-            if "mean_pg_loss" in agg_metrics:
-                lines.extend(
-                    [
-                        f"PG loss:\t\t{agg_metrics['mean_pg_loss']:.4f}",
-                        f"VF loss:\t\t{agg_metrics.get('mean_vf_loss', 0.0):.4f}",
-                        f"Entropy:\t\t{agg_metrics['mean_entropy']:.4f}",
-                    ]
+                rewards_2d = rewards_2d.float()
+                completion_lengths = np.mean([x.shape[1] for x in completion_ids_list])
+                episode_scores = (
+                    rewards_2d.sum(dim=1) if rewards_2d.dim() > 1 else rewards_2d
                 )
-            if max_reward is not None:
-                lines.insert(4, f"Train accuracy:\t\t{agg_metrics['accuracy']:.3f}")
-            if agg_eval_score is not None:
-                lines.append(f"Eval score:\t\t{agg_eval_score:.3f}")
-            lines.append(border)
-            pbar.write("\n".join(lines))
+                mean_score = episode_scores.mean().to(agent.device)
 
-        if accelerator is None or accelerator.is_main_process:
-            postfix = {
-                "loss": f"{np.mean([agent_metrics_dict[f'agent_{j}/train_metrics']['Train/Mean Loss'] for j in range(len(pop))]):.4f}",
-                "kl": f"{np.mean([agent_metrics_dict[f'agent_{j}/train_metrics']['Train/Mean KL'] for j in range(len(pop))]):.4f}",
-                "score": f"{np.mean([agent_metrics_dict[f'agent_{j}/train_metrics']['Train/Mean Score'] for j in range(len(pop))]):.3f}",
-            }
-            if max_reward is not None:
-                postfix["acc"] = (
-                    f"{np.mean([agent_metrics_dict[f'agent_{j}/train_metrics']['Train/Accuracy'] for j in range(len(pop))]):.3f}"
+                experiences = (
+                    completion_ids_list,
+                    action_masks_list,
+                    rewards_2d,
                 )
-            pbar.set_postfix(**postfix)
-            pbar.update(iteration_steps // len(pop))
 
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
-
-        if tournament is not None and mutation is not None:
-            if (i + 1) % evo_steps == 0:
-                if accelerator is not None:
-                    accelerator.wait_for_everyone()
-                pop = tournament_selection_and_mutation(
-                    population=pop,
-                    tournament=tournament,
-                    mutation=mutation,
-                    env_name=env_name,
-                    accelerator=accelerator,
-                    language_model=True,
-                    elite_path=elite_path,
-                    save_elite=save_elite,
+                # Pass turn_ids to every multi-turn RL agent that accepts it
+                # (LLMPPO/LLMREINFORCE, and the GRPO family — GRPO/CISPO/GSPO —
+                # which use it for turn-level importance sampling + per-turn
+                # group-relative advantages). Agents that don't need it (e.g.
+                # token/sequence levels, GSPO) simply ignore it.
+                learn_kwargs = (
+                    {"turn_ids": turn_ids_padded}
+                    if isinstance(agent, (LLMREINFORCE, LLMPPO, GRPO))
+                    else {}
                 )
-                if accelerator is not None:
-                    accelerator.wait_for_everyone()
-        else:
-            checkpoint_due = False
-            if checkpoint_steps is not None:
-                while (
-                    next_checkpoint_step is not None
-                    and total_steps >= next_checkpoint_step
+                if all_sampling_logps is not None and isinstance(
+                    agent, (GRPO, LLMPPO, LLMREINFORCE)
                 ):
+                    learn_kwargs["sampling_logps"] = all_sampling_logps
+                learn_output = agent.learn(experiences, **learn_kwargs)
+                metrics = _normalize_learn_metrics(
+                    agent=agent,
+                    learn_output=learn_output,
+                    mode="multiturn",
+                )
+                metrics["mean_score"] = mean_score
+                metrics["completion_length"] = torch.tensor(
+                    completion_lengths, dtype=torch.float32, device=agent.device
+                )
+                if max_reward is not None:
+                    accuracy = (
+                        (episode_scores >= max_reward).float().mean().to(agent.device)
+                    )
+                    metrics["accuracy"] = accuracy
+                agg_metrics = {
+                    metric_name: aggregate_metrics_across_gpus(accelerator, metric)
+                    for metric_name, metric in metrics.items()
+                }
+
+                effective_batch_steps = batch_steps * data_increment
+                agent.steps[-1] += effective_batch_steps
+                total_steps += effective_batch_steps
+                iteration_steps += effective_batch_steps
+                agg_eval_score = None
+
+                if (i + 1) % evaluation_interval == 0:
+                    if test_env is None:
+                        test_env = env_factory(**(env_config or {}))
+                    eval_score = agent.test(test_env, loop=eval_loop)
+                    eval_tensor = torch.tensor(
+                        eval_score, dtype=torch.float32, device=agent.device
+                    )
+                    agg_eval_score = aggregate_metrics_across_gpus(
+                        accelerator, eval_tensor
+                    )
+                    if accelerator is not None:
+                        accelerator.wait_for_everyone()
+
+                if accelerator is None or accelerator.is_main_process:
+                    metrics_dict = _format_prefixed_metrics(agg_metrics, "Train")
+                    metrics_dict["global_step"] = total_steps
+                    agent_metrics_dict[f"agent_{agent_idx}/train_metrics"] = (
+                        metrics_dict
+                    )
+                    if agg_eval_score is not None:
+                        agent_metrics_dict[f"agent_{agent_idx}/test_metrics"] = {
+                            "Eval/Score": agg_eval_score,
+                        }
+                    agent.scores.append(agg_metrics["mean_score"])
+
+            if (
+                verbose
+                and (i + 1) % evaluation_interval == 0
+                and (accelerator is None or accelerator.is_main_process)
+            ):
+                banner_text = f"Step {i + 1}  ({total_steps} samples)"
+                banner_width = max(len(banner_text) + 8, 40)
+                border = "=" * banner_width
+                lines = [
+                    f"\n{border}",
+                    banner_text.center(banner_width),
+                    border,
+                    f"Train score:\t\t{agg_metrics['mean_score']:.3f}",
+                    f"Loss:\t\t\t{agg_metrics['mean_loss']:.4f}",
+                    f"KL-divergence:\t\t{agg_metrics['mean_kl']:.4f}",
+                ]
+                if "mean_pg_loss" in agg_metrics:
+                    lines.extend(
+                        [
+                            f"PG loss:\t\t{agg_metrics['mean_pg_loss']:.4f}",
+                            f"VF loss:\t\t{agg_metrics.get('mean_vf_loss', 0.0):.4f}",
+                            f"Entropy:\t\t{agg_metrics['mean_entropy']:.4f}",
+                        ]
+                    )
+                if max_reward is not None:
+                    lines.insert(4, f"Train accuracy:\t\t{agg_metrics['accuracy']:.3f}")
+                if agg_eval_score is not None:
+                    lines.append(f"Eval score:\t\t{agg_eval_score:.3f}")
+                lines.append(border)
+                pbar.write("\n".join(lines))
+
+            if accelerator is None or accelerator.is_main_process:
+                postfix = {
+                    "loss": f"{np.mean([agent_metrics_dict[f'agent_{j}/train_metrics']['Train/Mean Loss'] for j in range(len(pop))]):.4f}",
+                    "kl": f"{np.mean([agent_metrics_dict[f'agent_{j}/train_metrics']['Train/Mean KL'] for j in range(len(pop))]):.4f}",
+                    "score": f"{np.mean([agent_metrics_dict[f'agent_{j}/train_metrics']['Train/Mean Score'] for j in range(len(pop))]):.3f}",
+                }
+                if max_reward is not None:
+                    postfix["acc"] = (
+                        f"{np.mean([agent_metrics_dict[f'agent_{j}/train_metrics']['Train/Accuracy'] for j in range(len(pop))]):.3f}"
+                    )
+                pbar.set_postfix(**postfix)
+                pbar.update(iteration_steps // len(pop))
+
+            if accelerator is not None:
+                accelerator.wait_for_everyone()
+
+            if tournament is not None and mutation is not None:
+                if (i + 1) % evo_steps == 0:
+                    if accelerator is not None:
+                        accelerator.wait_for_everyone()
+                    pop = tournament_selection_and_mutation(
+                        population=pop,
+                        tournament=tournament,
+                        mutation=mutation,
+                        env_name=env_name,
+                        accelerator=accelerator,
+                        language_model=True,
+                        elite_path=elite_path,
+                        save_elite=save_elite,
+                    )
+                    if accelerator is not None:
+                        accelerator.wait_for_everyone()
+            else:
+                checkpoint_due = False
+                if checkpoint_steps is not None:
+                    while (
+                        next_checkpoint_step is not None
+                        and total_steps >= next_checkpoint_step
+                    ):
+                        checkpoint_due = True
+                        next_checkpoint_step += checkpoint_steps
+                if total_steps >= max_steps and not max_steps_checkpoint_saved:
                     checkpoint_due = True
-                    next_checkpoint_step += checkpoint_steps
-            if total_steps >= max_steps and not max_steps_checkpoint_saved:
-                checkpoint_due = True
-                max_steps_checkpoint_saved = True
-            if checkpoint_due:
-                save_llm_checkpoint(agent, elite_path)
+                    max_steps_checkpoint_saved = True
+                if checkpoint_due:
+                    save_llm_checkpoint(agent, elite_path)
 
-        wandb_dict: dict[str, Any] = {}
-        if agent_metrics_dict and (wb or log_csv):
-            wandb_dict = build_train_wandb_dict(
-                agent_metrics_dict=agent_metrics_dict,
-                pop=pop,
-                agent=agent,
-                max_reward=max_reward,
-                mode="multiturn",
+            wandb_dict: dict[str, Any] = {}
+            if agent_metrics_dict and (wb or log_csv):
+                wandb_dict = build_train_wandb_dict(
+                    agent_metrics_dict=agent_metrics_dict,
+                    pop=pop,
+                    agent=agent,
+                    max_reward=max_reward,
+                    mode="multiturn",
+                )
+                eval_wandb_dict = build_eval_wandb_dict(
+                    agent_metrics_dict=agent_metrics_dict,
+                    pop=pop,
+                    mode="multiturn",
+                    eval_score_mode=True,
+                )
+                wandb_dict |= eval_wandb_dict
+
+            if wb and (accelerator is None or accelerator.is_main_process):
+                wandb.log(wandb_dict)
+            csv_logger.maybe_write(wandb_dict)
+
+            i += 1
+
+        if verbose and (accelerator is None or accelerator.is_main_process):
+            fitness_calculated = len(agent.fitness) > 0
+            fitness = (
+                [str(round(agent.fitness[-1], 2)) for agent in pop]
+                if fitness_calculated
+                else [None] * len(pop)
             )
-            eval_wandb_dict = build_eval_wandb_dict(
-                agent_metrics_dict=agent_metrics_dict,
-                pop=pop,
-                mode="multiturn",
-                eval_score_mode=True,
+            avg_fitness = (
+                [f"{np.mean(agent.fitness[-5:]):.2f}" for agent in pop]
+                if fitness_calculated
+                else [None] * len(pop)
             )
-            wandb_dict |= eval_wandb_dict
+            avg_score = [f"{np.mean(agent.scores[-10:]):.2f}" for agent in pop]
+            agents = [agent.index for agent in pop]
+            num_steps = [agent.steps[-1] for agent in pop]
+            muts = [agent.mut for agent in pop]
 
-        if wb and (accelerator is None or accelerator.is_main_process):
-            wandb.log(wandb_dict)
-        csv_logger.maybe_write(wandb_dict)
+            banner_text = f"Global Steps {total_steps}"
+            banner_width = max(len(banner_text) + 8, 35)
+            border = "=" * banner_width
+            centered_text = f"{banner_text}".center(banner_width)
+            pbar.write(
+                f"{border}\n"
+                f"{centered_text}\n"
+                f"{border}\n"
+                f"Fitness:\t\t{fitness}\n"
+                f"Score:\t\t{agg_metrics['mean_score']}\n"
+                f"5 fitness avgs:\t{avg_fitness}\n"
+                f"10 score avgs:\t{avg_score}\n"
+                f"Agents:\t\t{agents}\n"
+                f"Steps:\t\t{num_steps}\n"
+                f"Mutations:\t\t{muts}",
+            )
 
-        i += 1
-
-    if verbose and (accelerator is None or accelerator.is_main_process):
-        fitness_calculated = len(agent.fitness) > 0
-        fitness = (
-            [str(round(agent.fitness[-1], 2)) for agent in pop]
-            if fitness_calculated
-            else [None] * len(pop)
+        _save_elite_checkpoint(pop, save_elite, elite_path, accelerator)
+        _finish_training(
+            accelerator,
+            pbar,
+            wb,
+            csv_logger.csv_file,
+            elite_path if csv_logger.csv_file is not None else None,
         )
-        avg_fitness = (
-            [f"{np.mean(agent.fitness[-5:]):.2f}" for agent in pop]
-            if fitness_calculated
-            else [None] * len(pop)
-        )
-        avg_score = [f"{np.mean(agent.scores[-10:]):.2f}" for agent in pop]
-        agents = [agent.index for agent in pop]
-        num_steps = [agent.steps[-1] for agent in pop]
-        muts = [agent.mut for agent in pop]
-
-        banner_text = f"Global Steps {total_steps}"
-        banner_width = max(len(banner_text) + 8, 35)
-        border = "=" * banner_width
-        centered_text = f"{banner_text}".center(banner_width)
-        pbar.write(
-            f"{border}\n"
-            f"{centered_text}\n"
-            f"{border}\n"
-            f"Fitness:\t\t{fitness}\n"
-            f"Score:\t\t{agg_metrics['mean_score']}\n"
-            f"5 fitness avgs:\t{avg_fitness}\n"
-            f"10 score avgs:\t{avg_score}\n"
-            f"Agents:\t\t{agents}\n"
-            f"Steps:\t\t{num_steps}\n"
-            f"Mutations:\t\t{muts}",
-        )
-
-    _save_elite_checkpoint(pop, save_elite, elite_path, accelerator)
-    _finish_training(
-        accelerator,
-        pbar,
-        wb,
-        csv_logger.csv_file,
-        elite_path if csv_logger.csv_file is not None else None,
-    )
-
-    # Release the rollout envs (and any per-rollout OpenEnv servers they own) plus
-    # the separate test env, so repeated calls (e.g. HPO generations) don't leak.
-    rollout_env.close()
-    if hasattr(test_env, "close"):
-        test_env.close()
+    finally:
+        # Release the rollout envs (and any per-rollout OpenEnv servers they
+        # own) plus the test env — on error too, so exceptions and repeated
+        # calls (e.g. HPO generations in one process) don't leak servers.
+        rollout_env.close()
+        if test_env is not None and hasattr(test_env, "close"):
+            test_env.close()
 
     return pop
 
@@ -1366,3 +1360,21 @@ def train_llm_rollout(
 finetune_llm_multiturn = train_llm_rollout
 finetune_llm_preference = train_llm_dataset
 finetune_llm_sft = train_llm_dataset
+
+
+def finetune_llm_reasoning(*args: Any, **kwargs: Any) -> None:
+    """Migration stub: single-turn reasoning is :func:`train_llm_rollout`.
+
+    Build the env as a ``RolloutEnv`` with ``max_turns=1`` (see
+    :meth:`~agilerl.llm_envs.rollout_env.RolloutEnv.local` /
+    :meth:`~agilerl.llm_envs.rollout_env.RolloutEnv.serving`) and call
+    :func:`train_llm_rollout`. This stub only raises with that pointer, keeping
+    the deprecation surface consistent with the ``finetune_llm_*`` aliases above.
+    """
+    del args, kwargs
+    msg = (
+        "finetune_llm_reasoning has been replaced: build a RolloutEnv "
+        "(max_turns=1) via RolloutEnv.local / RolloutEnv.serving and call "
+        "train_llm_rollout instead."
+    )
+    raise NotImplementedError(msg)
