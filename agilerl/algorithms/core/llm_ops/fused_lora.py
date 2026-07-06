@@ -6,9 +6,8 @@ weights are applied only to its assigned batch rows, while the frozen base
 weights are computed once for the entire batch.
 
 This eliminates adapter switching during training and resolves the
-gradient-checkpointing / DeepSpeed incompatibility that arises when
-different adapters must be active for different parts of the computation
-graph.
+gradient-checkpointing incompatibility that arises when different
+adapters must be active for different parts of the computation graph.
 
 The mechanism piggy-backs on PEFT's existing ``_mixed_batch_forward``
 (which handles the per-row LoRA routing) but bypasses the inference-only

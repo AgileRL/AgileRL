@@ -50,11 +50,9 @@ class DQN(RLAlgorithm):
     :type actor_network: nn.Module, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
-    :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
     :param cudagraphs: Use CUDA graphs for optimization, defaults to False
     :type cudagraphs: bool, optional
-    :param wrap: Wrap models for distributed training upon creation, defaults to True
+    :param wrap: Retained for API compatibility; has no effect, defaults to True
     :type wrap: bool, optional
     """
 
@@ -75,7 +73,6 @@ class DQN(RLAlgorithm):
         normalize_images: bool = True,
         actor_network: EvolvableModule | None = None,
         device: str = "cpu",
-        accelerator: Any | None = None,
         cudagraphs: bool = False,
         wrap: bool = True,
     ) -> None:
@@ -85,7 +82,6 @@ class DQN(RLAlgorithm):
             index=index,
             hp_config=hp_config,
             device=device,
-            accelerator=accelerator,
             normalize_images=normalize_images,
             name="DQN",
         )
@@ -156,9 +152,6 @@ class DQN(RLAlgorithm):
             optimizer_kwargs={"capturable": self.capturable},
         )
 
-        if self.accelerator is not None and wrap:
-            self.wrap_models()
-
         self.criterion = nn.MSELoss()
 
         # torch.compile and cuda graph optimizations
@@ -206,7 +199,7 @@ class DQN(RLAlgorithm):
         """
         # Preprocess observations and convert inputs to torch tensors
         torch_obs = self.preprocess_observation(obs)
-        device = self.device if self.accelerator is None else self.accelerator.device
+        device = self.device
         epsilon = torch.tensor(epsilon, device=device)
         if action_mask is not None:
             # Need to stack if vectorized env
@@ -315,11 +308,7 @@ class DQN(RLAlgorithm):
 
         # zero gradients, perform a backward pass, and update the weights
         self.optimizer.zero_grad()
-        if self.accelerator is not None:
-            self.accelerator.backward(loss)
-        else:
-            loss.backward()
-
+        loss.backward()
         self.optimizer.step()
         return loss.detach()
 

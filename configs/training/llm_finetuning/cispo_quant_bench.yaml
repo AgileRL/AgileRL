@@ -43,7 +43,7 @@ INIT_HP:
     # mean_std divides by per-group std; mean_only only centers.
     ADV_NORM: mean_only
     # Skip the GRPO update when every advantage is zero (e.g. all rewards in a
-    # group tie) instead of running a no-signal backward that crashes DeepSpeed.
+    # group tie) instead of running a no-signal backward that crashes the trainer.
     FILTER_ZERO_ADV: true
     LR: 0.00002
     MAX_GRAD_NORM: 1

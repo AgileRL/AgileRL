@@ -226,7 +226,7 @@ def make_mock_vllm_instance(llm_spec: type[Any] | None = None) -> Any:
 def force_gpu_memory_release() -> None:
     """Aggressively release GPU memory using all available methods.
 
-    This combines multiple cleanup strategies used by vLLM and DeepSpeed:
+    This combines multiple cleanup strategies used by vLLM and distributed training:
     1. Unfreeze GC to allow collection of frozen objects
     2. Multiple garbage collection cycles
     3. CUDA cache clearing
@@ -275,7 +275,7 @@ def wait_for_gpu_memory_to_clear(
     Uses NVML for accurate memory measurement instead of PyTorch's view,
     which can be inaccurate due to caching and delayed deallocation.
 
-    This is particularly important for tests that use DeepSpeed and vLLM,
+    This is particularly important for tests that use distributed training and vLLM,
     where GPU memory may not be immediately released after cleanup calls.
 
     Args:

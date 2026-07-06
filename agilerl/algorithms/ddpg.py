@@ -85,9 +85,7 @@ class DDPG(RLAlgorithm):
     :type share_encoders: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
-    :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
-    :param wrap: Wrap models for distributed training upon creation, defaults to True
+    :param wrap: Retained for API compatibility; has no effect, defaults to True
     :type wrap: bool, optional
     """
 
@@ -119,7 +117,6 @@ class DDPG(RLAlgorithm):
         critic_network: EvolvableModule | None = None,
         share_encoders: bool = False,
         device: str = "cpu",
-        accelerator: Any | None = None,
         wrap: bool = True,
     ) -> None:
 
@@ -129,7 +126,6 @@ class DDPG(RLAlgorithm):
             index=index,
             hp_config=hp_config,
             device=device,
-            accelerator=accelerator,
             normalize_images=normalize_images,
             name="DDPG",
         )
@@ -311,9 +307,6 @@ class DDPG(RLAlgorithm):
             lr=lr_critic,
         )
 
-        if self.accelerator is not None and wrap:
-            self.wrap_models()
-
         self.criterion = nn.MSELoss()
 
         # Register network groups for actor and critic
@@ -462,11 +455,7 @@ class DDPG(RLAlgorithm):
 
         # critic loss backprop
         self.critic_optimizer.zero_grad()
-        if self.accelerator is not None:
-            self.accelerator.backward(critic_loss)
-        else:
-            critic_loss.backward()
-
+        critic_loss.backward()
         self.critic_optimizer.step()
 
         # update actor and targets every policy_freq learn steps
@@ -479,10 +468,7 @@ class DDPG(RLAlgorithm):
 
             # actor loss backprop
             self.actor_optimizer.zero_grad()
-            if self.accelerator is not None:
-                self.accelerator.backward(actor_loss)
-            else:
-                actor_loss.backward()
+            actor_loss.backward()
             self.actor_optimizer.step()
 
             self.soft_update(self.actor, self.actor_target)

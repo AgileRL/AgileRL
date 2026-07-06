@@ -3,8 +3,6 @@ import copy
 import numpy as np
 import pytest
 import torch
-from accelerate import Accelerator
-from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
 from torch import nn, optim
 
@@ -103,16 +101,11 @@ class TestCQNInit:
             ("multidiscrete_space", EvolvableMLP),
         ],
     )
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
-    def test_default_construction(
-        self, observation_space, encoder_cls, accelerator_flag, request
-    ):
-        accelerator = Accelerator() if accelerator_flag else None
+    def test_default_construction(self, observation_space, encoder_cls, request):
         action_space = spaces.Discrete(2)
         observation_space = request.getfixturevalue(observation_space)
-        cqn = CQN(observation_space, action_space, accelerator=accelerator)
+        cqn = CQN(observation_space, action_space)
 
-        expected_device = accelerator.device if accelerator else "cpu"
         assert cqn.observation_space == observation_space
         assert cqn.action_space == action_space
         assert cqn.batch_size == 64
@@ -121,16 +114,14 @@ class TestCQNInit:
         assert cqn.gamma == 0.99
         assert cqn.tau == 0.001
         assert cqn.mut is None
-        assert cqn.device == expected_device
-        assert cqn.accelerator == accelerator
+        assert cqn.device == "cpu"
         assert cqn.index == 0
         assert cqn.scores == []
         assert cqn.fitness == []
         assert cqn.steps == [0]
         assert isinstance(cqn.actor.encoder, encoder_cls)
         assert isinstance(cqn.actor_target.encoder, encoder_cls)
-        expected_opt_cls = AcceleratedOptimizer if accelerator else optim.Adam
-        assert isinstance(cqn.optimizer.optimizer, expected_opt_cls)
+        assert isinstance(cqn.optimizer.optimizer, optim.Adam)
         assert isinstance(cqn.criterion, nn.MSELoss)
         cqn.clean_up()
 
@@ -170,7 +161,6 @@ class TestCQNInit:
         assert cqn.tau == 0.001
         assert cqn.mut is None
         assert cqn.device == "cpu"
-        assert cqn.accelerator is None
         assert cqn.index == 0
         assert cqn.scores == []
         assert cqn.fitness == []
@@ -222,7 +212,6 @@ class TestCQNInit:
         assert cqn.tau == 0.001
         assert cqn.mut is None
         assert cqn.device == "cpu"
-        assert cqn.accelerator is None
         assert cqn.index == 0
         assert cqn.scores == []
         assert cqn.fitness == []
@@ -270,10 +259,9 @@ class TestCQNGetAction:
 
     # Returns the expected action when given a state observation and action mask.
     def test_respects_action_mask(self, vector_space):
-        accelerator = Accelerator()
         action_space = spaces.Discrete(2)
 
-        cqn = CQN(vector_space, action_space, accelerator=accelerator)
+        cqn = CQN(vector_space, action_space)
         state = np.array([1, 2, 3, 4])
 
         action_mask = np.array([0, 1])
@@ -335,7 +323,6 @@ class TestCQNLearn:
 
     # handles double Q-learning
     def test_handles_double_q_learning(self, discrete_space):
-        accelerator = Accelerator()
         action_space = spaces.Discrete(2)
         double = True
         batch_size = 64
@@ -346,7 +333,6 @@ class TestCQNLearn:
             action_space,
             double=double,
             batch_size=batch_size,
-            accelerator=accelerator,
         )
 
         # Create a batch of experiences
@@ -376,15 +362,13 @@ class TestCQNLearn:
         )
         cqn.clean_up()
 
-    def test_with_accelerator_moves_tensors(self, vector_space):
+    def test_learn_returns_float_loss(self, vector_space):
         action_space = spaces.Discrete(2)
         batch_size = 64
-        accelerator = Accelerator()
         cqn = CQN(
             vector_space,
             action_space,
             batch_size=batch_size,
-            accelerator=accelerator,
         )
         states = torch.randn(batch_size, vector_space.shape[0])
         actions = torch.randint(0, action_space.n, (batch_size, 1))
@@ -411,7 +395,6 @@ class TestCQNSoftUpdate:
         double = False
         actor_network = None
         device = "cpu"
-        accelerator = None
         wrap = True
 
         cqn = CQN(
@@ -427,7 +410,6 @@ class TestCQNSoftUpdate:
             double=double,
             actor_network=actor_network,
             device=device,
-            accelerator=accelerator,
             wrap=wrap,
         )
 
@@ -501,7 +483,6 @@ class TestCQNClone:
         assert clone_agent.tau == cqn.tau
         assert clone_agent.mut == cqn.mut
         assert clone_agent.device == cqn.device
-        assert clone_agent.accelerator == cqn.accelerator
         assert_state_dicts_equal(clone_agent.actor.state_dict(), cqn.actor.state_dict())
         assert_state_dicts_equal(
             clone_agent.actor_target.state_dict(),
@@ -516,66 +497,6 @@ class TestCQNClone:
         assert clone_agent.scores == cqn.scores
         assert clone_agent.tensor_attribute == cqn.tensor_attribute
         assert clone_agent.tensor_test == cqn.tensor_test
-        cqn.clean_up()
-        clone_agent.clean_up()
-
-        accelerator = Accelerator()
-        cqn = CQN(observation_space, action_space, accelerator=accelerator)
-        clone_agent = cqn.clone()
-
-        assert clone_agent.observation_space == cqn.observation_space
-        assert clone_agent.action_space == cqn.action_space
-        # assert clone_agent.actor_network == cqn.actor_network
-        assert clone_agent.batch_size == cqn.batch_size
-        assert clone_agent.lr == cqn.lr
-        assert clone_agent.learn_step == cqn.learn_step
-        assert clone_agent.gamma == cqn.gamma
-        assert clone_agent.tau == cqn.tau
-        assert clone_agent.mut == cqn.mut
-        assert clone_agent.device == cqn.device
-        assert clone_agent.accelerator == cqn.accelerator
-        assert_state_dicts_equal(clone_agent.actor.state_dict(), cqn.actor.state_dict())
-        assert_state_dicts_equal(
-            clone_agent.actor_target.state_dict(),
-            cqn.actor_target.state_dict(),
-        )
-        assert_state_dicts_equal(
-            clone_agent.optimizer.state_dict(),
-            cqn.optimizer.state_dict(),
-        )
-        assert clone_agent.fitness == cqn.fitness
-        assert clone_agent.steps == cqn.steps
-        assert clone_agent.scores == cqn.scores
-        cqn.clean_up()
-        clone_agent.clean_up()
-
-        accelerator = Accelerator()
-        cqn = CQN(observation_space, action_space, accelerator=accelerator, wrap=False)
-        clone_agent = cqn.clone(wrap=False)
-
-        assert clone_agent.observation_space == cqn.observation_space
-        assert clone_agent.action_space == cqn.action_space
-        # assert clone_agent.actor_network == cqn.actor_network
-        assert clone_agent.batch_size == cqn.batch_size
-        assert clone_agent.lr == cqn.lr
-        assert clone_agent.learn_step == cqn.learn_step
-        assert clone_agent.gamma == cqn.gamma
-        assert clone_agent.tau == cqn.tau
-        assert clone_agent.mut == cqn.mut
-        assert clone_agent.device == cqn.device
-        assert clone_agent.accelerator == cqn.accelerator
-        assert_state_dicts_equal(clone_agent.actor.state_dict(), cqn.actor.state_dict())
-        assert_state_dicts_equal(
-            clone_agent.actor_target.state_dict(),
-            cqn.actor_target.state_dict(),
-        )
-        assert_state_dicts_equal(
-            clone_agent.optimizer.state_dict(),
-            cqn.optimizer.state_dict(),
-        )
-        assert clone_agent.fitness == cqn.fitness
-        assert clone_agent.steps == cqn.steps
-        assert clone_agent.scores == cqn.scores
         cqn.clean_up()
         clone_agent.clean_up()
 

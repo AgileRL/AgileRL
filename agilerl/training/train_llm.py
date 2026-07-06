@@ -8,7 +8,6 @@ from typing import Any
 import numpy as np
 import torch
 import wandb
-from accelerate import Accelerator
 from tqdm import trange
 
 from agilerl.algorithms import DPO, GRPO, LLMPPO, LLMREINFORCE, SFT
@@ -22,6 +21,7 @@ from agilerl.llm_envs import (
 from agilerl.rollouts.on_policy import collect_rollouts_llm
 from agilerl.typing import PopulationType
 from agilerl.utils.algo_utils import stack_and_pad_experiences
+from agilerl.utils.distributed import barrier, is_distributed, is_main_process
 from agilerl.utils.llm_utils import collect_trainable_param_stats
 from agilerl.utils.utils import (
     _distributed_rank,
@@ -34,10 +34,6 @@ from agilerl.utils.utils import (
 )
 
 InitDictType = dict[str, Any] | None
-
-
-def _is_main_process(accelerator: Accelerator | None) -> bool:
-    return accelerator is None or accelerator.is_main_process
 
 
 def _validate_llm_evolution_args(
@@ -103,7 +99,6 @@ def _init_llm_wandb(
     effective_data_batch_size: int,
     wb: bool,
     wandb_api_key: str | None,
-    accelerator: Accelerator | None,
     additional_fields: dict[str, Any] | None = None,
     *,
     wandb_project: str = "AgileRL",
@@ -111,11 +106,11 @@ def _init_llm_wandb(
     wandb_run_name: str | None = None,
 ) -> None:
     """Initialize W&B run metadata for the current LLM finetuning session."""
-    if not wb or (accelerator is not None and not accelerator.is_main_process):
+    if not wb or not is_main_process():
         return
     init_hp["effective_data_batch_size"] = effective_data_batch_size
     init_hp["batch_size"] = init_hp.get("BATCH_SIZE", pop[0].batch_size)
-    init_hp["distributed_training"] = accelerator is not None
+    init_hp["distributed_training"] = is_distributed()
     init_hp["model_name"] = pop[0].pretrained_model_name_or_path
     init_hp.update(collect_trainable_param_stats(pop))
     if additional_fields is not None:
@@ -134,7 +129,6 @@ def _init_llm_wandb(
         env_name=env_name,
         wandb_api_key=wandb_api_key,
         init_hyperparams=init_hp,
-        accelerator=accelerator,
         project=wandb_project,
         addl_args=addl_args,
     )
@@ -467,12 +461,10 @@ def _save_elite_checkpoint(
     pop: PopulationType,
     save_elite: bool | None,
     elite_path: str | None,
-    accelerator: Accelerator | None,
 ) -> None:
     if save_elite and elite_path is not None:
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
-        if _is_main_process(accelerator):
+        barrier()
+        if is_main_process():
             elite = max(
                 pop, key=lambda a: a.fitness[-1] if a.fitness else float("-inf")
             )
@@ -480,15 +472,13 @@ def _save_elite_checkpoint(
 
 
 def _finish_training(
-    accelerator: Accelerator | None,
     pbar: Any | None,
     use_wandb: bool,
     csv_file: Any | None = None,
     elite_path: str | None = None,
 ) -> None:
-    if accelerator is not None:
-        accelerator.wait_for_everyone()
-    if _is_main_process(accelerator):
+    barrier()
+    if is_main_process():
         if pbar is not None:
             pbar.close()
         if use_wandb:
@@ -504,9 +494,8 @@ def _finish_training(
 def _open_csv_log(
     elite_path: str | None,
     fieldnames: list[str],
-    accelerator: Accelerator | None,
 ) -> tuple[Any, Any]:
-    if elite_path is None or not _is_main_process(accelerator):
+    if elite_path is None or not is_main_process():
         return None, None
     os.makedirs(elite_path, exist_ok=True)
     csv_path = os.path.join(elite_path, "metrics.csv")
@@ -521,9 +510,8 @@ def _log_csv_row(
     writer: Any,
     csv_file: Any,
     row_dict: dict[str, Any],
-    accelerator: Accelerator | None,
 ) -> None:
-    if not _is_main_process(accelerator):
+    if not is_main_process():
         return
     if writer is not None:
         writer.writerow(row_dict)
@@ -533,17 +521,15 @@ def _log_csv_row(
 class _CsvAggregateLogger:
     """Open ``metrics.csv`` on first aggregate row; columns from first row's keys."""
 
-    __slots__ = ("accelerator", "csv_file", "elite_path", "log_csv", "writer")
+    __slots__ = ("csv_file", "elite_path", "log_csv", "writer")
 
     def __init__(
         self,
         elite_path: str | None,
         log_csv: bool,
-        accelerator: Accelerator | None,
     ) -> None:
         self.elite_path = elite_path
         self.log_csv = log_csv
-        self.accelerator = accelerator
         self.csv_file = None
         self.writer = None
 
@@ -552,16 +538,15 @@ class _CsvAggregateLogger:
             not self.log_csv
             or self.elite_path is None
             or not row_dict
-            or not _is_main_process(self.accelerator)
+            or not is_main_process()
         ):
             return
         if self.writer is None:
             self.csv_file, self.writer = _open_csv_log(
                 self.elite_path,
                 list(row_dict.keys()),
-                self.accelerator,
             )
-        _log_csv_row(self.writer, self.csv_file, row_dict, self.accelerator)
+        _log_csv_row(self.writer, self.csv_file, row_dict)
 
 
 def train_llm_dataset(
@@ -582,7 +567,6 @@ def train_llm_dataset(
     wandb_run_name: str | None = None,
     evaluation_interval: int = 10,
     verbose: bool = True,
-    accelerator: Accelerator | None = None,
     max_steps: int | None = None,
     num_epochs: int | None = None,
     log_csv: bool = False,
@@ -623,8 +607,6 @@ def train_llm_dataset(
     :type evaluation_interval: int
     :param verbose: Whether to print periodic training summaries.
     :type verbose: bool
-    :param accelerator: Optional accelerator for distributed training.
-    :type accelerator: Accelerator | None
     :param max_steps: Maximum step budget; defaults to dataset-driven length.
     :type max_steps: int | None
     :param num_epochs: Number of epochs to run; takes precedence over max_steps.
@@ -663,7 +645,7 @@ def train_llm_dataset(
         else init_hp
     )
 
-    data_increment = _distributed_world_size(accelerator)
+    data_increment = _distributed_world_size()
     effective_data_batch_size = data_increment * envs[0].data_batch_size_per_gpu
 
     _init_llm_wandb(
@@ -673,7 +655,6 @@ def train_llm_dataset(
         effective_data_batch_size=effective_data_batch_size,
         wb=wb,
         wandb_api_key=wandb_api_key,
-        accelerator=accelerator,
         wandb_project=wandb_project,
         wandb_entity=wandb_entity,
         wandb_run_name=wandb_run_name,
@@ -689,7 +670,7 @@ def train_llm_dataset(
     steps_per_population_iteration = effective_data_batch_size * len(pop)
     training_steps = -(max_steps // -steps_per_population_iteration)
     pbar = None
-    if accelerator is None or accelerator.is_main_process:
+    if is_main_process():
         pbar = trange(
             max_steps,
             unit="step",
@@ -698,7 +679,7 @@ def train_llm_dataset(
             dynamic_ncols=True,
         )
 
-    csv_logger = _CsvAggregateLogger(elite_path, log_csv, accelerator)
+    csv_logger = _CsvAggregateLogger(elite_path, log_csv)
 
     agg_metrics: dict[str, Any] = {}
     agg_test_metrics: dict[str, Any] | None = None
@@ -723,7 +704,7 @@ def train_llm_dataset(
                 mode=mode,
             )
             agg_metrics = {
-                metric_name: safe_aggregate_metrics(accelerator, metric)
+                metric_name: safe_aggregate_metrics(metric)
                 for metric_name, metric in metrics.items()
             }
             if mode == "preference":
@@ -746,12 +727,11 @@ def train_llm_dataset(
                     else "Eval/Negative loss (fitness)"
                 )
                 agg_test_metrics = {
-                    eval_metric_name: safe_aggregate_metrics(accelerator, test_score)
+                    eval_metric_name: safe_aggregate_metrics(test_score)
                 }
-                if accelerator is not None:
-                    accelerator.wait_for_everyone()
+                barrier()
 
-            if _is_main_process(accelerator):
+            if is_main_process():
                 metrics_dict = _format_prefixed_metrics(agg_metrics, "Train")
                 metrics_dict["global_step"] = total_steps
                 if mode == "preference":
@@ -783,25 +763,21 @@ def train_llm_dataset(
                         ),
                     )
                     agent.scores.append(-agg_metrics["loss"])
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
+        barrier()
 
         if tournament and mutation is not None:
             if (i + 1) % evo_steps == 0:
-                if accelerator is not None:
-                    accelerator.wait_for_everyone()
+                barrier()
                 pop = tournament_selection_and_mutation(
                     population=pop,
                     tournament=tournament,
                     mutation=mutation,
                     env_name=env_name,
-                    accelerator=accelerator,
                     language_model=True,
                     elite_path=elite_path,
                     save_elite=save_elite,
                 )
-                if accelerator is not None:
-                    accelerator.wait_for_everyone()
+                barrier()
         else:
             checkpoint_due = False
             if checkpoint_steps is not None:
@@ -831,12 +807,12 @@ def train_llm_dataset(
                 pop=pop,
                 mode=mode,
             )
-        if wandb_dict and wb and _is_main_process(accelerator):
+        if wandb_dict and wb and is_main_process():
             wandb.log(wandb_dict)
         csv_logger.maybe_write(wandb_dict)
         if _num_epochs_reached(envs, num_epochs) or total_steps >= max_steps:
             break
-    if verbose and _is_main_process(accelerator):
+    if verbose and is_main_process():
         if mode == "preference":
             fitness_calculated = len(agent.fitness) > 0
             fitness = (
@@ -906,9 +882,8 @@ def train_llm_dataset(
 
             pbar.write("\n".join(lines))
 
-    _save_elite_checkpoint(pop, save_elite, elite_path, accelerator)
+    _save_elite_checkpoint(pop, save_elite, elite_path)
     _finish_training(
-        accelerator,
         pbar,
         wb,
         csv_logger.csv_file,
@@ -939,7 +914,6 @@ def train_llm_rollout(
     eval_loop: int = 8,
     max_reward: float | None = None,
     verbose: bool = True,
-    accelerator: Accelerator | None = None,
     log_csv: bool = False,
     max_wall_seconds: float | None = None,
 ) -> PopulationType:
@@ -992,8 +966,6 @@ def train_llm_rollout(
     :type max_reward: float, optional
     :param verbose: Progress bar and periodic train summaries, defaults to True.
     :type verbose: bool, optional
-    :param accelerator: Hugging Face Accelerate instance, defaults to None.
-    :type accelerator: Accelerator, optional
     :param max_wall_seconds: Stop after this wall-clock duration (seconds); ``None`` disables.
     :type max_wall_seconds: float | None
     :return: The finetuned population (same list object, possibly mutated in place).
@@ -1019,7 +991,7 @@ def train_llm_rollout(
     batch_size = init_hp.get("BATCH_SIZE", pop[0].batch_size)
 
     env_name = init_hp.get("env_name", "gem_multiturn")
-    data_increment = _distributed_world_size(accelerator)
+    data_increment = _distributed_world_size()
     effective_data_batch_size = data_increment * batch_size
 
     _init_llm_wandb(
@@ -1029,19 +1001,18 @@ def train_llm_rollout(
         effective_data_batch_size=effective_data_batch_size,
         wb=wb,
         wandb_api_key=wandb_api_key,
-        accelerator=accelerator,
         additional_fields={"max_turns": max_turns, "batch_size": batch_size},
         wandb_project=wandb_project,
         wandb_entity=wandb_entity,
         wandb_run_name=wandb_run_name,
     )
 
-    if accelerator is None or accelerator.is_main_process:
+    if is_main_process():
         print("\nTraining...")
 
     bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
     pbar = None
-    if accelerator is None or accelerator.is_main_process:
+    if is_main_process():
         pbar = trange(
             max_steps,
             unit="step",
@@ -1050,7 +1021,7 @@ def train_llm_rollout(
             dynamic_ncols=True,
         )
 
-    csv_logger = _CsvAggregateLogger(elite_path, log_csv, accelerator)
+    csv_logger = _CsvAggregateLogger(elite_path, log_csv)
 
     total_steps = 0
     agg_metrics: dict[str, Any] = {}
@@ -1058,9 +1029,7 @@ def train_llm_rollout(
     # Fold the rank into the seed so data-parallel ranks draw decorrelated
     # dataset rows and env tasks — the step accounting below multiplies by the
     # world size, which is only honest when each rank contributes distinct data.
-    group_seed = int(np.random.randint(0, 1000000)) + _distributed_rank(accelerator) * (
-        1 << 31
-    )
+    group_seed = int(np.random.randint(0, 1000000)) + _distributed_rank() * (1 << 31)
     i = 0
     next_checkpoint_step = checkpoint_steps
     max_steps_checkpoint_saved = False
@@ -1080,7 +1049,7 @@ def train_llm_rollout(
         )
         while total_steps < max_steps:
             if wall_deadline is not None and time.monotonic() >= wall_deadline:
-                if accelerator is None or accelerator.is_main_process:
+                if is_main_process():
                     print(
                         f"\nStopping multiturn training: wall time limit ({max_wall_seconds}s) reached.",
                     )
@@ -1167,7 +1136,7 @@ def train_llm_rollout(
                     )
                     metrics["accuracy"] = accuracy
                 agg_metrics = {
-                    metric_name: aggregate_metrics_across_gpus(accelerator, metric)
+                    metric_name: aggregate_metrics_across_gpus(metric)
                     for metric_name, metric in metrics.items()
                 }
 
@@ -1184,13 +1153,10 @@ def train_llm_rollout(
                     eval_tensor = torch.tensor(
                         eval_score, dtype=torch.float32, device=agent.device
                     )
-                    agg_eval_score = aggregate_metrics_across_gpus(
-                        accelerator, eval_tensor
-                    )
-                    if accelerator is not None:
-                        accelerator.wait_for_everyone()
+                    agg_eval_score = aggregate_metrics_across_gpus(eval_tensor)
+                    barrier()
 
-                if accelerator is None or accelerator.is_main_process:
+                if is_main_process():
                     metrics_dict = _format_prefixed_metrics(agg_metrics, "Train")
                     metrics_dict["global_step"] = total_steps
                     agent_metrics_dict[f"agent_{agent_idx}/train_metrics"] = (
@@ -1202,11 +1168,7 @@ def train_llm_rollout(
                         }
                     agent.scores.append(agg_metrics["mean_score"])
 
-            if (
-                verbose
-                and (i + 1) % evaluation_interval == 0
-                and (accelerator is None or accelerator.is_main_process)
-            ):
+            if verbose and (i + 1) % evaluation_interval == 0 and is_main_process():
                 banner_text = f"Step {i + 1}  ({total_steps} samples)"
                 banner_width = max(len(banner_text) + 8, 40)
                 border = "=" * banner_width
@@ -1233,7 +1195,7 @@ def train_llm_rollout(
                 lines.append(border)
                 pbar.write("\n".join(lines))
 
-            if accelerator is None or accelerator.is_main_process:
+            if is_main_process():
                 postfix = {
                     "loss": f"{np.mean([agent_metrics_dict[f'agent_{j}/train_metrics']['Train/Mean Loss'] for j in range(len(pop))]):.4f}",
                     "kl": f"{np.mean([agent_metrics_dict[f'agent_{j}/train_metrics']['Train/Mean KL'] for j in range(len(pop))]):.4f}",
@@ -1246,25 +1208,21 @@ def train_llm_rollout(
                 pbar.set_postfix(**postfix)
                 pbar.update(iteration_steps // len(pop))
 
-            if accelerator is not None:
-                accelerator.wait_for_everyone()
+            barrier()
 
             if tournament is not None and mutation is not None:
                 if (i + 1) % evo_steps == 0:
-                    if accelerator is not None:
-                        accelerator.wait_for_everyone()
+                    barrier()
                     pop = tournament_selection_and_mutation(
                         population=pop,
                         tournament=tournament,
                         mutation=mutation,
                         env_name=env_name,
-                        accelerator=accelerator,
                         language_model=True,
                         elite_path=elite_path,
                         save_elite=save_elite,
                     )
-                    if accelerator is not None:
-                        accelerator.wait_for_everyone()
+                    barrier()
             else:
                 checkpoint_due = False
                 if checkpoint_steps is not None:
@@ -1297,13 +1255,13 @@ def train_llm_rollout(
                 )
                 wandb_dict |= eval_wandb_dict
 
-            if wb and (accelerator is None or accelerator.is_main_process):
+            if wb and is_main_process():
                 wandb.log(wandb_dict)
             csv_logger.maybe_write(wandb_dict)
 
             i += 1
 
-        if verbose and (accelerator is None or accelerator.is_main_process):
+        if verbose and is_main_process():
             fitness_calculated = len(agent.fitness) > 0
             fitness = (
                 [str(round(agent.fitness[-1], 2)) for agent in pop]
@@ -1337,9 +1295,8 @@ def train_llm_rollout(
                 f"Mutations:\t\t{muts}",
             )
 
-        _save_elite_checkpoint(pop, save_elite, elite_path, accelerator)
+        _save_elite_checkpoint(pop, save_elite, elite_path)
         _finish_training(
-            accelerator,
             pbar,
             wb,
             csv_logger.csv_file,

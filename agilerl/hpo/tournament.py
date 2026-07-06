@@ -1,7 +1,12 @@
 import numpy as np
-from accelerate.utils import broadcast_object_list
 
 from agilerl.algorithms.core.base import EvolvableAlgorithm, LLMAlgorithm
+from agilerl.utils.distributed import (
+    barrier,
+    broadcast_object_list,
+    is_distributed,
+    is_main_process,
+)
 
 PopulationType = list[EvolvableAlgorithm]
 
@@ -130,14 +135,11 @@ class TournamentSelection:
         :return: Elite agent and new population
         :rtype: tuple[EvolvableAlgorithm, PopulationType]
         """
-        accelerator = population[0].accelerator
         new_population_idxs = []
         old_population_idxs = [ind.index for ind in population]
         unwanted_agents = {}
 
-        if accelerator is None or (
-            accelerator is not None and accelerator.is_main_process
-        ):
+        if is_main_process():
             elite_idx, rank, max_id = self._elitism(population)
             if self.elitism:  # keep top agent in population
                 new_population_idxs.append((elite_idx, elite_idx, True))
@@ -158,25 +160,22 @@ class TournamentSelection:
                 idx for idx, *_ in new_population_idxs
             }
 
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
-            if accelerator.num_processes > 1:
-                new_population_idxs, old_population_idxs, unwanted_agents = (
-                    broadcast_object_list(
-                        [new_population_idxs, old_population_idxs, unwanted_agents],
-                        from_process=0,
-                    )
+        if is_distributed():
+            barrier()
+            new_population_idxs, old_population_idxs, unwanted_agents = (
+                broadcast_object_list(
+                    [new_population_idxs, old_population_idxs, unwanted_agents],
+                    src=0,
                 )
+            )
 
         # Delete any unwanted agents from memory
         for agent_idx in old_population_idxs:
             if agent_idx in unwanted_agents:
                 agent_ref = population[old_population_idxs.index(agent_idx)]
-                if agent_ref.accelerator is not None:
-                    agent_ref.accelerator.wait_for_everyone()
+                barrier()
                 agent_ref.clean_up()
-                if agent_ref.accelerator is not None:
-                    agent_ref.accelerator.wait_for_everyone()
+                barrier()
                 agent_ref = None
 
         new_population = []
@@ -185,14 +184,11 @@ class TournamentSelection:
             if (
                 agent_ref := population[old_population_idxs.index(idx_to_clone)]
             ) is not None:
-                if agent_ref.accelerator is not None:
-                    agent_ref.accelerator.wait_for_everyone()
+                barrier()
                 actor_parent = agent_ref.clone(new_idx, wrap=False)
-                if agent_ref.accelerator is not None:
-                    agent_ref.accelerator.wait_for_everyone()
+                barrier()
                 agent_ref.clean_up()
-                if agent_ref.accelerator is not None:
-                    agent_ref.accelerator.wait_for_everyone()
+                barrier()
                 agent_ref = population[old_population_idxs.index(idx_to_clone)] = None
                 index_tracker[idx_to_clone] = actor_parent
             else:

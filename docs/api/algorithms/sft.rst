@@ -23,7 +23,6 @@ Example
 
   from agilerl.algorithms.sft import SFT
   from agilerl.llm_envs import DatasetEnv
-  from accelerate import Accelerator
   from datasets import load_dataset
   from peft import LoraConfig
   from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -35,9 +34,6 @@ Example
       torch_dtype=torch.bfloat16,
   )
   tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B")
-
-  # Instantiate an accelerator object for distributed training
-  accelerator = Accelerator()
 
   # Load the dataset into an SFT DatasetEnv
   raw_dataset = load_dataset("HumanLLMs/Human-Like-DPO-Dataset", split="train").shuffle(seed=42)
@@ -51,7 +47,6 @@ Example
     objective="sft",
     response_column="chosen",
     data_batch_size_per_gpu=16,
-    accelerator=accelerator,
   )
 
   # Configure LoRA adapters
@@ -75,7 +70,6 @@ Example
     lora_config=lora_config,
     seed=42,
     reduce_memory_peak=True,
-    accelerator=accelerator,
   )
 
 Training an SFT agent
@@ -92,7 +86,6 @@ To train an SFT agent on a single dataset environment, use the :ref:`train_llm_d
     env=env,
     init_hp={"BATCH_SIZE": 32, "UPDATE_EPOCHS": 1},
     checkpoint_steps=250,
-    accelerator=accelerator,
   )
 
 Saving and Loading Agents

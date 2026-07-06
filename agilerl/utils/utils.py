@@ -10,10 +10,9 @@ import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torch.distributed as dist
 import tqdm
 import wandb
-from accelerate import Accelerator
-from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
@@ -37,12 +36,22 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules import EvolvableModule
 from agilerl.typing import BPTTSequenceType, GymSpaceType, PopulationType
-from agilerl.utils.algo_utils import CosineLRScheduleConfig, DummyOptimizer, clone_llm
+from agilerl.utils.algo_utils import CosineLRScheduleConfig, clone_llm
+from agilerl.utils.distributed import (
+    all_reduce_mean,
+    barrier,
+    broadcast_object_list,
+    get_local_rank,
+    get_rank,
+    get_world_size,
+    is_distributed,
+    is_main_process,
+)
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
 if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
     from agilerl.algorithms import CISPO, DPO, GRPO, GSPO, LLMPPO, LLMREINFORCE, SFT
-    from agilerl.utils.llm_utils import get_llm_accelerator, get_state_dict
+    from agilerl.utils.llm_utils import get_state_dict
 
 SupportedObservationSpace = spaces.Box | spaces.Discrete | spaces.Dict | spaces.Tuple
 
@@ -149,7 +158,7 @@ def _prepare_llm_algo_kwargs(
         merged["micro_batch_size_per_gpu"] = INIT_HP.get(
             "MICRO_BATCH_SIZE_PER_GPU",
             batch_size,
-        )  # NOTE we should take a look into deepspeed auto batch-sizing
+        )
     # Plain passthroughs: (merged_key, init_hp_key, caster, present_when_truthy).
     # reduce_memory_peak/activation_offload fire on key membership (so an explicit
     # False is honoured); lora_target_scope/fused_loss_chunk_rows fire only on a
@@ -324,18 +333,7 @@ def observation_space_channels_to_first(
 
 
 def suppress_verbose_logging() -> None:
-    """Suppress verbose logging from DeepSpeed, Accelerate, and related libraries."""
-    # Suppress DeepSpeed logging
-    logging.getLogger("deepspeed").setLevel(logging.WARNING)
-
-    # Suppress Accelerate logging
-    logging.getLogger("accelerate").setLevel(logging.WARNING)
-
-    # Suppress specific DeepSpeed components
-    logging.getLogger("deepspeed.runtime.engine").setLevel(logging.WARNING)
-    logging.getLogger("deepspeed.runtime.zero").setLevel(logging.WARNING)
-    logging.getLogger("deepspeed.checkpoint").setLevel(logging.WARNING)
-
+    """Suppress verbose logging from related libraries."""
     # Suppress JAX logging (if used)
     logging.getLogger("jax").setLevel(logging.WARNING)
 
@@ -343,16 +341,11 @@ def suppress_verbose_logging() -> None:
     logging.getLogger().setLevel(logging.INFO)
 
 
-def default_progress_bar(
-    max_steps: int,
-    accelerator: Accelerator | None = None,
-) -> tqdm.tqdm:
-    """Return a default progress bar.
+def default_progress_bar(max_steps: int) -> tqdm.tqdm:
+    """Return a default progress bar (disabled on non-main ranks).
 
     :param max_steps: Maximum number of steps
     :type max_steps: int
-    :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
     :return: Progress bar
     :rtype: tqdm.tqdm
     """
@@ -366,9 +359,7 @@ def default_progress_bar(
         "{rate_fmt}"
         "{postfix}"
     )
-    disable = (
-        not accelerator.is_local_main_process if accelerator is not None else False
-    )
+    disable = not is_main_process()
     return tqdm.trange(
         max_steps,
         unit="step",
@@ -393,7 +384,6 @@ def create_population(
     population_size: int = 1,
     num_envs: int = 1,
     device: str = "cpu",
-    accelerator: Any | None = None,
     torch_compiler: Any | None = None,
     tokenizer: Any | None = None,
     model_name: str | None = None,
@@ -425,8 +415,6 @@ def create_population(
     :type num_envs: int, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
-    :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
     :param torch_compiler: Torch compiler, defaults to None
     :type torch_compiler: Any, optional
     :param tokenizer: Hugging Face tokenizer; used to default ``pad_token_id`` /
@@ -467,7 +455,6 @@ def create_population(
                 cudagraphs=INIT_HP.get("CUDAGRAPHS", False),
                 actor_network=actor_network,
                 device=device,
-                accelerator=accelerator,
                 **algo_kwargs,
             )
             population.append(agent)
@@ -493,7 +480,6 @@ def create_population(
                 n_step=INIT_HP.get("N_STEP", 3),
                 actor_network=actor_network,
                 device=device,
-                accelerator=accelerator,
                 **algo_kwargs,
             )
             population.append(agent)
@@ -523,7 +509,6 @@ def create_population(
                 critic_network=critic_network,
                 share_encoders=INIT_HP.get("SHARE_ENCODERS", True),
                 device=device,
-                accelerator=accelerator,
                 **algo_kwargs,
             )
 
@@ -565,7 +550,6 @@ def create_population(
                 actor_network=actor_network,
                 critic_network=critic_network,
                 device=device,
-                accelerator=accelerator,
                 num_envs=num_envs,
                 **algo_kwargs,
             )
@@ -587,7 +571,6 @@ def create_population(
                 double=INIT_HP.get("DOUBLE", False),
                 actor_network=actor_network,
                 device=device,
-                accelerator=accelerator,
                 **algo_kwargs,
             )
             population.append(agent)
@@ -617,7 +600,6 @@ def create_population(
                 critic_networks=critic_network,
                 share_encoders=INIT_HP.get("SHARE_ENCODERS", True),
                 device=device,
-                accelerator=accelerator,
                 **algo_kwargs,
             )
             population.append(agent)
@@ -646,7 +628,6 @@ def create_population(
                 actor_networks=actor_network,
                 critic_networks=critic_network,
                 device=device,
-                accelerator=accelerator,
                 torch_compiler=torch_compiler,
                 **algo_kwargs,
             )
@@ -677,7 +658,6 @@ def create_population(
                 actor_networks=actor_network,
                 critic_networks=critic_network,
                 device=device,
-                accelerator=accelerator,
                 torch_compiler=torch_compiler,
                 **algo_kwargs,
             )
@@ -708,7 +688,6 @@ def create_population(
                 critic_networks=critic_network,
                 action_batch_size=INIT_HP.get("ACTION_BATCH_SIZE"),
                 device=device,
-                accelerator=accelerator,
                 torch_compiler=torch_compiler,
                 **algo_kwargs,
             )
@@ -730,7 +709,6 @@ def create_population(
                 learn_step=INIT_HP.get("LEARN_STEP", 2),
                 actor_network=actor_network,
                 device=device,
-                accelerator=accelerator,
                 **algo_kwargs,
             )
             population.append(agent)
@@ -751,7 +729,6 @@ def create_population(
                 learn_step=INIT_HP.get("LEARN_STEP", 2),
                 actor_network=actor_network,
                 device=device,
-                accelerator=accelerator,
                 **algo_kwargs,
             )
             population.append(agent)
@@ -775,17 +752,11 @@ def create_population(
             CosineLRScheduleConfig(**cosine_cfg) if cosine_cfg is not None else None
         )
         for idx in range(population_size):
-            agent_accelerator = get_llm_accelerator(accelerator, idx)
             act = (
                 (
                     clone_llm(
                         actor_network,
-                        zero_stage=INIT_HP.get("ZERO_STAGE", 0),
-                        state_dict=(
-                            actor_network.state_dict()
-                            if accelerator is None
-                            else get_state_dict(actor_network)
-                        ),
+                        state_dict=get_state_dict(actor_network),
                     )
                     if idx != 0
                     else actor_network
@@ -817,7 +788,6 @@ def create_population(
                 min_output_tokens=INIT_HP.get("MIN_OUTPUT_TOKENS"),
                 max_model_len=INIT_HP.get("MAX_MODEL_LEN", 1024),
                 cosine_lr_schedule_config=cosine_lr,
-                accelerator=agent_accelerator,
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
                 # Agents after the first receive a clone_llm copy that already
@@ -882,17 +852,11 @@ def create_population(
         kwargs.pop("use_separate_reference_adapter", None)
 
         for idx in range(population_size):
-            agent_accelerator = get_llm_accelerator(accelerator, idx)
             act = (
                 (
                     clone_llm(
                         actor_network,
-                        zero_stage=INIT_HP.get("ZERO_STAGE", 0),
-                        state_dict=(
-                            actor_network.state_dict()
-                            if accelerator is None
-                            else get_state_dict(actor_network)
-                        ),
+                        state_dict=get_state_dict(actor_network),
                     )
                     if idx != 0
                     else actor_network
@@ -909,7 +873,6 @@ def create_population(
                 max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 0.1),
                 update_epochs=INIT_HP.get("UPDATE_EPOCHS", 1),
                 calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
-                accelerator=agent_accelerator,
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
                 clone=idx != 0 and act is not None,
@@ -939,17 +902,11 @@ def create_population(
         kwargs.pop("vllm_config", None)
 
         for idx in range(population_size):
-            agent_accelerator = get_llm_accelerator(accelerator, idx)
             act = (
                 (
                     clone_llm(
                         actor_network,
-                        zero_stage=INIT_HP.get("ZERO_STAGE", 0),
-                        state_dict=(
-                            actor_network.state_dict()
-                            if accelerator is None
-                            else get_state_dict(actor_network)
-                        ),
+                        state_dict=get_state_dict(actor_network),
                     )
                     if idx != 0
                     else actor_network
@@ -967,7 +924,6 @@ def create_population(
                 max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 0.1),
                 update_epochs=INIT_HP.get("UPDATE_EPOCHS", 1),
                 calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
-                accelerator=agent_accelerator,
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
                 clone=idx != 0 and act is not None,
@@ -998,17 +954,11 @@ def create_population(
             CosineLRScheduleConfig(**cosine_cfg) if cosine_cfg is not None else None
         )
         for idx in range(population_size):
-            agent_accelerator = get_llm_accelerator(accelerator, idx)
             act = (
                 (
                     clone_llm(
                         actor_network,
-                        zero_stage=INIT_HP.get("ZERO_STAGE", 0),
-                        state_dict=(
-                            actor_network.state_dict()
-                            if accelerator is None
-                            else get_state_dict(actor_network)
-                        ),
+                        state_dict=get_state_dict(actor_network),
                     )
                     if idx != 0
                     else actor_network
@@ -1049,7 +999,6 @@ def create_population(
                 ),
                 calc_position_embeddings=INIT_HP.get("CALC_POSITION_EMBEDDINGS", True),
                 cosine_lr_schedule_config=cosine_lr,
-                accelerator=agent_accelerator,
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
                 clone=idx != 0 and act is not None,
@@ -1090,17 +1039,11 @@ def create_population(
             CosineLRScheduleConfig(**cosine_cfg) if cosine_cfg is not None else None
         )
         for idx in range(population_size):
-            agent_accelerator = get_llm_accelerator(accelerator, idx)
             act = (
                 (
                     clone_llm(
                         actor_network,
-                        zero_stage=INIT_HP.get("ZERO_STAGE", 0),
-                        state_dict=(
-                            actor_network.state_dict()
-                            if accelerator is None
-                            else get_state_dict(actor_network)
-                        ),
+                        state_dict=get_state_dict(actor_network),
                     )
                     if idx != 0
                     else actor_network
@@ -1135,7 +1078,6 @@ def create_population(
                     "USE_MEMORY_EFFICIENT_PARAMS", True
                 ),
                 cosine_lr_schedule_config=cosine_lr,
-                accelerator=agent_accelerator,
                 gradient_checkpointing=INIT_HP.get("GRADIENT_CHECKPOINTING", True),
                 actor_network=act,
                 clone=idx != 0 and act is not None,
@@ -1160,7 +1102,6 @@ def save_population_checkpoint(
     population: PopulationType,
     save_path: str,
     overwrite_checkpoints: bool,
-    accelerator: Accelerator | None = None,
 ) -> None:
     """Save checkpoint of population of agents.
 
@@ -1170,40 +1111,14 @@ def save_population_checkpoint(
     :type save_path: str
     :param overwrite_checkpoints: Flag to overwrite checkpoints
     :type overwrite_checkpoints: bool
-    :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
     """
-    if accelerator is not None:
-        # Need to unwrap models from acccelerator before saving
-        accelerator.wait_for_everyone()
-        for model in population:
-            model.unwrap_models()
-        accelerator.wait_for_everyone()
-
-        # Save checkpoint on main process
-        if accelerator.is_main_process:
-            for i, agent in enumerate(population):
-                current_checkpoint_path = (
-                    f"{save_path}_{i}.pt"
-                    if overwrite_checkpoints
-                    else f"{save_path}_{i}_{agent.steps[-1]}.pt"
-                )
-                agent.save_checkpoint(current_checkpoint_path)
-        accelerator.wait_for_everyone()
-
-        # Load models back to accelerator processes
-        for model in population:
-            model.wrap_models()
-        accelerator.wait_for_everyone()
-    else:
-        # Save checkpoint
-        for i, agent in enumerate(population):
-            current_checkpoint_path = (
-                f"{save_path}_{i}.pt"
-                if overwrite_checkpoints
-                else f"{save_path}_{i}_{agent.steps[-1]}.pt"
-            )
-            agent.save_checkpoint(current_checkpoint_path)
+    for i, agent in enumerate(population):
+        current_checkpoint_path = (
+            f"{save_path}_{i}.pt"
+            if overwrite_checkpoints
+            else f"{save_path}_{i}_{agent.steps[-1]}.pt"
+        )
+        agent.save_checkpoint(current_checkpoint_path)
 
 
 def tournament_selection_and_mutation(
@@ -1214,7 +1129,6 @@ def tournament_selection_and_mutation(
     algo: str | None = None,
     elite_path: str | None = None,
     save_elite: bool = False,
-    accelerator: Accelerator | None = None,
     language_model: bool | None = False,
 ) -> PopulationType:
     """Perform tournament selection and mutation on a population of agents.
@@ -1231,8 +1145,6 @@ def tournament_selection_and_mutation(
     :type elite_path: str, optional
     :param save_elite: Flag to save elite agent, defaults to False
     :type save_elite: bool, optional
-    :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
     :param language_model: Flag to indicate if the environment is a language model, defaults to False
     :type language_model: bool, optional
     :return: Population of agents after tournament selection and mutation
@@ -1243,48 +1155,19 @@ def tournament_selection_and_mutation(
 
     if language_model:
         elite, population = tournament.select(population)
-        if accelerator is None or accelerator.is_main_process:
+        if is_main_process():
             population = mutation.mutation(population)
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
+        if is_distributed():
+            barrier()
             consolidate_mutations(population)
-            accelerator.wait_for_everyone()
+            barrier()
         if save_elite:
             save_llm_checkpoint(elite, elite_path)
         return population
 
-    elite = None
-    if accelerator is not None:
-        # Save temporary models for accelerator processes
-        accel_temp_models_path = f"models/{env_name}"
-        if accelerator.is_main_process:
-            Path(accel_temp_models_path).mkdir(parents=True, exist_ok=True)
-        # Need to unwrap models from acccelerator before selecting and mutating
-        accelerator.wait_for_everyone()
-        for model in population:
-            model.unwrap_models()
-        accelerator.wait_for_everyone()
-        # Perform tournament selection and mutation on main process
-        if accelerator.is_main_process:
-            elite, population = tournament.select(population)
-            population = mutation.mutation(population)
-            for pop_i, model in enumerate(population):
-                model.save_checkpoint(f"{accel_temp_models_path}/{algo}_{pop_i}.pt")
-        accelerator.wait_for_everyone()
-
-        # Load models back to accelerator processes
-        if not accelerator.is_main_process:
-            for pop_i, model in enumerate(population):
-                model.load_checkpoint(f"{accel_temp_models_path}/{algo}_{pop_i}.pt")
-        accelerator.wait_for_everyone()
-
-        # Wrap models back to accelerator
-        for model in population:
-            model.wrap_models()
-    else:
-        # Perform tournament selection and mutation
-        elite, population = tournament.select(population)
-        population = mutation.mutation(population)
+    # Perform tournament selection and mutation
+    elite, population = tournament.select(population)
+    population = mutation.mutation(population)
 
     if save_elite and elite is not None:
         elite_save_path = (
@@ -1303,11 +1186,12 @@ def init_wandb(
     init_hyperparams: dict[str, Any] | None = None,
     mutation_hyperparams: dict[str, Any] | None = None,
     wandb_api_key: str | None = None,
-    accelerator: Accelerator | None = None,
     project: str = "AgileRL",
     addl_args: dict[str, Any] | None = None,
 ) -> None:
     """Initialize wandb for logging hyperparameters and run metadata.
+
+    In distributed runs only the main process initializes wandb.
 
     :param algo: RL algorithm
     :type algo: str
@@ -1319,8 +1203,6 @@ def init_wandb(
     :type mutation_hyperparams: dict, optional
     :param wandb_api_key: Wandb API key, defaults to None
     :type wandb_api_key: str, optional
-    :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
     :param addl_args: Additional kwargs to pass to wandb.init()
     :type addl_args: dict, optional
     """
@@ -1357,13 +1239,9 @@ def init_wandb(
     if addl_args is not None:
         kwargs.update(addl_args)
 
-    if accelerator is not None:
-        accelerator.wait_for_everyone()
-        if accelerator.is_main_process:
-            wandb.init(**kwargs)
-        accelerator.wait_for_everyone()
-    else:
+    if is_main_process():
         wandb.init(**kwargs)
+    barrier()
 
 
 def calculate_vectorized_scores(
@@ -1490,53 +1368,55 @@ def get_env_defined_actions(
     return env_defined_actions
 
 
-def gather_tensor(
-    tensor: torch.Tensor | float,
-    accelerator: Accelerator,
-) -> torch.Tensor:
-    """Gather tensors from gpus.
+def _collective_device() -> torch.device:
+    """Device used for collective communication."""
+    if torch.cuda.is_available():
+        return torch.device(f"cuda:{get_local_rank()}")
+    return torch.device("cpu")
+
+
+def gather_tensor(tensor: torch.Tensor | float) -> torch.Tensor:
+    """Gather a tensor from every rank (identity on a single device).
 
     :param tensor: Tensor to gather
-    :type tensor: torch.Tensor
-    :param accelerator: Accelerator object
-    :type accelerator: accelerate.Accelerator
+    :type tensor: torch.Tensor | float
     :return: Stacked tensors
     :rtype: torch.Tensor
     """
     if not isinstance(tensor, torch.Tensor):
-        tensor = torch.tensor(tensor, device=accelerator.device)
-    tensor = tensor.to(accelerator.device)
-    return accelerator.gather(tensor)
+        tensor = torch.tensor(float(tensor))
+    tensor = tensor.detach()
+    if not is_distributed():
+        return tensor
+    tensor = tensor.to(_collective_device())
+    gathered = [torch.empty_like(tensor) for _ in range(get_world_size())]
+    dist.all_gather(gathered, tensor)
+    return torch.stack(gathered) if tensor.dim() == 0 else torch.cat(gathered)
 
 
-def aggregate_metrics_across_gpus(
-    accelerator: Accelerator,
-    metric_tensor: torch.Tensor | float,
-) -> float:
-    """Aggregate gathered tensors.
+def aggregate_metrics_across_gpus(metric_tensor: torch.Tensor | float) -> float:
+    """Average a metric across ranks (local mean on a single device).
 
-    :param accelerator: Accelerator object
-    :type accelerator: accelerate.Accelerator
     :param metric_tensor: Metrics
-    :type metric_tensor: torch.Tensor
+    :type metric_tensor: torch.Tensor | float
     :return: Mean metric
     :rtype: float
     """
-    if accelerator is None:
+    if not is_distributed():
         return (
             metric_tensor.mean().item()
             if isinstance(metric_tensor, torch.Tensor)
             else metric_tensor
         )
-    all_metrics = gather_tensor(metric_tensor, accelerator)
-    return all_metrics.mean().item()
+    if not isinstance(metric_tensor, torch.Tensor):
+        metric_tensor = torch.as_tensor(metric_tensor)
+    local_mean = metric_tensor.detach().float().mean()
+    return all_reduce_mean(local_mean.to(_collective_device())).item()
 
 
-def safe_aggregate_metrics(
-    accelerator: Accelerator | None,
-    metrics: torch.Tensor | np.ndarray | float,
-) -> float:
-    if accelerator is None:
+def safe_aggregate_metrics(metrics: torch.Tensor | np.ndarray | float) -> float:
+    """Average a metric across ranks, accepting numpy arrays and floats."""
+    if not is_distributed():
         if isinstance(metrics, (torch.Tensor, np.ndarray)):
             return float(
                 np.mean(metrics)
@@ -1544,7 +1424,7 @@ def safe_aggregate_metrics(
                 else metrics.float().mean().item()
             )
         return float(metrics)
-    return aggregate_metrics_across_gpus(accelerator, metrics)
+    return aggregate_metrics_across_gpus(metrics)
 
 
 def save_llm_checkpoint(
@@ -1570,12 +1450,9 @@ def save_llm_checkpoint(
     assert agent.actor is not None, "Actor is not initialized"
     path = "./saved_checkpoints" if checkpoint_path is None else checkpoint_path
     Path(path).mkdir(parents=True, exist_ok=True)
-    if agent.accelerator is not None:
-        agent.accelerator.wait_for_everyone()
-        agent.save_checkpoint(path)
-        agent.accelerator.wait_for_everyone()
-    else:
-        agent.save_checkpoint(path)
+    barrier()
+    agent.save_checkpoint(path)
+    barrier()
 
 
 def consolidate_mutations(population: list[LLMAlgorithm]) -> None:
@@ -1597,47 +1474,31 @@ def consolidate_mutations(population: list[LLMAlgorithm]) -> None:
                 agent.mut,
                 getattr(agent, agent.mut if agent.mut is not None else "None", "None"),
             ],
-            from_process=0,
+            src=0,
         )
         assert index == agent.index
         agent.mut = mut
         setattr(agent, mut, mut_value)
 
         if mut in ("lr", "critic_lr"):
-            opt = (
-                agent.optimizer
-                if not isinstance(agent.optimizer.optimizer, DummyOptimizer)
-                else agent.actor.optimizer
-            )
+            opt = agent.optimizer.optimizer
             lr = (
                 (agent.lr, agent.lr_critic)
                 if getattr(agent, "lr_critic", None) is not None
                 else agent.lr
             )
-            update_lr_kw = {
-                "optimizer": opt,
-                "lr": lr,
-                "accelerator": agent.accelerator,
-                "scheduler_config": agent.cosine_lr_schedule_config,
-            }
-            agent.accelerator, agent.lr_scheduler = LLMAlgorithm.update_lr(
-                **update_lr_kw
+            agent.lr_scheduler = LLMAlgorithm.update_lr(
+                opt,
+                lr,
+                scheduler_config=agent.cosine_lr_schedule_config,
             )
 
 
-def _distributed_world_size(accelerator: Accelerator | None) -> int:
-    """World size for batch accounting: prefer Accelerate, else torch.distributed."""
-    if accelerator is not None:
-        return accelerator.num_processes
-    if torch.distributed.is_available() and torch.distributed.is_initialized():
-        return torch.distributed.get_world_size()
-    return 1
+def _distributed_world_size() -> int:
+    """World size for batch accounting (1 on a single device)."""
+    return get_world_size()
 
 
-def _distributed_rank(accelerator: Accelerator | None) -> int:
-    """Process rank (e.g. for seed decorrelation): prefer Accelerate, else torch.distributed."""
-    if accelerator is not None:
-        return accelerator.process_index
-    if torch.distributed.is_available() and torch.distributed.is_initialized():
-        return torch.distributed.get_rank()
-    return 0
+def _distributed_rank() -> int:
+    """Process rank (e.g. for seed decorrelation), 0 on a single device."""
+    return get_rank()

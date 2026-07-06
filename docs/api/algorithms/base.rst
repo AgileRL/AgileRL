@@ -95,10 +95,6 @@ being flagged as having shared parameters. We also have two separate optimizers 
             :type critic_network: nn.Module | None, optional
             :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
             :type device: str, optional
-            :param accelerator: Accelerator for distributed computing, defaults to None
-            :type accelerator: accelerate.Accelerator | None, optional
-            :param wrap: Wrap models for distributed training upon creation, defaults to True
-            :type wrap: bool, optional
             """
 
             def __init__(
@@ -126,8 +122,6 @@ being flagged as having shared parameters. We also have two separate optimizers 
                 actor_network: EvolvableModule | None = None,
                 critic_network: EvolvableModule | None = None,
                 device: str = "cpu",
-                accelerator: Any | None = None,
-                wrap: bool = True,
             ) -> None:
 
                 super().__init__(
@@ -136,7 +130,6 @@ being flagged as having shared parameters. We also have two separate optimizers 
                     index=index,
                     hp_config=hp_config,
                     device=device,
-                    accelerator=accelerator,
                     normalize_images=normalize_images,
                     name="DDPG",
                 )
@@ -264,9 +257,6 @@ being flagged as having shared parameters. We also have two separate optimizers 
                 self.critic_optimizer = OptimizerWrapper(
                     optim.Adam, networks=self.critic, lr=lr_critic
                 )
-
-                if self.accelerator is not None and wrap:
-                    self.wrap_models()
 
                 self.criterion = nn.MSELoss()
 

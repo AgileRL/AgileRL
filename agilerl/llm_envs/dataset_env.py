@@ -21,11 +21,11 @@ import torch
 from torch.utils.data import DataLoader
 
 from agilerl.llm_envs.base import LLMEnv
+from agilerl.utils.distributed import shard_dataloader_kwargs
 
 if TYPE_CHECKING:
     from collections.abc import Generator
 
-    from accelerate import Accelerator
     from datasets import Dataset
     from transformers import AutoTokenizer
 
@@ -65,7 +65,6 @@ class DatasetEnv(LLMEnv, gym.Env):
         objective: Literal["preference", "sft"],
         response_column: str = "target",
         data_batch_size_per_gpu: int = 8,
-        accelerator: Accelerator | None = None,
         max_context_length: int | None = None,
         min_completion_length: int | None = None,
         seed: int = 42,
@@ -84,8 +83,6 @@ class DatasetEnv(LLMEnv, gym.Env):
         :type response_column: str
         :param data_batch_size_per_gpu: Batch size used by train/test dataloaders.
         :type data_batch_size_per_gpu: int
-        :param accelerator: Optional accelerator used to prepare dataloaders.
-        :type accelerator: Accelerator | None
         :param max_context_length: Optional max prompt+completion token budget.
         :type max_context_length: int | None
         :param min_completion_length: Minimum reserved completion token budget.
@@ -114,7 +111,6 @@ class DatasetEnv(LLMEnv, gym.Env):
         self.name = train_dataset.info.dataset_name
         self.tokenizer = tokenizer
         self.data_batch_size_per_gpu = data_batch_size_per_gpu
-        self.accelerator = accelerator
         self.min_completion_length = (
             0 if min_completion_length is None else min_completion_length
         )
@@ -131,17 +127,19 @@ class DatasetEnv(LLMEnv, gym.Env):
             test_dataset,
             "test dataset",
         )
+        # In distributed runs the datasets are sharded across ranks; each rank
+        # draws ``data_batch_size_per_gpu`` samples per step from its shard.
         self.train_dataloader = DataLoader(
             train_dataset,
             batch_size=data_batch_size_per_gpu,
-            shuffle=True,
+            **shard_dataloader_kwargs(train_dataset, shuffle=True),
             **dataloader_kwargs,
             generator=generator,
         )
         self.test_dataloader = DataLoader(
             test_dataset,
             batch_size=data_batch_size_per_gpu,
-            shuffle=False,
+            **shard_dataloader_kwargs(test_dataset, shuffle=False),
             **dataloader_kwargs,
             generator=generator,
         )
@@ -149,9 +147,6 @@ class DatasetEnv(LLMEnv, gym.Env):
             "train": len(train_dataset),
             "test": len(test_dataset),
         }
-        if self.accelerator is not None:
-            self.train_dataloader = self.accelerator.prepare(self.train_dataloader)
-            self.test_dataloader = self.accelerator.prepare(self.test_dataloader)
         self.train_dataloader_iter = iter(self.train_dataloader)
         self.test_dataloader_iter = iter(self.test_dataloader)
         self.dataloader = self.train_dataloader_iter
@@ -264,6 +259,10 @@ class DatasetEnv(LLMEnv, gym.Env):
     ) -> None:
         """Rebuild train/test iterators and refresh the active iterator pointer."""
         if reset_train:
+            # Reshuffle the distributed shard each epoch.
+            sampler = getattr(self.train_dataloader, "sampler", None)
+            if hasattr(sampler, "set_epoch"):
+                sampler.set_epoch(self.num_epochs)
             self.train_dataloader_iter = iter(self.train_dataloader)
         if reset_test:
             self.test_dataloader_iter = iter(self.test_dataloader)

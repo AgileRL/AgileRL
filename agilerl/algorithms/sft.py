@@ -11,9 +11,9 @@ from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.protocols import PreTrainedModelProtocol
 from agilerl.typing import ExperiencesType, LLMObsType
+from agilerl.utils.distributed import FSDPConfig, resolve_device
 
 if TYPE_CHECKING:
-    from accelerate import Accelerator
     from peft import LoraConfig
     from transformers import BitsAndBytesConfig
 
@@ -75,8 +75,10 @@ class SFT(LLMAlgorithm):
     :param lora_config: LoRA config; when supplied the base model is wrapped with
         PEFT adapters, defaults to None
     :type lora_config: LoraConfig, optional
-    :param accelerator: Accelerate distributed-training handle, defaults to None
-    :type accelerator: accelerate.Accelerator, optional
+    :param gradient_accumulation_steps: Micro-batches to accumulate per optimizer step, defaults to 1
+    :type gradient_accumulation_steps: int, optional
+    :param fsdp_config: FSDP2 sharding settings for distributed runs, defaults to None
+    :type fsdp_config: FSDPConfig | None, optional
     :param wrap: Wrap models for distributed training on construction, defaults to
         True
     :type wrap: bool, optional
@@ -144,7 +146,8 @@ class SFT(LLMAlgorithm):
         micro_batch_size_per_gpu: int | None = None,
         device: str = "cpu",
         lora_config: LoraConfig | None = None,
-        accelerator: Accelerator | None = None,
+        gradient_accumulation_steps: int = 1,
+        fsdp_config: FSDPConfig | None = None,
         wrap: bool = True,
         clone: bool = False,
         seed: int = 42,
@@ -157,17 +160,7 @@ class SFT(LLMAlgorithm):
         activation_offload: bool = False,
         lora_target_scope: str | None = None,
     ) -> None:
-        resolved_device = (
-            f"cuda:{accelerator.process_index}"
-            if accelerator is not None
-            else (
-                "cuda"
-                if torch.cuda.is_available()
-                else "mps"
-                if torch.backends.mps.is_available()
-                else "cpu"
-            )
-        )
+        resolved_device = resolve_device(device)
         super().__init__(
             index=index,
             batch_size=batch_size,
@@ -190,7 +183,8 @@ class SFT(LLMAlgorithm):
             hp_config=hp_config,
             wrap=wrap,
             device=resolved_device,
-            accelerator=accelerator,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            fsdp_config=fsdp_config,
             name="SFT",
             gradient_checkpointing=gradient_checkpointing,
             reduce_memory_peak=reduce_memory_peak,

@@ -1,31 +1,39 @@
-import json
 from typing import Any
 
 import torch
+import torch.distributed as dist
 import wandb
-from accelerate import Accelerator
 from flatten_dict import flatten, unflatten
+
+from agilerl.utils.distributed import (
+    barrier,
+    is_distributed,
+    is_main_process,
+    resolve_device,
+)
 
 
 class DistributeCombineLogs:
     count_tag = "__count__"
 
-    def __init__(self, accelerator: Accelerator, use_wandb: bool = False) -> None:
+    def __init__(
+        self,
+        device: str | torch.device | None = None,
+        use_wandb: bool = False,
+    ) -> None:
         """Initialize the DistributeCombineLogs object.
 
-        :param accelerator: Accelerator object.
-        :type accelerator: Accelerator
+        :param device: Device used to accumulate log tensors; resolved
+            automatically when ``None``.
+        :type device: str | torch.device | None
         :param use_wandb: Whether to use wandb.
         :type use_wandb: bool
         """
-        if not isinstance(accelerator, Accelerator):
-            msg = "accelerator must be an instance of Accelerator"
-            raise TypeError(msg)
         if not isinstance(use_wandb, bool):
             msg = "use_wandb must be a boolean"
             raise TypeError(msg)
         self.totals: dict[tuple[str, ...], torch.Tensor] = {}
-        self.accelerator = accelerator
+        self.device = torch.device(resolve_device(device))
         self.use_wandb = use_wandb
 
     def convert_key(self, k: tuple[str, ...]) -> tuple[str, ...]:
@@ -61,11 +69,11 @@ class DistributeCombineLogs:
         :return: Total logs.
         :rtype: dict
         """
-        self.accelerator.wait_for_everyone()
+        barrier()
         total_logs = self.gather_logs(*postproc_funcs, **additional_items)
-        if self.accelerator.is_main_process and self.use_wandb:
+        if is_main_process() and self.use_wandb:
             wandb.log(total_logs)
-        self.accelerator.wait_for_everyone()
+        barrier()
         return total_logs
 
     def accum_logs(self, logs: dict) -> None:
@@ -76,8 +84,8 @@ class DistributeCombineLogs:
         """
         logs = flatten(logs)
         for k, (item, n) in logs.items():
-            new_item = torch.tensor([item]).float().to(self.accelerator.device)
-            count_item = torch.tensor([n]).float().to(self.accelerator.device)
+            new_item = torch.tensor([item]).float().to(self.device)
+            count_item = torch.tensor([n]).float().to(self.device)
             if k in self.totals:
                 self.totals[k] += new_item * count_item
                 self.totals[self.convert_key(k)] += count_item
@@ -96,11 +104,12 @@ class DistributeCombineLogs:
         :return: Total logs.
         :rtype: dict
         """
-        str_totals = {json.dumps(list(k)): v for k, v in self.totals.items()}
-        combined_totals = self.accelerator.gather(str_totals)
-        combined_totals = {
-            tuple(json.loads(k)): v.sum().item() for k, v in combined_totals.items()
-        }
+        combined_totals = {}
+        for k, v in self.totals.items():
+            total = v.clone()
+            if is_distributed():
+                dist.all_reduce(total, op=dist.ReduceOp.SUM)
+            combined_totals[k] = total.sum().item()
         final_logs = {}
         for k, v in combined_totals.items():
             if not self.key_is_count(k):

@@ -21,9 +21,9 @@ Evaluate a saved checkpoint interactively::
 
     python demos/llm/demo_llm_finetuning.py sft --eval --load-path outputs/sft/actor
 
-Multi-GPU / DeepSpeed via accelerate::
+Multi-GPU (torch-native distributed)::
 
-    accelerate launch demos/llm/demo_llm_finetuning.py sft
+    torchrun --nproc_per_node N demos/llm/demo_llm_finetuning.py sft
 """
 
 from agilerl import HAS_LLM_DEPENDENCIES
@@ -40,7 +40,6 @@ import json
 from datetime import datetime
 
 import yaml
-from accelerate import Accelerator
 from datasets import load_dataset
 from peft import LoraConfig, PeftModel
 from torch.utils.data import Dataset
@@ -96,13 +95,6 @@ def main(
     tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
 
-    try:
-        accelerator = Accelerator()
-        if accelerator.state.deepspeed_plugin is None:
-            accelerator = None
-    except Exception:
-        accelerator = None
-
     # --- Environment -------------------------------------------------------
     env_objective = "sft" if mode == "sft" else "preference"
     env_kwargs: dict = dict(
@@ -111,7 +103,6 @@ def main(
         tokenizer=tokenizer,
         objective=env_objective,
         data_batch_size_per_gpu=init_hp["BATCH_SIZE"],
-        accelerator=accelerator,
         max_context_length=init_hp.get("MAX_CONTEXT_LENGTH"),
     )
     if mode == "sft":
@@ -150,8 +141,6 @@ def main(
         lr=init_hp["LR"],
         update_epochs=init_hp["UPDATE_EPOCHS"],
         lora_config=lora_config if actor_network is None else None,
-        accelerator=accelerator,
-        gradient_checkpointing=accelerator is not None,
         use_liger_loss=init_hp.get("USE_LIGER_LOSS", False),
     )
     if mode == "dpo":
@@ -179,7 +168,6 @@ def main(
             rl_hp=mut_p["RL_HP_MUT"],
             mutation_sd=mut_p["MUT_SD"],
             rand_seed=mut_p["RAND_SEED"],
-            accelerator=accelerator,
         )
     else:
         tournament = None
@@ -205,7 +193,6 @@ def main(
         wandb_entity=init_hp.get("WANDB_ENTITY"),
         wandb_run_name=init_hp.get("WANDB_RUN_NAME"),
         evaluation_interval=init_hp.get("EVALUATION_INTERVAL", 200),
-        accelerator=accelerator,
         max_steps=max_steps,
     )
 

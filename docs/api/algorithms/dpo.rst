@@ -22,7 +22,6 @@ Example
 
   from agilerl.algorithms import DPO
   from agilerl.llm_envs import DatasetEnv
-  from accelerate import Accelerator
   from datasets import load_dataset
   from peft import get_peft_model
   from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -35,9 +34,6 @@ Example
   )
   tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B")
 
-  # Instantiate an accelerator object for distributed training
-  accelerator = Accelerator()
-
   # Load the dataset into a preference DatasetEnv
   raw_dataset = load_dataset("HumanLLMs/Human-Like-DPO-Dataset", split="train").shuffle(seed=42)
   train_test_split = raw_dataset.train_test_split(test_size=0.1)
@@ -49,13 +45,10 @@ Example
     tokenizer=tokenizer,
     objective="preference",
     data_batch_size_per_gpu=16,
-    accelerator=accelerator,
   )
 
   # Instantiate the agent
   agent = DPO(
-    env.observation_space,
-    env.action_space,
     actor_network=model,
     pad_token_id=tokenizer.eos_token_id,
     pad_token=tokenizer.eos_token,
@@ -65,7 +58,6 @@ Example
     beta=0.001,
     update_epochs=1,
     seed=42,
-    accelerator=accelerator,
   )
 
 Training a DPO agent
@@ -82,7 +74,6 @@ To train a DPO agent on a single dataset environment, use the :ref:`train_llm_da
     env,
     num_epochs=1,
     checkpoint_steps=250,
-    accelerator=accelerator,
   )
 
 Saving and Loading Agents

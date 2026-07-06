@@ -576,7 +576,6 @@ class TestColocatedInitOrdering:
         agent.use_vllm = kwargs.get("use_vllm", True)
         agent.vllm_config = kwargs.get("vllm_config", VLLMConfig(sleep_mode=True))
         agent.quantization_config = kwargs.get("quantization_config")
-        agent.accelerator = kwargs.get("accelerator")
         return agent
 
     def test_trainer_first_for_fresh_bnb_trainer_under_sleep_mode(self):

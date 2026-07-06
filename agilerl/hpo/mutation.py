@@ -9,7 +9,6 @@ from typing import Any, TypeVar
 import fastrand
 import numpy as np
 import torch
-from accelerate import Accelerator
 from torch import nn
 
 from agilerl.algorithms import NeuralTS, NeuralUCB
@@ -149,8 +148,7 @@ def reinit_shared_networks(
                             eval_offspring,
                             remove_prefix=compiled_model,
                         )
-                        if self.accelerator is None:
-                            ind_shared = ind_shared.to(self.device)
+                        ind_shared = ind_shared.to(self.device)
 
                         if compiled_model:
                             torch._dynamo.config.force_parameter_static_shapes = False
@@ -206,8 +204,6 @@ class Mutations:
     :type rand_seed: int, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
-    :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
     """
 
     def __init__(
@@ -223,7 +219,6 @@ class Mutations:
         mutate_elite: bool = True,
         rand_seed: int | None = None,
         device: str = "cpu",
-        accelerator: Accelerator | None = None,
     ) -> None:
         if activation_selection is None:
             activation_selection = ["ReLU", "ELU", "GELU"]
@@ -305,7 +300,6 @@ class Mutations:
         self.mutation_sd = mutation_sd  # Mutation strength
         self.mutate_elite = mutate_elite
         self.device = device
-        self.accelerator = accelerator
 
         self.pretraining_mut_options, self.pretraining_mut_proba = (
             self._get_mutations_options(pretraining=True)
@@ -511,8 +505,7 @@ class Mutations:
                 )
                 break
 
-            if self.accelerator is None:
-                eval_module = eval_module.to(self.device)
+            eval_module = eval_module.to(self.device)
 
             if isinstance(individual, (NeuralTS, NeuralUCB)):
                 individual.exp_layer = get_exp_layer(eval_module)
@@ -631,9 +624,7 @@ class Mutations:
         :param networks: The networks to move to the device
         :type networks: EvolvableNetworkType
         """
-        if self.accelerator is None:
-            networks = networks.to(self.device)
-
+        networks = networks.to(self.device)
         setattr(individual, name, networks)
 
     def _reinit_module(
@@ -832,8 +823,7 @@ class Mutations:
 
             # Write the mutated, clamped values back to the weight tensor
             W[rows_tensor, cols_tensor] = new_vals
-            if self.accelerator is None:
-                network = network.to(self.device)
+            network = network.to(self.device)
 
         return network
 
@@ -1163,13 +1153,7 @@ class Mutations:
                 new_sigma_inv[i, i] = individual.lamb
 
         individual.exp_layer = exp_layer
-        individual.sigma_inv = torch.from_numpy(new_sigma_inv).to(
-            (
-                individual.device
-                if individual.accelerator is None
-                else individual.accelerator.device
-            ),
-        )
+        individual.sigma_inv = torch.from_numpy(new_sigma_inv).to(individual.device)
 
     def _find_analogous_mutation(
         self,

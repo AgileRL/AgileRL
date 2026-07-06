@@ -3,7 +3,6 @@ import logging
 import re
 import sys
 import types
-from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -14,18 +13,24 @@ import torch
 
 pytest.importorskip("datasets", reason="LLM dependencies not installed")
 
-from accelerate import Accelerator
-from accelerate.state import AcceleratorState
 from datasets import Dataset as Datasets
 from torch import nn
 from transformers import AutoTokenizer
 
 from agilerl.llm_envs import DatasetEnv
 from agilerl.utils import llm_utils as llm_utils_module
-from agilerl.utils.algo_utils import DummyOptimizer
+from agilerl.utils.distributed import (
+    FSDPConfig,
+    barrier,
+    broadcast_object_list,
+    get_world_size,
+    is_distributed,
+    is_main_process,
+    resolve_device,
+    shard_dataloader_kwargs,
+)
 from agilerl.utils.llm_utils import (
     adapt_lora_config_for_model,
-    align_deepspeed_lr,
     build_bnb_quantization_config,
     build_clippable_linear_lora_target_regex,
     build_clippable_linear_lora_target_suffixes,
@@ -37,18 +42,18 @@ from agilerl.utils.llm_utils import (
     clipped_is_surrogate,
     collect_trainable_param_stats,
     compare_responses,
-    create_llm_accelerator,
     create_model_from_name_or_path,
     cuda_tensor_bytes_in_module,
     discover_clippable_inner_linear_module_keys,
     discover_clippable_projection_leaf_names,
     filter_peft_state_dict_for_vllm_lora,
     format_colocated_vllm_oom_hint,
-    gather_if_zero3,
-    get_llm_accelerator,
+    gather_full_params,
     get_model_name_or_path,
     get_state_dict,
+    is_fsdp_sharded,
     list_peft_matched_module_keys,
+    load_full_state_dict,
     log_cuda_memory_snapshot,
     masked_mean,
     masked_var,
@@ -141,150 +146,41 @@ class DummyPreferenceDataset:
 
 
 @pytest.fixture
-def accelerator_factory():
-    def generate_accelerator(use_accelerator):
-        AcceleratorState._reset_state(True)
-        return Accelerator() if use_accelerator else None
-
-    return generate_accelerator
-
-
-@pytest.fixture
 def preference_dataset(num_samples):
     train_dataset = DummyPreferenceDataset(int(num_samples * 0.8))
     test_dataset = DummyPreferenceDataset(int(num_samples * 0.2))
     return train_dataset, test_dataset
 
 
-class TestDummyOptimizerInit:
-    def test_dummy_optimizer_init(self):
-        """Test DummyOptimizer initialization."""
-        params = [torch.tensor([1.0, 2.0, 3.0])]
-        lr = 0.001
-        optimizer = DummyOptimizer(params, lr=lr)
-        assert optimizer is not None
+class TestShardingSeam:
+    def test_gather_full_params_noop_for_plain_module(self):
+        """Unsharded modules pass through the gather context untouched."""
+        model = nn.Linear(4, 4)
+        before = {k: v.clone() for k, v in model.state_dict().items()}
+        with gather_full_params(model):
+            for key, value in model.state_dict().items():
+                assert torch.equal(value, before[key])
+        for key, value in model.state_dict().items():
+            assert torch.equal(value, before[key])
 
+    def test_is_fsdp_sharded_false_for_plain_module(self):
+        assert is_fsdp_sharded(nn.Linear(4, 4)) is False
 
-class TestDummyOptimizerStep:
-    def test_dummy_optimizer_step(self):
-        """Test DummyOptimizer step method raises RuntimeError."""
-        params = [torch.tensor([1.0, 2.0, 3.0])]
-        lr = 0.001
-        optimizer = DummyOptimizer(params, lr=lr)
+    def test_is_fsdp_sharded_false_without_fsdp_build(self):
+        from agilerl.utils import llm_utils
 
-        with pytest.raises(RuntimeError) as exc_info:
-            optimizer.step()
+        with patch.object(llm_utils, "HAS_FSDP", False):
+            assert llm_utils.is_fsdp_sharded(nn.Linear(4, 4)) is False
 
-        expected_message = (
-            "DummyOptimizer is a placeholder optimizer and should not be used."
-            "Please ensure you are calling accelerator.prepare() on the optimizer."
-        )
-        assert str(exc_info.value) == expected_message
-
-
-class TestDummyOptimizerZeroGrad:
-    def test_dummy_optimizer_zero_grad(self):
-        """Test DummyOptimizer zero_grad method raises RuntimeError."""
-        params = [torch.tensor([1.0, 2.0, 3.0])]
-        lr = 0.001
-        optimizer = DummyOptimizer(params, lr=lr)
-
-        with pytest.raises(RuntimeError) as exc_info:
-            optimizer.zero_grad()
-
-        expected_message = (
-            "DummyOptimizer is a placeholder optimizer and should not be used."
-            "Please ensure you are calling accelerator.prepare() on the optimizer."
-        )
-        assert str(exc_info.value) == expected_message
-
-
-class TestDummyOptimizerStateDict:
-    def test_dummy_optimizer_state_dict(self):
-        """Test DummyOptimizer state_dict method raises RuntimeError."""
-        params = [torch.tensor([1.0, 2.0, 3.0])]
-        lr = 0.001
-        optimizer = DummyOptimizer(params, lr=lr)
-
-        with pytest.raises(RuntimeError) as exc_info:
-            optimizer.state_dict()
-
-        expected_message = (
-            "DummyOptimizer is a placeholder optimizer and should not be used."
-            "Please ensure you are calling accelerator.prepare() on the optimizer."
-        )
-        assert str(exc_info.value) == expected_message
-
-
-class TestDummyOptimizerLoadStateDict:
-    def test_dummy_optimizer_load_state_dict(self):
-        """Test DummyOptimizer load_state_dict method raises RuntimeError."""
-        params = [torch.tensor([1.0, 2.0, 3.0])]
-        lr = 0.001
-        optimizer = DummyOptimizer(params, lr=lr)
-
-        with pytest.raises(RuntimeError) as exc_info:
-            optimizer.load_state_dict({})
-
-        expected_message = (
-            "DummyOptimizer is a placeholder optimizer and should not be used."
-            "Please ensure you are calling accelerator.prepare() on the optimizer."
-        )
-        assert str(exc_info.value) == expected_message
-
-
-class TestGatherIfZero3:
-    @pytest.mark.parametrize("zero_stage", [0, 1, 2, 3])
-    def test_gather_if_zero3(self, zero_stage):
-        """Test gather_if_zero3 context manager."""
-        # ``patch("deepspeed.zero.GatheredParameters", ...)`` resolves its
-        # target on ``__enter__`` (not at collection), so the patch blows up
-        # for *every* zero_stage on platforms without deepspeed (Windows: see
-        # ``deepspeed~=0.17.1; sys_platform != 'win32'`` in pyproject.toml),
-        # not just stage 3. Skip the whole parametrized test in that case;
-        # ``test_gather_if_zero3_stage_not_three_noop`` below covers the
-        # deepspeed-free stages without the patch.
-        pytest.importorskip("deepspeed", reason="gather_if_zero3 requires deepspeed.")
-        params = [torch.tensor([1.0, 2.0, 3.0])]
-
-        @contextmanager
-        def dummy_gather_parameters(*args, **kwargs):
-            yield
-
-        with (
-            patch(
-                "deepspeed.zero.GatheredParameters",
-                side_effect=dummy_gather_parameters,
-            ) as mock_gathered_parameters,
-            gather_if_zero3(zero_stage, params),
-        ):
-            assert mock_gathered_parameters.call_count == (zero_stage == 3)
-
-    def test_gather_if_zero3_stage_not_three_noop(self):
-        """ZeRO stages other than 3 should be a no-op context manager."""
-        with gather_if_zero3(1, []):
-            assert True
-
-    def test_gather_if_zero3_stage_three_without_deepspeed_raises(self):
-        """ZeRO-3 gathering requires deepspeed; raise a clear error when absent."""
-        with patch("agilerl.utils.llm_utils.HAS_DEEPSPEED", False):
-            with pytest.raises(ImportError, match="DeepSpeed is required for ZeRO"):
-                with gather_if_zero3(3, []):
-                    pass
+    def test_load_full_state_dict_plain_module(self):
+        source = nn.Linear(4, 4)
+        target = nn.Linear(4, 4)
+        load_full_state_dict(target, source.state_dict(), strict=True)
+        for key, value in target.state_dict().items():
+            assert torch.equal(value, source.state_dict()[key])
 
 
 def test_get_state_dict():
-    # ``get_state_dict`` unconditionally wraps ``model.state_dict()`` in
-    # ``gather_if_zero3(3, ...)`` (see agilerl/utils/llm_utils.py:166), which
-    # requires deepspeed at runtime regardless of whether the model is actually
-    # ZeRO-3-wrapped. On Windows deepspeed isn't installed (pyproject.toml:
-    # ``deepspeed~=0.17.1; sys_platform != 'win32'``) and the call raises
-    # ``ImportError: DeepSpeed is required for ZeRO stage 3 parameter
-    # gathering``. In production the function is gated behind
-    # ``HAS_LLM_DEPENDENCIES`` (only imported in agilerl/utils/utils.py when
-    # the LLM extras are installed), so this codepath is never reached on
-    # Windows in real usage either.
-    pytest.importorskip("deepspeed", reason="get_state_dict requires deepspeed.")
     model = nn.Linear(10, 10)
     state_dict = get_state_dict(model)
     assert isinstance(state_dict, dict)
@@ -592,91 +488,49 @@ def test_llm_utils_fallback_types_when_no_llm_dependencies():
             sys.modules.pop("agilerl.utils.llm_utils", None)
 
 
-class TestCreateLlmAccelerator:
-    def test_create_llm_accelerator_no_gpus_returns_none(self):
-        with patch("torch.cuda.device_count", return_value=0):
-            result = create_llm_accelerator()
-        assert result is None
+class TestDistributedHelpersSingleDevice:
+    """Single-device behaviour of the torch-native distributed helpers.
 
-    def test_create_llm_accelerator_uses_explicit_plugin_when_provided(self):
-        AcceleratorState._reset_state(True)
-        explicit_plugin = MagicMock(name="explicit_plugin")
-        expected_accelerator = MagicMock(spec=Accelerator)
-        mock_ctor = MagicMock(return_value=expected_accelerator)
-        with (
-            patch("torch.cuda.device_count", return_value=1),
-            patch.dict(create_llm_accelerator.__globals__, {"Accelerator": mock_ctor}),
-        ):
-            result = create_llm_accelerator(deepspeed_plugin=explicit_plugin)
-        assert result is expected_accelerator
-        mock_ctor.assert_called_once_with(deepspeed_plugin=explicit_plugin)
+    No process group exists in this test session, so every helper should
+    take its no-op / passthrough branch.
+    """
 
-    def test_create_llm_accelerator_uses_launch_configured_plugin_when_available(self):
-        AcceleratorState._reset_state(True)
-        launch_plugin = object()
-        launch_accelerator = MagicMock(spec=Accelerator)
-        launch_accelerator.state = MagicMock()
-        launch_accelerator.state.deepspeed_plugin = launch_plugin
-        mock_ctor = MagicMock(return_value=launch_accelerator)
-        with (
-            patch("torch.cuda.device_count", return_value=1),
-            patch.dict(create_llm_accelerator.__globals__, {"Accelerator": mock_ctor}),
-        ):
-            result = create_llm_accelerator()
-        assert result is launch_accelerator
-        mock_ctor.assert_called_once_with()
+    def test_is_distributed_false_without_process_group(self):
+        assert is_distributed() is False
 
-    def test_create_llm_accelerator_raises_without_explicit_or_launch_plugin(self):
-        AcceleratorState._reset_state(True)
-        launch_accelerator = MagicMock(spec=Accelerator)
-        launch_accelerator.state = MagicMock()
-        launch_accelerator.state.deepspeed_plugin = None
-        mock_ctor = MagicMock(return_value=launch_accelerator)
-        with (
-            patch("torch.cuda.device_count", return_value=1),
-            patch.dict(create_llm_accelerator.__globals__, {"Accelerator": mock_ctor}),
-            pytest.raises(RuntimeError, match="DeepSpeed is required"),
-        ):
-            create_llm_accelerator()
+    def test_get_world_size_is_one(self):
+        assert get_world_size() == 1
+
+    def test_is_main_process_true(self):
+        assert is_main_process() is True
+
+    def test_barrier_is_a_noop(self):
+        barrier()  # must not raise or block
+
+    def test_broadcast_object_list_passthrough(self):
+        objects = [{"seed": 42}, "payload"]
+        out = broadcast_object_list(objects)
+        assert out is objects
+        assert out == [{"seed": 42}, "payload"]
+
+    def test_resolve_device_returns_requested_on_cpu_only_host(self):
+        if torch.cuda.is_available():
+            pytest.skip("Requested-device passthrough only applies without CUDA.")
+        assert resolve_device("cpu") == "cpu"
+
+    def test_shard_dataloader_kwargs_plain_shuffle_when_not_distributed(self):
+        dataset = list(range(8))
+        assert shard_dataloader_kwargs(dataset, shuffle=True) == {"shuffle": True}
+        assert shard_dataloader_kwargs(dataset, shuffle=False) == {"shuffle": False}
 
 
-class TestGetLlmAccelerator:
-    def test_get_llm_accelerator_none_base_returns_none(self):
-        assert get_llm_accelerator(None, idx=0) is None
-        assert get_llm_accelerator(None, idx=3) is None
-
-    def test_get_llm_accelerator_returns_base_for_first_index(self):
-        base = MagicMock(spec=Accelerator)
-        assert get_llm_accelerator(base, idx=0) is base
-
-    def test_get_llm_accelerator_creates_new_plain_accelerator_for_nonzero_index(self):
-        base = MagicMock(spec=Accelerator)
-        base.state = MagicMock()
-        base.state.deepspeed_plugin = None
-        fresh = MagicMock(spec=Accelerator)
-        mock_ctor = MagicMock(return_value=fresh)
-        with patch.dict(get_llm_accelerator.__globals__, {"Accelerator": mock_ctor}):
-            out = get_llm_accelerator(base, idx=1)
-        assert out is fresh
-        mock_ctor.assert_called_once_with()
-
-    def test_get_llm_accelerator_creates_new_plain_accelerator_with_plugin_for_nonzero_index(
-        self,
-    ):
-        base = MagicMock(spec=Accelerator)
-        plugin = object()
-        base.state = MagicMock()
-        base.state.deepspeed_plugin = plugin
-        fresh = MagicMock(spec=Accelerator)
-        mock_ctor = MagicMock(return_value=fresh)
-        with patch.dict(get_llm_accelerator.__globals__, {"Accelerator": mock_ctor}):
-            out = get_llm_accelerator(base, idx=2)
-        assert out is fresh
-        mock_ctor.assert_called_once_with()
-
-    def test_get_llm_accelerator_negative_index_raises(self):
-        with pytest.raises(ValueError, match="must be non-negative"):
-            get_llm_accelerator(None, idx=-1)
+class TestFSDPConfigDefaults:
+    def test_defaults(self):
+        config = FSDPConfig()
+        assert config.reshard_after_forward is True
+        assert config.cpu_offload is False
+        assert config.param_dtype is None
+        assert config.reduce_dtype is None
 
 
 def test_normalize_reasoning_prompt_batch_stacked_dict_to_per_sample_list():
@@ -850,7 +704,7 @@ def test_move_params_helpers_call_model_move_and_cuda_sync():
     empty_cache.assert_called_once()
 
 
-def test_get_model_name_or_path_and_align_deepspeed_lr_helpers():
+def test_get_model_name_or_path_helpers():
     class _DirectModel:
         name_or_path = "direct_name"
 
@@ -872,17 +726,6 @@ def test_get_model_name_or_path_and_align_deepspeed_lr_helpers():
     missing = _Missing()
     with pytest.raises(ValueError, match="Model name or path not found"):
         get_model_name_or_path(missing)
-
-    accelerator = MagicMock()
-    accelerator.state.deepspeed_plugin.deepspeed_config = {
-        "optimizer": {"params": {"lr": 1e-3}}
-    }
-    with pytest.warns(UserWarning, match="DeepSpeed learning rate is set to"):
-        out = align_deepspeed_lr(2e-3, accelerator)
-    assert out == pytest.approx(2e-3)
-    assert accelerator.state.deepspeed_plugin.deepspeed_config["optimizer"]["params"][
-        "lr"
-    ] == pytest.approx(2e-3)
 
 
 def test_k3_helper_matches_torch() -> None:
@@ -1090,7 +933,7 @@ class TestCreateModelFromNameOrPathValueHead:
             out = llm_utils_module.create_model_from_name_or_path(
                 "some/model",
                 add_value_head=True,
-                use_accelerator=False,
+                use_distributed=False,
             )
         assert out is sentinel_model
         # Default model_config is built when not supplied; verify the loader saw
@@ -1596,7 +1439,7 @@ class TestFormatColocatedVllmOomHint:
         assert "≈2.00 GiB more free VRAM" in hint
         assert "gpu_memory_utilization=0.55" in hint
         assert "max_model_len=32768" in hint
-        assert "DeepSpeed trainer" in hint  # trainer_on_gpu defaults to True
+        assert "trainer was still on GPU" in hint  # trainer_on_gpu defaults to True
         assert "Check nvidia-smi" in hint
 
     def test_optional_sections_omitted(self, monkeypatch):
@@ -1606,7 +1449,7 @@ class TestFormatColocatedVllmOomHint:
         assert "requests" not in hint  # kv_cache_memory_bytes line
         assert "is also checked at" not in hint  # gpu_memory_utilization line
         assert "KV slot length cap" not in hint  # max_model_len line
-        assert "DeepSpeed trainer" not in hint
+        assert "trainer was still on GPU" not in hint
         assert "Check nvidia-smi" in hint
 
     def test_kv_shortfall_clamped_at_zero(self, monkeypatch):
@@ -1768,13 +1611,13 @@ class TestCreateModelFromNameOrPathDefaults:
         assert captured["kwargs"]["torch_dtype"] is torch.bfloat16
         assert captured["kwargs"]["attn_implementation"] == "sdpa"
 
-    def test_accelerator_defaults_to_fp16(self, monkeypatch):
+    def test_distributed_defaults_to_fp16(self, monkeypatch):
         captured = {}
         monkeypatch.setattr(
             llm_utils_module, "AutoModelForCausalLM", self._fake_loader(captured)
         )
         monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
-        create_model_from_name_or_path("org/tiny", use_accelerator=True)
+        create_model_from_name_or_path("org/tiny", use_distributed=True)
         assert captured["kwargs"]["torch_dtype"] is torch.float16
 
     def test_caller_dtype_stays_authoritative(self, monkeypatch):

@@ -9,7 +9,6 @@ readme = "README.md"
 requires-python = ">=3.10,<3.14"
 
 dependencies = [
-    "accelerate>=1.7.0",
     "dill>=0.3.7",
     "fastrand>=1.3.0",
     "flatten_dict>=0.4.2",
@@ -45,7 +44,6 @@ box2d = [
 llm = [
     "bitsandbytes==0.49.2; sys_platform == 'linux'",
     "datasets==5.0.0",
-    "deepspeed>=0.19.1; sys_platform == 'linux'",
     "liger-kernel==0.8.0; sys_platform == 'linux'",
     "openenv>=0.3.1,<0.4",
     "peft==0.19.1",
@@ -63,7 +61,6 @@ all = [
     "gymnasium[box2d]>=1.0.0; sys_platform != 'win32'",
     "bitsandbytes==0.49.2; sys_platform == 'linux'",
     "datasets==5.0.0",
-    "deepspeed>=0.19.1; sys_platform == 'linux'",
     "gem-llm",
     "liger-kernel==0.8.0; sys_platform == 'linux'",
     "openenv>=0.3.1,<0.4",
@@ -113,7 +110,7 @@ filterwarnings = [
 ]
 markers = [
     "vllm: tests that actually instantiate vllm.LLM (exclude with -m 'not vllm'). Pinned to a single xdist worker because vLLM's GPU memory profiling fails when peer workers free memory mid-init.",
-    "gpu: tests that use a GPU (CUDA, DeepSpeed, etc.) but do NOT initialise real vLLM (exclude with -m 'not gpu'). Safe to fan out across multiple xdist workers.",
+    "gpu: tests that use a GPU (CUDA, distributed backends, etc.) but do NOT initialise real vLLM (exclude with -m 'not gpu'). Safe to fan out across multiple xdist workers.",
 ]
 
 [tool.coverage.run]
@@ -137,13 +134,8 @@ build-backend = "hatchling.build"
 # This workaround tells uv to build box2d-py using the project environment directly
 # (not an isolated one), where it can see system PATH and find swig, which is already installed as a dependency
 # (no-build-isolation packages are built after the others).
-#
-# DeepSpeed can be built with env vars to specify compiler flags
-# e.g. DS_BUILD_FUSED_ADAM=1 is essential on L4 GPU
-# to pre-build the fused Adam kernel and prevent timeout during tests.
 no-build-isolation-package = [
     "box2d-py",
-    "deepspeed"
 ]
 
 # Overrides replace upstream transitive pins.
@@ -203,7 +195,7 @@ ignore = [
     "SIM",           # simplification: nested if, contextlib.suppress
     "ARG001",        # unused args (interface consistency)
     "ERA001",        # commented-out code (kept for reference)
-    "SLF001",        # private member access (torch/accelerate internals)
+    "SLF001",        # private member access (torch internals)
     "NPY002",        # legacy np.random
     "TC001", "TC003",# type-checking block imports
     "A002",          # argument shadowing builtin (input)

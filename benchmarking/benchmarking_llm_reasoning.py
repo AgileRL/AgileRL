@@ -19,7 +19,7 @@ from transformers import AutoTokenizer
 from agilerl.llm_envs import RolloutEnv
 from agilerl.training.train_llm import train_llm_rollout
 from agilerl.utils.algo_utils import VLLMConfig
-from agilerl.utils.llm_utils import create_llm_accelerator
+from agilerl.utils.distributed import resolve_device
 from agilerl.utils.utils import create_population
 
 MODEL_PATH = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -113,8 +113,6 @@ def main(init_hp, mut_p):
         },
         {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
     ]
-
-    accelerator = create_llm_accelerator()
 
     def prompt_builder(question: str) -> str:
         parts = [
@@ -225,7 +223,6 @@ def main(init_hp, mut_p):
         INIT_HP=init_hp,
         hp_config=hp_config,
         population_size=init_hp["POP_SIZE"],
-        accelerator=accelerator,
         tokenizer=tokenizer,
         model_name=MODEL_PATH,
         vllm_config=vllm_config,
@@ -246,7 +243,7 @@ def main(init_hp, mut_p):
         rl_hp=mut_p.get("RL_HP_MUT", 0.0),
         mutation_sd=mut_p.get("MUT_SD", 0.0),
         rand_seed=mut_p.get("RAND_SEED", 42),
-        device=accelerator.device,
+        device=resolve_device(),
     )
 
     train_llm_rollout(
@@ -262,11 +259,8 @@ def main(init_hp, mut_p):
         evo_steps=4,
         mutation=mutations,
         tournament=tournament,
-        accelerator=accelerator,
         verbose=True,
     )
-    if accelerator is not None:
-        accelerator.end_training()
 
 
 if __name__ == "__main__":

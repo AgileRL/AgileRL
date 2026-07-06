@@ -3,8 +3,6 @@ import copy
 import numpy as np
 import pytest
 import torch
-from accelerate import Accelerator
-from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
 from torch import nn, optim
 
@@ -108,23 +106,20 @@ class TestTD3Init:
             ("dict_space", EvolvableMultiInput),
         ],
     )
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     def test_initialize_td3(
         self,
         observation_space,
         vector_space,
         encoder_cls,
-        accelerator_flag,
         request,
     ):
-        accelerator = Accelerator() if accelerator_flag else None
         observation_space = request.getfixturevalue(observation_space)
 
         # Initialize TD3 with default parameters
-        td3 = TD3(observation_space, vector_space, accelerator=accelerator)
+        td3 = TD3(observation_space, vector_space)
 
-        expected_opt_cls = AcceleratedOptimizer if accelerator else optim.Adam
-        expected_device = accelerator.device if accelerator else "cpu"
+        expected_opt_cls = optim.Adam
+        expected_device = "cpu"
         assert td3.observation_space == observation_space
         assert td3.action_space == vector_space
         assert td3.batch_size == 64
@@ -135,7 +130,6 @@ class TestTD3Init:
         assert td3.tau == 0.005
         assert td3.mut is None
         assert td3.device == expected_device
-        assert td3.accelerator == accelerator
         assert td3.index == 0
         assert td3.scores == []
         assert td3.fitness == []
@@ -211,7 +205,6 @@ class TestTD3Init:
         assert td3.tau == 0.005
         assert td3.mut is None
         assert td3.device == "cpu"
-        assert td3.accelerator is None
         assert td3.index == 0
         assert td3.scores == []
         assert td3.fitness == []
@@ -321,7 +314,6 @@ class TestTD3Init:
         assert td3.tau == 0.005
         assert td3.mut is None
         assert td3.device == "cpu"
-        assert td3.accelerator is None
         assert td3.index == 0
         assert td3.scores == []
         assert td3.fitness == []
@@ -385,7 +377,6 @@ class TestTD3Init:
         assert td3.tau == 0.005
         assert td3.mut is None
         assert td3.device == "cpu"
-        assert td3.accelerator is None
         assert td3.index == 0
         assert td3.scores == []
         assert td3.fitness == []
@@ -427,7 +418,6 @@ class TestTD3Init:
         assert td3.tau == 0.005
         assert td3.mut is None
         assert td3.device == "cpu"
-        assert td3.accelerator is None
         assert td3.index == 0
         assert td3.scores == []
         assert td3.fitness == []
@@ -458,7 +448,6 @@ class TestTD3GetAction:
     def test_returns_expected_action_training(self, observation_space, request):
         observation_space = request.getfixturevalue(observation_space)
         action_space = spaces.Box(low=-1, high=1, shape=(2,))
-        accelerator = Accelerator()
 
         td3 = TD3(observation_space, action_space)
         state = get_sample_from_space(observation_space)
@@ -471,11 +460,7 @@ class TestTD3GetAction:
             assert -1 <= act <= 1
         td3.clean_up()
 
-        td3 = TD3(
-            observation_space,
-            action_space,
-            accelerator=accelerator,
-        )
+        td3 = TD3(observation_space, action_space)
         state = get_sample_from_space(observation_space)
         training = True
         action = td3.get_action(state, training)[0]
@@ -490,7 +475,6 @@ class TestTD3GetAction:
             observation_space,
             action_space,
             O_U_noise=False,
-            accelerator=accelerator,
         )
         state = get_sample_from_space(observation_space)
         training = True
@@ -549,16 +533,13 @@ class TestTD3Learn:
         ("min_action", "max_action"),
         [(-1, 1), ([-1, 0], [1, 1]), ([-1, -1], [0, 1]), ([-1, -2], [1, 0])],
     )
-    @pytest.mark.parametrize("accelerator_flag", [False])
     def test_learns_from_experiences(
         self,
         observation_space,
         min_action,
         max_action,
-        accelerator_flag,
         request,
     ):
-        accelerator = Accelerator() if accelerator_flag else None
         observation_space = request.getfixturevalue(observation_space)
         # Continuous action space
         low = np.array(min_action) if isinstance(min_action, list) else min_action
@@ -573,16 +554,14 @@ class TestTD3Learn:
             action_space,
             batch_size=batch_size,
             policy_freq=policy_freq,
-            accelerator=accelerator,
         )
 
         # Create a batch of experiences
-        device = accelerator.device if accelerator else "cpu"
         experiences = get_experiences_batch(
             observation_space,
             action_space,
             batch_size,
-            device,
+            "cpu",
         )
 
         # Copy state dict before learning - should be different to after updating weights
@@ -621,54 +600,6 @@ class TestTD3Learn:
         assert_not_equal_state_dict(critic_2_pre_learn_sd, td3.critic_2.state_dict())
         td3.clean_up()
 
-    @pytest.mark.gpu
-    def test_learns_from_experiences_accelerator_smoke(self, vector_space, request):
-        observation_space = request.getfixturevalue("vector_space")
-        action_space = spaces.Box(low=-1, high=1, shape=(2,))
-        batch_size = 32
-        policy_freq = 2
-        accelerator = Accelerator()
-        td3 = TD3(
-            observation_space,
-            action_space,
-            batch_size=batch_size,
-            policy_freq=policy_freq,
-            accelerator=accelerator,
-        )
-        device = accelerator.device
-        experiences = get_experiences_batch(
-            observation_space,
-            action_space,
-            batch_size,
-            device,
-        )
-        td3.scores = [0, 0]
-        _, critic_loss = td3.learn(experiences)
-        assert isinstance(critic_loss, float)
-        td3.clean_up()
-
-    def test_learn_uses_accelerator_backward_on_policy_step(self, vector_space):
-        action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
-        accelerator = Accelerator()
-        td3 = TD3(
-            vector_space,
-            action_space,
-            batch_size=4,
-            policy_freq=1,
-            accelerator=accelerator,
-        )
-        experiences = get_experiences_batch(
-            vector_space,
-            action_space,
-            4,
-            accelerator.device,
-        )
-        td3.scores = [0]
-        actor_loss, critic_loss = td3.learn(experiences)
-        assert isinstance(actor_loss, float)
-        assert isinstance(critic_loss, float)
-        td3.clean_up()
-
 
 class TestTD3SoftUpdate:
     # Updates target network parameters with soft update
@@ -683,7 +614,6 @@ class TestTD3SoftUpdate:
         mut = None
         actor_network = None
         device = "cpu"
-        accelerator = None
         wrap = True
 
         td3 = TD3(
@@ -699,7 +629,6 @@ class TestTD3SoftUpdate:
             mut=mut,
             actor_network=actor_network,
             device=device,
-            accelerator=accelerator,
             wrap=wrap,
         )
 
@@ -823,7 +752,6 @@ class TestTD3Clone:
         assert clone_agent.tau == td3.tau
         assert clone_agent.mut == td3.mut
         assert clone_agent.device == td3.device
-        assert clone_agent.accelerator == td3.accelerator
         assert_state_dicts_equal(clone_agent.actor.state_dict(), td3.actor.state_dict())
         assert_state_dicts_equal(
             clone_agent.actor_target.state_dict(),
@@ -865,114 +793,6 @@ class TestTD3Clone:
         td3.clean_up()
         clone_agent.clean_up()
 
-        accelerator = Accelerator()
-        td3 = TD3(observation_space, vector_space, accelerator=accelerator)
-        clone_agent = td3.clone()
-
-        assert clone_agent.observation_space == td3.observation_space
-        assert clone_agent.action_space == td3.action_space
-        assert clone_agent.batch_size == td3.batch_size
-        assert clone_agent.lr_actor == td3.lr_actor
-        assert clone_agent.lr_critic == td3.lr_critic
-        assert clone_agent.learn_step == td3.learn_step
-        assert clone_agent.gamma == td3.gamma
-        assert clone_agent.tau == td3.tau
-        assert clone_agent.mut == td3.mut
-        assert clone_agent.device == td3.device
-        assert clone_agent.accelerator == td3.accelerator
-        assert_state_dicts_equal(clone_agent.actor.state_dict(), td3.actor.state_dict())
-        assert_state_dicts_equal(
-            clone_agent.actor_target.state_dict(),
-            td3.actor_target.state_dict(),
-        )
-        assert_state_dicts_equal(
-            clone_agent.critic_1.state_dict(),
-            td3.critic_1.state_dict(),
-        )
-        assert_state_dicts_equal(
-            clone_agent.critic_target_1.state_dict(),
-            td3.critic_target_1.state_dict(),
-        )
-        assert_state_dicts_equal(
-            clone_agent.critic_2.state_dict(),
-            td3.critic_2.state_dict(),
-        )
-        assert_state_dicts_equal(
-            clone_agent.critic_target_2.state_dict(),
-            td3.critic_target_2.state_dict(),
-        )
-        assert_state_dicts_equal(
-            clone_agent.actor_optimizer.state_dict(),
-            td3.actor_optimizer.state_dict(),
-        )
-        assert_state_dicts_equal(
-            clone_agent.critic_1_optimizer.state_dict(),
-            td3.critic_1_optimizer.state_dict(),
-        )
-        assert_state_dicts_equal(
-            clone_agent.critic_2_optimizer.state_dict(),
-            td3.critic_2_optimizer.state_dict(),
-        )
-        assert clone_agent.fitness == td3.fitness
-        assert clone_agent.steps == td3.steps
-        assert clone_agent.scores == td3.scores
-        td3.clean_up()
-        clone_agent.clean_up()
-
-        accelerator = Accelerator()
-        td3 = TD3(observation_space, vector_space, accelerator=accelerator, wrap=False)
-        clone_agent = td3.clone(wrap=False)
-
-        assert clone_agent.observation_space == td3.observation_space
-        assert clone_agent.action_space == td3.action_space
-        assert clone_agent.batch_size == td3.batch_size
-        assert clone_agent.lr_actor == td3.lr_actor
-        assert clone_agent.lr_critic == td3.lr_critic
-        assert clone_agent.learn_step == td3.learn_step
-        assert clone_agent.gamma == td3.gamma
-        assert clone_agent.tau == td3.tau
-        assert clone_agent.mut == td3.mut
-        assert clone_agent.device == td3.device
-        assert clone_agent.accelerator == td3.accelerator
-        assert_state_dicts_equal(clone_agent.actor.state_dict(), td3.actor.state_dict())
-        assert_state_dicts_equal(
-            clone_agent.actor_target.state_dict(),
-            td3.actor_target.state_dict(),
-        )
-        assert_state_dicts_equal(
-            clone_agent.critic_1.state_dict(),
-            td3.critic_1.state_dict(),
-        )
-        assert_state_dicts_equal(
-            clone_agent.critic_target_1.state_dict(),
-            td3.critic_target_1.state_dict(),
-        )
-        assert_state_dicts_equal(
-            clone_agent.critic_2.state_dict(),
-            td3.critic_2.state_dict(),
-        )
-        assert_state_dicts_equal(
-            clone_agent.critic_target_2.state_dict(),
-            td3.critic_target_2.state_dict(),
-        )
-        assert_state_dicts_equal(
-            clone_agent.actor_optimizer.state_dict(),
-            td3.actor_optimizer.state_dict(),
-        )
-        assert_state_dicts_equal(
-            clone_agent.critic_1_optimizer.state_dict(),
-            td3.critic_1_optimizer.state_dict(),
-        )
-        assert_state_dicts_equal(
-            clone_agent.critic_2_optimizer.state_dict(),
-            td3.critic_2_optimizer.state_dict(),
-        )
-        assert clone_agent.fitness == td3.fitness
-        assert clone_agent.steps == td3.steps
-        assert clone_agent.scores == td3.scores
-        td3.clean_up()
-        clone_agent.clean_up()
-
     def test_clone_new_index(self, vector_space):
         td3 = TD3(vector_space, copy.deepcopy(vector_space))
         clone_agent = td3.clone(index=100)
@@ -1007,7 +827,6 @@ class TestTD3Clone:
         assert clone_agent.tau == td3.tau
         assert clone_agent.mut == td3.mut
         assert clone_agent.device == td3.device
-        assert clone_agent.accelerator == td3.accelerator
         assert_state_dicts_equal(clone_agent.actor.state_dict(), td3.actor.state_dict())
         assert_state_dicts_equal(
             clone_agent.actor_target.state_dict(),

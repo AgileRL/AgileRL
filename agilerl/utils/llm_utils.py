@@ -14,11 +14,19 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from accelerate import Accelerator
 from torch import nn
 
-from agilerl import HAS_DEEPSPEED, HAS_LLM_DEPENDENCIES
+from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.typing import RolloutPrompts
+
+try:
+    from torch.distributed.fsdp import FSDPModule, FullyShardedDataParallel
+
+    HAS_FSDP = True
+except ImportError:  # pragma: no cover -- torch built without distributed support
+    FSDPModule = None
+    FullyShardedDataParallel = None
+    HAS_FSDP = False
 
 logger = logging.getLogger(__name__)
 
@@ -165,50 +173,124 @@ def normalize_reasoning_prompt_batch(
     return result
 
 
-@contextmanager
-def gather_if_zero3(
-    zero_stage: int,
-    params: list[torch.Tensor],
-    modifier_rank: int | None = None,
-) -> Generator[None, None, None]:
-    """Conditional context manager for setting the zero stage for the model.
+def is_fsdp_sharded(model: nn.Module) -> bool:
+    """Return ``True`` when ``model`` contains FSDP-sharded submodules.
 
-    :param zero_stage: The zero stage
-    :type zero_stage: int
-    :param params: The parameters to gather
-    :type params: list[torch.Tensor]
-    :param modifier_rank: The modifier rank
-    :type modifier_rank: int | None
+    Detects both FSDP2 (``fully_shard``) and legacy FSDP1 wrappers; only FSDP2
+    is supported by AgileRL (see :func:`gather_full_params`).
+
+    :param model: The model to inspect.
+    :type model: nn.Module
+    :return: Whether any submodule is FSDP-sharded.
+    :rtype: bool
     """
-    if zero_stage == 3:
-        if not HAS_DEEPSPEED:
-            msg = (
-                "DeepSpeed is required for ZeRO stage 3 parameter gathering, but it "
-                "is not installed."
-            )
-            raise ImportError(msg)
-        # Lazy: deepspeed is an optional dependency and only ZeRO-3 needs it.
-        import deepspeed
+    if not HAS_FSDP:
+        return False
+    return any(
+        isinstance(module, (FSDPModule, FullyShardedDataParallel))
+        for module in model.modules()
+    )
 
-        with deepspeed.zero.GatheredParameters(
-            params=params,
-            modifier_rank=modifier_rank,
+
+@contextmanager
+def gather_full_params(model: nn.Module) -> Generator[None, None, None]:
+    """Materialize full (unsharded) parameters for the duration of the context.
+
+    No-op for non-sharded models (single process, DDP). For FSDP2
+    (``fully_shard``) models, parameters are unsharded on entry and resharded
+    on exit.
+
+    .. warning::
+        Under FSDP2 the gathered parameters are **read-only**: writes target
+        the all-gather buffer, which is discarded on reshard. Use
+        :func:`load_full_state_dict` to write weights into a sharded model.
+
+    :param model: The model whose parameters should be gathered.
+    :type model: nn.Module
+    """
+    fsdp2_modules = (
+        [module for module in model.modules() if isinstance(module, FSDPModule)]
+        if HAS_FSDP
+        else []
+    )
+    if not fsdp2_modules:
+        if HAS_FSDP and any(
+            isinstance(module, FullyShardedDataParallel) for module in model.modules()
         ):
-            yield
-    else:
+            msg = (
+                "Legacy FSDP1 wrapping detected. AgileRL only supports FSDP2 "
+                "(torch.distributed.fsdp.fully_shard); shard the model with "
+                "agilerl.utils.distributed.apply_fsdp2 instead."
+            )
+            raise NotImplementedError(msg)
         yield
+        return
+
+    for module in fsdp2_modules:
+        module.unshard()
+    try:
+        yield
+    finally:
+        for module in reversed(fsdp2_modules):
+            module.reshard()
+
+
+def load_full_state_dict(
+    model: nn.Module,
+    state_dict: dict[str, torch.Tensor],
+    strict: bool = False,
+) -> None:
+    """Load a full (unsharded) state dict into a model that may be FSDP-sharded.
+
+    For non-sharded models this is a plain ``load_state_dict``. For FSDP2
+    models, the full state dict is distributed onto the sharded parameters via
+    ``torch.distributed.checkpoint``.
+
+    :param model: The (possibly sharded) model to load weights into.
+    :type model: nn.Module
+    :param state_dict: Full state dict keyed like ``model.state_dict()``.
+    :type state_dict: dict[str, torch.Tensor]
+    :param strict: Whether to require an exact key match.
+    :type strict: bool
+    """
+    if is_fsdp_sharded(model):
+        from torch.distributed.checkpoint.state_dict import (
+            StateDictOptions,
+            set_model_state_dict,
+        )
+
+        set_model_state_dict(
+            model,
+            state_dict,
+            options=StateDictOptions(full_state_dict=True, strict=strict),
+        )
+    else:
+        model.load_state_dict(state_dict, strict=strict)
 
 
 def get_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
-    """Get the state dict of the model for zero3.
+    """Get the full state dict of a model, gathering FSDP-sharded parameters.
+
+    For FSDP2 models the state dict is materialized via
+    ``torch.distributed.checkpoint`` so the returned tensors own their storage
+    (plain unshard views would be freed on reshard).
 
     :param model: The model to get the state dict of.
     :type model: nn.Module
     :return: The state dict of the model.
     :rtype: dict[str, torch.Tensor]
     """
-    with gather_if_zero3(3, list(model.parameters()), modifier_rank=0):
-        return model.state_dict()
+    if is_fsdp_sharded(model):
+        from torch.distributed.checkpoint.state_dict import (
+            StateDictOptions,
+            get_model_state_dict,
+        )
+
+        return get_model_state_dict(
+            model,
+            options=StateDictOptions(full_state_dict=True, cpu_offload=True),
+        )
+    return model.state_dict()
 
 
 def build_bnb_quantization_config(
@@ -638,8 +720,8 @@ def format_colocated_vllm_oom_hint(
         )
     if trainer_on_gpu:
         lines.append(
-            "The DeepSpeed trainer was still on GPU when wake_up ran. With sleep_mode, "
-            "AgileRL moves trainer weights to CPU before wake_up; ZeRO optimizer state "
+            "The trainer was still on GPU when wake_up ran. With sleep_mode, "
+            "AgileRL moves trainer weights to CPU before wake_up; optimizer state "
             "may still remain on GPU."
         )
     lines.append(
@@ -762,7 +844,7 @@ def create_model_from_name_or_path(
     model_name_or_path: str,
     model_config: dict[str, Any] | None = None,
     add_value_head: bool = False,
-    use_accelerator: bool = False,
+    use_distributed: bool = False,
 ) -> PreTrainedModel:
     """Create a model from a name or path.
 
@@ -775,8 +857,9 @@ def create_model_from_name_or_path(
     :type model_config: dict[str, Any ] | None
     :param use_value_head: Flag to indicate if a value head should be added to the model, defaults to False
     :type use_value_head: bool, optional
-    :param use_accelerator: Flag to indicate if the model should be created with the accelerator, defaults to False
-    :type use_accelerator: bool, optional
+    :param use_distributed: Whether the model is created for a distributed
+        run, defaults to False
+    :type use_distributed: bool, optional
     :return: The created model.
     :rtype: PreTrainedModel
     """
@@ -785,7 +868,7 @@ def create_model_from_name_or_path(
     # authoritative.
     model_config = dict(model_config) if model_config else {}
     model_config.setdefault(
-        "torch_dtype", torch.bfloat16 if not use_accelerator else torch.float16
+        "torch_dtype", torch.bfloat16 if not use_distributed else torch.float16
     )
     # Auto-select the best available attention backend (flash_attention_2 when
     # the flash_attn package is installed, else sdpa). ``resolve_*`` treats an
@@ -1155,83 +1238,6 @@ def clipped_is_surrogate(
     )
 
 
-def create_llm_accelerator(
-    *,
-    deepspeed_plugin: Any | None = None,
-) -> Accelerator | None:
-    """Create an :class:`Accelerator` for LLM training with DeepSpeed.
-
-    This helper enforces a strict DeepSpeed contract for LLM workloads:
-
-    * **0 GPUs** — returns ``None`` (the ``accelerator=None`` code-path
-      in :class:`~agilerl.algorithms.core.base.LLMAlgorithm` handles
-      CPU-only training).
-    * When ``deepspeed_plugin`` is provided, returns an
-      ``Accelerator(deepspeed_plugin=...)``.
-    * Otherwise, instantiates ``Accelerator()`` and requires that a
-      DeepSpeed plugin is already present (for example via
-      ``accelerate config`` + ``accelerate launch``).
-      If no plugin is detected, raises ``RuntimeError`` with setup
-      instructions.
-
-    :param deepspeed_plugin: Explicit DeepSpeed plugin instance. If
-        omitted, this function expects a launch-configured plugin to be
-        present in ``Accelerator.state``.
-    :type deepspeed_plugin: Any | None
-    :return: A configured ``Accelerator``, or ``None`` when no GPU is
-        available.
-    """
-    num_gpus = torch.cuda.device_count()
-
-    if num_gpus == 0:
-        logger.info("No GPUs detected — returning None (CPU-only path).")
-        return None
-
-    if deepspeed_plugin is not None:
-        return Accelerator(deepspeed_plugin=deepspeed_plugin)
-
-    accelerator = Accelerator()
-    if accelerator.state.deepspeed_plugin is None:
-        msg = (
-            "DeepSpeed is required for create_llm_accelerator(), but no "
-            "DeepSpeed plugin was detected. Use one of: "
-            "(1) run `accelerate config` and launch with `accelerate launch ...`; "
-            "(2) pass `deepspeed_plugin=` explicitly to create_llm_accelerator()."
-        )
-        raise RuntimeError(msg)
-    return accelerator
-
-
-def get_llm_accelerator(
-    base_accelerator: Accelerator | None,
-    idx: int,
-) -> Accelerator | None:
-    """Return a per-agent accelerator from a base accelerator.
-
-    ``idx == 0`` reuses ``base_accelerator``. For additional agents this helper
-    creates a fresh ``Accelerator`` instance so each LLM algorithm owns an
-    independent accelerator/engine reference.
-
-    :param base_accelerator: Accelerator passed into population creation.
-    :type base_accelerator: Accelerator | None
-    :param idx: Agent index in the population.
-    :type idx: int
-    :return: Accelerator for the specific agent, or ``None``.
-    :rtype: Accelerator | None
-    """
-    if idx < 0:
-        msg = f"Population index must be non-negative, got {idx}."
-        raise ValueError(msg)
-
-    if base_accelerator is None:
-        return None
-
-    if idx == 0:
-        return base_accelerator
-
-    return Accelerator()
-
-
 def cuda_tensor_bytes_in_module(module: torch.nn.Module) -> int:
     """Sum nbytes of parameters and buffers still on a CUDA device."""
     total = 0
@@ -1245,8 +1251,8 @@ def collect_trainable_param_stats(pop: Any) -> dict[str, Any]:
     """Best-effort LoRA / trainable-param accounting for a population's first agent.
 
     Recorded once at init so runs can be correlated against LoRA size.
-    Wrapped in a broad except: introspecting peft-wrapped accelerator-managed
-    models can fail in odd ways, and a logging-only field shouldn't fault training.
+    Wrapped in a broad except: introspecting peft-wrapped models can fail in
+    odd ways, and a logging-only field shouldn't fault training.
 
     :param pop: Population of LLM algorithms; only ``pop[0]`` is inspected.
     :type pop: PopulationType
@@ -1260,7 +1266,7 @@ def collect_trainable_param_stats(pop: Any) -> dict[str, Any]:
         actor = getattr(agent, "actor", None)
         if actor is None:
             return out
-        # Unwrap accelerate / peft / DDP layers if present.
+        # Unwrap peft / DDP layers if present.
         inner = actor
         for attr in ("module", "model"):
             unwrapped = getattr(inner, attr, None)
@@ -1399,34 +1405,6 @@ def get_model_name_or_path(model: PreTrainedModel) -> str:
 
     msg = "Model name or path not found."
     raise ValueError(msg)
-
-
-def align_deepspeed_lr(lr: float, accelerator: Accelerator) -> float:
-    """Align the learning rate for DeepSpeed.
-
-    :param lr: The learning rate to align.
-    :type lr: float
-    :param accelerator: The accelerator to align the learning rate for.
-    :type accelerator: Accelerator
-    :return: The aligned learning rate.
-    :rtype: float
-    """
-    if accelerator is not None:
-        optim_lr = (
-            accelerator.state.deepspeed_plugin.deepspeed_config.get("optimizer", {})
-            .get("params", {})
-            .get("lr", None)
-        )
-        if optim_lr is not None and optim_lr != lr:
-            warnings.warn(
-                f"DeepSpeed learning rate is set to {optim_lr} but the argument 'lr' is set to {lr}. "
-                "Overwriting deepspeed learning rate with the argument 'lr'.",
-                stacklevel=2,
-            )
-            accelerator.state.deepspeed_plugin.deepspeed_config["optimizer"]["params"][
-                "lr"
-            ] = lr
-    return lr
 
 
 def sample_eval_prompts(

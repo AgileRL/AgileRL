@@ -19,13 +19,11 @@ from torch.optim.lr_scheduler import SequentialLR
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.modules import EvolvableModule
-from agilerl.modules.dummy import DummyEvolvable
 from agilerl.networks import EvolvableNetwork
 from agilerl.typing import BPTTSequenceType
 from agilerl.utils import algo_utils
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
-    DummyOptimizer,
     VLLMConfig,
     _reconcile_shapes,
     apply_env_defined_actions,
@@ -1849,7 +1847,7 @@ class TestCloneLlm:
                 return [torch.nn.Parameter(torch.tensor([1.0]))]
 
         @contextmanager
-        def fake_gather_if_zero3(zero_stage, params):
+        def fake_gather_full_params(model):
             yield
 
         def fake_get_peft_model(model, first_config, adapter_name="actor"):
@@ -1858,12 +1856,11 @@ class TestCloneLlm:
 
         monkeypatch.setattr(algo_utils, "PeftModel", FakePeftModel)
         monkeypatch.setattr(algo_utils, "get_peft_model", fake_get_peft_model)
-        monkeypatch.setattr(algo_utils, "gather_if_zero3", fake_gather_if_zero3)
+        monkeypatch.setattr(algo_utils, "gather_full_params", fake_gather_full_params)
 
         original = FakePeftModel()
         cloned = algo_utils.clone_llm(
             original_model=original,
-            zero_stage=0,
             state_dict={
                 "base.default.weight": torch.tensor([1.0]),
                 "lora_default.bias": torch.tensor([2.0]),
@@ -1891,69 +1888,24 @@ class TestCloneLlm:
                 return [torch.nn.Parameter(torch.tensor([1.0]))]
 
         @contextmanager
-        def fake_gather_if_zero3(zero_stage, params):
+        def fake_gather_full_params(model):
             yield
 
         monkeypatch.setattr(algo_utils, "PreTrainedModel", FakePreTrainedModel)
-        monkeypatch.setattr(algo_utils, "gather_if_zero3", fake_gather_if_zero3)
+        monkeypatch.setattr(algo_utils, "gather_full_params", fake_gather_full_params)
         original = FakePreTrainedModel()
-        cloned = algo_utils.clone_llm(original_model=original, zero_stage=0)
+        cloned = algo_utils.clone_llm(original_model=original)
         assert isinstance(cloned, FakeBaseModel)
 
     @pytest.mark.skipif(
         not HAS_LLM_DEPENDENCIES, reason="LLM deps required for clone_llm"
     )
-    def test_clone_llm_dummy_evolvable(self):
-        """clone_llm with DummyEvolvable unwraps and clones."""
-        from peft import LoraConfig, get_peft_model
-        from transformers import AutoModelForCausalLM, GPT2Config
-
-        # DummyEvolvable wraps a PeftModel (which has .model); use LoRA to create one.
-        # Construct GPT2Config directly to avoid an HF Hub download for gpt2/config.json.
-        config = GPT2Config(vocab_size=100, n_positions=64)
-        base = AutoModelForCausalLM.from_config(config)
-        lora_config = LoraConfig(r=2, lora_alpha=4, target_modules=["c_proj"])
-        peft_model = get_peft_model(base, lora_config)
-        dummy = DummyEvolvable(device="cpu", module=peft_model)
-
-        with patch("agilerl.utils.algo_utils.gather_if_zero3") as mock_gather:
-            mock_gather.return_value.__enter__ = MagicMock(return_value=None)
-            mock_gather.return_value.__exit__ = MagicMock(return_value=False)
-            result = clone_llm(dummy, 0)
-        assert result is not None
-        mock_gather.assert_called_once()
-
-    @pytest.mark.skipif(
-        not HAS_LLM_DEPENDENCIES, reason="LLM deps required for clone_llm"
-    )
     def test_clone_llm_invalid_type_raises(self):
-        """clone_llm raises ValueError for invalid type."""
+        """clone_llm raises ValueError for invalid type (including wrapper modules)."""
         with pytest.raises(ValueError, match="Invalid 'original_model' type"):
-            clone_llm("invalid_model", 0)
-
-
-class TestDummyOptimizer:
-    def test_zero_grad_raises_runtime_error(self):
-        opt = algo_utils.DummyOptimizer([torch.nn.Parameter(torch.tensor([1.0]))])
-        with pytest.raises(RuntimeError, match="DummyOptimizer is a placeholder"):
-            opt.zero_grad()
-
-    def test_state_dict_raises_runtime_error(self):
-        opt = algo_utils.DummyOptimizer([torch.nn.Parameter(torch.tensor([1.0]))])
-        with pytest.raises(RuntimeError, match="DummyOptimizer is a placeholder"):
-            opt.state_dict()
-
-    def test_dummy_optimizer_step_raises(self):
-        """DummyOptimizer.step raises RuntimeError."""
-        opt = DummyOptimizer([])
-        with pytest.raises(RuntimeError, match="DummyOptimizer"):
-            opt.step()
-
-    def test_dummy_optimizer_load_state_dict_raises(self):
-        """DummyOptimizer.load_state_dict raises RuntimeError."""
-        opt = DummyOptimizer([])
-        with pytest.raises(RuntimeError, match="DummyOptimizer"):
-            opt.load_state_dict({})
+            clone_llm("invalid_model")
+        with pytest.raises(ValueError, match="Invalid 'original_model' type"):
+            clone_llm(torch.nn.Linear(2, 2))
 
 
 class TestResolveLr:

@@ -7,10 +7,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-pytest.importorskip("deepspeed", reason="LLM tests require deepspeed.")
 pytest.importorskip("vllm", reason="LLM tests require vllm.")
 
-from accelerate.state import AcceleratorState
 from peft import LoraConfig
 from torch import nn
 from transformers.configuration_utils import PretrainedConfig
@@ -22,26 +20,12 @@ from agilerl.algorithms.core import ActionResult
 from agilerl.algorithms.reinforce_llm import REINFORCE
 from agilerl.llm_envs import RolloutEnv
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig
+from agilerl.utils.distributed import FSDPConfig
 from tests import TINY_LLM_FIXTURE_PATH
 from tests.utils import (
     assert_vllm_get_action_contract,
     make_mock_vllm_instance,
 )
-
-deepspeed_base_config = {
-    "bf16": {
-        "enabled": True,
-    },
-    "auto_cast": True,
-    "gradient_clipping": 0.5,
-    "gradient_accumulation_steps": 1,
-}
-
-deepspeed_config_stage_2 = deepspeed_base_config | {
-    "zero_optimization": {
-        "stage": 2,
-    },
-}
 
 
 class DummyConfig(PretrainedConfig):
@@ -161,7 +145,7 @@ def create_dummy_actor(input_size, max_tokens, vocab_size, device):
 
 
 def _cpu_llmreinforce(**kwargs):
-    """Small CPU REINFORCE for fast unit tests (PEFT dummy actor, no accelerator)."""
+    """Small CPU REINFORCE for fast unit tests (PEFT dummy actor, single device)."""
     device = "cpu"
     vocab_size = 100
     input_size = 10
@@ -182,7 +166,6 @@ def _cpu_llmreinforce(**kwargs):
         "micro_batch_size_per_gpu": 2,
         "max_output_tokens": max_tokens,
         "max_model_len": input_size + max_tokens + 4,
-        "accelerator": None,
         "wrap": False,
         "gradient_checkpointing": False,
         "use_vllm": False,
@@ -200,10 +183,9 @@ def _cpu_llmreinforce(**kwargs):
 
 
 def generate_reinforce(
-    accelerator_factory,
+    dist_mode_factory,
     model_factory,
-    config,
-    use_deepspeed_optimizer,
+    dist_mode,
     vocab_size,
     input_size,
     max_tokens,
@@ -222,11 +204,8 @@ def generate_reinforce(
     lr_use = lr_eff if lr_eff is not None else lr
     gc.collect()
     torch.cuda.empty_cache()
-    AcceleratorState._reset_state(True)
 
-    accelerator = accelerator_factory(use_deepspeed_optimizer, config)
-    if not use_deepspeed_optimizer and accelerator is not None:
-        accelerator.state.deepspeed_plugin.deepspeed_config.pop("optimizer", None)
+    dist_mode_factory(dist_mode)
 
     if use_vllm:
         lora_config = None
@@ -297,12 +276,12 @@ def generate_reinforce(
         "pad_token": "<pad>",
         "device": "cuda" if torch.cuda.is_available() else "cpu",
         "lora_config": lora_config,
+        "fsdp_config": FSDPConfig() if dist_mode == "fsdp2" else None,
         "cosine_lr_schedule_config": (
             None
-            if accelerator is not None
+            if dist_mode is not None
             else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
         ),
-        "accelerator": accelerator,
         "use_vllm": use_vllm,
         "vllm_config": vllm_config,
         "max_output_tokens": max_tokens,
@@ -698,9 +677,14 @@ class TestREINFORCEGetAction:
     def test_llmreinforce_get_action_hf_path_handles_actor_without_parameters(self):
         rf = _cpu_llmreinforce(use_vllm=False, max_model_len=128, max_output_tokens=8)
 
+        real_actor = rf._get_unwrapped_actor()
+
         class _NoParamModule:
             def parameters(self):
                 return iter(())
+
+            def __getattr__(self, name):
+                return getattr(real_actor, name)
 
         prompts = [
             {
@@ -850,7 +834,7 @@ class TestREINFORCELearn:
 
     @pytest.mark.parametrize("use_vllm", [False, True])
     def test_llmreinforce_learns_multiturn(self, use_vllm):
-        """Multi-turn learn path updates actor adapters without vLLM/DeepSpeed."""
+        """Multi-turn learn path updates actor adapters on a single device."""
         torch.manual_seed(0)
         rf = _cpu_llmreinforce(
             lr=0.05,
@@ -965,7 +949,7 @@ class TestREINFORCELearn:
         rf.learn((completions, masks, rewards), turn_ids=turn_ids)
 
     def test_llmreinforce_wrap_true_runs_learn(self):
-        """``wrap=True`` with no accelerator still calls :meth:`wrap_models`."""
+        """``wrap=True`` on a single device still calls :meth:`wrap_models`."""
         actor = create_dummy_actor(10, 8, 100, "cpu")
         lora = LoraConfig(
             r=4,
@@ -983,7 +967,6 @@ class TestREINFORCELearn:
             micro_batch_size_per_gpu=2,
             max_output_tokens=8,
             max_model_len=32,
-            accelerator=None,
             wrap=True,
             gradient_checkpointing=False,
             use_vllm=False,

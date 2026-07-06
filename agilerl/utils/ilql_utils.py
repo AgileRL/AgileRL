@@ -1,7 +1,7 @@
 import os
 from typing import Any
 
-from accelerate import Accelerator
+from agilerl.utils.distributed import get_world_size, resolve_device
 
 
 def convert_path(path: str | None) -> str | None:
@@ -18,21 +18,19 @@ def convert_path(path: str | None) -> str | None:
     return os.path.join(os.path.dirname(os.path.realpath(__file__)), "../../", path)
 
 
-def add_system_configs(cfg: dict[str, Any], accelerator: Accelerator) -> dict[str, Any]:
+def add_system_configs(cfg: dict[str, Any]) -> dict[str, Any]:
     """Add system configurations to the configuration dictionary.
 
     :param cfg: Configuration dictionary.
     :type cfg: dict[str, Any]
-    :param accelerator: Accelerator object.
-    :type accelerator: Accelerator
 
     :return: Configuration dictionary with system configurations.
     :rtype: dict[str, Any]
     """
     cfg["system"] = {}
-    cfg["system"]["device"] = str(accelerator.device)
-    cfg["system"]["num_processes"] = accelerator.num_processes
-    cfg["system"]["use_fp16"] = accelerator.mixed_precision != "no"
+    cfg["system"]["device"] = resolve_device()
+    cfg["system"]["num_processes"] = get_world_size()
+    cfg["system"]["use_fp16"] = False
     return cfg["system"]
 
 

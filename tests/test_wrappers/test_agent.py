@@ -6,7 +6,6 @@ import dill
 import numpy as np
 import pytest
 import torch
-from accelerate import Accelerator
 from gymnasium import spaces
 from pettingzoo import ParallelEnv
 
@@ -612,11 +611,7 @@ class TestRSNormLearn:
         "observation_space",
         ["vector_space", "discrete_space", "multidiscrete_space", "dict_space"],
     )
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
-    def test_rsnorm_learn(
-        self, observation_space, vector_space, request, accelerator_flag
-    ):
-        accelerator = Accelerator() if accelerator_flag else None
+    def test_rsnorm_learn(self, observation_space, vector_space, request):
         observation_space = request.getfixturevalue(observation_space)
         action_space = vector_space
         batch_size = 4
@@ -628,7 +623,6 @@ class TestRSNormLearn:
             action_space,
             batch_size=batch_size,
             policy_freq=policy_freq,
-            accelerator=accelerator,
         )
         ddpg = RSNorm(ddpg)
 
@@ -642,7 +636,7 @@ class TestRSNormLearn:
 
         for _i in range(policy_freq * 2):
             # Create a batch of experiences & learn
-            device = accelerator.device if accelerator else "cpu"
+            device = "cpu"
             experiences = get_experiences_batch(
                 observation_space,
                 action_space,
@@ -750,7 +744,6 @@ class TestRSNormClone:
         assert clone_agent.tau == ddpg.tau
         assert clone_agent.mut == ddpg.mut
         assert clone_agent.device == ddpg.device
-        assert clone_agent.accelerator == ddpg.accelerator
         assert_state_dicts_equal(
             clone_agent.actor.state_dict(), ddpg.actor.state_dict()
         )
@@ -777,100 +770,6 @@ class TestRSNormClone:
         assert clone_agent.steps == ddpg.steps
         assert clone_agent.scores == ddpg.scores
         assert clone_agent.tensor_attribute == ddpg.tensor_attribute
-
-        accelerator = Accelerator()
-        ddpg_norm = RSNorm(
-            DDPG(
-                observation_space=observation_space,
-                action_space=action_space,
-                accelerator=accelerator,
-            ),
-        )
-        ddpg = ddpg_norm.agent
-        clone = ddpg_norm.clone()
-        clone_agent = clone.agent
-
-        assert clone_agent.observation_space == ddpg.observation_space
-        assert clone_agent.action_space == ddpg.action_space
-        assert clone_agent.batch_size == ddpg.batch_size
-        assert clone_agent.lr_actor == ddpg.lr_actor
-        assert clone_agent.lr_critic == ddpg.lr_critic
-        assert clone_agent.learn_step == ddpg.learn_step
-        assert clone_agent.gamma == ddpg.gamma
-        assert clone_agent.tau == ddpg.tau
-        assert clone_agent.mut == ddpg.mut
-        assert clone_agent.device == ddpg.device
-        assert clone_agent.accelerator == ddpg.accelerator
-        assert_state_dicts_equal(
-            clone_agent.actor.state_dict(), ddpg.actor.state_dict()
-        )
-        assert_state_dicts_equal(
-            clone_agent.actor_target.state_dict(),
-            ddpg.actor_target.state_dict(),
-        )
-        assert_state_dicts_equal(
-            clone_agent.critic.state_dict(), ddpg.critic.state_dict()
-        )
-        assert_state_dicts_equal(
-            clone_agent.critic_target.state_dict(),
-            ddpg.critic_target.state_dict(),
-        )
-        assert_state_dicts_equal(
-            clone_agent.actor_optimizer.state_dict(),
-            ddpg.actor_optimizer.state_dict(),
-        )
-        assert_state_dicts_equal(
-            clone_agent.critic_optimizer.state_dict(),
-            ddpg.critic_optimizer.state_dict(),
-        )
-        assert clone_agent.fitness == ddpg.fitness
-        assert clone_agent.steps == ddpg.steps
-        assert clone_agent.scores == ddpg.scores
-
-        accelerator = Accelerator()
-        ddpg_norm = RSNorm(
-            DDPG(observation_space, action_space, accelerator=accelerator, wrap=False),
-        )
-        ddpg = ddpg_norm.agent
-        clone = ddpg_norm.clone(wrap=False)
-        clone_agent = clone.agent
-
-        assert clone_agent.observation_space == ddpg.observation_space
-        assert clone_agent.action_space == ddpg.action_space
-        assert clone_agent.batch_size == ddpg.batch_size
-        assert clone_agent.lr_actor == ddpg.lr_actor
-        assert clone_agent.lr_critic == ddpg.lr_critic
-        assert clone_agent.learn_step == ddpg.learn_step
-        assert clone_agent.gamma == ddpg.gamma
-        assert clone_agent.tau == ddpg.tau
-        assert clone_agent.mut == ddpg.mut
-        assert clone_agent.device == ddpg.device
-        assert clone_agent.accelerator == ddpg.accelerator
-        assert_state_dicts_equal(
-            clone_agent.actor.state_dict(), ddpg.actor.state_dict()
-        )
-        assert_state_dicts_equal(
-            clone_agent.actor_target.state_dict(),
-            ddpg.actor_target.state_dict(),
-        )
-        assert_state_dicts_equal(
-            clone_agent.critic.state_dict(), ddpg.critic.state_dict()
-        )
-        assert_state_dicts_equal(
-            clone_agent.critic_target.state_dict(),
-            ddpg.critic_target.state_dict(),
-        )
-        assert_state_dicts_equal(
-            clone_agent.actor_optimizer.state_dict(),
-            ddpg.actor_optimizer.state_dict(),
-        )
-        assert_state_dicts_equal(
-            clone_agent.critic_optimizer.state_dict(),
-            ddpg.critic_optimizer.state_dict(),
-        )
-        assert clone_agent.fitness == ddpg.fitness
-        assert clone_agent.steps == ddpg.steps
-        assert clone_agent.scores == ddpg.scores
 
     def test_rsnorm_clone_with_index(self, vector_space):
         ddpg = DDPG(vector_space, copy.deepcopy(vector_space))

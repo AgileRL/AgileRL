@@ -3,8 +3,6 @@ import copy
 import numpy as np
 import pytest
 import torch
-from accelerate import Accelerator
-from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
 from torch import nn, optim
 
@@ -108,17 +106,13 @@ class TestDDPGInit:
             ("multidiscrete_space", EvolvableMLP),
         ],
     )
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
-    def test_initialize_ddpg(
-        self, observation_space, encoder_cls, accelerator_flag, request
-    ):
-        accelerator = Accelerator() if accelerator_flag else None
+    def test_initialize_ddpg(self, observation_space, encoder_cls, request):
         action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
         observation_space = request.getfixturevalue(observation_space)
-        ddpg = DDPG(observation_space, action_space, accelerator=accelerator)
+        ddpg = DDPG(observation_space, action_space)
 
-        expected_opt_cls = AcceleratedOptimizer if accelerator else optim.Adam
-        expected_device = accelerator.device if accelerator else "cpu"
+        expected_opt_cls = optim.Adam
+        expected_device = "cpu"
         assert ddpg.observation_space == observation_space
         assert ddpg.action_space == action_space
         assert ddpg.batch_size == 64
@@ -129,7 +123,6 @@ class TestDDPGInit:
         assert ddpg.tau == 0.001
         assert ddpg.mut is None
         assert ddpg.device == expected_device
-        assert ddpg.accelerator == accelerator
         assert ddpg.index == 0
         assert ddpg.scores == []
         assert ddpg.fitness == []
@@ -196,7 +189,6 @@ class TestDDPGInit:
         assert ddpg.tau == 0.001
         assert ddpg.mut is None
         assert ddpg.device == "cpu"
-        assert ddpg.accelerator is None
         assert ddpg.index == 0
         assert ddpg.scores == []
         assert ddpg.fitness == []
@@ -229,7 +221,6 @@ class TestDDPGInit:
         assert ddpg.tau == 0.001
         assert ddpg.mut is None
         assert ddpg.device == "cpu"
-        assert ddpg.accelerator is None
         assert ddpg.index == 0
         assert ddpg.scores == []
         assert ddpg.fitness == []
@@ -315,7 +306,6 @@ class TestDDPGInit:
         assert ddpg.tau == 0.001
         assert ddpg.mut is None
         assert ddpg.device == "cpu"
-        assert ddpg.accelerator is None
         assert ddpg.index == 0
         assert ddpg.scores == []
         assert ddpg.fitness == []
@@ -343,11 +333,10 @@ class TestDDPGGetAction:
     def test_returns_expected_action_training(
         self, observation_space, request, action_dtype
     ):
-        accelerator = Accelerator()
         action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=action_dtype)
         observation_space = request.getfixturevalue(observation_space)
 
-        # Test without accelerator
+        # Test in evaluation mode
         ddpg = DDPG(observation_space, action_space)
         state = get_sample_from_space(observation_space)
 
@@ -359,8 +348,8 @@ class TestDDPGGetAction:
             assert -1 <= act <= 1
         ddpg.clean_up()
 
-        # Test with accelerator
-        ddpg = DDPG(observation_space, action_space, accelerator=accelerator)
+        # Test in training mode
+        ddpg = DDPG(observation_space, action_space)
         state = get_sample_from_space(observation_space)
         training = True
         action = ddpg.get_action(state, training)[0]
@@ -376,7 +365,6 @@ class TestDDPGGetAction:
             observation_space,
             action_space,
             O_U_noise=False,
-            accelerator=accelerator,
         )
         state = get_sample_from_space(observation_space)
         training = True
@@ -401,11 +389,7 @@ class TestDDPGLearn:
             "multidiscrete_space",
         ],
     )
-    @pytest.mark.parametrize("accelerator_flag", [False])
-    def test_learns_from_experiences(
-        self, observation_space, accelerator_flag, request
-    ):
-        accelerator = Accelerator() if accelerator_flag else None
+    def test_learns_from_experiences(self, observation_space, request):
         action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
         observation_space = request.getfixturevalue(observation_space)
         batch_size = 4
@@ -417,7 +401,6 @@ class TestDDPGLearn:
             action_space,
             batch_size=batch_size,
             policy_freq=policy_freq,
-            accelerator=accelerator,
         )
 
         # Copy state dict before learning - should be different to after updating weights
@@ -430,12 +413,11 @@ class TestDDPGLearn:
 
         for _i in range(policy_freq * 2):
             # Create a batch of experiences & learn
-            device = accelerator.device if accelerator else "cpu"
             experiences = get_experiences_batch(
                 observation_space,
                 action_space,
                 batch_size,
-                device,
+                "cpu",
             )
             ddpg.scores.append(0)
             actor_loss, critic_loss = ddpg.learn(experiences)
@@ -449,32 +431,6 @@ class TestDDPGLearn:
         assert critic == ddpg.critic
         assert critic_target == ddpg.critic_target
         assert_not_equal_state_dict(critic_pre_learn_sd, ddpg.critic.state_dict())
-        ddpg.clean_up()
-
-    @pytest.mark.gpu
-    def test_learns_from_experiences_accelerator_smoke(self, vector_space, request):
-        observation_space = request.getfixturevalue("vector_space")
-        action_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
-        batch_size = 4
-        policy_freq = 4
-        accelerator = Accelerator()
-        ddpg = DDPG(
-            observation_space,
-            action_space,
-            batch_size=batch_size,
-            policy_freq=policy_freq,
-            accelerator=accelerator,
-        )
-        device = accelerator.device
-        for _i in range(policy_freq):
-            experiences = get_experiences_batch(
-                observation_space,
-                action_space,
-                batch_size,
-                device,
-            )
-            ddpg.scores.append(0)
-            ddpg.learn(experiences)
         ddpg.clean_up()
 
     def test_learn_returns_none_actor_loss_when_policy_freq_not_met(self, vector_space):
@@ -503,7 +459,6 @@ class TestDDPGSoftUpdate:
         mut = None
         actor_network = None
         device = "cpu"
-        accelerator = None
         wrap = True
 
         ddpg = DDPG(
@@ -519,7 +474,6 @@ class TestDDPGSoftUpdate:
             mut=mut,
             actor_network=actor_network,
             device=device,
-            accelerator=accelerator,
             wrap=wrap,
         )
 
@@ -624,7 +578,6 @@ class TestDDPGClone:
         assert clone_agent.tau == ddpg.tau
         assert clone_agent.mut == ddpg.mut
         assert clone_agent.device == ddpg.device
-        assert clone_agent.accelerator == ddpg.accelerator
         assert_state_dicts_equal(
             clone_agent.actor.state_dict(), ddpg.actor.state_dict()
         )
@@ -651,94 +604,6 @@ class TestDDPGClone:
         assert clone_agent.steps == ddpg.steps
         assert clone_agent.scores == ddpg.scores
         assert clone_agent.tensor_attribute == ddpg.tensor_attribute
-        ddpg.clean_up()
-        clone_agent.clean_up()
-
-        accelerator = Accelerator()
-        ddpg = DDPG(observation_space, action_space, accelerator=accelerator)
-        clone_agent = ddpg.clone()
-
-        assert clone_agent.observation_space == ddpg.observation_space
-        assert clone_agent.action_space == ddpg.action_space
-        assert clone_agent.batch_size == ddpg.batch_size
-        assert clone_agent.lr_actor == ddpg.lr_actor
-        assert clone_agent.lr_critic == ddpg.lr_critic
-        assert clone_agent.learn_step == ddpg.learn_step
-        assert clone_agent.gamma == ddpg.gamma
-        assert clone_agent.tau == ddpg.tau
-        assert clone_agent.mut == ddpg.mut
-        assert clone_agent.device == ddpg.device
-        assert clone_agent.accelerator == ddpg.accelerator
-        assert_state_dicts_equal(
-            clone_agent.actor.state_dict(), ddpg.actor.state_dict()
-        )
-        assert_state_dicts_equal(
-            clone_agent.actor_target.state_dict(),
-            ddpg.actor_target.state_dict(),
-        )
-        assert_state_dicts_equal(
-            clone_agent.critic.state_dict(), ddpg.critic.state_dict()
-        )
-        assert_state_dicts_equal(
-            clone_agent.critic_target.state_dict(),
-            ddpg.critic_target.state_dict(),
-        )
-        assert_state_dicts_equal(
-            clone_agent.actor_optimizer.state_dict(),
-            ddpg.actor_optimizer.state_dict(),
-        )
-        assert_state_dicts_equal(
-            clone_agent.critic_optimizer.state_dict(),
-            ddpg.critic_optimizer.state_dict(),
-        )
-        assert clone_agent.fitness == ddpg.fitness
-        assert clone_agent.steps == ddpg.steps
-        assert clone_agent.scores == ddpg.scores
-        ddpg.clean_up()
-        clone_agent.clean_up()
-
-        accelerator = Accelerator()
-        ddpg = DDPG(
-            observation_space, action_space, accelerator=accelerator, wrap=False
-        )
-        clone_agent = ddpg.clone(wrap=False)
-
-        assert clone_agent.observation_space == ddpg.observation_space
-        assert clone_agent.action_space == ddpg.action_space
-        assert clone_agent.batch_size == ddpg.batch_size
-        assert clone_agent.lr_actor == ddpg.lr_actor
-        assert clone_agent.lr_critic == ddpg.lr_critic
-        assert clone_agent.learn_step == ddpg.learn_step
-        assert clone_agent.gamma == ddpg.gamma
-        assert clone_agent.tau == ddpg.tau
-        assert clone_agent.mut == ddpg.mut
-        assert clone_agent.device == ddpg.device
-        assert clone_agent.accelerator == ddpg.accelerator
-        assert_state_dicts_equal(
-            clone_agent.actor.state_dict(), ddpg.actor.state_dict()
-        )
-        assert_state_dicts_equal(
-            clone_agent.actor_target.state_dict(),
-            ddpg.actor_target.state_dict(),
-        )
-        assert_state_dicts_equal(
-            clone_agent.critic.state_dict(), ddpg.critic.state_dict()
-        )
-        assert_state_dicts_equal(
-            clone_agent.critic_target.state_dict(),
-            ddpg.critic_target.state_dict(),
-        )
-        assert_state_dicts_equal(
-            clone_agent.actor_optimizer.state_dict(),
-            ddpg.actor_optimizer.state_dict(),
-        )
-        assert_state_dicts_equal(
-            clone_agent.critic_optimizer.state_dict(),
-            ddpg.critic_optimizer.state_dict(),
-        )
-        assert clone_agent.fitness == ddpg.fitness
-        assert clone_agent.steps == ddpg.steps
-        assert clone_agent.scores == ddpg.scores
         ddpg.clean_up()
         clone_agent.clean_up()
 
@@ -775,7 +640,6 @@ class TestDDPGClone:
         assert clone_agent.tau == ddpg.tau
         assert clone_agent.mut == ddpg.mut
         assert clone_agent.device == ddpg.device
-        assert clone_agent.accelerator == ddpg.accelerator
         assert_state_dicts_equal(
             clone_agent.actor.state_dict(), ddpg.actor.state_dict()
         )

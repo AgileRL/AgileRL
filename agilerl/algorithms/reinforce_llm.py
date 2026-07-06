@@ -3,11 +3,11 @@ from typing import Any, Literal
 
 import numpy as np
 import torch
-from accelerate import Accelerator
 
 from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import ActionResult, LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.utils.distributed import FSDPConfig, resolve_device
 
 if HAS_LIGER_KERNEL:
     from agilerl.algorithms.core.llm_ops.fused_loss import (
@@ -116,14 +116,16 @@ class REINFORCE(LLMAlgorithm):
         own base to CPU during rollout (and bring it back for the training step)
         so the rollout engine and the trainer never both hold a base on the GPU.
         Defaults to True; inert without colocated vLLM, and disabled under
-        DeepSpeed ZeRO-3.
+        FSDP2 sharding.
     :type use_memory_efficient_params: bool
     :param lora_config: LoRA adapter configuration.
     :type lora_config: LoraConfigProtocol | None
     :param cosine_lr_schedule_config: Cosine LR schedule configuration.
     :type cosine_lr_schedule_config: CosineLRScheduleConfig | None
-    :param accelerator: HuggingFace Accelerator for distributed training.
-    :type accelerator: Accelerator | None
+    :param gradient_accumulation_steps: Micro-batches to accumulate per optimizer step, defaults to 1
+    :type gradient_accumulation_steps: int, optional
+    :param fsdp_config: FSDP2 sharding settings for distributed runs, defaults to None
+    :type fsdp_config: FSDPConfig | None, optional
     :param device: Device string.
     :type device: str
     :param wrap: Wrap models for distributed training upon creation.
@@ -258,7 +260,8 @@ class REINFORCE(LLMAlgorithm):
         hf_generate_chunk_size: int | None = None,
         lora_config: LoraConfigProtocol | None = None,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
-        accelerator: Accelerator | None = None,
+        gradient_accumulation_steps: int = 1,
+        fsdp_config: FSDPConfig | None = None,
         device: str = "cpu",
         wrap: bool = True,
         clone: bool = False,
@@ -284,9 +287,7 @@ class REINFORCE(LLMAlgorithm):
         vllm_importance_sampling_cap: float = 2.0,
     ) -> None:
 
-        device = (
-            f"cuda:{accelerator.process_index}" if accelerator is not None else device
-        )
+        device = resolve_device(device)
         super().__init__(
             index=index,
             batch_size=batch_size,
@@ -312,7 +313,8 @@ class REINFORCE(LLMAlgorithm):
             hp_config=hp_config,
             wrap=wrap,
             device=device,
-            accelerator=accelerator,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            fsdp_config=fsdp_config,
             name="LLMREINFORCE",
             gradient_checkpointing=gradient_checkpointing,
             torch_compiler=torch_compiler,

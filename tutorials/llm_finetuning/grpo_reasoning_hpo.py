@@ -1,6 +1,5 @@
 import re
 
-from accelerate import Accelerator
 from torch.utils.data import Dataset
 
 from agilerl import HAS_LLM_DEPENDENCIES
@@ -105,9 +104,6 @@ def main(init_hp, mut_p):
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
     tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
-
-    # Convert the HuggingFace dataset into a Gymnasium environment
-    accelerator = Accelerator()
 
     # Define the conversation template
     conversation_template = [
@@ -226,7 +222,6 @@ def main(init_hp, mut_p):
         INIT_HP=init_hp,
         hp_config=hp_config,
         population_size=init_hp["POP_SIZE"],
-        accelerator=accelerator,
         algo_kwargs=algo_kwargs,
     )
 
@@ -246,7 +241,6 @@ def main(init_hp, mut_p):
         rl_hp=mut_p["RL_HP_MUT"],
         mutation_sd=mut_p["MUT_SD"],
         rand_seed=mut_p["RAND_SEED"],
-        accelerator=accelerator,
     )
 
     train_llm_rollout(
@@ -262,10 +256,8 @@ def main(init_hp, mut_p):
         evo_steps=10,
         mutation=mutations,
         tournament=tournament,
-        accelerator=accelerator,
         verbose=True,
     )
-    accelerator.end_training()
 
 
 if __name__ == "__main__":

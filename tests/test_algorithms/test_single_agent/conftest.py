@@ -20,11 +20,12 @@ def reset_distributed_state():
     the environment variables that are inspected when deciding whether to
     initialise a distributed backend.
 
-    Without this, distributed LLM tests that run earlier in the session can
-    leave ``torch.distributed`` initialised and env-vars like ``WORLD_SIZE``
-    set, which can cause subsequent tests to attempt a multi-worker
-    rendezvous (hanging on macOS / Windows, or wrapping models in DDP on
-    Linux).
+    Without this, distributed LLM tests that run earlier on the same xdist
+    worker can leave ``torch.distributed`` initialised and env-vars like
+    ``WORLD_SIZE`` set, which can cause subsequent tests to attempt a
+    multi-worker rendezvous or wrap networks in DDP (e.g.
+    ``'DistributedDataParallel' object has no attribute 'encoder'``).
+    Mirrors ``tests/test_algorithms/test_multi_agent/conftest.py``.
     """
     _cleanup()
     yield

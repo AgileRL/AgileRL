@@ -3,8 +3,6 @@ import copy
 import numpy as np
 import pytest
 import torch
-from accelerate import Accelerator
-from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
 from tensordict import TensorDict
 from torch import nn, optim
@@ -65,15 +63,11 @@ class TestNeuralUCBInit:
             ("dict_space", EvolvableMultiInput),
         ],
     )
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
-    def test_initialize_bandit(
-        self, observation_space, encoder_cls, accelerator_flag, request
-    ):
-        accelerator = Accelerator() if accelerator_flag else None
+    def test_initialize_bandit(self, observation_space, encoder_cls, request):
         action_space = spaces.Discrete(2)
         observation_space = request.getfixturevalue(observation_space)
-        device = accelerator.device if accelerator else "cpu"
-        bandit = NeuralUCB(observation_space, action_space, accelerator=accelerator)
+        device = "cpu"
+        bandit = NeuralUCB(observation_space, action_space)
 
         assert bandit.observation_space == observation_space
         assert bandit.action_space == action_space
@@ -85,14 +79,12 @@ class TestNeuralUCBInit:
         assert bandit.reg == 0.000625
         assert bandit.mut is None
         assert bandit.device == device
-        assert bandit.accelerator == accelerator
         assert bandit.index == 0
         assert bandit.scores == []
         assert bandit.fitness == []
         assert bandit.steps == [0]
         assert isinstance(bandit.actor.encoder, encoder_cls)
-        expected_optimizer = AcceleratedOptimizer if accelerator else optim.Adam
-        assert isinstance(bandit.optimizer.optimizer, expected_optimizer)
+        assert isinstance(bandit.optimizer.optimizer, optim.Adam)
         assert isinstance(bandit.criterion, nn.MSELoss)
         bandit.clean_up()
 
@@ -131,7 +123,6 @@ class TestNeuralUCBInit:
         assert bandit.reg == 0.000625
         assert bandit.mut is None
         assert bandit.device == "cpu"
-        assert bandit.accelerator is None
         assert bandit.index == 0
         assert bandit.scores == []
         assert bandit.fitness == []
@@ -171,7 +162,6 @@ class TestNeuralUCBInit:
         assert bandit.reg == 0.000625
         assert bandit.mut is None
         assert bandit.device == "cpu"
-        assert bandit.accelerator is None
         assert bandit.index == 0
         assert bandit.scores == []
         assert bandit.fitness == []
@@ -228,9 +218,7 @@ class TestNeuralUCBGetAction:
 
     # Returns the expected action when given a state observation and action mask.
     def test_returns_expected_action_mask(self, vector_space, discrete_space):
-        accelerator = Accelerator()
-
-        bandit = NeuralUCB(vector_space, discrete_space, accelerator=accelerator)
+        bandit = NeuralUCB(vector_space, discrete_space)
         state = np.array([1, 2, 3, 4])
 
         action_mask = np.array([0, 1])
@@ -275,15 +263,12 @@ class TestNeuralUCBGetAction:
 class TestNeuralUCBLearn:
     # learns from experiences and updates network parameters
     @pytest.mark.parametrize("observation_space", ["vector_space", "image_space"])
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     def test_learns_from_experiences(
         self,
         observation_space,
         discrete_space,
-        accelerator_flag,
         request,
     ):
-        accelerator = Accelerator() if accelerator_flag else None
         observation_space = request.getfixturevalue(observation_space)
         batch_size = 64
 
@@ -292,7 +277,6 @@ class TestNeuralUCBLearn:
             observation_space,
             discrete_space,
             batch_size=batch_size,
-            accelerator=accelerator,
         )
 
         # Create a batch of experiences
@@ -368,7 +352,6 @@ class TestNeuralUCBClone:
         assert clone_agent.gamma == bandit.gamma
         assert clone_agent.mut == bandit.mut
         assert clone_agent.device == bandit.device
-        assert clone_agent.accelerator == bandit.accelerator
         assert_state_dicts_equal(
             clone_agent.actor.state_dict(), bandit.actor.state_dict()
         )
@@ -386,37 +369,9 @@ class TestNeuralUCBClone:
         bandit.clean_up()
         clone_agent.clean_up()
 
-        accelerator = Accelerator()
-        bandit = NeuralUCB(observation_space, discrete_space, accelerator=accelerator)
-        clone_agent = bandit.clone()
-
-        assert clone_agent.observation_space == bandit.observation_space
-        assert clone_agent.action_space == bandit.action_space
-        assert clone_agent.batch_size == bandit.batch_size
-        assert clone_agent.lr == bandit.lr
-        assert clone_agent.learn_step == bandit.learn_step
-        assert clone_agent.gamma == bandit.gamma
-        assert clone_agent.mut == bandit.mut
-        assert clone_agent.device == bandit.device
-        assert clone_agent.accelerator == bandit.accelerator
-        assert_state_dicts_equal(
-            clone_agent.actor.state_dict(), bandit.actor.state_dict()
-        )
-        assert_state_dicts_equal(
-            clone_agent.optimizer.state_dict(),
-            bandit.optimizer.state_dict(),
-        )
-        assert clone_agent.fitness == bandit.fitness
-        assert clone_agent.steps == bandit.steps
-        assert clone_agent.scores == bandit.scores
-        bandit.clean_up()
-        clone_agent.clean_up()
-
-        accelerator = Accelerator()
         bandit = NeuralUCB(
             observation_space,
             discrete_space,
-            accelerator=accelerator,
             wrap=False,
         )
         clone_agent = bandit.clone(wrap=False)
@@ -429,7 +384,6 @@ class TestNeuralUCBClone:
         assert clone_agent.gamma == bandit.gamma
         assert clone_agent.mut == bandit.mut
         assert clone_agent.device == bandit.device
-        assert clone_agent.accelerator == bandit.accelerator
         assert_state_dicts_equal(
             clone_agent.actor.state_dict(), bandit.actor.state_dict()
         )
@@ -470,7 +424,6 @@ class TestNeuralUCBClone:
         assert clone_agent.gamma == bandit.gamma
         assert clone_agent.mut == bandit.mut
         assert clone_agent.device == bandit.device
-        assert clone_agent.accelerator == bandit.accelerator
         assert_state_dicts_equal(
             clone_agent.actor.state_dict(), bandit.actor.state_dict()
         )
@@ -516,7 +469,6 @@ class TestNeuralUCBClone:
         assert clone_agent.gamma == bandit.gamma
         assert clone_agent.mut == bandit.mut
         assert clone_agent.device == bandit.device
-        assert clone_agent.accelerator == bandit.accelerator
         assert_state_dicts_equal(
             clone_agent.actor.state_dict(), bandit.actor.state_dict()
         )

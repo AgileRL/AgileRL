@@ -222,7 +222,6 @@ def build_population(
             net_config=None,
             INIT_HP=init_hp_single,
             population_size=1,
-            accelerator=None,
             tokenizer=tokenizer,
             model_name=None,
             actor_network=build_tiny_actor_network(use_value_head=(algo == "LLMPPO")),
@@ -307,7 +306,6 @@ def run_preference_case(
         evo_steps=evo_steps,
         tournament=tournament,
         mutation=mutation,
-        accelerator=None,
         checkpoint_steps=args.checkpoint_steps,
     )
 
@@ -359,7 +357,6 @@ def run_multiturn_case(
         tournament=tournament,
         mutation=mutation,
         checkpoint_steps=args.checkpoint_steps,
-        accelerator=None,
     )
 
 

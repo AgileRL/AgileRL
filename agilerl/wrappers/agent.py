@@ -123,7 +123,8 @@ class AgentWrapper(ABC, Generic[AgentType]):
 
         :param index: Index of the agent in a population, defaults to None
         :type index: int | None, optional
-        :param wrap: If True, wrap the models in the clone with the accelerator, defaults to False
+        :param wrap: Retained for API compatibility; cloning prepares the
+            model the same way regardless, defaults to True
         :type wrap: bool, optional
 
         :return: Cloned agent wrapper

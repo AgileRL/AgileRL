@@ -13,7 +13,6 @@ from typing import (
 import gymnasium as gym
 import numpy as np
 import torch
-from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
 from pettingzoo import ParallelEnv
 from tensordict import TensorDict
@@ -137,7 +136,7 @@ EvolvableNetworkType = (
     EvolvableModuleProtocol | ModuleDictProtocol[EvolvableModuleProtocol]
 )
 DeviceType = str | torch.device
-OptimizerType = Optimizer | AcceleratedOptimizer
+OptimizerType = Optimizer
 
 SingleAgentMutReturnType = dict[str, Any]
 MultiAgentMutReturnType = dict[str, dict[str, Any]]

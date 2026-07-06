@@ -70,9 +70,7 @@ class RainbowDQN(RLAlgorithm):
     :type actor_network: nn.Module, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
-    :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
-    :param wrap: Wrap models for distributed training upon creation, defaults to True
+    :param wrap: Retained for API compatibility; has no effect, defaults to True
     :type wrap: bool, optional
     """
 
@@ -100,7 +98,6 @@ class RainbowDQN(RLAlgorithm):
         combined_reward: bool = False,
         actor_network: EvolvableModule | None = None,
         device: str = "cpu",
-        accelerator: Any | None = None,
         wrap: bool = True,
     ) -> None:
         super().__init__(
@@ -109,7 +106,6 @@ class RainbowDQN(RLAlgorithm):
             index=index,
             hp_config=hp_config,
             device=device,
-            accelerator=accelerator,
             normalize_images=normalize_images,
             name="Rainbow DQN",
         )
@@ -221,9 +217,6 @@ class RainbowDQN(RLAlgorithm):
 
         # Optimizer
         self.optimizer = OptimizerWrapper(optim.Adam, networks=self.actor, lr=self.lr)
-
-        if self.accelerator is not None and wrap:
-            self.wrap_models()
 
         # Put the nets into training mode
         self.actor.train()
@@ -473,11 +466,7 @@ class RainbowDQN(RLAlgorithm):
             loss = torch.mean(elementwise_loss)
 
         self.optimizer.zero_grad()
-        if self.accelerator is not None:
-            self.accelerator.backward(loss)
-        else:
-            loss.backward()
-
+        loss.backward()
         clip_grad_norm_(self.actor.parameters(), 10.0)
         self.optimizer.step()
 

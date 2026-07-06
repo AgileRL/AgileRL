@@ -2,7 +2,8 @@ import numpy as np
 import pytest
 import torch
 
-pytest.importorskip("deepspeed", reason="LLM tests require deepspeed.")
+pytest.importorskip("transformers", reason="LLM tests require transformers.")
+pytest.importorskip("peft", reason="LLM tests require peft.")
 pytest.importorskip("vllm", reason="LLM tests require vllm.")
 
 from agilerl.algorithms.core import ActionResult

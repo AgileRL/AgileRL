@@ -5,7 +5,6 @@ from typing import Any
 import numpy as np
 import torch
 import torch.nn.functional as F
-from accelerate import Accelerator
 from torch import nn
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
@@ -62,8 +61,6 @@ class MakeEvolvable(EvolvableModule):
     :type rainbow: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
-    :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
     """
 
     warnings.warn(
@@ -98,7 +95,6 @@ class MakeEvolvable(EvolvableModule):
         support: torch.Tensor | None = None,
         rainbow: bool = False,
         device: str = "cpu",
-        accelerator: Accelerator | None = None,
         **kwargs: dict,
     ) -> None:
         super().__init__(device)
@@ -131,7 +127,6 @@ class MakeEvolvable(EvolvableModule):
         self.max_channel_size = max_channel_size
         self.output_vanish = output_vanish
         self.device = device
-        self.accelerator = accelerator
 
         #### Rainbow attributes
         self.rainbow = rainbow  #### add in as a doc string
@@ -246,8 +241,7 @@ class MakeEvolvable(EvolvableModule):
         if not isinstance(x, torch.Tensor):
             x = torch.FloatTensor(np.array(x))
 
-        if self.accelerator is None:
-            x = x.to(self.device)
+        x = x.to(self.device)
 
         if x.dtype != torch.float32:
             x = x.type(torch.float32)
@@ -264,8 +258,7 @@ class MakeEvolvable(EvolvableModule):
 
             # Concatenate actions if passed to network as a separate tensor
             if xc is not None:
-                if self.accelerator is None:
-                    xc = xc.to(self.device)
+                xc = xc.to(self.device)
                 x = torch.cat([x, xc], dim=1)
 
             value = self.value_net(x)
@@ -807,16 +800,13 @@ class MakeEvolvable(EvolvableModule):
                     mlp_output_activation=self.mlp_output_activation,
                 )
 
-        if self.accelerator is None:
-            feature_net = feature_net.to(self.device)
-            value_net = (
-                value_net.to(self.device) if value_net is not None else value_net
-            )
-            advantage_net = (
-                advantage_net.to(self.device)
-                if advantage_net is not None
-                else advantage_net
-            )
+        feature_net = feature_net.to(self.device)
+        value_net = value_net.to(self.device) if value_net is not None else value_net
+        advantage_net = (
+            advantage_net.to(self.device)
+            if advantage_net is not None
+            else advantage_net
+        )
         return feature_net, value_net, advantage_net
 
     def get_init_dict(self) -> dict[str, Any]:
@@ -831,7 +821,6 @@ class MakeEvolvable(EvolvableModule):
             "mlp_activation": self.mlp_activation,
             "mlp_output_activation": self.mlp_output_activation,
             "device": self.device,
-            "accelerator": self.accelerator,
             "in_channels": self.in_channels,
             "channel_size": self.channel_size,
             "kernel_size": self.kernel_size,

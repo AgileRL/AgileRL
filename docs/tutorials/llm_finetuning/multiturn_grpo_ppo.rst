@@ -116,7 +116,6 @@ Dependencies
     from transformers import AutoTokenizer
     from agilerl.training.train_llm import train_llm_rollout
     from agilerl.utils.algo_utils import VLLMConfig
-    from agilerl.utils.llm_utils import create_llm_accelerator
     from agilerl.utils.utils import create_population
     from agilerl.llm_envs import RolloutEnv
 
@@ -159,7 +158,6 @@ All runs use:
                 max_output_tokens=INIT_HP.get("MAX_OUTPUT_TOKENS"),
             )
 
-        accelerator = create_llm_accelerator()
         vllm_config = VLLMConfig(
             tensor_parallel_size=1,
             gpu_memory_utilization=0.85,
@@ -288,7 +286,6 @@ The key training call is the same for both algorithms. Evolutionary fields are e
         evaluation_interval=10,
         max_reward=1.0,
         verbose=True,
-        accelerator=accelerator,
     )
 
 Full training code

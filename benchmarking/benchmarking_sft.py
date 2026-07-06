@@ -6,11 +6,11 @@ use the demo script instead::
 
     python demos/llm/demo_llm_finetuning.py sft --help
 
-To run (single GPU, no accelerate):
+To run (single GPU):
     python benchmarking/benchmarking_sft.py
 
-To run with accelerate (multi-GPU / DeepSpeed):
-    accelerate launch benchmarking/benchmarking_sft.py
+To run multi-GPU (torch-native distributed):
+    torchrun --nproc_per_node N benchmarking/benchmarking_sft.py
 """
 
 from agilerl import HAS_LLM_DEPENDENCIES
@@ -25,7 +25,6 @@ if not HAS_LLM_DEPENDENCIES:
 from datetime import datetime
 
 import yaml
-from accelerate import Accelerator
 from datasets import load_dataset
 from peft import LoraConfig
 from torch.utils.data import Dataset
@@ -69,13 +68,6 @@ def main(init_hp: dict, mut_p: dict, save_path: str = "outputs") -> None:
     tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
 
-    try:
-        accelerator = Accelerator()
-        if accelerator.state.deepspeed_plugin is None:
-            accelerator = None
-    except Exception:
-        accelerator = None
-
     print("Setting up SFT DatasetEnv environment...")
     env = DatasetEnv(
         train_dataset=train_dataset,
@@ -84,7 +76,6 @@ def main(init_hp: dict, mut_p: dict, save_path: str = "outputs") -> None:
         objective="sft",
         response_column="chosen",
         data_batch_size_per_gpu=init_hp["BATCH_SIZE"],
-        accelerator=accelerator,
         max_context_length=init_hp.get("MAX_CONTEXT_LENGTH"),
     )
 
@@ -103,8 +94,6 @@ def main(init_hp: dict, mut_p: dict, save_path: str = "outputs") -> None:
             lr=init_hp["LR"],
             update_epochs=init_hp["UPDATE_EPOCHS"],
             lora_config=lora_config,
-            accelerator=accelerator,
-            gradient_checkpointing=accelerator is not None,
             use_liger_loss=init_hp.get("USE_LIGER_LOSS", False),
         )
         for _ in range(init_hp["POP_SIZE"])
@@ -127,7 +116,6 @@ def main(init_hp: dict, mut_p: dict, save_path: str = "outputs") -> None:
             rl_hp=mut_p["RL_HP_MUT"],
             mutation_sd=mut_p["MUT_SD"],
             rand_seed=mut_p["RAND_SEED"],
-            accelerator=accelerator,
         )
     else:
         tournament = None
@@ -152,7 +140,6 @@ def main(init_hp: dict, mut_p: dict, save_path: str = "outputs") -> None:
         wandb_entity=init_hp.get("WANDB_ENTITY"),
         wandb_run_name=init_hp.get("WANDB_RUN_NAME"),
         evaluation_interval=init_hp.get("EVALUATION_INTERVAL", 200),
-        accelerator=accelerator,
         max_steps=max_steps,
     )
 

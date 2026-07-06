@@ -10,7 +10,6 @@ from torch.optim import Optimizer
 
 from agilerl.protocols import EvolvableAlgorithmProtocol
 from agilerl.typing import NetworkType
-from agilerl.utils.algo_utils import DummyOptimizer
 
 
 @dataclass
@@ -95,7 +94,6 @@ class OptimizerConfig:
             "ASGD": torch.optim.ASGD,
             "LBFGS": torch.optim.LBFGS,
             "Rprop": torch.optim.Rprop,
-            "DummyOptimizer": DummyOptimizer,
         }
         if isinstance(self.optimizer_cls, dict):
             return {

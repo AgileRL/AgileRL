@@ -1,12 +1,11 @@
 import copy
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock, Mock, call, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import gymnasium as gym
 import numpy as np
 import pytest
 import torch
-from accelerate import Accelerator, DeepSpeedPlugin
 from gymnasium import spaces
 from peft import LoraConfig
 
@@ -163,14 +162,15 @@ def test_suppress_verbose_logging():
 
 
 class TestDefaultProgressBar:
-    def test_no_accelerator(self):
-        bar = default_progress_bar(10, accelerator=None)
+    def test_returns_bar(self):
+        bar = default_progress_bar(10)
         assert bar.total == 10
+        assert not bar.disable
 
-    def test_with_accelerator(self):
-        acc = Accelerator()
-        bar = default_progress_bar(10, accelerator=acc)
-        assert bar.total == 10
+    def test_disabled_on_non_main_rank(self):
+        with patch("agilerl.utils.utils.is_main_process", return_value=False):
+            bar = default_progress_bar(10)
+        assert bar.disable
 
 
 class TestGetEnvDefinedActions:
@@ -189,7 +189,7 @@ def test_batch_dimension_repr():
 
 
 class TestSavePopulationCheckpoint:
-    def test_no_accelerator(self, tmp_path):
+    def test_overwrite_checkpoints(self, tmp_path):
         pop = [
             MagicMock(spec=EvolvableAlgorithm),
             MagicMock(spec=EvolvableAlgorithm),
@@ -199,28 +199,18 @@ class TestSavePopulationCheckpoint:
             agent.save_checkpoint = MagicMock()
         save_path = str(tmp_path / "ckpt")
         save_population_checkpoint(pop, save_path, overwrite_checkpoints=True)
-        assert pop[0].save_checkpoint.called
-        assert pop[1].save_checkpoint.called
+        pop[0].save_checkpoint.assert_called_once_with(f"{save_path}_0.pt")
+        pop[1].save_checkpoint.assert_called_once_with(f"{save_path}_1.pt")
 
-    def test_with_accelerator(self, tmp_path):
+    def test_no_overwrite_appends_steps(self, tmp_path):
         pop = [MagicMock(spec=EvolvableAlgorithm), MagicMock(spec=EvolvableAlgorithm)]
         for agent in pop:
             agent.steps = [100, 200]
             agent.save_checkpoint = MagicMock()
-            agent.unwrap_models = MagicMock()
-            agent.wrap_models = MagicMock()
-        accel = MagicMock(spec=Accelerator)
-        accel.wait_for_everyone = MagicMock()
-        accel.is_main_process = True
         save_path = str(tmp_path / "ckpt")
-        save_population_checkpoint(
-            pop, save_path, overwrite_checkpoints=True, accelerator=accel
-        )
-        assert accel.wait_for_everyone.call_count >= 3
-        for agent in pop:
-            agent.unwrap_models.assert_called()
-            agent.wrap_models.assert_called()
-            agent.save_checkpoint.assert_called_once()
+        save_population_checkpoint(pop, save_path, overwrite_checkpoints=False)
+        pop[0].save_checkpoint.assert_called_once_with(f"{save_path}_0_200.pt")
+        pop[1].save_checkpoint.assert_called_once_with(f"{save_path}_1_200.pt")
 
 
 # Returns an AsyncVectorEnv object when given a valid environment name and number of environments
@@ -258,7 +248,6 @@ class TestCreatePopulation:
         net_config = {"encoder_config": {"hidden_size": [8, 8]}}
         population_size = 4
         device = "cpu"
-        accelerator = None
 
         algo_classes = {
             "DQN": DQN,
@@ -283,7 +272,6 @@ class TestCreatePopulation:
                 INIT_HP=SHARED_INIT_HP,
                 population_size=population_size,
                 device=device,
-                accelerator=accelerator,
             )
             assert len(population) == population_size
             for agent in population:
@@ -291,7 +279,6 @@ class TestCreatePopulation:
                 assert agent.observation_space == observation_space
                 assert agent.action_space == action_space
                 assert agent.device == "cpu"
-                assert agent.accelerator is None
 
     # Can create a population of agent for bandit algorithms
     def test_initial_population_bandits(self):
@@ -321,7 +308,6 @@ class TestCreatePopulation:
         net_config = {"encoder_config": {"hidden_size": [8], "min_mlp_nodes": 2}}
         population_size = 4
         device = "cpu"
-        accelerator = None
 
         algo_classes = {
             "MADDPG": MADDPG,
@@ -338,7 +324,6 @@ class TestCreatePopulation:
                 INIT_HP=SHARED_INIT_HP,
                 population_size=population_size,
                 device=device,
-                accelerator=accelerator,
             )
             assert len(population) == population_size
             for agent in population:
@@ -346,7 +331,6 @@ class TestCreatePopulation:
                 assert agent.observation_spaces == observation_space
                 assert agent.action_spaces == action_space
                 assert agent.device == "cpu"
-                assert agent.accelerator is None
 
     @pytest.mark.skipif(
         not HAS_LLM_DEPENDENCIES,
@@ -398,7 +382,6 @@ class TestCreatePopulation:
             "hp_config": None,
             "population_size": population_size,
             "device": device,
-            "accelerator": None,
             "actor_network": actor,
             "algo_kwargs": {
                 "lora_config": LoraConfig(**lora_kw),
@@ -427,7 +410,6 @@ class TestCreatePopulation:
             assert len(population) == population_size
             for agent in population:
                 assert isinstance(agent, expected_type)
-                assert agent.accelerator is None
                 assert agent.batch_size == init_hp["BATCH_SIZE"]
 
     @pytest.mark.skipif(
@@ -469,7 +451,6 @@ class TestCreatePopulation:
                 hp_config=None,
                 population_size=2,
                 device="cpu",
-                accelerator=None,
                 actor_network=actor,
                 vllm_config=vllm_cfg,
                 algo_kwargs={"pad_token_id": 999, "pad_token": "<pad>"},
@@ -532,7 +513,6 @@ class TestCreatePopulation:
                 hp_config=None,
                 population_size=2,
                 device="cpu",
-                accelerator=None,
                 actor_network=actor,
                 vllm_config=global_vllm_cfg,
                 torch_compiler="inductor",
@@ -555,70 +535,6 @@ class TestCreatePopulation:
         assert first_kw["torch_compiler"] == "inductor"
         assert first_kw["lr"] == init_hp["LR"]
         assert isinstance(first_kw["cosine_lr_schedule_config"], CosineLRScheduleConfig)
-
-    @pytest.mark.skipif(
-        not HAS_LLM_DEPENDENCIES,
-        reason="agilerl[llm] not installed",
-    )
-    def test_llmppo_uses_unique_per_agent_accelerators(self, vector_space):
-        init_hp = {
-            "BATCH_SIZE": 2,
-            "LR": 7e-5,
-            "BETA": 0.01,
-            "MAX_GRAD_NORM": 0.5,
-            "UPDATE_EPOCHS": 1,
-            "MAX_MODEL_LEN": 96,
-            "MAX_OUTPUT_TOKENS": 12,
-            "USE_VLLM": False,
-            "GRADIENT_CHECKPOINTING": False,
-        }
-        actor = MagicMock(name="actor_network")
-        actor.state_dict.return_value = {"w": torch.tensor([1.0])}
-        cloned_actor = MagicMock(name="cloned_actor")
-        a0 = MagicMock(name="ppo_agent_0")
-        a1 = MagicMock(name="ppo_agent_1")
-        base_accelerator = MagicMock(name="base_accelerator")
-        acc0 = MagicMock(name="agent_accel_0")
-        acc1 = MagicMock(name="agent_accel_1")
-
-        with (
-            patch("agilerl.utils.utils.clone_llm", return_value=cloned_actor),
-            patch(
-                "agilerl.utils.utils.get_state_dict",
-                return_value={"w": torch.tensor([1.0])},
-            ),
-            patch(
-                "agilerl.utils.utils.get_llm_accelerator", side_effect=[acc0, acc1]
-            ) as mock_get_accel,
-            patch("agilerl.utils.utils.LLMPPO", side_effect=[a0, a1]) as mock_llmppo,
-        ):
-            population = create_population(
-                algo="LLMPPO",
-                observation_space=vector_space,
-                action_space=copy.deepcopy(vector_space),
-                net_config=None,
-                INIT_HP=init_hp,
-                hp_config=None,
-                population_size=2,
-                device="cpu",
-                accelerator=base_accelerator,
-                actor_network=actor,
-                algo_kwargs={
-                    "pad_token_id": 999,
-                    "pad_token": "<pad>",
-                    "use_vllm": False,
-                },
-            )
-
-        assert population == [a0, a1]
-        assert mock_get_accel.call_args_list == [
-            call(base_accelerator, 0),
-            call(base_accelerator, 1),
-        ]
-        first_kw = mock_llmppo.call_args_list[0].kwargs
-        second_kw = mock_llmppo.call_args_list[1].kwargs
-        assert first_kw["accelerator"] is acc0
-        assert second_kw["accelerator"] is acc1
 
     @pytest.mark.skipif(
         not HAS_LLM_DEPENDENCIES,
@@ -665,7 +581,6 @@ class TestCreatePopulation:
                 hp_config=None,
                 population_size=1,
                 device="cpu",
-                accelerator=None,
                 actor_network=actor,
                 algo_kwargs={
                     "pad_token_id": 999,
@@ -842,7 +757,6 @@ class TestPrintHyperparams:
         net_config = {"encoder_config": {"hidden_size": [8]}}
         population_size = 1
         device = "cpu"
-        accelerator = None
         algo = "DQN"
 
         pop = create_population(
@@ -853,7 +767,6 @@ class TestPrintHyperparams:
             INIT_HP=SHARED_INIT_HP,
             population_size=population_size,
             device=device,
-            accelerator=accelerator,
         )
 
         # Manually set attributes
@@ -899,23 +812,11 @@ def test_plot_population_score_all_agents(mock_plt):
 
 
 class TestSaveLlmCheckpoint:
-    def test_save_with_accelerator(self, tmp_path):
-        """Test saving checkpoint when agent has an accelerator."""
-        agent = Mock()
-        agent.actor = Mock()
-        agent.accelerator = Mock()
-        agent.accelerator.wait_for_everyone = Mock()
-        agent.algo = "grpo"
-        save_llm_checkpoint(agent, str(tmp_path))
-        agent.save_checkpoint.assert_called_once_with(str(tmp_path))
-        agent.accelerator.wait_for_everyone.assert_called()
-
-    def test_save_without_accelerator(self, tmp_path):
-        """Test saving checkpoint when agent has no accelerator."""
+    def test_save(self, tmp_path):
+        """Test saving checkpoint delegates to the agent."""
         agent = Mock()
         agent.actor = Mock()
         agent.algo = "grpo"
-        agent.accelerator = None
         save_llm_checkpoint(agent, str(tmp_path))
         agent.save_checkpoint.assert_called_once_with(str(tmp_path))
 
@@ -923,10 +824,20 @@ class TestSaveLlmCheckpoint:
         agent = Mock()
         agent.actor = Mock()
         agent.algo = "grpo"
-        agent.accelerator = None
         path = str(tmp_path / "my_ckpt")
         save_llm_checkpoint(agent, path)
         agent.save_checkpoint.assert_called_once_with(path)
+        # The checkpoint directory is created before saving.
+        assert (tmp_path / "my_ckpt").is_dir()
+
+    def test_default_path_when_none(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        agent = Mock()
+        agent.actor = Mock()
+        agent.algo = "grpo"
+        save_llm_checkpoint(agent, None)
+        agent.save_checkpoint.assert_called_once_with("./saved_checkpoints")
+        assert (tmp_path / "saved_checkpoints").is_dir()
 
 
 class TestInitWandb:
@@ -951,15 +862,15 @@ class TestInitWandb:
             with pytest.warns(UserWarning, match="API key"):
                 init_wandb(algo="DQN", env_name="CartPole-v1")
 
-    def test_with_accelerator_main_process(self):
-        with patch("agilerl.utils.utils.wandb") as mock_wandb:
+    def test_non_main_rank_skips_init(self):
+        """Only rank 0 initializes wandb in distributed runs."""
+        with (
+            patch("agilerl.utils.utils.wandb") as mock_wandb,
+            patch("agilerl.utils.utils.is_main_process", return_value=False),
+        ):
             mock_wandb.api = MagicMock()
-            mock_accel = MagicMock(spec=Accelerator)
-            mock_accel.is_main_process = True
-            mock_accel.wait_for_everyone = Mock()
-            init_wandb(algo="DQN", env_name="CartPole-v1", accelerator=mock_accel)
-            mock_accel.wait_for_everyone.assert_called()
-            mock_wandb.init.assert_called_once()
+            init_wandb(algo="DQN", env_name="CartPole-v1")
+            mock_wandb.init.assert_not_called()
 
     def test_with_api_key(self):
         class NoApiWandb:
@@ -982,7 +893,7 @@ class TestInitWandb:
 
 
 class TestTournamentSelectionAndMutation:
-    def test_no_accelerator(self):
+    def test_select_and_mutate(self):
         population = [MagicMock(spec=EvolvableAlgorithm) for _ in range(3)]
         for agent in population:
             agent.steps = [100]
@@ -996,35 +907,6 @@ class TestTournamentSelectionAndMutation:
         tournament.select.assert_called_once()
         mutation.mutation.assert_called_once()
         assert len(result) == 3
-
-    def test_worker_loads_checkpoint(self):
-        """Worker process loads checkpoints saved by main process."""
-        population = [MagicMock(spec=EvolvableAlgorithm) for _ in range(2)]
-        for agent in population:
-            agent.steps = [100]
-            agent.load_checkpoint = Mock()
-            agent.unwrap_models = Mock()
-            agent.wrap_models = Mock()
-        tournament = MagicMock(spec=TournamentSelection)
-        tournament.select = Mock(return_value=(population[0], population))
-        mutation = MagicMock(spec=Mutations)
-        mutation.mutation = Mock(return_value=population)
-        accel = MagicMock(spec=Accelerator)
-        accel.wait_for_everyone = Mock()
-        accel.is_main_process = False
-
-        with patch("agilerl.utils.utils.Path") as mock_path:
-            mock_path.return_value.mkdir = Mock()
-            tournament_selection_and_mutation(
-                population,
-                tournament,
-                mutation,
-                "CartPole-v1",
-                algo="DQN",
-                accelerator=accel,
-            )
-        for agent in population:
-            agent.load_checkpoint.assert_called()
 
     def test_save_elite_with_path(self):
         population = [MagicMock(spec=EvolvableAlgorithm) for _ in range(2)]
@@ -1054,7 +936,6 @@ class TestTournamentSelectionAndMutation:
             agent.lr = 0.01
             agent.optimizer = Mock()
             agent.optimizer.param_groups = [{"lr": 0.01}]
-            agent.accelerator = MagicMock(spec=Accelerator)
             agent.actor = MagicMock()
             agent.actor.save_checkpoint = Mock()
         tournament = MagicMock(spec=TournamentSelection)
@@ -1062,13 +943,7 @@ class TestTournamentSelectionAndMutation:
         mutation.mutation = Mock(return_value=population)
         tournament.select = Mock(return_value=(population[0], population))
         env_name = "CartPole-v1"
-        algo = None
         elite_path = None
-        save_elite = True
-        language_model = True
-        accelerator = MagicMock(spec=Accelerator)
-        accelerator.is_main_process = True
-        accelerator.wait_for_everyone = Mock()
 
         with (
             patch(
@@ -1078,135 +953,193 @@ class TestTournamentSelectionAndMutation:
                 "agilerl.utils.utils.consolidate_mutations"
             ) as mock_consolidate_mutations,
         ):
-            output_pop = tournament_selection_and_mutation(
+            tournament_selection_and_mutation(
                 population,
                 tournament,
                 mutation,
                 env_name,
-                algo,
-                elite_path,
-                save_elite,
-                accelerator,
-                language_model,
+                algo=None,
+                elite_path=elite_path,
+                save_elite=True,
+                language_model=True,
             )
             mock_save_llm_checkpoint.assert_called_once_with(population[0], elite_path)
-            mock_consolidate_mutations.assert_called_once_with(output_pop)
+            # Single device: no cross-rank consolidation is required.
+            mock_consolidate_mutations.assert_not_called()
 
         tournament.select.assert_called_once_with(population)
         mutation.mutation.assert_called_once_with(population)
-        accelerator.wait_for_everyone.assert_called()
+
+    def test_language_model_distributed_consolidates_mutations(self):
+        """In distributed runs, mutations are consolidated across ranks."""
+        population = [MagicMock(spec=LLMAlgorithm) for _ in range(2)]
+        tournament = MagicMock(spec=TournamentSelection)
+        tournament.select = Mock(return_value=(population[0], population))
+        mutation = MagicMock(spec=Mutations)
+        mutation.mutation = Mock(return_value=population)
+
+        with (
+            patch("agilerl.utils.utils.is_distributed", return_value=True),
+            patch("agilerl.utils.utils.barrier") as mock_barrier,
+            patch(
+                "agilerl.utils.utils.consolidate_mutations"
+            ) as mock_consolidate_mutations,
+        ):
+            output_pop = tournament_selection_and_mutation(
+                population,
+                tournament,
+                mutation,
+                "CartPole-v1",
+                language_model=True,
+            )
+        mock_consolidate_mutations.assert_called_once_with(output_pop)
+        assert mock_barrier.call_count == 2
+
+    def test_language_model_non_main_rank_skips_mutation(self):
+        """Only rank 0 mutates; other ranks receive mutations via consolidation."""
+        population = [MagicMock(spec=LLMAlgorithm) for _ in range(2)]
+        tournament = MagicMock(spec=TournamentSelection)
+        tournament.select = Mock(return_value=(population[0], population))
+        mutation = MagicMock(spec=Mutations)
+        mutation.mutation = Mock(return_value=population)
+
+        with patch("agilerl.utils.utils.is_main_process", return_value=False):
+            tournament_selection_and_mutation(
+                population,
+                tournament,
+                mutation,
+                "CartPole-v1",
+                language_model=True,
+            )
+        mutation.mutation.assert_not_called()
 
 
 class TestGatherTensor:
+    def test_collective_device_cpu_without_cuda(self):
+        """The collective device falls back to CPU when CUDA is unavailable"""
+        from agilerl.utils.utils import _collective_device
+
+        with patch("torch.cuda.is_available", return_value=False):
+            assert _collective_device().type == "cpu"
+
     def test_with_tensor_input(self):
-        """Test gather_tensor with tensor input."""
-        accelerator = Accelerator()
+        """gather_tensor returns the (detached) input tensor on a single device"""
+        input_tensor = torch.tensor([1, 2, 3])
 
-        input_tensor = torch.tensor([1, 2, 3], device=accelerator.device)
-
-        gathered = gather_tensor(input_tensor, accelerator)
+        gathered = gather_tensor(input_tensor)
 
         assert isinstance(gathered, torch.Tensor)
 
         assert torch.equal(gathered, input_tensor)
 
     def test_with_non_tensor_input(self):
-        """Test gather_tensor with non-tensor input."""
-        input_list = [1, 2, 3]
-
-        accelerator = Accelerator()
-
-        gathered = gather_tensor(input_list, accelerator)
+        """gather_tensor converts scalar input to a tensor"""
+        gathered = gather_tensor(2.5)
 
         assert isinstance(gathered, torch.Tensor)
 
-        assert torch.equal(gathered, torch.tensor(input_list).to(accelerator.device))
+        assert gathered.item() == pytest.approx(2.5)
 
-    def test_device(self):
-        """Test that tensor is moved to accelerator device."""
-        input_tensor = torch.tensor([1, 2, 3])
+    def test_distributed_concatenates_across_ranks(self):
+        """gather_tensor all-gathers and concatenates in distributed runs"""
+        input_tensor = torch.tensor([1.0, 2.0])
 
-        accelerator = Accelerator()
+        def fake_all_gather(gathered, tensor):
+            for chunk in gathered:
+                chunk.copy_(tensor)
 
-        gathered = gather_tensor(input_tensor, accelerator)
+        with (
+            patch("agilerl.utils.utils.is_distributed", return_value=True),
+            patch("agilerl.utils.utils.get_world_size", return_value=2),
+            patch(
+                "agilerl.utils.utils.dist.all_gather", side_effect=fake_all_gather
+            ) as mock_all_gather,
+        ):
+            gathered = gather_tensor(input_tensor)
 
-        assert gathered.device.type == accelerator.device.type
+        mock_all_gather.assert_called_once()
+        assert torch.equal(gathered.cpu(), torch.cat([input_tensor, input_tensor]))
 
-    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-    def test_distributed(self):
-        """Test gather_tensor in distributed setting."""
-        accelerator = Accelerator()
+    def test_distributed_stacks_scalar_tensors(self):
+        """Zero-dim tensors are stacked rather than concatenated"""
 
-        rank = accelerator.process_index
-        input_tensor = torch.tensor([rank], device=accelerator.device)
+        def fake_all_gather(gathered, tensor):
+            for chunk in gathered:
+                chunk.copy_(tensor)
 
-        gathered = gather_tensor(input_tensor, accelerator)
+        with (
+            patch("agilerl.utils.utils.is_distributed", return_value=True),
+            patch("agilerl.utils.utils.get_world_size", return_value=3),
+            patch("agilerl.utils.utils.dist.all_gather", side_effect=fake_all_gather),
+        ):
+            gathered = gather_tensor(torch.tensor(5.0))
 
-        assert len(gathered) == accelerator.num_processes
-        assert torch.equal(
-            gathered,
-            torch.arange(accelerator.num_processes, device=accelerator.device),
-        )
+        assert gathered.shape == (3,)
+        assert torch.equal(gathered.cpu(), torch.tensor([5.0, 5.0, 5.0]))
 
 
 class TestAggregateMetricsAcrossGpus:
     def test_single_process(self):
-        """Test aggregate_metrics_across_gpus with single process."""
-        accelerator = Accelerator()
+        """Test aggregate_metrics_across_gpus with single process"""
+        metric_tensor = torch.tensor([1.0, 2.0, 3.0])
 
-        metric_tensor = torch.tensor([1.0, 2.0, 3.0], device=accelerator.device)
-
-        result = aggregate_metrics_across_gpus(accelerator, metric_tensor)
+        result = aggregate_metrics_across_gpus(metric_tensor)
 
         assert result == 2.0  # (1 + 2 + 3) / 3 = 2.0
         assert isinstance(result, float)
 
-    def test_with_scalar(self):
-        """Test aggregate_metrics_across_gpus with scalar input."""
-        accelerator = Accelerator()
+    def test_with_scalar_tensor(self):
+        """Test aggregate_metrics_across_gpus with scalar tensor input"""
+        metric_tensor = torch.tensor(5.0)
 
-        metric_tensor = torch.tensor(5.0, device=accelerator.device)
-
-        result = aggregate_metrics_across_gpus(accelerator, metric_tensor)
+        result = aggregate_metrics_across_gpus(metric_tensor)
 
         assert result == 5.0
         assert isinstance(result, float)
 
-    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-    def test_distributed(self):
-        """Test aggregate_metrics_across_gpus in distributed setting."""
-        accelerator = Accelerator()
+    def test_with_plain_scalar_passthrough(self):
+        """Plain scalars short-circuit and are returned unchanged"""
+        result = aggregate_metrics_across_gpus(1.5)
 
-        rank = accelerator.process_index
-        metric_tensor = torch.tensor([rank + 1.0], device=accelerator.device)
+        assert result == 1.5
 
-        result = aggregate_metrics_across_gpus(accelerator, metric_tensor)
+    def test_distributed_uses_all_reduce_mean(self):
+        """In distributed runs the local mean is averaged via all_reduce_mean"""
+        with (
+            patch("agilerl.utils.utils.is_distributed", return_value=True),
+            patch(
+                "agilerl.utils.utils.all_reduce_mean", side_effect=lambda t: t
+            ) as mock_reduce,
+        ):
+            result = aggregate_metrics_across_gpus(torch.tensor([1.0, 3.0]))
 
-        expected_mean = (
-            sum(range(1, accelerator.num_processes + 1)) / accelerator.num_processes
-        )
-        assert (
-            abs(result - expected_mean) < 1e-6
-        )  # Allow for small floating point differences
+        mock_reduce.assert_called_once()
+        assert result == pytest.approx(2.0)
+
+    def test_distributed_accepts_plain_scalars(self):
+        """Plain scalars are converted to tensors before the collective"""
+        with (
+            patch("agilerl.utils.utils.is_distributed", return_value=True),
+            patch("agilerl.utils.utils.all_reduce_mean", side_effect=lambda t: t),
+        ):
+            result = aggregate_metrics_across_gpus(4.0)
+
+        assert result == pytest.approx(4.0)
 
     def test_with_negative_values(self):
-        """Test aggregate_metrics_across_gpus with negative values."""
-        accelerator = Accelerator()
+        """Test aggregate_metrics_across_gpus with negative values"""
+        metric_tensor = torch.tensor([-1.0, -2.0, -3.0])
 
-        metric_tensor = torch.tensor([-1.0, -2.0, -3.0], device=accelerator.device)
-
-        result = aggregate_metrics_across_gpus(accelerator, metric_tensor)
+        result = aggregate_metrics_across_gpus(metric_tensor)
 
         assert result == -2.0  # (-1 + -2 + -3) / 3 = -2.0
         assert isinstance(result, float)
 
     def test_with_zero_values(self):
-        """Test aggregate_metrics_across_gpus with zero values."""
-        accelerator = Accelerator()
+        """Test aggregate_metrics_across_gpus with zero values"""
+        metric_tensor = torch.tensor([0.0, 0.0, 0.0])
 
-        metric_tensor = torch.tensor([0.0, 0.0, 0.0], device=accelerator.device)
-
-        result = aggregate_metrics_across_gpus(accelerator, metric_tensor)
+        result = aggregate_metrics_across_gpus(metric_tensor)
 
         assert result == 0.0
         assert isinstance(result, float)
@@ -1232,20 +1165,22 @@ class TestConsolidateMutations:
             agent.lr = 0.01
             agent.lr_critic = None
             agent.optimizer = Mock()
-            agent.optimizer.param_groups = [{"lr": 0.01}]
-            agent.cosine_lr_schedule_config = {"warmup_steps": 0, "total_steps": 100}
-            agent.accelerator = MagicMock(spec=Accelerator)
-            agent.accelerator.is_main_process = True
-            agent.accelerator.wait_for_everyone = Mock()
-            agent.accelerator.state = MagicMock()
-            agent.accelerator.state.deepspeed_plugin = MagicMock(spec=DeepSpeedPlugin)
-            agent.accelerator.state.deepspeed_plugin.deepspeed_config = {}
+            agent.optimizer.optimizer = Mock()
+            agent.optimizer.optimizer.param_groups = [{"lr": 0.01}]
+            agent.cosine_lr_schedule_config = None
             agent.actor = MagicMock()
-        consolidate_mutations(population)
+        # Patch the broadcast: with torch.distributed initialised by an earlier
+        # test on the same worker, the real collective would try to pickle the
+        # MagicMock agents.
+        with patch(
+            "agilerl.utils.utils.broadcast_object_list",
+            side_effect=lambda obj_list, **kw: list(obj_list),
+        ):
+            consolidate_mutations(population)
         for agent in population:
             assert agent.mut == "lr"
             assert agent.lr == 0.01
-            assert agent.optimizer.param_groups[0]["lr"] == 0.01
+            assert agent.optimizer.optimizer.param_groups[0]["lr"] == 0.01
 
 
 def test_check_box2d_available_raises_when_box2d_missing(monkeypatch):
@@ -1588,7 +1523,6 @@ class TestCreatePopulationLlmTorchCompiler:
                 hp_config=None,
                 population_size=1,
                 device="cpu",
-                accelerator=None,
                 actor_network=actor,
                 torch_compiler="inductor",
                 algo_kwargs={
@@ -1620,7 +1554,6 @@ class TestCreatePopulationLlmTorchCompiler:
                 hp_config=None,
                 population_size=1,
                 device="cpu",
-                accelerator=None,
                 actor_network=actor,
                 algo_kwargs={
                     "pad_token_id": 29,
@@ -1666,51 +1599,40 @@ class TestCreatePopulationLlmDepGuard:
                     hp_config=None,
                     population_size=1,
                     device="cpu",
-                    accelerator=None,
                     actor_network=None,
                 )
 
 
-class TestAggregateMetricsNoAccelerator:
-    """Cover the ``accelerator is None`` branch of ``aggregate_metrics_across_gpus``
-    and the polymorphic float/ndarray/tensor branches of ``safe_aggregate_metrics``.
+class TestSafeAggregateMetrics:
+    """Cover the polymorphic float/ndarray/tensor branches of
+    ``safe_aggregate_metrics`` plus its distributed delegation.
     """
 
-    def test_aggregate_with_none_accelerator_and_tensor(self):
-        result = aggregate_metrics_across_gpus(None, torch.tensor([1.0, 2.0, 3.0]))
-        assert result == pytest.approx(2.0)
-
-    def test_aggregate_with_none_accelerator_and_scalar_passthrough(self):
-        # When accelerator is None and the metric is a plain scalar, the helper
-        # short-circuits and returns the scalar unchanged.
-        result = aggregate_metrics_across_gpus(None, 1.5)
-        assert result == 1.5
-
-    def test_safe_aggregate_with_tensor_no_accelerator(self):
+    def test_safe_aggregate_with_tensor(self):
         from agilerl.utils.utils import safe_aggregate_metrics
 
-        result = safe_aggregate_metrics(None, torch.tensor([2.0, 4.0]))
+        result = safe_aggregate_metrics(torch.tensor([2.0, 4.0]))
         assert isinstance(result, float)
         assert result == pytest.approx(3.0)
 
-    def test_safe_aggregate_with_ndarray_no_accelerator(self):
+    def test_safe_aggregate_with_ndarray(self):
         from agilerl.utils.utils import safe_aggregate_metrics
 
-        result = safe_aggregate_metrics(None, np.array([3.0, 5.0, 7.0]))
+        result = safe_aggregate_metrics(np.array([3.0, 5.0, 7.0]))
         assert isinstance(result, float)
         assert result == pytest.approx(5.0)
 
-    def test_safe_aggregate_with_plain_float_no_accelerator(self):
+    def test_safe_aggregate_with_plain_float(self):
         from agilerl.utils.utils import safe_aggregate_metrics
 
-        assert safe_aggregate_metrics(None, 2.5) == 2.5
+        assert safe_aggregate_metrics(2.5) == 2.5
 
-    def test_safe_aggregate_with_accelerator_delegates(self):
+    def test_safe_aggregate_distributed_delegates(self):
         from agilerl.utils.utils import safe_aggregate_metrics
 
-        accelerator = Accelerator()
-        result = safe_aggregate_metrics(
-            accelerator,
-            torch.tensor([1.0, 3.0], device=accelerator.device),
-        )
+        with (
+            patch("agilerl.utils.utils.is_distributed", return_value=True),
+            patch("agilerl.utils.utils.all_reduce_mean", side_effect=lambda t: t),
+        ):
+            result = safe_aggregate_metrics(torch.tensor([1.0, 3.0]))
         assert result == pytest.approx(2.0)

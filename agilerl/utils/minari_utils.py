@@ -3,26 +3,23 @@ from pathlib import Path
 import h5py
 import minari
 import torch
-from accelerate import Accelerator
 from minari.storage.datasets_root_dir import get_dataset_path
 from minari.storage.hosting import download_dataset
 from minari.storage.local import load_dataset
 
 from agilerl.components.data import Transition
 from agilerl.components.replay_buffer import ReplayBuffer
+from agilerl.utils.distributed import barrier, is_main_process
 
 
 def load_minari_dataset(
     dataset_id: str,
-    accelerator: Accelerator | None = None,
     remote: bool = False,
 ) -> minari.MinariDataset:
     """Load a Minari dataset either from local storage or remote repository.
 
     :param dataset_id: The ID of the Minari dataset to load
     :type dataset_id: str
-    :param accelerator: Optional accelerator for distributed training
-    :type accelerator: Accelerator | None
     :param remote: Whether to load from remote repository. Defaults to False.
     :type remote: bool
     :return: The loaded Minari dataset
@@ -52,13 +49,9 @@ def load_minari_dataset(
     if not Path(file_path).exists():
         if remote:
             try:
-                if accelerator is not None:
-                    accelerator.wait_for_everyone()
-                    if accelerator.is_main_process:
-                        download_dataset(dataset_id)
-                    accelerator.wait_for_everyone()
-                else:
+                if is_main_process():
                     download_dataset(dataset_id)
+                barrier()
             except Exception as err:
                 raise KeyError(remote_dataset_error) from err
         else:
@@ -76,7 +69,6 @@ def load_minari_dataset(
 def minari_to_agile_buffer(
     dataset_id: str,
     memory: ReplayBuffer,
-    accelerator: Accelerator | None = None,
     remote: bool = False,
 ) -> ReplayBuffer:
     """Convert a Minari dataset to an agile buffer.
@@ -85,14 +77,12 @@ def minari_to_agile_buffer(
     :type dataset_id: str
     :param memory: The memory to save the dataset to
     :type memory: ReplayBuffer
-    :param accelerator: Optional accelerator for distributed training
-    :type accelerator: Accelerator | None
     :param remote: Whether to load from remote repository. Defaults to False.
     :type remote: bool
     :return: The loaded Minari dataset
     :rtype: ReplayBuffer
     """
-    minari_dataset = load_minari_dataset(dataset_id, accelerator, remote)
+    minari_dataset = load_minari_dataset(dataset_id, remote)
     for episode in minari_dataset.iterate_episodes():
         for num_steps in range(len(episode.rewards)):
             observation = episode.observations[num_steps]

@@ -1,9 +1,9 @@
 """Tests for :mod:`agilerl.llm_envs` (preference and SFT dataset envs, rollout env)."""
 
+from unittest.mock import MagicMock
+
 import pytest
 import torch
-from accelerate import Accelerator
-from accelerate.state import AcceleratorState
 
 pytest.importorskip("datasets", reason="LLM dependencies not installed")
 
@@ -71,15 +71,6 @@ class DummySFTDataset(Dataset):
 
 
 @pytest.fixture
-def accelerator_factory():
-    def generate_accelerator(use_accelerator: bool):
-        AcceleratorState._reset_state(True)
-        return Accelerator() if use_accelerator else None
-
-    return generate_accelerator
-
-
-@pytest.fixture
 def preference_dataset(num_samples):
     train_dataset = DummyPreferenceDataset(int(num_samples * 0.8))
     test_dataset = DummyPreferenceDataset(int(num_samples * 0.2))
@@ -94,13 +85,10 @@ def sft_dataset(num_samples):
 
 
 class TestDatasetEnvPreferenceInit:
-    @pytest.mark.parametrize("use_accelerator", [True, False])
     @pytest.mark.parametrize("num_samples", [20])
     def test_preference_init(
         self,
         preference_dataset,
-        accelerator_factory,
-        use_accelerator,
         num_samples,
     ):
         train_dataset, test_dataset = preference_dataset
@@ -112,7 +100,6 @@ class TestDatasetEnvPreferenceInit:
             tokenizer=tokenizer,
             objective="preference",
             data_batch_size_per_gpu=data_batch_size,
-            accelerator=accelerator_factory(use_accelerator),
         )
         assert isinstance(env, DatasetEnv)
         assert env.name == "dummy_dataset"
@@ -228,13 +215,10 @@ class TestDatasetEnvPreferenceInit:
 
 
 class TestDatasetEnvPreferenceStep:
-    @pytest.mark.parametrize("use_accelerator", [True, False])
     @pytest.mark.parametrize("num_samples", [20])
     def test_preference_step_is_noop(
         self,
         preference_dataset,
-        accelerator_factory,
-        use_accelerator,
         num_samples,
     ):
         """``step`` returns ``None`` and never advances the dataset cursor."""
@@ -247,7 +231,6 @@ class TestDatasetEnvPreferenceStep:
             tokenizer=tokenizer,
             objective="preference",
             data_batch_size_per_gpu=data_batch_size,
-            accelerator=accelerator_factory(use_accelerator),
         )
         assert env.step() is None
         assert env.step(completions=torch.zeros(1)) is None
@@ -255,13 +238,10 @@ class TestDatasetEnvPreferenceStep:
 
 
 class TestDatasetEnvPreferenceReset:
-    @pytest.mark.parametrize("use_accelerator", [True, False])
     @pytest.mark.parametrize("num_samples", [20])
     def test_preference_reset(
         self,
         preference_dataset,
-        accelerator_factory,
-        use_accelerator,
         num_samples,
     ):
         train_dataset, test_dataset = preference_dataset
@@ -273,7 +253,6 @@ class TestDatasetEnvPreferenceReset:
             tokenizer=tokenizer,
             objective="preference",
             data_batch_size_per_gpu=data_batch_size,
-            accelerator=accelerator_factory(use_accelerator),
         )
         prompts = env.reset()
         assert isinstance(prompts, dict)
@@ -306,13 +285,10 @@ class TestDatasetEnvPreferenceReset:
         assert isinstance(prompts["rejected_input_ids"], torch.Tensor)
         assert isinstance(prompts["rejected_attention_mask"], torch.Tensor)
 
-    @pytest.mark.parametrize("use_accelerator", [True, False])
     @pytest.mark.parametrize("num_samples", [20])
     def test_preference_reset_reset_dataloaders_warning(
         self,
         preference_dataset,
-        accelerator_factory,
-        use_accelerator,
         num_samples,
     ):
         train_dataset, test_dataset = preference_dataset
@@ -324,7 +300,6 @@ class TestDatasetEnvPreferenceReset:
             tokenizer=tokenizer,
             objective="preference",
             data_batch_size_per_gpu=data_batch_size,
-            accelerator=accelerator_factory(use_accelerator),
         )
         env.reset()
         env.reset()
@@ -366,13 +341,10 @@ class TestDatasetEnvPreferenceReset:
         assert isinstance(prompts["rejected_attention_mask"], torch.Tensor)
 
     @pytest.mark.parametrize("num_samples", [20])
-    @pytest.mark.parametrize("use_accelerator", [True, False])
     def test_preference_reset_num_epochs(
         self,
         preference_dataset,
         num_samples,
-        accelerator_factory,
-        use_accelerator,
     ):
         train_dataset, test_dataset = preference_dataset
         tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
@@ -383,7 +355,6 @@ class TestDatasetEnvPreferenceReset:
             tokenizer=tokenizer,
             objective="preference",
             data_batch_size_per_gpu=data_batch_size,
-            accelerator=accelerator_factory(use_accelerator),
         )
         while env.num_epochs == 0:
             env.reset()
@@ -415,6 +386,32 @@ class TestDatasetEnvPreferenceReset:
         assert env.num_epochs == 0
         env.reset()
         assert env.num_epochs == 1  # (N+1)th fetch triggers rollover
+
+    @pytest.mark.parametrize("num_samples", [20])
+    def test_preference_reset_dataloaders_sets_distributed_sampler_epoch(
+        self,
+        preference_dataset,
+        num_samples,
+    ):
+        """A sharded train dataloader gets its sampler epoch bumped on reset."""
+        train_dataset, test_dataset = preference_dataset
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+        env = DatasetEnv(
+            train_dataset=train_dataset,
+            test_dataset=test_dataset,
+            tokenizer=tokenizer,
+            objective="preference",
+            data_batch_size_per_gpu=8,
+        )
+
+        class _ShardedLoader(list):
+            pass
+
+        loader = _ShardedLoader([{"prompt": "p", "chosen": "c", "rejected": "r"}])
+        loader.sampler = MagicMock()
+        env.train_dataloader = loader
+        env._reset_dataloaders(reset_train=True, reset_test=False)
+        loader.sampler.set_epoch.assert_called_once_with(env.num_epochs)
 
 
 class TestDatasetEnvPreferenceCreateCollateFn:
@@ -455,13 +452,10 @@ class TestDatasetEnvPreferenceCreateCollateFn:
 
 
 class TestDatasetEnvSFTInit:
-    @pytest.mark.parametrize("use_accelerator", [True, False])
     @pytest.mark.parametrize("num_samples", [20])
     def test_sft_init(
         self,
         sft_dataset,
-        accelerator_factory,
-        use_accelerator,
         num_samples,
     ):
         train_dataset, test_dataset = sft_dataset
@@ -473,7 +467,6 @@ class TestDatasetEnvSFTInit:
             tokenizer=tokenizer,
             objective="sft",
             data_batch_size_per_gpu=data_batch_size,
-            accelerator=accelerator_factory(use_accelerator),
         )
         assert isinstance(env, DatasetEnv)
         assert env.name == "dummy_sft_dataset"
@@ -543,13 +536,10 @@ class TestDatasetEnvSFTInit:
 
 class TestDatasetEnvSFTStep:
     @pytest.mark.parametrize("num_samples", [20])
-    @pytest.mark.parametrize("use_accelerator", [True, False])
     def test_sft_num_epochs_increment(
         self,
         sft_dataset,
         num_samples,
-        accelerator_factory,
-        use_accelerator,
     ):
         train_dataset, test_dataset = sft_dataset
         tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
@@ -559,7 +549,6 @@ class TestDatasetEnvSFTStep:
             tokenizer=tokenizer,
             objective="sft",
             data_batch_size_per_gpu=1,
-            accelerator=accelerator_factory(use_accelerator),
         )
         while env.num_epochs == 0:
             env.reset()
@@ -567,13 +556,10 @@ class TestDatasetEnvSFTStep:
 
 
 class TestDatasetEnvSFTReset:
-    @pytest.mark.parametrize("use_accelerator", [True, False])
     @pytest.mark.parametrize("num_samples", [20])
     def test_sft_reset_returns_batch_step_is_noop(
         self,
         sft_dataset,
-        accelerator_factory,
-        use_accelerator,
         num_samples,
     ):
         train_dataset, test_dataset = sft_dataset
@@ -585,7 +571,6 @@ class TestDatasetEnvSFTReset:
             tokenizer=tokenizer,
             objective="sft",
             data_batch_size_per_gpu=data_batch_size,
-            accelerator=accelerator_factory(use_accelerator),
         )
         assert env.step() is None
 
@@ -599,13 +584,10 @@ class TestDatasetEnvSFTReset:
         }
         assert len(batch["prompt"]) == data_batch_size
 
-    @pytest.mark.parametrize("use_accelerator", [True, False])
     @pytest.mark.parametrize("num_samples", [20])
     def test_sft_reset_dataloaders_warning(
         self,
         sft_dataset,
-        accelerator_factory,
-        use_accelerator,
         num_samples,
     ):
         train_dataset, test_dataset = sft_dataset
@@ -616,7 +598,6 @@ class TestDatasetEnvSFTReset:
             tokenizer=tokenizer,
             objective="sft",
             data_batch_size_per_gpu=1,
-            accelerator=accelerator_factory(use_accelerator),
         )
         env.reset()
         env.reset()

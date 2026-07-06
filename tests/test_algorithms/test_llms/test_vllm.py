@@ -3,7 +3,6 @@ from contextlib import contextmanager
 import pytest
 import torch
 
-pytest.importorskip("deepspeed", reason="LLM tests require deepspeed.")
 pytest.importorskip("vllm", reason="LLM tests require vllm.")
 
 from agilerl.llm_envs import RolloutEnv
@@ -66,9 +65,8 @@ class TestREINFORCETest:
     @pytest.mark.parametrize("micro_batch_size_per_gpu", [None])
     def test_vllm_methods(
         self,
-        deepspeed_env,
         reinforce_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
         vocab_size,
         input_size,
@@ -76,12 +74,10 @@ class TestREINFORCETest:
         pretrained_model_name_or_path,
         micro_batch_size_per_gpu,
     ):
-        del deepspeed_env
         rf = reinforce_factory(
-            accelerator_factory=accelerator_factory,
+            dist_mode_factory=dist_mode_factory,
             model_factory=model_factory,
-            config=None,
-            use_deepspeed_optimizer=False,
+            dist_mode=None,
             vocab_size=vocab_size,
             input_size=input_size,
             max_tokens=max_tokens,
@@ -146,9 +142,8 @@ class TestREINFORCETest:
     @pytest.mark.parametrize("pretrained_model_name_or_path", [TINY_LLM_FIXTURE_PATH])
     def test_quantized_generate_survives_sleep_wake(
         self,
-        deepspeed_env,
         reinforce_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
         vocab_size,
         input_size,
@@ -175,12 +170,10 @@ class TestREINFORCETest:
             pytest.skip("bnb nf4 preset uses bf16 compute; GPU lacks native bf16.")
         from agilerl.utils.llm_utils import build_bnb_quantization_config
 
-        del deepspeed_env
         rf = reinforce_factory(
-            accelerator_factory=accelerator_factory,
+            dist_mode_factory=dist_mode_factory,
             model_factory=model_factory,
-            config=None,
-            use_deepspeed_optimizer=False,
+            dist_mode=None,
             vocab_size=vocab_size,
             input_size=input_size,
             max_tokens=max_tokens,
@@ -254,9 +247,8 @@ class TestREINFORCETest:
     @pytest.mark.parametrize("pretrained_model_name_or_path", [TINY_LLM_FIXTURE_PATH])
     def test_dense_generate_survives_sleep_wake(
         self,
-        deepspeed_env,
         reinforce_factory,
-        accelerator_factory,
+        dist_mode_factory,
         model_factory,
         vocab_size,
         input_size,
@@ -269,12 +261,10 @@ class TestREINFORCETest:
         decode of the same prompts has to be identical before sleep and after
         wake. fp16 (not bf16) so the test also runs on pre-Ampere CI GPUs.
         """
-        del deepspeed_env
         rf = reinforce_factory(
-            accelerator_factory=accelerator_factory,
+            dist_mode_factory=dist_mode_factory,
             model_factory=model_factory,
-            config=None,
-            use_deepspeed_optimizer=False,
+            dist_mode=None,
             vocab_size=vocab_size,
             input_size=input_size,
             max_tokens=max_tokens,

@@ -3,7 +3,6 @@ import importlib
 import supersuit as ss
 import torch
 import yaml
-from accelerate import Accelerator
 from pettingzoo.utils import env_logger
 
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
@@ -24,21 +23,12 @@ from agilerl.utils.utils import (
 # sys.path.append('../')
 
 
-def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
+def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env_logger.EnvLogger.suppress_output()
     suppress_verbose_logging()
 
     print("============ AgileRL Multi-agent benchmarking ============")
-
-    if DISTRIBUTED_TRAINING:
-        accelerator = Accelerator()
-        accelerator.wait_for_everyone()
-        if accelerator.is_main_process:
-            print("===== Distributed Training =====")
-        accelerator.wait_for_everyone()
-    else:
-        accelerator = None
 
     print(f"DEVICE: {device}")
 
@@ -91,7 +81,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
         mutation_sd=MUTATION_PARAMS["MUT_SD"],
         rand_seed=MUTATION_PARAMS["RAND_SEED"],
         device=device,
-        accelerator=accelerator,
     )
 
     hp_config = HyperparameterConfig(
@@ -126,7 +115,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
         population_size=INIT_HP["POP_SIZE"],
         num_envs=INIT_HP["NUM_ENVS"],
         device=device,
-        accelerator=accelerator,
         torch_compiler=INIT_HP["TORCH_COMPILE"],
     )
 
@@ -148,7 +136,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
             tournament=tournament,
             mutation=mutations,
             wb=INIT_HP["WANDB"],
-            accelerator=accelerator,
         )
     except Exception as e:
         env.close()
@@ -165,5 +152,4 @@ if __name__ == "__main__":
     INIT_HP = config["INIT_HP"]
     MUTATION_PARAMS = config["MUTATION_PARAMS"]
     NET_CONFIG = config["NET_CONFIG"]
-    DISTRIBUTED_TRAINING = config["DISTRIBUTED_TRAINING"]
-    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING)
+    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)

@@ -94,7 +94,7 @@ def main() -> None:
     torch.manual_seed(SEED)
     model = Qwen2ForCausalLM(config)
     # Store weights in float16 to keep the fixture under the size budget.
-    # Tests run under bf16/fp16 anyway (DeepSpeed bf16, vLLM fp16 downcast)
+    # Tests run under bf16/fp16 anyway (trainer bf16, vLLM fp16 downcast)
     # so this matches the working dtype and avoids any precision surprise.
     model = model.to(torch.float16)
 

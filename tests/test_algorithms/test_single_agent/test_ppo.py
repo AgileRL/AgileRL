@@ -4,8 +4,6 @@ import gymnasium
 import numpy as np
 import pytest
 import torch
-from accelerate import Accelerator
-from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
 from tensordict import TensorDict
 from torch import nn, optim
@@ -160,8 +158,7 @@ class SimpleCNN(nn.Module):
 
 
 @pytest.fixture
-def build_ppo(observation_space, action_space, recurrent, accelerator_flag, request):
-    accelerator = Accelerator() if accelerator_flag else None
+def build_ppo(observation_space, action_space, recurrent, request):
     observation_space = request.getfixturevalue(observation_space)
     action_space = request.getfixturevalue(action_space)
     use_rollout_buffer = recurrent
@@ -170,7 +167,6 @@ def build_ppo(observation_space, action_space, recurrent, accelerator_flag, requ
         action_space,
         use_rollout_buffer=use_rollout_buffer,
         recurrent=recurrent,
-        accelerator=accelerator,
     )
 
 
@@ -193,22 +189,18 @@ class TestPPOInit:
             "multibinary_space",
         ],
     )
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     def test_initialize_ppo(
         self,
         observation_space,
         action_space,
         encoder_cls,
-        accelerator_flag,
         request,
     ):
-        accelerator = Accelerator() if accelerator_flag else None
         observation_space = request.getfixturevalue(observation_space)
         action_space = request.getfixturevalue(action_space)
         ppo = PPO(
             observation_space,
             action_space,
-            accelerator=accelerator,
             use_rollout_buffer=False,
             recurrent=False,
         )
@@ -228,16 +220,14 @@ class TestPPOInit:
         assert ppo.max_grad_norm == 0.5
         assert ppo.target_kl is None
         assert ppo.update_epochs == 4
-        assert ppo.device == accelerator.device if accelerator else "cpu"
-        assert ppo.accelerator == accelerator
+        assert ppo.device == "cpu"
         assert ppo.index == 0
         assert ppo.scores == []
         assert ppo.fitness == []
         assert ppo.steps == [0]
         assert isinstance(ppo.actor.encoder, encoder_cls)
         assert isinstance(ppo.critic.encoder, encoder_cls)
-        expected_optimizer = AcceleratedOptimizer if accelerator else optim.Adam
-        assert isinstance(ppo.optimizer.optimizer, expected_optimizer)
+        assert isinstance(ppo.optimizer.optimizer, optim.Adam)
         ppo.clean_up()
 
     # Can initialize ppo with an actor network
@@ -301,7 +291,6 @@ class TestPPOInit:
         assert ppo.target_kl is None
         assert ppo.update_epochs == 4
         assert ppo.device == "cpu"
-        assert ppo.accelerator is None
         assert ppo.index == 0
         assert ppo.scores == []
         assert ppo.fitness == []
@@ -567,7 +556,6 @@ class TestPPOGetAction:
         "action_space",
         ["vector_space", "discrete_space", "multidiscrete_space", "multibinary_space"],
     )
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("recurrent", [False])
     # Returns the expected action when given a state observation.
     def test_returns_expected_action(
@@ -577,7 +565,6 @@ class TestPPOGetAction:
         build_ppo,
         request,
         recurrent,
-        accelerator_flag,
     ):
         observation_space = request.getfixturevalue(observation_space)
         action_space = request.getfixturevalue(action_space)
@@ -641,14 +628,12 @@ class TestPPOGetAction:
         ],
     )
     @pytest.mark.parametrize("recurrent", [True])
-    @pytest.mark.parametrize("accelerator_flag", [False])
     # Returns the expected action when given a state observation.
     def test_returns_expected_action_recurrent(
         self,
         observation_space,
         action_space,
         recurrent,
-        accelerator_flag,
         build_ppo,
         request,
     ):
@@ -701,7 +686,6 @@ class TestPPOGetAction:
 
     @pytest.mark.parametrize("observation_space", ["vector_space"])
     @pytest.mark.parametrize("action_space", ["discrete_space"])
-    @pytest.mark.parametrize("accelerator_flag", [False])
     @pytest.mark.parametrize("recurrent", [False])
     def test_returns_expected_action_mask_vectorized(
         self,
@@ -710,7 +694,6 @@ class TestPPOGetAction:
         action_space,
         recurrent,
         request,
-        accelerator_flag,
     ):
         observation_space = request.getfixturevalue(observation_space)
         request.getfixturevalue(action_space)  # for parametrization
@@ -982,22 +965,18 @@ class TestPPOLearn:
         "observation_space",
         ["vector_space", "image_space", "dict_space"],
     )
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     def test_learns_from_experiences(
         self,
         observation_space,
         discrete_space,
-        accelerator_flag,
         request,
     ):
-        accelerator = Accelerator() if accelerator_flag else None
         batch_size = 45
         observation_space = request.getfixturevalue(observation_space)
         ppo = PPO(
             observation_space=observation_space,
             action_space=discrete_space,
             batch_size=batch_size,
-            accelerator=accelerator,
         )
 
         # Copy state dict before learning - should be different to after updating weights
@@ -1274,20 +1253,12 @@ class TestPPOLearn:
         assert optimizer_steps < ppo.update_epochs * (num_steps // ppo.batch_size)
         ppo.clean_up()
 
-    def test_rollout_buffer_flat_external_uses_accelerator_and_early_stops(
+    def test_rollout_buffer_flat_external_early_stops(
         self,
         vector_space,
         discrete_space,
         monkeypatch,
     ):
-        class DummyAccel:
-            def __init__(self):
-                self.calls = 0
-
-            def backward(self, loss):
-                self.calls += 1
-                loss.backward()
-
         ppo = PPO(
             vector_space,
             discrete_space,
@@ -1296,7 +1267,6 @@ class TestPPOLearn:
             update_epochs=2,
             batch_size=2,
         )
-        ppo.accelerator = DummyAccel()
         ppo.rollout_buffer = type("RB", (), {"size": lambda self: 4})()
 
         td = TensorDict(
@@ -1322,7 +1292,6 @@ class TestPPOLearn:
         )
         loss = ppo._learn_from_rollout_buffer_flat(buffer_td_external=td)
         assert isinstance(loss, float)
-        assert ppo.accelerator.calls > 0
         ppo.clean_up()
 
     def test_rollout_buffer_bptt_kl_warning_and_break_paths(
@@ -1331,14 +1300,6 @@ class TestPPOLearn:
         discrete_space,
         monkeypatch,
     ):
-        class DummyAccel:
-            def __init__(self):
-                self.calls = 0
-
-            def backward(self, loss):
-                self.calls += 1
-                loss.backward()
-
         class FakeRolloutBuffer:
             def __init__(self):
                 self.capacity = 1
@@ -1381,7 +1342,6 @@ class TestPPOLearn:
             batch_size=1,
         )
         ppo.rollout_buffer = FakeRolloutBuffer()
-        ppo.accelerator = DummyAccel()
 
         monkeypatch.setattr(
             ppo,
@@ -1396,7 +1356,6 @@ class TestPPOLearn:
         with pytest.warns(UserWarning, match="KL divergence .* exceeded target"):
             loss = ppo._learn_from_rollout_buffer_bptt()
         assert isinstance(loss, float)
-        assert ppo.accelerator.calls > 0
         ppo.clean_up()
 
     def test_rollout_buffer_bptt_epoch_avg_kl_warning_branch(
@@ -1869,7 +1828,6 @@ class TestPPOClone:
         assert clone_agent.target_kl == ppo.target_kl
         assert clone_agent.update_epochs == ppo.update_epochs
         assert clone_agent.device == ppo.device
-        assert clone_agent.accelerator == ppo.accelerator
         assert_state_dicts_equal(clone_agent.actor.state_dict(), ppo.actor.state_dict())
         assert_state_dicts_equal(
             clone_agent.critic.state_dict(), ppo.critic.state_dict()
@@ -1885,82 +1843,6 @@ class TestPPOClone:
         assert clone_agent.tensor_test == ppo.tensor_test
         assert clone_agent.num_envs == ppo.num_envs
         assert clone_agent.index == ppo.index
-
-        accelerator = Accelerator()
-        ppo = PPO(observation_space, discrete_space, accelerator=accelerator)
-        clone_agent = ppo.clone()
-
-        assert clone_agent.observation_space == ppo.observation_space
-        assert clone_agent.action_space == ppo.action_space
-        assert clone_agent.batch_size == ppo.batch_size
-        assert clone_agent.lr == ppo.lr
-        assert clone_agent.gamma == ppo.gamma
-        assert clone_agent.gae_lambda == ppo.gae_lambda
-        assert clone_agent.mut == ppo.mut
-        assert clone_agent.action_std_init == ppo.action_std_init
-        assert clone_agent.clip_coef == ppo.clip_coef
-        assert clone_agent.ent_coef == ppo.ent_coef
-        assert clone_agent.vf_coef == ppo.vf_coef
-        assert clone_agent.max_grad_norm == ppo.max_grad_norm
-        assert clone_agent.target_kl == ppo.target_kl
-        assert clone_agent.update_epochs == ppo.update_epochs
-        assert clone_agent.device == ppo.device
-        assert clone_agent.accelerator == ppo.accelerator
-        assert_state_dicts_equal(clone_agent.actor.state_dict(), ppo.actor.state_dict())
-        assert_state_dicts_equal(
-            clone_agent.critic.state_dict(), ppo.critic.state_dict()
-        )
-        assert_state_dicts_equal(
-            clone_agent.optimizer.state_dict(),
-            ppo.optimizer.state_dict(),
-        )
-        assert clone_agent.fitness == ppo.fitness
-        assert clone_agent.steps == ppo.steps
-        assert clone_agent.scores == ppo.scores
-        assert clone_agent.num_envs == ppo.num_envs
-        assert clone_agent.index == ppo.index
-
-        accelerator = (
-            Accelerator(cpu=True)
-            if torch.backends.mps.is_available()
-            else Accelerator()
-        )
-        ppo = PPO(
-            observation_space,
-            discrete_space,
-            accelerator=accelerator,
-            wrap=False,
-        )
-        clone_agent = ppo.clone(wrap=False)
-
-        assert clone_agent.observation_space == ppo.observation_space
-        assert clone_agent.action_space == ppo.action_space
-        assert clone_agent.batch_size == ppo.batch_size
-        assert clone_agent.lr == ppo.lr
-        assert clone_agent.gamma == ppo.gamma
-        assert clone_agent.gae_lambda == ppo.gae_lambda
-        assert clone_agent.mut == ppo.mut
-        assert clone_agent.action_std_init == ppo.action_std_init
-        assert clone_agent.clip_coef == ppo.clip_coef
-        assert clone_agent.ent_coef == ppo.ent_coef
-        assert clone_agent.vf_coef == ppo.vf_coef
-        assert clone_agent.max_grad_norm == ppo.max_grad_norm
-        assert clone_agent.target_kl == ppo.target_kl
-        assert clone_agent.update_epochs == ppo.update_epochs
-        assert clone_agent.device == ppo.device
-        assert clone_agent.accelerator == ppo.accelerator
-        assert_state_dicts_equal(clone_agent.actor.state_dict(), ppo.actor.state_dict())
-        assert_state_dicts_equal(
-            clone_agent.critic.state_dict(), ppo.critic.state_dict()
-        )
-        assert_state_dicts_equal(
-            clone_agent.optimizer.state_dict(),
-            ppo.optimizer.state_dict(),
-        )
-        assert clone_agent.fitness == ppo.fitness
-        assert clone_agent.steps == ppo.steps
-        assert clone_agent.scores == ppo.scores
-        assert clone_agent.num_envs == ppo.num_envs
 
     def test_clone_new_index(self, vector_space, discrete_space):
         ppo = PPO(vector_space, discrete_space)
@@ -2076,7 +1958,6 @@ class TestPPOClone:
         assert clone_agent.target_kl == ppo.target_kl
         assert clone_agent.update_epochs == ppo.update_epochs
         assert clone_agent.device == ppo.device
-        assert clone_agent.accelerator == ppo.accelerator
         assert_state_dicts_equal(clone_agent.actor.state_dict(), ppo.actor.state_dict())
 
         if share_encoders and recurrent:

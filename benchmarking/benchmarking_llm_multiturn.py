@@ -16,10 +16,7 @@ from agilerl.algorithms import CISPO, GRPO, GSPO, LLMPPO, LLMREINFORCE
 from agilerl.llm_envs import RolloutEnv
 from agilerl.training.train_llm import train_llm_rollout
 from agilerl.utils.algo_utils import VLLMConfig
-from agilerl.utils.llm_utils import (
-    build_bnb_quantization_config,
-    create_llm_accelerator,
-)
+from agilerl.utils.llm_utils import build_bnb_quantization_config
 from agilerl.utils.utils import create_population
 
 CONFIG_PATH = "configs/training/llm_finetuning/cispo_quant_bench.yaml"
@@ -88,7 +85,7 @@ def main(init_hp, mut_p):
             max_output_tokens=init_hp.get("MAX_OUTPUT_TOKENS", None),
         )
 
-    accelerator = create_llm_accelerator()
+    pop_size = init_hp.get("POP_SIZE", 1)
 
     # Colocated vLLM rollout: vLLM and the trainer each hold their own base and
     # the GPU is shared via vLLM native sleep/wake (the engine's base is backed
@@ -119,8 +116,7 @@ def main(init_hp, mut_p):
         algo=algo_name,
         net_config=None,
         INIT_HP=init_hp,
-        population_size=init_hp.get("POP_SIZE", 1),
-        accelerator=accelerator,
+        population_size=pop_size,
         tokenizer=tokenizer,
         model_name=MODEL_PATH,
         vllm_config=vllm_config,
@@ -144,10 +140,8 @@ def main(init_hp, mut_p):
         evaluation_interval=10,
         max_reward=1.0,
         verbose=True,
-        accelerator=accelerator,
+        max_steps=300_000,
     )
-    if accelerator is not None:
-        accelerator.end_training()
 
 
 if __name__ == "__main__":

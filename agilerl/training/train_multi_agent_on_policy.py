@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import wandb
-from accelerate import Accelerator
 from gymnasium import spaces
 from pettingzoo import ParallelEnv
 
@@ -54,7 +53,6 @@ def train_multi_agent_on_policy(
     elite_path: str | None = None,
     wb: bool = False,
     verbose: bool = True,
-    accelerator: Accelerator | None = None,
     wandb_api_key: str | None = None,
 ) -> tuple[PopulationType, list[list[float]]]:
     """Run the general on-policy multi-agent RL training; returns trained population of agents
@@ -107,8 +105,6 @@ def train_multi_agent_on_policy(
     :type wb: bool, optional
     :param verbose: Display training stats, defaults to True
     :type verbose: bool, optional
-    :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
     :param wandb_api_key: API key for Weights & Biases, defaults to None
     :type wandb_api_key: str, optional
     """
@@ -153,7 +149,6 @@ def train_multi_agent_on_policy(
             mutation_hyperparams=MUT_P,
             wandb_api_key=wandb_api_key,
             project="AgileRLMultiAgent",
-            accelerator=accelerator,
         )
 
     if hasattr(env, "num_envs"):
@@ -173,13 +168,10 @@ def train_multi_agent_on_policy(
         )
     )
 
-    if accelerator is not None:
-        print(f"\nDistributed training on {accelerator.device}...")
-    else:
-        print("\nTraining...")
+    print("\nTraining...")
 
     # Format progress bar
-    pbar = default_progress_bar(max_steps, accelerator)
+    pbar = default_progress_bar(max_steps)
 
     sample_ind = pop[0]
     agent_ids = deepcopy(list(sample_ind.observation_space.keys()))
@@ -191,14 +183,11 @@ def train_multi_agent_on_policy(
     checkpoint_count = 0
 
     # Pre-training mutation
-    if accelerator is None and mutation is not None:
+    if mutation is not None:
         pop = mutation.mutation(pop, pre_training_mut=True)
 
     # RL training loop
     while np.sum([agent.steps[-1] for agent in pop]) < max_steps:
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
-
         pop_episode_scores = []
         pop_fps = []
         for agent_idx, agent in enumerate(pop):  # Loop through population
@@ -463,11 +452,7 @@ def train_multi_agent_on_policy(
 
         if wb:
             wandb_dict = {
-                "global_step": (
-                    total_steps * accelerator.state.num_processes
-                    if accelerator is not None and accelerator.is_main_process
-                    else total_steps
-                ),
+                "global_step": total_steps,
                 "fps": np.mean(pop_fps),
             }
             wandb_dict.update(fitness_dict)
@@ -498,13 +483,7 @@ def train_multi_agent_on_policy(
                         )
                 wandb_dict.update(entropy_dict)
 
-            if accelerator is not None:
-                accelerator.wait_for_everyone()
-                if accelerator.is_main_process:
-                    wandb.log(wandb_dict)
-                accelerator.wait_for_everyone()
-            else:
-                wandb.log(wandb_dict)
+            wandb.log(wandb_dict)
 
             for idx, agent in enumerate(pop):
                 wandb.log(
@@ -541,7 +520,6 @@ def train_multi_agent_on_policy(
                 algo=algo,
                 elite_path=elite_path,
                 save_elite=save_elite,
-                accelerator=accelerator,
             )
 
         if verbose:
@@ -606,18 +584,11 @@ def train_multi_agent_on_policy(
                     population=pop,
                     save_path=save_path,
                     overwrite_checkpoints=overwrite_checkpoints,
-                    accelerator=accelerator,
                 )
                 checkpoint_count += 1
 
     if wb:
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
-            if accelerator.is_main_process:
-                wandb.finish()
-            accelerator.wait_for_everyone()
-        else:
-            wandb.finish()
+        wandb.finish()
 
     pbar.close()
     return pop, pop_fitnesses

@@ -26,7 +26,6 @@ Dependencies
     import re
     import torch
     import yaml
-    from accelerate import Accelerator
     from datasets import load_dataset
     from peft import LoraConfig, get_peft_model
     from torch.utils.data import Dataset
@@ -226,9 +225,6 @@ inside an ``env_factory`` (a prompt dataset is just an environment we host).
             {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
         ]
 
-        # Define accelerators for distributed training
-        accelerator = Accelerator()
-
         def prompt_builder(question: str) -> str:
             parts = [
                 m["content"].format(question=question, answer="")
@@ -297,8 +293,9 @@ for the GRPO hyperparameters and the mutation parameters.
 An important part of training an LLM to display reasoning behavaiour is distributed training. They are
 called *Large* Language Models for a reason, and are often too large to train on a single GPU. If you want
 to train a larger, more powerful model, then this becomes even more infeasible. Instead, we can leverage
-distributed training, to share the workload across multiple devices and speed up training. To enable distributed
-training in this tutorial, we use deepspeed and accelerate.
+distributed training, to share the workload across multiple devices and speed up training. AgileRL's LLM
+algorithms use native ``torch.distributed``: when the script is launched with ``torchrun`` the constructor
+initialises the process group automatically, so the same code runs on one GPU or many.
 
 .. code-block:: python
 
@@ -333,7 +330,6 @@ training in this tutorial, we use deepspeed and accelerate.
         INIT_HP=init_hp,
         hp_config=hp_config,
         population_size=init_hp["POP_SIZE"],
-        accelerator=accelerator,
         algo_kwargs=algo_kwargs,
     )
 
@@ -401,59 +397,41 @@ with ``max_turns=1`` for single-turn reasoning.
         evo_steps=10,
         mutation=mutations,
         tournament=tournament,
-        accelerator=accelerator,
         verbose=True,
-        num_epochs=1
     )
 
-Configuring Accelerate and DeepSpeed
-------------------------------------
-To generate an accelerate file, run the command ``accelerate config`` in your terminal, following the instructions
-on screen to outline the details of the compute you intend to use for your finetuning, saying yes to the question
-"Do you want to use DeepSpeed?" and no to the question "Do you want to specify a json file to a DeepSpeed config?"
-if you want an auto-generated deepspeed config file. More information on the deepspeed configuration can be found
-in their `docs <https://www.deepspeed.ai/docs/config-json/>`_. The accelerate config will handle the details of
-the distribution and the GRPO class handles how the accelerator is used during training. You can then launch a training
-run using ``accelerate`` with the following command:
+Launching distributed training
+------------------------------
+To train across multiple GPUs, launch the training script with ``torchrun``:
 
 .. code-block:: bash
 
-    accelerate launch path/to/training_script
+    torchrun --nproc_per_node 4 path/to/training_script
 
-Alternatively, you can avoid ``accelerate config`` by defining your own accelerate-deepspeed config file and pass
-it as an argument to ``accelerate launch``:
+``torchrun`` sets the standard rendezvous environment variables and the LLM algorithm
+constructors call ``init_distributed()`` automatically — no launcher config files and no
+changes to the script are needed. For LoRA fine-tuning, plain data parallelism is the
+recommended choice: only the small adapter gradients are synchronized between devices,
+and the base model weights stay whole on each rank (which colocated vLLM generation requires).
 
-.. code-block:: bash
+Gradient clipping is configured via the ``max_grad_norm`` argument to the algorithm,
+and gradient accumulation via the ``gradient_accumulation_steps`` argument (or
+``micro_batch_size_per_gpu``), passed through ``algo_kwargs``. For models too large to
+train unsharded, shard the actor with PyTorch FSDP2 by passing an
+:class:`~agilerl.utils.distributed.FSDPConfig`:
 
-    accelerate launch --config_file path/to/accelerate-deepspeed-config.yaml path/to/training_script
+.. code-block:: python
 
-Example config file:
+    from agilerl.utils.distributed import FSDPConfig
 
-.. code-block:: yaml
-
-    compute_environment: LOCAL_MACHINE
-    debug: false
-    deepspeed_config:
-        gradient_accumulation_steps: 2
-        gradient_clipping: 1.0
-        offload_optimizer_device: cpu
-        offload_param_device: cpu
-        zero3_init_flag: false
-        zero_stage: 2
-    distributed_type: DEEPSPEED
-    downcast_bf16: no
-    enable_cpu_affinity: false
-    machine_rank: 0
-    main_training_function: main
-    mixed_precision: bf16
-    num_machines: 4
-    num_processes: 1
-    rdzv_backend: static
-    same_network: true
-    tpu_env: []
-    tpu_use_cluster: false
-    tpu_use_sudo: false
-    use_cpu: false
+    algo_kwargs = {
+        ...,
+        "gradient_accumulation_steps": 2,
+        "fsdp_config": FSDPConfig(
+            reshard_after_forward=True,  # ZeRO-3-like memory profile
+            cpu_offload=False,
+        ),
+    }
 
 
 Using a Custom Training Loop
@@ -466,22 +444,42 @@ function and is an example of how we might choose to make use of a population of
 
     .. code-block:: python
 
-        from agilerl.utils.utils import aggregate_metrics_across_gpus
-        from agilerl.training.train_llm import tournament_selection_and_mutation
+        from agilerl.llm_envs import BatchRolloutEnv
+        from agilerl.rollouts.on_policy import collect_rollouts_llm
+        from agilerl.utils.algo_utils import stack_and_pad_experiences
+        from agilerl.utils.utils import (
+            aggregate_metrics_across_gpus,
+            tournament_selection_and_mutation,
+        )
+        from agilerl.utils.distributed import barrier, is_main_process
         from tqdm import trange
         import numpy as np
         import torch
-        from accelerate import Accelerator
 
-        env = env_factory()
-        accelerator = Accelerator()
-        if accelerator is None or accelerator.is_main_process:
+        batch_size = pop[0].batch_size
+        group_size = pop[0].group_size
+        effective_data_batch_size = batch_size * group_size
+
+        # One RolloutEnv per grouped rollout, driven in lock-step; a separate
+        # test env keeps evaluation isolated from mid-rollout training state
+        env = BatchRolloutEnv(env_factory, batch_size, group_size)
+        test_env = env_factory(evaluation_mode=True)
+
+        evaluation_interval = 10
+        max_reward = 2.0
+        max_steps = 500
+        evo_steps = 10
+        group_seed = 42
+        elite_path = "path/to/model/directory"
+        save_elite = True
+        verbose = True
+
+        if is_main_process():
             print("\nTraining...")
 
         bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
-        max_steps = len(env) // effective_data_batch_size
         pbar = trange(
-            max_steps,
+            max_steps * effective_data_batch_size,
             unit="step",
             bar_format=bar_format,
             ascii=True,
@@ -489,44 +487,59 @@ function and is an example of how we might choose to make use of a population of
         )
 
         total_steps = 0
-        # calling env.reset() supplies the first batch of training data
-        prompts = env.reset(reset_dataloaders=True)
         for i in range(max_steps):
             agent_metrics_dict = {}
             for agent_idx, agent in enumerate(pop):
-                completion_ids, action_masks = agent.get_action(prompts)
+                # Collect one batch of grouped single-turn episodes
+                # (reset -> get_action -> step -> get_episode_data under the hood)
+                (
+                    completion_ids,
+                    action_masks,
+                    turn_ids,
+                    rewards,
+                    batch_steps,
+                    group_seed,
+                    sampling_logps,
+                ) = collect_rollouts_llm(
+                    agent=agent,
+                    env=env,
+                    n_steps=1,  # single-turn reasoning
+                    batch_size=batch_size,
+                    group_seed=group_seed,
+                )
                 completion_lengths = np.mean([x.shape[1] for x in completion_ids])
 
-                # Use the reward function stored in env.step to calculate reward of the each answer from the group
-                next_prompts, rewards = env.step(completion_ids)
+                # Stack per-episode rewards into a (batch, max_turns) tensor
+                (rewards_2d,) = stack_and_pad_experiences(
+                    [r.unsqueeze(0) if r.dim() == 1 else r for r in rewards],
+                    padding_values=[0.0],
+                )
+                rewards_2d = rewards_2d.float()
+                episode_scores = rewards_2d.sum(dim=1)
+
                 experiences = (
                     completion_ids,
                     action_masks,
-                    rewards,
+                    rewards_2d,
                 )
-                loss, kl = agent.learn(experiences)
-                metrics = [loss, kl, rewards, completion_lengths]
+                learn_metrics = agent.learn(experiences)
+                metrics = [
+                    learn_metrics["mean_loss"],
+                    learn_metrics["mean_kl"],
+                    episode_scores,
+                    completion_lengths,
+                ]
                 if max_reward is not None:
-                    accuracy = (rewards == max_reward).sum() / len(rewards.flatten())
+                    accuracy = (episode_scores >= max_reward).float().mean()
                     metrics.append(accuracy)
                 agg_metrics = [
-                    aggregate_metrics_across_gpus(accelerator, metric) for metric in metrics
+                    aggregate_metrics_across_gpus(metric) for metric in metrics
                 ]
-                prompts = next_prompts
                 agg_test_metrics = None
                 if (i + 1) % evaluation_interval == 0:
-                    test_reward = agent.test(env)
-                    test_metrics = [test_reward]
-                    if max_reward is not None:
-                        test_accuracy = (test_reward == max_reward).sum() / len(
-                            rewards.flatten()
-                        )
-                        test_metrics.append(test_accuracy)
-                    agg_test_metrics = [
-                        aggregate_metrics_across_gpus(accelerator, metric)
-                        for metric in test_metrics
-                    ]
-                    if verbose and (accelerator is None or accelerator.is_main_process):
+                    test_reward = agent.test(test_env)
+                    agg_test_metrics = [aggregate_metrics_across_gpus(test_reward)]
+                    if verbose and is_main_process():
                         fitness = [str(round(agent.fitness[-1], 2)) for agent in pop]
                         avg_fitness = [
                             "%.2f" % np.mean(agent.fitness[-5:]) for agent in pop
@@ -548,7 +561,7 @@ function and is an example of how we might choose to make use of a population of
                             """,
                             end="\r",
                         )
-                if accelerator is None or accelerator.is_main_process:
+                if is_main_process():
                     metrics_dict = {
                         "Train/Loss": agg_metrics[0],
                         "Train/KL-divergence": agg_metrics[1],
@@ -560,8 +573,6 @@ function and is an example of how we might choose to make use of a population of
                     agent_metrics_dict[f"agent_{agent_idx}/train_metrics"] = metrics_dict
                     if agg_test_metrics is not None:
                         test_metrics_dict = {"Eval/Mean reward": agg_test_metrics[0]}
-                        if max_reward is not None:
-                            test_metrics_dict |= {"Eval/Accuracy": agg_test_metrics[1]}
                         agent_metrics_dict[f"agent_{agent_idx}/test_metrics"] = (
                             test_metrics_dict
                         )
@@ -570,21 +581,21 @@ function and is an example of how we might choose to make use of a population of
                     agent.scores.append(mean_scores)
                     total_steps += effective_data_batch_size
 
-            if accelerator is not None:
-                accelerator.wait_for_everyone()
-            if tournament and mutation is not None:
+            barrier()
+            if tournament is not None and mutations is not None:
                 if (i + 1) % evo_steps == 0:
                     pop = tournament_selection_and_mutation(
                         population=pop,
                         tournament=tournament,
                         mutation=mutations,
-                        env_name=env.name,
-                        accelerator=None,  # Set as None for LLM finetuning as it does not require the same accelerator handling as standard RL models
+                        env_name="countdown",
                         language_model=True,
                         elite_path=elite_path,
                         save_elite=save_elite
                     )
         pbar.close()
+        env.close()
+        test_env.close()
 
 
 Loading a Trained Agent for Inference

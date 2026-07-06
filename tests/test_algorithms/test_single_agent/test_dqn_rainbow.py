@@ -3,8 +3,6 @@ import copy
 import numpy as np
 import pytest
 import torch
-from accelerate import Accelerator
-from accelerate.optimizer import AcceleratedOptimizer
 from tensordict import TensorDict
 from torch import optim
 
@@ -66,20 +64,17 @@ class TestRainbowDQNInit:
             ("multidiscrete_space", EvolvableMLP),
         ],
     )
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     def test_initialize_dqn(
         self,
         observation_space,
         discrete_space,
         encoder_cls,
-        accelerator_flag,
         request,
     ):
-        accelerator = Accelerator() if accelerator_flag else None
         observation_space = request.getfixturevalue(observation_space)
-        dqn = RainbowDQN(observation_space, discrete_space, accelerator=accelerator)
+        dqn = RainbowDQN(observation_space, discrete_space)
 
-        expected_device = accelerator.device if accelerator else "cpu"
+        expected_device = "cpu"
         assert dqn.observation_space == observation_space
         assert dqn.action_space == discrete_space
         assert dqn.batch_size == 64
@@ -89,7 +84,6 @@ class TestRainbowDQNInit:
         assert dqn.tau == 0.001
         assert dqn.mut is None
         assert dqn.device == expected_device
-        assert dqn.accelerator == accelerator
         assert dqn.index == 0
         assert dqn.scores == []
         assert dqn.fitness == []
@@ -97,8 +91,7 @@ class TestRainbowDQNInit:
         # assert dqn.actor_network is None
         assert isinstance(dqn.actor.encoder, encoder_cls)
         assert isinstance(dqn.actor_target.encoder, encoder_cls)
-        expected_opt_cls = AcceleratedOptimizer if accelerator else optim.Adam
-        assert isinstance(dqn.optimizer.optimizer, expected_opt_cls)
+        assert isinstance(dqn.optimizer.optimizer, optim.Adam)
         dqn.clean_up()
 
     @pytest.mark.parametrize(
@@ -107,19 +100,16 @@ class TestRainbowDQNInit:
             ("vector_space", EvolvableMLP),
         ],
     )
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     def test_initialize_dqn_with_actor_network_evo_net(
         self,
         observation_space,
         discrete_space,
         encoder_cls,
-        accelerator_flag,
         request,
     ):
-        accelerator = Accelerator() if accelerator_flag else None
         observation_space = request.getfixturevalue(observation_space)
         support = torch.linspace(0, 1, 51)
-        device = accelerator.device if accelerator else "cpu"
+        device = "cpu"
         actor_network = RainbowQNetwork(
             observation_space=observation_space,
             action_space=discrete_space,
@@ -132,7 +122,6 @@ class TestRainbowDQNInit:
             observation_space,
             discrete_space,
             actor_network=actor_network,
-            accelerator=accelerator,
         )
 
         assert dqn.observation_space == observation_space
@@ -144,7 +133,6 @@ class TestRainbowDQNInit:
         assert dqn.tau == 0.001
         assert dqn.mut is None
         assert dqn.device == device
-        assert dqn.accelerator == accelerator
         assert dqn.index == 0
         assert dqn.scores == []
         assert dqn.fitness == []
@@ -152,10 +140,7 @@ class TestRainbowDQNInit:
 
         assert isinstance(dqn.actor.encoder, encoder_cls)
         assert isinstance(dqn.actor_target.encoder, encoder_cls)
-        if accelerator is not None:
-            assert isinstance(dqn.optimizer.optimizer, AcceleratedOptimizer)
-        else:
-            assert isinstance(dqn.optimizer.optimizer, optim.Adam)
+        assert isinstance(dqn.optimizer.optimizer, optim.Adam)
         dqn.clean_up()
 
     def test_initialize_dqn_with_incorrect_actor_net_type(
@@ -209,7 +194,6 @@ class TestRainbowDQNInit:
         assert dqn.tau == 0.001
         assert dqn.mut is None
         assert dqn.device == "cpu"
-        assert dqn.accelerator is None
         assert dqn.index == 0
         assert dqn.scores == []
         assert dqn.fitness == []
@@ -229,17 +213,14 @@ class TestRainbowDQNGetAction:
             "dict_space",
         ],
     )
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     def test_returns_expected_action(
         self,
-        accelerator_flag,
         observation_space,
         discrete_space,
         request,
     ):
-        accelerator = Accelerator() if accelerator_flag else None
         observation_space = request.getfixturevalue(observation_space)
-        dqn = RainbowDQN(observation_space, discrete_space, accelerator=accelerator)
+        dqn = RainbowDQN(observation_space, discrete_space)
         state = get_sample_from_space(observation_space)
 
         action_mask = None
@@ -269,9 +250,7 @@ class TestRainbowDQNGetAction:
     def test_returns_expected_action_mask_vectorized(
         self, vector_space, discrete_space
     ):
-        accelerator = Accelerator()
-
-        dqn = RainbowDQN(vector_space, discrete_space, accelerator=accelerator)
+        dqn = RainbowDQN(vector_space, discrete_space)
         state = np.array([[1, 2, 4, 5], [2, 3, 5, 1]])
 
         action_mask = np.array([[0, 1], [1, 0]])
@@ -292,16 +271,13 @@ class TestRainbowDQNLearn:
             "multidiscrete_space",
         ],
     )
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     # learns from experiences and updates network parameters
     def test_learns_from_experiences(
         self,
-        accelerator_flag,
         observation_space,
         discrete_space,
         request,
     ):
-        accelerator = Accelerator() if accelerator_flag else None
         observation_space = request.getfixturevalue(observation_space)
         torch.autograd.set_detect_anomaly(True)
         batch_size = 64
@@ -311,11 +287,10 @@ class TestRainbowDQNLearn:
             observation_space,
             discrete_space,
             batch_size=batch_size,
-            accelerator=accelerator,
         )
 
         # Create a batch of experiences
-        device = accelerator.device if accelerator else "cpu"
+        device = "cpu"
         experiences = get_experiences_batch(
             observation_space,
             discrete_space,
@@ -344,17 +319,14 @@ class TestRainbowDQNLearn:
         )
         dqn.clean_up()
 
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("combined", [True, False])
     # learns from experiences and updates network parameters
     def test_learns_from_experiences_n_step(
         self,
-        accelerator_flag,
         combined,
         vector_space,
         discrete_space,
     ):
-        accelerator = Accelerator() if accelerator_flag else None
         batch_size = 64
 
         # Create an instance of the DQN class
@@ -362,7 +334,6 @@ class TestRainbowDQNLearn:
             vector_space,
             discrete_space,
             batch_size=batch_size,
-            accelerator=accelerator,
             combined_reward=combined,
         )
 
@@ -390,7 +361,7 @@ class TestRainbowDQNLearn:
                 "idxs": idxs,
             },
             batch_size=[batch_size],
-            device=accelerator.device if accelerator else "cpu",
+            device="cpu",
         )
 
         n_experiences = TensorDict(
@@ -402,7 +373,7 @@ class TestRainbowDQNLearn:
                 "done": n_dones,
             },
             batch_size=[batch_size],
-            device=accelerator.device if accelerator else "cpu",
+            device="cpu",
         )
 
         # Copy state dict before learning - should be different to after updating weights
@@ -429,16 +400,13 @@ class TestRainbowDQNLearn:
         dqn.clean_up()
 
     # learns from experiences and updates network parameters
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("combined", [True, False])
     def test_learns_from_experiences_per(
         self,
-        accelerator_flag,
         combined,
         vector_space,
         discrete_space,
     ):
-        accelerator = Accelerator() if accelerator_flag else None
         batch_size = 64
 
         # Create an instance of the DQN class
@@ -446,7 +414,6 @@ class TestRainbowDQNLearn:
             vector_space,
             discrete_space,
             batch_size=batch_size,
-            accelerator=accelerator,
             combined_reward=combined,
         )
 
@@ -470,7 +437,7 @@ class TestRainbowDQNLearn:
                 "weights": weights,
             },
             batch_size=[batch_size],
-            device=accelerator.device if accelerator else "cpu",
+            device="cpu",
         )
 
         # Copy state dict before learning - should be different to after updating weights
@@ -496,16 +463,13 @@ class TestRainbowDQNLearn:
         dqn.clean_up()
 
     # learns from experiences and updates network parameters
-    @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("combined", [True, False])
     def test_learns_from_experiences_per_n_step(
         self,
-        accelerator_flag,
         combined,
         vector_space,
         discrete_space,
     ):
-        accelerator = Accelerator() if accelerator_flag else None
         batch_size = 64
 
         # Create an instance of the DQN class
@@ -513,7 +477,6 @@ class TestRainbowDQNLearn:
             vector_space,
             discrete_space,
             batch_size=batch_size,
-            accelerator=accelerator,
             combined_reward=combined,
         )
 
@@ -542,7 +505,7 @@ class TestRainbowDQNLearn:
                 "weights": weights,
             },
             batch_size=[batch_size],
-            device=accelerator.device if accelerator else "cpu",
+            device="cpu",
         )
 
         n_experiences = TensorDict(
@@ -554,7 +517,7 @@ class TestRainbowDQNLearn:
                 "done": n_dones,
             },
             batch_size=[batch_size],
-            device=accelerator.device if accelerator else "cpu",
+            device="cpu",
         )
 
         # Copy state dict before learning - should be different to after updating weights
@@ -632,7 +595,6 @@ class TestRainbowDQNSoftUpdate:
         mut = None
         actor_network = None
         device = "cpu"
-        accelerator = None
         wrap = True
 
         dqn = RainbowDQN(
@@ -647,7 +609,6 @@ class TestRainbowDQNSoftUpdate:
             mut=mut,
             actor_network=actor_network,
             device=device,
-            accelerator=accelerator,
             wrap=wrap,
         )
 
@@ -729,7 +690,6 @@ class TestRainbowDQNClone:
         assert clone_agent.tau == dqn.tau
         assert clone_agent.mut == dqn.mut
         assert clone_agent.device == dqn.device
-        assert clone_agent.accelerator == dqn.accelerator
         assert_state_dicts_equal(clone_agent.actor.state_dict(), dqn.actor.state_dict())
         assert_state_dicts_equal(
             clone_agent.actor_target.state_dict(),
@@ -744,70 +704,6 @@ class TestRainbowDQNClone:
         assert clone_agent.scores == dqn.scores
         assert clone_agent.tensor_attribute == dqn.tensor_attribute
         assert clone_agent.tensor_test == dqn.tensor_test
-        dqn.clean_up()
-        clone_agent.clean_up()
-
-        accelerator = Accelerator()
-        dqn = RainbowDQN(observation_space, discrete_space, accelerator=accelerator)
-        clone_agent = dqn.clone()
-
-        assert clone_agent.observation_space == dqn.observation_space
-        assert clone_agent.action_space == dqn.action_space
-        assert clone_agent.batch_size == dqn.batch_size
-        assert clone_agent.lr == dqn.lr
-        assert clone_agent.learn_step == dqn.learn_step
-        assert clone_agent.gamma == dqn.gamma
-        assert clone_agent.tau == dqn.tau
-        assert clone_agent.mut == dqn.mut
-        assert clone_agent.device == dqn.device
-        assert clone_agent.accelerator == dqn.accelerator
-        assert_state_dicts_equal(clone_agent.actor.state_dict(), dqn.actor.state_dict())
-        assert_state_dicts_equal(
-            clone_agent.actor_target.state_dict(),
-            dqn.actor_target.state_dict(),
-        )
-        assert_state_dicts_equal(
-            clone_agent.optimizer.state_dict(),
-            dqn.optimizer.state_dict(),
-        )
-        assert clone_agent.fitness == dqn.fitness
-        assert clone_agent.steps == dqn.steps
-        assert clone_agent.scores == dqn.scores
-        dqn.clean_up()
-        clone_agent.clean_up()
-
-        accelerator = Accelerator()
-        dqn = RainbowDQN(
-            observation_space,
-            discrete_space,
-            accelerator=accelerator,
-            wrap=False,
-        )
-        clone_agent = dqn.clone(wrap=False)
-
-        assert clone_agent.observation_space == dqn.observation_space
-        assert clone_agent.action_space == dqn.action_space
-        # assert clone_agent.actor_network == dqn.actor_network
-        assert clone_agent.batch_size == dqn.batch_size
-        assert clone_agent.lr == dqn.lr
-        assert clone_agent.learn_step == dqn.learn_step
-        assert clone_agent.gamma == dqn.gamma
-        assert clone_agent.tau == dqn.tau
-        assert clone_agent.mut == dqn.mut
-        assert clone_agent.device == dqn.device
-        assert clone_agent.accelerator == dqn.accelerator
-        assert_state_dicts_equal(clone_agent.actor.state_dict(), dqn.actor.state_dict())
-        assert_state_dicts_equal(
-            clone_agent.actor_target.state_dict(),
-            dqn.actor_target.state_dict(),
-        )
-        assert_state_dicts_equal(
-            clone_agent.optimizer.state_dict(),
-            dqn.optimizer.state_dict(),
-        )
-        assert clone_agent.fitness == dqn.fitness
-        assert clone_agent.steps == dqn.steps
-        assert clone_agent.scores == dqn.scores
         dqn.clean_up()
         clone_agent.clean_up()
 
@@ -837,7 +733,6 @@ class TestRainbowDQNClone:
         assert clone_agent.tau == rainbow_dqn.tau
         assert clone_agent.mut == rainbow_dqn.mut
         assert clone_agent.device == rainbow_dqn.device
-        assert clone_agent.accelerator == rainbow_dqn.accelerator
         assert_state_dicts_equal(
             clone_agent.actor.state_dict(),
             rainbow_dqn.actor.state_dict(),

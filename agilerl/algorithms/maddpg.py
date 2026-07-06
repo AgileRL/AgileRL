@@ -89,11 +89,9 @@ class MADDPG(MultiAgentRLAlgorithm):
     :type critic_networks: list[nn.Module], optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
-    :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
     :param torch_compiler: The torch compile mode 'default', 'reduce-overhead' or 'max-autotune', defaults to None
     :type torch_compiler: str, optional
-    :param wrap: Wrap models for distributed training upon creation, defaults to True
+    :param wrap: Retained for API compatibility; has no effect, defaults to True
     :type wrap: bool, optional
     """
 
@@ -129,7 +127,6 @@ class MADDPG(MultiAgentRLAlgorithm):
         actor_networks: MultiAgentModule | None = None,
         critic_networks: MultiAgentModule | None = None,
         device: str = "cpu",
-        accelerator: Any | None = None,
         torch_compiler: str | None = None,
         wrap: bool = True,
     ) -> None:
@@ -141,7 +138,6 @@ class MADDPG(MultiAgentRLAlgorithm):
             agent_ids=agent_ids,
             hp_config=hp_config,
             device=device,
-            accelerator=accelerator,
             normalize_images=normalize_images,
             torch_compiler=torch_compiler,
             name="MADDPG",
@@ -398,9 +394,7 @@ class MADDPG(MultiAgentRLAlgorithm):
             lr=self.lr_critic,
         )
 
-        if self.accelerator is not None and wrap:
-            self.wrap_models()
-        elif self.torch_compiler:
+        if self.torch_compiler:
             if (
                 any(
                     actor.output_activation == "GumbelSoftmax"
@@ -499,12 +493,8 @@ class MADDPG(MultiAgentRLAlgorithm):
             actor = self.actors[group_id]
             actor.eval()
             grouped_obs = preprocessed_states[group_id]
-            if self.accelerator is not None:
-                with actor.no_sync(), torch.no_grad():
-                    actions = actor(grouped_obs)
-            else:
-                with torch.no_grad():
-                    actions = actor(grouped_obs)
+            with torch.no_grad():
+                actions = actor(grouped_obs)
             grouped_actions[group_id] = actions.cpu().numpy()
 
         action_dict = {}
@@ -745,21 +735,10 @@ class MADDPG(MultiAgentRLAlgorithm):
         actor_optimizer = self.actor_optimizers[network_id]
         critic_optimizer = self.critic_optimizers[network_id]
 
-        if self.accelerator is not None:
-            with critic.no_sync():
-                q_value = critic(states, stacked_actions)
-        else:
-            q_value = critic(states, stacked_actions)
+        q_value = critic(states, stacked_actions)
 
         with torch.no_grad():
-            if self.accelerator is not None:
-                with critic_target.no_sync():
-                    q_value_next_state = critic_target(
-                        next_states,
-                        stacked_next_actions,
-                    )
-            else:
-                q_value_next_state = critic_target(next_states, stacked_next_actions)
+            q_value_next_state = critic_target(next_states, stacked_next_actions)
 
         # Replace NaN rewards with 0 and dones with True
         rewards[agent_id] = torch.where(
@@ -782,19 +761,11 @@ class MADDPG(MultiAgentRLAlgorithm):
 
         # critic loss backprop
         critic_optimizer.zero_grad()
-        if self.accelerator is not None:
-            self.accelerator.backward(critic_loss)
-        else:
-            critic_loss.backward()
-
+        critic_loss.backward()
         critic_optimizer.step()
 
         # Get actions from actor
-        if self.accelerator is not None:
-            with actor.no_sync():
-                action = actor(states[agent_id])
-        else:
-            action = actor(states[agent_id])
+        action = actor(states[agent_id])
 
         detached_actions = copy.deepcopy(actions)
         detached_actions[agent_id] = action
@@ -804,18 +775,11 @@ class MADDPG(MultiAgentRLAlgorithm):
             [detached_actions[agent_key] for agent_key in self.agent_ids],
             dim=1,
         )
-        if self.accelerator is not None:
-            with critic.no_sync():
-                actor_loss = -critic(states, stacked_detached_actions).mean()
-        else:
-            actor_loss = -critic(states, stacked_detached_actions).mean()
+        actor_loss = -critic(states, stacked_detached_actions).mean()
 
         # actor loss backprop
         actor_optimizer.zero_grad()
-        if self.accelerator is not None:
-            self.accelerator.backward(actor_loss)
-        else:
-            actor_loss.backward()
+        actor_loss.backward()
         actor_optimizer.step()
 
         return actor_loss.item(), critic_loss.item()
