@@ -150,20 +150,6 @@ def _prepare_llm_algo_kwargs(
             "MICRO_BATCH_SIZE_PER_GPU",
             batch_size,
         )  # NOTE we should take a look into deepspeed auto batch-sizing
-    removed_chunk_keys = ("FUSED_LOGPROBS_CHUNK_ROWS", "FUSED_LOSS_CHUNK_ROWS")
-    for removed_key in removed_chunk_keys:
-        if removed_key in INIT_HP:
-            msg = (
-                f"{removed_key} has been removed. Use CHUNK_ROWS instead "
-                "(single chunk-size knob for all fused paths)."
-            )
-            raise ValueError(msg)
-        if removed_key.lower() in merged:
-            msg = (
-                f"{removed_key.lower()} has been removed. Use chunk_rows instead "
-                "(single chunk-size knob for all fused paths)."
-            )
-            raise ValueError(msg)
     # Plain passthroughs: (merged_key, init_hp_key, caster, present_when_truthy).
     # reduce_memory_peak/activation_offload fire on key membership (so an explicit
     # False is honoured); lora_target_scope/chunk_rows fire only on a truthy value.

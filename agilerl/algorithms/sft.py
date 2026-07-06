@@ -351,7 +351,7 @@ class SFT(LLMAlgorithm):
                 labels.masked_fill(ignore, 0),  # safe gather index; masked out below
                 temperature=1.0,
                 cast_to_fp32=self.cast_logprobs_to_fp32,
-                _chunk_rows=self.fused_logprobs_chunk_rows,
+                chunk_rows=self.chunk_rows,
             )  # [B, L-1]
             token_mask = (~ignore).to(logps.dtype)
             loss = -(logps * token_mask).sum() / token_mask.sum().clamp_min(1.0)

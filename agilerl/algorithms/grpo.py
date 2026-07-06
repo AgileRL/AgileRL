@@ -1787,7 +1787,7 @@ class GRPO(LLMAlgorithm):
                         .reshape(n_tokens, 1)
                     )
             chunk_size = self._resolve_fused_chunk_rows(
-                lm_head_weight.shape[0], self.fused_loss_chunk_rows
+                lm_head_weight.shape[0], self.chunk_rows
             )
         else:
             # Trajectory-level (GSPO): keep the padded layout and one-sequence-per-

@@ -1934,7 +1934,7 @@ class TestLLMLogprobsFromLogits:
         result_bf16 = LLMAlgorithm._logprobs_from_logits(
             logits_bf16,
             index,
-            _chunk_rows=chunk_rows,
+            chunk_rows=chunk_rows,
         )
         reference_fp32 = (
             F.log_softmax(logits_bf16.float(), dim=-1)
@@ -2056,7 +2056,7 @@ class TestLogprobsFromHiddenFused:
         assert torch.equal(result, ref)
 
     def test_chunked_matches_unchunked(self) -> None:
-        """Output is independent of ``_chunk_rows`` — covers the loop
+        """Output is independent of ``chunk_rows`` — covers the loop
         boundary path.
         """
         torch.manual_seed(2)
@@ -2072,7 +2072,7 @@ class TestLogprobsFromHiddenFused:
             targets,
             temperature=0.5,
             cast_to_fp32=True,
-            _chunk_rows=10_000,  # > B*T=27 → single chunk
+            chunk_rows=10_000,  # > B*T=27 → single chunk
         )
         small = LLMAlgorithm._logprobs_from_hidden_fused(
             hidden,
@@ -2081,7 +2081,7 @@ class TestLogprobsFromHiddenFused:
             targets,
             temperature=0.5,
             cast_to_fp32=True,
-            _chunk_rows=4,  # forces multiple chunks
+            chunk_rows=4,  # forces multiple chunks
         )
         assert torch.equal(big, small)
 
@@ -2207,7 +2207,7 @@ class TestFusedLinearLogProbsGrad:
 
     def test_grad_invariant_to_chunk_rows(self) -> None:
         """Forward value and hidden gradient are independent of
-        ``_chunk_rows`` (single chunk vs many) up to fp32 matmul-tiling
+        ``chunk_rows`` (single chunk vs many) up to fp32 matmul-tiling
         noise — chunking only partitions rows, it changes nothing about
         each row's reduction.
         """
@@ -2227,7 +2227,7 @@ class TestFusedLinearLogProbsGrad:
                 targets,
                 temperature=0.9,
                 cast_to_fp32=True,
-                _chunk_rows=chunk_rows,
+                chunk_rows=chunk_rows,
             )
             out.backward(upstream)
             return out.detach(), hid.grad

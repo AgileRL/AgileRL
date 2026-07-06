@@ -537,8 +537,7 @@ class TestREINFORCEInit:
 
     def test_init_stores_chunk_rows(self):
         rf = _cpu_llmreinforce(chunk_rows=256)
-        assert rf.fused_logprobs_chunk_rows == 256
-        assert rf.fused_loss_chunk_rows == 256
+        assert rf.chunk_rows == 256
 
     def test_init_turn_ratio_pooling_must_be_valid(self):
         actor = create_dummy_actor(10, 8, 100, "cpu")

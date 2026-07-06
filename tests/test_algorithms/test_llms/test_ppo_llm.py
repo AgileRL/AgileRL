@@ -509,13 +509,7 @@ class TestPPOInit:
 
     def test_init_stores_chunk_rows(self):
         ppo = _cpu_llmppo(chunk_rows=256)
-        assert ppo.fused_logprobs_chunk_rows == 256
-        assert ppo.fused_loss_chunk_rows == 256
-
-    def test_init_chunk_rows_sets_both_fused_chunk_knobs(self):
-        ppo = _cpu_llmppo(chunk_rows=256)
-        assert ppo.fused_logprobs_chunk_rows == 256
-        assert ppo.fused_loss_chunk_rows == 256
+        assert ppo.chunk_rows == 256
 
     def test_init_action_granularity_deprecated_warns_and_overrides(self):
         """The legacy ``action_granularity`` kwarg warns and is carried over
@@ -1762,7 +1756,7 @@ class TestPPOSequencePacking:
             action_mask[b, : length - 1] = True
 
         def fake_fused_fn(
-            h, weight, bias, targets, *, temperature, cast_to_fp32, _chunk_rows
+            h, weight, bias, targets, *, temperature, cast_to_fp32, chunk_rows
         ):
             # Context-free per-token logprob over the (already next-token-
             # shifted) hidden features. Identical closed form padded or packed,

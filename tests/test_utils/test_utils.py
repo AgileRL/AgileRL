@@ -1358,38 +1358,6 @@ class TestPrepareLlmAlgoKwargs:
         )
         assert merged["reduce_memory_peak"] is True
 
-    @pytest.mark.parametrize(
-        "removed_key", ["FUSED_LOGPROBS_CHUNK_ROWS", "FUSED_LOSS_CHUNK_ROWS"]
-    )
-    def test_raises_when_removed_chunk_init_hp_keys_are_used(self, removed_key):
-        from agilerl.utils.utils import _prepare_llm_algo_kwargs
-
-        with pytest.raises(ValueError, match="has been removed"):
-            _prepare_llm_algo_kwargs(
-                {},
-                tokenizer=None,
-                model_name="foo",
-                lora_config=None,
-                vllm_config=None,
-                INIT_HP=self._init_hp(**{removed_key: 128}),
-            )
-
-    @pytest.mark.parametrize(
-        "removed_kwarg", ["fused_logprobs_chunk_rows", "fused_loss_chunk_rows"]
-    )
-    def test_raises_when_removed_chunk_algo_kwargs_are_used(self, removed_kwarg):
-        from agilerl.utils.utils import _prepare_llm_algo_kwargs
-
-        with pytest.raises(ValueError, match="has been removed"):
-            _prepare_llm_algo_kwargs(
-                {removed_kwarg: 128},
-                tokenizer=None,
-                model_name="foo",
-                lora_config=None,
-                vllm_config=None,
-                INIT_HP=self._init_hp(),
-            )
-
     def test_attn_implementation_injected_into_model_config(self):
         """A non-"auto" ATTN_IMPLEMENTATION lands in model_config so the
         algorithm's create_model treats it as authoritative.

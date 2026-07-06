@@ -1324,7 +1324,7 @@ class PPO(LLMAlgorithm):
             full_turn_mask=full_turn_mask,
             max_turns=max_turns,
             token_chunk_size=self._resolve_fused_chunk_rows(
-                lm_head_weight.shape[0], self.fused_loss_chunk_rows
+                lm_head_weight.shape[0], self.chunk_rows
             ),
             turn_log_ratio_reduction=self.turn_ratio_pooling,
             vllm_is_ratio=vllm_is_ratio,

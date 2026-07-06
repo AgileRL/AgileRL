@@ -148,7 +148,6 @@ if TYPE_CHECKING or HAS_VLLM:
         set_fused_adapter_routing,
     )
     from agilerl.algorithms.core.llm_ops.vllm_colocate import (
-        patch_vllm_lora_copy_path,
         patch_vllm_lora_keep_resident,
         patch_vllm_strip_multimodal_towers,
     )
@@ -3975,7 +3974,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 fused_ids[start:end, 1:],
                 temperature=self.temperature,
                 cast_to_fp32=self.cast_logprobs_to_fp32,
-                _chunk_rows=self.chunk_rows,
+                chunk_rows=self.chunk_rows,
             )
             del first
 
@@ -4150,7 +4149,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             packed.input_ids[:, 1:],
             temperature=self.temperature,
             cast_to_fp32=self.cast_logprobs_to_fp32,
-            _chunk_rows=self.chunk_rows,
+            chunk_rows=self.chunk_rows,
         )
         log_probs = unpack_logprobs(packed_lp, packed)
 
@@ -4374,7 +4373,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                         packed.input_ids[:, 1:],
                         temperature=self.temperature,
                         cast_to_fp32=self.cast_logprobs_to_fp32,
-                        _chunk_rows=self.chunk_rows,
+                        chunk_rows=self.chunk_rows,
                     )
                     # Map back to the dense (mb, T-1) frame so the loss path is
                     # unchanged; cross-segment boundary predictions are dropped.
@@ -4388,7 +4387,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                         batch_ids[:, 1:],
                         temperature=self.temperature,
                         cast_to_fp32=self.cast_logprobs_to_fp32,
-                        _chunk_rows=self.chunk_rows,
+                        chunk_rows=self.chunk_rows,
                     )
 
                 first = None
@@ -4988,13 +4987,13 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         logits: torch.Tensor,
         index: torch.Tensor,
         cast_to_fp32: bool = True,
-        _chunk_rows: int = 1,
+        chunk_rows: int = 1,
     ) -> torch.Tensor:
         """Calculate log probabilities for previously generated token ids.
 
-        Processes ``_chunk_rows`` rows at a time so peak memory stays bounded to
-        ``(_chunk_rows, seq_len, vocab_size)`` rather than the full batch, avoiding
-        OOM on large-vocabulary models. Default ``_chunk_rows=1`` minimizes the
+        Processes ``chunk_rows`` rows at a time so peak memory stays bounded to
+        ``(chunk_rows, seq_len, vocab_size)`` rather than the full batch, avoiding
+        OOM on large-vocabulary models. Default ``chunk_rows=1`` minimizes the
         fp32 workspace at the cost of more kernel launches; raise to amortize
         launch overhead when memory headroom allows.
 
@@ -5031,12 +5030,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             result = target - log_z
             return result.to(orig_dtype) if cast_to_fp32 else result
 
-        if B <= _chunk_rows:
+        if B <= chunk_rows:
             return _logprobs_chunk(logits, index)
 
         per_token_logps = []
-        for start in range(0, B, _chunk_rows):
-            end = min(start + _chunk_rows, B)
+        for start in range(0, B, chunk_rows):
+            end = min(start + chunk_rows, B)
             per_token_logps.append(
                 _logprobs_chunk(logits[start:end], index[start:end]),
             )
@@ -5072,12 +5071,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         target_ids: torch.Tensor,
         temperature: float = 1.0,
         cast_to_fp32: bool = True,
-        _chunk_rows: int | None = None,
+        chunk_rows: int | None = None,
     ) -> torch.Tensor:
         """Per-token target logprobs without materializing the full ``(B, T, V)``
         logits tensor.
 
-        Tiles flat over ``(B*T)`` with workspace bounded to ``(_chunk_rows, V)``
+        Tiles flat over ``(B*T)`` with workspace bounded to ``(chunk_rows, V)``
         per iteration. Counterpart of :meth:`_logprobs_from_logits` for
         callers that hold hidden states and the lm_head separately. **No-grad
         only** — gradients won't flow to ``lm_head_weight`` from this fn. The
@@ -5105,16 +5104,16 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             in fp32 then cast back. Same semantics as
             :meth:`_logprobs_from_logits`.
         :type cast_to_fp32: bool, optional
-        :param _chunk_rows: rows of the flattened ``(B*T)`` workspace per
-            iteration; trades launch count vs ``_chunk_rows * V`` peak. When
+        :param chunk_rows: rows of the flattened ``(B*T)`` workspace per
+            iteration; trades launch count vs ``chunk_rows * V`` peak. When
             ``None`` (default) it is resolved from the vocab size via
             a ~256 MB fp32 workspace heuristic.
-        :type _chunk_rows: int | None, optional
+        :type chunk_rows: int | None, optional
         :return: ``(B, T)`` per-token logprobs in ``hidden.dtype``.
         :rtype: torch.Tensor
         """
-        _chunk_rows = LLMAlgorithm._resolve_fused_chunk_rows(
-            lm_head_weight.shape[0], _chunk_rows
+        chunk_rows = LLMAlgorithm._resolve_fused_chunk_rows(
+            lm_head_weight.shape[0], chunk_rows
         )
         return fused_linear_logprobs_chunked(
             hidden,
@@ -5123,7 +5122,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             target_ids,
             temperature=temperature,
             cast_to_fp32=cast_to_fp32,
-            chunk_rows=_chunk_rows,
+            chunk_rows=chunk_rows,
         )
 
     @staticmethod
@@ -5134,7 +5133,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         target_ids: torch.Tensor,
         temperature: float = 1.0,
         cast_to_fp32: bool = True,
-        _chunk_rows: int | None = None,
+        chunk_rows: int | None = None,
     ) -> torch.Tensor:
         """Gradient-aware version of :meth:`_logprobs_from_hidden_fused`.
 
@@ -5160,15 +5159,15 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :type temperature: float, optional
         :param cast_to_fp32: run the per-chunk reduction in fp32.
         :type cast_to_fp32: bool, optional
-        :param _chunk_rows: rows of the flattened ``(B*T)`` workspace per chunk.
+        :param chunk_rows: rows of the flattened ``(B*T)`` workspace per chunk.
             When ``None`` (default) it is resolved from the vocab size via
             a ~256 MB fp32 workspace heuristic.
-        :type _chunk_rows: int | None, optional
+        :type chunk_rows: int | None, optional
         :return: ``(B, T)`` per-token logprobs in ``hidden.dtype``.
         :rtype: torch.Tensor
         """
-        _chunk_rows = LLMAlgorithm._resolve_fused_chunk_rows(
-            lm_head_weight.shape[0], _chunk_rows
+        chunk_rows = LLMAlgorithm._resolve_fused_chunk_rows(
+            lm_head_weight.shape[0], chunk_rows
         )
         return FusedLinearLogProbsFunction.apply(
             hidden,
@@ -5177,7 +5176,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             target_ids,
             temperature,
             cast_to_fp32,
-            _chunk_rows,
+            chunk_rows,
         )
 
     def _configure_batch_size_per_process(
@@ -5616,22 +5615,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 stacklevel=2,
             )
 
-        copy_debug_enabled = os.environ.get("AGILERL_VLLM_LORA_COPY_DEBUG") == "1"
-        device_safe_copy_enabled = (
-            os.environ.get("AGILERL_VLLM_LORA_DEVICE_SAFE_COPY") == "1"
-        )
-        copy_patch_count = patch_vllm_lora_copy_path(self.llm)
-        if (self.accelerator is None or self.accelerator.process_index == 0) and (
-            copy_debug_enabled or device_safe_copy_enabled
-        ):
-            warnings.warn(
-                "colocated init: vLLM LoRA copy patch status "
-                f"(copy_debug={copy_debug_enabled}, "
-                f"device_safe_copy={device_safe_copy_enabled}, "
-                f"patched_layers={copy_patch_count}).",
-                stacklevel=2,
-            )
-
         strip_towers = getattr(self.vllm_config, "strip_multimodal_towers", False)
         if strip_towers:
             # Free unused vision/audio towers on multimodal bases (text-only RL
@@ -5794,6 +5777,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
     def _prepare_vllm_for_training(self) -> None:
         """Prepare vLLM for learning."""
+        if not self.use_vllm:
+            return
         # Every rank holds its own colocated engine (external_launcher), so
         # every rank must sleep it — not just the main process.
         if self.vllm_config.sleep_mode and self._vllm_awake:
@@ -5801,8 +5786,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             self.llm.sleep(level=self.vllm_config.sleep_mode_level)
             self._vllm_awake = False
 
-        if self.use_vllm:
-            self._vllm_moved = False
+        self._vllm_moved = False
 
     def _prepare_vllm_for_generation(self) -> None:
         if self.use_memory_efficient_params:

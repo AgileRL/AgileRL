@@ -599,7 +599,7 @@ class DPO(LLMAlgorithm):
             True,  # compiled
             True,  # use_ref_model
             False,  # average_log_prob (sum, matching _dpo_loss)
-            self.fused_loss_chunk_rows or 1,  # chunk_size (sequences per chunk)
+            self.chunk_rows or 1,  # chunk_size (sequences per chunk)
             "sigmoid",  # loss_type
         )
         # aux = (chosen_logps, rejected_logps, chosen_logits_mean, rejected_logits_mean,
