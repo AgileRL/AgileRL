@@ -139,10 +139,10 @@ def main() -> None:
         env_probe.close()
 
     def env_factory() -> RolloutEnv:
-        """Create one multi-turn environment instance, served over the OpenEnv API."""
-        return RolloutEnv.serving(
-            lambda: gem.make(args.env_name),
-            tokenizer=tokenizer,
+        """Create one multi-turn environment instance, driven in-process."""
+        return RolloutEnv.local(
+            gem.make(args.env_name),
+            tokenizer,
             max_turns=max_turns,
             pad_id=tokenizer.pad_token_id,
             apply_chat_template=True,

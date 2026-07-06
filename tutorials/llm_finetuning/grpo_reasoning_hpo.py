@@ -168,15 +168,22 @@ def main(init_hp, mut_p):
         def step(self, action):
             return "", float(self.reward_fn(action, self._a, self._q)), True, False, {}
 
+    # Materialise the dataset columns once; every env built by env_factory
+    # shares these read-only lists.
+    train_questions = list(train_dataset["question"])
+    train_answers = list(train_dataset["answer"])
+    test_questions = list(test_dataset["question"])
+    test_answers = list(test_dataset["answer"])
+
     def env_factory(evaluation_mode: bool = False):
-        env = RolloutEnv.serving(
-            lambda: PromptDataset(
-                questions=list(train_dataset["question"]),
-                answers=list(train_dataset["answer"]),
+        env = RolloutEnv.local(
+            PromptDataset(
+                questions=train_questions,
+                answers=train_answers,
                 reward_fn=combined_rewards,
                 prompt_builder=prompt_builder,
-                test_questions=list(test_dataset["question"]),
-                test_answers=list(test_dataset["answer"]),
+                test_questions=test_questions,
+                test_answers=test_answers,
             ),
             tokenizer,
             max_turns=1,

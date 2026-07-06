@@ -1,4 +1,4 @@
-"""Multi-turn grid navigation probe (``GridNavigationEnv`` + ``RolloutHarness``)."""
+"""Multi-turn grid navigation probe (``GridNavigationEnv`` + ``RolloutEnv``)."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ if not HAS_LLM_DEPENDENCIES:
     raise ImportError("LLM dependencies are not installed.")
 
 import torch
-from agilerl.llm_envs import RolloutHarness
+from agilerl.llm_envs import RolloutEnv
 from config_load import load_debug_config
 from llm_debug_utils import lora_config_from_dict
 from tiny_model import TinyDigitTokenizer, build_tiny_actor_network
@@ -310,16 +310,16 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
         print("\nPre-training detailed eval:")
         detailed_eval(agent, tokenizer, grid_size, max_turns)
 
-        def env_factory() -> RolloutHarness:
-            return RolloutHarness(
+        def env_factory() -> RolloutEnv:
+            return RolloutEnv.local(
                 GridNavigationEnv(
                     grid_size=grid_size,
                     max_turns=max_turns,
                     seed=rng.randint(0, 2**31),
                 ),
                 tokenizer,
-                max_turns,
-                tokenizer.pad_token_id,
+                max_turns=max_turns,
+                pad_id=tokenizer.pad_token_id,
                 apply_chat_template=False,
                 max_model_len=max_ctx,
                 max_output_tokens=max_new,

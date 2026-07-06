@@ -126,32 +126,79 @@ def main(init_hp, mut_p):
     # Reasoning folds into the single-turn rollout taxonomy; the BatchRolloutEnv
     # owns the dataset cursor, keeping each GRPO group's dataset order
     # deterministic and consistent.
+    class PromptDataset:
+        """Single-turn dataset env: serve a question on reset, score it on step."""
+
+        def __init__(
+            self,
+            questions,
+            answers,
+            reward_fn,
+            prompt_builder,
+            test_questions=None,
+            test_answers=None,
+        ):
+            self.questions, self.answers = questions, answers
+            self.test_questions, self.test_answers = test_questions, test_answers
+            self.reward_fn, self.prompt_builder = reward_fn, prompt_builder
+            self._cursor, self._split = 0, ""
+
+        @property
+        def dataset_size(self) -> int:
+            return len(self.questions)
+
+        def reset(self, seed=None, *, row_index=None, evaluation=None):
+            if evaluation and self.test_questions is not None:
+                qs, ans, split = self.test_questions, self.test_answers, "eval"
+            else:
+                qs, ans, split = self.questions, self.answers, "train"
+            if row_index is None:
+                if split != self._split:
+                    self._cursor, self._split = 0, split
+                row_index, self._cursor = self._cursor, self._cursor + 1
+            self._q, self._a = qs[row_index % len(qs)], ans[row_index % len(ans)]
+            return self.prompt_builder(self._q), {}
+
+        def step(self, action):
+            return "", float(self.reward_fn(action, self._a, self._q)), True, False, {}
+
+    # Materialise the dataset columns once; every env built by env_factory
+    # shares these read-only lists.
+    train_questions = list(train_dataset["question"])
+    train_answers = list(train_dataset["answer"])
+    test_questions = list(test_dataset["question"])
+    test_answers = list(test_dataset["answer"])
+
+    def make_env() -> PromptDataset:
+        return PromptDataset(
+            questions=train_questions,
+            answers=train_answers,
+            reward_fn=combined_rewards,
+            prompt_builder=prompt_builder,
+            test_questions=test_questions,
+            test_answers=test_answers,
+        )
+
     def env_factory(evaluation_mode: bool = False):
         rollout_kwargs = {
             "pad_id": getattr(tokenizer, "pad_token_id", None),
             "apply_chat_template": True,
             "max_model_len": init_hp["MAX_MODEL_LEN"],
-            # Per-request timeout comes from the run manifest (None = unbounded).
-            "timeout_s": init_hp.get("OPENENV_TIMEOUT_S"),
         }
-        # AGILERL_OPENENV_URL=<url> drives an env hosted on a *separate* OpenEnv server
-        # (e.g. scripts/local/serve_openenv_reasoning.py); else from_dataset hosts the
-        # dataset env on its own OpenEnv server per rollout.
+        # Per-request HTTP timeout comes from the run manifest (None = unbounded);
+        # it only applies when the env is reached over a URL.
+        http_kwargs = {"timeout_s": init_hp.get("OPENENV_TIMEOUT_S"), **rollout_kwargs}
+        # AGILERL_OPENENV_URL=<url> drives an env hosted on a *separate* OpenEnv
+        # server (e.g. scripts/local/serve_openenv_reasoning.py);
+        # AGILERL_OPENENV_SERVE=1 hosts the dataset env on its own OpenEnv server
+        # per rollout; the default runs it in-process (no HTTP).
         external_url = os.environ.get("AGILERL_OPENENV_URL")
         if external_url:
-            env = RolloutEnv(external_url, tokenizer, max_turns=1, **rollout_kwargs)
+            env = RolloutEnv(external_url, tokenizer, max_turns=1, **http_kwargs)
+        elif os.environ.get("AGILERL_OPENENV_SERVE") == "1":
+            env = RolloutEnv.serving(make_env, tokenizer, max_turns=1, **http_kwargs)
         else:
-            env = RolloutEnv.from_dataset(
-                questions=list(train_dataset["question"]),
-                answers=list(train_dataset["answer"]),
-                reward_fn=combined_rewards,
-                tokenizer=tokenizer,
-                prompt_builder=prompt_builder,
-                test_questions=list(test_dataset["question"]),
-                test_answers=list(test_dataset["answer"]),
-                max_turns=1,
-                **rollout_kwargs,
-            )
+            env = RolloutEnv.local(make_env(), tokenizer, max_turns=1, **rollout_kwargs)
         env.evaluation_mode = evaluation_mode
         return env
 

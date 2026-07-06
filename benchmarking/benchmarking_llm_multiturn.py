@@ -79,10 +79,10 @@ def main(init_hp, mut_p):
         return env
 
     def env_factory():
-        return RolloutEnv.serving(
-            make_env,
+        return RolloutEnv.local(
+            make_env(),
             tokenizer,
-            rollout_max_turns,
+            max_turns=rollout_max_turns,
             pad_id=tokenizer.pad_token_id,
             max_model_len=init_hp.get("MAX_MODEL_LEN", None),
             max_output_tokens=init_hp.get("MAX_OUTPUT_TOKENS", None),
