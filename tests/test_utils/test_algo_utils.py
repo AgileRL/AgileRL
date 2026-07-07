@@ -2007,3 +2007,14 @@ class TestInheritInitSignature:
 
         with pytest.raises(TypeError, match="must define its own __init__"):
             algo_utils.inherit_init_signature(self._Parent)(NoInit)
+
+
+class TestVLLMConfig:
+    @pytest.mark.parametrize("level", [1, 2])
+    def test_valid_sleep_mode_level_accepted(self, level):
+        assert VLLMConfig(sleep_mode_level=level).sleep_mode_level == level
+
+    @pytest.mark.parametrize("level", [0, 3, -1])
+    def test_invalid_sleep_mode_level_raises(self, level):
+        with pytest.raises(ValueError, match="sleep_mode_level must be either 1 or 2"):
+            VLLMConfig(sleep_mode_level=level)

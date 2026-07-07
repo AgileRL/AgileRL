@@ -152,14 +152,12 @@ def _prepare_llm_algo_kwargs(
         )  # NOTE we should take a look into deepspeed auto batch-sizing
     # Plain passthroughs: (merged_key, init_hp_key, caster, present_when_truthy).
     # reduce_memory_peak/activation_offload fire on key membership (so an explicit
-    # False is honoured); lora_target_scope/fused_loss_chunk_rows fire only on a
-    # truthy value. fused_loss_chunk_rows overrides the auto-tuned Liger fused-loss
-    # chunk (caps backward peak memory).
+    # False is honoured); lora_target_scope/chunk_rows fire only on a truthy value.
     _passthroughs = (
         ("reduce_memory_peak", "REDUCE_MEMORY_PEAK", bool, False),
         ("activation_offload", "ACTIVATION_OFFLOAD", bool, False),
         ("lora_target_scope", "LORA_TARGET_SCOPE", lambda v: v, True),
-        ("fused_loss_chunk_rows", "FUSED_LOSS_CHUNK_ROWS", int, True),
+        ("chunk_rows", "CHUNK_ROWS", int, True),
     )
     for merged_key, init_hp_key, caster, present_when_truthy in _passthroughs:
         present = (
@@ -1036,6 +1034,7 @@ def create_population(
                 turn_level_clip=INIT_HP.get("TURN_LEVEL_CLIP", True),
                 turn_value_reduction=INIT_HP.get("TURN_VALUE_REDUCTION", "final_value"),
                 whiten_advantages=INIT_HP.get("WHITEN_ADVANTAGES", True),
+                chunk_rows=INIT_HP.get("CHUNK_ROWS"),
                 lr_actor=INIT_HP.get("LR_ACTOR", INIT_HP.get("LR", 5e-6)),
                 lr_critic=INIT_HP.get("LR_CRITIC"),
                 max_grad_norm=INIT_HP.get("MAX_GRAD_NORM", 1.0),
