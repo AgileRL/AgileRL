@@ -50,18 +50,6 @@ network:
     latent_dim: 128
     min_latent_dim: 64
     max_latent_dim: 256
-    arch: multiinput
-    encoder_config:
-        vector_space_mlp: true
-        latent_dim: 128
-        min_latent_dim: 64
-        max_latent_dim: 256
-        mlp_config:
-            hidden_size:
-                - 128
-            activation: ReLU
-            min_mlp_nodes: 64
-            max_mlp_nodes: 256
     head_config:
         hidden_size:
             - 128

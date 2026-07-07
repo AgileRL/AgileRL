@@ -202,6 +202,10 @@ name as seen on Arena. If no version is specified, the latest one is used.
    .. literalinclude:: /_static/examples/merge_ppo.yaml
       :language: yaml
 
+Notice that the ``network`` section doesn't set an ``arch``. Arena infers the encoder
+architecture from the environment's observation space, so a ``Dict`` observation like ours
+gets a multi-input encoder automatically. Set ``simba: true`` in the network config, or
+``recurrent: true`` in the algorithm config, to opt into a SimBa or recurrent encoder instead.
 
 For this example, we will train on the ``arena-medium`` resource, which has 1x nvidia-l4 GPU, 15x CPUs, and 55GB of RAM
 (costing around 2.41 credits/node-hour on Arena), and using 2 nodes for quicker results. Since we are training a population
