@@ -31,6 +31,24 @@ class DictObsEnv(gym.Env):
         return self.observation_space.sample(), 0.0, False, False, {}
 
 
+class ImageObsEnv(gym.Env):
+    """Single-agent env with a 3-D Box observation space (needs EvolvableCNN)."""
+
+    def __init__(self, render_mode=None):
+        self.observation_space = spaces.Box(
+            low=0, high=255, shape=(3, 32, 32), dtype=np.uint8
+        )
+        self.action_space = spaces.Box(-1.0, 1.0, shape=(2,), dtype=np.float32)
+        self.render_mode = render_mode
+
+    def reset(self, *, seed=None, options=None):
+        super().reset(seed=seed)
+        return self.observation_space.sample(), {}
+
+    def step(self, action):
+        return self.observation_space.sample(), 0.0, False, False, {}
+
+
 class HeteroParallelEnv(ParallelEnv):
     """Two agents: one Dict-obs (multiinput), one vector-obs (mlp)."""
 

@@ -2630,27 +2630,96 @@ def test_from_manifest_wrong_arch_is_overridden_when_omitted(tmp_path):
     assert isinstance(trainer.population[0].actor.encoder, EvolvableMLP)
 
 
-def test_deferred_encoder_uses_spec_defaults_not_dataclass(tmp_path):
+@pytest.mark.parametrize(
+    ("arch", "environment", "algorithm_extra", "network_extra", "assertions"),
+    [
+        pytest.param(
+            "mlp",
+            {"name": "CartPole-v1", "num_envs": 2},
+            {},
+            {},
+            # MlpSpec defaults (dataclass MlpNetConfig would be 500 / 3)
+            {"max_mlp_nodes": 256, "max_hidden_layers": 6},
+            id="mlp",
+        ),
+        pytest.param(
+            "multiinput",
+            {
+                "name": "dict-obs-env",
+                "num_envs": 2,
+                "entrypoint": "tests.test_train._dummy_envs:DictObsEnv",
+            },
+            {},
+            {},
+            # MultiInputSpec default (dataclass MultiInputNetConfig would be 16)
+            {"latent_dim": 32},
+            id="multiinput",
+        ),
+        pytest.param(
+            "cnn",
+            {
+                "name": "image-obs-env",
+                "num_envs": 2,
+                "entrypoint": "tests.test_train._dummy_envs:ImageObsEnv",
+            },
+            {},
+            {},
+            # CnnSpec default (dataclass CnnNetConfig would be 16)
+            {"min_channel_size": 8},
+            id="cnn",
+        ),
+        pytest.param(
+            "lstm",
+            {"name": "CartPole-v1", "num_envs": 2},
+            {"recurrent": True},
+            {},
+            # LstmSpec defaults (dataclass LstmNetConfig would be 500 / 4)
+            {"max_hidden_state_size": 256, "max_layers": 6},
+            id="lstm",
+        ),
+        pytest.param(
+            "simba",
+            {"name": "CartPole-v1", "num_envs": 2},
+            {},
+            {"simba": True},
+            # SimbaSpec default (dataclass SimBaNetConfig would be 500)
+            {"max_mlp_nodes": 256},
+            id="simba",
+        ),
+    ],
+)
+def test_deferred_encoder_uses_spec_defaults_not_dataclass(
+    tmp_path, arch, environment, algorithm_extra, network_extra, assertions
+):
     """A no-arch manifest must resolve encoder HP bounds from the pydantic
     ``*Spec`` defaults, not the ``modules/configs`` dataclass defaults.
+
+    Parametrized across every inferable arch (mlp, multiinput, cnn, lstm,
+    simba) so the invariant is guarded regardless of which encoder the
+    deferred path infers from the observation space / algorithm flags.
     """
     import yaml
 
     from agilerl.training.trainer import LocalTrainer
 
     manifest = {
-        "algorithm": {"name": "PPO", "learn_step": 64},
-        "environment": {"name": "CartPole-v1", "num_envs": 2},
+        "algorithm": {"name": "PPO", "learn_step": 64, **algorithm_extra},
+        "environment": environment,
         "training": {"max_steps": 200, "evo_steps": 100, "pop_size": 1},
-        "network": {"latent_dim": 32, "head_config": {"hidden_size": [32]}},
+        "network": {
+            "latent_dim": 32,
+            "head_config": {"hidden_size": [32]},
+            **network_extra,
+        },
     }
     path = tmp_path / "m.yaml"
     path.write_text(yaml.safe_dump(manifest))
     trainer = LocalTrainer.from_manifest(manifest=path, device="cpu")
 
     enc = trainer.algorithm_spec.net_config.encoder_config
-    assert enc.max_mlp_nodes == 256  # MlpSpec default (dataclass would be 500)
-    assert enc.max_hidden_layers == 6  # MlpSpec default (dataclass would be 3)
+    assert enc.arch == arch
+    for field, expected in assertions.items():
+        assert getattr(enc, field) == expected
 
 
 def test_from_manifest_multi_agent_heterogeneous_per_agent_encoders(tmp_path):
