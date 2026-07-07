@@ -1721,13 +1721,13 @@ class TestDistributedHelpers:
         from agilerl.utils import utils as utils_mod
 
         with (
-            patch.object(utils_mod.torch.distributed, "is_available", return_value=True),
+            patch.object(
+                utils_mod.torch.distributed, "is_available", return_value=True
+            ),
             patch.object(
                 utils_mod.torch.distributed, "is_initialized", return_value=True
             ),
-            patch.object(
-                utils_mod.torch.distributed, "get_world_size", return_value=4
-            ),
+            patch.object(utils_mod.torch.distributed, "get_world_size", return_value=4),
             patch.object(utils_mod.torch.distributed, "get_rank", return_value=2),
         ):
             assert utils_mod._distributed_world_size(None) == 4

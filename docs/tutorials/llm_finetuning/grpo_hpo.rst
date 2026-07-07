@@ -458,133 +458,70 @@ Example config file:
 
 Using a Custom Training Loop
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-If we wanted to have more control over the training process, it is also possible to write our own custom
-training loops to train our agents. The training loop below can be used alternatively to the above ``train_llm_rollout``
-function and is an example of how we might choose to make use of a population of AgileRL agents in our own training loop.
+If you need lower-level control than :meth:`train_llm_rollout() <agilerl.training.train_llm.train_llm_rollout>`,
+build a :class:`~agilerl.llm_envs.BatchRolloutEnv` and collect trajectories with
+:func:`~agilerl.rollouts.on_policy.collect_rollouts_llm`. This is the same rollout API the trainer uses internally.
+Do **not** use dataset-env calls like ``env.reset(reset_dataloaders=True)`` / ``env.step(completion_ids)``
+for rollout training.
 
 .. collapse:: Custom Training Loop
 
     .. code-block:: python
 
+        import numpy as np
+        from agilerl.llm_envs import BatchRolloutEnv
+        from agilerl.rollouts.on_policy import collect_rollouts_llm
         from agilerl.utils.utils import aggregate_metrics_across_gpus
         from agilerl.training.train_llm import tournament_selection_and_mutation
-        from tqdm import trange
-        import numpy as np
-        import torch
-        from accelerate import Accelerator
 
-        env = env_factory()
-        accelerator = Accelerator()
-        if accelerator is None or accelerator.is_main_process:
-            print("\nTraining...")
+        batch_size = init_hp["BATCH_SIZE"]
+        group_size = getattr(pop[0], "group_size", 1)
+        accelerator = pop[0].accelerator
+        rollout_env = BatchRolloutEnv(env_factory, batch_size, group_size)
+        group_seed = int(np.random.randint(0, 1_000_000))
 
-        bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
-        max_steps = len(env) // effective_data_batch_size
-        pbar = trange(
-            max_steps,
-            unit="step",
-            bar_format=bar_format,
-            ascii=True,
-            dynamic_ncols=True,
-        )
+        try:
+            for i in range(max_steps):
+                for agent_idx, agent in enumerate(pop):
+                    (
+                        completion_ids_list,
+                        action_masks_list,
+                        all_turn_ids,
+                        all_rewards,
+                        batch_steps,
+                        group_seed,
+                        all_sampling_logps,
+                    ) = collect_rollouts_llm(
+                        agent=agent,
+                        env=rollout_env,
+                        n_steps=1,  # single-turn reasoning
+                        batch_size=batch_size,
+                        group_size=group_size,
+                        group_seed=group_seed,
+                    )
 
-        total_steps = 0
-        # calling env.reset() supplies the first batch of training data
-        prompts = env.reset(reset_dataloaders=True)
-        for i in range(max_steps):
-            agent_metrics_dict = {}
-            for agent_idx, agent in enumerate(pop):
-                completion_ids, action_masks = agent.get_action(prompts)
-                completion_lengths = np.mean([x.shape[1] for x in completion_ids])
+                    experiences = (completion_ids_list, action_masks_list, all_rewards)
+                    learn_kwargs = {"turn_ids": all_turn_ids}
+                    if all_sampling_logps is not None:
+                        learn_kwargs["sampling_logps"] = all_sampling_logps
+                    metrics = agent.learn(experiences, **learn_kwargs)
 
-                # Use the reward function stored in env.step to calculate reward of the each answer from the group
-                next_prompts, rewards = env.step(completion_ids)
-                experiences = (
-                    completion_ids,
-                    action_masks,
-                    rewards,
-                )
-                loss, kl = agent.learn(experiences)
-                metrics = [loss, kl, rewards, completion_lengths]
-                if max_reward is not None:
-                    accuracy = (rewards == max_reward).sum() / len(rewards.flatten())
-                    metrics.append(accuracy)
-                agg_metrics = [
-                    aggregate_metrics_across_gpus(accelerator, metric) for metric in metrics
-                ]
-                prompts = next_prompts
-                agg_test_metrics = None
-                if (i + 1) % evaluation_interval == 0:
-                    test_reward = agent.test(env)
-                    test_metrics = [test_reward]
-                    if max_reward is not None:
-                        test_accuracy = (test_reward == max_reward).sum() / len(
-                            rewards.flatten()
-                        )
-                        test_metrics.append(test_accuracy)
-                    agg_test_metrics = [
-                        aggregate_metrics_across_gpus(accelerator, metric)
-                        for metric in test_metrics
-                    ]
-                    if verbose and (accelerator is None or accelerator.is_main_process):
-                        fitness = [str(round(agent.fitness[-1], 2)) for agent in pop]
-                        avg_fitness = [
-                            "%.2f" % np.mean(agent.fitness[-5:]) for agent in pop
-                        ]
-                        avg_score = ["%.2f" % np.mean(agent.scores[-10:]) for agent in pop]
-                        agents = [agent.index for agent in pop]
-                        num_steps = [agent.steps[-1] for agent in pop]
-                        muts = [agent.mut for agent in pop]
-                        print(
-                            f"""
-                            --- Global Steps {total_steps} ---
-                            Fitness:\t\t{fitness}
-                            Score:\t\t{mean_scores}
-                            5 fitness avgs:\t{avg_fitness}
-                            10 score avgs:\t{avg_score}
-                            Agents:\t\t{agents}
-                            Steps:\t\t{num_steps}
-                            Mutations:\t\t{muts}
-                            """,
-                            end="\r",
-                        )
-                if accelerator is None or accelerator.is_main_process:
-                    metrics_dict = {
-                        "Train/Loss": agg_metrics[0],
-                        "Train/KL-divergence": agg_metrics[1],
-                        "Train/Mean reward": (mean_scores := agg_metrics[2]),
-                        "Train/Average completion length": int(agg_metrics[3]),
-                    }
-                    if max_reward is not None:
-                        metrics_dict |= {"Train/Accuracy": agg_metrics[4]}
-                    agent_metrics_dict[f"agent_{agent_idx}/train_metrics"] = metrics_dict
-                    if agg_test_metrics is not None:
-                        test_metrics_dict = {"Eval/Mean reward": agg_test_metrics[0]}
-                        if max_reward is not None:
-                            test_metrics_dict |= {"Eval/Accuracy": agg_test_metrics[1]}
-                        agent_metrics_dict[f"agent_{agent_idx}/test_metrics"] = (
-                            test_metrics_dict
-                        )
-                    pbar.update(effective_data_batch_size)
-                    agent.steps.append(effective_data_batch_size)
-                    agent.scores.append(mean_scores)
-                    total_steps += effective_data_batch_size
+                    # Example distributed-safe metric aggregation.
+                    mean_loss = aggregate_metrics_across_gpus(accelerator, metrics["mean_loss"])
 
-            if accelerator is not None:
-                accelerator.wait_for_everyone()
-            if tournament and mutation is not None:
-                if (i + 1) % evo_steps == 0:
+                if tournament and mutation is not None and (i + 1) % evo_steps == 0:
                     pop = tournament_selection_and_mutation(
                         population=pop,
                         tournament=tournament,
                         mutation=mutations,
-                        env_name=env.name,
-                        accelerator=None,  # Set as None for LLM finetuning as it does not require the same accelerator handling as standard RL models
+                        env_name="reasoning_env",
+                        accelerator=None,
                         language_model=True,
                         elite_path=elite_path,
-                        save_elite=save_elite
+                        save_elite=save_elite,
                     )
-        pbar.close()
+        finally:
+            rollout_env.close()
 
 
 Loading a Trained Agent for Inference

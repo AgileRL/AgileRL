@@ -358,87 +358,54 @@ Example config file:
 
 Using a custom training loop
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-If we wanted to have more control over the training process, it is also possible to write our own custom
-training loop to train our agent. The training loop below can be used alternatively to the above ``train_llm_rollout``
-function and is an example of how we might choose to train our agent to exhibit reasoning.
+If you need lower-level control than :meth:`train_llm_rollout() <agilerl.training.train_llm.train_llm_rollout>`,
+build a :class:`~agilerl.llm_envs.BatchRolloutEnv` and collect trajectories with
+:func:`~agilerl.rollouts.on_policy.collect_rollouts_llm`. This is the same rollout API the trainer uses internally.
+Do **not** use dataset-env calls like ``env.reset(reset_dataloaders=True)`` / ``env.step(completion_ids)``
+for rollout training.
 
 .. collapse:: Custom Training Loop
 
     .. code-block:: python
 
-        from tqdm import trange
-        import torch.distributed as dist
-        from agilerl.utils.utils import gather_tensor, aggregate_metrics_across_gpus
+        import numpy as np
+        from agilerl.llm_envs import BatchRolloutEnv
+        from agilerl.rollouts.on_policy import collect_rollouts_llm
 
-        env = env_factory()
-        evaluation_interval = 5
-        max_reward = 2.0
-        checkpoint_path="path/to/model/directory"
+        batch_size = agent.batch_size
+        group_size = getattr(agent, "group_size", 1)
+        rollout_env = BatchRolloutEnv(env_factory, batch_size, group_size)
+        group_seed = int(np.random.randint(0, 1_000_000))
 
-        if agent.accelerator.is_main_process:
-            print("\nTraining...")
-
-        bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
-        max_steps = len(env) // env.data_batch_size
-        if agent.accelerator.is_main_process:
-            pbar = trange(
-                max_steps,
-                unit="step",
-                bar_format=bar_format,
-                ascii=True,
-                dynamic_ncols=True,
-            )
-
-        # calling env.reset() supplies the first batch of training data
-        prompts = env.reset(reset_dataloaders=True)
-        for i in range(max_steps):
-            completion_ids, action_masks = agent.get_action(prompts)
-            # Use the reward function stored in env.step to calculate reward of the each answer from the group
-            next_prompts, rewards = env.step(completion_ids)
-            experiences = (
-                completion_ids,
-                action_masks,
-                rewards,
-            )
-            loss, kl = agent.learn(experiences)
-            metrics = [loss, kl, rewards]
-            if max_reward is not None:
-                accuracy = (rewards == max_reward).sum() / len(rewards.squeeze())
-                metrics.append(accuracy)
-            agg_metrics = [aggregate_metrics_across_gpus(agent.accelerator, metric) for metric in metrics]
-            prompts = next_prompts
-            if agent.accelerator.is_main_process:
-                metrics = {
-                            "Loss": (agg_metrics[0]),
-                            "KL-divergence": (agg_metrics[1]),
-                            "Mean training reward": (agg_metrics[2]),
-                        }
-                if max_reward is not None:
-                    metrics |= {"Accuracy": (agg_metrics[3])}
-                print(
-                    metrics
+        try:
+            for i in range(max_steps):
+                (
+                    completion_ids_list,
+                    action_masks_list,
+                    all_turn_ids,
+                    all_rewards,
+                    batch_steps,
+                    group_seed,
+                    all_sampling_logps,
+                ) = collect_rollouts_llm(
+                    agent=agent,
+                    env=rollout_env,
+                    n_steps=1,  # single-turn reasoning
+                    batch_size=batch_size,
+                    group_size=group_size,
+                    group_seed=group_seed,
                 )
-                pbar.update(1)
-                if wb:
-                    wandb.log(
-                        metrics
-                    )
-                if (i + 1) % evaluation_interval == 0:
-                    test_reward = agent.test(env)
-                    print(f"Test reward: {test_reward}")
-                    if wb:
-                        wandb.log({"Test reward": test_reward})
-                if (
-                    checkpoint_path is not None
-                    and checkpoint_interval is not None
-                    and (i + 1) % checkpoint_interval == 0
-                ):
-                    if agent.accelerator is not None:
-                        unwrapped_model = agent.accelerator.unwrap_model(agent.actor)
-                        agent.save_checkpoint(checkpoint_path)
-                        print(f"Saved checkpoint {save_path}")
-                    else:
-                        agent.save_checkpoint(checkpoint_path)
+
+                # Build the experience tuple your algorithm expects.
+                experiences = (completion_ids_list, action_masks_list, all_rewards)
+                learn_kwargs = {"turn_ids": all_turn_ids}
+                if all_sampling_logps is not None:
+                    learn_kwargs["sampling_logps"] = all_sampling_logps
+
+                metrics = agent.learn(experiences, **learn_kwargs)
+                # Add your logging / eval / checkpointing here.
+        finally:
+            rollout_env.close()
 
 
 Loading a Trained Agent for Inference

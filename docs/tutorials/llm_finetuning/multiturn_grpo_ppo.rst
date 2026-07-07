@@ -263,8 +263,9 @@ These values are intentionally conservative and align with the shipped configs:
 
 .. note::
 
-   For GRPO, ``BATCH_SIZE`` and ``GROUP_SIZE`` must satisfy divisibility constraints in
-   :meth:`train_llm_rollout() <agilerl.training.train_llm.train_llm_rollout>`.
+   ``BATCH_SIZE`` and ``GROUP_SIZE`` are independent rollout settings. ``BatchRolloutEnv``
+   builds ``batch_size * group_size`` env slots and keeps each group prompt-consistent
+   through the shared :class:`~agilerl.llm_envs.BatchPointer`.
 
 Train call (no evo/HPO)
 -----------------------
