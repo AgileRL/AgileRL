@@ -7,6 +7,8 @@ from unittest.mock import MagicMock, patch
 
 import click
 import pytest
+from click.testing import CliRunner
+
 from agilerl.arena.cli_manifest import (
     _manifest_spec_to_click_option,
     _parse_json_cli_value,
@@ -18,7 +20,6 @@ from agilerl.arena.cli_manifest import (
 from agilerl.arena.client import ArenaClient
 from agilerl.arena.config import CommandConfig
 from agilerl.arena.exceptions import ArenaValidationError
-from click.testing import CliRunner
 
 
 def _command_config() -> CommandConfig:
@@ -561,6 +562,42 @@ class TestManifestCommandCallbackBinary:
         assert res.exit_code == 0
         sent_args = client._invoke_manifest_command.call_args.args[1]
         assert sent_args["extra"] == {"nested": True}
+
+
+class TestArenaArchOptional:
+    def test_arch_present_validates(self) -> None:
+        from agilerl.arena.models.manifest import TrainingManifest
+
+        raw = {
+            "algorithm": {"name": "PPO"},
+            "environment": {"name": "merge-env", "version": "v1"},
+            "network": {
+                "arch": "mlp",
+                "encoder_config": {"hidden_size": [64]},
+                "head_config": {"hidden_size": [64]},
+            },
+        }
+        out = TrainingManifest.get_validated(raw, mode="json")
+        # _ensure_platform_run_spec_keys promotes arch to the network root
+        # (and adds `name`) for the Arena platform run-spec payload shape.
+        assert out["network"]["arch"] == "mlp"
+        assert "arch" not in out["network"]["encoder_config"]
+
+    def test_arch_absent_passes_network_raw(self) -> None:
+        from agilerl.arena.models.manifest import TrainingManifest
+
+        raw = {
+            "algorithm": {"name": "PPO"},
+            "environment": {"name": "merge-env", "version": "v1"},
+            "network": {"latent_dim": 64, "encoder_config": {"hidden_size": [64]}},
+        }
+        out = TrainingManifest.get_validated(raw, mode="json")
+        # Network section is left raw for the server to validate.
+        assert out["network"] == {
+            "latent_dim": 64,
+            "encoder_config": {"hidden_size": [64]},
+        }
+        assert "arch" not in out["network"]["encoder_config"]
 
 
 class TestAttachManifestTree:

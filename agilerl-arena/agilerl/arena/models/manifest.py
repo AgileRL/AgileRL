@@ -5,8 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Annotated, Any, Literal, get_args
 
-import agilerl.arena.models.algorithms as _arena_algorithms  # noqa: F401
 import yaml
+from pydantic import BaseModel, BeforeValidator, Field, PlainSerializer, model_validator
+from typing_extensions import Self
+
+import agilerl.arena.models.algorithms as _arena_algorithms  # noqa: F401
 from agilerl.arena.models.algo import (
     ARENA_REGISTRY,
     AlgoSpecT,
@@ -18,8 +21,6 @@ from agilerl.arena.models.networks import (
     NetworkSpec,
 )
 from agilerl.arena.models.training import ReplayBufferSpec, TrainingSpec
-from pydantic import BaseModel, BeforeValidator, Field, PlainSerializer, model_validator
-from typing_extensions import Self
 
 _MANIFEST_ENCODER_ARCHS = ("mlp", "cnn", "lstm", "simba", "multiinput")
 
@@ -67,8 +68,10 @@ def _normalize_network_arch(
     but :class:`NetworkSpec` (a discriminated union) expects it nested
     under ``encoder_config``.  This helper bridges the two representations.
 
-    :raises ValueError: If ``arch`` is missing from both the network root and
-        ``encoder_config``.
+    If ``arch`` is missing from both the network root and ``encoder_config``,
+    the data is returned unchanged: the Arena backend performs its own
+    obs-space-aware ``arch`` resolution server-side, so the client defers to
+    it instead of rejecting the manifest.
     """
     # If passing a network spec we already have the correct structure
     if not isinstance(data, dict):
@@ -82,14 +85,9 @@ def _normalize_network_arch(
     )
     arch = top_level_arch or nested_arch
 
-    # If arch is not found in the network or encoder_config, raise an error
+    # If arch is not found, defer resolution to the server (obs-space-aware).
     if arch is None:
-        supported = ", ".join(_MANIFEST_ENCODER_ARCHS)
-        msg = (
-            "Missing encoder architecture in the manifest. "
-            f"Set 'arch' at the top level of 'network'. Supported values: {supported}."
-        )
-        raise ValueError(msg)
+        return data
 
     if encoder_config is None:
         data["encoder_config"] = {"arch": arch}
@@ -98,6 +96,25 @@ def _normalize_network_arch(
         data["encoder_config"].setdefault("arch", arch)
 
     return data
+
+
+def _network_has_arch(network: dict[str, Any]) -> bool:
+    """Whether a raw network dict declares a resolvable ``arch``.
+
+    Checks both the network root and ``encoder_config`` (the two places a
+    manifest may place it). Used to decide whether the network section can be
+    validated client-side, or must be deferred to the Arena backend's own
+    obs-space-aware resolution.
+
+    :param network: Raw network section dict.
+    :type network: dict[str, Any]
+    :returns: ``True`` if ``arch`` is present at either location.
+    :rtype: bool
+    """
+    if network.get("arch"):
+        return True
+    encoder_config = network.get("encoder_config")
+    return isinstance(encoder_config, dict) and bool(encoder_config.get("arch"))
 
 
 def _resolve_algorithm(data: Any) -> AlgoSpecT:
@@ -156,6 +173,12 @@ def _resolve_network(data: dict[str, Any] | BaseModel) -> dict[str, Any]:
 
     Raw dicts are validated through :class:`NetworkSpec` so that default values are included in the serialized output.
 
+    If the raw dict has no resolvable ``arch`` (at the network root or nested
+    in ``encoder_config``), the network section is returned unchanged: the
+    Arena backend performs its own obs-space-aware ``arch`` resolution
+    server-side, so the client passes the raw section through rather than
+    validating (and rejecting) it.
+
     :param data: Network config dict or spec instance.
     :type data: Any
     :returns: A plain dictionary suitable for manifest storage.
@@ -171,6 +194,10 @@ def _resolve_network(data: dict[str, Any] | BaseModel) -> dict[str, Any]:
 
     if isinstance(data, dict) and "pretrained_model_name_or_path" in data:
         return FinetuningNetworkSpec.model_validate(data).model_dump(mode="json")
+
+    if isinstance(data, dict) and not _network_has_arch(data):
+        # Deferred: hand the raw network section to the server to validate.
+        return data
 
     normalized = _normalize_network_arch(data)
     spec = NetworkSpec.model_validate(normalized)
@@ -240,7 +267,10 @@ class TrainingManifest(BaseModel):
                     ),
                     None,
                 )
-                if spec_cls is not None:
+                # Skip when the network has no resolvable `arch`: the client
+                # defers to the Arena backend's obs-space-aware resolution
+                # rather than validating (and rejecting) the raw section.
+                if spec_cls is not None and _network_has_arch(self.network):
                     self.algorithm.net_config = spec_cls.model_validate(self.network)
             # LLM algorithms expect a pretrained model
             elif issubclass(algo_spec_cls, LLMAlgorithmSpec):
