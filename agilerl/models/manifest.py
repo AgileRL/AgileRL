@@ -250,6 +250,19 @@ class TrainingManifest(BaseModel):
             )
             raise ValueError(msg)
 
+        recurrent = bool(getattr(self.algorithm, "recurrent", False))
+        net_config = getattr(self.algorithm, "net_config", None)
+        if isinstance(net_config, dict):
+            simba = bool(net_config.get("simba", False))
+        else:
+            simba = bool(getattr(net_config, "simba", False))
+        if recurrent and simba:
+            msg = (
+                "`simba` and `recurrent` cannot both be set: a network cannot use "
+                "both a SimBa and a recurrent (LSTM) encoder. Enable only one."
+            )
+            raise ValueError(msg)
+
         return self
 
     @staticmethod

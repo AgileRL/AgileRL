@@ -1280,3 +1280,65 @@ class TestArchOptional:
         assert network_arch_is_resolvable({"encoder_config": {"arch": "cnn"}})
         assert not network_arch_is_resolvable({"encoder_config": {"hidden_size": [64]}})
         assert not network_arch_is_resolvable({})
+
+
+class TestSimbaRecurrentConflict:
+    """``simba`` and ``recurrent`` are contradictory encoder requests.
+
+    A network cannot simultaneously be a SimBa encoder and a recurrent (LSTM)
+    encoder, so setting both must raise a clear validation error rather than
+    silently picking one (``_build_encoder`` checks recurrent before simba,
+    which would otherwise silently ignore the ``simba`` flag).
+    """
+
+    def test_deferred_raises(self):
+        """No ``arch``: ``net_config`` is a raw dict when the conflict fires."""
+        raw = _make_manifest(
+            algo={"name": "PPO", "recurrent": True},
+            env={"name": "CartPole-v1"},
+            network={"simba": True, "head_config": {"hidden_size": [64]}},
+        )
+        with pytest.raises(ValueError, match="cannot both be set"):
+            TrainingManifest.model_validate(raw)
+
+    def test_eager_raises(self):
+        """``arch: simba`` declared: ``net_config`` is a validated ``NetworkSpec``."""
+        raw = _make_manifest(
+            algo={"name": "PPO", "recurrent": True},
+            env={"name": "CartPole-v1"},
+            network={
+                "arch": "simba",
+                "encoder_config": {"hidden_size": 128, "num_blocks": 2},
+                "head_config": {"hidden_size": [64]},
+            },
+        )
+        with pytest.raises(ValueError, match="cannot both be set"):
+            TrainingManifest.model_validate(raw)
+
+    def test_only_simba_validates(self):
+        raw = _make_manifest(
+            algo={"name": "PPO"},
+            env={"name": "CartPole-v1"},
+            network={"simba": True, "head_config": {"hidden_size": [64]}},
+        )
+        manifest = TrainingManifest.model_validate(raw)
+        assert isinstance(manifest.algorithm.net_config, dict)
+        assert manifest.algorithm.net_config.get("simba") is True
+
+    def test_only_recurrent_validates(self):
+        raw = _make_manifest(
+            algo={"name": "PPO", "recurrent": True},
+            env={"name": "CartPole-v1"},
+            network={"head_config": {"hidden_size": [64]}},
+        )
+        manifest = TrainingManifest.model_validate(raw)
+        assert manifest.algorithm.recurrent is True
+
+    def test_neither_validates(self):
+        raw = _make_manifest(
+            algo={"name": "PPO"},
+            env={"name": "CartPole-v1"},
+            network={"head_config": {"hidden_size": [64]}},
+        )
+        manifest = TrainingManifest.model_validate(raw)
+        assert manifest.algorithm.recurrent is False

@@ -292,6 +292,27 @@ class TrainingManifest(BaseModel):
             )
             raise ValueError(msg)
 
+        recurrent = bool(getattr(self.algorithm, "recurrent", False))
+        net_config = getattr(self.algorithm, "net_config", None)
+        if isinstance(net_config, dict):
+            simba = bool(net_config.get("simba", False))
+        elif net_config is not None:
+            simba = bool(getattr(net_config, "simba", False))
+        elif isinstance(self.network, dict):
+            # Deferred path: unlike core, `net_config` is left unset (None)
+            # here when the network section has no resolvable `arch` (see
+            # `_resolve_network`/`_network_has_arch`), so fall back to the raw
+            # `network` dict which still carries the manifest's `simba` flag.
+            simba = bool(self.network.get("simba", False))
+        else:
+            simba = False
+        if recurrent and simba:
+            msg = (
+                "`simba` and `recurrent` cannot both be set: a network cannot use "
+                "both a SimBa and a recurrent (LSTM) encoder. Enable only one."
+            )
+            raise ValueError(msg)
+
         return self
 
     @staticmethod
