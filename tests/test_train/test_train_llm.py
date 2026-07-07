@@ -160,9 +160,7 @@ class TestFinetuneLlmPreference:
         # Mock other dependencies
         with (
             patch("agilerl.training.train_llm.trange"),
-            patch(
-                "agilerl.training.train_llm.aggregate_metrics_across_gpus"
-            ) as mock_agg,
+            patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_agg,
             patch("agilerl.training.train_llm.save_llm_checkpoint"),
         ):
             mock_agg.return_value = 0.5
@@ -303,9 +301,7 @@ class TestFinetuneLlmPreference:
         # Mock other dependencies
         with (
             patch("agilerl.training.train_llm.trange"),
-            patch(
-                "agilerl.training.train_llm.aggregate_metrics_across_gpus"
-            ) as mock_agg,
+            patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_agg,
             patch("agilerl.training.train_llm.save_llm_checkpoint"),
             patch(
                 "agilerl.training.train_llm.tournament_selection_and_mutation"
