@@ -1717,18 +1717,35 @@ class TestAggregateMetricsNoAccelerator:
 
 
 class TestDistributedHelpers:
-    def test_world_size_and_rank_fall_back_to_torch_distributed(self):
-        from agilerl.utils import utils as utils_mod
+    """World size / rank helpers: Accelerate, torch.distributed, single-process."""
+
+    def test_world_size_prefers_accelerator(self):
+        from agilerl.utils.utils import _distributed_world_size
+
+        accelerator = MagicMock(num_processes=4)
+        assert _distributed_world_size(accelerator) == 4
+
+    def test_rank_prefers_accelerator(self):
+        from agilerl.utils.utils import _distributed_rank
+
+        accelerator = MagicMock(process_index=2)
+        assert _distributed_rank(accelerator) == 2
+
+    def test_world_size_and_rank_fall_back_to_single_process(self):
+        from agilerl.utils.utils import _distributed_rank, _distributed_world_size
+
+        with patch("torch.distributed.is_available", return_value=False):
+            assert _distributed_world_size(None) == 1
+            assert _distributed_rank(None) == 0
+
+    def test_world_size_and_rank_use_torch_distributed(self):
+        from agilerl.utils.utils import _distributed_rank, _distributed_world_size
 
         with (
-            patch.object(
-                utils_mod.torch.distributed, "is_available", return_value=True
-            ),
-            patch.object(
-                utils_mod.torch.distributed, "is_initialized", return_value=True
-            ),
-            patch.object(utils_mod.torch.distributed, "get_world_size", return_value=4),
-            patch.object(utils_mod.torch.distributed, "get_rank", return_value=2),
+            patch("torch.distributed.is_available", return_value=True),
+            patch("torch.distributed.is_initialized", return_value=True),
+            patch("torch.distributed.get_world_size", return_value=8),
+            patch("torch.distributed.get_rank", return_value=3),
         ):
-            assert utils_mod._distributed_world_size(None) == 4
-            assert utils_mod._distributed_rank(None) == 2
+            assert _distributed_world_size(None) == 8
+            assert _distributed_rank(None) == 3

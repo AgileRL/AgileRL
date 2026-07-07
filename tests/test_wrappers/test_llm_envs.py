@@ -848,3 +848,37 @@ def test_dataset_env_rejects_unknown_kind():
             tokenizer=tokenizer,
             objective="bogus",
         )
+
+
+class TestLLMEnvBase:
+    """The shared dataset-env base: the ``eval_mode`` block toggles + restores."""
+
+    def _minimal_env(self) -> LLMEnv:
+        class _Env(LLMEnv):
+            def reset(self, *args, **kwargs):
+                return None
+
+            def step(self, *args, **kwargs):
+                return None
+
+        return _Env()
+
+    def test_eval_mode_toggles_and_restores(self) -> None:
+        env = self._minimal_env()
+        assert env.evaluation_mode is False
+        with env.eval_mode():
+            assert env.evaluation_mode is True
+        assert env.evaluation_mode is False
+
+    def test_eval_mode_restores_prior_value_on_error(self) -> None:
+        env = self._minimal_env()
+        err = ValueError("boom")
+
+        def _raise_inside_block() -> None:
+            with env.eval_mode():
+                assert env.evaluation_mode is True
+                raise err
+
+        with pytest.raises(ValueError, match="boom"):
+            _raise_inside_block()
+        assert env.evaluation_mode is False

@@ -2363,3 +2363,32 @@ def test_finetune_llm_reasoning_raises_migration_pointer():
     """The deprecated entrypoint raises with the migration instruction."""
     with pytest.raises(NotImplementedError, match="train_llm_rollout instead"):
         finetune_llm_reasoning()
+
+
+def test_train_llm_rollout_closes_test_env_on_teardown():
+    """A lazily-built eval env is closed when the run tears down."""
+    mock_agent = _make_multiturn_mock_agent()
+    mock_agent.test.return_value = np.array(0.42, dtype=np.float32)
+    mock_env = _make_multiturn_mock_env(turn_boundaries_len=3)
+    mock_env.close = MagicMock()  # spec omits close; add it so teardown forwards
+
+    with (
+        patch("agilerl.training.train_llm.trange"),
+        patch("agilerl.training.train_llm.stack_and_pad_experiences") as mock_stack,
+        patch("agilerl.training.train_llm.aggregate_metrics_across_gpus") as mock_agg,
+        patch("agilerl.training.train_llm.save_llm_checkpoint"),
+    ):
+        mock_stack.return_value = (torch.zeros(1, 8, dtype=torch.long),)
+        mock_agg.return_value = 0.5
+        train_llm_rollout(
+            pop=[mock_agent],
+            env_factory=lambda: mock_env,
+            max_turns=2,
+            init_hp={"BATCH_SIZE": 1, "ALGO": "LLMPPO"},
+            max_steps=3,
+            evaluation_interval=1,  # build + eventually close a test env
+            verbose=False,
+            accelerator=None,
+        )
+
+    mock_env.close.assert_called()

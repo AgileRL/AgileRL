@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from agilerl.llm_envs import (
+    BatchPointer,
     BatchRolloutEnv,
     RolloutEnv,
 )
@@ -955,3 +956,112 @@ class TestBatchRolloutEnvGetTrajectories:
         # batch_steps is second-to-last.
         *_parts, batch_steps, _sampling_logps = vec.get_trajectories()
         assert batch_steps == 1
+
+
+def _render_ends_at_feedback(messages, add_generation_prompt: bool) -> str:
+    """Render whose last bytes are the feedback placeholder — empty suffix."""
+    del add_generation_prompt
+    # ...assistant_ph...<prefix>...feedback_ph  (nothing after feedback -> suffix "")
+    return f"A{messages[1]['content']}B{messages[2]['content']}"
+
+
+class TestRolloutEnvChatTemplateBoundaryExtra:
+    """Remaining boundary branches: the cached frame and an empty-suffix render."""
+
+    def test_boundary_frame_is_cached_after_first_render(self) -> None:
+        # A second call reuses the cached (prefix, suffix) frame instead of
+        # re-rendering the template.
+        w = _bare_wrapper()
+        w.apply_chat_template = True
+        w.tokenizer = _ChatTemplateRecordingTokenizer(_render_gemma_chat)
+        first = w._chat_template_boundary_ids("FEEDBACK")
+        assert first is not None
+        assert w._boundary_parts_known
+        second = w._chat_template_boundary_ids("FEEDBACK")
+        assert second is not None
+        assert torch.equal(first, second)
+
+    def test_returns_none_when_boundary_suffix_is_empty(self) -> None:
+        # Placeholders are found and ordered, but nothing follows the feedback
+        # slot, so the suffix is empty and we fall back.
+        w = _bare_wrapper()
+        w.apply_chat_template = True
+        w.tokenizer = _ChatTemplateRecordingTokenizer(_render_ends_at_feedback)
+        assert w._chat_template_boundary_ids("F") is None
+
+
+class TestRolloutEnvEvalMode:
+    def test_eval_mode_is_a_noop_without_client_support(self) -> None:
+        """An env client without ``eval_mode`` still enters/exits the block cleanly."""
+        w = _bare_wrapper()
+        w._env_client = object()  # no eval_mode attribute
+        with w.eval_mode():
+            pass
+
+
+class TestRolloutEnvStepSamplingLogps:
+    def test_step_records_sampling_logps(self, serve_env) -> None:
+        """A turn's vLLM sampling logprobs are appended to the episode's row."""
+        inner = _RecordingGemEnv()
+        w = RolloutEnv(
+            serve_env(inner),
+            _ChrTokenizer(),
+            max_turns=3,
+            pad_id=None,
+            apply_chat_template=False,
+        )
+        obs, _ = w.reset()
+        full = torch.cat(
+            [obs["input_ids"], torch.tensor([[ord("x")]], dtype=torch.long)], dim=1
+        )
+        logps = torch.tensor([-0.5])
+        w.step(full, sampling_logps=logps)
+        assert len(w.sampling_logps) == 1
+        assert torch.equal(w.sampling_logps[0], logps)
+
+
+class _RowIndexStubEnv(_SyncStubEnv):
+    """Sync stub whose ``reset`` accepts a ``row_index`` (dataset-backed shape)."""
+
+    def reset(self, seed: int | None = None, *, row_index: int | None = None):
+        self.reset_calls.append((seed, row_index))
+        self.done = False
+        self.current_prompt = {
+            "input_ids": torch.ones(1, 3, dtype=torch.long),
+            "attention_mask": torch.ones(1, 3, dtype=torch.long),
+        }
+        return (self.current_prompt, {})
+
+
+class _OverflowEnv:
+    """Env whose reset always reports an over-budget prompt."""
+
+    def reset(self, seed: int | None = None, *, row_index: int | None = None):
+        del seed, row_index
+        msg = "prompt over budget"
+        raise RuntimeError(msg)
+
+
+class TestBatchRolloutEnvResetLead:
+    def test_reset_env_forwards_row_index(self) -> None:
+        """A dataset-backed reset forwards the chosen ``row_index`` to the env."""
+        env = _RowIndexStubEnv()
+        vec = BatchRolloutEnv(env_factory=_SyncStubEnv, batch_size=1, group_size=1)
+        vec.envs.append(env)
+        vec._reset_env(seed=5, env_idx=0, row_index=2)
+        assert env.reset_calls[-1] == (5, 2)
+
+    def test_reset_lead_reraises_when_not_dataset_backed(self) -> None:
+        """A non-dataset env (no ``row_index``) has no cursor to skip to; re-raise."""
+        vec = BatchRolloutEnv(env_factory=_SyncStubEnv, batch_size=1, group_size=1)
+        vec._pointer = BatchPointer(1, seed=0)
+        with pytest.raises(RuntimeError, match="over budget"):
+            vec._reset_lead(_OverflowEnv(), seed=0, row_index=None)
+
+    def test_reset_lead_gives_up_after_exhausting_rows(self) -> None:
+        """Every candidate row overflowing exhausts the attempt budget loudly."""
+        vec = BatchRolloutEnv(env_factory=_SyncStubEnv, batch_size=1, group_size=1)
+        vec._pointer = BatchPointer(1, seed=0)
+        with pytest.warns(UserWarning, match="Skipping dataset row"):
+            with pytest.raises(RuntimeError, match="no dataset row fit"):
+                vec._reset_lead(_OverflowEnv(), seed=0, row_index=0)

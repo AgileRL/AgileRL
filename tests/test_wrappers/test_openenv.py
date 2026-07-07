@@ -29,6 +29,7 @@ from agilerl.llm_envs import (
 from agilerl.llm_envs import openenv as openenv_module
 from agilerl.llm_envs.openenv import (
     _load_entrypoint,
+    _module_from_path,
     _name_from_spec,
     _normalize_reset,
     _normalize_step,
@@ -472,6 +473,22 @@ class TestRolloutEnvFromSpec:
         assert "input_ids" in obs
         env.close()
 
+    def test_entrypoint_with_serve_hosts_on_a_server(self) -> None:
+        """``serve=True`` hosts the entrypoint env on its own server (HTTP loopback)."""
+        spec = f"{__file__}:_RowDatasetEnv"
+        env = RolloutEnv.from_spec(
+            spec,
+            {"prefix": "Q"},
+            _MiniTok(),
+            max_turns=1,
+            serve=True,
+            apply_chat_template=False,
+        )
+        assert isinstance(env._env_client, ServedEnvClient)
+        obs, _ = env.reset(row_index=0)
+        assert "input_ids" in obs
+        env.close()
+
 
 # --- BatchPointer: group-consistent dataset cursor -------------------------
 class TestBatchPointer:
@@ -842,3 +859,173 @@ def test_batch_reset_cleans_up_after_partial_init_failure() -> None:
     assert prompts is not None
     assert len(batch.envs) == 2
     batch.close()
+
+
+# --- gym-tuple normalisation: remaining single-element / bad-length branches --
+def test_normalize_reset_accepts_single_element_tuple() -> None:
+    """A 1-tuple ``(obs,)`` normalises to ``(obs, {})``."""
+    assert _normalize_reset(("obs",)) == ("obs", {})
+
+
+def test_normalize_step_rejects_wrong_length_tuple() -> None:
+    """A tuple that is neither a 4- nor 5-tuple is a clear error."""
+    with pytest.raises(ValueError, match="3-tuple; expected 4 or 5"):
+        _normalize_step(("o", 1.0, True))
+
+
+# --- OpenEnvServer: the 30s start deadline ----------------------------------
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+def test_server_start_times_out_when_never_ready(monkeypatch: Any) -> None:
+    """A server thread that stays alive but never binds fails at the deadline."""
+    import uvicorn
+
+    class _StuckServer:
+        def __init__(self, config: Any) -> None:
+            del config
+            self.started = False
+            self.should_exit = False
+
+        def run(self) -> None:
+            while not self.should_exit:
+                time.sleep(0.001)
+
+    monkeypatch.setattr(uvicorn, "Server", _StuckServer)
+    # First call sets the deadline; the loop's next reading is already past it.
+    clock = {"n": 0}
+
+    def _fake_monotonic() -> float:
+        clock["n"] += 1
+        return 0.0 if clock["n"] == 1 else 1000.0
+
+    monkeypatch.setattr(openenv_module.time, "monotonic", _fake_monotonic)
+    inner = _CountingEnv()
+    with pytest.raises(RuntimeError, match="within 30s"):
+        OpenEnvServer(inner).start()
+    assert inner.closed  # the failed start released the hosted env
+
+
+# --- OpenEnvClient: MCP-tool action encoding + strict payloads ---------------
+def test_step_encodes_mcp_call_tool_action() -> None:
+    """With ``mcp_tool`` set, the model's text is sent as a ``call_tool`` action."""
+    captured: dict[str, Any] = {}
+
+    class _CapturingHTTP(_StubHTTP):
+        def post(self, path: str, json: Any = None) -> Any:
+            captured["path"] = path
+            captured["json"] = json
+            return _StubResponse(
+                200, {"observation": "hi", "reward": 1.0, "done": True}
+            )
+
+    client = OpenEnvClient("http://stub.invalid", mcp_tool="echo", arg="text")
+    client._http = _CapturingHTTP([])
+    obs, reward, terminated, _truncated, _info = client.step("hello")
+    assert obs == "hi"
+    assert reward == 1.0
+    assert terminated is True
+    assert captured["json"]["action"] == {
+        "type": "call_tool",
+        "tool_name": "echo",
+        "arguments": {"text": "hello"},
+    }
+
+
+def test_fetch_state_retries_after_bad_status(monkeypatch: Any) -> None:
+    """A transient error status is retried, then the good state is served."""
+    monkeypatch.setattr(openenv_module.time, "sleep", lambda _s: None)
+    client = _stubbed_client(
+        [_StubResponse(500), _StubResponse(200, {"dataset_size": 3})]
+    )
+    assert client.dataset_size == 3
+
+
+def test_fetch_mcp_tools_is_cached(monkeypatch: Any) -> None:
+    """The MCP ``tools/list`` result is fetched once and cached."""
+    calls = {"n": 0}
+
+    class _CountingHTTP(_StubHTTP):
+        def post(self, path: str, json: Any = None) -> Any:
+            calls["n"] += 1
+            return _StubResponse(200, {"result": {"tools": [{"name": "e"}]}})
+
+    client = OpenEnvClient("http://stub.invalid")
+    client._http = _CountingHTTP([_StubResponse(200, {"dataset_size": 0})])
+    assert client.tools == [{"name": "e"}]
+    assert client.tools == [{"name": "e"}]  # served from the cache, no second POST
+    assert calls["n"] == 1
+
+
+def test_post_rejects_non_object_payload() -> None:
+    """A non-object JSON body from the server is a clear protocol error."""
+    client = _stubbed_client([], {"/step": _StubResponse(200, ["not", "a", "dict"])})
+    with pytest.raises(TypeError, match="non-object payload"):
+        client.step("x")
+
+
+# --- LocalEnvClient / ServedEnvClient: tool schemas + delegation -------------
+def test_local_env_client_exposes_tools() -> None:
+    """``LocalEnvClient`` surfaces the wrapped env's advertised tool schemas."""
+    env = _CountingEnv(tools=[{"name": "t"}])
+    assert LocalEnvClient(env).tools == [{"name": "t"}]
+
+
+def test_served_env_client_steps_and_reports_tools() -> None:
+    """The served backend forwards ``step`` and ``tools`` to its owned client."""
+    client = ServedEnvClient(_CountingEnv(tools=[{"name": "t"}]))
+    try:
+        client.reset()
+        _obs, reward, _term, _trunc, _info = client.step("go")
+        assert reward == 1.0
+        assert client.tools == [{"name": "t"}]
+    finally:
+        client.close()
+
+
+def test_served_env_client_stops_server_if_client_build_fails(
+    monkeypatch: Any,
+) -> None:
+    """If the client fails to build, the owned server is stopped (no leak)."""
+    inner = _CountingEnv()
+
+    def _boom(*_a: Any, **_k: Any) -> Any:
+        msg = "client build failed"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(openenv_module, "OpenEnvClient", _boom)
+    with pytest.raises(RuntimeError, match="client build failed"):
+        ServedEnvClient(inner)
+    assert inner.closed  # the started server was torn down, closing the env
+
+
+# --- _observation_text: rendering our own + third-party observations ---------
+def test_observation_text_renders_all_shapes() -> None:
+    """Bare strings, MCP content blocks, keyed fields, and errors all render."""
+    assert _observation_text("plain") == "plain"
+    assert _observation_text(12345) == ""
+    # MCP tool-result content blocks: only well-formed text blocks are kept.
+    assert (
+        _observation_text(
+            {"result": {"content": [{"text": "a"}, {"nope": 1}, {"text": "b"}]}}
+        )
+        == "a\nb"
+    )
+    # No text blocks -> the string ``data`` field is the fallback.
+    assert _observation_text({"result": {"content": [], "data": "d"}}) == "d"
+    # Error field renders as a message; an empty observation is empty text.
+    assert _observation_text({"error": "bad"}) == "Error: bad"
+    assert _observation_text({}) == ""
+
+
+# --- entrypoint resolution: malformed specs + unloadable paths ---------------
+def test_load_entrypoint_requires_module_and_class() -> None:
+    """An entrypoint missing the ``:`` or the class name is rejected."""
+    with pytest.raises(ValueError, match="must be 'module:Class'"):
+        _load_entrypoint("no_colon_here")
+    with pytest.raises(ValueError, match="must be 'module:Class'"):
+        _load_entrypoint("module:")
+
+
+def test_module_from_path_raises_when_unloadable() -> None:
+    """A path Python can't build a module spec for is a clear import error."""
+    with pytest.raises(ImportError, match="cannot load env module from path"):
+        _module_from_path("/tmp/not_a_python_module.bogus")
