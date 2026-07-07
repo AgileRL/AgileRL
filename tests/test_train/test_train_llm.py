@@ -1708,6 +1708,10 @@ class TestFinetuneLlmMultiturn:
                 "agilerl.training.train_llm._distributed_world_size",
                 return_value=1,
             ),
+            patch(
+                "agilerl.training.train_llm._distributed_rank",
+                return_value=0,
+            ),
         ):
             mock_stack.return_value = (torch.zeros(1, 8, dtype=torch.long),)
             mock_agg.return_value = 0.5
