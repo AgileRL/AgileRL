@@ -1,6 +1,7 @@
 import logging
 import warnings
 from collections.abc import Callable
+from contextlib import nullcontext
 from datetime import datetime
 from typing import Any
 
@@ -12,7 +13,8 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
 from agilerl.typing import GymEnvType
 from agilerl.utils.dormant_neurons import (
-    collect_observation_batch,
+    GRAMA_SCORES_ATTR,
+    GraMaCapture,
     dormant_neuron_fraction,
 )
 from agilerl.utils.population_diversity import population_diversity
@@ -43,7 +45,7 @@ def train_on_policy(
     eval_steps: int | None = None,
     eval_loop: int = 1,
     target: float | None = None,
-    dormant_tau: float = 0.0,
+    dormant_tau: float = 0.1,
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
     checkpoint: int | None = None,
@@ -89,7 +91,7 @@ def train_on_policy(
     :param target: Target score for early stopping, defaults to None
     :type target: float, optional
     :param dormant_tau: Threshold for the τ-dormant neuron metric (Sokar et al.
-        2023) logged for the best agent each evaluation cycle, defaults to 0.0
+        2023) logged for the best agent each evaluation cycle, defaults to 0.1
     :type dormant_tau: float, optional
     :param tournament: Tournament selection object, defaults to None
     :type tournament: object, optional
@@ -206,50 +208,67 @@ def train_on_policy(
 
     # RL training loop
     active_collect = collect_rollouts_fn
+    # Capture per-neuron post-activation gradients (GraMa) during training when the
+    # dormant diagnostic is logged (best agent) or the ReBorn parameter mutation is
+    # active (every agent, so cloned children can read their parent's snapshot).
+    capture_grama = bool(wb) or (
+        mutation is not None and getattr(mutation, "param_mut_type", None) == "reborn"
+    )
     while population.all_below(max_steps):
         if accelerator is not None:
             accelerator.wait_for_everyone()
 
         for agent in population.agents:
-            agent.set_training_mode(True)
-            agent.init_training_step()
+            with GraMaCapture(agent) if capture_grama else nullcontext():
+                agent.set_training_mode(True)
+                agent.init_training_step()
 
-            steps = 0
-            completed_episode_scores: list[float] = []
-            n_steps = -(agent.learn_step // -num_envs)
-            if active_collect is None:
-                if getattr(agent, "recurrent", False):
-                    from agilerl.rollouts import (
-                        collect_rollouts_recurrent as active_collect,
+                steps = 0
+                completed_episode_scores: list[float] = []
+                n_steps = -(agent.learn_step // -num_envs)
+                if active_collect is None:
+                    if getattr(agent, "recurrent", False):
+                        from agilerl.rollouts import (
+                            collect_rollouts_recurrent as active_collect,
+                        )
+                    else:
+                        from agilerl.rollouts import collect_rollouts as active_collect
+
+                # Collect rollouts and learn until evo_steps is reached
+                last_obs, last_done, last_scores, last_info = None, None, None, None
+                for _ in range(-(evo_steps // -agent.learn_step)):
+                    # Collect rollouts and save in buffer
+                    episode_scores, last_obs, last_done, last_scores, last_info = (
+                        active_collect(
+                            agent,
+                            env,
+                            n_steps=n_steps,
+                            last_obs=last_obs,
+                            last_done=last_done,
+                            last_scores=last_scores,
+                            last_info=last_info,
+                        )
                     )
-                else:
-                    from agilerl.rollouts import collect_rollouts as active_collect
 
-            # Collect rollouts and learn until evo_steps is reached
-            last_obs, last_done, last_scores, last_info = None, None, None, None
-            for _ in range(-(evo_steps // -agent.learn_step)):
-                # Collect rollouts and save in buffer
-                episode_scores, last_obs, last_done, last_scores, last_info = (
-                    active_collect(
-                        agent,
-                        env,
-                        n_steps=n_steps,
-                        last_obs=last_obs,
-                        last_done=last_done,
-                        last_scores=last_scores,
-                        last_info=last_info,
-                    )
-                )
+                    agent.learn()  # learn from the rollouts collected in the buffer
 
-                agent.learn()  # learn from the rollouts collected in the buffer
+                    # Update step counter and scores
+                    steps += n_steps * num_envs
+                    completed_episode_scores += episode_scores
 
-                # Update step counter and scores
-                steps += n_steps * num_envs
-                completed_episode_scores += episode_scores
-
-            agent.add_scores(completed_episode_scores)
-            agent.finalize_training_step(steps)
+                agent.add_scores(completed_episode_scores)
+                agent.finalize_training_step(steps)
             pbar.update(steps // population.size)
+
+        # Per-parent gradient snapshots for the ReBorn parameter mutation, captured
+        # above while grads were live (cloning drops them). Keyed by pre-tournament
+        # agent index; children look theirs up via their ``_parent_index``.
+        grama_side_table = None
+        if capture_grama:
+            grama_side_table = {
+                agent.index: getattr(agent, GRAMA_SCORES_ATTR, None)
+                for agent in population.agents
+            }
 
         # Evaluate population
         for agent in population.agents:
@@ -259,15 +278,14 @@ def train_on_policy(
                 loop=eval_loop,
             )
 
-        # Dormant-neuron fraction of the best agent (Sokar et al. 2023)
+        # Dormant-neuron fraction (GraMa) of the best agent.
         if wb:
             best_agent = max(
                 population.agents,
                 key=lambda a: a.fitness[-1] if a.fitness else float("-inf"),
             )
-            obs_batch = collect_observation_batch(env, best_agent)
             population.set_best_dormant_fraction(
-                dormant_neuron_fraction(best_agent, obs_batch, dormant_tau)
+                dormant_neuron_fraction(best_agent, dormant_tau)
             )
             # Normalised population-diversity diagnostics (hp / arch / activation).
             population.set_diversity(
@@ -301,6 +319,7 @@ def train_on_policy(
                     save_elite=save_elite,
                     accelerator=accelerator,
                     env=env,
+                    grama_scores=grama_side_table,
                 ),
             )
 

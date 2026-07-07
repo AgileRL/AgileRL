@@ -29,7 +29,6 @@ from agilerl.utils.algo_utils import remove_compile_prefix
 from agilerl.utils.dormant_neurons import (
     _eval_networks,
     capture_per_neuron_scores,
-    collect_observation_batch,
 )
 from agilerl.utils.evolvable_networks import compile_model
 from agilerl.wrappers.agent import AgentWrapper
@@ -321,12 +320,13 @@ class Mutations:
         # ReBorn parameter-mutation configuration (Qin et al.). When
         # ``param_mut_type == "reborn"`` the parameter mutation recycles dormant /
         # over-active neurons instead of adding Gaussian noise; ``mutation_sd`` is
-        # then unused. Detection needs an observation batch, supplied per-agent via
-        # ``self._reborn_env`` (set by :meth:`mutation`) during the main loop.
+        # then unused. Detection reads the per-neuron post-activation gradient
+        # snapshot captured during training (GraMa), threaded per-parent through
+        # ``self._grama_side_table`` (set by :meth:`mutation`) during the main loop.
         self.param_mut_type = param_mut_type
         self.dormant_tau = dormant_tau
         self.overact_beta = overact_beta
-        self._reborn_env: Any | None = None
+        self._grama_side_table: dict[int, Any] | None = None
         self.device = device
         self.accelerator = accelerator
 
@@ -340,6 +340,7 @@ class Mutations:
         population: PopulationType,
         pre_training_mut: bool = False,
         env: Any | None = None,
+        grama_scores: dict[int, Any] | None = None,
     ) -> PopulationType:
         """Return a mutated population of agents. See :ref:`evo_hyperparam_opt` for more details.
 
@@ -347,29 +348,39 @@ class Mutations:
         :type population: list[EvolvableAlgorithm]
         :param pre_training_mut: Boolean flag indicating if the mutation is before the training loop
         :type pre_training_mut: bool, optional
-        :param env: Optional (vectorized) environment used by the ReBorn parameter
-            mutation to collect a fresh per-agent observation batch. When ``None``
-            (e.g. the pre-training mutation), a ReBorn-configured operator falls
-            back to the original Gaussian parameter mutation.
+        :param env: Retained for API compatibility; unused by the gradient-based
+            ReBorn parameter mutation (which reads the pre-computed gradient
+            snapshot rather than collecting observations).
         :type env: Any | None, optional
+        :param grama_scores: Per-parent map ``{agent.index: _grama_scores}`` of the
+            gradient snapshots captured during the last training block (see
+            :class:`agilerl.utils.dormant_neurons.GraMaCapture`). Used by ReBorn to
+            score neurons; looked up per child via its ``_parent_index``. When
+            ``None`` (e.g. the pre-training mutation), a ReBorn-configured operator
+            falls back to the original Gaussian parameter mutation.
+        :type grama_scores: dict[int, Any] | None, optional
 
         :return: Mutated population
         :rtype: list[EvolvableAlgorithm]
         """
-        # Make the environment available to the (ReBorn) parameter mutation for the
-        # duration of this call only; reset afterwards so a later env-less call
-        # (e.g. pre-training) cannot accidentally reuse a stale handle.
-        self._reborn_env = env
+        # Make the gradient snapshot side-table available to the (ReBorn) parameter
+        # mutation for the duration of this call only; reset afterwards so a later
+        # snapshot-less call (e.g. pre-training) cannot reuse a stale table.
+        self._grama_side_table = grama_scores
 
-        # A ReBorn regime needs an environment to collect the observation batch it
-        # scores neurons on. When configured for ReBorn but called without one on a
-        # regular (non pre-training) mutation step -- e.g. a trainer that does not
-        # thread env, or the accelerator path -- the parameter mutation silently
+        # A ReBorn regime needs the per-parent gradient snapshot to score neurons.
+        # When configured for ReBorn but called without one on a regular (non
+        # pre-training) mutation step -- e.g. a trainer that does not thread the
+        # snapshots, or the accelerator path -- the parameter mutation silently
         # falls back to the Gaussian operator, which would misattribute results.
-        # The pre-training step is expected to run env-less, so it is exempt.
-        if self.param_mut_type == "reborn" and env is None and not pre_training_mut:
+        # The pre-training step is expected to run snapshot-less, so it is exempt.
+        if (
+            self.param_mut_type == "reborn"
+            and grama_scores is None
+            and not pre_training_mut
+        ):
             warnings.warn(
-                "param_mut_type='reborn' but no environment was provided to "
+                "param_mut_type='reborn' but no gradient snapshot was provided to "
                 "mutation(); falling back to the Gaussian parameter mutation for "
                 "this step. ReBorn is only wired into the on-policy, off-policy and "
                 "multi-agent on-policy trainers running without an accelerator.",
@@ -412,8 +423,8 @@ class Mutations:
 
             mutated_population.append(individual)
 
-        # Drop the environment handle so it is not held beyond this call.
-        self._reborn_env = None
+        # Drop the snapshot table so it is not held beyond this call.
+        self._grama_side_table = None
 
         return mutated_population
 
@@ -618,16 +629,19 @@ class Mutations:
             return individual
 
         # ReBorn parameter mutation (Qin et al.): recycle dormant / over-active
-        # neurons instead of adding Gaussian noise. It needs an observation batch,
-        # collected fresh per-agent from the environment stashed by ``mutation``.
-        # If no environment is available (e.g. the pre-training mutation step), we
-        # fall back to the original Gaussian parameter mutation below.
-        if self.param_mut_type == "reborn" and self._reborn_env is not None:
-            multi_agent = isinstance(individual, MultiAgentRLAlgorithm)
-            obs_batch = collect_observation_batch(
-                self._reborn_env, individual, multi_agent=multi_agent
-            )
-            return self.reborn_parameter_mutation(individual, obs_batch)
+        # neurons instead of adding Gaussian noise. It scores neurons from the
+        # per-neuron post-activation gradient snapshot captured during the parent's
+        # last training block (GraMa), looked up via the child's ``_parent_index``.
+        # If no snapshot is available (e.g. the pre-training mutation step, or an
+        # untrained agent), we fall back to the original Gaussian mutation below.
+        if self.param_mut_type == "reborn":
+            grama_scores = None
+            side_table = self._grama_side_table
+            parent_index = getattr(individual, "_parent_index", None)
+            if side_table is not None and parent_index is not None:
+                grama_scores = side_table.get(parent_index)
+            if grama_scores:
+                return self.reborn_parameter_mutation(individual, grama_scores)
 
         registry = individual.registry
 
@@ -687,7 +701,7 @@ class Mutations:
     # Phenomenon in Multi-Agent RL Value Factorization")                 #
     # ------------------------------------------------------------------ #
     def reborn_parameter_mutation(
-        self, individual: IndividualType, obs_batch: Any
+        self, individual: IndividualType, grama_scores: list[list[Any]]
     ) -> IndividualType:
         """Recycle dormant / over-active neurons, then add a gentle Gaussian pass.
 
@@ -695,8 +709,9 @@ class Mutations:
         each multi-agent sub-policy), each over-active neuron is *reborn* into a
         set of dormant neurons (a function-preserving neuron split), and dormant
         neurons that are not claimed are Xavier-reset with their outgoing weights
-        zeroed. Detection uses the same per-neuron scoring as the dormant-neuron
-        diagnostic, evaluated on *obs_batch*.
+        zeroed. Detection uses the same per-neuron gradient scoring as the
+        dormant-neuron diagnostic, read from the parent's captured gradient
+        snapshot *grama_scores* (no forward/backward pass here).
 
         After that surgery, the policy evaluation network additionally receives the
         original Gaussian parameter mutation *minus* its amplified ("super") noise
@@ -708,9 +723,11 @@ class Mutations:
 
         :param individual: Individual agent from population.
         :type individual: RLAlgorithm or MultiAgentRLAlgorithm
-        :param obs_batch: A batch of raw observations (array / dict / tuple, or a
-            ``{agent_id: observations}`` mapping for multi-agent algorithms).
-        :type obs_batch: Any
+        :param grama_scores: The parent's captured per-neuron post-activation
+            gradient snapshot (``_grama_scores``): one list per evaluation network
+            in :func:`_eval_networks` order, each a per-layer list aligned to
+            :func:`_target_activations` order.
+        :type grama_scores: list[list[Any]]
         :return: The individual with ReBorn-recycled parameters.
         :rtype: RLAlgorithm or MultiAgentRLAlgorithm
         """
@@ -725,24 +742,14 @@ class Mutations:
 
         counts = {"reborn": 0, "xavier": 0, "overactive": 0, "dormant": 0}
 
-        pairs = _eval_networks(individual)
-        multi_agent = any(network_id is not None for network_id, _ in pairs)
-        try:
-            if multi_agent:
-                network_ids = list({network_id for network_id, _ in pairs})
-                preprocessed = individual.preprocess_observation(obs_batch, network_ids)
-            else:
-                preprocessed = individual.preprocess_observation(obs_batch)
-        except Exception as exc:  # never break training on a bad obs batch
-            logger.warning("ReBorn could not preprocess observations: %s", exc)
-            individual.mut = "param_reborn"
-            individual.mut_details = self._reborn_mut_details(counts)
-            return individual
-
-        for network_id, network in pairs:
-            obs = preprocessed if network_id is None else preprocessed[network_id]
+        # Route each evaluation network's captured per-layer gradient scores
+        # positionally (the child's architecture matches its parent's, since an
+        # agent receiving ReBorn did not receive an architecture mutation this
+        # cycle). ``capture_per_neuron_scores`` guards any length mismatch.
+        for idx, (_network_id, network) in enumerate(_eval_networks(individual)):
+            per_neuron_list = grama_scores[idx] if idx < len(grama_scores) else None
             try:
-                self._reborn_network_surgery(network, obs, counts)
+                self._reborn_network_surgery(network, per_neuron_list, counts)
             except Exception as exc:  # keep this network untouched on failure
                 logger.warning("ReBorn surgery skipped for a network: %s", exc)
 
@@ -810,10 +817,13 @@ class Mutations:
         }
 
     def _reborn_network_surgery(
-        self, network: nn.Module, obs: Any, counts: dict[str, int]
+        self,
+        network: nn.Module,
+        per_neuron_list: list[Any] | None,
+        counts: dict[str, int],
     ) -> None:
         """Apply ReBorn recycling to every measured layer of a single network."""
-        scores = capture_per_neuron_scores(network, obs)
+        scores = capture_per_neuron_scores(network, per_neuron_list)
         if not scores:
             return
 

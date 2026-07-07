@@ -171,12 +171,14 @@ def plot_dormant_fraction(
     pop_size: int,
     out_path: str,
 ) -> None:
-    """Save the best agent's dormant-neuron percentage over training.
+    """Save the best agent's gradient-dormant-neuron percentage over training.
 
-    Plots the percentage of dormant neurons of the best individual (Sokar et al.
-    2023, Definition 3.1) against per-agent environment steps, in the same house
-    style as :func:`plot_fitness`. A placeholder figure is emitted when the run
-    logged no dormant-neuron values so the artifact always exists.
+    Plots the percentage of gradient-dormant neurons of the best individual (the
+    GraMa metric, eq. 2 of "Measure gradients, not activations!") against per-agent
+    environment steps, in the same house style as :func:`plot_fitness`. A neuron is
+    gradient-dormant when its normalised mean absolute post-activation gradient is
+    at or below the threshold. A placeholder figure is emitted when the run logged
+    no dormant-neuron values so the artifact always exists.
 
     :param df: W&B history dataframe for the run.
     :type df: pandas.DataFrame
@@ -208,9 +210,9 @@ def plot_dormant_fraction(
     y = data[DORMANT_FRACTION_COL].to_numpy(dtype=float) * 100.0
 
     ax.plot(x, y, color=MAIN_COLOR)
-    ax.set_title(f"{env_name}: Dormant neurons (best agent)")
+    ax.set_title(f"{env_name}: Gradient-dormant neurons (best agent)")
     ax.set_xlabel(X_LABEL)
-    ax.set_ylabel("% dormant neurons")
+    ax.set_ylabel("% gradient-dormant neurons")
     _finalize_axis(ax)
 
     fig.tight_layout()

@@ -2237,6 +2237,61 @@ def _make_reborn_mutations(seed=42, param_mut_type="reborn"):
     )
 
 
+def _healthy_fill(n):
+    """Uniform per-neuron gradient scores -> no dormant / over-active neurons."""
+    return torch.ones(n)
+
+
+def _surgery_fill(n):
+    """Inject an over-active neuron (0) and two dormant neurons (1, 2)."""
+    t = torch.ones(n)
+    if n >= 3:
+        t[0] = 10.0
+        t[1] = 0.0
+        t[2] = 0.0
+    return t
+
+
+def _grama_snapshot(agent, obs, fill=_healthy_fill):
+    """Build a synthetic ``_grama_scores`` snapshot for *agent*.
+
+    Discovers each measured activation's neuron count with a throwaway forward pass
+    (forward hooks capture output shapes), fills each with *fill*, and stores the
+    result as ``agent._grama_scores`` in the exact structure the gradient-based
+    dormant diagnostic / ReBorn consume: one list per :func:`_eval_networks`
+    network, each aligned to :func:`_target_activations` order.
+    """
+    from agilerl.utils.dormant_neurons import _eval_networks, _target_activations
+
+    processed = agent.preprocess_observation(obs)
+    scores = []
+    for _nid, net in _eval_networks(agent):
+        targets = _target_activations(net)
+        outputs = {}
+        handles = [
+            m.register_forward_hook(
+                lambda mod, inp, out, k=k: outputs.__setitem__(k, out)
+            )
+            for k, m in enumerate(targets)
+        ]
+        net.eval()
+        with torch.no_grad():
+            net(processed)
+        for h in handles:
+            h.remove()
+        net_scores = []
+        for k in range(len(targets)):
+            o = outputs.get(k)
+            if not isinstance(o, torch.Tensor):
+                net_scores.append(None)
+                continue
+            n = o.shape[1] if o.dim() > 1 else o.numel()
+            net_scores.append(fill(n))
+        scores.append(net_scores)
+    agent._grama_scores = scores
+    return scores
+
+
 class TestRebornConstructorValidation:
     def test_rejects_bad_param_mut_type(self):
         with pytest.raises(AssertionError):
@@ -2433,7 +2488,8 @@ class TestRebornEndToEnd:
         # amplified ("super") noise band is never applied under ReBorn.
         agent = self._ppo()
         obs = np.random.RandomState(0).uniform(-1, 1, size=(32, 6)).astype(np.float32)
-        out = _make_reborn_mutations().reborn_parameter_mutation(agent, obs)
+        scores = _grama_snapshot(agent, obs)
+        out = _make_reborn_mutations().reborn_parameter_mutation(agent, scores)
         assert out.mut == "param_reborn"
         assert out.mut_details["category"] == "reborn"
         assert set(out.mut_details) >= {
@@ -2449,6 +2505,21 @@ class TestRebornEndToEnd:
         assert out.mut_details["weights_amplified_noise"] == 0
         assert all(torch.isfinite(v).all() for v in out.actor.state_dict().values())
 
+    def test_surgery_triggers_on_injected_scores(self):
+        # An injected snapshot with dormant + over-active neurons drives real
+        # recycling: neurons are detected and reborn / Xavier-reset, weights finite.
+        agent = self._ppo()
+        obs = np.random.RandomState(0).uniform(-1, 1, size=(32, 6)).astype(np.float32)
+        scores = _grama_snapshot(agent, obs, fill=_surgery_fill)
+        out = _make_reborn_mutations().reborn_parameter_mutation(agent, scores)
+        assert out.mut_details["dormant_count"] > 0
+        assert out.mut_details["overactive_count"] > 0
+        assert (
+            out.mut_details["neurons_reborn"] + out.mut_details["neurons_xavier_reset"]
+            > 0
+        )
+        assert all(torch.isfinite(v).all() for v in out.actor.state_dict().values())
+
     def test_dqn_cnn_runs_and_syncs_target(self):
         agent = self._dqn()
         obs = (
@@ -2456,7 +2527,8 @@ class TestRebornEndToEnd:
             .randint(0, 255, size=(16, 4, 84, 84))
             .astype(np.uint8)
         )
-        out = _make_reborn_mutations().reborn_parameter_mutation(agent, obs)
+        scores = _grama_snapshot(agent, obs)
+        out = _make_reborn_mutations().reborn_parameter_mutation(agent, scores)
         assert out.mut == "param_reborn"
         assert all(torch.isfinite(v).all() for v in out.actor.state_dict().values())
         # DQN target network is synced from the mutated online network.
@@ -2475,7 +2547,8 @@ class TestRebornEndToEnd:
             .randint(0, 255, size=(16, 4, 84, 84))
             .astype(np.uint8)
         )
-        out = _make_reborn_mutations().reborn_parameter_mutation(agent, obs)
+        scores = _grama_snapshot(agent, obs)
+        out = _make_reborn_mutations().reborn_parameter_mutation(agent, scores)
         after = out.actor.state_dict()
         assert any(not torch.equal(before[k], after[k]) for k in before)
         for k, v in after.items():
@@ -2498,47 +2571,44 @@ class TestRebornEndToEnd:
         import copy
 
         a = self._ppo()
-        # Deep-copy so *all* state matches (including non-persistent buffers such as
-        # observation-normaliser running stats, which a state_dict copy would miss
-        # and which feed the per-neuron scoring).
+        # Deep-copy so all weights match; both agents get an identical injected
+        # gradient snapshot (same architecture -> same shapes -> same fill), so the
+        # surgery *and* the trailing Gaussian pass must replay identically.
         b = copy.deepcopy(a)
         obs = np.random.RandomState(2).uniform(-1, 1, size=(32, 6)).astype(np.float32)
+        scores_a = _grama_snapshot(a, obs, fill=_surgery_fill)
+        scores_b = _grama_snapshot(b, obs, fill=_surgery_fill)
         # ReBorn draws from the global numpy RNG (surgery) and the global torch RNG
         # (the trailing Gaussian noise pass), so pin both identically before each
         # call. In a real run seed_everything pins these once and the whole mutation
         # sequence replays deterministically; here we isolate the two calls.
         np.random.seed(0)
         torch.manual_seed(0)
-        ra = _make_reborn_mutations(seed=123).reborn_parameter_mutation(a, obs)
+        ra = _make_reborn_mutations(seed=123).reborn_parameter_mutation(a, scores_a)
         np.random.seed(0)
         torch.manual_seed(0)
-        rb = _make_reborn_mutations(seed=123).reborn_parameter_mutation(b, obs)
+        rb = _make_reborn_mutations(seed=123).reborn_parameter_mutation(b, scores_b)
         for k in ra.actor.state_dict():
             assert torch.equal(ra.actor.state_dict()[k], rb.actor.state_dict()[k])
 
-    def test_falls_back_to_gaussian_without_env(self):
-        # param_mut_type='reborn' but no env stashed -> Gaussian parameter mutation.
+    def test_falls_back_to_gaussian_without_snapshot(self):
+        # param_mut_type='reborn' but no gradient snapshot -> Gaussian mutation.
         agent = self._ppo()
         mut = _make_reborn_mutations()
-        assert mut._reborn_env is None
+        assert mut._grama_side_table is None
         out = mut.parameter_mutation(agent)
         assert out.mut == "param"  # not "param_reborn"
 
-    def test_dispatch_uses_reborn_when_env_supplied(self):
-        # The full mutation() dispatch collects a per-agent observation batch from
-        # the supplied env and routes the parameter mutation through ReBorn.
-        class _FakeVecEnv:
-            num_envs = 4
-
-            def reset(self, *args, **kwargs):
-                obs = np.zeros((self.num_envs, 6), dtype=np.float32)
-                return obs, {}
-
-            def step(self, action):
-                obs = np.zeros((self.num_envs, 6), dtype=np.float32)
-                return obs, np.zeros(4), np.zeros(4, bool), np.zeros(4, bool), {}
-
+    def test_dispatch_uses_reborn_with_snapshot(self):
+        # The full mutation() dispatch looks up each child's parent gradient
+        # snapshot (by ``_parent_index``) and routes the parameter mutation
+        # through ReBorn.
         pop = [self._ppo(), self._ppo()]
+        obs = np.zeros((4, 6), dtype=np.float32)
+        side = {}
+        for i, ag in enumerate(pop):
+            ag._parent_index = i
+            side[i] = _grama_snapshot(ag, obs)
         mut = Mutations(
             no_mutation=0.0,
             architecture=0.0,
@@ -2553,12 +2623,12 @@ class TestRebornEndToEnd:
             rand_seed=0,
             device="cpu",
         )
-        out = mut.mutation(pop, env=_FakeVecEnv())
+        out = mut.mutation(pop, grama_scores=side)
         assert all(agent.mut == "param_reborn" for agent in out)
-        # The env handle is released after the call.
-        assert mut._reborn_env is None
+        # The snapshot table is released after the call.
+        assert mut._grama_side_table is None
 
-    def test_dispatch_falls_back_without_env(self):
+    def test_dispatch_falls_back_without_snapshot(self):
         pop = [self._ppo(), self._ppo()]
         mut = Mutations(
             no_mutation=0.0,
@@ -2572,7 +2642,9 @@ class TestRebornEndToEnd:
             rand_seed=0,
             device="cpu",
         )
-        out = mut.mutation(pop)  # no env -> Gaussian fallback
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            out = mut.mutation(pop)  # no snapshot -> Gaussian fallback
         assert all(agent.mut == "param" for agent in out)
 
     def _reborn_dispatch_mut(self):
@@ -2591,40 +2663,30 @@ class TestRebornEndToEnd:
             device="cpu",
         )
 
-    def test_eval_cycle_warns_when_reborn_configured_without_env(self):
-        # A reborn regime whose trainer does not thread env silently falls back to
-        # Gaussian, misattributing results; surface it with a warning.
+    def test_eval_cycle_warns_when_reborn_configured_without_snapshot(self):
+        # A reborn regime whose trainer does not thread the gradient snapshot
+        # silently falls back to Gaussian, misattributing results; surface it.
         pop = [self._ppo(), self._ppo()]
         mut = self._reborn_dispatch_mut()
         with pytest.warns(UserWarning, match="falling back to the Gaussian"):
-            mut.mutation(pop)  # eval-cycle mutation, no env
+            mut.mutation(pop)  # eval-cycle mutation, no snapshot
 
-    def test_no_warning_when_env_supplied(self):
-        class _FakeVecEnv:
-            num_envs = 4
-
-            def reset(self, *args, **kwargs):
-                return np.zeros((self.num_envs, 6), dtype=np.float32), {}
-
-            def step(self, action):
-                return (
-                    np.zeros((self.num_envs, 6), dtype=np.float32),
-                    np.zeros(4),
-                    np.zeros(4, bool),
-                    np.zeros(4, bool),
-                    {},
-                )
-
+    def test_no_warning_with_snapshot(self):
         pop = [self._ppo(), self._ppo()]
+        obs = np.zeros((4, 6), dtype=np.float32)
+        side = {}
+        for i, ag in enumerate(pop):
+            ag._parent_index = i
+            side[i] = _grama_snapshot(ag, obs)
         mut = self._reborn_dispatch_mut()
         with warnings.catch_warnings(record=True) as record:
             warnings.simplefilter("always")
-            mut.mutation(pop, env=_FakeVecEnv())
+            mut.mutation(pop, grama_scores=side)
         assert not [
             w for w in record if "falling back to the Gaussian" in str(w.message)
         ]
 
-    def test_pretraining_mutation_does_not_warn_without_env(self):
+    def test_pretraining_mutation_does_not_warn_without_snapshot(self):
         # The pre-training mutation step is expected to run env-less; the reborn
         # fallback there is intended and must not warn.
         pop = [self._ppo(), self._ppo()]

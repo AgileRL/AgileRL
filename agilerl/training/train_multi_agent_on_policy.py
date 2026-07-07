@@ -1,5 +1,6 @@
 import logging
 import warnings
+from contextlib import nullcontext
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -14,7 +15,8 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks import StochasticActor
 from agilerl.population import Population
 from agilerl.utils.dormant_neurons import (
-    collect_observation_batch,
+    GRAMA_SCORES_ATTR,
+    GraMaCapture,
     dormant_neuron_fraction,
 )
 from agilerl.utils.population_diversity import population_diversity
@@ -50,7 +52,7 @@ def train_multi_agent_on_policy(
     eval_steps: int | None = None,
     eval_loop: int = 1,
     target: float | None = None,
-    dormant_tau: float = 0.0,
+    dormant_tau: float = 0.1,
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
     checkpoint: int | None = None,
@@ -95,7 +97,7 @@ def train_multi_agent_on_policy(
     :param target: Target score for early stopping, defaults to None
     :type target: float, optional
     :param dormant_tau: Threshold for the τ-dormant neuron metric (Sokar et al.
-        2023) logged for the best agent each evaluation cycle, defaults to 0.0
+        2023) logged for the best agent each evaluation cycle, defaults to 0.1
     :type dormant_tau: float, optional
     :param tournament: Tournament selection object, defaults to None
     :type tournament: object, optional
@@ -204,153 +206,179 @@ def train_multi_agent_on_policy(
     if accelerator is None and mutation is not None:
         population.update(mutation.mutation(population.agents, pre_training_mut=True))
 
+    # Capture per-neuron post-activation gradients (GraMa) during training when the
+    # dormant diagnostic is logged (best agent) or the ReBorn parameter mutation is
+    # active (every agent, so cloned children can read their parent's snapshot).
+    capture_grama = bool(wb) or (
+        mutation is not None and getattr(mutation, "param_mut_type", None) == "reborn"
+    )
+
     # RL training loop
     while population.all_below(max_steps):
         if accelerator is not None:
             accelerator.wait_for_everyone()
 
         for agent in population.agents:
-            compiled_agent = agent.torch_compiler is not None
-            agent.set_training_mode(True)
-            agent.init_training_step()
+            # GraMa backward hooks ride the whole training block; the context
+            # manager removes them and stores the per-neuron gradient snapshot
+            # on exit -- even if training raises (a bare __enter__/__exit__ pair
+            # would leak the hooks on an exception).
+            with GraMaCapture(agent) if capture_grama else nullcontext():
+                compiled_agent = agent.torch_compiler is not None
+                agent.set_training_mode(True)
+                agent.init_training_step()
 
-            obs, info = env.reset()
-            scores = (
-                np.zeros((num_envs, 1))
-                if sum_scores
-                else np.zeros((num_envs, len(agent.agent_ids)))
-            )
-            completed_episode_scores = []
-            steps = 0
-            for _ in range(-(evo_steps // -agent.learn_step)):
-                states = {agent_id: [] for agent_id in agent.agent_ids}
-                actions = {agent_id: [] for agent_id in agent.agent_ids}
-                log_probs = {agent_id: [] for agent_id in agent.agent_ids}
-                rewards = {agent_id: [] for agent_id in agent.agent_ids}
-                dones = {agent_id: [] for agent_id in agent.agent_ids}
-                values = {agent_id: [] for agent_id in agent.agent_ids}
-
-                done = {agent_id: np.zeros(num_envs) for agent_id in agent.agent_ids}
-
-                for _ in range(-(agent.learn_step // -num_envs)):
-                    # Get next action from agent
-                    action, log_prob, _entropy, value = agent.get_action(
-                        obs=obs,
-                        infos=info,
-                    )
-
-                    # Clip to action space
-                    clipped_action = {}
-                    for agent_id, agent_action in action.items():
-                        network_id = (
-                            agent_id
-                            if agent_id in agent.actors
-                            else agent.get_group_id(agent_id)
-                        )
-                        agent_space = agent.possible_action_spaces[agent_id]
-                        policy = getattr(agent, agent.registry.policy())
-                        agent_policy: SingleAgentModule = policy[network_id]
-
-                        if compiled_agent:
-                            agent_policy = agent_policy._orig_mod
-
-                        if isinstance(agent_policy, StochasticActor) and isinstance(
-                            agent_space,
-                            spaces.Box,
-                        ):
-                            if agent_policy.squash_output:
-                                clipped_agent_action = agent_policy.scale_action(
-                                    agent_action,
-                                )
-                            else:
-                                clipped_agent_action = np.clip(
-                                    agent_action,
-                                    agent_space.low,
-                                    agent_space.high,
-                                )
-                        else:
-                            clipped_agent_action = agent_action
-
-                        clipped_action[agent_id] = clipped_agent_action
-
-                    # Act in environment
-                    next_obs, reward, termination, truncation, info = env.step(
-                        clipped_action,
-                    )
-
-                    # Compute score increment (replace NaNs representing inactive agents with 0)
-                    agent_rewards = np.column_stack(
-                        [np.asarray(v).ravel() for v in reward.values()]
-                    )
-                    agent_rewards = np.where(np.isnan(agent_rewards), 0, agent_rewards)
-                    score_increment = (
-                        np.sum(agent_rewards, axis=-1)[:, np.newaxis]
-                        if sum_scores
-                        else agent_rewards
-                    )
-                    scores += score_increment
-                    steps += num_envs
-
-                    # Save transition
-                    for agent_id in obs:
-                        states[agent_id].append(obs[agent_id])
-                        rewards[agent_id].append(reward[agent_id])
-                        actions[agent_id].append(action[agent_id])
-                        log_probs[agent_id].append(log_prob[agent_id])
-                        values[agent_id].append(value[agent_id])
-                        dones[agent_id].append(done[agent_id])
-
-                    # Find which agents are "done" - i.e. terminated or truncated
-                    next_done = {}
-                    for agent_id in termination:
-                        terminated = termination[agent_id]
-                        truncated = truncation[agent_id]
-
-                        # Process asynchronous dones (NaN = inactive agent)
-                        mask = ~(np.isnan(terminated) | np.isnan(truncated))
-                        result = np.full_like(mask, np.nan, dtype=float)
-                        result[mask] = np.logical_or(
-                            terminated[mask],
-                            truncated[mask],
-                        )
-                        next_done[agent_id] = result
-
-                    obs = next_obs
-                    done = next_done
-                    for idx, agent_dones in enumerate(
-                        zip(*next_done.values(), strict=False)
-                    ):
-                        if all(agent_dones):
-                            completed_score = (
-                                float(scores[idx].item())
-                                if sum_scores
-                                else list(scores[idx])
-                            )
-                            completed_episode_scores.append(completed_score)
-                            scores[idx].fill(0)
-
-                            done = {
-                                agent_id: np.zeros(num_envs)
-                                for agent_id in agent.agent_ids
-                            }
-
-                experiences = (
-                    states,
-                    actions,
-                    log_probs,
-                    rewards,
-                    dones,
-                    values,
-                    next_obs,
-                    next_done,
+                obs, info = env.reset()
+                scores = (
+                    np.zeros((num_envs, 1))
+                    if sum_scores
+                    else np.zeros((num_envs, len(agent.agent_ids)))
                 )
+                completed_episode_scores = []
+                steps = 0
+                for _ in range(-(evo_steps // -agent.learn_step)):
+                    states = {agent_id: [] for agent_id in agent.agent_ids}
+                    actions = {agent_id: [] for agent_id in agent.agent_ids}
+                    log_probs = {agent_id: [] for agent_id in agent.agent_ids}
+                    rewards = {agent_id: [] for agent_id in agent.agent_ids}
+                    dones = {agent_id: [] for agent_id in agent.agent_ids}
+                    values = {agent_id: [] for agent_id in agent.agent_ids}
 
-                # Learn according to agent's RL algorithm
-                agent.learn(experiences)
+                    done = {
+                        agent_id: np.zeros(num_envs) for agent_id in agent.agent_ids
+                    }
 
-            agent.add_scores(completed_episode_scores)
-            agent.finalize_training_step(steps)
+                    for _ in range(-(agent.learn_step // -num_envs)):
+                        # Get next action from agent
+                        action, log_prob, _entropy, value = agent.get_action(
+                            obs=obs,
+                            infos=info,
+                        )
+
+                        # Clip to action space
+                        clipped_action = {}
+                        for agent_id, agent_action in action.items():
+                            network_id = (
+                                agent_id
+                                if agent_id in agent.actors
+                                else agent.get_group_id(agent_id)
+                            )
+                            agent_space = agent.possible_action_spaces[agent_id]
+                            policy = getattr(agent, agent.registry.policy())
+                            agent_policy: SingleAgentModule = policy[network_id]
+
+                            if compiled_agent:
+                                agent_policy = agent_policy._orig_mod
+
+                            if isinstance(agent_policy, StochasticActor) and isinstance(
+                                agent_space,
+                                spaces.Box,
+                            ):
+                                if agent_policy.squash_output:
+                                    clipped_agent_action = agent_policy.scale_action(
+                                        agent_action,
+                                    )
+                                else:
+                                    clipped_agent_action = np.clip(
+                                        agent_action,
+                                        agent_space.low,
+                                        agent_space.high,
+                                    )
+                            else:
+                                clipped_agent_action = agent_action
+
+                            clipped_action[agent_id] = clipped_agent_action
+
+                        # Act in environment
+                        next_obs, reward, termination, truncation, info = env.step(
+                            clipped_action,
+                        )
+
+                        # Compute score increment (replace NaNs representing inactive agents with 0)
+                        agent_rewards = np.column_stack(
+                            [np.asarray(v).ravel() for v in reward.values()]
+                        )
+                        agent_rewards = np.where(
+                            np.isnan(agent_rewards), 0, agent_rewards
+                        )
+                        score_increment = (
+                            np.sum(agent_rewards, axis=-1)[:, np.newaxis]
+                            if sum_scores
+                            else agent_rewards
+                        )
+                        scores += score_increment
+                        steps += num_envs
+
+                        # Save transition
+                        for agent_id in obs:
+                            states[agent_id].append(obs[agent_id])
+                            rewards[agent_id].append(reward[agent_id])
+                            actions[agent_id].append(action[agent_id])
+                            log_probs[agent_id].append(log_prob[agent_id])
+                            values[agent_id].append(value[agent_id])
+                            dones[agent_id].append(done[agent_id])
+
+                        # Find which agents are "done" - i.e. terminated or truncated
+                        next_done = {}
+                        for agent_id in termination:
+                            terminated = termination[agent_id]
+                            truncated = truncation[agent_id]
+
+                            # Process asynchronous dones (NaN = inactive agent)
+                            mask = ~(np.isnan(terminated) | np.isnan(truncated))
+                            result = np.full_like(mask, np.nan, dtype=float)
+                            result[mask] = np.logical_or(
+                                terminated[mask],
+                                truncated[mask],
+                            )
+                            next_done[agent_id] = result
+
+                        obs = next_obs
+                        done = next_done
+                        for idx, agent_dones in enumerate(
+                            zip(*next_done.values(), strict=False)
+                        ):
+                            if all(agent_dones):
+                                completed_score = (
+                                    float(scores[idx].item())
+                                    if sum_scores
+                                    else list(scores[idx])
+                                )
+                                completed_episode_scores.append(completed_score)
+                                scores[idx].fill(0)
+
+                                done = {
+                                    agent_id: np.zeros(num_envs)
+                                    for agent_id in agent.agent_ids
+                                }
+
+                    experiences = (
+                        states,
+                        actions,
+                        log_probs,
+                        rewards,
+                        dones,
+                        values,
+                        next_obs,
+                        next_done,
+                    )
+
+                    # Learn according to agent's RL algorithm
+                    agent.learn(experiences)
+
+                agent.add_scores(completed_episode_scores)
+                agent.finalize_training_step(steps)
             pbar.update(steps // population.size)
+
+        # Per-parent gradient snapshots for the ReBorn parameter mutation, captured
+        # above while grads were live (cloning drops them). Keyed by pre-tournament
+        # agent index; children look theirs up via their ``_parent_index``.
+        grama_side_table = None
+        if capture_grama:
+            grama_side_table = {
+                agent.index: getattr(agent, GRAMA_SCORES_ATTR, None)
+                for agent in population.agents
+            }
 
         # Evaluate population
         for agent in population.agents:
@@ -361,7 +389,7 @@ def train_multi_agent_on_policy(
                 sum_scores=sum_scores,
             )
 
-        # Dormant-neuron fraction of the best agent (Sokar et al. 2023)
+        # Dormant-neuron fraction (GraMa) of the best agent.
         if wb:
             best_agent = max(
                 population.agents,
@@ -375,9 +403,8 @@ def train_multi_agent_on_policy(
                     else float("-inf")
                 ),
             )
-            obs_batch = collect_observation_batch(env, best_agent, multi_agent=True)
             population.set_best_dormant_fraction(
-                dormant_neuron_fraction(best_agent, obs_batch, dormant_tau)
+                dormant_neuron_fraction(best_agent, dormant_tau)
             )
             # Normalised population-diversity diagnostics (hp / arch / activation).
             population.set_diversity(
@@ -411,6 +438,7 @@ def train_multi_agent_on_policy(
                     save_elite=save_elite,
                     accelerator=accelerator,
                     env=env,
+                    grama_scores=grama_side_table,
                 ),
             )
 

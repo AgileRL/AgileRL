@@ -1,5 +1,6 @@
 import logging
 import warnings
+from contextlib import nullcontext
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -22,7 +23,8 @@ from agilerl.networks.actors import DeterministicActor
 from agilerl.population import Population
 from agilerl.typing import GymEnvType
 from agilerl.utils.dormant_neurons import (
-    collect_observation_batch,
+    GRAMA_SCORES_ATTR,
+    GraMaCapture,
     dormant_neuron_fraction,
 )
 from agilerl.utils.population_diversity import population_diversity
@@ -96,7 +98,7 @@ def train_off_policy(
     eps_end: float = 0.01,
     eps_decay: float = 0.999,
     target: float | None = None,
-    dormant_tau: float = 0.0,
+    dormant_tau: float = 0.1,
     n_step_memory: MultiStepReplayBuffer | None = None,
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
@@ -150,7 +152,7 @@ def train_off_policy(
     :param target: Target score for early stopping, defaults to None
     :type target: float, optional
     :param dormant_tau: Threshold for the τ-dormant neuron metric (Sokar et al.
-        2023) logged for the best agent each evaluation cycle, defaults to 0.0
+        2023) logged for the best agent each evaluation cycle, defaults to 0.1
     :type dormant_tau: float, optional
     :param n_step_memory: Multi-step Experience Replay Buffer to be used alongside Prioritized
         ERB, defaults to None
@@ -288,125 +290,153 @@ def train_off_policy(
     if accelerator is None and mutation is not None:
         population.update(mutation.mutation(population.agents, pre_training_mut=True))
 
+    # Capture per-neuron post-activation gradients (GraMa) during training when the
+    # dormant diagnostic is logged (best agent) or the ReBorn parameter mutation is
+    # active (every agent, so cloned children can read their parent's snapshot).
+    capture_grama = bool(wb) or (
+        mutation is not None and getattr(mutation, "param_mut_type", None) == "reborn"
+    )
+
     # RL training loop
     while population.all_below(max_steps):
         if accelerator is not None:
             accelerator.wait_for_everyone()
 
         for agent in population.agents:
-            agent.set_training_mode(True)
-            agent.init_training_step()
+            # GraMa backward hooks ride the whole training block; the context
+            # manager removes them and stores the per-neuron gradient snapshot
+            # on exit -- even if training raises (a bare __enter__/__exit__ pair
+            # would leak the hooks on an exception).
+            with GraMaCapture(agent) if capture_grama else nullcontext():
+                agent.set_training_mode(True)
+                agent.init_training_step()
 
-            obs, info = env.reset()
-            scores = np.zeros(num_envs)
-            completed_episode_scores: list[float] = []
-            steps = 0
+                obs, info = env.reset()
+                scores = np.zeros(num_envs)
+                completed_episode_scores: list[float] = []
+                steps = 0
 
-            if isinstance(agent, DQN):
-                epsilon = eps_start
-
-            for idx_step in range(evo_steps // num_envs):
-                # Get next action from agent
                 if isinstance(agent, DQN):
-                    action_mask = info.get("action_mask", None)
-                    action = agent.get_action(obs, epsilon, action_mask=action_mask)
-                    epsilon = max(eps_end, epsilon * eps_decay)
-                elif isinstance(agent, RainbowDQN):
-                    action_mask = info.get("action_mask", None)
-                    action = agent.get_action(obs, action_mask=action_mask)
-                else:
-                    raw_action = agent.get_action(obs)
+                    epsilon = eps_start
 
-                    # Rescale action to action space bounds
-                    action = DeterministicActor.rescale_action(
-                        action=torch.from_numpy(raw_action),
-                        low=agent.action_low,
-                        high=agent.action_high,
-                        output_activation=agent.actor.output_activation,
+                for idx_step in range(evo_steps // num_envs):
+                    # Get next action from agent
+                    if isinstance(agent, DQN):
+                        action_mask = info.get("action_mask", None)
+                        action = agent.get_action(obs, epsilon, action_mask=action_mask)
+                        epsilon = max(eps_end, epsilon * eps_decay)
+                    elif isinstance(agent, RainbowDQN):
+                        action_mask = info.get("action_mask", None)
+                        action = agent.get_action(obs, action_mask=action_mask)
+                    else:
+                        raw_action = agent.get_action(obs)
+
+                        # Rescale action to action space bounds
+                        action = DeterministicActor.rescale_action(
+                            action=torch.from_numpy(raw_action),
+                            low=agent.action_low,
+                            high=agent.action_high,
+                            output_activation=agent.actor.output_activation,
+                        )
+                        action = action.cpu().numpy()
+
+                    # Act in environment
+                    next_obs, reward, done, trunc, info = env.step(action)
+                    scores += np.array(reward)
+
+                    reset_noise_indices = []
+                    for idx, (d, t) in enumerate(zip(done, trunc, strict=False)):
+                        if d or t:
+                            completed_episode_scores.append(scores[idx])
+                            scores[idx] = 0
+                            reset_noise_indices.append(idx)
+
+                    if isinstance(agent, (DDPG, TD3)):
+                        agent.reset_action_noise(reset_noise_indices)
+
+                    steps += num_envs
+
+                    # Save network output in buffer
+                    if isinstance(agent, (DDPG, TD3)):
+                        action = raw_action
+
+                    transition: TensorDictBase = Transition(
+                        obs=obs,
+                        action=action,
+                        reward=reward,
+                        next_obs=next_obs,
+                        done=done,
                     )
-                    action = action.cpu().numpy()
 
-                # Act in environment
-                next_obs, reward, done, trunc, info = env.step(action)
-                scores += np.array(reward)
+                    transition = transition.to_tensordict()
+                    transition.batch_size = [num_envs]
+                    if n_step_memory is not None:
+                        one_step_transition = n_step_memory.add(transition)
+                        if one_step_transition is not None:
+                            memory.add(one_step_transition)
+                    else:
+                        memory.add(transition)
 
-                reset_noise_indices = []
-                for idx, (d, t) in enumerate(zip(done, trunc, strict=False)):
-                    if d or t:
-                        completed_episode_scores.append(scores[idx])
-                        scores[idx] = 0
-                        reset_noise_indices.append(idx)
+                    if per:
+                        fraction = min(
+                            (
+                                (agent.metrics.steps + idx_step + 1)
+                                * num_envs
+                                / max_steps
+                            ),
+                            1.0,
+                        )
+                        agent.beta += fraction * (1.0 - agent.beta)
 
-                if isinstance(agent, (DDPG, TD3)):
-                    agent.reset_action_noise(reset_noise_indices)
+                    # Learn according to learning frequency
+                    # Handle learn_step > num_envs
+                    if agent.learn_step > num_envs:
+                        learn_step = agent.learn_step // num_envs
+                        if (
+                            idx_step % learn_step == 0
+                            and len(memory) >= agent.batch_size
+                            and memory.size > learning_delay
+                        ):
+                            _learn_from_buffer(
+                                agent,
+                                sampler,
+                                memory,
+                                n_step_memory,
+                                n_step_sampler,
+                                per,
+                            )
 
-                steps += num_envs
-
-                # Save network output in buffer
-                if isinstance(agent, (DDPG, TD3)):
-                    action = raw_action
-
-                transition: TensorDictBase = Transition(
-                    obs=obs,
-                    action=action,
-                    reward=reward,
-                    next_obs=next_obs,
-                    done=done,
-                )
-
-                transition = transition.to_tensordict()
-                transition.batch_size = [num_envs]
-                if n_step_memory is not None:
-                    one_step_transition = n_step_memory.add(transition)
-                    if one_step_transition is not None:
-                        memory.add(one_step_transition)
-                else:
-                    memory.add(transition)
-
-                if per:
-                    fraction = min(
-                        ((agent.metrics.steps + idx_step + 1) * num_envs / max_steps),
-                        1.0,
-                    )
-                    agent.beta += fraction * (1.0 - agent.beta)
-
-                # Learn according to learning frequency
-                # Handle learn_step > num_envs
-                if agent.learn_step > num_envs:
-                    learn_step = agent.learn_step // num_envs
-                    if (
-                        idx_step % learn_step == 0
-                        and len(memory) >= agent.batch_size
-                        and memory.size > learning_delay
+                    elif (
+                        len(memory) >= agent.batch_size and memory.size > learning_delay
                     ):
-                        _learn_from_buffer(
-                            agent,
-                            sampler,
-                            memory,
-                            n_step_memory,
-                            n_step_sampler,
-                            per,
-                        )
+                        for _ in range(num_envs // agent.learn_step):
+                            _learn_from_buffer(
+                                agent,
+                                sampler,
+                                memory,
+                                n_step_memory,
+                                n_step_sampler,
+                                per,
+                            )
 
-                elif len(memory) >= agent.batch_size and memory.size > learning_delay:
-                    for _ in range(num_envs // agent.learn_step):
-                        _learn_from_buffer(
-                            agent,
-                            sampler,
-                            memory,
-                            n_step_memory,
-                            n_step_sampler,
-                            per,
-                        )
+                    obs = next_obs
 
-                obs = next_obs
-
-            agent.add_scores(completed_episode_scores)
-            agent.finalize_training_step(steps)
+                agent.add_scores(completed_episode_scores)
+                agent.finalize_training_step(steps)
             pbar.update(evo_steps // population.size)
 
         if isinstance(agent, DQN):
             eps_start = epsilon
+
+        # Per-parent gradient snapshots for the ReBorn parameter mutation, captured
+        # above while grads were live (cloning drops them). Keyed by pre-tournament
+        # agent index; children look theirs up via their ``_parent_index``.
+        grama_side_table = None
+        if capture_grama:
+            grama_side_table = {
+                agent.index: getattr(agent, GRAMA_SCORES_ATTR, None)
+                for agent in population.agents
+            }
 
         # Evaluate population
         for agent in population.agents:
@@ -416,15 +446,14 @@ def train_off_policy(
                 loop=eval_loop,
             )
 
-        # Dormant-neuron fraction of the best agent (Sokar et al. 2023)
+        # Dormant-neuron fraction (GraMa) of the best agent.
         if wb:
             best_agent = max(
                 population.agents,
                 key=lambda a: a.fitness[-1] if a.fitness else float("-inf"),
             )
-            obs_batch = collect_observation_batch(env, best_agent)
             population.set_best_dormant_fraction(
-                dormant_neuron_fraction(best_agent, obs_batch, dormant_tau)
+                dormant_neuron_fraction(best_agent, dormant_tau)
             )
             # Normalised population-diversity diagnostics (hp / arch / activation).
             population.set_diversity(
@@ -457,6 +486,7 @@ def train_off_policy(
                     save_elite=save_elite,
                     accelerator=accelerator,
                     env=env,
+                    grama_scores=grama_side_table,
                 ),
             )
 
