@@ -93,15 +93,11 @@ class SFT(LLMAlgorithm):
         otherwise). Both this and the standard path are memory-bounded — the
         full ``(B, L, V)`` logits are never materialized — so this is mainly a
         speed/kernel choice. The Liger kernel auto-sizes its own chunk; the
-        standard path's chunk is set by ``fused_logprobs_chunk_rows``.
+        standard path's chunk is set by ``chunk_rows``.
     :type use_liger_loss: bool, optional
-    :param fused_logprobs_chunk_rows: Standard-path (non-Liger) only. Rows
-        (tokens) per ``(chunk_rows, vocab)`` logit tile when computing the loss
-        from token-chunked fused-linear logprobs. Peak logits memory is
-        ``O(chunk_rows * vocab)`` regardless of batch/sequence length, so this
-        tunes peak memory by token budget. ``None`` (default) auto-tunes to a
-        ~256 MB fp32 tile. Ignored on the Liger path (it auto-sizes internally).
-    :type fused_logprobs_chunk_rows: int | None, optional
+    :param chunk_rows: Primary chunk-size knob for fused logit tiles. On SFT's
+        standard path this controls the fused-logprob chunk rows directly.
+    :type chunk_rows: int | None, optional
     :param reduce_memory_peak: Deprecated and ignored; previously hinted
         peak-memory batching. Configure ``micro_batch_size_per_gpu`` instead.
     :type reduce_memory_peak: bool, optional
@@ -150,7 +146,7 @@ class SFT(LLMAlgorithm):
         seed: int = 42,
         gradient_checkpointing: bool = True,
         use_liger_loss: bool = False,
-        fused_logprobs_chunk_rows: int | None = None,
+        chunk_rows: int | None = None,
         reduce_memory_peak: bool = False,
         use_separate_reference_adapter: bool = False,
         quantization_config: BitsAndBytesConfig | None = None,
@@ -179,7 +175,7 @@ class SFT(LLMAlgorithm):
             pad_token_id=pad_token_id,
             pad_token=pad_token,
             use_liger_loss=use_liger_loss,
-            fused_logprobs_chunk_rows=fused_logprobs_chunk_rows,
+            chunk_rows=chunk_rows,
             lora_config=lora_config,
             use_separate_reference_adapter=use_separate_reference_adapter,
             model_name=model_name,
@@ -355,7 +351,7 @@ class SFT(LLMAlgorithm):
                 labels.masked_fill(ignore, 0),  # safe gather index; masked out below
                 temperature=1.0,
                 cast_to_fp32=self.cast_logprobs_to_fp32,
-                _chunk_rows=self.fused_logprobs_chunk_rows,
+                chunk_rows=self.chunk_rows,
             )  # [B, L-1]
             token_mask = (~ignore).to(logps.dtype)
             loss = -(logps * token_mask).sum() / token_mask.sum().clamp_min(1.0)
