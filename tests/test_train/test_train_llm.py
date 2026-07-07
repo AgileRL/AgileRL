@@ -18,6 +18,7 @@ from agilerl.training.train_llm import (
     _normalize_learn_metrics,
     build_eval_wandb_dict,
     build_train_wandb_dict,
+    finetune_llm_reasoning,
     train_llm_dataset,
     train_llm_rollout,
 )
@@ -2356,3 +2357,9 @@ def test_open_csv_log_and_log_row(tmp_path):
     file_mock = MagicMock()
     _log_csv_row(writer_mock, file_mock, {"step": 2}, non_main)
     writer_mock.writerow.assert_not_called()
+
+
+def test_finetune_llm_reasoning_raises_migration_pointer():
+    """The deprecated entrypoint raises with the migration instruction."""
+    with pytest.raises(NotImplementedError, match="train_llm_rollout instead"):
+        finetune_llm_reasoning()

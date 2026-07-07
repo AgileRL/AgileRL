@@ -32,6 +32,7 @@ from agilerl.llm_envs.openenv import (
     _name_from_spec,
     _normalize_reset,
     _normalize_step,
+    _observation_text,
 )
 
 
@@ -224,6 +225,40 @@ def test_normalize_step_rejects_non_tuple() -> None:
 def test_normalize_reset_accepts_bare_observation() -> None:
     """An env returning just an observation gets an empty info dict."""
     assert _normalize_reset("obs") == ("obs", {})
+
+
+def test_normalize_reset_accepts_singleton_tuple() -> None:
+    """A 1-tuple ``(obs,)`` reset return normalizes to empty info."""
+    assert _normalize_reset(("obs",)) == ("obs", {})
+
+
+def test_normalize_step_rejects_unsupported_tuple_length() -> None:
+    """Only 4/5-tuples are accepted from ``env.step``."""
+    with pytest.raises(ValueError, match="expected 4 or 5"):
+        _normalize_step(("o", 1.0, True))
+
+
+# --- observation rendering ---------------------------------------------------
+@pytest.mark.parametrize(
+    ("obs", "expected"),
+    [
+        ("plain text", "plain text"),
+        ({"result": {"content": [{"text": "a"}, {"text": "b"}]}}, "a\nb"),
+        ({"result": {"data": "tool data"}}, "tool data"),
+        ({"prompt": "p"}, "p"),
+        ({"text": "t"}, "t"),
+        ({"message": "m"}, "m"),
+        ({"observation": "o"}, "o"),
+        ({"error": "boom"}, "Error: boom"),
+        ({"unknown": 1}, ""),
+        (123, ""),
+    ],
+)
+def test_observation_text_supports_openenv_and_mcp_shapes(
+    obs: Any, expected: str
+) -> None:
+    """``_observation_text`` handles plain text, MCP blocks, and fallback keys."""
+    assert _observation_text(obs) == expected
 
 
 # --- env identity: the served env's real name in OpenEnv metadata ----------
@@ -563,6 +598,35 @@ class TestStateFetchStrictness:
             {"/mcp": httpx.ConnectError("no mcp")},
         )
         assert client.tools == []
+
+    def test_non_object_state_payload_is_treated_as_empty(self) -> None:
+        """A non-dict ``/state`` body normalizes to ``{}``."""
+        client = _stubbed_client([_StubResponse(200, ["not", "a", "dict"])])
+        assert client.dataset_size == 0
+        assert client.tools == []
+
+
+def test_openenv_client_reset_forwards_eval_and_positive_seed_only() -> None:
+    """``reset`` sends row/eval flags and drops negative seeds."""
+    payloads: list[dict[str, Any]] = []
+    client = OpenEnvClient("http://stub.invalid")
+
+    def _capture(path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        assert path == "/reset"
+        payloads.append(payload)
+        return {"observation": "prompt"}
+
+    client._post = _capture  # type: ignore[method-assign]
+
+    with client.eval_mode():
+        prompt, info = client.reset(seed=-2, row_index=3)
+    assert prompt == "prompt"
+    assert info == {}
+    assert payloads[-1] == {"row_index": 3, "evaluation": True}
+
+    prompt2, _ = client.reset(seed=5)
+    assert prompt2 == "prompt"
+    assert payloads[-1] == {"seed": 5}
 
 
 # --- truncated round-trips over HTTP ----------------------------------------

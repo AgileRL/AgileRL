@@ -766,6 +766,23 @@ def test_llm_env_close_is_a_noop_by_default():
     assert _MinimalEnv().close() is None
 
 
+def test_llm_env_eval_mode_restores_previous_value():
+    """The base ``LLMEnv.eval_mode`` restores whatever mode was active on entry."""
+
+    class _MinimalEnv(LLMEnv):
+        def reset(self, *args, **kwargs):
+            return None
+
+        def step(self, *args, **kwargs):
+            return None
+
+    env = _MinimalEnv()
+    env.evaluation_mode = True
+    with env.eval_mode():
+        assert env.evaluation_mode is True
+    assert env.evaluation_mode is True
+
+
 def test_dataset_env_len_and_eval_mode_preserve_tokenized_prompts():
     """``__len__`` reflects the active split and ``eval_mode`` saves/restores
     ``last_tokenized_prompts`` around the held-out block.
