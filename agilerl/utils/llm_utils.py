@@ -1647,20 +1647,6 @@ def resolve_vllm_max_num_batched_tokens(
     return min(worst_case, concurrent_budget)
 
 
-def resolve_peft_adapter_export_dir(staging_dir: Path, adapter_name: str) -> Path:
-    """Return the directory vLLM expects for a PEFT adapter export.
-
-    ``PeftModel.save_pretrained(..., selected_adapters=[name])`` normally writes
-    ``staging_dir/name/``; some layouts write directly into ``staging_dir``.
-    """
-    nested = staging_dir / adapter_name
-    if nested.is_dir() and (nested / "adapter_config.json").is_file():
-        return nested
-    if (staging_dir / "adapter_config.json").is_file():
-        return staging_dir
-    return nested
-
-
 def build_vllm_llm_init_kwargs(
     vllm_config: Any,
     *,
@@ -1787,13 +1773,14 @@ def save_peft_adapter_for_vllm_rollout(
     adapter_name: str,
     *,
     target_modules: str | list[str],
-    is_main_process: bool = True,
 ) -> Path:
     """Export a PEFT adapter checkpoint that vLLM can load for colocated rollout.
 
     Keeps only tensors that match the same ``target_modules`` spec used for PEFT
     training (from :func:`adapt_lora_config_for_model`). Rewrites ClippableLinear
-    ``.linear`` suffixes in keys for vLLM.
+    ``.linear`` suffixes in keys for vLLM. ``staging_dir`` must be
+    process-private (AgileRL stages per-rank when distributed): every caller
+    writes the adapter files.
     """
     if not HAS_LLM_DEPENDENCIES:
         msg = "save_peft_adapter_for_vllm_rollout requires peft and transformers."
@@ -1802,11 +1789,7 @@ def save_peft_adapter_for_vllm_rollout(
     from peft import get_peft_model_state_dict
     from safetensors.torch import save_file
 
-    staging = Path(staging_dir)
-    adapter_path = staging / adapter_name
-    if not is_main_process:
-        return resolve_peft_adapter_export_dir(staging, adapter_name)
-
+    adapter_path = Path(staging_dir) / adapter_name
     state = get_peft_model_state_dict(peft_model, adapter_name=adapter_name)
     n_before = len(state)
     state = filter_peft_state_dict_for_vllm_lora(state, target_modules)
