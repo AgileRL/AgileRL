@@ -2004,18 +2004,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     :param lora_target_scope: Optional PEFT LoRA path scope for multimodal models
         (e.g. ``"language_model"``). Passed to :func:`adapt_lora_config_for_model`.
     :type lora_target_scope: str | None, optional
-    :param fused_logprobs_chunk_rows: Standard (non-Liger) path only. Rows
-        (tokens) per ``(chunk_rows, vocab)`` logit tile when computing per-token
-        log-probs via the fused-linear-logprob path. Peak logits memory is
-        ``O(chunk_rows * vocab)`` regardless of batch/sequence length. ``None``
-        (default) auto-tunes to a ~256 MB fp32 tile.
-    :type fused_logprobs_chunk_rows: int | None, optional
-    :param fused_loss_chunk_rows: Rows per ``(chunk_rows, vocab)`` logit tile in
-        the token-level Liger fused policy loss. ``None`` (default) auto-tunes to
-        a ~256 MB fp32 logit workspace — the same heuristic as
-        ``fused_logprobs_chunk_rows`` on the standard path; pass an int to
-        override.
-    :type fused_loss_chunk_rows: int | None, optional
+    :param chunk_rows: Primary chunk-size knob for fused logit tiles used by
+        both the standard fused-logprob path and the Liger fused-loss path.
+        ``None`` (default) preserves each path's auto-tuned behavior.
+    :type chunk_rows: int | None, optional
     :param vllm_importance_sampling_correction: When ``True`` (default) and
         ``use_vllm=True``, correct the rollout/trainer log-prob mismatch by
         weighting each training token by ``clamp(exp(trainer - sampling),
@@ -2112,8 +2104,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         activation_offload: bool = False,
         use_sequence_packing: bool = False,
         lora_target_scope: str | None = None,
-        fused_logprobs_chunk_rows: int | None = None,
-        fused_loss_chunk_rows: int | None = None,
+        chunk_rows: int | None = None,
         vllm_importance_sampling_correction: bool = True,
         vllm_importance_sampling_cap: float = 2.0,
     ) -> None:
@@ -2254,10 +2245,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.wrap = wrap
         self.use_separate_reference_adapter = use_separate_reference_adapter
         self.cast_logprobs_to_fp32 = cast_logprobs_to_fp32
-        # Per-chunk row count for the fused-linear-logprob workspace. ``None``
-        # uses a vocab-aware ~256 MB-workspace heuristic;
-        # set explicitly to trade kernel-launch count vs ``rows * vocab`` peak.
-        self.fused_logprobs_chunk_rows = fused_logprobs_chunk_rows
+        if chunk_rows is not None and chunk_rows <= 0:
+            msg = f"chunk_rows must be a positive int or None, got {chunk_rows}."
+            raise ValueError(msg)
+        self.chunk_rows = chunk_rows
         # vLLM sampling-mismatch correction (truncated importance sampling).
         # The rollout is drawn from vLLM but the loss treats the trainer's
         # recomputed ``old_log_probs`` as the behaviour policy; the two differ
@@ -2273,13 +2264,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         # Kept on even when use_vllm=False: decoupled rollouts still sample
         # from a separate vLLM engine.
         self._is_correction_liger_warned = False
-        if fused_loss_chunk_rows is not None and fused_loss_chunk_rows <= 0:
-            msg = (
-                f"fused_loss_chunk_rows must be a positive int or None, "
-                f"got {fused_loss_chunk_rows}."
-            )
-            raise ValueError(msg)
-        self.fused_loss_chunk_rows = fused_loss_chunk_rows
         # Warn-once flag for the canonical Liger + non-token importance-sampling
         # "not memory-bounded" warning (see :meth:`_warn_liger_non_token_is`).
         self._liger_non_token_warned = False
@@ -2300,6 +2284,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self._vllm_moved = False
         self._vllm_lora_loaded = False
         self._vllm_lora_staging_dir: Path | None = None
+        self._vllm_lora_staging_dir_is_temp = True
         self._vllm_rollout_lora_request: Any | None = None
         # Colocated vLLM (use_vllm=True) runs the rollout engine and the HF
         # trainer in one process. Each holds its OWN base: vLLM cycles its base
@@ -3684,7 +3669,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 fused_ids[start:end, 1:],
                 temperature=self.temperature,
                 cast_to_fp32=self.cast_logprobs_to_fp32,
-                _chunk_rows=self.fused_logprobs_chunk_rows,
+                chunk_rows=self.chunk_rows,
             )
             del first
 
@@ -3859,7 +3844,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             packed.input_ids[:, 1:],
             temperature=self.temperature,
             cast_to_fp32=self.cast_logprobs_to_fp32,
-            _chunk_rows=self.fused_logprobs_chunk_rows,
+            chunk_rows=self.chunk_rows,
         )
         log_probs = unpack_logprobs(packed_lp, packed)
 
@@ -4083,7 +4068,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                         packed.input_ids[:, 1:],
                         temperature=self.temperature,
                         cast_to_fp32=self.cast_logprobs_to_fp32,
-                        _chunk_rows=self.fused_logprobs_chunk_rows,
+                        chunk_rows=self.chunk_rows,
                     )
                     # Map back to the dense (mb, T-1) frame so the loss path is
                     # unchanged; cross-segment boundary predictions are dropped.
@@ -4097,7 +4082,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                         batch_ids[:, 1:],
                         temperature=self.temperature,
                         cast_to_fp32=self.cast_logprobs_to_fp32,
-                        _chunk_rows=self.fused_logprobs_chunk_rows,
+                        chunk_rows=self.chunk_rows,
                     )
 
                 first = None
@@ -4197,13 +4182,17 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def _ensure_vllm_lora_staging_dir(self) -> Path:
         """Resolve (once) the dir the rollout LoRA adapter is exported to.
 
-        Honours ``VLLMConfig.lora_staging_dir`` when set — e.g. a shared/NFS
-        path that a colocated Ray rollout worker reads the adapter from — by
-        creating it (parents included) and marking it non-temporary so
-        ``clean_up`` never deletes it. Otherwise falls back to a process-private
-        ``mkdtemp`` that ``clean_up`` removes. Idempotent: both the colocated
-        init (``_configure_vllm``) and every adapter sync (``_move_lora_to_vllm``)
-        call this, so the same directory is used throughout the agent's life.
+        The staging dir is always process-private: each rank exports its own
+        adapter copy and reads it back locally, so ranks never race on shared
+        files. Honours ``VLLMConfig.lora_staging_dir`` when set — e.g. a known
+        path that orchestrated deployments expect the adapter under — staging
+        in a ``rank_<process_index>`` subdirectory of that root when
+        distributed. The dir is created (parents included) and marked
+        non-temporary so ``clean_up`` never deletes it. Otherwise falls back
+        to a process-private ``mkdtemp`` that ``clean_up`` removes.
+        Idempotent: both the colocated init (``_configure_vllm``) and every
+        adapter sync (``_move_lora_to_vllm``) call this, so the same directory
+        is used throughout the agent's life.
 
         :return: The resolved staging directory.
         :rtype: pathlib.Path
@@ -4211,8 +4200,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         if self._vllm_lora_staging_dir is None:
             configured = getattr(self.vllm_config, "lora_staging_dir", None)
             if configured is not None:
-                self._vllm_lora_staging_dir = Path(configured)
-                self._vllm_lora_staging_dir.mkdir(parents=True, exist_ok=True)
+                staging_dir = Path(configured)
+                if get_world_size() > 1:
+                    staging_dir = staging_dir / f"rank_{get_rank()}"
+                staging_dir.mkdir(parents=True, exist_ok=True)
+                self._vllm_lora_staging_dir = staging_dir
                 self._vllm_lora_staging_dir_is_temp = False
             else:
                 self._vllm_lora_staging_dir = Path(
@@ -4235,10 +4227,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         peft_ref = self._get_peft_model_for_vllm_sync()
         peft_ref.set_adapter(self._vllm_rollout_adapter)
 
-        # Export to a fixed staging dir + id and refresh the resident rollout
-        # slot in place: ``load_inplace`` (2nd sync onward) re-reads the updated
-        # weights from disk, and the fixed id avoids per-sync CUDA-graph
-        # accumulation that would grow GPU memory across iterations.
         staging_dir = self._ensure_vllm_lora_staging_dir()
         main_process = is_main_process()
         with gather_full_params(peft_ref):
@@ -4250,7 +4238,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 staging_dir,
                 self._vllm_rollout_adapter,
                 target_modules=self.lora_config.target_modules,
-                is_main_process=main_process,
             )
         barrier()
         if not adapter_path.is_dir():
@@ -4284,11 +4271,19 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             adapter_path,
             load_inplace=self._vllm_lora_loaded,
         )
-        loaded = self.llm.llm_engine.add_lora(refresh_request)
+        lora_device = torch.device(self.device)
+        if lora_device.type == "cuda":
+            # Pin the CUDA context to this agent's device: vLLM's LoRA copy
+            # kernels otherwise launch on the process-default device.
+            with torch.cuda.device(lora_device):
+                loaded = self.llm.llm_engine.add_lora(refresh_request)
+        else:
+            loaded = self.llm.llm_engine.add_lora(refresh_request)
         if not loaded:
             msg = (
-                f"vLLM failed to load LoRA adapter from {adapter_path}. "
-                "Check max_lora_rank / target module names match the trainer."
+                "vLLM failed to load LoRA adapter from "
+                f"{adapter_path}. Check max_lora_rank / target module "
+                "names match the trainer."
             )
             raise RuntimeError(msg)
 
@@ -4575,13 +4570,13 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         logits: torch.Tensor,
         index: torch.Tensor,
         cast_to_fp32: bool = True,
-        _chunk_rows: int = 1,
+        chunk_rows: int = 1,
     ) -> torch.Tensor:
         """Calculate log probabilities for previously generated token ids.
 
-        Processes ``_chunk_rows`` rows at a time so peak memory stays bounded to
-        ``(_chunk_rows, seq_len, vocab_size)`` rather than the full batch, avoiding
-        OOM on large-vocabulary models. Default ``_chunk_rows=1`` minimizes the
+        Processes ``chunk_rows`` rows at a time so peak memory stays bounded to
+        ``(chunk_rows, seq_len, vocab_size)`` rather than the full batch, avoiding
+        OOM on large-vocabulary models. Default ``chunk_rows=1`` minimizes the
         fp32 workspace at the cost of more kernel launches; raise to amortize
         launch overhead when memory headroom allows.
 
@@ -4618,12 +4613,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             result = target - log_z
             return result.to(orig_dtype) if cast_to_fp32 else result
 
-        if B <= _chunk_rows:
+        if B <= chunk_rows:
             return _logprobs_chunk(logits, index)
 
         per_token_logps = []
-        for start in range(0, B, _chunk_rows):
-            end = min(start + _chunk_rows, B)
+        for start in range(0, B, chunk_rows):
+            end = min(start + chunk_rows, B)
             per_token_logps.append(
                 _logprobs_chunk(logits[start:end], index[start:end]),
             )
@@ -4633,10 +4628,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def _resolve_fused_chunk_rows(vocab_size: int, explicit: int | None = None) -> int:
         """Rows per fused ``(chunk_rows, vocab)`` logit tile.
 
-        Shared by the fused-linear-logprob (standard) path
-        (``fused_logprobs_chunk_rows``) and the Liger fused-loss path
-        (``fused_loss_chunk_rows``) so both bound their per-chunk logit
-        workspace identically. A positive ``explicit`` overrides; ``None``
+        Shared by the fused-linear-logprob (standard) path and the Liger
+        fused-loss path so both bound their per-chunk logit workspace
+        identically. A positive ``explicit`` overrides; ``None``
         auto-tunes to a ~256 MB fp32 logit workspace (fewer rows at larger
         vocab), clamped to ``[128, 4096]``.
 
@@ -4660,12 +4654,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         target_ids: torch.Tensor,
         temperature: float = 1.0,
         cast_to_fp32: bool = True,
-        _chunk_rows: int | None = None,
+        chunk_rows: int | None = None,
     ) -> torch.Tensor:
         """Per-token target logprobs without materializing the full ``(B, T, V)``
         logits tensor.
 
-        Tiles flat over ``(B*T)`` with workspace bounded to ``(_chunk_rows, V)``
+        Tiles flat over ``(B*T)`` with workspace bounded to ``(chunk_rows, V)``
         per iteration. Counterpart of :meth:`_logprobs_from_logits` for
         callers that hold hidden states and the lm_head separately. **No-grad
         only** — gradients won't flow to ``lm_head_weight`` from this fn. The
@@ -4693,16 +4687,16 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             in fp32 then cast back. Same semantics as
             :meth:`_logprobs_from_logits`.
         :type cast_to_fp32: bool, optional
-        :param _chunk_rows: rows of the flattened ``(B*T)`` workspace per
-            iteration; trades launch count vs ``_chunk_rows * V`` peak. When
+        :param chunk_rows: rows of the flattened ``(B*T)`` workspace per
+            iteration; trades launch count vs ``chunk_rows * V`` peak. When
             ``None`` (default) it is resolved from the vocab size via
             a ~256 MB fp32 workspace heuristic.
-        :type _chunk_rows: int | None, optional
+        :type chunk_rows: int | None, optional
         :return: ``(B, T)`` per-token logprobs in ``hidden.dtype``.
         :rtype: torch.Tensor
         """
-        _chunk_rows = LLMAlgorithm._resolve_fused_chunk_rows(
-            lm_head_weight.shape[0], _chunk_rows
+        chunk_rows = LLMAlgorithm._resolve_fused_chunk_rows(
+            lm_head_weight.shape[0], chunk_rows
         )
         return fused_linear_logprobs_chunked(
             hidden,
@@ -4711,7 +4705,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             target_ids,
             temperature=temperature,
             cast_to_fp32=cast_to_fp32,
-            chunk_rows=_chunk_rows,
+            chunk_rows=chunk_rows,
         )
 
     @staticmethod
@@ -4722,7 +4716,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         target_ids: torch.Tensor,
         temperature: float = 1.0,
         cast_to_fp32: bool = True,
-        _chunk_rows: int | None = None,
+        chunk_rows: int | None = None,
     ) -> torch.Tensor:
         """Gradient-aware version of :meth:`_logprobs_from_hidden_fused`.
 
@@ -4748,15 +4742,15 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :type temperature: float, optional
         :param cast_to_fp32: run the per-chunk reduction in fp32.
         :type cast_to_fp32: bool, optional
-        :param _chunk_rows: rows of the flattened ``(B*T)`` workspace per chunk.
+        :param chunk_rows: rows of the flattened ``(B*T)`` workspace per chunk.
             When ``None`` (default) it is resolved from the vocab size via
             a ~256 MB fp32 workspace heuristic.
-        :type _chunk_rows: int | None, optional
+        :type chunk_rows: int | None, optional
         :return: ``(B, T)`` per-token logprobs in ``hidden.dtype``.
         :rtype: torch.Tensor
         """
-        _chunk_rows = LLMAlgorithm._resolve_fused_chunk_rows(
-            lm_head_weight.shape[0], _chunk_rows
+        chunk_rows = LLMAlgorithm._resolve_fused_chunk_rows(
+            lm_head_weight.shape[0], chunk_rows
         )
         return FusedLinearLogProbsFunction.apply(
             hidden,
@@ -4765,7 +4759,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             target_ids,
             temperature,
             cast_to_fp32,
-            _chunk_rows,
+            chunk_rows,
         )
 
     def _configure_batch_size_per_process(
@@ -5191,10 +5185,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def _sleep_vllm_after_init(self) -> None:
         """Put the colocated engine to sleep once after construction.
 
-        Native ``sleep(level=1)``: vLLM backs its base up to host RAM and frees
-        the KV cache; ``wake_up()`` restores the base (dense or bnb 4-bit).
+        Native ``sleep(level=sleep_mode_level)``: vLLM cycles its allocator
+        state based on the configured sleep level; ``wake_up()`` restores the
+        engine allocations.
         """
-        self.llm.sleep(level=1)
+        self.llm.sleep(level=self.vllm_config.sleep_mode_level)
         self._vllm_awake = False
         if is_main_process():
             log_cuda_memory_snapshot("vLLM sleep complete")
@@ -5293,13 +5288,16 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
     def _prepare_vllm_for_training(self) -> None:
         """Prepare vLLM for learning."""
-        if self._vllm_awake and is_main_process():
+        if not self.use_vllm:
+            return
+        # Every rank holds its own colocated engine (external_launcher), so
+        # every rank must sleep it — not just the main process.
+        if self.vllm_config.sleep_mode and self._vllm_awake:
             torch.cuda.empty_cache()
-            self.llm.sleep(level=1)
+            self.llm.sleep(level=self.vllm_config.sleep_mode_level)
             self._vllm_awake = False
 
-        if self.use_vllm:
-            self._vllm_moved = False
+        self._vllm_moved = False
 
     def _prepare_vllm_for_generation(self) -> None:
         if self.use_memory_efficient_params:
@@ -5312,7 +5310,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 log_cuda_memory_snapshot(
                     "trainer base offloaded to CPU (before vLLM wake)"
                 )
-        if not self._vllm_awake and is_main_process():
+        # Every rank holds its own colocated engine, and _sleep_vllm_after_init
+        # slept them all; we wake them all here.
+        if self.vllm_config.sleep_mode and not self._vllm_awake:
             torch.cuda.empty_cache()
             device_index = get_local_rank()
             try:

@@ -1745,7 +1745,7 @@ class TestLLMLogprobsFromLogits:
         result_bf16 = LLMAlgorithm._logprobs_from_logits(
             logits_bf16,
             index,
-            _chunk_rows=chunk_rows,
+            chunk_rows=chunk_rows,
         )
         reference_fp32 = (
             F.log_softmax(logits_bf16.float(), dim=-1)
@@ -1867,7 +1867,7 @@ class TestLogprobsFromHiddenFused:
         assert torch.equal(result, ref)
 
     def test_chunked_matches_unchunked(self) -> None:
-        """Output is independent of ``_chunk_rows`` — covers the loop
+        """Output is independent of ``chunk_rows`` — covers the loop
         boundary path.
         """
         torch.manual_seed(2)
@@ -1883,7 +1883,7 @@ class TestLogprobsFromHiddenFused:
             targets,
             temperature=0.5,
             cast_to_fp32=True,
-            _chunk_rows=10_000,  # > B*T=27 → single chunk
+            chunk_rows=10_000,  # > B*T=27 → single chunk
         )
         small = LLMAlgorithm._logprobs_from_hidden_fused(
             hidden,
@@ -1892,7 +1892,7 @@ class TestLogprobsFromHiddenFused:
             targets,
             temperature=0.5,
             cast_to_fp32=True,
-            _chunk_rows=4,  # forces multiple chunks
+            chunk_rows=4,  # forces multiple chunks
         )
         assert torch.equal(big, small)
 
@@ -2018,7 +2018,7 @@ class TestFusedLinearLogProbsGrad:
 
     def test_grad_invariant_to_chunk_rows(self) -> None:
         """Forward value and hidden gradient are independent of
-        ``_chunk_rows`` (single chunk vs many) up to fp32 matmul-tiling
+        ``chunk_rows`` (single chunk vs many) up to fp32 matmul-tiling
         noise — chunking only partitions rows, it changes nothing about
         each row's reduction.
         """
@@ -2038,7 +2038,7 @@ class TestFusedLinearLogProbsGrad:
                 targets,
                 temperature=0.9,
                 cast_to_fp32=True,
-                _chunk_rows=chunk_rows,
+                chunk_rows=chunk_rows,
             )
             out.backward(upstream)
             return out.detach(), hid.grad
@@ -3092,7 +3092,6 @@ def _fake_save_peft_adapter_for_vllm_rollout(
     adapter_name,
     *,
     target_modules,
-    is_main_process=True,
 ):
     from pathlib import Path
 
@@ -3190,6 +3189,19 @@ class TestEnsureVllmLoraStagingDir:
         is_temp = getattr(agent, "_vllm_lora_staging_dir_is_temp", True)
         assert is_temp is False
         assert target.is_dir()
+
+    def test_appends_rank_subdir_in_distributed_run(self, tmp_path):
+        """With >1 process, each rank gets its own ``rank_<rank>`` subdir."""
+        target = tmp_path / "nfs_lora"
+        agent = self._agent(str(target))
+        with (
+            patch("agilerl.algorithms.core.base.get_world_size", return_value=2),
+            patch("agilerl.algorithms.core.base.get_rank", return_value=1),
+        ):
+            resolved = LLMAlgorithm._ensure_vllm_lora_staging_dir(agent)
+        assert resolved == target / "rank_1"
+        assert resolved.is_dir()
+        assert agent._vllm_lora_staging_dir_is_temp is False
 
 
 class TestLLMSyncActorToVllm:
@@ -4283,6 +4295,7 @@ class TestLLMConfigureVllmPaths:
         vllm_config.gpu_memory_utilization = 0.9
         vllm_config.max_num_seqs = 256
         vllm_config.sleep_mode = True
+        vllm_config.sleep_mode_level = 1
         agent.vllm_config = vllm_config
         agent.max_model_len = 512
         agent.pretrained_model_name_or_path = "mock-model"
@@ -5178,6 +5191,78 @@ class TestLLMMoveLoraToVllmErrors:
         assert any(
             "lora-sync: actor lora_B L2=" in rec.message for rec in caplog.records
         )
+
+    def test_each_rank_exports_to_private_staging_dir(self, tmp_path):
+        """Every rank exports to its own ``rank_<rank>`` subdir under the root."""
+        agent = _make_llm_agent()
+        peft_ref = MagicMock()
+        peft_ref.parameters.return_value = [torch.tensor([1.0])]
+        peft_ref.named_parameters.return_value = []
+        peft_ref.set_adapter = MagicMock()
+        _setup_agent_for_vllm_lora_sync(agent, peft_ref)
+        # Force the staging dir to be resolved from the configured root so the
+        # per-rank derivation in _ensure_vllm_lora_staging_dir is exercised.
+        agent.vllm_config = VLLMConfig(lora_staging_dir=str(tmp_path))
+        agent._vllm_lora_staging_dir = None
+
+        with (
+            patch("agilerl.algorithms.core.base.gather_full_params"),
+            patch("agilerl.algorithms.core.base.is_main_process", return_value=False),
+            patch("agilerl.algorithms.core.base.get_world_size", return_value=2),
+            patch("agilerl.algorithms.core.base.get_rank", return_value=1),
+            patch("agilerl.algorithms.core.base.barrier"),
+            patch(
+                "agilerl.algorithms.core.base.build_vllm_rollout_lora_request",
+                side_effect=_fake_build_vllm_rollout_lora_request,
+            ),
+            patch(
+                "agilerl.algorithms.core.base.save_peft_adapter_for_vllm_rollout",
+                side_effect=_fake_save_peft_adapter_for_vllm_rollout,
+            ) as mock_save,
+        ):
+            agent._move_lora_to_vllm()
+
+        mock_save.assert_called_once()
+        assert mock_save.call_args.args[1] == tmp_path / "rank_1"
+        agent.llm.llm_engine.add_lora.assert_called_once()
+
+    def test_add_lora_uses_cuda_device_guard_when_agent_device_is_cuda(self, tmp_path):
+        agent = _make_llm_agent()
+        peft_ref = MagicMock()
+        peft_ref.parameters.return_value = [torch.tensor([1.0])]
+        peft_ref.named_parameters.return_value = []
+        peft_ref.set_adapter = MagicMock()
+        _setup_agent_for_vllm_lora_sync(agent, peft_ref)
+        agent.device = "cuda:1"
+
+        adapter_path = tmp_path / "actor"
+        adapter_path.mkdir(parents=True, exist_ok=True)
+        (adapter_path / "adapter_config.json").write_text("{}")
+        (adapter_path / "adapter_model.safetensors").write_bytes(b"")
+        device_guard = MagicMock()
+        device_guard.__enter__ = MagicMock(return_value=None)
+        device_guard.__exit__ = MagicMock(return_value=False)
+
+        with (
+            patch("agilerl.algorithms.core.base.gather_full_params"),
+            patch("agilerl.algorithms.core.base.is_main_process", return_value=True),
+            patch("agilerl.algorithms.core.base.barrier"),
+            patch(
+                "agilerl.algorithms.core.base.build_vllm_rollout_lora_request",
+                side_effect=_fake_build_vllm_rollout_lora_request,
+            ),
+            patch(
+                "agilerl.algorithms.core.base.save_peft_adapter_for_vllm_rollout",
+                return_value=adapter_path,
+            ),
+            patch(
+                "agilerl.algorithms.core.base.torch.cuda.device",
+                return_value=device_guard,
+            ) as mock_cuda_device,
+        ):
+            agent._move_lora_to_vllm()
+        mock_cuda_device.assert_called_once_with(torch.device("cuda:1"))
+        agent.llm.llm_engine.add_lora.assert_called_once()
 
     def test_raises_when_vllm_add_lora_fails(self, tmp_path):
         agent = _make_llm_agent()
