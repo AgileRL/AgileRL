@@ -7,6 +7,8 @@ from unittest.mock import MagicMock, patch
 
 import click
 import pytest
+from click.testing import CliRunner
+
 from agilerl.arena.cli import (
     _redact_agent_rows_for_display,
     arena_client,
@@ -14,7 +16,6 @@ from agilerl.arena.cli import (
 )
 from agilerl.arena.config import CommandConfig, build_client
 from agilerl.arena.exceptions import ArenaAPIError
-from click.testing import CliRunner
 
 
 @pytest.fixture
@@ -1067,8 +1068,9 @@ class TestProjectsDefaultCommand:
         with _patched_arena_client(mock_client):
             result = runner.invoke(main, ["projects", "set-default", "my-proj"])
         assert result.exit_code == 0
+        # The command delegates persistence (and the confirmation log) to the
+        # client, which is mocked here, so behavior is verified via the call.
         mock_client.set_default_project.assert_called_once_with("my-proj")
-        assert "my-proj" in result.output
 
     def test_get_default_when_set(self, runner, mock_client):
         mock_client.get_default_project.return_value = "my-proj"

@@ -38,6 +38,17 @@ def _detach_arena_rich_handler() -> None:
         arena_logger.propagate = saved_propagate
 
 
+@pytest.fixture(autouse=True)
+def _isolate_arena_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prevent a developer's real ``ARENA_API_KEY`` from leaking into tests.
+
+    Without this, a key exported in the shell makes the CLI attempt real
+    authentication (e.g. ``arena --help`` building a client), producing
+    spurious 401 failures. Tests that need a key set it explicitly.
+    """
+    monkeypatch.delenv("ARENA_API_KEY", raising=False)
+
+
 @pytest.fixture
 def arena_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Temporary HOME with ``~/.arena`` created under it."""
