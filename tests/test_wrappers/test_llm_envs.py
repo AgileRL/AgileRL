@@ -14,7 +14,6 @@ from transformers.tokenization_utils_base import BatchEncoding
 
 from agilerl.llm_envs import (
     DatasetEnv,
-    LLMEnv,
     apply_chat_template,
 )
 from tests import TINY_LLM_FIXTURE_PATH
@@ -753,36 +752,6 @@ def test_batch_rollout_env_shuffle_is_group_consistent_full_permutation():
     assert other != per_reset_rows
 
 
-def test_llm_env_close_is_a_noop_by_default():
-    """The base ``close`` releases nothing by default and returns ``None``."""
-
-    class _MinimalEnv(LLMEnv):
-        def reset(self, *args, **kwargs):
-            return None
-
-        def step(self, *args, **kwargs):
-            return None
-
-    assert _MinimalEnv().close() is None
-
-
-def test_llm_env_eval_mode_restores_previous_value():
-    """The base ``LLMEnv.eval_mode`` restores whatever mode was active on entry."""
-
-    class _MinimalEnv(LLMEnv):
-        def reset(self, *args, **kwargs):
-            return None
-
-        def step(self, *args, **kwargs):
-            return None
-
-    env = _MinimalEnv()
-    env.evaluation_mode = True
-    with env.eval_mode():
-        assert env.evaluation_mode is True
-    assert env.evaluation_mode is True
-
-
 def test_dataset_env_len_and_eval_mode_preserve_tokenized_prompts():
     """``__len__`` reflects the active split and ``eval_mode`` saves/restores
     ``last_tokenized_prompts`` around the held-out block.
@@ -848,37 +817,3 @@ def test_dataset_env_rejects_unknown_kind():
             tokenizer=tokenizer,
             objective="bogus",
         )
-
-
-class TestLLMEnvBase:
-    """The shared dataset-env base: the ``eval_mode`` block toggles + restores."""
-
-    def _minimal_env(self) -> LLMEnv:
-        class _Env(LLMEnv):
-            def reset(self, *args, **kwargs):
-                return None
-
-            def step(self, *args, **kwargs):
-                return None
-
-        return _Env()
-
-    def test_eval_mode_toggles_and_restores(self) -> None:
-        env = self._minimal_env()
-        assert env.evaluation_mode is False
-        with env.eval_mode():
-            assert env.evaluation_mode is True
-        assert env.evaluation_mode is False
-
-    def test_eval_mode_restores_prior_value_on_error(self) -> None:
-        env = self._minimal_env()
-        err = ValueError("boom")
-
-        def _raise_inside_block() -> None:
-            with env.eval_mode():
-                assert env.evaluation_mode is True
-                raise err
-
-        with pytest.raises(ValueError, match="boom"):
-            _raise_inside_block()
-        assert env.evaluation_mode is False

@@ -1,9 +1,5 @@
 """Gymnasium-style environments for LLM training."""
 
-from agilerl.llm_envs.base import (
-    LLMEnv,
-    apply_chat_template,
-)
 from agilerl.llm_envs.dataset_env import DatasetEnv
 from agilerl.llm_envs.openenv import (
     LocalEnvClient,
@@ -21,12 +17,12 @@ from agilerl.llm_envs.rollout_env import (
     BatchRolloutEnv,
     RolloutEnv,
 )
+from agilerl.utils.llm_utils import apply_chat_template
 
 __all__ = [
     "BatchPointer",
     "BatchRolloutEnv",
     "DatasetEnv",
-    "LLMEnv",
     "LocalEnvClient",
     "OpenEnvClient",
     "OpenEnvServer",

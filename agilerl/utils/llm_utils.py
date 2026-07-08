@@ -11,7 +11,7 @@ import warnings
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from accelerate import Accelerator
@@ -19,6 +19,10 @@ from torch import nn
 
 from agilerl import HAS_DEEPSPEED, HAS_LLM_DEPENDENCIES
 from agilerl.typing import RolloutPrompts
+
+if TYPE_CHECKING:
+    from transformers import AutoTokenizer
+    from transformers.tokenization_utils_base import BatchEncoding
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +39,6 @@ else:
     AutoModelForCausalLMWithValueHead = Any  # type: ignore[assignment,misc]
     BitsAndBytesConfig = Any  # type: ignore[assignment,misc]
 
-_DEPRECATED_LLM_ENV_NAMES = frozenset(("apply_chat_template",))
-
 # Named bitsandbytes quantization presets
 _BNB_QUANT_PRESETS = frozenset({"none", "int8", "nf4"})
 
@@ -45,28 +47,44 @@ _BNB_QUANT_PRESETS = frozenset({"none", "int8", "nf4"})
 _CLIPPABLE_LINEAR_WRAPPER_SUFFIX = "ClippableLinear"
 
 
-def __getattr__(name: str) -> Any:
-    """Lazy re-exports from ``llm_envs`` with a deprecation warning."""
-    if name in _DEPRECATED_LLM_ENV_NAMES:
-        warnings.warn(
-            (
-                f"Importing {name} from agilerl.utils.llm_utils is deprecated; "
-                "it has moved to agilerl.llm_envs. Import from "
-                "agilerl.llm_envs instead; importing from "
-                "agilerl.utils.llm_utils will be removed in a future release."
-            ),
-            FutureWarning,
-            stacklevel=2,
-        )
-        import agilerl.llm_envs as _llm_envs
+def apply_chat_template(
+    conversation_template: list[dict[str, str]],
+    question: str,
+    answer: str,
+    tokenizer: AutoTokenizer,
+) -> BatchEncoding:
+    """Create and tokenize a chat template for a reasoning task.
 
-        return getattr(_llm_envs, name)
-    msg = f"module {__name__!r} has no attribute {name!r}"
-    raise AttributeError(msg)
-
-
-def __dir__() -> list[str]:
-    return sorted(set(globals()) | set(_DEPRECATED_LLM_ENV_NAMES))
+    :param conversation_template: The conversation template to be tokenized.
+    :type conversation_template: list[dict[str, str]]
+    :param question: The question to be tokenized.
+    :type question: str
+    :param answer: The answer to be tokenized.
+    :type answer: str
+    :param tokenizer: The tokenizer to be used.
+    :type tokenizer: AutoTokenizer
+    :return: The tokenized prompt.
+    :rtype: BatchEncoding
+    """
+    formatted_conversation = [
+        {
+            "role": msg["role"],
+            "content": msg["content"].format(question=question, answer=answer),
+        }
+        for msg in conversation_template
+    ]
+    updated_prompt = tokenizer.apply_chat_template(
+        formatted_conversation,
+        tokenize=False,
+        continue_final_message=True,
+    )
+    return tokenizer(
+        [updated_prompt],
+        return_tensors="pt",
+        padding=True,
+        padding_side="left",
+        return_attention_mask=True,
+    )
 
 
 def max_prompt_tokens_for_model_len(

@@ -20,8 +20,6 @@ import gymnasium as gym
 import torch
 from torch.utils.data import DataLoader
 
-from agilerl.llm_envs.base import LLMEnv
-
 if TYPE_CHECKING:
     from collections.abc import Generator
 
@@ -35,7 +33,7 @@ if TYPE_CHECKING:
     ]
 
 
-class DatasetEnv(LLMEnv, gym.Env):
+class DatasetEnv(gym.Env):
     """Dataset-backed LLM env for SFT and DPO (no generation).
 
     Serves batches straight from a labelled dataset: the model is scored on the
@@ -198,9 +196,8 @@ class DatasetEnv(LLMEnv, gym.Env):
     def step(self, completions: torch.Tensor | None = None) -> None:
         """No-op: dataset training advances via :meth:`reset`.
 
-        ``step`` exists only because :class:`~agilerl.llm_envs.base.LLMEnv`
-        requires it, and returns ``None``. ``completions`` is accepted for
-        trainer API parity and is ignored.
+        Returns ``None``; ``completions`` is accepted for trainer API parity
+        (mirroring the ``env.step`` a ``RolloutEnv`` implements) and is ignored.
 
         :param completions: Unused; accepted for API parity.
         :type completions: torch.Tensor | None
@@ -226,8 +223,7 @@ class DatasetEnv(LLMEnv, gym.Env):
     def eval_mode(self) -> Generator[None, None, None]:
         """Temporarily switch reads to the held-out split, restoring the prior mode.
 
-        Restores whatever mode was active on entry (matching
-        :meth:`LLMEnv.eval_mode`'s save/set/restore behaviour), so nested
+        Restores whatever mode was active on entry (save/set/restore), so nested
         evaluation probes don't flip an outer eval context back to the train
         split. This also snapshots and
         restores ``last_tokenized_prompts`` when present, so train-loop prompt

@@ -565,23 +565,25 @@ def test_protocol_type_aliases_importable():
 
 
 class TestLLMEnvHierarchy:
-    """The LLM env contract lives in :mod:`agilerl.llm_envs`.
+    """The LLM env classes live in :mod:`agilerl.llm_envs`.
 
-    ``LLMEnv`` is the abstract base for the teacher-forced ``DatasetEnv``;
-    ``RolloutEnv`` is the token rollout env (an OpenEnv client driven by a URL)
-    and does not subclass ``LLMEnv``.
+    The teacher-forced ``DatasetEnv`` is a ``gymnasium.Env``; the token rollout
+    ``RolloutEnv`` (an OpenEnv client driven by a URL) has its own interface and
+    shares no base with it.
     """
 
     def test_llm_env_hierarchy(self):
         pytest.importorskip("datasets", reason="LLM dependencies not installed")
-        from agilerl.llm_envs import DatasetEnv, LLMEnv, RolloutEnv
+        import gymnasium as gym
 
-        # DatasetEnv is the abstract LLMEnv's concrete teacher-forced subtype.
-        assert issubclass(DatasetEnv, LLMEnv)
-        # RolloutEnv is the token rollout env (an OpenEnv client), not an LLMEnv.
-        assert not issubclass(RolloutEnv, LLMEnv)
+        from agilerl.llm_envs import DatasetEnv, RolloutEnv
+
+        # DatasetEnv is the teacher-forced dataset env, a gymnasium.Env.
+        assert issubclass(DatasetEnv, gym.Env)
+        # RolloutEnv is the token rollout env (an OpenEnv client), not a gym.Env.
+        assert not issubclass(RolloutEnv, gym.Env)
         # agilerl.protocols exposes no env classes (they live in agilerl.llm_envs).
         import agilerl.protocols as protocols
 
         assert not hasattr(protocols, "RolloutEnv")
-        assert not hasattr(protocols, "LLMEnv")
+        assert not hasattr(protocols, "DatasetEnv")

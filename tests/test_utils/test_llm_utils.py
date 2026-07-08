@@ -802,15 +802,13 @@ class TestNormalizeReasoningPromptBatch:
         assert out == [prompts]
 
 
-class TestLlmUtilsDeprecatedReexports:
-    def test_deprecated_name_warns_and_resolves(self):
+class TestApplyChatTemplateReexport:
+    def test_apply_chat_template_is_reexported_from_llm_envs(self):
         import agilerl.utils.llm_utils as llm_utils_module
+        from agilerl.llm_envs import apply_chat_template as reexport
 
-        with pytest.warns(FutureWarning, match="moved to agilerl.llm_envs"):
-            fn = llm_utils_module.apply_chat_template
-        from agilerl.llm_envs import apply_chat_template as expected
-
-        assert fn is expected
+        # Canonical home is llm_utils; llm_envs re-exports the same object.
+        assert llm_utils_module.apply_chat_template is reexport
 
     def test_unknown_name_raises_attribute_error(self):
         import agilerl.utils.llm_utils as llm_utils_module
@@ -818,11 +816,10 @@ class TestLlmUtilsDeprecatedReexports:
         with pytest.raises(AttributeError, match="has no attribute"):
             _ = llm_utils_module._nope_definitely_not_here
 
-    def test_dir_includes_deprecated_names(self):
+    def test_dir_includes_apply_chat_template(self):
         import agilerl.utils.llm_utils as llm_utils_module
 
-        d = dir(llm_utils_module)
-        assert "apply_chat_template" in d
+        assert "apply_chat_template" in dir(llm_utils_module)
 
 
 def test_move_params_helpers_call_model_move_and_cuda_sync():

@@ -32,7 +32,8 @@ ways, so there are no per-env codecs. See :ref:`llm_environments` for a guide.
   entrypoint), and :func:`~agilerl.llm_envs.load_env` just builds an entrypoint env (no
   hosting) for the in-process path.
 
-``apply_chat_template`` is also re-exported from :mod:`agilerl.utils.llm_utils`.
+:func:`~agilerl.utils.llm_utils.apply_chat_template` lives in
+:mod:`agilerl.utils.llm_utils` and is re-exported here for convenience.
 
 To drive a *real external* OpenEnv server (e.g. an env on the HuggingFace Hub), point
 :class:`~agilerl.llm_envs.RolloutEnv` at its URL; the env is reached over HTTP by the
@@ -60,4 +61,3 @@ each its own HTTP server (one OS thread + port), closed on ``close``.
 .. autoclass:: agilerl.llm_envs.LocalEnvClient
 .. autofunction:: agilerl.llm_envs.resolve_env
 .. autofunction:: agilerl.llm_envs.load_env
-.. autofunction:: agilerl.llm_envs.apply_chat_template
