@@ -68,13 +68,44 @@ def test_training_and_replay_buffer_aliases() -> None:
 
 def test_get_validated_inserts_empty_platform_sections() -> None:
     payload = TrainingManifest.get_validated(
-        _manifest(algorithm={"name": "DQN", "lr": 3e-4, "cudagraphs": True})
+        _manifest(algorithm={"name": "DQN", "lr": 3e-4})
     )
     assert payload["mutation"] == {}
     assert payload["tournament_selection"] == {}
     assert payload["network"] == {}
     assert payload["algorithm"]["name"] == "DQN"
-    assert "cudagraphs" not in payload["algorithm"]
+
+
+def test_get_validated_warns_on_unknown_algorithm_field() -> None:
+    with patch("agilerl.arena.models.manifest.logger") as mock_logger:
+        TrainingManifest.get_validated(
+            _manifest(algorithm={"name": "DQN", "lr": 3e-4, "bogus_algo_field": 1})
+        )
+    mock_logger.warning.assert_called_once()
+    template, formatted = mock_logger.warning.call_args.args
+    assert "unrecognized manifest field" in template
+    assert "algorithm.bogus_algo_field" in formatted
+
+
+def test_get_validated_warns_on_unknown_top_level_field() -> None:
+    with patch("agilerl.arena.models.manifest.logger") as mock_logger:
+        TrainingManifest.get_validated(_manifest(bogus_top_level=123))
+    mock_logger.warning.assert_called_once()
+    assert "bogus_top_level" in mock_logger.warning.call_args.args[1]
+
+
+def test_get_validated_no_warning_for_aliased_fields() -> None:
+    # population_size / metrics_interval / memory_size are validation aliases,
+    # not unknown fields.
+    with patch("agilerl.arena.models.manifest.logger") as mock_logger:
+        TrainingManifest.get_validated(
+            _manifest(
+                algorithm={"name": "DQN", "lr": 3e-4},
+                training={"population_size": 4, "metrics_interval": 123},
+                replay_buffer={"memory_size": 4096},
+            )
+        )
+    mock_logger.warning.assert_not_called()
 
 
 def test_get_validated_accepts_env_spec_objects() -> None:
@@ -177,12 +208,6 @@ def test_generated_manifest_validates(algo_name: str, tmp_path) -> None:
     assert validated["environment"]["name"]
     assert "mutation" in validated
     assert "tournament_selection" in validated
-
-
-def test_dqn_generated_manifest_omits_cudagraphs(tmp_path) -> None:
-    _path, validated = write_arena_manifest("DQN", tmp_path)
-    assert validated["algorithm"]["name"] == "DQN"
-    assert "cudagraphs" not in validated["algorithm"]
 
 
 def test_llm_env_type_str() -> None:

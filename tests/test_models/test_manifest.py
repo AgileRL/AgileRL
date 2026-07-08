@@ -105,6 +105,50 @@ def test_get_validated_json_omits_unset_optional_sections() -> None:
     assert "network" not in out
 
 
+def test_get_validated_warns_on_unknown_algorithm_field() -> None:
+    with patch("agilerl.models.manifest.logger") as mock_logger:
+        TrainingManifest.get_validated(
+            _make_manifest(
+                {"name": "DQN", "lr": 3e-4, "bogus_algo_field": 1},
+                env={"name": "CartPole-v1"},
+            )
+        )
+    mock_logger.warning.assert_called_once()
+    template, formatted = mock_logger.warning.call_args.args
+    assert "unrecognized manifest field" in template
+    assert "algorithm.bogus_algo_field" in formatted
+
+
+def test_get_validated_warns_on_unknown_top_level_field() -> None:
+    with patch("agilerl.models.manifest.logger") as mock_logger:
+        TrainingManifest.get_validated(
+            _make_manifest(
+                {"name": "DQN"}, env={"name": "CartPole-v1"}, bogus_top_level=123
+            )
+        )
+    mock_logger.warning.assert_called_once()
+    assert "bogus_top_level" in mock_logger.warning.call_args.args[1]
+
+
+def test_get_validated_no_warning_for_known_aliased_or_excluded_fields() -> None:
+    # `cudagraphs` is declared-but-excluded, and population_size / metrics_interval
+    # / memory_size are validation aliases: none are unknown.
+    with patch("agilerl.models.manifest.logger") as mock_logger:
+        TrainingManifest.get_validated(
+            _make_manifest(
+                {"name": "DQN", "lr": 3e-4, "cudagraphs": True},
+                env={"name": "CartPole-v1"},
+                training={
+                    "population_size": 4,
+                    "metrics_interval": 123,
+                    "max_steps": 1000,
+                },
+                replay_buffer={"memory_size": 4096},
+            )
+        )
+    mock_logger.warning.assert_not_called()
+
+
 class TestNormalizeNetworkForPlatform:
     """Tests for network normalization via get_validated(mode='json')."""
 
