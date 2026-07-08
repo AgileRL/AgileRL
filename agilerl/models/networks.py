@@ -363,11 +363,7 @@ def encoder_spec_for_arch(arch: str) -> type[BaseModel]:
     :rtype: type[BaseModel]
     """
     for member in get_args(EncoderType):
-        arch_field = member.model_fields["arch"]
-        member_arch = arch_field.default
-        if member_arch is None:
-            member_arch = get_args(arch_field.annotation)[0]
-        if member_arch == arch:
+        if member.model_fields["arch"].default == arch:
             return member
     msg = f"Unknown encoder arch: {arch!r}"
     raise ValueError(msg)

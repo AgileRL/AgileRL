@@ -7,8 +7,18 @@ import logging
 from pathlib import Path
 from typing import Annotated, Any, Literal, get_args
 
-import agilerl.arena.models.algorithms as _arena_algorithms  # noqa: F401
 import yaml
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    BeforeValidator,
+    Field,
+    PlainSerializer,
+    model_validator,
+)
+from typing_extensions import Self
+
+import agilerl.arena.models.algorithms as _arena_algorithms  # noqa: F401
 from agilerl.arena.models.algo import (
     ARENA_REGISTRY,
     AlgoSpecT,
@@ -20,15 +30,6 @@ from agilerl.arena.models.networks import (
     NetworkSpec,
 )
 from agilerl.arena.models.training import ReplayBufferSpec, TrainingSpec
-from pydantic import (
-    AliasChoices,
-    BaseModel,
-    BeforeValidator,
-    Field,
-    PlainSerializer,
-    model_validator,
-)
-from typing_extensions import Self
 
 logger = logging.getLogger(__name__)
 
@@ -362,15 +363,9 @@ class TrainingManifest(BaseModel):
 
         recurrent = bool(getattr(self.algorithm, "recurrent", False))
         net_config = getattr(self.algorithm, "net_config", None)
-        if isinstance(net_config, dict):
-            simba = bool(net_config.get("simba", False))
-        elif net_config is not None:
+        if net_config is not None:
             simba = bool(getattr(net_config, "simba", False))
         elif isinstance(self.network, dict):
-            # Deferred path: unlike core, `net_config` is left unset (None)
-            # here when the network section has no resolvable `arch` (see
-            # `_resolve_network`/`_network_has_arch`), so fall back to the raw
-            # `network` dict which still carries the manifest's `simba` flag.
             simba = bool(self.network.get("simba", False))
         else:
             simba = False
