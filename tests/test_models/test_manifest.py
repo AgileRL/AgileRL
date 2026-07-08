@@ -12,8 +12,10 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 import yaml
+from gymnasium import spaces
 from pydantic import ValidationError
 
 from agilerl import HAS_ARENA_DEPENDENCIES, HAS_LLM_DEPENDENCIES
@@ -1150,6 +1152,18 @@ _MULTI_AGENT_CONFIGS = [
     ("multi_agent/ippo_pong.yaml", IPPOSpec),
 ]
 
+# Configs omit the network ``arch``, so it is inferred from the observation
+# space at build time. Give the stub env a space matching the expected encoder.
+_OBS_SPACE_FOR_ENCODER = {
+    MlpSpec: spaces.Box(-1.0, 1.0, shape=(4,), dtype=np.float32),
+    LstmSpec: spaces.Box(-1.0, 1.0, shape=(4,), dtype=np.float32),
+    SimbaSpec: spaces.Box(-1.0, 1.0, shape=(4,), dtype=np.float32),
+    CnnSpec: spaces.Box(0, 255, shape=(3, 32, 32), dtype=np.uint8),
+    MultiInputSpec: spaces.Dict(
+        {"vector": spaces.Box(-1.0, 1.0, shape=(4,), dtype=np.float32)}
+    ),
+}
+
 
 class TestFromConfigFiles:
     """Load every YAML config under ``configs/training/`` and verify that
@@ -1157,12 +1171,27 @@ class TestFromConfigFiles:
     """
 
     @pytest.fixture(autouse=True)
-    def _patch_heavy_init(self):
+    def _patch_heavy_init(self, request):
         """Avoid spawning real environments and populations for config
         file integration tests.
+
+        When a test parametrizes ``expected_encoder_cls``, give the stub env a
+        matching observation space so the deferred obs-space -> encoder-arch
+        inference resolves to the expected encoder.
         """
+        env = MagicMock()
+        callspec = getattr(request.node, "callspec", None)
+        expected_encoder_cls = (
+            callspec.params.get("expected_encoder_cls")
+            if callspec is not None
+            else None
+        )
+        obs_space = _OBS_SPACE_FOR_ENCODER.get(expected_encoder_cls)
+        if obs_space is not None:
+            env.single_observation_space = obs_space
+
         with (
-            patch.object(LocalTrainer, "_make_env", return_value=MagicMock()),
+            patch.object(LocalTrainer, "_make_env", return_value=env),
             patch(
                 "agilerl.training.trainer.create_population_from_spec",
                 return_value=[MagicMock()],
