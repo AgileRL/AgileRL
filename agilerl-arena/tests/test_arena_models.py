@@ -6,13 +6,6 @@ from unittest.mock import patch
 
 import pytest
 import yaml
-from generate_arena_manifests import (
-    arena_algorithm_names,
-    generate_arena_manifests,
-    write_arena_manifest,
-)
-from pydantic import ValidationError
-
 from agilerl.arena.models import (
     ARENA_REGISTRY,
     ReplayBufferSpec,
@@ -32,6 +25,12 @@ from agilerl.arena.models.networks import (
     MlpSpec,
     QNetworkSpec,
 )
+from generate_arena_manifests import (
+    arena_algorithm_names,
+    generate_arena_manifests,
+    write_arena_manifest,
+)
+from pydantic import ValidationError
 
 
 def _manifest(**sections) -> dict:
