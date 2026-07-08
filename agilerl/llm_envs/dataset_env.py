@@ -1,9 +1,8 @@
 """Dataset-backed LLM env for SFT and DPO — one class, selected by ``objective``.
 
-A ``DatasetEnv`` serves batches straight from a labelled dataset: the model is scored
-on the dataset's own completions in a single forward pass (cross-entropy for SFT,
-chosen-vs-rejected preference for DPO), so nothing is generated — unlike a
-``RolloutEnv``, where the model produces the text being scored. SFT and DPO differ
+A ``DatasetEnv`` serves batches of prompts and completions: the model is scored
+on its similarity to the dataset completions in a single forward pass (cross-entropy for SFT,
+chosen-vs-rejected preference for DPO), so no next-token generation is required. SFT and DPO differ
 only by the *required columns* and the *collate function*, so they share one class and
 are picked with the ``objective`` argument rather than separate subclasses.
 """
@@ -38,7 +37,7 @@ class DatasetEnv(gym.Env):
 
     Serves batches straight from a labelled dataset: the model is scored on the
     dataset's own completions in a single forward pass (cross-entropy for SFT,
-    chosen-vs-rejected preference for DPO) — nothing is generated. The two
+    chosen-vs-rejected preference for DPO) — no next-token generation. The two
     objectives differ only by the *required columns* and the *collate function*,
     selected with ``objective``:
 

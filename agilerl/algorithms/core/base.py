@@ -2432,13 +2432,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     ) -> np.ndarray:
         """Return fitness (test) score of the llm on the test sub-set.
 
-        Each of the ``loop`` episodes runs ``reset`` then repeated
-        ``get_action`` / ``step`` turns until the environment terminates or
-        truncates. A safety cap also ends the turn loop after
-        ``env.max_turns`` iterations (512 when the attribute is ``None``) so
-        a non-terminating environment cannot hang evaluation; rewards
-        collected up to the cap still count.
-
         :param env: Tokenized rollout episode environment (single- or multi-turn).
         :type env: RolloutEnv
         :param loop: Number of outer test iterations (episodes).
@@ -2455,7 +2448,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 msg = f"env must be a RolloutEnv; got {type(env).__name__}"
                 raise TypeError(msg)
             max_turns = getattr(env, "max_turns", None)
-            turn_cap = 512 if max_turns is None else max_turns
+            turn_cap = 1 if max_turns is None else max_turns
             all_rewards: list[torch.Tensor] = []
             for _ in range(loop):
                 prompt_dict, _info = env.reset()
@@ -4373,8 +4366,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             self.actor.train(mode=not eval_mode)
             num_samples = ids.shape[0]
             if attention_mask is None:
-                # TODO this calc is avoided for preference (DatasetEnv) batches;
-                # generation (RolloutEnv) rollouts should supply an attention mask too
                 attention_mask = ids != self.pad_token_id
             if self.calc_position_embeddings:
                 position_ids = self._position_ids_from_mask(attention_mask)

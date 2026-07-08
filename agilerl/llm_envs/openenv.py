@@ -1,4 +1,4 @@
-"""The OpenEnv seam: reach any text env the same way — over HTTP or in-process.
+"""The OpenEnv API: reach any text env the same way — over HTTP or in-process.
 
 Every LLM-training env is driven through the same two calls — ``reset()`` returns a
 prompt, ``step(text)`` returns the next prompt, a reward, and done flags — and a
@@ -209,8 +209,11 @@ def _fold(text: str, info: dict[str, Any] | None) -> str:
 class OpenEnvServer:
     """Run OpenEnv's app on uvicorn in-process.
 
-    OpenEnv builds the FastAPI app (``create_app``), but its hosting is meant to be a standalone, blocking process e.g. (a HF Space, a container, ``python -m openenv``).
-    To enable envs to be served in-process, this class wraps the same ``create_app`` in a uvicorn **daemon thread**, binds an ephemeral port (``port=0``) read back from :attr:`base_url`, and exposes ``start`` / ``stop`` (and the context-manager protocol).
+    OpenEnv builds the FastAPI app (``create_app``), but its hosting is meant to be a standalone,
+    blocking process e.g. (a HF Space, a container, ``python -m openenv``).
+    To enable envs to be served in-process, this class wraps the same ``create_app`` in a
+    uvicorn **daemon thread**, binds an ephemeral port (``port=0``) read back from
+    :attr:`base_url`, and exposes ``start`` / ``stop`` (and the context-manager protocol).
     Any OpenEnv client can then reach it by URL.
     This class also enables env servers to be hosted by Ray actors in their own process.
 
@@ -318,14 +321,8 @@ class OpenEnvClient:
     Implements :class:`~agilerl.protocols.EnvClientProtocol` for
     :class:`~agilerl.llm_envs.rollout_env.RolloutEnv`.
 
-    Why this rather than OpenEnv's own client: OpenEnv ships an async, WebSocket-first
-    ``EnvClient``, but our rollout loop drives ``reset`` / ``step`` synchronously,
-    so a plain **sync** httpx client hitting the (async) FastAPI server is
-    simpler than threading an event loop through the trainer. This client can still be
-    used asynchronously by sitting inside an async process, like a Ray actor.
-
-    Drives any env hosted as an OpenEnv server — our own :class:`OpenEnvServer` or a
-    third-party one.
+    Our rollout loop drives ``reset`` / ``step`` synchronously, but this client
+    can be used asynchronously by sitting inside an async process e.g. Ray actor.
 
     For an external server whose env is exposed as an MCP tool rather than plain
     ``{"message": text}`` actions, pass ``mcp_tool``: the model's text is sent as

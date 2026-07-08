@@ -3,9 +3,9 @@
 A :class:`RolloutEnv` owns the tokenisation + turn loop and talks to its env through an
 **env client** exposing the OpenEnv ``reset`` / ``step`` calls. The env client is
 either an :class:`~agilerl.llm_envs.openenv.OpenEnvClient` (the env is hosted over a URL
-— a remote Space or a local :class:`~agilerl.llm_envs.openenv.OpenEnvServer`) or a
-:class:`~agilerl.llm_envs.openenv.LocalEnvClient` (the env runs in-process, no HTTP —
-e.g. inside a Ray actor). :meth:`RolloutEnv.from_spec` picks the right one from a URL or
+— a remote server or a local :class:`~agilerl.llm_envs.openenv.OpenEnvServer`) or a
+:class:`~agilerl.llm_envs.openenv.LocalEnvClient` (the env runs in-process, no HTTP).
+:meth:`RolloutEnv.from_spec` picks the right one from a URL or
 a ``module:Class`` entrypoint. ``BatchRolloutEnv`` maintains independent groups of these
 rollouts over a batch, sharing a :class:`BatchPointer` dataset cursor.
 """
@@ -56,9 +56,8 @@ class RolloutEnv:
       enforces the **context budget**: when ``max_model_len`` is set and the next
       turn would overflow, the episode terminates rather than dropping turns.
 
-    It is the in-flight, mutable builder of one episode's row: the owning
-    :class:`BatchRolloutEnv` keeps a ``list`` of these and reads :attr:`done` /
-    :attr:`current_prompt` to drive the lockstep loop.
+    :class:`BatchRolloutEnv` keeps a ``list`` of RolloutEnvs and reads :attr:`done` /
+    :attr:`current_prompt` to drive the training loop.
     """
 
     def __init__(

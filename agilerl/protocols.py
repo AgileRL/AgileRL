@@ -12,7 +12,7 @@ The key protocols include:
 - MutationMethodProtocol: Interface for mutation operations on networks
 - OptimizerWrapperProtocol: Interface for optimizer management
 - TextEnvProtocol: Interface for local text envs (raw reset/step)
-- EnvClientProtocol: Interface for OpenEnv HTTP and in-process env clients
+- EnvClientProtocol: Interface for env clients (both OpenEnv HTTP and in-process)
 
 Type aliases are provided for common types used throughout the framework.
 """

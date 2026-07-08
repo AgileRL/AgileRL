@@ -1056,8 +1056,8 @@ def train_llm_rollout(
     agg_metrics: dict[str, Any] = {}
     agg_eval_score: float | None = None
     # Fold the rank into the seed so data-parallel ranks draw decorrelated
-    # dataset rows and env tasks — the step accounting below multiplies by the
-    # world size, which is only honest when each rank contributes distinct data.
+    # dataset rows and env tasks. The ``1 << 31`` offset is arbitrary but ensures that the rank's contribution
+    # is large enough to decorrelate the RNG streams even if the base seed is small.
     group_seed = int(np.random.randint(0, 1000000)) + _distributed_rank(accelerator) * (
         1 << 31
     )
