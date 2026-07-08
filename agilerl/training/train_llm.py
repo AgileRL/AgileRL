@@ -936,7 +936,7 @@ def train_llm_rollout(
     wandb_entity: str | None = None,
     wandb_run_name: str | None = None,
     evaluation_interval: int = 50,
-    eval_loop: int = 8,
+    eval_loop: int = 1,
     max_reward: float | None = None,
     verbose: bool = True,
     accelerator: Accelerator | None = None,
@@ -984,9 +984,9 @@ def train_llm_rollout(
     :param evaluation_interval: How often to call ``agent.test`` on a fresh
         environment from ``env_factory`` and emit verbose banners.
     :type evaluation_interval: int, optional
-    :param eval_loop: Episodes per evaluation — the fitness driving HPO selection
-        is the mean over this many episodes, so 1 makes tournament selection
-        single-sample noise; defaults to 8.
+    :param eval_loop: Episodes averaged per evaluation for the HPO fitness score;
+        defaults to 1 (matching the other trainers). Raise it for less noisy
+        tournament selection at higher eval cost.
     :type eval_loop: int, optional
     :param max_reward: If set, adds accuracy metric vs this threshold.
     :type max_reward: float, optional
@@ -1347,8 +1347,7 @@ def train_llm_rollout(
         )
     finally:
         # Release the rollout envs (and any per-rollout OpenEnv servers they
-        # own) plus the test env — on error too, so exceptions and repeated
-        # calls (e.g. HPO generations in one process) don't leak servers.
+        # own) plus the test env, including if error ("finally").
         rollout_env.close()
         if test_env is not None and hasattr(test_env, "close"):
             test_env.close()
