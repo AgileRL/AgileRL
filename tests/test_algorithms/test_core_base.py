@@ -2102,7 +2102,7 @@ class TestLLMLogprobsFromLogits:
         result_bf16 = LLMAlgorithm._logprobs_from_logits(
             logits_bf16,
             index,
-            _chunk_rows=chunk_rows,
+            chunk_rows=chunk_rows,
         )
         reference_fp32 = (
             F.log_softmax(logits_bf16.float(), dim=-1)
@@ -2224,7 +2224,7 @@ class TestLogprobsFromHiddenFused:
         assert torch.equal(result, ref)
 
     def test_chunked_matches_unchunked(self) -> None:
-        """Output is independent of ``_chunk_rows`` — covers the loop
+        """Output is independent of ``chunk_rows`` — covers the loop
         boundary path.
         """
         torch.manual_seed(2)
@@ -2240,7 +2240,7 @@ class TestLogprobsFromHiddenFused:
             targets,
             temperature=0.5,
             cast_to_fp32=True,
-            _chunk_rows=10_000,  # > B*T=27 → single chunk
+            chunk_rows=10_000,  # > B*T=27 → single chunk
         )
         small = LLMAlgorithm._logprobs_from_hidden_fused(
             hidden,
@@ -2249,7 +2249,7 @@ class TestLogprobsFromHiddenFused:
             targets,
             temperature=0.5,
             cast_to_fp32=True,
-            _chunk_rows=4,  # forces multiple chunks
+            chunk_rows=4,  # forces multiple chunks
         )
         assert torch.equal(big, small)
 
@@ -2375,7 +2375,7 @@ class TestFusedLinearLogProbsGrad:
 
     def test_grad_invariant_to_chunk_rows(self) -> None:
         """Forward value and hidden gradient are independent of
-        ``_chunk_rows`` (single chunk vs many) up to fp32 matmul-tiling
+        ``chunk_rows`` (single chunk vs many) up to fp32 matmul-tiling
         noise — chunking only partitions rows, it changes nothing about
         each row's reduction.
         """
@@ -2395,7 +2395,7 @@ class TestFusedLinearLogProbsGrad:
                 targets,
                 temperature=0.9,
                 cast_to_fp32=True,
-                _chunk_rows=chunk_rows,
+                chunk_rows=chunk_rows,
             )
             out.backward(upstream)
             return out.detach(), hid.grad
@@ -4131,7 +4131,6 @@ def _fake_save_peft_adapter_for_vllm_rollout(
     adapter_name,
     *,
     target_modules,
-    is_main_process=True,
 ):
     from pathlib import Path
 
@@ -4167,6 +4166,7 @@ class TestEnsureVllmLoraStagingDir:
         return SimpleNamespace(
             vllm_config=VLLMConfig(lora_staging_dir=lora_staging_dir),
             _vllm_lora_staging_dir=None,
+            accelerator=None,
         )
 
     def test_uses_configured_dir_and_marks_persistent(self, tmp_path):
@@ -4203,6 +4203,16 @@ class TestEnsureVllmLoraStagingDir:
         is_temp = getattr(agent, "_vllm_lora_staging_dir_is_temp", True)
         assert is_temp is False
         assert target.is_dir()
+
+    def test_appends_rank_subdir_in_distributed_run(self, tmp_path):
+        """With >1 process, each rank gets its own ``rank_<index>`` subdir."""
+        target = tmp_path / "nfs_lora"
+        agent = self._agent(str(target))
+        agent.accelerator = SimpleNamespace(num_processes=2, process_index=1)
+        resolved = LLMAlgorithm._ensure_vllm_lora_staging_dir(agent)
+        assert resolved == target / "rank_1"
+        assert resolved.is_dir()
+        assert agent._vllm_lora_staging_dir_is_temp is False
 
 
 @pytest.mark.skipif(
@@ -5488,6 +5498,7 @@ class TestLLMConfigureVllmAcceleratorPaths:
         vllm_config.gpu_memory_utilization = 0.9
         vllm_config.max_num_seqs = 256
         vllm_config.sleep_mode = True
+        vllm_config.sleep_mode_level = 1
         agent.vllm_config = vllm_config
         agent.max_model_len = 512
         agent.pretrained_model_name_or_path = "mock-model"
@@ -6401,37 +6412,18 @@ class TestLLMMoveLoraToVllmErrors:
         ):
             agent._move_lora_to_vllm()
 
-    def test_raises_when_adapter_export_missing(self, tmp_path):
-        acc = _make_mock_accelerator()
+    def test_non_main_rank_exports_and_loads_adapter(self, tmp_path):
+        """Every rank exports to its process-private staging dir and loads it."""
+        acc = _make_mock_accelerator(
+            num_processes=2, is_main_process=False, process_index=1
+        )
         agent = _make_llm_agent(accelerator=acc)
         peft_ref = MagicMock()
         peft_ref.parameters.return_value = [torch.tensor([1.0])]
         acc.unwrap_model = MagicMock(return_value=peft_ref)
         _setup_agent_for_vllm_lora_sync(agent)
-        agent._vllm_lora_staging_dir = tmp_path
-
-        with (
-            patch("agilerl.algorithms.core.base.gather_if_zero3", create=True),
-            patch(
-                "agilerl.algorithms.core.base.save_peft_adapter_for_vllm_rollout",
-                return_value=tmp_path / "missing_adapter",
-                create=True,
-            ),
-            pytest.raises(FileNotFoundError, match="PEFT adapter export"),
-        ):
-            agent._move_lora_to_vllm()
-
-    def test_logs_debug_lora_norm_on_main_process(self, tmp_path, caplog):
-        acc = _make_mock_accelerator(is_main_process=True)
-        agent = _make_llm_agent(accelerator=acc)
-        lora_b = torch.nn.Parameter(torch.tensor([3.0, 4.0]))
-        peft_ref = MagicMock()
-        peft_ref.parameters.return_value = [lora_b]
-        peft_ref.named_parameters.return_value = [
-            ("lora.actor.lora_B.weight", lora_b),
-        ]
-        acc.unwrap_model = MagicMock(return_value=peft_ref)
-        _setup_agent_for_vllm_lora_sync(agent)
+        agent.vllm_config = VLLMConfig(lora_staging_dir=str(tmp_path))
+        agent._vllm_lora_staging_dir = tmp_path / "rank_1"
 
         with (
             patch("agilerl.algorithms.core.base.gather_if_zero3", create=True),
@@ -6439,14 +6431,49 @@ class TestLLMMoveLoraToVllmErrors:
                 "agilerl.algorithms.core.base.save_peft_adapter_for_vllm_rollout",
                 side_effect=_fake_save_peft_adapter_for_vllm_rollout,
                 create=True,
-            ),
-            caplog.at_level(logging.DEBUG, logger="agilerl.algorithms.core.base"),
+            ) as mock_save,
         ):
             agent._move_lora_to_vllm()
+        mock_save.assert_called_once()
+        assert mock_save.call_args.args[1] == tmp_path / "rank_1"
+        agent.llm.llm_engine.add_lora.assert_called_once()
 
-        assert any(
-            "lora-sync: actor lora_B L2=" in rec.message for rec in caplog.records
-        )
+    def test_add_lora_uses_cuda_device_guard_when_agent_device_is_cuda(self, tmp_path):
+        acc = _make_mock_accelerator(is_main_process=True, process_index=1)
+        agent = _make_llm_agent(accelerator=acc)
+        peft_ref = MagicMock()
+        peft_ref.parameters.return_value = [torch.tensor([1.0])]
+        acc.unwrap_model = MagicMock(return_value=peft_ref)
+        _setup_agent_for_vllm_lora_sync(agent)
+        agent.device = "cuda:1"
+
+        adapter_path = tmp_path / "actor"
+        adapter_path.mkdir(parents=True, exist_ok=True)
+        (adapter_path / "adapter_config.json").write_text("{}")
+        (adapter_path / "adapter_model.safetensors").write_bytes(b"")
+        device_guard = MagicMock()
+        device_guard.__enter__ = MagicMock(return_value=None)
+        device_guard.__exit__ = MagicMock(return_value=False)
+
+        with (
+            patch("agilerl.algorithms.core.base.gather_if_zero3", create=True),
+            patch(
+                "agilerl.algorithms.core.base.save_peft_adapter_for_vllm_rollout",
+                return_value=adapter_path,
+                create=True,
+            ),
+            patch(
+                "agilerl.algorithms.core.base.torch.cuda.current_device",
+                return_value=0,
+            ),
+            patch(
+                "agilerl.algorithms.core.base.torch.cuda.device",
+                return_value=device_guard,
+            ) as mock_cuda_device,
+        ):
+            agent._move_lora_to_vllm()
+        mock_cuda_device.assert_called_once_with(torch.device("cuda:1"))
+        agent.llm.llm_engine.add_lora.assert_called_once()
 
     def test_raises_when_vllm_add_lora_fails(self, tmp_path):
         acc = _make_mock_accelerator()

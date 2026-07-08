@@ -1605,6 +1605,13 @@ class VLLMConfig:
         for training.  Cannot be used with agent populations on a single device,
         defaults to False.
     :type sleep_mode: bool, optional
+    :param sleep_mode_level: Sleep level passed to ``llm.sleep(level=...)`` when
+        ``sleep_mode`` is enabled. ``1`` backs the base weights up to CPU and
+        drops the KV cache; ``2`` discards the weights entirely, so it is only
+        safe when new base weights are pushed into vLLM after every wake. The
+        colocated LoRA-only sync never re-pushes the base, so it requires
+        level 1. Defaults to 1.
+    :type sleep_mode_level: int, optional
     :param dtype: Model weight dtype passed to the vLLM ``LLM`` constructor
         (e.g. ``"bfloat16"``, ``"float16"``).  ``None`` lets vLLM choose,
         defaults to None.
@@ -1669,12 +1676,14 @@ class VLLMConfig:
         of attribute names strips those instead, for models that mount
         unwanted modalities elsewhere. Defaults to ``False``.
     :type strip_multimodal_towers: bool | list[str], optional
-    :param lora_staging_dir: Directory where the trained LoRA adapter is
-        exported for vLLM to (re)load each sync. ``None`` (default) uses a
-        fresh process-private temporary directory, removed on ``clean_up``.
-        Set explicitly when the rollout engine must read the adapter from a
-        known path (e.g. orchestrated/arena deployments); user-supplied
-        directories are created if missing and never deleted by AgileRL.
+    :param lora_staging_dir: Root directory where the trained LoRA adapter is
+        exported for vLLM to (re)load each sync. Staging is always
+        process-private: in distributed runs each rank stages under a
+        ``rank_<process_index>`` subdirectory of this root. Set explicitly
+        when the adapter must live at a known path (e.g. orchestrated/arena
+        deployments); user-supplied directories are created if missing and
+        never deleted by AgileRL. ``None`` (default) uses a fresh
+        process-private temporary directory, removed on ``clean_up``.
     :type lora_staging_dir: str | None, optional
     """
 
@@ -1686,6 +1695,7 @@ class VLLMConfig:
     swap_space: float | None = None
     enforce_eager: bool | None = None
     sleep_mode: bool = False
+    sleep_mode_level: int = 1
     dtype: str | None = None
     quantization: str | None = None
     vllm_model_name_or_path: str | None = None
@@ -1702,6 +1712,13 @@ class VLLMConfig:
     lora_staging_dir: str | None = None
 
     def __post_init__(self) -> None:
+        if self.sleep_mode_level not in (1, 2):
+            msg = (
+                "vllm sleep_mode_level must be either 1 or 2, got "
+                f"{self.sleep_mode_level}."
+            )
+            raise ValueError(msg)
+
         # sleep_mode toggles the native vLLM sleep/wake cycle (base backed up to
         # host RAM, KV freed) between rollout and training for a single colocated
         # agent; it is not usable with a population on one device.
