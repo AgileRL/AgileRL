@@ -44,7 +44,6 @@ network:
     latent_dim: 64
     min_latent_dim: 8
     max_latent_dim: 1024
-    arch: mlp
 
     encoder_config:
         hidden_size:

@@ -45,7 +45,7 @@ mutation:
 
 network:
     latent_dim: 64
-    arch: simba
+    simba: true
 
     encoder_config:
         hidden_size: 128

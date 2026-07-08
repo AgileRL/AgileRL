@@ -49,7 +49,6 @@ network:
     latent_dim: 256
     min_latent_dim: 128
     max_latent_dim: 512
-    arch: cnn
     encoder_config:
         min_channel_size: 32          # Min CNN channels for architecture mutation
         max_channel_size: 256         # Max CNN channels for architecture mutation

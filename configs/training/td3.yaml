@@ -44,7 +44,6 @@ mutation:
 
 network:
     latent_dim: 64
-    arch: mlp
 
     encoder_config:
         hidden_size:
