@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, get_args
 
 from typing_extensions import Self
 
@@ -33,7 +33,12 @@ from agilerl.models.env import (
     OfflineEnvSpec,
     PzEnvSpec,
 )
-from agilerl.models.networks import infer_encoder_arch, network_arch_is_resolvable
+from agilerl.models.networks import (
+    NetworkSpec,
+    encoder_spec_for_arch,
+    infer_encoder_arch,
+    network_arch_is_resolvable,
+)
 from agilerl.utils.trainer_utils import (
     EnvironmentT,
     build_mutations_from_spec,
@@ -434,7 +439,6 @@ class LocalTrainer(Trainer):
         :returns: A resolved ``encoder_config`` dict including its ``arch``.
         :rtype: dict[str, Any]
         """
-        from agilerl.models.networks import encoder_spec_for_arch
         from agilerl.utils.evolvable_networks import get_default_encoder_config
 
         arch = infer_encoder_arch(observation_space, recurrent=recurrent, simba=simba)
@@ -460,10 +464,6 @@ class LocalTrainer(Trainer):
         :returns: The ``NetworkSpec`` subclass used to validate the network.
         :rtype: type
         """
-        from typing import get_args
-
-        from agilerl.models.networks import NetworkSpec
-
         net_config_field = type(self.algorithm_spec).model_fields.get("net_config")
         return next(
             (t for t in get_args(net_config_field.annotation) if t is not type(None)),
