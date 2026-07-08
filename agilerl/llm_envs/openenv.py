@@ -312,38 +312,7 @@ class OpenEnvServer:
         self.stop()
 
 
-class _EvalSplitMixin:
-    """Held-out-split flag shared by the env clients.
-
-    Provides the ``evaluation_mode`` property (read by each client's ``reset``) and
-    the ``eval_mode`` save/set/restore context manager, so every
-    :class:`~agilerl.protocols.EnvClientProtocol` implementation carries one
-    definition of the toggle.
-    """
-
-    _evaluation_mode: bool = False
-
-    @property
-    def evaluation_mode(self) -> bool:
-        """Whether resets are currently flagged for the held-out split."""
-        return self._evaluation_mode
-
-    @evaluation_mode.setter
-    def evaluation_mode(self, value: bool) -> None:
-        self._evaluation_mode = bool(value)
-
-    @contextlib.contextmanager
-    def eval_mode(self) -> Iterator[None]:
-        """Flag resets for the env's held-out split within the block."""
-        previous = self._evaluation_mode
-        self._evaluation_mode = True
-        try:
-            yield
-        finally:
-            self._evaluation_mode = previous
-
-
-class OpenEnvClient(_EvalSplitMixin):
+class OpenEnvClient:
     """Synchronous httpx client for an OpenEnv env server (text in, text out).
 
     Implements :class:`~agilerl.protocols.EnvClientProtocol` for
@@ -453,6 +422,16 @@ class OpenEnvClient(_EvalSplitMixin):
             self._post("/close", {})
         self._http.close()
 
+    @contextlib.contextmanager
+    def eval_mode(self) -> Iterator[None]:
+        """Flag resets for the env's held-out split within the block."""
+        previous = self._evaluation_mode
+        self._evaluation_mode = True
+        try:
+            yield
+        finally:
+            self._evaluation_mode = previous
+
     @property
     def dataset_size(self) -> int:
         """Dataset rows the env serves, from ``/state`` (``0`` if not dataset-backed)."""
@@ -542,7 +521,7 @@ class OpenEnvClient(_EvalSplitMixin):
         return body
 
 
-class LocalEnvClient(_EvalSplitMixin):
+class LocalEnvClient:
     """In-process backend for a local env — the no-HTTP sibling of :class:`OpenEnvClient`.
 
     Implements :class:`~agilerl.protocols.EnvClientProtocol` for
@@ -606,6 +585,16 @@ class LocalEnvClient(_EvalSplitMixin):
         if callable(closer):
             with contextlib.suppress(Exception):
                 closer()
+
+    @contextlib.contextmanager
+    def eval_mode(self) -> Iterator[None]:
+        """Flag resets for the env's held-out split within the block."""
+        previous = self._evaluation_mode
+        self._evaluation_mode = True
+        try:
+            yield
+        finally:
+            self._evaluation_mode = previous
 
     @property
     def dataset_size(self) -> int:
@@ -718,15 +707,6 @@ class ServedEnvClient:
     def tools(self) -> list[Any]:
         """Tool schemas the served env advertises (empty when none)."""
         return self._client.tools
-
-    @property
-    def evaluation_mode(self) -> bool:
-        """Whether resets are currently flagged for the held-out split."""
-        return self._client.evaluation_mode
-
-    @evaluation_mode.setter
-    def evaluation_mode(self, value: bool) -> None:
-        self._client.evaluation_mode = value
 
     def eval_mode(self) -> Any:
         """Flag resets for the env's held-out split within the block."""

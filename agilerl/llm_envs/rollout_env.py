@@ -476,16 +476,6 @@ class RolloutEnv:
         """Number of rows in the env client (0 if not dataset-backed)."""
         return getattr(self._env_client, "dataset_size", 0)
 
-    @property
-    def evaluation_mode(self) -> bool:
-        """Whether the env client is currently serving its held-out split."""
-        return bool(getattr(self._env_client, "evaluation_mode", False))
-
-    @evaluation_mode.setter
-    def evaluation_mode(self, value: bool) -> None:
-        if hasattr(self._env_client, "evaluation_mode"):
-            self._env_client.evaluation_mode = value
-
     @contextmanager
     def eval_mode(self):
         """Serve the env client's held-out split for the duration of the block."""

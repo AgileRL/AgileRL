@@ -666,12 +666,5 @@ class EnvClientProtocol(Protocol):
     def tools(self) -> list[Any]:
         """Tool schemas advertised by the env (empty when none)."""
 
-    @property
-    def evaluation_mode(self) -> bool:
-        """Whether resets are flagged for the held-out split."""
-
-    @evaluation_mode.setter
-    def evaluation_mode(self, value: bool) -> None: ...
-
     def eval_mode(self) -> Iterator[None]:
         """Serve the held-out split for the duration of the context."""

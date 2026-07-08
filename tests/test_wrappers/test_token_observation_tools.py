@@ -219,34 +219,15 @@ def test_dataset_size_reflects_served_env() -> None:
         w.close()
 
 
-def test_evaluation_mode_setter_routes_eval_split() -> None:
-    """Setting ``evaluation_mode`` routes resets to the env's held-out split."""
-    w = _wrap(_reasoning_env())
-    try:
-        assert w.evaluation_mode is False
-        w.reset(row_index=0)
-        assert w._prompt_text == "train-q"
-
-        w.evaluation_mode = True
-        w.reset(row_index=0)
-        assert w._prompt_text == "eval-q"
-
-        w.evaluation_mode = False
-        w.reset(row_index=0)
-        assert w._prompt_text == "train-q"
-    finally:
-        w.close()
-
-
 def test_eval_mode_serves_wrapped_env_eval_split() -> None:
     """``eval_mode()`` routes resets to the held-out split, restoring after."""
     w = _wrap(_reasoning_env())
     try:
+        w.reset(row_index=0)
+        assert w._prompt_text == "train-q"
         with w.eval_mode():
-            assert w.evaluation_mode is True
             w.reset(row_index=0)
             assert w._prompt_text == "eval-q"
-        assert w.evaluation_mode is False
         w.reset(row_index=0)
         assert w._prompt_text == "train-q"
     finally:
@@ -296,10 +277,10 @@ def test_dataset_size_falls_back_when_env_lacks_it() -> None:
     w = _wrap(_NoDataset())
     try:
         assert w.dataset_size == 0
-        assert w.evaluation_mode is False
+        # eval_mode stays usable even when the env exposes no held-out split.
         with w.eval_mode():
-            assert w.evaluation_mode is True
-        assert w.evaluation_mode is False
+            w.reset()
+        w.reset()
     finally:
         w.close()
 
