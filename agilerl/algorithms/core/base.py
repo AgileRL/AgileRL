@@ -2448,7 +2448,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 msg = f"env must be a RolloutEnv; got {type(env).__name__}"
                 raise TypeError(msg)
             max_turns = getattr(env, "max_turns", None)
-            turn_cap = 1 if max_turns is None else max_turns
+            # Safety cap so a non-terminating env can't hang evaluation; the env's
+            # own ``max_turns`` takes precedence when it exposes one.
+            turn_cap = 1000 if max_turns is None else max_turns
             all_rewards: list[torch.Tensor] = []
             for _ in range(loop):
                 prompt_dict, _info = env.reset()

@@ -71,14 +71,14 @@ class TestLLMAlgorithmTestTurnCap:
         assert out.item() == pytest.approx(1.0)
         assert algo.fitness == [pytest.approx(1.0)]
 
-    def test_turn_cap_falls_back_to_1_when_max_turns_is_none(self):
+    def test_turn_cap_falls_back_to_1000_when_max_turns_is_none(self):
         algo = _StubAlgo()
         env = _NeverDoneEnv()
         env.max_turns = None
 
         out = LLMAlgorithm.test(algo, env, loop=1)
 
-        assert env.step_calls == 1
+        assert env.step_calls == 1000
         assert out.item() == pytest.approx(1.0)
 
     def test_terminating_env_finishes_before_cap(self):
