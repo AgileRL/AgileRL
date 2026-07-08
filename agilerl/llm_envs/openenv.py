@@ -610,18 +610,9 @@ class LocalEnvClient:
 class ServedEnvClient:
     """Backend that hosts a local env on its own :class:`OpenEnvServer` and owns both halves.
 
-    The env client behind :meth:`RolloutEnv.serving`. Ownership is the point: a
-    self-hosted env involves two transport objects — the server hosting it and
-    the client driving it — and whoever holds them must tear both down together.
-    Housing the pair behind one :class:`~agilerl.protocols.EnvClientProtocol`
-    backend keeps ``RolloutEnv`` transport-agnostic: it holds exactly one env
-    client no matter who hosts the env, and its ``close`` is a single
-    unconditional call — this class stops the server (which closes the hosted
-    env exactly once) and releases the client's connection pool. Both halves
-    stay useful on their own (:class:`OpenEnvClient` drives servers we don't
-    own, e.g. a remote Space; :class:`OpenEnvServer` hosts envs driven from
-    another process, via :func:`resolve_env`); this is the composition for the
-    common self-hosted case.
+    It holds both the :class:`OpenEnvServer` and the :class:`OpenEnvClient` so
+    ``RolloutEnv`` sees one backend with a single ``close`` that tears both down
+    together.
 
     Any backend that owns transport infrastructure follows this shape: a future
     WebSocket-session backend would likewise hold one session on a shared
