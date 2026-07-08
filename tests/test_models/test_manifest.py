@@ -151,6 +151,42 @@ def test_get_validated_no_warning_for_known_aliased_or_excluded_fields() -> None
     mock_logger.warning.assert_not_called()
 
 
+def test_collect_unknown_fields_ignores_non_dict_raw() -> None:
+    from agilerl.models.manifest import _collect_unknown_fields
+
+    validated = TrainingManifest.get_validated(
+        _make_manifest({"name": "DQN"}, env={"name": "CartPole-v1"}), mode="python"
+    )
+    assert _collect_unknown_fields("not-a-dict", validated) == []
+    assert _collect_unknown_fields(None, validated) == []
+
+
+def test_known_field_names_includes_all_alias_forms() -> None:
+    from pydantic import AliasChoices, BaseModel, Field
+
+    from agilerl.models.manifest import _known_field_names
+
+    class _M(BaseModel):
+        plain: int = Field(default=0)
+        aliased: int = Field(default=0, alias="aliased_in")
+        val_str: int = Field(default=0, validation_alias="val_str_in")
+        val_choices: int = Field(
+            default=0, validation_alias=AliasChoices("choice_a", "choice_b")
+        )
+
+    names = _known_field_names(_M())
+    assert {
+        "plain",
+        "aliased",
+        "aliased_in",
+        "val_str",
+        "val_str_in",
+        "val_choices",
+        "choice_a",
+        "choice_b",
+    } <= names
+
+
 class TestNormalizeNetworkForPlatform:
     """Tests for network normalization via get_validated(mode='json')."""
 

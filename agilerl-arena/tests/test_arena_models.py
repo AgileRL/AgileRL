@@ -6,6 +6,13 @@ from unittest.mock import patch
 
 import pytest
 import yaml
+from generate_arena_manifests import (
+    arena_algorithm_names,
+    generate_arena_manifests,
+    write_arena_manifest,
+)
+from pydantic import ValidationError
+
 from agilerl.arena.models import (
     ARENA_REGISTRY,
     ReplayBufferSpec,
@@ -25,12 +32,6 @@ from agilerl.arena.models.networks import (
     MlpSpec,
     QNetworkSpec,
 )
-from generate_arena_manifests import (
-    arena_algorithm_names,
-    generate_arena_manifests,
-    write_arena_manifest,
-)
-from pydantic import ValidationError
 
 
 def _manifest(**sections) -> dict:
@@ -105,6 +106,52 @@ def test_get_validated_no_warning_for_aliased_fields() -> None:
             )
         )
     mock_logger.warning.assert_not_called()
+
+
+def test_collect_unknown_fields_ignores_non_dict_raw() -> None:
+    from agilerl.arena.models.manifest import _collect_unknown_fields
+
+    validated = TrainingManifest.get_validated(_manifest(), mode="python")
+    assert _collect_unknown_fields("not-a-dict", validated) == []
+    assert _collect_unknown_fields(None, validated) == []
+
+
+def test_known_field_names_includes_all_alias_forms() -> None:
+    from pydantic import AliasChoices, BaseModel, Field
+
+    from agilerl.arena.models.manifest import _known_field_names
+
+    class _M(BaseModel):
+        plain: int = Field(default=0)
+        aliased: int = Field(default=0, alias="aliased_in")
+        val_str: int = Field(default=0, validation_alias="val_str_in")
+        val_choices: int = Field(
+            default=0, validation_alias=AliasChoices("choice_a", "choice_b")
+        )
+
+    names = _known_field_names(_M())
+    assert {
+        "plain",
+        "aliased",
+        "aliased_in",
+        "val_str",
+        "val_str_in",
+        "val_choices",
+        "choice_a",
+        "choice_b",
+    } <= names
+
+
+def test_deferred_simba_recurrent_conflict_raises() -> None:
+    # arch omitted -> net_config stays None; the simba flag is read from the raw
+    # network dict, and simba + recurrent must be rejected.
+    with pytest.raises(ValidationError, match="simba"):
+        TrainingManifest.get_validated(
+            _manifest(
+                algorithm={"name": "PPO", "recurrent": True},
+                network={"latent_dim": 64, "simba": True},
+            )
+        )
 
 
 def test_get_validated_accepts_env_spec_objects() -> None:

@@ -2722,6 +2722,35 @@ def test_deferred_encoder_uses_spec_defaults_not_dataclass(
         assert getattr(enc, field) == expected
 
 
+def test_resolve_deferred_net_config_noop_when_arch_present(tmp_path):
+    """A raw net_config that already declares an ``arch`` is left untouched
+    (nothing to infer), so ``_resolve_deferred_net_config`` returns early.
+    """
+    import yaml
+
+    from agilerl.training.trainer import LocalTrainer
+
+    manifest = {
+        "algorithm": {"name": "PPO", "learn_step": 64},
+        "environment": {"name": "CartPole-v1", "num_envs": 2},
+        "training": {"max_steps": 200, "evo_steps": 100, "pop_size": 1},
+        "network": {
+            "latent_dim": 32,
+            "arch": "mlp",
+            "encoder_config": {"hidden_size": [32]},
+            "head_config": {"hidden_size": [32]},
+        },
+    }
+    path = tmp_path / "m.yaml"
+    path.write_text(yaml.safe_dump(manifest))
+    trainer = LocalTrainer.from_manifest(manifest=path, device="cpu")
+
+    raw = {"arch": "mlp", "encoder_config": {"arch": "mlp", "hidden_size": [64]}}
+    trainer.algorithm_spec.net_config = raw
+    trainer._resolve_deferred_net_config()
+    assert trainer.algorithm_spec.net_config is raw
+
+
 def test_from_manifest_multi_agent_heterogeneous_per_agent_encoders(tmp_path):
     """Heterogeneous multi-agent env with no arch: per-agent encoders inferred."""
     import yaml
