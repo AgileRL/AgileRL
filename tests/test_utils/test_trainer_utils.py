@@ -115,3 +115,18 @@ class TestBuildMutationsArchMutType:
         from agilerl.utils.trainer_utils import build_mutations_from_spec
 
         assert build_mutations_from_spec(None) is None
+
+    def test_forwards_arch_fp_noise(self):
+        from agilerl.models.hpo import MutationSpec
+        from agilerl.utils.trainer_utils import build_mutations_from_spec
+
+        spec = MutationSpec(arch_fp_noise=0.25)
+        muts = build_mutations_from_spec(spec)
+        assert muts.arch_fp_noise == 0.25
+
+    def test_arch_fp_noise_defaults_to_point_one(self):
+        from agilerl.models.hpo import MutationSpec
+        from agilerl.utils.trainer_utils import build_mutations_from_spec
+
+        muts = build_mutations_from_spec(MutationSpec())
+        assert muts.arch_fp_noise == 0.1

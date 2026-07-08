@@ -41,6 +41,7 @@ from torch import nn
 
 from agilerl.utils.dormant_neurons import (
     _activation_modules,
+    _per_neuron_score,
     capture_per_neuron_scores,
 )
 
@@ -48,6 +49,11 @@ from agilerl.utils.dormant_neurons import (
 ADD_NODE_MUTATIONS = frozenset({"add_node", "add_channel"})
 ADD_LAYER_MUTATIONS = frozenset({"add_layer"})
 REMOVE_MUTATIONS = frozenset({"remove_node", "remove_channel"})
+# Latent-dimension mutations cross the encoder->head boundary (the producing layer
+# is the encoder's output, the consuming layer is the head's first layer), so they
+# are handled separately from the within-sub-module node/channel operators above.
+LATENT_ADD_MUTATIONS = frozenset({"add_latent_node", "add_latent_channel"})
+LATENT_REMOVE_MUTATIONS = frozenset({"remove_latent_node", "remove_latent_channel"})
 # Function-preserving activations for Net2DeeperNet identity layers.
 _PRESERVING_ACTIVATIONS = frozenset({"ReLU", "Identity", None})
 
@@ -193,20 +199,83 @@ def _permute_in(layer: nn.Module, perm: torch.Tensor, block: int = 1) -> None:
 # --------------------------------------------------------------------------- #
 # The three function-preserving operations
 # --------------------------------------------------------------------------- #
-def zero_new_outgoing(
-    submodule: nn.Module, hidden_layer: int, old_width: int | None
+def _existing_columns_std(weight: torch.Tensor, col_slice: slice) -> float:
+    """Std of the weight's columns *outside* ``col_slice`` (the pre-existing fan-out).
+
+    Used to scale symmetry-breaking noise to the layer's own weight magnitude, so
+    the ``arch_fp_noise`` factor is architecture/scale-invariant. Falls back to the
+    full-tensor std (then a tiny constant) when there are no existing columns or the
+    existing block is (near-)constant, so the new units still break symmetry.
+    """
+    ncols = int(weight.shape[1])
+    mask = torch.ones(ncols, dtype=torch.bool, device=weight.device)
+    mask[col_slice] = False
+    existing = weight.data[:, mask]
+    std = float(existing.std()) if existing.numel() else 0.0
+    if std <= 0.0:
+        std = float(weight.data.std())
+    if std <= 0.0:
+        std = 1e-3
+    return std
+
+
+def _fill_new_block(weight: torch.Tensor, col_slice: slice, noise_scale: float) -> None:
+    """Fill a block of new input columns of *weight* (in place, no grad).
+
+    ``noise_scale <= 0`` sets them to exactly zero (the original function-preserving
+    behaviour -- no RNG is drawn, so seeded runs stay byte-identical). A positive
+    value seeds them with ``randn * (noise_scale * sigma)`` where ``sigma`` is the
+    std of the existing columns, breaking the new units' symmetry so their incoming
+    weights receive gradient (see ``arch_fp_noise``). The draw uses the global torch
+    RNG (seeded in ``Mutations.__init__``), matching ``_gaussian_parameter_mutation``.
+    """
+    if noise_scale <= 0.0:
+        weight.data[:, col_slice] = 0.0
+        return
+    sigma = _existing_columns_std(weight, col_slice)
+    block = weight.data[:, col_slice]
+    weight.data[:, col_slice] = torch.randn_like(block) * (noise_scale * sigma)
+
+
+def _init_new_input_columns(
+    consumer: nn.Module, col_slice: slice, noise_scale: float
+) -> None:
+    """Zero/noise the new input columns of a consuming layer's weight tensors.
+
+    Only the primary weight (``weight`` / ``weight_mu``) is noised; any auxiliary
+    ``NoisyLinear`` tensors (``weight_sigma`` / ``weight_epsilon``) are zeroed so the
+    new units add no extra stochasticity, matching the original zeroing behaviour.
+    """
+    primary = _primary_weight(consumer)
+    with torch.no_grad():
+        for w in _weight_tensors(consumer):
+            if w is primary:
+                _fill_new_block(w, col_slice, noise_scale)
+            else:
+                w.data[:, col_slice] = 0.0
+
+
+def init_new_outgoing(
+    submodule: nn.Module,
+    hidden_layer: int,
+    old_width: int | None,
+    noise_scale: float = 0.0,
 ) -> int:
-    """Zero the outgoing weights of newly added units after add_node/add_channel.
+    """Initialise the outgoing weights of newly added units after add_node/add_channel.
 
     The new units are the trailing ``new_width - old_width`` rows of the producing
     layer; their outgoing weights are the matching input slice of the consuming
-    layer. Zeroing them makes the addition function-preserving.
+    layer. Setting them to zero (``noise_scale == 0``) makes the addition exactly
+    function-preserving; a small ``noise_scale`` breaks their symmetry instead (see
+    :func:`_fill_new_block`).
 
     :param submodule: The mutated ``EvolvableMLP`` / ``EvolvableCNN``.
     :param hidden_layer: Index of the widened hidden layer.
     :param old_width: The layer's output width *before* the mutation (``None`` or a
         value ``>= new_width`` means nothing was actually added -- a no-op).
-    :return: The number of units whose outgoing weights were zeroed.
+    :param noise_scale: Symmetry-breaking noise factor (``arch_fp_noise``); ``0``
+        keeps the exact-zero, function-preserving behaviour.
+    :return: The number of units whose outgoing weights were (re)initialised.
     """
     layers = _ordered_weight_layers(submodule)
     if old_width is None or not 0 <= hidden_layer < len(layers) - 1:
@@ -221,9 +290,8 @@ def zero_new_outgoing(
 
     conv_to_linear = _is_conv(producer) and _is_linear(consumer)
     block = _spatial_size(submodule) if conv_to_linear else 1
-    with torch.no_grad():
-        for w in _weight_tensors(consumer):
-            w.data[:, old_width * block : new_width * block] = 0.0
+    col_slice = slice(old_width * block, new_width * block)
+    _init_new_input_columns(consumer, col_slice, noise_scale)
     return num_added
 
 
@@ -304,6 +372,135 @@ def permute_submodule_by_activation(
             _permute_in(consumer, perm, block=block)
         else:
             _permute_in(consumer, perm, block=1)
+
+
+# --------------------------------------------------------------------------- #
+# Latent-dimension mutations (encoder output <-> head input boundary)
+# --------------------------------------------------------------------------- #
+def is_latent_mutation(base: str) -> bool:
+    """Whether *base* is an add/remove latent-dimension mutation."""
+    return base in LATENT_ADD_MUTATIONS or base in LATENT_REMOVE_MUTATIONS
+
+
+def parse_latent_target(mut_method: str) -> tuple[str | None, str]:
+    """Split a latent mutation-method name into ``(agent_id, base_name)``.
+
+    Latent mutations are defined on the ``EvolvableNetwork`` itself, so -- unlike
+    node/channel/layer mutations -- they carry no ``encoder``/``head_net`` segment:
+    single-agent names are bare (``"add_latent_node"``) and multi-agent
+    ``ModuleDict`` names are ``"<agent_id>.add_latent_node"``.
+
+    :param mut_method: The mutation-method attribute name.
+    :return: ``(agent_id, base_name)`` where ``agent_id`` is the ``ModuleDict`` key
+        (or ``None`` for a single-agent network).
+    """
+    parts = mut_method.split(".")
+    base = parts[-1]
+    agent_id = ".".join(parts[:-1]) or None
+    return agent_id, base
+
+
+def resolve_latent_network(network: Any, agent_id: str | None) -> Any:
+    """Return the ``EvolvableNetwork`` (encoder + ``head_net``) a latent mutation targets."""
+    return network[agent_id] if agent_id is not None else network
+
+
+def head_first_layer(fwd_net: Any) -> nn.Module | None:
+    """The head network's first weight layer (unwraps ``EvolvableDistribution``)."""
+    head = getattr(fwd_net, "head_net", None)
+    if head is None:
+        return None
+    layers = _ordered_weight_layers(head)
+    return layers[0] if layers else None
+
+
+def encoder_output_layer(fwd_net: Any) -> nn.Module | None:
+    """The encoder's output (latent-producing) weight layer."""
+    encoder = getattr(fwd_net, "encoder", None)
+    if encoder is None:
+        return None
+    layers = _ordered_weight_layers(encoder)
+    return layers[-1] if layers else None
+
+
+def init_new_latent_outgoing(
+    fwd_net: Any, old_latent: int | None, noise_scale: float = 0.0
+) -> int:
+    """Zero/noise the head's new input columns after a latent-dim widening.
+
+    New latent units are the trailing input columns of the head's first weight
+    layer (latent is flat, so ``block == 1``); filling them zero (or with small
+    symmetry-breaking noise) makes ``add_latent_node`` / ``add_latent_channel``
+    function-preserving across the encoder->head boundary.
+
+    :param fwd_net: The mutated ``EvolvableNetwork`` (encoder + ``head_net``).
+    :param old_latent: The latent dim *before* the mutation (``None`` or ``>=`` the
+        new latent dim means nothing was added -- a no-op, e.g. capped at
+        ``max_latent_dim``).
+    :param noise_scale: Symmetry-breaking noise factor (``arch_fp_noise``).
+    :return: The number of new latent units whose fan-out was (re)initialised.
+    """
+    consumer = head_first_layer(fwd_net)
+    if consumer is None or old_latent is None:
+        return 0
+    new_latent = int(_primary_weight(consumer).shape[1])
+    num_added = new_latent - old_latent
+    if num_added <= 0:
+        return 0
+    _init_new_input_columns(consumer, slice(old_latent, new_latent), noise_scale)
+    return num_added
+
+
+def latent_scores(fwd_net: Any, obs: Any) -> torch.Tensor | None:
+    """Mean absolute activation of each latent unit (the encoder's output).
+
+    Scores the *latent* the head actually consumes -- i.e. ``encoder(obs)`` -- so it
+    works whether or not the encoder exposes a latent output-activation sub-module
+    (an MLP encoder has an ``Identity`` output activation, a CNN encoder has none),
+    unlike :func:`capture_per_neuron_scores` which only measures activation modules.
+
+    :param fwd_net: The ``EvolvableNetwork`` being mutated (encoder + ``head_net``).
+    :param obs: A preprocessed observation batch accepted by *fwd_net*.
+    :return: A 1-D tensor of per-latent-unit scores, or ``None`` if unavailable.
+    """
+    encoder = getattr(fwd_net, "encoder", None)
+    if encoder is None:
+        return None
+    was_training = encoder.training
+    try:
+        encoder.eval()
+        with torch.no_grad():
+            latent = encoder(obs)
+    finally:
+        encoder.train(was_training)
+    if not isinstance(latent, torch.Tensor):
+        return None
+    return _per_neuron_score(latent)
+
+
+def permute_latent_by_activation(fwd_net: Any, obs: Any) -> None:
+    """Function-preservingly reorder the latent units by descending activation.
+
+    Scores the encoder's latent output on *obs*, then relabels the latent units so
+    the most active come first -- moving the encoder output layer's rows/bias *and*
+    the head's first-layer input columns together (a consistent relabelling that
+    leaves the function unchanged). The subsequent positional latent removal
+    therefore drops the lowest-activation latent units.
+
+    :param fwd_net: The ``EvolvableNetwork`` being mutated (encoder + ``head_net``).
+    :param obs: A preprocessed observation batch accepted by *fwd_net*.
+    """
+    producer = encoder_output_layer(fwd_net)
+    consumer = head_first_layer(fwd_net)
+    if producer is None or consumer is None:
+        return
+    scores = latent_scores(fwd_net, obs)
+    if scores is None or scores.numel() != _out_dim(producer):
+        return
+    perm = torch.sort(scores, descending=True, stable=True).indices
+    perm = perm.to(_primary_weight(producer).device)
+    _permute_out(producer, perm)
+    _permute_in(consumer, perm, block=1)
 
 
 def hidden_widths(submodule: nn.Module) -> list[int]:

@@ -2327,9 +2327,19 @@ def _dqn_q(policy, obs):
         return policy(obs).clone()
 
 
-def _fp_muts(arch="func_preserving", seed=0):
+def _fp_muts(arch="func_preserving", seed=0, arch_fp_noise=0.0):
     return Mutations(
-        0.5, 0.5, 0.2, 0, 0, 0, 0.1, arch_mut_type=arch, rand_seed=seed, device="cpu"
+        0.5,
+        0.5,
+        0.2,
+        0,
+        0,
+        0,
+        0.1,
+        arch_mut_type=arch,
+        arch_fp_noise=arch_fp_noise,
+        rand_seed=seed,
+        device="cpu",
     )
 
 
@@ -2468,6 +2478,141 @@ class TestFunctionPreservingMutations:
             fp_obs=pre,
         )
         assert torch.allclose(q0, _dqn_q(po, pre), atol=1e-4)
+
+    def test_add_latent_node_preserves_function(self):
+        # Widening the latent dim adds new encoder outputs whose fan-out lives in
+        # the head's first layer; zeroing those new head input columns preserves
+        # the function across the encoder->head boundary.
+        pop = _fp_dqn_pop(head_hidden=(32,))
+        ind = pop[0]
+        obs = np.random.randint(0, 255, size=(8, 4, 32, 32)).astype(np.uint8)
+        pre = ind.preprocess_observation(obs)
+        policy, _ = get_offspring_eval_modules(ind)
+        _n, po = next(iter(policy.items()))
+        old_latent = po.latent_dim
+        q0 = _dqn_q(po, pre)
+        applied, _md = _fp_muts()._apply_arch_mutation(
+            po, "add_latent_node", {"numb_new_nodes": 8}
+        )
+        assert applied == "add_latent_node"
+        assert po.latent_dim == old_latent + 8
+        assert torch.allclose(q0, _dqn_q(po, pre), atol=1e-5)
+        # The new head input columns (fan-out of the new latent units) are zero.
+        head_first = fp.head_first_layer(po)
+        assert torch.count_nonzero(head_first.weight.data[:, old_latent:]) == 0
+
+    def test_add_latent_node_noise_breaks_symmetry(self):
+        # With arch_fp_noise > 0 the new latent units' head columns are non-zero
+        # (recruitable) but small relative to the existing weights.
+        pop = _fp_dqn_pop(head_hidden=(32,))
+        ind = pop[0]
+        policy, _ = get_offspring_eval_modules(ind)
+        _n, po = next(iter(policy.items()))
+        old_latent = po.latent_dim
+        _fp_muts(arch_fp_noise=0.1)._apply_arch_mutation(
+            po, "add_latent_node", {"numb_new_nodes": 8}
+        )
+        head_first = fp.head_first_layer(po)
+        new_cols = head_first.weight.data[:, old_latent:]
+        existing = head_first.weight.data[:, :old_latent]
+        assert torch.count_nonzero(new_cols) > 0  # symmetry broken
+        assert float(new_cols.std()) < float(existing.std())  # but small
+
+    def test_add_node_noise_reproducible(self):
+        # arch_fp_noise draws from the seeded global torch RNG, so two identical
+        # seeded runs produce byte-identical noised weights.
+        obs = np.random.randint(0, 255, size=(8, 4, 32, 32)).astype(np.uint8)
+
+        def run():
+            torch.manual_seed(0)
+            np.random.seed(0)
+            pop = _fp_dqn_pop(head_hidden=(32,))
+            ind = pop[0]
+            policy, _ = get_offspring_eval_modules(ind)
+            _n, po = next(iter(policy.items()))
+            _fp_muts(seed=0, arch_fp_noise=0.1)._apply_arch_mutation(
+                po, "head_net.add_node", {"hidden_layer": 0, "numb_new_nodes": 16}
+            )
+            return {k: v.clone() for k, v in po.state_dict().items()}
+
+        a, b = run(), run()
+        assert set(a) == set(b)
+        for k in a:
+            assert torch.equal(a[k], b[k]), k
+
+    def test_add_node_noise_recruitable_vs_exact_zero(self):
+        # noise=0 leaves the new fan-out exactly zero; noise>0 makes it non-zero.
+        obs = np.random.randint(0, 255, size=(8, 4, 32, 32)).astype(np.uint8)
+
+        def run(noise):
+            pop = _fp_dqn_pop(head_hidden=(32,))
+            ind = pop[0]
+            policy, _ = get_offspring_eval_modules(ind)
+            _n, po = next(iter(policy.items()))
+            _fp_muts(seed=0, arch_fp_noise=noise)._apply_arch_mutation(
+                po, "head_net.add_node", {"hidden_layer": 0, "numb_new_nodes": 16}
+            )
+            return _ordered_head_weights(po)[:, -16:].clone()
+
+        assert torch.count_nonzero(run(0.0)) == 0
+        assert torch.count_nonzero(run(0.1)) > 0
+
+    def test_remove_latent_node_drops_lowest_activation(self):
+        # Kill the FIRST 4 latent units: positional removal keeps them and drops
+        # live latent units (changing the output), whereas the func-preserving
+        # cross-boundary permutation ranks them last and drops them (preserving it).
+        obs = np.random.randint(0, 255, size=(8, 4, 32, 32)).astype(np.uint8)
+
+        def build():
+            pop = _fp_dqn_pop(head_hidden=(32,))
+            ind = pop[0]
+            pre = ind.preprocess_observation(obs)
+            policy, _ = get_offspring_eval_modules(ind)
+            _n, po = next(iter(policy.items()))
+            enc_out = fp.encoder_output_layer(po)
+            with torch.no_grad():  # kill latent units [0:4]
+                enc_out.weight.data[:4] = 0.0
+                enc_out.bias.data[:4] = 0.0
+            return ind, pre, po
+
+        ind, pre, po = build()
+        q0 = _dqn_q(po, pre)
+        _fp_muts()._apply_arch_mutation(
+            po, "remove_latent_node", {"numb_new_nodes": 4}, fp_obs=pre
+        )
+        assert torch.allclose(q0, _dqn_q(po, pre), atol=1e-4)  # dropped dead latent
+
+        _ind2, pre2, po2 = build()
+        q0b = _dqn_q(po2, pre2)
+        _fp_muts(arch="original")._apply_arch_mutation(
+            po2, "remove_latent_node", {"numb_new_nodes": 4}
+        )
+        assert not torch.allclose(q0b, _dqn_q(po2, pre2), atol=1e-4)
+
+    def test_collect_obs_returns_batch_for_latent_remove(self):
+        # Latent removals also need an observation batch (for the cross-boundary
+        # activation ranking), so the collection gate must accept them.
+        pop = _fp_dqn_pop()
+        ind = pop[0]
+
+        class _FakeVecEnv:
+            def __init__(self):
+                self.obs = np.random.randint(0, 255, size=(8, 4, 32, 32)).astype(
+                    np.uint8
+                )
+
+            def reset(self):
+                return self.obs, {}
+
+            def step(self, _action):
+                n = len(self.obs)
+                z = np.zeros(n, dtype=np.float32)
+                return self.obs, z, z.astype(bool), z.astype(bool), {}
+
+        muts = _fp_muts()
+        muts._fp_env = _FakeVecEnv()
+        obs = muts._fp_collect_obs(ind, "remove_latent_node", multi_agent=False)
+        assert obs is not None
 
     def test_change_kernel_falls_back_and_warns_once(self):
         pop = _fp_dqn_pop()
@@ -2705,6 +2850,44 @@ class TestFunctionPreservingMultiAgent:
         assert new_width > old_width
         # The trailing (new) fan-out columns must be exactly zero.
         assert torch.count_nonzero(consumer.weight.data[:, old_width:new_width]) == 0
+
+    def test_ippo_add_latent_node_preserves_across_moduledict(
+        self, ma_vector_space, ma_discrete_space, monkeypatch
+    ):
+        # The cross-boundary latent surgery must reach through the multi-agent
+        # ``ModuleDict`` dispatch: after a forced add_latent_node on one sub-agent,
+        # the head's new input columns (the new latent units' fan-out) are zero.
+        pop = create_population(
+            algo="IPPO",
+            observation_space=ma_vector_space,
+            action_space=ma_discrete_space,
+            net_config=_ma_relu_config(),
+            INIT_HP=SHARED_INIT_HP_MA,
+            population_size=1,
+            device="cpu",
+        )
+        ind = pop[0]
+        policy_attr = ind.registry.policy()
+        policy_md = getattr(ind, policy_attr)
+
+        first_id = next(iter(policy_md.keys()))
+        old_latent = policy_md[first_id].latent_dim
+        forced = f"{first_id}.add_latent_node"
+
+        monkeypatch.setattr(
+            ModuleDict,
+            "sample_mutation_method",
+            lambda _self, *_a, **_k: forced,
+            raising=False,
+        )
+
+        muts = _fp_muts()
+        muts._architecture_mutate_multi(ind)
+
+        mutated = getattr(ind, policy_attr)[first_id]
+        assert mutated.latent_dim > old_latent
+        head_first = fp.head_first_layer(mutated)
+        assert torch.count_nonzero(head_first.weight.data[:, old_latent:]) == 0
 
 
 class TestCapturePerNeuronScores:

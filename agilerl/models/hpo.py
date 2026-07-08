@@ -66,8 +66,19 @@ class MutationSpec(BaseModel):
         default add/remove node/channel/layer) or ``"func_preserving"``
         (function-preserving Net2Net-style variants -- new units are added with
         zero outgoing weights, removals drop the lowest-activation units, and new
-        head layers are identity-initialised). No extra hyperparameters are needed.
+        head layers are identity-initialised).
     :type arch_mut_type: Literal["original", "func_preserving"]
+    :param arch_fp_noise: Symmetry-breaking noise scale for function-preserving
+        additions (read *only* when ``arch_mut_type == "func_preserving"`` and an
+        architecture add fires; completely inert otherwise, so its value is
+        irrelevant for ``"original"`` runs). A relative factor ``alpha``: the new
+        units' outgoing weights are seeded with ``randn * (alpha * sigma)`` where
+        ``sigma`` is the std of the existing outgoing weights in that consuming
+        layer. The default ``0.1`` breaks the new units' symmetry so they receive
+        incoming-weight gradient and the added capacity is recruitable, at a
+        negligible (~1%) function-preservation cost; set ``0.0`` for exact-zero,
+        byte-identical preservation.
+    :type arch_fp_noise: float
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -78,6 +89,7 @@ class MutationSpec(BaseModel):
     rand_seed: int = Field(default=42, ge=0)
     mutate_elite: bool = False
     arch_mut_type: Literal["original", "func_preserving"] = "original"
+    arch_fp_noise: float = Field(default=0.1, ge=0.0)
 
 
 class TournamentSelectionSpec(BaseModel):

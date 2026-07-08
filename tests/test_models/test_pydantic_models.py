@@ -898,3 +898,18 @@ class TestMutationSpecArchMutType:
     def test_rejects_invalid_value(self):
         with pytest.raises(ValidationError):
             MutationSpec(arch_mut_type="bogus")
+
+
+class TestMutationSpecArchFpNoise:
+    def test_default_is_point_one(self):
+        assert MutationSpec().arch_fp_noise == 0.1
+
+    def test_accepts_custom_positive(self):
+        assert MutationSpec(arch_fp_noise=0.25).arch_fp_noise == 0.25
+
+    def test_accepts_zero_for_exact_preservation(self):
+        assert MutationSpec(arch_fp_noise=0.0).arch_fp_noise == 0.0
+
+    def test_rejects_negative(self):
+        with pytest.raises(ValidationError):
+            MutationSpec(arch_fp_noise=-0.1)

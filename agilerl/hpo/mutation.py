@@ -225,6 +225,7 @@ class Mutations:
         device: str = "cpu",
         accelerator: Accelerator | None = None,
         arch_mut_type: str = "original",
+        arch_fp_noise: float = 0.1,
     ) -> None:
         if activation_selection is None:
             activation_selection = ["ReLU", "ELU", "GELU"]
@@ -291,6 +292,12 @@ class Mutations:
         assert arch_mut_type in ("original", "func_preserving"), (
             "arch_mut_type must be either 'original' or 'func_preserving'."
         )
+        assert isinstance(arch_fp_noise, (float, int)), (
+            "arch_fp_noise must be a float or integer."
+        )
+        assert arch_fp_noise >= 0, (
+            "arch_fp_noise must be greater than or equal to zero."
+        )
 
         # Random seed for repeatability
         set_global_seed(rand_seed)
@@ -315,6 +322,9 @@ class Mutations:
         # fresh observation batch to score neuron activations, supplied per-agent
         # via ``self._fp_env`` (set by :meth:`mutation`) during the main loop.
         self.arch_mut_type = arch_mut_type
+        # Symmetry-breaking noise scale (relative to the existing outgoing-weight
+        # std) for function-preserving additions; 0.0 keeps the exact-zero fan-out.
+        self.arch_fp_noise = arch_fp_noise
         self._fp_env: Any | None = None
         # One-time warning guards (function preservation caveats / fallbacks).
         self._fp_warned_layernorm = False
@@ -1355,8 +1365,14 @@ class Mutations:
         """Warn, snapshot widths, and activation-rank units before a mutation.
 
         :return: The target sub-module's hidden-layer widths before the mutation
-            (used to size the outgoing-weight zeroing of an addition).
+            (used to size the outgoing-weight zeroing of an addition), or, for a
+            latent-dimension mutation, a single-element list holding the latent dim.
         """
+        # Latent-dimension mutations cross the encoder->head boundary and are named
+        # without an ``encoder``/``head_net`` segment, so handle them separately.
+        if fp.is_latent_mutation(mut_method.split(".")[-1]):
+            return self._fp_pre_latent_mutation(network, mut_method, fp_obs)
+
         agent_id, submodule_name, base = fp.parse_mut_target(mut_method)
         if submodule_name is None:
             return []
@@ -1411,7 +1427,12 @@ class Mutations:
         mut_dict: dict[str, Any],
         before_widths: list[int],
     ) -> None:
-        """Zero new units' outgoing weights / identity-init a new head layer."""
+        """Zero/noise new units' outgoing weights / identity-init a new head layer."""
+        # Latent-dimension adds are fixed up across the encoder->head boundary.
+        if fp.is_latent_mutation(applied_mut.split(".")[-1]):
+            self._fp_post_latent_mutation(network, applied_mut, before_widths)
+            return
+
         agent_id, submodule_name, base = fp.parse_mut_target(applied_mut)
         if submodule_name is None:
             return
@@ -1430,9 +1451,64 @@ class Mutations:
                 if 0 <= hidden_layer < len(before_widths)
                 else None
             )
-            fp.zero_new_outgoing(submodule, hidden_layer, old_width)
+            fp.init_new_outgoing(submodule, hidden_layer, old_width, self.arch_fp_noise)
         elif base in fp.ADD_LAYER_MUTATIONS:
             fp.identity_new_layer(submodule)
+
+    def _fp_pre_latent_mutation(
+        self,
+        network: EvolvableNetworkType,
+        mut_method: str,
+        fp_obs: Any | None,
+    ) -> list[int]:
+        """Snapshot the latent dim (and, for a removal, activation-rank the latent
+        units across the encoder->head boundary) before a latent-dimension mutation.
+
+        :return: A single-element list holding the latent dim before the mutation
+            (used to size the head-input-column fixup of a latent addition).
+        """
+        agent_id, base = fp.parse_latent_target(mut_method)
+        try:
+            fwd_net = fp.resolve_latent_network(network, agent_id)
+        except (KeyError, AttributeError):
+            return []
+        old_latent = int(getattr(fwd_net, "latent_dim", 0))
+
+        if base in fp.LATENT_REMOVE_MUTATIONS:
+            obs = self._fp_resolve_obs(network, agent_id, fp_obs)
+            if obs is not None:
+                try:
+                    fp.permute_latent_by_activation(fwd_net, obs)
+                except Exception as exc:
+                    # Fail loud (see _fp_pre_mutation): silently skipping the latent
+                    # permutation would drop the removal back to positional and
+                    # invalidate the func_preserving ablation.
+                    msg = (
+                        "arch_mut_type='func_preserving': the function-preserving "
+                        f"latent activation ranking for '{mut_method}' failed. Fix "
+                        "the underlying error rather than falling back to positional "
+                        "removal (which would silently invalidate the "
+                        "func_preserving ablation)."
+                    )
+                    raise RuntimeError(msg) from exc
+        return [old_latent]
+
+    def _fp_post_latent_mutation(
+        self,
+        network: EvolvableNetworkType,
+        applied_mut: str,
+        before_widths: list[int],
+    ) -> None:
+        """Zero/noise the head's new input columns after a latent-dimension add."""
+        agent_id, base = fp.parse_latent_target(applied_mut)
+        if base not in fp.LATENT_ADD_MUTATIONS:
+            return  # latent removals are handled entirely pre-mutation
+        try:
+            fwd_net = fp.resolve_latent_network(network, agent_id)
+        except (KeyError, AttributeError):
+            return
+        old_latent = before_widths[0] if before_widths else None
+        fp.init_new_latent_outgoing(fwd_net, old_latent, self.arch_fp_noise)
 
     @staticmethod
     def _fp_resolve_obs(
@@ -1501,7 +1577,7 @@ class Mutations:
         ):
             return None
         _agent_id, _submodule, base = fp.parse_mut_target(mut_method)
-        if base not in fp.REMOVE_MUTATIONS:
+        if base not in fp.REMOVE_MUTATIONS and base not in fp.LATENT_REMOVE_MUTATIONS:
             return None
         try:
             raw = collect_observation_batch(
