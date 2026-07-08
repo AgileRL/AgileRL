@@ -799,8 +799,19 @@ class ArenaTrainer(Trainer):
         validated_manifest = ArenaManifest.get_validated(manifest, mode="python")
         env_spec = cls._resolve_env_spec(validated_manifest)
 
+        algorithm = validated_manifest.algorithm
+        # Deferred network (``arch`` omitted): the arena manifest leaves
+        # ``net_config`` unset and keeps the raw network section. Carry it on the
+        # spec so it is submitted for the server to resolve, not dropped.
+        if (
+            "net_config" in type(algorithm).model_fields
+            and algorithm.net_config is None
+            and validated_manifest.network
+        ):
+            algorithm.net_config = validated_manifest.network
+
         return cls(
-            algorithm=validated_manifest.algorithm,
+            algorithm=algorithm,
             environment=env_spec,
             client=client,
             api_key=api_key,
