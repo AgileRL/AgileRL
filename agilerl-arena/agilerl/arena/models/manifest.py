@@ -7,8 +7,18 @@ import logging
 from pathlib import Path
 from typing import Annotated, Any, Literal, get_args
 
-import agilerl.arena.models.algorithms as _arena_algorithms  # noqa: F401
 import yaml
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    BeforeValidator,
+    Field,
+    PlainSerializer,
+    model_validator,
+)
+from typing_extensions import Self
+
+import agilerl.arena.models.algorithms as _arena_algorithms  # noqa: F401
 from agilerl.arena.models.algo import (
     ARENA_REGISTRY,
     AlgoSpecT,
@@ -20,15 +30,6 @@ from agilerl.arena.models.networks import (
     NetworkSpec,
 )
 from agilerl.arena.models.training import ReplayBufferSpec, TrainingSpec
-from pydantic import (
-    AliasChoices,
-    BaseModel,
-    BeforeValidator,
-    Field,
-    PlainSerializer,
-    model_validator,
-)
-from typing_extensions import Self
 
 logger = logging.getLogger(__name__)
 
@@ -86,10 +87,6 @@ def _normalize_network_arch(
         encoder_config.get("arch") if isinstance(encoder_config, dict) else None
     )
     arch = top_level_arch or nested_arch
-
-    # If arch is not found, defer resolution to the server.
-    if arch is None:
-        return data
 
     if encoder_config is None:
         data["encoder_config"] = {"arch": arch}
