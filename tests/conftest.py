@@ -116,12 +116,14 @@ def pytest_collection_modifyitems(config, items):
       worker-process state is reset between them. ``gpu`` tests run in-process
       and share accelerator / DeepSpeed distributed state across the worker:
       accelerator state is reset per fixture (``AcceleratorState._reset_state``),
-      and ``generate_accelerator`` additionally resets DeepSpeed's cached comm
-      backend + cloned process groups before each engine build, so an
-      interleaved ``destroy_process_group`` (e.g. test_mutation) no longer
-      dangles DeepSpeed's group handles into ``Group <ProcessGroup ...> is not
-      registered``. MASTER_PORT is still per-test (``get_free_port``) to avoid
-      ``EADDRINUSE`` on concurrent inits.
+      and ``generate_accelerator`` clears DeepSpeed's cached comm backend +
+      cloned process groups *only* when the world group has been torn down
+      (``not dist.is_initialized()``), so an interleaved ``destroy_process_group``
+      (e.g. test_mutation) no longer dangles DeepSpeed's group handles into
+      ``Group <ProcessGroup ...> is not registered`` — while leaving the cache
+      intact otherwise (re-cloning every build leaks NCCL communicators and OOMs
+      concurrent workers). MASTER_PORT is still per-test (``get_free_port``) to
+      avoid ``EADDRINUSE`` on concurrent inits.
     - ``test_minari_utils``: tests create/delete shared Minari datasets on disk.
 
     Uses ``tryfirst=True`` so the ``xdist_group`` markers below are attached
