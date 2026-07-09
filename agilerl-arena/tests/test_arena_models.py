@@ -6,6 +6,13 @@ from unittest.mock import patch
 
 import pytest
 import yaml
+from generate_arena_manifests import (
+    arena_algorithm_names,
+    generate_arena_manifests,
+    write_arena_manifest,
+)
+from pydantic import ValidationError
+
 from agilerl.arena.models import (
     ARENA_REGISTRY,
     ReplayBufferSpec,
@@ -25,12 +32,6 @@ from agilerl.arena.models.networks import (
     MlpSpec,
     QNetworkSpec,
 )
-from generate_arena_manifests import (
-    arena_algorithm_names,
-    generate_arena_manifests,
-    write_arena_manifest,
-)
-from pydantic import ValidationError
 
 
 def _manifest(**sections) -> dict:
@@ -116,8 +117,9 @@ def test_collect_unknown_fields_ignores_non_dict_raw() -> None:
 
 
 def test_known_field_names_includes_all_alias_forms() -> None:
-    from agilerl.arena.models.manifest import _known_field_names
     from pydantic import AliasChoices, BaseModel, Field
+
+    from agilerl.arena.models.manifest import _known_field_names
 
     class _M(BaseModel):
         plain: int = Field(default=0)
@@ -180,10 +182,7 @@ def test_get_validated_normalizes_network_for_platform() -> None:
 
 
 def test_get_validated_passes_network_raw_when_arch_missing() -> None:
-    """When `arch` is absent, the client defers to the Arena backend's own
-    obs-space-aware resolution instead of validating/rejecting the network
-    section.
-    """
+    """When `arch` is absent, the client defers to the server."""
     network = {
         "encoder_config": {"hidden_size": [64], "activation": "ReLU"},
         "head_config": {"hidden_size": [64], "activation": "ReLU"},
