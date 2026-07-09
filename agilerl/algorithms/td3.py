@@ -4,21 +4,31 @@ from typing import Any
 
 import numpy as np
 import torch
+from accelerate import Accelerator
 from gymnasium import spaces
 from torch import nn, optim
 
 from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
-from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.algorithms.core.registry import (
+    HyperparameterConfig,
+    NetworkGroup,
+    make_default_hp_config,
+)
 from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.q_networks import ContinuousQNetwork
-from agilerl.typing import ExperiencesType, GymEnvType, NetConfigType, ObservationType
+from agilerl.typing import (
+    ExperiencesType,
+    GymEnvType,
+    NetConfigType,
+    ObservationType,
+    SupportedObservationSpace,
+)
 from agilerl.utils.algo_utils import (
     make_safe_deepcopies,
     multi_dim_clamp,
-    obs_channels_to_first,
     share_encoder_parameters,
 )
 from agilerl.utils.evolvable_networks import (
@@ -28,7 +38,7 @@ from agilerl.utils.evolvable_networks import (
 
 
 class TD3(RLAlgorithm):
-    """Twin Delayed Deep Deterministic Policy Gradient (TD3) algorithm.
+    """Twin Delayed Deep Deterministic Policy Gradient (TD3).
 
     Paper: https://arxiv.org/abs/1802.09477
 
@@ -90,7 +100,7 @@ class TD3(RLAlgorithm):
 
     def __init__(
         self,
-        observation_space: spaces.Space,
+        observation_space: SupportedObservationSpace,
         action_space: spaces.Box,
         O_U_noise: bool = True,
         vect_noise_dim: int = 1,
@@ -114,7 +124,7 @@ class TD3(RLAlgorithm):
         critic_networks: list[EvolvableModule] | None = None,
         share_encoders: bool = False,
         device: str = "cpu",
-        accelerator: Any | None = None,
+        accelerator: Accelerator | None = None,
         wrap: bool = True,
     ) -> None:
         super().__init__(
@@ -202,6 +212,14 @@ class TD3(RLAlgorithm):
             else mean_noise * np.ones((vect_noise_dim, self.action_dim))
         )
 
+        # Default RL hyperparameters to mutate when doing Evo-HPO
+        self.hp_config = self.hp_config or make_default_hp_config(
+            lr_actor=self.lr_actor,
+            lr_critic=self.lr_critic,
+            batch_size=self.batch_size,
+            learn_step=self.learn_step,
+        )
+
         if actor_network is not None and critic_networks is not None:
             assert isinstance(
                 critic_networks,
@@ -260,7 +278,7 @@ class TD3(RLAlgorithm):
                 simba = net_config.get("simba", False)
                 recurrent = net_config.get("recurrent", False)
                 encoder_config = get_default_encoder_config(
-                    observation_space,
+                    self.observation_space,
                     simba=simba,
                     recurrent=recurrent,
                     layer_norm=False,
@@ -281,16 +299,16 @@ class TD3(RLAlgorithm):
 
             def create_actor() -> DeterministicActor:
                 return DeterministicActor(
-                    observation_space=observation_space,
-                    action_space=action_space,
+                    observation_space=self.observation_space,
+                    action_space=self.action_space,
                     device=self.device,
                     **net_config,
                 )
 
             def create_critic() -> ContinuousQNetwork:
                 return ContinuousQNetwork(
-                    observation_space=observation_space,
-                    action_space=action_space,
+                    observation_space=self.observation_space,
+                    action_space=self.action_space,
                     device=self.device,
                     **critic_net_config,
                 )
@@ -361,6 +379,10 @@ class TD3(RLAlgorithm):
                 shared_networks=self.critic_target_2,
             ),
         )
+
+        # Register metrics to keep track of during training
+        self.metrics.register("actor_loss")
+        self.metrics.register("critic_loss")
 
     def share_encoder_parameters(self) -> None:
         """Shares the encoder parameters between the actor and critics.
@@ -522,6 +544,9 @@ class TD3(RLAlgorithm):
         else:
             critic_loss.backward()
 
+        critic_loss = critic_loss.item()
+        self.metrics.log("critic_loss", critic_loss)
+
         self.critic_1_optimizer.step()
         self.critic_2_optimizer.step()
 
@@ -547,8 +572,11 @@ class TD3(RLAlgorithm):
             self.soft_update(self.critic_1, self.critic_target_1)
             self.soft_update(self.critic_2, self.critic_target_2)
 
-            return actor_loss.item(), critic_loss.item()
-        return None, critic_loss.item()
+            actor_loss = actor_loss.item()
+            self.metrics.log("actor_loss", actor_loss)
+            return actor_loss, critic_loss
+
+        return None, critic_loss
 
     def soft_update(self, net: EvolvableModule, target: EvolvableModule) -> None:
         """Soft updates target network parameters.
@@ -568,7 +596,6 @@ class TD3(RLAlgorithm):
     def test(
         self,
         env: GymEnvType,
-        swap_channels: bool = False,
         max_steps: int | None = None,
         loop: int = 3,
     ) -> float:
@@ -576,8 +603,6 @@ class TD3(RLAlgorithm):
 
         :param env: The environment to be tested in
         :type env: Gym-style environment
-        :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
-        :type swap_channels: bool, optional
         :param max_steps: Maximum number of testing steps, defaults to None
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
@@ -597,9 +622,6 @@ class TD3(RLAlgorithm):
                 finished = np.zeros(num_envs)
                 step = 0
                 while not np.all(finished):
-                    if swap_channels:
-                        obs = obs_channels_to_first(obs)
-
                     action = self.get_action(obs, training=False)
                     obs, reward, done, trunc, _ = env.step(action)
                     step += 1
@@ -612,5 +634,5 @@ class TD3(RLAlgorithm):
                             finished[idx] = 1
                 rewards.append(np.mean(completed_episode_scores))
         mean_fit = np.mean(rewards)
-        self.fitness.append(mean_fit)
+        self.metrics.add_fitness(mean_fit)
         return mean_fit

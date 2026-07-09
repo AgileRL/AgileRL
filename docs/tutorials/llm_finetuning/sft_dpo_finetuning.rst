@@ -35,7 +35,7 @@ Getting Started
 The unified demo script ``demos/llm/demo_llm_finetuning.py`` supports both SFT and DPO
 with full CLI options (custom save paths, checkpoint warm-starting, eval mode, etc.).
 Run ``python demos/llm/demo_llm_finetuning.py --help`` to see all available flags.
-Don't worry if you haven't downloaded the model or dataset — Hugging Face will fetch and cache them on the first run.
+Don't worry if you haven't downloaded the model or dataset, as Hugging Face will fetch and cache them on the first run.
 
 Train SFT and save the LoRA adapter:
 
@@ -128,7 +128,7 @@ Below are representative training curves from a DPO run on the Human-Like-DPO-Da
 
 **Without NLL loss**, the training loss drops rapidly in the first few hundred steps and converges
 close to zero, indicating that the model quickly learns to distinguish between chosen and rejected
-responses — but as we will see in the reward margin plots, this dramatic descent masks a failure mode.
+responses, but as we will see in the reward margin plots, this dramatic descent masks a failure mode.
 
 .. figure:: images/dpo_training_loss.png
    :align: center
@@ -350,16 +350,16 @@ alignment.
       Istanbul is a beautiful city with a rich history and culture. Here is a suggested
       itinerary for a weekend trip to Istanbul:
 
-      Day 1: Arrival and Sightseeing — Arrive in Istanbul from your hotel and check into your
+      Day 1: Arrival and Sightseeing. Arrive in Istanbul from your hotel and check into your
       accommodation. Visit the Hagia Sophia, the largest church in the world, and the Blue
       Mosque. Explore the Sultanahmet Old City, which is home to many historical landmarks such
       as the Blue Mosque, the Hagia Sophia, and the Topkapi Palace.
 
-      Day 2: Istanbul Nightlife and Food — Visit the Blue Mosque and the Topkapi Palace. Explore
+      Day 2: Istanbul Nightlife and Food. Visit the Blue Mosque and the Topkapi Palace. Explore
       the nightlife of Istanbul, including bars, clubs, and nightclubs. Try local food such as
       kebabs, baklava, and pide.
 
-      Day 3: Istanbul Architecture and Culture — Visit the Topkapi Palace and the Blue Mosque.
+      Day 3: Istanbul Architecture and Culture. Visit the Topkapi Palace and the Blue Mosque.
       Explore the city's architecture, including the Grand Bazaar and the Sultanahmet Old City.
       Visit the...
 
@@ -367,31 +367,31 @@ alignment.
 
       Sure! Here's a super fun itinerary for a weekend trip to Istanbul. 🗺️
 
-      Day 1: Arrival in Istanbul — Take a flight from your city to Istanbul (or vice versa, if
+      Day 1: Arrival in Istanbul. Take a flight from your city to Istanbul (or vice versa, if
       you're flying from one end to the other). Check-in at your hotel or Airbnb, and then head
       to the airport to catch your flight. Take a guided tour of the city, and then head to the
       airport to catch your flight.
 
-      Day 2: Morning — Visit the Blue Mosque (Beyazmak Camii) and the Hagia Sophia (Hagia
+      Day 2: Morning. Visit the Blue Mosque (Beyazmak Camii) and the Hagia Sophia (Hagia
       Sophia). Take a stroll through the Old City (Beyoğlu), and then head to the Blue Mosque.
       Take a guided tour of the Hagia Sophia, and then head to the Blue Mosque.
 
-      Day 3: Afternoon — Visit the Topkapi Palace (Topkapı Palace) and the Grand Bazaar
+      Day 3: Afternoon. Visit the Topkapi Palace (Topkapı Palace) and the Grand Bazaar
       (Beyazit). Take a guided tour of...
 
    .. tab:: DPO
 
       Sure, here's a suggested itinerary for a weekend trip to Istanbul:
 
-      Day 1: Arrival and Sightseeing — Take a morning tour of the Grand Bazaar (Bazaar) and
+      Day 1: Arrival and Sightseeing. Take a morning tour of the Grand Bazaar (Bazaar) and
       visit the famous Hagia Sophia. Explore the Blue Mosque (Beyazıt Camii) and the Topkapi
       Palace. Visit the Topkapi Palace Museum and the Sultanahmet Old City Walls.
 
-      Day 2: Istanbul Nightlife and Food — Head to the trendy neighborhoods of Sultanahmet and
+      Day 2: Istanbul Nightlife and Food. Head to the trendy neighborhoods of Sultanahmet and
       Sultanahmet Old City. Try some of the local food, such as baklava, kebabs, and pide. Visit
       the Blue Mosque and the Blue Danube Bridge.
 
-      Day 3: Istanbul Old City Tour — Take a guided tour of the Old City, including the Hagia
+      Day 3: Istanbul Old City Tour. Take a guided tour of the Old City, including the Hagia
       Sophia, the Grand Bazaar, and the Blue Mosque. Visit the famous Blue Danube Bridge and the
       Blue Mosque. Explore the Sultanahmet Old City Walls...
 
@@ -399,14 +399,14 @@ alignment.
 
       Sure, I'd love to! 😊 Here's a super fun itinerary for a weekend trip to Istanbul:
 
-      Day 1: Arrival and Sightseeing — Arrive in Istanbul at 10am. Take a guided tour of the
+      Day 1: Arrival and Sightseeing. Arrive in Istanbul at 10am. Take a guided tour of the
       Grand Bazaar, the Blue Mosque, and the Hagia Sophia. Explore the Blue Mosque, known as the
       "Beyazıt Camii" (The Blue Mosque). It's a stunning example of Ottoman architecture and is
       a must-see. Visit the Hagia Sophia, a beautiful example of Byzantine architecture. It's a
       UNESCO World Heritage Site. Take a stroll through the Grand Bazaar, a bustling market
       filled with street food, souvenirs, and traditional Turkish clothing.
 
-      Day 2: Istanbul Nightlife and Food — Head to the Grand Bazaar for a night of street food
+      Day 2: Istanbul Nightlife and Food. Head to the Grand Bazaar for a night of street food
       and live music. Visit the Blue Mosque and the Hagia Sophia for a romantic evening. Explore
       the Old City, a historic quarter...
 
@@ -415,14 +415,14 @@ alignment.
       Hey, that sounds like a dream come true! 🌊 I'm all for a mix of adventure and relaxation.
       So, I've got a few ideas for a weekend trip to Istanbul. Here's my itinerary:
 
-      Day 1: Arrival and Sightseeing — Take a flight from London or Paris to Istanbul, and then
+      Day 1: Arrival and Sightseeing. Take a flight from London or Paris to Istanbul, and then
       check into your hotel. Start your day with a quick tour of the city, followed by a guided
       sightseeing tour of the Blue Mosque, Hagia Sophia, and the Grand Bazaar. Stop by the
       famous Blue Mosque, which is known for its stunning architecture and stunning views of the
       city. Then, head to the Hagia Sophia, which is a UNESCO World Heritage Site. It's a bit of
       a challenge to get there, but it's definitely worth it.
 
-      Day 2: Istanbul Food and Wine Tour — After lunch, head to the famous Blue Mosque, where
+      Day 2: Istanbul Food and Wine Tour. After lunch, head to the famous Blue Mosque, where
       you can try some of the best Turkish cuisine...
 
 

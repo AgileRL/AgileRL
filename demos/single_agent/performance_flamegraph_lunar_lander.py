@@ -56,7 +56,6 @@ INIT_HP = {
     "DISCRETE_ACTIONS": True,  # LunarLander-v3 has discrete actions
     "ACTION_STD_INIT": 0.6,  # Only used for continuous actions
     "TARGET_KL": None,
-    "CHANNELS_LAST": False,  # LunarLander obs are 1D
 }
 
 # =====================================================================
@@ -79,9 +78,6 @@ pop = create_population(
     population_size=INIT_HP["POP_SIZE"],
     num_envs=num_envs,
     device=device,
-    algo_kwargs={
-        "use_rollout_buffer": True,
-    },
 )
 
 # Get the agent from the population

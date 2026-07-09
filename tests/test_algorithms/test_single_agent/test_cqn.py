@@ -14,11 +14,9 @@ from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
     assert_not_equal_state_dict,
     assert_state_dicts_equal,
+    assert_transpose_image_observation_called,
     get_experiences_batch,
-)
-from tests.helpers.algorithm_coverage import (
-    assert_swap_channels_called,
-    patch_obs_channels_to_first,
+    patch_transpose_image_observation,
 )
 
 
@@ -126,7 +124,7 @@ class TestCQNInit:
         assert cqn.index == 0
         assert cqn.scores == []
         assert cqn.fitness == []
-        assert cqn.steps == [0]
+        assert cqn.steps == 0
         assert isinstance(cqn.actor.encoder, encoder_cls)
         assert isinstance(cqn.actor_target.encoder, encoder_cls)
         expected_opt_cls = AcceleratedOptimizer if accelerator else optim.Adam
@@ -174,7 +172,7 @@ class TestCQNInit:
         assert cqn.index == 0
         assert cqn.scores == []
         assert cqn.fitness == []
-        assert cqn.steps == [0]
+        assert cqn.steps == 0
         assert isinstance(cqn.optimizer.optimizer, optim.Adam)
         assert isinstance(cqn.criterion, nn.MSELoss)
         cqn.clean_up()
@@ -226,7 +224,7 @@ class TestCQNInit:
         assert cqn.index == 0
         assert cqn.scores == []
         assert cqn.fitness == []
-        assert cqn.steps == [0]
+        assert cqn.steps == 0
         assert isinstance(cqn.optimizer.optimizer, optim.Adam)
         assert isinstance(cqn.criterion, nn.MSELoss)
         cqn.clean_up()
@@ -307,13 +305,13 @@ class TestCQNLearn:
         td = get_experiences_batch(
             observation_space, action_space, batch_size, cqn.device
         )
-        experiences = (
-            td["obs"],
-            td["action"],
-            td["reward"],
-            td["next_obs"],
-            td["done"],
-        )
+        experiences = {
+            "obs": td["obs"],
+            "action": td["action"],
+            "reward": td["reward"],
+            "next_obs": td["next_obs"],
+            "done": td["done"],
+        }
 
         # Copy state dict before learning - should be different to after updating weights
         actor = cqn.actor
@@ -356,7 +354,13 @@ class TestCQNLearn:
         next_states = torch.randint(0, discrete_space.n, (batch_size, 1))
         dones = torch.randint(0, 2, (batch_size, 1))
 
-        experiences = [states, actions, rewards, next_states, dones]
+        experiences = {
+            "obs": states,
+            "action": actions,
+            "reward": rewards,
+            "next_obs": next_states,
+            "done": dones,
+        }
 
         # Copy state dict before learning - should be different to after updating weights
         actor = cqn.actor
@@ -391,7 +395,13 @@ class TestCQNLearn:
         rewards = torch.randn((batch_size, 1))
         next_states = torch.randn(batch_size, vector_space.shape[0])
         dones = torch.randint(0, 2, (batch_size, 1))
-        experiences = (states, actions, rewards, next_states, dones)
+        experiences = {
+            "obs": states,
+            "action": actions,
+            "reward": rewards,
+            "next_obs": next_states,
+            "done": dones,
+        }
         loss = cqn.learn(experiences)
         assert isinstance(loss, float)
         cqn.clean_up()
@@ -468,16 +478,17 @@ class TestCQNTest:
         assert isinstance(mean_score, float)
         agent.clean_up()
 
-    def test_swap_channels_path(
-        self, image_space, discrete_space, monkeypatch, request
-    ):
-        observation_space = request.getfixturevalue("image_space")
-        env = DummyEnv(state_size=observation_space.shape, vect=False, num_envs=1)
-        spy = patch_obs_channels_to_first(monkeypatch, "agilerl.algorithms.cqn")
-        agent = CQN(observation_space=observation_space, action_space=discrete_space)
-        mean_score = agent.test(env, swap_channels=True, max_steps=1, loop=1)
+    def test_swap_channels_path(self, discrete_space, monkeypatch):
+        channels_last_box = spaces.Box(
+            low=0, high=255, shape=(32, 32, 3), dtype=np.uint8
+        )
+        env = DummyEnv(state_size=channels_last_box.shape, vect=False, num_envs=1)
+        spy = patch_transpose_image_observation(monkeypatch)
+        agent = CQN(observation_space=channels_last_box, action_space=discrete_space)
+        assert agent.swap_channels is True
+        mean_score = agent.test(env, max_steps=1, loop=1)
         assert isinstance(mean_score, float)
-        assert_swap_channels_called(spy)
+        assert_transpose_image_observation_called(spy)
         agent.clean_up()
 
 

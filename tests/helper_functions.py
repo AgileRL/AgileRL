@@ -10,6 +10,7 @@ from gymnasium import spaces
 from tensordict import TensorDict
 from torch import nn
 
+import agilerl.utils.algo_utils as algo_utils
 from agilerl.components.data import Transition
 from agilerl.modules import EvolvableModule
 from agilerl.typing import NumpyObsType, TorchObsType
@@ -354,3 +355,72 @@ def assert_close_dict(before: dict[str, Any], after: dict[str, Any]) -> None:
             ), f"Value not close: {value} != {after[key]}"
         else:
             assert value == after[key], f"Value not equal: {value} != {after[key]}"
+
+
+class TransposeImageObservationSpy:
+    """Records calls to ``transpose_image_observation`` while delegating."""
+
+    def __init__(self, original: Any) -> None:
+        self._original = original
+        self.call_count = 0
+        self.calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.call_count += 1
+        self.calls.append((args, kwargs))
+        return self._original(*args, **kwargs)
+
+
+def patch_transpose_image_observation(monkeypatch: Any) -> TransposeImageObservationSpy:
+    """Patch ``transpose_image_observation`` in algo_utils and return a call spy."""
+    spy = TransposeImageObservationSpy(algo_utils.transpose_image_observation)
+    monkeypatch.setattr(algo_utils, "transpose_image_observation", spy)
+    return spy
+
+
+def assert_transpose_image_observation_called(
+    spy: TransposeImageObservationSpy, min_calls: int = 1
+) -> None:
+    """Assert ``transpose_image_observation`` was invoked during preprocessing."""
+    assert spy.call_count >= min_calls, (
+        f"Expected transpose_image_observation to be called at least {min_calls} "
+        f"time(s), but it was called {spy.call_count} time(s)"
+    )
+
+
+# Maps actor scalar-output storage pointers to per-arm mu values for the current test.
+_broadcast_by_storage: dict[int, torch.Tensor] = {}
+
+
+def patch_actor_scalar_mu_repeat(
+    monkeypatch: pytest.MonkeyPatch,
+    bandit: object,
+    broadcast_mu: torch.Tensor,
+) -> None:
+    """Scope mu repeat override to scalar outputs from ``bandit.actor``.
+
+    When the actor returns a single-element tensor, ``repeat(n)`` for ``n > 1``
+    returns ``broadcast_mu`` instead of duplicating the scalar. Other tensors
+    keep the default ``torch.Tensor.repeat`` behavior.
+    """
+    actor = bandit.actor
+    original_forward = actor.forward
+    original_repeat = torch.Tensor.repeat
+
+    def forwarding(obs, *args, **kwargs):
+        result = original_forward(obs, *args, **kwargs)
+        if result.reshape(-1).numel() == 1:
+            _broadcast_by_storage[result.untyped_storage().data_ptr()] = broadcast_mu
+        return result
+
+    def selective_repeat(self, *args, **kwargs):
+        broadcast = _broadcast_by_storage.get(self.untyped_storage().data_ptr())
+        if broadcast is not None and self.numel() == 1:
+            repeats = args[0] if args else kwargs.get("repeats", 1)
+            if repeats > 1:
+                return broadcast
+        return original_repeat(self, *args, **kwargs)
+
+    monkeypatch.setattr(actor, "forward", forwarding)
+    monkeypatch.setattr(torch.Tensor, "repeat", selective_repeat)
+    _broadcast_by_storage.clear()

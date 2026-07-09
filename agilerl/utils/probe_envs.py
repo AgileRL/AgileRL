@@ -8,6 +8,7 @@ from gymnasium import spaces
 from tqdm import trange
 
 from agilerl.components.data import Transition
+from agilerl.rollouts import collect_rollouts
 
 
 class ConstantRewardEnv(gym.Env):
@@ -1242,54 +1243,8 @@ def check_policy_on_policy_with_probe_env(
     agent = algo_class(**algo_args, device=device)
 
     for i in trange(learn_steps):
-        state, _ = env.reset()
-        states = []
-        actions = []
-        log_probs = []
-        rewards = []
-        dones = []
-        values = []
-
-        done = 0
-
-        for _j in range(200):
-            if isinstance(state, dict):
-                state = {k: np.expand_dims(v, 0) for k, v in state.items()}
-            else:
-                state = np.expand_dims(state, 0)
-
-            action, log_prob, _, value = agent.get_action(state)
-
-            action = action[0]
-            log_prob = log_prob[0]
-            value = value[0]
-            next_state, reward, term, trunc, _ = env.step(action)
-            next_done = np.logical_or(term, trunc).astype(np.int8)
-
-            states.append(state)
-            actions.append(action)
-            log_probs.append(log_prob)
-            rewards.append(reward)
-            dones.append(done)
-            values.append(value)
-
-            state = next_state
-            done = next_done
-
-            if done:
-                state, _ = env.reset()
-
-        experiences = (
-            states,
-            actions,
-            log_probs,
-            rewards,
-            dones,
-            values,
-            next_state,
-            next_done,
-        )
-        agent.learn(experiences)
+        collect_rollouts(agent, env, n_steps=200)
+        agent.learn()
         if i < 20:
             pass
 

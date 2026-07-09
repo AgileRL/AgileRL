@@ -1,7 +1,7 @@
 .. _bandit_tutorials:
 
-Contextual Multi-arm Bandit Tutorials
-=====================================
+Contextual Multi-arm Bandits
+============================
 
 These tutorials provide an introductory guide to using `AgileRL <https://github.com/AgileRL/AgileRL>`_
 contextual multi-armed :ref:`bandit algorithms<bandits>`.

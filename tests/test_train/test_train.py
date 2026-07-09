@@ -16,6 +16,7 @@ from pettingzoo import ParallelEnv
 from tensordict import TensorDict
 
 import agilerl
+import agilerl.rollouts.on_policy
 from agilerl.algorithms import (
     CQN,
     DDPG,
@@ -25,30 +26,60 @@ from agilerl.algorithms import (
     MATD3,
     PPO,
     TD3,
-    NeuralTS,
     NeuralUCB,
     RainbowDQN,
 )
+from agilerl.algorithms.core.base import MultiAgentRLAlgorithm
 from agilerl.components.data import Transition
 from agilerl.components.replay_buffer import (
     MultiStepReplayBuffer,
     PrioritizedReplayBuffer,
     ReplayBuffer,
 )
+from agilerl.metrics import AgentMetrics, MultiAgentMetrics
+from agilerl.population import Population
 from agilerl.training.train_bandits import train_bandits
 from agilerl.training.train_multi_agent_off_policy import train_multi_agent_off_policy
 from agilerl.training.train_multi_agent_on_policy import train_multi_agent_on_policy
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.training.train_offline import train_offline
 from agilerl.training.train_on_policy import train_on_policy
-from tests.pz_vector_test_utils import make_sync_multi_agent_vec_env
+from agilerl.utils.utils import make_multi_agent_vect_envs
+
+# Common parametrize constants
+_FLAT_VECT = [((6,), 2, True)]
+_FLAT_NOVECT = [((6,), 2, False)]
+_FLAT_BOTH = [((6,), 2, True), ((6,), 2, False)]
+_IMG_NOVECT = [((250, 160, 3), 2, False)]
+_IMG_VECT = [((3, 64, 64), 2, True)]
+_FLAT = [((6,), 2)]
+_IMG = [((250, 160, 3), 2)]
+_IMG_SQUARE = [((3, 64, 64), 2)]
+
+_WANDB_SUMMARY_KEYS = (
+    "train/global_step",
+    "train/steps_per_second",
+    "train/mean_score",
+    "eval/mean_fitness",
+    "eval/best_fitness",
+)
+
+
+def _assert_wandb_summary_log(mock_wandb_log: MagicMock) -> None:
+    """Assert final wandb.log includes population summary keys (may include per-agent keys)."""
+    mock_wandb_log.assert_called()
+    logged = mock_wandb_log.call_args[0][0]
+    for key in _WANDB_SUMMARY_KEYS:
+        assert key in logged
 
 
 class DummyEnv:
     def __init__(self, state_size, action_size, vect=True, num_envs=2):
+        self._single_state_size = tuple(state_size)
         self.state_size = state_size
         self.action_size = action_size
-        self.action_space = Discrete(action_size)
+        self.observation_space = Box(0.0, 1.0, self._single_state_size)
+        self.action_space = Box(-1.0, 1.0, (action_size,))
         self.vect = vect
         if self.vect:
             self.state_size = (num_envs, *self.state_size)
@@ -57,10 +88,18 @@ class DummyEnv:
         else:
             self.n_envs = 1
 
-    def reset(self):
+    def reset(self, seed=None, options=None):
         return np.random.rand(*self.state_size), {}
 
     def step(self, action):
+        if not self.vect:
+            return (
+                np.random.rand(*self.state_size),
+                float(np.random.randint(0, 5)),
+                bool(np.random.randint(0, 2)),
+                bool(np.random.randint(0, 2)),
+                {},
+            )
         return (
             np.random.rand(*self.state_size),
             np.random.randint(0, 5, self.n_envs),
@@ -75,9 +114,11 @@ class DummyBanditEnv:
         self.arms = arms
         self.state_size = (arms, *state_size)
         self.action_size = 1
+        self.observation_space = Box(0.0, 1.0, self.state_size)
+        self.action_space = Discrete(self.action_size)
         self.num_envs = 1
 
-    def reset(self):
+    def reset(self, seed=None, options=None):
         return np.random.rand(*self.state_size)
 
     def step(self, action):
@@ -109,11 +150,15 @@ class DummyAgentOffPolicy:
         self.training = True
         self.beta = beta
         self.learn_step = learn_step
-        self.scores = []
-        self.steps = [0]
+        self.metrics = AgentMetrics()
+        self.scores = self.metrics.scores
+        self.steps = self.metrics.steps
         self.fitness = []
+        self.steps_per_second = 0.0
         self.mut = "mutation"
         self.index = 1
+        self.registry = MagicMock()
+        self.registry.hp_config = None
         # Attributes required by train_off_policy for continuous action agents (DDPG/TD3)
         self.action_low = torch.as_tensor(
             [-1.0] * self.action_size,
@@ -130,7 +175,11 @@ class DummyAgentOffPolicy:
         self.training = training
 
     def get_action(self, *args, **kwargs):
-        return np.random.rand(self.action_size)
+        obs = args[0] if args else kwargs.get("obs")
+        num_envs = (
+            int(obs.shape[0]) if isinstance(obs, np.ndarray) and obs.ndim > 1 else 1
+        )
+        return np.random.rand(num_envs, self.action_size).astype(np.float32)
 
     def learn(self, experiences, n_experiences=None, per=False):
         loss = random.random()
@@ -138,10 +187,22 @@ class DummyAgentOffPolicy:
             return loss, None, None
         return loss
 
-    def test(self, env, swap_channels=False, max_steps=None, loop=3, **kwargs):
+    def test(self, env, max_steps=None, loop=3, **kwargs):
         rand_int = np.random.uniform(0, 400)
         self.fitness.append(rand_int)
         return rand_int
+
+    def init_training_step(self):
+        self.metrics.init_training_step()
+
+    def add_scores(self, scores):
+        self.metrics.add_scores(scores)
+        self.scores = self.metrics.scores
+
+    def finalize_training_step(self, num_steps):
+        self.metrics.finalize_training_step(num_steps)
+        self.steps_per_second = self.metrics.steps_per_second
+        self.steps = self.metrics.steps
 
     def save_checkpoint(self, path):
         torch.save({}, path, pickle_module=dill)
@@ -179,7 +240,6 @@ class DummyAgentOnPolicy(DummyAgentOffPolicy):  # pylint: disable=overwritten-in
         self.rollout_buffer.reset.side_effect = lambda: None
         self.rollout_buffer.add.side_effect = lambda *args, **kwargs: None
         self.registry.policy.side_effect = lambda: "actor"
-        self.use_rollout_buffer = False
         self.num_envs = 2
 
     def learn(self, *args, **kwargs):
@@ -191,8 +251,8 @@ class DummyAgentOnPolicy(DummyAgentOffPolicy):  # pylint: disable=overwritten-in
     def _get_action_and_values(self, *args, **kwargs):
         return tuple(torch.randn(self.action_size) for _ in range(5))
 
-    def test(self, env, swap_channels=False, max_steps=None, loop=3, **kwargs):
-        return super().test(env, swap_channels, max_steps, loop, **kwargs)
+    def test(self, env, max_steps=None, loop=3, **kwargs):
+        return super().test(env, max_steps, loop, **kwargs)
 
     def preprocess_observation(self, obs):
         return obs
@@ -210,52 +270,61 @@ class DummyAgentOnPolicy(DummyAgentOffPolicy):  # pylint: disable=overwritten-in
         return
 
 
-class DummyBandit:
+class DummyBandit(DummyAgentOffPolicy):
     def __init__(self, batch_size, bandit_env, beta=None):
-        self.state_size = bandit_env.state_size
-        self.action_size = bandit_env.action_size
-        self.action_dim = bandit_env.action_size
-        self.batch_size = batch_size
-        self.beta = beta
-        self.learn_step = 1
-        self.scores = []
-        self.steps = [0]
+        super().__init__(batch_size, bandit_env, beta=beta)
         self.regret = [0]
-        self.fitness = []
-        self.mut = "mutation"
-        self.index = 1
 
-    def get_action(self, *args):
+    def get_action(self, *args, **kwargs):
         return np.random.randint(self.action_size)
 
-    def learn(self, experiences):
-        return random.random()
 
-    def test(self, env, swap_channels=False, max_steps=None, loop=3, **kwargs):
-        rand_int = np.random.uniform(0, 400)
-        self.fitness.append(rand_int)
-        return rand_int
+class ScalarDoneEnv:
+    """Minimal env that returns scalar done (bool) instead of array."""
 
-    def save_checkpoint(self, path):
-        torch.save({}, path, pickle_module=dill)
-        return True
+    def __init__(self):
+        self.observation_space = Box(low=-1.0, high=1.0, shape=(1,))
+        self.action_space = Box(low=-1.0, high=1.0, shape=(1,))
+        self.state_size = (1,)
+        self.action_size = 1
 
-    def load_checkpoint(self, *args):
-        return
+    def reset(self, **kwargs):
+        return np.array([0.0], dtype=np.float32), {}
 
-    def wrap_models(self, *args):
-        return
+    def step(self, action):
+        return np.array([0.0], dtype=np.float32), 1.0, True, False, {}
 
-    def unwrap_models(self, *args):
-        return
+
+class DummyStochastic:
+    """Stand-in for StochasticActor with configurable squash_output."""
+
+    def __init__(self, squash_output=False, clip_low=-1.0, clip_high=1.0):
+        self.squash_output = squash_output
+        self._clip_low = clip_low
+        self._clip_high = clip_high
+
+    def scale_action(self, action):
+        if self.squash_output:
+            return np.clip(action, self._clip_low, self._clip_high)
+        return action
+
+
+class DummyCompiledPolicy:
+    """Stand-in for a torch-compiled policy wrapping a DummyStochastic."""
+
+    def __init__(self, orig_mod=None):
+        self._orig_mod = orig_mod if orig_mod is not None else DummyStochastic()
 
 
 class DummyMultiEnv(ParallelEnv):  # pylint: disable=overwritten-inherited-attribute
+    """Mimics a vectorized multi-agent parallel environment with num_envs=1."""
+
     def __init__(self, state_dims, action_dims):
         self.state_dims = state_dims
         self.state_size = self.state_dims
         self.action_dims = action_dims
         self.action_size = self.action_dims
+        self.num_envs = 1
         self.agents = ["agent_0", "other_agent_0"]
         self.possible_agents = ["agent_0", "other_agent_0"]
         self.render_mode = None
@@ -271,15 +340,25 @@ class DummyMultiEnv(ParallelEnv):  # pylint: disable=overwritten-inherited-attri
 
     def reset(self, seed=None, options=None):
         return {
-            agent: np.random.rand(*self.state_dims) for agent in self.agents
+            agent: np.random.rand(self.num_envs, *self.state_dims)
+            for agent in self.agents
         }, self.info
 
     def step(self, action):
         return (
-            {agent: np.random.rand(*self.state_dims) for agent in self.agents},
-            {agent: np.random.randint(0, 5) for agent in self.agents},
-            {agent: np.random.randint(0, 2) for agent in self.agents},
-            {agent: np.random.randint(0, 2) for agent in self.agents},
+            {
+                agent: np.random.rand(self.num_envs, *self.state_dims)
+                for agent in self.agents
+            },
+            {agent: np.random.rand(self.num_envs) for agent in self.agents},
+            {
+                agent: np.random.randint(0, 2, size=(self.num_envs,)).astype(bool)
+                for agent in self.agents
+            },
+            {
+                agent: np.random.randint(0, 2, size=(self.num_envs,)).astype(bool)
+                for agent in self.agents
+            },
             self.info,
         )
 
@@ -308,6 +387,9 @@ class DummyMultiAgent(DummyAgentOffPolicy):
             batch_size, env, *args, action_space=deepcopy(possible_action_spaces)
         )
         self.agent_ids = ["agent_0", "other_agent_0"]
+        self.metrics = MultiAgentMetrics(self.agent_ids)
+        self.scores = self.metrics.scores
+        self.steps = self.metrics.steps
         self.shared_agent_ids = ["agent", "other_agent"]
         self.lr_actor = 0.001
         self.lr_critic = 0.01
@@ -369,7 +451,6 @@ class DummyMultiAgent(DummyAgentOffPolicy):
     def test(
         self,
         env,
-        swap_channels=False,
         max_steps=None,
         loop=3,
         sum_scores=True,
@@ -412,6 +493,10 @@ class DummyMultiAgent(DummyAgentOffPolicy):
 
     def extract_inactive_agents(self, obs):
         return {}, obs
+
+
+# Register the dummy multi-agent algorithm with the MultiAgentRLAlgorithm base class.
+MultiAgentRLAlgorithm.register(DummyMultiAgent)
 
 
 class DummyTournament:
@@ -511,6 +596,11 @@ class DummyMemory(ReplayBuffer):
         return
 
 
+class DummyPrioritizedMemory(DummyMemory, PrioritizedReplayBuffer):  # pylint: disable=overwritten-inherited-attribute
+    def __init__(self):
+        super().__init__()
+
+
 class DummyNStepMemory(DummyMemory, MultiStepReplayBuffer):  # pylint: disable=overwritten-inherited-attribute
     def __init__(self):
         super().__init__()
@@ -583,62 +673,72 @@ class DummyBanditMemory(ReplayBuffer):
         )
 
 
-class DummyMultiMemory:
+class DummyMultiMemory(ReplayBuffer):
+    """TensorDict-based multi-agent replay buffer stub.
+
+    Mirrors the API of :class:`ReplayBuffer` that the
+    multi-agent off-policy training loop expects (``add``, ``sample``,
+    ``counter``, ``__len__``).
+    """
+
     def __init__(self):
-        self.counter = 0
+        super().__init__(max_size=0)
         self.state_size = None
         self.action_size = None
         self.next_state_size = None
-        self.agents = ["agent_0", "other_agent_1"]
+        self.agents = ["agent_0", "other_agent_0"]
 
     def __len__(self):
         return 1000
 
-    def save_to_memory(
-        self,
-        state,
-        action,
-        reward,
-        next_state,
-        done,
-        is_vectorised=False,
-    ):
-        self.state_size = next(iter(state.values())).shape
-        self.action_size = next(iter(action.values())).shape
-        self.next_state_size = next(iter(next_state.values())).shape
+    def add(self, data: TensorDict) -> None:
+        obs_td = data["obs"]
+        first_agent = next(iter(obs_td.keys()))
+        if self.state_size is None:
+            self.state_size = obs_td[first_agent].shape
+            self.action_size = data["action"][first_agent].shape
+            self.next_state_size = data["next_obs"][first_agent].shape
+        self.size += 1
         self.counter += 1
 
     def sample(self, batch_size, *args):
-        states = {
-            agent: np.array(
-                [np.random.randn(*self.state_size) for _ in range(batch_size)],
-            )
-            for agent in self.agents
-        }
-        actions = {
-            agent: np.array(
-                [np.random.randn(*self.action_size) for _ in range(batch_size)],
-            )
-            for agent in self.agents
-        }
-        rewards = {
-            agent: np.array([np.random.uniform(0, 400) for _ in range(batch_size)])
-            for agent in self.agents
-        }
-        dones = {
-            agent: np.array(
-                [np.random.choice([True, False]) for _ in range(batch_size)],
-            )
-            for agent in self.agents
-        }
-        next_states = {
-            agent: np.array(
-                [np.random.randn(*self.next_state_size) for _ in range(batch_size)],
-            )
-            for agent in self.agents
-        }
-
-        return states, actions, rewards, dones, next_states
+        return TensorDict(
+            {
+                "obs": TensorDict(
+                    {
+                        agent: torch.randn(batch_size, *self.state_size[1:])
+                        for agent in self.agents
+                    },
+                    batch_size=[batch_size],
+                ),
+                "action": TensorDict(
+                    {
+                        agent: torch.randn(batch_size, *self.action_size[1:])
+                        for agent in self.agents
+                    },
+                    batch_size=[batch_size],
+                ),
+                "reward": TensorDict(
+                    {agent: torch.randn(batch_size, 1) for agent in self.agents},
+                    batch_size=[batch_size],
+                ),
+                "next_obs": TensorDict(
+                    {
+                        agent: torch.randn(batch_size, *self.next_state_size[1:])
+                        for agent in self.agents
+                    },
+                    batch_size=[batch_size],
+                ),
+                "done": TensorDict(
+                    {
+                        agent: torch.randint(0, 2, (batch_size, 1)).float()
+                        for agent in self.agents
+                    },
+                    batch_size=[batch_size],
+                ),
+            },
+            batch_size=[batch_size],
+        )
 
 
 @pytest.fixture
@@ -706,20 +806,48 @@ def multi_memory():
     return DummyMultiMemory()
 
 
+def _make_base_mock_agent(spec_cls, state_size, action_size, *, metrics=None):
+    """Wire up the attributes every EvolvableAlgorithm mock needs."""
+    mock = MagicMock(spec=spec_cls)
+    mock.metrics = metrics or AgentMetrics()
+    mock.learn_step = 1
+    mock.batch_size = 5
+    mock.state_size = state_size
+    mock.action_size = action_size
+    mock.beta = 0.4
+    mock.scores = mock.metrics.scores
+    mock.steps = mock.metrics.steps
+    mock.steps_per_second = 0.0
+    mock.fitness = []
+    mock.mut = "mutation"
+    mock.index = 1
+    mock.registry = MagicMock()
+    mock.registry.hp_config = None
+
+    def _test_side_effect(*args, **kwargs):
+        score = np.random.uniform(0, 400)
+        mock.fitness.append(score)
+        return score
+
+    mock.test.side_effect = _test_side_effect
+    mock.init_training_step.side_effect = lambda: mock.metrics.init_training_step()
+    mock.add_scores.side_effect = lambda scores: mock.metrics.add_scores(scores)
+    mock.finalize_training_step.side_effect = lambda num_steps: (
+        mock.metrics.finalize_training_step(num_steps)
+    )
+    mock.learn.side_effect = lambda *args, **kwargs: random.random()
+    mock.save_checkpoint.side_effect = lambda *a, **kw: None
+    mock.load_checkpoint.side_effect = lambda *a, **kw: None
+    mock.wrap_models.side_effect = lambda *a, **kw: None
+    mock.unwrap_models.side_effect = lambda *a, **kw: None
+    return mock
+
+
 @pytest.fixture
 def mocked_agent_off_policy(env, algo):
-    mock_agent = MagicMock(spec=algo)
-    mock_agent.learn_step = 1
-    mock_agent.batch_size = 5
-    mock_agent.state_size = env.state_size
-    mock_agent.action_size = 2
+    mock_agent = _make_base_mock_agent(algo, env.state_size, 2)
     mock_agent.action_dim = 2
-    mock_agent.beta = 0.4
-    mock_agent.scores = []
-    mock_agent.steps = [0]
-    mock_agent.fitness = []
-    mock_agent.mut = "mutation"
-    mock_agent.index = 1
+
     if algo in [DDPG, TD3]:
         mock_agent.action_low = torch.as_tensor(
             [-1.0] * mock_agent.action_size,
@@ -732,19 +860,14 @@ def mocked_agent_off_policy(env, algo):
         mock_agent.actor = MagicMock()
         mock_agent.actor.output_activation = "Tanh"
         mock_agent.get_action.side_effect = lambda state, *args, **kwargs: (
-            np.random.randn(
-                env.n_envs,
-                mock_agent.action_size,
-            ).astype(np.float32)
+            np.random.randn(env.n_envs, mock_agent.action_size).astype(np.float32)
         )
+        mock_agent.reset_action_noise.side_effect = lambda *a, **kw: None
     else:
         mock_agent.get_action.side_effect = lambda state, *args, **kwargs: (
-            np.random.randint(
-                env.action_size,
-                size=(env.n_envs,),
-            )
+            np.random.randint(env.action_size, size=(env.n_envs,))
         )
-    mock_agent.test.side_effect = lambda *args, **kwargs: np.random.uniform(0, 400)
+
     if algo == RainbowDQN:
         mock_agent.learn.side_effect = lambda experiences, **kwargs: (
             random.random(),
@@ -753,12 +876,7 @@ def mocked_agent_off_policy(env, algo):
         )
     else:
         mock_agent.learn.side_effect = lambda experiences, **kwargs: random.random()
-    mock_agent.save_checkpoint.side_effect = lambda *args, **kwargs: None
-    mock_agent.load_checkpoint.side_effect = lambda *args, **kwargs: None
-    mock_agent.wrap_models.side_effect = lambda *args, **kwargs: None
-    mock_agent.unwrap_models.side_effect = lambda *args, **kwargs: None
-    if algo in [DDPG, TD3]:
-        mock_agent.reset_action_noise.side_effect = lambda *args, **kwargs: None
+
     mock_agent.algo = {
         DQN: "DQN",
         RainbowDQN: "Rainbow DQN",
@@ -766,98 +884,68 @@ def mocked_agent_off_policy(env, algo):
         TD3: "TD3",
         CQN: "CQN",
     }[algo]
-
     return mock_agent
 
 
 @pytest.fixture
 def mocked_agent_on_policy(env, algo):
-    mock_agent = MagicMock(spec=algo)
-    mock_agent.learn_step = 1
-    mock_agent.batch_size = 5
-    mock_agent.state_size = env.state_size
-    mock_agent.action_size = env.action_size
+    mock_agent = _make_base_mock_agent(algo, env.state_size, env.action_size)
     mock_agent.action_space = env.action_space
-    mock_agent.beta = 0.4
-    mock_agent.scores = []
-    mock_agent.steps = [0]
-    mock_agent.fitness = []
-    mock_agent.mut = "mutation"
-    mock_agent.index = 1
+    mock_agent.algo = "PPO"
+
     mock_agent.get_action.side_effect = lambda state, *args, **kwargs: tuple(
         np.random.randn(env.action_size) for _ in range(4)
     )
-    mock_agent.test.side_effect = lambda *args, **kwargs: np.random.uniform(0, 400)
-    mock_agent.learn.side_effect = lambda experiences: random.random()
-    mock_agent.save_checkpoint.side_effect = lambda *args, **kwargs: None
-    mock_agent.load_checkpoint.side_effect = lambda *args, **kwargs: None
-    mock_agent.wrap_models.side_effect = lambda *args, **kwargs: None
-    mock_agent.unwrap_models.side_effect = lambda *args, **kwargs: None
-    mock_agent.algo = "PPO"
 
-    mock_agent.registry = MagicMock()
+    num_envs = env.num_envs if hasattr(env, "num_envs") else 1
+    mock_agent.num_envs = num_envs
+    mock_agent.rollout_buffer = MagicMock()
+    mock_agent.recurrent = False
+    mock_agent.preprocess_observation.side_effect = lambda obs: obs
+    mock_agent._get_action_and_values.side_effect = lambda *args, **kwargs: (
+        torch.zeros(num_envs, env.action_size),
+        torch.zeros(num_envs),
+        torch.zeros(num_envs),
+        torch.zeros(num_envs, 1),
+        None,
+    )
     mock_agent.registry.policy = lambda: "actor"
     mock_agent.actor = MagicMock()
     mock_agent.actor.squash_output = False
-
     return mock_agent
 
 
 @pytest.fixture
 def mocked_bandit(bandit_env, algo):
-    mock_agent = MagicMock(spec=algo)
-    mock_agent.learn_step = 1
-    mock_agent.batch_size = 5
-    mock_agent.state_size = bandit_env.state_size
-    mock_agent.action_size = 2
+    mock_agent = _make_base_mock_agent(algo, bandit_env.state_size, 2)
     mock_agent.action_dim = 2
-    mock_agent.beta = 0.4
-    mock_agent.scores = []
-    mock_agent.steps = [0]
     mock_agent.regret = [0]
-    mock_agent.fitness = []
-    mock_agent.mut = "mutation"
-    mock_agent.index = 1
+
     mock_agent.get_action.side_effect = lambda state, *args, **kwargs: (
         np.random.randint(bandit_env.action_size)
     )
-    mock_agent.test.side_effect = lambda *args, **kwargs: np.random.uniform(0, 400)
     mock_agent.learn.side_effect = lambda experiences: random.random()
-    mock_agent.save_checkpoint.side_effect = lambda *args, **kwargs: None
-    mock_agent.load_checkpoint.side_effect = lambda *args, **kwargs: None
-    mock_agent.wrap_models.side_effect = lambda *args, **kwargs: None
-    mock_agent.unwrap_models.side_effect = lambda *args, **kwargs: None
-
     return mock_agent
 
 
 @pytest.fixture
 def mocked_multi_agent(multi_env, algo):
-    mock_agent = MagicMock(spec=algo)
-    mock_agent.learn_step = 1
-    mock_agent.batch_size = 5
+    agent_ids = ["agent_0", "other_agent_0"]
+    mock_agent = _make_base_mock_agent(
+        algo,
+        multi_env.state_size,
+        multi_env.action_size,
+        metrics=MultiAgentMetrics(agent_ids),
+    )
     mock_agent.lr = 0.1
-    mock_agent.agent_ids = ["agent_0", "other_agent_0"]
+    mock_agent.agent_ids = agent_ids
     mock_agent.shared_agent_ids = ["agent", "other_agent"]
-    mock_agent.state_size = multi_env.state_size
-    mock_agent.action_size = multi_env.action_size
-    mock_agent.scores = []
-    mock_agent.steps = [0]
-    mock_agent.fitness = []
     mock_agent.torch_compiler = None
-    mock_agent.mut = "mutation"
-    mock_agent.index = 1
     mock_agent.possible_action_spaces = Dict(
-        {
-            agent_id: multi_env.action_space(agent_id)
-            for agent_id in mock_agent.agent_ids
-        },
+        {aid: multi_env.action_space(aid) for aid in agent_ids},
     )
     mock_agent.possible_observation_spaces = Dict(
-        {
-            agent_id: multi_env.observation_space(agent_id)
-            for agent_id in mock_agent.agent_ids
-        },
+        {aid: multi_env.observation_space(aid) for aid in agent_ids},
     )
     mock_agent.action_space = deepcopy(mock_agent.possible_action_spaces)
     mock_agent.observation_space = deepcopy(mock_agent.possible_observation_spaces)
@@ -865,29 +953,21 @@ def mocked_multi_agent(multi_env, algo):
     mock_agent.get_group_id.side_effect = lambda x: (
         x.rsplit("_", 1)[0] if isinstance(x, str) else x
     )
-    mock_agent.registry = MagicMock()
     mock_agent.registry.policy.side_effect = lambda: "actors"
     mock_agent.has_grouped_agents.side_effect = lambda: algo == IPPO
-    mock_agent.actors = {agent_id: MagicMock() for agent_id in mock_agent.agent_ids}
+    mock_agent.actors = {aid: MagicMock() for aid in agent_ids}
 
     def get_action_on_policy(*args, **kwargs):
-        out = {
-            agent: np.random.randn(mock_agent.action_size)
-            for agent in mock_agent.agent_ids
-        }
+        out = {a: np.random.randn(1, mock_agent.action_size) for a in agent_ids}
         return out, out
 
     def get_action_off_policy(*args, **kwargs):
-        out = {
-            agent: np.random.randn(mock_agent.action_size)
-            for agent in mock_agent.agent_ids
-        }
+        out = {a: np.random.randn(1, mock_agent.action_size) for a in agent_ids}
         return out, out, out, out
 
     mock_agent.get_action.side_effect = (
         get_action_off_policy if algo == IPPO else get_action_on_policy
     )
-    mock_agent.test.side_effect = lambda *args, **kwargs: np.random.uniform(0, 400)
     if algo == IPPO:
         mock_agent.learn.side_effect = lambda experiences: {
             "agent_0": random.random(),
@@ -898,268 +978,116 @@ def mocked_multi_agent(multi_env, algo):
             "agent_0": (random.random(), random.random()),
             "other_agent_0": (random.random(), random.random()),
         }
-    mock_agent.save_checkpoint.side_effect = lambda *args, **kwargs: None
-    mock_agent.load_checkpoint.side_effect = lambda *args, **kwargs: None
-    mock_agent.wrap_models.side_effect = lambda *args, **kwargs: None
-    mock_agent.unwrap_models.side_effect = lambda *args, **kwargs: None
     if algo != IPPO:
-        mock_agent.reset_action_noise.side_effect = lambda *args, **kwargs: None
+        mock_agent.reset_action_noise.side_effect = lambda *a, **kw: None
     mock_agent.algo = {MADDPG: "MADDPG", MATD3: "MATD3", IPPO: "IPPO"}[algo]
-
     return mock_agent
+
+
+def _make_mock_replay_buffer(
+    spec_cls,
+    *,
+    len_value=10,
+    include_weights=True,
+    include_sample_from_indices=False,
+):
+    """Build a MagicMock replay buffer with dynamic shape tracking."""
+    mock = MagicMock(spec=spec_cls)
+    mock.counter = 0
+    mock.size = 0
+    mock.state_size = None
+    mock.action_size = None
+    mock.next_state_size = None
+    mock.__len__.return_value = len_value
+
+    def add(data: TensorDict):
+        if mock.state_size is None:
+            mock.num_envs = data["obs"].shape[0]
+            mock.state_size = data["obs"].shape
+            mock.action_size = data["action"].shape
+            mock.next_state_size = data["next_obs"].shape
+
+        mock.counter += 1
+        mock.size += 1
+
+        t = Transition(
+            obs=np.random.randn(*mock.state_size),
+            action=np.random.randn(*mock.action_size),
+            reward=np.random.uniform(0, 400, mock.num_envs),
+            done=np.random.choice([True, False], mock.num_envs),
+            next_obs=np.random.randn(*mock.next_state_size),
+        )
+        return t.to_tensordict()
+
+    mock.add.side_effect = add
+
+    def sample(batch_size, beta=None, *args):
+        if isinstance(batch_size, (list, torch.Tensor)):
+            batch_size = len(batch_size)
+
+        if batch_size == 1:
+            states = np.random.randn(*mock.state_size)
+            actions = np.random.randn(*mock.action_size)
+            rewards = np.random.uniform(0, 400)
+            dones = np.random.choice([True, False])
+            next_states = np.random.randn(*mock.next_state_size)
+        else:
+            states = np.array(
+                [np.random.randn(*mock.state_size) for _ in range(batch_size)],
+            )
+            actions = np.array(
+                [np.random.randn(*mock.action_size) for _ in range(batch_size)],
+            )
+            rewards = np.array([np.random.uniform(0, 400) for _ in range(batch_size)])
+            dones = np.array(
+                [np.random.choice([True, False]) for _ in range(batch_size)],
+            )
+            next_states = np.array(
+                [np.random.randn(*mock.next_state_size) for _ in range(batch_size)],
+            )
+
+        td = Transition(
+            obs=states,
+            action=actions,
+            reward=rewards,
+            done=dones,
+            next_obs=next_states,
+            batch_size=[batch_size],
+        ).to_tensordict()
+
+        if beta is not None:
+            idxs = [np.random.randn(1) for _ in range(batch_size)]
+            td["idxs"] = torch.tensor(idxs)
+            if include_weights:
+                td["weights"] = torch.tensor(list(range(batch_size)))
+        return td
+
+    mock.sample.side_effect = sample
+    if include_sample_from_indices:
+        mock.sample_from_indices.side_effect = sample
+    if spec_cls is PrioritizedReplayBuffer:
+        mock.update_priorities.side_effect = lambda idxs, priorities: None
+    return mock
 
 
 @pytest.fixture
 def mocked_per_memory():
-    mock_memory = MagicMock(spec=PrioritizedReplayBuffer)
-    mock_memory.counter = 0
-    mock_memory.size = 0
-    mock_memory.state_size = None
-    mock_memory.action_size = None
-    mock_memory.next_state_size = None
-    mock_memory.__len__.return_value = 10
-
-    def add(data: TensorDict):
-        if mock_memory.state_size is None:
-            mock_memory.num_envs = data["obs"].shape[0]
-            mock_memory.state_size = data["obs"].shape
-            mock_memory.action_size = data["action"].shape
-            mock_memory.next_state_size = data["next_obs"].shape
-
-        mock_memory.counter += 1
-        mock_memory.size += 1
-
-        one_step_transition = Transition(
-            obs=np.random.randn(*mock_memory.state_size),
-            action=np.random.randn(*mock_memory.action_size),
-            reward=np.random.uniform(0, 400, mock_memory.num_envs),
-            done=np.random.choice([True, False], mock_memory.num_envs),
-            next_obs=np.random.randn(*mock_memory.next_state_size),
-        )
-        return one_step_transition.to_tensordict()
-
-    # Assigning the save_to_memory function to the MagicMock
-    mock_memory.add.side_effect = add
-
-    def sample(batch_size, beta=None, *args):
-        # Account for sample_from_indices
-        if isinstance(batch_size, (list, torch.Tensor)):
-            batch_size = len(batch_size)
-
-        if batch_size == 1:
-            states = np.random.randn(*mock_memory.state_size)
-            actions = np.random.randn(*mock_memory.action_size)
-            rewards = np.random.uniform(0, 400)
-            dones = np.random.choice([True, False])
-            next_states = np.random.randn(*mock_memory.next_state_size)
-        else:
-            states = np.array(
-                [np.random.randn(*mock_memory.state_size) for _ in range(batch_size)],
-            )
-            actions = np.array(
-                [np.random.randn(*mock_memory.action_size) for _ in range(batch_size)],
-            )
-            rewards = np.array([np.random.uniform(0, 400) for _ in range(batch_size)])
-            dones = np.array(
-                [np.random.choice([True, False]) for _ in range(batch_size)],
-            )
-            next_states = np.array(
-                [
-                    np.random.randn(*mock_memory.next_state_size)
-                    for _ in range(batch_size)
-                ],
-            )
-        sample_transition = Transition(
-            obs=states,
-            action=actions,
-            reward=rewards,
-            done=dones,
-            next_obs=next_states,
-            batch_size=[batch_size],
-        ).to_tensordict()
-        if beta is not None:
-            idxs = [np.random.randn(1) for _ in range(batch_size)]
-            weights = list(range(batch_size))
-            sample_transition["weights"] = torch.tensor(weights)
-            sample_transition["idxs"] = torch.tensor(idxs)
-        return sample_transition
-
-    # Assigning the sample function to the MagicMock
-    mock_memory.sample.side_effect = sample
-
-    def update_priorities(idxs, priorities):
-        return None
-
-    mock_memory.update_priorities.side_effect = update_priorities
-
-    return mock_memory
+    return _make_mock_replay_buffer(PrioritizedReplayBuffer, include_weights=True)
 
 
 @pytest.fixture
 def mocked_memory():
-    mock_memory = MagicMock(spec=ReplayBuffer)
-    mock_memory.counter = 0
-    mock_memory.size = 0
-    mock_memory.state_size = None
-    mock_memory.action_size = None
-    mock_memory.next_state_size = None
-    mock_memory.__len__.return_value = 10
-
-    def add(data: TensorDict):
-        if mock_memory.state_size is None:
-            mock_memory.num_envs = data["obs"].shape[0]
-            mock_memory.state_size = data["obs"].shape
-            mock_memory.action_size = data["action"].shape
-            mock_memory.next_state_size = data["next_obs"].shape
-
-        mock_memory.counter += 1
-        mock_memory.size += 1
-
-        one_step_transition = Transition(
-            obs=np.random.randn(*mock_memory.state_size),
-            action=np.random.randn(*mock_memory.action_size),
-            reward=np.random.uniform(0, 400, mock_memory.num_envs),
-            done=np.random.choice([True, False], mock_memory.num_envs),
-            next_obs=np.random.randn(*mock_memory.next_state_size),
-        )
-        return one_step_transition.to_tensordict()
-
-    # Assigning the save_to_memory function to the MagicMock
-    mock_memory.add.side_effect = add
-
-    def sample(batch_size, beta=None, *args):
-        # Account for sample_from_indices
-        if isinstance(batch_size, (list, torch.Tensor)):
-            batch_size = len(batch_size)
-
-        if batch_size == 1:
-            states = np.random.randn(*mock_memory.state_size)
-            actions = np.random.randn(*mock_memory.action_size)
-            rewards = np.random.uniform(0, 400)
-            dones = np.random.choice([True, False])
-            next_states = np.random.randn(*mock_memory.next_state_size)
-        else:
-            states = np.array(
-                [np.random.randn(*mock_memory.state_size) for _ in range(batch_size)],
-            )
-            actions = np.array(
-                [np.random.randn(*mock_memory.action_size) for _ in range(batch_size)],
-            )
-            rewards = np.array([np.random.uniform(0, 400) for _ in range(batch_size)])
-            dones = np.array(
-                [np.random.choice([True, False]) for _ in range(batch_size)],
-            )
-            next_states = np.array(
-                [
-                    np.random.randn(*mock_memory.next_state_size)
-                    for _ in range(batch_size)
-                ],
-            )
-
-        sample_transition = Transition(
-            obs=states,
-            action=actions,
-            reward=rewards,
-            done=dones,
-            next_obs=next_states,
-            batch_size=[batch_size],
-        ).to_tensordict()
-
-        if beta is None:
-            return sample_transition
-
-        idxs = [np.random.randn(1) for _ in range(batch_size)]
-
-        sample_transition["idxs"] = torch.tensor(idxs)
-
-        return sample_transition
-
-    # Assigning the sample function to the MagicMock
-    mock_memory.sample.side_effect = sample
-
-    return mock_memory
+    return _make_mock_replay_buffer(ReplayBuffer, include_weights=False)
 
 
 @pytest.fixture
 def mocked_n_step_memory():
-    mock_memory = MagicMock(spec=MultiStepReplayBuffer)
-    mock_memory.counter = 0
-    mock_memory.size = 0
-    mock_memory.state_size = None
-    mock_memory.action_size = None
-    mock_memory.next_state_size = None
-    mock_memory.__len__.return_value = 10000
-
-    def add(data: TensorDict):
-        if mock_memory.state_size is None:
-            mock_memory.num_envs = data["obs"].shape[0]
-            mock_memory.state_size = data["obs"].shape
-            mock_memory.action_size = data["action"].shape
-            mock_memory.next_state_size = data["next_obs"].shape
-
-        mock_memory.size += 1
-        mock_memory.counter += 1
-
-        one_step_transition = Transition(
-            obs=np.random.randn(*mock_memory.state_size),
-            action=np.random.randn(*mock_memory.action_size),
-            reward=np.random.uniform(0, 400, mock_memory.num_envs),
-            done=np.random.choice([True, False], mock_memory.num_envs),
-            next_obs=np.random.randn(*mock_memory.next_state_size),
-        )
-        return one_step_transition.to_tensordict()
-
-    # Assigning the save_to_memory function to the MagicMock
-    mock_memory.add.side_effect = add
-
-    def sample(batch_size, beta=None, *args):
-        # Account for sample_from_indices
-        if isinstance(batch_size, (list, torch.Tensor)):
-            batch_size = len(batch_size)
-
-        if batch_size == 1:
-            states = np.random.randn(*mock_memory.state_size)
-            actions = np.random.randn(*mock_memory.action_size)
-            rewards = np.random.uniform(0, 400)
-            dones = np.random.choice([True, False])
-            next_states = np.random.randn(*mock_memory.next_state_size)
-        else:
-            states = np.array(
-                [np.random.randn(*mock_memory.state_size) for _ in range(batch_size)],
-            )
-            actions = np.array(
-                [np.random.randn(*mock_memory.action_size) for _ in range(batch_size)],
-            )
-            rewards = np.array([np.random.uniform(0, 400) for _ in range(batch_size)])
-            dones = np.array(
-                [np.random.choice([True, False]) for _ in range(batch_size)],
-            )
-            next_states = np.array(
-                [
-                    np.random.randn(*mock_memory.next_state_size)
-                    for _ in range(batch_size)
-                ],
-            )
-        sample_transition = Transition(
-            obs=states,
-            action=actions,
-            reward=rewards,
-            done=dones,
-            next_obs=next_states,
-            batch_size=[batch_size],
-        ).to_tensordict()
-        if beta is not None:
-            idxs = [np.random.randn(1) for _ in range(batch_size)]
-            weights = list(range(batch_size))
-            sample_transition["weights"] = torch.tensor(weights)
-            sample_transition["idxs"] = torch.tensor(idxs)
-        return sample_transition
-
-    # Assigning the sample function to the MagicMock
-    mock_memory.sample.side_effect = sample
-    mock_memory.sample_from_indices.side_effect = sample
-
-    return mock_memory
+    return _make_mock_replay_buffer(
+        MultiStepReplayBuffer,
+        len_value=10000,
+        include_weights=True,
+        include_sample_from_indices=True,
+    )
 
 
 @pytest.fixture
@@ -1207,49 +1135,59 @@ def mocked_multi_memory():
     mock_memory.__len__.return_value = 10000
     mock_memory.agents = ["agent_0", "other_agent_0"]
 
-    def save_to_memory(state, action, reward, next_state, done, is_vectorised=False):
-        mock_memory.state_size = next(iter(state.values())).shape
-        mock_memory.action_size = next(iter(action.values())).shape
-        mock_memory.next_state_size = next(iter(next_state.values())).shape
-        mock_memory.counter += 1
+    def add(data):
+        if mock_memory.state_size is None:
+            mock_memory.state_size = data["obs", mock_memory.agents[0]].shape[1:]
+        if mock_memory.action_size is None:
+            mock_memory.action_size = data["action", mock_memory.agents[0]].shape[1:]
+        if mock_memory.next_state_size is None:
+            mock_memory.next_state_size = data["next_obs", mock_memory.agents[0]].shape[
+                1:
+            ]
+        mock_memory.counter += data.shape[0]
 
-    # Assigning the save_to_memory function to the MagicMock
-    mock_memory.save_to_memory.side_effect = save_to_memory
+    mock_memory.add.side_effect = add
 
     def sample(batch_size, *args):
-        states = {
-            agent: np.array(
-                [np.random.randn(*mock_memory.state_size) for _ in range(batch_size)],
-            )
-            for agent in mock_memory.agents
-        }
-        actions = {
-            agent: np.array(
-                [np.random.randn(*mock_memory.action_size) for _ in range(batch_size)],
-            )
-            for agent in mock_memory.agents
-        }
-        rewards = {
-            agent: np.array([np.random.uniform(0, 400) for _ in range(batch_size)])
-            for agent in mock_memory.agents
-        }
-        dones = {
-            agent: np.array(
-                [np.random.choice([True, False]) for _ in range(batch_size)],
-            )
-            for agent in mock_memory.agents
-        }
-        next_states = {
-            agent: np.array(
-                [
-                    np.random.randn(*mock_memory.next_state_size)
-                    for _ in range(batch_size)
-                ],
-            )
-            for agent in mock_memory.agents
-        }
-
-        return states, actions, rewards, dones, next_states
+        obs = TensorDict(
+            {
+                a: torch.randn(batch_size, *mock_memory.state_size)
+                for a in mock_memory.agents
+            },
+            batch_size=[batch_size],
+        )
+        actions = TensorDict(
+            {
+                a: torch.randn(batch_size, *mock_memory.action_size)
+                for a in mock_memory.agents
+            },
+            batch_size=[batch_size],
+        )
+        rewards = TensorDict(
+            {a: torch.rand(batch_size, 1) for a in mock_memory.agents},
+            batch_size=[batch_size],
+        )
+        dones = TensorDict(
+            {a: torch.zeros(batch_size, 1) for a in mock_memory.agents},
+            batch_size=[batch_size],
+        )
+        next_obs = TensorDict(
+            {
+                a: torch.randn(batch_size, *mock_memory.next_state_size)
+                for a in mock_memory.agents
+            },
+            batch_size=[batch_size],
+        )
+        return TensorDict(
+            {
+                "obs": obs,
+                "action": actions,
+                "reward": rewards,
+                "done": dones,
+                "next_obs": next_obs,
+            },
+            batch_size=[batch_size],
+        )
 
     mock_memory.sample.side_effect = sample
 
@@ -1315,9 +1253,14 @@ def mocked_multi_env(state_size, action_size):
     mock_env = MagicMock(spec=DummyMultiEnv)
     mock_env.state_size = state_size
     mock_env.action_size = action_size
+    mock_env.num_envs = 1
     mock_env.agents = ["agent_0", "other_agent_0"]
-    mock_env.reset.side_effect = lambda *args: (
-        {agent: np.random.rand(*mock_env.state_size) for agent in mock_env.agents},
+    mock_env.possible_agents = ["agent_0", "other_agent_0"]
+    mock_env.reset.side_effect = lambda *args, **kwargs: (
+        {
+            agent: np.expand_dims(np.random.rand(*mock_env.state_size), 0)
+            for agent in mock_env.agents
+        },
         {
             agent: {
                 "env_defined_actions": (
@@ -1328,10 +1271,22 @@ def mocked_multi_env(state_size, action_size):
         },
     )
     mock_env.step.side_effect = lambda *args: (
-        {agent: np.random.rand(*mock_env.state_size) for agent in mock_env.agents},
-        {agent: np.random.randint(0, 5) for agent in mock_env.agents},
-        {agent: np.random.randint(0, 2) for agent in mock_env.agents},
-        {agent: np.random.randint(0, 2) for agent in mock_env.agents},
+        {
+            agent: np.expand_dims(np.random.rand(*mock_env.state_size), 0)
+            for agent in mock_env.agents
+        },
+        {
+            agent: np.array([np.random.randint(0, 5)], dtype=np.float64)
+            for agent in mock_env.agents
+        },
+        {
+            agent: np.array([np.random.randint(0, 2)], dtype=bool)
+            for agent in mock_env.agents
+        },
+        {
+            agent: np.array([np.random.randint(0, 2)], dtype=bool)
+            for agent in mock_env.agents
+        },
         {
             agent: {
                 "env_defined_actions": (
@@ -1376,7 +1331,6 @@ def offline_init_hp():
         "DOUBLE": False,
         "LEARN_STEP": 1,
         "TAU": 1e-3,
-        "CHANNELS_LAST": False,
         "POP_SIZE": 6,
         "MEMORY_SIZE": 20000,
         "DATASET": "../data/cartpole/cartpole_v1.1.0.h5",
@@ -1400,10 +1354,7 @@ def dummy_h5py_data(action_size, state_size):
 
 
 class TestTrainOffPolicy:
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "vect"),
-        [((6,), 2, True), ((6,), 2, False)],
-    )
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_BOTH)
     def test_train_off_policy(
         self, env, population_off_policy, tournament, mutations, memory
     ):
@@ -1413,14 +1364,11 @@ class TestTrainOffPolicy:
             "algo",
             population_off_policy,
             memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            n_step=False,
-            per=False,
             n_step_memory=None,
             tournament=tournament,
             mutation=mutations,
@@ -1428,18 +1376,12 @@ class TestTrainOffPolicy:
         )
 
         assert len(pop) == len(population_off_policy)
+        assert len(pop) == len(population_off_policy)
 
     @pytest.mark.parametrize(
-        ("state_size", "action_size", "vect", "algo", "num_envs", "learn_step"),
-        [
-            ((6,), 2, False, DQN, 1, 2),
-            ((6,), 2, False, DDPG, 1, 2),
-            ((6,), 2, False, TD3, 1, 2),
-            ((6,), 2, True, DQN, 2, 1),
-            ((6,), 2, True, DDPG, 2, 1),
-            ((6,), 2, True, TD3, 2, 1),
-        ],
+        ("algo", "num_envs", "learn_step"), [(DQN, 2, 1), (DDPG, 2, 1), (TD3, 1, 2)]
     )
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_BOTH)
     def test_train_off_policy_agent_calls_made(
         self,
         env,
@@ -1459,6 +1401,8 @@ class TestTrainOffPolicy:
 
             if env.vect:
                 env.num_envs = num_envs
+                env.n_envs = num_envs
+                env.state_size = (num_envs, *env._single_state_size)
 
             _pop, _ = train_off_policy(
                 env,
@@ -1466,14 +1410,11 @@ class TestTrainOffPolicy:
                 "algo",
                 mock_population,
                 memory,
-                INIT_HP=None,
-                MUT_P=None,
-                swap_channels=False,
+                init_hp=None,
+                mut_p=None,
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                n_step=False,
-                per=False,
                 n_step_memory=None,
                 tournament=tournament,
                 mutation=mutations,
@@ -1488,27 +1429,17 @@ class TestTrainOffPolicy:
             if accelerator is not None:
                 mocked_agent_off_policy.wrap_models.assert_called()
                 mocked_agent_off_policy.unwrap_models.assert_called()
+            mocked_agent_off_policy.get_action.assert_called()
+            mocked_agent_off_policy.learn.assert_called()
+            mocked_agent_off_policy.test.assert_called()
+            if accelerator is not None:
+                mocked_agent_off_policy.wrap_models.assert_called()
+                mocked_agent_off_policy.unwrap_models.assert_called()
 
-    @pytest.mark.parametrize(
-        (
-            "state_size",
-            "action_size",
-            "vect",
-            "algo",
-            "num_envs",
-            "learn_step",
-            "n_step",
-            "per",
-        ),
-        [
-            ((6,), 2, False, RainbowDQN, 1, 2, True, False),
-            ((6,), 2, True, RainbowDQN, 2, 1, True, False),
-            ((6,), 2, False, RainbowDQN, 1, 2, True, True),
-            ((6,), 2, True, RainbowDQN, 2, 1, True, True),
-            ((6,), 2, False, RainbowDQN, 1, 2, False, False),
-            ((6,), 2, True, RainbowDQN, 2, 1, False, False),
-        ],
-    )
+    @pytest.mark.parametrize(("per", "n_step"), [(False, True), (True, True)])
+    @pytest.mark.parametrize(("num_envs", "learn_step"), [(2, 1)])
+    @pytest.mark.parametrize("algo", [RainbowDQN])
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_BOTH)
     def test_train_off_policy_agent_calls_made_rainbow(
         self,
         env,
@@ -1528,22 +1459,23 @@ class TestTrainOffPolicy:
         mock_population = [mocked_agent_off_policy for _ in range(6)]
         for agent in mock_population:
             agent.learn_step = learn_step
-        env.n_envs = num_envs
+        if env.vect:
+            env.num_envs = num_envs
+            env.n_envs = num_envs
+            env.state_size = (num_envs, *env._single_state_size)
+        buf = DummyPrioritizedMemory() if per else memory
 
         _pop, _ = train_off_policy(
             env,
             "env_name",
             "Rainbow DQN",
             mock_population,
-            memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            buf,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            n_step=n_step,
-            per=per,
             n_step_memory=n_step_memory,
             tournament=tournament,
             mutation=mutations,
@@ -1555,8 +1487,11 @@ class TestTrainOffPolicy:
         mocked_agent_off_policy.get_action.assert_called()
         mocked_agent_off_policy.learn.assert_called()
         mocked_agent_off_policy.test.assert_called()
+        mocked_agent_off_policy.get_action.assert_called()
+        mocked_agent_off_policy.learn.assert_called()
+        mocked_agent_off_policy.test.assert_called()
 
-    @pytest.mark.parametrize(("state_size", "action_size", "vect"), [((6,), 2, False)])
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_NOVECT)
     def test_train_off_policy_save_elite_warning(
         self,
         env,
@@ -1566,8 +1501,8 @@ class TestTrainOffPolicy:
         memory,
     ):
         warning_string = (
-            r"'save_elite' set to False but 'elite_path' has been defined, "
-            r"elite will not\s+be saved unless 'save_elite' is set to True\."
+            "'save_elite' set to False but 'elite_path' has been defined, elite will not\
+                      be saved unless 'save_elite' is set to True."
         )
         with pytest.warns(match=warning_string):
             _pop, _ = train_off_policy(
@@ -1576,14 +1511,11 @@ class TestTrainOffPolicy:
                 "algo",
                 population_off_policy,
                 memory,
-                INIT_HP=None,
-                MUT_P=None,
-                swap_channels=False,
+                init_hp=None,
+                mut_p=None,
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                n_step=False,
-                per=False,
                 n_step_memory=None,
                 tournament=tournament,
                 mutation=mutations,
@@ -1592,7 +1524,7 @@ class TestTrainOffPolicy:
                 elite_path="path",
             )
 
-    @pytest.mark.parametrize(("state_size", "action_size", "vect"), [((6,), 2, False)])
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_NOVECT)
     def test_train_off_policy_checkpoint_warning(
         self,
         env,
@@ -1602,8 +1534,8 @@ class TestTrainOffPolicy:
         memory,
     ):
         warning_string = (
-            r"'checkpoint' set to None but 'checkpoint_path' has been defined, "
-            r"checkpoint will not\s+be saved unless 'checkpoint' is defined\."
+            "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
+                      be saved unless 'checkpoint' is defined."
         )
         with pytest.warns(match=warning_string):
             _pop, _ = train_off_policy(
@@ -1612,14 +1544,11 @@ class TestTrainOffPolicy:
                 "algo",
                 population_off_policy,
                 memory,
-                INIT_HP=None,
-                MUT_P=None,
-                swap_channels=False,
+                init_hp=None,
+                mut_p=None,
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                n_step=False,
-                per=False,
                 n_step_memory=None,
                 tournament=tournament,
                 mutation=mutations,
@@ -1628,7 +1557,7 @@ class TestTrainOffPolicy:
                 checkpoint_path="path",
             )
 
-    @pytest.mark.parametrize(("state_size", "action_size", "vect"), [((6,), 2, False)])
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_NOVECT)
     def test_actions_histogram(
         self, env, population_off_policy, tournament, mutations, memory
     ):
@@ -1638,14 +1567,11 @@ class TestTrainOffPolicy:
             "DQN",
             population_off_policy,
             memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            n_step=False,
-            per=False,
             n_step_memory=None,
             tournament=tournament,
             mutation=mutations,
@@ -1653,8 +1579,9 @@ class TestTrainOffPolicy:
         )
 
         assert len(pop) == len(population_off_policy)
+        assert len(pop) == len(population_off_policy)
 
-    @pytest.mark.parametrize(("state_size", "action_size", "vect"), [((6,), 2, True)])
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_off_policy_replay_buffer_calls(
         self,
         mocked_memory,
@@ -1669,14 +1596,11 @@ class TestTrainOffPolicy:
             "algo",
             population_off_policy,
             mocked_memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            n_step=False,
-            per=False,
             n_step_memory=None,
             tournament=tournament,
             mutation=mutations,
@@ -1685,10 +1609,8 @@ class TestTrainOffPolicy:
         mocked_memory.add.assert_called()
         mocked_memory.sample.assert_called()
 
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "vect", "per"),
-        [((6,), 2, True, True), ((6,), 2, True, False)],
-    )
+    @pytest.mark.parametrize("per", [False, True])
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_off_policy_alternate_buffer_calls(
         self,
         env,
@@ -1707,14 +1629,11 @@ class TestTrainOffPolicy:
             "algo",
             population_off_policy,
             memory=mocked_memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            n_step=True,
-            per=per,
             n_step_memory=mocked_n_step_memory,
             tournament=tournament,
             mutation=mutations,
@@ -1728,12 +1647,7 @@ class TestTrainOffPolicy:
         else:
             mocked_memory.sample.assert_called()
 
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "vect"),
-        [
-            ((6,), 2, True),
-        ],
-    )
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_off_policy_env_calls(
         self,
         mocked_env,
@@ -1748,14 +1662,11 @@ class TestTrainOffPolicy:
             "algo",
             population_off_policy,
             memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            n_step=False,
-            per=False,
             n_step_memory=None,
             tournament=tournament,
             mutation=mutations,
@@ -1764,12 +1675,7 @@ class TestTrainOffPolicy:
         mocked_env.step.assert_called()
         mocked_env.reset.assert_called()
 
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "vect"),
-        [
-            ((6,), 2, True),
-        ],
-    )
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_off_policy_tourn_mut_calls(
         self,
         env,
@@ -1784,14 +1690,11 @@ class TestTrainOffPolicy:
             "algo",
             population_off_policy,
             memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            n_step=False,
-            per=False,
             n_step_memory=None,
             tournament=mocked_tournament,
             mutation=mocked_mutations,
@@ -1800,9 +1703,7 @@ class TestTrainOffPolicy:
         mocked_mutations.mutation.assert_called()
         mocked_tournament.select.assert_called()
 
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "vect"), [((32, 32, 3), 2, False)]
-    )
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _IMG_NOVECT)
     def test_train_off_policy_rgb_input(
         self,
         env,
@@ -1817,14 +1718,11 @@ class TestTrainOffPolicy:
             "algo",
             population_off_policy,
             memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=True,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            n_step=False,
-            per=False,
             n_step_memory=None,
             tournament=tournament,
             mutation=mutations,
@@ -1832,11 +1730,10 @@ class TestTrainOffPolicy:
         )
 
         assert len(pop) == len(population_off_policy)
+        assert len(pop) == len(population_off_policy)
 
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "vect", "per"),
-        [((6,), 2, True, True), ((6,), 2, True, False)],
-    )
+    @pytest.mark.parametrize("per", [False, True])
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_off_policy_using_alternate_buffers(
         self,
         env,
@@ -1847,20 +1744,18 @@ class TestTrainOffPolicy:
         n_step_memory,
         per,
     ):
+        buf = DummyPrioritizedMemory() if per else memory
         pop, _ = train_off_policy(
             env,
             "env_name",
             "algo",
             population_off_policy,
-            memory=memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            memory=buf,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            n_step=True,
-            per=per,
             n_step_memory=n_step_memory,
             tournament=tournament,
             mutation=mutations,
@@ -1868,10 +1763,9 @@ class TestTrainOffPolicy:
         )
 
         assert len(pop) == len(population_off_policy)
+        assert len(pop) == len(population_off_policy)
 
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "vect"), [((3, 64, 64), 2, True)]
-    )
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _IMG_VECT)
     def test_train_off_policy_using_alternate_buffers_rgb(
         self,
         env,
@@ -1887,14 +1781,11 @@ class TestTrainOffPolicy:
             "algo",
             population_off_policy,
             memory=memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=True,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            n_step=True,
-            per=True,
             n_step_memory=n_step_memory,
             tournament=tournament,
             mutation=mutations,
@@ -1902,11 +1793,9 @@ class TestTrainOffPolicy:
         )
 
         assert len(pop) == len(population_off_policy)
+        assert len(pop) == len(population_off_policy)
 
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "vect"),
-        [((6,), 2, True), ((6,), 2, False)],
-    )
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_off_policy_distributed(
         self,
         env,
@@ -1922,14 +1811,11 @@ class TestTrainOffPolicy:
             "algo",
             population_off_policy,
             memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            n_step=False,
-            per=False,
             n_step_memory=None,
             tournament=tournament,
             mutation=mutations,
@@ -1938,22 +1824,22 @@ class TestTrainOffPolicy:
         )
 
         assert len(pop) == len(population_off_policy)
+        assert len(pop) == len(population_off_policy)
 
-    @pytest.mark.parametrize(("state_size", "action_size", "vect"), [((6,), 2, True)])
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_wandb_init_log(
         self, env, population_off_policy, tournament, mutations, memory
     ):
-        INIT_HP = {
+        init_hp = {
             "BATCH_SIZE": 128,
             "LR": 1e-3,
             "GAMMA": 0.99,
             "LEARN_STEP": 1,
             "TAU": 1e-3,
-            "CHANNELS_LAST": False,
             "POP_SIZE": 6,
             "MEMORY_SIZE": 20000,
         }
-        MUT_P = {
+        mut_p = {
             "NO_MUT": 0.4,
             "ARCH_MUT": 0.2,
             "PARAMS_MUT": 0.2,
@@ -1961,12 +1847,11 @@ class TestTrainOffPolicy:
             "RL_HP_MUT": 0.2,
         }
         with (
-            patch("agilerl.training.train_off_policy.wandb.login") as _,
-            patch("agilerl.training.train_off_policy.wandb.init") as mock_wandb_init,
-            patch("agilerl.training.train_off_policy.wandb.log") as mock_wandb_log,
-            patch(
-                "agilerl.training.train_off_policy.wandb.finish"
-            ) as mock_wandb_finish,
+            patch("agilerl.utils.utils.wandb.login") as _,
+            patch("agilerl.utils.utils.wandb.init") as mock_wandb_init,
+            patch("agilerl.logger.wandb.run", new=MagicMock()),
+            patch("agilerl.logger.wandb.log") as mock_wandb_log,
+            patch("agilerl.logger.wandb.finish") as mock_wandb_finish,
         ):
             # Call the function that should trigger wandb.init
             agilerl.training.train_off_policy.train_off_policy(
@@ -1975,14 +1860,11 @@ class TestTrainOffPolicy:
                 "algo",
                 population_off_policy,
                 memory,
-                INIT_HP=INIT_HP,
-                MUT_P=MUT_P,
-                swap_channels=False,
+                init_hp=init_hp,
+                mut_p=mut_p,
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                n_step=False,
-                per=False,
                 n_step_memory=None,
                 tournament=tournament,
                 mutation=mutations,
@@ -1997,25 +1879,12 @@ class TestTrainOffPolicy:
                 config=ANY,
             )
             # Assert that wandb.log was called with expected log parameters
-            mock_wandb_log.assert_called_with(
-                {
-                    "global_step": ANY,
-                    "fps": ANY,
-                    "train/mean_score": ANY,
-                    "eval/mean_fitness": ANY,
-                    "eval/best_fitness": ANY,
-                },
-            )
+            _assert_wandb_summary_log(mock_wandb_log)
             # Assert that wandb.finish was called
             mock_wandb_finish.assert_called()
 
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "vect", "accelerator"),
-        [
-            ((6,), 2, True, True),
-            ((6,), 2, True, False),
-        ],
-    )
+    @pytest.mark.parametrize("accelerator", [False, True])
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_wandb_init_log_distributed(
         self,
         env,
@@ -2026,17 +1895,16 @@ class TestTrainOffPolicy:
         accelerator,
     ):
         accelerator = Accelerator() if accelerator else None
-        INIT_HP = {
+        init_hp = {
             "BATCH_SIZE": 128,
             "LR": 1e-3,
             "GAMMA": 0.99,
             "LEARN_STEP": 1,
             "TAU": 1e-3,
-            "CHANNELS_LAST": False,
             "POP_SIZE": 6,
             "MEMORY_SIZE": 20000,
         }
-        MUT_P = {
+        mut_p = {
             "NO_MUT": 0.4,
             "ARCH_MUT": 0.2,
             "PARAMS_MUT": 0.2,
@@ -2044,12 +1912,11 @@ class TestTrainOffPolicy:
             "RL_HP_MUT": 0.2,
         }
         with (
-            patch("agilerl.training.train_off_policy.wandb.login") as _,
-            patch("agilerl.training.train_off_policy.wandb.init") as mock_wandb_init,
-            patch("agilerl.training.train_off_policy.wandb.log") as mock_wandb_log,
-            patch(
-                "agilerl.training.train_off_policy.wandb.finish"
-            ) as mock_wandb_finish,
+            patch("agilerl.utils.utils.wandb.login") as _,
+            patch("agilerl.utils.utils.wandb.init") as mock_wandb_init,
+            patch("agilerl.logger.wandb.run", new=MagicMock()),
+            patch("agilerl.logger.wandb.log") as mock_wandb_log,
+            patch("agilerl.logger.wandb.finish") as mock_wandb_finish,
         ):
             # Call the function that should trigger wandb.init
             agilerl.training.train_off_policy.train_off_policy(
@@ -2058,14 +1925,11 @@ class TestTrainOffPolicy:
                 "algo",
                 population_off_policy,
                 memory,
-                INIT_HP=INIT_HP,
-                MUT_P=MUT_P,
-                swap_channels=False,
+                init_hp=init_hp,
+                mut_p=mut_p,
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                n_step=False,
-                per=False,
                 n_step_memory=None,
                 tournament=tournament,
                 mutation=mutations,
@@ -2081,33 +1945,24 @@ class TestTrainOffPolicy:
                 config=ANY,
             )
             # Assert that wandb.log was called with expected log parameters
-            mock_wandb_log.assert_called_with(
-                {
-                    "global_step": ANY,
-                    "fps": ANY,
-                    "train/mean_score": ANY,
-                    "eval/mean_fitness": ANY,
-                    "eval/best_fitness": ANY,
-                },
-            )
+            _assert_wandb_summary_log(mock_wandb_log)
             # Assert that wandb.finish was called
             mock_wandb_finish.assert_called()
 
-    @pytest.mark.parametrize(("state_size", "action_size", "vect"), [((6,), 2, True)])
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_early_stop_wandb(
         self, env, population_off_policy, tournament, mutations, memory
     ):
-        INIT_HP = {
+        init_hp = {
             "BATCH_SIZE": 128,
             "LR": 1e-3,
             "GAMMA": 0.99,
             "LEARN_STEP": 1,
             "TAU": 1e-3,
-            "CHANNELS_LAST": False,
             "POP_SIZE": 6,
             "MEMORY_SIZE": 20000,
         }
-        MUT_P = {
+        mut_p = {
             "NO_MUT": 0.4,
             "ARCH_MUT": 0.2,
             "PARAMS_MUT": 0.2,
@@ -2115,12 +1970,11 @@ class TestTrainOffPolicy:
             "RL_HP_MUT": 0.2,
         }
         with (
-            patch("agilerl.training.train_off_policy.wandb.login") as _,
-            patch("agilerl.training.train_off_policy.wandb.init") as _,
-            patch("agilerl.training.train_off_policy.wandb.log") as _,
-            patch(
-                "agilerl.training.train_off_policy.wandb.finish"
-            ) as mock_wandb_finish,
+            patch("agilerl.utils.utils.wandb.login") as _,
+            patch("agilerl.utils.utils.wandb.init") as _,
+            patch("agilerl.logger.wandb.run", new=MagicMock()),
+            patch("agilerl.logger.wandb.log") as _,
+            patch("agilerl.logger.wandb.finish") as mock_wandb_finish,
         ):
             # Call the function that should trigger wandb.init
             agilerl.training.train_off_policy.train_off_policy(
@@ -2129,15 +1983,12 @@ class TestTrainOffPolicy:
                 "algo",
                 population_off_policy,
                 memory,
-                INIT_HP=INIT_HP,
-                MUT_P=MUT_P,
+                init_hp=init_hp,
+                mut_p=mut_p,
                 target=-10000,
-                swap_channels=False,
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                n_step=False,
-                per=False,
                 n_step_memory=None,
                 tournament=tournament,
                 mutation=mutations,
@@ -2147,7 +1998,7 @@ class TestTrainOffPolicy:
             # Assert that wandb.finish was called
             mock_wandb_finish.assert_called()
 
-    @pytest.mark.parametrize(("state_size", "action_size", "vect"), [((6,), 2, True)])
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_off_policy_save_elite(
         self,
         env,
@@ -2164,14 +2015,11 @@ class TestTrainOffPolicy:
             "algo",
             population_off_policy,
             memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            n_step=False,
-            per=False,
             n_step_memory=None,
             tournament=tournament,
             mutation=mutations,
@@ -2181,10 +2029,8 @@ class TestTrainOffPolicy:
         )
         assert os.path.isfile(elite_path)
 
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "vect", "accelerator_flag"),
-        [((6,), 2, True, True), ((6,), 2, True, False)],
-    )
+    @pytest.mark.parametrize("accelerator_flag", [False, True])
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_save_checkpoint(
         self,
         env,
@@ -2203,14 +2049,11 @@ class TestTrainOffPolicy:
             "algo",
             population_off_policy,
             memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            n_step=False,
-            per=False,
             n_step_memory=None,
             tournament=tournament,
             mutation=mutations,
@@ -2222,14 +2065,15 @@ class TestTrainOffPolicy:
         for i in range(6):  # iterate through the population indices
             assert os.path.isfile(f"{checkpoint_path}_{i}_{50}.pt")
 
-    @pytest.mark.parametrize(("state_size", "action_size", "vect"), [((6,), 2, True)])
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_off_policy_wandb_kwargs_update(self, env, memory):
         agent = DummyAgentOffPolicy(5, env, 0.4)
 
         with (
-            patch("agilerl.training.train_off_policy.init_wandb") as mock_init_wandb,
-            patch("agilerl.training.train_off_policy.wandb.log"),
-            patch("agilerl.training.train_off_policy.wandb.finish"),
+            patch("agilerl.utils.utils.init_wandb") as mock_init_wandb,
+            patch("agilerl.logger.wandb.run", new=MagicMock()),
+            patch("agilerl.logger.wandb.log"),
+            patch("agilerl.logger.wandb.finish"),
         ):
             train_off_policy(
                 env,
@@ -2248,7 +2092,7 @@ class TestTrainOffPolicy:
         assert kwargs["project"] == "custom_project"
         assert kwargs["name"] == "custom_run"
 
-    @pytest.mark.parametrize(("state_size", "action_size", "vect"), [((6,), 2, True)])
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_off_policy_per_nstep_none_branches(self, env):
         class CapturingPerAgent(DummyAgentOffPolicy):
             def __init__(self, batch_size, env):
@@ -2266,10 +2110,9 @@ class TestTrainOffPolicy:
             "env_name",
             "algo",
             [agent_gt],
-            DummyMemory(),
+            DummyPrioritizedMemory(),
             max_steps=4,
             evo_steps=4,
-            per=True,
             n_step_memory=None,
             verbose=False,
         )
@@ -2282,16 +2125,15 @@ class TestTrainOffPolicy:
             "env_name",
             "algo",
             [agent_le],
-            DummyMemory(),
+            DummyPrioritizedMemory(),
             max_steps=4,
             evo_steps=4,
-            per=True,
             n_step_memory=None,
             verbose=False,
         )
         assert any(item is None for item in agent_le.captured)
 
-    @pytest.mark.parametrize(("state_size", "action_size", "vect"), [((6,), 2, True)])
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_off_policy_wandb_dqn_and_ddpg_loss_branches(self, env, monkeypatch):
         class DQNLossAgent(DummyAgentOffPolicy):
             def get_action(self, *args, **kwargs):
@@ -2305,18 +2147,19 @@ class TestTrainOffPolicy:
                 return (0.1, 0.2)
 
         dqn_agent = DQNLossAgent(5, env, 0.4)
-        dqn_agent.steps = [0] * 100
+        dqn_agent.steps = 0
         ddpg_agent = DDPGLossAgent(5, env, 0.4)
-        ddpg_agent.steps = [0] * 100
+        ddpg_agent.steps = 0
 
         monkeypatch.setattr(agilerl.training.train_off_policy, "DQN", DQNLossAgent)
         monkeypatch.setattr(agilerl.training.train_off_policy, "DDPG", DDPGLossAgent)
         monkeypatch.setattr(agilerl.training.train_off_policy, "TD3", DDPGLossAgent)
 
         with (
-            patch("agilerl.training.train_off_policy.init_wandb"),
-            patch("agilerl.training.train_off_policy.wandb.log") as mock_wandb_log,
-            patch("agilerl.training.train_off_policy.wandb.finish"),
+            patch("agilerl.utils.utils.init_wandb"),
+            patch("agilerl.logger.wandb.run", new=MagicMock()),
+            patch("agilerl.logger.wandb.log") as mock_wandb_log,
+            patch("agilerl.logger.wandb.finish"),
         ):
             train_off_policy(
                 env,
@@ -2330,8 +2173,9 @@ class TestTrainOffPolicy:
                 verbose=False,
             )
             dqn_log = mock_wandb_log.call_args[0][0]
-            assert "train/agent_0_actor_loss" in dqn_log
-            assert any(key.startswith("train/action_") for key in dqn_log)
+            assert "train/global_step" in dqn_log
+            assert "eval/mean_fitness" in dqn_log
+            assert "train/mean_score" in dqn_log
 
             train_off_policy(
                 env,
@@ -2345,20 +2189,20 @@ class TestTrainOffPolicy:
                 verbose=False,
             )
             ddpg_log = mock_wandb_log.call_args[0][0]
-            assert "train/agent_0_actor_loss" in ddpg_log
-            assert "train/agent_0_critic_loss" in ddpg_log
+            assert "train/global_step" in ddpg_log
+            assert "eval/mean_fitness" in ddpg_log
+            assert "train/mean_score" in ddpg_log
 
-    @pytest.mark.parametrize(("state_size", "action_size", "vect"), [((6,), 2, True)])
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_off_policy_early_stop_wb_branch(self, env):
         agent = DummyAgentOffPolicy(5, env, 0.4)
-        agent.steps = [0] * 100
+        agent.steps = 0
 
         with (
-            patch("agilerl.training.train_off_policy.init_wandb"),
-            patch("agilerl.training.train_off_policy.wandb.log"),
-            patch(
-                "agilerl.training.train_off_policy.wandb.finish"
-            ) as mock_wandb_finish,
+            patch("agilerl.utils.utils.init_wandb"),
+            patch("agilerl.logger.wandb.run", new=MagicMock()),
+            patch("agilerl.logger.wandb.log"),
+            patch("agilerl.logger.wandb.finish") as mock_wandb_finish,
         ):
             train_off_policy(
                 env,
@@ -2373,6 +2217,229 @@ class TestTrainOffPolicy:
                 verbose=False,
             )
         mock_wandb_finish.assert_called()
+
+
+class TestTrainTargetEarlyReturn:
+    """Cover ``population.should_stop`` early-return branches in train loops."""
+
+    @staticmethod
+    def _population_with_min_evo(agents: list) -> Population:
+        return Population(agents=agents, min_evo_steps=0)
+
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
+    def test_train_off_policy_returns_when_target_met(self, env):
+        agent = DummyAgentOffPolicy(5, env, 0.4)
+        agent.fitness = [100.0]
+        population = self._population_with_min_evo([agent])
+
+        with (
+            patch(
+                "agilerl.training.train_off_policy.Population",
+                return_value=population,
+            ),
+            patch("agilerl.utils.utils.init_wandb"),
+            patch("agilerl.logger.wandb.run", new=MagicMock()),
+            patch("agilerl.logger.wandb.log"),
+            patch.object(population, "finish") as mock_finish,
+        ):
+            agents, fitnesses = train_off_policy(
+                env,
+                "env_name",
+                "algo",
+                [agent],
+                DummyMemory(),
+                max_steps=100,
+                evo_steps=2,
+                target=-1.0,
+                wb=True,
+                verbose=False,
+            )
+
+        assert agents is population.agents
+        assert fitnesses == population.last_fitnesses
+        mock_finish.assert_called_once()
+
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
+    def test_train_on_policy_returns_when_target_met(self, env):
+        agent = DummyAgentOnPolicy(5, env)
+        agent.fitness = [100.0]
+        population = self._population_with_min_evo([agent])
+
+        with (
+            patch(
+                "agilerl.training.train_on_policy.Population",
+                return_value=population,
+            ),
+            patch("agilerl.utils.utils.init_wandb"),
+            patch("agilerl.logger.wandb.run", new=MagicMock()),
+            patch("agilerl.logger.wandb.log"),
+            patch.object(population, "finish") as mock_finish,
+        ):
+            agents, fitnesses = train_on_policy(
+                env,
+                "env_name",
+                "algo",
+                [agent],
+                max_steps=100,
+                evo_steps=2,
+                target=-1.0,
+                wb=True,
+                verbose=False,
+            )
+
+        assert agents is population.agents
+        assert fitnesses == population.last_fitnesses
+        mock_finish.assert_called_once()
+
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
+    def test_train_offline_returns_when_target_met(self, env, dummy_h5py_data):
+        agent = DummyAgentOffPolicy(5, env, 0.4)
+        agent.fitness = [100.0]
+        population = self._population_with_min_evo([agent])
+        memory = DummyMemory()
+        seed_transition = Transition(
+            obs=np.random.randn(2, *env.state_size[1:]),
+            action=np.random.randn(2, env.action_size),
+            reward=np.random.uniform(0, 1, 2),
+            done=np.random.choice([True, False], 2),
+            next_obs=np.random.randn(2, *env.state_size[1:]),
+        ).to_tensordict()
+        seed_transition.batch_size = [2]
+        memory.add(seed_transition)
+
+        with (
+            patch(
+                "agilerl.training.train_offline.Population",
+                return_value=population,
+            ),
+            patch("agilerl.utils.utils.init_wandb"),
+            patch("agilerl.logger.wandb.run", new=MagicMock()),
+            patch("agilerl.logger.wandb.log"),
+            patch.object(population, "finish") as mock_finish,
+        ):
+            agents, fitnesses = train_offline(
+                env,
+                "env_name",
+                "algo",
+                [agent],
+                memory,
+                dataset=dummy_h5py_data,
+                max_steps=100,
+                evo_steps=2,
+                target=-1.0,
+                wb=True,
+                verbose=False,
+            )
+
+        assert agents is population.agents
+        assert fitnesses == population.last_fitnesses
+        mock_finish.assert_called_once()
+
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
+    def test_train_multi_agent_off_policy_returns_when_target_met(
+        self,
+        multi_env,
+        multi_memory,
+    ):
+        agent = DummyMultiAgent(1, multi_env, on_policy=False)
+        agent.fitness = [100.0]
+        population = self._population_with_min_evo([agent])
+        should_stop_results: list[bool] = []
+
+        def should_stop_spy(target):
+            result = Population.should_stop(population, target)
+            should_stop_results.append(result)
+            return result
+
+        with (
+            patch(
+                "agilerl.training.train_multi_agent_off_policy.Population",
+                return_value=population,
+            ),
+            patch("agilerl.utils.utils.init_wandb"),
+            patch("agilerl.logger.wandb.run", new=MagicMock()),
+            patch("agilerl.logger.wandb.log"),
+            patch.object(population, "finish") as mock_finish,
+            patch.object(population, "should_stop", side_effect=should_stop_spy),
+        ):
+            agents, fitnesses = train_multi_agent_off_policy(
+                multi_env,
+                "env_name",
+                "algo",
+                [agent],
+                multi_memory,
+                max_steps=100,
+                evo_steps=2,
+                target=-1.0,
+                wb=True,
+                verbose=False,
+            )
+
+        assert agents is population.agents
+        assert fitnesses == population.last_fitnesses
+        mock_finish.assert_called_once()
+        assert should_stop_results == [True]
+        assert agent.steps < 100
+
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
+    def test_train_multi_agent_on_policy_returns_when_target_met(self, multi_env):
+        agent = DummyMultiAgent(1, multi_env, on_policy=True)
+        agent.fitness = [100.0]
+        population = self._population_with_min_evo([agent])
+        should_stop_results: list[bool] = []
+
+        def should_stop_spy(target):
+            result = Population.should_stop(population, target)
+            should_stop_results.append(result)
+            return result
+
+        with (
+            patch(
+                "agilerl.training.train_multi_agent_on_policy.Population",
+                return_value=population,
+            ),
+            patch("agilerl.utils.utils.init_wandb"),
+            patch("agilerl.logger.wandb.run", new=MagicMock()),
+            patch("agilerl.logger.wandb.log"),
+            patch.object(population, "finish") as mock_finish,
+            patch.object(population, "should_stop", side_effect=should_stop_spy),
+        ):
+            agents, fitnesses = train_multi_agent_on_policy(
+                multi_env,
+                "env_name",
+                "algo",
+                [agent],
+                max_steps=100,
+                evo_steps=2,
+                target=-1.0,
+                wb=True,
+                verbose=False,
+            )
+
+        assert agents is population.agents
+        assert fitnesses == population.last_fitnesses
+        mock_finish.assert_called_once()
+        assert should_stop_results == [True]
+        assert agent.steps < 100
+
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
+    def test_train_offline_requires_dataset_or_minari(self, env):
+        agent = DummyAgentOffPolicy(5, env, 0.4)
+        memory = DummyMemory()
+
+        with pytest.raises(ValueError, match="minari_dataset_id"):
+            train_offline(
+                env,
+                "env_name",
+                "algo",
+                [agent],
+                memory,
+                dataset=None,
+                minari_dataset_id=None,
+                max_steps=2,
+                evo_steps=2,
+                verbose=False,
+            )
 
 
 class TestTrainOnPolicy:
@@ -2395,9 +2462,8 @@ class TestTrainOnPolicy:
                 "env_name",
                 "algo",
                 mock_population,
-                INIT_HP=None,
-                MUT_P=None,
-                swap_channels=False,
+                init_hp=None,
+                mut_p=None,
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
@@ -2413,8 +2479,14 @@ class TestTrainOnPolicy:
             if accelerator is not None:
                 mocked_agent_on_policy.wrap_models.assert_called()
                 mocked_agent_on_policy.unwrap_models.assert_called()
+            mocked_agent_on_policy.get_action.assert_called()
+            mocked_agent_on_policy.learn.assert_called()
+            mocked_agent_on_policy.test.assert_called()
+            if accelerator is not None:
+                mocked_agent_on_policy.wrap_models.assert_called()
+                mocked_agent_on_policy.unwrap_models.assert_called()
 
-    @pytest.mark.parametrize(("state_size", "action_size", "vect"), [((6,), 2, False)])
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_NOVECT)
     def test_train_on_policy_save_elite_warning(
         self,
         env,
@@ -2423,8 +2495,8 @@ class TestTrainOnPolicy:
         mutations,
     ):
         warning_string = (
-            r"'save_elite' set to False but 'elite_path' has been defined, "
-            r"elite will not\s+be saved unless 'save_elite' is set to True\."
+            "'save_elite' set to False but 'elite_path' has been defined, elite will not\
+                      be saved unless 'save_elite' is set to True."
         )
         with pytest.warns(match=warning_string):
             _pop, _ = train_on_policy(
@@ -2432,9 +2504,8 @@ class TestTrainOnPolicy:
                 "env_name",
                 "algo",
                 population_on_policy,
-                INIT_HP=None,
-                MUT_P=None,
-                swap_channels=False,
+                init_hp=None,
+                mut_p=None,
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
@@ -2445,7 +2516,7 @@ class TestTrainOnPolicy:
                 elite_path="path",
             )
 
-    @pytest.mark.parametrize(("state_size", "action_size", "vect"), [((6,), 2, False)])
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_NOVECT)
     def test_train_on_policy_checkpoint_warning(
         self,
         env,
@@ -2454,8 +2525,8 @@ class TestTrainOnPolicy:
         mutations,
     ):
         warning_string = (
-            r"'checkpoint' set to None but 'checkpoint_path' has been defined, "
-            r"checkpoint will not\s+be saved unless 'checkpoint' is defined\."
+            "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
+                      be saved unless 'checkpoint' is defined."
         )
         with pytest.warns(match=warning_string):
             _pop, _ = train_on_policy(
@@ -2463,9 +2534,8 @@ class TestTrainOnPolicy:
                 "env_name",
                 "algo",
                 population_on_policy,
-                INIT_HP=None,
-                MUT_P=None,
-                swap_channels=False,
+                init_hp=None,
+                mut_p=None,
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
@@ -2476,12 +2546,7 @@ class TestTrainOnPolicy:
                 checkpoint_path="path",
             )
 
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "vect"),
-        [
-            ((6,), 2, True),
-        ],
-    )
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_on_policy_env_calls(
         self,
         mocked_env,
@@ -2494,9 +2559,8 @@ class TestTrainOnPolicy:
             "env_name",
             "algo",
             population_on_policy,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -2507,12 +2571,7 @@ class TestTrainOnPolicy:
         mocked_env.step.assert_called()
         mocked_env.reset.assert_called()
 
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "vect"),
-        [
-            ((6,), 2, True),
-        ],
-    )
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_on_policy_tourn_mut_calls(
         self,
         env,
@@ -2525,9 +2584,8 @@ class TestTrainOnPolicy:
             "env_name",
             "algo",
             population_on_policy,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -2538,30 +2596,21 @@ class TestTrainOnPolicy:
         mocked_mutations.mutation.assert_called()
         mocked_tournament.select.assert_called()
 
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "vect", "use_rollout_buffer"),
-        [((6,), 2, True, True), ((6,), 2, False, False)],
-    )
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_on_policy(
         self,
         env,
         population_on_policy,
         tournament,
         mutations,
-        use_rollout_buffer,
     ):
-        if use_rollout_buffer:
-            for agent in population_on_policy:
-                agent.use_rollout_buffer = True
-
         pop, _ = train_on_policy(
             env,
             "env_name",
             "algo",
             population_on_policy,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=256,
             evo_steps=256,
             eval_loop=1,
@@ -2571,10 +2620,9 @@ class TestTrainOnPolicy:
         )
 
         assert len(pop) == len(population_on_policy)
+        assert len(pop) == len(population_on_policy)
 
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "vect"), [((32, 32, 3), 2, False)]
-    )
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _IMG_NOVECT)
     def test_train_on_policy_rgb_input(
         self, env, population_on_policy, tournament, mutations
     ):
@@ -2583,9 +2631,8 @@ class TestTrainOnPolicy:
             "env_name",
             "algo",
             population_on_policy,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=True,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -2595,11 +2642,9 @@ class TestTrainOnPolicy:
         )
 
         assert len(pop) == len(population_on_policy)
+        assert len(pop) == len(population_on_policy)
 
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "vect"),
-        [((6,), 2, True), ((6,), 2, False)],
-    )
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_on_policy_distributed(
         self, env, population_on_policy, tournament, mutations
     ):
@@ -2609,9 +2654,8 @@ class TestTrainOnPolicy:
             "env_name",
             "algo",
             population_on_policy,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -2622,11 +2666,10 @@ class TestTrainOnPolicy:
         )
 
         assert len(pop) == len(population_on_policy)
+        assert len(pop) == len(population_on_policy)
 
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "vect", "accelerator"),
-        [((6,), 2, True, False), ((6,), 2, True, True)],
-    )
+    @pytest.mark.parametrize("accelerator", [False, True])
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_wandb_init_log_on_policy(
         self,
         env,
@@ -2636,16 +2679,15 @@ class TestTrainOnPolicy:
         accelerator,
     ):
         accelerator = Accelerator() if accelerator else None
-        INIT_HP = {
+        init_hp = {
             "BATCH_SIZE": 128,
             "LR": 1e-3,
             "GAMMA": 0.99,
             "LEARN_STEP": 1,
             "TAU": 1e-3,
-            "CHANNELS_LAST": False,
             "POP_SIZE": 6,
         }
-        MUT_P = {
+        mut_p = {
             "NO_MUT": 0.4,
             "ARCH_MUT": 0.2,
             "PARAMS_MUT": 0.2,
@@ -2653,10 +2695,11 @@ class TestTrainOnPolicy:
             "RL_HP_MUT": 0.2,
         }
         with (
-            patch("agilerl.training.train_on_policy.wandb.login") as _,
-            patch("agilerl.training.train_on_policy.wandb.init") as mock_wandb_init,
-            patch("agilerl.training.train_on_policy.wandb.log") as mock_wandb_log,
-            patch("agilerl.training.train_on_policy.wandb.finish") as mock_wandb_finish,
+            patch("agilerl.utils.utils.wandb.login") as _,
+            patch("agilerl.utils.utils.wandb.init") as mock_wandb_init,
+            patch("agilerl.logger.wandb.run", new=MagicMock()),
+            patch("agilerl.logger.wandb.log") as mock_wandb_log,
+            patch("agilerl.logger.wandb.finish") as mock_wandb_finish,
         ):
             # Call the function that should trigger wandb.init
             agilerl.training.train_on_policy.train_on_policy(
@@ -2664,9 +2707,8 @@ class TestTrainOnPolicy:
                 "env_name",
                 "algo",
                 population_on_policy,
-                INIT_HP=INIT_HP,
-                MUT_P=MUT_P,
-                swap_channels=False,
+                init_hp=init_hp,
+                mut_p=mut_p,
                 max_steps=50,
                 evo_steps=10,
                 eval_loop=1,
@@ -2687,22 +2729,31 @@ class TestTrainOnPolicy:
             mock_wandb_log.assert_called()
             # Assert that wandb.finish was called
             mock_wandb_finish.assert_called()
+            # Assert that wandb.init was called with expected arguments
+            mock_wandb_init.assert_called_once_with(
+                project=ANY,
+                name=ANY,
+                config=ANY,
+            )
+            # Assert that wandb.log was called with expected log parameters
+            mock_wandb_log.assert_called()
+            # Assert that wandb.finish was called
+            mock_wandb_finish.assert_called()
 
-    @pytest.mark.parametrize(("state_size", "action_size", "vect"), [((6,), 2, True)])
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_early_stop_wandb_on_policy(
         self, env, population_on_policy, tournament, mutations
     ):
-        INIT_HP = {
+        init_hp = {
             "BATCH_SIZE": 128,
             "LR": 1e-3,
             "GAMMA": 0.99,
             "LEARN_STEP": 1,
             "TAU": 1e-3,
-            "CHANNELS_LAST": False,
             "POP_SIZE": 6,
             "MEMORY_SIZE": 20000,
         }
-        MUT_P = {
+        mut_p = {
             "NO_MUT": 0.4,
             "ARCH_MUT": 0.2,
             "PARAMS_MUT": 0.2,
@@ -2710,10 +2761,11 @@ class TestTrainOnPolicy:
             "RL_HP_MUT": 0.2,
         }
         with (
-            patch("agilerl.training.train_on_policy.wandb.login") as _,
-            patch("agilerl.training.train_on_policy.wandb.init") as _,
-            patch("agilerl.training.train_on_policy.wandb.log") as _,
-            patch("agilerl.training.train_on_policy.wandb.finish") as mock_wandb_finish,
+            patch("agilerl.utils.utils.wandb.login") as _,
+            patch("agilerl.utils.utils.wandb.init") as _,
+            patch("agilerl.logger.wandb.run", new=MagicMock()),
+            patch("agilerl.logger.wandb.log") as _,
+            patch("agilerl.logger.wandb.finish") as mock_wandb_finish,
         ):
             # Call the function that should trigger wandb.init
             agilerl.training.train_on_policy.train_on_policy(
@@ -2721,10 +2773,9 @@ class TestTrainOnPolicy:
                 "env_name",
                 "algo",
                 population_on_policy,
-                INIT_HP=INIT_HP,
-                MUT_P=MUT_P,
+                init_hp=init_hp,
+                mut_p=mut_p,
                 target=-10000,
-                swap_channels=False,
                 max_steps=500,
                 evo_steps=10,
                 eval_loop=1,
@@ -2736,10 +2787,8 @@ class TestTrainOnPolicy:
             # Assert that wandb.finish was called
             mock_wandb_finish.assert_called()
 
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "vect", "accelerator_flag"),
-        [((6,), 2, True, True), ((6,), 2, True, False)],
-    )
+    @pytest.mark.parametrize("accelerator_flag", [False, True])
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_on_policy_save_elite(
         self,
         env,
@@ -2756,9 +2805,8 @@ class TestTrainOnPolicy:
             "env_name",
             "algo",
             population_on_policy,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -2771,10 +2819,8 @@ class TestTrainOnPolicy:
         )
         assert os.path.isfile(f"{elite_path}.pt")
 
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "vect", "accelerator_flag"),
-        [((6,), 2, True, True), ((6,), 2, True, False)],
-    )
+    @pytest.mark.parametrize("accelerator_flag", [False, True])
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_on_policy_save_checkpoint(
         self,
         env,
@@ -2791,9 +2837,8 @@ class TestTrainOnPolicy:
             "env_name",
             "algo",
             population_on_policy,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=500,
             evo_steps=500,
             eval_loop=1,
@@ -2807,13 +2852,14 @@ class TestTrainOnPolicy:
         for i in range(6):  # iterate through the population indices
             assert os.path.isfile(f"{checkpoint_path}_{i}_{512}.pt")
 
-    @pytest.mark.parametrize(("state_size", "action_size", "vect"), [((6,), 2, True)])
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_on_policy_wandb_kwargs_update(self, env):
         agent = DummyAgentOnPolicy(5, env)
         with (
-            patch("agilerl.training.train_on_policy.init_wandb") as mock_init_wandb,
-            patch("agilerl.training.train_on_policy.wandb.log"),
-            patch("agilerl.training.train_on_policy.wandb.finish"),
+            patch("agilerl.utils.utils.init_wandb") as mock_init_wandb,
+            patch("agilerl.logger.wandb.run", new=MagicMock()),
+            patch("agilerl.logger.wandb.log"),
+            patch("agilerl.logger.wandb.finish"),
         ):
             train_on_policy(
                 env,
@@ -2830,12 +2876,11 @@ class TestTrainOnPolicy:
         assert kwargs["project"] == "custom_project"
         assert kwargs["name"] == "custom_run"
 
-    @pytest.mark.parametrize(("state_size", "action_size", "vect"), [((6,), 2, True)])
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_on_policy_recurrent_collect_rollouts_import_branch(
         self, env, monkeypatch
     ):
         agent = DummyAgentOnPolicy(5, env)
-        agent.use_rollout_buffer = True
         agent.recurrent = True
         agent.learn_step = 1
 
@@ -2856,33 +2901,14 @@ class TestTrainOnPolicy:
         )
 
     def test_train_on_policy_clip_box_without_squash_and_scalar_done(self, monkeypatch):
-        class ScalarDoneEnv:
-            def __init__(self):
-                self.action_space = Box(low=-1.0, high=1.0, shape=(1,))
-                self.state_size = (1,)
-                self.action_size = 1
-
-            def reset(self):
-                return np.array([0.0], dtype=np.float32), {}
-
-            def step(self, action):
-                return np.array([0.0], dtype=np.float32), 1.0, True, False, {}
-
-        class DummyStochastic:
-            def __init__(self):
-                self.squash_output = False
-
-            def scale_action(self, action):
-                return action
-
         monkeypatch.setattr(
-            agilerl.training.train_on_policy, "StochasticActor", DummyStochastic
+            agilerl.rollouts.on_policy, "StochasticActor", DummyStochastic
         )
 
         env = ScalarDoneEnv()
         agent = DummyAgentOnPolicy(1, env)
         agent.action_space = Box(low=-1.0, high=1.0, shape=(1,))
-        agent.actor = DummyStochastic()
+        agent.actor = DummyStochastic(squash_output=False)
         agent.registry.policy.side_effect = lambda: "actor"
         agent.get_action = lambda *args, **kwargs: (
             np.array([2.5], dtype=np.float32),
@@ -2903,33 +2929,14 @@ class TestTrainOnPolicy:
         )
 
     def test_train_on_policy_clip_box_with_squash(self, monkeypatch):
-        class ScalarDoneEnv:
-            def __init__(self):
-                self.action_space = Box(low=-1.0, high=1.0, shape=(1,))
-                self.state_size = (1,)
-                self.action_size = 1
-
-            def reset(self):
-                return np.array([0.0], dtype=np.float32), {}
-
-            def step(self, action):
-                return np.array([0.0], dtype=np.float32), 1.0, True, False, {}
-
-        class DummyStochastic:
-            def __init__(self):
-                self.squash_output = True
-
-            def scale_action(self, action):
-                return np.clip(action, -1.0, 1.0)
-
         monkeypatch.setattr(
-            agilerl.training.train_on_policy, "StochasticActor", DummyStochastic
+            agilerl.rollouts.on_policy, "StochasticActor", DummyStochastic
         )
 
         env = ScalarDoneEnv()
         agent = DummyAgentOnPolicy(1, env)
         agent.action_space = Box(low=-1.0, high=1.0, shape=(1,))
-        agent.actor = DummyStochastic()
+        agent.actor = DummyStochastic(squash_output=True)
         agent.registry.policy.side_effect = lambda: "actor"
         agent.get_action = lambda *args, **kwargs: (
             np.array([2.5], dtype=np.float32),
@@ -2949,14 +2956,15 @@ class TestTrainOnPolicy:
             verbose=False,
         )
 
-    @pytest.mark.parametrize(("state_size", "action_size", "vect"), [((6,), 2, True)])
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_on_policy_early_stop_wb_branch(self, env):
         agent = DummyAgentOnPolicy(5, env)
-        agent.steps = [0] * 100
+        agent.steps = 0
         with (
-            patch("agilerl.training.train_on_policy.init_wandb"),
-            patch("agilerl.training.train_on_policy.wandb.log"),
-            patch("agilerl.training.train_on_policy.wandb.finish") as mock_wandb_finish,
+            patch("agilerl.utils.utils.init_wandb"),
+            patch("agilerl.logger.wandb.run", new=MagicMock()),
+            patch("agilerl.logger.wandb.log"),
+            patch("agilerl.logger.wandb.finish") as mock_wandb_finish,
         ):
             train_on_policy(
                 env,
@@ -2973,11 +2981,33 @@ class TestTrainOnPolicy:
 
 
 class TestTrainMultiAgentOffPolicy:
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
+    def test_wraps_env_without_num_envs(self, state_size, action_size, multi_memory):
+        env = DummyMultiEnv(state_size, action_size)
+        del env.num_envs
+        agent = DummyMultiAgent(1, env, on_policy=False)
+        wrapped = DummyMultiEnv(state_size, action_size)
+
+        with patch(
+            "agilerl.training.train_multi_agent_off_policy.PzDummyVecEnv",
+            return_value=wrapped,
+        ) as mock_wrap:
+            train_multi_agent_off_policy(
+                env,
+                "env_name",
+                "algo",
+                [agent],
+                multi_memory,
+                max_steps=2,
+                evo_steps=2,
+                verbose=False,
+            )
+
+        mock_wrap.assert_called_once_with(env)
+
+    @pytest.mark.parametrize("sum_scores", [True, False])
     @pytest.mark.parametrize("on_policy", [False])
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "sum_scores"),
-        [((6,), 2, True), ((6,), 2, False)],
-    )
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_agent_off_policy(
         self,
         multi_env,
@@ -2994,9 +3024,8 @@ class TestTrainMultiAgentOffPolicy:
             "algo",
             pop=population_multi_agent,
             memory=multi_memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -3008,7 +3037,7 @@ class TestTrainMultiAgentOffPolicy:
         assert len(pop) == len(population_multi_agent)
 
     @pytest.mark.parametrize("on_policy", [False])
-    @pytest.mark.parametrize(("state_size", "action_size"), [((6,), 2)])
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_agent_off_policy_distributed(
         self,
         multi_env,
@@ -3025,9 +3054,8 @@ class TestTrainMultiAgentOffPolicy:
             "algo",
             pop=population_multi_agent,
             memory=multi_memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -3037,12 +3065,13 @@ class TestTrainMultiAgentOffPolicy:
         )
 
         assert len(pop) == len(population_multi_agent)
+        assert len(pop) == len(population_multi_agent)
 
     def test_train_multi_agent_off_policy_agent_masking(self):
         pass
 
     @pytest.mark.parametrize("on_policy", [False])
-    @pytest.mark.parametrize(("state_size", "action_size"), [((32, 32, 3), 2)])
+    @pytest.mark.parametrize(("state_size", "action_size"), _IMG)
     def test_train_multi_agent_off_policy_rgb(
         self,
         multi_env,
@@ -3058,9 +3087,8 @@ class TestTrainMultiAgentOffPolicy:
             "algo",
             pop=population_multi_agent,
             memory=multi_memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=True,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -3069,9 +3097,10 @@ class TestTrainMultiAgentOffPolicy:
         )
 
         assert len(pop) == len(population_multi_agent)
+        assert len(pop) == len(population_multi_agent)
 
     @pytest.mark.parametrize("on_policy", [False])
-    @pytest.mark.parametrize(("state_size", "action_size"), [((32, 32, 3), 2)])
+    @pytest.mark.parametrize(("state_size", "action_size"), _IMG)
     def test_train_multi_agent_off_policy_rgb_vectorized(
         self,
         multi_env,
@@ -3083,17 +3112,14 @@ class TestTrainMultiAgentOffPolicy:
         state_size,
         action_size,
     ):
-        # In-process sync vec env covers the vectorised training path without
-        # paying the AsyncPettingZooVecEnv subprocess spawn cost (~20-40s in CI).
-        num_envs = 2
-        env = make_sync_multi_agent_vec_env(
+        env = make_multi_agent_vect_envs(
             DummyMultiEnv,
-            num_envs=num_envs,
+            num_envs=4,
             state_dims=state_size,
             action_dims=action_size,
         )
         for agent in population_multi_agent:
-            agent.num_envs = num_envs
+            agent.num_envs = 4
             agent.scores = [1]
         env.reset()
         pop, _ = train_multi_agent_off_policy(
@@ -3102,9 +3128,8 @@ class TestTrainMultiAgentOffPolicy:
             "algo",
             pop=population_multi_agent,
             memory=multi_memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=10,
             evo_steps=5,
             eval_loop=1,
@@ -3115,7 +3140,7 @@ class TestTrainMultiAgentOffPolicy:
         env.close()
 
     @pytest.mark.parametrize("on_policy", [False])
-    @pytest.mark.parametrize(("state_size", "action_size"), [((6,), 2)])
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_save_elite_warning(
         self,
         multi_env,
@@ -3126,8 +3151,8 @@ class TestTrainMultiAgentOffPolicy:
         mutations,
     ):
         warning_string = (
-            r"'save_elite' set to False but 'elite_path' has been defined, "
-            r"elite will not\s+be saved unless 'save_elite' is set to True\."
+            "'save_elite' set to False but 'elite_path' has been defined, elite will not\
+                      be saved unless 'save_elite' is set to True."
         )
         with pytest.warns(match=warning_string):
             _pop, _ = train_multi_agent_off_policy(
@@ -3136,9 +3161,8 @@ class TestTrainMultiAgentOffPolicy:
                 "algo",
                 pop=population_multi_agent,
                 memory=multi_memory,
-                INIT_HP=None,
-                MUT_P=None,
-                swap_channels=False,
+                init_hp=None,
+                mut_p=None,
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
@@ -3149,7 +3173,7 @@ class TestTrainMultiAgentOffPolicy:
             )
 
     @pytest.mark.parametrize("on_policy", [False])
-    @pytest.mark.parametrize(("state_size", "action_size"), [((6,), 2)])
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_checkpoint_warning(
         self,
         multi_env,
@@ -3160,8 +3184,8 @@ class TestTrainMultiAgentOffPolicy:
         mutations,
     ):
         warning_string = (
-            r"'checkpoint' set to None but 'checkpoint_path' has been defined, "
-            r"checkpoint will not\s+be saved unless 'checkpoint' is defined\."
+            "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
+                      be saved unless 'checkpoint' is defined."
         )
         with pytest.warns(match=warning_string):
             _pop, _ = train_multi_agent_off_policy(
@@ -3170,9 +3194,8 @@ class TestTrainMultiAgentOffPolicy:
                 "algo",
                 pop=population_multi_agent,
                 memory=multi_memory,
-                INIT_HP=None,
-                MUT_P=None,
-                swap_channels=False,
+                init_hp=None,
+                mut_p=None,
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
@@ -3182,11 +3205,9 @@ class TestTrainMultiAgentOffPolicy:
                 checkpoint_path="path",
             )
 
+    @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("on_policy", [False])
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "accelerator_flag"),
-        [((6,), 2, False), ((6,), 2, True)],
-    )
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_wandb_init_log(
         self,
         multi_env,
@@ -3197,18 +3218,17 @@ class TestTrainMultiAgentOffPolicy:
         mutations,
         accelerator_flag,
     ):
-        INIT_HP = {
+        init_hp = {
             "BATCH_SIZE": 128,
             "LR_ACTOR": 1e-4,
             "LR_CRITIC": 1e-3,
             "GAMMA": 0.99,
             "LEARN_STEP": 1,
             "TAU": 1e-3,
-            "CHANNELS_LAST": False,
             "POP_SIZE": 6,
             "MEMORY_SIZE": 20000,
         }
-        MUT_P = {
+        mut_p = {
             "NO_MUT": 0.4,
             "ARCH_MUT": 0.2,
             "PARAMS_MUT": 0.2,
@@ -3216,15 +3236,16 @@ class TestTrainMultiAgentOffPolicy:
             "RL_HP_MUT": 0.2,
         }
         with (
-            patch("agilerl.training.train_multi_agent_off_policy.wandb.login") as _,
+            patch("agilerl.utils.utils.wandb.login") as _,
             patch(
-                "agilerl.training.train_multi_agent_off_policy.wandb.init",
+                "agilerl.utils.utils.wandb.init",
             ) as mock_wandb_init,
+            patch("agilerl.logger.wandb.run", new=MagicMock()),
             patch(
-                "agilerl.training.train_multi_agent_off_policy.wandb.log",
+                "agilerl.logger.wandb.log",
             ) as mock_wandb_log,
             patch(
-                "agilerl.training.train_multi_agent_off_policy.wandb.finish",
+                "agilerl.logger.wandb.finish",
             ) as mock_wandb_finish,
         ):
             accelerator = Accelerator() if accelerator_flag else None
@@ -3235,9 +3256,8 @@ class TestTrainMultiAgentOffPolicy:
                 "algo",
                 population_multi_agent,
                 multi_memory,
-                INIT_HP=INIT_HP,
-                MUT_P=MUT_P,
-                swap_channels=False,
+                init_hp=init_hp,
+                mut_p=mut_p,
                 max_steps=50,
                 evo_steps=10,
                 eval_loop=1,
@@ -3258,14 +3278,19 @@ class TestTrainMultiAgentOffPolicy:
             mock_wandb_log.assert_called()
             # Assert that wandb.finish was called
             mock_wandb_finish.assert_called()
+            # Assert that wandb.init was called with expected arguments
+            mock_wandb_init.assert_called_once_with(
+                project=ANY,
+                name=ANY,
+                config=ANY,
+            )
+            # Assert that wandb.log was called with expected log parameters
+            mock_wandb_log.assert_called()
+            # Assert that wandb.finish was called
+            mock_wandb_finish.assert_called()
 
     @pytest.mark.parametrize("on_policy", [False])
-    @pytest.mark.parametrize(
-        ("state_size", "action_size"),
-        [
-            ((6,), 2),
-        ],
-    )
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_multi_agent_early_stop(
         self,
         multi_env,
@@ -3275,18 +3300,17 @@ class TestTrainMultiAgentOffPolicy:
         tournament,
         mutations,
     ):
-        INIT_HP = {
+        init_hp = {
             "BATCH_SIZE": 128,
             "LR_ACTOR": 1e-4,
             "LR_CRITIC": 1e-3,
             "GAMMA": 0.99,
             "LEARN_STEP": 1,
             "TAU": 1e-3,
-            "CHANNELS_LAST": False,
             "POP_SIZE": 6,
             "MEMORY_SIZE": 20000,
         }
-        MUT_P = {
+        mut_p = {
             "NO_MUT": 0.4,
             "ARCH_MUT": 0.2,
             "PARAMS_MUT": 0.2,
@@ -3294,11 +3318,12 @@ class TestTrainMultiAgentOffPolicy:
             "RL_HP_MUT": 0.2,
         }
         with (
-            patch("agilerl.training.train_multi_agent_off_policy.wandb.login") as _,
-            patch("agilerl.training.train_multi_agent_off_policy.wandb.init") as _,
-            patch("agilerl.training.train_multi_agent_off_policy.wandb.log") as _,
+            patch("agilerl.utils.utils.wandb.login") as _,
+            patch("agilerl.utils.utils.wandb.init") as _,
+            patch("agilerl.logger.wandb.run", new=MagicMock()),
+            patch("agilerl.logger.wandb.log") as _,
             patch(
-                "agilerl.training.train_multi_agent_off_policy.wandb.finish",
+                "agilerl.logger.wandb.finish",
             ) as mock_wandb_finish,
         ):
             # Call the function that should trigger wandb.init
@@ -3308,9 +3333,8 @@ class TestTrainMultiAgentOffPolicy:
                 "algo",
                 population_multi_agent,
                 multi_memory,
-                INIT_HP=INIT_HP,
-                MUT_P=MUT_P,
-                swap_channels=False,
+                init_hp=init_hp,
+                mut_p=mut_p,
                 target=-10000,
                 max_steps=500,
                 evo_steps=10,
@@ -3323,14 +3347,10 @@ class TestTrainMultiAgentOffPolicy:
             # Assert that wandb.finish was called
             mock_wandb_finish.assert_called()
 
+    @pytest.mark.parametrize("algo", [MADDPG])
+    @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("on_policy", [False])
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "algo", "accelerator_flag"),
-        [
-            ((6,), 2, MADDPG, False),
-            ((6,), 2, MATD3, True),
-        ],
-    )
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_agent_off_policy_calls(
         self,
         multi_env,
@@ -3344,6 +3364,7 @@ class TestTrainMultiAgentOffPolicy:
         accelerator = Accelerator() if accelerator_flag else None
 
         mock_population = [mocked_multi_agent for _ in range(6)]
+        mock_population = [mocked_multi_agent for _ in range(6)]
 
         _pop, _ = train_multi_agent_off_policy(
             multi_env,
@@ -3351,9 +3372,8 @@ class TestTrainMultiAgentOffPolicy:
             "algo",
             mock_population,
             multi_memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -3370,14 +3390,16 @@ class TestTrainMultiAgentOffPolicy:
             if accelerator is not None:
                 agent.wrap_models.assert_called()
                 agent.unwrap_models.assert_called()
+        for agent in mock_population:
+            agent.get_action.assert_called()
+            agent.learn.assert_called()
+            agent.test.assert_called()
+            if accelerator is not None:
+                agent.wrap_models.assert_called()
+                agent.unwrap_models.assert_called()
 
     @pytest.mark.parametrize("on_policy", [False])
-    @pytest.mark.parametrize(
-        ("state_size", "action_size"),
-        [
-            ((6,), 2),
-        ],
-    )
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_env_calls(
         self,
         mocked_multi_env,
@@ -3393,9 +3415,8 @@ class TestTrainMultiAgentOffPolicy:
             "algo",
             population_multi_agent,
             multi_memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -3407,12 +3428,7 @@ class TestTrainMultiAgentOffPolicy:
         mocked_multi_env.reset.assert_called()
 
     @pytest.mark.parametrize("on_policy", [False])
-    @pytest.mark.parametrize(
-        ("state_size", "action_size"),
-        [
-            ((6,), 2),
-        ],
-    )
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_tourn_mut_calls(
         self,
         multi_env,
@@ -3428,9 +3444,8 @@ class TestTrainMultiAgentOffPolicy:
             "algo",
             population_multi_agent,
             multi_memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -3442,12 +3457,7 @@ class TestTrainMultiAgentOffPolicy:
         mocked_mutations.mutation.assert_called()
 
     @pytest.mark.parametrize("on_policy", [False])
-    @pytest.mark.parametrize(
-        ("state_size", "action_size"),
-        [
-            ((6,), 2),
-        ],
-    )
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_memory_calls(
         self,
         multi_env,
@@ -3463,9 +3473,8 @@ class TestTrainMultiAgentOffPolicy:
             "algo",
             population_multi_agent,
             mocked_multi_memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -3474,13 +3483,11 @@ class TestTrainMultiAgentOffPolicy:
             wb=False,
         )
         mocked_multi_memory.sample.assert_called()
-        mocked_multi_memory.save_to_memory.assert_called()
+        mocked_multi_memory.add.assert_called()
 
+    @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("on_policy", [False])
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "accelerator_flag"),
-        [((6,), 2, True), ((6,), 2, False)],
-    )
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_save_elite(
         self,
         multi_env,
@@ -3500,9 +3507,8 @@ class TestTrainMultiAgentOffPolicy:
             "algo",
             population_multi_agent,
             multi_memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -3515,11 +3521,9 @@ class TestTrainMultiAgentOffPolicy:
         )
         assert os.path.isfile(f"{elite_path}.pt")
 
+    @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("on_policy", [False])
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "accelerator_flag"),
-        [((6,), 2, True), ((6,), 2, False)],
-    )
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_save_checkpoint(
         self,
         multi_env,
@@ -3528,6 +3532,7 @@ class TestTrainMultiAgentOffPolicy:
         mutations,
         multi_memory,
         accelerator_flag,
+        on_policy,
         tmpdir,
     ):
         accelerator = Accelerator() if accelerator_flag else None
@@ -3538,9 +3543,8 @@ class TestTrainMultiAgentOffPolicy:
             "algo",
             population_multi_agent,
             multi_memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -3554,7 +3558,7 @@ class TestTrainMultiAgentOffPolicy:
         for i in range(6):  # iterate through the population indices
             assert os.path.isfile(f"{checkpoint_path}_{i}_{50}.pt")
 
-    @pytest.mark.parametrize(("state_size", "action_size"), [((6,), 2)])
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_agent_off_policy_learn_step_branch_and_early_stop(
         self,
         multi_env,
@@ -3562,14 +3566,13 @@ class TestTrainMultiAgentOffPolicy:
     ):
         agent = DummyMultiAgent(1, multi_env, on_policy=False)
         agent.learn_step = 2
-        agent.steps = [0] * 100
+        agent.steps = 0
 
         with (
-            patch("agilerl.training.train_multi_agent_off_policy.init_wandb"),
-            patch("agilerl.training.train_multi_agent_off_policy.wandb.log"),
-            patch(
-                "agilerl.training.train_multi_agent_off_policy.wandb.finish"
-            ) as mock_wandb_finish,
+            patch("agilerl.utils.utils.init_wandb"),
+            patch("agilerl.logger.wandb.run", new=MagicMock()),
+            patch("agilerl.logger.wandb.log"),
+            patch("agilerl.logger.wandb.finish") as mock_wandb_finish,
         ):
             train_multi_agent_off_policy(
                 multi_env,
@@ -3585,76 +3588,54 @@ class TestTrainMultiAgentOffPolicy:
             )
         mock_wandb_finish.assert_called()
 
-    def test_train_multi_agent_off_policy_empty_score_nan_branch(
-        self, multi_memory, monkeypatch
-    ):
+    def test_train_multi_agent_off_policy_empty_population_rejected(self, multi_memory):
         class EmptyAgentEnv:
             agents: ClassVar[list] = []
+            possible_agents: ClassVar[list] = []
 
-        class DummyPbar:
-            def update(self, *args, **kwargs):
-                return None
-
-            def write(self, *args, **kwargs):
-                return None
-
-            def close(self):
-                return None
-
-        class ToggleLess:
-            def __init__(self):
-                self.calls = 0
-
-            def __call__(self, *_args, **_kwargs):
-                self.calls += 1
-                return np.array([True]) if self.calls == 1 else np.array([False])
-
-        monkeypatch.setattr(
-            agilerl.training.train_multi_agent_off_policy,
-            "default_progress_bar",
-            lambda *args, **kwargs: DummyPbar(),
-        )
-        monkeypatch.setattr(
-            agilerl.training.train_multi_agent_off_policy,
-            "np",
-            MagicMock(
-                less=ToggleLess(),
-                mean=np.mean,
-                max=lambda x, axis=0: (
-                    np.array([]) if len(x) == 0 else np.max(x, axis=axis)
-                ),
-                stack=np.stack,
-                all=np.all,
-                greater=np.greater,
-                array=np.array,
-            ),
-        )
-
-        train_multi_agent_off_policy(
-            EmptyAgentEnv(),
-            "env_name",
-            "algo",
-            [],
-            multi_memory,
-            sum_scores=False,
-            max_steps=1,
-            evo_steps=1,
-            wb=False,
-            verbose=False,
-        )
+        with pytest.raises(ValueError, match="at least one agent"):
+            train_multi_agent_off_policy(
+                EmptyAgentEnv(),
+                "env_name",
+                "algo",
+                [],
+                multi_memory,
+                sum_scores=False,
+                max_steps=1,
+                evo_steps=1,
+                wb=False,
+                verbose=False,
+            )
 
 
 class TestTrainMultiAgentOnPolicy:
-    @pytest.mark.parametrize("on_policy", [True])
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "sum_scores", "swap_channels"),
-        [
-            ((6,), 2, True, False),
-            ((6,), 2, False, False),
-            ((32, 32, 3), 2, False, True),
-        ],
-    )
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
+    def test_wraps_env_without_num_envs(self, state_size, action_size):
+        env = DummyMultiEnv(state_size, action_size)
+        del env.num_envs
+        agent = DummyMultiAgent(1, env, on_policy=True)
+        wrapped = DummyMultiEnv(state_size, action_size)
+
+        with patch(
+            "agilerl.training.train_multi_agent_on_policy.PzDummyVecEnv",
+            return_value=wrapped,
+        ) as mock_wrap:
+            train_multi_agent_on_policy(
+                env,
+                "env_name",
+                "algo",
+                [agent],
+                max_steps=2,
+                evo_steps=2,
+                verbose=False,
+            )
+
+        mock_wrap.assert_called_once_with(env)
+
     @pytest.mark.parametrize("accelerator_flag", [False, True])
+    @pytest.mark.parametrize("sum_scores", [True, False])
+    @pytest.mark.parametrize("on_policy", [True])
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_agent_on_policy(
         self,
         multi_env,
@@ -3663,7 +3644,6 @@ class TestTrainMultiAgentOnPolicy:
         tournament,
         mutations,
         sum_scores,
-        swap_channels,
         accelerator_flag,
     ):
         accelerator = Accelerator() if accelerator_flag else None
@@ -3672,9 +3652,8 @@ class TestTrainMultiAgentOnPolicy:
             "env_name",
             "algo",
             pop=population_multi_agent,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=swap_channels,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -3687,7 +3666,7 @@ class TestTrainMultiAgentOnPolicy:
         assert len(pop) == len(population_multi_agent)
 
     @pytest.mark.parametrize("on_policy", [True])
-    @pytest.mark.parametrize(("state_size", "action_size"), [((32, 32, 3), 2)])
+    @pytest.mark.parametrize(("state_size", "action_size"), _IMG)
     def test_train_multi_agent_on_policy_rgb_vectorized(
         self,
         multi_env,
@@ -3699,15 +3678,14 @@ class TestTrainMultiAgentOnPolicy:
         state_size,
         action_size,
     ):
-        num_envs = 2
-        env = make_sync_multi_agent_vec_env(
+        env = make_multi_agent_vect_envs(
             DummyMultiEnv,
-            num_envs=num_envs,
+            num_envs=4,
             state_dims=state_size,
             action_dims=action_size,
         )
         for agent in population_multi_agent:
-            agent.num_envs = num_envs
+            agent.num_envs = 4
             agent.scores = [1]
         env.reset()
         pop, _ = train_multi_agent_on_policy(
@@ -3715,9 +3693,8 @@ class TestTrainMultiAgentOnPolicy:
             "env_name",
             "algo",
             pop=population_multi_agent,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=10,
             evo_steps=5,
             eval_loop=1,
@@ -3728,7 +3705,7 @@ class TestTrainMultiAgentOnPolicy:
         env.close()
 
     @pytest.mark.parametrize("on_policy", [True])
-    @pytest.mark.parametrize(("state_size", "action_size"), [((6,), 2)])
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_save_elite_warning_on_policy(
         self,
         multi_env,
@@ -3739,8 +3716,8 @@ class TestTrainMultiAgentOnPolicy:
         mutations,
     ):
         warning_string = (
-            r"'save_elite' set to False but 'elite_path' has been defined, "
-            r"elite will not\s+be saved unless 'save_elite' is set to True\."
+            "'save_elite' set to False but 'elite_path' has been defined, elite will not\
+                      be saved unless 'save_elite' is set to True."
         )
         with pytest.warns(match=warning_string):
             _pop, _ = train_multi_agent_on_policy(
@@ -3748,9 +3725,8 @@ class TestTrainMultiAgentOnPolicy:
                 "env_name",
                 "algo",
                 pop=population_multi_agent,
-                INIT_HP=None,
-                MUT_P=None,
-                swap_channels=False,
+                init_hp=None,
+                mut_p=None,
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
@@ -3761,7 +3737,7 @@ class TestTrainMultiAgentOnPolicy:
             )
 
     @pytest.mark.parametrize("on_policy", [True])
-    @pytest.mark.parametrize(("state_size", "action_size"), [((6,), 2)])
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_checkpoint_warning_on_policy(
         self,
         multi_env,
@@ -3772,8 +3748,8 @@ class TestTrainMultiAgentOnPolicy:
         mutations,
     ):
         warning_string = (
-            r"'checkpoint' set to None but 'checkpoint_path' has been defined, "
-            r"checkpoint will not\s+be saved unless 'checkpoint' is defined\."
+            "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
+                      be saved unless 'checkpoint' is defined."
         )
         with pytest.warns(match=warning_string):
             _pop, _ = train_multi_agent_on_policy(
@@ -3781,9 +3757,8 @@ class TestTrainMultiAgentOnPolicy:
                 "env_name",
                 "algo",
                 pop=population_multi_agent,
-                INIT_HP=None,
-                MUT_P=None,
-                swap_channels=False,
+                init_hp=None,
+                mut_p=None,
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
@@ -3793,11 +3768,9 @@ class TestTrainMultiAgentOnPolicy:
                 checkpoint_path="path",
             )
 
+    @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("on_policy", [True])
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "accelerator_flag"),
-        [((6,), 2, False), ((6,), 2, True)],
-    )
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_wandb_init_log_on_policy(
         self,
         multi_env,
@@ -3808,18 +3781,17 @@ class TestTrainMultiAgentOnPolicy:
         mutations,
         accelerator_flag,
     ):
-        INIT_HP = {
+        init_hp = {
             "BATCH_SIZE": 128,
             "LR_ACTOR": 1e-4,
             "LR_CRITIC": 1e-3,
             "GAMMA": 0.99,
             "LEARN_STEP": 1,
             "TAU": 1e-3,
-            "CHANNELS_LAST": False,
             "POP_SIZE": 6,
             "MEMORY_SIZE": 20000,
         }
-        MUT_P = {
+        mut_p = {
             "NO_MUT": 0.4,
             "ARCH_MUT": 0.2,
             "PARAMS_MUT": 0.2,
@@ -3827,15 +3799,16 @@ class TestTrainMultiAgentOnPolicy:
             "RL_HP_MUT": 0.2,
         }
         with (
-            patch("agilerl.training.train_multi_agent_on_policy.wandb.login") as _,
+            patch("agilerl.utils.utils.wandb.login") as _,
             patch(
-                "agilerl.training.train_multi_agent_on_policy.wandb.init",
+                "agilerl.utils.utils.wandb.init",
             ) as mock_wandb_init,
+            patch("agilerl.logger.wandb.run", new=MagicMock()),
             patch(
-                "agilerl.training.train_multi_agent_on_policy.wandb.log",
+                "agilerl.logger.wandb.log",
             ) as mock_wandb_log,
             patch(
-                "agilerl.training.train_multi_agent_on_policy.wandb.finish",
+                "agilerl.logger.wandb.finish",
             ) as mock_wandb_finish,
         ):
             accelerator = Accelerator() if accelerator_flag else None
@@ -3845,9 +3818,8 @@ class TestTrainMultiAgentOnPolicy:
                 "env_name",
                 "algo",
                 population_multi_agent,
-                INIT_HP=INIT_HP,
-                MUT_P=MUT_P,
-                swap_channels=False,
+                init_hp=init_hp,
+                mut_p=mut_p,
                 max_steps=50,
                 evo_steps=10,
                 eval_loop=1,
@@ -3870,12 +3842,7 @@ class TestTrainMultiAgentOnPolicy:
             mock_wandb_finish.assert_called()
 
     @pytest.mark.parametrize("on_policy", [True])
-    @pytest.mark.parametrize(
-        ("state_size", "action_size"),
-        [
-            ((6,), 2),
-        ],
-    )
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_multi_agent_early_stop_on_policy(
         self,
         multi_env,
@@ -3885,18 +3852,17 @@ class TestTrainMultiAgentOnPolicy:
         tournament,
         mutations,
     ):
-        INIT_HP = {
+        init_hp = {
             "BATCH_SIZE": 128,
             "LR_ACTOR": 1e-4,
             "LR_CRITIC": 1e-3,
             "GAMMA": 0.99,
             "LEARN_STEP": 1,
             "TAU": 1e-3,
-            "CHANNELS_LAST": False,
             "POP_SIZE": 6,
             "MEMORY_SIZE": 20000,
         }
-        MUT_P = {
+        mut_p = {
             "NO_MUT": 0.4,
             "ARCH_MUT": 0.2,
             "PARAMS_MUT": 0.2,
@@ -3904,12 +3870,11 @@ class TestTrainMultiAgentOnPolicy:
             "RL_HP_MUT": 0.2,
         }
         with (
-            patch("agilerl.training.train_multi_agent_on_policy.wandb.login") as _,
-            patch("agilerl.training.train_multi_agent_on_policy.wandb.init") as _,
-            patch("agilerl.training.train_multi_agent_on_policy.wandb.log") as _,
-            patch(
-                "agilerl.training.train_multi_agent_on_policy.wandb.finish"
-            ) as mock_wandb_finish,
+            patch("agilerl.utils.utils.wandb.login") as _,
+            patch("agilerl.utils.utils.wandb.init") as _,
+            patch("agilerl.logger.wandb.run", new=MagicMock()),
+            patch("agilerl.logger.wandb.log") as _,
+            patch("agilerl.logger.wandb.finish") as mock_wandb_finish,
         ):
             # Call the function that should trigger wandb.init
             agilerl.training.train_multi_agent_on_policy.train_multi_agent_on_policy(
@@ -3917,9 +3882,8 @@ class TestTrainMultiAgentOnPolicy:
                 "env_name",
                 "algo",
                 population_multi_agent,
-                INIT_HP=INIT_HP,
-                MUT_P=MUT_P,
-                swap_channels=False,
+                init_hp=init_hp,
+                mut_p=mut_p,
                 target=-10000,
                 max_steps=500,
                 evo_steps=10,
@@ -3932,14 +3896,10 @@ class TestTrainMultiAgentOnPolicy:
             # Assert that wandb.finish was called
             mock_wandb_finish.assert_called()
 
+    @pytest.mark.parametrize("algo", [IPPO])
+    @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("on_policy", [True])
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "algo", "accelerator_flag"),
-        [
-            ((6,), 2, IPPO, False),
-            ((6,), 2, IPPO, True),
-        ],
-    )
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_agent_onpolicy_calls(
         self,
         multi_env,
@@ -3959,9 +3919,8 @@ class TestTrainMultiAgentOnPolicy:
             "env_name",
             "algo",
             mock_population,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -3980,12 +3939,7 @@ class TestTrainMultiAgentOnPolicy:
                 agent.unwrap_models.assert_called()
 
     @pytest.mark.parametrize("on_policy", [True])
-    @pytest.mark.parametrize(
-        ("state_size", "action_size"),
-        [
-            ((6,), 2),
-        ],
-    )
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_env_calls_on_policy(
         self,
         mocked_multi_env,
@@ -4000,9 +3954,8 @@ class TestTrainMultiAgentOnPolicy:
             "env_name",
             "algo",
             population_multi_agent,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -4014,12 +3967,7 @@ class TestTrainMultiAgentOnPolicy:
         mocked_multi_env.reset.assert_called()
 
     @pytest.mark.parametrize("on_policy", [True])
-    @pytest.mark.parametrize(
-        ("state_size", "action_size"),
-        [
-            ((6,), 2),
-        ],
-    )
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_tourn_mut_calls_on_policy(
         self,
         multi_env,
@@ -4034,9 +3982,8 @@ class TestTrainMultiAgentOnPolicy:
             "env_name",
             "algo",
             population_multi_agent,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -4047,11 +3994,9 @@ class TestTrainMultiAgentOnPolicy:
         mocked_tournament.select.assert_called()
         mocked_mutations.mutation.assert_called()
 
+    @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("on_policy", [True])
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "accelerator_flag"),
-        [((6,), 2, True), ((6,), 2, False)],
-    )
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_save_elite_on_policy(
         self,
         multi_env,
@@ -4070,9 +4015,8 @@ class TestTrainMultiAgentOnPolicy:
             "env_name",
             "algo",
             population_multi_agent,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -4085,11 +4029,9 @@ class TestTrainMultiAgentOnPolicy:
         )
         assert os.path.isfile(f"{elite_path}.pt")
 
+    @pytest.mark.parametrize("accelerator_flag", [False, True])
     @pytest.mark.parametrize("on_policy", [True])
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "accelerator_flag"),
-        [((6,), 2, True), ((6,), 2, False)],
-    )
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_save_checkpoint_on_policy(
         self,
         multi_env,
@@ -4098,6 +4040,7 @@ class TestTrainMultiAgentOnPolicy:
         mutations,
         multi_memory,
         accelerator_flag,
+        on_policy,
         tmpdir,
     ):
         accelerator = Accelerator() if accelerator_flag else None
@@ -4107,9 +4050,8 @@ class TestTrainMultiAgentOnPolicy:
             "env_name",
             "algo",
             population_multi_agent,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -4123,23 +4065,12 @@ class TestTrainMultiAgentOnPolicy:
         for i in range(6):  # iterate through the population indices
             assert os.path.isfile(f"{checkpoint_path}_{i}_{50}.pt")
 
-    @pytest.mark.parametrize(("state_size", "action_size"), [((6,), 2)])
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_agent_on_policy_compiled_clip_and_early_stop(
         self,
         multi_env,
         monkeypatch,
     ):
-        class DummyStochastic:
-            def __init__(self):
-                self.squash_output = False
-
-            def scale_action(self, action):
-                return action
-
-        class DummyCompiledPolicy:
-            def __init__(self):
-                self._orig_mod = DummyStochastic()
-
         monkeypatch.setattr(
             agilerl.training.train_multi_agent_on_policy,
             "StochasticActor",
@@ -4148,7 +4079,7 @@ class TestTrainMultiAgentOnPolicy:
 
         agent = DummyMultiAgent(1, multi_env, on_policy=True)
         agent.torch_compiler = "compiled"
-        agent.steps = [0] * 100
+        agent.steps = 0
         agent.possible_action_spaces = Dict(
             {"agent_0": Box(0, 1, (2,)), "other_agent_0": Box(0, 1, (2,))}
         )
@@ -4158,11 +4089,10 @@ class TestTrainMultiAgentOnPolicy:
         }
 
         with (
-            patch("agilerl.training.train_multi_agent_on_policy.init_wandb"),
-            patch("agilerl.training.train_multi_agent_on_policy.wandb.log"),
-            patch(
-                "agilerl.training.train_multi_agent_on_policy.wandb.finish"
-            ) as mock_wandb_finish,
+            patch("agilerl.utils.utils.init_wandb"),
+            patch("agilerl.logger.wandb.run", new=MagicMock()),
+            patch("agilerl.logger.wandb.log"),
+            patch("agilerl.logger.wandb.finish") as mock_wandb_finish,
         ):
             train_multi_agent_on_policy(
                 multi_env,
@@ -4178,37 +4108,27 @@ class TestTrainMultiAgentOnPolicy:
             )
         mock_wandb_finish.assert_called()
 
-    @pytest.mark.parametrize(("state_size", "action_size"), [((6,), 2)])
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_agent_on_policy_compiled_clip_with_squash(
         self,
         multi_env,
         monkeypatch,
     ):
-        class DummyStochastic:
-            def __init__(self):
-                self.squash_output = True
-
-            def scale_action(self, action):
-                return np.clip(action, 0.0, 1.0)
-
-        class DummyCompiledPolicy:
-            def __init__(self):
-                self._orig_mod = DummyStochastic()
-
         monkeypatch.setattr(
             agilerl.training.train_multi_agent_on_policy,
             "StochasticActor",
             DummyStochastic,
         )
 
+        squashed = DummyStochastic(squash_output=True, clip_low=0.0, clip_high=1.0)
         agent = DummyMultiAgent(1, multi_env, on_policy=True)
         agent.torch_compiler = "compiled"
         agent.possible_action_spaces = Dict(
             {"agent_0": Box(0, 1, (2,)), "other_agent_0": Box(0, 1, (2,))}
         )
         agent.actors = {
-            "agent_0": DummyCompiledPolicy(),
-            "other_agent_0": DummyCompiledPolicy(),
+            "agent_0": DummyCompiledPolicy(squashed),
+            "other_agent_0": DummyCompiledPolicy(squashed),
         }
 
         train_multi_agent_on_policy(
@@ -4223,7 +4143,7 @@ class TestTrainMultiAgentOnPolicy:
             verbose=False,
         )
 
-    @pytest.mark.parametrize(("state_size", "action_size"), [((6,), 2)])
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_multi_agent_on_policy_nan_mean_score_branch(
         self, multi_env, monkeypatch
     ):
@@ -4283,19 +4203,12 @@ class TestTrainMultiAgentOnPolicy:
 
 
 class TestTrainOffline:
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "vect", "swap_channels"),
-        [
-            ((6,), 2, True, False),
-            ((32, 32, 3), 2, False, True),
-        ],
-    )
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_offline(
         self,
         env,
         population_off_policy,
         memory,
-        swap_channels,
         tournament,
         mutations,
         offline_init_hp,
@@ -4307,13 +4220,12 @@ class TestTrainOffline:
             pop, _ = train_offline(
                 env,
                 "env_name",
-                dummy_h5py_data,
                 "algo",
                 population_off_policy,
                 memory,
-                INIT_HP=offline_init_hp,
-                MUT_P=None,
-                swap_channels=swap_channels,
+                dataset=dummy_h5py_data,
+                init_hp=offline_init_hp,
+                mut_p=None,
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
@@ -4324,13 +4236,9 @@ class TestTrainOffline:
             )
 
             assert len(pop) == len(population_off_policy)
+            assert len(pop) == len(population_off_policy)
 
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "vect"),
-        [
-            ((6,), 2, True),
-        ],
-    )
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_offline_save_elite_warning(
         self,
         env,
@@ -4342,19 +4250,19 @@ class TestTrainOffline:
         dummy_h5py_data,
     ):
         warning_string = (
-            r"'save_elite' set to False but 'elite_path' has been defined, "
-            r"elite will not\s+be saved unless 'save_elite' is set to True\."
+            "'save_elite' set to False but 'elite_path' has been defined, elite will not\
+                      be saved unless 'save_elite' is set to True."
         )
         with pytest.warns(match=warning_string):
             _pop, _ = train_offline(
                 env,
                 "env_name",
-                dummy_h5py_data,
                 "algo",
                 population_off_policy,
                 memory,
-                INIT_HP=offline_init_hp,
-                MUT_P=None,
+                dataset=dummy_h5py_data,
+                init_hp=offline_init_hp,
+                mut_p=None,
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
@@ -4365,12 +4273,7 @@ class TestTrainOffline:
                 elite_path="path",
             )
 
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "vect"),
-        [
-            ((6,), 2, True),
-        ],
-    )
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_offline_save_checkpoint_warning(
         self,
         env,
@@ -4382,19 +4285,19 @@ class TestTrainOffline:
         dummy_h5py_data,
     ):
         warning_string = (
-            r"'checkpoint' set to None but 'checkpoint_path' has been defined, "
-            r"checkpoint will not\s+be saved unless 'checkpoint' is defined\."
+            "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
+                      be saved unless 'checkpoint' is defined."
         )
         with pytest.warns(match=warning_string):
             _pop, _ = train_offline(
                 env,
                 "env_name",
-                dummy_h5py_data,
                 "algo",
                 population_off_policy,
                 memory,
-                INIT_HP=offline_init_hp,
-                MUT_P=None,
+                dataset=dummy_h5py_data,
+                init_hp=offline_init_hp,
+                mut_p=None,
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
@@ -4405,13 +4308,8 @@ class TestTrainOffline:
                 checkpoint_path="path",
             )
 
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "vect", "accelerator_flag"),
-        [
-            ((6,), 2, True, False),
-            ((6,), 2, True, True),
-        ],
-    )
+    @pytest.mark.parametrize("accelerator_flag", [False, True])
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_offline_wandb_calls(
         self,
         env,
@@ -4424,7 +4322,7 @@ class TestTrainOffline:
         accelerator_flag,
     ):
         accelerator = Accelerator() if accelerator_flag else None
-        MUT_P = {
+        mut_p = {
             "NO_MUT": 0.4,
             "ARCH_MUT": 0.2,
             "PARAMS_MUT": 0.2,
@@ -4432,22 +4330,22 @@ class TestTrainOffline:
             "RL_HP_MUT": 0.2,
         }
         with (
-            patch("agilerl.training.train_offline.wandb.login") as _,
-            patch("agilerl.training.train_offline.wandb.init") as mock_wandb_init,
-            patch("agilerl.training.train_offline.wandb.log") as mock_wandb_log,
-            patch("agilerl.training.train_offline.wandb.finish") as mock_wandb_finish,
+            patch("agilerl.utils.utils.wandb.login") as _,
+            patch("agilerl.utils.utils.wandb.init") as mock_wandb_init,
+            patch("agilerl.logger.wandb.run", new=MagicMock()),
+            patch("agilerl.logger.wandb.log") as mock_wandb_log,
+            patch("agilerl.logger.wandb.finish") as mock_wandb_finish,
         ):
             # Call the function that should trigger wandb.init
             agilerl.training.train_offline.train_offline(
                 env,
                 "env_name",
-                dummy_h5py_data,
                 "algo",
                 population_off_policy,
                 memory,
-                INIT_HP=offline_init_hp,
-                MUT_P=MUT_P,
-                swap_channels=False,
+                dataset=dummy_h5py_data,
+                init_hp=offline_init_hp,
+                mut_p=mut_p,
                 max_steps=50,
                 evo_steps=10,
                 eval_loop=1,
@@ -4468,13 +4366,18 @@ class TestTrainOffline:
             mock_wandb_log.assert_called()
             # Assert that wandb.finish was called
             mock_wandb_finish.assert_called()
+            # Assert that wandb.init was called with expected arguments
+            mock_wandb_init.assert_called_once_with(
+                project=ANY,
+                name=ANY,
+                config=ANY,
+            )
+            # Assert that wandb.log was called with expected log parameters
+            mock_wandb_log.assert_called()
+            # Assert that wandb.finish was called
+            mock_wandb_finish.assert_called()
 
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "vect"),
-        [
-            ((6,), 2, True),
-        ],
-    )
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_offline_early_stop(
         self,
         env,
@@ -4487,7 +4390,7 @@ class TestTrainOffline:
     ):
         for accelerator_flag in [True, False]:
             accelerator = Accelerator() if accelerator_flag else None
-            MUT_P = {
+            mut_p = {
                 "NO_MUT": 0.4,
                 "ARCH_MUT": 0.2,
                 "PARAMS_MUT": 0.2,
@@ -4495,24 +4398,22 @@ class TestTrainOffline:
                 "RL_HP_MUT": 0.2,
             }
             with (
-                patch("agilerl.training.train_offline.wandb.login") as _,
-                patch("agilerl.training.train_offline.wandb.init") as _,
-                patch("agilerl.training.train_offline.wandb.log") as _,
-                patch(
-                    "agilerl.training.train_offline.wandb.finish"
-                ) as mock_wandb_finish,
+                patch("agilerl.utils.utils.wandb.login") as _,
+                patch("agilerl.utils.utils.wandb.init") as _,
+                patch("agilerl.logger.wandb.run", new=MagicMock()),
+                patch("agilerl.logger.wandb.log") as _,
+                patch("agilerl.logger.wandb.finish") as mock_wandb_finish,
             ):
                 # Call the function that should trigger wandb.init
                 agilerl.training.train_offline.train_offline(
                     env,
                     "env_name",
-                    dummy_h5py_data,
                     "algo",
                     population_off_policy,
                     memory,
-                    INIT_HP=offline_init_hp,
-                    MUT_P=MUT_P,
-                    swap_channels=False,
+                    dataset=dummy_h5py_data,
+                    init_hp=offline_init_hp,
+                    mut_p=mut_p,
                     target=-10000,
                     max_steps=50,
                     evo_steps=10,
@@ -4526,12 +4427,8 @@ class TestTrainOffline:
                 # Assert that wandb.finish was called
                 mock_wandb_finish.assert_called()
 
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "vect", "algo"),
-        [
-            ((6,), 2, True, CQN),
-        ],
-    )
+    @pytest.mark.parametrize("algo", [DQN])
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_offline_agent_calls(
         self,
         env,
@@ -4550,13 +4447,12 @@ class TestTrainOffline:
             _pop, _ = train_offline(
                 env,
                 "env_name",
-                dummy_h5py_data,
                 "algo",
                 mock_population,
                 memory,
-                INIT_HP=offline_init_hp,
-                MUT_P=None,
-                swap_channels=False,
+                dataset=dummy_h5py_data,
+                init_hp=offline_init_hp,
+                mut_p=None,
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
@@ -4571,13 +4467,13 @@ class TestTrainOffline:
             if accelerator is not None:
                 mocked_agent_off_policy.wrap_models.assert_called()
                 mocked_agent_off_policy.unwrap_models.assert_called()
+            mocked_agent_off_policy.learn.assert_called()
+            mocked_agent_off_policy.test.assert_called()
+            if accelerator is not None:
+                mocked_agent_off_policy.wrap_models.assert_called()
+                mocked_agent_off_policy.unwrap_models.assert_called()
 
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "vect"),
-        [
-            ((6,), 2, True),
-        ],
-    )
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_offline_memory_calls(
         self,
         env,
@@ -4593,13 +4489,12 @@ class TestTrainOffline:
             _pop, _ = train_offline(
                 env,
                 "env_name",
-                dummy_h5py_data,
                 "algo",
                 population_off_policy,
                 mocked_memory,
-                INIT_HP=offline_init_hp,
-                MUT_P=None,
-                swap_channels=False,
+                dataset=dummy_h5py_data,
+                init_hp=offline_init_hp,
+                mut_p=None,
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
@@ -4611,12 +4506,7 @@ class TestTrainOffline:
             mocked_memory.add.assert_called()
             mocked_memory.sample.assert_called()
 
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "vect"),
-        [
-            ((6,), 2, True),
-        ],
-    )
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_offline_mut_tourn_calls(
         self,
         env,
@@ -4633,13 +4523,12 @@ class TestTrainOffline:
             _pop, _ = train_offline(
                 env,
                 "env_name",
-                dummy_h5py_data,
                 "algo",
                 population_off_policy,
                 memory,
-                INIT_HP=offline_init_hp,
-                MUT_P=None,
-                swap_channels=False,
+                dataset=dummy_h5py_data,
+                init_hp=offline_init_hp,
+                mut_p=None,
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
@@ -4651,10 +4540,8 @@ class TestTrainOffline:
             mocked_tournament.select.assert_called()
             mocked_mutations.mutation.assert_called()
 
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "vect", "accelerator_flag"),
-        [((6,), 2, True, True), ((6,), 2, True, False)],
-    )
+    @pytest.mark.parametrize("accelerator_flag", [False, True])
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_offline_save_elite(
         self,
         env,
@@ -4672,13 +4559,12 @@ class TestTrainOffline:
         _pop, _ = train_offline(
             env,
             "env_name",
-            dummy_h5py_data,
             "algo",
             population_off_policy,
             memory,
-            INIT_HP=offline_init_hp,
-            MUT_P=None,
-            swap_channels=False,
+            dataset=dummy_h5py_data,
+            init_hp=offline_init_hp,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -4691,10 +4577,8 @@ class TestTrainOffline:
         )
         assert os.path.isfile(f"{elite_path}.pt")
 
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "vect", "accelerator_flag"),
-        [((6,), 2, True, True), ((6,), 2, True, False)],
-    )
+    @pytest.mark.parametrize("accelerator_flag", [False, True])
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_offline_save_checkpoint(
         self,
         env,
@@ -4712,13 +4596,12 @@ class TestTrainOffline:
         _pop, _ = train_offline(
             env,
             "env_name",
-            dummy_h5py_data,
             "algo",
             population_off_policy,
             memory,
-            INIT_HP=offline_init_hp,
-            MUT_P=None,
-            swap_channels=False,
+            dataset=dummy_h5py_data,
+            init_hp=offline_init_hp,
+            mut_p=None,
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
@@ -4732,10 +4615,10 @@ class TestTrainOffline:
         for i in range(6):  # iterate through the population indices
             assert os.path.isfile(f"{checkpoint_path}_{i}_{50}.pt")
 
-    @pytest.mark.parametrize(("state_size", "action_size", "vect"), [((6,), 2, True)])
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_offline_minari_branch_and_early_stop(self, env, memory):
         agent = DummyAgentOffPolicy(5, env, 0.4)
-        agent.steps = [0] * 100
+        agent.steps = 0
         seed_transition = Transition(
             obs=np.random.randn(2, *env.state_size[1:]),
             action=np.random.randn(2, env.action_size),
@@ -4750,17 +4633,18 @@ class TestTrainOffline:
                 "agilerl.training.train_offline.minari_to_agile_buffer",
                 side_effect=lambda *_args, **_kwargs: memory,
             ) as mock_minari,
-            patch("agilerl.training.train_offline.init_wandb"),
-            patch("agilerl.training.train_offline.wandb.log"),
-            patch("agilerl.training.train_offline.wandb.finish") as mock_wandb_finish,
+            patch("agilerl.utils.utils.init_wandb"),
+            patch("agilerl.logger.wandb.run", new=MagicMock()),
+            patch("agilerl.logger.wandb.log"),
+            patch("agilerl.logger.wandb.finish") as mock_wandb_finish,
         ):
             train_offline(
                 env,
                 "env_name",
-                {},
                 "algo",
                 [agent],
                 memory,
+                dataset={},
                 max_steps=2,
                 evo_steps=2,
                 minari_dataset_id="dummy_minari_id",
@@ -4771,14 +4655,12 @@ class TestTrainOffline:
         mock_minari.assert_called_once()
         mock_wandb_finish.assert_called()
 
+    # LEAVE LAST, TEMPORARY TO DELETE SAVED MODELS
+    # TODO: Properly handle saving/deletion in tests
+
 
 class TestTrainBandits:
-    @pytest.mark.parametrize(
-        ("state_size", "action_size"),
-        [
-            ((6,), 2),
-        ],
-    )
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_bandit(
         self,
         bandit_env,
@@ -4793,9 +4675,8 @@ class TestTrainBandits:
             "algo",
             population_bandit,
             bandit_memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             episode_steps=5,
             evo_steps=25,
@@ -4807,14 +4688,10 @@ class TestTrainBandits:
         )
 
         assert len(pop) == len(population_bandit)
+        assert len(pop) == len(population_bandit)
 
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "algo"),
-        [
-            ((6,), 2, NeuralTS),
-            ((6,), 2, NeuralUCB),
-        ],
-    )
+    @pytest.mark.parametrize("algo", [NeuralUCB])
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_bandit_agent_calls_made(
         self,
         bandit_env,
@@ -4833,9 +4710,8 @@ class TestTrainBandits:
                 "algo",
                 mock_population,
                 bandit_memory,
-                INIT_HP=None,
-                MUT_P=None,
-                swap_channels=False,
+                init_hp=None,
+                mut_p=None,
                 max_steps=50,
                 episode_steps=5,
                 evo_steps=25,
@@ -4854,8 +4730,14 @@ class TestTrainBandits:
             if accelerator is not None:
                 mocked_bandit.wrap_models.assert_called()
                 mocked_bandit.unwrap_models.assert_called()
+            mocked_bandit.get_action.assert_called()
+            mocked_bandit.learn.assert_called()
+            mocked_bandit.test.assert_called()
+            if accelerator is not None:
+                mocked_bandit.wrap_models.assert_called()
+                mocked_bandit.unwrap_models.assert_called()
 
-    @pytest.mark.parametrize(("state_size", "action_size"), [((6,), 2)])
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_bandit_save_elite_warning(
         self,
         bandit_env,
@@ -4865,8 +4747,8 @@ class TestTrainBandits:
         bandit_memory,
     ):
         warning_string = (
-            r"'save_elite' set to False but 'elite_path' has been defined, "
-            r"elite will not\s+be saved unless 'save_elite' is set to True\."
+            "'save_elite' set to False but 'elite_path' has been defined, elite will not\
+                      be saved unless 'save_elite' is set to True."
         )
         with pytest.warns(match=warning_string):
             _pop, _ = train_bandits(
@@ -4875,9 +4757,8 @@ class TestTrainBandits:
                 "algo",
                 population_bandit,
                 bandit_memory,
-                INIT_HP=None,
-                MUT_P=None,
-                swap_channels=False,
+                init_hp=None,
+                mut_p=None,
                 max_steps=50,
                 episode_steps=5,
                 evo_steps=25,
@@ -4890,7 +4771,7 @@ class TestTrainBandits:
                 elite_path="path",
             )
 
-    @pytest.mark.parametrize(("state_size", "action_size"), [((6,), 2)])
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_bandit_checkpoint_warning(
         self,
         bandit_env,
@@ -4900,8 +4781,8 @@ class TestTrainBandits:
         bandit_memory,
     ):
         warning_string = (
-            r"'checkpoint' set to None but 'checkpoint_path' has been defined, "
-            r"checkpoint will not\s+be saved unless 'checkpoint' is defined\."
+            "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
+                      be saved unless 'checkpoint' is defined."
         )
         with pytest.warns(match=warning_string):
             _pop, _ = train_bandits(
@@ -4910,9 +4791,8 @@ class TestTrainBandits:
                 "algo",
                 population_bandit,
                 bandit_memory,
-                INIT_HP=None,
-                MUT_P=None,
-                swap_channels=False,
+                init_hp=None,
+                mut_p=None,
                 max_steps=50,
                 episode_steps=5,
                 evo_steps=25,
@@ -4925,7 +4805,7 @@ class TestTrainBandits:
                 checkpoint_path="path",
             )
 
-    @pytest.mark.parametrize(("state_size", "action_size"), [((6,), 2)])
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_bandit_actions_histogram(
         self,
         bandit_env,
@@ -4940,9 +4820,8 @@ class TestTrainBandits:
             "DQN",
             population_bandit,
             bandit_memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             episode_steps=5,
             evo_steps=25,
@@ -4954,8 +4833,9 @@ class TestTrainBandits:
         )
 
         assert len(pop) == len(population_bandit)
+        assert len(pop) == len(population_bandit)
 
-    @pytest.mark.parametrize(("state_size", "action_size"), [((6,), 2)])
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_bandit_replay_buffer_calls(
         self,
         mocked_bandit_memory,
@@ -4970,9 +4850,8 @@ class TestTrainBandits:
             "algo",
             population_bandit,
             mocked_bandit_memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             episode_steps=5,
             evo_steps=25,
@@ -4985,12 +4864,7 @@ class TestTrainBandits:
         mocked_bandit_memory.add.assert_called()
         mocked_bandit_memory.sample.assert_called()
 
-    @pytest.mark.parametrize(
-        ("state_size", "action_size"),
-        [
-            ((6,), 2),
-        ],
-    )
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_bandit_bandit_env_calls(
         self,
         mocked_bandit_env,
@@ -5005,9 +4879,8 @@ class TestTrainBandits:
             "algo",
             population_bandit,
             bandit_memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             episode_steps=5,
             evo_steps=25,
@@ -5020,12 +4893,7 @@ class TestTrainBandits:
         mocked_bandit_env.step.assert_called()
         mocked_bandit_env.reset.assert_called()
 
-    @pytest.mark.parametrize(
-        ("state_size", "action_size"),
-        [
-            ((6,), 2),
-        ],
-    )
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_bandit_tourn_mut_calls(
         self,
         bandit_env,
@@ -5040,9 +4908,8 @@ class TestTrainBandits:
             "algo",
             population_bandit,
             bandit_memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             episode_steps=5,
             evo_steps=25,
@@ -5055,7 +4922,7 @@ class TestTrainBandits:
         mocked_mutations.mutation.assert_called()
         mocked_tournament.select.assert_called()
 
-    @pytest.mark.parametrize(("state_size", "action_size"), [((32, 32, 3), 2)])
+    @pytest.mark.parametrize(("state_size", "action_size"), _IMG)
     def test_train_bandit_rgb_input(
         self,
         bandit_env,
@@ -5070,9 +4937,8 @@ class TestTrainBandits:
             "algo",
             population_bandit,
             bandit_memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=True,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             episode_steps=5,
             evo_steps=25,
@@ -5084,11 +4950,9 @@ class TestTrainBandits:
         )
 
         assert len(pop) == len(population_bandit)
+        assert len(pop) == len(population_bandit)
 
-    @pytest.mark.parametrize(
-        ("state_size", "action_size"),
-        [((6,), 2)],
-    )
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_bandit_using_alternate_buffers(
         self,
         bandit_env,
@@ -5103,9 +4967,8 @@ class TestTrainBandits:
             "algo",
             population_bandit,
             memory=bandit_memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             episode_steps=5,
             evo_steps=25,
@@ -5117,8 +4980,9 @@ class TestTrainBandits:
         )
 
         assert len(pop) == len(population_bandit)
+        assert len(pop) == len(population_bandit)
 
-    @pytest.mark.parametrize(("state_size", "action_size"), [((3, 64, 64), 2)])
+    @pytest.mark.parametrize(("state_size", "action_size"), _IMG_SQUARE)
     def test_train_bandit_using_alternate_buffers_rgb(
         self,
         bandit_env,
@@ -5133,9 +4997,8 @@ class TestTrainBandits:
             "algo",
             population_bandit,
             memory=bandit_memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=True,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             episode_steps=5,
             evo_steps=25,
@@ -5147,8 +5010,9 @@ class TestTrainBandits:
         )
 
         assert len(pop) == len(population_bandit)
+        assert len(pop) == len(population_bandit)
 
-    @pytest.mark.parametrize(("state_size", "action_size"), [((6,), 2)])
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_bandit_distributed(
         self,
         bandit_env,
@@ -5164,9 +5028,8 @@ class TestTrainBandits:
             "algo",
             population_bandit,
             bandit_memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             episode_steps=5,
             evo_steps=25,
@@ -5179,8 +5042,9 @@ class TestTrainBandits:
         )
 
         assert len(pop) == len(population_bandit)
+        assert len(pop) == len(population_bandit)
 
-    @pytest.mark.parametrize(("state_size", "action_size"), [((6,), 2)])
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_bandit_wandb_init_log(
         self,
         bandit_env,
@@ -5189,18 +5053,17 @@ class TestTrainBandits:
         mutations,
         bandit_memory,
     ):
-        INIT_HP = {
+        init_hp = {
             "BATCH_SIZE": 128,
             "LR": 1e-3,
             "GAMMA": 1,
             "LAMBDA": 1,
             "REG": 0.000625,
             "LEARN_STEP": 1,
-            "CHANNELS_LAST": False,
             "POP_SIZE": 6,
             "MEMORY_SIZE": 20000,
         }
-        MUT_P = {
+        mut_p = {
             "NO_MUT": 0.4,
             "ARCH_MUT": 0.2,
             "PARAMS_MUT": 0.2,
@@ -5208,10 +5071,11 @@ class TestTrainBandits:
             "RL_HP_MUT": 0.2,
         }
         with (
-            patch("agilerl.training.train_bandits.wandb.login") as _,
-            patch("agilerl.training.train_bandits.wandb.init") as mock_wandb_init,
-            patch("agilerl.training.train_bandits.wandb.log") as mock_wandb_log,
-            patch("agilerl.training.train_bandits.wandb.finish") as mock_wandb_finish,
+            patch("agilerl.utils.utils.wandb.login") as _,
+            patch("agilerl.utils.utils.wandb.init") as mock_wandb_init,
+            patch("agilerl.logger.wandb.run", new=MagicMock()),
+            patch("agilerl.logger.wandb.log") as mock_wandb_log,
+            patch("agilerl.logger.wandb.finish") as mock_wandb_finish,
         ):
             # Call the function that should trigger wandb.init
             agilerl.training.train_bandits.train_bandits(
@@ -5220,9 +5084,8 @@ class TestTrainBandits:
                 "algo",
                 population_bandit,
                 bandit_memory,
-                INIT_HP=INIT_HP,
-                MUT_P=MUT_P,
-                swap_channels=False,
+                init_hp=init_hp,
+                mut_p=mut_p,
                 max_steps=50,
                 episode_steps=5,
                 evo_steps=25,
@@ -5241,28 +5104,12 @@ class TestTrainBandits:
                 config=ANY,
             )
             # Assert that wandb.log was called with expected log parameters
-            mock_wandb_log.assert_called_with(
-                {
-                    "global_step": ANY,
-                    "steps_per_agent": ANY,
-                    "train/mean_score": ANY,
-                    "train/mean_regret": ANY,
-                    "train/best_regret": ANY,
-                    "train/mean_loss": ANY,
-                    "eval/mean_fitness": ANY,
-                    "eval/best_fitness": ANY,
-                },
-            )
+            _assert_wandb_summary_log(mock_wandb_log)
             # Assert that wandb.finish was called
             mock_wandb_finish.assert_called()
 
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "accelerator"),
-        [
-            ((6,), 2, True),
-            ((6,), 2, False),
-        ],
-    )
+    @pytest.mark.parametrize("accelerator", [False, True])
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_bandit_wandb_init_log_distributed(
         self,
         bandit_env,
@@ -5273,18 +5120,17 @@ class TestTrainBandits:
         accelerator,
     ):
         accelerator = Accelerator() if accelerator else None
-        INIT_HP = {
+        init_hp = {
             "BATCH_SIZE": 128,
             "LR": 1e-3,
             "GAMMA": 1,
             "LAMBDA": 1,
             "REG": 0.000625,
             "LEARN_STEP": 1,
-            "CHANNELS_LAST": False,
             "POP_SIZE": 6,
             "MEMORY_SIZE": 20000,
         }
-        MUT_P = {
+        mut_p = {
             "NO_MUT": 0.4,
             "ARCH_MUT": 0.2,
             "PARAMS_MUT": 0.2,
@@ -5292,10 +5138,11 @@ class TestTrainBandits:
             "RL_HP_MUT": 0.2,
         }
         with (
-            patch("agilerl.training.train_bandits.wandb.login") as _,
-            patch("agilerl.training.train_bandits.wandb.init") as mock_wandb_init,
-            patch("agilerl.training.train_bandits.wandb.log") as mock_wandb_log,
-            patch("agilerl.training.train_bandits.wandb.finish") as mock_wandb_finish,
+            patch("agilerl.utils.utils.wandb.login") as _,
+            patch("agilerl.utils.utils.wandb.init") as mock_wandb_init,
+            patch("agilerl.logger.wandb.run", new=MagicMock()),
+            patch("agilerl.logger.wandb.log") as mock_wandb_log,
+            patch("agilerl.logger.wandb.finish") as mock_wandb_finish,
         ):
             # Call the function that should trigger wandb.init
             agilerl.training.train_bandits.train_bandits(
@@ -5304,9 +5151,8 @@ class TestTrainBandits:
                 "algo",
                 population_bandit,
                 bandit_memory,
-                INIT_HP=INIT_HP,
-                MUT_P=MUT_P,
-                swap_channels=False,
+                init_hp=init_hp,
+                mut_p=mut_p,
                 max_steps=50,
                 episode_steps=5,
                 evo_steps=25,
@@ -5326,22 +5172,11 @@ class TestTrainBandits:
                 config=ANY,
             )
             # Assert that wandb.log was called with expected log parameters
-            mock_wandb_log.assert_called_with(
-                {
-                    "global_step": ANY,
-                    "steps_per_agent": ANY,
-                    "train/mean_score": ANY,
-                    "train/mean_regret": ANY,
-                    "train/best_regret": ANY,
-                    "train/mean_loss": ANY,
-                    "eval/mean_fitness": ANY,
-                    "eval/best_fitness": ANY,
-                },
-            )
+            _assert_wandb_summary_log(mock_wandb_log)
             # Assert that wandb.finish was called
             mock_wandb_finish.assert_called()
 
-    @pytest.mark.parametrize(("state_size", "action_size"), [((6,), 2)])
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_bandit_early_stop_wandb(
         self,
         bandit_env,
@@ -5350,18 +5185,17 @@ class TestTrainBandits:
         mutations,
         bandit_memory,
     ):
-        INIT_HP = {
+        init_hp = {
             "BATCH_SIZE": 128,
             "LR": 1e-3,
             "GAMMA": 1,
             "LAMBDA": 1,
             "REG": 0.000625,
             "LEARN_STEP": 1,
-            "CHANNELS_LAST": False,
             "POP_SIZE": 6,
             "MEMORY_SIZE": 20000,
         }
-        MUT_P = {
+        mut_p = {
             "NO_MUT": 0.4,
             "ARCH_MUT": 0.2,
             "PARAMS_MUT": 0.2,
@@ -5369,10 +5203,11 @@ class TestTrainBandits:
             "RL_HP_MUT": 0.2,
         }
         with (
-            patch("agilerl.training.train_bandits.wandb.login") as _,
-            patch("agilerl.training.train_bandits.wandb.init") as _,
-            patch("agilerl.training.train_bandits.wandb.log") as _,
-            patch("agilerl.training.train_bandits.wandb.finish") as mock_wandb_finish,
+            patch("agilerl.utils.utils.wandb.login") as _,
+            patch("agilerl.utils.utils.wandb.init") as _,
+            patch("agilerl.logger.wandb.run", new=MagicMock()),
+            patch("agilerl.logger.wandb.log") as _,
+            patch("agilerl.logger.wandb.finish") as mock_wandb_finish,
         ):
             # Call the function that should trigger wandb.init
             agilerl.training.train_bandits.train_bandits(
@@ -5381,10 +5216,9 @@ class TestTrainBandits:
                 "algo",
                 population_bandit,
                 bandit_memory,
-                INIT_HP=INIT_HP,
-                MUT_P=MUT_P,
+                init_hp=init_hp,
+                mut_p=mut_p,
                 target=-10000,
-                swap_channels=False,
                 max_steps=550,
                 episode_steps=5,
                 evo_steps=25,
@@ -5398,7 +5232,7 @@ class TestTrainBandits:
             # Assert that wandb.finish was called
             mock_wandb_finish.assert_called()
 
-    @pytest.mark.parametrize(("state_size", "action_size"), [((6,), 2)])
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_train_bandit_save_elite(
         self,
         bandit_env,
@@ -5415,9 +5249,8 @@ class TestTrainBandits:
             "algo",
             population_bandit,
             bandit_memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             episode_steps=5,
             evo_steps=25,
@@ -5431,17 +5264,8 @@ class TestTrainBandits:
         )
         assert os.path.isfile(elite_path)
 
-    # Same xdist_group as ``test_remove_saved_models`` below — the
-    # accelerator branch of ``train_bandits`` writes into ``models/<env_name>/``,
-    # which ``test_remove_saved_models`` then rmtrees. On macOS the rmtree can
-    # land between this test's mkdir and save_checkpoint, producing
-    # ``Parent directory models/<env_name> does not exist``. Pinning both to
-    # the same xdist worker forces serial execution.
-    @pytest.mark.xdist_group("models_dir")
-    @pytest.mark.parametrize(
-        ("state_size", "action_size", "accelerator_flag"),
-        [((6,), 2, True), ((6,), 2, False)],
-    )
+    @pytest.mark.parametrize("accelerator_flag", [False, True])
+    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_bandit_train_save_checkpoint(
         self,
         bandit_env,
@@ -5460,9 +5284,8 @@ class TestTrainBandits:
             "algo",
             population_bandit,
             bandit_memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
+            init_hp=None,
+            mut_p=None,
             max_steps=50,
             episode_steps=5,
             evo_steps=25,
@@ -5480,31 +5303,18 @@ class TestTrainBandits:
                 assert os.path.isfile(f"{checkpoint_path}_{i}_{10 * (s + 1)}.pt")
 
 
-@pytest.mark.xdist_group("models_dir")
+def _try_remove_models_dir() -> bool:
+    try:
+        shutil.rmtree("models")
+        return True
+    except OSError:
+        return not os.path.exists("models")
+
+
 def test_remove_saved_models():
-    # Pinned to the ``models_dir`` xdist_group alongside
-    # ``test_bandit_train_save_checkpoint`` so the two never run on different
-    # workers — the bandit test's checkpoint writes used to race this rmtree
-    # on macOS (``Parent directory models/<env_name> does not exist``).
-    #
-    # The retry below remains for the inverse race against any *other*
-    # sibling worker's writes into ``models/`` (rmtree losing to a concurrent
-    # write), which the xdist_group can't cover.
     if not os.path.exists("models"):
         return
     for _ in range(3):
-        try:
-            shutil.rmtree("models")
+        if _try_remove_models_dir():
             return
-        except OSError:  # noqa: PERF203 — retry loop tolerates xdist races on models/
-            if not os.path.exists("models"):
-                return
     shutil.rmtree("models", ignore_errors=True)
-
-
-# NOTE: Image dimensions are intentionally tiny — DummyEnv just produces random
-# arrays of this shape, so we only need a 3D HWC tensor to exercise the
-# rgb/swap_channels code path. Reducing from (250, 160, 3) keeps coverage
-# identical while shrinking the per-step memory traffic ~80x.
-# LEAVE LAST, TEMPORARY TO DELETE SAVED MODELS
-# TODO: Properly handle saving/deletion in tests

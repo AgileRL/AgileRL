@@ -7,9 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import gymnasium as gym
-import matplotlib.pyplot as plt
 import numpy as np
-import torch
 import tqdm
 import wandb
 from accelerate import Accelerator
@@ -35,6 +33,7 @@ from agilerl.algorithms.core import EvolvableAlgorithm, LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.logger import CSVLogger, StdOutLogger, TensorboardLogger, WandbLogger
 from agilerl.modules import EvolvableModule
 from agilerl.typing import BPTTSequenceType, GymSpaceType, PopulationType
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, DummyOptimizer, clone_llm
@@ -43,6 +42,7 @@ from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
     from agilerl.algorithms import CISPO, DPO, GRPO, GSPO, LLMPPO, LLMREINFORCE, SFT
     from agilerl.utils.llm_utils import get_llm_accelerator, get_state_dict
+
 
 SupportedObservationSpace = spaces.Box | spaces.Discrete | spaces.Dict | spaces.Tuple
 
@@ -209,6 +209,7 @@ def make_vect_envs(
     *,
     make_env: Callable[..., Any] | None = None,
     should_async_vector: bool = True,
+    extra_wrappers: list[type] | None = None,
     **env_kwargs: Any,
 ) -> Any:
     """Return async-vectorized gym environments.
@@ -221,6 +222,9 @@ def make_vect_envs(
     :type make_env: Callable, optional
     :param should_async_vector: Whether to asynchronous vectorized environments, defaults to True
     :type should_async_vector: bool, optional
+    :param extra_wrappers: Optional list of wrapper classes to apply to each individual
+        environment before vectorization.
+    :type extra_wrappers: list[type] or None, optional
     """
     if env_name is None and make_env is None:
         msg = "Either env_name or make_env must be provided"
@@ -238,12 +242,23 @@ def make_vect_envs(
 
     make_env = make_env or default_make_env
 
+    if extra_wrappers is not None:
+        _inner_make_env = make_env
+
+        def make_env() -> gym.Env:
+            env = _inner_make_env()
+            for wrapper_cls in extra_wrappers:
+                env = wrapper_cls(env)
+            return env
+
     return vectorize([make_env for _ in range(num_envs)])
 
 
 def make_multi_agent_vect_envs(
     env: Callable[[], ParallelEnv],
     num_envs: int = 1,
+    *,
+    extra_wrappers: list[type] | None = None,
     **env_kwargs: Any,
 ) -> AsyncPettingZooVecEnv:
     """Return async-vectorized PettingZoo parallel environments.
@@ -252,10 +267,22 @@ def make_multi_agent_vect_envs(
     :type env: pettingzoo.utils.env.ParallelEnv
     :param num_envs: Number of vectorized environments, defaults to 1
     :type num_envs: int, optional
+    :param extra_wrappers: Optional list of wrapper classes to apply to each individual
+        environment before vectorization.
+    :type extra_wrappers: list[type] or None, optional
 
     :return: Async-vectorized PettingZoo parallel environments
     :rtype: agilerl.vector.pz_async_vec_env.AsyncPettingZooVecEnv
     """
+    if extra_wrappers is not None:
+        _original_env = env
+
+        def env(**kwargs: Any) -> ParallelEnv:
+            e = _original_env(**kwargs)
+            for wrapper_cls in extra_wrappers:
+                e = wrapper_cls(e)
+            return e
+
     env_fns = [lambda: env(**env_kwargs) for _ in range(num_envs)]
     return AsyncPettingZooVecEnv(env_fns=env_fns)
 
@@ -277,48 +304,6 @@ def make_skill_vect_envs(
     return gym.vector.AsyncVectorEnv(
         [lambda: skill(gym.make(env_name)) for i in range(num_envs)],
     )
-
-
-def observation_space_channels_to_first(
-    observation_space: SupportedObservationSpace,
-) -> SupportedObservationSpace:
-    """Swap the channel order of an observation space from [H, W, C] -> [C, H, W].
-
-    :param observation_space: Observation space
-    :type observation_space: spaces.Box, spaces.Dict, spaces.Tuple, spaces.Discrete
-    :return: Observation space with swapped channels
-    :rtype: spaces.Box, spaces.Dict, spaces.Tuple, spaces.Discrete
-    """
-    if isinstance(observation_space, spaces.Dict):
-        for key in observation_space.spaces:
-            if (
-                isinstance(observation_space[key], spaces.Box)
-                and len(observation_space[key].shape) == 3
-            ):
-                observation_space[key] = observation_space_channels_to_first(
-                    observation_space[key],
-                )
-    elif isinstance(observation_space, spaces.Tuple):
-        observation_space = spaces.Tuple(
-            [
-                (
-                    observation_space_channels_to_first(space)
-                    if isinstance(space, spaces.Box) and len(space.shape) == 3
-                    else space
-                )
-                for space in observation_space.spaces
-            ],
-        )
-    elif isinstance(observation_space, spaces.Box):
-        low = observation_space.low.transpose(2, 0, 1)
-        high = observation_space.high.transpose(2, 0, 1)
-        observation_space = spaces.Box(
-            low=low,
-            high=high,
-            dtype=observation_space.dtype,
-        )
-
-    return observation_space
 
 
 def suppress_verbose_logging() -> None:
@@ -355,7 +340,7 @@ def default_progress_bar(
     :rtype: tqdm.tqdm
     """
     bar_format = (
-        "🚀 Training Progress │ "
+        "Training Progress │ "
         "{percentage:3.0f}% │ "
         "{bar:20} │ "
         "{n_fmt}/{total_fmt} steps │ "
@@ -401,6 +386,9 @@ def create_population(
 ) -> PopulationType:
     """Return population of identical agents.
 
+    .. deprecated::
+        Use ``Algorithm.population()`` instead (e.g. ``DQN.population(size=4, ...)``).
+
     :param algo: RL algorithm
     :type algo: str
     :param net_config: Network configuration
@@ -438,13 +426,18 @@ def create_population(
     :type lora_config: Any, optional
     :param vllm_config: ``VLLMConfig`` for GRPO / LLMPPO / LLMREINFORCE (ignored for DPO).
     :type vllm_config: Any, optional
-    :return: Population of agents
-    :rtype: list[EvolvableAlgorithm]
     :param algo_kwargs: Additional keyword arguments for the algorithm
     :type algo_kwargs: dict, optional
     :return: Population of agents
     :rtype: list[EvolvableAlgorithm]
     """
+    algo_name = algo.replace(" ", "")
+    warnings.warn(
+        f"create_population() is deprecated. Use {algo_name}.population() instead "
+        f"(e.g. {algo_name}.population(size=4, observation_space=obs, action_space=act, ...)).",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     if algo_kwargs is None:
         algo_kwargs = {}
     population = []
@@ -554,7 +547,6 @@ def create_population(
                 update_epochs=INIT_HP.get("UPDATE_EPOCHS", 4),
                 share_encoders=INIT_HP.get("SHARE_ENCODERS", True),
                 recurrent=INIT_HP.get("RECURRENT", False),
-                use_rollout_buffer=INIT_HP.get("USE_ROLLOUT_BUFFER", False),
                 bptt_sequence_type=INIT_HP.get(
                     "BPTT_SEQUENCE_TYPE",
                     BPTTSequenceType.CHUNKED,
@@ -1185,7 +1177,7 @@ def save_population_checkpoint(
                 current_checkpoint_path = (
                     f"{save_path}_{i}.pt"
                     if overwrite_checkpoints
-                    else f"{save_path}_{i}_{agent.steps[-1]}.pt"
+                    else f"{save_path}_{i}_{agent.steps}.pt"
                 )
                 agent.save_checkpoint(current_checkpoint_path)
         accelerator.wait_for_everyone()
@@ -1200,7 +1192,7 @@ def save_population_checkpoint(
             current_checkpoint_path = (
                 f"{save_path}_{i}.pt"
                 if overwrite_checkpoints
-                else f"{save_path}_{i}_{agent.steps[-1]}.pt"
+                else f"{save_path}_{i}_{agent.steps}.pt"
             )
             agent.save_checkpoint(current_checkpoint_path)
 
@@ -1341,11 +1333,10 @@ def init_wandb(
     if mutation_hyperparams is not None:
         config_dict.update(mutation_hyperparams)
 
+    # track hyperparameters and run metadata
     kwargs = {
-        # track hyperparameters and run metadata
         "config": config_dict,
-        # set the wandb project where this run will be logged
-        "project": project,
+        "project": project,  # wandb project where this run will be logged
         "name": "{}-EvoHPO-{}-{}".format(
             env_name,
             algo,
@@ -1363,6 +1354,92 @@ def init_wandb(
         accelerator.wait_for_everyone()
     else:
         wandb.init(**kwargs)
+
+
+def init_loggers(
+    *,
+    algo: str,
+    env_name: str,
+    pbar: tqdm.tqdm,
+    verbose: bool = True,
+    wb: bool = False,
+    tensorboard: bool = False,
+    csv: bool = False,
+    tensorboard_log_dir: str | None = None,
+    csv_log_dir: str | None = None,
+    accelerator: Accelerator | None = None,
+    wandb_api_key: str | None = None,
+    wandb_kwargs: dict[str, Any] | None = None,
+    init_hyperparams: dict[str, Any] | None = None,
+    mutation_hyperparams: dict[str, Any] | None = None,
+) -> list:
+    """Build the list of loggers for a training run.
+
+    Consolidates the repeated logger-setup block shared by all training loops.
+
+    :param algo: Algorithm name (used for wandb run name and TensorBoard experiment).
+    :type algo: str
+    :param env_name: Environment name.
+    :type env_name: str
+    :param pbar: ``tqdm`` progress bar for :class:`~agilerl.logger.StdOutLogger`.
+    :type pbar: tqdm.tqdm
+    :param verbose: Enable console logging via ``StdOutLogger``, defaults to True.
+    :type verbose: bool
+    :param wb: Enable Weights & Biases logging, defaults to False.
+    :type wb: bool
+    :param tensorboard: Enable TensorBoard logging, defaults to False.
+    :type tensorboard: bool
+    :param csv: Enable CSV logging, defaults to False.
+    :type csv: bool
+    :param tensorboard_log_dir: Directory for TensorBoard event files, defaults to None.
+    :type tensorboard_log_dir: str | None
+    :param csv_log_dir: Directory for CSV files, defaults to None.
+    :type csv_log_dir: str | None
+    :param accelerator: HuggingFace Accelerator for distributed training, defaults to None.
+    :type accelerator: Accelerator | None
+    :param wandb_api_key: API key for Weights & Biases, defaults to None.
+    :type wandb_api_key: str | None
+    :param wandb_kwargs: Extra kwargs merged into the ``init_wandb`` call (e.g.
+        ``{"project": "AgileRLMultiAgent"}``), defaults to None.
+    :type wandb_kwargs: dict[str, Any] | None
+    :param init_hyperparams: Initial hyperparameters logged to wandb, defaults to None.
+    :type init_hyperparams: dict[str, Any] | None
+    :param mutation_hyperparams: Mutation hyperparameters logged to wandb, defaults to None.
+    :type mutation_hyperparams: dict[str, Any] | None
+    :returns: List of configured :class:`~agilerl.logger.Logger` instances.
+    :rtype: list[Logger]
+    """
+    loggers = []
+    if verbose:
+        loggers.append(StdOutLogger(pbar))
+
+    if wb:
+        init_wandb_kwargs: dict[str, Any] = {
+            "algo": algo,
+            "env_name": env_name,
+            "init_hyperparams": init_hyperparams,
+            "mutation_hyperparams": mutation_hyperparams,
+            "wandb_api_key": wandb_api_key,
+            "accelerator": accelerator,
+        }
+        if wandb_kwargs is not None:
+            init_wandb_kwargs.update(wandb_kwargs)
+        init_wandb(**init_wandb_kwargs)
+        loggers.append(WandbLogger(accelerator))
+
+    if tensorboard:
+        experiment_name = f"{algo}-{env_name}"
+        loggers.append(
+            TensorboardLogger(
+                log_dir=tensorboard_log_dir,
+                experiment_name=experiment_name,
+                accelerator=accelerator,
+            )
+        )
+    if csv:
+        loggers.append(CSVLogger(csv_log_dir))
+
+    return loggers
 
 
 def calculate_vectorized_scores(
@@ -1449,23 +1526,6 @@ def print_hyperparams(pop: PopulationType) -> None:
         print("\n".join(lines) + "\n")
 
 
-def plot_population_score(pop: PopulationType) -> None:
-    """Plot the fitness scores of agents in a population.
-
-    :param pop: Population of agents
-    :type pop: list[EvolvableAlgorithm]
-    """
-    plt.figure()
-    for agent in pop:
-        scores = agent.fitness
-        steps = agent.steps[:-1]
-        plt.plot(steps, scores)
-    plt.title("Score History - Mutations")
-    plt.xlabel("Steps")
-    plt.ylim(bottom=-400)
-    plt.show()
-
-
 def get_env_defined_actions(
     info: dict[str, Any],
     agents: list[str],
@@ -1487,63 +1547,6 @@ def get_env_defined_actions(
         return None
 
     return env_defined_actions
-
-
-def gather_tensor(
-    tensor: torch.Tensor | float,
-    accelerator: Accelerator,
-) -> torch.Tensor:
-    """Gather tensors from gpus.
-
-    :param tensor: Tensor to gather
-    :type tensor: torch.Tensor
-    :param accelerator: Accelerator object
-    :type accelerator: accelerate.Accelerator
-    :return: Stacked tensors
-    :rtype: torch.Tensor
-    """
-    if not isinstance(tensor, torch.Tensor):
-        tensor = torch.tensor(tensor, device=accelerator.device)
-    tensor = tensor.to(accelerator.device)
-    return accelerator.gather(tensor)
-
-
-def aggregate_metrics_across_gpus(
-    accelerator: Accelerator,
-    metric_tensor: torch.Tensor | float,
-) -> float:
-    """Aggregate gathered tensors.
-
-    :param accelerator: Accelerator object
-    :type accelerator: accelerate.Accelerator
-    :param metric_tensor: Metrics
-    :type metric_tensor: torch.Tensor
-    :return: Mean metric
-    :rtype: float
-    """
-    if accelerator is None:
-        return (
-            metric_tensor.mean().item()
-            if isinstance(metric_tensor, torch.Tensor)
-            else metric_tensor
-        )
-    all_metrics = gather_tensor(metric_tensor, accelerator)
-    return all_metrics.mean().item()
-
-
-def safe_aggregate_metrics(
-    accelerator: Accelerator | None,
-    metrics: torch.Tensor | np.ndarray | float,
-) -> float:
-    if accelerator is None:
-        if isinstance(metrics, (torch.Tensor, np.ndarray)):
-            return float(
-                np.mean(metrics)
-                if isinstance(metrics, np.ndarray)
-                else metrics.float().mean().item()
-            )
-        return float(metrics)
-    return aggregate_metrics_across_gpus(accelerator, metrics)
 
 
 def save_llm_checkpoint(

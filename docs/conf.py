@@ -1,9 +1,8 @@
-# Configuration file for the Sphinx documentation builder.
-
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path("..").resolve()))
+sys.path.insert(0, str(Path(__file__).parent.resolve() / "_ext"))
 
 # -- Project information
 
@@ -12,7 +11,7 @@ copyright = "2023, AgileRL"  # noqa: A001
 author = "Nick Ustaran-Anderegg"
 
 release = "0.1"
-version = "0.1.18"
+version = "2.8.0"
 
 # -- General configuration
 
@@ -21,9 +20,13 @@ extensions = [
     "sphinx.ext.doctest",
     "sphinx.ext.autodoc",
     "sphinx.ext.autosummary",
+    "sphinx.ext.graphviz",
     "sphinx.ext.intersphinx",
+    "sphinx_copybutton",
+    "sphinx_design",
     "sphinx_tabs.tabs",
     "sphinx_toolbox.collapse",
+    "agilerl_directives",
     "sphinx_github_changelog",
     "notfound.extension",
     "sphinxcontrib.googleanalytics",
@@ -38,6 +41,11 @@ intersphinx_mapping = {
 intersphinx_disabled_domains = ["std"]
 
 templates_path = ["_templates"]
+
+# -- Options for syntax highlighting
+
+pygments_style = "friendly"
+pygments_dark_style = "monokai"
 
 # -- Options for HTML output
 

@@ -119,7 +119,7 @@ Example Training Loop
     # Define training loop parameters
     max_steps = 100000  # Max steps
     pbar = tqdm(total=max_steps)
-    while agent.steps[-1] < max_steps:
+    while agent.steps < max_steps:
         obs, info  = env.reset() # Reset environment at start of episode
         scores = np.zeros((num_envs, len(agent.shared_agent_ids)))
         completed_episode_scores = []
@@ -232,7 +232,7 @@ Example Training Loop
             pbar.update(-(agent.learn_step // -num_envs))
             pbar.set_description(f"Score: {np.mean(completed_episode_scores[-10:])}")
 
-        agent.steps[-1] += steps
+        agent.steps += steps
 
 
 

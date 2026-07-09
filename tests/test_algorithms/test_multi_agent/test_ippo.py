@@ -463,7 +463,7 @@ class TestIPPOInit:
         assert ippo.batch_size == batch_size
         assert ippo.scores == []
         assert ippo.fitness == []
-        assert ippo.steps == [0]
+        assert ippo.steps == 0
         assert ippo.target_kl == 0.5
 
         expected_actor_cls = (
@@ -575,7 +575,7 @@ class TestIPPOInit:
         assert ippo.agent_ids == agent_ids
         assert ippo.scores == []
         assert ippo.fitness == []
-        assert ippo.steps == [0]
+        assert ippo.steps == 0
         if accelerator is None:
             assert all(
                 isinstance(actor_optimizer, optim.Adam)
@@ -714,7 +714,7 @@ class TestIPPOInit:
         assert ippo.agent_ids == agent_ids
         assert ippo.scores == []
         assert ippo.fitness == []
-        assert ippo.steps == [0]
+        assert ippo.steps == 0
         if accelerator is None:
             assert all(
                 isinstance(actor_optimizer, optim.Adam)
@@ -850,7 +850,7 @@ class TestIPPOInit:
         assert ippo.agent_ids == agent_ids
         assert ippo.scores == []
         assert ippo.fitness == []
-        assert ippo.steps == [0]
+        assert ippo.steps == 0
         assert isinstance(ippo.criterion, nn.MSELoss)
         ippo.clean_up()
 
@@ -1820,6 +1820,7 @@ class TestIPPOLearn:
             {"agent": np.array([0])},
         )
         loss = ippo._learn_individual(
+            agent_id="agent",
             experiences=experiences,
             actor=ippo.actors["agent"],
             critic=ippo.critics["agent"],
@@ -1891,25 +1892,6 @@ class TestIPPOTest:
         mean_score = ippo.test(env, max_steps=5, sum_scores=True)
         assert isinstance(mean_score, float)
         ippo.clean_up()
-
-    def test_with_swap_channels_path(
-        self, ma_image_space, ma_discrete_space, monkeypatch
-    ):
-        env = DummyMultiEnv(ma_image_space, ma_discrete_space)
-        monkeypatch.setattr(
-            "agilerl.algorithms.ippo.obs_channels_to_first", lambda x: x
-        )
-        ippo = IPPO(
-            observation_spaces=ma_image_space,
-            action_spaces=ma_discrete_space,
-            agent_ids=["agent_0", "agent_1", "other_agent_0"],
-            device="cpu",
-            torch_compiler=None,
-        )
-        mean_score = ippo.test(
-            env, swap_channels=True, max_steps=1, loop=1, sum_scores=True
-        )
-        assert isinstance(mean_score, float)
 
 
 class TestIPPOClone:
@@ -2197,3 +2179,53 @@ class TestIPPOPreprocessObservation:
         assert "agent" in preprocessed
         assert "other_agent" in preprocessed
         assert preprocessed["other_agent"] == []
+
+
+class TestIPPOAddScores:
+    def test_grouped_scores_aggregated_per_group(
+        self, ma_vector_space, ma_discrete_space
+    ):
+        """Non-summed score rows arrive per env agent; metrics track group IDs."""
+        ippo = IPPO(
+            observation_spaces=ma_vector_space,
+            action_spaces=ma_discrete_space,
+            agent_ids=["agent_0", "agent_1", "other_agent_0"],
+            device="cpu",
+            torch_compiler=None,
+        )
+        assert ippo.metrics.agent_ids == ["agent", "other_agent"]
+
+        ippo.add_scores([[1.0, 3.0, 5.0], [2.0, 4.0, 6.0]])
+        # "agent" group = mean(agent_0, agent_1); "other_agent" = other_agent_0
+        assert ippo.metrics.scores == [[2.0, 5.0], [3.0, 6.0]]
+        ippo.clean_up()
+
+    def test_scalar_scores_unchanged(self, ma_vector_space, ma_discrete_space):
+        """Summed (scalar) scores pass through untouched."""
+        ippo = IPPO(
+            observation_spaces=ma_vector_space,
+            action_spaces=ma_discrete_space,
+            agent_ids=["agent_0", "agent_1", "other_agent_0"],
+            device="cpu",
+            torch_compiler=None,
+        )
+        ippo.add_scores([1.5, 2.5])
+        assert ippo.metrics.scores == [1.5, 2.5]
+        ippo.clean_up()
+
+    def test_grouped_scores_wrong_row_length_raises(
+        self, ma_vector_space, ma_discrete_space
+    ):
+        """A grouped row that isn't one entry per agent must fail loudly."""
+        ippo = IPPO(
+            observation_spaces=ma_vector_space,
+            action_spaces=ma_discrete_space,
+            agent_ids=["agent_0", "agent_1", "other_agent_0"],
+            device="cpu",
+            torch_compiler=None,
+        )
+        # Three raw agents, but rows carry only two entries: aggregating would
+        # mislabel group columns, so add_scores must raise rather than misrecord.
+        with pytest.raises(AssertionError, match="one entry per agent"):
+            ippo.add_scores([[1.0, 2.0], [3.0, 4.0]])
+        ippo.clean_up()

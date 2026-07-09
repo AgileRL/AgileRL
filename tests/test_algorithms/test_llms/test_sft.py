@@ -202,7 +202,7 @@ class TestSFTInit:
         assert sft.index == 0
         assert sft.scores == []
         assert sft.fitness == []
-        assert sft.steps == [0]
+        assert sft.steps == 0
         if config is not None:
             assert isinstance(sft.actor, DeepSpeedEngine)
             if not use_deepspeed_optimizer:
@@ -374,8 +374,8 @@ class TestSFTLearn:
         prompts = env.reset()
         pre_learn_actor_state_dict = copy.deepcopy(sft.actor.state_dict())
         metrics = sft.learn(prompts)
-        loss = metrics["mean_loss"]
-        perplexity = metrics["mean_perplexity"]
+        loss = metrics["loss"]
+        perplexity = metrics["perplexity"]
         assert isinstance(loss, float)
         assert isinstance(perplexity, float)
         assert perplexity >= 1.0  # perplexity is exp(loss), always >= 1

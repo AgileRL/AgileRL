@@ -1,6 +1,6 @@
 .. _llm_finetuning_hpo:
 
-LLM Finetuning with HPO
+LLM Fine-Tuning with HPO
 ========================
 
 To build on the :ref:`LLM reasoning tutorial<grpo_tutorial>`, we will now introduce how you can perform hyperparameter optimisation (HPO)
@@ -31,12 +31,13 @@ Dependencies
     from peft import LoraConfig, get_peft_model
     from torch.utils.data import Dataset
     from transformers import AutoModelForCausalLM, AutoTokenizer
+    from agilerl.algorithms import GRPO
     from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
+    from agilerl.utils.algo_utils import VLLMConfig
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
     from agilerl.training.train_llm import finetune_llm_reasoning
     from agilerl.llm_envs import ReasoningGym
-    from agilerl.utils.utils import create_population
 
 Defining Hyperparameters
 ------------------------
@@ -50,7 +51,7 @@ unlike the rest of the AgileRL framework, we can only tune the RL hyperparameter
 
     .. code-block:: python
 
-        MUTATION_PARAMS = {
+        mut_p = {
             "NO_MUT": 0.1,
             "RL_HP_MUT": 0.6,
             "MUT_SD": 0.1,
@@ -63,21 +64,36 @@ unlike the rest of the AgileRL framework, we can only tune the RL hyperparameter
             "MAX_GROUP_SIZE": 12,
         }
 
-        INIT_HP = {
-            "ALGO": "GRPO",
-            "BATCH_SIZE": 16,
-            "BETA": 0.001,
-            "LR": 0.000005,
-            "CLIP_COEF": 0.2,
-            "MAX_GRAD_NORM": 0.1,
-            "UPDATE_EPOCHS": 1,
-            "GROUP_SIZE": 8,
-            "TEMPERATURE": 0.9,
-            "MAX_MODEL_LEN": 1024,
-            "TOURN_SIZE": 2,
-            "ELITISM": True,
-            "POP_SIZE": 4,
-            "EVAL_LOOP": 1,
+        hp_config = HyperparameterConfig(
+            beta=RLParameter(min=mut_p["MIN_BETA"], max=mut_p["MAX_BETA"]),
+            lr=RLParameter(min=mut_p["MIN_LR"], max=mut_p["MAX_LR"]),
+            group_size=RLParameter(min=mut_p["MIN_GROUP_SIZE"], max=mut_p["MAX_GROUP_SIZE"], dtype=int),
+        )
+
+        # Algorithm hyperparameters
+        init_hp = {
+            "hp_config": hp_config,
+            "batch_size": 16,
+            "beta": 0.001,
+            "lr": 5e-6,
+            "clip_coef": 0.2,
+            "max_grad_norm": 0.1,
+            "update_epochs": 1,
+            "group_size": 8,
+            "temperature": 0.9,
+            "max_model_len": 1024,
+            "use_vllm": True,
+            "vllm_config": VLLMConfig(
+                sleep_mode=False,
+                max_num_seqs=4,
+            ),
+            "lora_config": LoraConfig(
+                r=16,
+                lora_alpha=64,
+                target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+                lora_dropout=0.05,
+                bias="none",
+            ),
         }
 
 Defining our Base Model and Dataset
@@ -254,39 +270,14 @@ training in this tutorial, we use deepspeed and accelerate.
 
 .. code-block:: python
 
-    hp_config = HyperparameterConfig(
-        beta=RLParameter(min=mut_p["MIN_BETA"], max=mut_p["MAX_BETA"]),
-        lr=RLParameter(min=mut_p["MIN_LR"], max=mut_p["MAX_LR"]),
-        group_size=RLParameter(min=mut_p["MIN_GROUP_SIZE"], max=mut_p["MAX_GROUP_SIZE"], dtype=int),
-    )
-
-    # Define the algorithm kwargs
-    algo_kwargs = {
-        "model_name": MODEL_PATH,
-        "lora_config": LoraConfig(
-            r=16,
-            lora_alpha=64,
-            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-            lora_dropout=0.05,
-            bias="none",
-        ),
-        "use_vllm": True,
-        "vllm_config": VLLMConfig(
-            sleep_mode=False,
-            max_num_seqs=4
-        ),
-        "pad_token_id": tokenizer.pad_token_id,
-        "pad_token": tokenizer.pad_token,
-    }
-
-    pop = create_population(
-        algo=init_hp["ALGO"],
-        net_config=None,
-        INIT_HP=init_hp,
-        hp_config=hp_config,
-        population_size=init_hp["POP_SIZE"],
+    # Initialise the population
+    pop = GRPO.population(
+        size=4,
+        model_name=MODEL_PATH,
+        pad_token_id=tokenizer.pad_token_id,
+        pad_token=tokenizer.pad_token,
         accelerator=accelerator,
-        algo_kwargs=algo_kwargs,
+        **init_hp,
     )
 
 Creating Mutations and Tournament Objects
@@ -302,10 +293,9 @@ returns the best agent, and the new generation of agents.
 .. code-block:: python
 
     tournament = TournamentSelection(
-        INIT_HP["TOURN_SIZE"],
-        INIT_HP["ELITISM"],
-        INIT_HP["POP_SIZE"],
-        INIT_HP["EVAL_LOOP"],
+        tournament_size=2,
+        elitism=True,
+        population_size=4,
     )
 
 Mutation is periodically used to explore the hyperparameter space, allowing different hyperparameter combinations to be
@@ -322,14 +312,14 @@ The ``Mutations()`` class is used to mutate agents with pre-set probabilities. T
 .. code-block:: python
 
     mutations = Mutations(
-        no_mutation=MUT_P["NO_MUT"],
+        no_mutation=mut_p["NO_MUT"],
         architecture=0,
         new_layer_prob=0,
         parameters=0,
         activation=0,
-        rl_hp=MUT_P["RL_HP_MUT"],
-        mutation_sd=MUT_P["MUT_SD"],
-        rand_seed=MUT_P["RAND_SEED"],
+        rl_hp=mut_p["RL_HP_MUT"],
+        mutation_sd=mut_p["MUT_SD"],
+        rand_seed=mut_p["RAND_SEED"],
         device=device,
     )
 
@@ -416,7 +406,7 @@ function and is an example of how we might choose to make use of a population of
 
     .. code-block:: python
 
-        from agilerl.utils.utils import aggregate_metrics_across_gpus
+        from agilerl.utils.llm_utils import aggregate_metrics_across_gpus
         from agilerl.training.train_llm import tournament_selection_and_mutation
         from tqdm import trange
         import numpy as np
@@ -482,7 +472,7 @@ function and is an example of how we might choose to make use of a population of
                         ]
                         avg_score = ["%.2f" % np.mean(agent.scores[-10:]) for agent in pop]
                         agents = [agent.index for agent in pop]
-                        num_steps = [agent.steps[-1] for agent in pop]
+                        num_steps = [agent.steps for agent in pop]
                         muts = [agent.mut for agent in pop]
                         print(
                             f"""
@@ -515,7 +505,7 @@ function and is an example of how we might choose to make use of a population of
                             test_metrics_dict
                         )
                     pbar.update(effective_data_batch_size)
-                    agent.steps.append(effective_data_batch_size)
+                    agent.steps += effective_data_batch_size
                     agent.scores.append(mean_scores)
                     total_steps += effective_data_batch_size
 

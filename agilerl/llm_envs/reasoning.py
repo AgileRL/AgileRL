@@ -18,7 +18,25 @@ if TYPE_CHECKING:
 
 
 class ReasoningGym(HuggingFaceGym):
-    """Class to convert HuggingFace datasets into Gymnasium style environment."""
+    """Class to convert HuggingFace datasets into Gymnasium style environment.
+
+    :param train_dataset: The training dataset.
+    :type train_dataset: Dataset
+    :param test_dataset: The test dataset.
+    :type test_dataset: Dataset
+    :param tokenizer: The tokenizer.
+    :type tokenizer: AutoTokenizer
+    :param data_batch_size_per_gpu: The batch size per GPU.
+    :type data_batch_size_per_gpu: int
+    :param accelerator: The accelerator.
+    :type accelerator: Accelerator | None
+    :param return_raw_completions: Whether to return raw completions from the LLM model.
+    :type return_raw_completions: bool
+    :param max_context_length: The maximum context length for the LLM model.
+    :type max_context_length: int | None
+    :param seed: The seed for the random number generator for the environment.
+    :type seed: int
+    """
 
     def __init__(
         self,
