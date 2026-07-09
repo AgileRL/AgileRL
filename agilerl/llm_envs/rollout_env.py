@@ -17,6 +17,7 @@ import warnings
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -510,8 +511,31 @@ class RolloutEnv:
             beats the same condition killing the run inside the generation
             engine mid-training.
         """
-        obs_text, info = self._env_client.reset(seed=seed, row_index=row_index)
+        obs_text, info = self._reset_fetch(seed, row_index=row_index)
+        return self._reset_apply(obs_text, info, row_index=row_index)
 
+    def _reset_fetch(
+        self, seed: int | None = None, *, row_index: int | None = None
+    ) -> tuple[str, dict[str, Any]]:
+        """Pull the initial prompt from the env backend — the parallelizable I/O.
+
+        Pure backend I/O: no tokenizer, no episode-state mutation, so a batched
+        collector can overlap it across envs.
+        """
+        return self._env_client.reset(seed=seed, row_index=row_index)
+
+    def _reset_apply(
+        self,
+        obs_text: str,
+        info: dict[str, Any],
+        *,
+        row_index: int | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Tokenize the initial prompt and start the episode (tokenizer).
+
+        Raises ``RuntimeError`` when the initial prompt already exceeds the
+        context budget, so the owning ``BatchRolloutEnv`` can skip the row.
+        """
         encoded = self._tokenize_initial_prompt(obs_text)
         if (max_pt := self._prompt_budget()) is not None:
             prompt_len = int(encoded["input_ids"].shape[1])
@@ -944,16 +968,59 @@ class BatchRolloutEnv:
         assignments = self._pointer.assign(
             self.batch_size, self.group_size, base_seed=seed
         )
-        for batch_idx in range(self.batch_size):
-            lead_idx = batch_idx * self.group_size
-            env_seed, row_index = assignments[lead_idx]
-            row_index = self._reset_lead(self.envs[lead_idx], env_seed, row_index)
-            for group_idx in range(1, self.group_size):
-                env = self.envs[lead_idx + group_idx]
-                if row_index is not None:
-                    env.reset(seed=env_seed, row_index=row_index)
-                else:
-                    env.reset(seed=env_seed)
+        leads = [b * self.group_size for b in range(self.batch_size)]
+
+        # Envs without the phased reset interface (test doubles / custom envs)
+        # take the sequential path.
+        if not (self.envs and all(hasattr(e, "_reset_fetch") for e in self.envs)):
+            for lead_idx in leads:
+                env_seed, row_index = assignments[lead_idx]
+                row_index = self._reset_lead(self.envs[lead_idx], env_seed, row_index)
+                for group_idx in range(1, self.group_size):
+                    env = self.envs[lead_idx + group_idx]
+                    if row_index is not None:
+                        env.reset(seed=env_seed, row_index=row_index)
+                    else:
+                        env.reset(seed=env_seed)
+            return self._get_prompts()
+
+        # Phase 1 (concurrent — pure I/O): fetch every group-lead's prompt.
+        lead_fetches = self._map_env_io(
+            [
+                partial(
+                    self.envs[li]._reset_fetch,
+                    assignments[li][0],
+                    row_index=assignments[li][1],
+                )
+                for li in leads
+            ]
+        )
+        # Phase 2 (sequential — tokenizer): apply each lead, skipping over-budget
+        # rows via the shared cursor; settle the row each group lands on.
+        settled_rows: list[int | None] = [
+            self._apply_lead_with_skip(
+                self.envs[li], assignments[li][0], assignments[li][1], obs_text, info
+            )
+            for li, (obs_text, info) in zip(leads, lead_fetches, strict=False)
+        ]
+        # Phase 3 (concurrent — pure I/O): fetch group members at their settled rows.
+        members = [
+            (li + g, assignments[li][0], settled_rows[b])
+            for b, li in enumerate(leads)
+            for g in range(1, self.group_size)
+        ]
+        member_fetches = self._map_env_io(
+            [
+                partial(self.envs[ei]._reset_fetch, env_seed, row_index=row)
+                for ei, env_seed, row in members
+            ]
+        )
+        # Phase 4 (sequential — tokenizer): apply members (over-budget raises,
+        # as before — the lead already validated the shared row).
+        for (ei, _seed, row), (obs_text, info) in zip(
+            members, member_fetches, strict=False
+        ):
+            self.envs[ei]._reset_apply(obs_text, info, row_index=row)
 
         return self._get_prompts()
 
@@ -1004,6 +1071,53 @@ class BatchRolloutEnv:
             return exc
         return None
 
+    @staticmethod
+    def _apply_or_overflow(
+        env: RolloutEnv,
+        obs_text: str,
+        info: dict[str, Any],
+        row_index: int | None,
+    ) -> RuntimeError | None:
+        """Apply a pre-fetched prompt, returning its over-budget ``RuntimeError``
+        instead of raising, so the caller can skip the row.
+        """
+        try:
+            env._reset_apply(obs_text, info, row_index=row_index)
+        except RuntimeError as exc:
+            return exc
+        return None
+
+    def _apply_lead_with_skip(
+        self,
+        env: RolloutEnv,
+        seed: int | None,
+        row_index: int | None,
+        obs_text: str,
+        info: dict[str, Any],
+    ) -> int | None:
+        """Apply a group-lead's pre-fetched prompt, skipping over-budget rows.
+
+        The first apply uses the prompt already fetched concurrently; on an
+        over-budget row it advances the shared cursor and re-fetches
+        sequentially (the rare path), returning the row the group settles on.
+        """
+        assert self._pointer is not None
+        attempts = min(max(self._pointer.dataset_size, 1), 100)
+        for _ in range(attempts):
+            error = self._apply_or_overflow(env, obs_text, info, row_index)
+            if error is None:
+                return row_index
+            if row_index is None:
+                raise error
+            warnings.warn(
+                f"Skipping dataset row {row_index}: {error}",
+                stacklevel=2,
+            )
+            row_index = self._pointer.next_row()
+            obs_text, info = env._reset_fetch(seed, row_index=row_index)
+        msg = f"no dataset row fit the context budget after {attempts} attempts"
+        raise RuntimeError(msg) from error
+
     def step(
         self,
         completion_ids: list[torch.Tensor],
@@ -1049,7 +1163,12 @@ class BatchRolloutEnv:
                 for env, full, slp in zip(active, completions, slps, strict=False)
             ]
             # Phase 2 (concurrent — pure I/O): round-trip each env backend at once.
-            results = self._map_env_io([env._step_env for env in active], gen_texts)
+            results = self._map_env_io(
+                [
+                    partial(env._step_env, gt)
+                    for env, gt in zip(active, gen_texts, strict=False)
+                ]
+            )
             # Phase 3 (sequential — tokenizer): apply each result to its own env.
             for env, result in zip(active, results, strict=False):
                 env._step_apply(result)
@@ -1058,26 +1177,20 @@ class BatchRolloutEnv:
                 env.step(full, sampling_logps=slp)
         return self._get_prompts()
 
-    def _map_env_io(
-        self,
-        fns: list[Callable[[Any], Any]],
-        args: list[Any],
-    ) -> list[Any]:
-        """Run ``fn(arg)`` for each pair concurrently, returning results in order.
+    def _map_env_io(self, thunks: list[Callable[[], Any]]) -> list[Any]:
+        """Run each zero-arg thunk concurrently, returning results in order.
 
         Overlaps the backend round-trips (I/O-bound, so the GIL is released
-        during each blocking call); a single env's exception propagates, matching
-        the sequential behaviour. Falls back to a direct call for a single env.
+        during each blocking call); a single thunk's exception propagates,
+        matching the sequential behaviour. Falls back to a direct call for one.
         """
-        if len(fns) <= 1:
-            return [fn(arg) for fn, arg in zip(fns, args, strict=False)]
+        if len(thunks) <= 1:
+            return [thunk() for thunk in thunks]
         if self._io_pool is None:
             self._io_pool = ThreadPoolExecutor(
                 max_workers=self.num_envs, thread_name_prefix="rollout-env-io"
             )
-        futures = [
-            self._io_pool.submit(fn, arg) for fn, arg in zip(fns, args, strict=False)
-        ]
+        futures = [self._io_pool.submit(thunk) for thunk in thunks]
         return [future.result() for future in futures]
 
     def close(self) -> None:

@@ -1126,10 +1126,47 @@ class TestBatchRolloutEnvConcurrentStep:
         finally:
             batch.close()
 
+    def test_reset_round_trips_run_concurrently(self):
+        """Group-lead reset fetches overlap; a barrier needing all N releases only
+        if they run concurrently (sequential reset would time out).
+        """
+        n = 4
+        barrier = threading.Barrier(n, timeout=15)
+
+        class _BarrierResetEnv:
+            def reset(self, seed=None):
+                del seed
+                barrier.wait()  # only releases when all n leads fetch together
+                return "start", {}
+
+            def step(self, action):
+                del action
+                return "done", 1.0, True, False, {}
+
+        batch = BatchRolloutEnv(
+            lambda **_: RolloutEnv.local(
+                _BarrierResetEnv(), _MiniTok(), max_turns=1, apply_chat_template=False
+            ),
+            batch_size=n,
+            group_size=1,
+        )
+        try:
+            batch.reset(seed=0)  # BrokenBarrierError if leads fetched serially
+            assert not barrier.broken
+        finally:
+            batch.close()
+
     def test_close_shuts_down_io_pool(self):
-        """The lazily-built I/O pool is created on a multi-env step and released."""
-        batch = self._batch(_CountingEnv, 2)
-        assert batch._io_pool is None
+        """The I/O pool is lazily built by concurrent reset/step and released."""
+        batch = BatchRolloutEnv(
+            lambda **_: RolloutEnv.local(
+                _CountingEnv(), _MiniTok(), max_turns=1, apply_chat_template=False
+            ),
+            batch_size=2,
+            group_size=1,
+        )
+        assert batch._io_pool is None  # not built at construction
+        batch.reset(seed=0)  # concurrent lead fetches build the pool
         batch.step(self._completions(2))
         assert batch._io_pool is not None
         batch.close()
