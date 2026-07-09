@@ -145,42 +145,16 @@ For standard RL algorithms, this section is validated against :class:`~agilerl.m
 .. code-block:: yaml
 
    network:
-     arch: mlp # Required discriminator for Pydantic validation
      latent_dim: 128
      encoder_config:
        hidden_size: [128]
      head_config:
        hidden_size: [128]
 
-.. warning::
+.. note::
 
-  Users must always set a ``arch`` field at the top-level of this section corresponding to the type of encoder their network
-  configuration aligns with. If this is not set, we can't validate against the appropriate Pydantic model.
-
-**Supported arch values**
-
-.. list-table::
-   :widths: 14 30 56
-   :header-rows: 1
-
-   * - ``arch``
-     - Use when
-     - Key ``encoder_config`` fields
-   * - ``mlp``
-     - Vector / box observations
-     - ``hidden_size`` (list of layer widths), ``activation``, ``layer_norm``, ``min_mlp_nodes``, ``max_mlp_nodes``, …
-   * - ``cnn``
-     - Image observations
-     - ``channel_size``, ``kernel_size``, ``stride_size`` (lists of **equal length**), ``activation``, ``layer_norm``, …
-   * - ``lstm``
-     - Recurrent policies
-     - ``hidden_state_size``, ``num_layers``, ``dropout``, min/max layer bounds
-   * - ``simba``
-     - SimBA encoder
-     - ``hidden_size``, ``num_blocks``, block/node mutation bounds
-   * - ``multiinput``
-     - ``Dict`` / ``Tuple`` observation spaces
-     - ``latent_dim``, optional ``mlp_config`` / ``cnn_config`` per sub-space
+  Make sure the fields you set under ``encoder_config`` match the initialisation arguments of the
+  encoder used for that observation space. See :ref:`evolvable_networks` for more detail.
 
 **LLM Fine-tuning:**
 
@@ -200,7 +174,7 @@ any model available on Hugging Face or locally.
        lora_dropout: 0.05
        task_type: CAUSAL_LM
 
-5. ``mutation``
+1. ``mutation``
 ^^^^^^^^^^^^^^^
 
 Configures the mutation probabilities and the hyperparameters of the selected algorithm
@@ -272,8 +246,7 @@ environment. This is mostly useful for quick experiments and benchmarking.
 
   from agilerl import LocalTrainer
 
-  # Specify algorithm and Gymnasium/PettingZoo environment and use
-  # default parameters for training.
+  # Specify algorithm and environment with default parameters for training.
   trainer = LocalTrainer(algorithm="PPO", environment="LunarLanderContinuous-v3")
   population, fitnesses = trainer.train()
 
@@ -307,7 +280,6 @@ Below is a minimal off-policy manifest to train DQN on LunarLander-v3.
       evo_steps: 10_000
 
     network:
-      arch: mlp
       latent_dim: 128
       encoder_config:
         hidden_size: [128]
@@ -359,7 +331,7 @@ Below is a minimal off-policy manifest to train DQN on LunarLander-v3.
          # Train the population of agents.
          population, fitnesses = trainer.train(
             wb=True, # Enable Weights & Biases logging
-            verbose=True # Print verbose output
+            verbose=True # Print logs
          )
 
    .. tab-item:: CLI
@@ -424,20 +396,6 @@ applying evolutionary HPO with custom mutation probabilities.
       wb=True, # Enable Weights & Biases logging
       verbose=True # Print verbose output
    )
-
-
-How ``LocalTrainer.train()`` works
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Calling ``LocalTrainer.train()`` assembles keyword arguments from the stored specs
-and dispatches to the algorithm-specific training function (e.g.
-``train_off_policy``, ``train_on_policy``, ``train_multi_agent_off_policy``).
-The return value is always a tuple of ``(population, fitness_history)``.
-
-.. seealso::
-
-   :ref:`API documentation <trainers_api>` for the full method signature, including options to
-   customise monitoring and checkpointing.
 
 
 .. _arena_trainer:

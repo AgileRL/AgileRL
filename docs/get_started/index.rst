@@ -370,7 +370,6 @@ Or via a YAML manifest:
 
     network:
         latent_dim: 128
-        arch: mlp
         encoder_config:
             hidden_size:
                 - 128

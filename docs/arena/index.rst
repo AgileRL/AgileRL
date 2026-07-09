@@ -181,8 +181,11 @@ LLM Datasets
 
       .. code-block:: bash
 
-         # Upload and validate from a local directory
-         arena datasets create --source ./my_dataset/
+         # Upload a local CSV and create the dataset
+         arena datasets create my-dataset \
+             --category reasoning \
+             --column-mapping '{"question": "prompt", "answer": "completion"}' \
+             --file ./my_dataset/data.csv
 
 Additional Tools
 ^^^^^^^^^^^^^^^^
@@ -363,7 +366,6 @@ Here is an example manifest for training DQN on LunarLander-v3:
       evo_steps: 10_000
 
     network:
-      arch: mlp
       latent_dim: 128
       encoder_config:
         hidden_size: [128]

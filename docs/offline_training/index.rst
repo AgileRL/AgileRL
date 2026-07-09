@@ -55,7 +55,6 @@ Below is an example manifest for training CQN on the CartPole-v1 environment (Mi
 
       network:
         latent_dim: 64
-        arch: mlp
         encoder_config:
           hidden_size: [64]
         head_config:

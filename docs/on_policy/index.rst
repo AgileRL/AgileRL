@@ -68,7 +68,6 @@ Here is an example manifest to train PPO on LunarLander-v3:
 
     network:
       latent_dim: 64
-      arch: mlp
       encoder_config:
         hidden_size: [64]
         activation: ReLU

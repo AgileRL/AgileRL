@@ -64,7 +64,6 @@ Below is an example manifest for training NeuralUCB on the Iris dataset.
 
       network:
         latent_dim: 128
-        arch: mlp
         encoder_config:
           hidden_size: [128]
         head_config:

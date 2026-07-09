@@ -238,7 +238,6 @@ Below is an example manifest for training MADDPG on the simple-speaker-listener-
 
     network:
       latent_dim: 64
-      arch: mlp
       encoder_config:
         hidden_size: [64]
       head_config:

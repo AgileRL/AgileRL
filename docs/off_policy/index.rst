@@ -65,7 +65,6 @@ Here is an example manifest to train DQN on LunarLander-v3:
       evo_steps: 10_000
 
     network:
-      arch: mlp
       latent_dim: 128
       encoder_config:
         hidden_size: [128]
