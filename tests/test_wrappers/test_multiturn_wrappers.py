@@ -469,6 +469,17 @@ class TestRolloutEnvFromDataset:
             assert self._reset_prompt(env, row_index=0) == "P:tq0"
         assert self._reset_prompt(env, row_index=0) == "P:q0"
 
+    def test_default_prompt_is_str_question_without_builder(self) -> None:
+        """With no ``prompt_builder`` the prompt is ``str(question)`` verbatim."""
+        env = RolloutEnv.from_dataset(
+            self._ROWS,
+            lambda c, a, q: 0.0,
+            _ChrTokenizer(),
+            pad_id=None,
+            apply_chat_template=False,
+        )
+        assert self._reset_prompt(env, row_index=2) == "q2"
+
     def test_max_turns_is_rejected(self) -> None:
         with pytest.raises(TypeError, match="single-turn"):
             RolloutEnv.from_dataset(
