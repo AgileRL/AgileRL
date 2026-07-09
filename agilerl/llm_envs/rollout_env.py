@@ -15,6 +15,7 @@ from __future__ import annotations
 import uuid
 import warnings
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from typing import TYPE_CHECKING, Any
 
@@ -537,28 +538,58 @@ class RolloutEnv:
         self.current_prompt = self._policy_observation_from_state()
         return self.current_prompt, info
 
-    def _step(
+    def _step_prepare(
         self,
         full_completion_ids: torch.Tensor,
-        gen_text: str,
-    ) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
-        """Record a generation and step the underlying environment."""
+        sampling_logps: torch.Tensor | None = None,
+    ) -> str:
+        """Decode and record this turn's generation; return its text.
+
+        The tokenizer runs here, so the env round-trip (:meth:`_step_env`)
+        carries no tokenization — letting a batched collector overlap the
+        round-trips across envs without sharing the tokenizer across threads.
+        """
+        if self._last_full_prompt_token_len is None:
+            msg = (
+                "step() requires a prior reset() or step() "
+                "that built a input context observation"
+            )
+            raise RuntimeError(msg)
+        prompt_len = self._last_full_prompt_token_len
+        gen_tokens = full_completion_ids[0, prompt_len:]
+        gen_text = self.tokenizer.decode(
+            gen_tokens.tolist(),
+            skip_special_tokens=True,
+        )
+        if sampling_logps is not None:
+            self.sampling_logps.append(sampling_logps)
         prompt_len = self.full_ids.shape[1]
         self.full_ids = full_completion_ids.detach().to(self.full_ids.device)
         gen_end = self.full_ids.shape[1]
         self.turn_boundaries.append((prompt_len, gen_end, self._turn_idx))
         self._gen_texts.append(gen_text)
+        return gen_text
 
-        next_obs, reward, terminated, truncated, info = self._env_client.step(gen_text)
+    def _step_env(self, gen_text: str) -> tuple[str, float, bool, bool, dict[str, Any]]:
+        """Round-trip the env backend for ``gen_text`` — the parallelizable I/O.
+
+        Pure backend I/O: no tokenizer, no wrapper-state mutation, so a batched
+        collector can run this concurrently across envs.
+        """
+        return self._env_client.step(gen_text)
+
+    def _step_apply(
+        self,
+        env_result: tuple[str, float, bool, bool, dict[str, Any]],
+    ) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
+        """Apply the env round-trip result: rewards, truncation, feedback tokens."""
+        next_obs, reward, terminated, truncated, info = env_result
         self.turn_rewards.append(float(reward))
         self._turn_idx += 1
 
-        # The env may be happy to continue, but this episode's turn budget is
-        # spent: truncate here so no driver (eval loop, external collector) has
-        # to impose the cap itself — and no dangling feedback turn is appended.
+        # Turn cap exceeded
         if not (terminated or truncated) and self._turn_idx >= self.max_turns:
             truncated = True
-            info = {**info, "agilerl_max_turns_reached": int(self.max_turns)}
 
         prompt_dict: dict[str, Any] = {}
         if not (terminated or truncated):
@@ -569,26 +600,11 @@ class RolloutEnv:
             )
             self.full_ids = torch.cat([self.full_ids, feedback_ids], dim=1)
 
-            # Strict overflow check: if the cumulative prompt would no
-            # longer fit under ``max_model_len`` with room for at least one
-            # generation, terminate the trajectory cleanly.
+            # Strict overflow check
             if (max_pt := self._prompt_budget()) is not None:
                 prompt_len = int(self.full_ids.shape[1])
                 if prompt_len > max_pt:
                     truncated = True
-                    info = {
-                        **info,
-                        "agilerl_context_overflow": {
-                            "full_prompt_len": prompt_len,
-                            "max_prompt_tokens": int(max_pt),
-                            "max_model_len": int(self._max_model_len),
-                            "max_output_tokens": (
-                                int(self._max_output_tokens)
-                                if self._max_output_tokens is not None
-                                else None
-                            ),
-                        },
-                    }
 
             if not truncated:
                 prompt_dict = self._policy_observation_from_state()
@@ -602,27 +618,18 @@ class RolloutEnv:
         full_completion_ids: torch.Tensor,
         sampling_logps: torch.Tensor | None = None,
     ) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
-        """Decode the generation from completion IDs and step the environment.
+        """Decode the generation, round-trip the env, and apply the result.
+
+        Single-env convenience composing :meth:`_step_prepare` / :meth:`_step_env`
+        / :meth:`_step_apply`; ``BatchRolloutEnv`` drives the three phases directly
+        so it can overlap the env round-trips across envs.
 
         ``sampling_logps`` is this turn's per-token vLLM rollout logprobs (or
         ``None`` on the HF path); when provided it is appended to
         :attr:`sampling_logps` so the assembled episode owns the complete row.
         """
-        if self._last_full_prompt_token_len is None:
-            msg = (
-                "step() requires a prior reset() or step() "
-                "that built a input context observation"
-            )
-            raise RuntimeError(msg)
-        pl = self._last_full_prompt_token_len
-        gen_tokens = full_completion_ids[0, pl:]
-        gen_text = self.tokenizer.decode(
-            gen_tokens.tolist(),
-            skip_special_tokens=True,
-        )
-        if sampling_logps is not None:
-            self.sampling_logps.append(sampling_logps)
-        return self._step(full_completion_ids, gen_text)
+        gen_text = self._step_prepare(full_completion_ids, sampling_logps)
+        return self._step_apply(self._step_env(gen_text))
 
     def get_episode_data(
         self,
@@ -844,11 +851,12 @@ class BatchRolloutEnv:
         self.batch_size = batch_size
         self.group_size = group_size
         self.envs: list[RolloutEnv] = []
-        # Shared dataset cursor, built on the first reset from the first env's
-        # ``dataset_size`` (0 -> it only derives per-item seeds, no row pinning). The
-        # same :class:`BatchPointer` drives the distributed ``RayBatchRolloutEnv``, so
-        # dataset order + group pinning match across the colocated and async paths.
+        # Shared dataset cursor for dataset shuffling and iteration.
+        # Also used by async RolloutEnvs in distributed code.
         self._pointer: BatchPointer | None = None
+        # Thread pool for overlapping env.step(). Built lazily on first
+        # use and reused across turns; shut down in ``close``.
+        self._io_pool: ThreadPoolExecutor | None = None
 
     @property
     def _is_initialized(self) -> bool:
@@ -1028,18 +1036,55 @@ class BatchRolloutEnv:
                 f"envs: {len(sampling_logps)} != {len(active)}"
             )
             raise RuntimeError(msg)
-        for idx, (env, completion) in enumerate(
-            zip(active, completion_ids, strict=False)
-        ):
-            full_completion = completion
-            if full_completion.dim() == 1:
-                full_completion = full_completion.unsqueeze(0)
-            slp = sampling_logps[idx] if sampling_logps is not None else None
-            env.step(full_completion, sampling_logps=slp)
+        # Normalize each completion to 2D once (shared by both step paths).
+        completions = [c if c.dim() > 1 else c.unsqueeze(0) for c in completion_ids]
+        slps = sampling_logps if sampling_logps is not None else [None] * len(active)
+        # Real ``RolloutEnv``s expose the phased interface, so the per-env backend
+        # round-trips are overlapped (I/O-bound). Envs that don't (test doubles /
+        # custom envs) fall back to sequential single-call stepping.
+        if active and all(hasattr(env, "_step_prepare") for env in active):
+            # Phase 1 (sequential — tokenizer): decode + record each generation.
+            gen_texts = [
+                env._step_prepare(full, sampling_logps=slp)
+                for env, full, slp in zip(active, completions, slps, strict=False)
+            ]
+            # Phase 2 (concurrent — pure I/O): round-trip each env backend at once.
+            results = self._map_env_io([env._step_env for env in active], gen_texts)
+            # Phase 3 (sequential — tokenizer): apply each result to its own env.
+            for env, result in zip(active, results, strict=False):
+                env._step_apply(result)
+        else:
+            for env, full, slp in zip(active, completions, slps, strict=False):
+                env.step(full, sampling_logps=slp)
         return self._get_prompts()
 
+    def _map_env_io(
+        self,
+        fns: list[Callable[[Any], Any]],
+        args: list[Any],
+    ) -> list[Any]:
+        """Run ``fn(arg)`` for each pair concurrently, returning results in order.
+
+        Overlaps the backend round-trips (I/O-bound, so the GIL is released
+        during each blocking call); a single env's exception propagates, matching
+        the sequential behaviour. Falls back to a direct call for a single env.
+        """
+        if len(fns) <= 1:
+            return [fn(arg) for fn, arg in zip(fns, args, strict=False)]
+        if self._io_pool is None:
+            self._io_pool = ThreadPoolExecutor(
+                max_workers=self.num_envs, thread_name_prefix="rollout-env-io"
+            )
+        futures = [
+            self._io_pool.submit(fn, arg) for fn, arg in zip(fns, args, strict=False)
+        ]
+        return [future.result() for future in futures]
+
     def close(self) -> None:
-        """Close all env wrappers."""
+        """Close all env wrappers and the env-I/O thread pool."""
+        if self._io_pool is not None:
+            self._io_pool.shutdown(wait=True)
+            self._io_pool = None
         seen: set[int] = set()
         for env in self.envs:
             env_id = id(env)

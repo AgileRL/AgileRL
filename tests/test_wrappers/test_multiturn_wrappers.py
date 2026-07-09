@@ -160,8 +160,7 @@ class TestRolloutEnvStep:
     def test_strict_mode_terminates_on_context_overflow(self, serve_env) -> None:
         """When the cumulative prompt would exceed
         ``max_model_len - max_output_tokens``, the trajectory ends with
-        ``truncated=True`` and an ``agilerl_context_overflow`` breadcrumb in
-        ``info``.
+        ``truncated=True`` and no next observation.
         """
         env = _NonTerminalEnv()
         # Tiny budget: 20 - 4 = 16 prompt tokens. Initial prompt "P:hello\nS"
@@ -184,12 +183,7 @@ class TestRolloutEnvStep:
         assert truncated is True
         assert terminated is False
         assert next_obs == {}
-        assert "agilerl_context_overflow" in info
-        overflow = info["agilerl_context_overflow"]
-        assert overflow["max_prompt_tokens"] == 16
-        assert overflow["max_model_len"] == 20
-        assert overflow["max_output_tokens"] == 4
-        assert overflow["full_prompt_len"] > overflow["max_prompt_tokens"]
+        assert info == {}
 
 
 class TestRolloutEnvChatTemplateBoundary:

@@ -8,6 +8,7 @@ OpenEnv HTTP protocol. These cover both halves (``OpenEnvServer`` host +
 from __future__ import annotations
 
 import socket
+import threading
 import time
 from typing import Any
 
@@ -738,7 +739,7 @@ def test_rollout_env_truncates_at_max_turns() -> None:
     assert truncated
     assert not terminated
     assert env.done
-    assert info["agilerl_max_turns_reached"] == 2
+    assert info == {}
     assert env.full_ids.shape[1] == seq_len + 1  # generation only, no feedback
     env.close()
 
@@ -1029,3 +1030,107 @@ def test_module_from_path_raises_when_unloadable() -> None:
     """A path Python can't build a module spec for is a clear import error."""
     with pytest.raises(ImportError, match="cannot load env module from path"):
         _module_from_path("/tmp/not_a_python_module.bogus")
+
+
+class TestBatchRolloutEnvConcurrentStep:
+    """``BatchRolloutEnv.step`` overlaps the per-env backend round-trips.
+
+    The tokenizer stays single-threaded (used only in the sequential
+    prepare/apply phases); only the pure-I/O ``env_client.step`` round-trips run
+    concurrently, so these tests cover overlap, index-correct routing, error
+    propagation, and pool teardown.
+    """
+
+    @staticmethod
+    def _batch(env_cls, batch_size):
+        batch = BatchRolloutEnv(
+            lambda **_: RolloutEnv.local(
+                env_cls(), _MiniTok(), max_turns=1, apply_chat_template=False
+            ),
+            batch_size=batch_size,
+            group_size=1,
+        )
+        batch.reset(seed=0)
+        return batch
+
+    @staticmethod
+    def _completions(n):
+        return [torch.tensor([[1, 2, 3, 4, 5]], dtype=torch.long) for _ in range(n)]
+
+    def test_step_round_trips_run_concurrently(self):
+        """A barrier needing all N envs releases only if the round-trips overlap;
+        sequential stepping would block the first env until the barrier times out.
+        """
+        n = 4
+        barrier = threading.Barrier(n, timeout=15)
+
+        class _BarrierEnv:
+            def reset(self, seed=None):
+                del seed
+                return "start", {}
+
+            def step(self, action):
+                del action
+                barrier.wait()  # only releases when all n envs arrive together
+                return "done", 1.0, True, False, {}
+
+        batch = self._batch(_BarrierEnv, n)
+        try:
+            # Raises BrokenBarrierError (via a worker) if the steps ran serially.
+            batch.step(self._completions(n))
+            assert not barrier.broken
+        finally:
+            batch.close()
+
+    def test_step_routes_results_to_correct_env(self):
+        """Each env applies its own backend result (index-correct routing)."""
+        counter = {"i": 0}
+
+        class _IdEnv:
+            def __init__(self):
+                self.ident = counter["i"]
+                counter["i"] += 1
+
+            def reset(self, seed=None):
+                del seed
+                return "s", {}
+
+            def step(self, action):
+                del action
+                return "d", float(self.ident), True, False, {}
+
+        batch = self._batch(_IdEnv, 4)
+        try:
+            batch.step(self._completions(4))
+            assert [env.turn_rewards[-1] for env in batch.envs] == [0.0, 1.0, 2.0, 3.0]
+        finally:
+            batch.close()
+
+    def test_step_propagates_env_exception(self):
+        """A single env's backend error propagates out of the batched step."""
+
+        class _BoomEnv:
+            def reset(self, seed=None):
+                del seed
+                return "s", {}
+
+            def step(self, action):
+                del action
+                msg = "boom"
+                raise RuntimeError(msg)
+
+        batch = self._batch(_BoomEnv, 3)
+        try:
+            with pytest.raises(RuntimeError, match="boom"):
+                batch.step(self._completions(3))
+        finally:
+            batch.close()
+
+    def test_close_shuts_down_io_pool(self):
+        """The lazily-built I/O pool is created on a multi-env step and released."""
+        batch = self._batch(_CountingEnv, 2)
+        assert batch._io_pool is None
+        batch.step(self._completions(2))
+        assert batch._io_pool is not None
+        batch.close()
+        assert batch._io_pool is None
