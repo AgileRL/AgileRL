@@ -11,9 +11,10 @@ import webbrowser
 from pathlib import Path
 from typing import Any
 
-from agilerl.arena.exceptions import ArenaAuthError, ArenaTimeoutError
 from keycloak import KeycloakOpenID
 from keycloak.exceptions import KeycloakError
+
+from agilerl.arena.exceptions import ArenaAuthError, ArenaTimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -127,9 +128,7 @@ class ArenaOAuth2:
     CREDENTIALS_DIR = Path.home() / ".arena"
     CREDENTIALS_FILE = CREDENTIALS_DIR / "credentials.json"
 
-    # KEYCLOAK_URL = "https://auth.arena.agilerl.com"
-    KEYCLOAK_URL = "https://arena-dev-auth.agilerl.rlops.ai/"
-    # KEYCLOAK_URL = "http://localhost:8023"
+    KEYCLOAK_URL = "https://auth.arena.agilerl.com"
     REALM = "arena"
     CLIENT_ID = "arena-cli"
 
