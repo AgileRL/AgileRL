@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager, nullcontext
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -174,7 +174,7 @@ class RolloutEnv:
         max_turns: int = 1,
         *,
         headers: dict[str, str] | None = None,
-        timeout_s: float | None = None,
+        timeout_s: float | None = 300.0,
         mcp_tool: str | None = None,
         env_name: str | None = None,
         **kwargs: Any,
@@ -199,7 +199,8 @@ class RolloutEnv:
         :param tokenizer: Tokenizer for the token-level loop.
         :param max_turns: Generation turns per episode.
         :param headers: Optional HTTP headers sent on every client request.
-        :param timeout_s: Per-request client timeout in seconds (``None`` = unbounded).
+        :param timeout_s: Per-request client timeout in seconds, defaults to
+            300 (``None`` = unbounded); see :class:`ServedEnvClient`.
         :param mcp_tool: Optional MCP transport adapter (see
             :class:`~agilerl.llm_envs.openenv.OpenEnvClient`).
         :param env_name: Name advertised in the served env's OpenEnv metadata.
@@ -517,9 +518,12 @@ class RolloutEnv:
     ) -> tuple[str, dict[str, Any]]:
         """Pull the initial prompt from the env backend — the parallelizable I/O.
 
-        Pure backend I/O: no tokenizer, no episode-state mutation, so a batched
-        collector can overlap it across envs.
+        Backend I/O only (no tokenizer), so a batched collector can overlap it
+        across envs. Touching :attr:`tools` here warms its cache, so the one-off
+        ``/state`` round-trip an HTTP client pays on first access overlaps too,
+        instead of serializing in the apply (tokenizer) phase.
         """
+        _ = self.tools
         return self._env_client.reset(seed=seed, row_index=row_index)
 
     def _reset_apply(
@@ -831,10 +835,13 @@ class BatchRolloutEnv:
     Each wrapper owns its own in-flight episode state — transcript, ``done``,
     ``current_prompt`` and ``sampling_logps``.
 
-    Envs are stepped sequentially, so per-turn latency is the sum of the envs'
-    step times — negligible for in-process backends, but a real cost for
-    high-latency HTTP envs. Rollout concurrency is the distributed (Ray)
-    collector's job; this class is the simple colocated counterpart sharing the
+    Per-turn latency is bounded by the slowest env, not the sum: the backend
+    round-trips (``_reset_fetch`` / ``_step_env``) run concurrently on an
+    internal thread pool, while all tokenizer work and episode-state mutation
+    stay sequential on the calling thread. In-process (``RolloutEnv.local``)
+    envs are stepped on pool threads too, so env code that shares state across
+    instances must be thread-safe. Distributed rollout concurrency remains the
+    Ray collector's job; this class is the colocated counterpart sharing the
     same :class:`BatchPointer` semantics.
     """
 
@@ -1033,8 +1040,11 @@ class BatchRolloutEnv:
         """Run each zero-arg thunk concurrently, returning results in order.
 
         Overlaps the backend round-trips (I/O-bound, so the GIL is released
-        during each blocking call); a single thunk's exception propagates,
-        matching the sequential behaviour. Falls back to a direct call for one.
+        during each blocking call). Every thunk runs to completion before the
+        first exception (in submission order) propagates, so no round-trip is
+        still in flight when the caller regains control — a retried reset/step
+        cannot race a straggler on the same env client. Falls back to a direct
+        call for a single thunk.
         """
         if len(thunks) <= 1:
             return [thunk() for thunk in thunks]
@@ -1043,6 +1053,7 @@ class BatchRolloutEnv:
                 max_workers=self.num_envs, thread_name_prefix="rollout-env-io"
             )
         futures = [self._io_pool.submit(thunk) for thunk in thunks]
+        wait(futures)
         return [future.result() for future in futures]
 
     def close(self) -> None:

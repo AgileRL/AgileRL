@@ -113,15 +113,15 @@ def pytest_collection_modifyitems(config, items):
          keeps simultaneous inits rare.
 
       ``vllm`` tests run in ``subprocess_runner.py``-spawned subprocesses, so
-      worker-process state is reset between them. ``gpu`` tests run
-      in-process and can leak DeepSpeed groups / accelerator state to the
-      next test sharing the same group; the per-fixture cleanup
-      (``AcceleratorState._reset_state(True)`` etc.) handles this in
-      practice for the test sets in this repo, but **don't add many more
-      ``gpu``-marked tests without re-checking** — DeepSpeed has no clean
-      ``destroy_process_group`` path so sharing a worker between two
-      DeepSpeed-init tests can surface ``Group <ProcessGroup ...> is not
-      registered`` or ``EADDRINUSE``-on-MASTER_PORT.
+      worker-process state is reset between them. ``gpu`` tests run in-process
+      and share accelerator / DeepSpeed distributed state across the worker:
+      accelerator state is reset per fixture (``AcceleratorState._reset_state``),
+      and ``generate_accelerator`` additionally resets DeepSpeed's cached comm
+      backend + cloned process groups before each engine build, so an
+      interleaved ``destroy_process_group`` (e.g. test_mutation) no longer
+      dangles DeepSpeed's group handles into ``Group <ProcessGroup ...> is not
+      registered``. MASTER_PORT is still per-test (``get_free_port``) to avoid
+      ``EADDRINUSE`` on concurrent inits.
     - ``test_minari_utils``: tests create/delete shared Minari datasets on disk.
 
     Uses ``tryfirst=True`` so the ``xdist_group`` markers below are attached

@@ -622,7 +622,11 @@ class ServedEnvClient:
     :param env_name: Name advertised in the env's OpenEnv metadata; defaults to the
         env's class name.
     :param headers: Optional HTTP headers sent on every client request.
-    :param timeout_s: Per-request client timeout in seconds (``None`` = unbounded).
+    :param timeout_s: Per-request client timeout in seconds, defaults to 300 —
+        the server is our own loopback process, so a request that outlives this
+        means a hung env, and bounding it stops one stuck rollout stalling the
+        whole batch forever. Pass ``None`` for unbounded (e.g. an env step that
+        legitimately runs a very long tool job).
     :param mcp_tool: Optional MCP transport adapter (see :class:`OpenEnvClient`).
     :param arg: MCP argument name carrying the text (default ``"message"``).
     :param instruction: Prompt returned from reset when the env's reset obs is empty.
@@ -636,7 +640,7 @@ class ServedEnvClient:
         port: int = 0,
         env_name: str | None = None,
         headers: dict[str, str] | None = None,
-        timeout_s: float | None = None,
+        timeout_s: float | None = 300.0,
         mcp_tool: str | None = None,
         arg: str = "message",
         instruction: str = "",
