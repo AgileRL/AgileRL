@@ -24,6 +24,32 @@ from agilerl.training.train_llm import (
 )
 
 
+def _wire_phased_env_mock(mock_env):
+    """Delegate BatchRolloutEnv's phased interface to a per-env mock's
+    reset()/step() (mirrors ``tests.helpers.rollout_doubles.RolloutEnvDoubleMixin``)
+    so mocks drive the real concurrent collector path — reset/step call counts
+    and step side effects (e.g. flipping ``done``) still apply.
+    """
+    pending: dict = {}
+
+    def _reset_fetch(seed=None, *, row_index=None):
+        return mock_env.reset(seed=seed, row_index=row_index)
+
+    def _step_prepare(full_completion, sampling_logps=None):
+        pending["step"] = (full_completion, sampling_logps)
+        return ""
+
+    def _step_apply(_env_result):
+        full_completion, sampling_logps = pending["step"]
+        return mock_env.step(full_completion, sampling_logps=sampling_logps)
+
+    mock_env._reset_fetch.side_effect = _reset_fetch
+    mock_env._reset_apply.side_effect = lambda obs, info, *, row_index=None: (obs, info)
+    mock_env._step_prepare.side_effect = _step_prepare
+    mock_env._step_env.side_effect = lambda gen_text: None
+    mock_env._step_apply.side_effect = _step_apply
+
+
 def _make_multiturn_mock_env(*, turn_boundaries_len: int = 3):
     """GEM-style env: reset/step/get_episode_data + turn_boundaries for step accounting."""
     mock_env = MagicMock(
@@ -34,6 +60,13 @@ def _make_multiturn_mock_env(*, turn_boundaries_len: int = 3):
             "turn_boundaries",
             "done",
             "current_prompt",
+            # Phased interface BatchRolloutEnv drives (reset/step are the
+            # single-env composition of these).
+            "_reset_fetch",
+            "_reset_apply",
+            "_step_prepare",
+            "_step_env",
+            "_step_apply",
         ],
     )
     prompt_dict: dict = {
@@ -42,6 +75,7 @@ def _make_multiturn_mock_env(*, turn_boundaries_len: int = 3):
     }
     mock_env.reset.return_value = (prompt_dict, {})
     mock_env.step.return_value = (prompt_dict, 0.0, False, False, {})
+    _wire_phased_env_mock(mock_env)
     mock_env.turn_boundaries = list(range(turn_boundaries_len))
     mock_env.done = False
     mock_env.current_prompt = prompt_dict
@@ -1572,6 +1606,7 @@ class TestFinetuneLlmMultiturn:
             torch.ones(T, dtype=torch.float32),
             None,
         )
+        _wire_phased_env_mock(mock_env)
 
         with (
             patch("agilerl.training.train_llm.trange"),
