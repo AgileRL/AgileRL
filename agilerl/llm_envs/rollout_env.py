@@ -13,7 +13,6 @@ rollouts over a batch, sharing a :class:`BatchPointer` dataset cursor.
 from __future__ import annotations
 
 import uuid
-import warnings
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
@@ -505,11 +504,10 @@ class RolloutEnv:
         :param row_index: Dataset row chosen by the owning ``BatchRolloutEnv``,
             forwarded to ``env_client.reset``.
         :type row_index: int | None
-        :raises RuntimeError: When ``max_model_len`` is set and the initial
-            prompt already exceeds the context budget (the owning
-            ``BatchRolloutEnv`` skips such rows with a warning) — failing here
-            beats the same condition killing the run inside the generation
-            engine mid-training.
+
+        An initial prompt that exceeds the context budget can't be generated for,
+        so the episode ends in truncation at turn 0 (``done`` with an empty
+        ``current_prompt``) rather than being sent to the generation engine.
         """
         obs_text, info = self._reset_fetch(seed, row_index=row_index)
         return self._reset_apply(obs_text, info, row_index=row_index)
@@ -533,22 +531,13 @@ class RolloutEnv:
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Tokenize the initial prompt and start the episode (tokenizer).
 
-        Raises ``RuntimeError`` when the initial prompt already exceeds the
-        context budget, so the owning ``BatchRolloutEnv`` can skip the row.
+        An initial prompt that already exceeds the context budget can't be
+        generated for, so the episode ends in truncation at turn 0 (``done`` with
+        an empty ``current_prompt``) — it is simply never made active — instead of
+        raising or skipping the row.
         """
+        del row_index
         encoded = self._tokenize_initial_prompt(obs_text)
-        if (max_pt := self._prompt_budget()) is not None:
-            prompt_len = int(encoded["input_ids"].shape[1])
-            if prompt_len > max_pt:
-                msg = (
-                    f"initial prompt is {prompt_len} tokens but the context budget "
-                    f"allows at most {max_pt} "
-                    f"(max_model_len={self._max_model_len}, "
-                    f"max_output_tokens={self._max_output_tokens}"
-                    + (f", row_index={row_index}" if row_index is not None else "")
-                    + ")"
-                )
-                raise RuntimeError(msg)
         self.full_ids = encoded["input_ids"]
         self.turn_boundaries = []
         self.turn_rewards = []
@@ -556,9 +545,15 @@ class RolloutEnv:
         self._prompt_text = obs_text
         self._gen_texts = []
         self._feedback_texts = []
-        self.done = False
         self.sampling_logps = []
 
+        max_pt = self._prompt_budget()
+        if max_pt is not None and int(self.full_ids.shape[1]) > max_pt:
+            self.done = True
+            self.current_prompt = {}
+            return self.current_prompt, info
+
+        self.done = False
         self.current_prompt = self._policy_observation_from_state()
         return self.current_prompt, info
 
@@ -941,8 +936,8 @@ class BatchRolloutEnv:
         Prompts are returned in stable list (batch/group) order. Envs that are not
         dataset-backed (``dataset_size == 0``) get seeds but no ``row_index``.
 
-        A dataset row whose initial prompt exceeds the context budget
-        is skipped with a warning and replaced by the next row in the stream.
+        A dataset row whose initial prompt exceeds the context budget produces
+        an episode that is truncated at turn 0 (never made active).
 
         If building the envs fails partway (e.g. a server fails to start), the
         already-built envs are closed and the batch is left empty, so a retried
@@ -964,159 +959,23 @@ class BatchRolloutEnv:
             self._pointer = BatchPointer(
                 int(getattr(self.envs[0], "dataset_size", 0) or 0), seed=seed
             )
-
         assignments = self._pointer.assign(
             self.batch_size, self.group_size, base_seed=seed
         )
-        leads = [b * self.group_size for b in range(self.batch_size)]
-
-        # Envs without the phased reset interface (test doubles / custom envs)
-        # take the sequential path.
-        if not (self.envs and all(hasattr(e, "_reset_fetch") for e in self.envs)):
-            for lead_idx in leads:
-                env_seed, row_index = assignments[lead_idx]
-                row_index = self._reset_lead(self.envs[lead_idx], env_seed, row_index)
-                for group_idx in range(1, self.group_size):
-                    env = self.envs[lead_idx + group_idx]
-                    if row_index is not None:
-                        env.reset(seed=env_seed, row_index=row_index)
-                    else:
-                        env.reset(seed=env_seed)
-            return self._get_prompts()
-
-        # Phase 1 (concurrent — pure I/O): fetch every group-lead's prompt.
-        lead_fetches = self._map_env_io(
+        # Phase 1 (concurrent — pure I/O): fetch every env's initial prompt.
+        fetches = self._map_env_io(
             [
-                partial(
-                    self.envs[li]._reset_fetch,
-                    assignments[li][0],
-                    row_index=assignments[li][1],
-                )
-                for li in leads
+                partial(env._reset_fetch, env_seed, row_index=row)
+                for env, (env_seed, row) in zip(self.envs, assignments, strict=False)
             ]
         )
-        # Phase 2 (sequential — tokenizer): apply each lead, skipping over-budget
-        # rows via the shared cursor; settle the row each group lands on.
-        settled_rows: list[int | None] = [
-            self._apply_lead_with_skip(
-                self.envs[li], assignments[li][0], assignments[li][1], obs_text, info
-            )
-            for li, (obs_text, info) in zip(leads, lead_fetches, strict=False)
-        ]
-        # Phase 3 (concurrent — pure I/O): fetch group members at their settled rows.
-        members = [
-            (li + g, assignments[li][0], settled_rows[b])
-            for b, li in enumerate(leads)
-            for g in range(1, self.group_size)
-        ]
-        member_fetches = self._map_env_io(
-            [
-                partial(self.envs[ei]._reset_fetch, env_seed, row_index=row)
-                for ei, env_seed, row in members
-            ]
-        )
-        # Phase 4 (sequential — tokenizer): apply members (over-budget raises,
-        # as before — the lead already validated the shared row).
-        for (ei, _seed, row), (obs_text, info) in zip(
-            members, member_fetches, strict=False
+        # Phase 2 (sequential — tokenizer): apply each prompt.
+        for env, (_seed, row), (obs_text, info) in zip(
+            self.envs, assignments, fetches, strict=False
         ):
-            self.envs[ei]._reset_apply(obs_text, info, row_index=row)
+            env._reset_apply(obs_text, info, row_index=row)
 
         return self._get_prompts()
-
-    def _reset_lead(
-        self,
-        env: RolloutEnv,
-        seed: int | None,
-        row_index: int | None,
-    ) -> int | None:
-        """Reset a group-lead env, skipping over-budget dataset rows with a warning.
-
-        Returns the row the group settles on (the assigned row, or the next
-        in-budget row from the shared cursor). Re-raised when the env is not
-        dataset-backed (no cursor to advance) or no in-budget row turns up
-        within 100 attempts.
-        """
-        assert self._pointer is not None
-        attempts = min(max(self._pointer.dataset_size, 1), 100)
-        for _ in range(attempts):
-            error = self._reset_or_overflow(env, seed, row_index)
-            if error is None:
-                return row_index
-            if row_index is None:
-                raise error
-            warnings.warn(
-                f"Skipping dataset row {row_index}: {error}",
-                stacklevel=2,
-            )
-            row_index = self._pointer.next_row()
-        msg = f"no dataset row fit the context budget after {attempts} attempts"
-        raise RuntimeError(msg) from error
-
-    @staticmethod
-    def _reset_or_overflow(
-        env: RolloutEnv,
-        seed: int | None,
-        row_index: int | None,
-    ) -> RuntimeError | None:
-        """Reset ``env``, returning its ``RuntimeError`` (an over-budget prompt)
-        instead of raising, so the caller can skip the row.
-        """
-        try:
-            if row_index is not None:
-                env.reset(seed=seed, row_index=row_index)
-            else:
-                env.reset(seed=seed)
-        except RuntimeError as exc:
-            return exc
-        return None
-
-    @staticmethod
-    def _apply_or_overflow(
-        env: RolloutEnv,
-        obs_text: str,
-        info: dict[str, Any],
-        row_index: int | None,
-    ) -> RuntimeError | None:
-        """Apply a pre-fetched prompt, returning its over-budget ``RuntimeError``
-        instead of raising, so the caller can skip the row.
-        """
-        try:
-            env._reset_apply(obs_text, info, row_index=row_index)
-        except RuntimeError as exc:
-            return exc
-        return None
-
-    def _apply_lead_with_skip(
-        self,
-        env: RolloutEnv,
-        seed: int | None,
-        row_index: int | None,
-        obs_text: str,
-        info: dict[str, Any],
-    ) -> int | None:
-        """Apply a group-lead's pre-fetched prompt, skipping over-budget rows.
-
-        The first apply uses the prompt already fetched concurrently; on an
-        over-budget row it advances the shared cursor and re-fetches
-        sequentially (the rare path), returning the row the group settles on.
-        """
-        assert self._pointer is not None
-        attempts = min(max(self._pointer.dataset_size, 1), 100)
-        for _ in range(attempts):
-            error = self._apply_or_overflow(env, obs_text, info, row_index)
-            if error is None:
-                return row_index
-            if row_index is None:
-                raise error
-            warnings.warn(
-                f"Skipping dataset row {row_index}: {error}",
-                stacklevel=2,
-            )
-            row_index = self._pointer.next_row()
-            obs_text, info = env._reset_fetch(seed, row_index=row_index)
-        msg = f"no dataset row fit the context budget after {attempts} attempts"
-        raise RuntimeError(msg) from error
 
     def step(
         self,
@@ -1153,28 +1012,21 @@ class BatchRolloutEnv:
         # Normalize each completion to 2D once (shared by both step paths).
         completions = [c if c.dim() > 1 else c.unsqueeze(0) for c in completion_ids]
         slps = sampling_logps if sampling_logps is not None else [None] * len(active)
-        # Real ``RolloutEnv``s expose the phased interface, so the per-env backend
-        # round-trips are overlapped (I/O-bound). Envs that don't (test doubles /
-        # custom envs) fall back to sequential single-call stepping.
-        if active and all(hasattr(env, "_step_prepare") for env in active):
-            # Phase 1 (sequential — tokenizer): decode + record each generation.
-            gen_texts = [
-                env._step_prepare(full, sampling_logps=slp)
-                for env, full, slp in zip(active, completions, slps, strict=False)
+        # Phase 1 (sequential — tokenizer): decode + record each generation.
+        gen_texts = [
+            env._step_prepare(full, sampling_logps=slp)
+            for env, full, slp in zip(active, completions, slps, strict=False)
+        ]
+        # Phase 2 (concurrent — pure I/O): round-trip each env backend at once.
+        results = self._map_env_io(
+            [
+                partial(env._step_env, gt)
+                for env, gt in zip(active, gen_texts, strict=False)
             ]
-            # Phase 2 (concurrent — pure I/O): round-trip each env backend at once.
-            results = self._map_env_io(
-                [
-                    partial(env._step_env, gt)
-                    for env, gt in zip(active, gen_texts, strict=False)
-                ]
-            )
-            # Phase 3 (sequential — tokenizer): apply each result to its own env.
-            for env, result in zip(active, results, strict=False):
-                env._step_apply(result)
-        else:
-            for env, full, slp in zip(active, completions, slps, strict=False):
-                env.step(full, sampling_logps=slp)
+        )
+        # Phase 3 (sequential — tokenizer): apply each result to its own env.
+        for env, result in zip(active, results, strict=False):
+            env._step_apply(result)
         return self._get_prompts()
 
     def _map_env_io(self, thunks: list[Callable[[], Any]]) -> list[Any]:

@@ -17,6 +17,7 @@ from agilerl.llm_envs import (
     apply_chat_template,
 )
 from tests import TINY_LLM_FIXTURE_PATH
+from tests.helpers.rollout_doubles import RolloutEnvDoubleMixin
 
 
 class Info:
@@ -699,7 +700,7 @@ def test_batch_rollout_env_shuffle_is_group_consistent_full_permutation():
 
     dataset_size = 6
 
-    class _RowRecordingEnv:
+    class _RowRecordingEnv(RolloutEnvDoubleMixin):
         """Minimal pooled env recording the ``row_index`` BatchRolloutEnv assigns.
 
         This test exercises only the shuffle / cursor, so it needs the

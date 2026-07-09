@@ -8,10 +8,10 @@ import pytest
 import torch
 
 from agilerl.llm_envs import (
-    BatchPointer,
     BatchRolloutEnv,
     RolloutEnv,
 )
+from tests.helpers.rollout_doubles import RolloutEnvDoubleMixin
 
 # The boundary marker is a per-render ``uuid4().hex`` (32 lowercase hex chars);
 # a correctly sliced boundary contains no such run.
@@ -411,7 +411,7 @@ class TestRolloutEnvPolicyObservationFromState:
             w._policy_observation_from_state()
 
 
-class _SyncStubEnv:
+class _SyncStubEnv(RolloutEnvDoubleMixin):
     def __init__(self) -> None:
         self.turn_boundaries: list[int] = []
         self.reset_calls: list[int | None] = []
@@ -669,6 +669,14 @@ class TestBatchRolloutEnvResetEnv:
         assert vec.envs[0].current_prompt["input_ids"].shape == (1, 3)
         assert env.reset_calls[-1] == 5
 
+    def test_reset_env_forwards_row_index(self) -> None:
+        """A dataset-backed reset forwards the chosen ``row_index`` to the env."""
+        env = _RowIndexStubEnv()
+        vec = BatchRolloutEnv(env_factory=_SyncStubEnv, batch_size=1, group_size=1)
+        vec.envs.append(env)
+        vec._reset_env(seed=5, env_idx=0, row_index=2)
+        assert env.reset_calls[-1] == (5, 2)
+
 
 class _ChatTokenizer:
     pad_token_id = 0
@@ -873,7 +881,7 @@ class TestBatchRolloutEnvGetPrompts:
         assert prompts[1]["input_ids"].shape == (1, 3)
 
 
-class _StepVariantEnv:
+class _StepVariantEnv(RolloutEnvDoubleMixin):
     def __init__(self, done_after_step: bool, include_turn_boundaries: bool = True):
         self.done_after_step = done_after_step
         self.include_turn_boundaries = include_turn_boundaries
@@ -1025,37 +1033,3 @@ class _RowIndexStubEnv(_SyncStubEnv):
             "attention_mask": torch.ones(1, 3, dtype=torch.long),
         }
         return (self.current_prompt, {})
-
-
-class _OverflowEnv:
-    """Env whose reset always reports an over-budget prompt."""
-
-    def reset(self, seed: int | None = None, *, row_index: int | None = None):
-        del seed, row_index
-        msg = "prompt over budget"
-        raise RuntimeError(msg)
-
-
-class TestBatchRolloutEnvResetLead:
-    def test_reset_env_forwards_row_index(self) -> None:
-        """A dataset-backed reset forwards the chosen ``row_index`` to the env."""
-        env = _RowIndexStubEnv()
-        vec = BatchRolloutEnv(env_factory=_SyncStubEnv, batch_size=1, group_size=1)
-        vec.envs.append(env)
-        vec._reset_env(seed=5, env_idx=0, row_index=2)
-        assert env.reset_calls[-1] == (5, 2)
-
-    def test_reset_lead_reraises_when_not_dataset_backed(self) -> None:
-        """A non-dataset env (no ``row_index``) has no cursor to skip to; re-raise."""
-        vec = BatchRolloutEnv(env_factory=_SyncStubEnv, batch_size=1, group_size=1)
-        vec._pointer = BatchPointer(1, seed=0)
-        with pytest.raises(RuntimeError, match="over budget"):
-            vec._reset_lead(_OverflowEnv(), seed=0, row_index=None)
-
-    def test_reset_lead_gives_up_after_exhausting_rows(self) -> None:
-        """Every candidate row overflowing exhausts the attempt budget loudly."""
-        vec = BatchRolloutEnv(env_factory=_SyncStubEnv, batch_size=1, group_size=1)
-        vec._pointer = BatchPointer(1, seed=0)
-        with pytest.warns(UserWarning, match="Skipping dataset row"):
-            with pytest.raises(RuntimeError, match="no dataset row fit"):
-                vec._reset_lead(_OverflowEnv(), seed=0, row_index=0)

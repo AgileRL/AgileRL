@@ -744,7 +744,7 @@ def test_rollout_env_truncates_at_max_turns() -> None:
     env.close()
 
 
-# --- context budget: over-budget rows fail fast / are skipped ---------------
+# --- context budget: over-budget rows truncate at turn 0 --------------------
 class _LenTok(_MiniTok):
     """Tokenizer whose token count tracks the text length (for budget tests)."""
 
@@ -778,22 +778,26 @@ class _VariedRowEnv:
         return "", 1.0, True, False, {}
 
 
-def test_reset_raises_prompt_overflow_for_over_budget_row() -> None:
-    """An over-budget initial prompt fails at reset with a clear error, not
-    hours later inside the generation engine.
+def test_reset_truncates_over_budget_row() -> None:
+    """An over-budget initial prompt truncates the episode at turn 0 (``done``
+    with an empty prompt) rather than raising — it just never becomes active.
     """
     env = RolloutEnv.local(
         _VariedRowEnv(), _LenTok(), apply_chat_template=False, max_model_len=64
     )
-    with pytest.raises(RuntimeError, match="row_index=1"):
-        env.reset(row_index=1)
+    obs, _ = env.reset(row_index=1)  # over-budget row
+    assert obs == {}
+    assert env.done is True
     obs, _ = env.reset(row_index=0)  # in-budget rows reset fine
+    assert env.done is False
     assert obs["input_ids"].shape[1] <= 63
     env.close()
 
 
-def test_batch_reset_skips_over_budget_rows_with_warning() -> None:
-    """The batch collector warns and advances the cursor past over-budget rows."""
+def test_batch_reset_truncates_over_budget_rows() -> None:
+    """Over-budget rows self-truncate: those envs are ``done`` and excluded from
+    the returned active prompts — no row-skipping, no cursor advance.
+    """
     batch = BatchRolloutEnv(
         lambda **_: RolloutEnv.local(
             _VariedRowEnv(), _LenTok(), apply_chat_template=False, max_model_len=64
@@ -801,10 +805,14 @@ def test_batch_reset_skips_over_budget_rows_with_warning() -> None:
         batch_size=3,
         group_size=2,
     )
-    with pytest.warns(UserWarning, match="Skipping dataset row"):
-        prompts = batch.reset(seed=0)
+    # 3 rows, batch_size=3 -> one full permutation, so exactly the single
+    # over-budget row's group (group_size envs) truncates.
+    prompts = batch.reset(seed=0)
     assert prompts is not None
     assert all(p["input_ids"].shape[1] <= 63 for p in prompts)
+    n_done = sum(1 for e in batch.envs if e.done)
+    assert n_done == batch.group_size
+    assert len(prompts) + n_done == len(batch.envs)
     batch.close()
 
 

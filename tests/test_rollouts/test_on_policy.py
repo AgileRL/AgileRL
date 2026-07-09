@@ -17,6 +17,7 @@ from agilerl.rollouts.on_policy import (
     collect_rollouts_llm,
     collect_rollouts_recurrent,
 )
+from tests.helpers.rollout_doubles import RolloutEnvDoubleMixin
 from tests.test_algorithms.test_llms.test_ppo_llm import _cpu_llmppo
 from tests.test_algorithms.test_llms.test_reinforce_llm import _cpu_llmreinforce
 
@@ -153,7 +154,7 @@ class TestCollectRolloutsLlm:
         prompt_tokens_by_env_index = [42, 7, 99, 13, 55, 21, 88, 3]
         creation_idx = {"value": 0}
 
-        class _OrderingEnv:
+        class _OrderingEnv(RolloutEnvDoubleMixin):
             """Minimal env that records which completion token it receives."""
 
             def __init__(self, prompt_token: int) -> None:
