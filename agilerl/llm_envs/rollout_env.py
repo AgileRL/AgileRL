@@ -266,6 +266,10 @@ class RolloutEnv:
         Owns whatever it builds (the local env client, or the served server); :meth:`close`
         releases it.
 
+        ``from_spec`` is for tasks **already packaged as an env**. If what you have is
+        labelled ``(question, answer)`` rows and a reward function rather than an env,
+        see :meth:`from_dataset`.
+
         :param spec: A URL or a ``module:Class`` / ``path.py:Class`` entrypoint.
         :param env_config: Kwargs forwarded to the entrypoint constructor (ignored for a URL).
         :param tokenizer: Tokenizer for the token-level loop.
@@ -286,6 +290,65 @@ class RolloutEnv:
                 **kwargs,
             )
         return cls.local(env, tokenizer, max_turns=max_turns, **kwargs)
+
+    @classmethod
+    def from_dataset(
+        cls,
+        dataset: Any,
+        reward_fn: Callable[[str, Any, Any], float],
+        tokenizer: Any,
+        *,
+        test_dataset: Any | None = None,
+        prompt_builder: Callable[[Any], str] | None = None,
+        question_column: str = "question",
+        answer_column: str = "answer",
+        **kwargs: Any,
+    ) -> RolloutEnv:
+        """Build a single-turn ``RolloutEnv`` from (question, answer) rows and a reward fn.
+
+        The counterpart to :meth:`from_spec` for callers who **don't have an env** —
+        just labelled prompt data and a scoring function. Use :meth:`from_spec` when
+        the task is already packaged as an env (an OpenEnv URL, or a ``module:Class`` /
+        ``module:func`` entrypoint such as a GEM registry factory); use
+        ``from_dataset`` when what you have is rows of ``(question, answer)`` and a
+        ``reward_fn``, and the env is simply "serve a row, score the completion" —
+        single-turn generative RL (reasoning / contextual bandit). The rows + reward
+        fn are bundled into an internal dataset env driven **in-process** (no HTTP),
+        so there is nothing to host or register.
+
+        The env is single-turn by definition (``max_turns`` is fixed to 1). The
+        owning :class:`BatchRolloutEnv` pins each group to one dataset row via
+        ``row_index``; ``test_dataset`` rows are served under
+        :meth:`eval_mode` / ``evaluation_mode``.
+
+        :param dataset: Train rows, indexable to per-row mappings with
+            ``question_column`` / ``answer_column`` keys (e.g. a ``datasets.Dataset``).
+        :param reward_fn: ``(completion, answer, question) -> float`` scorer. The
+            row's answer/question values are passed through unmodified.
+        :param tokenizer: Tokenizer for the token-level loop.
+        :param test_dataset: Optional held-out rows served under evaluation mode
+            (falls back to ``dataset`` when ``None``).
+        :param prompt_builder: Maps a row's question to the prompt text served on
+            reset. ``None`` serves ``str(question)`` as-is; pass
+            ``apply_chat_template=False`` if the built prompt is already templated.
+        :param question_column: Row key for the question, defaults to ``"question"``.
+        :param answer_column: Row key for the answer, defaults to ``"answer"``.
+        :param kwargs: Forwarded to :class:`RolloutEnv` (e.g. ``pad_id``,
+            ``apply_chat_template``, ``max_model_len``, ``max_output_tokens``).
+        :rtype: RolloutEnv
+        """
+        if "max_turns" in kwargs:
+            msg = "from_dataset builds a single-turn env; max_turns is fixed to 1"
+            raise TypeError(msg)
+        env = _PromptDatasetEnv(
+            dataset,
+            test_dataset,
+            reward_fn,
+            prompt_builder,
+            question_column,
+            answer_column,
+        )
+        return cls.local(env, tokenizer, max_turns=1, **kwargs)
 
     def _tokenize_initial_prompt(self, obs_text: str) -> dict[str, torch.Tensor]:
         """Tokenize the initial observation, optionally with chat template."""
@@ -759,6 +822,73 @@ class RolloutEnv:
             "turn_details": turn_details,
             "feedback_texts": self._feedback_texts,
         }
+
+
+class _PromptDatasetEnv:
+    """(question, answer) rows + a reward fn, served as a single-turn text env.
+
+    The backend :meth:`RolloutEnv.from_dataset` builds: ``reset`` serves the row's
+    (optionally templated) question and ``step`` scores the model's completion with
+    ``reward_fn`` — always terminal, single turn. The owning
+    :class:`BatchRolloutEnv` pins each group to one row via ``row_index``; a bare
+    ``reset`` walks a sequential cursor instead. The held-out split is served when
+    ``reset`` is called with ``evaluation=True``.
+    """
+
+    def __init__(
+        self,
+        dataset: Any,
+        test_dataset: Any | None,
+        reward_fn: Callable[[str, Any, Any], float],
+        prompt_builder: Callable[[Any], str] | None,
+        question_column: str,
+        answer_column: str,
+    ) -> None:
+        self._train = dataset
+        self._test = test_dataset
+        self._reward_fn = reward_fn
+        self._prompt_builder = prompt_builder
+        self._question_column = question_column
+        self._answer_column = answer_column
+        # Cursor for the standalone (no row_index) path; the batch path always passes one.
+        self._cursor = 0
+        self._split = ""
+        self._question: Any = None
+        self._answer: Any = None
+
+    @property
+    def dataset_size(self) -> int:
+        """Number of train rows backing this env (drives the ``BatchPointer``)."""
+        return len(self._train)
+
+    def reset(
+        self,
+        seed: int | None = None,
+        *,
+        row_index: int | None = None,
+        evaluation: bool | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        """Select a row and return its prompt text plus an empty info dict."""
+        del seed
+        if evaluation and self._test is not None:
+            rows, split = self._test, "eval"
+        else:
+            rows, split = self._train, "train"
+        if row_index is None:
+            if split != self._split:
+                self._cursor, self._split = 0, split
+            row_index, self._cursor = self._cursor, self._cursor + 1
+        row = rows[int(row_index) % len(rows)]
+        self._question = row[self._question_column]
+        self._answer = row[self._answer_column]
+        if self._prompt_builder is not None:
+            return self._prompt_builder(self._question), {}
+        return str(self._question), {}
+
+    def step(self, action: str) -> tuple[str, float, bool, bool, dict[str, Any]]:
+        """Score the completion against the current row; always single-turn."""
+        reward = float(self._reward_fn(action, self._answer, self._question))
+        return "", reward, True, False, {}
 
 
 class BatchPointer:

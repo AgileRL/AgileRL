@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from typing import ClassVar
 
 import pytest
 import torch
@@ -409,6 +410,73 @@ class TestRolloutEnvPolicyObservationFromState:
         w.full_ids = None
         with pytest.raises(RuntimeError, match="No prompt"):
             w._policy_observation_from_state()
+
+
+class TestRolloutEnvFromDataset:
+    """from_dataset bundles (question, answer) rows + a reward fn into a single-turn env."""
+
+    _ROWS: ClassVar[list[dict]] = [
+        {"question": "q0", "answer": "a0"},
+        {"question": "q1", "answer": "a1"},
+        {"question": "q2", "answer": "a2"},
+    ]
+    _TEST_ROWS: ClassVar[list[dict]] = [{"question": "tq0", "answer": "ta0"}]
+
+    def _make(self):
+        calls: list[tuple] = []
+
+        def reward_fn(completion, answer, question):
+            calls.append((completion, answer, question))
+            return 1.0 if answer == "a1" else 0.25
+
+        env = RolloutEnv.from_dataset(
+            self._ROWS,
+            reward_fn,
+            _ChrTokenizer(),
+            test_dataset=self._TEST_ROWS,
+            prompt_builder=lambda q: f"P:{q}",
+            pad_id=None,
+            apply_chat_template=False,
+        )
+        return env, calls
+
+    def _reset_prompt(self, env, **kwargs) -> str:
+        obs, _info = env.reset(**kwargs)
+        return _ChrTokenizer().decode(obs["input_ids"][0].tolist())
+
+    def test_reset_serves_pinned_row_and_step_scores_single_turn(self) -> None:
+        env, calls = self._make()
+        assert env.dataset_size == 3
+        obs, _info = env.reset(row_index=1)
+        assert _ChrTokenizer().decode(obs["input_ids"][0].tolist()) == "P:q1"
+        gen = torch.tensor([[ord("z")]], dtype=torch.long)
+        _obs, reward, terminated, truncated, _i = env.step(
+            torch.cat([obs["input_ids"], gen], dim=1)
+        )
+        assert calls == [("z", "a1", "q1")]
+        assert reward == 1.0
+        assert terminated is True
+        assert truncated is False
+
+    def test_bare_reset_walks_rows_and_wraps(self) -> None:
+        env, _calls = self._make()
+        prompts = [self._reset_prompt(env) for _ in range(4)]
+        assert prompts == ["P:q0", "P:q1", "P:q2", "P:q0"]
+
+    def test_eval_mode_serves_test_rows(self) -> None:
+        env, _calls = self._make()
+        with env.eval_mode():
+            assert self._reset_prompt(env, row_index=0) == "P:tq0"
+        assert self._reset_prompt(env, row_index=0) == "P:q0"
+
+    def test_max_turns_is_rejected(self) -> None:
+        with pytest.raises(TypeError, match="single-turn"):
+            RolloutEnv.from_dataset(
+                self._ROWS,
+                lambda c, a, q: 0.0,
+                _ChrTokenizer(),
+                max_turns=2,
+            )
 
 
 class _SyncStubEnv(RolloutEnvDoubleMixin):
