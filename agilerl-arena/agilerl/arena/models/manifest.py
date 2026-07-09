@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+import logging
 from pathlib import Path
 from typing import Annotated, Any, Literal, get_args
 
@@ -18,8 +20,17 @@ from agilerl.arena.models.networks import (
     NetworkSpec,
 )
 from agilerl.arena.models.training import ReplayBufferSpec, TrainingSpec
-from pydantic import BaseModel, BeforeValidator, Field, PlainSerializer, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    BeforeValidator,
+    Field,
+    PlainSerializer,
+    model_validator,
+)
 from typing_extensions import Self
+
+logger = logging.getLogger(__name__)
 
 _MANIFEST_ENCODER_ARCHS = ("mlp", "cnn", "lstm", "simba", "multiinput")
 
@@ -61,14 +72,8 @@ def _ensure_platform_run_spec_keys(data: dict[str, Any]) -> None:
 def _normalize_network_arch(
     data: dict[str, Any] | BaseModel,
 ) -> dict[str, Any] | BaseModel:
-    """Move a top-level ``arch`` key into ``encoder_config.arch``.
-
-    Raw YAML/JSON manifests place ``arch`` at the network section root,
-    but :class:`NetworkSpec` (a discriminated union) expects it nested
-    under ``encoder_config``.  This helper bridges the two representations.
-
-    :raises ValueError: If ``arch`` is missing from both the network root and
-        ``encoder_config``.
+    """Move a top-level ``arch`` key into ``encoder_config.arch`` for proper
+    Pydantic validation client-side. If missing, resolution is deferred to the server.
     """
     # If passing a network spec we already have the correct structure
     if not isinstance(data, dict):
@@ -82,14 +87,9 @@ def _normalize_network_arch(
     )
     arch = top_level_arch or nested_arch
 
-    # If arch is not found in the network or encoder_config, raise an error
+    # If arch is not found, defer resolution to the server.
     if arch is None:
-        supported = ", ".join(_MANIFEST_ENCODER_ARCHS)
-        msg = (
-            "Missing encoder architecture in the manifest. "
-            f"Set 'arch' at the top level of 'network'. Supported values: {supported}."
-        )
-        raise ValueError(msg)
+        return data
 
     if encoder_config is None:
         data["encoder_config"] = {"arch": arch}
@@ -98,6 +98,24 @@ def _normalize_network_arch(
         data["encoder_config"].setdefault("arch", arch)
 
     return data
+
+
+def _network_has_arch(network: dict[str, Any]) -> bool:
+    """Whether a raw network dict declares a resolvable ``arch``.
+
+    Checks both the network root and ``encoder_config`` (the two places a
+    manifest may place it). Used to decide whether the network section can be
+    validated client-side, or must be deferred to the server.
+
+    :param network: Raw network section dict.
+    :type network: dict[str, Any]
+    :returns: ``True`` if ``arch`` is present at either location.
+    :rtype: bool
+    """
+    if network.get("arch"):
+        return True
+    encoder_config = network.get("encoder_config")
+    return isinstance(encoder_config, dict) and bool(encoder_config.get("arch"))
 
 
 def _resolve_algorithm(data: Any) -> AlgoSpecT:
@@ -156,6 +174,9 @@ def _resolve_network(data: dict[str, Any] | BaseModel) -> dict[str, Any]:
 
     Raw dicts are validated through :class:`NetworkSpec` so that default values are included in the serialized output.
 
+    If the raw dict has no resolvable ``arch`` (at the network root or nested
+    in ``encoder_config``), the network section is returned unchanged.
+
     :param data: Network config dict or spec instance.
     :type data: Any
     :returns: A plain dictionary suitable for manifest storage.
@@ -172,6 +193,9 @@ def _resolve_network(data: dict[str, Any] | BaseModel) -> dict[str, Any]:
     if isinstance(data, dict) and "pretrained_model_name_or_path" in data:
         return FinetuningNetworkSpec.model_validate(data).model_dump(mode="json")
 
+    if isinstance(data, dict) and not _network_has_arch(data):
+        return data
+
     normalized = _normalize_network_arch(data)
     spec = NetworkSpec.model_validate(normalized)
     data_dict = spec.model_dump()
@@ -186,7 +210,7 @@ def _serialize_algorithm(spec: AlgoSpecT) -> dict[str, Any]:
     return dumped
 
 
-# NOTE: Use of PlainSerializer here I believe results in not being able to serialize a
+# NOTE: Use of PlainSerializer here results in not being able to serialize the
 # TrainingManifest's algorithm section in "python" mode, which is fine since we only serialize
 # when submitting jobs to Arena.
 AlgorithmFromManifest = Annotated[
@@ -198,6 +222,64 @@ EnvironmentFromManifest = Annotated[
     dict[str, Any], BeforeValidator(_coerce_environment)
 ]
 NetworkFromManifest = Annotated[dict[str, Any], BeforeValidator(_resolve_network)]
+
+
+def _known_field_names(model: BaseModel) -> set[str]:
+    """Return every accepted input key for *model*: field names plus aliases.
+
+    Includes declared-but-excluded fields and every
+    :class:`~pydantic.AliasChoices` option so aliased keys are not mistaken
+    for unknown fields.
+    """
+    names: set[str] = set()
+    for field_name, field in type(model).model_fields.items():
+        names.add(field_name)
+        if isinstance(field.alias, str):
+            names.add(field.alias)
+        validation_alias = field.validation_alias
+        if isinstance(validation_alias, str):
+            names.add(validation_alias)
+        elif isinstance(validation_alias, AliasChoices):
+            names.update(c for c in validation_alias.choices if isinstance(c, str))
+    return names
+
+
+def _collect_unknown_fields(
+    raw: dict[str, Any], validated: TrainingManifest
+) -> list[str]:
+    """Collect dotted paths of manifest keys dropped during validation.
+
+    Only sections that resolve to a concrete Pydantic model are inspected;
+    ``environment`` (a raw passthrough dict) and ``network`` (normalized
+    before validation) are skipped to avoid false positives.
+    """
+    if not isinstance(raw, dict):
+        return []
+
+    dumped = validated.model_dump(mode="json", exclude_none=True)
+
+    unknown: list[str] = []
+    top_known = _known_field_names(validated) | set(dumped)
+    unknown.extend(str(key) for key in raw if key not in top_known)
+
+    sections: dict[str, Any] = {
+        "algorithm": validated.algorithm,
+        "training": validated.training,
+        "mutation": validated.mutation,
+        "replay_buffer": validated.replay_buffer,
+        "tournament_selection": validated.tournament_selection,
+    }
+    for section, model in sections.items():
+        raw_section = raw.get(section)
+        if not isinstance(raw_section, dict) or not isinstance(model, BaseModel):
+            continue
+        known = _known_field_names(model)
+        dumped_section = dumped.get(section)
+        if isinstance(dumped_section, dict):
+            known |= set(dumped_section)
+        unknown.extend(f"{section}.{key}" for key in raw_section if key not in known)
+
+    return unknown
 
 
 class TrainingManifest(BaseModel):
@@ -240,7 +322,8 @@ class TrainingManifest(BaseModel):
                     ),
                     None,
                 )
-                if spec_cls is not None:
+                # Skip when the network has no resolvable `arch`
+                if spec_cls is not None and _network_has_arch(self.network):
                     self.algorithm.net_config = spec_cls.model_validate(self.network)
             # LLM algorithms expect a pretrained model
             elif issubclass(algo_spec_cls, LLMAlgorithmSpec):
@@ -259,6 +342,21 @@ class TrainingManifest(BaseModel):
                 "Required field 'pretrained_model_name_or_path' wasn't found in the manifest. "
                 "This is required for LLM finetuning algorithms, and can be added under either the "
                 "'algorithm' or 'network' sections."
+            )
+            raise ValueError(msg)
+
+        recurrent = bool(getattr(self.algorithm, "recurrent", False))
+        net_config = getattr(self.algorithm, "net_config", None)
+        if net_config is not None:
+            simba = bool(getattr(net_config, "simba", False))
+        elif isinstance(self.network, dict):
+            simba = bool(self.network.get("simba", False))
+        else:
+            simba = False
+        if recurrent and simba:
+            msg = (
+                "`simba` and `recurrent` cannot both be set: a network cannot use "
+                "both a SimBa and a recurrent (LSTM) encoder. Enable only one."
             )
             raise ValueError(msg)
 
@@ -290,7 +388,13 @@ class TrainingManifest(BaseModel):
         :rtype: dict[str, Any] | TrainingManifest
         """
         data = TrainingManifest._load_yaml(manifest)
+        raw_snapshot = copy.deepcopy(data) if isinstance(data, dict) else {}
         validated = cls.model_validate(data)
+
+        unknown = _collect_unknown_fields(raw_snapshot, validated)
+        if unknown:
+            formatted = "[" + ", ".join(f'"{name}"' for name in unknown) + "]"
+            logger.warning("Ignoring unrecognized manifest field(s): %s", formatted)
 
         if mode == "python":
             return validated

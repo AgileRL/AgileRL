@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+import copy
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal, get_args
 
 import yaml
-from pydantic import BaseModel, BeforeValidator, Field, PlainSerializer, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    BeforeValidator,
+    Field,
+    PlainSerializer,
+    model_validator,
+)
 from typing_extensions import Self
 
 from agilerl import HAS_ARENA_DEPENDENCIES, HAS_LLM_DEPENDENCIES, AgentType
@@ -19,9 +28,12 @@ from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
 from agilerl.models.networks import (
     FinetuningNetworkSpec,
     NetworkSpec,
+    network_arch_is_resolvable,
     normalize_manifest_network,
 )
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from agilerl.models.env import GymEnvSpec, LLMEnvSpec, OfflineEnvSpec, PzEnvSpec
@@ -129,6 +141,10 @@ def _resolve_network(data: Any) -> dict[str, Any]:
         return FinetuningNetworkSpec.model_validate(data).model_dump(mode="json")
 
     normalized = normalize_manifest_network(data)
+    if not network_arch_is_resolvable(normalized):
+        # Deferred: keep the raw network dict; the trainer resolves the arch
+        # from the observation space in Trainer.__init__.
+        return normalized
     spec = NetworkSpec.model_validate(normalized)
     data_dict = spec.model_dump()
     data_dict["encoder_config"]["arch"] = spec.encoder_config.arch
@@ -176,6 +192,64 @@ EnvironmentFromManifest = Annotated[
 NetworkFromManifest = Annotated[dict[str, Any], BeforeValidator(_resolve_network)]
 
 
+def _known_field_names(model: BaseModel) -> set[str]:
+    """Return every accepted input key for *model*: field names plus aliases.
+
+    Includes declared-but-excluded fields (e.g. ``cudagraphs``) and every
+    :class:`~pydantic.AliasChoices` option so aliased keys are not mistaken
+    for unknown fields.
+    """
+    names: set[str] = set()
+    for field_name, field in type(model).model_fields.items():
+        names.add(field_name)
+        if isinstance(field.alias, str):
+            names.add(field.alias)
+        validation_alias = field.validation_alias
+        if isinstance(validation_alias, str):
+            names.add(validation_alias)
+        elif isinstance(validation_alias, AliasChoices):
+            names.update(c for c in validation_alias.choices if isinstance(c, str))
+    return names
+
+
+def _collect_unknown_fields(
+    raw: dict[str, Any], validated: TrainingManifest
+) -> list[str]:
+    """Collect dotted paths of manifest keys dropped during validation.
+
+    Only sections that resolve to a concrete Pydantic model are inspected;
+    ``environment`` (a raw passthrough dict) and ``network`` (normalized
+    before validation) are skipped to avoid false positives.
+    """
+    if not isinstance(raw, dict):
+        return []
+
+    dumped = validated.model_dump(mode="json", exclude_none=True)
+
+    unknown: list[str] = []
+    top_known = _known_field_names(validated) | set(dumped)
+    unknown.extend(str(key) for key in raw if key not in top_known)
+
+    sections: dict[str, Any] = {
+        "algorithm": validated.algorithm,
+        "training": validated.training,
+        "mutation": validated.mutation,
+        "replay_buffer": validated.replay_buffer,
+        "tournament_selection": validated.tournament_selection,
+    }
+    for section, model in sections.items():
+        raw_section = raw.get(section)
+        if not isinstance(raw_section, dict) or not isinstance(model, BaseModel):
+            continue
+        known = _known_field_names(model)
+        dumped_section = dumped.get(section)
+        if isinstance(dumped_section, dict):
+            known |= set(dumped_section)
+        unknown.extend(f"{section}.{key}" for key in raw_section if key not in known)
+
+    return unknown
+
+
 class TrainingManifest(BaseModel):
     """Pydantic model that validates a full training manifest.
 
@@ -217,7 +291,14 @@ class TrainingManifest(BaseModel):
                     None,
                 )
                 if spec_cls is not None:
-                    self.algorithm.net_config = spec_cls.model_validate(self.network)
+                    if network_arch_is_resolvable(self.network):
+                        self.algorithm.net_config = spec_cls.model_validate(
+                            self.network
+                        )
+                    else:
+                        # Deferred: leave the raw dict for the trainer to resolve
+                        # once the observation space is known.
+                        self.algorithm.net_config = dict(self.network)
             # LLM algorithms expect a pretrained model
             elif issubclass(algo_spec_cls, LLMAlgorithmSpec):
                 llm_network = FinetuningNetworkSpec.model_validate(self.network)
@@ -235,6 +316,19 @@ class TrainingManifest(BaseModel):
                 "Required field 'pretrained_model_name_or_path' wasn't found in the manifest. "
                 "This is required for LLM finetuning algorithms, and can be added under either the "
                 "'algorithm' or 'network' sections."
+            )
+            raise ValueError(msg)
+
+        recurrent = bool(getattr(self.algorithm, "recurrent", False))
+        net_config = getattr(self.algorithm, "net_config", None)
+        if isinstance(net_config, dict):
+            simba = bool(net_config.get("simba", False))
+        else:
+            simba = bool(getattr(net_config, "simba", False))
+        if recurrent and simba:
+            msg = (
+                "`simba` and `recurrent` cannot both be set: a network cannot use "
+                "both a SimBa and a recurrent (LSTM) encoder. Enable only one."
             )
             raise ValueError(msg)
 
@@ -362,7 +456,13 @@ class TrainingManifest(BaseModel):
         :rtype: dict[str, Any] | TrainingManifest
         """
         data = TrainingManifest._load_yaml(manifest)
+        raw_snapshot = copy.deepcopy(data) if isinstance(data, dict) else {}
         validated = cls.model_validate(data)
+
+        unknown = _collect_unknown_fields(raw_snapshot, validated)
+        if unknown:
+            formatted = "[" + ", ".join(f'"{name}"' for name in unknown) + "]"
+            logger.warning("Ignoring unrecognized manifest field(s): %s", formatted)
 
         if mode == "json":
             return validated.model_dump(mode="json", exclude_none=True)

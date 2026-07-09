@@ -12,8 +12,10 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 import yaml
+from gymnasium import spaces
 from pydantic import ValidationError
 
 from agilerl import HAS_ARENA_DEPENDENCIES, HAS_LLM_DEPENDENCIES
@@ -103,6 +105,86 @@ def test_get_validated_json_omits_unset_optional_sections() -> None:
     assert "mutation" not in out
     assert "tournament_selection" not in out
     assert "network" not in out
+
+
+def test_get_validated_warns_on_unknown_algorithm_field() -> None:
+    with patch("agilerl.models.manifest.logger") as mock_logger:
+        TrainingManifest.get_validated(
+            _make_manifest(
+                {"name": "DQN", "lr": 3e-4, "bogus_algo_field": 1},
+                env={"name": "CartPole-v1"},
+            )
+        )
+    mock_logger.warning.assert_called_once()
+    template, formatted = mock_logger.warning.call_args.args
+    assert "unrecognized manifest field" in template
+    assert "algorithm.bogus_algo_field" in formatted
+
+
+def test_get_validated_warns_on_unknown_top_level_field() -> None:
+    with patch("agilerl.models.manifest.logger") as mock_logger:
+        TrainingManifest.get_validated(
+            _make_manifest(
+                {"name": "DQN"}, env={"name": "CartPole-v1"}, bogus_top_level=123
+            )
+        )
+    mock_logger.warning.assert_called_once()
+    assert "bogus_top_level" in mock_logger.warning.call_args.args[1]
+
+
+def test_get_validated_no_warning_for_known_aliased_or_excluded_fields() -> None:
+    # `cudagraphs` is declared-but-excluded, and population_size / metrics_interval
+    # / memory_size are validation aliases: none are unknown.
+    with patch("agilerl.models.manifest.logger") as mock_logger:
+        TrainingManifest.get_validated(
+            _make_manifest(
+                {"name": "DQN", "lr": 3e-4, "cudagraphs": True},
+                env={"name": "CartPole-v1"},
+                training={
+                    "population_size": 4,
+                    "metrics_interval": 123,
+                    "max_steps": 1000,
+                },
+                replay_buffer={"memory_size": 4096},
+            )
+        )
+    mock_logger.warning.assert_not_called()
+
+
+def test_collect_unknown_fields_ignores_non_dict_raw() -> None:
+    from agilerl.models.manifest import _collect_unknown_fields
+
+    validated = TrainingManifest.get_validated(
+        _make_manifest({"name": "DQN"}, env={"name": "CartPole-v1"}), mode="python"
+    )
+    assert _collect_unknown_fields("not-a-dict", validated) == []
+    assert _collect_unknown_fields(None, validated) == []
+
+
+def test_known_field_names_includes_all_alias_forms() -> None:
+    from pydantic import AliasChoices, BaseModel, Field
+
+    from agilerl.models.manifest import _known_field_names
+
+    class _M(BaseModel):
+        plain: int = Field(default=0)
+        aliased: int = Field(default=0, alias="aliased_in")
+        val_str: int = Field(default=0, validation_alias="val_str_in")
+        val_choices: int = Field(
+            default=0, validation_alias=AliasChoices("choice_a", "choice_b")
+        )
+
+    names = _known_field_names(_M())
+    assert {
+        "plain",
+        "aliased",
+        "aliased_in",
+        "val_str",
+        "val_str_in",
+        "val_choices",
+        "choice_a",
+        "choice_b",
+    } <= names
 
 
 class TestNormalizeNetworkForPlatform:
@@ -255,7 +337,7 @@ class TestTrainingManifest:
 
     # -- Network architecture injection -------------------------------------
 
-    def test_network_missing_arch_raises_helpful_error(self):
+    def test_network_missing_arch_defers_resolution(self):
         data = _make_manifest(
             algo={"name": "DQN"},
             network={
@@ -264,8 +346,12 @@ class TestTrainingManifest:
                 "head_config": {"hidden_size": [64]},
             },
         )
-        with pytest.raises(ValueError, match="Missing encoder architecture"):
-            TrainingManifest.model_validate(data)
+        manifest = TrainingManifest.model_validate(data)
+        # Deferred: no arch declared, so net_config is left as a raw dict for
+        # the trainer to resolve from the observation space (Task 3), rather
+        # than raising.
+        assert isinstance(manifest.algorithm.net_config, dict)
+        assert "arch" not in manifest.algorithm.net_config.get("encoder_config", {})
 
     @pytest.mark.parametrize(
         ("arch", "encoder_kwargs", "expected_encoder_cls"),
@@ -1102,6 +1188,18 @@ _MULTI_AGENT_CONFIGS = [
     ("multi_agent/ippo_pong.yaml", IPPOSpec),
 ]
 
+# Configs omit the network ``arch``, so it is inferred from the observation
+# space at build time. Give the stub env a space matching the expected encoder.
+_OBS_SPACE_FOR_ENCODER = {
+    MlpSpec: spaces.Box(-1.0, 1.0, shape=(4,), dtype=np.float32),
+    LstmSpec: spaces.Box(-1.0, 1.0, shape=(4,), dtype=np.float32),
+    SimbaSpec: spaces.Box(-1.0, 1.0, shape=(4,), dtype=np.float32),
+    CnnSpec: spaces.Box(0, 255, shape=(3, 32, 32), dtype=np.uint8),
+    MultiInputSpec: spaces.Dict(
+        {"vector": spaces.Box(-1.0, 1.0, shape=(4,), dtype=np.float32)}
+    ),
+}
+
 
 class TestFromConfigFiles:
     """Load every YAML config under ``configs/training/`` and verify that
@@ -1109,12 +1207,27 @@ class TestFromConfigFiles:
     """
 
     @pytest.fixture(autouse=True)
-    def _patch_heavy_init(self):
+    def _patch_heavy_init(self, request):
         """Avoid spawning real environments and populations for config
         file integration tests.
+
+        When a test parametrizes ``expected_encoder_cls``, give the stub env a
+        matching observation space so the deferred obs-space -> encoder-arch
+        inference resolves to the expected encoder.
         """
+        env = MagicMock()
+        callspec = getattr(request.node, "callspec", None)
+        expected_encoder_cls = (
+            callspec.params.get("expected_encoder_cls")
+            if callspec is not None
+            else None
+        )
+        obs_space = _OBS_SPACE_FOR_ENCODER.get(expected_encoder_cls)
+        if obs_space is not None:
+            env.single_observation_space = obs_space
+
         with (
-            patch.object(LocalTrainer, "_make_env", return_value=MagicMock()),
+            patch.object(LocalTrainer, "_make_env", return_value=env),
             patch(
                 "agilerl.training.trainer.create_population_from_spec",
                 return_value=[MagicMock()],
@@ -1240,3 +1353,101 @@ class TestFromConfigFiles:
 
         manifest = TrainingManifest.model_validate(data)
         assert isinstance(manifest.algorithm, expected_algo_cls)
+
+
+class TestArchOptional:
+    def test_arch_present_still_validates(self):
+        raw = {
+            "algorithm": {"name": "PPO"},
+            "environment": {"name": "CartPole-v1"},
+            "network": {
+                "arch": "mlp",
+                "encoder_config": {"hidden_size": [64]},
+                "head_config": {"hidden_size": [64]},
+            },
+        }
+        out = TrainingManifest.get_validated(raw, mode="json")
+        assert out["network"]["encoder_config"]["arch"] == "mlp"
+
+    def test_arch_absent_keeps_network_raw(self):
+        from agilerl.models.manifest import TrainingManifest as TM
+
+        raw = {
+            "algorithm": {"name": "PPO"},
+            "environment": {"name": "CartPole-v1"},
+            "network": {"latent_dim": 64, "encoder_config": {"hidden_size": [64]}},
+        }
+        manifest = TM.model_validate(raw)
+        # Deferred: net_config left as a raw dict, not a NetworkSpec.
+        assert isinstance(manifest.algorithm.net_config, dict)
+        assert "arch" not in manifest.algorithm.net_config.get("encoder_config", {})
+
+    def test_network_arch_is_resolvable(self):
+        from agilerl.models.networks import network_arch_is_resolvable
+
+        assert network_arch_is_resolvable({"arch": "mlp"})
+        assert network_arch_is_resolvable({"encoder_config": {"arch": "cnn"}})
+        assert not network_arch_is_resolvable({"encoder_config": {"hidden_size": [64]}})
+        assert not network_arch_is_resolvable({})
+
+
+class TestSimbaRecurrentConflict:
+    """``simba`` and ``recurrent`` are contradictory encoder requests.
+
+    A network cannot simultaneously be a SimBa encoder and a recurrent (LSTM)
+    encoder, so setting both must raise a clear validation error rather than
+    silently picking one (``_build_encoder`` checks recurrent before simba,
+    which would otherwise silently ignore the ``simba`` flag).
+    """
+
+    def test_deferred_raises(self):
+        """No ``arch``: ``net_config`` is a raw dict when the conflict fires."""
+        raw = _make_manifest(
+            algo={"name": "PPO", "recurrent": True},
+            env={"name": "CartPole-v1"},
+            network={"simba": True, "head_config": {"hidden_size": [64]}},
+        )
+        with pytest.raises(ValueError, match="cannot both be set"):
+            TrainingManifest.model_validate(raw)
+
+    def test_eager_raises(self):
+        """``arch: simba`` declared: ``net_config`` is a validated ``NetworkSpec``."""
+        raw = _make_manifest(
+            algo={"name": "PPO", "recurrent": True},
+            env={"name": "CartPole-v1"},
+            network={
+                "arch": "simba",
+                "encoder_config": {"hidden_size": 128, "num_blocks": 2},
+                "head_config": {"hidden_size": [64]},
+            },
+        )
+        with pytest.raises(ValueError, match="cannot both be set"):
+            TrainingManifest.model_validate(raw)
+
+    def test_only_simba_validates(self):
+        raw = _make_manifest(
+            algo={"name": "PPO"},
+            env={"name": "CartPole-v1"},
+            network={"simba": True, "head_config": {"hidden_size": [64]}},
+        )
+        manifest = TrainingManifest.model_validate(raw)
+        assert isinstance(manifest.algorithm.net_config, dict)
+        assert manifest.algorithm.net_config.get("simba") is True
+
+    def test_only_recurrent_validates(self):
+        raw = _make_manifest(
+            algo={"name": "PPO", "recurrent": True},
+            env={"name": "CartPole-v1"},
+            network={"head_config": {"hidden_size": [64]}},
+        )
+        manifest = TrainingManifest.model_validate(raw)
+        assert manifest.algorithm.recurrent is True
+
+    def test_neither_validates(self):
+        raw = _make_manifest(
+            algo={"name": "PPO"},
+            env={"name": "CartPole-v1"},
+            network={"head_config": {"hidden_size": [64]}},
+        )
+        manifest = TrainingManifest.model_validate(raw)
+        assert manifest.algorithm.recurrent is False

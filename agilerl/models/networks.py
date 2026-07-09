@@ -1,6 +1,7 @@
 from collections.abc import Callable
-from typing import Any, Literal, TypeVar
+from typing import Any, Literal, TypeVar, get_args
 
+from gymnasium import spaces
 from pydantic import (
     BaseModel,
     Field,
@@ -20,15 +21,58 @@ T = TypeVar("T", bound=BaseModel)
 _MANIFEST_ENCODER_ARCHS = ("mlp", "cnn", "lstm", "simba", "multiinput")
 
 
+def infer_encoder_arch(
+    observation_space: spaces.Space,
+    *,
+    recurrent: bool = False,
+    simba: bool = False,
+) -> Literal["mlp", "cnn", "lstm", "simba", "multiinput"]:
+    """Infer the encoder architecture from an observation space.
+
+    Mirrors the branch order in
+    :func:`agilerl.utils.evolvable_networks.get_default_encoder_config` and
+    :meth:`agilerl.networks.base.EvolvableNetwork._build_encoder` so the schema
+    used to validate ``encoder_config`` always matches the encoder that will be
+    built. ``simba`` takes precedence over ``recurrent``.
+
+    :param observation_space: The (single-agent or per-agent) observation space.
+    :param recurrent: Whether the algorithm requests a recurrent encoder.
+    :param simba: Whether the network requests a SimBa encoder.
+    :returns: One of ``"mlp"``, ``"cnn"``, ``"lstm"``, ``"simba"``, ``"multiinput"``.
+    """
+    if isinstance(observation_space, (spaces.Dict, spaces.Tuple)):
+        return "multiinput"
+    if isinstance(observation_space, spaces.Box) and len(observation_space.shape) == 3:
+        return "cnn"
+    if simba:
+        return "simba"
+    if recurrent:
+        return "lstm"
+    return "mlp"
+
+
+def network_arch_is_resolvable(network: dict) -> bool:
+    """Return True if the manifest network section declares an ``arch``.
+
+    Checks the top level and the nested ``encoder_config``. When False, the
+    architecture must be inferred from the observation space at build time.
+    """
+    if not isinstance(network, dict):
+        return False
+    if network.get("arch"):
+        return True
+    encoder_config = network.get("encoder_config")
+    return isinstance(encoder_config, dict) and bool(encoder_config.get("arch"))
+
+
 def normalize_manifest_network(data: Any) -> Any:
-    """Move a top-level ``arch`` key into ``encoder_config.arch``.
+    """Move a top-level ``arch`` key into ``encoder_config.arch`` when present.
 
-    Raw YAML/JSON manifests place ``arch`` at the network section root,
-    but :class:`NetworkSpec` (a discriminated union) expects it nested
-    under ``encoder_config``.  This helper bridges the two representations.
-
-    :raises ValueError: If ``arch`` is missing from both the network root and
-        ``encoder_config``.
+    Raw YAML/JSON manifests place ``arch`` at the network section root, but
+    :class:`NetworkSpec` (a discriminated union) expects it nested under
+    ``encoder_config``. When ``arch`` is absent it is inferred later from the
+    observation space, so this helper leaves the data unchanged rather than
+    raising.
     """
     if not isinstance(data, dict):
         return data
@@ -42,12 +86,8 @@ def normalize_manifest_network(data: Any) -> Any:
     arch = top_level_arch or nested_arch
 
     if arch is None:
-        supported = ", ".join(_MANIFEST_ENCODER_ARCHS)
-        msg = (
-            "Missing encoder architecture in the manifest. "
-            f"Set 'arch' at the top level of 'network'. Supported values: {supported}."
-        )
-        raise ValueError(msg)
+        # Deferred: architecture inferred from the observation space later.
+        return data
 
     if encoder_config is None:
         data["encoder_config"] = {"arch": arch}
@@ -308,6 +348,25 @@ class LstmSpec(BaseModel):
 
 
 EncoderType = MlpSpec | CnnSpec | LstmSpec | MultiInputSpec | SimbaSpec
+
+
+def encoder_spec_for_arch(arch: str) -> type[BaseModel]:
+    """Return the encoder spec class (``MlpSpec``, ``CnnSpec``, ...) for an arch literal.
+
+    Single source of truth mapping an ``arch`` string (as produced by
+    :func:`infer_encoder_arch`) to the concrete pydantic spec that validates
+    that encoder's ``encoder_config``.
+
+    :param arch: The encoder architecture literal (e.g. ``"mlp"``, ``"cnn"``).
+    :type arch: str
+    :returns: The encoder spec class whose ``arch`` field matches.
+    :rtype: type[BaseModel]
+    """
+    for member in get_args(EncoderType):
+        if member.model_fields["arch"].default == arch:
+            return member
+    msg = f"Unknown encoder arch: {arch!r}"
+    raise ValueError(msg)
 
 
 class NetworkSpec(BaseModel):

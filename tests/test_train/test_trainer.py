@@ -2584,3 +2584,222 @@ class TestLocalTrainerResolveEnvSpecBranches:
         result = LocalTrainer._resolve_env_spec(manifest)
         assert isinstance(result, LLMEnvSpec)
         assert result.env_type == LLMEnvType.REASONING
+
+
+def test_from_manifest_infers_multiinput_when_arch_absent(tmp_path):
+    """A Dict-obs env with NO arch builds an EvolvableMultiInput encoder."""
+    import yaml
+
+    from agilerl.modules.multi_input import EvolvableMultiInput
+    from agilerl.training.trainer import LocalTrainer
+
+    manifest = {
+        "algorithm": {"name": "PPO", "learn_step": 64},
+        "environment": {
+            "name": "dict-obs-env",
+            "num_envs": 2,
+            "entrypoint": "tests.test_train._dummy_envs:DictObsEnv",
+        },
+        "training": {"max_steps": 200, "evo_steps": 100, "pop_size": 1},
+        "network": {"latent_dim": 32, "head_config": {"hidden_size": [32]}},
+    }
+    path = tmp_path / "m.yaml"
+    path.write_text(yaml.safe_dump(manifest))
+
+    trainer = LocalTrainer.from_manifest(manifest=path, device="cpu")
+    encoder = trainer.population[0].actor.encoder
+    assert isinstance(encoder, EvolvableMultiInput)
+
+
+def test_from_manifest_wrong_arch_is_overridden_when_omitted(tmp_path):
+    """Vector-obs env with no arch builds an EvolvableMLP."""
+    import yaml
+
+    from agilerl.modules.mlp import EvolvableMLP
+    from agilerl.training.trainer import LocalTrainer
+
+    manifest = {
+        "algorithm": {"name": "PPO", "learn_step": 64},
+        "environment": {"name": "CartPole-v1", "num_envs": 2},
+        "training": {"max_steps": 200, "evo_steps": 100, "pop_size": 1},
+        "network": {"latent_dim": 32, "head_config": {"hidden_size": [32]}},
+    }
+    path = tmp_path / "m.yaml"
+    path.write_text(yaml.safe_dump(manifest))
+    trainer = LocalTrainer.from_manifest(manifest=path, device="cpu")
+    assert isinstance(trainer.population[0].actor.encoder, EvolvableMLP)
+
+
+@pytest.mark.parametrize(
+    ("arch", "environment", "algorithm_extra", "network_extra", "assertions"),
+    [
+        pytest.param(
+            "mlp",
+            {"name": "CartPole-v1", "num_envs": 2},
+            {},
+            {},
+            # MlpSpec defaults (dataclass MlpNetConfig would be 500 / 3)
+            {"max_mlp_nodes": 256, "max_hidden_layers": 6},
+            id="mlp",
+        ),
+        pytest.param(
+            "multiinput",
+            {
+                "name": "dict-obs-env",
+                "num_envs": 2,
+                "entrypoint": "tests.test_train._dummy_envs:DictObsEnv",
+            },
+            {},
+            {},
+            # MultiInputSpec default (dataclass MultiInputNetConfig would be 16)
+            {"latent_dim": 32},
+            id="multiinput",
+        ),
+        pytest.param(
+            "cnn",
+            {
+                "name": "image-obs-env",
+                "num_envs": 2,
+                "entrypoint": "tests.test_train._dummy_envs:ImageObsEnv",
+            },
+            {},
+            {},
+            # CnnSpec default (dataclass CnnNetConfig would be 16)
+            {"min_channel_size": 8},
+            id="cnn",
+        ),
+        pytest.param(
+            "lstm",
+            {"name": "CartPole-v1", "num_envs": 2},
+            {"recurrent": True},
+            {},
+            # LstmSpec defaults (dataclass LstmNetConfig would be 500 / 4)
+            {"max_hidden_state_size": 256, "max_layers": 6},
+            id="lstm",
+        ),
+        pytest.param(
+            "simba",
+            {"name": "CartPole-v1", "num_envs": 2},
+            {},
+            {"simba": True},
+            # SimbaSpec default (dataclass SimBaNetConfig would be 500)
+            {"max_mlp_nodes": 256},
+            id="simba",
+        ),
+    ],
+)
+def test_deferred_encoder_uses_spec_defaults_not_dataclass(
+    tmp_path, arch, environment, algorithm_extra, network_extra, assertions
+):
+    """A no-arch manifest must resolve encoder HP bounds from the pydantic
+    ``*Spec`` defaults, not the ``modules/configs`` dataclass defaults.
+
+    Parametrized across every inferable arch (mlp, multiinput, cnn, lstm,
+    simba) so the invariant is guarded regardless of which encoder the
+    deferred path infers from the observation space / algorithm flags.
+    """
+    import yaml
+
+    from agilerl.training.trainer import LocalTrainer
+
+    manifest = {
+        "algorithm": {"name": "PPO", "learn_step": 64, **algorithm_extra},
+        "environment": environment,
+        "training": {"max_steps": 200, "evo_steps": 100, "pop_size": 1},
+        "network": {
+            "latent_dim": 32,
+            "head_config": {"hidden_size": [32]},
+            **network_extra,
+        },
+    }
+    path = tmp_path / "m.yaml"
+    path.write_text(yaml.safe_dump(manifest))
+    trainer = LocalTrainer.from_manifest(manifest=path, device="cpu")
+
+    enc = trainer.algorithm_spec.net_config.encoder_config
+    assert enc.arch == arch
+    for field, expected in assertions.items():
+        assert getattr(enc, field) == expected
+
+
+def test_resolve_deferred_net_config_noop_when_arch_present(tmp_path):
+    """A raw net_config that already declares an ``arch`` is left untouched
+    (nothing to infer), so ``_resolve_deferred_net_config`` returns early.
+    """
+    import yaml
+
+    from agilerl.training.trainer import LocalTrainer
+
+    manifest = {
+        "algorithm": {"name": "PPO", "learn_step": 64},
+        "environment": {"name": "CartPole-v1", "num_envs": 2},
+        "training": {"max_steps": 200, "evo_steps": 100, "pop_size": 1},
+        "network": {
+            "latent_dim": 32,
+            "arch": "mlp",
+            "encoder_config": {"hidden_size": [32]},
+            "head_config": {"hidden_size": [32]},
+        },
+    }
+    path = tmp_path / "m.yaml"
+    path.write_text(yaml.safe_dump(manifest))
+    trainer = LocalTrainer.from_manifest(manifest=path, device="cpu")
+
+    raw = {"arch": "mlp", "encoder_config": {"arch": "mlp", "hidden_size": [64]}}
+    trainer.algorithm_spec.net_config = raw
+    trainer._resolve_deferred_net_config()
+    assert trainer.algorithm_spec.net_config is raw
+
+
+def test_from_manifest_multi_agent_heterogeneous_per_agent_encoders(tmp_path):
+    """Heterogeneous multi-agent env with no arch: per-agent encoders inferred."""
+    import yaml
+
+    from agilerl.modules.mlp import EvolvableMLP
+    from agilerl.modules.multi_input import EvolvableMultiInput
+    from agilerl.training.trainer import LocalTrainer
+
+    manifest = {
+        "algorithm": {"name": "IPPO", "learn_step": 64},
+        "environment": {
+            "name": "hetero-env",
+            "num_envs": 2,
+            "entrypoint": "tests.test_train._dummy_envs:HeteroParallelEnv",
+        },
+        "training": {"max_steps": 200, "evo_steps": 100, "pop_size": 1},
+        "network": {"latent_dim": 32, "head_config": {"hidden_size": [32]}},
+    }
+    path = tmp_path / "m.yaml"
+    path.write_text(yaml.safe_dump(manifest))
+
+    trainer = LocalTrainer.from_manifest(manifest=path, device="cpu")
+    agent = trainer.population[0]
+    encoders = {aid: net.encoder for aid, net in agent.actors.items()}
+    assert isinstance(encoders["dict_agent"], EvolvableMultiInput)
+    assert isinstance(encoders["vec_agent"], EvolvableMLP)
+
+
+def test_from_manifest_multi_agent_homogeneous(tmp_path):
+    """Homogeneous multi-agent env with no arch: shared MLP encoder per group."""
+    import yaml
+
+    from agilerl.modules.mlp import EvolvableMLP
+    from agilerl.training.trainer import LocalTrainer
+
+    manifest = {
+        "algorithm": {"name": "IPPO", "learn_step": 64},
+        "environment": {
+            "name": "pettingzoo.mpe.simple_spread_v3",
+            "num_envs": 2,
+        },
+        "training": {"max_steps": 200, "evo_steps": 100, "pop_size": 1},
+        "network": {"latent_dim": 32, "head_config": {"hidden_size": [32]}},
+    }
+    path = tmp_path / "m.yaml"
+    path.write_text(yaml.safe_dump(manifest))
+    trainer = LocalTrainer.from_manifest(manifest=path, device="cpu")
+    agent = trainer.population[0]
+    # simple_spread agents (agent_0/1/2) share a prefix -> one grouped policy.
+    assert len(agent.actors) >= 1
+    for net in agent.actors.values():
+        assert isinstance(net.encoder, EvolvableMLP)

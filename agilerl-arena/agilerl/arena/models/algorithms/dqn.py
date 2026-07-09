@@ -15,6 +15,3 @@ class DQNSpec(RLAlgorithmSpec):
     double: bool = Field(default=False)
     lr: float = Field(default=0.0001, ge=0.0)
     net_config: QNetworkSpec | None = Field(default=None)
-
-    # NOTE: Don't support cudagraphs on Arena yet
-    cudagraphs: bool = Field(default=False, exclude=True)

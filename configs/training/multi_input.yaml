@@ -41,7 +41,6 @@ mutation:
 
 network:
     latent_dim: 64
-    arch: multiinput
 
     encoder_config:
         latent_dim: 64                # Per-input encoder output dimension

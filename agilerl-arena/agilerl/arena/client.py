@@ -122,7 +122,9 @@ class ArenaClient:
     :rtype: None
     """
 
-    BASE_URL: ClassVar[str] = "https://arena.agilerl.com"
+    # BASE_URL: ClassVar[str] = "https://arena.agilerl.com"
+    # BASE_URL: ClassVar[str] = "https://arena-dev.agilerl.rlops.ai"
+    BASE_URL: ClassVar[str] = "http://localhost:3001"
     CONFIG_DIR: ClassVar[Path] = Path.home() / ".arena"
     CONFIG_FILE: ClassVar[Path] = CONFIG_DIR / "config.json"
 
