@@ -1,3 +1,5 @@
+.. _off_policy:
+
 Off-Policy Training
 ===================
 
@@ -29,75 +31,159 @@ often results in higher potential for reuse of previously gathered experiences a
      - :ref:`Lunar Lander <td3_tutorial>`
 
 
+.. _off_policy_trainer:
+
+Training with LocalTrainer
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The recommended way to train a fully-customised off-policy agent is through a YAML manifest and the
+:class:`~agilerl.training.trainer.LocalTrainer`. This handles population
+creation, replay buffers, evolutionary HPO, and the training loop automatically.
+
+Here is an example manifest to train DQN on LunarLander-v3:
+
+.. collapse:: dqn.yaml
+
+  .. code-block:: yaml
+
+    algorithm:
+      name: DQN
+      batch_size: 128
+      lr: 6.3e-4
+      learn_step: 4
+      gamma: 0.99
+      tau: 0.001
+
+    environment:
+      name: LunarLander-v3
+      num_envs: 16
+
+    training:
+      max_steps: 1_000_000
+      target_score: 200.0
+      pop_size: 4
+      evo_steps: 10_000
+
+    network:
+      latent_dim: 128
+      encoder_config:
+        hidden_size: [128]
+      head_config:
+        hidden_size: [128]
+
+    replay_buffer:
+      max_size: 100_000
+
+    mutation:
+      probabilities:
+        no_mut: 0.4
+        arch_mut: 0.2
+        new_layer: 0.2
+        params_mut: 0.2
+        act_mut: 0.2
+        rl_hp_mut: 0.2
+      rl_hp_selection:
+        lr:
+          min: 0.0000625
+          max: 0.01
+        batch_size:
+          min: 8
+          max: 512
+      mutation_sd: 0.1
+      rand_seed: 42
+
+    tournament_selection:
+      tournament_size: 2
+      elitism: true
+
+.. tab-set::
+
+   .. tab-item:: Python
+
+      .. code-block:: python
+
+         from agilerl import LocalTrainer
+
+         trainer = LocalTrainer.from_manifest("dqn.yaml")
+         population, fitnesses = trainer.train()
+
+   .. tab-item:: CLI
+
+      .. code-block:: bash
+
+         python -m agilerl.train dqn.yaml
+
+.. seealso::
+
+   :ref:`trainers` for full manifest reference and additional options.
+
+
+Customised Training Pipeline
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
 .. _initpop_off_policy:
 
 Population Creation
--------------------
+^^^^^^^^^^^^^^^^^^^
 
 To perform evolutionary HPO, we require a population of agents. Individuals in this population will share experiences but learn individually, allowing us to
 determine the efficacy of certain hyperparameters. Individual agents which learn best are more likely to survive until the next generation, and so their hyperparameters
 are more likely to remain present in the population. The sequence of evolution (tournament selection followed by mutation) is detailed further below.
 
 .. collapse:: Create a Population of DQN Agents
+  :open:
 
-    .. code-block:: python
+  .. code-block:: python
 
-        import torch
+    import torch
 
-        from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
-        from agilerl.utils.utils import create_population, make_vect_envs, default_progress_bar
+    from agilerl.algorithms import DQN
+    from agilerl.utils.utils import make_vect_envs
 
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        NET_CONFIG = {
-            "encoder_config": {
-                "hidden_size": [32, 32] # Encoder hidden size
-                },
-            "head_config": {
-                "hidden_size": [32, 32]  # Head hidden size
-            }
+    # Initialize vectorized environments
+    num_envs = 16
+    env = make_vect_envs("LunarLander-v3", num_envs=num_envs)
+    observation_space = env.single_observation_space
+    action_space = env.single_action_space
+
+    # Configure network architecture
+    net_config = {
+        "encoder_config": {
+            "hidden_size": [32, 32]
+        },
+        "head_config": {
+            "hidden_size": [32, 32]
         }
+    }
 
-        INIT_HP = {
-            "DOUBLE": True,  # Use double Q-learning
-            "BATCH_SIZE": 128,  # Batch size
-            "LR": 1e-3,  # Learning rate
-            "GAMMA": 0.99,  # Discount factor
-            "LEARN_STEP": 1,  # Learning frequency
-            "TAU": 1e-3,  # For soft update of target network parameters
-            "POP_SIZE": 4,  # Population size
-        }
+    # Algorithm hyperparameters
+    init_hp = {
+        "double": True,
+        "batch_size": 128,
+        "lr": 1e-3,
+        "gamma": 0.99,
+        "learn_step": 1,
+        "tau": 1e-3,
+    }
 
-        # Initialize vectorized environments
-        num_envs = 16
-        env = make_vect_envs("LunarLander-v3", num_envs=num_envs)  # Create environment
-        observation_space = env.single_observation_space
-        action_space = env.single_action_space
-
-        # RL hyperparameter configuration for mutations
-        hp_config = HyperparameterConfig(
-            lr = RLParameter(min=1e-4, max=1e-2),
-            batch_size = RLParameter(min=8, max=64),
-            learn_step = RLParameter(min=1, max=120, grow_factor=1.5, shrink_factor=0.75)
-        )
-
-        pop = create_population(
-            algo="DQN",  # Algorithm
-            observation_space=observation_space,  # State dimension
-            action_space=action_space,  # Action dimension
-            net_config=NET_CONFIG,  # Network configuration
-            INIT_HP=INIT_HP,  # Initial hyperparameters
-            hp_config=hp_config,  # Hyperparameter configuration
-            population_size=INIT_HP["POP_SIZE"],  # Population size
-            num_envs=num_envs,  # Number of vectorized envs
-            device=device,
-        )
+    # Initialize population
+    population_size = 4
+    pop = DQN.population(
+        size=population_size,
+        observation_space=observation_space,
+        action_space=action_space,
+        net_config=net_config,
+        device=device,
+        **init_hp,
+    )
 
 
 .. _memory_off_policy:
 
 Experience Replay
------------------
+^^^^^^^^^^^^^^^^^
 
 In order to efficiently train a population of RL agents, off-policy algorithms must be used to share memory within populations. This reduces the exploration needed
 by an individual agent because it allows faster learning from the behaviour of other agents. For example, if you were able to watch a bunch of people attempt to solve
@@ -117,13 +203,52 @@ buffer, call ``ReplayBuffer.sample()``.
         device=device,
     )
 
+Evolutionary HPO
+^^^^^^^^^^^^^^^^^
+
+Tournament selection is used to select the agents from a population which will make up the next generation of agents. If
+elitism is used, the best agent from a population is automatically preserved and becomes a member of the next generation.
+Then, for each tournament, *k* individuals are randomly chosen, and the agent with the best evaluation fitness is preserved.
+This is repeated until the population for the next generation is full.
+
+Mutation is periodically used to explore the hyperparameter space, allowing different hyperparameter combinations to be
+trialled during training. If certain hyperparameters prove relatively beneficial to training, then that agent is more
+likely to be preserved in the next generation, and so those characteristics are more likely to remain in the population.
+
+.. code-block:: python
+
+    from agilerl.hpo.mutation import Mutations
+    from agilerl.hpo.tournament import TournamentSelection
+
+    tournament = TournamentSelection(
+        tournament_size=2,  # Tournament selection size
+        elitism=True,  # Elitism in tournament selection
+        population_size=4,  # Population size
+    )
+
+    mutations = Mutations(
+        no_mutation=0.4,  # No mutation
+        architecture=0.2,  # Architecture mutation
+        new_layer_prob=0.2,  # New layer mutation
+        parameters=0.2,  # Network parameters mutation
+        activation=0,  # Activation layer mutation
+        rl_hp=0.2,  # Learning HP mutation
+        mutation_sd=0.1,  # Mutation strength
+        rand_seed=1,  # Random seed
+        device=device,
+    )
+
+.. seealso::
+
+   :ref:`evo_hyperparam_opt` for details on how evolutionary HPO works.
+
 .. _trainloop_off_policy:
 
 Training Loop
--------------
+^^^^^^^^^^^^^
 
-Now it is time to insert the evolutionary HPO components into our training loop. If you are using a Gym-style environment, it is
-easiest to use our training function, which returns a population of trained agents and logged training metrics.
+Now it is time to insert the evolutionary HPO components into our training loop. If you are using a Gym-style environment, you
+can use our off-the-shelf training function, which returns a population of trained agents and logged training metrics.
 
 .. code-block:: python
 
@@ -135,6 +260,7 @@ easiest to use our training function, which returns a population of trained agen
         algo="DQN",  # Algorithm
         pop=pop,  # Population of agents
         memory=memory,  # Replay buffer
+        init_hp=init_hp,  # Algorithm hyperparameters
         max_steps=200000,  # Max number of training steps
         evo_steps=10000,  # Evolution frequency
         eval_steps=None,  # Number of steps in evaluation episode
@@ -153,51 +279,53 @@ Alternatively, use a custom training loop. Combining all of the above:
 
     .. code-block:: python
 
+        from agilerl.algorithms import DQN
         from agilerl.components.replay_buffer import ReplayBuffer
         from agilerl.components.data import Transition
         from agilerl.hpo.mutation import Mutations
         from agilerl.hpo.tournament import TournamentSelection
-        from agilerl.utils.utils import create_population, make_vect_envs
+        from agilerl.utils.utils import make_vect_envs, default_progress_bar
         import numpy as np
         import torch
         from tqdm import trange
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        NET_CONFIG = {
-            "encoder_config": {
-                "hidden_size": [32, 32] # Encoder hidden size
-                },
-            "head_config": {
-                "hidden_size": [32, 32]  # Head hidden size
-            }
-        }
-
-        INIT_HP = {
-            "DOUBLE": True,  # Use double Q-learning
-            "BATCH_SIZE": 128,  # Batch size
-            "LR": 1e-3,  # Learning rate
-            "GAMMA": 0.99,  # Discount factor
-            "LEARN_STEP": 1,  # Learning frequency
-            "TAU": 1e-3,  # For soft update of target network parameters
-            "POP_SIZE": 4,  # Population size
-        }
-
         # Initialize vectorized environments
         num_envs = 16
-        env = make_vect_envs("LunarLander-v3", num_envs=num_envs)  # Create environment
+        env = make_vect_envs("LunarLander-v3", num_envs=num_envs)
         observation_space = env.single_observation_space
         action_space = env.single_action_space
 
-        pop = create_population(
-            algo="DQN",  # Algorithm
-            observation_space=observation_space,  # State dimension
-            action_space=action_space,  # Action dimension
-            net_config=NET_CONFIG,  # Network configuration
-            INIT_HP=INIT_HP,  # Initial hyperparameters
-            population_size=INIT_HP["POP_SIZE"],  # Population size
-            num_envs=num_envs,  # Number of vectorized envs
+        # Configure network architecture
+        net_config = {
+            "encoder_config": {
+                "hidden_size": [32, 32]
+            },
+            "head_config": {
+                "hidden_size": [32, 32]
+            }
+        }
+
+        # Algorithm hyperparameters
+        init_hp = {
+            "double": True,
+            "batch_size": 128,
+            "lr": 1e-3,
+            "gamma": 0.99,
+            "learn_step": 1,
+            "tau": 1e-3,
+        }
+
+        # Initialize population
+        population_size = 4
+        pop = DQN.population(
+            size=population_size,
+            observation_space=observation_space,
+            action_space=action_space,
+            net_config=net_config,
             device=device,
+            **init_hp,
         )
 
         memory = ReplayBuffer(
@@ -205,13 +333,12 @@ Alternatively, use a custom training loop. Combining all of the above:
             device=device,
         )
 
+        # Evo-HPO
         tournament = TournamentSelection(
             tournament_size=2,  # Tournament selection size
             elitism=True,  # Elitism in tournament selection
-            population_size=INIT_HP["POP_SIZE"],  # Population size
-            eval_loop=1,  # Evaluate using last N fitness scores
+            population_size=population_size,  # Population size
         )
-
         mutations = Mutations(
             no_mutation=0.4,  # No mutation
             architecture=0.2,  # Architecture mutation
@@ -237,9 +364,8 @@ Alternatively, use a custom training loop. Combining all of the above:
         total_steps = 0
 
         # TRAINING LOOP
-        print("Training...")
         pbar = default_progress_bar(max_steps)
-        while np.less([agent.steps[-1] for agent in pop], max_steps).all():
+        while np.less([agent.steps for agent in pop], max_steps).all():
             pop_episode_scores = []
             for agent in pop:  # Loop through population
                 agent.set_training_mode(True)
@@ -296,7 +422,7 @@ Alternatively, use a custom training loop. Combining all of the above:
                     obs = next_obs
 
                 pbar.update(evo_steps // len(pop))
-                agent.steps[-1] += steps
+                agent.steps += steps
                 pop_episode_scores.append(completed_episode_scores)
 
             # Reset epsilon start to latest decayed value for next round of population training
@@ -322,7 +448,7 @@ Alternatively, use a custom training loop. Combining all of the above:
 
             pbar.write(
                 f"--- Global steps {total_steps} --- \n"
-                f"Steps: {[agent.steps[-1] for agent in pop]} \n"
+                f"Steps: {[agent.steps for agent in pop]} \n"
                 f"Scores: {mean_scores} \n"
                 f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]} \n'
                 f'5 fitness avgs: {["%.2f"%np.mean(agent.fitness[-5:]) for agent in pop]}',
@@ -332,9 +458,16 @@ Alternatively, use a custom training loop. Combining all of the above:
             elite, pop = tournament.select(pop)
             pop = mutations.mutation(pop)
 
-            # Update step counter
-            for agent in pop:
-                agent.steps.append(agent.steps[-1])
-
         pbar.close()
         env.close()
+
+.. tutorial::
+
+   :ref:`rainbow_tutorial`
+      Rainbow DQN on CartPole-v1.
+
+   :ref:`td3_tutorial`
+      TD3 on LunarLander-v3.
+
+   :ref:`DQN tutorial`
+      Curriculum learning and self-play with DQN.

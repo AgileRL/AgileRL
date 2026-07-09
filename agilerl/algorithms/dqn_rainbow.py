@@ -2,12 +2,17 @@ from typing import Any
 
 import numpy as np
 import torch
+from accelerate import Accelerator
 from gymnasium import spaces
 from torch import optim
 from torch.nn.utils import clip_grad_norm_
 
 from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
-from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.algorithms.core.registry import (
+    HyperparameterConfig,
+    NetworkGroup,
+    make_default_hp_config,
+)
 from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.q_networks import RainbowQNetwork
@@ -15,21 +20,22 @@ from agilerl.typing import (
     ExperiencesType,
     GymEnvType,
     ObservationType,
+    SupportedObservationSpace,
     TorchObsType,
 )
-from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
+from agilerl.utils.algo_utils import make_safe_deepcopies
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
 class RainbowDQN(RLAlgorithm):
-    """Rainbow Deep Q-Network (DQN) algorithm.
+    """Rainbow Deep Q-Network (DQN).
 
     Paper: https://arxiv.org/abs/1710.02298
 
     :param observation_space: Observation space of the environment
-    :type observation_space: gym.spaces.Space
+    :type observation_space: SupportedObservationSpace
     :param action_space: Action space of the environment
-    :type action_space: gym.spaces.Space
+    :type action_space: gym.spaces.Discrete
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
     :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
@@ -67,7 +73,7 @@ class RainbowDQN(RLAlgorithm):
     :param combined_reward: Boolean flag indicating whether to use combined 1-step and n-step reward, defaults to False
     :type combined_reward: bool, optional
     :param actor_network: Custom actor network, defaults to None
-    :type actor_network: nn.Module, optional
+    :type actor_network: EvolvableModule | None, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -78,8 +84,8 @@ class RainbowDQN(RLAlgorithm):
 
     def __init__(
         self,
-        observation_space: spaces.Space,
-        action_space: spaces.Space,
+        observation_space: SupportedObservationSpace,
+        action_space: spaces.Discrete,
         index: int = 0,
         hp_config: HyperparameterConfig | None = None,
         net_config: dict[str, Any] | None = None,
@@ -100,7 +106,7 @@ class RainbowDQN(RLAlgorithm):
         combined_reward: bool = False,
         actor_network: EvolvableModule | None = None,
         device: str = "cpu",
-        accelerator: Any | None = None,
+        accelerator: Accelerator | None = None,
         wrap: bool = True,
     ) -> None:
         super().__init__(
@@ -164,6 +170,13 @@ class RainbowDQN(RLAlgorithm):
         self.combined_reward = combined_reward
         self.noise_std = noise_std
 
+        # Default RL hyperparameters to mutate when doing Evo-HPO
+        self.hp_config = self.hp_config or make_default_hp_config(
+            lr=self.lr,
+            batch_size=self.batch_size,
+            learn_step=self.learn_step,
+        )
+
         self.support = torch.linspace(
             self.v_min,
             self.v_max,
@@ -191,6 +204,7 @@ class RainbowDQN(RLAlgorithm):
             )
         else:
             net_config = {} if net_config is None else net_config
+            net_config.pop("simba", None)
             head_config: dict[str, Any] | None = net_config.get("head_config", {})
 
             head_config = MlpNetConfig(
@@ -204,8 +218,8 @@ class RainbowDQN(RLAlgorithm):
 
             def create_actor() -> RainbowQNetwork:
                 return RainbowQNetwork(
-                    observation_space=observation_space,
-                    action_space=action_space,
+                    observation_space=self.observation_space,
+                    action_space=self.action_space,
                     support=self.support,
                     num_atoms=self.num_atoms,
                     noise_std=self.noise_std,
@@ -237,6 +251,10 @@ class RainbowDQN(RLAlgorithm):
                 policy=True,
             ),
         )
+
+        # Register metrics to keep track of during training
+        self.metrics.register("loss")
+        self.metrics.register_histogram("action_dist")
 
     def get_action(
         self,
@@ -280,6 +298,9 @@ class RainbowDQN(RLAlgorithm):
             action = np.argmax(masked_action_values, axis=-1)
 
         self.actor.train()
+
+        if self.training:
+            self.metrics.log_histogram("action_dist", action)
 
         return action
 
@@ -489,7 +510,9 @@ class RainbowDQN(RLAlgorithm):
             loss_for_prior = elementwise_loss.detach().cpu().numpy()
             new_priorities = loss_for_prior + self.prior_eps
 
-        return loss.item(), idxs, new_priorities
+        loss_value = loss.item()
+        self.metrics.log("loss", loss_value)
+        return loss_value, idxs, new_priorities
 
     def soft_update(self) -> None:
         """Soft updates target network."""
@@ -505,7 +528,6 @@ class RainbowDQN(RLAlgorithm):
     def test(
         self,
         env: GymEnvType,
-        swap_channels: bool = False,
         max_steps: int | None = None,
         loop: int = 3,
     ) -> float:
@@ -513,8 +535,6 @@ class RainbowDQN(RLAlgorithm):
 
         :param env: The environment to be tested in
         :type env: Gym-style environment
-        :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
-        :type swap_channels: bool, optional
         :param max_steps: Maximum number of testing steps, defaults to None
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean over these tests. Defaults to 3
@@ -531,9 +551,6 @@ class RainbowDQN(RLAlgorithm):
                 finished = np.zeros(num_envs)
                 step = 0
                 while not np.all(finished):
-                    if swap_channels:
-                        obs = obs_channels_to_first(obs)
-
                     action_mask = info.get("action_mask", None)
                     action = self.get_action(
                         obs,
@@ -553,5 +570,5 @@ class RainbowDQN(RLAlgorithm):
                 rewards.append(np.mean(completed_episode_scores))
 
         mean_fit = np.mean(rewards)
-        self.fitness.append(mean_fit)
+        self.metrics.add_fitness(mean_fit)
         return mean_fit

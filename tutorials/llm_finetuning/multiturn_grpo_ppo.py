@@ -15,10 +15,10 @@ import yaml
 from transformers import AutoTokenizer
 
 from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE
 from agilerl.training.train_llm import finetune_llm_multiturn
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import create_llm_accelerator
-from agilerl.utils.utils import create_population, _normalize_algo_name
 from agilerl.llm_envs import TokenObservationWrapper
 
 if not HAS_LLM_DEPENDENCIES:
@@ -53,14 +53,20 @@ def _load_init_hp(config_path: str) -> dict[str, Any]:
     return dict(init_hp)
 
 
+ALGO_MAP: dict[str, type] = {
+    "LLMPPO": LLMPPO,
+    "GRPO": GRPO,
+    "LLMREINFORCE": LLMREINFORCE,
+}
+
+
 def _default_config_for_algo(algo: str) -> str:
     """Return tutorial default config path for the selected algorithm."""
-    algo_name = _normalize_algo_name(algo)
-    if algo_name == "LLMPPO":
+    if algo == "LLMPPO":
         return DEFAULT_PPO_CONFIG
-    if algo_name == "GRPO":
+    if algo == "GRPO":
         return DEFAULT_GRPO_CONFIG
-    if algo_name == "LLMREINFORCE":
+    if algo == "LLMREINFORCE":
         return DEFAULT_REINFORCE_CONFIG
     msg = f"Unsupported algorithm '{algo}'. Use LLMPPO, LLMREINFORCE, or GRPO."
     raise ValueError(msg)
@@ -164,16 +170,41 @@ def main() -> None:
         else None
     )
 
-    pop = create_population(
-        algo=args.algo,
-        net_config=None,
-        INIT_HP=init_hp,
-        population_size=1,
-        accelerator=accelerator,
-        tokenizer=tokenizer,
-        model_name=args.model_path,
-        vllm_config=vllm_config,
-    )
+    algo_cls = ALGO_MAP[args.algo]
+
+    # Map INIT_HP uppercase keys to constructor kwargs
+    algo_kwargs: dict[str, Any] = {
+        "model_name": args.model_path,
+        "pad_token_id": tokenizer.pad_token_id,
+        "pad_token": tokenizer.pad_token,
+        "accelerator": accelerator,
+    }
+    if use_vllm:
+        algo_kwargs["use_vllm"] = True
+        algo_kwargs["vllm_config"] = vllm_config
+
+    # Forward numeric/string hyperparams from the YAML config
+    _hp_key_map = {
+        "BATCH_SIZE": "batch_size",
+        "LR": "lr",
+        "BETA": "beta",
+        "CLIP_COEF": "clip_coef",
+        "MAX_GRAD_NORM": "max_grad_norm",
+        "UPDATE_EPOCHS": "update_epochs",
+        "GROUP_SIZE": "group_size",
+        "TEMPERATURE": "temperature",
+        "MAX_MODEL_LEN": "max_model_len",
+        "MAX_OUTPUT_TOKENS": "max_output_tokens",
+        "GAE_LAMBDA": "gae_lambda",
+        "GAMMA": "gamma",
+        "VF_COEF": "vf_coef",
+        "ENT_COEF": "ent_coef",
+    }
+    for hp_key, kwarg_name in _hp_key_map.items():
+        if hp_key in init_hp:
+            algo_kwargs[kwarg_name] = init_hp[hp_key]
+
+    pop = algo_cls.population(size=1, **algo_kwargs)
     agent = pop[0]
 
     try:

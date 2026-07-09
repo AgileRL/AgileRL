@@ -1,0 +1,26 @@
+"""IPPO algorithm specification."""
+
+from __future__ import annotations
+
+from agilerl.arena.models.algo import MultiAgentRLAlgorithmSpec, register
+from agilerl.arena.models.networks import StochasticActorSpec
+from pydantic import Field
+
+
+@register()
+class IPPOSpec(MultiAgentRLAlgorithmSpec):
+    """Specification for IPPO algorithm."""
+
+    learn_step: int = Field(default=2048, ge=1)
+    gae_lambda: float = Field(default=0.95, ge=0.0, le=1.0)
+    action_std_init: float = Field(default=0.0)
+    clip_coef: float = Field(default=0.2, ge=0.0, le=1.0)
+    ent_coef: float = Field(default=0.01, ge=0.0, le=1.0)
+    vf_coef: float = Field(default=0.5, ge=0.0, le=1.0)
+    max_grad_norm: float = Field(default=0.5)
+    target_kl: float | None = Field(default=None)
+    update_epochs: int = Field(default=4, ge=1)
+    action_batch_size: int | None = Field(default=None)
+    lr: float = Field(default=0.0001, ge=0.0)
+    torch_compiler: str | None = Field(default=None)
+    net_config: StochasticActorSpec | None = Field(default=None)

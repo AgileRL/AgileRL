@@ -120,7 +120,6 @@ def run_demo(recurrent: bool = True) -> None:
         tournament_size=1,
         elitism=True,
         population_size=INIT_HP["POP_SIZE"],
-        eval_loop=eval_loop,
     )
 
     mutations = Mutations(
@@ -149,7 +148,7 @@ def run_demo(recurrent: bool = True) -> None:
     print("Training...")
     pbar = default_progress_bar(max_steps)
     while (
-        np.less([agent.steps[-1] for agent in pop], max_steps).all()
+        np.less([agent.steps for agent in pop], max_steps).all()
         and not training_complete
     ):
         pop_episode_scores = []
@@ -175,7 +174,7 @@ def run_demo(recurrent: bool = True) -> None:
                 # Update step counter and scores
                 total_steps += agent.learn_step
                 steps += agent.learn_step
-                agent.steps[-1] += agent.learn_step
+                agent.steps += agent.learn_step
                 completed_episodes += episode_scores
 
             pop_episode_scores.append(
@@ -199,7 +198,7 @@ def run_demo(recurrent: bool = True) -> None:
 
         pbar.write(
             f"--- Global steps {total_steps} ---\n"
-            f"Steps: {[agent.steps[-1] for agent in pop]}\n"
+            f"Steps: {[agent.steps for agent in pop]}\n"
             f"Scores: {pop_episode_scores}\n"
             f"Fitnesses: {[f'{fitness:.2f}' for fitness in fitnesses]}\n"
             f"5 fitness avgs: {[f'{np.mean(agent.fitness[-5:]):.2f}' for agent in pop]}\n"
@@ -215,9 +214,6 @@ def run_demo(recurrent: bool = True) -> None:
         else:
             elite, pop = tournament.select(pop)
             pop = mutations.mutation(pop)
-            for agent in pop:
-                agent.steps.append(agent.steps[-1])
-
     pbar.close()
     env.close()
 

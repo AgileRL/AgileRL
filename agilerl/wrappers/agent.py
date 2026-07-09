@@ -8,7 +8,7 @@ import dill
 import numpy as np
 import torch
 from gymnasium import spaces
-from tensordict import is_tensor_collection
+from tensordict import TensorDictBase
 
 from agilerl.algorithms import PPO
 from agilerl.algorithms.core import (
@@ -201,7 +201,9 @@ class AgentWrapper(ABC, Generic[AgentType]):
         """
         return self.wrapped_get_action(obs, *args, **kwargs)
 
-    def learn(self, experiences: ExperiencesType, *args: Any, **kwargs: Any) -> Any:
+    def learn(
+        self, experiences: ExperiencesType | None = None, *args: Any, **kwargs: Any
+    ) -> Any:
         """Learns from the experiences.
 
         :param experiences: Experiences from the environment
@@ -214,6 +216,9 @@ class AgentWrapper(ABC, Generic[AgentType]):
         :return: Learning information
         :rtype: Any
         """
+        if experiences is None:
+            return self.wrapped_learn(*args, **kwargs)
+
         return self.wrapped_learn(experiences, *args, **kwargs)
 
 
@@ -228,6 +233,12 @@ class RSNorm(AgentWrapper[AgentType]):
 
     The normalization statistics are only updated when the agent is in training mode. This can be
     disabled during inference through ``agent.set_training_mode(False)``.
+
+    .. warning::
+        This wrapper is currently only supported for off-policy algorithms since it relies on
+        experiences passed as a :class:`tensordict.TensorDict` (as produced by the replay
+        buffer). For on-policy PPO, experiences may be omitted so the wrapper normalizes
+        observations stored in the rollout buffer before learning.
 
     :param agent: Agent to be wrapped
     :type agent: RLAlgorithm, MultiAgentRLAlgorithm
@@ -305,43 +316,38 @@ class RSNorm(AgentWrapper[AgentType]):
         self,
         observation: ObservationType,
         *,
-        rms: RunningMeanStd
-        | dict[str, RunningMeanStd]
-        | tuple[RunningMeanStd, ...]
-        | None = None,
+        obs_rms: RunningStatsType | None = None,
     ) -> ObservationType:
         """Normalize the observation using the RunningMeanStd object(s).
 
         :param observation: Observation from the environment
         :type observation: ObservationType
-        :param rms: Running mean/std tracker(s) to use. Defaults to ``self.obs_rms``.
-        :type rms: RunningMeanStd | dict[str, RunningMeanStd] | tuple[RunningMeanStd, ...] | None
+        :param obs_rms: Optional running-statistics object(s) to use instead of
+            ``self.obs_rms`` (required for per-agent stats in multi-agent mode).
 
         :return: Normalized observation
         :rtype: ObservationType
         """
-        if rms is None:
-            rms = self.obs_rms
-
-        if isinstance(rms, dict):
+        obs_rms = self.obs_rms if obs_rms is None else obs_rms
+        if isinstance(obs_rms, dict):
             norm_observation = {}
-            for key, key_rms in rms.items():
-                norm_observation[key] = (observation[key] - key_rms.mean) / (
-                    key_rms.var + key_rms.epsilon
+            for key, rms in obs_rms.items():
+                norm_observation[key] = (observation[key] - rms.mean) / (
+                    rms.var + rms.epsilon
                 ).sqrt()
 
             observation = norm_observation
-        elif isinstance(rms, tuple):
+        elif isinstance(obs_rms, tuple):
             norm_observation = []
-            for i, key_rms in enumerate(rms):
-                norm_obs = (observation[i] - key_rms.mean) / (
-                    key_rms.var + key_rms.epsilon
-                ).sqrt()
+            for i, rms in enumerate(obs_rms):
+                norm_obs = (observation[i] - rms.mean) / (rms.var + rms.epsilon).sqrt()
                 norm_observation.append(norm_obs)
 
             observation = tuple(norm_observation)
         else:
-            observation = (observation - rms.mean) / (rms.var + rms.epsilon).sqrt()
+            observation = (observation - obs_rms.mean) / (
+                obs_rms.var + obs_rms.epsilon
+            ).sqrt()
 
         return observation
 
@@ -355,10 +361,12 @@ class RSNorm(AgentWrapper[AgentType]):
         :rtype: ObservationType
         """
         if self.multi_agent:
-            return {
-                agent_id: self._normalize_observation(obs, rms=self.obs_rms[agent_id])
-                for agent_id, obs in observation.items()
-            }
+            for agent_id, obs in observation.items():
+                agent_rms = self.obs_rms[agent_id]
+                observation[agent_id] = self._normalize_observation(
+                    obs, obs_rms=agent_rms
+                )
+            return observation
 
         return self._normalize_observation(observation)
 
@@ -366,29 +374,24 @@ class RSNorm(AgentWrapper[AgentType]):
         self,
         observation: ObservationType,
         *,
-        rms: RunningMeanStd
-        | dict[str, RunningMeanStd]
-        | tuple[RunningMeanStd, ...]
-        | None = None,
+        obs_rms: RunningStatsType | None = None,
     ) -> None:
         """Update the running statistics using the observation.
 
         :param observation: Observation from the environment
         :type observation: ObservationType
-        :param rms: Running mean/std tracker(s) to use. Defaults to ``self.obs_rms``.
-        :type rms: RunningMeanStd | dict[str, RunningMeanStd] | tuple[RunningMeanStd, ...] | None
+        :param obs_rms: Optional running-statistics object(s) to use instead of
+            ``self.obs_rms`` (required for per-agent stats in multi-agent mode).
         """
-        if rms is None:
-            rms = self.obs_rms
-
-        if isinstance(rms, dict):
-            for key, key_rms in rms.items():
-                key_rms.update(observation[key])
-        elif isinstance(rms, tuple):
-            for i, key_rms in enumerate(rms):
-                key_rms.update(observation[i])
+        obs_rms = self.obs_rms if obs_rms is None else obs_rms
+        if isinstance(obs_rms, dict):
+            for key, rms in obs_rms.items():
+                rms.update(observation[key])
+        elif isinstance(obs_rms, tuple):
+            for i, rms in enumerate(obs_rms):
+                rms.update(observation[i])
         else:
-            rms.update(observation)
+            obs_rms.update(observation)
 
     def update_statistics(self, observation: ObservationType) -> None:
         """Update the running statistics using the observation.
@@ -398,7 +401,7 @@ class RSNorm(AgentWrapper[AgentType]):
         """
         if self.multi_agent:
             for agent_id, obs in observation.items():
-                self._update_statistics(obs, rms=self.obs_rms[agent_id])
+                self._update_statistics(obs, obs_rms=self.obs_rms[agent_id])
         else:
             self._update_statistics(observation)
 
@@ -422,14 +425,14 @@ class RSNorm(AgentWrapper[AgentType]):
 
     def learn(
         self,
-        experiences: ExperiencesType | None = None,
+        experiences: TensorDictBase | None = None,
         *args: Any,
         **kwargs: Any,
     ) -> Any:
         """Learns from the experiences after normalizing the observations.
 
         :param experiences: Experiences from the environment
-        :type experiences: ExperiencesType
+        :type experiences: TensorDictBase
         :param args: Additional positional arguments
         :type args: Any
         :param kwargs: Additional keyword arguments
@@ -439,8 +442,8 @@ class RSNorm(AgentWrapper[AgentType]):
         :rtype: Any
         """
         if experiences is None:
-            if not isinstance(self.agent, PPO) or not self.agent.use_rollout_buffer:
-                msg = "Experiences must be provided if not using a rollout buffer."
+            if not isinstance(self.agent, PPO):
+                msg = "Experiences must be provided unless the wrapped agent is PPO."
                 raise ValueError(
                     msg,
                 )
@@ -459,21 +462,15 @@ class RSNorm(AgentWrapper[AgentType]):
             )
             self.agent.rollout_buffer.buffer[:buffer_size] = valid_data
 
-        # NOTE: We want to move towards always passing experiences as TensorDict objects
-        elif is_tensor_collection(experiences):
-            experiences["obs"] = self.normalize_observation(experiences["obs"])
-            experiences["next_obs"] = self.normalize_observation(
-                experiences["next_obs"],
-            )
-        else:
-            experiences = (
-                self.normalize_observation(experiences[0]),  # State
-                experiences[1],
-                experiences[2],
-                self.normalize_observation(experiences[3]),  # Next state
-                *experiences[4:],
-            )
+            return self.wrapped_learn(*args, **kwargs)
 
+        # NOTE: All AgileRL off-policy algorithms now expect experiences to be a TensorDict.
+        if not isinstance(experiences, TensorDictBase):
+            msg = "Experiences must be a TensorDict."
+            raise ValueError(msg)
+
+        experiences["obs"] = self.normalize_observation(experiences["obs"])
+        experiences["next_obs"] = self.normalize_observation(experiences["next_obs"])
         return self.wrapped_learn(experiences, *args, **kwargs)
 
 
@@ -481,7 +478,7 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
     """Wrapper for multi-agent algorithms that solve environments with asynchronous agents (i.e. environments
     where agents don't return observations with the same frequency).
 
-    .. warning::
+    .. note::
         This currently supports IPPO, MADDPG, and MATD3.
 
     :param agent: MultiAgentRLAlgorithm instance to be wrapped.
@@ -497,18 +494,18 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
 
     def extract_inactive_agents(
         self,
-        obs: dict[str, ObservationType],
-    ) -> tuple[dict[str, np.ndarray], dict[str, ObservationType]]:
+        obs: MARLObservationType,
+    ) -> tuple[dict[str, np.ndarray], MARLObservationType]:
         """Extract the inactive agents from an observation. Inspects each key in the
         observation dictionary and, if all the values are `np.nan` (as set by
         ``AsyncPettingZooVecEnv``), the agent is considered inactive and removed from
         the observation dictionary.
 
         :param obs: Observation dictionary
-        :type obs: dict[str, ObservationType]
+        :type obs: MARLObservationType
 
         :return: Tuple of inactive agents and filtered observations
-        :rtype: tuple[dict[str, np.ndarray], dict[str, ObservationType]]
+        :rtype: tuple[dict[str, np.ndarray], MARLObservationType]
         """
         inactive_agents = {}
         agents_to_remove = []
@@ -559,30 +556,29 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
 
         return inactive_agents, obs
 
-    def stack_experiences(self, experiences: ExperiencesType) -> ExperiencesType:
+    def stack_experiences(
+        self, experiences: ExperiencesType | list[ExperiencesType]
+    ) -> ExperiencesType:
         """Stacks the experiences.
 
         :param experiences: Experiences from the environment
-        :type experiences: ExperiencesType
-        """
-        if isinstance(experiences, tuple):
-            return tuple(self.stack_experiences(exp) for exp in experiences)
+        :type experiences: ExperiencesType | list[ExperiencesType]
 
-        if not isinstance(experiences, dict):
+        :return: Stacked experiences
+        :rtype: ExperiencesType
+        """
+        if isinstance(experiences, dict):
+            return {
+                key: self.stack_experiences(val) for key, val in experiences.items()
+            }
+
+        if not isinstance(experiences, list):
             return experiences
 
-        stacked_experience = {}
-        for agent_id, inp in experiences.items():
-            if isinstance(inp, list):
-                stacked_exp = (
-                    stack_experiences(inp, to_torch=False)[0] if len(inp) > 0 else None
-                )
-            else:
-                stacked_exp = inp
+        if len(experiences) > 0:
+            return stack_experiences(experiences, to_torch=False)[0]
 
-            stacked_experience[agent_id] = stacked_exp
-
-        return stacked_experience
+        return None
 
     def _insert_placeholder_actions(
         self,
@@ -623,36 +619,36 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
         self,
         experiences: ExperiencesType,
     ) -> ExperiencesType:
-        """Align async off-policy experiences for MADDPG/MATD3.
-
-        Expected format:
-            (states, actions, rewards, next_states, dones)
-        """
-        states, actions, rewards, next_states, dones = experiences
+        """Align async off-policy experiences."""
+        obs = experiences["obs"]
+        actions = experiences["action"]
+        rewards = experiences["reward"]
+        next_obs = experiences["next_obs"]
+        dones = experiences["done"]
 
         all_agent_ids = (
-            set(states.keys())
+            set(obs.keys())
             | set(actions.keys())
             | set(rewards.keys())
-            | set(next_states.keys())
+            | set(next_obs.keys())
             | set(dones.keys())
         )
 
-        aligned_states = {}
+        aligned_obs = {}
         aligned_actions = {}
         aligned_rewards = {}
-        aligned_next_states = {}
+        aligned_next_obs = {}
         aligned_dones = {}
 
         for agent_id in all_agent_ids:
-            agent_states = states.get(agent_id)
+            agent_obs = obs.get(agent_id)
             agent_actions = actions.get(agent_id)
             agent_rewards = rewards.get(agent_id)
-            agent_next_states = next_states.get(agent_id)
+            agent_next_obs = next_obs.get(agent_id)
             agent_dones = dones.get(agent_id)
 
             if (
-                agent_states is None
+                agent_obs is None
                 or agent_actions is None
                 or agent_rewards is None
                 or agent_dones is None
@@ -660,49 +656,49 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
                 continue
 
             # If next_states is missing or all NaN, infer it from the state sequence.
-            missing_next_state = agent_next_states is None or (
-                isinstance(agent_next_states, np.ndarray)
-                and np.isnan(agent_next_states).all()
+            missing_next_obs = agent_next_obs is None or (
+                isinstance(agent_next_obs, np.ndarray)
+                and np.isnan(agent_next_obs).all()
             )
 
-            if missing_next_state:
-                if len(agent_states) <= 1:
+            if missing_next_obs:
+                if len(agent_obs) <= 1:
                     continue
 
-                aligned_states[agent_id] = agent_states[:-1]
+                aligned_obs[agent_id] = agent_obs[:-1]
                 aligned_actions[agent_id] = agent_actions[:-1]
                 aligned_rewards[agent_id] = agent_rewards[:-1]
                 aligned_dones[agent_id] = agent_dones[:-1]
-                aligned_next_states[agent_id] = agent_states[1:]
+                aligned_next_obs[agent_id] = agent_obs[1:]
             else:
                 # If lengths differ, trim all fields to the shortest length.
                 min_len = min(
-                    len(agent_states),
+                    len(agent_obs),
                     len(agent_actions),
                     len(agent_rewards),
-                    len(agent_next_states),
+                    len(agent_next_obs),
                     len(agent_dones),
                 )
                 if min_len == 0:
                     continue
 
-                aligned_states[agent_id] = agent_states[:min_len]
+                aligned_obs[agent_id] = agent_obs[:min_len]
                 aligned_actions[agent_id] = agent_actions[:min_len]
                 aligned_rewards[agent_id] = agent_rewards[:min_len]
-                aligned_next_states[agent_id] = agent_next_states[:min_len]
+                aligned_next_obs[agent_id] = agent_next_obs[:min_len]
                 aligned_dones[agent_id] = agent_dones[:min_len]
 
-        return (
-            aligned_states,
-            aligned_actions,
-            aligned_rewards,
-            aligned_next_states,
-            aligned_dones,
-        )
+        return {
+            "obs": aligned_obs,
+            "action": aligned_actions,
+            "reward": aligned_rewards,
+            "next_obs": aligned_next_obs,
+            "done": aligned_dones,
+        }
 
     def get_action(
         self,
-        obs: ObservationType,
+        obs: MARLObservationType,
         *args: Any,
         **kwargs: Any,
     ) -> ActionReturnType:
@@ -713,7 +709,7 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
         placeholder values for their actions.
 
         :param obs: Observation from the environment
-        :type obs: ObservationType
+        :type obs: MARLObservationType
 
         :return: Action from the agent
         :rtype: Any

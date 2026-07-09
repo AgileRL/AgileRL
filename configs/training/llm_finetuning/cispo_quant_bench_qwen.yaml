@@ -1,69 +1,88 @@
 ---
 # CISPO quant bench — shrunk variant for a fast learning-signal smoke run on a
-# small dense model (e.g. Qwen2.5-1.5B-Instruct) on the easy 4x4 Sudoku env.
+# small dense model (Qwen2.5-1.5B-Instruct) on the easy 4x4 Sudoku env.
 # Validates the colocated native-sleep path end to end (bnb nf4 trainer + vLLM
 # bitsandbytes rollout, sleep/wake each cycle, trainer base offloaded during
-# rollout). Differs from cispo_quant_bench.yaml only in: shorter context/turns,
-# plain (non-ClippableLinear) LoRA target names, and no multimodal target scope.
+# rollout). Set algorithm.quantization to none | int8 | nf4 to switch recipe.
 
-MUTATION_PARAMS:
-    NO_MUT: 0.1
-    RL_HP_MUT: 0.6
-    MUT_SD: 0.1
-    RAND_SEED: 42
-    MIN_LR: 0.0000001
-    MAX_LR: 0.000025
-    MIN_BETA: 0.0
-    MAX_BETA: 0.01
-    MIN_GROUP_SIZE: 2
-    MAX_GROUP_SIZE: 2
+algorithm:
+    name: CISPO
+    batch_size: 2
+    beta: 0.0
+    lr: 0.00002
+    clip_coef: [0.8, 2.0]
+    max_grad_norm: 1
+    update_epochs: 1
+    group_size: 4
+    temperature: 1.0
+    advantage_granularity: turn
+    importance_sampling_level: token
+    adv_norm: mean_only
+    filter_zero_adv: true
+    max_output_tokens: 1024
+    use_liger_loss: true
+    use_sequence_packing: true
+    vllm_importance_sampling_correction: true
+    attn_implementation: flex_attention
+    quantization: nf4
+    activation_offload: true
+    use_vllm: true
+    vllm_config:
+        tensor_parallel_size: 1
+        gpu_memory_utilization: 0.3
+        max_num_seqs: 8
+        sleep_mode: true
 
-INIT_HP:
-    ADVANTAGE_GRANULARITY: turn
-    IMPORTANCE_SAMPLING_LEVEL: token
-    ALGO: CISPO
-    BATCH_SIZE: 2
-    BETA: 0.0
-    CLIP_COEF: [0.8, 2.0]
-    ELITISM: true
-    EVAL_LOOP: 1
-    GROUP_SIZE: 4
-    MAX_TURNS: 8
-    ADV_NORM: mean_only
-    FILTER_ZERO_ADV: true
-    LR: 0.00002
-    MAX_GRAD_NORM: 1
-    MAX_MODEL_LEN: 8192
-    MAX_OUTPUT_TOKENS: 1024
-    ENABLE_SLIDING_WINDOW: false
-    MICRO_BATCH_SIZE_PER_GPU: 1
-    POP_SIZE: 1
-    # Trainer-side bnb quant (none | int8 | nf4).
-    QUANTIZATION: nf4
-    ACTIVATION_OFFLOAD: true
-    # Qwen2.5 is a plain causal LM (no multimodal towers, no ClippableLinear
-    # wrappers), so target the projections directly and use no target scope.
-    LORA_TARGET_SCOPE:
-    TARGET_MODULES:
-        - q_proj
-        - k_proj
-        - v_proj
-        - o_proj
-        - up_proj
-        - down_proj
-        - gate_proj
-    TEMPERATURE: 1.0
-    TOURN_SIZE: 1
-    UPDATE_EPOCHS: 1
-    USE_VLLM: true
-    USE_LIGER_LOSS: true
-    LORA_R: 8
-    LORA_ALPHA: 32
-    LORA_DROPOUT: 0
-    LORA_BIAS: none
-    # flex_attention is dependency-free (pure PyTorch) and supports the
-    # block-sparse mask that sequence packing needs — no flash-attn required.
-    ATTN_IMPLEMENTATION: flex_attention
-    LIGER_TOKEN_CHUNK_SIZE: 256
-    USE_SEQUENCE_PACKING: true
-    VLLM_IMPORTANCE_SAMPLING_CORRECTION: true
+environment:
+    env_type: multiturn
+    env_name: game:Sudoku-v0-easy
+    max_turns: 8
+    max_reward: 1.0
+
+training:
+    max_steps: 4096
+    pop_size: 1
+    eval_loop: 1
+    evaluation_interval: 5
+
+tournament_selection:
+    tournament_size: 2
+    elitism: true
+
+mutation:
+    mutation_sd: 0.1
+    rand_seed: 42
+    probabilities:
+        no_mut: 0.1
+        arch_mut: 0.0
+        new_layer: 0.0
+        params_mut: 0.0
+        act_mut: 0.0
+        rl_hp_mut: 0.6
+    rl_hp_selection:
+        lr:
+            min: 0.0000001
+            max: 0.000025
+        beta:
+            min: 0.0
+            max: 0.01
+        group_size:
+            min: 2
+            max: 2
+
+network:
+    pretrained_model_name_or_path: Qwen/Qwen2.5-1.5B-Instruct
+    max_context_length: 8192
+    lora_config:
+        lora_r: 8
+        lora_alpha: 32
+        target_modules:
+            - q_proj
+            - k_proj
+            - v_proj
+            - o_proj
+            - up_proj
+            - down_proj
+            - gate_proj
+        lora_dropout: 0
+        task_type: CAUSAL_LM

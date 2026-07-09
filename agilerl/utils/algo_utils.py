@@ -37,7 +37,7 @@ from agilerl.typing import (
     NetConfigType,
     NumpyObsType,
     ObservationType,
-    SupportedObsSpaces,
+    SupportedObservationSpace,
     TorchObsType,
 )
 
@@ -57,6 +57,16 @@ else:
         ForwardRef("PeftModel"),
         ForwardRef("PreTrainedModel"),
     ]
+
+
+def configure_tf32_precision() -> None:
+    """Configure TF32 using a single, legacy-compatible API path.
+
+    Some runtimes import third-party code that still calls the legacy TF32 API.
+    To avoid mixed "new + legacy" TF32 state in one process (which can break
+    torch.compile/inductor), keep AgileRL on the legacy setter only.
+    """
+    torch.set_float32_matmul_precision("high")
 
 
 def check_supported_space(observation_space: GymSpaceType) -> None:
@@ -302,6 +312,132 @@ def is_image_space(space: spaces.Space) -> bool:
     :rtype: bool
     """
     return isinstance(space, spaces.Box) and len(space.shape) == 3
+
+
+def is_channels_last(space: spaces.Box) -> bool:
+    """Detect whether a 3-D Box space is in channels-last (HWC) format.
+
+    Uses a simple heuristic: if the smallest dimension is last, the
+    observation is assumed to be ``(H, W, C)`` — i.e. channels-last.
+
+    :param space: A gymnasium Box space.
+    :type space: spaces.Box
+    :returns: ``True`` when the space looks like a channels-last image.
+    :rtype: bool
+    """
+    if not is_image_space(space):
+        return False
+    return int(np.argmin(space.shape)) == 2
+
+
+def needs_image_transpose(observation_space: spaces.Space) -> bool:
+    """Check whether *any* image subspace requires a channels-last → first transpose.
+
+    Recursively inspects :class:`~gymnasium.spaces.Dict` and
+    :class:`~gymnasium.spaces.Tuple` spaces.
+
+    :param observation_space: The observation space to inspect.
+    :type observation_space: spaces.Space
+    :returns: ``True`` if at least one Box subspace is channels-last.
+    :rtype: bool
+    """
+    if isinstance(observation_space, spaces.Box):
+        return is_channels_last(observation_space)
+    if isinstance(observation_space, spaces.Dict):
+        return any(needs_image_transpose(s) for s in observation_space.spaces.values())
+    if isinstance(observation_space, spaces.Tuple):
+        return any(needs_image_transpose(s) for s in observation_space.spaces)
+    return False
+
+
+def transpose_image_space(space: spaces.Space) -> spaces.Space:
+    """Return a copy of *space* with channels-last Box subspaces transposed to CHW.
+
+    Subspaces that are already channels-first (e.g. stacked frames with shape
+    ``(C, H, W)``) are left untouched, so mixed Dict/Tuple spaces only have
+    their channels-last leaves transposed.
+
+    :param space: Space to transpose
+    :type space: spaces.Space
+    :return: Transposed space
+    :rtype: spaces.Space
+    """
+    if isinstance(space, spaces.Box) and len(space.shape) == 3:
+        if not is_channels_last(space):
+            return space
+        low = space.low.transpose(2, 0, 1)
+        high = space.high.transpose(2, 0, 1)
+        return spaces.Box(low=low, high=high, dtype=space.dtype)
+
+    if isinstance(space, spaces.Dict):
+        return spaces.Dict(
+            {key: transpose_image_space(s) for key, s in space.spaces.items()}
+        )
+
+    if isinstance(space, spaces.Tuple):
+        return spaces.Tuple(tuple(transpose_image_space(s) for s in space.spaces))
+
+    return space
+
+
+def transpose_image_observation(
+    observation: NumpyObsType | torch.Tensor, original_space: spaces.Space
+) -> NumpyObsType | torch.Tensor:
+    """Transpose 3-D observations from HWC to CHW.
+
+    Supports both NumPy arrays and PyTorch tensors. Observations that already
+    match the channels-first layout the space leaf maps to (e.g. an
+    always-channels-first stacked-frames leaf inside a mixed Dict space) are
+    returned unchanged.
+
+    :param observation: Observation
+    :type observation: np.ndarray | torch.Tensor
+    :param original_space: Original observation space
+    :type original_space: spaces.Space
+    :return: Transposed observation
+    :rtype: np.ndarray | torch.Tensor
+    """
+    if isinstance(original_space, spaces.Box) and len(original_space.shape) == 3:
+        # The channels-first layout this leaf should end up in
+        shape = tuple(original_space.shape)
+        target = (
+            (shape[2], shape[0], shape[1])
+            if is_channels_last(original_space)
+            else shape
+        )
+        if isinstance(observation, torch.Tensor):
+            ndim = observation.ndim
+            if ndim == 3:
+                if tuple(observation.shape) == target:
+                    return observation
+                return observation.permute(2, 0, 1)
+            if ndim == 4:
+                if tuple(observation.shape[1:]) == target:
+                    return observation
+                return observation.permute(0, 3, 1, 2)
+        arr = np.asarray(observation)
+        if arr.ndim == 3:
+            if tuple(arr.shape) == target:
+                return arr
+            return arr.transpose(2, 0, 1)
+        if arr.ndim == 4:
+            if tuple(arr.shape[1:]) == target:
+                return arr
+            return arr.transpose(0, 3, 1, 2)
+
+    if isinstance(original_space, spaces.Dict):
+        return {
+            key: transpose_image_observation(observation[key], original_space[key])
+            for key in observation
+        }
+
+    if isinstance(original_space, spaces.Tuple):
+        return tuple(
+            transpose_image_observation(o, s)
+            for o, s in zip(observation, original_space.spaces, strict=True)
+        )
+
+    return observation
 
 
 def get_obs_shape(space: spaces.Space) -> tuple[int, ...] | dict[str, tuple[int, ...]]:
@@ -663,13 +799,13 @@ def get_deepest_head_config(
     return deepest
 
 
-def concatenate_spaces(space_list: list[SupportedObsSpaces]) -> spaces.Space:
+def concatenate_spaces(space_list: list[SupportedObservationSpace]) -> spaces.Space:
     """Concatenates a list of spaces into a single space. If spaces correspond to images,
     we check that their shapes are the same and use the first space's shape as the shape of the
     concatenated space.
 
     :param space_list: List of spaces to concatenate
-    :type space_list: list[SupportedObsSpaces]
+    :type space_list: list[SupportedObservationSpace]
     :return: Concatenated space
     :rtype: spaces.Space
     """
@@ -714,33 +850,6 @@ def concatenate_spaces(space_list: list[SupportedObsSpaces]) -> spaces.Space:
     raise TypeError(
         msg,
     )
-
-
-def obs_channels_to_first(
-    observation: NumpyObsType,
-    expand_dims: bool = False,
-) -> NumpyObsType:
-    """Convert observation space from channels last to channels first format.
-
-    :param observation_space: Observation space
-    :type observation_space: spaces.Box | spaces.Dict
-    :param expand_dims: If True, expand the dimensions of the observation, defaults to False
-    :type expand_dims: bool, optional
-    :return: Observation space with channels first format
-    :rtype: spaces.Box | spaces.Dict
-    """
-    if isinstance(observation, np.ndarray):
-        if expand_dims:
-            observation = np.expand_dims(observation, axis=0)
-
-        if observation.ndim in {3, 4}:
-            return np.moveaxis(observation, -1, -3)
-        return observation
-
-    if isinstance(observation, dict):
-        return {key: obs_channels_to_first(obs) for key, obs in observation.items()}
-    msg = f"Expected np.ndarray or dict, got {type(observation)}"
-    raise TypeError(msg)
 
 
 def obs_to_tensor(obs: ObservationType, device: str | torch.device) -> TorchObsType:
@@ -895,28 +1004,24 @@ def preprocess_observation(
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
     placeholder_value: Any | None = None,
+    swap_channels: bool = False,
 ) -> TorchObsType:
     """Preprocesses observations for forward pass through neural network.
 
     :param observation_space: The observation space of the environment, defaults to the agent's observation space
     :type observation_space: spaces.Space
-    :type observation_space: spaces.Space
     :param observation: Observations of environment
-    :type observation: ObservationType
     :type observation: ObservationType
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to "cpu"
     :type device: str | torch.device, optional
-    :type device: str | torch.device, optional
     :param normalize_images: Normalize images from [0. 255] to [0, 1], defaults to True
-    :type normalize_images: bool, optional
     :type normalize_images: bool, optional
     :param placeholder_value: The value to use as placeholder for missing observations, defaults to None.
     :type placeholder_value: Any | None, optional
-    :type placeholder_value: Any | None, optional
-
+    :param swap_channels: Whether to swap channels, defaults to False
+    :type swap_channels: bool, optional
     :return: Preprocessed observations
     :rtype: TorchObsType
-    :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or tuple[torch.Tensor[float], ...]
     """
     msg = f"AgileRL currently doesn't support {type(observation_space)} spaces."
     raise TypeError(
@@ -931,6 +1036,7 @@ def preprocess_dict_observation(
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
     placeholder_value: Any | None = None,
+    swap_channels: bool = False,
 ) -> dict[str, TorchObsType]:
     """Preprocess dictionary observations.
 
@@ -944,6 +1050,8 @@ def preprocess_dict_observation(
     :type normalize_images: bool, optional
     :param placeholder_value: Value to replace NaNs with
     :type placeholder_value: Any | None, optional
+    :param swap_channels: Whether to swap channels, defaults to False
+    :type swap_channels: bool, optional
     :return: Preprocessed dictionary observation
     :rtype: dict[str, TorchObsType]
     """
@@ -960,6 +1068,7 @@ def preprocess_dict_observation(
             device=device,
             normalize_images=normalize_images,
             placeholder_value=placeholder_value,
+            swap_channels=swap_channels,
         )
 
     return preprocessed_obs
@@ -972,6 +1081,7 @@ def preprocess_tuple_observation(
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
     placeholder_value: Any | None = None,
+    swap_channels: bool = False,
 ) -> tuple[TorchObsType, ...]:
     """Preprocess tuple observations.
 
@@ -985,6 +1095,8 @@ def preprocess_tuple_observation(
     :type normalize_images: bool, optional
     :param placeholder_value: Value to replace NaNs with
     :type placeholder_value: Any | None, optional
+    :param swap_channels: Whether to swap channels, defaults to False
+    :type swap_channels: bool, optional
     :return: Preprocessed tuple observation
     :rtype: tuple[TorchObsType, ...]
     """
@@ -1006,6 +1118,7 @@ def preprocess_tuple_observation(
             device=device,
             normalize_images=normalize_images,
             placeholder_value=placeholder_value,
+            swap_channels=swap_channels,
         )
         for _obs, _space in zip(observation, observation_space.spaces, strict=False)
     )
@@ -1018,6 +1131,7 @@ def preprocess_box_observation(
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
     placeholder_value: Any | None = None,
+    swap_channels: bool = False,
 ) -> torch.Tensor:
     """Preprocess box observations (continuous spaces).
 
@@ -1031,6 +1145,8 @@ def preprocess_box_observation(
     :type normalize_images: bool, optional
     :param placeholder_value: Value to replace NaNs with
     :type placeholder_value: Any | None, optional
+    :param swap_channels: Whether to swap channels, defaults to False
+    :type swap_channels: bool, optional
     :return: Preprocessed box observation
     :rtype: torch.Tensor
     """
@@ -1040,6 +1156,9 @@ def preprocess_box_observation(
     # Replace NaNs with placeholder value if specified
     if placeholder_value is not None:
         observation = add_placeholder_value(observation, placeholder_value)
+
+    if swap_channels:
+        observation = transpose_image_observation(observation, observation_space)
 
     # Normalize images if applicable and specified
     if len(observation_space.shape) == 3 and normalize_images:
@@ -1056,6 +1175,7 @@ def preprocess_discrete_observation(
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
     placeholder_value: Any | None = None,
+    swap_channels: bool = False,
 ) -> torch.Tensor:
     """Preprocess discrete observations.
 
@@ -1069,6 +1189,8 @@ def preprocess_discrete_observation(
     :type normalize_images: bool, optional
     :param placeholder_value: Value to replace NaNs with
     :type placeholder_value: Any | None, optional
+    :param swap_channels: Whether to swap channels, defaults to False
+    :type swap_channels: bool, optional
     :return: Preprocessed discrete observation (one-hot encoded)
     :rtype: torch.Tensor
     """
@@ -1099,6 +1221,7 @@ def preprocess_multidiscrete_observation(
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
     placeholder_value: Any | None = None,
+    swap_channels: bool = False,
 ) -> torch.Tensor:
     """Preprocess multi-discrete observations.
 
@@ -1112,6 +1235,8 @@ def preprocess_multidiscrete_observation(
     :type normalize_images: bool, optional
     :param placeholder_value: Value to replace NaNs with
     :type placeholder_value: Any | None, optional
+    :param swap_channels: Whether to swap channels, defaults to False
+    :type swap_channels: bool, optional
     :return: Preprocessed multi-discrete observation (one-hot encoded)
     :rtype: torch.Tensor
     """
@@ -1144,6 +1269,7 @@ def preprocess_multibinary_observation(
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
     placeholder_value: Any | None = None,
+    swap_channels: bool = False,
 ) -> torch.Tensor:
     """Preprocess multi-binary observations.
 
@@ -1157,6 +1283,8 @@ def preprocess_multibinary_observation(
     :type normalize_images: bool, optional
     :param placeholder_value: Value to replace NaNs with
     :type placeholder_value: Any | None, optional
+    :param swap_channels: Whether to swap channels, defaults to False
+    :type swap_channels: bool, optional
     :return: Preprocessed multi-binary observation
     :rtype: torch.Tensor
     """

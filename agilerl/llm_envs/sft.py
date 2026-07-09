@@ -15,7 +15,25 @@ if TYPE_CHECKING:
 
 
 class SFTGym(IterablePromptBatchGym):
-    """Gymnasium-style environment for supervised fine-tuning (SFT) datasets."""
+    """Gymnasium-style environment for supervised fine-tuning (SFT) datasets.
+
+    :param train_dataset: The training dataset.
+    :type train_dataset: Dataset
+    :param test_dataset: The test dataset.
+    :type test_dataset: Dataset
+    :param tokenizer: The tokenizer.
+    :type tokenizer: AutoTokenizer
+    :param data_batch_size_per_gpu: The batch size per GPU.
+    :type data_batch_size_per_gpu: int
+    :param response_column: The column name for the response in the dataset.
+    :type response_column: str
+    :param accelerator: The accelerator for distributed training.
+    :type accelerator: Accelerator | None
+    :param max_context_length: The maximum context length for the LLM model.
+    :type max_context_length: int | None
+    :param seed: The seed for the random number generator for the environment and the dataloaders.
+    :type seed: int
+    """
 
     def __init__(
         self,
@@ -49,14 +67,26 @@ class SFTGym(IterablePromptBatchGym):
         )
 
     def reset(self, reset_dataloaders: bool = False) -> SFTPrompts:
-        """Reset the environment and return the first batch of tokenised data."""
+        """Reset the environment and return the first batch of tokenised data.
+
+        :param reset_dataloaders: Whether to reset the dataloaders.
+        :type reset_dataloaders: bool
+        :return: The first batch of tokenised data.
+        :rtype: SFTPrompts
+        """
         return super().reset(reset_dataloaders)
 
     def step(
         self,
         completions: torch.Tensor | None = None,
     ) -> SFTPrompts:
-        """Advance the data iterator and return the next batch."""
+        """Advance the data iterator and return the next batch of tokenised data
+
+        :param completions: The completions from the LLM model.
+        :type completions: torch.Tensor | None
+        :return: The next batch of tokenised data.
+        :rtype: SFTPrompts
+        """
         return super().step(completions)
 
     def create_collate_fn(
@@ -64,7 +94,15 @@ class SFTGym(IterablePromptBatchGym):
         tokenizer: AutoTokenizer,
         max_context_length: int | None = None,
     ) -> Any:
-        """Build a collate function that tokenises ``(prompt, response)`` pairs."""
+        """Build a collate function that tokenises ``(prompt, response)`` pairs.
+
+        :param tokenizer: The tokenizer.
+        :type tokenizer: AutoTokenizer
+        :param max_context_length: The maximum context length for the LLM model.
+        :type max_context_length: int | None
+        :return: The collate function.
+        :rtype: Any
+        """
         response_column = self.response_column
 
         def collate_fn(batch: list[dict[str, Any]]) -> SFTPrompts:

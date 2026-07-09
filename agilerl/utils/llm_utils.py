@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 from accelerate import Accelerator
 from torch import nn
@@ -165,6 +166,86 @@ def normalize_reasoning_prompt_batch(
             for sample in result:
                 sample[key] = value
     return result
+
+
+def gather_tensor(
+    tensor: torch.Tensor | float,
+    accelerator: Accelerator,
+) -> torch.Tensor:
+    """Gather tensors from gpus.
+
+    :param tensor: Tensor to gather
+    :type tensor: torch.Tensor
+    :param accelerator: Accelerator object
+    :type accelerator: accelerate.Accelerator
+    :return: Stacked tensors
+    :rtype: torch.Tensor
+    """
+    if not isinstance(tensor, torch.Tensor):
+        tensor = torch.tensor(tensor, device=accelerator.device)
+    tensor = tensor.to(accelerator.device)
+    return accelerator.gather(tensor)
+
+
+def aggregate_metrics_across_gpus(
+    accelerator: Accelerator | None,
+    metric_tensor: torch.Tensor | float,
+) -> float:
+    """Aggregate gathered tensors.
+
+    :param accelerator: Accelerator object
+    :type accelerator: accelerate.Accelerator | None
+    :param metric_tensor: Metrics
+    :type metric_tensor: torch.Tensor
+    :return: Mean metric
+    :rtype: float
+    """
+    if accelerator is None:
+        if isinstance(metric_tensor, torch.Tensor):
+            return metric_tensor.float().mean().item()
+        return float(metric_tensor)
+    all_metrics = gather_tensor(metric_tensor, accelerator)
+    return all_metrics.mean().item()
+
+
+def safe_aggregate_metrics(
+    accelerator: Accelerator | None,
+    metrics: torch.Tensor | np.ndarray | float,
+) -> float:
+    """Aggregate metrics generically, handling both when an accelerator is being used and when it isn't.
+
+    :param accelerator: Accelerator object
+    :type accelerator: Accelerator | None
+    :param metrics: Metrics
+    :type metrics: torch.Tensor | np.ndarray | float
+    :return: Mean metric
+    :rtype: float
+    """
+    if accelerator is None:
+        if isinstance(metrics, (torch.Tensor, np.ndarray)):
+            return float(
+                np.mean(metrics)
+                if isinstance(metrics, np.ndarray)
+                else metrics.float().mean().item()
+            )
+        return float(metrics)
+    return aggregate_metrics_across_gpus(accelerator, metrics)
+
+
+def aggregate_metrics_dict(
+    accelerator: Accelerator | None,
+    metrics: dict[str, torch.Tensor | np.ndarray | float],
+) -> dict[str, float]:
+    """Aggregate all values in a metrics dict across GPUs (or locally if no accelerator).
+
+    :param accelerator: Accelerator object (or None for single-device).
+    :type accelerator: Accelerator | None
+    :param metrics: Dictionary mapping metric names to raw values.
+    :type metrics: dict[str, torch.Tensor | np.ndarray | float]
+    :return: Dictionary with all values aggregated to floats.
+    :rtype: dict[str, float]
+    """
+    return {k: safe_aggregate_metrics(accelerator, v) for k, v in metrics.items()}
 
 
 @contextmanager

@@ -1,41 +1,41 @@
 ---
-MUTATION_PARAMS:
-    NO_MUT: 0.1
-    RL_HP_MUT: 0.6
-    MUT_SD: 0.1
-    RAND_SEED: 42
-    MIN_LR: 0.0000001
-    MAX_LR: 0.00001
-    MIN_BETA: 0.0001
-    MAX_BETA: 0.01
-    MIN_GROUP_SIZE: 1
-    MAX_GROUP_SIZE: 1
+algorithm:
+    name: GRPO
+    batch_size: 16
+    group_size: 4
+    lr: 0.0003
+    beta: 0.0005
+    clip_coef: 0.2
+    max_grad_norm: 0.1
+    update_epochs: 2
+    temperature: 0.85
+    use_vllm: true
+    vllm_config:
+        tensor_parallel_size: 1
+        gpu_memory_utilization: 0.85
+        max_num_seqs: 16
+        sleep_mode: true
 
+environment:
+    env_type: multiturn
+    env_name: game:GuessTheNumber-v0-easy
+    max_reward: 1.0
 
-INIT_HP:
-    ALGO: GRPO
-    BATCH_SIZE: 16
-    BETA: 1.0e-3
-    LR: 5.0e-6
-    CLIP_COEF: 0.2
-    MAX_GRAD_NORM: 0.1
-    UPDATE_EPOCHS: 1
-    GROUP_SIZE: 1
-    TEMPERATURE: 0.9
-    MAX_MODEL_LEN: 2048
-    MAX_OUTPUT_TOKENS: 64
-    TOURN_SIZE: 2
-    ELITISM: true
-    POP_SIZE: 4
-    EVAL_LOOP: 1
-    USE_VLLM: true
-    MICRO_BATCH_SIZE_PER_GPU: 4
-    TARGET_MODULES:
-        - q_proj
-        - k_proj
-        - v_proj
-        - o_proj
-    LORA_R: 16
-    LORA_ALPHA: 64
-    LORA_DROPOUT: 0.05
-    LORA_BIAS: none
+training:
+    max_steps: 4096
+    pop_size: 1
+    evaluation_interval: 10
+
+network:
+    pretrained_model_name_or_path: Qwen/Qwen2.5-0.5B-Instruct
+    max_context_length: 2048
+    lora_config:
+        lora_r: 16
+        lora_alpha: 64
+        target_modules:
+            - q_proj
+            - k_proj
+            - v_proj
+            - o_proj
+        lora_dropout: 0.05
+        task_type: CAUSAL_LM

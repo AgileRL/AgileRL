@@ -33,11 +33,11 @@ LunarLanderContinuous-v3 Example
 .. code-block:: python
 
   import numpy as np
-  from gymnasium import spaces
   from tqdm import tqdm
 
-  from agilerl.utils.utils import make_vect_envs
   from agilerl.algorithms.ppo import PPO
+  from agilerl.rollouts.on_policy import collect_rollouts
+  from agilerl.utils.utils import make_vect_envs
 
   # Create environment
   num_envs = 16
@@ -56,57 +56,20 @@ LunarLanderContinuous-v3 Example
   )
 
   pbar = tqdm(total=max_steps)
-  while True:
-      observations = []
-      actions = []
-      log_probs = []
-      rewards = []
-      dones = []
-      values = []
-
-      done = np.zeros(num_envs)
-      obs, info = env.reset()
+  total_steps = 0
+  while total_steps < max_steps:
       agent.set_training_mode(True)
-      for _ in range(-(agent.learn_step // -num_envs)):
-          # Get next action from agent
-          action, log_prob, _, value = agent.get_action(obs)
 
-          # Clip to action space
-          if isinstance(agent.action_space, spaces.Box):
-              if agent.actor.squash_output:
-                  clipped_action = agent.actor.scale_action(action)
-              else:
-                  clipped_action = np.clip(action, agent.action_space.low, agent.action_space.high)
-          else:
-              clipped_action = action
+      # Collect rollouts and save in the agent's rollout buffer
+      episode_scores = collect_rollouts(agent, env)
 
-          next_obs, reward, term, trunc, _ = env.step(clipped_action)  # Act in environment
-          next_done = np.logical_or(term, trunc).astype(np.int8)
+      agent.learn()    # Learn from rollout buffer
 
-          observations.append(obs)
-          actions.append(action)
-          log_probs.append(log_prob)
-          rewards.append(reward)
-          dones.append(done)
-          values.append(value)
-
-          obs = next_obs
-          done = next_done
-
-      experiences = (
-          observations,
-          actions,
-          log_probs,
-          rewards,
-          dones,
-          values,
-          next_obs,
-          next_done,
-      )
-      agent.learn(experiences)    # Learn according to agent's RL algorithm
-
+      total_steps += agent.learn_step
+      agent.steps += agent.learn_step
       pbar.update(agent.learn_step)
-      pbar.set_description(f"Score: {np.mean(np.sum(rewards, axis=0))}")
+      if episode_scores:
+          pbar.set_description(f"Score: {np.mean(episode_scores)}")
 
 Neural Network Configuration
 ----------------------------

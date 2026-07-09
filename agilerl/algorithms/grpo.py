@@ -17,8 +17,6 @@ if TYPE_CHECKING:
     from peft import LoraConfig
     from transformers import BitsAndBytesConfig
 
-    from agilerl.llm_envs import ReasoningGym
-
 if HAS_LIGER_KERNEL or TYPE_CHECKING:
     from liger_kernel.chunked_loss.grpo_loss import LigerFusedLinearGRPOFunction
 else:
@@ -28,6 +26,7 @@ else:
 
 from agilerl.algorithms.core import ActionResult, LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.llm_envs import ReasoningGym
 from agilerl.protocols import (
     MultiTurnEnv,
     PeftModelProtocol,
@@ -45,7 +44,7 @@ from agilerl.utils.llm_packing import (
     unpack_hidden_states,
 )
 from agilerl.utils.llm_utils import (
-    ReasoningGym,
+    aggregate_metrics_dict,
     build_completion_mask,
     masked_mean,
     masked_whiten,
@@ -62,7 +61,9 @@ if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
 
 
 class GRPO(LLMAlgorithm):
-    """The GRPO algorithm class. GRPO paper: https://arxiv.org/pdf/2402.03300.
+    """Group Relative Policy Optimization (GRPO).
+
+    Paper: https://arxiv.org/pdf/2402.03300
 
     :param pad_token_id: Pad token id
     :type pad_token_id: int
@@ -411,6 +412,11 @@ class GRPO(LLMAlgorithm):
         if self.wrap:
             self.wrap_models()
 
+        # Register metrics to keep track of during training
+        self.metrics.register("loss")
+        self.metrics.register("kl")
+        self.metrics.register("completion_length")
+
     def get_action(
         self,
         obs: LLMObsType,
@@ -550,7 +556,8 @@ class GRPO(LLMAlgorithm):
             importance-ratio pooling (when ``importance_sampling_level="turn"``).
             Ignored when neither applies.
         :type turn_ids: torch.Tensor | None
-        :return: Dict with keys ``mean_loss`` and ``mean_kl``, averaged over the update.
+        :return: Dict with averaged ``loss``, ``kl`` and ``completion_length`` (plus
+            the ``vllm_is_*`` sampling-mismatch metrics when the correction is active).
         :rtype: dict[str, float]
         """
         gc.collect()
@@ -559,7 +566,6 @@ class GRPO(LLMAlgorithm):
             torch.mps.empty_cache()
 
         self._prepare_vllm_for_training()
-
         with self.memory_efficient_params_context():
             completion_ids, action_masks, rewards, turn_ids = (
                 self._prepare_experience_batch(experiences, turn_ids)
@@ -574,11 +580,11 @@ class GRPO(LLMAlgorithm):
                     "All samples were filtered by advantage threshold; skipping GRPO update.",
                     stacklevel=2,
                 )
-                return {"mean_loss": 0.0, "mean_kl": 0.0}
+                return {"loss": 0.0, "kl": 0.0}
 
             learn_metrics = {
-                "mean_loss": 0.0,
-                "mean_kl": 0.0,
+                "loss": 0.0,
+                "kl": 0.0,
             }
             updates = 0
             batch_size = (
@@ -586,7 +592,6 @@ class GRPO(LLMAlgorithm):
                 if hasattr(self, "micro_batch_size_per_gpu")
                 else num_samples
             )
-
             with torch.no_grad():
                 reference_log_probs, old_log_probs, _ = self._fused_forward_no_grad(
                     completion_ids,
@@ -606,11 +611,10 @@ class GRPO(LLMAlgorithm):
                     "No active samples after filtering; skipping GRPO update.",
                     stacklevel=2,
                 )
-                return {"mean_loss": 0.0, "mean_kl": 0.0}
+                return {"loss": 0.0, "kl": 0.0}
 
             # Ensure batch_size is not larger than the number of active samples
             batch_size = min(batch_size, effective_num_samples)
-
             for _ in range(self.update_epochs):
                 self.rng.shuffle(batch_idxs)
                 for start in range(0, effective_num_samples, batch_size):
@@ -633,14 +637,23 @@ class GRPO(LLMAlgorithm):
                     if not loss.isfinite():
                         msg = f"Loss is not finite: {loss}"
                         raise ValueError(msg)
+
                     self._backward_pass(loss)
-                    learn_metrics["mean_loss"] += loss.item()
-                    learn_metrics["mean_kl"] += kl.item()
+                    learn_metrics["loss"] += loss.item()
+                    learn_metrics["kl"] += kl.item()
                     updates += 1
         result = {
             metric: value / max(updates, 1) for metric, value in learn_metrics.items()
         }
-        # Batch-level metrics: not divided by the update count above.
+        result["completion_length"] = np.mean([x.shape[-1] for x in experiences[0]])
+
+        # Aggregate across GPUs and report to the metrics tracker (new API).
+        agg = aggregate_metrics_dict(self.accelerator, result)
+        agg["completion_length"] = int(agg["completion_length"])
+        for key, value in agg.items():
+            self.metrics.log(key, value)
+
+        # Batch-level sampling-mismatch metrics bypass the per-update averaging.
         result.update(is_metrics)
         return result
 
@@ -703,7 +716,7 @@ class GRPO(LLMAlgorithm):
                 )
                 raise TypeError(msg)
         mean_fit = torch.mean(reward_tensor).item()
-        self.fitness.append(mean_fit)
+        self.metrics.add_fitness(mean_fit)
         return np.array(mean_fit)
 
     def _validate_core_args(

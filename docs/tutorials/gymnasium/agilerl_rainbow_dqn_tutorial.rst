@@ -28,7 +28,7 @@ state-of-the-art performance. These improvements include:
 
     * **Double DQN (DDQN)**: Addresses the overestimation bias of Q-values by using two networks to decouple the selection and evaluation of the action in the Q-learning target.
     * **Prioritized Experience Replay**: Instead of uniformly sampling from the replay buffer, it samples more important transitions more frequently based on the magnitude of their temporal difference (TD) error.
-    * **Dueling Networks**: Splits the Q-network into two separate streams — one for estimating the state value function and another for estimating the advantages for each action. They are then combined to produce Q-values.
+    * **Dueling Networks**: Splits the Q-network into two separate streams: one for estimating the state value function and another for estimating the advantages for each action. They are then combined to produce Q-values.
     * **Multi-step Learning (n-step returns)**: Instead of using just the immediate reward for learning, it uses multi-step returns which consider a sequence of future rewards.
     * **Distributional RL**: Instead of estimating the expected value of the cumulative future reward, it predicts the entire distribution of the cumulative future reward.
     * **Noisy Nets**: Adds noise directly to the weights of the network, providing a way to explore the environment without the need for epsilon-greedy exploration.
@@ -182,18 +182,16 @@ for both the tournament and mutation arguments.
         pop=[rainbow_dqn],
         memory=memory,
         n_step_memory=n_step_memory,
-        INIT_HP=INIT_HP,
+        init_hp=INIT_HP,
         max_steps=INIT_HP["MAX_STEPS"],
         evo_steps=INIT_HP["EVO_STEPS"],
         eval_steps=INIT_HP["EVAL_STEPS"],
         eval_loop=INIT_HP["EVAL_LOOP"],
         learning_delay=INIT_HP["LEARNING_DELAY"],
         target=INIT_HP["TARGET_SCORE"],
-        n_step=True,
-        per=True,
         tournament=None,
         mutation=None,
-        wb=False,  # Boolean flag to record run with Weights & Biases
+        wb=False,
         checkpoint=INIT_HP["MAX_STEPS"],
         checkpoint_path="RainbowDQN.pt",
     )
@@ -211,7 +209,7 @@ for both the tournament and mutation arguments.
       if __name__ == "__main__":
           train_agent()
 
-Using a custom training loop
+Using a Custom Training Loop
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 If we wanted to have more control over the training process, it is also possible to write our own custom
 training loops to train our agents. The training loop below can be used alternatively to the above ``train_off_policy``
@@ -225,10 +223,9 @@ function and is an example of how we might choose to train an AgileRL agent.
         save_path = "RainbowDQN.pt"
 
         # TRAINING LOOP
-        print("Training...")
         pbar = trange(INIT_HP["MAX_STEPS"], unit="step")
         rainbow_dqn.set_training_mode(True)
-        while rainbow_dqn.steps[-1] < INIT_HP["MAX_STEPS"]:
+        while rainbow_dqn.steps < INIT_HP["MAX_STEPS"]:
             obs = env.reset()[0]  # Reset environment at start of episode
             scores = np.zeros(num_envs)
             completed_episode_scores = []
@@ -267,7 +264,7 @@ function and is an example of how we might choose to train an AgileRL agent.
 
                 # Update agent beta
                 fraction = min(
-                    ((rainbow_dqn.steps[-1] + idx_step + 1) * num_envs / INIT_HP["MAX_STEPS"]), 1.0
+                    ((rainbow_dqn.steps + idx_step + 1) * num_envs / INIT_HP["MAX_STEPS"]), 1.0
                 )
                 rainbow_dqn.beta += fraction * (1.0 - rainbow_dqn.beta)
 
@@ -277,9 +274,10 @@ function and is an example of how we might choose to train an AgileRL agent.
                         # Sample replay buffer
                         # Learn according to agent's RL algorithm
                         experiences = memory.sample(rainbow_dqn.batch_size, rainbow_dqn.beta)
-                        n_step_experiences = n_step_memory.sample_from_indices(experiences[6])
-                        experiences += n_step_experiences
-                        loss, idxs, priorities = rainbow_dqn.learn(experiences, n_step=n_step, per=per)
+                        n_step_experiences = n_step_memory.sample_from_indices(experiences["idxs"])
+                        loss, idxs, priorities = rainbow_dqn.learn(
+                            experiences, n_experiences=n_step_experiences, per=per
+                        )
                         memory.update_priorities(idxs, priorities)
 
                 obs = next_obs
@@ -299,7 +297,7 @@ function and is an example of how we might choose to train an AgileRL agent.
             )
 
             print(f"--- Global steps {total_steps} ---")
-            print(f"Steps {rainbow_dqn.steps[-1]}")
+            print(f"Steps {rainbow_dqn.steps}")
             print(f"Scores: {"%.2f"%mean_score}")
             print(f'Fitness: {"%.2f"%fitness}')
             print(f'5 fitness avg: {"%.2f"%np.mean(rainbow_dqn.fitness[-5:])}')
@@ -307,7 +305,7 @@ function and is an example of how we might choose to train an AgileRL agent.
             fitness = "%.2f" % fitness
             avg_fitness = "%.2f" % np.mean(rainbow_dqn.fitness[-100:])
             avg_score = "%.2f" % np.mean(rainbow_dqn.scores[-100:])
-            num_steps = rainbow_dqn.steps[-1]
+            num_steps = rainbow_dqn.steps
 
             print(
                 f"""
@@ -319,8 +317,6 @@ function and is an example of how we might choose to train an AgileRL agent.
                 """,
                 end="\r",
             )
-
-            rainbow_dqn.steps.append(rainbow_dqn.steps[-1])
 
         # Save the trained algorithm at the end of the training loop
         rainbow_dqn.save_checkpoint(save_path)

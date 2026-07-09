@@ -15,7 +15,7 @@ class TestSegmentTreeInit:
         segment_tree = SegmentTree(capacity, operation, init_value)
 
         assert segment_tree.capacity == capacity
-        assert segment_tree.tree == [init_value] * (2 * capacity)
+        assert segment_tree.tree.tolist() == [init_value] * (2 * capacity)
         assert segment_tree.operation == operation
 
 
@@ -127,3 +127,60 @@ class TestMinSegmentTreeMin:
         assert np.isclose(tree.min(2, 3), 4.0)
         assert np.isclose(tree.min(2, -1), 4.0)
         assert np.isclose(tree.min(3, 4), 3.0)
+
+
+class TestSegmentTreeBatchOps:
+    """The vectorised batch helpers must agree with the scalar API."""
+
+    def test_get_batch_matches_getitem(self):
+        tree = SumSegmentTree(8)
+        for i, v in enumerate([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]):
+            tree[i] = v
+        idxs = np.array([0, 3, 3, 7, 5])
+        assert np.allclose(tree.get_batch(idxs), [tree[int(i)] for i in idxs])
+
+    def test_update_batch_matches_sequential_sum(self):
+        cap = 16
+        idxs = [0, 1, 2, 5, 9, 15]
+        vals = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+
+        ref = SumSegmentTree(cap)
+        for i, v in zip(idxs, vals, strict=False):
+            ref[i] = v
+
+        batch = SumSegmentTree(cap)
+        batch.update_batch(np.array(idxs), np.array(vals))
+
+        assert np.allclose(batch.tree, ref.tree)
+        assert np.isclose(batch.sum(), ref.sum())
+
+    def test_update_batch_matches_sequential_min(self):
+        cap = 8
+        idxs = [0, 2, 3, 7]
+        vals = [1.0, 0.5, 3.0, 0.2]
+
+        ref = MinSegmentTree(cap)
+        for i, v in zip(idxs, vals, strict=False):
+            ref[i] = v
+
+        batch = MinSegmentTree(cap)
+        batch.update_batch(np.array(idxs), np.array(vals))
+
+        assert np.allclose(batch.tree, ref.tree)
+        assert np.isclose(batch.min(), ref.min())
+
+    def test_retrieve_batch_matches_scalar(self):
+        cap = 16
+        tree = SumSegmentTree(cap)
+        rng = np.random.default_rng(0)
+        tree.update_batch(np.arange(cap), rng.random(cap) + 0.01)
+
+        ubs = np.linspace(0.0, tree.sum() - 1e-6, 50)
+        batch_idx = tree.retrieve_batch(ubs).tolist()
+        scalar_idx = [tree.retrieve(float(u)) for u in ubs]
+        assert batch_idx == scalar_idx
+
+    def test_update_batch_empty_is_noop(self):
+        tree = SumSegmentTree(8)
+        tree.update_batch(np.array([], dtype=np.int64), np.array([]))
+        assert tree.sum() == 0.0

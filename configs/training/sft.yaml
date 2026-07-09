@@ -1,43 +1,55 @@
 ---
-INIT_HP:
-    ALGO: SFT                             # Algorithm — supervised fine-tuning
-    BATCH_SIZE: 4                         # Batch size
-    LR: 5.0e-5                            # Learning rate
-    UPDATE_EPOCHS: 1                      # Number of training epochs per learn() call
-    MAX_GRAD_NORM: 0.1                    # Maximum norm for gradient clipping
-    MAX_CONTEXT_LENGTH: 512               # Cap sequence length to save memory
-    REDUCE_MEMORY_PEAK: false             # Recompute logits in chunks to lower peak VRAM
-    CALC_POSITION_EMBEDDINGS: true        # Recalculate position embeddings after tokenization
-    USE_LIGER_LOSS: true                  # Set true on Linux with liger-kernel installed
-    SEED: 42                              # Random seed
-    TOURN_SIZE: 2                         # Tournament size for evolutionary selection
-    ELITISM: true                         # Elitism in tournament selection
-    POP_SIZE: 1                           # Population size (1 = single model, no HPO)
-    EVAL_LOOP: 1                          # Evaluation episodes
-    EVO_STEPS:                            # Evolution frequency (null disables HPO evolution)
-    EVALUATION_INTERVAL: 1000             # Evaluate every N batches
-    NUM_BATCHES:                          # Batches per epoch (null = full epoch)
-    WANDB: false                          # Log with Weights and Biases
-    WANDB_API_KEY:                        # W&B API key (or set via WANDB_API_KEY env var)
-    WANDB_PROJECT: SFT-Benchmarking       # W&B project name
-    WANDB_ENTITY:                         # W&B username or team (null = default entity)
-    WANDB_RUN_NAME:                       # W&B run name (null = auto-generated)
-    EVAL_N_SAMPLES: 10                    # Prompts randomly drawn from test set for comparison
-    LORA:                                  # LoRA adapter configuration (passed to peft.LoraConfig)
-        r: 16                              # LoRA rank
-        lora_alpha: 32                     # LoRA scaling factor
-        target_modules:                    # Linear layers to apply LoRA to
+algorithm:
+    name: SFT
+    batch_size: 16
+    lr: 0.00005
+    update_epochs: 1
+    max_grad_norm: 0.1
+    reduce_memory_peak: false
+    calc_position_embeddings: true
+    gradient_checkpointing: true
+
+environment:
+    dataset: HumanLLMs/Human-Like-DPO-Dataset
+    response_column: chosen
+
+training:
+    max_steps: 100000
+    evo_steps: 10
+    pop_size: 4
+    eval_loop: 1
+    evaluation_interval: 5
+    num_epochs: 1
+
+mutation:
+    mutation_sd: 0.1
+    rand_seed: 42
+    probabilities:
+        no_mut: 0.1
+        arch_mut: 0.0
+        new_layer: 0.0
+        params_mut: 0.0
+        act_mut: 0.0
+        rl_hp_mut: 0.6
+    rl_hp_selection:
+        lr:
+            min: 0.000001
+            max: 0.0001
+
+tournament_selection:
+    tournament_size: 2
+    elitism: true
+
+network:
+    pretrained_model_name_or_path: Qwen/Qwen2.5-0.5B
+    max_context_length: 1024
+    lora_config:
+        lora_r: 16
+        lora_alpha: 64
+        target_modules:
             - q_proj
             - k_proj
             - v_proj
             - o_proj
-        lora_dropout: 0.05                # Dropout probability for LoRA layers
-        bias: none                         # Bias training strategy ("none", "all", or "lora_only")
-
-MUTATION_PARAMS:
-    NO_MUT: 0.4                           # Probability of no mutation
-    RL_HP_MUT: 0.6                        # Probability of learning HP mutation
-    MUT_SD: 0.1                           # Mutation strength (std dev)
-    RAND_SEED: 42                         # Random seed
-    MIN_LR: 1.0e-6                        # Min learning rate for HP mutation
-    MAX_LR: 1.0e-4                        # Max learning rate for HP mutation
+        lora_dropout: 0.05
+        task_type: CAUSAL_LM

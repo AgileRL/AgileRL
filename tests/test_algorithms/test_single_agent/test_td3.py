@@ -16,12 +16,10 @@ from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
     assert_not_equal_state_dict,
     assert_state_dicts_equal,
+    assert_transpose_image_observation_called,
     get_experiences_batch,
     get_sample_from_space,
-)
-from tests.helpers.algorithm_coverage import (
-    assert_swap_channels_called,
-    patch_obs_channels_to_first,
+    patch_transpose_image_observation,
 )
 
 
@@ -139,7 +137,7 @@ class TestTD3Init:
         assert td3.index == 0
         assert td3.scores == []
         assert td3.fitness == []
-        assert td3.steps == [0]
+        assert td3.steps == 0
         assert isinstance(td3.actor.encoder, encoder_cls)
         assert isinstance(td3.actor_target.encoder, encoder_cls)
         assert isinstance(td3.actor_optimizer.optimizer, expected_opt_cls)
@@ -215,7 +213,7 @@ class TestTD3Init:
         assert td3.index == 0
         assert td3.scores == []
         assert td3.fitness == []
-        assert td3.steps == [0]
+        assert td3.steps == 0
         assert isinstance(td3.actor_optimizer.optimizer, optim.Adam)
         assert isinstance(td3.critic_1_optimizer.optimizer, optim.Adam)
         assert isinstance(td3.critic_2_optimizer.optimizer, optim.Adam)
@@ -325,7 +323,7 @@ class TestTD3Init:
         assert td3.index == 0
         assert td3.scores == []
         assert td3.fitness == []
-        assert td3.steps == [0]
+        assert td3.steps == 0
         assert isinstance(td3.actor_optimizer.optimizer, optim.Adam)
         assert isinstance(td3.critic_1_optimizer.optimizer, optim.Adam)
         assert isinstance(td3.critic_2_optimizer.optimizer, optim.Adam)
@@ -389,7 +387,7 @@ class TestTD3Init:
         assert td3.index == 0
         assert td3.scores == []
         assert td3.fitness == []
-        assert td3.steps == [0]
+        assert td3.steps == 0
         assert isinstance(td3.actor_optimizer.optimizer, optim.Adam)
         assert isinstance(td3.critic_1_optimizer.optimizer, optim.Adam)
         assert isinstance(td3.critic_2_optimizer.optimizer, optim.Adam)
@@ -431,7 +429,7 @@ class TestTD3Init:
         assert td3.index == 0
         assert td3.scores == []
         assert td3.fitness == []
-        assert td3.steps == [0]
+        assert td3.steps == 0
         assert isinstance(td3.actor_optimizer.optimizer, optim.Adam)
         assert isinstance(td3.critic_1_optimizer.optimizer, optim.Adam)
         assert isinstance(td3.critic_2_optimizer.optimizer, optim.Adam)
@@ -787,14 +785,17 @@ class TestTD3Test:
         assert isinstance(mean_score, float)
         agent.clean_up()
 
-    def test_swap_channels_path(self, image_space, vector_space, monkeypatch, request):
-        observation_space = request.getfixturevalue("image_space")
-        env = DummyEnv(state_size=observation_space.shape, vect=False, num_envs=1)
-        spy = patch_obs_channels_to_first(monkeypatch, "agilerl.algorithms.td3")
-        agent = TD3(observation_space, vector_space)
-        mean_score = agent.test(env, swap_channels=True, max_steps=1, loop=1)
+    def test_swap_channels_path(self, vector_space, monkeypatch):
+        channels_last_box = spaces.Box(
+            low=0, high=255, shape=(32, 32, 3), dtype=np.uint8
+        )
+        env = DummyEnv(state_size=channels_last_box.shape, vect=False, num_envs=1)
+        spy = patch_transpose_image_observation(monkeypatch)
+        agent = TD3(channels_last_box, vector_space)
+        assert agent.swap_channels is True
+        mean_score = agent.test(env, max_steps=1, loop=1)
         assert isinstance(mean_score, float)
-        assert_swap_channels_called(spy)
+        assert_transpose_image_observation_called(spy)
         agent.clean_up()
 
 
@@ -809,7 +810,7 @@ class TestTD3Clone:
         td3 = DummyTD3(observation_space, vector_space)
         td3.fitness = [200, 200, 200]
         td3.scores = [94, 94, 94]
-        td3.steps = [2500]
+        td3.steps = 2500
         td3.tensor_attribute = torch.randn(1)
         clone_agent = td3.clone()
 

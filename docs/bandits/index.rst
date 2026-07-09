@@ -29,8 +29,98 @@ decision-making, as the algorithm becomes better at identifying which actions ar
      - :ref:`PenDigits Dataset<neural_ts_tutorial>`
 
 
+Training with LocalTrainer
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The simplest way to train a bandit agent is with a YAML manifest and the
+:class:`~agilerl.training.trainer.LocalTrainer`. This handles population
+creation, dataset loading, evolutionary HPO, and the training loop automatically.
+
+Below is an example manifest for training NeuralUCB on the Iris dataset.
+
+.. collapse:: neural_ucb.yaml
+
+   .. code-block:: yaml
+
+      algorithm:
+        name: NeuralUCB
+        batch_size: 64
+        lr: 0.001
+        learn_step: 2
+        gamma: 1.0
+        lamb: 1.0
+        reg: 0.000625
+
+      environment:
+        name: IRIS
+        features: data/iris_features.csv
+        targets: data/iris_targets.csv
+
+      training:
+        max_steps: 10_000
+        target_score: 96.0
+        pop_size: 4
+        evo_steps: 500
+
+      network:
+        latent_dim: 128
+        encoder_config:
+          hidden_size: [128]
+        head_config:
+          hidden_size: [128]
+
+      replay_buffer:
+        max_size: 10_000
+
+      mutation:
+        probabilities:
+          no_mut: 0.4
+          arch_mut: 0.2
+          new_layer: 0.2
+          params_mut: 0.2
+          act_mut: 0.2
+          rl_hp_mut: 0.2
+        rl_hp_selection:
+          lr:
+            min: 0.0000625
+            max: 0.01
+          batch_size:
+            min: 8
+            max: 512
+        mutation_sd: 0.1
+        rand_seed: 42
+
+      tournament_selection:
+        tournament_size: 2
+        elitism: true
+
+.. tab-set::
+
+   .. tab-item:: Python
+
+      .. code-block:: python
+
+         from agilerl import LocalTrainer
+
+         trainer = LocalTrainer.from_manifest("neural_ucb.yaml")
+         population, fitnesses = trainer.train()
+
+   .. tab-item:: CLI
+
+      .. code-block:: bash
+
+         python -m agilerl.train neural_ucb.yaml
+
+.. seealso::
+
+   Full manifest reference and additional options: :ref:`trainers`
+
+
+Customised Training Pipeline
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
 Population Creation and Environment Setup
------------------------------------------
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 To perform evolutionary HPO, we require a population of agents. Individuals in this population will share experiences but learn individually, allowing us to
 determine the efficacy of certain hyperparameters. Individual agents which learn best are more likely to survive until the next generation, and so their hyperparameters
@@ -44,28 +134,13 @@ be imported and used for training with the Python package ``ucimlrepo``, and to 
 
     .. code-block:: python
 
-        from agilerl.utils.utils import create_population
+        from agilerl.algorithms import NeuralUCB
         from agilerl.wrappers.learning import BanditEnv
+        from gymnasium import spaces
         import torch
         from ucimlrepo import fetch_ucirepo
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        NET_CONFIG = {
-            "encoder_config": {"hidden_size": [128]},  # Encoder hidden size
-        }
-
-        INIT_HP = {
-            "BATCH_SIZE": 64,  # Batch size
-            "LR": 1e-3,  # Learning rate
-            "GAMMA": 1.0,  # Scaling factor
-            "LAMBDA": 1.0,  # Regularization factor
-            "REG": 0.000625,  # Loss regularization factor
-            "LEARN_STEP": 2,  # Learning frequency
-            # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-            "CHANNELS_LAST": False,
-            "POP_SIZE": 4,  # Population size
-        }
 
         # Fetch data  https://archive.ics.uci.edu/
         iris = fetch_ucirepo(id=53)
@@ -76,28 +151,36 @@ be imported and used for training with the Python package ``ucimlrepo``, and to 
         context_dim = env.context_dim
         action_dim = env.arms
 
-        # Mutation config for RL hyperparameters
-        hp_config = HyperparameterConfig(
-            lr = RLParameter(min=6.25e-5, max=1e-2),
-            batch_size = RLParameter(min=8, max=512),
-            learn_step = RLParameter(min=1, max=10, grow_factor=1.5, shrink_factor=0.75)
-        )
-
         obs_space = spaces.Box(low=features.values.min(), high=features.values.max())
         action_space = spaces.Discrete(action_dim)
-        pop = create_population(
-            algo="NeuralUCB",  # Algorithm
-            observation_space=obs_space,  # Observation space
-            action_space=action_space,  # Action space
-            net_config=NET_CONFIG,  # Network configuration
-            INIT_HP=INIT_HP,  # Initial hyperparameters
-            hp_config=hp_config,  # Hyperparameter configuration
-            population_size=INIT_HP["POP_SIZE"],  # Population size
+
+        # Configure network architecture
+        net_config = {
+            "encoder_config": {"hidden_size": [128]},  # Encoder hidden size
+        }
+
+        # Algorithm hyperparameters
+        init_hp = {
+            "batch_size": 64,
+            "lr": 1e-3,
+            "gamma": 1.0,
+            "lamb": 1.0,
+            "reg": 0.000625,
+            "learn_step": 2,
+        }
+
+        # Initialize population
+        pop = NeuralUCB.population(
+            size=4,
+            observation_space=obs_space,
+            action_space=action_space,
+            net_config=net_config,
             device=device,
+            **init_hp,
         )
 
 Experience Replay
------------------
+^^^^^^^^^^^^^^^^^
 
 In order to efficiently train a population of RL agents, off-policy algorithms must be used to share memory within populations. This reduces the exploration needed
 by an individual agent because it allows faster learning from the behaviour of other agents. For example, if you were able to watch a bunch of people attempt to solve
@@ -118,8 +201,37 @@ buffer, call ``ReplayBuffer.sample()``.
     )
 
 
+Evolutionary HPO
+^^^^^^^^^^^^^^^^^
+
+Tournament selection is used to select the agents from a population which will make up the next generation of agents.
+Mutation is periodically used to explore the hyperparameter space.
+
+.. code-block:: python
+
+    from agilerl.hpo.mutation import Mutations
+    from agilerl.hpo.tournament import TournamentSelection
+
+    tournament = TournamentSelection(
+        tournament_size=2,  # Tournament selection size
+        elitism=True,  # Elitism in tournament selection
+        population_size=4,  # Population size
+    )
+
+    mutations = Mutations(
+        no_mutation=0.4,  # No mutation
+        architecture=0.2,  # Architecture mutation
+        new_layer_prob=0.2,  # New layer mutation
+        parameters=0.2,  # Network parameters mutation
+        activation=0,  # Activation layer mutation
+        rl_hp=0.2,  # Learning HP mutation
+        mutation_sd=0.1,  # Mutation strength
+        rand_seed=1,  # Random seed
+        device=device,
+    )
+
 Training Loop
--------------
+^^^^^^^^^^^^^
 
 The easiest way to train a population of bandits is to use our training function:
 
@@ -129,22 +241,20 @@ The easiest way to train a population of bandits is to use our training function
 
     trained_pop, pop_fitnesses = train_bandits(
         env,  # Bandit environment
-        INIT_HP["ENV_NAME"],  # Environment name
+        "IRIS",  # Environment name
         "NeuralUCB",  # Algorithm
         agent_pop,  # Population of agents
         memory=memory,  # Experience replay buffer
-        INIT_HP=INIT_HP,  # Initial hyperparameters
-        MUT_P=MUTATION_PARAMS,  # Mutation parameters
-        swap_channels=INIT_HP["CHANNELS_LAST"],  # Swap image channel from last to first
+        init_hp=init_hp,  # Initial hyperparameters
         max_steps=10000,  # Max number of training steps
         episode_steps=500,  # Steps in episode
         evo_steps=500,  # Evolution frequency
         eval_steps=500,  # Number of steps in evaluation episode,
         eval_loop=1,  # Number of evaluation episodes
-        target=INIT_HP["TARGET_SCORE"],  # Target score for early stopping
+        target=96.0,  # Target score for early stopping
         tournament=tournament,  # Tournament selection object
         mutation=mutations,  # Mutations object
-        wb=INIT_HP["WANDB"],  # Weights and Biases tracking
+        wb=True,  # Weights and Biases tracking
     )
 
 Alternatively, use a custom bandit training loop:
@@ -163,174 +273,170 @@ Alternatively, use a custom bandit training loop:
 
         import wandb
         from agilerl.components.replay_buffer import ReplayBuffer
+        from agilerl.algorithms import NeuralUCB
         from agilerl.hpo.mutation import Mutations
         from agilerl.hpo.tournament import TournamentSelection
-        from agilerl.utils.utils import create_population
         from agilerl.wrappers.learning import BanditEnv
 
 
         if __name__ == "__main__":
-        print("===== AgileRL Bandit Demo =====")
+            print("===== AgileRL Bandit Demo =====")
 
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        NET_CONFIG = {
-            "hidden_size": [128],  # Actor hidden size
-        }
+            # Fetch data  https://archive.ics.uci.edu/
+            iris = fetch_ucirepo(id=53)
+            features = iris.data.features
+            targets = iris.data.targets
 
-        INIT_HP = {
-            "BATCH_SIZE": 64,  # Batch size
-            "LR": 1e-3,  # Learning rate
-            "GAMMA": 1.0,  # Scaling factor
-            "LAMBDA": 1.0,  # Regularization factor
-            "REG": 0.000625,  # Loss regularization factor
-            "LEARN_STEP": 2,  # Learning frequency
-            # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-            "CHANNELS_LAST": False,
-            "POP_SIZE": 4,  # Population size
-        }
+            env = BanditEnv(features, targets)  # Create environment
+            context_dim = env.context_dim
+            action_dim = env.arms
 
-        # Fetch data  https://archive.ics.uci.edu/
-        iris = fetch_ucirepo(id=53)
-        features = iris.data.features
-        targets = iris.data.targets
+            obs_space = spaces.Box(low=features.values.min(), high=features.values.max())
+            action_space = spaces.Discrete(action_dim)
 
-        env = BanditEnv(features, targets)  # Create environment
-        context_dim = env.context_dim
-        action_dim = env.arms
+            # Configure network architecture
+            net_config = {
+                "hidden_size": [128],  # Actor hidden size
+            }
 
-        obs_space = spaces.Box(low=features.values.min(), high=features.values.max())
-        action_space = spaces.Discrete(action_dim)
-        pop = create_population(
-            algo="NeuralUCB",  # Algorithm
-            observation_space=obs_space,  # Observation space
-            action_space=action_space,  # Action space
-            net_config=NET_CONFIG,  # Network configuration
-            INIT_HP=INIT_HP,  # Initial hyperparameters
-            population_size=INIT_HP["POP_SIZE"],  # Population size
-            device=device,
-        )
+            # Algorithm hyperparameters
+            init_hp = {
+                "batch_size": 64,
+                "lr": 1e-3,
+                "gamma": 1.0,
+                "lamb": 1.0,
+                "reg": 0.000625,
+                "learn_step": 2,
+            }
 
-        memory = ReplayBuffer(max_size=10000, device=device)
-
-        tournament = TournamentSelection(
-            tournament_size=2,  # Tournament selection size
-            elitism=True,  # Elitism in tournament selection
-            population_size=INIT_HP["POP_SIZE"],  # Population size
-            eval_loop=1,  # Evaluate using last N fitness scores
-        )
-        mutations = Mutations(
-            no_mutation=0.4,  # No mutation
-            architecture=0.2,  # Architecture mutation
-            new_layer_prob=0.5,  # New layer mutation
-            parameters=0.2,  # Network parameters mutation
-            activation=0.2,  # Activation layer mutation
-            rl_hp=0.2,  # Learning HP mutation
-            mutation_sd=0.1,  # Mutation strength  # Network architecture
-            rand_seed=1,  # Random seed
-            device=device,
-        )
-
-        max_steps = 10000  # Max steps per episode
-        episode_steps = 500  # Steps in episode
-        evo_steps = 500  # Evolution frequency
-        eval_steps = 500  # Evaluation steps per episode
-        eval_loop = 1  # Number of evaluation episodes
-
-        print("Training...")
-
-        wandb.init(
-            # set the wandb project where this run will be logged
-            project="AgileRL-Bandits",
-            name="NeuralUCB-{}".format(datetime.now().strftime("%m%d%Y%H%M%S")),
-            # track hyperparameters and run metadata
-            config=INIT_HP,
-        )
-
-        total_steps = 0
-        evo_count = 0
-
-        # TRAINING LOOP
-        print("Training...")
-        pbar = trange(max_steps, unit="step")
-        while np.less([agent.steps[-1] for agent in pop], max_steps).all():
-            pop_episode_scores = []
-            for agent_idx, agent in enumerate(pop):  # Loop through population
-                score = 0
-                losses = []
-                context = env.reset()  # Reset environment at start of episode
-                for idx_step in range(episode_steps):
-                    if INIT_HP["CHANNELS_LAST"]:
-                        context = obs_channels_to_first(context)
-                    # Get next action from agent
-                    action = agent.get_action(context)
-                    next_context, reward = env.step(action)  # Act in environment
-
-                    transition = TensorDict(
-                        {
-                            "obs": context[action],
-                            "reward": reward,
-                        },
-                    ).float()
-                    transition.batch_size = [1]
-                    # Save experience to replay buffer
-                    memory.add(transition)
-
-                    # Learn according to learning frequency
-                    if len(memory) >= agent.batch_size:
-                        for _ in range(agent.learn_step):
-                            # Sample replay buffer
-                            # Learn according to agent's RL algorithm
-                            experiences = memory.sample(agent.batch_size)
-                            loss = agent.learn(experiences)
-                            losses.append(loss)
-
-                    context = next_context
-                    score += reward
-                    agent.regret.append(agent.regret[-1] + 1 - reward)
-
-                agent.scores.append(score)
-                pop_episode_scores.append(score)
-                agent.steps[-1] += episode_steps
-                total_steps += episode_steps
-                pbar.update(episode_steps // len(pop))
-
-                wandb_dict = {
-                    "global_step": total_steps,
-                    "train/loss": np.mean(losses),
-                    "train/score": score,
-                    "train/mean_regret": np.mean([agent.regret[-1] for agent in pop]),
-                }
-                wandb.log(wandb_dict)
-
-            # Evaluate population
-            fitnesses = [
-                agent.test(
-                    env,
-                    swap_channels=INIT_HP["CHANNELS_LAST"],
-                    max_steps=eval_steps,
-                    loop=eval_loop,
-                )
-                for agent in pop
-            ]
-
-            print(f"--- Global steps {total_steps} ---")
-            print(f"Steps {[agent.steps[-1] for agent in pop]}")
-            print(f"Regret: {[agent.regret[-1] for agent in pop]}")
-            print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
-            print(
-                f'5 fitness avgs: {["%.2f"%np.mean(agent.fitness[-5:]) for agent in pop]}'
+            # Initialize population
+            pop = NeuralUCB.population(
+                size=4,
+                observation_space=obs_space,
+                action_space=action_space,
+                net_config=net_config,
+                device=device,
+                **init_hp,
             )
 
-            if pop[0].steps[-1] // evo_steps > evo_count:
-                # Tournament selection and population mutation
-                elite, pop = tournament.select(pop)
-                pop = mutations.mutation(pop)
-                evo_count += 1
+            memory = ReplayBuffer(max_size=10000, device=device)
 
-            # Update step counter
-            for agent in pop:
-                agent.steps.append(agent.steps[-1])
+            tournament = TournamentSelection(
+                tournament_size=2,  # Tournament selection size
+                elitism=True,  # Elitism in tournament selection
+                population_size=4,  # Population size
+            )
+            mutations = Mutations(
+                no_mutation=0.4,  # No mutation
+                architecture=0.2,  # Architecture mutation
+                new_layer_prob=0.5,  # New layer mutation
+                parameters=0.2,  # Network parameters mutation
+                activation=0.2,  # Activation layer mutation
+                rl_hp=0.2,  # Learning HP mutation
+                mutation_sd=0.1,  # Mutation strength  # Network architecture
+                rand_seed=1,  # Random seed
+                device=device,
+            )
 
-        pbar.close()
-        env.close()
+            max_steps = 10000  # Max steps per episode
+            episode_steps = 500  # Steps in episode
+            evo_steps = 500  # Evolution frequency
+            eval_steps = 500  # Evaluation steps per episode
+            eval_loop = 1  # Number of evaluation episodes
+
+            wandb.init(
+                # set the wandb project where this run will be logged
+                project="AgileRL-Bandits",
+                name="NeuralUCB-{}".format(datetime.now().strftime("%m%d%Y%H%M%S")),
+                # track hyperparameters and run metadata
+                config=init_hp,
+            )
+
+            total_steps = 0
+            evo_count = 0
+
+            # TRAINING LOOP
+            pbar = trange(max_steps, unit="step")
+            while np.less([agent.steps for agent in pop], max_steps).all():
+                for agent_idx, agent in enumerate(pop):  # Loop through population
+                    score = 0
+                    losses = []
+                    context = env.reset()  # Reset environment at start of episode
+                    for idx_step in range(episode_steps):
+                        # Get next action from agent
+                        action = agent.get_action(context)
+                        next_context, reward = env.step(action)  # Act in environment
+
+                        transition = TensorDict(
+                            {
+                                "obs": context[action],
+                                "reward": reward,
+                            },
+                        ).float()
+                        transition.batch_size = [1]
+
+                        # Save experience to replay buffer
+                        memory.add(transition)
+
+                        # Learn according to learning frequency
+                        if len(memory) >= agent.batch_size:
+                            for _ in range(agent.learn_step):
+                                # Sample replay buffer
+                                # Learn according to agent's RL algorithm
+                                experiences = memory.sample(agent.batch_size)
+                                loss = agent.learn(experiences)
+                                losses.append(loss)
+
+                        context = next_context
+                        score += reward
+                        agent.regret.append(agent.regret[-1] + 1 - reward)
+
+                    agent.scores.append(score)
+                    agent.steps += episode_steps
+                    total_steps += episode_steps
+                    pbar.update(episode_steps // len(pop))
+
+                    wandb_dict = {
+                        "global_step": total_steps,
+                        "train/loss": np.mean(losses),
+                        "train/score": score,
+                        "train/mean_regret": np.mean([agent.regret[-1] for agent in pop]),
+                    }
+                    wandb.log(wandb_dict)
+
+                # Evaluate population
+                fitnesses = [
+                    agent.test(
+                        env,
+                        max_steps=eval_steps,
+                        loop=eval_loop,
+                    )
+                    for agent in pop
+                ]
+
+                pbar.write(
+                    f"--- Global steps {total_steps} ---\n"
+                    f"Steps: {[agent.steps for agent in pop]}\n"
+                    f"Regret: {[agent.regret[-1] for agent in pop]}\n"
+                    f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}\n'
+                    f'5 fitness avgs: {["%.2f"%np.mean(agent.fitness[-5:]) for agent in pop]}'
+                )
+
+                if pop[0].steps // evo_steps > evo_count:
+                    # Tournament selection and population mutation
+                    elite, pop = tournament.select(pop)
+                    pop = mutations.mutation(pop)
+                    evo_count += 1
+
+            pbar.close()
+            env.close()
+
+.. tutorial::
+
+   :ref:`neural_ucb_tutorial`
+      Train NeuralUCB on the Iris bandit environment.
+
+   :ref:`neural_ts_tutorial`
+      Train NeuralTS on PenDigits with evolutionary HPO.

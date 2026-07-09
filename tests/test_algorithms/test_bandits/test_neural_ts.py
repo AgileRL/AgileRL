@@ -12,10 +12,12 @@ from torch import nn, optim
 from agilerl.algorithms.neural_ts_bandit import NeuralTS
 from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
 from agilerl.wrappers.make_evolvable import MakeEvolvable
-from tests.helper_functions import assert_not_equal_state_dict, assert_state_dicts_equal
-from tests.helpers.algorithm_coverage import (
-    assert_swap_channels_called,
-    patch_obs_channels_to_first,
+from tests.helper_functions import (
+    assert_not_equal_state_dict,
+    assert_state_dicts_equal,
+    assert_transpose_image_observation_called,
+    patch_actor_scalar_mu_repeat,
+    patch_transpose_image_observation,
 )
 
 
@@ -90,7 +92,7 @@ class TestNeuralTSInit:
         assert bandit.index == 0
         assert bandit.scores == []
         assert bandit.fitness == []
-        assert bandit.steps == [0]
+        assert bandit.steps == 0
         assert isinstance(bandit.actor.encoder, encoder_cls)
         expected_optimizer = AcceleratedOptimizer if accelerator else optim.Adam
         assert isinstance(bandit.optimizer.optimizer, expected_optimizer)
@@ -136,7 +138,7 @@ class TestNeuralTSInit:
         assert bandit.index == 0
         assert bandit.scores == []
         assert bandit.fitness == []
-        assert bandit.steps == [0]
+        assert bandit.steps == 0
         assert isinstance(bandit.optimizer.optimizer, optim.Adam)
         assert isinstance(bandit.criterion, nn.MSELoss)
         bandit.clean_up()
@@ -166,7 +168,7 @@ class TestNeuralTSInit:
         assert bandit.index == 0
         assert bandit.scores == []
         assert bandit.fitness == []
-        assert bandit.steps == [0]
+        assert bandit.steps == 0
         assert isinstance(bandit.optimizer.optimizer, optim.Adam)
         assert isinstance(bandit.criterion, nn.MSELoss)
         bandit.clean_up()
@@ -232,7 +234,7 @@ class TestNeuralTSGetAction:
         assert action == 1
         bandit.clean_up()
 
-    def test_get_action_single_output_multi_arm_branch(self, vector_space):
+    def test_get_action_single_output_multi_arm_branch(self, vector_space, monkeypatch):
         action_space = spaces.Discrete(3)
         actor = EvolvableMLP(
             num_inputs=vector_space.shape[0],
@@ -241,10 +243,13 @@ class TestNeuralTSGetAction:
             layer_norm=False,
         )
         bandit = NeuralTS(vector_space, action_space, actor_network=actor)
+        broadcast_mu = torch.tensor([0.1, 0.9, 0.2], device=bandit.device)
+        patch_actor_scalar_mu_repeat(monkeypatch, bandit, broadcast_mu)
+        monkeypatch.setattr(torch, "normal", lambda mean, std: mean)
+
         state = np.array([1.0, 0.5, -0.5, 0.0], dtype=np.float32)
         action = bandit.get_action(state, action_mask=None)
-        assert isinstance(action, (int, np.integer))
-        assert 0 <= action < 3
+        assert action == 1
         bandit.clean_up()
 
     def test_get_action_multi_output_gradient_path(self, vector_space):
@@ -325,17 +330,49 @@ class TestNeuralTSTest:
         assert isinstance(mean_score, float)
         agent.clean_up()
 
-    def test_algorithm_test_loop_swap_channels(
-        self, image_space, discrete_space, monkeypatch
-    ):
-        spy = patch_obs_channels_to_first(
-            monkeypatch, "agilerl.algorithms.neural_ts_bandit"
+    def test_algorithm_test_loop_swap_channels(self, discrete_space, monkeypatch):
+        channels_last_box = spaces.Box(
+            low=0, high=255, shape=(32, 32, 3), dtype=np.uint8
         )
-        env = DummyBanditEnv(state_size=image_space.shape, arms=discrete_space.n)
-        agent = NeuralTS(observation_space=image_space, action_space=discrete_space)
-        mean_score = agent.test(env, swap_channels=True, max_steps=1, loop=1)
+        spy = patch_transpose_image_observation(monkeypatch)
+        agent = NeuralTS(
+            observation_space=channels_last_box, action_space=discrete_space
+        )
+        assert agent.swap_channels is True
+        env = DummyBanditEnv(state_size=channels_last_box.shape, arms=discrete_space.n)
+        mean_score = agent.test(env, max_steps=1, loop=1)
         assert isinstance(mean_score, float)
-        assert_swap_channels_called(spy)
+        assert_transpose_image_observation_called(spy)
+        agent.clean_up()
+
+    def test_greedy_test_does_not_update_sigma_inv(self, vector_space, discrete_space):
+        env = DummyBanditEnv(state_size=vector_space.shape, arms=discrete_space.n)
+        agent = NeuralTS(observation_space=vector_space, action_space=discrete_space)
+        sigma_before = agent.sigma_inv.clone()
+        mean_score = agent.test(env, max_steps=5, loop=2)
+        assert isinstance(mean_score, float)
+        assert torch.equal(agent.sigma_inv, sigma_before)
+        agent.clean_up()
+
+    def test_greedy_test_action_broadcasts_scalar_mu(self, vector_space, monkeypatch):
+        action_space = spaces.Discrete(4)
+        actor = EvolvableMLP(
+            num_inputs=vector_space.shape[0],
+            num_outputs=1,
+            hidden_size=[8],
+            layer_norm=False,
+        )
+        agent = NeuralTS(
+            observation_space=vector_space,
+            action_space=action_space,
+            actor_network=actor,
+        )
+        broadcast_mu = torch.tensor([0.2, 0.8, 0.5, 0.1], device=agent.device)
+        patch_actor_scalar_mu_repeat(monkeypatch, agent, broadcast_mu)
+
+        obs = np.zeros(vector_space.shape, dtype=np.float32)
+        action = agent._greedy_test_action(obs)
+        assert action == 1
         agent.clean_up()
 
 

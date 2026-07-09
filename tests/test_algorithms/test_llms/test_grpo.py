@@ -762,7 +762,7 @@ class TestGRPOInit:
         assert grpo.index == 0
         assert grpo.scores == []
         assert grpo.fitness == []
-        assert grpo.steps == [0]
+        assert grpo.steps == 0
         assert 3 > grpo.zero_stage >= 1
         assert isinstance(grpo.generation_config, GenerationConfig)
         assert isinstance(grpo.actor, DeepSpeedEngine)
@@ -1368,7 +1368,7 @@ class TestGRPOInit:
         assert grpo.index == 0
         assert grpo.scores == []
         assert grpo.fitness == []
-        assert grpo.steps == [0]
+        assert grpo.steps == 0
         assert grpo.pad_token_id == 999
         assert grpo.pad_token == "<pad>"
         assert isinstance(grpo.generation_config, GenerationConfig)
@@ -3612,8 +3612,8 @@ class TestGRPOLearn:
         assert mock_prepare_vllm_for_training.call_count == 1
         if use_vllm:
             mock_llm_instance.sleep.assert_called_once()
-        mean_loss = learn_result["mean_loss"]
-        mean_kl = learn_result["mean_kl"]
+        mean_loss = learn_result["loss"]
+        mean_kl = learn_result["kl"]
         if use_vllm:
             grpo._vllm_awake = True
         with patch.object(
@@ -3625,8 +3625,8 @@ class TestGRPOLearn:
         assert mock_prepare_vllm_for_training.call_count == 1
         if use_vllm:
             mock_llm_instance.sleep.assert_called_once()
-        mean_loss = learn_result["mean_loss"]
-        mean_kl = learn_result["mean_kl"]
+        mean_loss = learn_result["loss"]
+        mean_kl = learn_result["kl"]
         assert isinstance(mean_loss, float)
         assert isinstance(mean_kl, float)
 
@@ -3701,8 +3701,8 @@ class TestGRPOLearn:
             metrics = grpo.learn((completion_ids, action_masks, rewards))
         processed_advantages = mock_grpo_loss.call_args.args[5]
         assert processed_advantages.abs().max().item() <= 0.100001
-        assert metrics["mean_loss"] == pytest.approx(1.0)
-        assert metrics["mean_kl"] == pytest.approx(0.1)
+        assert metrics["loss"] == pytest.approx(1.0)
+        assert metrics["kl"] == pytest.approx(0.1)
         grpo.clean_up()
 
     def test_learn_warns_and_returns_zeros_when_all_filtered(self):
@@ -3726,7 +3726,7 @@ class TestGRPOLearn:
             ),
         ):
             metrics = grpo.learn((completion_ids, action_masks, rewards))
-        assert metrics == {"mean_loss": 0.0, "mean_kl": 0.0}
+        assert metrics == {"loss": 0.0, "kl": 0.0}
         grpo.clean_up()
 
     def test_learn_warns_and_returns_zeros_when_no_active_samples_after_filtering(self):
@@ -3753,7 +3753,7 @@ class TestGRPOLearn:
             ),
         ):
             metrics = grpo.learn((completion_ids, action_masks, rewards))
-        assert metrics == {"mean_loss": 0.0, "mean_kl": 0.0}
+        assert metrics == {"loss": 0.0, "kl": 0.0}
         grpo.clean_up()
 
     def test_learn_empty_minibatch_branch_continues_without_grpo_step(self):
@@ -3788,7 +3788,8 @@ class TestGRPOLearn:
             ),
         ):
             metrics = grpo.learn((completion_ids, action_masks, rewards))
-        assert metrics == {"mean_loss": 0.0, "mean_kl": 0.0}
+        assert metrics["loss"] == 0.0
+        assert metrics["kl"] == 0.0
         grpo.clean_up()
 
     @pytest.mark.parametrize("config", [deepspeed_config_stage_2])
@@ -3945,7 +3946,7 @@ class TestGRPOLearn:
         rewards = torch.stack([torch.rand(2, dtype=torch.float32)], dim=0)
 
         metrics = grpo.learn((completions, action_masks, rewards))
-        assert set(metrics.keys()) == {"mean_loss", "mean_kl"}
+        assert set(metrics.keys()) == {"loss", "kl", "completion_length"}
         grpo.clean_up()
 
     def test_grpo_learn_calls_mps_empty_cache(
@@ -5065,6 +5066,55 @@ class TestGRPOPreprocessObservation:
         assert torch.equal(obs, orig_obs)
         grpo.clean_up()
 
+    @pytest.mark.gpu
+    @pytest.mark.parametrize("config", [deepspeed_config_stage_3])
+    @pytest.mark.parametrize("use_deepspeed_optimizer", [False])
+    @pytest.mark.parametrize("use_separate_reference_adapter", [False, True])
+    def test_init_grpo_zero3_warning(
+        self,
+        deepspeed_env,
+        accelerator_factory,
+        config,
+        use_deepspeed_optimizer,
+        use_separate_reference_adapter,
+    ):
+        accelerator = accelerator_factory(use_deepspeed_optimizer, config)
+        vocab_size = 1000
+        input_size = 10
+        max_tokens = 20
+        group_size = 5
+        gc.collect()
+        with pytest.warns(UserWarning, match=r"DeepSpeed ZeRO Stage 3"):
+            grpo = GRPO(
+                actor_network=create_module(
+                    input_size=input_size,
+                    max_tokens=max_tokens,
+                    vocab_size=vocab_size,
+                    device="cuda" if torch.cuda.is_available() else "cpu",
+                ),
+                lr=0.1,
+                pad_token_id=vocab_size - 1,
+                pad_token="<pad>",
+                device="cuda" if torch.cuda.is_available() else "cpu",
+                group_size=group_size,
+                lora_config=LoraConfig(
+                    r=16,
+                    lora_alpha=64,
+                    target_modules=["linear_1"],
+                    task_type="CAUSAL_LM",
+                    lora_dropout=0.05,
+                ),
+                cosine_lr_schedule_config=(
+                    None
+                    if accelerator is not None
+                    else CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.05)
+                ),
+                accelerator=accelerator,
+                use_separate_reference_adapter=use_separate_reference_adapter,
+                max_output_tokens=max_tokens,
+            )
+        grpo.clean_up()
+
 
 class TestGRPOLoadDistributedActor:
     @pytest.mark.parametrize("config", [None])
@@ -5962,7 +6012,7 @@ class TestGRPOVLLMSamplingCorrection:
         mock_liger_loss.assert_not_called()
         assert grpo._is_correction_liger_warned is True
         assert "vllm_is_delta_mean" in metrics
-        assert torch.isfinite(torch.tensor(metrics["mean_loss"]))
+        assert torch.isfinite(torch.tensor(metrics["loss"]))
         grpo.clean_up()
 
 
@@ -6118,7 +6168,7 @@ class TestGRPOTurnAdvantageLearnPath:
             metrics = grpo.learn(
                 (completion_ids, action_masks, turn_rewards), turn_ids=turn_ids
             )
-        assert np.isfinite(metrics["mean_loss"])
+        assert np.isfinite(metrics["loss"])
         grpo.clean_up()
 
     def test_learn_liger_turn_level_falls_back_to_standard_path(self):
@@ -6147,5 +6197,5 @@ class TestGRPOTurnAdvantageLearnPath:
                 (completion_ids, action_masks, turn_rewards), turn_ids=turn_ids
             )
         mock_liger.assert_not_called()
-        assert np.isfinite(metrics["mean_loss"])
+        assert np.isfinite(metrics["loss"])
         grpo.clean_up()
