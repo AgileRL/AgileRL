@@ -6,7 +6,6 @@ from unittest.mock import MagicMock, patch
 
 import click
 import pytest
-
 from agilerl.arena.exceptions import (
     ArenaAPIError,
     ArenaTrainingError,
