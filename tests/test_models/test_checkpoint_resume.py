@@ -31,6 +31,75 @@ if HAS_LLM_DEPENDENCIES:
     from tests import TINY_LLM_FIXTURE_PATH
 
 
+def _lora_config():
+    return LoraConfig(
+        r=16,
+        lora_alpha=64,
+        target_modules=["q_proj"],
+        task_type="CAUSAL_LM",
+        lora_dropout=0.05,
+    )
+
+
+def _schedule_config():
+    return CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.1)
+
+
+def _stub_tokenizer():
+    return type("Tok", (), {"eos_token_id": 0, "eos_token": "<pad>"})()
+
+
+@pytest.fixture(scope="module")
+def grpo_checkpoint(tmp_path_factory):
+    """One GRPO run, five scheduler steps in. Written once and shared read-only.
+
+    Building a real causal-LM is the expensive part of this module, so it happens
+    as few times as possible.
+    """
+    agent = GRPO(
+        model_name=TINY_LLM_FIXTURE_PATH,
+        pad_token_id=0,
+        pad_token="<pad>",
+        device="cpu",
+        lr=5e-5,
+        group_size=2,
+        lora_config=_lora_config(),
+        cosine_lr_schedule_config=_schedule_config(),
+    )
+    for _ in range(5):
+        agent.lr_scheduler.step()
+
+    path = str(tmp_path_factory.mktemp("grpo") / "run")
+    agent.save_checkpoint(path)
+    return path
+
+
+@pytest.fixture(scope="module")
+def sft_checkpoints(tmp_path_factory):
+    """One trained SFT agent, saved in both checkpoint formats."""
+    from agilerl.algorithms.sft import SFT
+
+    source = SFT(
+        model_name=TINY_LLM_FIXTURE_PATH,
+        pad_token_id=0,
+        pad_token="<pad>",
+        lora_config=_lora_config(),
+        device="cpu",
+        lr=5e-5,
+    )
+    for name, param in source.actor.named_parameters():
+        if "lora_B" in name:
+            torch.nn.init.normal_(param, std=0.02)
+
+    base = tmp_path_factory.mktemp("sft")
+    paths = {}
+    for lora_only in (True, False):
+        path = str(base / f"ckpt_{lora_only}")
+        source.save_checkpoint(path, lora_only=lora_only)
+        paths[lora_only] = path
+    return paths
+
+
 @pytest.fixture
 def spaces():
     return generate_random_box_space(shape=(4,)), generate_discrete_space(2)
@@ -112,50 +181,17 @@ class TestLLMSpecResumeVsLoad:
     """The lr schedule is the sharpest test: resuming must keep its decay point."""
 
     @staticmethod
-    def _lora():
-        return LoraConfig(
-            r=16,
-            lora_alpha=64,
-            target_modules=["q_proj"],
-            task_type="CAUSAL_LM",
-            lora_dropout=0.05,
-        )
-
-    @staticmethod
-    def _schedule():
-        return CosineLRScheduleConfig(num_epochs=10, warmup_proportion=0.1)
-
-    @staticmethod
     def _tokenizer():
-        return type("Tok", (), {"eos_token_id": 0, "eos_token": "<pad>"})()
+        return _stub_tokenizer()
 
     def _spec(self, lr):
         return GRPOSpec(
             pretrained_model_name_or_path=TINY_LLM_FIXTURE_PATH,
             lr=lr,
             group_size=2,
-            lora_config=self._lora(),
-            cosine_lr_schedule_config=self._schedule(),
+            lora_config=_lora_config(),
+            cosine_lr_schedule_config=_schedule_config(),
         )
-
-    @pytest.fixture
-    def grpo_checkpoint(self, tmp_path):
-        agent = GRPO(
-            model_name=TINY_LLM_FIXTURE_PATH,
-            pad_token_id=0,
-            pad_token="<pad>",
-            device="cpu",
-            lr=5e-5,
-            group_size=2,
-            lora_config=self._lora(),
-            cosine_lr_schedule_config=self._schedule(),
-        )
-        for _ in range(5):
-            agent.lr_scheduler.step()
-
-        path = str(tmp_path / "grpo_run")
-        agent.save_checkpoint(path)
-        return path
 
     def test_resume_restores_the_schedule_position(self, grpo_checkpoint):
         agent = self._spec(5e-5).build_algorithm(
@@ -202,40 +238,20 @@ class TestLoadWeightsCoversBothCheckpointFormats:
         not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed"
     )
     @pytest.mark.parametrize("lora_only", [True, False])
-    def test_llm_load_weights_takes_weights_and_nothing_else(self, tmp_path, lora_only):
+    def test_llm_load_weights_takes_weights_and_nothing_else(
+        self, sft_checkpoints, lora_only
+    ):
         from agilerl.algorithms.sft import SFT
-
-        lora = LoraConfig(
-            r=16,
-            lora_alpha=64,
-            target_modules=["q_proj"],
-            task_type="CAUSAL_LM",
-            lora_dropout=0.05,
-        )
-        source = SFT(
-            model_name=TINY_LLM_FIXTURE_PATH,
-            pad_token_id=0,
-            pad_token="<pad>",
-            lora_config=lora,
-            device="cpu",
-            lr=5e-5,
-        )
-        for name, param in source.actor.named_parameters():
-            if "lora_B" in name:
-                torch.nn.init.normal_(param, std=0.02)
-
-        path = str(tmp_path / f"ckpt_{lora_only}")
-        source.save_checkpoint(path, lora_only=lora_only)
 
         target = SFT(
             model_name=TINY_LLM_FIXTURE_PATH,
             pad_token_id=0,
             pad_token="<pad>",
-            lora_config=lora,
+            lora_config=_lora_config(),
             device="cpu",
             lr=7e-6,
         )
-        target.load_weights(path)
+        target.load_weights(sft_checkpoints[lora_only])
 
         params = dict(target.actor.named_parameters())
         adapters = [v for k, v in params.items() if "lora_B.actor" in k]
