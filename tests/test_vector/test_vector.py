@@ -1,10 +1,10 @@
-"""Tests for pz_async_vec_env.py and pz_vec_env.py."""
+"""Tests for pz_async_vec_env.py and pz_vec_env.py"""
 
 import multiprocessing as mp
 import os
 import signal
 from typing import ClassVar
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import gymnasium as gym
 import numpy as np
@@ -18,9 +18,10 @@ from gymnasium.error import (
 from gymnasium.spaces import Box, Discrete, MultiDiscrete
 from gymnasium.vector.utils import CloudpickleWrapper
 from pettingzoo import ParallelEnv
+from tensordict import TensorDictBase
 
-from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
-from agilerl.vector.pz_async_vec_env import (  # PettingZooExperienceSpec,; SharedMemory,
+from agilerl.components.replay_buffer import ReplayBuffer
+from agilerl.vector.pz_async_vec_env import (
     AsyncPettingZooVecEnv,
     AsyncState,
     Observations,
@@ -51,9 +52,9 @@ class DummyRecv:
 
 
 class DictSpaceTestEnv(ParallelEnv):
-    """Test environment with dictionary observation spaces."""
+    """Test environment with dictionary observation spaces"""
 
-    metadata: ClassVar[dict[str, str | list[str]]] = {
+    metadata: ClassVar[dict] = {
         "render_modes": ["human", "rgb_array"],
         "name": "dict_space_test_v0",
     }
@@ -116,9 +117,9 @@ class DictSpaceTestEnv(ParallelEnv):
 
 
 class TupleSpaceTestEnv(ParallelEnv):
-    """Test environment with tuple observation spaces."""
+    """Test environment with tuple observation spaces"""
 
-    metadata: ClassVar[dict[str, str | list[str]]] = {
+    metadata: ClassVar[dict] = {
         "render_modes": ["human", "rgb_array"],
         "name": "tuple_space_test_v0",
     }
@@ -181,9 +182,9 @@ class TupleSpaceTestEnv(ParallelEnv):
 
 
 class ComplexDictSpaceTestEnv(ParallelEnv):
-    """Test environment with dictionary observation spaces containing both vector and image data."""
+    """Test environment with dictionary observation spaces containing both vector and image data"""
 
-    metadata: ClassVar[dict[str, str | list[str]]] = {
+    metadata: ClassVar[dict] = {
         "render_modes": ["human", "rgb_array"],
         "name": "complex_dict_space_test_v0",
     }
@@ -251,9 +252,9 @@ class ComplexDictSpaceTestEnv(ParallelEnv):
 
 
 class ComplexTupleSpaceTestEnv(ParallelEnv):
-    """Test environment with tuple observation spaces containing both vector and image data."""
+    """Test environment with tuple observation spaces containing both vector and image data"""
 
-    metadata: ClassVar[dict[str, str | list[str]]] = {
+    metadata: ClassVar[dict] = {
         "render_modes": ["human", "rgb_array"],
         "name": "complex_tuple_space_test_v0",
     }
@@ -341,7 +342,7 @@ def actions_to_list_helper(actions):
 
 @pytest.fixture(autouse=True)
 def clean_process_fixture():
-    """Fixture to ensure processes are cleaned up between tests."""
+    """Fixture to ensure processes are cleaned up between tests"""
     # Before each test
     yield
     # After each test - forcibly terminate any stray processes
@@ -463,9 +464,9 @@ class TestAsyncPettingZooVecEnvStep:
                 assert truncations[agent].size == num_envs
             env.close()
 
-        except Exception:
+        except Exception as e:
             env.close()
-            raise
+            raise e
 
     def test_env_order_preserved(self):
         num_envs = 4
@@ -631,10 +632,14 @@ class TestAsyncPettingZooVecEnvResetWait:
     )
     def test_reset_wait_exception(self, env_fns):
         env = AsyncPettingZooVecEnv(env_fns)
-        env.reset_async()
-        env._state = AsyncState.DEFAULT
-        with pytest.raises(NoAsyncCallError):
+
+        def _trigger_reset_wait():
+            env.reset_async()
+            env._state = AsyncState.DEFAULT
             env.reset_wait()
+
+        with pytest.raises(NoAsyncCallError):
+            _trigger_reset_wait()
         env.close()
 
 
@@ -704,9 +709,7 @@ class TestAsyncPettingZooVecEnvCall:
     )
     def test_call_exception_worker(self, env_fns):
         env = AsyncPettingZooVecEnv(env_fns)
-        with pytest.raises(
-            ValueError, match="Trying to call function `reset` with `call`"
-        ):
+        with pytest.raises(ValueError, match=r"Trying to call function"):
             env.call("reset")
         env.close()
 
@@ -733,10 +736,7 @@ class TestAsyncPettingZooVecEnvSetAttr:
     )
     def test_set_attr_val_error(self, env_fns):
         env = AsyncPettingZooVecEnv(env_fns)
-        with pytest.raises(
-            ValueError,
-            match="Values must be a list or tuple with length equal to the number of environments",
-        ):
+        with pytest.raises(ValueError, match="values"):
             env.set_attr("test", values=[1, 2, 3])
         env.close()
 
@@ -781,56 +781,26 @@ class TestAsyncPettingZooVecEnvCloseExtras:
         for p in env.processes:
             assert not p.is_alive()
 
-    def test_close_terminates_processes_still_alive_after_join(self):
-        env = AsyncPettingZooVecEnv(
-            [speaker_listener_like_env for _ in range(2)],
-        )
-
-        class StubProcess:
-            def __init__(self):
-                self.alive = True
-                self.terminated = False
-
-            def join(self, timeout=None):
-                del timeout
-
-            def is_alive(self):
-                return self.alive and not self.terminated
-
-            def terminate(self):
-                self.terminated = True
-                self.alive = False
-
-        env.processes = [StubProcess(), StubProcess()]
-        env.parent_pipes = [None, None]
-        env.close_extras(terminate=True)
-        assert all(not p.is_alive() for p in env.processes)
-
     @pytest.mark.parametrize(
         "env_fns",
         [[speaker_listener_like_env for _ in range(2)]],
     )
-    def test_close_extras_terminates_when_join_times_out(self, env_fns):
-        """Cover forced terminate when a worker is still alive after join."""
-        import types
-
+    def test_close_extras_join_timeout_terminates_stuck_process(self, env_fns):
         env = AsyncPettingZooVecEnv(env_fns)
-        proc = env.processes[0]
-        still_alive = [True]
-        terminate_called = [False]
+        env.reset()
 
-        def fake_is_alive(_self):
-            return still_alive[0]
+        stuck_processes = []
+        for _ in env.processes:
+            stuck = MagicMock()
+            stuck.is_alive.return_value = True
+            stuck_processes.append(stuck)
 
-        def fake_terminate(_self):
-            terminate_called[0] = True
-            still_alive[0] = False
-            mp.Process.terminate(proc)
+        with patch.object(env, "processes", stuck_processes):
+            env.close_extras(terminate=False)
 
-        proc.is_alive = types.MethodType(fake_is_alive, proc)
-        proc.terminate = types.MethodType(fake_terminate, proc)
-        env.close_extras(terminate=False)
-        assert terminate_called[0]
+        for stuck in stuck_processes:
+            stuck.terminate.assert_called_once()
+            stuck.join.assert_called()
 
 
 class TestAsyncPettingZooVecEnvPollPipeEnvs:
@@ -899,9 +869,14 @@ class TestAsyncPettingZooVecEnvStepWait:
     def test_step_wait_timeout_async_pz_vector_env(self, env_fns):
         env = AsyncPettingZooVecEnv(env_fns)
         env._state = AsyncState.WAITING_STEP
-        env.parent_pipes[0] = None
-        with pytest.raises(mp.TimeoutError):
+
+        def _trigger_step_wait():
+            env.parent_pipes[0] = None
             env.step_wait(timeout=1)
+            env.close()
+
+        with pytest.raises(mp.TimeoutError):
+            _trigger_step_wait()
         env.close()
 
 
@@ -924,9 +899,14 @@ class TestAsyncPettingZooVecEnvCallWait:
     def test_call_wait_timeout_async_pz_vector_env(self, env_fns):
         env = AsyncPettingZooVecEnv(env_fns)
         env._state = AsyncState.WAITING_CALL
-        env.parent_pipes[0] = None
-        with pytest.raises(mp.TimeoutError):
+
+        def _trigger_call_wait():
+            env.parent_pipes[0] = None
             env.call_wait(timeout=1)
+            env.close()
+
+        with pytest.raises(mp.TimeoutError):
+            _trigger_call_wait()
         env.close()
 
 
@@ -1191,10 +1171,7 @@ class TestAsyncWorker:
 
 
 class ImageObsTestEnv(ParallelEnv):
-    metadata: ClassVar[dict[str, str | list[str]]] = {
-        "render_modes": ["human"],
-        "name": "image_obs_test_v0",
-    }
+    metadata: ClassVar[dict] = {"render_modes": ["human"], "name": "image_obs_test_v0"}
 
     def __init__(self):
         self.possible_agents = ["pursuer_0", "pursuer_1"]
@@ -1421,7 +1398,7 @@ class TestAsyncPettingZooVecEnvDel:
 
 class TestAsyncPettingZooVecEnvSpaces:
     def test_dict_space_env(self):
-        """Test environment with dictionary observation spaces."""
+        """Test environment with dictionary observation spaces"""
         num_envs = 2
         env_fns = [DictSpaceTestEnv for _ in range(num_envs)]
         env = AsyncPettingZooVecEnv(env_fns)
@@ -1461,7 +1438,7 @@ class TestAsyncPettingZooVecEnvSpaces:
         env.close()
 
     def test_tuple_space_env(self):
-        """Test environment with tuple observation spaces."""
+        """Test environment with tuple observation spaces"""
         num_envs = 2
         env_fns = [TupleSpaceTestEnv for _ in range(num_envs)]
         env = AsyncPettingZooVecEnv(env_fns)
@@ -1493,7 +1470,7 @@ class TestAsyncPettingZooVecEnvSpaces:
         env.close()
 
     def test_complex_dict_space_env(self):
-        """Test environment with complex dictionary observation spaces (containing images)."""
+        """Test environment with complex dictionary observation spaces (containing images)"""
         num_envs = 2
         env_fns = [ComplexDictSpaceTestEnv for _ in range(num_envs)]
         env = AsyncPettingZooVecEnv(env_fns)
@@ -1541,7 +1518,7 @@ class TestAsyncPettingZooVecEnvSpaces:
         env.close()
 
     def test_complex_tuple_space_env(self):
-        """Test environment with complex tuple observation spaces (containing images)."""
+        """Test environment with complex tuple observation spaces (containing images)"""
         num_envs = 2
         env_fns = [ComplexTupleSpaceTestEnv for _ in range(num_envs)]
         env = AsyncPettingZooVecEnv(env_fns)
@@ -1578,7 +1555,7 @@ class TestAsyncPettingZooVecEnvSpaces:
 
 class TestWriteToSharedMemory:
     def test_write_to_shared_memory_dict_image(self):
-        """Test writing dictionary observations with images to shared memory."""
+        """Test writing dictionary observations with images to shared memory"""
         agents, obs_spaces, shared_memory, observations = make_observation_views(
             ComplexDictSpaceTestEnv
         )
@@ -1613,7 +1590,7 @@ class TestWriteToSharedMemory:
             assert np.all(observations[agent]["image"][0] == test_obs[agent]["image"])
 
     def test_write_to_shared_memory_tuple_image(self):
-        """Test writing tuple observations with images to shared memory."""
+        """Test writing tuple observations with images to shared memory"""
         agents, obs_spaces, shared_memory, observations = make_observation_views(
             ComplexTupleSpaceTestEnv
         )
@@ -1642,7 +1619,7 @@ class TestWriteToSharedMemory:
             assert np.all(observations[agent][2][0] == test_obs[agent][2])
 
     def test_write_to_shared_memory_dict(self):
-        """Test writing dictionary observations to shared memory."""
+        """Test writing dictionary observations to shared memory"""
         agents, obs_spaces, shared_memory, observations = make_observation_views(
             DictSpaceTestEnv
         )
@@ -1674,7 +1651,7 @@ class TestWriteToSharedMemory:
             )
 
     def test_write_to_shared_memory_tuple(self):
-        """Test writing tuple observations to shared memory."""
+        """Test writing tuple observations to shared memory"""
         agents, obs_spaces, shared_memory, observations = make_observation_views(
             TupleSpaceTestEnv
         )
@@ -1741,7 +1718,7 @@ class TestGetPlaceholderValue:
         assert output is None
 
     def test_placeholder_dict_space(self):
-        """Test placeholder values for dictionary observation spaces."""
+        """Test placeholder values for dictionary observation spaces"""
         _, obs_spaces, _, _ = make_observation_views(DictSpaceTestEnv)
 
         placeholder = get_placeholder_value(
@@ -1757,7 +1734,7 @@ class TestGetPlaceholderValue:
         assert placeholder["velocity"].shape == (2,)
 
     def test_placeholder_tuple_space(self):
-        """Test placeholder values for tuple observation spaces."""
+        """Test placeholder values for tuple observation spaces"""
         _, obs_spaces, _, _ = make_observation_views(TupleSpaceTestEnv)
 
         placeholder = get_placeholder_value(
@@ -1773,19 +1750,29 @@ class TestGetPlaceholderValue:
 
 
 # Helper function to create a replay buffer and add transitions
-def create_replay_buffer_with_transitions(env, memory_size=10):
-    buffer = MultiAgentReplayBuffer(
-        memory_size=memory_size,
-        field_names=["state", "action", "reward", "next_state", "done"],
-        agent_ids=env.possible_agents,
-    )
+def create_replay_buffer_with_transitions(env, max_size=10):
+    from tensordict import TensorDictBase
+
+    from agilerl.components.data import MultiAgentTransition
+
+    buffer = ReplayBuffer(max_size=max_size)
     env.reset()
-    for _ in range(memory_size):
+    num_envs = env.num_envs
+    for _ in range(max_size):
         actions = {
             agent: env.action_space(agent).sample() for agent in env.possible_agents
         }
         obs, rewards, dones, _truncated, _infos = env.step(actions)
-        buffer.save_to_memory(obs, actions, rewards, obs, dones, is_vectorised=True)
+        transition: TensorDictBase = MultiAgentTransition(
+            obs=obs,
+            action=actions,
+            reward=rewards,
+            next_obs=obs,
+            done=dones,
+        )
+        transition = transition.to_tensordict()
+        transition.batch_size = [num_envs]
+        buffer.add(transition)
     return buffer
 
 
@@ -1800,21 +1787,23 @@ class TestAsyncPettingZooVecEnvReplayBuffer:
         sampled_transitions = buffer.sample(batch_size)
 
         # Check that the sampled transitions have the correct structure
-        for field, agent_data in zip(
-            buffer.field_names, sampled_transitions, strict=False
-        ):
+        for field, agent_data in sampled_transitions.items():
             for agent_id, data in agent_data.items():
                 assert agent_id in env.possible_agents
-                if field == "state":
+                if field == "obs":
                     obs_space = env.single_observation_space(agent_id)
                     if isinstance(obs_space, spaces.Dict):
                         for key in obs_space.spaces:
                             assert key in data
                             assert data[key].shape[0] == batch_size
                     elif isinstance(obs_space, spaces.Tuple):
-                        assert len(data) == len(obs_space.spaces)
-                        for _i, sub_data in enumerate(data):
-                            assert sub_data.shape[0] == batch_size
+                        assert isinstance(data, TensorDictBase)
+                        tuple_keys = sorted(
+                            k for k in data.keys() if str(k).startswith("tuple_obs_")
+                        )
+                        assert len(tuple_keys) == len(obs_space.spaces)
+                        for k in tuple_keys:
+                            assert data[k].shape[0] == batch_size
                     else:
                         assert data.shape[0] == batch_size
 

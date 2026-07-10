@@ -6,7 +6,13 @@ from contextlib import contextmanager
 
 
 def _format_install_message(package: str) -> str:
-    """Build install hint for a single package."""
+    """Build install hint for a single package.
+
+    :param package: The package name to format the install message for.
+    :type package: str
+    :return: The formatted install message.
+    :rtype: str
+    """
     return (
         f"This tutorial requires the '{package}' package, which is not installed.\n"
         f"Install it with:\n\n"
@@ -33,11 +39,18 @@ class MissingPackageError(ImportError):
 
 
 def _package_from_import_error(exc: ImportError) -> str | None:
-    """Extract the missing package name from an ImportError."""
+    """Extract the missing package name from an ImportError.
+
+    :param exc: The ImportError to extract the missing package name from.
+    :type exc: ImportError
+    :return: The missing package name.
+    :rtype: str | None
+    """
     # ImportError.name is set in Python 3.3+ for "from X import Y" / "import X"
     if getattr(exc, "name", None):
         # name can be the module we tried to import (e.g. 'ucimlrepo')
         return exc.name
+
     # Fallback: parse "No module named 'foo'" or "No module named \"foo\""
     msg = str(exc)
     match = re.search(r"No module named\s+['\"]([^'\"]+)['\"]", msg)

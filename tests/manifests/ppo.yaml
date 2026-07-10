@@ -1,0 +1,28 @@
+---
+algorithm:
+    name: PPO
+    lr: 0.001
+    learn_step: 2048
+    gae_lambda: 0.95
+    clip_coef: 0.2
+    ent_coef: 0.01
+    update_epochs: 4
+    share_encoders: true
+
+environment:
+    name: LunarLander-v3
+    num_envs: 16
+
+network:
+    latent_dim: 64
+    arch: mlp
+    encoder_config:
+        hidden_size: [64]
+        layer_norm: true
+    head_config:
+        hidden_size: [64]
+
+training:
+    max_steps: 1000
+    evo_steps: 100
+    pop_size: 2

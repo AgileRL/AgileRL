@@ -1,14 +1,13 @@
 .. _DQN tutorial:
 
-Self-play Connect4 with DQN + curriculum learning
-=============================================================
+Self-Play Connect4 with DQN + Curriculum Learning
+=================================================
 
 .. figure:: connect_four_self_opp.gif
    :height: 400
    :align: center
 
    Agent trained to play Connect Four through self-play
-
 
 This tutorial shows how to train a :ref:`DQN<dqn>` agent on the `connect four <https://pettingzoo.farama.org/environments/classic/connect_four/>`_ classic environment.
 
@@ -52,7 +51,7 @@ Compatible Action Spaces
 
 
 Curriculum learning and Self-play Using DQN on Connect Four
----------------------------------------------------------
+------------------------------------------------------------
 
 The following code should run without any issues. The comments are designed to help you understand how to use PettingZoo with AgileRL. If you have any questions, please feel free to ask in the `Discord server <https://discord.com/invite/eB8HyTA2ux>`_.
 
@@ -81,10 +80,10 @@ Importing the following packages, functions and classes will enable us to run th
       from tqdm import tqdm
       from pettingzoo.classic import connect_four_v3
 
+      from agilerl.algorithms import DQN
       from agilerl.components.replay_buffer import ReplayBuffer
       from agilerl.hpo.mutation import Mutations
       from agilerl.hpo.tournament import TournamentSelection
-      from agilerl.utils.utils import create_population
 
 Curriculum Learning
 ^^^^^^^^^^^^^^^^^^^
@@ -654,6 +653,8 @@ Before we go any further in this tutorial, it would be helpful to define and set
 
    .. code-block:: python
 
+      from gymnasium import spaces
+
       device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
       print("===== AgileRL Curriculum Learning Demo =====")
 
@@ -662,39 +663,6 @@ Before we go any further in this tutorial, it would be helpful to define and set
       # Load lesson for curriculum
       with open(f"./curriculums/connect_four/lesson{lesson_number}.yaml") as file:
          LESSON = yaml.safe_load(file)
-
-      # Define the network configuration
-      NET_CONFIG = {
-         "encoder_config": {
-            "channel_size": [128],  # CNN channel size
-            "kernel_size": [4],  # CNN kernel size
-            "stride_size": [1],  # CNN stride size
-         },
-         "head_config": {"hidden_size": [64, 64]},  # Network head hidden size
-      }
-
-      # Define the initial hyperparameters
-      INIT_HP = {
-         "POPULATION_SIZE": 6,
-         # "ALGO": "Rainbow DQN",  # Algorithm
-         "ALGO": "DQN",  # Algorithm
-         "DOUBLE": True,
-         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-         "BATCH_SIZE": 256,  # Batch size
-         "LR": 1e-4,  # Learning rate
-         "GAMMA": 0.99,  # Discount factor
-         "MEMORY_SIZE": 100000,  # Max memory buffer size
-         "LEARN_STEP": 1,  # Learning frequency
-         "N_STEP": 1,  # Step number to calculate td error
-         "PER": False,  # Use prioritized experience replay buffer
-         "ALPHA": 0.6,  # Prioritized replay buffer parameter
-         "TAU": 0.01,  # For soft update of target parameters
-         "BETA": 0.4,  # Importance sampling coefficient
-         "PRIOR_EPS": 0.000001,  # Minimum priority for sampling
-         "NUM_ATOMS": 51,  # Unit number of support
-         "V_MIN": 0.0,  # Minimum value of support
-         "V_MAX": 200.0,  # Maximum value of support
-      }
 
       # Define the connect four environment
       env = connect_four_v3.env()
@@ -709,34 +677,52 @@ Before we go any further in this tutorial, it would be helpful to define and set
       # Warp the environment in the curriculum learning wrapper
       env = CurriculumEnv(env, LESSON)
 
-      # Pre-process dimensions for PyTorch layers
+      # Pre-process dimensions for PyTorch layers (channels-first: C, H, W)
       # We only need to worry about the state dim of a single agent
-      # We flatten the 6x7x2 observation as input to the agent"s neural network
-      observation_space = observation_space_channels_to_first(observation_spaces[0])
+      _ob = observation_spaces[0]
+      observation_space = spaces.Box(
+         low=np.moveaxis(_ob.low, -1, -3),
+         high=np.moveaxis(_ob.high, -1, -3),
+         dtype=_ob.dtype,
+      )
       action_space = action_spaces[0]
 
-      # Mutation config for RL hyperparameters
-      hp_config = HyperparameterConfig(
-         lr = RLParameter(min=1e-4, max=1e-2),
-         batch_size = RLParameter(min=8, max=64),
-         learn_step = RLParameter(min=1, max=120, grow_factor=1.5, shrink_factor=0.75)
+      # Configure network architecture
+      net_config = {
+         "encoder_config": {
+            "channel_size": [128],  # CNN channel size
+            "kernel_size": [4],  # CNN kernel size
+            "stride_size": [1],  # CNN stride size
+         },
+         "head_config": {"hidden_size": [64, 64]},  # Network head hidden size
+      }
+
+      # Algorithm hyperparameters
+      init_hp = {
+         "double": True,
+         "batch_size": 256,
+         "lr": 1e-4,
+         "gamma": 0.99,
+         "learn_step": 2,
+         "tau": 0.01,
+      }
+
+      # Initialize population
+      population_size = 6
+      pop = DQN.population(
+         size=population_size,
+         observation_space=observation_space,
+         action_space=action_space,
+         net_config=net_config,
+         device=device,
+         **init_hp,
       )
 
-      # Create a population ready for evolutionary hyper-parameter optimisation
-      pop = create_population(
-         INIT_HP["ALGO"],
-         observation_space,
-         action_space,
-         NET_CONFIG,
-         INIT_HP,
-         hp_config,
-         population_size=INIT_HP["POPULATION_SIZE"],
-         device=device,
-      )
+      memory_size = 20000
 
       # Configure the replay buffer
       memory = ReplayBuffer(
-         max_size=INIT_HP["MEMORY_SIZE"],  # Max replay buffer size
+         max_size=memory_size,  # Max replay buffer size
          device=device,
       )
 
@@ -744,8 +730,7 @@ Before we go any further in this tutorial, it would be helpful to define and set
       tournament = TournamentSelection(
          tournament_size=2,  # Tournament selection size
          elitism=True,  # Elitism in tournament selection
-         population_size=INIT_HP["POPULATION_SIZE"],  # Population size
-         eval_loop=1,  # Evaluate using last N fitness scores
+         population_size=population_size,  # Population size
       )
 
       # Instantiate a mutations object (used for HPO)
@@ -817,7 +802,7 @@ account for the fact that the agent will play as both player 0 and player 1. We 
          """
          state = observation["observation"]
          # Pre-process dimensions for PyTorch (N, C, H, W)
-         state = obs_channels_to_first(state)
+         state = np.moveaxis(state, -1, -3)
          if player == 1:
             # Swap pieces so that the agent always sees the board from the same perspective
             state[[0, 1], :, :] = state[[1, 0], :, :]
@@ -844,7 +829,7 @@ can be loaded to the population as follows:
                # Load pretrained checkpoint
                agent.load_checkpoint(LESSON["pretrained_path"])
                # Reinit optimizer for new task
-               agent.lr = INIT_HP["LR"]
+               agent.lr = init_hp["lr"]
                agent.optimizer = OptimizerWrapper(
                   torch.optim.Adam,
                   networks=agent.actor,
@@ -904,18 +889,18 @@ to optimize hyperparameters and maximise the performance of our agents in a sing
                # set the wandb project where this run will be logged
                project="AgileRL",
                name="{}-EvoHPO-{}-{}Opposition-CNN-{}".format(
-                  "connect_four_v3",
-                  INIT_HP["ALGO"],
-                  LESSON["opponent"],
-                  datetime.now().strftime("%m%d%Y%H%M%S"),
-               ),
-               # track hyperparameters and run metadata
-               config={
-                  "algo": "Evo HPO Rainbow DQN",
-                  "env": "connect_four_v3",
-                  "INIT_HP": INIT_HP,
-                  "lesson": LESSON,
-               },
+               "connect_four_v3",
+               "DQN",
+               LESSON["opponent"],
+               datetime.now().strftime("%m%d%Y%H%M%S"),
+            ),
+            # track hyperparameters and run metadata
+            config={
+               "algo": "Evo HPO Rainbow DQN",
+               "env": "connect_four_v3",
+               "init_hp": init_hp,
+               "lesson": LESSON,
+            },
          )
 
       total_steps = 0

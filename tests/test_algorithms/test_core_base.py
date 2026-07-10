@@ -54,10 +54,12 @@ right branch was taken with the right kwargs.
 
 from __future__ import annotations
 
+import importlib
 import inspect
 import logging
 import re
 import shutil
+import sys
 import warnings
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -73,7 +75,7 @@ from accelerate.state import AcceleratorState
 from gymnasium import spaces
 from torch import optim
 
-from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl import HAS_DEEPSPEED, HAS_LLM_DEPENDENCIES, HAS_VLLM
 from agilerl.algorithms.core.base import (
     EvolvableAlgorithm,
     LLMAlgorithm,
@@ -88,20 +90,44 @@ from agilerl.modules import EvolvableMLP
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.utils.algo_utils import VLLMConfig
 from tests.test_algorithms.test_base import DummyMARLAlgorithm, DummyRLAlgorithm
-from tests.test_algorithms.test_llms.test_grpo import create_module
+
+create_module = None
+if HAS_DEEPSPEED and HAS_VLLM:
+    # create_module lives in test_grpo, which importorskips deepspeed/vllm.
+    from tests.test_algorithms.test_llms.test_grpo import create_module
 
 pytest.importorskip("peft", reason="LLM checkpoint tests require peft.")
 pytest.importorskip("transformers", reason="LLM checkpoint tests require transformers.")
 
+deepspeed_config_stage_2 = None
+if HAS_DEEPSPEED and HAS_VLLM:
+    from tests.test_algorithms.test_llms.test_grpo import deepspeed_config_stage_2
+
 if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
     from peft import LoraConfig
 
-    from tests.test_algorithms.test_llms.test_grpo import deepspeed_config_stage_2
-
 _LLM_DEPS_SKIP = pytest.mark.skipif(
-    not HAS_LLM_DEPENDENCIES,
-    reason="LLM dependencies not installed",
+    not HAS_LLM_DEPENDENCIES, reason="agilerl[llm] not installed"
 )
+
+_VLLM_SKIP = pytest.mark.skipif(not HAS_VLLM, reason="vLLM not installed")
+
+
+def test_core_base_vllm_types_none_when_vllm_not_installed():
+    """vLLM symbols are None when HAS_VLLM is false at import time."""
+    original_module = sys.modules.pop("agilerl.algorithms.core.base", None)
+
+    try:
+        with patch("agilerl.HAS_VLLM", False):
+            reloaded = importlib.import_module("agilerl.algorithms.core.base")
+            assert reloaded.LLM is None
+            assert reloaded.CompletionOutput is None
+            assert reloaded.SamplingParams is None
+    finally:
+        sys.modules["agilerl.algorithms.core.base"] = original_module
+        import agilerl.algorithms.core as _core_pkg
+
+        _core_pkg.base = original_module
 
 
 @pytest.fixture
@@ -1535,6 +1561,12 @@ def _make_mock_peft_actor():
 class _StubLLMAlgorithm(LLMAlgorithm):
     """Concrete stub of the abstract LLMAlgorithm for testing."""
 
+    def __init__(self, *args, **kwargs):
+        actor_network = kwargs.get("actor_network")
+        super().__init__(*args, **kwargs)
+        if actor_network is not None:
+            self.actor = actor_network
+
     def learn(self, *a, **kw):
         return None
 
@@ -1615,6 +1647,142 @@ def _make_llm_agent(
     agent.registry.groups = []
     agent.registry.optimizers = []
     return agent
+
+
+class TestLLMAlgorithmPopulation:
+    """Tests for :meth:`LLMAlgorithm.population`."""
+
+    @staticmethod
+    def _population_kwargs() -> dict:
+        return {
+            "batch_size": 4,
+            "lr": 1e-4,
+            "max_grad_norm": 0.0,
+            "clone": True,
+            "calc_position_embeddings": False,
+            "seed": 42,
+            "pad_token_id": 0,
+            "pad_token": "<pad>",
+            "use_liger_loss": False,
+            "lora_config": MagicMock(),
+        }
+
+    @staticmethod
+    def _population_init_context():
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _ctx():
+            with (
+                patch.object(LLMAlgorithm, "_initialize_actors"),
+                patch.object(LLMAlgorithm, "_configure_vllm"),
+                patch.object(LLMAlgorithm, "wrap_models"),
+                patch.object(EvolvableAlgorithm, "_registry_init"),
+                patch(
+                    "agilerl.algorithms.core.base.broadcast_object_list",
+                    side_effect=lambda obj_list, from_process=0: list(obj_list),
+                ),
+            ):
+                yield
+
+        return _ctx()
+
+    @pytest.mark.skipif(
+        not HAS_LLM_DEPENDENCIES,
+        reason="LLM dependencies not installed",
+    )
+    def test_population_builds_requested_size_without_accelerator(self):
+        with (
+            self._population_init_context(),
+            patch(
+                "agilerl.algorithms.core.base.clone_llm",
+                return_value=_make_mock_peft_actor(),
+            ) as mock_clone,
+        ):
+            population = _StubLLMAlgorithm.population(
+                size=3,
+                accelerator=None,
+                device="cpu",
+                actor_network=_make_mock_peft_actor(),
+                **self._population_kwargs(),
+            )
+
+        assert len(population) == 3
+        assert mock_clone.call_count == 2
+        assert population[0].index == 0
+        assert population[1].index == 1
+        assert population[2].index == 2
+        assert population[1].accelerator is None
+        assert population[2].accelerator is None
+
+    @pytest.mark.skipif(
+        not HAS_LLM_DEPENDENCIES,
+        reason="LLM dependencies not installed",
+    )
+    def test_population_with_accelerator_clones_deepspeed_state(self):
+        """Population clones via ``get_state_dict`` when an accelerator is set."""
+        import agilerl.algorithms.core.base as algo_base
+
+        acc = _make_mock_accelerator(num_processes=1)
+        agent_0 = _make_llm_agent(accelerator=acc)
+
+        with self._population_init_context():
+            with (
+                patch(
+                    "agilerl.algorithms.core.base.clone_llm",
+                    return_value=_make_mock_peft_actor(),
+                ) as mock_clone,
+                patch(
+                    "agilerl.algorithms.core.base.get_state_dict",
+                    return_value={"layer": torch.tensor(1.0)},
+                ) as mock_get_sd,
+            ):
+                cloned_actor = algo_base.clone_llm(
+                    agent_0.actor,
+                    zero_stage=0,
+                    state_dict=algo_base.get_state_dict(agent_0.actor),
+                )
+                agent_1 = _StubLLMAlgorithm(
+                    index=1,
+                    accelerator=_make_mock_accelerator(num_processes=1),
+                    device="cpu",
+                    actor_network=cloned_actor,
+                    **self._population_kwargs(),
+                )
+
+        mock_get_sd.assert_called_once_with(agent_0.actor)
+        mock_clone.assert_called_once()
+        assert agent_1.actor is cloned_actor
+
+    @pytest.mark.skipif(
+        not HAS_LLM_DEPENDENCIES,
+        reason="LLM dependencies not installed",
+    )
+    def test_population_resume_from_checkpoint_loads_each_agent(self):
+        checkpoint_path = "/tmp/llm_checkpoint"
+
+        with (
+            self._population_init_context(),
+            patch(
+                "agilerl.algorithms.core.base.clone_llm",
+                return_value=_make_mock_peft_actor(),
+            ),
+            patch.object(_StubLLMAlgorithm, "load_checkpoint") as mock_load,
+        ):
+            population = _StubLLMAlgorithm.population(
+                size=2,
+                accelerator=None,
+                device="cpu",
+                actor_network=_make_mock_peft_actor(),
+                resume_from_checkpoint=checkpoint_path,
+                **self._population_kwargs(),
+            )
+
+        assert len(population) == 2
+        assert mock_load.call_count == 2
+        mock_load.assert_any_call(checkpoint_path)
+        assert population[0].index == 0
+        assert population[1].index == 1
 
 
 class TestLLMAlgorithmLoad:
@@ -2759,6 +2927,10 @@ class TestLLMGetLmHead:
             agent._get_lm_head()
 
 
+@pytest.mark.skipif(
+    not HAS_VLLM,
+    reason="_configure_vllm exercises the vllm extra.",
+)
 class TestLLMConfigureVllm:
     def test_raises_when_vllm_not_installed(self):
         agent = _make_llm_agent()
@@ -2967,6 +3139,8 @@ def normalize_optimizer_state(value):
 
 def generate_tiny_grpo(accelerator=None) -> GRPO:
     """Build a tiny CPU GRPO agent with (actor, reference) adapters."""
+    if not (HAS_VLLM and HAS_DEEPSPEED):
+        pytest.skip("Need to install agilerl with deepspeed + vllm")
     actor = create_module(input_size=6, max_tokens=4, vocab_size=64, device="cpu")
     return GRPO(
         actor_network=actor,
@@ -3832,6 +4006,8 @@ def get_lora_config(
 
 def _build_grpo_with_lora(lora_config: LoraConfig) -> GRPO:
     """Like ``_build_grpo`` but lets the caller override ``lora_config``."""
+    if not (HAS_VLLM and HAS_DEEPSPEED):
+        pytest.skip("Need to install agilerl with deepspeed + vllm")
     actor = create_module(input_size=6, max_tokens=4, vocab_size=64, device="cpu")
     return GRPO(
         actor_network=actor,
@@ -4039,6 +4215,10 @@ class TestEnsureVllmLoraStagingDir:
         assert agent._vllm_lora_staging_dir_is_temp is False
 
 
+@pytest.mark.skipif(
+    not HAS_VLLM,
+    reason="vLLM rollout sync needs the Linux-only vllm extra.",
+)
 class TestLLMSyncActorToVllm:
     def test_sync_actor_to_vllm_lora_path_exports_adapter_without_merge(self):
         """Adapter-only sync: save_pretrained + add_lora, no merge_adapter."""
@@ -4619,6 +4799,10 @@ class TestLLMUseReferencePolicySeparateAdapter:
         assert critic_param.requires_grad
 
 
+@pytest.mark.skipif(
+    not HAS_VLLM,
+    reason="vLLM rollout sync needs the Linux-only vllm extra.",
+)
 class TestLLMMoveModelToVllmAdapterReload:
     """Second sync uses load_inplace on the LoRA request."""
 
@@ -5163,6 +5347,7 @@ class TestLLMCloneActorNetwork:
             patch(
                 "agilerl.algorithms.core.base.clone_tensors_for_torch_save",
                 return_value={"w": torch.tensor([1.0, 2.0])},
+                create=True,
             ) as mock_clone_sd,
             patch(
                 "agilerl.algorithms.core.base.clone_llm", return_value=cloned_inner
@@ -5188,7 +5373,8 @@ class TestLLMCloneActorNetwork:
 
         with (
             patch(
-                "agilerl.algorithms.core.base.clone_tensors_for_torch_save"
+                "agilerl.algorithms.core.base.clone_tensors_for_torch_save",
+                create=True,
             ) as mock_clone_sd,
             patch(
                 "agilerl.algorithms.core.base.clone_llm", return_value=cloned_inner
@@ -5235,6 +5421,10 @@ class TestLLMLoadAdapterWeights:
         assert not ref_param.requires_grad
 
 
+@pytest.mark.skipif(
+    not HAS_VLLM,
+    reason="_configure_vllm exercises the Linux-only vllm extra.",
+)
 class TestLLMConfigureVllmAcceleratorPaths:
     """_configure_vllm with accelerator and various TP configurations."""
 
@@ -5252,7 +5442,9 @@ class TestLLMConfigureVllmAcceleratorPaths:
 
         mock_llm_instance = MagicMock()
         with patch(
-            "agilerl.algorithms.core.base.LLM", return_value=mock_llm_instance
+            "agilerl.algorithms.core.base.LLM",
+            return_value=mock_llm_instance,
+            create=True,
         ) as mock_llm_cls:
             agent._configure_vllm()
         assert agent.llm is mock_llm_instance
@@ -5285,7 +5477,9 @@ class TestLLMConfigureVllmAcceleratorPaths:
         agent.pretrained_model_name_or_path = "mock-model"
 
         with patch(
-            "agilerl.algorithms.core.base.LLM", return_value=MagicMock()
+            "agilerl.algorithms.core.base.LLM",
+            return_value=MagicMock(),
+            create=True,
         ) as mock_llm_cls:
             agent._configure_vllm()
 
@@ -5316,7 +5510,9 @@ class TestLLMConfigureVllmAcceleratorPaths:
                 return_value=(MagicMock(name="tp_group"), None),
             ),
             patch(
-                "agilerl.algorithms.core.base.LLM", return_value=mock_llm_instance
+                "agilerl.algorithms.core.base.LLM",
+                return_value=mock_llm_instance,
+                create=True,
             ) as mock_llm_cls,
         ):
             agent._configure_vllm()
@@ -6198,6 +6394,7 @@ class TestLLMBackwardPassDeepSpeedScheduler:
         assert agent.lr == 3e-4
 
 
+@_VLLM_SKIP
 @_LLM_DEPS_SKIP
 class TestLLMMoveLoraToVllmErrors:
     def test_raises_when_lora_config_missing(self):
@@ -6299,6 +6496,7 @@ class TestLLMMoveLoraToVllmErrors:
             agent._move_lora_to_vllm()
 
 
+@_VLLM_SKIP
 @_LLM_DEPS_SKIP
 class TestLLMGenerateWithVllmColocateErrors:
     def test_raises_when_prompt_exceeds_max_model_len(self):
@@ -6318,7 +6516,14 @@ class TestLLMGenerateWithVllmColocateErrors:
         agent.llm = MagicMock()
 
         prompts = [{"input_ids": torch.tensor([[1, 2, 3, 4, 5]]), "text": "hello"}]
-        with pytest.raises(ValueError, match="Model prompt length"):
+        with (
+            patch(
+                "agilerl.algorithms.core.base.SamplingParams",
+                return_value=MagicMock(),
+                create=True,
+            ),
+            pytest.raises(ValueError, match="Model prompt length"),
+        ):
             agent._generate_with_vllm_colocate(prompts, group_size=1, temperature=1.0)
 
     def test_tp_slice_sampling_logps_when_capture_enabled(self):

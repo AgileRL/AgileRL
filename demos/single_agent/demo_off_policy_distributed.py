@@ -74,7 +74,6 @@ if __name__ == "__main__":
         tournament_size=2,  # Tournament selection size
         elitism=True,  # Elitism in tournament selection
         population_size=INIT_HP["POP_SIZE"],  # Population size
-        eval_loop=1,  # Evaluate using last N fitness scores
     )
 
     mutations = Mutations(
@@ -113,7 +112,7 @@ if __name__ == "__main__":
     # TRAINING LOOP
     print("Training...")
     pbar = default_progress_bar(max_steps, accelerator=accelerator)
-    while np.less([agent.steps[-1] for agent in pop], max_steps).all():
+    while np.less([agent.steps for agent in pop], max_steps).all():
         accelerator.wait_for_everyone()
         pop_episode_scores = []
         for agent in pop:  # Loop through population
@@ -167,7 +166,7 @@ if __name__ == "__main__":
                 obs = next_obs
 
             pbar.update(evo_steps // len(pop))
-            agent.steps[-1] += steps
+            agent.steps += steps
             pop_episode_scores.append(completed_episode_scores)
 
         # Reset epsilon start to latest decayed value for next round of population training
@@ -194,7 +193,7 @@ if __name__ == "__main__":
         if accelerator.is_main_process:
             pbar.write(
                 f"--- Global steps {total_steps} ---\n"
-                f"Steps: {[agent.steps[-1] for agent in pop]}\n"
+                f"Steps: {[agent.steps for agent in pop]}\n"
                 f"Scores: {mean_scores}\n"
                 f"Fitnesses: {[f'{fitness:.2f}' for fitness in fitnesses]}\n"
                 f"5 fitness avgs: {[f'{np.mean(agent.fitness[-5:]):.2f}' for agent in pop]}\n",
@@ -217,10 +216,6 @@ if __name__ == "__main__":
         accelerator.wait_for_everyone()
         for model in pop:
             model.wrap_models()
-
-        # Update step counter
-        for agent in pop:
-            agent.steps.append(agent.steps[-1])
 
     pbar.close()
     env.close()

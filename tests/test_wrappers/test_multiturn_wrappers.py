@@ -434,7 +434,7 @@ class TestRolloutEnvFromDataset:
             reward_fn,
             _ChrTokenizer(),
             test_dataset=self._TEST_ROWS,
-            prompt_builder=lambda q: f"P:{q}",
+            prompt_builder=lambda row: f"P:{row['question']}",
             pad_id=None,
             apply_chat_template=False,
         )

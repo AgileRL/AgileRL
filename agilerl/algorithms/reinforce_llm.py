@@ -33,6 +33,7 @@ from agilerl.utils.algo_utils import (
 )
 from agilerl.utils.llm_utils import (
     BitsAndBytesConfig,
+    aggregate_metrics_dict,
     build_completion_mask,
     clipped_is_surrogate,
     masked_mean,
@@ -338,6 +339,9 @@ class REINFORCE(LLMAlgorithm):
         if self.wrap:
             self.wrap_models()
 
+        for m in ("loss", "kl", "entropy", "completion_length"):
+            self.metrics.register(m)
+
     def get_action(
         self,
         obs: LLMObsType,
@@ -442,8 +446,8 @@ class REINFORCE(LLMAlgorithm):
             Parallel to the stacked ``completion_ids`` rows. ``None`` disables
             the correction for this update.
         :type sampling_logps: list[torch.Tensor | None] | None
-        :return: Dict with keys ``mean_loss``, ``mean_kl``, ``mean_pg_loss``,
-            ``mean_entropy``, averaged over all minibatch updates.
+        :return: Dict with keys ``loss``, ``kl``, ``pg_loss``,
+            ``entropy``, averaged over all minibatch updates.
         :rtype: dict[str, float]
         """
         self._prepare_vllm_for_training()
@@ -481,10 +485,10 @@ class REINFORCE(LLMAlgorithm):
                 else num_samples
             )
             learn_metrics = {
-                "mean_loss": 0.0,
-                "mean_kl": 0.0,
-                "mean_pg_loss": 0.0,
-                "mean_entropy": 0.0,
+                "loss": 0.0,
+                "kl": 0.0,
+                "pg_loss": 0.0,
+                "entropy": 0.0,
             }
             updates = 0
 
@@ -492,11 +496,9 @@ class REINFORCE(LLMAlgorithm):
                 completion_ids,
                 batch_size,
             )
-
             token_rewards = self._compute_token_rewards(
                 action_masks, rewards_2d, turn_ids
             )
-
             old_log_probs = torch.masked_fill(old_log_probs, ~action_mask_bool, 1.0)
             reference_log_probs = torch.masked_fill(
                 reference_log_probs, ~action_mask_bool, 1.0
@@ -594,10 +596,10 @@ class REINFORCE(LLMAlgorithm):
                             batch_sampling_log_probs,
                         )
                         self._backward_pass(pg_loss)
-                        learn_metrics["mean_kl"] += metrics["kl"]
-                        learn_metrics["mean_entropy"] += metrics["entropy"]
-                        learn_metrics["mean_pg_loss"] += metrics["pg_loss"]
-                        learn_metrics["mean_loss"] += pg_loss.item()
+                        learn_metrics["kl"] += metrics["kl"]
+                        learn_metrics["entropy"] += metrics["entropy"]
+                        learn_metrics["pg_loss"] += metrics["pg_loss"]
+                        learn_metrics["loss"] += pg_loss.item()
                         updates += 1
                         continue
 
@@ -646,20 +648,35 @@ class REINFORCE(LLMAlgorithm):
 
                     self._backward_pass(pg_loss)
 
-                    learn_metrics["mean_kl"] += masked_mean(
-                        kl, batch_action_mask
-                    ).item()
-                    learn_metrics["mean_entropy"] += masked_entropy.item()
-                    learn_metrics["mean_pg_loss"] += pg_loss.item()
-                    learn_metrics["mean_loss"] += pg_loss.item()
+                    learn_metrics["kl"] += masked_mean(kl, batch_action_mask).item()
+                    learn_metrics["entropy"] += masked_entropy.item()
+                    learn_metrics["pg_loss"] += pg_loss.item()
+                    learn_metrics["loss"] += pg_loss.item()
                     updates += 1
 
-        result = {
+        averaged = {
             metric: value / max(updates, 1) for metric, value in learn_metrics.items()
         }
+        result = dict(averaged)
         # Sampling-mismatch metrics are computed once over the full batch, so
         # they bypass the per-update averaging above.
         result.update(is_metrics)
+
+        # Wire averaged metrics into the metrics tracker (new API).
+        completion_length = float(np.mean([c.shape[-1] for c in experiences[0]]))
+        agg = aggregate_metrics_dict(
+            self.accelerator,
+            {
+                "loss": averaged["loss"],
+                "kl": averaged["kl"],
+                "entropy": averaged["entropy"],
+                "completion_length": completion_length,
+            },
+        )
+        agg["completion_length"] = int(agg["completion_length"])
+        for key, value in agg.items():
+            self.metrics.log(key, value)
+
         return result
 
     def _validate_core_args(

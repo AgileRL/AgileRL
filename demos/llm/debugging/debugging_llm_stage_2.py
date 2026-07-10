@@ -223,10 +223,6 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
             init_hp=init_hp,
             max_steps=int(dbg["max_sample_steps"]),
             evaluation_interval=int(dbg["evaluation_interval"]),
-            wb=False,
-            save_elite=False,
-            verbose=True,
-            accelerator=accelerator,
             env_factory=env_factory,
         )
     finally:

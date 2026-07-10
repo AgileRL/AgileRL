@@ -210,35 +210,6 @@ def setup_rs_norm_multi_agent():
     return wrapper, mock_agent
 
 
-@pytest.fixture
-def setup_rs_norm_multi_agent_dict():
-    observation_space = {
-        "agent_1": spaces.Dict(
-            {
-                "sensor1": spaces.Box(low=-1.0, high=1.0, shape=(3,)),
-                "sensor2": spaces.Box(low=-1.0, high=1.0, shape=(2,)),
-            },
-        ),
-        "other_agent_1": spaces.Dict(
-            {
-                "sensor1": spaces.Box(low=-1.0, high=1.0, shape=(4,)),
-                "sensor2": spaces.Box(low=-1.0, high=1.0, shape=(1,)),
-            },
-        ),
-    }
-    mock_agent = MagicMock(spec=MultiAgentRLAlgorithm)
-    mock_agent.observation_space = observation_space
-    mock_agent.action_space = {
-        "agent_1": spaces.Discrete(2),
-        "other_agent_1": spaces.Discrete(2),
-    }
-    mock_agent.device = "cpu"
-    mock_agent.training = True
-
-    wrapper = RSNorm(mock_agent)
-    return wrapper, mock_agent
-
-
 class TestRSNormGetState:
     def test_set_get_state(self, setup_rs_norm):
         wrapper, mock_agent = setup_rs_norm
@@ -258,7 +229,6 @@ class TestRSNormDevice:
         ppo = PPO(
             observation_space,
             action_space,
-            use_rollout_buffer=True,
             num_envs=1,
         )
         wrapper = RSNorm(ppo)
@@ -332,10 +302,11 @@ class TestRSNormNormalizeObservation:
 
     def test_normalize_observation_multi_agent(self, setup_rs_norm_multi_agent):
         wrapper, _ = setup_rs_norm_multi_agent
-        obs = {
+        raw_obs = {
             "agent_1": torch.tensor([1.0, 2.0, 3.0]),
             "other_agent_1": torch.tensor([1.0, 2.0]),
         }
+        obs = {agent_id: tensor.clone() for agent_id, tensor in raw_obs.items()}
         wrapper.obs_rms["agent_1"].mean = torch.tensor([1.0, 1.0, 1.0])
         wrapper.obs_rms["agent_1"].var = torch.tensor([1.0, 1.0, 1.0])
         wrapper.obs_rms["agent_1"].epsilon = 1e-4
@@ -343,20 +314,20 @@ class TestRSNormNormalizeObservation:
         wrapper.obs_rms["other_agent_1"].var = torch.tensor([1.0, 1.0])
         wrapper.obs_rms["other_agent_1"].epsilon = 1e-4
 
-        normalized_obs = wrapper.normalize_observation(obs)
         expected_obs = {
-            "agent_1": (obs["agent_1"] - wrapper.obs_rms["agent_1"].mean)
+            "agent_1": (raw_obs["agent_1"] - wrapper.obs_rms["agent_1"].mean)
             / torch.sqrt(
                 wrapper.obs_rms["agent_1"].var + wrapper.obs_rms["agent_1"].epsilon,
             ),
             "other_agent_1": (
-                obs["other_agent_1"] - wrapper.obs_rms["other_agent_1"].mean
+                raw_obs["other_agent_1"] - wrapper.obs_rms["other_agent_1"].mean
             )
             / torch.sqrt(
                 wrapper.obs_rms["other_agent_1"].var
                 + wrapper.obs_rms["other_agent_1"].epsilon,
             ),
         }
+        normalized_obs = wrapper.normalize_observation(obs)
         assert torch.allclose(
             normalized_obs["agent_1"], expected_obs["agent_1"], atol=1e-2
         )
@@ -366,57 +337,27 @@ class TestRSNormNormalizeObservation:
             atol=1e-2,
         )
 
-    def test_normalize_observation_multi_agent_dict(
-        self, setup_rs_norm_multi_agent_dict
-    ):
-        wrapper, _ = setup_rs_norm_multi_agent_dict
-        obs = {
-            "agent_1": {
-                "sensor1": torch.tensor([1.0, 2.0, 3.0]),
-                "sensor2": torch.tensor([1.0, 2.0]),
-            },
-            "other_agent_1": {
-                "sensor1": torch.tensor([1.0, 2.0, 3.0, 4.0]),
-                "sensor2": torch.tensor([1.0]),
-            },
-        }
-        wrapper.obs_rms["agent_1"]["sensor1"].mean = torch.tensor([1.0, 1.0, 1.0])
-        wrapper.obs_rms["agent_1"]["sensor1"].var = torch.tensor([1.0, 1.0, 1.0])
-        wrapper.obs_rms["agent_1"]["sensor1"].epsilon = 1e-4
-        wrapper.obs_rms["agent_1"]["sensor2"].mean = torch.tensor([1.0, 1.0])
-        wrapper.obs_rms["agent_1"]["sensor2"].var = torch.tensor([1.0, 1.0])
-        wrapper.obs_rms["agent_1"]["sensor2"].epsilon = 1e-4
-        wrapper.obs_rms["other_agent_1"]["sensor1"].mean = torch.tensor(
-            [1.0, 1.0, 1.0, 1.0]
-        )
-        wrapper.obs_rms["other_agent_1"]["sensor1"].var = torch.tensor(
-            [1.0, 1.0, 1.0, 1.0]
-        )
-        wrapper.obs_rms["other_agent_1"]["sensor1"].epsilon = 1e-4
-        wrapper.obs_rms["other_agent_1"]["sensor2"].mean = torch.tensor([1.0])
-        wrapper.obs_rms["other_agent_1"]["sensor2"].var = torch.tensor([1.0])
-        wrapper.obs_rms["other_agent_1"]["sensor2"].epsilon = 1e-4
-
-        normalized_obs = wrapper.normalize_observation(obs)
-
-        for agent_id, sensor_key in (
-            ("agent_1", "sensor1"),
-            ("agent_1", "sensor2"),
-            ("other_agent_1", "sensor1"),
-            ("other_agent_1", "sensor2"),
-        ):
-            agent_rms = wrapper.obs_rms[agent_id][sensor_key]
-            expected = (obs[agent_id][sensor_key] - agent_rms.mean) / torch.sqrt(
-                agent_rms.var + agent_rms.epsilon,
-            )
-            assert torch.allclose(
-                normalized_obs[agent_id][sensor_key],
-                expected,
-                atol=1e-2,
-            )
-
 
 class TestRSNormUpdateStatistics:
+    def test_update_statistics_multi_agent(self, setup_rs_norm_multi_agent):
+        wrapper, _ = setup_rs_norm_multi_agent
+        obs = {
+            "agent_1": torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
+            "other_agent_1": torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
+        }
+        wrapper.update_statistics(obs)
+
+        assert torch.allclose(
+            wrapper.obs_rms["agent_1"].mean,
+            torch.tensor([2.5, 3.5, 4.5]),
+            atol=1e-2,
+        )
+        assert torch.allclose(
+            wrapper.obs_rms["other_agent_1"].mean,
+            torch.tensor([2.0, 3.0]),
+            atol=1e-2,
+        )
+
     def test_update_statistics(self, setup_rs_norm):
         wrapper, _ = setup_rs_norm
         obs = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
@@ -459,90 +400,6 @@ class TestRSNormUpdateStatistics:
         assert torch.allclose(
             wrapper.obs_rms["sensor2"].var,
             torch.tensor([1.0, 1.0]),
-            atol=1e-2,
-        )
-
-    def test_update_statistics_multi_agent(self, setup_rs_norm_multi_agent):
-        wrapper, _ = setup_rs_norm_multi_agent
-        obs = {
-            "agent_1": torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
-            "other_agent_1": torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
-        }
-        wrapper.update_statistics(obs)
-
-        assert torch.allclose(
-            wrapper.obs_rms["agent_1"].mean,
-            torch.tensor([2.5, 3.5, 4.5]),
-            atol=1e-2,
-        )
-        assert torch.allclose(
-            wrapper.obs_rms["agent_1"].var,
-            torch.tensor([2.25, 2.25, 2.25]),
-            atol=1e-2,
-        )
-        assert torch.allclose(
-            wrapper.obs_rms["other_agent_1"].mean,
-            torch.tensor([2.0, 3.0]),
-            atol=1e-2,
-        )
-        assert torch.allclose(
-            wrapper.obs_rms["other_agent_1"].var,
-            torch.tensor([1.0, 1.0]),
-            atol=1e-2,
-        )
-
-    def test_update_statistics_multi_agent_dict(self, setup_rs_norm_multi_agent_dict):
-        wrapper, _ = setup_rs_norm_multi_agent_dict
-        obs = {
-            "agent_1": {
-                "sensor1": torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
-                "sensor2": torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
-            },
-            "other_agent_1": {
-                "sensor1": torch.tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]]),
-                "sensor2": torch.tensor([[1.0], [2.0]]),
-            },
-        }
-        wrapper.update_statistics(obs)
-
-        assert torch.allclose(
-            wrapper.obs_rms["agent_1"]["sensor1"].mean,
-            torch.tensor([2.5, 3.5, 4.5]),
-            atol=1e-2,
-        )
-        assert torch.allclose(
-            wrapper.obs_rms["agent_1"]["sensor1"].var,
-            torch.tensor([2.25, 2.25, 2.25]),
-            atol=1e-2,
-        )
-        assert torch.allclose(
-            wrapper.obs_rms["agent_1"]["sensor2"].mean,
-            torch.tensor([2.0, 3.0]),
-            atol=1e-2,
-        )
-        assert torch.allclose(
-            wrapper.obs_rms["agent_1"]["sensor2"].var,
-            torch.tensor([1.0, 1.0]),
-            atol=1e-2,
-        )
-        assert torch.allclose(
-            wrapper.obs_rms["other_agent_1"]["sensor1"].mean,
-            torch.tensor([3.0, 4.0, 5.0, 6.0]),
-            atol=1e-2,
-        )
-        assert torch.allclose(
-            wrapper.obs_rms["other_agent_1"]["sensor1"].var,
-            torch.tensor([4.0, 4.0, 4.0, 4.0]),
-            atol=1e-2,
-        )
-        assert torch.allclose(
-            wrapper.obs_rms["other_agent_1"]["sensor2"].mean,
-            torch.tensor([1.5]),
-            atol=1e-2,
-        )
-        assert torch.allclose(
-            wrapper.obs_rms["other_agent_1"]["sensor2"].var,
-            torch.tensor([0.25]),
             atol=1e-2,
         )
 
@@ -597,16 +454,17 @@ class TestRSNormGetAction:
 
 
 class TestRSNormLearn:
-    def test_learn(self, setup_rs_norm):
-        wrapper, _mock_agent = setup_rs_norm
+    def test_learn_rejects_non_tensordict(self, setup_rs_norm):
+        wrapper, _ = setup_rs_norm
         experiences = (
-            torch.tensor([1.0, 2.0, 3.0]),  # State
-            torch.tensor([0]),  # Action
-            torch.tensor([1.0]),  # Reward
-            torch.tensor([4.0, 5.0, 6.0]),  # Next state
-            torch.tensor([0]),  # Done
+            torch.tensor([1.0, 2.0, 3.0]),
+            torch.tensor([0]),
+            torch.tensor([1.0]),
+            torch.tensor([4.0, 5.0, 6.0]),
+            torch.tensor([0]),
         )
-        wrapper.learn(experiences)
+        with pytest.raises(ValueError, match="TensorDict"):
+            wrapper.learn(experiences)
 
     @pytest.mark.parametrize(
         "observation_space",
@@ -652,10 +510,7 @@ class TestRSNormLearn:
             ddpg.scores.append(0)
             actor_loss, critic_loss = ddpg.learn(experiences)
 
-        with pytest.raises(
-            ValueError,
-            match="Experiences must be provided if not using a rollout buffer",
-        ):
+        with pytest.raises(ValueError, match="Experiences must be provided"):
             ddpg.learn()
 
         assert isinstance(actor_loss, float)
@@ -671,7 +526,7 @@ class TestRSNormLearn:
     def test_rsnorm_learn_ppo(self, vector_space):
         observation_space = vector_space
         action_space = copy.deepcopy(vector_space)
-        ppo = PPO(observation_space, action_space, use_rollout_buffer=True, num_envs=1)
+        ppo = PPO(observation_space, action_space, num_envs=1)
         ppo = RSNorm(ppo)
 
         env = DummyEnv(
@@ -703,12 +558,12 @@ class TestRSNormLearn:
             batch_size=[batch],
         )
         loss_info = wrapper.learn(td)
-        assert isinstance(loss_info, (tuple, dict, float))
+        assert isinstance(loss_info, (tuple, dict)) or isinstance(loss_info, float)
 
     def test_rsnorm_learn_rollout_buffer_full(self, vector_space):
         obs_space = vector_space
         action_space = copy.deepcopy(vector_space)
-        ppo = PPO(obs_space, action_space, use_rollout_buffer=True, num_envs=2)
+        ppo = PPO(obs_space, action_space, num_envs=2)
         ppo.rollout_buffer.full = True
         ppo.rollout_buffer.pos = 10
         wrapper = RSNorm(ppo)
@@ -735,7 +590,7 @@ class TestRSNormClone:
         ddpg = ddpg_norm.agent
         ddpg.fitness = [200, 200, 200]
         ddpg.scores = [94, 94, 94]
-        ddpg.steps = [2500]
+        ddpg.steps = 2500
         ddpg.tensor_attribute = torch.randn(1)
         clone = ddpg_norm.clone()
         clone_agent = clone.agent
@@ -946,7 +801,7 @@ class TestRSNormSaveLoadCheckpoint:
         assert ddpg.index == 0
         assert ddpg.scores == []
         assert ddpg.fitness == []
-        assert ddpg.steps == [0]
+        assert ddpg.steps == 0
 
         loaded_agent = DDPG.load(checkpoint_path)
         ddpg = loaded_agent.agent
@@ -973,7 +828,7 @@ class TestRSNormSaveLoadCheckpoint:
         assert ddpg.index == 0
         assert ddpg.scores == []
         assert ddpg.fitness == []
-        assert ddpg.steps == [0]
+        assert ddpg.steps == 0
 
 
 class TestRSNormBuildRms:
@@ -988,6 +843,18 @@ class TestRSNormBuildRms:
         rms = RSNorm.build_rms(obs_space, norm_obs_keys=None, device="cpu")
         assert isinstance(rms, dict)
         assert set(rms) == {"sensor1", "sensor2", "other"}
+
+    def test_rsnorm_build_rms_dict_filters_norm_obs_keys(self):
+        obs_space = spaces.Dict(
+            {
+                "sensor1": spaces.Box(low=-1.0, high=1.0, shape=(2,)),
+                "sensor2": spaces.Box(low=-1.0, high=1.0, shape=(3,)),
+                "other": spaces.Box(low=-1.0, high=1.0, shape=(1,)),
+            }
+        )
+        rms = RSNorm.build_rms(obs_space, norm_obs_keys=["sensor1"], device="cpu")
+        assert set(rms) == {"sensor1"}
+        assert rms["sensor1"].mean.shape == (2,)
 
     def test_rsnorm_build_rms_tuple_space(self):
         obs_space = spaces.Tuple(
@@ -1011,21 +878,6 @@ class TestRSNormBuildRms:
         assert isinstance(rms, dict)
         assert set(rms) == {"sensor1", "sensor2"}
 
-    def test_rsnorm_build_rms_dict_norm_obs_keys_filter(self):
-        obs_space = spaces.Dict(
-            {
-                "sensor1": spaces.Box(low=-1.0, high=1.0, shape=(2,)),
-                "sensor2": spaces.Box(low=-1.0, high=1.0, shape=(3,)),
-                "other": spaces.Box(low=-1.0, high=1.0, shape=(1,)),
-            }
-        )
-        rms = RSNorm.build_rms(
-            obs_space,
-            norm_obs_keys=["sensor1", "sensor2"],
-            device="cpu",
-        )
-        assert set(rms) == {"sensor1", "sensor2"}
-
 
 class TestAgentWrapperGetActionLearn:
     def test_agent_wrapper_base_get_action_learn(self, vector_space):
@@ -1042,6 +894,21 @@ class TestAgentWrapperGetActionLearn:
         experiences = get_experiences_batch(vector_space, vector_space, 4, "cpu")
         result = wrapper.learn(experiences)
         assert result is not None
+
+    def test_agent_wrapper_learn_without_experiences(self, vector_space):
+        from agilerl.wrappers.agent import AgentWrapper
+
+        class MinimalWrapper(AgentWrapper):
+            pass
+
+        agent = DDPG(vector_space, copy.deepcopy(vector_space), batch_size=4)
+        wrapper = MinimalWrapper(agent)
+        wrapper.wrapped_learn = MagicMock(return_value={"loss": 0.0})
+
+        result = wrapper.learn()
+
+        wrapper.wrapped_learn.assert_called_once_with()
+        assert result == {"loss": 0.0}
 
 
 class TestAgentWrapperSetattr:
@@ -1236,7 +1103,266 @@ class TestAsyncAgentsWrapperExtractInactiveAgents:
         assert "agent_0" in filtered
 
 
+class TestAsyncAgentsWrapperInsertPlaceholderActions:
+    def test_insert_placeholder_skips_missing_agent_id(
+        self, ma_vector_space, ma_discrete_space
+    ):
+        agent = IPPO(
+            observation_spaces=ma_vector_space[:2],
+            action_spaces=ma_discrete_space[:2],
+            agent_ids=["agent_0", "agent_1"],
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        action_dict = {"agent_0": np.array([[1.0, 2.0]], dtype=np.float32)}
+        inactive_agents = {"agent_1": np.array([0])}
+
+        result = wrapper._insert_placeholder_actions(action_dict, inactive_agents)
+
+        assert np.array_equal(result["agent_0"], action_dict["agent_0"])
+        assert "agent_1" not in result
+
+    def test_insert_placeholder_skips_none_action(
+        self, ma_vector_space, ma_discrete_space
+    ):
+        agent = IPPO(
+            observation_spaces=ma_vector_space[:1],
+            action_spaces=ma_discrete_space[:1],
+            agent_ids=["agent_0"],
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        action_dict = {"agent_0": None}
+        inactive_agents = {"agent_0": np.array([0])}
+
+        result = wrapper._insert_placeholder_actions(action_dict, inactive_agents)
+
+        assert result["agent_0"] is None
+
+    def test_insert_placeholder_1d_integer_actions(
+        self, ma_vector_space, ma_discrete_space
+    ):
+        agent = IPPO(
+            observation_spaces=ma_vector_space[:1],
+            action_spaces=ma_discrete_space[:1],
+            agent_ids=["agent_0"],
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        action_dict = {"agent_0": np.array([1, 2, 3], dtype=np.int32)}
+        inactive_agents = {"agent_0": np.array([1])}
+
+        result = wrapper._insert_placeholder_actions(action_dict, inactive_agents)
+
+        assert result["agent_0"].shape == (4,)
+        assert result["agent_0"].tolist() == [1, 0, 2, 3]
+
+
+class TestAsyncAgentsWrapperAlignExperiences:
+    def test_align_skips_agent_with_missing_fields(self, ma_vector_space):
+        from gymnasium import spaces as gym_spaces
+
+        from agilerl.algorithms import MADDPG
+
+        agent_ids = ["agent_0"]
+        action_spaces = [
+            gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+        ]
+        agent = MADDPG(
+            observation_spaces=ma_vector_space[:1],
+            action_spaces=action_spaces,
+            agent_ids=agent_ids,
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        experiences = {
+            "obs": {"agent_0": np.array([[1.0, 2.0, 3.0]])},
+            "action": {"agent_0": np.array([[0.1, 0.2]])},
+            "reward": {},
+            "next_obs": {"agent_0": np.array([[1.0, 2.0, 3.0]])},
+            "done": {"agent_0": np.array([[0.0]])},
+        }
+
+        aligned = wrapper._align_async_off_policy_experiences(experiences)
+
+        assert "agent_0" not in aligned["obs"]
+
+    def test_align_skips_single_obs_when_next_obs_missing(self, ma_vector_space):
+        from gymnasium import spaces as gym_spaces
+
+        from agilerl.algorithms import MADDPG
+
+        agent = MADDPG(
+            observation_spaces=ma_vector_space[:1],
+            action_spaces=[
+                gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+            ],
+            agent_ids=["agent_0"],
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        experiences = {
+            "obs": {"agent_0": np.array([[1.0, 2.0, 3.0]])},
+            "action": {"agent_0": np.array([[0.1, 0.2]])},
+            "reward": {"agent_0": np.array([[1.0]])},
+            "next_obs": {"agent_0": None},
+            "done": {"agent_0": np.array([[0.0]])},
+        }
+
+        aligned = wrapper._align_async_off_policy_experiences(experiences)
+
+        assert "agent_0" not in aligned["obs"]
+
+    def test_align_infers_next_obs_from_state_sequence(self, ma_vector_space):
+        from gymnasium import spaces as gym_spaces
+
+        from agilerl.algorithms import MADDPG
+
+        agent = MADDPG(
+            observation_spaces=ma_vector_space[:1],
+            action_spaces=[
+                gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+            ],
+            agent_ids=["agent_0"],
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        obs = np.array(
+            [[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [7.0, 8.0, 9.0, 10.0, 11.0, 12.0]]
+        )
+        experiences = {
+            "obs": {"agent_0": obs},
+            "action": {
+                "agent_0": np.array([[0.1, 0.2], [0.3, 0.4]], dtype=np.float32),
+            },
+            "reward": {"agent_0": np.array([[1.0], [2.0]], dtype=np.float32)},
+            "next_obs": {"agent_0": np.full_like(obs, np.nan)},
+            "done": {"agent_0": np.array([[0.0], [1.0]], dtype=np.float32)},
+        }
+
+        aligned = wrapper._align_async_off_policy_experiences(experiences)
+
+        assert len(aligned["obs"]["agent_0"]) == 1
+        assert len(aligned["next_obs"]["agent_0"]) == 1
+        np.testing.assert_array_equal(aligned["obs"]["agent_0"], obs[:-1])
+        np.testing.assert_array_equal(aligned["next_obs"]["agent_0"], obs[1:])
+
+    def test_align_trims_mismatched_lengths(self, ma_vector_space):
+        from gymnasium import spaces as gym_spaces
+
+        from agilerl.algorithms import MADDPG
+
+        agent = MADDPG(
+            observation_spaces=ma_vector_space[:1],
+            action_spaces=[
+                gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+            ],
+            agent_ids=["agent_0"],
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        experiences = {
+            "obs": {
+                "agent_0": np.arange(15).reshape(5, 3).astype(np.float32),
+            },
+            "action": {
+                "agent_0": np.arange(8).reshape(4, 2).astype(np.float32),
+            },
+            "reward": {
+                "agent_0": np.arange(3).reshape(3, 1).astype(np.float32),
+            },
+            "next_obs": {
+                "agent_0": np.arange(12).reshape(4, 3).astype(np.float32),
+            },
+            "done": {
+                "agent_0": np.zeros((4, 1), dtype=np.float32),
+            },
+        }
+
+        aligned = wrapper._align_async_off_policy_experiences(experiences)
+
+        assert len(aligned["obs"]["agent_0"]) == 3
+        assert len(aligned["action"]["agent_0"]) == 3
+        assert len(aligned["reward"]["agent_0"]) == 3
+        assert len(aligned["next_obs"]["agent_0"]) == 3
+        assert len(aligned["done"]["agent_0"]) == 3
+
+    def test_align_skips_when_min_len_is_zero(self, ma_vector_space):
+        from gymnasium import spaces as gym_spaces
+
+        from agilerl.algorithms import MADDPG
+
+        agent = MADDPG(
+            observation_spaces=ma_vector_space[:1],
+            action_spaces=[
+                gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+            ],
+            agent_ids=["agent_0"],
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        experiences = {
+            "obs": {"agent_0": np.empty((0, 6), dtype=np.float32)},
+            "action": {"agent_0": np.array([[0.1, 0.2]], dtype=np.float32)},
+            "reward": {"agent_0": np.array([[1.0]], dtype=np.float32)},
+            "next_obs": {
+                "agent_0": np.array([[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]], dtype=np.float32),
+            },
+            "done": {"agent_0": np.array([[0.0]], dtype=np.float32)},
+        }
+
+        aligned = wrapper._align_async_off_policy_experiences(experiences)
+
+        assert "agent_0" not in aligned["obs"]
+
+
 class TestAsyncAgentsWrapperGetAction:
+    def test_async_get_action_maddpg_non_tuple_return(self, ma_vector_space):
+        from gymnasium import spaces as gym_spaces
+
+        from agilerl.algorithms import MADDPG
+
+        agent = MADDPG(
+            observation_spaces=ma_vector_space[:1],
+            action_spaces=[
+                gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+            ],
+            agent_ids=["agent_0"],
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        expected = {"agent_0": np.array([[0.1, 0.2]], dtype=np.float32)}
+        wrapper.wrapped_get_action = MagicMock(return_value=expected)
+
+        result = wrapper.get_action(
+            {"agent_0": np.array([[1.0] * 6], dtype=np.float32)}
+        )
+
+        assert result is expected
+        wrapper.wrapped_get_action.assert_called_once()
+
+    def test_async_get_action_ippo_non_tuple_return(
+        self, ma_vector_space, ma_discrete_space
+    ):
+        agent = IPPO(
+            observation_spaces=ma_vector_space[:1],
+            action_spaces=ma_discrete_space[:1],
+            agent_ids=["agent_0"],
+            device="cpu",
+        )
+        wrapper = AsyncAgentsWrapper(agent)
+        expected = {"agent_0": np.array([1], dtype=np.int64)}
+        wrapper.wrapped_get_action = MagicMock(return_value=expected)
+
+        result = wrapper.get_action(
+            {"agent_0": np.array([[1.0] * 6], dtype=np.float32)},
+            {"agent_0": {}},
+        )
+
+        assert isinstance(result, dict)
+        assert "agent_0" in result
+        assert result["agent_0"].shape[0] == 1
+
     def test_async_get_action_with_inactive_float_actions(
         self, ma_vector_space, ma_discrete_space
     ):
@@ -1277,57 +1403,6 @@ class TestAsyncAgentsWrapperGetAction:
         action_dict, _, _, _ = wrapper.get_action(obs, {a: {} for a in obs})
         assert "agent_0" in action_dict
         assert "agent_1" in action_dict
-
-    def test_async_get_action_non_tuple_return(
-        self, ma_vector_space, ma_discrete_space
-    ):
-        agent = IPPO(
-            observation_spaces=ma_vector_space[:2],
-            action_spaces=ma_discrete_space[:2],
-            agent_ids=["agent_0", "agent_1"],
-            device="cpu",
-        )
-        wrapper = AsyncAgentsWrapper(agent)
-        active_action = np.zeros((1, 1), dtype=np.int64)
-        wrapper.wrapped_get_action = lambda obs, *a, **kw: {
-            "agent_0": active_action,
-        }
-        obs = {
-            "agent_0": np.array([[1.0] * 6, [np.nan] * 6], dtype=np.float32),
-        }
-
-        result = wrapper.get_action(obs)
-
-        # On-policy bare-dict return path (not a tuple of log_probs / values).
-        assert isinstance(result, dict)
-        assert not isinstance(result, tuple)
-        assert tuple(result.keys()) == ("agent_0",)
-        assert result["agent_0"].shape == (2, 1)
-        assert result["agent_0"].dtype == np.int64
-        assert np.array_equal(result["agent_0"][0], active_action[0])
-        assert result["agent_0"][1, 0] == 0
-
-    def test_async_get_action_non_tuple_with_inactive_agents(
-        self, ma_vector_space, ma_discrete_space
-    ):
-        agent = IPPO(
-            observation_spaces=ma_vector_space[:2],
-            action_spaces=ma_discrete_space[:2],
-            agent_ids=["agent_0", "agent_1"],
-            device="cpu",
-        )
-        wrapper = AsyncAgentsWrapper(agent)
-        wrapper.wrapped_get_action = lambda obs, *a, **kw: {
-            "agent_0": np.zeros((1, 1), dtype=np.int64),
-        }
-        obs = {
-            "agent_0": np.array([[1.0] * 6, [np.nan] * 6], dtype=np.float32),
-        }
-
-        result = wrapper.get_action(obs)
-
-        assert isinstance(result, dict)
-        assert result["agent_0"].shape == (2, 1)
 
     def test_async_get_action_with_inactive_off_policy_agents(self, ma_vector_space):
         from gymnasium import spaces as gym_spaces
@@ -1420,266 +1495,6 @@ class TestAsyncAgentsWrapperStackExperiences:
         stacked = wrapper.stack_experiences(experience)
         assert stacked["agent_0"] is None
         assert stacked["agent_1"] is not None
-
-    def test_async_stack_experiences_passthrough_non_dict_element(
-        self, ma_vector_space, ma_discrete_space
-    ):
-        """``stack_experiences`` recurses into tuples; non-dict elements
-        (e.g. plain tensors / ndarrays) should be returned unchanged. This
-        covers the ``return experiences`` short-circuit in the recursive helper.
-        """
-        agent = IPPO(
-            observation_spaces=ma_vector_space[:2],
-            action_spaces=ma_discrete_space[:2],
-            agent_ids=["agent_0", "agent_1"],
-            device="cpu",
-        )
-        wrapper = AsyncAgentsWrapper(agent)
-        raw_array = np.array([1.0, 2.0, 3.0])
-        # Tuple of mixed types: one dict, one bare ndarray. The recursion sees
-        # the ndarray and bails through ``return experiences``.
-        out = wrapper.stack_experiences(({"agent_0": raw_array}, raw_array))
-        assert isinstance(out, tuple)
-        assert out[1] is raw_array
-
-
-def _make_maddpg_wrapper(ma_vector_space):
-    """Build a CPU MADDPG wrapper for direct off-policy helper tests."""
-    from gymnasium import spaces as gym_spaces
-
-    from agilerl.algorithms import MADDPG
-
-    agent_ids = ["agent_0", "agent_1"]
-    action_spaces = [
-        gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
-        gym_spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
-    ]
-    agent = MADDPG(
-        observation_spaces=ma_vector_space[:2],
-        action_spaces=action_spaces,
-        agent_ids=agent_ids,
-        device="cpu",
-    )
-    return AsyncAgentsWrapper(agent)
-
-
-class TestAsyncAgentsWrapperInsertPlaceholderActions:
-    def test_skips_agent_not_in_action_dict(self, ma_vector_space):
-        wrapper = _make_maddpg_wrapper(ma_vector_space)
-        action_dict = {"agent_0": np.array([[0.1, 0.2]], dtype=np.float32)}
-        inactive = {"agent_1": np.array([0])}
-
-        out = wrapper._insert_placeholder_actions(action_dict, inactive)
-
-        assert "agent_1" not in out
-        assert out["agent_0"].shape == (1, 2)
-
-    def test_skips_when_action_is_none(self, ma_vector_space):
-        wrapper = _make_maddpg_wrapper(ma_vector_space)
-        action_dict = {"agent_0": None}
-        inactive = {"agent_0": np.array([0])}
-
-        out = wrapper._insert_placeholder_actions(action_dict, inactive)
-
-        assert out["agent_0"] is None
-
-    def test_integer_dtype_placeholder_is_zero(self, ma_vector_space):
-        wrapper = _make_maddpg_wrapper(ma_vector_space)
-        action_dict = {"agent_0": np.array([[3, 4]], dtype=np.int64)}
-        inactive = {"agent_0": np.array([1])}
-
-        out = wrapper._insert_placeholder_actions(action_dict, inactive)
-
-        assert out["agent_0"].dtype == np.int64
-        assert out["agent_0"].shape == (2, 2)
-        assert np.array_equal(out["agent_0"][1], np.array([0, 0]))
-
-    def test_float_placeholder_is_nan(self, ma_vector_space):
-        wrapper = _make_maddpg_wrapper(ma_vector_space)
-        action_dict = {"agent_0": np.array([[0.5, 0.5]], dtype=np.float32)}
-        inactive = {"agent_0": np.array([0])}
-
-        out = wrapper._insert_placeholder_actions(action_dict, inactive)
-
-        assert np.isnan(out["agent_0"][0]).all()
-
-    def test_one_dim_action_uses_scalar_placeholder(self, ma_vector_space):
-        wrapper = _make_maddpg_wrapper(ma_vector_space)
-        action_dict = {"agent_0": np.array([0.5, 0.7], dtype=np.float32)}
-        inactive = {"agent_0": np.array([1])}
-
-        out = wrapper._insert_placeholder_actions(action_dict, inactive)
-
-        assert out["agent_0"].shape == (3,)
-        assert np.isnan(out["agent_0"][1])
-
-
-class TestAsyncAgentsWrapperAlignAsyncOffPolicyExperiences:
-    def test_drops_agent_with_none_field(self, ma_vector_space):
-        wrapper = _make_maddpg_wrapper(ma_vector_space)
-        states = {"agent_0": np.zeros((3, 6)), "agent_1": np.zeros((3, 6))}
-        actions = {"agent_0": np.zeros((3, 2)), "agent_1": None}
-        rewards = {"agent_0": np.zeros(3), "agent_1": np.zeros(3)}
-        next_states = {"agent_0": np.zeros((3, 6)), "agent_1": np.zeros((3, 6))}
-        dones = {"agent_0": np.zeros(3), "agent_1": np.zeros(3)}
-
-        out = wrapper._align_async_off_policy_experiences(
-            (states, actions, rewards, next_states, dones)
-        )
-        aligned_states, *_ = out
-
-        assert "agent_0" in aligned_states
-        assert "agent_1" not in aligned_states
-
-    def test_missing_next_state_infers_from_sequence(self, ma_vector_space):
-        wrapper = _make_maddpg_wrapper(ma_vector_space)
-        states = {"agent_0": np.arange(18.0).reshape(3, 6)}
-        actions = {"agent_0": np.zeros((3, 2))}
-        rewards = {"agent_0": np.array([1.0, 2.0, 3.0])}
-        # next_states absent entirely
-        next_states = {}
-        dones = {"agent_0": np.array([0, 0, 0])}
-
-        (
-            aligned_states,
-            _aligned_actions,
-            aligned_rewards,
-            aligned_next,
-            aligned_dones,
-        ) = wrapper._align_async_off_policy_experiences(
-            (states, actions, rewards, next_states, dones)
-        )
-
-        assert aligned_states["agent_0"].shape == (2, 6)
-        assert np.array_equal(aligned_next["agent_0"], states["agent_0"][1:])
-        assert aligned_rewards["agent_0"].tolist() == [1.0, 2.0]
-        assert aligned_dones["agent_0"].tolist() == [0, 0]
-
-    def test_missing_next_state_skips_when_too_few_samples(self, ma_vector_space):
-        wrapper = _make_maddpg_wrapper(ma_vector_space)
-        states = {"agent_0": np.zeros((1, 6))}
-        actions = {"agent_0": np.zeros((1, 2))}
-        rewards = {"agent_0": np.zeros(1)}
-        next_states = {}
-        dones = {"agent_0": np.zeros(1)}
-
-        aligned_states, *_ = wrapper._align_async_off_policy_experiences(
-            (states, actions, rewards, next_states, dones)
-        )
-
-        assert aligned_states == {}
-
-    def test_all_nan_next_state_treated_as_missing(self, ma_vector_space):
-        wrapper = _make_maddpg_wrapper(ma_vector_space)
-        states = {"agent_0": np.ones((3, 6))}
-        actions = {"agent_0": np.zeros((3, 2))}
-        rewards = {"agent_0": np.zeros(3)}
-        next_states = {"agent_0": np.full((3, 6), np.nan)}
-        dones = {"agent_0": np.zeros(3)}
-
-        aligned_states, _, _, aligned_next, _ = (
-            wrapper._align_async_off_policy_experiences(
-                (states, actions, rewards, next_states, dones)
-            )
-        )
-
-        assert aligned_states["agent_0"].shape == (2, 6)
-        assert np.array_equal(aligned_next["agent_0"], states["agent_0"][1:])
-
-    def test_trims_to_min_len_when_lengths_differ(self, ma_vector_space):
-        wrapper = _make_maddpg_wrapper(ma_vector_space)
-        states = {"agent_0": np.zeros((5, 6))}
-        actions = {"agent_0": np.zeros((4, 2))}
-        rewards = {"agent_0": np.zeros(3)}
-        next_states = {"agent_0": np.zeros((5, 6))}
-        dones = {"agent_0": np.zeros(4)}
-
-        (
-            aligned_states,
-            aligned_actions,
-            aligned_rewards,
-            aligned_next,
-            aligned_dones,
-        ) = wrapper._align_async_off_policy_experiences(
-            (states, actions, rewards, next_states, dones)
-        )
-
-        assert aligned_states["agent_0"].shape == (3, 6)
-        assert aligned_actions["agent_0"].shape == (3, 2)
-        assert aligned_rewards["agent_0"].shape == (3,)
-        assert aligned_next["agent_0"].shape == (3, 6)
-        assert aligned_dones["agent_0"].shape == (3,)
-
-    def test_zero_min_len_drops_agent(self, ma_vector_space):
-        wrapper = _make_maddpg_wrapper(ma_vector_space)
-        states = {"agent_0": np.zeros((0, 6))}
-        actions = {"agent_0": np.zeros((0, 2))}
-        rewards = {"agent_0": np.zeros(0)}
-        next_states = {"agent_0": np.zeros((0, 6))}
-        dones = {"agent_0": np.zeros(0)}
-
-        aligned_states, *_ = wrapper._align_async_off_policy_experiences(
-            (states, actions, rewards, next_states, dones)
-        )
-
-        assert aligned_states == {}
-
-    def test_zero_min_len_in_present_next_state_branch_drops_agent(
-        self, ma_vector_space
-    ):
-        """When ``next_states`` is supplied (non-NaN) but one of the per-agent
-        sequence lengths is zero, the ``min_len == 0`` continue in the else
-        branch of ``_align_async_off_policy_experiences`` should fire and the
-        agent is dropped from the aligned output.
-        """
-        wrapper = _make_maddpg_wrapper(ma_vector_space)
-        # next_states is populated and not NaN, so we go down the else branch.
-        states = {"agent_0": np.ones((3, 6))}
-        actions = {"agent_0": np.zeros((0, 2))}  # length zero forces min_len=0
-        rewards = {"agent_0": np.zeros(3)}
-        next_states = {"agent_0": np.ones((3, 6))}
-        dones = {"agent_0": np.zeros(3)}
-
-        aligned_states, *_ = wrapper._align_async_off_policy_experiences(
-            (states, actions, rewards, next_states, dones)
-        )
-
-        assert aligned_states == {}
-
-
-class TestAsyncAgentsWrapperGetActionOffPolicy:
-    def test_passthrough_when_get_action_returns_non_tuple(self, ma_vector_space):
-        wrapper = _make_maddpg_wrapper(ma_vector_space)
-        # Replace get_action so it returns a bare action dict (no env/raw split).
-        wrapper.wrapped_get_action = lambda obs, *a, **kw: {
-            "agent_0": np.zeros((1, 2), dtype=np.float32),
-        }
-        obs = {"agent_0": np.array([[1.0] * 6], dtype=np.float32)}
-
-        result = wrapper.get_action(obs)
-
-        assert isinstance(result, dict)
-        assert "agent_0" in result
-
-    def test_passes_extra_return_values_through(self, ma_vector_space):
-        wrapper = _make_maddpg_wrapper(ma_vector_space)
-        sentinel = {"meta": "value"}
-
-        def fake_get_action(obs, *_a, **_kw):
-            return (
-                {"agent_0": np.zeros((1, 2), dtype=np.float32)},
-                {"agent_0": np.zeros((1, 2), dtype=np.float32)},
-                sentinel,
-            )
-
-        wrapper.wrapped_get_action = fake_get_action
-        obs = {"agent_0": np.array([[1.0] * 6], dtype=np.float32)}
-
-        env_actions, raw_actions, extra = wrapper.get_action(obs)
-
-        assert extra is sentinel
-        assert env_actions["agent_0"].shape == (1, 2)
-        assert raw_actions["agent_0"].shape == (1, 2)
 
 
 class TestAsyncAgentsWrapperLearn:
@@ -1978,13 +1793,13 @@ class TestAsyncAgentsWrapperLearn:
         rewards = {agent_id: rewards[agent_id][:min_len] for agent_id in agent_ids}
         dones = {agent_id: dones[agent_id][:min_len] for agent_id in agent_ids}
 
-        experiences = (
-            states,
-            actions,
-            rewards,
-            next_states,
-            dones,
-        )
+        experiences = {
+            "obs": states,
+            "action": actions,
+            "reward": rewards,
+            "next_obs": next_states,
+            "done": dones,
+        }
 
         assert any(len(v) > 0 for v in states.values())
         loss_info = async_agent.learn(experiences)

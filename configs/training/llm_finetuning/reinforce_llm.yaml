@@ -1,40 +1,55 @@
 ---
-MUTATION_PARAMS:
-    NO_MUT: 0.1
-    RL_HP_MUT: 0.6
-    MUT_SD: 0.1
-    RAND_SEED: 42
-    MIN_LR: 0.0000001
-    MAX_LR: 0.00001
-    MIN_BETA: 0.0001
-    MAX_BETA: 0.01
+algorithm:
+    name: LLMREINFORCE
+    batch_size: 4
+    beta: 0.001
+    lr: 0.000005
+    clip_coef: 0.2
+    max_grad_norm: 0.1
+    update_epochs: 1
+    gamma: 0.99
+    temperature: 0.9
+    action_granularity: turn
+    use_vllm: true
+    vllm_config:
+        tensor_parallel_size: 1
+        gpu_memory_utilization: 0.3
+        max_num_seqs: 8
+        sleep_mode: false
 
+environment:
+    env_type: rollout
+    dataset: Jiayi-Pan/Countdown-Tasks-3to4
+    columns:
+        nums: question
+        target: answer
+    reward_file_path: reward.py
+    reward_fn_name: combined_rewards
+    prompt_template:
+        system_0: You are a helpful assistant. You first think about the reasoning process in your mind and then provide the user with the answer.
+        user_1: Using each number in this list only once {question}, create an equation that equals {answer}. You can use basic arithmetic operations (+,
+            -, *, /) and each number can only be used once. Show your work in <redacted_thinking> </redacted_thinking> tags. And return the final equation
+            and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.
+        assistant_2: "Let me solve this step by step.\n<redacted_thinking>"
+    max_reward: 2.0
+    train_test_split: 0.8
 
-INIT_HP:
-    ALGO: LLMREINFORCE
-    BATCH_SIZE: 4
-    BETA: 1.0e-3
-    LR: 5.0e-6
-    CLIP_COEF: 0.2
-    MAX_GRAD_NORM: 0.1
-    UPDATE_EPOCHS: 1
-    TEMPERATURE: 0.9
-    MAX_MODEL_LEN: 2048
-    MAX_OUTPUT_TOKENS: 64
-    TOURN_SIZE: 2
-    GAMMA: 0.99
-    ELITISM: true
-    POP_SIZE: 1
-    EVAL_LOOP: 1
-    USE_VLLM: true
-    MICRO_BATCH_SIZE_PER_GPU: 4
-    ADVANTAGE_GRANULARITY: turn
-    TARGET_MODULES:
-        - q_proj
-        - k_proj
-        - v_proj
-        - o_proj
-    LORA_R: 16
-    LORA_ALPHA: 64
-    LORA_DROPOUT: 0.05
-    LORA_BIAS: none
+training:
+    max_steps: 100000
+    pop_size: 1
+    eval_loop: 1
+    evaluation_interval: 5
+
+network:
+    pretrained_model_name_or_path: Qwen/Qwen2.5-0.5B-Instruct
+    max_context_length: 2048
+    lora_config:
+        lora_r: 16
+        lora_alpha: 64
+        target_modules:
+            - q_proj
+            - k_proj
+            - v_proj
+            - o_proj
+        lora_dropout: 0.05
+        task_type: CAUSAL_LM

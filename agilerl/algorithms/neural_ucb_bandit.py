@@ -2,20 +2,30 @@ from typing import Any
 
 import numpy as np
 import torch
+from accelerate import Accelerator
 from gymnasium import spaces
 from torch import nn, optim
 
 from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
-from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.algorithms.core.registry import (
+    HyperparameterConfig,
+    NetworkGroup,
+    make_default_hp_config,
+)
 from agilerl.modules import EvolvableModule
 from agilerl.networks.value_networks import ValueNetwork
-from agilerl.typing import ExperiencesType, GymEnvType, ObservationType
-from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
+from agilerl.protocols import BanditEnvProtocol
+from agilerl.typing import (
+    ExperiencesType,
+    ObservationType,
+    SupportedObservationSpace,
+)
+from agilerl.utils.algo_utils import make_safe_deepcopies
 from agilerl.utils.evolvable_networks import get_default_encoder_config
 
 
 class NeuralUCB(RLAlgorithm):
-    """Neural Upper Confidence Bound (UCB) algorithm.
+    """Neural Upper Confidence Bound (UCB).
 
     Paper: https://arxiv.org/abs/1911.04462
 
@@ -46,7 +56,7 @@ class NeuralUCB(RLAlgorithm):
     :param mut: Most recent mutation to agent, defaults to None
     :type mut: str, optional
     :param actor_network: Custom actor network, defaults to None
-    :type actor_network: EvolvableModule, optional
+    :type actor_network: EvolvableModule | None, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -57,7 +67,7 @@ class NeuralUCB(RLAlgorithm):
 
     def __init__(
         self,
-        observation_space: spaces.Space,
+        observation_space: SupportedObservationSpace,
         action_space: spaces.Space,
         index: int = 0,
         hp_config: HyperparameterConfig | None = None,
@@ -72,7 +82,7 @@ class NeuralUCB(RLAlgorithm):
         mut: str | None = None,
         actor_network: EvolvableModule | None = None,
         device: str = "cpu",
-        accelerator: Any | None = None,
+        accelerator: Accelerator | None = None,
         wrap: bool = True,
     ) -> None:
         super().__init__(
@@ -120,6 +130,13 @@ class NeuralUCB(RLAlgorithm):
         self.regret = [0]
         self.actor_network = None
 
+        # Default RL hyperparameters to mutate when doing Evo-HPO
+        self.hp_config = self.hp_config or make_default_hp_config(
+            lr=self.lr,
+            batch_size=self.batch_size,
+            learn_step=self.learn_step,
+        )
+
         if actor_network is not None:
             if not isinstance(actor_network, EvolvableModule):
                 msg = f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule."
@@ -133,13 +150,13 @@ class NeuralUCB(RLAlgorithm):
             net_config = {} if net_config is None else net_config
             simba = net_config.get("simba", False)
             encoder_config = (
-                get_default_encoder_config(observation_space, simba)
+                get_default_encoder_config(self.observation_space, simba)
                 if net_config.get("encoder_config") is None
                 else net_config["encoder_config"]
             )
 
             if not simba and not isinstance(
-                observation_space,
+                self.observation_space,
                 (spaces.Dict, spaces.Tuple),
             ):
                 # Layer norm is not used in the original implementation
@@ -148,7 +165,7 @@ class NeuralUCB(RLAlgorithm):
             net_config["encoder_config"] = encoder_config
 
             self.actor = ValueNetwork(
-                observation_space=observation_space,
+                observation_space=self.observation_space,
                 device=self.device,
                 **net_config,
             )
@@ -169,6 +186,9 @@ class NeuralUCB(RLAlgorithm):
         self.register_network_group(
             NetworkGroup(eval_network=self.actor, shared_networks=None, policy=True),
         )
+
+        # Register metrics to keep track of during training
+        self.metrics.register("loss")
 
     def init_params(self) -> None:
         """Initialize the parameters of the network."""
@@ -207,9 +227,7 @@ class NeuralUCB(RLAlgorithm):
             if (mu_raw.numel() == 1 and self.action_dim > 1)
             else mu_raw
         )
-        g = torch.zeros((self.action_dim, self.numel)).to(
-            self.device if self.accelerator is None else self.accelerator.device,
-        )
+        g: torch.Tensor = torch.zeros((self.action_dim, self.numel)).to(self.device)
         if mu_raw.numel() == 1 and self.action_dim > 1:
             self.optimizer.zero_grad()
             mu_raw[0].backward(retain_graph=True)
@@ -258,6 +276,15 @@ class NeuralUCB(RLAlgorithm):
 
         return action
 
+    def _greedy_test_action(self, obs: ObservationType) -> int:
+        """Greedy arm for evaluation: preprocess obs, no UCB bonus or posterior update."""
+        with torch.no_grad():
+            obs_tensor = self.preprocess_observation(obs)
+            mu_raw = self.actor(obs_tensor).reshape(-1)
+            if mu_raw.numel() == 1 and self.action_dim > 1:
+                mu_raw = mu_raw.repeat(self.action_dim)
+            return int(np.argmax(mu_raw.cpu().numpy()))
+
     def learn(self, experiences: ExperiencesType) -> float:
         """Update agent network parameters to learn from experiences.
 
@@ -273,7 +300,7 @@ class NeuralUCB(RLAlgorithm):
         pred_rewards = self.actor(states)
 
         # loss backprop
-        loss = self.criterion(rewards, pred_rewards)
+        loss = self.criterion(pred_rewards, rewards)
         loss += (
             self.reg
             * torch.norm(
@@ -296,21 +323,24 @@ class NeuralUCB(RLAlgorithm):
 
         self.optimizer.step()
 
-        return loss.item()
+        loss = loss.item()
+        self.metrics.log("loss", loss)
+        return loss
 
     def test(
         self,
-        env: GymEnvType,
-        swap_channels: bool = False,
+        env: BanditEnvProtocol,
         max_steps: int = 100,
         loop: int = 1,
     ) -> float:
-        """Return mean test score of agent in environment with epsilon-greedy policy.
+        """Return mean greedy test score in the environment.
 
-        :param env: The environment to be tested in
-        :type env: Gym-style environment
-        :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
-        :type swap_channels: bool, optional
+        Uses :meth:`preprocess_observation` and a greedy forward pass only —
+        unlike :meth:`get_action`, this does not apply the UCB bonus or update
+        ``sigma_inv``.
+
+        :param env: The bandit environment to be tested in
+        :type env: BanditEnvProtocol
         :param max_steps: Maximum number of testing steps, defaults to 500
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean over these tests. Defaults to 3
@@ -326,14 +356,10 @@ class NeuralUCB(RLAlgorithm):
                 obs = env.reset()
                 score = 0
                 for _ in range(max_steps):
-                    if swap_channels:
-                        obs = obs_channels_to_first(obs)
-                    obs = torch.from_numpy(obs).float()
-                    obs = obs.to(self.device)
-                    action = np.argmax(self.actor(obs).cpu().numpy())
+                    action = self._greedy_test_action(obs)
                     obs, reward = env.step(action)
                     score += reward
                 rewards.append(score)
         mean_fit = np.mean(rewards)
-        self.fitness.append(mean_fit)
+        self.metrics.add_fitness(mean_fit)
         return mean_fit

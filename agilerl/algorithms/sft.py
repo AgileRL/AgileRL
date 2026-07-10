@@ -11,6 +11,7 @@ from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.protocols import PreTrainedModelProtocol
 from agilerl.typing import ExperiencesType, LLMObsType
+from agilerl.utils.llm_utils import aggregate_metrics_dict
 
 if TYPE_CHECKING:
     from accelerate import Accelerator
@@ -203,6 +204,9 @@ class SFT(LLMAlgorithm):
         if self.wrap:
             self.wrap_models()
 
+        self.metrics.register("loss")
+        self.metrics.register("perplexity")
+
     def get_action(
         self,
         obs: LLMObsType,
@@ -232,7 +236,7 @@ class SFT(LLMAlgorithm):
         :type experiences: ExperiencesType
         :param training: When ``False`` the backward pass is skipped (eval mode).
         :type training: bool
-        :return: ``{"mean_loss", "mean_perplexity"}`` averaged over all samples in
+        :return: ``(loss, perplexity)`` averaged over all samples in
             the batch.
         :rtype: dict[str, float]
         """
@@ -269,8 +273,8 @@ class SFT(LLMAlgorithm):
         num_updates = 0
 
         learn_metrics = {
-            "mean_loss": 0.0,
-            "mean_perplexity": 0.0,
+            "loss": 0.0,
+            "perplexity": 0.0,
         }
 
         for _ in range(self.update_epochs):
@@ -286,12 +290,20 @@ class SFT(LLMAlgorithm):
                 if training:
                     self._backward_pass(loss)
                 loss_val = loss.item()
-                learn_metrics["mean_loss"] += loss_val
-                learn_metrics["mean_perplexity"] += float(np.exp(min(loss_val, 100)))
+                learn_metrics["loss"] += loss_val
+                learn_metrics["perplexity"] += float(np.exp(min(loss_val, 100)))
                 num_updates += 1
 
-        learn_metrics["mean_loss"] /= num_updates
-        learn_metrics["mean_perplexity"] /= num_updates
+        learn_metrics = {
+            key: value / max(num_updates, 1) for key, value in learn_metrics.items()
+        }
+
+        learn_metrics = aggregate_metrics_dict(self.accelerator, learn_metrics)
+
+        if training:
+            self.metrics.log("loss", learn_metrics["loss"])
+            self.metrics.log("perplexity", learn_metrics["perplexity"])
+
         return learn_metrics
 
     def _sft_loss(
@@ -378,7 +390,7 @@ class SFT(LLMAlgorithm):
             for _ in range(loop):
                 prompts = env.reset()
                 metrics = self.learn(prompts, training=False)
-                losses.append(metrics["mean_loss"])
+                losses.append(metrics["loss"])
             mean_fit = -float(np.mean(losses))
-        self.fitness.append(mean_fit)
+        self.metrics.add_fitness(mean_fit)
         return np.array(mean_fit)

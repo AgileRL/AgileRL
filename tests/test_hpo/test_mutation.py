@@ -10,7 +10,8 @@ from accelerate.state import AcceleratorState
 from accelerate.utils import DeepSpeedPlugin
 from gymnasium import spaces
 
-from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl import HAS_DEEPSPEED, HAS_LLM_DEPENDENCIES, HAS_VLLM
+from agilerl.algorithms import DDPG, DQN, PPO, TD3, NeuralUCB
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 
 if HAS_LLM_DEPENDENCIES:
@@ -30,7 +31,11 @@ from tests.helper_functions import (
     generate_discrete_space,
     generate_random_box_space,
 )
-from tests.test_algorithms.test_llms.test_grpo import create_module
+
+if HAS_DEEPSPEED and HAS_VLLM:
+    from tests.test_algorithms.test_llms.test_grpo import create_module
+else:
+    create_module = None
 
 if TYPE_CHECKING:
     from agilerl.algorithms.core import EvolvableAlgorithm
@@ -65,7 +70,6 @@ SHARED_INIT_HP = {
     "AGENT_IDS": ["agent_0", "agent_1", "other_agent_0"],
     "LAMBDA": 1.0,
     "REG": 0.000625,
-    "CHANNELS_LAST": False,
     "O_U_NOISE": True,
     "EXPL_NOISE": 0.1,
     "MEAN_NOISE": 0.0,
@@ -1498,7 +1502,8 @@ class TestMutationsMutation:
             AcceleratorState._reset_state(True)
 
     @pytest.mark.skipif(
-        not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed"
+        not (HAS_VLLM and HAS_DEEPSPEED),
+        reason="Need to install agilerl with deepspeed + vllm",
     )
     @pytest.mark.parametrize(
         "mutation_type", ["architecture", "parameters", "activation"]
@@ -2084,30 +2089,26 @@ class TestMutationsNoMutation:
 
 class TestMutationsActivationMutation:
     @pytest.mark.gpu
-    @pytest.mark.parametrize("algo", ["PPO", "DDPG", "TD3"])
+    @pytest.mark.parametrize("algo_cls", [PPO, DDPG, TD3])
     def test_warns_for_policy_gradient_algos(
-        self, algo, vector_space, encoder_mlp_config, device
+        self, algo_cls, vector_space, encoder_mlp_config, device
     ):
-        from agilerl.utils.utils import create_population
-
         action_space = (
             generate_random_box_space((2,))
-            if algo in ("DDPG", "TD3")
+            if algo_cls in (DDPG, TD3)
             else generate_discrete_space(2)
         )
-        pop = create_population(
-            algo=algo,
+        pop = algo_cls.population(
+            size=1,
             observation_space=vector_space,
             action_space=action_space,
             net_config=encoder_mlp_config,
-            INIT_HP=SHARED_INIT_HP,
-            population_size=1,
             device=device,
         )
         muts = Mutations(0, 0, 0, 0, 1, 0, 0.1, device=device)
         with pytest.warns(
             UserWarning,
-            match=f"Activation mutations are not supported for {algo}",
+            match=f"Activation mutations are not supported for {algo_cls.__name__}",
         ):
             out = muts.activation_mutation(pop[0].clone(wrap=False))
         assert out.mut == "None"
@@ -2142,7 +2143,8 @@ class TestMutationsActivationMutation:
         assert out.mut == "None"
 
     @pytest.mark.skipif(
-        not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed"
+        not (HAS_VLLM and HAS_DEEPSPEED),
+        reason="Need to install agilerl with deepspeed + vllm",
     )
     @pytest.mark.parametrize("algo", ["GRPO", "DPO"])
     def test_warns_for_llm_algorithms(self, algo, grpo_hp_config, vector_space, device):
@@ -2239,15 +2241,11 @@ class TestGetExpLayer:
     def test_returns_output_layer_for_evolvable_module(
         self, vector_space, discrete_space, encoder_mlp_config
     ):
-        from agilerl.utils.utils import create_population
-
-        pop = create_population(
-            algo="NeuralUCB",
+        pop = NeuralUCB.population(
+            size=1,
             observation_space=vector_space,
             action_space=discrete_space,
             net_config=encoder_mlp_config,
-            INIT_HP=SHARED_INIT_HP,
-            population_size=1,
             device="cpu",
         )
         offspring = pop[0].actor.clone()
@@ -2267,15 +2265,11 @@ def test_set_global_seed(seed):
 def test_get_offspring_eval_modules_returns_policy_and_modules(
     vector_space, discrete_space, encoder_mlp_config
 ):
-    from agilerl.utils.utils import create_population
-
-    pop = create_population(
-        algo="DQN",
+    pop = DQN.population(
+        size=1,
         observation_space=vector_space,
         action_space=discrete_space,
         net_config=encoder_mlp_config,
-        INIT_HP=SHARED_INIT_HP,
-        population_size=1,
         device="cpu",
     )
     policy, offspring_evals = get_offspring_eval_modules(pop[0])

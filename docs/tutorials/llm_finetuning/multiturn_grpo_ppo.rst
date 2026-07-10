@@ -1,7 +1,7 @@
 .. _multiturn_grpo_ppo_tutorial:
 
-Multi-turn finetuning with LLMPPO, LLMREINFORCE, and GRPO
-=========================================================
+Multi-turn Fine-Tuning with LLMPPO, LLMREINFORCE, and GRPO
+==========================================================
 
 In this tutorial, we train three LLM reinforcement learning agents on the same multi-turn GEM task:
 ``LLMPPO``, ``LLMREINFORCE``, and ``GRPO``. The environment, model, tokenizer, and training loop are kept fixed so you can
@@ -17,7 +17,7 @@ Credit assignment: MDP vs bandit formulations
 The core difference between these algorithms is how they answer the question:
 *which actions caused the outcome?*
 
-MDP formulation — ``LLMPPO`` and ``LLMREINFORCE``
+MDP formulation: ``LLMPPO`` and ``LLMREINFORCE``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 These treat multi-turn interaction as a sequential decision process. Each
@@ -48,7 +48,7 @@ matters and that knowing you are at turn 3 of 5, having received a tool error
 at turn 2, is useful signal for the update. This is the right assumption for
 long agentic trajectories where early decisions constrain later ones.
 
-Bandit formulation — ``GRPO``
+Bandit formulation: ``GRPO``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 GRPO collapses the multi-turn trajectory into a single episode return and
@@ -148,6 +148,9 @@ All runs use:
         if hasattr(env_probe, "close"):
             env_probe.close()
 
+        max_model_len = 1024
+        max_output_tokens = 64
+
         def env_factory():
             return RolloutEnv.serving(
                 lambda: gem.make(ENV_NAME),
@@ -155,8 +158,8 @@ All runs use:
                 max_turns=max_turns,
                 pad_id=tokenizer.pad_token_id,
                 apply_chat_template=True,
-                max_model_len=INIT_HP.get("MAX_MODEL_LEN"),
-                max_output_tokens=INIT_HP.get("MAX_OUTPUT_TOKENS"),
+                max_model_len=max_model_len,
+                max_output_tokens=max_output_tokens,
             )
 
         accelerator = create_llm_accelerator()
@@ -167,99 +170,139 @@ All runs use:
             sleep_mode=True,
         )
 
-Run LLMPPO baseline
--------------------
+Run a Baseline
+--------------
 
-Use the LLMPPO multiturn config as a base and keep ``ALGO=LLMPPO``.
+.. tab-set::
 
-.. code-block:: bash
+  .. tab-item:: LLMPPO
 
-    python tutorials/llm_finetuning/multiturn_grpo_ppo.py \
-      --algo LLMPPO \
-      --config configs/training/llm_finetuning/ppo_llm.yaml \
-      --max-steps 4096 \
-      --evaluation-interval 10 \
-      --output-dir saved_llms/multiturn_ppo
+    Use the ``LLMPPO`` multiturn config as a base.
 
-Run LLMREINFORCE baseline
--------------------------
+    .. code-block:: bash
 
-Use the LLMREINFORCE config and set ``ALGO=LLMREINFORCE``.
+      python tutorials/llm_finetuning/multiturn_grpo_ppo.py \
+        --algo LLMPPO \
+        --config configs/training/llm_finetuning/ppo_llm.yaml \
+        --max-steps 4096 \
+        --evaluation-interval 10 \
+        --output-dir saved_llms/multiturn_ppo
 
-.. code-block:: bash
+  .. tab-item:: LLMREINFORCE
 
-    python tutorials/llm_finetuning/multiturn_grpo_ppo.py \
-      --algo LLMREINFORCE \
-      --config configs/training/llm_finetuning/reinforce_llm.yaml \
-      --max-steps 4096 \
-      --evaluation-interval 10 \
-      --output-dir saved_llms/multiturn_reinforce
+    Use the ``LLMREINFORCE`` config.
 
-Run GRPO baseline
------------------
+    .. code-block:: bash
 
-Use the GRPO multiturn config and set ``ALGO=GRPO``.
+      python tutorials/llm_finetuning/multiturn_grpo_ppo.py \
+        --algo LLMREINFORCE \
+        --config configs/training/llm_finetuning/reinforce_llm.yaml \
+        --max-steps 4096 \
+        --evaluation-interval 10 \
+        --output-dir saved_llms/multiturn_reinforce
 
-.. code-block:: bash
+  .. tab-item:: GRPO
 
-    python tutorials/llm_finetuning/multiturn_grpo_ppo.py \
-      --algo GRPO \
-      --config configs/training/llm_finetuning/grpo_multiturn.yaml \
-      --max-steps 4096 \
-      --evaluation-interval 10 \
-      --output-dir saved_llms/multiturn_grpo
+    Use the ``GRPO`` multiturn config.
+
+    .. code-block:: bash
+
+      python tutorials/llm_finetuning/multiturn_grpo_ppo.py \
+        --algo GRPO \
+        --config configs/training/llm_finetuning/grpo_multiturn.yaml \
+        --max-steps 4096 \
+        --evaluation-interval 10 \
+        --output-dir saved_llms/multiturn_grpo
 
 Starter hyperparameters (good first run values)
 -----------------------------------------------
 
 These values are intentionally conservative and align with the shipped configs:
 
-.. collapse:: Suggested ``INIT_HP`` starting points
+.. tab-set::
+
+  .. tab-item:: LLMPPO
 
     .. code-block:: python
 
-        # LLMPPO
-        INIT_HP_PPO = {
-            "ALGO": "LLMPPO",
-            "BATCH_SIZE": 32,
-            "LR_ACTOR": 5e-6,
-            "LR_CRITIC": 5e-5,
-            "BETA": 0.01,
-            "GAMMA": 0.99,
-            "GAE_LAMBDA": 0.95,
-            "VF_COEF": 0.5,
-            "UPDATE_EPOCHS": 2,
-            "MAX_MODEL_LEN": 1024,
-            "MAX_OUTPUT_TOKENS": 64,
-            "USE_VLLM": True,
-            "MICRO_BATCH_SIZE_PER_GPU": 32,
-        }
+      # Algorithm hyperparameters
+      init_hp = {
+          "batch_size": 32,
+          "lr": 5e-6,
+          "lr_critic": 5e-5,
+          "beta": 0.01,
+          "gamma": 0.99,
+          "gae_lambda": 0.95,
+          "vf_coef": 0.5,
+          "update_epochs": 2,
+          "max_model_len": 1024,
+          "max_output_tokens": 64,
+          "use_vllm": True,
+          "vllm_config": vllm_config,
+          "micro_batch_size_per_gpu": 32,
+      }
 
-        # LLMREINFORCE
-        INIT_HP_REINFORCE = {
-            "ALGO": "LLMREINFORCE",
-            "BATCH_SIZE": 32,
-            "LR": 5e-6,
-            "BETA": 0.01,
-            "GAMMA": 0.9,
-            "UPDATE_EPOCHS": 2,
-            "MAX_MODEL_LEN": 1024,
-            "MAX_OUTPUT_TOKENS": 64,
-            "USE_VLLM": True,
-            "MICRO_BATCH_SIZE_PER_GPU": 32,
-        }
+      pop = LLMPPO.population(
+          size=1,
+          model_name=MODEL_PATH,
+          pad_token_id=tokenizer.pad_token_id,
+          pad_token=tokenizer.pad_token,
+          accelerator=accelerator,
+          **init_hp,
+      )
 
-        # GRPO multiturn
-        INIT_HP_GRPO = {
-            "ALGO": "GRPO",
-            "BATCH_SIZE": 16,
-            "GROUP_SIZE": 4,
-            "LR": 3e-4,
-            "BETA": 5e-4,
-            "UPDATE_EPOCHS": 2,
-            "TEMPERATURE": 0.85,
-            "MAX_MODEL_LEN": 2048,
-        }
+  .. tab-item:: LLMREINFORCE
+
+    .. code-block:: python
+
+      # Algorithm hyperparameters
+      init_hp = {
+          "batch_size": 32,
+          "lr": 5e-6,
+          "beta": 0.01,
+          "gamma": 0.9,
+          "update_epochs": 2,
+          "max_model_len": 1024,
+          "max_output_tokens": 64,
+          "use_vllm": True,
+          "vllm_config": vllm_config,
+          "micro_batch_size_per_gpu": 32,
+      }
+
+      pop = LLMREINFORCE.population(
+          size=1,
+          model_name=MODEL_PATH,
+          pad_token_id=tokenizer.pad_token_id,
+          pad_token=tokenizer.pad_token,
+          accelerator=accelerator,
+          **init_hp,
+      )
+
+  .. tab-item:: GRPO
+
+    .. code-block:: python
+
+      # Algorithm hyperparameters
+      init_hp = {
+          "batch_size": 16,
+          "group_size": 4,
+          "lr": 3e-4,
+          "beta": 5e-4,
+          "update_epochs": 2,
+          "temperature": 0.85,
+          "max_model_len": 2048,
+          "use_vllm": True,
+          "vllm_config": vllm_config,
+      }
+
+      pop = GRPO.population(
+          size=1,
+          model_name=MODEL_PATH,
+          pad_token_id=tokenizer.pad_token_id,
+          pad_token=tokenizer.pad_token,
+          accelerator=accelerator,
+          **init_hp,
+      )
 
 .. note::
 
@@ -270,7 +313,7 @@ These values are intentionally conservative and align with the shipped configs:
 Train call (no evo/HPO)
 -----------------------
 
-The key training call is the same for both algorithms. Evolutionary fields are explicitly disabled:
+The key training call is the same for all algorithms. Evolutionary fields are explicitly disabled:
 
 .. code-block:: python
 
@@ -278,7 +321,7 @@ The key training call is the same for both algorithms. Evolutionary fields are e
         pop=[agent],
         max_turns=max_turns,
         env_factory=env_factory,
-        init_hp=INIT_HP,
+        init_hp=init_hp,
         max_steps=4096,
         save_elite=True,
         elite_path="saved_llms/multiturn_tutorial",

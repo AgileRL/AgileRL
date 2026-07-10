@@ -1,6 +1,6 @@
 """CPU tests for the shared :meth:`LLMAlgorithm.test` evaluation loop.
 
-The method only touches ``self.get_action`` and ``self.fitness``, so it is
+The method only touches ``self.get_action`` and ``self.metrics``, so it is
 exercised here with a stub in place of a fully constructed algorithm — no
 model, GPU, deepspeed, or vllm required.
 """
@@ -12,13 +12,18 @@ import torch
 from agilerl.algorithms.core import ActionResult
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.llm_envs import RolloutEnv
+from agilerl.metrics import AgentMetrics
 
 
 class _StubAlgo:
     """Minimal stand-in exposing the attributes ``LLMAlgorithm.test`` uses."""
 
     def __init__(self):
-        self.fitness = []
+        self.metrics = AgentMetrics()
+
+    @property
+    def fitness(self):
+        return list(self.metrics.fitness)
 
     def get_action(self, prompts, training=False):
         del prompts, training

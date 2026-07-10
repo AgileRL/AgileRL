@@ -3,27 +3,38 @@ from typing import Any
 
 import numpy as np
 import torch
+from accelerate import Accelerator
 from gymnasium import spaces
 from tensordict.nn import CudaGraphModule
 from torch import nn, optim
 
 from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
-from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.algorithms.core.registry import (
+    HyperparameterConfig,
+    NetworkGroup,
+    make_default_hp_config,
+)
 from agilerl.modules.base import EvolvableModule
 from agilerl.networks.q_networks import QNetwork
-from agilerl.typing import ExperiencesType, GymEnvType, ObservationType, TorchObsType
-from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
+from agilerl.typing import (
+    ExperiencesType,
+    GymEnvType,
+    ObservationType,
+    SupportedObservationSpace,
+    TorchObsType,
+)
+from agilerl.utils.algo_utils import make_safe_deepcopies
 
 
 class DQN(RLAlgorithm):
-    """Deep Q-Network (DQN) algorithm.
+    """Deep Q-Network (DQN).
 
     Paper: https://arxiv.org/abs/1312.5602
 
     :param observation_space: Observation space of the environment
-    :type observation_space: gymnasium.spaces.Space
+    :type observation_space: SupportedObservationSpace
     :param action_space: Action space of the environment
-    :type action_space: gymnasium.spaces.Space
+    :type action_space: gymnasium.spaces.Discrete
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
     :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
@@ -60,8 +71,8 @@ class DQN(RLAlgorithm):
 
     def __init__(
         self,
-        observation_space: spaces.Space,
-        action_space: spaces.Space,
+        observation_space: SupportedObservationSpace,
+        action_space: spaces.Discrete,
         index: int = 0,
         hp_config: HyperparameterConfig | None = None,
         net_config: dict[str, Any] | None = None,
@@ -75,7 +86,7 @@ class DQN(RLAlgorithm):
         normalize_images: bool = True,
         actor_network: EvolvableModule | None = None,
         device: str = "cpu",
-        accelerator: Any | None = None,
+        accelerator: Accelerator | None = None,
         cudagraphs: bool = False,
         wrap: bool = True,
     ) -> None:
@@ -119,6 +130,13 @@ class DQN(RLAlgorithm):
         self.cudagraphs = cudagraphs
         self.capturable = cudagraphs
 
+        # Default RL hyperparameters to mutate when doing Evo-HPO
+        self.hp_config = self.hp_config or make_default_hp_config(
+            lr=self.lr,
+            batch_size=self.batch_size,
+            learn_step=self.learn_step,
+        )
+
         if actor_network is not None:
             if not isinstance(actor_network, EvolvableModule):
                 msg = f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule."
@@ -136,8 +154,8 @@ class DQN(RLAlgorithm):
 
             def create_actor() -> QNetwork:
                 return QNetwork(
-                    observation_space=observation_space,
-                    action_space=action_space,
+                    observation_space=self.observation_space,
+                    action_space=self.action_space,
                     device=self.device,
                     **net_config,
                 )
@@ -185,6 +203,10 @@ class DQN(RLAlgorithm):
             ),
         )
 
+        # Register metrics to keep track of during training
+        self.metrics.register("loss")
+        self.metrics.register_histogram("action_dist")
+
     def get_action(
         self,
         obs: ObservationType,
@@ -206,8 +228,7 @@ class DQN(RLAlgorithm):
         """
         # Preprocess observations and convert inputs to torch tensors
         torch_obs = self.preprocess_observation(obs)
-        device = self.device if self.accelerator is None else self.accelerator.device
-        epsilon = torch.tensor(epsilon, device=device)
+        epsilon = torch.tensor(epsilon, device=self.device)
         if action_mask is not None:
             # Need to stack if vectorized env
             action_mask = (
@@ -215,7 +236,7 @@ class DQN(RLAlgorithm):
                 if action_mask.dtype == object or isinstance(action_mask, list)
                 else action_mask
             )
-            action_mask = torch.as_tensor(action_mask, device=device)
+            action_mask = torch.as_tensor(action_mask, device=self.device)
         else:
             if isinstance(torch_obs, dict):
                 sample = next(iter(torch_obs.values()))
@@ -225,9 +246,14 @@ class DQN(RLAlgorithm):
             else:
                 batch_size = torch_obs.size(0)
 
-            action_mask = torch.ones((batch_size, self.action_dim), device=device)
+            action_mask = torch.ones((batch_size, self.action_dim), device=self.device)
 
-        return self._get_action(torch_obs, epsilon, action_mask).cpu().numpy()
+        action = self._get_action(torch_obs, epsilon, action_mask).cpu().numpy()
+
+        if self.training:
+            self.metrics.log_histogram("action_dist", action)
+
+        return action
 
     def _get_action(
         self,
@@ -251,6 +277,7 @@ class DQN(RLAlgorithm):
         self.actor.eval()
         with torch.no_grad():
             q_values = self.actor(obs)
+
         self.actor.train()
 
         # Masked random actions
@@ -344,7 +371,10 @@ class DQN(RLAlgorithm):
 
         # soft update target network
         self.soft_update()
-        return loss.item()
+
+        loss = loss.item()
+        self.metrics.log("loss", loss)
+        return loss
 
     def soft_update(self) -> None:
         """Soft updates target network."""
@@ -360,7 +390,6 @@ class DQN(RLAlgorithm):
     def test(
         self,
         env: GymEnvType,
-        swap_channels: bool = False,
         max_steps: int | None = None,
         loop: int = 1,
     ) -> float:
@@ -368,13 +397,10 @@ class DQN(RLAlgorithm):
 
         :param env: The environment to be tested in
         :type env: Gym-style environment
-        :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
-        :type swap_channels: bool, optional
         :param max_steps: Maximum number of testing steps, defaults to None
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean over these tests. Defaults to 1
         :type loop: int, optional
-
         :return: Mean test score of agent in environment
         :rtype: float
         """
@@ -389,9 +415,6 @@ class DQN(RLAlgorithm):
                 finished = np.zeros(num_envs)
                 step = 0
                 while not np.all(finished):
-                    if swap_channels:
-                        obs = obs_channels_to_first(obs)
-
                     action_mask = info.get("action_mask", None)
                     action = self.get_action(obs, epsilon=0.0, action_mask=action_mask)
                     obs, reward, done, trunc, info = env.step(action)
@@ -405,5 +428,5 @@ class DQN(RLAlgorithm):
                             finished[idx] = 1
                 rewards.append(np.mean(completed_episode_scores))
         mean_fit = np.mean(rewards)
-        self.fitness.append(mean_fit)
+        self.metrics.add_fitness(mean_fit)
         return mean_fit

@@ -34,6 +34,7 @@ from agilerl.utils.algo_utils import (
 )
 from agilerl.utils.llm_utils import (
     BitsAndBytesConfig,
+    aggregate_metrics_dict,
     build_completion_mask,
     calculate_k3_kl,
     clipped_is_surrogate,
@@ -381,6 +382,18 @@ class PPO(LLMAlgorithm):
         if self.wrap:
             self.wrap_models()
 
+        # Register algorithm metrics
+        for m in (
+            "loss",
+            "pg_loss",
+            "vf_loss",
+            "kl",
+            "entropy",
+            "clipfrac",
+            "completion_length",
+        ):
+            self.metrics.register(m)
+
     def get_action(
         self,
         obs: LLMObsType,
@@ -487,7 +500,6 @@ class PPO(LLMAlgorithm):
         :rtype: dict[str, float]
         """
         self._prepare_vllm_for_training()
-
         with self.memory_efficient_params_context():
             completion_ids, action_masks, rewards = stack_and_pad_experiences(
                 *experiences,
@@ -522,12 +534,12 @@ class PPO(LLMAlgorithm):
             )
             updates = 0
             learn_metrics = {
-                "mean_loss": 0.0,
-                "mean_pg_loss": 0.0,
-                "mean_vf_loss": 0.0,
-                "mean_kl": 0.0,
-                "mean_entropy": 0.0,
-                "mean_clipfrac": 0.0,
+                "loss": 0.0,
+                "pg_loss": 0.0,
+                "vf_loss": 0.0,
+                "kl": 0.0,
+                "entropy": 0.0,
+                "clipfrac": 0.0,
             }
             reference_log_probs, old_log_probs, old_values = (
                 self._fused_forward_no_grad(
@@ -639,12 +651,12 @@ class PPO(LLMAlgorithm):
                         )
                         self._backward_pass(total_loss)
                         clear_fused_adapter_routing(self._get_unwrapped_actor())
-                        learn_metrics["mean_kl"] += metrics["kl"]
-                        learn_metrics["mean_entropy"] += metrics["entropy"]
-                        learn_metrics["mean_clipfrac"] += metrics["clipfrac"]
-                        learn_metrics["mean_pg_loss"] += metrics["pg_loss"]
-                        learn_metrics["mean_vf_loss"] += metrics["vf_loss"]
-                        learn_metrics["mean_loss"] += total_loss.item()
+                        learn_metrics["kl"] += metrics["kl"]
+                        learn_metrics["entropy"] += metrics["entropy"]
+                        learn_metrics["clipfrac"] += metrics["clipfrac"]
+                        learn_metrics["pg_loss"] += metrics["pg_loss"]
+                        learn_metrics["vf_loss"] += metrics["vf_loss"]
+                        learn_metrics["loss"] += total_loss.item()
                         updates += 1
                         continue
 
@@ -738,20 +750,40 @@ class PPO(LLMAlgorithm):
                     self._backward_pass(total_loss)
                     clear_fused_adapter_routing(self._get_unwrapped_actor())
 
-                    learn_metrics["mean_kl"] += kl_loss.item()
-                    learn_metrics["mean_entropy"] += masked_entropy.mean().item()
-                    learn_metrics["mean_clipfrac"] += clipfrac.item()
-                    learn_metrics["mean_pg_loss"] += pg_loss.mean().item()
-                    learn_metrics["mean_vf_loss"] += vf_loss.mean().item()
-                    learn_metrics["mean_loss"] += total_loss.item()
+                    learn_metrics["kl"] += kl_loss.item()
+                    learn_metrics["entropy"] += masked_entropy.mean().item()
+                    learn_metrics["clipfrac"] += clipfrac.item()
+                    learn_metrics["pg_loss"] += pg_loss.mean().item()
+                    learn_metrics["vf_loss"] += vf_loss.mean().item()
+                    learn_metrics["loss"] += total_loss.item()
                     updates += 1
 
-        result = {
+        averaged = {
             metric: value / max(updates, 1) for metric, value in learn_metrics.items()
         }
+        result = dict(averaged)
         # Sampling-mismatch metrics are computed once over the full batch, so
         # they bypass the per-update averaging above.
         result.update(is_metrics)
+
+        # Wire averaged metrics into the metrics tracker (new API).
+        completion_length = np.mean([c.shape[-1] for c in experiences[0]])
+        agg = aggregate_metrics_dict(
+            self.accelerator,
+            {
+                "loss": averaged["loss"],
+                "pg_loss": averaged["pg_loss"],
+                "vf_loss": averaged["vf_loss"],
+                "kl": averaged["kl"],
+                "entropy": averaged["entropy"],
+                "clipfrac": averaged["clipfrac"],
+                "completion_length": completion_length,
+            },
+        )
+        agg["completion_length"] = int(agg["completion_length"])
+        for key, value in agg.items():
+            self.metrics.log(key, value)
+
         return result
 
     def _validate_core_args(

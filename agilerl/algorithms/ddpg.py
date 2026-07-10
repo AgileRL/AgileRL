@@ -4,11 +4,16 @@ from typing import Any
 
 import numpy as np
 import torch
+from accelerate import Accelerator
 from gymnasium import spaces
 from torch import nn, optim
 
 from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
-from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.algorithms.core.registry import (
+    HyperparameterConfig,
+    NetworkGroup,
+    make_default_hp_config,
+)
 from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import DeterministicActor
@@ -19,11 +24,11 @@ from agilerl.typing import (
     GymEnvType,
     NetConfigType,
     ObservationType,
+    SupportedObservationSpace,
 )
 from agilerl.utils.algo_utils import (
     make_safe_deepcopies,
     multi_dim_clamp,
-    obs_channels_to_first,
     share_encoder_parameters,
 )
 from agilerl.utils.evolvable_networks import (
@@ -33,12 +38,12 @@ from agilerl.utils.evolvable_networks import (
 
 
 class DDPG(RLAlgorithm):
-    """Deep Deterministic Policy Gradient (DDPG) algorithm.
+    """Deep Deterministic Policy Gradient (DDPG).
 
     Paper: https://arxiv.org/abs/1509.02971
 
     :param observation_space: Environment observation space
-    :type observation_space: gym.spaces.Space
+    :type observation_space: SupportedObservationSpace
     :param action_space: Environment action space
     :type action_space: gym.spaces.Box
     :param O_U_noise: Use Ornstein Uhlenbeck action noise for exploration. If False, uses Gaussian noise. Defaults to True
@@ -78,15 +83,15 @@ class DDPG(RLAlgorithm):
     :param policy_freq: Frequency of critic network updates compared to policy network, defaults to 2
     :type policy_freq: int, optional
     :param actor_network: Custom actor network, defaults to None
-    :type actor_network: nn.Module | None, optional
+    :type actor_network: EvolvableModule | None, optional
     :param critic_network: Custom critic network, defaults to None
-    :type critic_network: nn.Module | None, optional
+    :type critic_network: EvolvableModule | None, optional
     :param share_encoders: Share encoders between actor and critic, defaults to False
     :type share_encoders: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
+    :type accelerator: accelerate.Accelerator | None, optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """
@@ -95,7 +100,7 @@ class DDPG(RLAlgorithm):
 
     def __init__(
         self,
-        observation_space: spaces.Space,
+        observation_space: SupportedObservationSpace,
         action_space: spaces.Box,
         O_U_noise: bool = True,
         expl_noise: float | np.ndarray = 0.1,
@@ -119,7 +124,7 @@ class DDPG(RLAlgorithm):
         critic_network: EvolvableModule | None = None,
         share_encoders: bool = False,
         device: str = "cpu",
-        accelerator: Any | None = None,
+        accelerator: Accelerator | None = None,
         wrap: bool = True,
     ) -> None:
 
@@ -204,6 +209,14 @@ class DDPG(RLAlgorithm):
         self.action_low = torch.as_tensor(action_space.low, dtype=torch.float32)
         self.action_high = torch.as_tensor(action_space.high, dtype=torch.float32)
 
+        # Default RL hyperparameters to mutate when doing Evo-HPO
+        self.hp_config = self.hp_config or make_default_hp_config(
+            lr_actor=self.lr_actor,
+            lr_critic=self.lr_critic,
+            batch_size=self.batch_size,
+            learn_step=self.learn_step,
+        )
+
         if actor_network is not None and critic_network is not None:
             if not isinstance(actor_network, EvolvableModule):
                 msg = f"'actor_network' is of type {type(actor_network)}, but must be of type EvolvableModule."
@@ -246,7 +259,7 @@ class DDPG(RLAlgorithm):
                 simba = net_config.get("simba", False)
                 recurrent = net_config.get("recurrent", False)
                 encoder_config = get_default_encoder_config(
-                    observation_space,
+                    self.observation_space,
                     simba=simba,
                     recurrent=recurrent,
                     layer_norm=False,
@@ -267,7 +280,7 @@ class DDPG(RLAlgorithm):
 
             def create_actor() -> DeterministicActor:
                 return DeterministicActor(
-                    observation_space=observation_space,
+                    observation_space=self.observation_space,
                     action_space=action_space,
                     device=self.device,
                     **net_config,
@@ -275,7 +288,7 @@ class DDPG(RLAlgorithm):
 
             def create_critic() -> ContinuousQNetwork:
                 return ContinuousQNetwork(
-                    observation_space=observation_space,
+                    observation_space=self.observation_space,
                     action_space=action_space,
                     device=self.device,
                     **critic_net_config,
@@ -331,6 +344,10 @@ class DDPG(RLAlgorithm):
                 policy=False,
             ),
         )
+
+        # Register metrics to keep track of during training
+        self.metrics.register("actor_loss")
+        self.metrics.register("critic_loss")
 
     def share_encoder_parameters(self) -> None:
         """Shares the encoder parameters between the actor and critic. Registered as a mutation hook
@@ -469,6 +486,9 @@ class DDPG(RLAlgorithm):
 
         self.critic_optimizer.step()
 
+        critic_loss = critic_loss.item()
+        self.metrics.log("critic_loss", critic_loss)
+
         # update actor and targets every policy_freq learn steps
         self.learn_counter += 1
         if self.learn_counter % self.policy_freq == 0:
@@ -489,11 +509,9 @@ class DDPG(RLAlgorithm):
             self.soft_update(self.critic, self.critic_target)
 
             actor_loss = actor_loss.item()
-            critic_loss = critic_loss.item()
-
+            self.metrics.log("actor_loss", actor_loss)
         else:
             actor_loss = None
-            critic_loss = critic_loss.item()
 
         return actor_loss, critic_loss
 
@@ -515,7 +533,6 @@ class DDPG(RLAlgorithm):
     def test(
         self,
         env: GymEnvType,
-        swap_channels: bool = False,
         max_steps: int | None = None,
         loop: int = 3,
     ) -> float:
@@ -523,8 +540,6 @@ class DDPG(RLAlgorithm):
 
         :param env: The environment to be tested in
         :type env: Gym-style environment
-        :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
-        :type swap_channels: bool, optional
         :param max_steps: Maximum number of testing steps, defaults to None
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
@@ -544,8 +559,6 @@ class DDPG(RLAlgorithm):
                 finished = np.zeros(num_envs)
                 step = 0
                 while not np.all(finished):
-                    if swap_channels:
-                        obs = obs_channels_to_first(obs)
                     action = self.get_action(obs, training=False)
                     obs, reward, done, trunc, _ = env.step(action)
                     step += 1
@@ -558,5 +571,5 @@ class DDPG(RLAlgorithm):
                             finished[idx] = 1
                 rewards.append(np.mean(completed_episode_scores))
         mean_fit = np.mean(rewards)
-        self.fitness.append(mean_fit)
+        self.metrics.add_fitness(mean_fit)
         return mean_fit

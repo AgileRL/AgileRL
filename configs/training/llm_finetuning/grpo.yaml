@@ -1,42 +1,79 @@
 ---
-MUTATION_PARAMS:
-    NO_MUT: 0.1                           # Probability of no mutation
-    RL_HP_MUT: 0.6                        # Probability of learning HP mutation
-    MUT_SD: 0.1                           # Mutation strength (std dev)
-    RAND_SEED: 42                         # Random seed
-    MIN_LR: 1.0e-7                        # Min learning rate for HP mutation
-    MAX_LR: 1.0e-5                        # Max learning rate for HP mutation
-    MIN_BETA: 1.0e-4                      # Min KL penalty beta for HP mutation
-    MAX_BETA: 1.0e-2                      # Max KL penalty beta for HP mutation
-    MIN_GROUP_SIZE: 4                     # Min group size for HP mutation
-    MAX_GROUP_SIZE: 12                    # Max group size for HP mutation
+algorithm:
+    name: GRPO                            # Algorithm — group relative policy optimization
+    batch_size: 6                         # Batch size (number of prompts per step)
+    beta: 0.001                           # KL divergence penalty coefficient
+    lr: 0.000005
+    clip_coef: 0.2                         # Surrogate clipping coefficient (PPO-style)
+    max_grad_norm: 0.1                     # Maximum norm for gradient clipping
+    update_epochs: 1
+    group_size: 2                         # Number of completions sampled per prompt
+    temperature: 0.9                       # Sampling temperature for generation
+    use_vllm: false
+    vllm_config:                          # VLLM config
+        tensor_parallel_size: 1
+        gpu_memory_utilization: 0.3
+        max_num_seqs: 8
+        sleep_mode: false
+    calc_position_embeddings: true
+    reduce_memory_peak: false
 
+environment:
+    env_type: rollout
+    dataset: Jiayi-Pan/Countdown-Tasks-3to4
+    columns:
+        nums: question
+        target: answer
+    reward_file_path: reward.py
+    reward_fn_name: combined_rewards
+    prompt_template:
+        system_0: You are a helpful assistant. You first think about the reasoning process in your mind and then provide the user with the answer.
+        user_1: Using each number in this list only once {question}, create an equation that equals {answer}. You can use basic arithmetic operations (+,
+            -, *, /) and each number can only be used once. Show your work in <redacted_thinking> </redacted_thinking> tags. And return the final equation
+            and answer in <answer> </answer> tags, for example <answer>(1 + 2) / 3</answer>.
+        assistant_2: "Let me solve this step by step.\n<redacted_thinking>"
+    max_reward: 2.0
+    train_test_split: 0.8
 
-INIT_HP:
-    ALGO: GRPO                            # Algorithm — group relative policy optimization
-    BATCH_SIZE: 4                        # Batch size (number of prompts per step)
-    BETA: 1.0e-3                          # KL divergence penalty coefficient
-    LR: 5.0e-6                            # Learning rate
-    CLIP_COEF: 0.2                        # Surrogate clipping coefficient (PPO-style)
-    MAX_GRAD_NORM: 0.1                    # Maximum norm for gradient clipping
-    UPDATE_EPOCHS: 1                      # Number of training epochs per learn() call
-    GROUP_SIZE: 16                         # Number of completions sampled per prompt
-    TEMPERATURE: 0.9                      # Sampling temperature for generation
-    MAX_MODEL_LEN: 1024                   # Maximum context length for the model
-    MAX_OUTPUT_TOKENS: 64
-    COSINE_lR_SCHEDULER:
-    TOURN_SIZE: 2                         # Tournament size for evolutionary selection
-    ELITISM: true                         # Elitism in tournament selection
-    POP_SIZE: 1                           # Population size
-    EVAL_LOOP: 1                          # Evaluation episodes
-    USE_VLLM: true
-    MICRO_BATCH_SIZE_PER_GPU: 4
-    TARGET_MODULES:
-        - q_proj
-        - k_proj
-        - v_proj
-        - o_proj
-    LORA_R: 16
-    LORA_ALPHA: 64
-    LORA_DROPOUT: 0.05
-    LORA_BIAS: none
+training:
+    max_steps: 100000
+    evo_steps: 5
+    pop_size: 2
+    eval_loop: 1
+    evaluation_interval: 5
+
+mutation:
+    mutation_sd: 0.1
+    rand_seed: 42
+    probabilities:
+        no_mut: 0.1
+        arch_mut: 0.0
+        new_layer: 0.0
+        params_mut: 0.0
+        act_mut: 0.0
+        rl_hp_mut: 0.6
+    rl_hp_selection:
+        lr:
+            min: 0.0000001
+            max: 0.00001
+        beta:
+            min: 0.0001
+            max: 0.01
+
+tournament_selection:
+    tournament_size: 2
+    elitism: true
+
+network:
+    pretrained_model_name_or_path: Qwen/Qwen2.5-0.5B-Instruct
+    max_context_length: 512
+    lora_config:
+        lora_r: 16
+        lora_alpha: 64
+        target_modules:
+            - q_proj
+            - k_proj
+            - v_proj
+            - o_proj
+        lora_dropout: 0.05
+        task_type: CAUSAL_LM

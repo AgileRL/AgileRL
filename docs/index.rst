@@ -1,5 +1,3 @@
-----------------
-
 .. raw:: html
 
    <style>
@@ -113,6 +111,12 @@ If you use AgileRL in your work, please cite the repository:
 
 .. toctree::
    :maxdepth: 2
+   :caption: Arena
+
+   arena/index
+
+.. toctree::
+   :maxdepth: 2
    :caption: Training
 
    evo_hyperparam_opt/index
@@ -124,9 +128,16 @@ If you use AgileRL in your work, please cite the repository:
    llm_finetuning/index
    bandits/index
    distributed_training/index
+   trainers/index
    evolvable_networks/index
    custom_algorithms/index
    debugging_rl/index
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Observability
+
+   metrics_and_logging/index
 
 .. toctree::
    :maxdepth: 1
@@ -138,16 +149,22 @@ If you use AgileRL in your work, please cite the repository:
    tutorials/llm_finetuning/index
    tutorials/bandits/index
    tutorials/custom_networks/index
+   tutorials/arena_training/index
 
 .. toctree::
    :maxdepth: 1
    :caption: API
 
    api/algorithms/index
+   api/arena/index
    api/components/index
    api/hpo/index
+   api/logger
+   api/metrics
+   api/models/index
    api/modules/index
    api/networks/index
+   api/population
    api/train
    api/rollouts/index
    api/utils/index

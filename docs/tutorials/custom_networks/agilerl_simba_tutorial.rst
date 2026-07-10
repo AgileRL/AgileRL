@@ -389,7 +389,6 @@ to have access to the ``HalfCheetah-v4`` environment.
             tournament_size=2,
             elitism=True,
             population_size=population_size,
-            eval_loop=1
         )
 
         # Hyperarameter mutation probabilities

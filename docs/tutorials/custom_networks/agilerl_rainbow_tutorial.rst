@@ -12,7 +12,7 @@ Building a Dueling Distributional Q Network
 
 `Rainbow DQN <https://arxiv.org/abs/1710.02298>`_ is an extension of DQN that integrates multiple improvements and techniques to achieve state-of-the-art performance. The improvements pertaining to the Q network that is optimized during training are the following:
 
-    * **Dueling Networks**: Splits the Q-network into two separate streams — one for estimating the state value function and another for estimating the advantages for each action. They are then combined to produce Q-values.
+    * **Dueling Networks**: Splits the Q-network into two separate streams: one for estimating the state value function and another for estimating the advantages for each action. They are then combined to produce Q-values.
     * **Categorical DQN (C51)**: A specific form of distributional RL where the continuous range of possible cumulative future rewards is discretized into a fixed set of categories.
 
 In order to extend our implementation of :class:`QNetwork <agilerl.networks.q_networks.QNetwork>` to a Dueling Distributional Q Network, we need to make the following changes:
@@ -484,9 +484,7 @@ End-to-end example
             "V_MIN": -200.0,  # Minimum value of support
             "V_MAX": 200.0,  # Maximum value of support
             "NOISY": True,  # Add noise directly to the weights of the network
-            # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
             "LEARNING_DELAY": 1000,  # Steps before starting learning
-            "CHANNELS_LAST": False,  # Use with RGB states
             "TARGET_SCORE": 200.0,  # Target score that will beat the environment
             "MAX_STEPS": 200000,  # Maximum number of steps an agent takes in an environment
             "EVO_STEPS": 10000,  # Evolution frequency
@@ -541,7 +539,6 @@ End-to-end example
             tournament_size=INIT_HP["TOURN_SIZE"],
             elitism=INIT_HP["ELITISM"],
             population_size=INIT_HP["POP_SIZE"],
-            eval_loop=INIT_HP["EVAL_LOOP"],
         )
 
         # Define the mutation parameters
@@ -588,8 +585,8 @@ End-to-end example
             "Rainbow DQN",
             agent_pop,
             memory=memory,
-            INIT_HP=INIT_HP,
-            MUT_P=MUTATION_PARAMS,
+            init_hp=INIT_HP,
+            mut_p=MUTATION_PARAMS,
             max_steps=INIT_HP["MAX_STEPS"],
             evo_steps=INIT_HP["EVO_STEPS"],
             eval_steps=INIT_HP["EVAL_STEPS"],

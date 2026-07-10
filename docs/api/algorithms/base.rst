@@ -1,7 +1,7 @@
 .. _base_algorithm:
 
-EvolvableAlgorithm Base Class
-=============================
+EvolvableAlgorithm
+==================
 
 We develop a class hierarchy for RL algorithms with a focus on making the evolution of their hyperparameters, and that of their
 underlying neural networks, seamless. The base class implements methods and attributes that are used by :class:`Mutations <agilerl.hpo.mutation.Mutations>`
@@ -29,7 +29,7 @@ The last thing users should do when creating a custom algorithm is wrap their op
 specifying the networks that the optimizer is responsible for optimizing. Since we are mutating network architectures during training, we need to have knowledge of
 this in order to reinitiliaze the optimizers correctly when we do so.
 
-.. note::
+.. warning::
     All of the network groups and optimizers of an algorithm should by convention be defined in the ``__init__`` method of the algorithm.
 
 Example

@@ -614,6 +614,38 @@ class PeftModelProtocol(Protocol):
         pass
 
 
+@runtime_checkable
+class BanditEnvProtocol(Protocol):
+    """Protocol for contextual bandit environments.
+
+    Any environment used with :func:`~agilerl.training.train_bandits.train_bandits`
+    or :class:`~agilerl.algorithms.neural_ts_bandit.NeuralTS` /
+    :class:`~agilerl.algorithms.neural_ucb_bandit.NeuralUCB` must satisfy this
+    interface.  The built-in :class:`~agilerl.wrappers.learning.BanditEnv` is the
+    reference implementation.
+
+    :param arms: Number of arms (actions) in the bandit problem.
+    :type arms: int
+    :param num_envs: Number of parallel environments (typically 1).
+    :type num_envs: int
+    :param single_observation_space: Observation space for a single environment.
+    :type single_observation_space: gymnasium.spaces.Space
+    :param single_action_space: Action space for a single environment.
+    :type single_action_space: gymnasium.spaces.Discrete
+    """
+
+    arms: int
+    num_envs: int
+    single_observation_space: Any
+    single_action_space: Any
+
+    def reset(self) -> np.ndarray:
+        pass
+
+    def step(self, k: int) -> tuple[np.ndarray, float]:
+        pass
+
+
 class TextEnvProtocol(Protocol):
     """Structural type for local text envs served or wrapped by OpenEnv.
 

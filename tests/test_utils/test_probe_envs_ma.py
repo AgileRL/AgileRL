@@ -6,7 +6,7 @@ import torch
 
 from agilerl.algorithms.ippo import IPPO
 from agilerl.algorithms.maddpg import MADDPG
-from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
+from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.utils.probe_envs_ma import (
     ConstantRewardContActionsEnv,
     ConstantRewardContActionsImageEnv,
@@ -679,11 +679,8 @@ class TestCheckPolicyQLearningWithProbeEnv:
             "net_config": {"encoder_config": {"hidden_size": [32, 32]}},
             "batch_size": 256,
         }
-        field_names = ["state", "action", "reward", "next_state", "done"]
-        memory = MultiAgentReplayBuffer(
-            memory_size=10000,  # Max replay buffer size
-            field_names=field_names,  # Field names to store in memory
-            agent_ids=algo_args["agent_ids"],
+        memory = ReplayBuffer(
+            max_size=10000,
             device=device,
         )
 
@@ -710,14 +707,10 @@ class TestCheckPolicyQLearningWithProbeEnv:
             "net_config": {"encoder_config": {"hidden_size": [32, 32]}},
             "batch_size": 256,
         }
-        field_names = ["state", "action", "reward", "next_state", "done"]
-        memory = MultiAgentReplayBuffer(
-            memory_size=10000,  # Max replay buffer size
-            field_names=field_names,  # Field names to store in memory
-            agent_ids=algo_args["agent_ids"],
+        memory = ReplayBuffer(
+            max_size=10000,
             device=device,
         )
-
         check_policy_q_learning_with_probe_env(
             env,
             MADDPG,
@@ -758,11 +751,8 @@ class TestCheckPolicyQLearningWithProbeEnv:
             "gamma": 0.99,  # Stable discount factor
             "tau": 0.005,  # Smaller soft update parameter
         }
-        field_names = ["state", "action", "reward", "next_state", "done"]
-        memory = MultiAgentReplayBuffer(
-            memory_size=10000,
-            field_names=field_names,
-            agent_ids=algo_args["agent_ids"],
+        memory = ReplayBuffer(
+            max_size=10000,
             device=device,
         )
 

@@ -1,0 +1,43 @@
+---
+algorithm:
+    name: DQN
+    batch_size: 128
+    lr: 0.00063
+    tau: 0.001
+    double: false
+
+environment:
+    name: LunarLander-v3
+    num_envs: 16
+
+network:
+    latent_dim: 128
+    arch: mlp
+    encoder_config:
+        hidden_size: [128]
+    head_config:
+        hidden_size: [128]
+
+replay_buffer:
+    max_size: 100_000
+
+mutation:
+    probabilities:
+        rl_hp_mut: 0.2
+    rl_hp_selection:
+        lr:
+            min: 0.0000625
+            max: 0.01
+    mutation_sd: 0.1
+
+tournament_selection:
+    tournament_size: 2
+    elitism: true
+
+training:
+    max_steps: 1000000
+    evo_steps: 10000
+    pop_size: 4
+    eps_start: 1.0
+    eps_end: 0.1
+    eps_decay: 0.99

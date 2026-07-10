@@ -6,6 +6,14 @@ import socket
 import sys
 import tempfile
 
+import gymnasium as gym
+
+# Register lightweight test environments
+gym.register(
+    id="DummyImage-v0",
+    entry_point="tests.envs.image_env:DummyImageEnv",
+)
+
 # Give each xdist worker its own torch inductor cache dir BEFORE torch is
 # imported. Parallel workers sharing the default cache race on precompiled
 # headers (mtime checks fail on macOS clang++ and can cause flaky rebuilds

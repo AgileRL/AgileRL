@@ -328,9 +328,10 @@ class RolloutEnv:
         :param tokenizer: Tokenizer for the token-level loop.
         :param test_dataset: Optional held-out rows served under evaluation mode
             (falls back to ``dataset`` when ``None``).
-        :param prompt_builder: Maps a row's question to the prompt text served on
-            reset. ``None`` serves ``str(question)`` as-is; pass
-            ``apply_chat_template=False`` if the built prompt is already templated.
+        :param prompt_builder: Maps a dataset row to the prompt text served on reset,
+            so a template may interpolate any column. ``None`` serves
+            ``str(row[question_column])`` as-is; pass ``apply_chat_template=False``
+            if the built prompt is already templated.
         :param question_column: Row key for the question, defaults to ``"question"``.
         :param answer_column: Row key for the answer, defaults to ``"answer"``.
         :param kwargs: Forwarded to :class:`RolloutEnv` (e.g. ``pad_id``,
@@ -882,7 +883,7 @@ class _PromptDatasetEnv:
         self._question = row[self._question_column]
         self._answer = row[self._answer_column]
         if self._prompt_builder is not None:
-            return self._prompt_builder(self._question), {}
+            return self._prompt_builder(row), {}
         return str(self._question), {}
 
     def step(self, action: str) -> tuple[str, float, bool, bool, dict[str, Any]]:

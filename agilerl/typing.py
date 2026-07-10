@@ -86,7 +86,7 @@ class ModuleType(Enum):
     MULTI_INPUT = "multi_input"
 
 
-SupportedObsSpaces = (
+SupportedObservationSpace = (
     spaces.Box
     | spaces.Discrete
     | spaces.MultiDiscrete
@@ -94,7 +94,7 @@ SupportedObsSpaces = (
     | spaces.Tuple
     | spaces.MultiBinary
 )
-SupportedActionSpaces = (
+SupportedActionSpace = (
     spaces.Discrete | spaces.MultiDiscrete | spaces.MultiBinary | spaces.Box
 )
 
@@ -105,7 +105,7 @@ ArrayDict = dict[str, np.ndarray]
 ArrayTuple = tuple[np.ndarray, ...]
 NetConfigType = dict[str, dict[str, Any] | Any]
 KernelSizeType = int | tuple[int, ...]
-GymSpaceType = SupportedObsSpaces | list[SupportedObsSpaces]
+GymSpaceType = SupportedObservationSpace | list[SupportedObservationSpace]
 GymEnvType = str | gym.Env | gym.vector.VectorEnv | gym.vector.AsyncVectorEnv
 PzEnvType = str | ParallelEnv
 LLMObsType = list[RolloutPrompts] | RolloutPrompts
