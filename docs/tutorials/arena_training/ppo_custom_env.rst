@@ -419,14 +419,15 @@ with ``arena agent list``.
    from agilerl.arena import ArenaClient
    from merge_env import MergeEnv
 
-   client = ArenaClient()
-   agent = client.open_inference_agent("merge-ppo-v1")
-
-   # Get an action from the deployed model
+   # Initialize the environment
    env = MergeEnv()
-   observation, _ = env.reset()
-   action, _ = agent.get_action(observation)
-   print(f"Agent chose action: {action}")
+
+   # Initialize the client and the deployed agent
+   with ArenaClient() as client:
+      with client.open_inference_agent("merge-ppo-v1") as agent:
+         observation, _ = env.reset()
+         action, _ = agent.get_action(observation)
+         print(f"Action: {action}")
 
 .. seealso::
 
