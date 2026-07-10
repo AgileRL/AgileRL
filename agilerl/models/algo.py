@@ -214,6 +214,90 @@ def _warn_ignored_llm_training_fields(training: TrainingSpec) -> None:
         )
 
 
+# Values whose type makes a meaningful ``!=`` comparison; anything else (an
+# Accelerator, a LoraConfig, a registry) is skipped when diffing hyperparameters.
+_COMPARABLE_HYPERPARAMETERS = (bool, int, float, str, type(None))
+
+
+def _apply_checkpoint(
+    algo: AlgoT,
+    resume_from_checkpoint: str | None,
+    load_weights_from: str | None,
+) -> None:
+    """Seed a freshly-built agent from a checkpoint, if asked to.
+
+    The two options are different operations and must not be combined:
+
+    * ``resume_from_checkpoint`` continues an interrupted run. The checkpoint is
+      authoritative -- optimizer moments, the learning-rate schedule position and
+      the hyperparameters they were computed under all come back, so the run picks
+      up exactly where it stopped. A hyperparameter that disagrees with the spec is
+      warned about, because the spec no longer describes what will be trained.
+    * ``load_weights_from`` starts a *new* run from a previous one's parameters (a
+      warm start). Only the weights are taken; the optimizer, schedule and progress
+      start fresh, and the spec keeps every hyperparameter.
+
+    :param algo: A freshly-built algorithm, configured from its spec.
+    :type algo: AlgoT
+    :param resume_from_checkpoint: Checkpoint to resume the run from.
+    :type resume_from_checkpoint: str | None
+    :param load_weights_from: Checkpoint to take weights from.
+    :type load_weights_from: str | None
+    """
+    if resume_from_checkpoint is not None and load_weights_from is not None:
+        msg = (
+            "Provide exactly one of 'resume_from_checkpoint' (continue a run, "
+            "restoring optimizer state and its hyperparameters) or "
+            "'load_weights_from' (warm-start a new run from prior weights)."
+        )
+        raise ValueError(msg)
+
+    if load_weights_from is not None:
+        algo.load_weights(load_weights_from)
+    elif resume_from_checkpoint is not None:
+        _resume_and_warn_on_drift(algo, resume_from_checkpoint)
+
+
+def _resume_and_warn_on_drift(algo: AlgoT, path: str) -> None:
+    """Restore a checkpoint, warning about hyperparameters it overrode.
+
+    Resuming keeps the checkpoint's hyperparameters, because they are the ones the
+    restored optimizer state and lr schedule belong to. That silently diverges from
+    the spec if the two disagree, so say so.
+
+    :param algo: A freshly-built algorithm, configured from its spec.
+    :type algo: AlgoT
+    :param path: Checkpoint to resume from.
+    :type path: str
+    """
+    from agilerl.algorithms.core.base import EvolvableAlgorithm
+
+    configured = EvolvableAlgorithm.inspect_attributes(algo, input_args_only=True)
+
+    algo.load_checkpoint(path)
+
+    drifted = {
+        name: (configured[name], getattr(algo, name))
+        for name in configured
+        if isinstance(configured[name], _COMPARABLE_HYPERPARAMETERS)
+        and hasattr(algo, name)
+        and configured[name] != getattr(algo, name)
+    }
+    if drifted:
+        changes = ", ".join(
+            f"{name}: {new!r} (checkpoint) overrides {old!r} (spec)"
+            for name, (old, new) in sorted(drifted.items())
+        )
+        warnings.warn(
+            f"Resuming from {path} restored hyperparameters that differ from the "
+            f"spec, and the checkpoint's values win because the optimizer state "
+            f"belongs to them -- {changes}. Update the spec to match, or use "
+            f"'load_weights_from' to warm-start with the spec's values instead.",
+            UserWarning,
+            stacklevel=3,
+        )
+
+
 class AlgorithmSpec(BaseModel):
     """Base specification for all algorithms.
 
@@ -374,6 +458,7 @@ class RLAlgorithmSpec(AlgorithmSpec):
         action_space: SupportedActionSpace,
         index: int,
         resume_from_checkpoint: str | None = None,
+        load_weights_from: str | None = None,
         device: str | torch.device = "cpu",
         accelerator: Accelerator | None = None,
     ) -> RLAlgorithm:
@@ -385,8 +470,13 @@ class RLAlgorithmSpec(AlgorithmSpec):
         :type action_space: SupportedActionSpace
         :param index: Index of the algorithm in the population.
         :type index: int
-        :param resume_from_checkpoint: Path to resume from checkpoint.
+        :param resume_from_checkpoint: Checkpoint to continue an interrupted run
+            from, restoring optimizer state and the hyperparameters it belongs to.
+            Mutually exclusive with ``load_weights_from``.
         :type resume_from_checkpoint: str | None
+        :param load_weights_from: Checkpoint to warm-start a new run from, taking
+            only the weights. Mutually exclusive with ``resume_from_checkpoint``.
+        :type load_weights_from: str | None
         :param device: Torch device. Defaults to "cpu".
         :type device: str | torch.device
         :param accelerator: Accelerator object for distributed computing.
@@ -404,8 +494,7 @@ class RLAlgorithmSpec(AlgorithmSpec):
             **self.model_dump(mode="python", exclude_unset=True),
         )
 
-        if resume_from_checkpoint is not None:
-            algo.load_checkpoint(resume_from_checkpoint)
+        _apply_checkpoint(algo, resume_from_checkpoint, load_weights_from)
 
         return algo
 
@@ -429,6 +518,7 @@ class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
         action_spaces: dict[str, SupportedActionSpace],
         index: int,
         resume_from_checkpoint: str | None = None,
+        load_weights_from: str | None = None,
         device: str | torch.device = "cpu",
         accelerator: Accelerator | None = None,
     ) -> MultiAgentRLAlgorithm:
@@ -440,8 +530,13 @@ class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
         :type action_spaces: dict[str, SupportedActionSpace]
         :param index: Index of the algorithm in the population.
         :type index: int
-        :param resume_from_checkpoint: Path to resume from checkpoint.
+        :param resume_from_checkpoint: Checkpoint to continue an interrupted run
+            from, restoring optimizer state and the hyperparameters it belongs to.
+            Mutually exclusive with ``load_weights_from``.
         :type resume_from_checkpoint: str | None
+        :param load_weights_from: Checkpoint to warm-start a new run from, taking
+            only the weights. Mutually exclusive with ``resume_from_checkpoint``.
+        :type load_weights_from: str | None
         :param device: Torch device. Defaults to "cpu".
         :type device: str | torch.device
         :param accelerator: Accelerator object for distributed computing.
@@ -459,8 +554,7 @@ class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
             **self.model_dump(mode="python", exclude_unset=True),
         )
 
-        if resume_from_checkpoint is not None:
-            algo.load_checkpoint(resume_from_checkpoint)
+        _apply_checkpoint(algo, resume_from_checkpoint, load_weights_from)
 
         return algo
 
@@ -512,6 +606,7 @@ class LLMAlgorithmSpec(AlgorithmSpec):
         tokenizer: Any,
         index: int = 0,
         resume_from_checkpoint: str | None = None,
+        load_weights_from: str | None = None,
         accelerator: Accelerator | None = None,
         device: str | torch.device = "cpu",
         actor_network: Any | None = None,
@@ -522,8 +617,13 @@ class LLMAlgorithmSpec(AlgorithmSpec):
         :type tokenizer: Any
         :param index: Index of the algorithm in the population.
         :type index: int
-        :param resume_from_checkpoint: Path to resume from checkpoint.
+        :param resume_from_checkpoint: Checkpoint to continue an interrupted run
+            from, restoring optimizer state and the hyperparameters it belongs to.
+            Mutually exclusive with ``load_weights_from``.
         :type resume_from_checkpoint: str | None
+        :param load_weights_from: Checkpoint to warm-start a new run from, taking
+            only the weights. Mutually exclusive with ``resume_from_checkpoint``.
+        :type load_weights_from: str | None
         :param accelerator: HuggingFace ``Accelerator`` instance.
         :type accelerator: Accelerator | None
         :param device: Torch device. Defaults to "cpu".
@@ -589,8 +689,7 @@ class LLMAlgorithmSpec(AlgorithmSpec):
             **kwargs,
         )
 
-        if resume_from_checkpoint is not None:
-            algo.load_checkpoint(resume_from_checkpoint)
+        _apply_checkpoint(algo, resume_from_checkpoint, load_weights_from)
 
         return algo
 

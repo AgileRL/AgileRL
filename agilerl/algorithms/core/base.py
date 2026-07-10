@@ -1060,8 +1060,15 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             pickle_module=dill,
         )
 
-    def load_checkpoint(self, path: str) -> None:
-        """Load saved agent properties and network weights from checkpoint.
+    def load_weights(self, path: str) -> None:
+        """Load only the network weights from a checkpoint.
+
+        The counterpart to :meth:`load_checkpoint`, for starting a *new* run from
+        a previous run's parameters (a warm start) rather than continuing an
+        interrupted one. Optimizer state, learning-rate schedule and training
+        progress are left at their freshly-constructed values, and the agent's
+        hyperparameters are untouched -- so whatever configured this agent stays
+        the authority on how it trains.
 
         :param path: Location to load checkpoint from
         :type path: string
@@ -1072,8 +1079,20 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             pickle_module=dill,
             weights_only=False,
         )
+        self._load_module_weights(checkpoint)
 
-        # Recreate evolvable modules
+        if self.accelerator is not None:
+            self.wrap_models()
+        elif self.torch_compiler:
+            configure_tf32_precision()
+            self.recompile()
+
+    def _load_module_weights(self, checkpoint: dict[str, Any]) -> None:
+        """Recreate the evolvable modules and load their state dicts.
+
+        :param checkpoint: Deserialized checkpoint dictionary.
+        :type checkpoint: dict[str, Any]
+        """
         network_info: dict[str, dict[str, Any]] = checkpoint["network_info"]
         network_names = network_info["network_names"]
         for name in network_names:
@@ -1122,6 +1141,27 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             elif state_dict:
                 loaded_module.load_state_dict(state_dict)
 
+    def load_checkpoint(self, path: str) -> None:
+        """Load saved agent properties and network weights from checkpoint.
+
+        Restores the full training state -- weights, optimizer, learning-rate
+        schedule and every saved hyperparameter -- so an interrupted run resumes
+        exactly where it stopped. Use :meth:`load_weights` to take only the
+        parameters into a new run.
+
+        :param path: Location to load checkpoint from
+        :type path: string
+        """
+        checkpoint: dict[str, Any] = torch.load(
+            path,
+            map_location=self.device,
+            pickle_module=dill,
+            weights_only=False,
+        )
+
+        self._load_module_weights(checkpoint)
+
+        network_info: dict[str, dict[str, Any]] = checkpoint["network_info"]
         optimizer_names = network_info["optimizer_names"]
         for name in optimizer_names:
             opt_dict = {
@@ -2772,25 +2812,85 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
 
+    def load_weights(
+        self,
+        path: str,
+        overwrite_reference_adapter: bool | None = None,
+        overwrite_critic_adapter: bool = False,
+    ) -> None:
+        """Load only the LoRA adapters (and value head) from a checkpoint directory.
+
+        The warm-start counterpart to :meth:`load_checkpoint`: nothing else about
+        the agent moves. Optimizer moments, the learning-rate schedule position
+        and training progress stay at their freshly-constructed values, and the
+        agent keeps every hyperparameter it was built with.
+
+        :param path: Directory containing a checkpoint written by
+            :meth:`save_checkpoint`.
+        :type path: str
+        :param overwrite_reference_adapter: See :meth:`load_checkpoint`.
+        :type overwrite_reference_adapter: bool | None
+        :param overwrite_critic_adapter: See :meth:`load_checkpoint`.
+        :type overwrite_critic_adapter: bool
+        """
+        checkpoint: dict[str, Any] = torch.load(
+            str(Path(path) / "attributes.pt"),
+            weights_only=False,
+            pickle_module=dill if self.accelerator is None else pickle,
+        )
+        lora_only = checkpoint.get("_lora_only", False) or checkpoint.get(
+            "_weights_only", False
+        )
+        if lora_only:
+            self._load_model_checkpoint(
+                path,
+                overwrite_reference_adapter,
+                overwrite_critic_adapter,
+            )
+            return
+
+        # A full-model checkpoint keeps the actor's weights in ``attributes.pt``.
+        actor_state_dict = (
+            checkpoint.get("network_info", {})
+            .get("modules", {})
+            .get("actor_state_dict")
+        )
+        if actor_state_dict is None:
+            msg = f"Checkpoint at {path} contains no actor weights to load."
+            raise ValueError(msg)
+
+        model_ref = self._get_unwrapped_actor()
+        with gather_if_zero3(self.zero_stage, list(model_ref.parameters())):
+            model_ref.load_state_dict(actor_state_dict)
+
     def load_checkpoint(
         self,
         path: str,
         load_optimizer: bool = False,
-        overwrite_reference_adapter: bool = False,
-        overwrite_critic_adapter: bool = True,
+        overwrite_reference_adapter: bool | None = None,
+        overwrite_critic_adapter: bool = False,
     ) -> None:
         """Load adapter weights and algorithm state from a checkpoint directory.
+
+        Restores the full training state, so an interrupted run resumes where it
+        stopped: adapters, optimizer moments, the learning-rate schedule position
+        and every saved hyperparameter. Use :meth:`load_weights` to carry only the
+        adapters into a new run.
 
         Adapter roles restored on load:
 
           * ``actor``     — the trained policy. Always loaded.
-          * ``reference`` — the fixed policy used for KL / comparison. The
-            checkpoint's ``actor`` adapter is copied onto ``reference`` so
-            that SFT -> DPO -> GRPO chains work out of the box: the stage-N
-            actor becomes the stage-N+1 reference.
-          * ``critic``    — optional value head. Loaded from disk if a
-            ``critic/`` adapter is present, else copied from ``actor``, else
-            left as the live fresh LoRA init.
+          * ``reference`` — the fixed policy used for KL / comparison. Loaded from
+            the checkpoint's ``reference/`` adapter when it has one, so a resumed
+            run keeps the anchor it was training against. When it has none, the
+            checkpoint's ``actor`` is copied onto ``reference`` instead, so
+            SFT -> DPO -> GRPO chains work out of the box: the stage-N actor
+            becomes the stage-N+1 reference.
+          * ``critic``    — optional value head. Loaded from the checkpoint's
+            ``critic/`` adapter when it has one, otherwise left at its fresh LoRA
+            init (all-zero ``lora_B``), i.e. a critic that starts from the base
+            model. Set ``overwrite_critic_adapter`` to seed it from the actor
+            instead.
 
         The checkpoint's LoRA config must match the live algorithm's config;
         a mismatch raises ``ValueError`` (re-create the agent with the
@@ -2915,22 +3015,31 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def _load_model_checkpoint(
         self,
         path: str,
-        overwrite_reference_adapter: bool = False,
-        overwrite_critic_adapter: bool = True,
+        overwrite_reference_adapter: bool | None = None,
+        overwrite_critic_adapter: bool = False,
     ) -> None:
         """Restore LoRA adapter weights from a checkpoint directory.
 
-        The checkpoint's LoRA config must match the live algorithm's; a mismatch
-        (e.g. a different rank) raises ``ValueError``. Reference and Critic
-        LoRA adapters in the checkpoint can be overwritten by the Actor using the
-        ``overwrite_reference_adapter`` and ``overwrite_critic_adapter`` flags.
+        Each adapter in :attr:`selected_adapters` is loaded from its own
+        subdirectory when the checkpoint has one. The checkpoint's LoRA config
+        must match the live algorithm's; a mismatch (e.g. a different rank)
+        raises ``ValueError``.
 
         :param path: Checkpoint directory path.
         :type path: str
-        :param overwrite_reference_adapter: If ``True`` do not overwrite the live reference
-            adapter. Defaults to ``False``.
-        :type overwrite_reference_adapter: bool
+        :param overwrite_reference_adapter: Seed the reference adapter from the
+            actor. ``None`` (the default) decides from the checkpoint: seed when it
+            carries no ``reference/`` adapter of its own, otherwise keep the one
+            just loaded from disk.
+        :type overwrite_reference_adapter: bool | None
+        :param overwrite_critic_adapter: Seed the critic adapter from the actor.
+            Defaults to ``False``: a critic absent from the checkpoint keeps its
+            fresh LoRA init and so starts from the base model.
+        :type overwrite_critic_adapter: bool
         """
+        if overwrite_reference_adapter is None:
+            overwrite_reference_adapter = not (Path(path) / "reference").exists()
+
         ckpt_lora_config = self._load_checkpoint_lora_config(path)
         if ckpt_lora_config is not None:
             if self.lora_config is None or self._lora_configs_equivalent(
@@ -2954,7 +3063,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             )
 
         if "critic" in self.selected_adapters and overwrite_critic_adapter:
-            # Always overwrite the critic
             self._copy_adapter_weights(source_adapter="actor", target_adapter="critic")
 
         # The value head (PPO's ``v_head`` Linear) is a non-LoRA module saved

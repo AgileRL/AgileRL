@@ -5765,6 +5765,95 @@ class TestLLMLoadCheckpointLoraOnlyWithRefAdapter:
         assert any(args[:2] == (str(tmp_path), "actor") for args in load_calls) is False
         mock_copy.assert_called_with(source_adapter="actor", target_adapter="reference")
 
+    def _write_attrs(self, tmp_path):
+        import dill
+
+        torch.save(
+            {"_lora_only": True, "lr": 1e-4},
+            str(tmp_path / "attributes.pt"),
+            pickle_module=dill,
+        )
+
+    def test_reference_seeded_from_actor_when_checkpoint_has_none(self, tmp_path):
+        """A stage-N actor becomes the stage-N+1 reference (e.g. SFT -> DPO)."""
+        agent = _make_llm_agent(
+            accelerator=_make_mock_accelerator(), use_separate_reference_adapter=True
+        )
+        self._write_attrs(tmp_path)
+
+        with (
+            patch.object(LLMAlgorithm, "_load_adapter_weights"),
+            patch.object(LLMAlgorithm, "_copy_adapter_weights") as mock_copy,
+            patch.object(
+                LLMAlgorithm, "_load_checkpoint_lora_config", return_value=None
+            ),
+        ):
+            agent.load_checkpoint(str(tmp_path), load_optimizer=False)
+
+        mock_copy.assert_called_with(source_adapter="actor", target_adapter="reference")
+
+    def test_reference_preserved_when_checkpoint_has_one(self, tmp_path):
+        """Resuming a run keeps the reference anchor it was training against."""
+        agent = _make_llm_agent(
+            accelerator=_make_mock_accelerator(), use_separate_reference_adapter=True
+        )
+        self._write_attrs(tmp_path)
+        (tmp_path / "reference").mkdir()
+
+        with (
+            patch.object(LLMAlgorithm, "_load_adapter_weights"),
+            patch.object(LLMAlgorithm, "_copy_adapter_weights") as mock_copy,
+            patch.object(
+                LLMAlgorithm, "_load_checkpoint_lora_config", return_value=None
+            ),
+        ):
+            agent.load_checkpoint(str(tmp_path), load_optimizer=False)
+
+        assert not any(
+            call.kwargs.get("target_adapter") == "reference"
+            for call in mock_copy.call_args_list
+        )
+
+    def test_critic_is_not_seeded_from_actor_by_default(self, tmp_path):
+        """A critic starts from the base model, not from the policy."""
+        agent = _make_llm_agent(accelerator=_make_mock_accelerator())
+        agent.selected_adapters = ["actor", "critic"]
+        self._write_attrs(tmp_path)
+
+        with (
+            patch.object(LLMAlgorithm, "_load_adapter_weights"),
+            patch.object(LLMAlgorithm, "_copy_adapter_weights") as mock_copy,
+            patch.object(
+                LLMAlgorithm, "_load_checkpoint_lora_config", return_value=None
+            ),
+        ):
+            agent.load_checkpoint(str(tmp_path), load_optimizer=False)
+
+        assert not any(
+            call.kwargs.get("target_adapter") == "critic"
+            for call in mock_copy.call_args_list
+        )
+
+    def test_critic_seeded_from_actor_when_explicitly_requested(self, tmp_path):
+        agent = _make_llm_agent(accelerator=_make_mock_accelerator())
+        agent.selected_adapters = ["actor", "critic"]
+        self._write_attrs(tmp_path)
+
+        with (
+            patch.object(LLMAlgorithm, "_load_adapter_weights"),
+            patch.object(LLMAlgorithm, "_copy_adapter_weights") as mock_copy,
+            patch.object(
+                LLMAlgorithm, "_load_checkpoint_lora_config", return_value=None
+            ),
+        ):
+            agent.load_checkpoint(
+                str(tmp_path),
+                load_optimizer=False,
+                overwrite_critic_adapter=True,
+            )
+
+        mock_copy.assert_called_with(source_adapter="actor", target_adapter="critic")
+
     def test_load_checkpoint_updates_reference_adapter_legacy_weights_only_key(
         self, tmp_path
     ):
@@ -5782,7 +5871,9 @@ class TestLLMLoadCheckpointLoraOnlyWithRefAdapter:
             ),
         ):
             agent.load_checkpoint(str(tmp_path), load_optimizer=False)
-        mock_model_load.assert_called_once_with(str(tmp_path), False, True)
+        # ``None`` defers the reference decision to the checkpoint layout; the
+        # critic is never seeded from the actor unless explicitly asked.
+        mock_model_load.assert_called_once_with(str(tmp_path), None, False)
 
     def test_load_model_checkpoint_fails_fast_on_lora_config_mismatch(self, tmp_path):
         agent = _make_llm_agent()

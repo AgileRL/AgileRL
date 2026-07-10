@@ -49,7 +49,7 @@ def stub_tokenizer():
     [("sft", "SFT", "sft"), ("dpo", "DPO", "preference")],
 )
 def test_demo_builds_a_trainer_from_its_default_config(
-    demo, stub_tokenizer, tmp_path, mode, expected_algo, expected_objective
+    demo, stub_tokenizer, mode, expected_algo, expected_objective
 ):
     """The demo's default config for each mode drives a dataset trainer."""
     from agilerl.training.train_llm import train_llm_dataset
@@ -58,7 +58,7 @@ def test_demo_builds_a_trainer_from_its_default_config(
     config_path = PROJECT_ROOT / demo.CONFIG_DIR / f"{mode}.yaml"
     assert config_path.exists(), f"demo default config missing: {config_path}"
 
-    manifest = demo.build_manifest(str(config_path), None, str(tmp_path))
+    manifest = demo.build_manifest(str(config_path))
     assert manifest["algorithm"]["name"] == expected_algo
 
     with (
@@ -79,26 +79,33 @@ def test_demo_builds_a_trainer_from_its_default_config(
     assert trainer.env_factory is None
 
 
-def test_build_manifest_repoints_model_for_warm_start(demo, tmp_path):
-    """``--load-path`` swaps the manifest's base model for the merged adapter."""
+def test_demo_warm_starts_with_load_weights_from(demo, stub_tokenizer):
+    """``--load-path`` is a warm start, not a resume: weights only, manifest rules.
+
+    The base model stays exactly what the manifest names -- nothing is merged into
+    it -- and the checkpoint is passed as ``load_weights_from``, so the optimizer
+    starts fresh and the manifest keeps its hyperparameters.
+    """
+    from agilerl.training.trainer import LocalTrainer
+
     config_path = PROJECT_ROOT / demo.CONFIG_DIR / "dpo.yaml"
-    dest = str(tmp_path / "merged")
-
-    with patch.object(
-        demo, "_merge_adapter_into_base", return_value=dest
-    ) as mock_merge:
-        manifest = demo.build_manifest(str(config_path), "some/adapter", dest)
-
-    mock_merge.assert_called_once_with("some/adapter", dest)
-    assert manifest["network"]["pretrained_model_name_or_path"] == dest
-
-
-def test_build_manifest_leaves_model_alone_without_warm_start(demo, tmp_path):
-    """Without ``--load-path`` the manifest's own base model is used."""
-    config_path = PROJECT_ROOT / demo.CONFIG_DIR / "dpo.yaml"
-
-    with patch.object(demo, "_merge_adapter_into_base") as mock_merge:
-        manifest = demo.build_manifest(str(config_path), None, str(tmp_path))
-
-    mock_merge.assert_not_called()
+    manifest = demo.build_manifest(str(config_path))
     assert manifest["network"]["pretrained_model_name_or_path"] == "Qwen/Qwen2.5-0.5B"
+
+    with (
+        patch.object(LocalTrainer, "_make_tokenizer", return_value=stub_tokenizer),
+        patch.object(LocalTrainer, "_make_env", return_value=MagicMock()),
+        patch("agilerl.training.trainer.create_population_from_spec") as mock_create,
+    ):
+        mock_create.return_value = [MagicMock()]
+        LocalTrainer.from_manifest(manifest, load_weights_from="outputs/sft_run")
+
+    kwargs = mock_create.call_args.kwargs
+    assert kwargs["load_weights_from"] == "outputs/sft_run"
+    assert kwargs["resume_from_checkpoint"] is None
+
+
+def test_demo_never_merges_adapters_into_the_base(demo):
+    """The demo must not fold LoRA weights into base weights."""
+    source = DEMO_PATH.read_text()
+    assert "merge_and_unload" not in source

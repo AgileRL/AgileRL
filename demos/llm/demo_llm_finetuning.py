@@ -15,13 +15,14 @@ Train DPO from the base model::
 
     python demos/llm/demo_llm_finetuning.py dpo
 
-Warm-start DPO from a prior SFT checkpoint::
+Warm-start DPO from a prior SFT checkpoint (its actor becomes the DPO reference;
+hyperparameters still come from the manifest)::
 
-    python demos/llm/demo_llm_finetuning.py dpo --load-path outputs/sft/actor
+    python demos/llm/demo_llm_finetuning.py dpo --load-path outputs/20260101_120000_SFT
 
 Evaluate a saved checkpoint interactively::
 
-    python demos/llm/demo_llm_finetuning.py sft --eval --load-path outputs/sft/actor
+    python demos/llm/demo_llm_finetuning.py sft --eval --load-path outputs/20260101_120000_SFT
 
 Multi-GPU / DeepSpeed via accelerate::
 
@@ -38,16 +39,14 @@ if not HAS_LLM_DEPENDENCIES:
     raise ImportError(msg)
 
 import argparse
-import json
-import shutil
-import tempfile
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import yaml
 from accelerate import Accelerator
-from peft import PeftModel
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import LoraConfig
+from transformers import AutoTokenizer
 
 from agilerl.algorithms.dpo import DPO
 from agilerl.algorithms.sft import SFT
@@ -66,56 +65,16 @@ def _make_accelerator() -> Accelerator | None:
     return accelerator if accelerator.state.deepspeed_plugin is not None else None
 
 
-def _merge_adapter_into_base(load_path: str, dest: str) -> str:
-    """Fold a saved LoRA adapter into its base model and save the dense result.
-
-    AgileRL manages its own adapters on an immutable base and rejects
-    ``PeftModel`` inputs, so a warm start is expressed as a dense model on disk
-    that the manifest can point at.
-
-    :param load_path: Directory holding ``adapter_config.json`` and the adapter weights.
-    :type load_path: str
-    :param dest: Directory to write the merged model and tokenizer to.
-    :type dest: str
-    :return: ``dest``, ready to use as ``pretrained_model_name_or_path``.
-    :rtype: str
-    """
-    with open(f"{load_path}/adapter_config.json") as f:
-        base_model_name = json.load(f)["base_model_name_or_path"]
-
-    print(f"Merging LoRA adapter {load_path} into base {base_model_name} ...")
-    base_model = AutoModelForCausalLM.from_pretrained(base_model_name)
-    merged = PeftModel.from_pretrained(
-        base_model, load_path, adapter_name="actor"
-    ).merge_and_unload()
-
-    merged.save_pretrained(dest)
-    AutoTokenizer.from_pretrained(base_model_name).save_pretrained(dest)
-    return dest
-
-
-def build_manifest(
-    config_path: str, load_path: str | None, dest: str
-) -> dict[str, Any]:
-    """Load the training manifest, optionally repointing it at merged warm-start weights.
+def build_manifest(config_path: str) -> dict[str, Any]:
+    """Load the training manifest.
 
     :param config_path: Path to the YAML manifest.
     :type config_path: str
-    :param load_path: Optional LoRA adapter directory to warm-start from.
-    :type load_path: str | None
-    :param dest: Directory to write merged warm-start weights to.
-    :type dest: str
     :return: The manifest dict, ready for ``LocalTrainer.from_manifest``.
     :rtype: dict[str, Any]
     """
     with open(config_path) as f:
-        manifest = yaml.safe_load(f)
-
-    if load_path is not None:
-        manifest["network"]["pretrained_model_name_or_path"] = _merge_adapter_into_base(
-            load_path, dest
-        )
-    return manifest
+        return yaml.safe_load(f)
 
 
 def main(
@@ -131,8 +90,9 @@ def main(
     :type config_path: str
     :param save_path: Directory to save the elite LoRA checkpoint.
     :type save_path: str
-    :param load_path: Optional path to a pre-trained LoRA checkpoint to warm-start from
-        (e.g. an SFT adapter when running DPO).
+    :param load_path: Optional checkpoint directory to warm-start from (e.g. an SFT
+        run when training DPO). Only its LoRA adapters are taken -- the optimizer
+        starts fresh and the manifest keeps every hyperparameter.
     :type load_path: str | None
     :param wb: Whether to log the run to Weights & Biases.
     :type wb: bool
@@ -140,27 +100,28 @@ def main(
     :type eval_samples: int
     """
     accelerator = _make_accelerator()
-    warm_start_dir = tempfile.mkdtemp(prefix="agilerl_warm_start_")
+    manifest = build_manifest(config_path)
 
-    try:
-        manifest = build_manifest(config_path, load_path, warm_start_dir)
+    print(f"Building trainer from {config_path} ...")
+    if load_path is not None:
+        print(f"Warm-starting from LoRA checkpoint {load_path} ...")
+    trainer = LocalTrainer.from_manifest(
+        manifest,
+        load_weights_from=load_path,
+        accelerator=accelerator,
+    )
 
-        print(f"Building trainer from {config_path} ...")
-        trainer = LocalTrainer.from_manifest(manifest, accelerator=accelerator)
+    print(f"Fine-tuning {trainer.algorithm_spec.name} agents...")
+    pop, _fitnesses = trainer.train(
+        save_elite=True,
+        elite_path=save_path,
+        wb=wb,
+    )
 
-        print(f"Fine-tuning {trainer.algorithm_spec.name} agents...")
-        pop, _fitnesses = trainer.train(
-            save_elite=True,
-            elite_path=save_path,
-            wb=wb,
-        )
-
-        print("\nQualitative response comparison (elite agent):")
-        elite = max(pop, key=lambda a: a.fitness[-1] if a.fitness else float("-inf"))
-        prompts = sample_eval_prompts(trainer.env, n=eval_samples)
-        compare_responses(elite, trainer.tokenizer, prompts)
-    finally:
-        shutil.rmtree(warm_start_dir, ignore_errors=True)
+    print("\nQualitative response comparison (elite agent):")
+    elite = max(pop, key=lambda a: a.fitness[-1] if a.fitness else float("-inf"))
+    prompts = sample_eval_prompts(trainer.env, n=eval_samples)
+    compare_responses(elite, trainer.tokenizer, prompts)
 
 
 def eval_mode(mode: str, load_path: str, max_new_tokens: int = 200) -> None:
@@ -168,34 +129,33 @@ def eval_mode(mode: str, load_path: str, max_new_tokens: int = 200) -> None:
 
     :param mode: ``"sft"`` or ``"dpo"`` — selects the agent class.
     :type mode: str
-    :param load_path: Path to a directory containing ``adapter_config.json``
-        and the LoRA adapter weights.
+    :param load_path: Checkpoint directory written by training, holding an
+        ``actor/`` LoRA adapter.
     :type load_path: str
     :param max_new_tokens: Maximum tokens to generate per response.
     :type max_new_tokens: int
     """
-    with open(f"{load_path}/adapter_config.json") as f:
-        base_model_name = json.load(f)["base_model_name_or_path"]
+    # The adapter records the base it was trained against and its own LoRA config,
+    # which is enough to rebuild the agent and load the adapter onto it.
+    adapter_path = str(Path(load_path) / "actor")
+    lora_config = LoraConfig.from_pretrained(adapter_path)
+    base_model_name = lora_config.base_model_name_or_path
 
     print(f"Loading tokenizer from {base_model_name} ...")
     tokenizer = AutoTokenizer.from_pretrained(base_model_name)
     tokenizer.pad_token = tokenizer.eos_token
 
-    print(f"Loading base model from {base_model_name} ...")
-    base_model = AutoModelForCausalLM.from_pretrained(base_model_name)
-
-    print(f"Applying LoRA adapter from {load_path} ...")
-    # Fold the saved adapter into the base — AgileRL rejects PeftModel inputs.
-    actor_network = PeftModel.from_pretrained(base_model, load_path).merge_and_unload()
-
+    print(f"Building agent on {base_model_name}, loading adapter {adapter_path} ...")
     agent_cls = SFT if mode == "sft" else DPO
     agent = agent_cls(
-        actor_network=actor_network,
+        model_name=base_model_name,
+        lora_config=lora_config,
         pad_token_id=tokenizer.eos_token_id,
         pad_token=tokenizer.eos_token,
     )
+    agent.load_weights(load_path)
 
-    print(f"\nEval mode ready  |  base: {base_model_name}  |  adapter: {load_path}")
+    print(f"\nEval mode ready  |  base: {base_model_name}  |  adapter: {adapter_path}")
     print("Enter a prompt and press Enter to generate a response.")
     print("Type 'quit', 'q', 'exit', or press Ctrl+C to quit.\n")
 
@@ -236,9 +196,10 @@ if __name__ == "__main__":
         "--load-path",
         default=None,
         help=(
-            "Path to a LoRA checkpoint. In training mode, warm-starts from these weights "
-            "(e.g. an SFT adapter for DPO). In eval mode (--eval), loads for interactive "
-            "inference. Must contain adapter_model.safetensors / adapter_config.json."
+            "Checkpoint directory from a previous run (containing actor/ and "
+            "attributes.pt). In training mode, warm-starts from its LoRA adapter "
+            "(e.g. an SFT run when training DPO); hyperparameters still come from "
+            "the manifest. In eval mode (--eval), loads it for inference."
         ),
     )
     parser.add_argument(
