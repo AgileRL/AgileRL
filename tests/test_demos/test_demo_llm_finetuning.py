@@ -64,6 +64,7 @@ def test_demo_builds_a_trainer_from_its_default_config(
     with (
         patch.object(LocalTrainer, "_make_tokenizer", return_value=stub_tokenizer),
         patch.object(LocalTrainer, "_make_env", return_value=MagicMock()),
+        patch("agilerl.training.trainer.create_llm_accelerator", return_value=None),
         patch(
             "agilerl.training.trainer.create_population_from_spec",
             return_value=[MagicMock()],
@@ -95,6 +96,7 @@ def test_demo_warm_starts_with_load_weights_from(demo, stub_tokenizer):
     with (
         patch.object(LocalTrainer, "_make_tokenizer", return_value=stub_tokenizer),
         patch.object(LocalTrainer, "_make_env", return_value=MagicMock()),
+        patch("agilerl.training.trainer.create_llm_accelerator", return_value=None),
         patch("agilerl.training.trainer.create_population_from_spec") as mock_create,
     ):
         mock_create.return_value = [MagicMock()]
