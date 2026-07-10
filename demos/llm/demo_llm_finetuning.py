@@ -1,7 +1,9 @@
 """LLM fine-tuning demo -- SFT and DPO with full CLI support.
 
 Train, warm-start, or interactively evaluate LoRA-adapted language models.
-Hyperparameters are loaded from YAML configs in ``configs/training/``.
+Everything -- model, dataset, LoRA, population size, evolution -- is read from a
+training manifest under ``configs/training/llm_finetuning/`` and handed to
+:class:`~agilerl.training.trainer.LocalTrainer`.
 
 Examples
 --------
@@ -37,186 +39,128 @@ if not HAS_LLM_DEPENDENCIES:
 
 import argparse
 import json
+import shutil
+import tempfile
 from datetime import datetime
+from typing import Any
 
 import yaml
 from accelerate import Accelerator
-from datasets import load_dataset
-from peft import LoraConfig, PeftModel
-from torch.utils.data import Dataset
+from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from agilerl.algorithms.dpo import DPO
 from agilerl.algorithms.sft import SFT
-from agilerl.hpo.mutation import Mutations
-from agilerl.hpo.tournament import TournamentSelection
-from agilerl.training.train_llm import train_llm_dataset
+from agilerl.training.trainer import LocalTrainer
 from agilerl.utils.llm_utils import compare_responses, sample_eval_prompts
-from agilerl.llm_envs import DatasetEnv
 
-MODEL_PATH = "Qwen/Qwen2.5-0.5B"
-DATASET = "HumanLLMs/Human-Like-DPO-Dataset"
+CONFIG_DIR = "configs/training/llm_finetuning"
 
 
-def make_dataset(dataset_name: str) -> tuple[Dataset, Dataset]:
-    """Download and split the dataset into train / test subsets.
+def _make_accelerator() -> Accelerator | None:
+    """Return an ``Accelerator`` only when launched under DeepSpeed."""
+    try:
+        accelerator = Accelerator()
+    except Exception:
+        return None
+    return accelerator if accelerator.state.deepspeed_plugin is not None else None
 
-    :param dataset_name: HuggingFace dataset identifier.
-    :type dataset_name: str
-    :return: ``(train_dataset, test_dataset)`` HuggingFace ``Dataset`` objects.
-    :rtype: tuple[Dataset, Dataset]
+
+def _merge_adapter_into_base(load_path: str, dest: str) -> str:
+    """Fold a saved LoRA adapter into its base model and save the dense result.
+
+    AgileRL manages its own adapters on an immutable base and rejects
+    ``PeftModel`` inputs, so a warm start is expressed as a dense model on disk
+    that the manifest can point at.
+
+    :param load_path: Directory holding ``adapter_config.json`` and the adapter weights.
+    :type load_path: str
+    :param dest: Directory to write the merged model and tokenizer to.
+    :type dest: str
+    :return: ``dest``, ready to use as ``pretrained_model_name_or_path``.
+    :rtype: str
     """
-    raw = load_dataset(dataset_name, split="train").shuffle(seed=42)
-    splits = raw.train_test_split(test_size=0.1)
-    return splits["train"], splits["test"]
+    with open(f"{load_path}/adapter_config.json") as f:
+        base_model_name = json.load(f)["base_model_name_or_path"]
+
+    print(f"Merging LoRA adapter {load_path} into base {base_model_name} ...")
+    base_model = AutoModelForCausalLM.from_pretrained(base_model_name)
+    merged = PeftModel.from_pretrained(
+        base_model, load_path, adapter_name="actor"
+    ).merge_and_unload()
+
+    merged.save_pretrained(dest)
+    AutoTokenizer.from_pretrained(base_model_name).save_pretrained(dest)
+    return dest
+
+
+def build_manifest(
+    config_path: str, load_path: str | None, dest: str
+) -> dict[str, Any]:
+    """Load the training manifest, optionally repointing it at merged warm-start weights.
+
+    :param config_path: Path to the YAML manifest.
+    :type config_path: str
+    :param load_path: Optional LoRA adapter directory to warm-start from.
+    :type load_path: str | None
+    :param dest: Directory to write merged warm-start weights to.
+    :type dest: str
+    :return: The manifest dict, ready for ``LocalTrainer.from_manifest``.
+    :rtype: dict[str, Any]
+    """
+    with open(config_path) as f:
+        manifest = yaml.safe_load(f)
+
+    if load_path is not None:
+        manifest["network"]["pretrained_model_name_or_path"] = _merge_adapter_into_base(
+            load_path, dest
+        )
+    return manifest
 
 
 def main(
-    mode: str,
-    init_hp: dict,
-    mut_p: dict,
+    config_path: str,
     save_path: str = "outputs",
     load_path: str | None = None,
+    wb: bool = False,
+    eval_samples: int = 5,
 ) -> None:
-    """Run an SFT or DPO fine-tuning loop.
+    """Run an SFT or DPO fine-tuning loop from a training manifest.
 
-    :param mode: ``"sft"`` or ``"dpo"``.
-    :type mode: str
-    :param init_hp: Initial hyperparameter dict from the YAML config.
-    :type init_hp: dict
-    :param mut_p: Mutation parameter dict from the YAML config.
-    :type mut_p: dict
+    :param config_path: Path to the YAML manifest describing the run.
+    :type config_path: str
     :param save_path: Directory to save the elite LoRA checkpoint.
     :type save_path: str
     :param load_path: Optional path to a pre-trained LoRA checkpoint to warm-start from
         (e.g. an SFT adapter when running DPO).
     :type load_path: str | None
+    :param wb: Whether to log the run to Weights & Biases.
+    :type wb: bool
+    :param eval_samples: Number of prompts used for the qualitative comparison.
+    :type eval_samples: int
     """
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-    tokenizer.pad_token = tokenizer.eos_token
-    train_dataset, test_dataset = make_dataset(DATASET)
+    accelerator = _make_accelerator()
+    warm_start_dir = tempfile.mkdtemp(prefix="agilerl_warm_start_")
 
     try:
-        accelerator = Accelerator()
-        if accelerator.state.deepspeed_plugin is None:
-            accelerator = None
-    except Exception:
-        accelerator = None
+        manifest = build_manifest(config_path, load_path, warm_start_dir)
 
-    # --- Environment -------------------------------------------------------
-    env_objective = "sft" if mode == "sft" else "preference"
-    env_kwargs: dict = dict(
-        train_dataset=train_dataset,
-        test_dataset=test_dataset,
-        tokenizer=tokenizer,
-        objective=env_objective,
-        data_batch_size_per_gpu=init_hp["BATCH_SIZE"],
-        accelerator=accelerator,
-        max_context_length=init_hp.get("MAX_CONTEXT_LENGTH"),
-    )
-    if mode == "sft":
-        env_kwargs["response_column"] = "chosen"
+        print(f"Building trainer from {config_path} ...")
+        trainer = LocalTrainer.from_manifest(manifest, accelerator=accelerator)
 
-    print(f"Setting up {env_objective} DatasetEnv environment...")
-    env = DatasetEnv(**env_kwargs)
-
-    init_hp["PAD_TOKEN_ID"] = tokenizer.eos_token_id
-    init_hp["PAD_TOKEN"] = tokenizer.eos_token
-
-    lora_config = LoraConfig(**init_hp["LORA"])
-
-    # --- Optional warm-start from a saved LoRA adapter ---------------------
-    # AgileRL manages its own adapters on an immutable base and rejects
-    # PeftModel inputs, so fold the saved adapter into the base here before
-    # handing the dense model over.
-    actor_network = None
-    if load_path is not None:
-        print(f"Loading pre-trained LoRA weights from {load_path} ...")
-        with open(f"{load_path}/adapter_config.json") as f:
-            base_model_name = json.load(f)["base_model_name_or_path"]
-        base_model = AutoModelForCausalLM.from_pretrained(base_model_name)
-        actor_network = PeftModel.from_pretrained(
-            base_model, load_path, adapter_name="actor"
-        ).merge_and_unload()
-
-    # --- Agent population --------------------------------------------------
-    agent_cls = SFT if mode == "sft" else DPO
-    agent_kwargs: dict = dict(
-        model_name=MODEL_PATH if actor_network is None else None,
-        actor_network=actor_network,
-        pad_token_id=init_hp["PAD_TOKEN_ID"],
-        pad_token=init_hp["PAD_TOKEN"],
-        batch_size=init_hp["BATCH_SIZE"],
-        lr=init_hp["LR"],
-        update_epochs=init_hp["UPDATE_EPOCHS"],
-        lora_config=lora_config if actor_network is None else None,
-        accelerator=accelerator,
-        gradient_checkpointing=accelerator is not None,
-        use_liger_loss=init_hp.get("USE_LIGER_LOSS", False),
-    )
-    if mode == "dpo":
-        agent_kwargs["beta"] = init_hp["BETA"]
-        agent_kwargs["nll_alpha"] = init_hp.get("NLL_ALPHA", 1.0)
-
-    print(f"Defining {mode.upper()} agent population...")
-    pop = [agent_cls(**agent_kwargs) for _ in range(init_hp["POP_SIZE"])]
-
-    # --- HPO (only when evolution is enabled) ------------------------------
-    evo_steps = init_hp.get("EVO_STEPS")
-    if evo_steps is not None:
-        tournament = TournamentSelection(
-            init_hp["TOURN_SIZE"],
-            init_hp["ELITISM"],
-            init_hp["POP_SIZE"],
-            init_hp["EVAL_LOOP"],
+        print(f"Fine-tuning {trainer.algorithm_spec.name} agents...")
+        pop, _fitnesses = trainer.train(
+            save_elite=True,
+            elite_path=save_path,
+            wb=wb,
         )
-        mutations = Mutations(
-            no_mutation=mut_p["NO_MUT"],
-            architecture=0,
-            new_layer_prob=0,
-            parameters=0,
-            activation=0,
-            rl_hp=mut_p["RL_HP_MUT"],
-            mutation_sd=mut_p["MUT_SD"],
-            rand_seed=mut_p["RAND_SEED"],
-            accelerator=accelerator,
-        )
-    else:
-        tournament = None
-        mutations = None
 
-    num_batches = init_hp.get("NUM_BATCHES")
-    max_steps = num_batches * init_hp["BATCH_SIZE"] if num_batches is not None else None
-
-    # --- Training ----------------------------------------------------------
-    train_fn = train_llm_dataset
-    train_kwargs: dict = dict(
-        pop=pop,
-        env=env,
-        init_hp=init_hp,
-        save_elite=True,
-        elite_path=save_path,
-        wb=init_hp.get("WANDB", False),
-        evo_steps=evo_steps,
-        tournament=tournament,
-        mutation=mutations,
-        wandb_api_key=init_hp.get("WANDB_API_KEY"),
-        wandb_project=init_hp.get("WANDB_PROJECT", "AgileRL"),
-        wandb_entity=init_hp.get("WANDB_ENTITY"),
-        wandb_run_name=init_hp.get("WANDB_RUN_NAME"),
-        evaluation_interval=init_hp.get("EVALUATION_INTERVAL", 200),
-        accelerator=accelerator,
-        max_steps=max_steps,
-    )
-
-    print(f"Fine-tuning {mode.upper()} agents...")
-    train_fn(**train_kwargs)
-
-    # --- Post-training qualitative eval ------------------------------------
-    print("\nQualitative response comparison (elite agent):")
-    elite = max(pop, key=lambda a: a.fitness[-1] if a.fitness else float("-inf"))
-    eval_samples = sample_eval_prompts(env, n=init_hp.get("EVAL_N_SAMPLES", 5))
-    compare_responses(elite, tokenizer, eval_samples)
+        print("\nQualitative response comparison (elite agent):")
+        elite = max(pop, key=lambda a: a.fitness[-1] if a.fitness else float("-inf"))
+        prompts = sample_eval_prompts(trainer.env, n=eval_samples)
+        compare_responses(elite, trainer.tokenizer, prompts)
+    finally:
+        shutil.rmtree(warm_start_dir, ignore_errors=True)
 
 
 def eval_mode(mode: str, load_path: str, max_new_tokens: int = 200) -> None:
@@ -309,9 +253,20 @@ if __name__ == "__main__":
         help="Maximum tokens to generate per response in eval mode (default: 200)",
     )
     parser.add_argument(
+        "--eval-samples",
+        type=int,
+        default=5,
+        help="Prompts used for the post-training comparison (default: 5)",
+    )
+    parser.add_argument(
+        "--wandb",
+        action="store_true",
+        help="Log the run to Weights & Biases",
+    )
+    parser.add_argument(
         "--config",
         default=None,
-        help="Path to YAML config file (default: configs/training/{mode}.yaml)",
+        help=f"Path to a training manifest (default: {CONFIG_DIR}/{{mode}}.yaml)",
     )
     args = parser.parse_args()
 
@@ -324,20 +279,15 @@ if __name__ == "__main__":
             max_new_tokens=args.max_new_tokens,
         )
     else:
-        config_path = args.config or f"configs/training/{args.mode}.yaml"
-        with open(config_path) as f:
-            config = yaml.safe_load(f)
-
         save_path = (
             args.save_path
             if args.no_timestamp
             else f"{args.save_path}/{datetime.now().strftime('%Y%m%d_%H%M%S')}_{args.mode.upper()}"
         )
-
         main(
-            mode=args.mode,
-            init_hp=config["INIT_HP"],
-            mut_p=config["MUTATION_PARAMS"],
+            config_path=args.config or f"{CONFIG_DIR}/{args.mode}.yaml",
             save_path=save_path,
             load_path=args.load_path,
+            wb=args.wandb,
+            eval_samples=args.eval_samples,
         )

@@ -1456,3 +1456,55 @@ class TestSimbaRecurrentConflict:
         )
         manifest = TrainingManifest.model_validate(raw)
         assert manifest.algorithm.recurrent is False
+
+
+# The LLM manifests are the ones the demo (``demos/llm/demo_llm_finetuning.py``)
+# runs against, and the only place the algorithm-injected ``env_type`` /
+# ``objective`` are exercised straight from disk.
+_LLM_CONFIG_ENV_TYPES = {
+    "cispo.yaml": ("rollout", None),
+    "cispo_quant_bench.yaml": ("rollout", None),
+    "cispo_quant_bench_qwen.yaml": ("rollout", None),
+    "dpo.yaml": ("dataset", "preference"),
+    "grpo.yaml": ("rollout", None),
+    "grpo_multiturn.yaml": ("rollout", None),
+    "gspo.yaml": ("rollout", None),
+    "ppo_llm.yaml": ("rollout", None),
+    "ppo_llm_quant_bench.yaml": ("rollout", None),
+    "reinforce_llm.yaml": ("rollout", None),
+    "reinforce_quant_bench.yaml": ("rollout", None),
+    "sft.yaml": ("dataset", "sft"),
+}
+
+
+@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed")
+class TestLLMConfigFiles:
+    """Every manifest under ``configs/training/llm_finetuning/`` must validate.
+
+    Building a ``LocalTrainer`` from these would download a tokenizer, so this
+    stops at the manifest and env-spec layer -- which is exactly the contract
+    the LLM demo relies on.
+    """
+
+    def test_every_llm_config_is_covered(self):
+        """Guard against a new config slipping in unvalidated."""
+        on_disk = {
+            path.name for path in (CONFIGS_DIR / "llm_finetuning").glob("*.yaml")
+        }
+        assert on_disk == set(_LLM_CONFIG_ENV_TYPES)
+
+    @pytest.mark.parametrize(
+        ("filename", "expected"),
+        sorted(_LLM_CONFIG_ENV_TYPES.items()),
+        ids=sorted(_LLM_CONFIG_ENV_TYPES),
+    )
+    def test_llm_config_resolves_env_spec(self, filename, expected):
+        expected_env_type, expected_objective = expected
+        manifest = TrainingManifest.get_validated(
+            CONFIGS_DIR / "llm_finetuning" / filename, mode="python"
+        )
+        env_spec = LocalTrainer._resolve_env_spec(manifest)
+
+        assert isinstance(env_spec, LLMEnvSpec)
+        assert str(env_spec.env_type) == expected_env_type
+        assert env_spec.objective == expected_objective
