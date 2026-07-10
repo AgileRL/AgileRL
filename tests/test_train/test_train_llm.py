@@ -1468,3 +1468,65 @@ def test_train_llm_rollout_closes_envs_on_teardown():
 
     rollout_env.close.assert_called_once()
     test_env.close.assert_called_once()
+
+
+def test_validate_finetune_args_warns_when_checkpoint_steps_ignored():
+    """Periodic checkpoints are skipped while evolution is active; say so."""
+    from agilerl.training.train_llm import _validate_finetune_args
+
+    with pytest.warns(
+        UserWarning,
+        match="'checkpoint_steps' is set, but evolution is active",
+    ):
+        _validate_finetune_args(
+            2,
+            MagicMock(
+                architecture_mut=0, new_layer_prob=0, parameters_mut=0, activation_mut=0
+            ),
+            MagicMock(
+                architecture_mut=0, new_layer_prob=0, parameters_mut=0, activation_mut=0
+            ),
+            None,
+            None,
+            [_mock_dpo_agent()],
+            DPO,
+            "unused",
+            checkpoint_steps=10,
+            algo="dpo",
+        )
+
+
+def test_train_llm_rollout_syncs_ranks_after_evaluation():
+    """Distributed evaluation must rendezvous before training continues."""
+    mock_agent = _make_multiturn_mock_agent(spec=LLMPPO)
+    accelerator = Accelerator()
+
+    with (
+        patch(
+            "agilerl.training.train_llm.default_progress_bar",
+            return_value=MagicMock(),
+        ),
+        patch("agilerl.training.train_llm.init_loggers", return_value=[]),
+        patch("agilerl.training.train_llm.safe_aggregate_metrics", return_value=0.5),
+        patch("agilerl.training.train_llm.save_llm_checkpoint"),
+        patch("agilerl.training.train_llm.BatchRolloutEnv"),
+        patch("agilerl.training.train_llm.collect_rollouts_llm") as mock_collect,
+        patch("agilerl.training.train_llm.stack_and_pad_experiences") as mock_stack,
+        patch.object(accelerator, "wait_for_everyone") as mock_wait,
+    ):
+        mock_collect.return_value = _multiturn_collect_return(batch_steps=3)
+        mock_stack.return_value = (torch.zeros(1, 8, dtype=torch.long),)
+
+        train_llm_rollout(
+            pop=[mock_agent],
+            env_factory=MagicMock(),
+            max_turns=2,
+            init_hp={"BATCH_SIZE": 1, "ALGO": mock_agent.algo},
+            max_steps=3,
+            evaluation_interval=1,
+            verbose=False,
+            accelerator=accelerator,
+        )
+
+    assert mock_agent.test.call_count == 1
+    mock_wait.assert_called()

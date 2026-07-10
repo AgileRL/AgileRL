@@ -396,7 +396,15 @@ class TestLLMEnvSpec:
         assert args[1] is reward_fn
         assert kwargs["test_dataset"] is mock_test_ds
         assert kwargs["apply_chat_template"] is False
-        assert callable(kwargs["prompt_builder"])
+
+        # The builder renders the template for a row, so it can interpolate any
+        # column -- not just the question.
+        mock_tokenizer.apply_chat_template.return_value = "<rendered>"
+        assert kwargs["prompt_builder"]({"question": "2+2", "answer": "4"}) == (
+            "<rendered>"
+        )
+        (messages,) = mock_tokenizer.apply_chat_template.call_args.args
+        assert messages == [{"role": "user", "content": "2+2"}]
 
     @patch.object(LLMEnvSpec, "_load_dataset")
     def test_make_env_preference(self, mock_load):
@@ -843,6 +851,26 @@ class TestLLMEnvSpecMultiturn:
                 env_type=LLMEnvType.ROLLOUT,
                 env_name="game:Test-v0",
                 entrypoint="my_mod:make",
+                max_turns=5,
+            )
+
+    def test_dataset_backed_rollout_rejects_multi_turn(self):
+        with pytest.raises(ValueError, match="single-turn; max_turns must be 1"):
+            LLMEnvSpec(
+                env_type=LLMEnvType.ROLLOUT,
+                dataset="ds",
+                reward_file_path="r.py",
+                reward_fn_name="fn",
+                prompt_template={"user_0": "Q: {question}"},
+                max_turns=4,
+            )
+
+    def test_env_backed_rollout_rejects_reward_file_path(self):
+        with pytest.raises(ValueError, match="not supported for env-backed"):
+            LLMEnvSpec(
+                env_type=LLMEnvType.ROLLOUT,
+                env_name="game:Test-v0",
+                reward_file_path="r.py",
                 max_turns=5,
             )
 

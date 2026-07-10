@@ -12,6 +12,7 @@ They are different operations and must not be confused:
 """
 
 import warnings
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -192,3 +193,83 @@ class TestLLMSpecResumeVsLoad:
         assert [g["lr"] for g in agent.optimizer.optimizer.param_groups] == [
             g["lr"] for g in fresh.optimizer.optimizer.param_groups
         ]
+
+
+class TestLoadWeightsCoversBothCheckpointFormats:
+    """``load_weights`` must handle a LoRA checkpoint and a full-model one."""
+
+    @pytest.mark.skipif(
+        not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed"
+    )
+    @pytest.mark.parametrize("lora_only", [True, False])
+    def test_llm_load_weights_takes_weights_and_nothing_else(self, tmp_path, lora_only):
+        from agilerl.algorithms.sft import SFT
+
+        lora = LoraConfig(
+            r=16,
+            lora_alpha=64,
+            target_modules=["q_proj"],
+            task_type="CAUSAL_LM",
+            lora_dropout=0.05,
+        )
+        source = SFT(
+            model_name=TINY_LLM_FIXTURE_PATH,
+            pad_token_id=0,
+            pad_token="<pad>",
+            lora_config=lora,
+            device="cpu",
+            lr=5e-5,
+        )
+        for name, param in source.actor.named_parameters():
+            if "lora_B" in name:
+                torch.nn.init.normal_(param, std=0.02)
+
+        path = str(tmp_path / f"ckpt_{lora_only}")
+        source.save_checkpoint(path, lora_only=lora_only)
+
+        target = SFT(
+            model_name=TINY_LLM_FIXTURE_PATH,
+            pad_token_id=0,
+            pad_token="<pad>",
+            lora_config=lora,
+            device="cpu",
+            lr=7e-6,
+        )
+        target.load_weights(path)
+
+        params = dict(target.actor.named_parameters())
+        adapters = [v for k, v in params.items() if "lora_B.actor" in k]
+        assert adapters
+        assert all(weight.abs().sum() > 0 for weight in adapters)
+        assert target.lr == 7e-6
+
+    def test_rl_load_weights_wraps_models_when_accelerated(
+        self, spaces, dqn_checkpoint
+    ):
+        """The accelerator branch re-wraps the freshly-loaded modules."""
+        _, path = dqn_checkpoint
+        observation_space, action_space = spaces
+
+        agent = DQN(observation_space, action_space, lr=7e-4)
+        agent.accelerator = MagicMock()
+        with patch.object(DQN, "wrap_models") as mock_wrap:
+            agent.load_weights(path)
+
+        mock_wrap.assert_called_once()
+
+    def test_rl_load_weights_recompiles_when_compiled(self, spaces, dqn_checkpoint):
+        """The torch.compile branch recompiles the freshly-loaded modules."""
+        _, path = dqn_checkpoint
+        observation_space, action_space = spaces
+
+        agent = DQN(observation_space, action_space, lr=7e-4)
+        agent.accelerator = None
+        agent.torch_compiler = "default"
+        with (
+            patch.object(DQN, "recompile") as mock_recompile,
+            patch("agilerl.algorithms.core.base.configure_tf32_precision") as mock_tf32,
+        ):
+            agent.load_weights(path)
+
+        mock_recompile.assert_called_once()
+        mock_tf32.assert_called_once()

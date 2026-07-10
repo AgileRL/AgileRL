@@ -2847,21 +2847,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 overwrite_reference_adapter,
                 overwrite_critic_adapter,
             )
-            return
-
-        # A full-model checkpoint keeps the actor's weights in ``attributes.pt``.
-        actor_state_dict = (
-            checkpoint.get("network_info", {})
-            .get("modules", {})
-            .get("actor_state_dict")
-        )
-        if actor_state_dict is None:
-            msg = f"Checkpoint at {path} contains no actor weights to load."
-            raise ValueError(msg)
-
-        model_ref = self._get_unwrapped_actor()
-        with gather_if_zero3(self.zero_stage, list(model_ref.parameters())):
-            model_ref.load_state_dict(actor_state_dict)
+        else:
+            # A full-model checkpoint keeps the actor's weights in ``attributes.pt``.
+            self._load_module_weights(checkpoint)
 
     def load_checkpoint(
         self,
