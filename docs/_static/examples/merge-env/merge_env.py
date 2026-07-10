@@ -61,7 +61,7 @@ class MergeEnv(gym.Env):
                 "sin(drift)": spaces.Box(-1, 1, shape=(1,), dtype=np.float64),
                 "airspeed": spaces.Box(-np.inf, np.inf, shape=(1,), dtype=np.float64),
                 "waypoint_dist": spaces.Box(-np.inf, np.inf, shape=(1,), dtype=np.float64),
-                "faf_reached": spaces.Box(0, 1, shape=(1,), dtype=np.int64),
+                "faf_reached": spaces.Box(0, 1, shape=(1,), dtype=np.float64),
                 "x_r": spaces.Box(-np.inf, np.inf, shape=(NUM_AC_STATE,), dtype=np.float64),
                 "y_r": spaces.Box(-np.inf, np.inf, shape=(NUM_AC_STATE,), dtype=np.float64),
                 "vx_r": spaces.Box(-np.inf, np.inf, shape=(NUM_AC_STATE,), dtype=np.float64),

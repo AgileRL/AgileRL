@@ -7,8 +7,18 @@ import logging
 from pathlib import Path
 from typing import Annotated, Any, Literal, get_args
 
-import agilerl.arena.models.algorithms as _arena_algorithms  # noqa: F401
 import yaml
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    BeforeValidator,
+    Field,
+    PlainSerializer,
+    model_validator,
+)
+from typing_extensions import Self
+
+import agilerl.arena.models.algorithms as _arena_algorithms  # noqa: F401
 from agilerl.arena.models.algo import (
     ARENA_REGISTRY,
     AlgoSpecT,
@@ -20,15 +30,6 @@ from agilerl.arena.models.networks import (
     NetworkSpec,
 )
 from agilerl.arena.models.training import ReplayBufferSpec, TrainingSpec
-from pydantic import (
-    AliasChoices,
-    BaseModel,
-    BeforeValidator,
-    Field,
-    PlainSerializer,
-    model_validator,
-)
-from typing_extensions import Self
 
 logger = logging.getLogger(__name__)
 
@@ -328,7 +329,6 @@ class TrainingManifest(BaseModel):
                     llm_network.pretrained_model_name_or_path
                 )
                 self.algorithm.max_model_len = llm_network.max_context_length
-                self.algorithm.lora_config = llm_network.lora_config
 
         if (
             issubclass(algo_spec_cls, LLMAlgorithmSpec)

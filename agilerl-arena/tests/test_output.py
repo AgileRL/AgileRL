@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import click
 import pytest
+
 from agilerl.arena.exceptions import (
     ArenaAPIError,
     ArenaTrainingError,
@@ -476,3 +477,22 @@ class TestEmitCsvPreview:
     def test_empty_csv_no_output(self, mock_console):
         emit_csv_preview(b"", max_rows=5)
         mock_console.print.assert_not_called()
+
+    @patch("agilerl.arena.output.console")
+    def test_wide_csv_is_pivoted(self, mock_console):
+        header = ",".join(f"metric_{i}" for i in range(30))
+        row = ",".join(str(i) for i in range(30))
+        csv_data = f"{header}\n{row}\n{row}\n".encode()
+        emit_csv_preview(csv_data, max_rows=2)
+        table = mock_console.print.call_args.args[0]
+        # Pivoted: one leading "Metric" column plus one column per preview row.
+        assert [col.header for col in table.columns] == ["Metric", "Row 1", "Row 2"]
+        assert table.row_count == 30
+
+    @patch("agilerl.arena.output.console")
+    def test_narrow_csv_stays_flat(self, mock_console):
+        csv_data = b"col1,col2\n1,2\n3,4\n5,6\n"
+        emit_csv_preview(csv_data, max_rows=3)
+        table = mock_console.print.call_args.args[0]
+        assert [col.header for col in table.columns] == ["col1", "col2"]
+        assert table.row_count == 3

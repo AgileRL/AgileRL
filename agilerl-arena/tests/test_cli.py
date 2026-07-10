@@ -7,6 +7,8 @@ from unittest.mock import MagicMock, patch
 
 import click
 import pytest
+from click.testing import CliRunner
+
 from agilerl.arena.cli import (
     _redact_agent_rows_for_display,
     arena_client,
@@ -14,7 +16,6 @@ from agilerl.arena.cli import (
 )
 from agilerl.arena.config import CommandConfig, build_client
 from agilerl.arena.exceptions import ArenaAPIError
-from click.testing import CliRunner
 
 
 @pytest.fixture
@@ -972,6 +973,7 @@ class TestAgentGenerateCommand:
             )
         assert result.exit_code == 0
         mock_agent.generate_stream.assert_called_once_with("hi")
+        assert result.output.strip() == "foobar"
 
     def test_generate_uses_active_agent(self, runner, mock_client):
         mock_agent = MagicMock()

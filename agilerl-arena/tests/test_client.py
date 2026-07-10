@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
+
 from agilerl.arena.auth import ArenaOAuth2
 from agilerl.arena.client import ArenaClient, _TokenStore
 from agilerl.arena.exceptions import (
@@ -1603,7 +1604,8 @@ class TestInferenceDeployments:
             json={"experiment_name": "exp1", "checkpoint": "step_100"},
         )
         assert result == {"deployed": True}
-        assert "deployed successfully" in caplog.text
+        assert "submitted for deployment" in caplog.text
+        assert "Check its status in Arena" in caplog.text
         assert "step_100" in caplog.text
 
     def test_deploy_agent_no_checkpoint(self, api_key_client):

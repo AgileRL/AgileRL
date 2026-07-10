@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, ClassVar, TypedDict
 
 import httpx
+from typing_extensions import Self
+
 from agilerl.arena.auth import (
     ArenaOAuth2,
     is_oauth_access_token_valid,
@@ -40,7 +42,6 @@ from agilerl.arena.utils import (
     prepare_env_upload,
     prepare_file_upload,
 )
-from typing_extensions import Self
 
 logger = logging.getLogger(__name__)
 
@@ -127,8 +128,6 @@ class ArenaClient:
     CONFIG_FILE: ClassVar[Path] = CONFIG_DIR / "config.json"
 
     _CAPABILITIES_PATH: ClassVar[str] = "/api/cli/v1/capabilities"
-    # Capability checks gate `--help` rendering, so keep them snappy even when the
-    # API is slow/unreachable instead of blocking on the full request timeout.
     _CAPABILITIES_TIMEOUT_SECS: ClassVar[float] = 5.0
     _MANIFEST_ALLOWED_PATH_PREFIX: ClassVar[str] = "/api/cli/v1/on-prem"
     _MANIFEST_ALLOWED_METHODS: ClassVar[frozenset[str]] = frozenset(
@@ -1205,7 +1204,8 @@ class ArenaClient:
             f" (checkpoint {checkpoint})" if checkpoint else " (best checkpoint)"
         )
         logger.info(
-            "Agent deployed successfully from experiment %s%s.",
+            "Agent submitted for deployment from experiment %s%s. "
+            "Check its status in Arena.",
             experiment_name,
             checkpoint_suffix,
         )

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+from pydantic import Field, model_validator
+
 from agilerl.arena.models.algo import LLMAlgorithmSpec, register
 from agilerl.arena.models.env import LLMEnvType
 from agilerl.arena.models.networks import CosineLRScheduleConfig, VLLMConfig
-from pydantic import Field, model_validator
 
 
 @register()
@@ -18,7 +19,7 @@ class GRPOSpec(LLMAlgorithmSpec):
     lr: float = Field(default=0.0001, ge=0.0)
     clip_coef: float = Field(default=0.2, ge=0.0, le=1.0)
     temperature: float = Field(default=0.9)
-    max_output_tokens: int | None = Field(default=1024)
+    max_output_tokens: int | None = Field(default=1024, exclude=True)
     min_output_tokens: int | None = Field(default=None)
     cosine_lr_schedule_config: CosineLRScheduleConfig | None = Field(default=None)
     vllm_config: VLLMConfig | None = Field(default=None)

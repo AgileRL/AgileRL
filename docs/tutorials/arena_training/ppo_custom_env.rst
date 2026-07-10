@@ -75,9 +75,8 @@ traffic simulator and follows the standard Gymnasium interface.
 
 The observation is a dictionary describing the ownship (its drift from the target heading,
 airspeed, distance to the next waypoint) and the relative position, velocity and track of
-the nearest aircraft. The action is continuous, with shape ``(2,)``: a heading change and a
-speed change. PPO handles continuous actions with a Gaussian policy, which makes it a good
-fit for this task.
+the nearest aircraft. The action is continuous, with shape ``(2,)``: - a heading change and a speed change.
+PPO handles continuous actions with a Gaussian policy, which makes it a good fit for this task.
 
 The environment source is taken from
 `bluesky-gym <https://github.com/TUDelft-CNS-ATM/bluesky-gym>`_.
@@ -102,8 +101,8 @@ with the keyword arguments passed to the environment's constructor:
    ├── requirements.txt
    └── env_config.yaml
 
-When you point Arena at a directory, it packages the whole folder and picks these files up
-automatically. ``requirements.txt`` is installed on Arena before your environment runs, and
+When submitting an environment for validation, ``agielrl-arena`` automatically packages the whole folder.
+``requirements.txt`` is installed on the validation environment before the checks are ran, and
 ``env_config.yaml`` is applied when the environment is created:
 
 .. literalinclude:: /_static/examples/merge-env/requirements.txt
@@ -120,7 +119,7 @@ Validate the Environment
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
 Before training, we need to register and validate our environment on Arena. Validation
-ensures the environment is importable, has the correct interface, and can be stepped
+ensures the environment is importable, has the correct interface, and can be stepped reliably
 without errors.
 
 An entrypoint corresponds to the specific class we want to validate for training. In order to be
@@ -135,7 +134,7 @@ All available entrypoints in the specified environment source are automatically 
 If there are multiple available entrypoints in the same file, we need to provide the
 one we want to validate against to avoid ambiguity through the ``entrypoint`` parameter.
 The ``merge_env.py`` file defines a single Gymnasium environment class, ``MergeEnv``,
-so the ``entrypoint`` parameter is unnecessary.
+so passing ``entrypoint`` is unnecessary.
 
 If no version is specified when creating an environment from scratch, ``v1`` is used by default.
 
@@ -158,6 +157,98 @@ If no version is specified when creating an environment from scratch, ``v1`` is 
       .. code-block:: bash
 
          arena env validate merge-env --source merge-env/
+
+Validation uploads the environment, installs its requirements, and runs a series of interface
+checks. For the environment as shipped, some of these checks fail:
+
+.. container:: scrollable-output
+
+   .. code-block:: text
+
+      INFO     No version specified, defaulting to v1.
+      INFO     Uploading environment 'merge-env:v1' (13.4 KB)
+      INFO     Installing requirements…
+      INFO       Resolving dependencies…
+      INFO       Installing 23 package(s)
+      INFO       Downloading kiwisolver
+      INFO       Downloading pillow
+      INFO       Downloading pandas
+      INFO       Downloading fonttools
+      INFO       Downloading matplotlib
+      INFO       Downloading scipy
+      INFO       Downloading pygame
+      INFO       Downloading openap
+      INFO       Downloading bluesky-navdata
+      INFO       Installed bluesky-gym 0.2.0
+      INFO       Installed bluesky-navdata 1.0.0
+      INFO       Installed bluesky-simulator 1.1.1
+      INFO       Installed cloudpickle 3.1.2
+      INFO       Installed contourpy 1.3.3
+      INFO       Installed cycler 0.12.1
+      INFO       Installed fonttools 4.63.0
+      INFO       Installed kiwisolver 1.5.0
+      INFO       Installed matplotlib 3.11.0
+      INFO       Installed msgpack 1.2.1
+      INFO       Installed openap 2.6.0
+      INFO       Installed packaging 26.2
+      INFO       Installed pandas 3.0.3
+      INFO       Installed pillow 12.3.0
+      INFO       Installed pygame 2.6.1
+      INFO       Installed pyparsing 3.3.2
+      INFO       Installed python-dateutil 2.9.0.post0
+      INFO       Installed pyyaml 6.0.3
+      INFO       Installed pyzmq 27.1.0
+      INFO       Installed scipy 1.18.0
+      INFO       Installed six 1.17.0
+      INFO       Installed stable-baselines3 2.9.0
+      INFO       Installed zmq 0.0.0
+      INFO     Installed 23 package(s)
+      INFO     Identifying available entrypoints
+      INFO     Environment uploaded successfully
+      INFO     Running validation checks for 'merge_env:MergeEnv'
+      ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+      ┃ Check                         ┃ Result ┃ Details                                                                     ┃
+      ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+      │ Environment class path        │ PASS   │                                                                             │
+      │ Class exists in path          │ PASS   │                                                                             │
+      │ Preliminary environment       │ PASS   │                                                                             │
+      │ Action space                  │ PASS   │                                                                             │
+      │ Action space limits           │ PASS   │                                                                             │
+      │ Observation space             │ PASS   │                                                                             │
+      │ Observation space limits      │ PASS   │                                                                             │
+      │ Seed deprecation              │ PASS   │                                                                             │
+      │ Reset return info deprecation │ PASS   │                                                                             │
+      │ Reset return type             │ FAIL   │ dtype error in key faf_reached of observation: The observation dtype does   │
+      │                               │        │ not match the dtype defined in the observation space. Returned observation  │
+      │                               │        │ has dtype int64, expected float64.                                          │
+      │ Reset seed                    │ FAIL   │ dtype error in key faf_reached of observation: The observation dtype does   │
+      │                               │        │ not match the dtype defined in the observation space. Returned observation  │
+      │                               │        │ has dtype int64, expected float64.                                          │
+      │ Reset options                 │ PASS   │                                                                             │
+      │ Reset                         │ PASS   │                                                                             │
+      │ Step                          │ FAIL   │ The obs returned by the `step()` method was expecting observation numpy     │
+      │                               │        │ array dtype to be float64, actual type: int64                               │
+      │ Episode lifecycle             │ PASS   │                                                                             │
+      └───────────────────────────────┴────────┴─────────────────────────────────────────────────────────────────────────────┘
+      INFO     Validation checks did not pass. Please review the errors above and re-validate the environment.
+
+The failing checks all point to the same issue: the ``faf_reached`` key of the observation. The
+observation space declares it as ``float64``:
+
+.. code-block:: python
+
+   "faf_reached": spaces.Box(0, 1, shape=(1,), dtype=np.float64),
+
+but the environment builds that key with ``np.array([self.wpt_reach])``, and since
+``self.wpt_reach`` is an integer this returns an ``int64`` array. The fix is to declare the space
+with the same integer dtype the environment actually returns:
+
+.. code-block:: python
+
+   "faf_reached": spaces.Box(0, 1, shape=(1,), dtype=np.int64),
+
+Re-run the validation command with the corrected environment and all checks now pass (you will need to
+give it a new version v2).
 
 After validation succeeds, the environment is automatically profiled to determine its
 resource usage. You will be able to view it in the **Environments** section of the Arena
@@ -192,8 +283,7 @@ Before submitting a training job, we need to create a project to submit it to (i
 Submit a Training Job
 ~~~~~~~~~~~~~~~~~~~~~
 
-With the environment validated, we can now submit a training job for it. For this example, we will
-train a ``PPO`` agent on this task. We define the training configuration in a YAML manifest
+For this example, we will train a ``PPO`` agent on this task. We define the training configuration in a YAML manifest
 (``merge_ppo.yaml``). Note how in the ``environment`` section we reference the validated environment by its
 name as seen on Arena. If no version is specified, the latest one is used.
 
@@ -321,8 +411,8 @@ Interact with the Deployed Agent
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 After deployment, open the agent by name and send it observations to receive actions. The
-deployment name matches the experiment you deployed; you can also list your deployments with
-``arena agent list``.
+deployment name matches the experiment you deployed by default. You can list available deployments
+with ``arena agent list``.
 
 .. code-block:: python
 
