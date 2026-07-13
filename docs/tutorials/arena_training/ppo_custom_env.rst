@@ -101,7 +101,7 @@ with the keyword arguments passed to the environment's constructor:
    ├── requirements.txt
    └── env_config.yaml
 
-When submitting an environment for validation, ``agielrl-arena`` automatically packages the whole folder.
+When submitting an environment for validation, ``agilerl-arena`` automatically packages the whole folder.
 ``requirements.txt`` is installed on the validation environment before the checks are ran, and
 ``env_config.yaml`` is applied when the environment is created:
 
