@@ -33,7 +33,10 @@ jobs:
                 python-version: ['3.10', '3.11', '3.12', '3.13']
 
         container:
-            image: pytorch/pytorch:2.11.0-cuda13.0-cudnn9-devel
+            # Pull via account ECR Docker Hub pull-through (ops-eks-use1 Karpenter
+            # node IAM). Avoids cold-node Docker Hub rate limits / EOF flakiness.
+            # Pin recorded in agilerl/infra environments/ops/release.yaml tooling.gha_arc.job_image
+            image: 761296822462.dkr.ecr.us-east-1.amazonaws.com/docker-hub/pytorch/pytorch:2.11.0-cuda13.0-cudnn9-devel
             options: --user root
 
         # Workspace (/__w) is ~1GB with little free space; root (/) has plenty. Put cache and venv on /.
