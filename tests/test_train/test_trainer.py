@@ -738,8 +738,41 @@ class TestArenaTrainerTrain:
         result = trainer.train()
 
         mock_get_validated.assert_called_once()
-        mock_client.submit_experiment.assert_called_once_with(validated)
+        mock_client.submit_experiment.assert_called_once_with(
+            validated,
+            resource_id=None,
+            num_nodes=None,
+            project=None,
+            experiment_name=None,
+            reward_file=None,
+            completion=None,
+        )
         assert result["job_id"] == "test-123"
+
+    def test_train_forwards_submit_kwargs(self, mock_client, ppo_spec, training_spec):
+        env_spec = ArenaEnvSpec(name="CartPole-v1")
+        trainer = ArenaTrainer(
+            algorithm=ppo_spec,
+            environment=env_spec,
+            training=training_spec,
+            client=mock_client,
+        )
+        trainer.train(
+            resource_id="arena-medium",
+            num_nodes=2,
+            project="GSM8K Tutorial",
+            experiment_name="gsm8k-grpo",
+            reward_file="reward.py",
+            completion="#### 42",
+        )
+
+        kwargs = mock_client.submit_experiment.call_args.kwargs
+        assert kwargs["resource_id"] == "arena-medium"
+        assert kwargs["num_nodes"] == 2
+        assert kwargs["project"] == "GSM8K Tutorial"
+        assert kwargs["experiment_name"] == "gsm8k-grpo"
+        assert kwargs["reward_file"] == "reward.py"
+        assert kwargs["completion"] == "#### 42"
 
     def test_train_submits_manifest(self, mock_client, ppo_spec, training_spec):
         env_spec = ArenaEnvSpec(name="CartPole-v1")
