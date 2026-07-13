@@ -502,9 +502,19 @@ will be deployed by default.
 Interacting with a Deployed Agent
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Each deployment runs one agent type. Metadata is loaded when you construct
-:class:`~agilerl.arena.inference.Agent` (see :attr:`~agilerl.arena.inference.Agent.metadata`).
-Call the matching client method; the server returns HTTP 400 if the route does
+Each deployment runs one agent type. The simplest way to interact with one is to open it by
+name with :meth:`~agilerl.arena.client.ArenaClient.open_inference_agent`, which returns an
+:class:`~agilerl.arena.inference.Agent` you can make requests to:
+
+.. code-block:: python
+
+   from agilerl.arena import ArenaClient
+
+   with ArenaClient() as client:
+       with client.open_inference_agent("<deployment-name>") as agent:
+           print(agent.metadata.agent.algo, agent.metadata.agent.llm)
+
+Call the matching agent method; the server returns HTTP 400 if the route does
 not match the deployment:
 
 - **RL** (single- or multi-agent, recurrent): :meth:`~agilerl.arena.inference.Agent.get_action`
@@ -512,47 +522,13 @@ not match the deployment:
 - **LLM**: :meth:`~agilerl.arena.inference.Agent.generate` or
   :meth:`~agilerl.arena.inference.Agent.generate_stream`
 
-.. code-block:: python
+.. tip::
 
-   from agilerl.arena.inference import Agent
+   For LLM deployments, set an active agent with ``arena agent run <deployment-name>`` and you
+   can drop the deployment name from later CLI commands. ``arena agent generate --prompt "..."``
+   then makes inference requests to the active agent.
 
-   agent = Agent(
-       "https://<deployment-id>.inference.agilerl.com",
-       api_key="your-arena-api-key",
-   )
-   print(agent.metadata.agent.algo, agent.metadata.agent.llm)
-
-Routing by deployment type
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-.. code-block:: python
-
-   if agent.metadata.agent.llm:
-       result = agent.generate(
-           ["Explain reinforcement learning."],
-           params={"max_new_tokens": 128},
-       )
-       for item in result.results:
-           print(item.completion)
-
-       for chunk in agent.generate_stream("Summarize PPO in one sentence."):
-           print(chunk, end="", flush=True)
-
-   elif agent.metadata.agent.supervised:
-       import numpy as np
-
-       outputs, meta = agent.predict(np.array([1.0, 2.0, 3.0]))
-       print(meta.inference_time_ms, outputs)
-
-   else:
-       import gymnasium as gym
-
-       env = gym.make("LunarLander-v3")
-       obs, _ = env.reset()
-       action, _ = agent.get_action(obs)
-       print(action)
-
-RL inference
+RL Inference
 ^^^^^^^^^^^^
 
 :meth:`~agilerl.arena.inference.Agent.get_action` serializes NumPy observations
@@ -564,25 +540,20 @@ observation spaces, and recurrent hidden states.
    import numpy as np
    import gymnasium as gym
 
-   from agilerl.arena.inference import Agent
+   from agilerl.arena import ArenaClient
 
    env = gym.make("LunarLander-v3")
-   agent = Agent("https://<deployment-id>.inference.agilerl.com", api_key="...")
 
-   obs, _ = env.reset()
-   action, hidden_state = agent.get_action(obs)
+   with ArenaClient() as client:
+       with client.open_inference_agent("lunar-lander-dqn") as agent:
+         # Single request
+         obs, _ = env.reset()
+         action, hidden_state = agent.get_action(obs)
 
-   # Batched inference
-   batch_size = 8
-   obs_batch = np.stack([env.observation_space.sample() for _ in range(batch_size)])
-   actions, _ = agent.get_action(obs_batch, batched=True)
-
-   # Dict observation space (single-agent)
-   obs_dict = {
-       "image": np.random.randn(64, 64, 3),
-       "velocity": np.array([1.0, 0.5]),
-   }
-   action, hidden_state = agent.get_action(obs_dict)
+         # Batched inference
+         batch_size = 8
+         obs_batch = np.stack([env.observation_space.sample() for _ in range(batch_size)])
+         actions, _ = agent.get_action(obs_batch, batched=True)
 
 Multi-agent RL passes per-agent observations and returns a dict of actions:
 
@@ -596,3 +567,6 @@ Multi-agent RL passes per-agent observations and returns a dict of actions:
 
    :ref:`tutorial_arena_end_to_end`
       Complete walkthrough of validating, training, and deploying a custom environment on Arena.
+
+   :ref:`tutorial_arena_grpo_gsm8k`
+      Complete walkthrough of fine-tuning an LLM with GRPO on the GSM8K dataset in Arena.

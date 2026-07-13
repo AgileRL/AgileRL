@@ -127,8 +127,15 @@ GSM8K already uses those names, so the mapping is one-to-one.
              --hf-split train \
              --column-mapping '{"question": "question", "answer": "answer"}'
 
-Datasets fall into one of three categories: ``reasoning`` (a prompt with a verifiable answer, as
-here), ``preference`` (chosen vs. rejected responses), and ``sft`` (supervised fine-tuning pairs).
+Datasets fall into one of three categories, and each expects its own column mapping keys:
+
+* ``reasoning``: question and answer pairs for algorithms like GRPO, as here.
+  Expects ``{"question": "<column>", "answer": "<column>"}``.
+* ``preference``: a prompt with a chosen and a rejected completion, for algorithms like DPO.
+  Expects ``{"prompt": "<column>", "chosen": "<column>", "rejected": "<column>"}``.
+* ``sft``: supervised fine-tuning pairs mapping a prompt to a target completion.
+  Expects ``{"prompt": "<column>", "target": "<column>"}``.
+
 GRPO trains on ``reasoning`` datasets.
 
 You can browse datasets already registered for your organization, or search Hugging Face, with
