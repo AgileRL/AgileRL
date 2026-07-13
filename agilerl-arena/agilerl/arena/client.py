@@ -127,8 +127,6 @@ class ArenaClient:
     CONFIG_FILE: ClassVar[Path] = CONFIG_DIR / "config.json"
 
     _CAPABILITIES_PATH: ClassVar[str] = "/api/cli/v1/capabilities"
-    # Capability checks gate `--help` rendering, so keep them snappy even when the
-    # API is slow/unreachable instead of blocking on the full request timeout.
     _CAPABILITIES_TIMEOUT_SECS: ClassVar[float] = 5.0
     _MANIFEST_ALLOWED_PATH_PREFIX: ClassVar[str] = "/api/cli/v1/on-prem"
     _MANIFEST_ALLOWED_METHODS: ClassVar[frozenset[str]] = frozenset(
@@ -1205,7 +1203,8 @@ class ArenaClient:
             f" (checkpoint {checkpoint})" if checkpoint else " (best checkpoint)"
         )
         logger.info(
-            "Agent deployed successfully from experiment %s%s.",
+            "Agent submitted for deployment from experiment %s%s. "
+            "Check its status in Arena.",
             experiment_name,
             checkpoint_suffix,
         )

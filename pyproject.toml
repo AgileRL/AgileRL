@@ -1,6 +1,6 @@
 [project]
 name = "agilerl"
-version = "2.8.0.dev2"
+version = "2.8.0"
 description = "AgileRL is a deep reinforcement learning library focused on improving RL development through RLOps."
 authors = [{ name = "Nick Ustaran-Anderegg", email = "dev@agilerl.com" }]
 license = "Apache-2.0"
@@ -58,7 +58,7 @@ llm = [
     "vllm>=0.23; sys_platform == 'linux'",
 ]
 arena = [
-    "agilerl-arena==0.1.0.dev0",
+    "agilerl-arena==0.1.0",
 ]
 all = [
     "swig>=4.4.1; sys_platform != 'win32'",
@@ -70,7 +70,7 @@ all = [
     "peft==0.19.1",
     "transformers==5.11.0",
     "vllm>=0.23; sys_platform == 'linux'",
-    "agilerl-arena==0.1.0.dev0",
+    "agilerl-arena==0.1.0",
 ]
 
 [dependency-groups]

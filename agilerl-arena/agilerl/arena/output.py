@@ -353,10 +353,31 @@ def emit_csv_preview(payload: bytes, *, max_rows: int) -> None:
 
     header = rows[0]
     data_rows = rows[1 : max_rows + 1]
+    if len(header) > len(data_rows) + 1:
+        table = _build_pivoted_preview(header, data_rows)
+    else:
+        table = _build_flat_preview(header, data_rows)
+    console.print(table)
+
+
+def _build_flat_preview(header: list[str], data_rows: list[list[str]]) -> Table:
+    """One column per metric, one row per record (natural CSV layout)."""
     table = Table(title=f"Metrics Preview (first {len(data_rows)} rows)")
     for column in header:
         table.add_column(column)
     for row in data_rows:
         padded = row + [""] * max(0, len(header) - len(row))
         table.add_row(*padded[: len(header)])
-    console.print(table)
+    return table
+
+
+def _build_pivoted_preview(header: list[str], data_rows: list[list[str]]) -> Table:
+    """One row per metric with a column per record."""
+    table = Table(title=f"Metrics Preview (first {len(data_rows)} rows)")
+    table.add_column("Metric", style="bold", no_wrap=True)
+    for index in range(len(data_rows)):
+        table.add_column(f"Row {index + 1}", justify="right")
+    for col_index, name in enumerate(header):
+        values = [row[col_index] if col_index < len(row) else "" for row in data_rows]
+        table.add_row(name, *values)
+    return table

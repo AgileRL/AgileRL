@@ -328,7 +328,6 @@ class TrainingManifest(BaseModel):
                     llm_network.pretrained_model_name_or_path
                 )
                 self.algorithm.max_model_len = llm_network.max_context_length
-                self.algorithm.lora_config = llm_network.lora_config
 
         if (
             issubclass(algo_spec_cls, LLMAlgorithmSpec)

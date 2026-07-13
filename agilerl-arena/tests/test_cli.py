@@ -972,6 +972,7 @@ class TestAgentGenerateCommand:
             )
         assert result.exit_code == 0
         mock_agent.generate_stream.assert_called_once_with("hi")
+        assert result.output.strip() == "foobar"
 
     def test_generate_uses_active_agent(self, runner, mock_client):
         mock_agent = MagicMock()

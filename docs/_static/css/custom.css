@@ -42,3 +42,9 @@
 .admonition.tutorial dl dd > p {
   margin: 0;
 }
+
+/* .. container:: scrollable-output — cap tall terminal transcripts and scroll */
+.scrollable-output pre {
+  max-height: 28rem;
+  overflow: auto;
+}
