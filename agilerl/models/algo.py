@@ -370,9 +370,9 @@ class RLAlgorithmSpec(AlgorithmSpec):
 
     def build_algorithm(
         self,
-        observation_space: SupportedObservationSpace,
-        action_space: SupportedActionSpace,
-        index: int,
+        observation_space: SupportedObservationSpace | None = None,
+        action_space: SupportedActionSpace | None = None,
+        index: int | None = None,
         resume_from_checkpoint: str | None = None,
         device: str | torch.device = "cpu",
         accelerator: Accelerator | None = None,
@@ -380,11 +380,11 @@ class RLAlgorithmSpec(AlgorithmSpec):
         """Build a single-agent algorithm instance from spec fields.
 
         :param observation_space: Observation space.
-        :type observation_space: SupportedObservationSpace
+        :type observation_space: SupportedObservationSpace | None
         :param action_space: Action space.
-        :type action_space: SupportedActionSpace
+        :type action_space: SupportedActionSpace | None
         :param index: Index of the algorithm in the population.
-        :type index: int
+        :type index: int | None
         :param resume_from_checkpoint: Path to resume from checkpoint.
         :type resume_from_checkpoint: str | None
         :param device: Torch device. Defaults to "cpu".
@@ -393,7 +393,14 @@ class RLAlgorithmSpec(AlgorithmSpec):
         :type accelerator: Accelerator | None
         :returns: Single-agent algorithm instance.
         :rtype: RLAlgorithm
+        :raises ValueError: If observation_space, action_space, or index is None.
         """
+        if observation_space is None or action_space is None or index is None:
+            msg = (
+                "RLAlgorithmSpec.build_algorithm requires observation_space, "
+                "action_space, and index."
+            )
+            raise ValueError(msg)
         algo_cls = self.algo_class()
         algo = algo_cls(
             observation_space=observation_space,
@@ -425,9 +432,9 @@ class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
 
     def build_algorithm(
         self,
-        observation_spaces: dict[str, SupportedObservationSpace],
-        action_spaces: dict[str, SupportedActionSpace],
-        index: int,
+        observation_spaces: dict[str, SupportedObservationSpace] | None = None,
+        action_spaces: dict[str, SupportedActionSpace] | None = None,
+        index: int | None = None,
         resume_from_checkpoint: str | None = None,
         device: str | torch.device = "cpu",
         accelerator: Accelerator | None = None,
@@ -435,11 +442,11 @@ class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
         """Build a multi-agent algorithm from spec fields.
 
         :param observation_spaces: Per-agent observation spaces.
-        :type observation_spaces: dict[str, SupportedObservationSpace]
+        :type observation_spaces: dict[str, SupportedObservationSpace] | None
         :param action_spaces: Per-agent action spaces.
-        :type action_spaces: dict[str, SupportedActionSpace]
+        :type action_spaces: dict[str, SupportedActionSpace] | None
         :param index: Index of the algorithm in the population.
-        :type index: int
+        :type index: int | None
         :param resume_from_checkpoint: Path to resume from checkpoint.
         :type resume_from_checkpoint: str | None
         :param device: Torch device. Defaults to "cpu".
@@ -448,7 +455,14 @@ class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
         :type accelerator: Accelerator | None
         :returns: Multi-agent algorithm instance.
         :rtype: MultiAgentRLAlgorithm
+        :raises ValueError: If observation_spaces, action_spaces, or index is None.
         """
+        if observation_spaces is None or action_spaces is None or index is None:
+            msg = (
+                "MultiAgentRLAlgorithmSpec.build_algorithm requires "
+                "observation_spaces, action_spaces, and index."
+            )
+            raise ValueError(msg)
         algo_cls = self.algo_class()
         algo = algo_cls(
             observation_spaces=observation_spaces,
@@ -507,7 +521,7 @@ class LLMAlgorithmSpec(AlgorithmSpec):
 
     def build_algorithm(
         self,
-        tokenizer: Any,
+        tokenizer: Any | None = None,
         index: int = 0,
         resume_from_checkpoint: str | None = None,
         accelerator: Accelerator | None = None,
@@ -517,7 +531,7 @@ class LLMAlgorithmSpec(AlgorithmSpec):
         """Build an LLM algorithm instance from spec fields.
 
         :param tokenizer: A HuggingFace ``AutoTokenizer`` instance.
-        :type tokenizer: Any
+        :type tokenizer: Any | None
         :param index: Index of the algorithm in the population.
         :type index: int
         :param resume_from_checkpoint: Path to resume from checkpoint.
@@ -532,7 +546,12 @@ class LLMAlgorithmSpec(AlgorithmSpec):
         :type actor_network: Any | None
         :returns: LLM algorithm instance.
         :rtype: LLMAlgorithm
+        :raises ValueError: If tokenizer is None.
         """
+        if tokenizer is None:
+            msg = "LLMAlgorithmSpec.build_algorithm requires a tokenizer."
+            raise ValueError(msg)
+
         micro_batch_size_per_gpu = None
         if accelerator is not None:
             micro_batch_size_per_gpu = max(

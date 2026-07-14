@@ -7,6 +7,8 @@ from unittest.mock import MagicMock, patch
 
 import click
 import pytest
+from click.testing import CliRunner
+
 from agilerl.arena.cli import (
     _redact_agent_rows_for_display,
     arena_client,
@@ -14,7 +16,6 @@ from agilerl.arena.cli import (
 )
 from agilerl.arena.config import CommandConfig, build_client
 from agilerl.arena.exceptions import ArenaAPIError
-from click.testing import CliRunner
 
 
 @pytest.fixture
@@ -188,11 +189,13 @@ class TestArenaClientContextManager:
             request_timeout=30,
             upload_timeout=300,
         )
+        mock_client.get_current_user.side_effect = ArenaAPIError(
+            "boom", status_code=500
+        )
         with patch("agilerl.arena.config.build_client", return_value=mock_client):
             with patch("agilerl.arena.config.handle_error") as mock_handle:
-                with arena_client(cfg):
-                    msg = "boom"
-                    raise ArenaAPIError(msg, status_code=500)
+                with arena_client(cfg) as client:
+                    client.get_current_user()
                 mock_handle.assert_called_once()
         mock_client.close.assert_called_once()
 
