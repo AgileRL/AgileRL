@@ -1014,9 +1014,8 @@ class TestManifestFromTrainerSpecsForeignModels:
     """Foreign BaseModel inputs are dumped before manifest validation."""
 
     def test_from_trainer_specs_coerces_foreign_training_model(self):
-        from pydantic import BaseModel
-
         from agilerl.arena.models.env import EnvSpec as ArenaEnvSpec
+        from pydantic import BaseModel
 
         class ForeignTraining(BaseModel):
             max_steps: int = 300
@@ -1032,6 +1031,7 @@ class TestManifestFromTrainerSpecsForeignModels:
 
     def test_resolve_foreign_arena_algorithm(self):
         from agilerl.arena.models.algorithms.ppo import PPOSpec as ArenaPPOSpec
+
         from agilerl.models.manifest import _resolve_algorithm
 
         resolved = _resolve_algorithm(ArenaPPOSpec(learn_step=48))
