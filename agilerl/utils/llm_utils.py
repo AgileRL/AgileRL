@@ -188,7 +188,7 @@ def gather_tensor(
 
 
 def needs_cross_rank_seq_padding(algo: Any, *, world_size: int) -> bool:
-    """Return whether ranks must sync completion seq lengths before Liger token loss.
+    """Return whether ranks must sync completion seq lengths before ``learn()``.
 
     Multi-rank Liger token-level losses chunk over ``B * (T - 1)`` and issue one
     NCCL allreduce per chunk (DAPO/CISPO normaliser). Divergent per-rank ``T``
@@ -203,13 +203,16 @@ def needs_cross_rank_seq_padding(algo: Any, *, world_size: int) -> bool:
 
 
 def allreduce_minmax_int(value: int, accelerator: Accelerator) -> tuple[int, int]:
-    """All-reduce ``value`` and return ``(min, max)`` across Accelerate ranks."""
-    device = accelerator.device
-    t_min = torch.tensor([float(value)], device=device, dtype=torch.float32)
-    t_max = torch.tensor([float(value)], device=device, dtype=torch.float32)
-    torch.distributed.all_reduce(t_min, op=torch.distributed.ReduceOp.MIN)
-    torch.distributed.all_reduce(t_max, op=torch.distributed.ReduceOp.MAX)
-    return int(t_min.item()), int(t_max.item())
+    """Return ``(min, max)`` of ``value`` across Accelerate ranks.
+
+    Uses :meth:`Accelerator.gather` so the reduction participates in the same
+    process-group bookkeeping as the rest of the Accelerate/DeepSpeed run
+    (plain ``torch.distributed.all_reduce`` on the default group is easy to
+    desync from DeepSpeed's communicator set).
+    """
+    t = torch.tensor([int(value)], device=accelerator.device, dtype=torch.long)
+    gathered = accelerator.gather(t)
+    return int(gathered.min().item()), int(gathered.max().item())
 
 
 def pad_completion_batch_to_seq_len(
@@ -272,25 +275,31 @@ def pad_completion_batch_to_seq_len(
     return completion_ids, action_masks
 
 
-def align_stacked_completion_shapes_across_ranks(
-    completion_ids: torch.Tensor,
-    action_masks: torch.Tensor,
+def align_completion_batch_shapes_across_ranks(
+    completion_ids: Any,
+    action_masks: Any,
+    rewards: Any,
     *,
     pad_token_id: int,
     accelerator: Accelerator,
-    turn_ids: torch.Tensor | None = None,
     minmax_fn: Callable[[int], tuple[int, int]] | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    """Sync ``T`` across ranks after local ``stack_and_pad``. Raise if ``B`` diverges.
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Locally stack/pad, then sync ``T`` across ranks. Raise if ``B`` diverges.
 
-    Operates on already-stacked ``(B, T)`` / ``(B, T-1)`` tensors. When ranks
-    disagree on ``T``, right-pads shorter ranks to the global max so Liger
-    token-level chunk collectives stay in lockstep. ``turn_ids`` (typically
-    ``(B, T-1)``) is padded on the time dim the same way when present.
-
-    :param minmax_fn: Optional ``(value) -> (min, max)`` override for tests;
-        defaults to a distributed allreduce via ``accelerator``.
+    Call immediately before ``learn()`` when
+    :func:`needs_cross_rank_seq_padding` is true. Shorter ranks are right-padded
+    to the global max ``T`` so Liger token-level chunk collectives stay in
+    lockstep.
     """
+    # Lazy import avoids a circular dependency with algo_utils -> llm_utils.
+    from agilerl.utils.algo_utils import stack_and_pad_experiences
+
+    completion_ids, action_masks, rewards = stack_and_pad_experiences(
+        completion_ids,
+        action_masks,
+        rewards,
+        padding_values=[pad_token_id, False, 0.0],
+    )
     local_b = int(completion_ids.shape[0])
     local_t = int(completion_ids.shape[1])
     reduce_fn = minmax_fn or (lambda value: allreduce_minmax_int(value, accelerator))
@@ -305,26 +314,20 @@ def align_stacked_completion_shapes_across_ranks(
         raise RuntimeError(msg)
 
     min_t, max_t = reduce_fn(local_t)
-    if min_t == max_t:
-        return completion_ids, action_masks, turn_ids
-
-    if local_t < max_t:
-        logger.debug(
-            "Cross-rank seq pad: local T=%s -> global T=%s (B=%s)",
-            local_t,
-            max_t,
-            local_b,
-        )
+    if min_t != max_t and local_t < max_t:
         completion_ids, action_masks = pad_completion_batch_to_seq_len(
             completion_ids,
             action_masks,
             target_seq_len=max_t,
             pad_token_id=pad_token_id,
         )
-        if turn_ids is not None:
-            pad_t = max_t - local_t
-            turn_ids = torch.nn.functional.pad(turn_ids, (0, pad_t), value=-1)
-    return completion_ids, action_masks, turn_ids
+    if int(completion_ids.shape[1]) != max_t:
+        msg = (
+            f"Cross-rank seq align failed: local T={completion_ids.shape[1]} "
+            f"!= global max T={max_t}"
+        )
+        raise RuntimeError(msg)
+    return completion_ids, action_masks, rewards
 
 
 def aggregate_metrics_across_gpus(

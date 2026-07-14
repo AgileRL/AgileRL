@@ -28,6 +28,7 @@ algorithm:
     lora_target_scope: language_model
     quantization: nf4
     activation_offload: true
+    chunk_rows: 128
     use_vllm: true
     vllm_config:
         tensor_parallel_size: 1

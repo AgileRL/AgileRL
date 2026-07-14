@@ -9,12 +9,12 @@ from typing import TYPE_CHECKING, Any
 import gymnasium as gym
 import numpy as np
 import tqdm
-import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import (
     CQN,
@@ -1411,7 +1411,7 @@ def init_loggers(
     """
     loggers = []
     if verbose:
-        loggers.append(StdOutLogger(pbar))
+        loggers.append(StdOutLogger(pbar, accelerator))
 
     if wb:
         init_wandb_kwargs: dict[str, Any] = {

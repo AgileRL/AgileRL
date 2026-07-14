@@ -896,10 +896,18 @@ class TestTokenObservationWrapperFormatObs:
 
 
 class TestTokenObservationWrapperGetEpisodeData:
-    def test_get_episode_data_padding_and_pad_mask(self) -> None:
+    def test_get_episode_data_keeps_pad_inside_generation_span(self) -> None:
+        """Pad tokens inside a turn generation stay masked as actions.
+
+        When ``pad_token_id == eos_token_id`` (typical after assigning
+        ``tokenizer.pad_token = tokenizer.eos_token``), the EOS at the end of
+        a generation must remain an action token so vLLM sampling-logprob
+        counts stay aligned for importance-sampling correction.
+        """
         w = _bare_wrapper()
         w.pad_id = 0
         w.max_turns = 3
+        # Token 0 at index 2 sits inside turn-0 generation [1, 3).
         w.full_ids = torch.tensor([[9, 5, 0, 7, 8]], dtype=torch.long)
         w.turn_boundaries = [(1, 3, 0), (3, 5, 1)]
         w.turn_rewards = [1.5]
@@ -908,8 +916,29 @@ class TestTokenObservationWrapperGetEpisodeData:
         assert action_mask.dtype == torch.bool
         assert turn_ids.dtype == torch.long
         assert rewards.tolist() == [1.5, 0.0, 0.0]
-        assert action_mask[0, 1].item() is False
-        assert turn_ids[0, 1].item() == -1
+        # Shifted index 1 ↔ full_ids[2] == pad, but still inside gen span.
+        assert action_mask[0, 1].item() is True
+        assert turn_ids[0, 1].item() == 0
+        assert int(action_mask.sum().item()) == 4
+
+    def test_get_episode_data_clears_pad_outside_generation_span(self) -> None:
+        w = _bare_wrapper()
+        w.pad_id = 0
+        w.max_turns = 2
+        # Prompt token at index 1 is pad and outside any generation span.
+        w.full_ids = torch.tensor([[9, 0, 5, 7]], dtype=torch.long)
+        w.turn_boundaries = [(2, 4, 0)]
+        w.turn_rewards = [0.25]
+        _full_ids, action_mask, turn_ids, rewards = w.get_episode_data()
+        assert rewards.tolist() == [0.25, 0.0]
+        # Shifted index 0 ↔ full_ids[1] == pad, outside gen → cleared.
+        assert action_mask[0, 0].item() is False
+        assert turn_ids[0, 0].item() == -1
+        # Generation tokens remain actions.
+        assert action_mask[0, 1].item() is True
+        assert action_mask[0, 2].item() is True
+        assert turn_ids[0, 1].item() == 0
+        assert turn_ids[0, 2].item() == 0
 
     def test_get_episode_data_raises_without_reset(self) -> None:
         w = _bare_wrapper()

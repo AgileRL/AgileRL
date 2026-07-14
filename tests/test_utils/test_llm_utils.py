@@ -2792,3 +2792,56 @@ class TestSavePeftAdapterForVllmRollout:
                 "actor",
                 target_modules=["q_proj"],
             )
+
+
+class TestCrossRankLigerAlign:
+    def test_needs_cross_rank_seq_padding_gates_on_liger_token_is(self):
+        assert not llm_utils_module.needs_cross_rank_seq_padding(
+            SimpleNamespace(use_liger_loss=True, importance_sampling_level="token"),
+            world_size=1,
+        )
+        assert not llm_utils_module.needs_cross_rank_seq_padding(
+            SimpleNamespace(use_liger_loss=False, importance_sampling_level="token"),
+            world_size=2,
+        )
+        assert not llm_utils_module.needs_cross_rank_seq_padding(
+            SimpleNamespace(
+                use_liger_loss=True, importance_sampling_level="trajectory"
+            ),
+            world_size=2,
+        )
+        assert llm_utils_module.needs_cross_rank_seq_padding(
+            SimpleNamespace(use_liger_loss=True, importance_sampling_level="token"),
+            world_size=2,
+        )
+
+    def test_align_completion_batch_shapes_pads_short_rank(self):
+        short_ids = [
+            torch.ones(1, 4, dtype=torch.long),
+            torch.ones(1, 3, dtype=torch.long),
+        ]
+        short_mask = [
+            torch.ones(1, 3, dtype=torch.bool),
+            torch.ones(1, 2, dtype=torch.bool),
+        ]
+        rewards = torch.zeros(2, dtype=torch.float32)
+
+        def fake_minmax(value):
+            # After local stack/pad, T=4; pretend peer has T=6.
+            return (4, 6) if value == 4 else (value, value)
+
+        out_ids, out_mask, out_rewards = (
+            llm_utils_module.align_completion_batch_shapes_across_ranks(
+                short_ids,
+                short_mask,
+                rewards,
+                pad_token_id=0,
+                accelerator=MagicMock(),
+                minmax_fn=fake_minmax,
+            )
+        )
+        assert out_ids.shape == (2, 6)
+        assert out_mask.shape == (2, 5)
+        assert out_rewards.shape == (2,)
+        assert torch.all(out_ids[:, 4:] == 0)
+        assert torch.all(~out_mask[:, 3:])

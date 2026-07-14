@@ -10,7 +10,9 @@ import numpy as np
 import torch
 
 from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
-from agilerl.utils.llm_utils import calculate_k3_kl
+from agilerl.utils.llm_utils import (
+    calculate_k3_kl,
+)
 
 if TYPE_CHECKING:
     from accelerate import Accelerator
@@ -688,26 +690,46 @@ class GRPO(LLMAlgorithm):
                     rewards.append(reward)
                 reward_tensor = torch.cat(rewards)
             elif isinstance(env, MultiTurnEnv):
+                max_turns = getattr(env, "max_turns", None) or kwargs.get(
+                    "max_turns", None
+                )
+                if not isinstance(max_turns, int) or max_turns < 1:
+                    msg = (
+                        "MultiTurnEnv must define a positive integer "
+                        "'max_turns' (via the env attribute or the "
+                        f"'max_turns' kwarg); got {max_turns!r}. This is "
+                        "required to keep the get_action collective "
+                        "schedule symmetric across ranks."
+                    )
+                    raise ValueError(msg)
                 all_rewards: list[torch.Tensor] = []
                 for _ in range(loop):
-                    prompt_dict, _info = env.reset()
-                    terminated, truncated = False, False
-                    while not terminated and not truncated:
+                    action_prompt, _info = env.reset()
+                    done = False
+                    for _ in range(max_turns):
                         completion_ids = self.get_action(
-                            [prompt_dict],
+                            [action_prompt],
                             training=False,
                         ).completion_ids
-                        full = completion_ids[0]
-                        prompt_dict, reward, terminated, truncated, _info = env.step(
-                            full,
-                        )
-                        all_rewards.append(
-                            torch.tensor(
-                                [float(reward)],
-                                dtype=torch.float32,
-                                device=full.device,
+                        if not done:
+                            full = completion_ids[0]
+                            (
+                                next_prompt,
+                                reward,
+                                terminated,
+                                truncated,
+                                _info,
+                            ) = env.step(full)
+                            all_rewards.append(
+                                torch.tensor(
+                                    [float(reward)],
+                                    dtype=torch.float32,
+                                    device=full.device,
+                                )
                             )
-                        )
+                            done = terminated or truncated
+                            if not done:
+                                action_prompt = next_prompt
                 reward_tensor = torch.cat(all_rewards)
             else:
                 msg = (
@@ -929,25 +951,11 @@ class GRPO(LLMAlgorithm):
         self,
         experiences: ExperiencesType,
         turn_ids: torch.Tensor | None,
-        *,
-        minmax_fn: Callable[[int], tuple[int, int]] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
-        """Stack and pad the experience batch and move it to the device.
-
-        When multi-rank Liger + token-level IS is active, also right-pads local
-        ``T`` to the global max so Liger chunk collectives stay in lockstep.
-        """
+        """Stack and pad the experience batch and move it to the device."""
         completion_ids, action_masks, rewards = stack_and_pad_experiences(
             *experiences,
             padding_values=[self.pad_token_id, False, None],
-        )
-        completion_ids, action_masks, turn_ids = (
-            self._maybe_align_completion_shapes_across_ranks(
-                completion_ids,
-                action_masks,
-                turn_ids,
-                minmax_fn=minmax_fn,
-            )
         )
         action_masks = action_masks.to(self.device)
         rewards = rewards.to(self.device).float()

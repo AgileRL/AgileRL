@@ -4827,25 +4827,22 @@ class TestGRPOTest:
 
             def __init__(self):
                 self._step_count = 0
+                self.valid_prompt = {
+                    "input_ids": torch.ones(1, 4, dtype=torch.long),
+                    "attention_mask": torch.ones(1, 4, dtype=torch.long),
+                }
 
             def reset(self, seed=None):
                 del seed
                 self._step_count = 0
-                prompt = {
-                    "input_ids": torch.ones(1, 4, dtype=torch.long),
-                    "attention_mask": torch.ones(1, 4, dtype=torch.long),
-                }
-                return prompt, {}
+                return self.valid_prompt, {}
 
             def step(self, full_completion_ids):
                 del full_completion_ids
                 self._step_count += 1
-                prompt = {
-                    "input_ids": torch.ones(1, 4, dtype=torch.long),
-                    "attention_mask": torch.ones(1, 4, dtype=torch.long),
-                }
-                terminated = self._step_count >= 2
-                return prompt, 1.0, terminated, False, {}
+                # Terminate early and return empty obs so dummy turns must
+                # replay the last valid prompt rather than feeding ``{}``.
+                return {}, 1.0, True, False, {}
 
             def get_episode_data(self):
                 return (
@@ -4881,8 +4878,36 @@ class TestGRPOTest:
             out = grpo.test(env, loop=2)
 
         assert out.shape == ()
+        # max_turns * loop, including dummy turns after early termination.
         assert get_action.call_count == 4
+        for call in get_action.call_args_list:
+            assert call.args[0][0] is env.valid_prompt
         assert grpo.fitness[-1] == pytest.approx(1.0)
+        grpo.clean_up()
+
+    def test_grpo_test_method_multiturn_requires_max_turns(self):
+        class DummyMultiTurnEpisodeEnvNoMaxTurns:
+            # Present for Protocol isinstance checks; invalid value triggers
+            # the fixed-length eval loop guard.
+            max_turns = None
+
+            def reset(self, seed=None):
+                del seed
+                return {
+                    "input_ids": torch.ones(1, 4, dtype=torch.long),
+                    "attention_mask": torch.ones(1, 4, dtype=torch.long),
+                }, {}
+
+            def step(self, full_completion_ids):
+                del full_completion_ids
+                return {}, 1.0, True, False, {}
+
+            def close(self):
+                return None
+
+        grpo = _make_cpu_grpo_for_branch_tests()
+        with pytest.raises(ValueError, match="max_turns"):
+            grpo.test(DummyMultiTurnEpisodeEnvNoMaxTurns(), loop=1)
         grpo.clean_up()
 
     def test_grpo_test_method_invalid_env_type_raises(self):

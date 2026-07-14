@@ -518,13 +518,6 @@ class PPO(LLMAlgorithm):
                 *experiences,
                 padding_values=[self.pad_token_id, False, None],
             )
-            completion_ids, action_masks, turn_ids = (
-                self._maybe_align_completion_shapes_across_ranks(
-                    completion_ids,
-                    action_masks,
-                    turn_ids,
-                )
-            )
             completion_ids = completion_ids.to(self.device)
             action_masks = action_masks.to(self.device)
             action_mask_bool = action_masks.bool()
@@ -810,6 +803,8 @@ class PPO(LLMAlgorithm):
         self,
         env: ReasoningGym | MultiTurnEnv,
         loop: int = 1,
+        *args: Any,
+        **kwargs: Any,
     ) -> torch.Tensor:
         """Return fitness (test) score tensor of llm on test sub-set.
 
@@ -840,29 +835,46 @@ class PPO(LLMAlgorithm):
                     rewards.append(reward)
                 reward_tensor = torch.cat(rewards)
             elif isinstance(env, MultiTurnEnv):
+                max_turns = getattr(env, "max_turns", None) or kwargs.get(
+                    "max_turns", None
+                )
+                if not isinstance(max_turns, int) or max_turns < 1:
+                    msg = (
+                        "MultiTurnEnv must define a positive integer "
+                        "'max_turns' (via the env attribute or the "
+                        f"'max_turns' kwarg); got {max_turns!r}. This is "
+                        "required to keep the get_action collective "
+                        "schedule symmetric across ranks."
+                    )
+                    raise ValueError(msg)
                 all_rewards: list[torch.Tensor] = []
                 for _ in range(loop):
-                    prompt_dict, _info = env.reset()
-                    terminated, truncated = False, False
-
-                    while not terminated and not truncated:
+                    action_prompt, _info = env.reset()
+                    done = False
+                    for _ in range(max_turns):
                         completion_ids = self.get_action(
-                            [prompt_dict],
+                            [action_prompt],
                             training=False,
                         ).completion_ids
-                        full = completion_ids[0]
-                        prompt_dict, reward, terminated, truncated, _step_info = (
-                            env.step(
-                                full,
+                        if not done:
+                            full = completion_ids[0]
+                            (
+                                next_prompt,
+                                reward,
+                                terminated,
+                                truncated,
+                                _info,
+                            ) = env.step(full)
+                            all_rewards.append(
+                                torch.tensor(
+                                    [float(reward)],
+                                    dtype=torch.float32,
+                                    device=full.device,
+                                )
                             )
-                        )
-                        all_rewards.append(
-                            torch.tensor(
-                                [float(reward)],
-                                dtype=torch.float32,
-                                device=full.device,
-                            ),
-                        )
+                            done = terminated or truncated
+                            if not done:
+                                action_prompt = next_prompt
                 reward_tensor = torch.cat(all_rewards)
             else:
                 msg = (

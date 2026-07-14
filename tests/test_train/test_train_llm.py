@@ -1703,6 +1703,146 @@ class TestFinetuneLlmMultiturn:
 
 
 # ---------------------------------------------------------------------------
+# Distributed: report_metrics must run on every rank
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "loop",
+    ["reasoning", "preference", "sft", "multiturn"],
+)
+def test_report_metrics_called_on_non_main_process(loop):
+    """WandbLogger / Logger.on_main_process issue wait_for_everyone barriers.
+    report_metrics must therefore run on every rank — calling it only on the
+    main process desyncs NCCL (hang after the first metrics table).
+    """
+    acc = MagicMock()
+    acc.is_main_process = False
+    acc.num_processes = 2
+
+    with patch.object(Population, "report_metrics", autospec=True) as mock_report:
+        if loop == "reasoning":
+            mock_agent = _mock_grpo_agent()
+            mock_env = MagicMock()
+            mock_env.__len__.return_value = 2
+            mock_env.reset.return_value = "initial_prompts"
+            mock_env.step.return_value = ("next_prompts", torch.tensor([2.0, 3.0]))
+            mock_env.data_batch_size_per_gpu = 1
+            with (
+                patch(
+                    "agilerl.training.train_llm.default_progress_bar",
+                    return_value=MagicMock(),
+                ),
+                patch("agilerl.training.train_llm.init_loggers", return_value=[]),
+                patch(
+                    "agilerl.training.train_llm.safe_aggregate_metrics",
+                    return_value=0.5,
+                ),
+                patch("agilerl.training.train_llm.save_llm_checkpoint"),
+            ):
+                finetune_llm_reasoning(
+                    pop=[mock_agent],
+                    env=mock_env,
+                    max_steps=2,
+                    evaluation_interval=100,
+                    verbose=False,
+                    accelerator=acc,
+                )
+        elif loop == "preference":
+            mock_agent = _mock_dpo_agent()
+            mock_env = MagicMock()
+            mock_env.__len__.return_value = 2
+            mock_env.reset.return_value = "batch"
+            mock_env.step.return_value = "batch"
+            mock_env.data_batch_size_per_gpu = 1
+            with (
+                patch(
+                    "agilerl.training.train_llm.default_progress_bar",
+                    return_value=MagicMock(),
+                ),
+                patch("agilerl.training.train_llm.init_loggers", return_value=[]),
+                patch(
+                    "agilerl.training.train_llm.safe_aggregate_metrics",
+                    return_value=0.5,
+                ),
+                patch("agilerl.training.train_llm.save_llm_checkpoint"),
+            ):
+                finetune_llm_preference(
+                    pop=[mock_agent],
+                    env=mock_env,
+                    max_steps=2,
+                    evaluation_interval=100,
+                    verbose=False,
+                    accelerator=acc,
+                )
+        elif loop == "sft":
+            mock_agent = _mock_sft_agent()
+            mock_env = MagicMock()
+            mock_env.__len__.return_value = 2
+            mock_env.reset.return_value = "batch"
+            mock_env.step.return_value = "batch"
+            mock_env.data_batch_size_per_gpu = 1
+            with (
+                patch(
+                    "agilerl.training.train_llm.default_progress_bar",
+                    return_value=MagicMock(),
+                ),
+                patch("agilerl.training.train_llm.init_loggers", return_value=[]),
+                patch(
+                    "agilerl.training.train_llm.safe_aggregate_metrics",
+                    return_value=0.5,
+                ),
+                patch("agilerl.training.train_llm.save_llm_checkpoint"),
+            ):
+                finetune_llm_sft(
+                    pop=[mock_agent],
+                    env=mock_env,
+                    max_steps=2,
+                    evaluation_interval=100,
+                    verbose=False,
+                    accelerator=acc,
+                )
+        else:
+            mock_agent = _make_multiturn_mock_agent(spec=GRPO)
+            with (
+                patch(
+                    "agilerl.training.train_llm.default_progress_bar",
+                    return_value=MagicMock(),
+                ),
+                patch("agilerl.training.train_llm.init_loggers", return_value=[]),
+                patch(
+                    "agilerl.training.train_llm.safe_aggregate_metrics",
+                    return_value=0.5,
+                ),
+                patch("agilerl.training.train_llm.save_llm_checkpoint"),
+                patch("agilerl.training.train_llm.SyncMultiTurnVecEnv"),
+                patch(
+                    "agilerl.training.train_llm.collect_rollouts_llm",
+                    return_value=_multiturn_collect_return(batch_steps=2),
+                ),
+                patch(
+                    "agilerl.training.train_llm.stack_and_pad_experiences",
+                    return_value=(torch.zeros(1, 8, dtype=torch.long),),
+                ),
+            ):
+                finetune_llm_multiturn(
+                    pop=[mock_agent],
+                    env_factory=MagicMock(),
+                    max_turns=2,
+                    init_hp={"BATCH_SIZE": 1, "ALGO": mock_agent.algo},
+                    max_steps=2,
+                    evaluation_interval=100,
+                    verbose=False,
+                    accelerator=acc,
+                )
+
+        assert mock_report.call_count >= 1, (
+            f"{loop}: report_metrics must run on non-main ranks "
+            "(logger collectives require all ranks)"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Module-level: env/env_fn validation tests
 # ---------------------------------------------------------------------------
 

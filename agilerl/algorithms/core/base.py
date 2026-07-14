@@ -145,7 +145,6 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.utils.llm_utils import (
         adapt_lora_config_for_model,
         align_deepspeed_lr,
-        align_stacked_completion_shapes_across_ranks,
         build_completion_mask,
         build_vllm_llm_init_kwargs,
         build_vllm_rollout_lora_request,
@@ -156,7 +155,6 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
         log_cuda_memory_snapshot,
         move_params_to_cpu,
         move_params_to_gpu,
-        needs_cross_rank_seq_padding,
         offload_colocated_trainer_from_gpu,
         save_peft_adapter_for_vllm_rollout,
         stitch_completion_after_windowed_vllm_generate,
@@ -5831,35 +5829,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         finally:
             # Always move the base back on CPU on error
             move_params_to_cpu(unwrapped_model)
-
-    def _maybe_align_completion_shapes_across_ranks(
-        self,
-        completion_ids: torch.Tensor,
-        action_masks: torch.Tensor,
-        turn_ids: torch.Tensor | None = None,
-        *,
-        minmax_fn: Callable[[int], tuple[int, int]] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-        """Pad local stacked completions to global max ``T`` when required.
-
-        No-op unless multi-rank Liger + token-level IS is active (see
-        :func:`~agilerl.utils.llm_utils.needs_cross_rank_seq_padding`). Call
-        after local ``stack_and_pad_experiences`` and before the Liger flatten /
-        chunk loop so every rank issues the same number of NCCL collectives.
-        """
-        world_size = (
-            int(self.accelerator.num_processes) if self.accelerator is not None else 1
-        )
-        if not needs_cross_rank_seq_padding(self, world_size=world_size):
-            return completion_ids, action_masks, turn_ids
-        return align_stacked_completion_shapes_across_ranks(
-            completion_ids,
-            action_masks,
-            pad_token_id=self.pad_token_id,
-            accelerator=self.accelerator,
-            turn_ids=turn_ids,
-            minmax_fn=minmax_fn,
-        )
 
     def _prepare_vllm_for_training(self) -> None:
         """Prepare vLLM for learning."""

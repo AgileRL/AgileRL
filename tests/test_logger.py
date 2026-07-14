@@ -167,6 +167,34 @@ class TestStdOutLogger:
             logger = StdOutLogger()
         logger.close()
 
+    def test_write_skips_on_non_main_process(self):
+        """Non-main ranks must not print — report_metrics runs on every rank
+        so logger collectives stay symmetric, but console output stays main-only.
+        """
+        with patch("agilerl.logger._is_notebook", return_value=False):
+            from agilerl.logger import StdOutLogger
+
+            acc = MagicMock()
+            acc.is_main_process = False
+            pbar = MagicMock()
+            logger = StdOutLogger(pbar=pbar, accelerator=acc)
+
+        logger.write(_make_report())
+        pbar.write.assert_not_called()
+
+    def test_write_on_main_process_with_accelerator(self):
+        with patch("agilerl.logger._is_notebook", return_value=False):
+            from agilerl.logger import StdOutLogger
+
+            acc = MagicMock()
+            acc.is_main_process = True
+            pbar = MagicMock()
+            logger = StdOutLogger(pbar=pbar, accelerator=acc)
+
+        report = _make_report()
+        logger.write(report)
+        pbar.write.assert_called_once_with(str(report))
+
 
 class TestWandbLogger:
     def test_init(self):

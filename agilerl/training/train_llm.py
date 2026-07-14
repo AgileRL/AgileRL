@@ -4,6 +4,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
+import torch
 from accelerate import Accelerator
 
 from agilerl import HAS_LLM_DEPENDENCIES
@@ -12,7 +13,11 @@ from agilerl.algorithms.sft import SFT
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
-from agilerl.utils.llm_utils import safe_aggregate_metrics
+from agilerl.utils.llm_utils import (
+    align_completion_batch_shapes_across_ranks,
+    needs_cross_rank_seq_padding,
+    safe_aggregate_metrics,
+)
 from agilerl.utils.utils import (
     default_progress_bar,
     init_loggers,
@@ -335,6 +340,20 @@ def finetune_llm_reasoning(
             next_prompts_i, rewards = training_env.step(completion_ids)
 
             experiences = (completion_ids, action_masks, rewards)
+            if accelerator is not None and needs_cross_rank_seq_padding(
+                agent,
+                world_size=accelerator.num_processes,
+            ):
+                completion_ids, action_masks, rewards = (
+                    align_completion_batch_shapes_across_ranks(
+                        completion_ids,
+                        action_masks,
+                        rewards,
+                        pad_token_id=agent.pad_token_id,
+                        accelerator=accelerator,
+                    )
+                )
+                experiences = (completion_ids, action_masks, rewards)
             learn_kwargs = (
                 {"sampling_logps": sampling_logps}
                 if sampling_logps is not None
@@ -369,14 +388,16 @@ def finetune_llm_reasoning(
             if accelerator is not None:
                 accelerator.wait_for_everyone()
 
-        # Report progress
+        # Report progress. ``report_metrics`` runs collective ops (logger
+        # barriers + gather) so it MUST run on every rank; console output is
+        # guarded inside the loggers.
         if accelerator is None or accelerator.is_main_process:
             increment = min(effective_data_batch_size, max_steps - displayed_steps)
             if increment > 0:
                 pbar.update(increment)
                 displayed_steps += increment
 
-            population.report_metrics(clear=True)
+        population.report_metrics(clear=True)
 
         # Tournament selection and mutation
         if tournament and mutation is not None:
@@ -608,14 +629,16 @@ def finetune_llm_preference(
             if accelerator is not None:
                 accelerator.wait_for_everyone()
 
-        # Report progress
+        # Report progress. ``report_metrics`` runs collective ops (logger
+        # barriers + gather) so it MUST run on every rank; console output is
+        # guarded inside the loggers.
         if accelerator is None or accelerator.is_main_process:
             increment = min(effective_data_batch_size, max_steps - displayed_steps)
             if increment > 0:
                 pbar.update(increment)
                 displayed_steps += increment
 
-            population.report_metrics(clear=True)
+        population.report_metrics(clear=True)
 
         # Tournament selection and mutation
         if tournament and mutation is not None:
@@ -830,14 +853,16 @@ def finetune_llm_sft(
             if accelerator is not None:
                 accelerator.wait_for_everyone()
 
-        # Report progress
+        # Report progress. ``report_metrics`` runs collective ops (logger
+        # barriers + gather) so it MUST run on every rank; console output is
+        # guarded inside the loggers.
         if accelerator is None or accelerator.is_main_process:
             increment = min(effective_data_batch_size, max_steps - displayed_steps)
             if increment > 0:
                 pbar.update(increment)
                 displayed_steps += increment
 
-            population.report_metrics(clear=True)
+        population.report_metrics(clear=True)
 
         # Tournament selection and mutation
         if tournament and mutation is not None:
@@ -1116,6 +1141,31 @@ def finetune_llm_multiturn(
                 agent, (GRPO, LLMPPO, LLMREINFORCE)
             ):
                 learn_kwargs["sampling_logps"] = all_sampling_logps
+            if accelerator is not None and needs_cross_rank_seq_padding(
+                agent,
+                world_size=accelerator.num_processes,
+            ):
+                completion_ids, action_masks, rewards_2d = (
+                    align_completion_batch_shapes_across_ranks(
+                        completion_ids_list,
+                        action_masks_list,
+                        rewards_2d,
+                        pad_token_id=agent.pad_token_id,
+                        accelerator=accelerator,
+                    )
+                )
+                experiences = (completion_ids, action_masks, rewards_2d)
+                # Keep turn_ids time dim aligned with padded action masks.
+                target_mask_len = int(action_masks.shape[1])
+                if (
+                    "turn_ids" in learn_kwargs
+                    and turn_ids_padded is not None
+                    and int(turn_ids_padded.shape[1]) < target_mask_len
+                ):
+                    pad_t = target_mask_len - int(turn_ids_padded.shape[1])
+                    learn_kwargs["turn_ids"] = torch.nn.functional.pad(
+                        turn_ids_padded, (0, pad_t), value=-1
+                    )
             agent.learn(experiences, **learn_kwargs)
 
             agg_score = safe_aggregate_metrics(accelerator, mean_score)
@@ -1144,10 +1194,12 @@ def finetune_llm_multiturn(
             if (i + 1) % evaluation_interval == 0:
                 agent.test(test_env)
 
-        # Report training metrics
+        # Report training metrics. ``report_metrics`` performs collective ops
+        # (logger ``wait_for_everyone`` barriers + ``accelerator.gather``) so it
+        # MUST run on every rank; console output is guarded inside the loggers.
         if accelerator is None or accelerator.is_main_process:
             pbar.update(iteration_steps // len(population.agents))
-            population.report_metrics(clear=True)
+        population.report_metrics(clear=True)
 
         if accelerator is not None:
             accelerator.wait_for_everyone()
