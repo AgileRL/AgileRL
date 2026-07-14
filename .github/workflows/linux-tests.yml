@@ -10,6 +10,7 @@ on:
             - tests/**
             - .github/workflows/**
             - pyproject.toml
+            - uv.lock
     pull_request:
         paths:
             - agilerl/**
@@ -17,6 +18,7 @@ on:
             - tests/**
             - .github/workflows/**
             - pyproject.toml
+            - uv.lock
 
 concurrency:
     group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
