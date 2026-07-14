@@ -5,6 +5,7 @@ import torch
 from torch import nn
 
 from agilerl.algorithms.core.llm_ops.fused_lora import (
+    _align_routing_to_leading_dim,
     _fused_routing_pre_hook,
     _get_cached_lora_layers,
     _make_base_output_clone_hook,
@@ -126,6 +127,58 @@ class TestFusedRoutingPreHook:
         assert returned_args == args
         assert returned_kwargs["existing_kwarg"] == "present"
         assert "adapter_names" not in returned_kwargs
+
+    def test_fused_lora_hook_expands_routing_for_flattened_input(self):
+        # A model that flattens (batch, seq, hidden) -> (batch * seq, hidden)
+        # before a LoRA linear (e.g. OPT's MLP) makes x.shape[0] a multiple of
+        # the per-row routing length; the hook must expand names to match.
+        model = _DummyFusedModel()
+        routing = ["actor", "critic"]  # batch of 2
+        with patch(
+            "agilerl.algorithms.core.llm_ops.fused_lora.LoraLayer", _DummyLoraLayer
+        ):
+            patch_lora_for_fused_forward(model)
+            set_fused_adapter_routing(model, routing)
+            # (batch * seq, hidden) with batch=2, seq=3 -> leading dim 6.
+            _ = model.lora_a(torch.ones(6, 2))
+
+        assert model.lora_a.last_adapter_names == [
+            "actor",
+            "actor",
+            "actor",
+            "critic",
+            "critic",
+            "critic",
+        ]
+
+
+class TestAlignRoutingToLeadingDim:
+    def test_returns_routing_unchanged_when_leading_dim_matches(self):
+        # Common 3D path: (batch, seq, hidden) -> leading dim == batch.
+        routing = ["actor", "critic"]
+        aligned = _align_routing_to_leading_dim(routing, (torch.ones(2, 5, 4),))
+        assert aligned is routing
+
+    def test_expands_routing_when_leading_dim_is_multiple(self):
+        routing = ["actor", "critic", "__base__"]
+        # Flattened (batch=3, seq=2, hidden) -> leading dim 6, factor 2.
+        aligned = _align_routing_to_leading_dim(routing, (torch.ones(6, 4),))
+        assert aligned == ["actor", "actor", "critic", "critic", "__base__", "__base__"]
+
+    def test_leaves_non_divisible_mismatch_for_peft_to_report(self):
+        routing = ["actor", "critic", "__base__"]
+        # 7 is not a multiple of 3: don't guess, defer to PEFT's length check.
+        aligned = _align_routing_to_leading_dim(routing, (torch.ones(7, 4),))
+        assert aligned is routing
+
+    def test_returns_routing_unchanged_when_no_tensor_arg(self):
+        routing = ["actor"]
+        assert _align_routing_to_leading_dim(routing, ()) is routing
+        assert _align_routing_to_leading_dim(routing, ("not-a-tensor",)) is routing
+
+    def test_returns_routing_unchanged_when_routing_empty(self):
+        routing: list[str] = []
+        assert _align_routing_to_leading_dim(routing, (torch.ones(4, 2),)) is routing
 
 
 class _AdapterAwareLoraLayer(_DummyLoraLayer):

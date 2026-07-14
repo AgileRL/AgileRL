@@ -38,25 +38,49 @@ except ImportError:  # pragma: no cover
     LoraLayer = None  # type: ignore[assignment, misc]
 
 
+def _align_routing_to_leading_dim(routing: Sequence[str], args: tuple) -> Sequence[str]:
+    """Repeat each per-row adapter name to match the input's leading dim.
+
+    Models that flatten ``(batch, seq, hidden)`` to ``(batch * seq, hidden)``
+    before a LoRA linear (OPT, Switch/NLLB-MoE) need one name per flattened row;
+    a no-op when the leading dim already equals the routing length.
+
+    :param routing: Adapter names, one per logical batch row.
+    :type routing: Sequence[str]
+    :param args: Positional forward args; ``args[0]`` is the input tensor.
+    :type args: tuple
+    :return: Routing expanded to the input's leading dim, or unchanged.
+    :rtype: Sequence[str]
+    """
+    if not args or not isinstance(args[0], torch.Tensor):
+        return routing
+    leading = args[0].shape[0]
+    n = len(routing)
+    if n == 0 or leading == n or leading % n != 0:
+        return routing
+    factor = leading // n
+    return [name for name in routing for _ in range(factor)]
+
+
 def _fused_routing_pre_hook(
     module: nn.Module,
     args: tuple,
     kwargs: dict,
 ) -> tuple[tuple, dict]:
-    """Forward pre-hook that injects ``adapter_names`` when fused routing is active.
+    """Inject leading-dim-aligned ``adapter_names`` when fused routing is active.
 
     :param module: The LoRA layer about to run ``forward``.
     :type module: nn.Module
-    :param args: Positional arguments passed to ``forward``.
+    :param args: Positional forward args; ``args[0]`` is the input tensor.
     :type args: tuple
-    :param kwargs: Keyword arguments passed to ``forward``.
+    :param kwargs: Keyword args passed to ``forward``.
     :type kwargs: dict
-    :return: ``args`` unchanged and ``kwargs`` possibly updated with ``adapter_names``.
+    :return: ``args`` unchanged and ``kwargs`` with ``adapter_names`` set when routing is active.
     :rtype: tuple[tuple, dict]
     """
     routing = getattr(module, "_fused_adapter_routing", None)
     if routing is not None:
-        kwargs["adapter_names"] = routing
+        kwargs["adapter_names"] = _align_routing_to_leading_dim(routing, args)
     return args, kwargs
 
 
