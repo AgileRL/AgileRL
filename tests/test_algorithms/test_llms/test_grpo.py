@@ -201,6 +201,7 @@ class DummyReasoningEnv(RolloutEnv):
         self.data_batch_size = data_batch_size
         self.device = device
         self._env_client = None
+        self.done = False
 
     def _prompt(self):
         return {
@@ -216,10 +217,12 @@ class DummyReasoningEnv(RolloutEnv):
 
     def reset(self, seed=None):
         del seed
+        self.done = False
         return self._prompt(), {}
 
     def step(self, full_completion_ids):
         del full_completion_ids
+        self.done = True
         return self._prompt(), 1.0, True, False, {}
 
     def get_episode_data(self):

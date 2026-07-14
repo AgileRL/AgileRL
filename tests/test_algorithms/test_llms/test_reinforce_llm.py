@@ -346,6 +346,7 @@ def _minimal_reasoning_rollout_env(device: str, vocab_size: int, input_size: int
 
         def __init__(self):
             self._env_client = None
+            self.done = False
 
         def _prompt(self):
             return {
@@ -358,10 +359,12 @@ def _minimal_reasoning_rollout_env(device: str, vocab_size: int, input_size: int
 
         def reset(self, seed=None):
             del seed
+            self.done = False
             return self._prompt(), {}
 
         def step(self, full_completion_ids):
             del full_completion_ids
+            self.done = True
             return self._prompt(), 1.0, True, False, {}
 
         def get_episode_data(self):
