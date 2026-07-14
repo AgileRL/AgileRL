@@ -884,13 +884,42 @@ class ArenaTrainer(Trainer):
         )
         return TrainingManifest.to_arena_manifest(manifest)
 
-    def train(self) -> dict[str, Any]:
+    def train(
+        self,
+        *,
+        resource_id: str | int | None = None,
+        num_nodes: int | None = None,
+        project: str | None = None,
+        experiment_name: str | None = None,
+        reward_file: str | Path | bytes | None = None,
+        completion: str | None = None,
+    ) -> dict[str, Any]:
         """Build the manifest and submit the training job to Arena.
 
-        :returns: Arena API response including ``job_id`` and ``status``.
+        :param resource_id: Arena cluster type or resource id for the job.
+        :type resource_id: str | int | None
+        :param num_nodes: The number of nodes to use for training.
+        :type num_nodes: int | None
+        :param project: The project to submit the experiment to.
+        :type project: str | None
+        :param experiment_name: The name of the experiment to submit.
+        :type experiment_name: str | None
+        :param reward_file: Python reward module for reasoning dataset jobs.
+        :type reward_file: str | Path | bytes | None
+        :param completion: Optional model completion for reward validation.
+        :type completion: str | None
+        :returns: Arena API response.
         :rtype: dict[str, Any]
         """
-        return self._client.submit_experiment(self.to_manifest())
+        return self._client.submit_experiment(
+            self.to_manifest(),
+            resource_id=resource_id,
+            num_nodes=num_nodes,
+            project=project,
+            experiment_name=experiment_name,
+            reward_file=reward_file,
+            completion=completion,
+        )
 
     def resume_from_checkpoint(self, job_id: str, max_steps: int) -> None:
         """Resume a training job from a checkpoint.

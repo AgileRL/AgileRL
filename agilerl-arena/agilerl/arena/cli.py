@@ -5,6 +5,7 @@ from typing import Any
 
 import agilerl.arena  # noqa: F401 — configure package logging before submodules
 import click
+from agilerl.arena import console
 from agilerl.arena.cli_manifest import handle_help_option
 from agilerl.arena.config import CommandConfig, arena_client
 from agilerl.arena.exceptions import ArenaError
@@ -662,7 +663,7 @@ def experiment_checkpoints(
 @click.option(
     "--preview-rows",
     type=click.IntRange(0),
-    default=10,
+    default=5,
     show_default=True,
     help="When CSV is returned, preview this many rows in a rich table.",
 )
@@ -896,14 +897,9 @@ def agent_generate(
             project_name=project_name,
         ) as agent,
     ):
-        completion = "".join(agent.generate_stream(prompt))
-        emit_result(
-            {
-                "deployment": target,
-                "prompt": prompt,
-                "completion": completion,
-            }
-        )
+        for chunk in agent.generate_stream(prompt):
+            console.print(chunk, end="", markup=False, highlight=False, soft_wrap=True)
+        console.print()
 
 
 @main.group("projects")

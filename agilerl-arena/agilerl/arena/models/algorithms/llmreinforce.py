@@ -18,7 +18,7 @@ class LLMREINFORCESpec(LLMAlgorithmSpec):
     clip_coef: float = Field(default=0.2, ge=0.0, le=1.0)
     gamma: float = Field(default=0.99, ge=0.0, le=1.0)
     temperature: float = Field(default=0.9)
-    max_output_tokens: int | None = Field(default=1024)
+    max_output_tokens: int | None = Field(default=1024, exclude=True)
     min_output_tokens: int | None = Field(default=None)
     action_granularity: Literal["turn", "token", "auto"] = Field(default="auto")
     cosine_lr_schedule_config: CosineLRScheduleConfig | None = Field(default=None)

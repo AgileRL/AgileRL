@@ -139,7 +139,8 @@ def _resolve_training_envs(
 
     if len(pop) > 1:
         warnings.warn(
-            "A shared 'env' is being used with multiple agents. This can introduce fairness bias; prefer 'env_fn' for per-agent environments.",
+            "A shared 'env' is being used with multiple agents. This can introduce "
+            "fairness bias; prefer 'env_fn' for per-agent environments.",
             stacklevel=2,
         )
     assert env is not None
@@ -150,10 +151,10 @@ def _num_epochs_reached(envs: "list[DatasetEnv]", num_epochs: int | None) -> boo
     """Check whether all active environments have reached the epoch budget."""
     if num_epochs is None:
         return False
-    epoch_counts = [getattr(training_env, "num_epochs", None) for training_env in envs]
-    if not all(isinstance(epoch_count, int) for epoch_count in epoch_counts):
+    epoch_counts = [getattr(e, "num_epochs", None) for e in envs]
+    if not all(isinstance(c, int) for c in epoch_counts):
         return False
-    return all(epoch_count >= num_epochs for epoch_count in epoch_counts)
+    return all(c >= num_epochs for c in epoch_counts)
 
 
 def _save_elite(
@@ -220,13 +221,13 @@ def train_llm_rollout(
     :type env_factory: Callable[[], RolloutEnv]
     :param env_config: Configuration for the environment factory.
     :type env_config: dict[str, Any], optional
-    :param init_hp: Initial hyperparameters (e.g. ``BATCH_SIZE``, ``ALGO``).
+    :param init_hp: Initial hyperparameters.
     :type init_hp: dict, optional
-    :param max_steps: Progress-bar / outer-loop budget in sample steps, defaults to 32768.
-    :type max_steps: int, optional
+    :param max_steps: Progress-bar budget in sample steps, defaults to 32768.
+    :type max_steps: int
     :param save_elite: Whether to save the elite checkpoint, defaults to None.
     :type save_elite: bool, optional
-    :param elite_path: Directory or path prefix for checkpoints, defaults to None.
+    :param elite_path: Directory for checkpoints, defaults to None.
     :type elite_path: str, optional
     :param wb: Whether to log to Weights and Biases, defaults to False.
     :type wb: bool, optional
@@ -262,7 +263,7 @@ def train_llm_rollout(
     :param max_reward: If set, adds accuracy metric vs this threshold.
     :type max_reward: float, optional
     :param verbose: Progress bar and periodic train summaries, defaults to True.
-    :type verbose: bool, optional
+    :type verbose: bool
     :param accelerator: Hugging Face Accelerate instance, defaults to None.
     :type accelerator: Accelerator, optional
     :param max_wall_seconds: Stop after this wall-clock duration (seconds); ``None`` disables.
@@ -296,6 +297,7 @@ def train_llm_rollout(
     env_name = init_hp.get("env_name", "rollout")
     data_increment = _distributed_world_size(accelerator)
     effective_data_batch_size = data_increment * batch_size
+    env_name = init_hp.get("env_name", "multiturn")
 
     if wb:
         init_hp["effective_data_batch_size"] = effective_data_batch_size
@@ -727,8 +729,12 @@ def train_llm_dataset(
                     checkpoint_path if checkpoint_path is not None else elite_path,
                 )
 
-        if _num_epochs_reached(envs, num_epochs) or total_steps >= max_steps:
-            break
+    if save_elite and elite_path is not None:
+        elite = max(
+            population.agents,
+            key=lambda a: a.fitness[-1] if a.fitness else float("-inf"),
+        )
+        save_llm_checkpoint(elite, elite_path)
 
     _save_elite(population, save_elite, elite_path)
     population.finish()

@@ -218,6 +218,29 @@ def test_llm_pretrained_model_can_come_from_network_section() -> None:
     assert payload["algorithm"]["max_model_len"] == 2048
 
 
+def test_llm_lora_and_max_output_tokens_excluded_from_algorithm() -> None:
+    payload = TrainingManifest.get_validated(
+        _manifest(
+            algorithm={"name": "GRPO", "group_size": 8},
+            environment={"name": "my-llm-env"},
+            network={
+                "pretrained_model_name_or_path": "Qwen/Qwen2.5-0.5B-Instruct",
+                "max_context_length": 512,
+                "lora_config": {"lora_r": 16},
+            },
+        )
+    )
+    algorithm = payload["algorithm"]
+    # Model fields the platform expects under algorithm are still there.
+    assert algorithm["pretrained_model_name_or_path"] == "Qwen/Qwen2.5-0.5B-Instruct"
+    assert algorithm["max_model_len"] == 512
+    # lora_config and max_output_tokens must not be emitted under algorithm.
+    assert "lora_config" not in algorithm
+    assert "max_output_tokens" not in algorithm
+    # lora_config still travels under the network section.
+    assert payload["network"]["lora_config"]["lora_r"] == 16
+
+
 def test_get_validated_loads_yaml_file(tmp_path) -> None:
     path = tmp_path / "manifest.yaml"
     path.write_text(yaml.safe_dump(_manifest()))

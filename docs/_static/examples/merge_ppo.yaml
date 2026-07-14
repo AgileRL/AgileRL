@@ -17,8 +17,9 @@ environment:
     version: v1
 
 training:
-    max_steps: 1_000_000
-    evo_steps: 10_000
+    max_steps: 10_000_000
+    evo_steps: 160_000
+    eval_steps: 500
     pop_size: 4
 
 mutation:
