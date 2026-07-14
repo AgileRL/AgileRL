@@ -346,14 +346,15 @@ class DPO(LLMAlgorithm):
         }
 
         # Aggregate metrics across GPUs for both train/test paths.
-        agg = aggregate_metrics_dict(self.accelerator, learn_metrics)
+        learn_metrics = aggregate_metrics_dict(self.accelerator, learn_metrics)
 
         if training:
-            self.metrics.log("loss", agg["loss"])
-            self.metrics.log("chosen_reward", agg["chosen_reward"])
-            self.metrics.log("rejected_reward", agg["rejected_reward"])
+            self.metrics.log("loss", learn_metrics["loss"])
+            self.metrics.log("chosen_reward", learn_metrics["chosen_reward"])
+            self.metrics.log("rejected_reward", learn_metrics["rejected_reward"])
             self.metrics.log(
-                "reward_margin", agg["chosen_reward"] - agg["rejected_reward"]
+                "reward_margin",
+                learn_metrics["chosen_reward"] - learn_metrics["rejected_reward"],
             )
 
         return learn_metrics

@@ -218,7 +218,7 @@ def main(cfg: dict) -> None:
 
     prompts = env.reset(reset_dataloaders=True)
     with torch.no_grad():
-        init_ids, init_masks = agent.get_action(prompts, training=False)
+        init_ids, init_masks, _ = agent.get_action(prompts, training=False)
         init_values = get_terminal_values(agent, init_ids, init_masks)
 
     init_mean = float(init_values.mean().item())
@@ -231,27 +231,27 @@ def main(cfg: dict) -> None:
 
     for step in range(num_steps):
         agent.set_reference_policy(env.num_epochs)
-        completion_ids, action_masks = agent.get_action(prompts)
+        completion_ids, action_masks, _ = agent.get_action(prompts)
         next_prompts, rewards = env.step(completion_ids)
 
-        loss, kl, pg_loss, vf_loss, entropy = agent.learn(
+        learn_metrics = agent.learn(
             (completion_ids, action_masks, rewards),
         )
         prompts = next_prompts
 
         if (step + 1) % log_interval == 0:
             with torch.no_grad():
-                snap_ids, snap_masks = agent.get_action(prompts, training=False)
+                snap_ids, snap_masks, _ = agent.get_action(prompts, training=False)
                 snap_values = get_terminal_values(agent, snap_ids, snap_masks)
             print(
                 f"[value-debug] step {step + 1:4d} | "
-                f"vf_loss={vf_loss:.4f} | "
+                f"vf_loss={learn_metrics['vf_loss']:.4f} | "
                 f"V(terminal) mean={snap_values.mean():.4f}, "
                 f"std={snap_values.std():.4f}"
             )
 
     with torch.no_grad():
-        final_ids, final_masks = agent.get_action(prompts, training=False)
+        final_ids, final_masks, _ = agent.get_action(prompts, training=False)
         final_values = get_terminal_values(agent, final_ids, final_masks)
 
     final_mean = float(final_values.mean().item())

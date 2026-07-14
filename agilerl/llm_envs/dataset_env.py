@@ -9,7 +9,6 @@ are picked with the ``objective`` argument rather than separate subclasses.
 
 from __future__ import annotations
 
-import copy
 import warnings
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -104,6 +103,9 @@ class DatasetEnv(gym.Env):
         self.response_column = response_column
         self._collate_builder = collate_builder
         for label, dataset in (("Train", train_dataset), ("Test", test_dataset)):
+            if len(dataset) == 0:
+                msg = f"{label} dataset is empty; each split needs at least one row."
+                raise ValueError(msg)
             assert self.required_columns.issubset(set(dataset.features.keys())), (
                 f"{label} dataset must contain columns {sorted(self.required_columns)}."
             )
@@ -185,11 +187,7 @@ class DatasetEnv(gym.Env):
         """
         if reset_dataloaders:
             self._reset_dataloaders()
-            warnings.warn(
-                "env.reset() called with reset_dataloaders=True, this will reset "
-                "the dataloaders to the beginning of the dataset, proceed with caution.",
-                stacklevel=2,
-            )
+            self.num_epochs = 0
         return self._get_next_batch()
 
     def step(self, completions: torch.Tensor | None = None) -> None:
@@ -207,7 +205,7 @@ class DatasetEnv(gym.Env):
     def _get_next_batch(self) -> Any:
         """Read one batch and cycle dataloaders at split boundaries."""
         try:
-            batch = next(self.dataloader)
+            return next(self.dataloader)
         except StopIteration:
             if not self.evaluation_mode:
                 self.num_epochs += 1
@@ -215,8 +213,7 @@ class DatasetEnv(gym.Env):
                 reset_train=not self.evaluation_mode,
                 reset_test=self.evaluation_mode,
             )
-            return self._get_next_batch()
-        return batch
+            return next(self.dataloader)
 
     @contextmanager
     def eval_mode(self) -> Generator[None, None, None]:
@@ -224,16 +221,11 @@ class DatasetEnv(gym.Env):
 
         Restores whatever mode was active on entry (save/set/restore), so nested
         evaluation probes don't flip an outer eval context back to the train
-        split. This also snapshots and
-        restores ``last_tokenized_prompts`` when present, so train-loop prompt
-        caches survive evaluation probes.
+        split.
         """
         previous_mode = self.evaluation_mode
         self.dataloader = self.test_dataloader_iter
         self.evaluation_mode = True
-        last_tokenized_prompts = None
-        if hasattr(self, "last_tokenized_prompts"):
-            last_tokenized_prompts = copy.deepcopy(self.last_tokenized_prompts)
         try:
             yield
         finally:
@@ -245,8 +237,6 @@ class DatasetEnv(gym.Env):
                 if previous_mode
                 else self.train_dataloader_iter
             )
-            if last_tokenized_prompts is not None:
-                self.last_tokenized_prompts = last_tokenized_prompts
 
     def __len__(self) -> int:
         """Return row count for the currently active split."""
@@ -279,15 +269,14 @@ class DatasetEnv(gym.Env):
         min_completion_length`` and warns when any rows are removed.
         """
         dataset_type = "dataset" if dataset_type is None else dataset_type
-        filter_keyword = "prompt" if "prompt" in dataset.features else "question"
         if self.max_context_length is None or not isinstance(
-            dataset[0][filter_keyword],
+            dataset[0]["prompt"],
             str,
         ):
             return dataset
         filtered_dataset = dataset.filter(
             lambda x: (
-                len(self.tokenizer.encode(x[filter_keyword]))
+                len(self.tokenizer.encode(x["prompt"]))
                 <= self.max_context_length - self.min_completion_length
             ),
         )
@@ -346,18 +335,14 @@ def preference_collate_builder(
                 *(len(ids) for ids in chosen_ids["input_ids"]),
                 *(len(ids) for ids in rejected_ids["input_ids"]),
             )
-            chosen_enc = tokenizer(
-                prompts,
-                chosen,
-                truncation=True,
+            chosen_enc = tokenizer.pad(
+                chosen_ids,
                 padding="max_length",
                 max_length=max_len,
                 return_tensors="pt",
             )
-            rejected_enc = tokenizer(
-                prompts,
-                rejected,
-                truncation=True,
+            rejected_enc = tokenizer.pad(
+                rejected_ids,
                 padding="max_length",
                 max_length=max_len,
                 return_tensors="pt",

@@ -18,7 +18,6 @@ from agilerl.algorithms.sft import SFT
 from agilerl.population import Population
 from agilerl.rollouts.on_policy import collect_rollouts_llm
 from agilerl.training.train_llm import (
-    finetune_llm_reasoning,
     train_llm_dataset,
     train_llm_rollout,
 )
@@ -770,9 +769,9 @@ class TestTrainLlmRollout:
         assert mock_collect.call_count == num_outer
         assert mock_agent.learn.call_count == num_outer
         assert mock_agent.test.call_count == 0
-        # GRPO/CISPO/GSPO now also receive turn_ids in the multi-turn loop
-        # (turn-level importance sampling + per-turn group-relative advantages).
-        mock_agent.learn.assert_called_with(ANY, turn_ids=ANY)
+        # The rollout loop passes turn_ids and sampling_logps unconditionally;
+        # every rollout algorithm's learn() accepts both.
+        mock_agent.learn.assert_called_with(ANY, turn_ids=ANY, sampling_logps=ANY)
         assert mock_save.call_count == 1
 
     def test_train_llm_rollout_forwards_sampling_logps_to_learn(self):
@@ -1425,12 +1424,6 @@ def test_collect_rollouts_llm_breaks_when_vector_env_has_no_active_prompts():
 
     assert mock_agent.get_action.call_count == 1
     assert mock_env.step.call_count == 1
-
-
-def test_finetune_llm_reasoning_raises_migration_pointer():
-    """The deprecated entrypoint raises with the migration instruction."""
-    with pytest.raises(NotImplementedError, match="train_llm_rollout instead"):
-        finetune_llm_reasoning()
 
 
 def test_train_llm_rollout_closes_envs_on_teardown():

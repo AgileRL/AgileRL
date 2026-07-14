@@ -15,20 +15,12 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, wait
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
 import torch
 
-from agilerl.llm_envs.openenv import (
-    LocalEnvClient,
-    OpenEnvClient,
-    ServedEnvClient,
-    _name_from_spec,
-    is_url,
-    load_env,
-)
 from agilerl.protocols import EnvClientProtocol, TextEnvProtocol
 from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
 
@@ -127,10 +119,14 @@ class RolloutEnv:
         """
         self.max_turns = max_turns
         # ``env_client`` is either a URL string (build an HTTP client) or an already-built
-        # client object (an ``OpenEnvClient`` / ``LocalEnvClient`` / injected double) —
-        # the latter is how ``.local`` / ``.from_spec`` plug in an in-process or custom
-        # transport. ``headers`` / ``timeout_s`` / ``mcp_tool`` apply only to the URL case.
+        # ``EnvClientProtocol`` implementation — the latter is how ``.local`` /
+        # ``.from_spec`` plug in an in-process or custom transport. ``headers`` /
+        # ``timeout_s`` / ``mcp_tool`` apply only to the URL case.
         if isinstance(env_client, str):
+            # Lazy: the OpenEnv backend needs the optional ``openenv`` package
+            # (llm extra); an injected client keeps the core install import-free.
+            from agilerl.llm_envs.openenv import OpenEnvClient
+
             self._env_client = OpenEnvClient(
                 env_client,
                 headers=headers,
@@ -208,6 +204,8 @@ class RolloutEnv:
             ``apply_chat_template``, ``max_model_len``).
         :rtype: RolloutEnv
         """
+        from agilerl.llm_envs.openenv import ServedEnvClient
+
         env_client = ServedEnvClient(
             make_env(),
             env_name=env_name,
@@ -240,6 +238,8 @@ class RolloutEnv:
         :param kwargs: Forwarded to :class:`RolloutEnv` (e.g. ``pad_id``, ``max_model_len``).
         :rtype: RolloutEnv
         """
+        from agilerl.llm_envs.openenv import LocalEnvClient
+
         env_client = LocalEnvClient(env, instruction=instruction)
         return cls(env_client, tokenizer, max_turns=max_turns, **kwargs)
 
@@ -278,6 +278,8 @@ class RolloutEnv:
         :param kwargs: Forwarded to :class:`RolloutEnv`.
         :rtype: RolloutEnv
         """
+        from agilerl.llm_envs.openenv import _name_from_spec, is_url, load_env
+
         if is_url(spec):
             return cls(spec, tokenizer, max_turns=max_turns, **kwargs)
         env = load_env(spec, env_config)
@@ -351,7 +353,7 @@ class RolloutEnv:
         )
         return cls.local(env, tokenizer, max_turns=1, **kwargs)
 
-    def _tokenize_initial_prompt(self, obs_text: str) -> dict[str, torch.Tensor]:
+    def _tokenize_initial_prompt(self, obs_text: str) -> torch.Tensor:
         """Tokenize the initial observation, optionally with chat template."""
         if self.apply_chat_template:
             chat_template_kwargs: dict[str, Any] = {}
@@ -371,11 +373,7 @@ class RolloutEnv:
                 and isinstance(token_ids[0], list)
             ):
                 token_ids = token_ids[0]
-            input_ids = torch.tensor([token_ids], dtype=torch.long)
-            return {
-                "input_ids": input_ids,
-                "attention_mask": torch.ones_like(input_ids),
-            }
+            return torch.tensor([token_ids], dtype=torch.long)
 
         encoded = self.tokenizer(
             [obs_text],
@@ -384,10 +382,7 @@ class RolloutEnv:
             padding_side="left",
             return_attention_mask=True,
         )
-        return {
-            "input_ids": encoded["input_ids"],
-            "attention_mask": encoded["attention_mask"],
-        }
+        return encoded["input_ids"]
 
     def _tokenize_feedback(self, feedback_text: str) -> torch.Tensor:
         """Tokenize the assistant→user→assistant boundary plus feedback text.
@@ -400,7 +395,7 @@ class RolloutEnv:
         """
         if not self.apply_chat_template:
             return torch.tensor(
-                [self.tokenizer.encode(feedback_text)],
+                [self.tokenizer.encode(feedback_text, add_special_tokens=False)],
                 dtype=torch.long,
             )
 
@@ -415,7 +410,7 @@ class RolloutEnv:
             + "<|im_end|>\n<|im_start|>assistant\n"
         )
         return torch.tensor(
-            [self.tokenizer.encode(turn_boundary)],
+            [self.tokenizer.encode(turn_boundary, add_special_tokens=False)],
             dtype=torch.long,
         )
 
@@ -509,10 +504,9 @@ class RolloutEnv:
             msg = "No prompt: reset() was never called"
             raise RuntimeError(msg)
         self._last_full_prompt_token_len = int(self.full_ids.shape[1])
-        return {
-            "input_ids": self.full_ids,
-            "attention_mask": torch.ones_like(self.full_ids),
-        }
+        # The row is single and unpadded, so consumers that need an attention
+        # mask (the HF-generate path) derive all-ones from ``input_ids``.
+        return {"input_ids": self.full_ids}
 
     @property
     def tools(self) -> list[Any] | None:
@@ -526,7 +520,7 @@ class RolloutEnv:
         tool schemas.
         """
         if not self._tools_known:
-            self._tools = getattr(self._env_client, "tools", None) or None
+            self._tools = self._env_client.tools or None
             self._tools_known = True
         return self._tools
 
@@ -539,18 +533,13 @@ class RolloutEnv:
     @property
     def dataset_size(self) -> int:
         """Number of rows in the env client (0 if not dataset-backed)."""
-        return getattr(self._env_client, "dataset_size", 0)
+        return self._env_client.dataset_size
 
     @contextmanager
     def eval_mode(self):
         """Serve the env client's held-out split for the duration of the block."""
-        inner = getattr(self._env_client, "eval_mode", None)
-        if callable(inner):
-            with inner():
-                yield
-        else:
-            with nullcontext():
-                yield
+        with self._env_client.eval_mode():
+            yield
 
     def reset(
         self,
@@ -575,7 +564,7 @@ class RolloutEnv:
         ``current_prompt``) rather than being sent to the generation engine.
         """
         obs_text, info = self._reset_fetch(seed, row_index=row_index)
-        return self._reset_apply(obs_text, info, row_index=row_index)
+        return self._reset_apply(obs_text, info)
 
     def _reset_fetch(
         self, seed: int | None = None, *, row_index: int | None = None
@@ -594,8 +583,6 @@ class RolloutEnv:
         self,
         obs_text: str,
         info: dict[str, Any],
-        *,
-        row_index: int | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Tokenize the initial prompt and start the episode (tokenizer).
 
@@ -604,9 +591,7 @@ class RolloutEnv:
         an empty ``current_prompt``) — it is simply never made active — instead of
         raising or skipping the row.
         """
-        del row_index
-        encoded = self._tokenize_initial_prompt(obs_text)
-        self.full_ids = encoded["input_ids"]
+        self.full_ids = self._tokenize_initial_prompt(obs_text)
         self.turn_boundaries = []
         self.turn_rewards = []
         self._turn_idx = 0
@@ -643,15 +628,16 @@ class RolloutEnv:
             )
             raise RuntimeError(msg)
         prompt_len = self._last_full_prompt_token_len
-        gen_tokens = full_completion_ids[0, prompt_len:]
+        # Only the newly generated suffix crosses devices; the prompt prefix in
+        # ``full_completion_ids`` is byte-identical to the resident ``full_ids``.
+        gen_ids = full_completion_ids[0, prompt_len:].detach().to(self.full_ids.device)
         gen_text = self.tokenizer.decode(
-            gen_tokens.tolist(),
+            gen_ids.tolist(),
             skip_special_tokens=True,
         )
         if sampling_logps is not None:
             self.sampling_logps.append(sampling_logps)
-        prompt_len = self.full_ids.shape[1]
-        self.full_ids = full_completion_ids.detach().to(self.full_ids.device)
+        self.full_ids = torch.cat([self.full_ids, gen_ids.unsqueeze(0)], dim=1)
         gen_end = self.full_ids.shape[1]
         self.turn_boundaries.append((prompt_len, gen_end, self._turn_idx))
         self._gen_texts.append(gen_text)
@@ -772,8 +758,7 @@ class RolloutEnv:
         releases its pool, a :class:`~agilerl.llm_envs.openenv.LocalEnvClient`
         closes the wrapped env.
         """
-        if hasattr(self._env_client, "close"):
-            self._env_client.close()
+        self._env_client.close()
 
     def get_debug_info(self) -> dict[str, Any]:
         """Return a dict of human-readable debug information for the episode."""
@@ -1036,31 +1021,6 @@ class BatchRolloutEnv:
             return None
         return [env.current_prompt for env in active]
 
-    def _reset_env(
-        self,
-        *,
-        seed: int | None,
-        env_idx: int,
-        row_index: int | None = None,
-    ) -> None:
-        """Reset one existing env in place; the wrapper rebinds its own state.
-
-        :param seed: Optional reset seed passed to the env wrapper.
-        :type seed: int | None
-        :param env_idx: Index into ``self.envs`` to reset.
-        :type env_idx: int
-        :param row_index: Dataset row chosen by this ``BatchRolloutEnv``.
-        :type row_index: int | None
-        """
-        if env_idx < 0 or env_idx >= len(self.envs):
-            msg = f"env_idx out of bounds: {env_idx} not in [0, {len(self.envs) - 1}]"
-            raise IndexError(msg)
-        env = self.envs[env_idx]
-        if row_index is not None:
-            env.reset(seed=seed, row_index=row_index)
-        else:
-            env.reset(seed=seed)
-
     def reset(
         self,
         seed: int | None = None,
@@ -1094,9 +1054,7 @@ class BatchRolloutEnv:
                 self.close()
                 self.envs = []
                 raise
-            self._pointer = BatchPointer(
-                int(getattr(self.envs[0], "dataset_size", 0) or 0), seed=seed
-            )
+            self._pointer = BatchPointer(self.envs[0].dataset_size, seed=seed)
         assignments = self._pointer.assign(
             self.batch_size, self.group_size, base_seed=seed
         )
@@ -1108,10 +1066,8 @@ class BatchRolloutEnv:
             ]
         )
         # Phase 2 (sequential — tokenizer): apply each prompt.
-        for env, (_seed, row), (obs_text, info) in zip(
-            self.envs, assignments, fetches, strict=False
-        ):
-            env._reset_apply(obs_text, info, row_index=row)
+        for env, (obs_text, info) in zip(self.envs, fetches, strict=False):
+            env._reset_apply(obs_text, info)
 
         return self._get_prompts()
 
@@ -1198,8 +1154,7 @@ class BatchRolloutEnv:
             if env_id in seen:
                 continue
             seen.add(env_id)
-            if hasattr(env, "close"):
-                env.close()
+            env.close()
 
     def get_trajectories(
         self,
@@ -1240,7 +1195,7 @@ class BatchRolloutEnv:
             action_masks_list.append(action_mask)
             all_turn_ids.append(turn_ids)
             all_rewards.append(turn_rewards_t)
-            batch_steps += len(getattr(env, "turn_boundaries", []))
+            batch_steps += len(env.turn_boundaries)
             all_sampling_logps.append(sampling_logps)
 
         return (

@@ -12,7 +12,11 @@ from agilerl.llm_envs import (
     BatchRolloutEnv,
     RolloutEnv,
 )
-from tests.helpers.rollout_doubles import RolloutEnvDoubleMixin
+from tests.helpers.rollout_doubles import (
+    FakeEnvClient,
+    RolloutEnvDoubleMixin,
+    bare_rollout_env,
+)
 
 # The boundary marker is a per-render ``uuid4().hex`` (32 lowercase hex chars);
 # a correctly sliced boundary contains no such run.
@@ -22,16 +26,6 @@ _UUID4_HEX = re.compile(r"[0-9a-f]{32}")
 class _StubTokenizer:
     def decode(self, ids: list[int], skip_special_tokens: bool = True) -> str:
         return "x" * len(ids)
-
-
-def _bare_wrapper() -> RolloutEnv:
-    w = RolloutEnv.__new__(RolloutEnv)
-    w.tools = None  # optional config; __init__ default, read by the tokenize paths
-    w.sampling_logps = []  # read by get_episode_data
-    # boundary-frame cache; __init__ defaults, read by the feedback tokenize path
-    w._boundary_parts = None
-    w._boundary_parts_known = False
-    return w
 
 
 def test_max_prompt_tokens_for_model_len() -> None:
@@ -51,7 +45,8 @@ class _ChrTokenizer:
         t = torch.tensor(ids, dtype=torch.long)
         return {"input_ids": t, "attention_mask": torch.ones_like(t)}
 
-    def encode(self, s: str) -> list[int]:
+    def encode(self, s: str, add_special_tokens: bool = True) -> list[int]:
+        del add_special_tokens
         return [ord(c) for c in s]
 
     def decode(self, ids: list[int], skip_special_tokens: bool = True) -> str:
@@ -83,7 +78,7 @@ class TestRolloutEnvReset:
         )
         obs, info = w.reset()
         assert isinstance(info, dict)
-        assert set(obs.keys()) >= {"input_ids", "attention_mask"}
+        assert set(obs.keys()) >= {"input_ids"}
         assert w._prompt_text == "hello"
         assert w._last_full_prompt_token_len == obs["input_ids"].shape[1]
 
@@ -108,7 +103,7 @@ class TestRolloutEnvStep:
         assert _pd == {}
 
     def test_step_raises_without_prior_policy_observation(self) -> None:
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w._last_full_prompt_token_len = None
         with pytest.raises(RuntimeError, match="requires a prior reset"):
             w.step(torch.ones(1, 2, dtype=torch.long))
@@ -193,7 +188,7 @@ class TestRolloutEnvChatTemplateBoundary:
     """
 
     def test_gemma_style_template_emits_full_boundary(self) -> None:
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w.apply_chat_template = True
         w.tokenizer = _ChatTemplateRecordingTokenizer(_render_gemma_chat)
 
@@ -209,7 +204,7 @@ class TestRolloutEnvChatTemplateBoundary:
         assert decoded.endswith("<start_of_turn>model\n")
 
     def test_qwen_style_template_emits_full_boundary(self) -> None:
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w.apply_chat_template = True
         w.tokenizer = _ChatTemplateRecordingTokenizer(_render_chatml)
 
@@ -223,7 +218,7 @@ class TestRolloutEnvChatTemplateBoundary:
         assert decoded.endswith("<|im_start|>assistant\n")
 
     def test_llama_style_template_emits_full_boundary(self) -> None:
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w.apply_chat_template = True
         w.tokenizer = _ChatTemplateRecordingTokenizer(_render_llama)
 
@@ -238,7 +233,7 @@ class TestRolloutEnvChatTemplateBoundary:
         assert decoded.endswith("<|start_header_id|>assistant<|end_header_id|>\n\n")
 
     def test_returns_none_when_template_renderer_raises(self) -> None:
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w.apply_chat_template = True
         w.tokenizer = _ChatTemplateRecordingTokenizer(_render_raises)
         assert w._chat_template_boundary_ids("F") is None
@@ -246,7 +241,7 @@ class TestRolloutEnvChatTemplateBoundary:
     def test_returns_none_when_placeholder_is_stripped(self) -> None:
         # Pathological template whose render drops content entirely; the
         # placeholder doesn't survive, so we can't slice. Caller falls back.
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w.apply_chat_template = True
         w.tokenizer = _ChatTemplateRecordingTokenizer(_render_drops_content)
         assert w._chat_template_boundary_ids("F") is None
@@ -254,7 +249,7 @@ class TestRolloutEnvChatTemplateBoundary:
     def test_returns_none_when_render_is_not_a_string(self) -> None:
         # Some tokenizers tokenize regardless of ``tokenize=False`` and hand
         # back ids; we can only slice a string render, so fall back.
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w.apply_chat_template = True
         w.tokenizer = _ChatTemplateRecordingTokenizer(_render_returns_ids)
         assert w._chat_template_boundary_ids("F") is None
@@ -262,7 +257,7 @@ class TestRolloutEnvChatTemplateBoundary:
     def test_returns_none_when_boundary_text_is_empty(self) -> None:
         # Render ends exactly at the placeholder -> nothing after it to
         # tokenize as the boundary, so fall back.
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w.apply_chat_template = True
         w.tokenizer = _ChatTemplateRecordingTokenizer(_render_ends_at_placeholder)
         assert w._chat_template_boundary_ids("F") is None
@@ -270,7 +265,7 @@ class TestRolloutEnvChatTemplateBoundary:
     def test_returns_none_when_boundary_encodes_to_no_tokens(self) -> None:
         # A tokenizer that maps the boundary text to zero ids gives us
         # nothing to append, so fall back.
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w.apply_chat_template = True
         w.tokenizer = _EmptyEncodeTokenizer(_render_chatml)
         assert w._chat_template_boundary_ids("F") is None
@@ -279,7 +274,7 @@ class TestRolloutEnvChatTemplateBoundary:
         # With a working (Gemma-style) template, _tokenize_feedback must
         # return the template-derived boundary — not the hard-coded ChatML
         # fallback markers.
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w.apply_chat_template = True
         w.tokenizer = _ChatTemplateRecordingTokenizer(_render_gemma_chat)
         out = w._tokenize_feedback("FEEDBACK")
@@ -292,7 +287,7 @@ class TestRolloutEnvChatTemplateBoundary:
         # If the chat-template path returns None (no apply_chat_template at
         # all on the tokenizer), _tokenize_feedback falls back to ChatML so
         # we never crash.
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w.apply_chat_template = True
         w.tokenizer = _ChrTokenizerWithChatTemplateBroken()
         out = w._tokenize_feedback("F")
@@ -397,16 +392,16 @@ class _ChrTokenizerWithChatTemplateBroken(_ChrTokenizer):
 class TestRolloutEnvPolicyObservationFromState:
     def test_policy_observation_returns_current_prompt_fields(self) -> None:
         """The policy observation carries the current ``input_ids`` directly."""
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w.tokenizer = _StubTokenizer()
         w.full_ids = torch.tensor([[0, 1, 2, 3]], dtype=torch.long)
         w.turn_boundaries = []
         obs = w._policy_observation_from_state()
-        assert set(obs.keys()) == {"input_ids", "attention_mask"}
+        assert set(obs.keys()) == {"input_ids"}
         assert obs["input_ids"].shape[1] == 4
 
     def test_policy_observation_raises_without_full_ids(self) -> None:
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w.full_ids = None
         with pytest.raises(RuntimeError, match="No prompt"):
             w._policy_observation_from_state()
@@ -491,6 +486,8 @@ class TestRolloutEnvFromDataset:
 
 
 class _SyncStubEnv(RolloutEnvDoubleMixin):
+    dataset_size = 0
+
     def __init__(self) -> None:
         self.turn_boundaries: list[int] = []
         self.reset_calls: list[int | None] = []
@@ -733,30 +730,6 @@ def _stub_env(*, done: bool = False, prompt: dict | None = None) -> _SyncStubEnv
     return env
 
 
-class TestBatchRolloutEnvResetEnv:
-    def test_reset_env_out_of_bounds(self) -> None:
-        vec = BatchRolloutEnv(env_factory=_SyncStubEnv, batch_size=1, group_size=1)
-        with pytest.raises(IndexError, match="env_idx out of bounds"):
-            vec._reset_env(seed=0, env_idx=0)
-
-    def test_reset_env_success_path(self) -> None:
-        env = _stub_env(done=True)
-        vec = BatchRolloutEnv(env_factory=_SyncStubEnv, batch_size=1, group_size=1)
-        vec.envs.append(env)
-        vec._reset_env(seed=5, env_idx=0)
-        assert vec.envs[0].done is False
-        assert vec.envs[0].current_prompt["input_ids"].shape == (1, 3)
-        assert env.reset_calls[-1] == 5
-
-    def test_reset_env_forwards_row_index(self) -> None:
-        """A dataset-backed reset forwards the chosen ``row_index`` to the env."""
-        env = _RowIndexStubEnv()
-        vec = BatchRolloutEnv(env_factory=_SyncStubEnv, batch_size=1, group_size=1)
-        vec.envs.append(env)
-        vec._reset_env(seed=5, env_idx=0, row_index=2)
-        assert env.reset_calls[-1] == (5, 2)
-
-
 class _ChatTokenizer:
     pad_token_id = 0
     pad_token = "<pad>"
@@ -814,13 +787,12 @@ class TestRolloutEnvTokenizeInitialPrompt:
             [{"role": "user", "content": "hi"}]
         )["input_ids"]
 
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w.apply_chat_template = True
         w.tokenizer = _NestedChatTokenizer()
         out = w._tokenize_initial_prompt("hi")
-        assert out["input_ids"].shape == (1, len(flat_ids))
-        assert out["input_ids"][0].tolist() == flat_ids
-        assert torch.equal(out["attention_mask"], torch.ones_like(out["input_ids"]))
+        assert out.shape == (1, len(flat_ids))
+        assert out[0].tolist() == flat_ids
 
 
 class _NonTerminalEnv:
@@ -842,7 +814,7 @@ class _NonTerminalEnv:
 
 class TestRolloutEnvGetEpisodeData:
     def test_get_episode_data_padding_and_pad_mask(self) -> None:
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w.pad_id = 0
         w.max_turns = 3
         w.full_ids = torch.tensor([[9, 5, 0, 7, 8]], dtype=torch.long)
@@ -857,7 +829,7 @@ class TestRolloutEnvGetEpisodeData:
         assert turn_ids[0, 1].item() == -1
 
     def test_get_episode_data_raises_without_reset(self) -> None:
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w.full_ids = None
         with pytest.raises(RuntimeError, match="No episode data"):
             w.get_episode_data()
@@ -865,11 +837,11 @@ class TestRolloutEnvGetEpisodeData:
 
 class TestRolloutEnvGetDebugInfo:
     def test_get_debug_info_paths(self) -> None:
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w.full_ids = None
         assert w.get_debug_info() == {"error": "No episode data"}
 
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w.tokenizer = _ChrTokenizer()
         w.pad_id = None
         w.max_turns = 2
@@ -961,6 +933,8 @@ class TestBatchRolloutEnvGetPrompts:
 
 
 class _StepVariantEnv(RolloutEnvDoubleMixin):
+    dataset_size = 0
+
     def __init__(self, done_after_step: bool, include_turn_boundaries: bool = True):
         self.done_after_step = done_after_step
         self.include_turn_boundaries = include_turn_boundaries
@@ -968,8 +942,7 @@ class _StepVariantEnv(RolloutEnvDoubleMixin):
         self.done = False
         self.current_prompt: dict = {}
         self.sampling_logps: list[torch.Tensor] = []
-        if include_turn_boundaries:
-            self.turn_boundaries: list[int] = []
+        self.turn_boundaries: list[int] = []
 
     def reset(self, seed: int | None = None):
         del seed
@@ -1052,7 +1025,7 @@ class TestRolloutEnvChatTemplateBoundaryExtra:
     def test_boundary_frame_is_cached_after_first_render(self) -> None:
         # A second call reuses the cached (prefix, suffix) frame instead of
         # re-rendering the template.
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w.apply_chat_template = True
         w.tokenizer = _ChatTemplateRecordingTokenizer(_render_gemma_chat)
         first = w._chat_template_boundary_ids("FEEDBACK")
@@ -1065,19 +1038,22 @@ class TestRolloutEnvChatTemplateBoundaryExtra:
     def test_returns_none_when_boundary_suffix_is_empty(self) -> None:
         # Placeholders are found and ordered, but nothing follows the feedback
         # slot, so the suffix is empty and we fall back.
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w.apply_chat_template = True
         w.tokenizer = _ChatTemplateRecordingTokenizer(_render_ends_at_feedback)
         assert w._chat_template_boundary_ids("F") is None
 
 
 class TestRolloutEnvEvalMode:
-    def test_eval_mode_is_a_noop_without_client_support(self) -> None:
-        """An env client without ``eval_mode`` still enters/exits the block cleanly."""
-        w = _bare_wrapper()
-        w._env_client = object()  # no eval_mode attribute
+    def test_eval_mode_delegates_to_the_env_client(self) -> None:
+        """``eval_mode`` runs the block inside the client's own eval context."""
+        w = bare_rollout_env()
+        client = FakeEnvClient()
+        w._env_client = client
         with w.eval_mode():
-            pass
+            assert client.eval_mode_depth == 1
+        assert client.eval_mode_depth == 0
+        assert client.eval_mode_entries == 1
 
 
 class TestRolloutEnvStepSamplingLogps:
@@ -1099,16 +1075,3 @@ class TestRolloutEnvStepSamplingLogps:
         w.step(full, sampling_logps=logps)
         assert len(w.sampling_logps) == 1
         assert torch.equal(w.sampling_logps[0], logps)
-
-
-class _RowIndexStubEnv(_SyncStubEnv):
-    """Sync stub whose ``reset`` accepts a ``row_index`` (dataset-backed shape)."""
-
-    def reset(self, seed: int | None = None, *, row_index: int | None = None):
-        self.reset_calls.append((seed, row_index))
-        self.done = False
-        self.current_prompt = {
-            "input_ids": torch.ones(1, 3, dtype=torch.long),
-            "attention_mask": torch.ones(1, 3, dtype=torch.long),
-        }
-        return (self.current_prompt, {})

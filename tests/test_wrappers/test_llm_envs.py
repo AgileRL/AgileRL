@@ -329,11 +329,8 @@ class TestDatasetEnvPreferenceReset:
         env.reset()
         env.reset()
         env.reset()
-        with pytest.warns(
-            UserWarning,
-            match=r"env\.reset\(\) called with reset_dataloaders=True, this will reset the dataloaders to the beginning of the dataset, proceed with caution\.",
-        ):
-            prompts = env.reset(reset_dataloaders=True)
+        prompts = env.reset(reset_dataloaders=True)
+        assert env.num_epochs == 0
         assert len(prompts["prompt"]) == data_batch_size
         assert isinstance(prompts, dict)
         assert set(prompts.keys()) == {
@@ -620,11 +617,8 @@ class TestDatasetEnvSFTReset:
         )
         env.reset()
         env.reset()
-        with pytest.warns(
-            UserWarning,
-            match=r"env\.reset\(\) called with reset_dataloaders=True",
-        ):
-            env.reset(reset_dataloaders=True)
+        env.reset(reset_dataloaders=True)
+        assert env.num_epochs == 0
 
     def test_sft_response_column_chosen(self):
         """``response_column`` can point at a DPO-style ``chosen`` column."""
@@ -753,10 +747,8 @@ def test_batch_rollout_env_shuffle_is_group_consistent_full_permutation():
     assert other != per_reset_rows
 
 
-def test_dataset_env_len_and_eval_mode_preserve_tokenized_prompts():
-    """``__len__`` reflects the active split and ``eval_mode`` saves/restores
-    ``last_tokenized_prompts`` around the held-out block.
-    """
+def test_dataset_env_len_reflects_active_split():
+    """``__len__`` follows the active split inside and outside ``eval_mode``."""
     train_dataset = DummyPreferenceDataset(6)
     test_dataset = DummyPreferenceDataset(2)
     tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
@@ -768,20 +760,12 @@ def test_dataset_env_len_and_eval_mode_preserve_tokenized_prompts():
         data_batch_size_per_gpu=2,
     )
 
-    # Stand-in for prompts cached on a real training step; eval_mode must not
-    # clobber it for the surrounding train loop.
-    sentinel = {"input_ids": torch.tensor([[1, 2, 3]])}
-    env.last_tokenized_prompts = sentinel
-
     assert len(env) == 6  # train split length (evaluation_mode is False)
     with env.eval_mode():
         assert env.evaluation_mode is True
         assert len(env) == 2  # held-out split length
     assert env.evaluation_mode is False
     assert len(env) == 6  # restored to the train split
-
-    # The cached prompts survive the eval block (restored, equal by value).
-    assert torch.equal(env.last_tokenized_prompts["input_ids"], sentinel["input_ids"])
 
 
 def test_dataset_env_eval_mode_restores_prior_mode_when_nested():

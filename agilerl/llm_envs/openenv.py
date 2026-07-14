@@ -39,26 +39,29 @@ today rollout concurrency comes from the distributed (Ray) collector.
 from __future__ import annotations
 
 import contextlib
-import importlib
-import importlib.util
 import inspect
 import logging
-import os
-import re
 import threading
 import time
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
-import httpx
-from openenv.core.env_server.http_server import create_app
-from openenv.core.env_server.interfaces import Environment, EnvironmentMetadata
-from openenv.core.env_server.types import Action, Observation, State
+try:
+    import httpx
+    from openenv.core.env_server.http_server import create_app
+    from openenv.core.env_server.interfaces import Environment, EnvironmentMetadata
+    from openenv.core.env_server.types import Action, Observation, State
+except ImportError as exc:  # pragma: no cover - only reachable without the llm extra
+    msg = (
+        "The OpenEnv backend requires the 'openenv' and 'httpx' packages; "
+        "install them with the LLM extra: pip install agilerl[llm]."
+    )
+    raise ImportError(msg) from exc
 
 from agilerl.protocols import TextEnvProtocol
+from agilerl.utils.env_utils import resolve_entrypoint_target
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from typing import Self
 
 logger = logging.getLogger(__name__)
@@ -107,7 +110,13 @@ class OpenEnvWrapper(Environment):
         super().__init__()
         self._inner = inner
         self._env_name = env_name
-        self._reset_params = set(inspect.signature(inner.reset).parameters)
+        params = inspect.signature(inner.reset).parameters
+        # A ``**kwargs`` reset accepts any keyword, so every forwardable name
+        # counts as supported (a delegating proxy must not lose seed/row pinning).
+        if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            self._reset_params = {"seed", "row_index", "evaluation"}
+        else:
+            self._reset_params = set(params)
         self._state = State()
 
     def get_metadata(self) -> EnvironmentMetadata:
@@ -315,7 +324,27 @@ class OpenEnvServer:
         self.stop()
 
 
-class OpenEnvClient:
+class _EvalModeFlag:
+    """Client-side evaluation flag shared by the env clients.
+
+    ``eval_mode`` flips ``_evaluation_mode`` for the block's duration so
+    ``reset`` routes to the env's held-out split.
+    """
+
+    _evaluation_mode: bool
+
+    @contextlib.contextmanager
+    def eval_mode(self) -> Iterator[None]:
+        """Flag resets for the env's held-out split within the block."""
+        previous = self._evaluation_mode
+        self._evaluation_mode = True
+        try:
+            yield
+        finally:
+            self._evaluation_mode = previous
+
+
+class OpenEnvClient(_EvalModeFlag):
     """Synchronous httpx client for an OpenEnv env server (text in, text out).
 
     Implements :class:`~agilerl.protocols.EnvClientProtocol` for
@@ -419,16 +448,6 @@ class OpenEnvClient:
             self._post("/close", {})
         self._http.close()
 
-    @contextlib.contextmanager
-    def eval_mode(self) -> Iterator[None]:
-        """Flag resets for the env's held-out split within the block."""
-        previous = self._evaluation_mode
-        self._evaluation_mode = True
-        try:
-            yield
-        finally:
-            self._evaluation_mode = previous
-
     @property
     def dataset_size(self) -> int:
         """Dataset rows the env serves, from ``/state`` (``0`` if not dataset-backed)."""
@@ -518,20 +537,19 @@ class OpenEnvClient:
         return body
 
 
-class LocalEnvClient:
+class LocalEnvClient(_EvalModeFlag):
     """In-process backend for a local env — the no-HTTP sibling of :class:`OpenEnvClient`.
 
     Implements :class:`~agilerl.protocols.EnvClientProtocol` for
     :class:`~agilerl.llm_envs.rollout_env.RolloutEnv`.
 
-    Calls a local env's ``reset`` / ``step`` **directly** (no server, no
-    socket), exposing the same surface a :class:`RolloutEnv` consumes (``reset`` /
-    ``step`` / ``close`` / ``dataset_size`` / ``tools`` / ``eval_mode``). Use it (via
-    :meth:`RolloutEnv.local` / :meth:`RolloutEnv.from_spec`) when the env lives in the
-    same process — e.g. inside a Ray actor — so there is no pointless loopback HTTP;
-    :class:`OpenEnvClient` is the sibling for an env reached over a URL. The prefix /
-    suffix folding and reset-arg matching that :class:`OpenEnvWrapper` does server-side
-    happen here instead, so both backends hand ``RolloutEnv`` the same shape.
+    Drives the env through the same :class:`OpenEnvWrapper` the server path
+    hosts, so reset-arg matching, reset/step normalisation and prefix/suffix
+    folding live in one adapter and the in-process and HTTP transports behave
+    identically on the same env — just without a server or socket. Use it (via
+    :meth:`RolloutEnv.local` / :meth:`RolloutEnv.from_spec`) when the env lives
+    in the same process — e.g. inside a Ray actor; :class:`OpenEnvClient` is
+    the sibling for an env reached over a URL.
 
     :param env: The local env: ``reset(seed=None[, row_index, evaluation]) ->
         (prompt, info)`` and ``step(text) -> (obs, reward, terminated, truncated, info)``.
@@ -541,8 +559,8 @@ class LocalEnvClient:
     def __init__(self, env: TextEnvProtocol, *, instruction: str = "") -> None:
         """Wrap a local ``env`` as an in-process backend."""
         self._env = env
+        self._wrapper = OpenEnvWrapper(env)
         self._instruction = instruction
-        self._reset_params = set(inspect.signature(env.reset).parameters)
         self._evaluation_mode = False
 
     def reset(
@@ -552,26 +570,22 @@ class LocalEnvClient:
         row_index: int | None = None,
     ) -> tuple[str, dict[str, Any]]:
         """Reset the local env and return ``(prompt, info)`` (prefix/suffix folded in)."""
-        call: dict[str, Any] = {}
-        if seed is not None and "seed" in self._reset_params:
-            call["seed"] = seed
-        if row_index is not None and "row_index" in self._reset_params:
-            call["row_index"] = row_index
-        if self._evaluation_mode and "evaluation" in self._reset_params:
-            call["evaluation"] = True
-        prompt, info = _normalize_reset(self._env.reset(**call))
-        return (_fold(prompt, info) or self._instruction), {}
+        obs = self._wrapper.reset(
+            seed=seed,
+            row_index=row_index,
+            evaluation=True if self._evaluation_mode else None,
+        )
+        return (obs.prompt or self._instruction), {}
 
     def step(self, action: Any) -> tuple[str, float, bool, bool, dict[str, Any]]:
         """Step the local env with the action text and return the Gym 5-tuple."""
         text = action if isinstance(action, str) else str(action)
-        prompt, reward, terminated, truncated, info = _normalize_step(
-            self._env.step(text)
-        )
+        obs = self._wrapper.step(TextAction(message=text))
+        truncated = bool(obs.truncated)
         return (
-            _fold(prompt, info),
-            float(reward) if reward is not None else 0.0,
-            terminated,
+            obs.prompt,
+            float(obs.reward) if obs.reward is not None else 0.0,
+            bool(obs.done) and not truncated,
             truncated,
             {},
         )
@@ -583,25 +597,15 @@ class LocalEnvClient:
             with contextlib.suppress(Exception):
                 closer()
 
-    @contextlib.contextmanager
-    def eval_mode(self) -> Iterator[None]:
-        """Flag resets for the env's held-out split within the block."""
-        previous = self._evaluation_mode
-        self._evaluation_mode = True
-        try:
-            yield
-        finally:
-            self._evaluation_mode = previous
-
     @property
     def dataset_size(self) -> int:
         """Dataset rows the env serves (``0`` if not dataset-backed)."""
-        return int(getattr(self._env, "dataset_size", 0) or 0)
+        return int(self._wrapper.state.dataset_size or 0)
 
     @property
     def tools(self) -> list[Any]:
         """Tool schemas the env advertises (empty when none)."""
-        return list(getattr(self._env, "tools", None) or [])
+        return list(self._wrapper.state.tools or [])
 
 
 class ServedEnvClient:
@@ -760,7 +764,7 @@ def resolve_env(
             "'path.py:Class' entrypoint"
         )
         raise ValueError(msg)
-    env = _load_entrypoint(spec)(**(env_config or {}))
+    env = resolve_entrypoint_target(spec)(**(env_config or {}))
     server = OpenEnvServer(
         env, host=host, port=port, env_name=_name_from_spec(spec)
     ).start()
@@ -775,7 +779,7 @@ def load_env(spec: str, env_config: dict[str, Any] | None = None) -> TextEnvProt
     directly — e.g. :meth:`RolloutEnv.local` / :meth:`RolloutEnv.from_spec` wrapping it in
     a :class:`LocalEnvClient`.
     """
-    return _load_entrypoint(spec)(**(env_config or {}))
+    return resolve_entrypoint_target(spec)(**(env_config or {}))
 
 
 def is_url(spec: str) -> bool:
@@ -791,40 +795,3 @@ def _name_from_spec(spec: str) -> str:
     """
     tail = spec.rsplit(":", 1)[-1]
     return tail.rsplit("/", 1)[-1].rsplit("\\", 1)[-1] or spec
-
-
-def _load_entrypoint(target: str) -> Callable[..., Any]:
-    """Import ``module:Class`` (or ``/path/to/file.py:Class``) and return ``Class``."""
-    module_part, sep, attr = target.rpartition(":")
-    if not sep:
-        msg = f"env entrypoint {target!r} must be 'module:Class'"
-        raise ValueError(msg)
-    if not attr:
-        msg = f"env entrypoint {target!r} must be 'module:Class'"
-        raise ValueError(msg)
-    # Detect filesystem paths across platforms, including Windows-style paths
-    # parsed on non-Windows hosts (e.g. CI, cross-platform tests).
-    looks_like_path = (
-        module_part.endswith(".py")
-        or "/" in module_part
-        or "\\" in module_part
-        or os.sep in module_part
-        or bool(re.match(r"^[A-Za-z]:[\\/]", module_part))
-    )
-    if looks_like_path:
-        module = _module_from_path(module_part)
-    else:
-        module = importlib.import_module(module_part)
-    return getattr(module, attr)
-
-
-def _module_from_path(path: str) -> Any:
-    """Import a Python module from a filesystem path (an env definition on disk)."""
-    name = "agilerl_env_" + os.path.splitext(os.path.basename(path))[0]
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        msg = f"cannot load env module from path {path!r}"
-        raise ImportError(msg)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module

@@ -15,64 +15,18 @@ import torch
 
 from agilerl.llm_envs import RolloutEnv
 from agilerl.llm_envs.openenv import _fold
+from tests.helpers.rollout_doubles import (
+    MiniTokenizer,
+    TinyDatasetEnv,
+    bare_rollout_env,
+)
 
 _WIP = "pending tool-path wiring (engine / _align_sampling_logprobs)"
 
 
-class _DatasetEnv:
-    """A tiny dataset-backed env (questions/answers + reward_fn) used to drive
-    ``RolloutEnv``'s dataset_size / eval-split / row-index plumbing over a hosted
-    server. ``reset`` pins a row (routing to the held-out split under
-    ``evaluation``); ``step`` scores the completion and ends the turn.
-    """
-
-    def __init__(
-        self,
-        questions: list[str],
-        answers: list[str],
-        reward_fn: Any,
-        *,
-        prompt_builder: Any = None,
-        test_questions: list[str] | None = None,
-        test_answers: list[str] | None = None,
-    ) -> None:
-        self.questions = questions
-        self.answers = answers
-        self.reward_fn = reward_fn
-        self.prompt_builder = prompt_builder or (lambda q: q)
-        self.test_questions = test_questions
-        self.test_answers = test_answers
-        self._question = ""
-        self._answer = ""
-
-    @property
-    def dataset_size(self) -> int:
-        return len(self.questions)
-
-    def reset(
-        self,
-        seed: int | None = None,
-        *,
-        row_index: int = 0,
-        evaluation: bool | None = None,
-    ) -> tuple[str, dict[str, Any]]:
-        del seed
-        if evaluation and self.test_questions is not None:
-            questions, answers = self.test_questions, self.test_answers
-        else:
-            questions, answers = self.questions, self.answers
-        row = (row_index or 0) % len(questions)
-        self._question, self._answer = questions[row], answers[row]
-        return self.prompt_builder(self._question), {}
-
-    def step(self, action: str) -> tuple[str, float, bool, bool, dict[str, Any]]:
-        reward = float(self.reward_fn(action, self._answer, self._question))
-        return "", reward, True, False, {}
-
-
-def _reasoning_env() -> _DatasetEnv:
+def _reasoning_env() -> TinyDatasetEnv:
     """A tiny dataset-backed reasoning env with a held-out split."""
-    return _DatasetEnv(
+    return TinyDatasetEnv(
         questions=["train-q"],
         answers=["train-a"],
         reward_fn=lambda c, a, q: 0.0,
@@ -89,18 +43,10 @@ def _wrap(inner: object) -> RolloutEnv:
     """
     return RolloutEnv.serving(
         lambda: inner,
-        _MiniTokenizer(),
+        MiniTokenizer(),
         max_turns=1,
         apply_chat_template=False,
     )
-
-
-def _bare_wrapper() -> RolloutEnv:
-    w = RolloutEnv.__new__(RolloutEnv)
-    # boundary-frame cache; __init__ defaults, read by the feedback tokenize path
-    w._boundary_parts = None
-    w._boundary_parts_known = False
-    return w
 
 
 def _mask_wrapper() -> RolloutEnv:
@@ -110,7 +56,7 @@ def _mask_wrapper() -> RolloutEnv:
     generated turn 0, appended feedback (stands in for a tool result), generated
     turn 1.
     """
-    w = _bare_wrapper()
+    w = bare_rollout_env()
     w.full_ids = torch.tensor([[0, 1, 2, 3, 4, 5, 6, 7]], dtype=torch.long)
     w.turn_boundaries = [(2, 4, 0), (6, 8, 1)]
     w.turn_rewards = [0.5, 1.0]
@@ -167,7 +113,7 @@ def test_tool_schema_injected_into_prompt() -> None:
     """When ``tools`` is set, they are forwarded to ``apply_chat_template`` so the
     template renders the schemas into the initial prompt.
     """
-    w = _bare_wrapper()
+    w = bare_rollout_env()
     w.apply_chat_template = True
     w.tools = _TOOLS
     w.tokenizer = _RecordingTokenizer()
@@ -179,7 +125,7 @@ def test_tools_none_is_backward_compatible() -> None:
     """With ``tools=None`` (default) no ``tools=`` kwarg is forwarded, preserving
     the exact pre-tool behaviour.
     """
-    w = _bare_wrapper()
+    w = bare_rollout_env()
     w.apply_chat_template = True
     w.tools = None
     w.tokenizer = _RecordingTokenizer()
@@ -192,7 +138,7 @@ def test_tool_schema_injected_into_feedback_boundary() -> None:
     feedback-boundary render (``_chat_template_boundary_ids``), not only the
     initial prompt.
     """
-    w = _bare_wrapper()
+    w = bare_rollout_env()
     w.tools = _TOOLS
     w.tokenizer = _RecordingTokenizer()
     w._chat_template_boundary_ids("tool result")
@@ -234,22 +180,9 @@ def test_eval_mode_serves_wrapped_env_eval_split() -> None:
         w.close()
 
 
-class _MiniTokenizer:
-    """Minimal tokenizer for the non-chat ``_tokenize_initial_prompt`` path."""
-
-    def __call__(self, texts: list[str], **kwargs: Any) -> dict[str, torch.Tensor]:
-        del texts, kwargs
-        ids = torch.tensor([[1, 2, 3]], dtype=torch.long)
-        return {"input_ids": ids, "attention_mask": torch.ones_like(ids)}
-
-    def decode(self, ids: Any, **kwargs: Any) -> str:
-        del ids, kwargs
-        return ""
-
-
 def test_reset_forwards_row_index_to_served_env() -> None:
     """``reset`` passes ``row_index`` through to the served env, selecting that row."""
-    inner = _DatasetEnv(
+    inner = TinyDatasetEnv(
         questions=["q0", "q1"],
         answers=["a0", "a1"],
         reward_fn=lambda c, a, q: 0.0,

@@ -2623,6 +2623,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     ) -> np.ndarray:
         """Return fitness (test) score of the llm on the test sub-set.
 
+        Episodes run until the env reports itself done: ``RolloutEnv`` already
+        terminates or truncates every episode (at ``max_turns`` at the latest),
+        and a reset that is immediately done (an over-budget initial prompt)
+        contributes no turns.
+
         :param env: Tokenized rollout episode environment (single- or multi-turn).
         :type env: RolloutEnv
         :param loop: Number of outer test iterations (episodes).
@@ -2633,39 +2638,32 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """
         from agilerl.llm_envs import RolloutEnv
 
-        eval_context = getattr(env, "eval_mode", nullcontext)
-        with eval_context():
-            if not isinstance(env, RolloutEnv):
-                msg = f"env must be a RolloutEnv; got {type(env).__name__}"
-                raise TypeError(msg)
-            max_turns = getattr(env, "max_turns", None)
-            # Safety cap so a non-terminating env can't hang evaluation; the env's
-            # own ``max_turns`` takes precedence when it exposes one.
-            turn_cap = 1000 if max_turns is None else max_turns
-            all_rewards: list[torch.Tensor] = []
+        if not isinstance(env, RolloutEnv):
+            msg = f"env must be a RolloutEnv; got {type(env).__name__}"
+            raise TypeError(msg)
+        rewards: list[float] = []
+        with env.eval_mode():
             for _ in range(loop):
                 prompt_dict, _info = env.reset()
-                terminated, truncated = False, False
-                turn = 0
-                while not terminated and not truncated and turn < turn_cap:
+                while not env.done:
                     completion_ids = self.get_action(
                         [prompt_dict],
                         training=False,
                     ).completion_ids
-                    full = completion_ids[0]
-                    prompt_dict, reward, terminated, truncated, _info = env.step(
-                        full,
+                    prompt_dict, reward, _terminated, _truncated, _info = env.step(
+                        completion_ids[0],
                     )
-                    all_rewards.append(
-                        torch.tensor(
-                            [float(reward)],
-                            dtype=torch.float32,
-                            device=full.device,
-                        )
-                    )
-                    turn += 1
-            reward_tensor = torch.cat(all_rewards)
-        mean_fit = torch.mean(reward_tensor).item()
+                    rewards.append(float(reward))
+        if rewards:
+            mean_fit = float(np.mean(rewards))
+        else:
+            warnings.warn(
+                "test() collected no turns (every reset was already done, e.g. "
+                "over-budget prompts); recording fitness 0.0.",
+                UserWarning,
+                stacklevel=2,
+            )
+            mean_fit = 0.0
         self.metrics.add_fitness(mean_fit)
         return np.array(mean_fit)
 
@@ -2847,9 +2845,40 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 overwrite_reference_adapter,
                 overwrite_critic_adapter,
             )
+        elif self._uses_deepspeed:
+            self._load_full_model_actor(path, checkpoint)
         else:
             # A full-model checkpoint keeps the actor's weights in ``attributes.pt``.
             self._load_module_weights(checkpoint)
+
+    def _load_full_model_actor(self, path: str, checkpoint: dict[str, Any]) -> None:
+        """Load only the actor weights of a DeepSpeed full-model checkpoint.
+
+        ``save_checkpoint(lora_only=False, save_optimizer=False)`` gathers the
+        state dict into ``attributes.pt``; with ``save_optimizer=True`` the
+        module weights live in the ``save_checkpoint`` tag directory instead.
+
+        :param path: Checkpoint directory written by :meth:`save_checkpoint`.
+        :type path: str
+        :param checkpoint: Deserialized ``attributes.pt`` payload.
+        :type checkpoint: dict[str, Any]
+        """
+        actor_state_dict = (
+            checkpoint.get("network_info", {})
+            .get("modules", {})
+            .get("actor_state_dict")
+        )
+        if actor_state_dict is None:
+            self._load_distributed_actor(
+                path,
+                tag="save_checkpoint",
+                load_optimizer_states=False,
+                load_lr_scheduler_states=False,
+            )
+        else:
+            model_ref = self._get_unwrapped_actor()
+            with gather_if_zero3(self.zero_stage, list(model_ref.parameters())):
+                model_ref.load_state_dict(actor_state_dict)
 
     def load_checkpoint(
         self,
@@ -2947,25 +2976,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     overwrite_critic_adapter,
                 )
             else:
-                actor_state_dict = (
-                    checkpoint.get("network_info", {})
-                    .get("modules", {})
-                    .get("actor_state_dict")
-                )
-                if actor_state_dict is None:
-                    # DeepSpeed full-model checkpoints saved with
-                    # save_optimizer=True persist module weights in the
-                    # save_checkpoint tag directory (not attributes.pt).
-                    self._load_distributed_actor(
-                        path,
-                        tag="save_checkpoint",
-                        load_optimizer_states=False,
-                        load_lr_scheduler_states=False,
-                    )
-                else:
-                    model_ref = self._get_unwrapped_actor()
-                    with gather_if_zero3(self.zero_stage, list(model_ref.parameters())):
-                        model_ref.load_state_dict(actor_state_dict)
+                self._load_full_model_actor(path, checkpoint)
 
             self._restore_checkpoint_attributes(checkpoint)
 

@@ -127,7 +127,7 @@ def pytest_collection_modifyitems(config, items):
       and ``generate_accelerator`` clears DeepSpeed's cached comm backend +
       cloned process groups *only* when the world group has been torn down
       (``not dist.is_initialized()``), so an interleaved ``destroy_process_group``
-      (e.g. test_mutation) no longer dangles DeepSpeed's group handles into
+      (e.g. test_mutation) cannot dangle DeepSpeed's group handles into
       ``Group <ProcessGroup ...> is not registered`` — while leaving the cache
       intact otherwise (re-cloning every build leaks NCCL communicators and OOMs
       concurrent workers). MASTER_PORT is still per-test (``get_free_port``) to

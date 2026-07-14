@@ -406,21 +406,11 @@ def train_llm_rollout(
                     rewards_2d,
                 )
 
-                # Pass turn_ids to every multi-turn RL agent that accepts it
-                # (LLMPPO/LLMREINFORCE, and the GRPO family — GRPO/CISPO/GSPO —
-                # which use it for turn-level importance sampling + per-turn
-                # group-relative advantages). Agents that don't need it (e.g.
-                # token/sequence levels, GSPO) simply ignore it.
-                learn_kwargs = (
-                    {"turn_ids": turn_ids_padded}
-                    if isinstance(agent, (LLMREINFORCE, LLMPPO, GRPO))
-                    else {}
+                agent.learn(
+                    experiences,
+                    turn_ids=turn_ids_padded,
+                    sampling_logps=all_sampling_logps,
                 )
-                if all_sampling_logps is not None and isinstance(
-                    agent, (GRPO, LLMPPO, LLMREINFORCE)
-                ):
-                    learn_kwargs["sampling_logps"] = all_sampling_logps
-                agent.learn(experiences, **learn_kwargs)
 
                 agg_score = safe_aggregate_metrics(accelerator, mean_score)
 
@@ -671,8 +661,10 @@ def train_llm_dataset(
             agent.init_training_step()
 
             # ``DatasetEnv.reset`` is the data-advancing call: each invocation
-            # returns the next collated batch (``step`` is a no-op).
-            learn_result = agent.learn(training_env.reset())
+            # returns the next collated batch (``step`` is a no-op). The first
+            # training step rewinds to the dataset start so a reused env
+            # doesn't begin mid-epoch.
+            learn_result = agent.learn(training_env.reset(reset_dataloaders=i == 0))
             score = (
                 float(learn_result["chosen_reward"] - learn_result["rejected_reward"])
                 if is_preference
@@ -742,27 +734,3 @@ def train_llm_dataset(
     population.finish()
     pbar.close()
     return population.agents, population.last_fitnesses
-
-
-def finetune_llm_reasoning(*args: Any, **kwargs: Any) -> None:
-    """Migration stub: single-turn reasoning is :func:`train_llm_rollout`.
-
-    Build the env as a ``RolloutEnv`` with ``max_turns=1`` (see
-    :meth:`~agilerl.llm_envs.rollout_env.RolloutEnv.local` /
-    :meth:`~agilerl.llm_envs.rollout_env.RolloutEnv.serving`) and call
-    :func:`train_llm_rollout`. This stub only raises with that pointer, keeping
-    the deprecation surface consistent with the ``finetune_llm_*`` aliases below.
-    """
-    del args, kwargs
-    msg = (
-        "finetune_llm_reasoning has been replaced: build a RolloutEnv "
-        "(max_turns=1) via RolloutEnv.local / RolloutEnv.serving and call "
-        "train_llm_rollout instead."
-    )
-    raise NotImplementedError(msg)
-
-
-# Back-compat aliases (one release): the finetune_llm_* names were renamed.
-finetune_llm_multiturn = train_llm_rollout
-finetune_llm_preference = train_llm_dataset
-finetune_llm_sft = train_llm_dataset

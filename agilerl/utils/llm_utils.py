@@ -48,6 +48,36 @@ _BNB_QUANT_PRESETS = frozenset({"none", "int8", "nf4"})
 _CLIPPABLE_LINEAR_WRAPPER_SUFFIX = "ClippableLinear"
 
 
+def render_chat_template(
+    conversation_template: list[dict[str, str]],
+    tokenizer: AutoTokenizer,
+    **format_kwargs: Any,
+) -> str:
+    """Format each template message and render it through the chat template.
+
+    :param conversation_template: Messages whose ``content`` holds
+        ``str.format`` placeholders.
+    :type conversation_template: list[dict[str, str]]
+    :param tokenizer: Tokenizer providing the chat template.
+    :type tokenizer: AutoTokenizer
+    :param format_kwargs: Values interpolated into each message's content.
+    :return: The rendered (untokenized) prompt text.
+    :rtype: str
+    """
+    formatted_conversation = [
+        {
+            "role": msg["role"],
+            "content": msg["content"].format(**format_kwargs),
+        }
+        for msg in conversation_template
+    ]
+    return tokenizer.apply_chat_template(
+        formatted_conversation,
+        tokenize=False,
+        continue_final_message=True,
+    )
+
+
 def apply_chat_template(
     conversation_template: list[dict[str, str]],
     question: str,
@@ -67,17 +97,11 @@ def apply_chat_template(
     :return: The tokenized prompt.
     :rtype: BatchEncoding
     """
-    formatted_conversation = [
-        {
-            "role": msg["role"],
-            "content": msg["content"].format(question=question, answer=answer),
-        }
-        for msg in conversation_template
-    ]
-    updated_prompt = tokenizer.apply_chat_template(
-        formatted_conversation,
-        tokenize=False,
-        continue_final_message=True,
+    updated_prompt = render_chat_template(
+        conversation_template,
+        tokenizer,
+        question=question,
+        answer=answer,
     )
     return tokenizer(
         [updated_prompt],
@@ -1461,6 +1485,10 @@ def prepare_prompt_hf_generate(
 ) -> dict[str, torch.Tensor]:
     """Prepare a prompt dictionary for HuggingFace generate.
 
+    ``attention_mask`` is taken from the dict when present (e.g. a padded
+    batch) and derived as all-ones otherwise (a single unpadded row, the
+    ``RolloutEnv`` observation shape).
+
     :param prompt_dict: The prompt dictionary to prepare.
     :type prompt_dict: RolloutPrompts
     :param device: The device to move the prompt dictionary to.
@@ -1468,9 +1496,15 @@ def prepare_prompt_hf_generate(
     :return: ``input_ids`` / ``attention_mask`` moved to ``device``.
     :rtype: dict[str, torch.Tensor]
     """
+    input_ids = prompt_dict["input_ids"].to(device)
+    attention_mask = prompt_dict.get("attention_mask")
     return {
-        "input_ids": prompt_dict["input_ids"].to(device),
-        "attention_mask": prompt_dict["attention_mask"].to(device),
+        "input_ids": input_ids,
+        "attention_mask": (
+            torch.ones_like(input_ids)
+            if attention_mask is None
+            else attention_mask.to(device)
+        ),
     }
 
 

@@ -565,24 +565,15 @@ class LLMEnvSpec(BaseModel):
 
             def _resolve() -> dict[str, Any]:
                 if not resolved:
+                    from agilerl.utils.llm_utils import render_chat_template
+
                     conversation = make_conversation_template(
                         prompt_template=self.prompt_template
                     )
 
                     def _prompt_builder(row: Any) -> str:
                         """Render the manifest's chat template for one dataset row."""
-                        messages = [
-                            {
-                                "role": message["role"],
-                                "content": message["content"].format(**row),
-                            }
-                            for message in conversation
-                        ]
-                        return tokenizer.apply_chat_template(
-                            messages,
-                            tokenize=False,
-                            continue_final_message=True,
-                        )
+                        return render_chat_template(conversation, tokenizer, **row)
 
                     train_ds, test_ds = self._load_dataset()
                     resolved.update(

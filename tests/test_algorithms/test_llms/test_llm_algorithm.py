@@ -13,6 +13,7 @@ from agilerl.algorithms.core import ActionResult
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.llm_envs import RolloutEnv
 from agilerl.metrics import AgentMetrics
+from tests.helpers.rollout_doubles import FakeEnvClient
 
 
 class _StubAlgo:
@@ -32,75 +33,73 @@ class _StubAlgo:
         return ActionResult([completion], [action_mask])
 
 
-class _NeverDoneEnv(RolloutEnv):
-    """Rollout env double that never terminates or truncates."""
+class _TinyTokenizer:
+    """Raw-encoding tokenizer for the ``apply_chat_template=False`` paths."""
 
-    max_turns = 3
+    def __call__(self, texts, **kwargs):
+        del kwargs
+        return {"input_ids": torch.ones(len(texts), 4, dtype=torch.long)}
 
-    def __init__(self, reward: float = 1.0):
-        self._env_client = None
-        self._reward = reward
-        self.step_calls = 0
+    def encode(self, text, add_special_tokens=True):
+        del text, add_special_tokens
+        return [7, 8]
 
-    def _prompt(self):
-        return {
-            "input_ids": torch.ones(1, 4, dtype=torch.long),
-            "attention_mask": torch.ones(1, 4, dtype=torch.long),
-        }
-
-    def reset(self, seed=None):
-        del seed
-        return self._prompt(), {}
-
-    def step(self, full_completion_ids):
-        del full_completion_ids
-        self.step_calls += 1
-        return self._prompt(), self._reward, False, False, {}
-
-    def close(self):
-        return None
+    def decode(self, ids, skip_special_tokens=True):
+        del ids, skip_special_tokens
+        return "gen"
 
 
-class TestLLMAlgorithmTestTurnCap:
-    def test_turn_cap_stops_non_terminating_env_at_max_turns(self):
+def _rollout_env(client: FakeEnvClient, max_turns: int, **kwargs) -> RolloutEnv:
+    return RolloutEnv(
+        client,
+        _TinyTokenizer(),
+        max_turns=max_turns,
+        apply_chat_template=False,
+        **kwargs,
+    )
+
+
+class TestLLMAlgorithmTest:
+    def test_env_truncation_ends_each_episode_at_max_turns(self):
         algo = _StubAlgo()
-        env = _NeverDoneEnv()
+        client = FakeEnvClient()  # backend never ends the episode itself
+        env = _rollout_env(client, max_turns=3)
 
         out = LLMAlgorithm.test(algo, env, loop=2)
 
-        # Two episodes of exactly ``max_turns`` steps each.
-        assert env.step_calls == 2 * env.max_turns
+        # Two episodes of exactly ``max_turns`` turns each, run under eval mode.
+        assert client.step_calls == 2 * env.max_turns
+        assert client.eval_mode_entries == 1
         assert isinstance(out, np.ndarray)
         assert out.shape == ()
-        # Rewards collected up to the cap are used for the fitness score.
         assert out.item() == pytest.approx(1.0)
         assert algo.fitness == [pytest.approx(1.0)]
 
-    def test_turn_cap_falls_back_to_1000_when_max_turns_is_none(self):
+    def test_terminating_env_finishes_before_max_turns(self):
         algo = _StubAlgo()
-        env = _NeverDoneEnv()
-        env.max_turns = None
+        client = FakeEnvClient(reward=0.5, terminate_after=2)
+        env = _rollout_env(client, max_turns=5)
 
         out = LLMAlgorithm.test(algo, env, loop=1)
 
-        assert env.step_calls == 1000
-        assert out.item() == pytest.approx(1.0)
-
-    def test_terminating_env_finishes_before_cap(self):
-        algo = _StubAlgo()
-        env = _NeverDoneEnv(reward=0.5)
-        terminate_after = 2
-        original_step = env.step
-
-        def step(full_completion_ids):
-            prompt, reward, _, _, info = original_step(full_completion_ids)
-            return prompt, reward, env.step_calls >= terminate_after, False, info
-
-        env.step = step
-        out = LLMAlgorithm.test(algo, env, loop=1)
-
-        assert env.step_calls == terminate_after
+        assert client.step_calls == 2
         assert out.item() == pytest.approx(0.5)
+
+    def test_done_at_reset_records_zero_fitness(self):
+        """An over-budget initial prompt ends the episode before any turn."""
+        algo = _StubAlgo()
+        env = _rollout_env(
+            FakeEnvClient(),
+            max_turns=3,
+            max_model_len=4,
+            max_output_tokens=2,
+        )
+
+        with pytest.warns(UserWarning, match="collected no turns"):
+            out = LLMAlgorithm.test(algo, env, loop=1)
+
+        assert out.item() == 0.0
+        assert algo.fitness == [0.0]
 
     def test_subclasses_share_the_base_implementation(self):
         from agilerl.algorithms.grpo import GRPO

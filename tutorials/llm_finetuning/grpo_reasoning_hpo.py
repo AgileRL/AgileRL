@@ -122,9 +122,9 @@ def main(init_hp, mut_p):
         {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
     ]
 
-    def prompt_builder(question: str) -> str:
+    def prompt_builder(row: dict) -> str:
         parts = [
-            m["content"].format(question=question, answer="")
+            m["content"].format(question=row["question"], answer=row["answer"])
             for m in conversation_template
         ]
         return "\n".join(p for p in parts if p)

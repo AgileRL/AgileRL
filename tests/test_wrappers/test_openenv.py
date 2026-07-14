@@ -29,13 +29,12 @@ from agilerl.llm_envs import (
 )
 from agilerl.llm_envs import openenv as openenv_module
 from agilerl.llm_envs.openenv import (
-    _load_entrypoint,
-    _module_from_path,
     _name_from_spec,
     _normalize_reset,
     _normalize_step,
     _observation_text,
 )
+from tests.helpers.rollout_doubles import MiniTokenizer
 
 
 class _CountingEnv:
@@ -59,66 +58,6 @@ class _CountingEnv:
 
     def close(self) -> None:
         self.closed = True
-
-
-class _MiniTok:
-    """Minimal tokenizer for the non-chat-template token path."""
-
-    pad_token_id = 0
-
-    def __call__(self, texts: list[str], **_: Any) -> dict[str, torch.Tensor]:
-        del texts
-        ids = torch.tensor([[1, 2, 3]], dtype=torch.long)
-        return {"input_ids": ids, "attention_mask": torch.ones_like(ids)}
-
-    def decode(self, ids: Any, **_: Any) -> str:
-        del ids
-        return "go"
-
-    def encode(self, text: str, **_: Any) -> list[int]:
-        del text
-        return [7, 7]
-
-
-class _DatasetEnv:
-    """A tiny dataset-backed env, imported by its ``module:Class`` path to exercise
-    ``resolve_env``'s entrypoint loading: ``reset`` serves a row's prompt, ``step``
-    scores the completion.
-    """
-
-    def __init__(
-        self,
-        questions: list[str],
-        answers: list[str],
-        reward_fn: Any,
-        *,
-        prompt_builder: Any = None,
-    ) -> None:
-        self.questions = questions
-        self.answers = answers
-        self.reward_fn = reward_fn
-        self.prompt_builder = prompt_builder or (lambda q: q)
-        self._answer = ""
-
-    @property
-    def dataset_size(self) -> int:
-        return len(self.questions)
-
-    def reset(
-        self,
-        seed: int | None = None,
-        *,
-        row_index: int = 0,
-        evaluation: bool | None = None,
-    ) -> tuple[str, dict[str, Any]]:
-        del seed, evaluation
-        row = (row_index or 0) % len(self.questions)
-        self._answer = self.answers[row]
-        return self.prompt_builder(self.questions[row]), {}
-
-    def step(self, action: str) -> tuple[str, float, bool, bool, dict[str, Any]]:
-        reward = float(self.reward_fn(action, self._answer, ""))
-        return "", reward, True, False, {}
 
 
 class _RowDatasetEnv:
@@ -281,31 +220,10 @@ def test_name_from_spec_takes_trailing_identifier() -> None:
     assert _name_from_spec("plainname") == "plainname"
 
 
-def test_load_entrypoint_windows_style_path_uses_last_colon(monkeypatch: Any) -> None:
-    r"""``_load_entrypoint`` treats ``C:\...\file.py:Class`` as a path entrypoint."""
-
-    class _FakeModule:
-        DiskEnv = _DatasetEnv
-
-    captured: dict[str, str] = {}
-
-    def _fake_module_from_path(path: str) -> _FakeModule:
-        captured["path"] = path
-        return _FakeModule()
-
-    monkeypatch.setattr(
-        "agilerl.llm_envs.openenv._module_from_path",
-        _fake_module_from_path,
-    )
-    cls = _load_entrypoint(r"C:\tmp\disk_env.py:DiskEnv")
-    assert cls is _DatasetEnv
-    assert captured["path"] == r"C:\tmp\disk_env.py"
-
-
 # --- serving: one OpenEnv server instance per rollout ----------------------
 def test_serving_hosts_owns_and_stops_its_server() -> None:
     """``serving`` binds a ``ServedEnvClient`` whose server ``close`` stops."""
-    env = RolloutEnv.serving(_CountingEnv, _MiniTok(), apply_chat_template=False)
+    env = RolloutEnv.serving(_CountingEnv, MiniTokenizer(), apply_chat_template=False)
     assert isinstance(env._env_client, ServedEnvClient)
     env.reset()  # reachable over real HTTP
     assert env._prompt_text == "Start.\nReply 'go'."
@@ -323,7 +241,7 @@ def test_batch_serving_factory_gives_one_server_per_env() -> None:
     """
     batch = BatchRolloutEnv(
         lambda **_: RolloutEnv.serving(
-            _CountingEnv, _MiniTok(), apply_chat_template=False
+            _CountingEnv, MiniTokenizer(), apply_chat_template=False
         ),
         batch_size=2,
         group_size=1,
@@ -343,7 +261,7 @@ def test_rollout_env_drives_url_and_applies_suffix() -> None:
     server = OpenEnvServer(_CountingEnv()).start()
     try:
         env = RolloutEnv(
-            server.base_url, _MiniTok(), max_turns=2, apply_chat_template=False
+            server.base_url, MiniTokenizer(), max_turns=2, apply_chat_template=False
         )
         env.reset()
         # reset prompt + info["suffix"] are folded server-side by OpenEnvWrapper.
@@ -361,7 +279,7 @@ def test_resolve_env_url_is_used_raw() -> None:
 
 def test_resolve_env_entrypoint_hosts_locally() -> None:
     url, server = resolve_env(
-        "tests.test_wrappers.test_openenv:_DatasetEnv",
+        "tests.helpers.rollout_doubles:TinyDatasetEnv",
         {
             "questions": ["q"],
             "answers": ["a"],
@@ -445,7 +363,7 @@ class TestRolloutEnvLocal:
 
     def test_uses_in_process_env_client(self) -> None:
         env = RolloutEnv.local(
-            _RowDatasetEnv(), _MiniTok(), max_turns=1, apply_chat_template=False
+            _RowDatasetEnv(), MiniTokenizer(), max_turns=1, apply_chat_template=False
         )
         assert isinstance(env._env_client, LocalEnvClient)
         obs, _ = env.reset(row_index=2)
@@ -459,7 +377,7 @@ class TestRolloutEnvFromSpec:
 
     def test_url_builds_http_client(self) -> None:
         """A URL spec routes to the HTTP ``OpenEnvClient`` env client."""
-        env = RolloutEnv.from_spec("http://localhost:0", None, _MiniTok())
+        env = RolloutEnv.from_spec("http://localhost:0", None, MiniTokenizer())
         assert isinstance(env._env_client, OpenEnvClient)
         env.close()
 
@@ -467,7 +385,11 @@ class TestRolloutEnvFromSpec:
         """A ``path.py:Class`` entrypoint loads + drives the env in-process (no HTTP)."""
         spec = f"{__file__}:_RowDatasetEnv"
         env = RolloutEnv.from_spec(
-            spec, {"prefix": "Q"}, _MiniTok(), max_turns=1, apply_chat_template=False
+            spec,
+            {"prefix": "Q"},
+            MiniTokenizer(),
+            max_turns=1,
+            apply_chat_template=False,
         )
         assert isinstance(env._env_client, LocalEnvClient)
         obs, _ = env.reset(row_index=0)
@@ -480,7 +402,7 @@ class TestRolloutEnvFromSpec:
         env = RolloutEnv.from_spec(
             spec,
             {"prefix": "Q"},
-            _MiniTok(),
+            MiniTokenizer(),
             max_turns=1,
             serve=True,
             apply_chat_template=False,
@@ -724,7 +646,7 @@ def test_rollout_env_truncates_at_max_turns() -> None:
     no dangling feedback turn is appended after the final generation.
     """
     env = RolloutEnv.local(
-        _EndlessEnv(), _MiniTok(), max_turns=2, apply_chat_template=False
+        _EndlessEnv(), MiniTokenizer(), max_turns=2, apply_chat_template=False
     )
     env.reset()
     _obs, _r, terminated, truncated, _info = env.step(
@@ -745,7 +667,7 @@ def test_rollout_env_truncates_at_max_turns() -> None:
 
 
 # --- context budget: over-budget rows truncate at turn 0 --------------------
-class _LenTok(_MiniTok):
+class _LenTok(MiniTokenizer):
     """Tokenizer whose token count tracks the text length (for budget tests)."""
 
     def __call__(self, texts: list[str], **_: Any) -> dict[str, torch.Tensor]:
@@ -831,7 +753,7 @@ def test_batch_rollout_env_exposes_num_epochs() -> None:
     """The collector surfaces the cursor's epoch count (e.g. for KL refresh)."""
     batch = BatchRolloutEnv(
         lambda **_: RolloutEnv.local(
-            _RowDatasetEnv(n=2), _MiniTok(), apply_chat_template=False
+            _RowDatasetEnv(n=2), MiniTokenizer(), apply_chat_template=False
         ),
         batch_size=2,
         group_size=1,
@@ -857,7 +779,7 @@ def test_batch_reset_cleans_up_after_partial_init_failure() -> None:
             raise RuntimeError(msg)
         inner = _CountingEnv()
         inners.append(inner)
-        return RolloutEnv.local(inner, _MiniTok(), apply_chat_template=False)
+        return RolloutEnv.local(inner, MiniTokenizer(), apply_chat_template=False)
 
     batch = BatchRolloutEnv(factory, batch_size=2, group_size=1)
     with pytest.raises(RuntimeError, match="boom"):
@@ -1025,19 +947,13 @@ def test_observation_text_renders_all_shapes() -> None:
     assert _observation_text({}) == ""
 
 
-# --- entrypoint resolution: malformed specs + unloadable paths ---------------
-def test_load_entrypoint_requires_module_and_class() -> None:
+# --- entrypoint resolution: malformed specs ---------------------------------
+def test_load_env_requires_module_and_class() -> None:
     """An entrypoint missing the ``:`` or the class name is rejected."""
-    with pytest.raises(ValueError, match="must be 'module:Class'"):
-        _load_entrypoint("no_colon_here")
-    with pytest.raises(ValueError, match="must be 'module:Class'"):
-        _load_entrypoint("module:")
-
-
-def test_module_from_path_raises_when_unloadable() -> None:
-    """A path Python can't build a module spec for is a clear import error."""
-    with pytest.raises(ImportError, match="cannot load env module from path"):
-        _module_from_path("/tmp/not_a_python_module.bogus")
+    with pytest.raises(ValueError, match="Invalid entrypoint format"):
+        openenv_module.load_env("no_colon_here")
+    with pytest.raises(ValueError, match="must include both module and target"):
+        openenv_module.load_env("module:")
 
 
 class TestBatchRolloutEnvConcurrentStep:
@@ -1053,7 +969,7 @@ class TestBatchRolloutEnvConcurrentStep:
     def _batch(env_cls, batch_size):
         batch = BatchRolloutEnv(
             lambda **_: RolloutEnv.local(
-                env_cls(), _MiniTok(), max_turns=1, apply_chat_template=False
+                env_cls(), MiniTokenizer(), max_turns=1, apply_chat_template=False
             ),
             batch_size=batch_size,
             group_size=1,
@@ -1153,7 +1069,10 @@ class TestBatchRolloutEnvConcurrentStep:
 
         batch = BatchRolloutEnv(
             lambda **_: RolloutEnv.local(
-                _BarrierResetEnv(), _MiniTok(), max_turns=1, apply_chat_template=False
+                _BarrierResetEnv(),
+                MiniTokenizer(),
+                max_turns=1,
+                apply_chat_template=False,
             ),
             batch_size=n,
             group_size=1,
@@ -1168,7 +1087,7 @@ class TestBatchRolloutEnvConcurrentStep:
         """The I/O pool is lazily built by concurrent reset/step and released."""
         batch = BatchRolloutEnv(
             lambda **_: RolloutEnv.local(
-                _CountingEnv(), _MiniTok(), max_turns=1, apply_chat_template=False
+                _CountingEnv(), MiniTokenizer(), max_turns=1, apply_chat_template=False
             ),
             batch_size=2,
             group_size=1,

@@ -117,6 +117,8 @@ class TestCollectRolloutsLlm:
         class _OrderingEnv(RolloutEnvDoubleMixin):
             """Minimal env that records which completion token it receives."""
 
+            dataset_size = 0
+
             def __init__(self, prompt_token: int) -> None:
                 self.prompt_token = prompt_token
                 self._seen_token: int | None = None

@@ -392,7 +392,16 @@ class AlgorithmSpec(BaseModel):
 
             kwargs["evaluation_interval"] = training.evaluation_interval
             if training.num_epochs is not None:
-                kwargs["num_epochs"] = training.num_epochs
+                if self.env_type == "dataset":
+                    kwargs["num_epochs"] = training.num_epochs
+                else:
+                    warnings.warn(
+                        "TrainingSpec.num_epochs only applies to dataset "
+                        "fine-tuning (DPO/SFT) and is ignored for rollout "
+                        "algorithms.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
 
             _warn_ignored_llm_training_fields(training)
             return kwargs

@@ -23,6 +23,7 @@ from agilerl.algorithms.reinforce_llm import REINFORCE
 from agilerl.llm_envs import RolloutEnv
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig
 from tests import TINY_LLM_FIXTURE_PATH
+from tests.helpers.rollout_doubles import FakeEnvClient
 from tests.utils import (
     assert_vllm_get_action_contract,
     make_mock_vllm_instance,
@@ -1017,11 +1018,13 @@ class TestREINFORCETest:
 
             def __init__(self):
                 self._step_count = 0
-                self._env_client = None
+                self._env_client = FakeEnvClient()
+                self.done = False
 
             def reset(self, seed=None):
                 del seed
                 self._step_count = 0
+                self.done = False
                 prompt = {
                     "input_ids": torch.ones(1, 4, dtype=torch.long),
                     "attention_mask": torch.ones(1, 4, dtype=torch.long),
@@ -1036,6 +1039,7 @@ class TestREINFORCETest:
                     "attention_mask": torch.ones(1, 4, dtype=torch.long),
                 }
                 terminated = self._step_count >= 2
+                self.done = terminated
                 return prompt, 1.0, terminated, False, {}
 
             def get_episode_data(self):

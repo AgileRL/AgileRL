@@ -585,28 +585,42 @@ class TestAlgoSpecClassVars:
     """Lines 302, 335-336, 400, 455 in algo.py."""
 
     def test_llm_spec_num_epochs_kwarg(self):
-        """get_training_kwargs includes num_epochs for LLM."""
-        from agilerl.models.algo import LLMAlgorithmSpec
+        """get_training_kwargs forwards num_epochs for dataset specs only."""
+        from agilerl.models.algorithms.dpo import DPOSpec
+        from agilerl.models.algorithms.grpo import GRPOSpec
         from agilerl.models.training import TrainingSpec
 
-        spec = LLMAlgorithmSpec.__new__(LLMAlgorithmSpec)
-        object.__setattr__(
-            spec,
-            "__dict__",
-            {
-                "batch_size": 8,
-                "hp_config": None,
-            },
-        )
+        def bare_spec(cls):
+            spec = cls.__new__(cls)
+            object.__setattr__(
+                spec,
+                "__dict__",
+                {
+                    "batch_size": 8,
+                    "hp_config": None,
+                },
+            )
+            return spec
+
         training = TrainingSpec(
             num_epochs=3, checkpoint_steps=100, evaluation_interval=10
         )
         env_spec = MagicMock()
         env_spec.max_reward = 1.0
-        kwargs = spec.get_training_kwargs(training=training, env_spec=env_spec)
+
+        kwargs = bare_spec(DPOSpec).get_training_kwargs(
+            training=training, env_spec=env_spec
+        )
         assert kwargs["num_epochs"] == 3
         assert kwargs["max_reward"] == 1.0
         assert kwargs["checkpoint_steps"] == 100
+
+        # Rollout loops are step-based: num_epochs is warned about and dropped.
+        with pytest.warns(UserWarning, match="num_epochs"):
+            rollout_kwargs = bare_spec(GRPOSpec).get_training_kwargs(
+                training=training, env_spec=env_spec
+            )
+        assert "num_epochs" not in rollout_kwargs
 
     def test_llm_spec_forwards_checkpoint_path(self):
         from agilerl.models.algo import LLMAlgorithmSpec
