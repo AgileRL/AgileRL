@@ -25,6 +25,8 @@ permissions:
 
 jobs:
     tests:
+        # Self-hosted ARC on ops-eks-use1 ci-gpu: runner image includes CUDA
+        # userspace (no job `container:` / k8s hooks). Python via setup-uv.
         runs-on: gha-runner-scale-set
         strategy:
             fail-fast: false
@@ -32,11 +34,7 @@ jobs:
             matrix:
                 python-version: ['3.10', '3.11', '3.12', '3.13']
 
-        container:
-            image: pytorch/pytorch:2.11.0-cuda13.0-cudnn9-devel
-            options: --user root
-
-        # Workspace (/__w) is ~1GB with little free space; root (/) has plenty. Put cache and venv on /.
+        # Caches and venv on / (node root volume); workspace is the runner workdir.
         env:
             UV_CACHE_DIR: /tmp/uv-cache
             UV_PROJECT_ENVIRONMENT: /tmp/agilerl-venv
@@ -65,13 +63,10 @@ jobs:
                   restore-keys: inductor-${{ matrix.python-version }}-
 
             - name: Install dependencies
-              # swig is needed to build box2d-py from source (no pre-built wheels for py3.10+).
+              # swig is on the runner image (needed to build box2d-py from source).
               run: |
                   uv sync --locked --all-groups --extra all
                   echo "$UV_PROJECT_ENVIRONMENT/bin" >> $GITHUB_PATH
-
-            - name: Reset coverage data
-              run: rm -f .coverage .coverage.*
 
             # Single phase: `-n auto --dist loadgroup` from pyproject gives 8
             # workers on the gha-runner-scale-set node. `vllm`- and `gpu`-marked
@@ -86,7 +81,9 @@ jobs:
             # so we don't need a manual `coverage combine` step (which was
             # tripping over corrupted shards under the old two-phase setup).
             - name: Run tests
-              run: uv run pytest --exitfirst --cov=agilerl --cov-report=xml --durations=0 --durations-min=1.0
+              run: |
+                  rm -f .coverage .coverage.*
+                  uv run pytest --exitfirst --cov=agilerl --cov-report=xml --durations=0 --durations-min=1.0
 
             - name: Upload coverage reports to Codecov
               uses: codecov/codecov-action@v3
