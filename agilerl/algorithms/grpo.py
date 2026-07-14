@@ -929,11 +929,25 @@ class GRPO(LLMAlgorithm):
         self,
         experiences: ExperiencesType,
         turn_ids: torch.Tensor | None,
+        *,
+        minmax_fn: Callable[[int], tuple[int, int]] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
-        """Stack and pad the experience batch and move it to the device."""
+        """Stack and pad the experience batch and move it to the device.
+
+        When multi-rank Liger + token-level IS is active, also right-pads local
+        ``T`` to the global max so Liger chunk collectives stay in lockstep.
+        """
         completion_ids, action_masks, rewards = stack_and_pad_experiences(
             *experiences,
             padding_values=[self.pad_token_id, False, None],
+        )
+        completion_ids, action_masks, turn_ids = (
+            self._maybe_align_completion_shapes_across_ranks(
+                completion_ids,
+                action_masks,
+                turn_ids,
+                minmax_fn=minmax_fn,
+            )
         )
         action_masks = action_masks.to(self.device)
         rewards = rewards.to(self.device).float()

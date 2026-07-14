@@ -518,6 +518,13 @@ class PPO(LLMAlgorithm):
                 *experiences,
                 padding_values=[self.pad_token_id, False, None],
             )
+            completion_ids, action_masks, turn_ids = (
+                self._maybe_align_completion_shapes_across_ranks(
+                    completion_ids,
+                    action_masks,
+                    turn_ids,
+                )
+            )
             completion_ids = completion_ids.to(self.device)
             action_masks = action_masks.to(self.device)
             action_mask_bool = action_masks.bool()

@@ -8,7 +8,7 @@ import re
 import shutil
 import textwrap
 import warnings
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -185,6 +185,146 @@ def gather_tensor(
         tensor = torch.tensor(tensor, device=accelerator.device)
     tensor = tensor.to(accelerator.device)
     return accelerator.gather(tensor)
+
+
+def needs_cross_rank_seq_padding(algo: Any, *, world_size: int) -> bool:
+    """Return whether ranks must sync completion seq lengths before Liger token loss.
+
+    Multi-rank Liger token-level losses chunk over ``B * (T - 1)`` and issue one
+    NCCL allreduce per chunk (DAPO/CISPO normaliser). Divergent per-rank ``T``
+    after local ``stack_and_pad`` therefore deadlocks. Gate on that mechanism,
+    not on a specific algorithm name.
+    """
+    if world_size <= 1:
+        return False
+    if not getattr(algo, "use_liger_loss", False):
+        return False
+    return getattr(algo, "importance_sampling_level", "token") == "token"
+
+
+def allreduce_minmax_int(value: int, accelerator: Accelerator) -> tuple[int, int]:
+    """All-reduce ``value`` and return ``(min, max)`` across Accelerate ranks."""
+    device = accelerator.device
+    t_min = torch.tensor([float(value)], device=device, dtype=torch.float32)
+    t_max = torch.tensor([float(value)], device=device, dtype=torch.float32)
+    torch.distributed.all_reduce(t_min, op=torch.distributed.ReduceOp.MIN)
+    torch.distributed.all_reduce(t_max, op=torch.distributed.ReduceOp.MAX)
+    return int(t_min.item()), int(t_max.item())
+
+
+def pad_completion_batch_to_seq_len(
+    completion_ids: torch.Tensor,
+    action_masks: torch.Tensor,
+    *,
+    target_seq_len: int,
+    pad_token_id: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Right-pad stacked completions/masks to ``target_seq_len`` / ``target-1``.
+
+    Pad positions use ``pad_token_id`` and ``False`` so they contribute nothing
+    to the masked CISPO/Liger objective.
+    """
+    required_dims = 2
+    if completion_ids.dim() != required_dims:
+        msg = f"completion_ids must be (B, T), got shape {tuple(completion_ids.shape)}"
+        raise ValueError(msg)
+    if action_masks.dim() != required_dims:
+        msg = f"action_masks must be (B, T-1), got shape {tuple(action_masks.shape)}"
+        raise ValueError(msg)
+
+    batch, seq_len = completion_ids.shape
+    mask_len = action_masks.shape[1]
+    if mask_len != seq_len - 1:
+        msg = (
+            f"action_masks length ({mask_len}) must be completion_ids length "
+            f"({seq_len}) - 1"
+        )
+        raise ValueError(msg)
+    if target_seq_len < seq_len:
+        msg = f"target_seq_len ({target_seq_len}) must be >= local seq_len ({seq_len})"
+        raise ValueError(msg)
+    if target_seq_len == seq_len:
+        return completion_ids, action_masks
+
+    pad_t = target_seq_len - seq_len
+    completion_ids = torch.nn.functional.pad(
+        completion_ids,
+        (0, pad_t),
+        value=pad_token_id,
+    )
+    action_masks = torch.nn.functional.pad(
+        action_masks,
+        (0, pad_t),
+        value=False,
+    )
+    if completion_ids.shape != (batch, target_seq_len):
+        msg = (
+            f"padded completions shape {tuple(completion_ids.shape)} != "
+            f"({batch}, {target_seq_len})"
+        )
+        raise RuntimeError(msg)
+    if action_masks.shape != (batch, target_seq_len - 1):
+        msg = (
+            f"padded masks shape {tuple(action_masks.shape)} != "
+            f"({batch}, {target_seq_len - 1})"
+        )
+        raise RuntimeError(msg)
+    return completion_ids, action_masks
+
+
+def align_stacked_completion_shapes_across_ranks(
+    completion_ids: torch.Tensor,
+    action_masks: torch.Tensor,
+    *,
+    pad_token_id: int,
+    accelerator: Accelerator,
+    turn_ids: torch.Tensor | None = None,
+    minmax_fn: Callable[[int], tuple[int, int]] | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    """Sync ``T`` across ranks after local ``stack_and_pad``. Raise if ``B`` diverges.
+
+    Operates on already-stacked ``(B, T)`` / ``(B, T-1)`` tensors. When ranks
+    disagree on ``T``, right-pads shorter ranks to the global max so Liger
+    token-level chunk collectives stay in lockstep. ``turn_ids`` (typically
+    ``(B, T-1)``) is padded on the time dim the same way when present.
+
+    :param minmax_fn: Optional ``(value) -> (min, max)`` override for tests;
+        defaults to a distributed allreduce via ``accelerator``.
+    """
+    local_b = int(completion_ids.shape[0])
+    local_t = int(completion_ids.shape[1])
+    reduce_fn = minmax_fn or (lambda value: allreduce_minmax_int(value, accelerator))
+
+    min_b, max_b = reduce_fn(local_b)
+    if min_b != max_b:
+        msg = (
+            f"Completion batch row counts diverge across ranks "
+            f"(local B={local_b}, min={min_b}, max={max_b}); refusing to pad "
+            f"rows. Check dataloader / data_batch_size_per_gpu sharding."
+        )
+        raise RuntimeError(msg)
+
+    min_t, max_t = reduce_fn(local_t)
+    if min_t == max_t:
+        return completion_ids, action_masks, turn_ids
+
+    if local_t < max_t:
+        logger.debug(
+            "Cross-rank seq pad: local T=%s -> global T=%s (B=%s)",
+            local_t,
+            max_t,
+            local_b,
+        )
+        completion_ids, action_masks = pad_completion_batch_to_seq_len(
+            completion_ids,
+            action_masks,
+            target_seq_len=max_t,
+            pad_token_id=pad_token_id,
+        )
+        if turn_ids is not None:
+            pad_t = max_t - local_t
+            turn_ids = torch.nn.functional.pad(turn_ids, (0, pad_t), value=-1)
+    return completion_ids, action_masks, turn_ids
 
 
 def aggregate_metrics_across_gpus(
