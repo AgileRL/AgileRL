@@ -1,4 +1,3 @@
-from .multi_agent_replay_buffer import MultiAgentReplayBuffer
 from .replay_buffer import (
     MultiStepReplayBuffer,
     PrioritizedReplayBuffer,
@@ -6,7 +5,6 @@ from .replay_buffer import (
 )
 
 __all__ = [
-    "MultiAgentReplayBuffer",
     "MultiStepReplayBuffer",
     "PrioritizedReplayBuffer",
     "ReplayBuffer",

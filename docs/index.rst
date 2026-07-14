@@ -1,5 +1,3 @@
-----------------
-
 .. raw:: html
 
    <style>
@@ -55,7 +53,7 @@ We are constantly adding more algorithms and features. AgileRL already includes 
 
 .. raw:: html
 
-   <h3 id="llm-finetuning-benchmarks">LLM Fine-tuning benchmarks</h3>
+   <h3 id="llm-finetuning-benchmarks">LLM Fine-tuning</h3>
 
 AgileRL's multi-turn LLM training enables state-of-the-art performance on long-horizon tasks with small models. In the following example, AgileRL's CISPO was benchmarked against ART and TRL on the `GEM <https://github.com/axon-rl/gem>`_ Sudoku Hard task. This is a difficult multi-turn problem, which requires a context length of 32k tokens and up to 50 turns per rollout. The sync AgileRL run is a single agent using the AgileRL framework. The async and HPO runs were performed on `Arena <https://arena.agilerl.com>`_, AgileRL's RLOps platform. All runs used the same starting hyperparameters. AgileRL runs were run on A100 40GB nodes, whereas ART and TRL required A100 80GB nodes due to a lack of optimizations. AgileRL runs significantly outperformed those using the ART and TRL frameworks.
 
@@ -65,7 +63,7 @@ AgileRL's multi-turn LLM training enables state-of-the-art performance on long-h
 
 .. raw:: html
 
-   <h3 id="classic-rl-benchmarks">Classic RL benchmarks</h3>
+   <h3 id="classic-rl-benchmarks">Classic RL</h3>
 
 Reinforcement learning algorithms and libraries are usually benchmarked once the optimal hyperparameters for training are known, but it often takes hundreds or thousands of experiments to discover these. This is unrealistic and does not reflect the true, total time taken for training. What if we could remove the need to conduct all these prior experiments?
 
@@ -113,6 +111,12 @@ If you use AgileRL in your work, please cite the repository:
 
 .. toctree::
    :maxdepth: 2
+   :caption: Arena
+
+   arena/index
+
+.. toctree::
+   :maxdepth: 2
    :caption: Training
 
    evo_hyperparam_opt/index
@@ -124,9 +128,16 @@ If you use AgileRL in your work, please cite the repository:
    llm_finetuning/index
    bandits/index
    distributed_training/index
+   trainers/index
    evolvable_networks/index
    custom_algorithms/index
    debugging_rl/index
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Observability
+
+   metrics_and_logging/index
 
 .. toctree::
    :maxdepth: 1
@@ -138,16 +149,22 @@ If you use AgileRL in your work, please cite the repository:
    tutorials/llm_finetuning/index
    tutorials/bandits/index
    tutorials/custom_networks/index
+   tutorials/arena_training/index
 
 .. toctree::
    :maxdepth: 1
    :caption: API
 
    api/algorithms/index
+   api/arena/index
    api/components/index
    api/hpo/index
+   api/logger
+   api/metrics
+   api/models/index
    api/modules/index
    api/networks/index
+   api/population
    api/train
    api/rollouts/index
    api/utils/index

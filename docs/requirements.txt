@@ -1,4 +1,6 @@
 furo
+sphinx-copybutton
+sphinx-design
 sphinx-tabs
 sphinx-toolbox
 sphinx-notfound-page

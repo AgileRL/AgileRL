@@ -1,4 +1,6 @@
 import gymnasium as gym
+import numpy as np
+import pandas as pd
 import pytest
 import torch
 
@@ -35,6 +37,7 @@ from agilerl.networks import (
 )
 from agilerl.protocols import (
     AgentWrapperProtocol,
+    BanditEnvProtocol,
     EvolvableAlgorithmProtocol,
     EvolvableModuleProtocol,
     EvolvableNetworkProtocol,
@@ -49,6 +52,7 @@ from agilerl.protocols import (
     PretrainedConfigProtocol,
     PreTrainedModelProtocol,
 )
+from agilerl.wrappers.learning import BanditEnv
 from tests.helper_functions import (
     generate_dict_or_tuple_space,
     generate_discrete_space,
@@ -584,3 +588,37 @@ class TestMultiTurnEnvProtocol:
         assert env.reset(seed=0) is None
         assert env.step(action="noop") is None
         assert env.close() is None
+
+
+class TestBanditEnvProtocol:
+    """Cover :class:`agilerl.protocols.BanditEnvProtocol` stub bodies and the
+    reference :class:`~agilerl.wrappers.learning.BanditEnv` implementation.
+    """
+
+    def test_protocol_default_method_bodies_execute(self):
+        class _PassthroughBanditEnv(BanditEnvProtocol):
+            arms = 2
+            num_envs = 1
+            single_observation_space = gym.spaces.Box(
+                low=0.0, high=1.0, shape=(4,), dtype=np.float32
+            )
+            single_action_space = gym.spaces.Discrete(2)
+
+        env = _PassthroughBanditEnv()
+        assert env.reset() is None
+        assert env.step(0) is None
+
+    def test_bandit_env_implements_protocol(self):
+        features = pd.DataFrame(np.random.uniform(0, 1, size=(10, 1)), columns=["x"])
+        targets = pd.DataFrame(np.random.randint(0, 2, size=(10, 1)), columns=["y"])
+        env = BanditEnv(features, targets)
+
+        assert isinstance(env, BanditEnvProtocol)
+        assert env.arms == 2
+        assert env.num_envs == 1
+
+        state = env.reset()
+        assert isinstance(state, np.ndarray)
+        next_state, reward = env.step(0)
+        assert isinstance(next_state, np.ndarray)
+        assert isinstance(reward, float)

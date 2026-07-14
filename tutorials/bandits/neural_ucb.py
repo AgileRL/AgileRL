@@ -20,27 +20,30 @@ from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.utils.utils import create_population, default_progress_bar
+from agilerl.utils.utils import default_progress_bar
 from agilerl.wrappers.learning import BanditEnv
 
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    NET_CONFIG = {
+    # Network configuration
+    net_config = {
         "latent_dim": 64,
         "encoder_config": {"hidden_size": [64]},
         "head_config": {"hidden_size": [64]},
     }
 
-    INIT_HP = {
-        "POPULATION_SIZE": 4,  # Population size
-        "BATCH_SIZE": 64,  # Batch size
-        "LR": 1e-3,  # Learning rate
-        "GAMMA": 1.0,  # Scaling factor
-        "LAMBDA": 1.0,  # Regularization factor
-        "REG": 0.000625,  # Loss regularization factor
-        "LEARN_STEP": 2,  # Learning frequency
+    # Algorithm hyperparameters
+    init_hp = {
+        "batch_size": 64,
+        "lr": 1e-3,
+        "gamma": 1.0,
+        "lamb": 1.0,
+        "reg": 0.000625,
+        "learn_step": 2,
     }
+
+    population_size = 4
 
     # Fetch data  https://archive.ics.uci.edu/
     iris = fetch_ucirepo(id=53)
@@ -58,7 +61,6 @@ if __name__ == "__main__":
         learn_step=RLParameter(
             min=1,
             max=10,
-            dtype=int,
             grow_factor=1.5,
             shrink_factor=0.75,
         ),
@@ -70,15 +72,16 @@ if __name__ == "__main__":
         shape=context_dim,
     )
     action_space = spaces.Discrete(action_dim)
-    pop: list[NeuralUCB] = create_population(
-        algo="NeuralUCB",  # Algorithm
-        observation_space=observation_space,  # Observation space
-        action_space=action_space,  # Action space
-        net_config=NET_CONFIG,  # Network configuration
-        INIT_HP=INIT_HP,  # Initial hyperparameters
-        hp_config=hp_config,  # Hyperparameter configuration
-        population_size=INIT_HP["POPULATION_SIZE"],  # Population size
+
+    # Create population of agents
+    pop = NeuralUCB.population(
+        size=population_size,
+        observation_space=observation_space,
+        action_space=action_space,
+        net_config=net_config,
+        hp_config=hp_config,
         device=device,
+        **init_hp,
     )
 
     memory = ReplayBuffer(
@@ -89,8 +92,7 @@ if __name__ == "__main__":
     tournament = TournamentSelection(
         tournament_size=2,  # Tournament selection size
         elitism=True,  # Elitism in tournament selection
-        population_size=INIT_HP["POPULATION_SIZE"],  # Population size
-        eval_loop=1,  # Evaluate using last N fitness scores
+        population_size=population_size,  # Population size
     )
 
     mutations = Mutations(
@@ -120,7 +122,7 @@ if __name__ == "__main__":
     # TRAINING LOOP
     print("Training...")
     pbar = default_progress_bar(max_steps)
-    while np.less([agent.steps[-1] for agent in pop], max_steps).all():
+    while np.less([agent.steps for agent in pop], max_steps).all():
         for i, agent in enumerate(pop):  # Loop through population
             losses = []
             context = env.reset()  # Reset environment at start of episode
@@ -156,7 +158,7 @@ if __name__ == "__main__":
                 regret[i].append(regret[i][-1] + 1 - reward)
 
             total_steps += episode_steps
-            agent.steps[-1] += episode_steps
+            agent.steps += episode_steps
 
         pbar.update(episode_steps)
 
@@ -172,13 +174,13 @@ if __name__ == "__main__":
 
         pbar.write(
             f"--- Global steps {total_steps} ---\n"
-            f"Steps {[agent.steps[-1] for agent in pop]}\n"
+            f"Steps {[agent.steps for agent in pop]}\n"
             f"Regret: {[regret[i][-1] for i in range(len(pop))]}\n"
             f"Fitnesses: {[f'{fitness:.2f}' for fitness in fitnesses]}\n"
             f"Mutations: {[agent.mut for agent in pop]}",
         )
 
-        if pop[0].steps[-1] // evo_steps > evo_count:
+        if pop[0].steps // evo_steps > evo_count:
             # Tournament selection and population mutation
             elite, pop = tournament.select(pop)
             pop = mutations.mutation(pop)

@@ -1,5 +1,5 @@
 Modules
-=======
+========
 
 Evolvable module architectures implemented: (More coming soon!)
     * MLP

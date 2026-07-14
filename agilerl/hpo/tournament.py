@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 import numpy as np
 from accelerate.utils import broadcast_object_list
 
 from agilerl.algorithms.core.base import EvolvableAlgorithm, LLMAlgorithm
 
-PopulationType = list[EvolvableAlgorithm]
+PopulationT = list[EvolvableAlgorithm]
 
 
 class TournamentSelection:
@@ -17,8 +19,6 @@ class TournamentSelection:
     :type elitism: bool
     :param population_size: Number of agents in population
     :type population_size: int
-    :param eval_loop: Number of most recent fitness scores to use in evaluation
-    :type eval_loop: int
     """
 
     def __init__(
@@ -26,17 +26,28 @@ class TournamentSelection:
         tournament_size: int,
         elitism: bool,
         population_size: int,
-        eval_loop: int,
     ) -> None:
         assert tournament_size > 0, "Tournament size must be greater than zero."
         assert isinstance(elitism, bool), "Elitism must be boolean value True or False."
         assert population_size > 0, "Population size must be greater than zero."
-        assert eval_loop > 0, "Evo step must be greater than zero."
         self.tournament_size = tournament_size
         self.elitism = elitism
         self.population_size = population_size
-        self.eval_loop = eval_loop
         self.language_model = None
+
+    @staticmethod
+    def _scalar_fitness(fitness: float | np.ndarray | dict[str, float]) -> float:
+        """Reduce a possibly vector-valued fitness to a single scalar for ranking.
+
+        When ``sum_scores=False``, multi-agent algorithms store per-sub-agent
+        fitness values.  Tournament selection needs a total ordering, so we
+        collapse to the mean across sub-agents.
+        """
+        if isinstance(fitness, dict):
+            return float(np.mean(list(fitness.values())))
+        if isinstance(fitness, (list, tuple, np.ndarray)):
+            return float(np.mean(fitness))
+        return float(fitness)
 
     def _tournament(self, fitness_values: list[float]) -> int:
         """Perform tournament selection given a list of fitness values.
@@ -52,16 +63,16 @@ class TournamentSelection:
 
     def _elitism(
         self,
-        population: PopulationType,
+        population: PopulationT,
     ) -> tuple[EvolvableAlgorithm, np.ndarray, int]:
         """Perform elitism selection given a population of agents.
 
         :param population: Population of agents
-        :type population: PopulationType
+        :type population: PopulationT
         :return: Elite member of population, rank array, and max id
         :rtype: tuple[EvolvableAlgorithm, np.ndarray, int]
         """
-        last_fitness = [np.mean(indi.fitness[-self.eval_loop :]) for indi in population]
+        last_fitness = [self._scalar_fitness(indi.fitness[-1]) for indi in population]
         rank = np.argsort(last_fitness).argsort()
         max_id = max([ind.index for ind in population])
         model = population[int(np.argsort(rank)[-1])]
@@ -70,14 +81,14 @@ class TournamentSelection:
 
     def select(
         self,
-        population: PopulationType,
-    ) -> tuple[EvolvableAlgorithm, PopulationType]:
+        population: PopulationT,
+    ) -> tuple[EvolvableAlgorithm, PopulationT]:
         """Select the best agent and new population of agents following tournament selection.
 
         :param population: Population of agents
-        :type population: PopulationType
+        :type population: PopulationT
         :return: Elite agent and new population
-        :rtype: tuple[EvolvableAlgorithm, PopulationType]
+        :rtype: tuple[EvolvableAlgorithm, PopulationT]
         """
         if self.language_model is None:
             self.language_model = isinstance(population[0], LLMAlgorithm)
@@ -90,16 +101,16 @@ class TournamentSelection:
 
     def _select_standard_agents(
         self,
-        population: PopulationType,
-    ) -> tuple[EvolvableAlgorithm, PopulationType]:
+        population: PopulationT,
+    ) -> tuple[EvolvableAlgorithm, PopulationT]:
         """Return best agent and new population of agents following tournament selection. Used for
-        a population of :class:`EvolvableAlgorithm <agilerl.algorithms.core.RLAlgorithm>` or
+        a population of :class:`RLAlgorithm <agilerl.algorithms.core.RLAlgorithm>` or
         :class:`MultiAgentRLAlgorithm <agilerl.algorithms.core.MultiAgentRLAlgorithm>` agents.
 
         :param population: Population of agents
-        :type population: PopulationType
+        :type population: PopulationT
         :return: Elite agent and new population
-        :rtype: tuple[EvolvableAlgorithm, PopulationType]
+        :rtype: tuple[EvolvableAlgorithm, PopulationT]
         """
         elite, rank, max_id = self._elitism(population)
         new_population = []
@@ -120,15 +131,15 @@ class TournamentSelection:
 
     def _select_llm_agents(
         self,
-        population: PopulationType,
-    ) -> tuple[EvolvableAlgorithm, PopulationType]:
+        population: PopulationT,
+    ) -> tuple[LLMAlgorithm, PopulationT]:
         """Return best agent and new population of agents following tournament selection. Used for
         a population of :class:`LLMAlgorithm <agilerl.algorithms.core.LLMAlgorithm>` agents.
 
         :param population: Population of agents
-        :type population: PopulationType
+        :type population: PopulationT
         :return: Elite agent and new population
-        :rtype: tuple[EvolvableAlgorithm, PopulationType]
+        :rtype: tuple[LLMAlgorithm, PopulationT]
         """
         accelerator = population[0].accelerator
         new_population_idxs = []

@@ -1,0 +1,76 @@
+---
+algorithm:
+    name: PPO
+    lr: 0.0003
+    gamma: 0.99
+    batch_size: 128
+    learn_step: 2048
+    gae_lambda: 0.95
+    action_std_init: 0.6
+    clip_coef: 0.2
+    ent_coef: 0.01
+    vf_coef: 0.5
+    update_epochs: 4
+
+environment:
+    name: merge-env
+    version: v1
+
+training:
+    max_steps: 10_000_000
+    evo_steps: 160_000
+    eval_steps: 500
+    pop_size: 4
+
+mutation:
+    probabilities:
+        no_mut: 0.4
+        arch_mut: 0.2
+        new_layer: 0.5
+        params_mut: 0.2
+        act_mut: 0.1
+        rl_hp_mut: 0.1
+    rl_hp_selection:
+        lr:
+            min: 0.0001
+            max: 0.01
+        batch_size:
+            min: 8
+            max: 1024
+        learn_step:
+            min: 256
+            max: 8192
+        ent_coef:
+            min: 0.001
+            max: 0.1
+        update_epochs:
+            min: 1
+            max: 10
+
+network:
+    latent_dim: 128
+    min_latent_dim: 64
+    max_latent_dim: 256
+    encoder_config:
+        vector_space_mlp: true
+        mlp_config:
+            hidden_size:
+                - 128
+                - 128
+            activation: ReLU
+            min_hidden_layers: 1
+            max_hidden_layers: 3
+            min_mlp_nodes: 64
+            max_mlp_nodes: 256
+    head_config:
+        hidden_size:
+            - 128
+        activation: ReLU
+        min_hidden_layers: 1
+        max_hidden_layers: 3
+        min_mlp_nodes: 64
+        max_mlp_nodes: 256
+
+tournament_selection:
+    tournament_size: 2
+    elitism: true

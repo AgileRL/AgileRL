@@ -319,7 +319,7 @@ function and is an example of how we might choose to train our agent to exhibit 
 
         from tqdm import trange
         import torch.distributed as dist
-        from agilerl.utils.utils import gather_tensor, aggregate_metrics_across_gpus
+        from agilerl.utils.llm_utils import gather_tensor, aggregate_metrics_across_gpus
 
         evaluation_interval = 5
         max_reward = 2.0

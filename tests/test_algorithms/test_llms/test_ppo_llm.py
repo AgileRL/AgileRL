@@ -487,7 +487,7 @@ class TestPPOInit:
                 gradient_checkpointing=False,
             )
 
-    def test_init_fused_loss_chunk_rows_must_be_positive(self):
+    def test_init_chunk_rows_must_be_positive(self):
         actor = create_module(10, 8, 100, "cpu")
         lora = LoraConfig(
             r=4,
@@ -496,22 +496,20 @@ class TestPPOInit:
             task_type="CAUSAL_LM",
             modules_to_save=["summary"],
         )
-        with pytest.raises(
-            ValueError, match="fused_loss_chunk_rows must be a positive int"
-        ):
+        with pytest.raises(ValueError, match="chunk_rows must be a positive int"):
             LLMPPO(
                 actor_network=actor,
                 pad_token_id=99,
                 pad_token="<pad>",
                 lora_config=lora,
-                fused_loss_chunk_rows=0,
+                chunk_rows=0,
                 wrap=False,
                 gradient_checkpointing=False,
             )
 
-    def test_init_stores_fused_loss_chunk_rows(self):
-        ppo = _cpu_llmppo(fused_loss_chunk_rows=256)
-        assert ppo.fused_loss_chunk_rows == 256
+    def test_init_stores_chunk_rows(self):
+        ppo = _cpu_llmppo(chunk_rows=256)
+        assert ppo.chunk_rows == 256
 
     def test_init_action_granularity_deprecated_warns_and_overrides(self):
         """The legacy ``action_granularity`` kwarg warns and is carried over
@@ -945,12 +943,12 @@ class TestPPOLearn:
             metrics = ppo.learn((completions, action_masks, rewards), turn_ids=turn_ids)
         assert mock_prepare_vllm_for_training.call_count == 1
         for key in (
-            "mean_loss",
-            "mean_kl",
-            "mean_pg_loss",
-            "mean_vf_loss",
-            "mean_entropy",
-            "mean_clipfrac",
+            "loss",
+            "kl",
+            "pg_loss",
+            "vf_loss",
+            "entropy",
+            "clipfrac",
         ):
             assert key in metrics
             assert isinstance(metrics[key], float)
@@ -1011,7 +1009,7 @@ class TestPPOLearn:
 
         metrics = ppo.learn((completions, action_masks, rewards), turn_ids=turn_ids)
 
-        assert "mean_loss" in metrics
+        assert "loss" in metrics
 
     def test_learn_token_granularity(self):
         ppo = _cpu_llmppo(advantage_granularity="token", lr_actor=0.05)
@@ -1124,7 +1122,7 @@ class TestPPOFusedNoGradBaseRoutedReference:
 
         metrics = ppo.learn((completions, action_masks, rewards))
 
-        for key in ("mean_loss", "mean_kl", "mean_pg_loss", "mean_vf_loss"):
+        for key in ("loss", "kl", "pg_loss", "vf_loss"):
             assert torch.isfinite(torch.tensor(metrics[key]))
 
 
@@ -1338,8 +1336,8 @@ class TestPPOLossLiger:
         # total_loss = fake_loss (0.5) + vf_loss (real, computed from values)
         assert isinstance(total_loss, torch.Tensor)
 
-    def test_token_mode_forwards_configured_fused_loss_chunk_rows(self) -> None:
-        ppo = _cpu_llmppo(fused_loss_chunk_rows=123)
+    def test_token_mode_forwards_configured_chunk_rows(self) -> None:
+        ppo = _cpu_llmppo(chunk_rows=123)
         B, T = 2, 5
         ids = torch.randint(1, 50, (B, T), dtype=torch.long)
         mask = torch.ones(B, T - 1, dtype=torch.float32)
@@ -1546,9 +1544,9 @@ class TestPPOLearnWithLiger:
         # The Liger branch was actually exercised (not the fallback path).
         assert ppo._ppo_loss_liger.call_count >= 1
         # And its returned scalars made it into the aggregated metrics.
-        assert learn_out["mean_loss"] == pytest.approx(0.42, rel=1e-6)
-        assert learn_out["mean_kl"] == pytest.approx(0.1, rel=1e-6)
-        assert learn_out["mean_vf_loss"] == pytest.approx(0.5, rel=1e-6)
+        assert learn_out["loss"] == pytest.approx(0.42, rel=1e-6)
+        assert learn_out["kl"] == pytest.approx(0.1, rel=1e-6)
+        assert learn_out["vf_loss"] == pytest.approx(0.5, rel=1e-6)
 
     def test_learn_liger_token_with_sampling_logps_uses_fused_kernel(self, monkeypatch):
         """token-level use_liger_loss=True + captured vLLM logprobs: the
@@ -1649,7 +1647,7 @@ class TestPPOLearnWithLiger:
         ppo._ppo_loss_liger.assert_not_called()
         assert ppo._is_correction_liger_warned is True
         assert "vllm_is_delta_mean" in metrics
-        assert torch.isfinite(torch.tensor(metrics["mean_loss"]))
+        assert torch.isfinite(torch.tensor(metrics["loss"]))
 
 
 class TestPPOVllmISCorrection:
@@ -1685,7 +1683,7 @@ class TestPPOVllmISCorrection:
             assert key in metrics
             assert isinstance(metrics[key], float)
         assert metrics["vllm_is_ratio_mean"] > 0
-        assert torch.isfinite(torch.tensor(metrics["mean_loss"]))
+        assert torch.isfinite(torch.tensor(metrics["loss"]))
 
 
 class _CtxFreeValueActor(nn.Module):
@@ -1735,7 +1733,7 @@ class TestPPOSequencePacking:
         )[:, : seq_len - 1]
         rewards = torch.tensor([[0.5, -0.5]], dtype=torch.float32)
         metrics = ppo.learn((completions, action_masks, rewards), turn_ids=turn_ids)
-        assert torch.isfinite(torch.tensor(metrics["mean_loss"]))
+        assert torch.isfinite(torch.tensor(metrics["loss"]))
 
     def test_packed_fused_forward_matches_padded(self):
         ppo = _cpu_llmppo(use_vllm=False)
@@ -1758,7 +1756,7 @@ class TestPPOSequencePacking:
             action_mask[b, : length - 1] = True
 
         def fake_fused_fn(
-            h, weight, bias, targets, *, temperature, cast_to_fp32, _chunk_rows
+            h, weight, bias, targets, *, temperature, cast_to_fp32, chunk_rows
         ):
             # Context-free per-token logprob over the (already next-token-
             # shifted) hidden features. Identical closed form padded or packed,

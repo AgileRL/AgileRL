@@ -1,7 +1,7 @@
 .. _skills_tutorials:
 
-Hierarchical Skills Tutorial
-============================
+Hierarchical Skills
+===================
 
 This tutorial provides an introductory guide to using `AgileRL <https://github.com/AgileRL/AgileRL>`_ to learn skills and apply these in a hierarchical fashion.
 AgileRL's single-agent algorithms allow users to train agents to perform specific skills, and then combine these in a learned order to achieve an outcome.
@@ -69,13 +69,7 @@ Importing the following packages, functions and classes will enable us to run th
       from agilerl.algorithms.ppo import PPO
       from agilerl.training.train_on_policy import train_on_policy
       from agilerl.wrappers.learning import Skill
-      from agilerl.utils.algo_utils import obs_channels_to_first
-      from agilerl.utils.utils import (
-         create_population,
-         make_skill_vect_envs,
-         make_vect_envs,
-         observation_space_channels_to_first
-      )
+      from agilerl.utils.utils import make_skill_vect_envs, make_vect_envs
 
 
 Defining Skills
@@ -222,33 +216,11 @@ Once the skills have been defined, training agents to solve them is very straigh
 
    .. code-block:: python
 
-      NET_CONFIG = {
-         "encoder_config": {"hidden_size": [64, 64]}  # Actor encoder hidden size
-      }
-
-      INIT_HP = {
-         "ENV_NAME": "LunarLander-v3",
-         "ALGO": "PPO",
-         "POPULATION_SIZE": 1,  # Population size
-         "BATCH_SIZE": 128,  # Batch size
-         "LR": 1e-3,  # Learning rate
-         "LEARN_STEP": 128,  # Learning frequency
-         "GAMMA": 0.99,  # Discount factor
-         "GAE_LAMBDA": 0.95,  # Lambda for general advantage estimation
-         "ACTION_STD_INIT": 0.6,  # Initial action standard deviation
-         "CLIP_COEF": 0.2,  # Surrogate clipping coefficient
-         "ENT_COEF": 0.01,  # Entropy coefficient
-         "VF_COEF": 0.5,  # Value function coefficient
-         "MAX_GRAD_NORM": 0.5,  # Maximum norm for gradient clipping
-         "TARGET_KL": None,  # Target KL divergence threshold
-         "TARGET_SCORE": 2000,
-         "MAX_STEPS": 1_000_000,
-         "EVO_STEPS": 10_000,
-         "UPDATE_EPOCHS": 4,  # Number of policy update epochs
-         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-         "CHANNELS_LAST": False,
-         "WANDB": True,
-      }
+      ENV_NAME = "LunarLander-v3"
+      TARGET_SCORE = 2000
+      MAX_STEPS = 1_000_000
+      EVO_STEPS = 10_000
+      WANDB = True
 
       device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -268,39 +240,55 @@ Once the skills have been defined, training agents to solve them is very straigh
 
       for skill in skills.keys():
          env = make_skill_vect_envs(
-               INIT_HP["ENV_NAME"], skills[skill], num_envs=1
+               ENV_NAME, skills[skill], num_envs=1
          )  # Create environment
 
          observation_space = env.single_observation_space
          action_space = env.single_action_space
-         if INIT_HP["CHANNELS_LAST"]:
-               observation_space = observation_space_channels_to_first(observation_space)
 
-         pop = create_population(
-               algo="PPO",  # Algorithm
-               observation_space=observation_space,  # Observation space
-               action_space=action_space,  # Action space
-               net_config=NET_CONFIG,  # Network configuration
-               INIT_HP=INIT_HP,  # Initial hyperparameters
-               population_size=INIT_HP["POPULATION_SIZE"],  # Population size
+         # Configure network architecture
+         net_config = {
+            "encoder_config": {"hidden_size": [64, 64]}
+         }
+
+         # Algorithm hyperparameters
+         init_hp = {
+            "batch_size": 128,
+            "lr": 1e-3,
+            "learn_step": 128,
+            "gamma": 0.99,
+            "gae_lambda": 0.95,
+            "action_std_init": 0.6,
+            "clip_coef": 0.2,
+            "ent_coef": 0.01,
+            "vf_coef": 0.5,
+            "max_grad_norm": 0.5,
+            "target_kl": None,
+            "update_epochs": 4,
+         }
+
+         # Initialize population
+         pop = PPO.population(
+               size=1,
+               observation_space=observation_space,
+               action_space=action_space,
+               net_config=net_config,
                device=device,
+               **init_hp,
          )
 
          trained_pop, pop_fitnesses = train_on_policy(
                env=env,  # Gym-style environment
-               env_name=f"{INIT_HP['ENV_NAME']}-{skill}",  # Environment name
-               algo=INIT_HP["ALGO"],  # Algorithm
+               env_name=f"{ENV_NAME}-{skill}",  # Environment name
+               algo="PPO",  # Algorithm
                pop=pop,  # Population of agents
-               swap_channels=INIT_HP[
-                  "CHANNELS_LAST"
-               ],  # Swap image channel from last to first
-               max_steps=INIT_HP["MAX_STEPS"],  # Max number of training episodes
-               evo_steps=INIT_HP["EVO_STEPS"],  # Evolution frequency
+               max_steps=MAX_STEPS,  # Max number of training steps
+               evo_steps=EVO_STEPS,  # Evolution frequency
                evo_loop=3,  # Number of evaluation episodes per agent
-               target=INIT_HP["TARGET_SCORE"],  # Target score for early stopping
+               target=TARGET_SCORE,  # Target score for early stopping
                tournament=None,  # Tournament selection object
                mutation=None,  # Mutations object
-               wb=INIT_HP["WANDB"],  # Weights and Biases tracking
+               wb=WANDB,  # Weights and Biases tracking
          )
 
          # Save the trained algorithm
@@ -340,7 +328,7 @@ Next we can define the variables we will need in our training loop.
 
    .. code-block:: python
 
-      env = make_vect_envs(INIT_HP["ENV_NAME"], num_envs=1)  # Create environment
+      env = make_vect_envs(ENV_NAME, num_envs=1)  # Create environment
 
       observation_space = env.single_observation_space
 
@@ -350,39 +338,56 @@ Next we can define the variables we will need in our training loop.
 
       action_space = spaces.Discrete(action_dim)
 
-      if INIT_HP["CHANNELS_LAST"]:
-         observation_space = observation_space_channels_to_first(observation_space)
+      # Configure network architecture
+      net_config = {
+         "encoder_config": {"hidden_size": [64, 64]}
+      }
 
-      pop = create_population(
-         algo="PPO",  # Algorithm
-         observation_space=observation_space,  # Observation space
-         action_space=action_space,  # Action space
-         net_config=NET_CONFIG,  # Network configuration
-         INIT_HP=INIT_HP,  # Initial hyperparameters
-         population_size=INIT_HP["POPULATION_SIZE"],  # Population size
+      # Algorithm hyperparameters
+      init_hp = {
+         "batch_size": 128,
+         "lr": 1e-3,
+         "learn_step": 128,
+         "gamma": 0.99,
+         "gae_lambda": 0.95,
+         "action_std_init": 0.6,
+         "clip_coef": 0.2,
+         "ent_coef": 0.01,
+         "vf_coef": 0.5,
+         "max_grad_norm": 0.5,
+         "target_kl": None,
+         "update_epochs": 4,
+      }
+
+      # Initialize population
+      pop = PPO.population(
+         size=1,
+         observation_space=observation_space,
+         action_space=action_space,
+         net_config=net_config,
          device=device,
+         **init_hp,
       )
 
-      if INIT_HP["WANDB"]:
+      if WANDB:
          wandb.init(
                # set the wandb project where this run will be logged
                project="EvoWrappers",
                name="{}-EvoHPO-{}-{}".format(
-                  INIT_HP["ENV_NAME"],
-                  INIT_HP["ALGO"],
+                  ENV_NAME,
+                  "PPO",
                   datetime.now().strftime("%m%d%Y%H%M%S"),
                ),
                # track hyperparameters and run metadata
                config={
-                  "algo": f"Evo HPO {INIT_HP['ALGO']}",
-                  "env": INIT_HP["ENV_NAME"],
-                  "INIT_HP": INIT_HP,
+                  "algo": "Evo HPO PPO",
+                  "env": ENV_NAME,
                },
          )
 
       bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
       pbar = trange(
-        INIT_HP["MAX_STEPS"],
+        MAX_STEPS,
         unit="step",
         bar_format=bar_format,
         ascii=True)
@@ -396,100 +401,89 @@ Finally, we can run the training loop for the selector agent. Each skill agent's
    .. code-block:: python
 
       # RL training loop
-      while np.less([agent.steps[-1] for agent in pop], INIT_HP["MAX_STEPS"]).all():
+      while np.less([agent.steps for agent in pop], MAX_STEPS).all():
          for agent in pop:  # Loop through population
+            agent.set_training_mode(True)
+
+            for _ in range(-(EVO_STEPS // -agent.learn_step)):
                obs = env.reset()[0]  # Reset environment at start of episode
                score = 0
-
-               observations = []
-               actions = []
-               log_probs = []
-               rewards = []
-               dones = []
-               values = []
-
                done = np.zeros(1)
 
-               for idx_step in range(500):
-                  # Get next action from agent
-                  action, log_prob, _, value = agent.get_action(obs)
+               agent.rollout_buffer.reset()
+               for _ in range(agent.learn_step):
+                  decision_obs = obs  # Observation used to select the skill
 
-                  # Clip to action space
-                  if isinstance(agent.action_space, spaces.Box):
-                      if agent.actor.squash_output:
-                          clipped_action = agent.actor.scale_action(action)
-                      else:
-                          clipped_action = np.clip(action, agent.action_space.low, agent.action_space.high)
-                  else:
-                      clipped_action = action
+                  # Get next action from agent
+                  action, log_prob, _, value = agent.get_action(decision_obs)
 
                   # Internal loop to execute trained skill
                   skill_agent = trained_skills[action[0]]["agent"]
                   skill_duration = trained_skills[action[0]]["skill_duration"]
                   reward = 0
+                  next_obs, next_done = obs, done
                   for skill_step in range(skill_duration):
                      # If landed, do nothing
                      if obs[0][6] or obs[0][7]:
-                           next_obs, skill_reward, termination, truncation, _ = env.step(
-                              [0]
-                           )
+                        next_obs, skill_reward, termination, truncation, _ = env.step(
+                           [0]
+                        )
                      else:
-                           skill_action, _, _, _ = skill_agent.get_action(obs)
-                           next_obs, skill_reward, termination, truncation, _ = env.step(
-                              skill_action
-                           )  # Act in environment
+                        skill_action, _, _, _ = skill_agent.get_action(obs)
+                        next_obs, skill_reward, termination, truncation, _ = env.step(
+                           skill_action
+                        )  # Act in environment
                      next_done = np.logical_or(termination, truncation).astype(np.int8)
                      reward += skill_reward
                      if np.any(termination) or np.any(truncation):
-                           break
+                        break
                      obs = next_obs
-                     done = next_done
                   score += reward
 
-                  observations.append(obs)
-                  actions.append(action)
-                  log_probs.append(log_prob)
-                  rewards.append(reward)
-                  dones.append(done)
-                  values.append(value)
+                  # Save experience in the agent's rollout buffer
+                  agent.rollout_buffer.add(
+                     obs=decision_obs,
+                     action=action,
+                     reward=np.atleast_1d(reward),
+                     done=np.atleast_1d(next_done),
+                     value=np.atleast_1d(value),
+                     log_prob=np.atleast_1d(log_prob),
+                     next_obs=next_obs,
+                  )
+
+                  obs = next_obs
+                  done = next_done
 
                agent.scores.append(score)
 
-               # Learn according to agent's RL algorithm
-               agent.learn(
-                  (
-                     observations,
-                     actions,
-                     log_probs,
-                     rewards,
-                     dones,
-                     values,
-                     next_obs,
-                     next_done,
-                  )
+               # Bootstrap the final state value and learn from the rollout buffer
+               _, _, _, last_value = agent.get_action(obs)
+               agent.rollout_buffer.compute_returns_and_advantages(
+                  last_value=np.atleast_1d(last_value),
+                  last_done=np.atleast_1d(done),
                )
+               agent.learn()
 
-               agent.steps[-1] += idx_step + 1
-               total_steps += idx_step + 1
+               agent.steps += agent.learn_step
+               total_steps += agent.learn_step
 
-         if (agent.steps[-1]) % INIT_HP["EVO_STEPS"] == 0:
-            mean_scores = np.mean([agent.scores[-20:] for agent in pop], axis=1)
-            if INIT_HP["WANDB"]:
-                wandb.log(
-                    {
-                        "global_step": total_steps,
-                        "train/mean_score": np.mean(mean_scores),
-                    }
-                )
-            print(
-                f"""
-                --- Global Steps {total_steps} ---
-                Score:\t\t{mean_scores}
-                """,
-                end="\r",
-            )
+         mean_scores = np.mean([agent.scores[-20:] for agent in pop], axis=1)
+         if WANDB:
+             wandb.log(
+                 {
+                     "global_step": total_steps,
+                     "train/mean_score": np.mean(mean_scores),
+                 }
+             )
+         print(
+             f"""
+             --- Global Steps {total_steps} ---
+             Score:\t\t{mean_scores}
+             """,
+             end="\r",
+         )
 
-      if INIT_HP["WANDB"]:
+      if WANDB:
          wandb.finish()
       env.close()
 

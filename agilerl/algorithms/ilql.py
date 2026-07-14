@@ -29,7 +29,9 @@ from agilerl.utils.sampling_utils import (
 
 
 class ILQL(nn.Module):
-    """The Implicit Language Q Learning algorithm class. ILQL paper: https://arxiv.org/pdf/2206.11871.pdf.
+    """Implicit Language Q Learning (ILQL).
+
+    Paper: https://arxiv.org/pdf/2206.11871.pdf
 
     :param dataset: Language dataset to perform ILQL on
     :type dataset: torch.utils.data.Dataset

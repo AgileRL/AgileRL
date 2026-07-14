@@ -516,7 +516,7 @@ class TestREINFORCEInit:
                 gradient_checkpointing=False,
             )
 
-    def test_init_fused_loss_chunk_rows_must_be_positive(self):
+    def test_init_chunk_rows_must_be_positive(self):
         actor = create_dummy_actor(10, 8, 100, "cpu")
         lora = LoraConfig(
             r=4,
@@ -524,22 +524,20 @@ class TestREINFORCEInit:
             target_modules=["lin"],
             task_type="CAUSAL_LM",
         )
-        with pytest.raises(
-            ValueError, match="fused_loss_chunk_rows must be a positive int"
-        ):
+        with pytest.raises(ValueError, match="chunk_rows must be a positive int"):
             REINFORCE(
                 actor_network=actor,
                 pad_token_id=99,
                 pad_token="<pad>",
                 lora_config=lora,
-                fused_loss_chunk_rows=0,
+                chunk_rows=0,
                 wrap=False,
                 gradient_checkpointing=False,
             )
 
-    def test_init_stores_fused_loss_chunk_rows(self):
-        rf = _cpu_llmreinforce(fused_loss_chunk_rows=256)
-        assert rf.fused_loss_chunk_rows == 256
+    def test_init_stores_chunk_rows(self):
+        rf = _cpu_llmreinforce(chunk_rows=256)
+        assert rf.chunk_rows == 256
 
     def test_init_turn_ratio_pooling_must_be_valid(self):
         actor = create_dummy_actor(10, 8, 100, "cpu")
@@ -902,7 +900,7 @@ class TestREINFORCELearn:
         ) as mock_prepare_vllm_for_training:
             metrics = rf.learn((completions, action_masks, rewards), turn_ids=turn_ids)
         assert mock_prepare_vllm_for_training.call_count == 1
-        for key in ("mean_loss", "mean_kl", "mean_pg_loss", "mean_entropy"):
+        for key in ("loss", "kl", "entropy"):
             assert key in metrics
             assert isinstance(metrics[key], float)
             assert torch.isfinite(torch.tensor(metrics[key]))
@@ -1173,8 +1171,8 @@ class TestReinforceLossLiger:
         assert ratio is not None
         assert torch.all(ratio <= rf.vllm_importance_sampling_cap)
 
-    def test_forwards_configured_fused_loss_chunk_rows(self) -> None:
-        rf = _cpu_llmreinforce(fused_loss_chunk_rows=123)
+    def test_forwards_configured_chunk_rows(self) -> None:
+        rf = _cpu_llmreinforce(chunk_rows=123)
         B, T = 2, 5
         ids = torch.randint(1, 50, (B, T), dtype=torch.long)
         mask = torch.ones(B, T - 1, dtype=torch.float32)
@@ -1317,9 +1315,9 @@ class TestREINFORCELearnWithLiger:
         learn_out = rf.learn((completions, action_masks, rewards), turn_ids=turn_ids)
 
         assert rf._reinforce_loss_liger.call_count >= 1
-        assert learn_out["mean_loss"] == pytest.approx(0.3, rel=1e-6)
-        assert learn_out["mean_kl"] == pytest.approx(0.05, rel=1e-6)
-        assert learn_out["mean_pg_loss"] == pytest.approx(0.25, rel=1e-6)
+        assert learn_out["loss"] == pytest.approx(0.3, rel=1e-6)
+        assert learn_out["kl"] == pytest.approx(0.05, rel=1e-6)
+        assert learn_out["pg_loss"] == pytest.approx(0.25, rel=1e-6)
 
     def test_learn_liger_token_with_sampling_logps_uses_fused_kernel(self, monkeypatch):
         """token-level use_liger_loss=True + captured vLLM logprobs: the
@@ -1408,7 +1406,7 @@ class TestREINFORCELearnWithLiger:
         rf._reinforce_loss_liger.assert_not_called()
         assert rf._is_correction_liger_warned is True
         assert "vllm_is_delta_mean" in metrics
-        assert torch.isfinite(torch.tensor(metrics["mean_loss"]))
+        assert torch.isfinite(torch.tensor(metrics["loss"]))
 
 
 class TestREINFORCEVllmISCorrection:
@@ -1446,7 +1444,7 @@ class TestREINFORCEVllmISCorrection:
             assert key in metrics
             assert isinstance(metrics[key], float)
         assert metrics["vllm_is_ratio_mean"] > 0
-        assert torch.isfinite(torch.tensor(metrics["mean_loss"]))
+        assert torch.isfinite(torch.tensor(metrics["loss"]))
 
 
 class TestREINFORCESequencePacking:
@@ -1468,4 +1466,4 @@ class TestREINFORCESequencePacking:
         )[:, : seq_len - 1]
         rewards = torch.tensor([[0.5, -0.5]], dtype=torch.float32)
         metrics = rf.learn((completions, action_masks, rewards), turn_ids=turn_ids)
-        assert torch.isfinite(torch.tensor(metrics["mean_loss"]))
+        assert torch.isfinite(torch.tensor(metrics["loss"]))

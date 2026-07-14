@@ -5,6 +5,7 @@ import pytest
 import torch
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
+from gymnasium import spaces
 from tensordict import TensorDict
 from torch import optim
 
@@ -15,12 +16,10 @@ from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
     assert_not_equal_state_dict,
     assert_state_dicts_equal,
+    assert_transpose_image_observation_called,
     get_experiences_batch,
     get_sample_from_space,
-)
-from tests.helpers.algorithm_coverage import (
-    assert_swap_channels_called,
-    patch_obs_channels_to_first,
+    patch_transpose_image_observation,
 )
 
 
@@ -93,7 +92,7 @@ class TestRainbowDQNInit:
         assert dqn.index == 0
         assert dqn.scores == []
         assert dqn.fitness == []
-        assert dqn.steps == [0]
+        assert dqn.steps == 0
         # assert dqn.actor_network is None
         assert isinstance(dqn.actor.encoder, encoder_cls)
         assert isinstance(dqn.actor_target.encoder, encoder_cls)
@@ -148,7 +147,7 @@ class TestRainbowDQNInit:
         assert dqn.index == 0
         assert dqn.scores == []
         assert dqn.fitness == []
-        assert dqn.steps == [0]
+        assert dqn.steps == 0
 
         assert isinstance(dqn.actor.encoder, encoder_cls)
         assert isinstance(dqn.actor_target.encoder, encoder_cls)
@@ -213,7 +212,7 @@ class TestRainbowDQNInit:
         assert dqn.index == 0
         assert dqn.scores == []
         assert dqn.fitness == []
-        assert dqn.steps == [0]
+        assert dqn.steps == 0
         # assert dqn.actor_network == actor_network
         assert isinstance(dqn.optimizer.optimizer, optim.Adam)
 
@@ -688,20 +687,23 @@ class TestRainbowDQNTest:
         )
         mean_score = agent.test(env, max_steps=10)
         assert isinstance(mean_score, float)
+        # Fitness must be recorded through the metrics tracker
+        assert list(agent.fitness) == [mean_score]
         agent.clean_up()
 
-    def test_swap_channels_path(
-        self, image_space, discrete_space, monkeypatch, request
-    ):
-        observation_space = request.getfixturevalue("image_space")
-        env = DummyEnv(state_size=observation_space.shape, vect=False, num_envs=1)
-        spy = patch_obs_channels_to_first(monkeypatch, "agilerl.algorithms.dqn_rainbow")
-        agent = RainbowDQN(
-            observation_space=observation_space, action_space=discrete_space
+    def test_swap_channels_path(self, discrete_space, monkeypatch):
+        channels_last_box = spaces.Box(
+            low=0, high=255, shape=(32, 32, 3), dtype=np.uint8
         )
-        mean_score = agent.test(env, swap_channels=True, max_steps=1, loop=1)
+        env = DummyEnv(state_size=channels_last_box.shape, vect=False, num_envs=1)
+        spy = patch_transpose_image_observation(monkeypatch)
+        agent = RainbowDQN(
+            observation_space=channels_last_box, action_space=discrete_space
+        )
+        assert agent.swap_channels is True
+        mean_score = agent.test(env, max_steps=1, loop=1)
         assert isinstance(mean_score, float)
-        assert_swap_channels_called(spy)
+        assert_transpose_image_observation_called(spy)
         agent.clean_up()
 
 
@@ -715,7 +717,7 @@ class TestRainbowDQNClone:
         dqn = DummyRainbowDQN(observation_space, discrete_space)
         dqn.fitness = [200, 200, 200]
         dqn.scores = [94, 94, 94]
-        dqn.steps = [2500]
+        dqn.steps = 2500
         dqn.tensor_attribute = torch.randn(1)
         clone_agent = dqn.clone()
 

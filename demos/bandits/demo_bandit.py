@@ -74,7 +74,6 @@ if __name__ == "__main__":
         tournament_size=2,  # Tournament selection size
         elitism=True,  # Elitism in tournament selection
         population_size=INIT_HP["POP_SIZE"],  # Population size
-        eval_loop=1,  # Evaluate using last N fitness scores
     )
     mutations = Mutations(
         no_mutation=0.4,  # No mutation
@@ -108,9 +107,8 @@ if __name__ == "__main__":
     evo_count = 0
 
     # TRAINING LOOP
-    print("Training...")
     pbar = default_progress_bar(max_steps)
-    while np.less([agent.steps[-1] for agent in pop], max_steps).all():
+    while np.less([agent.steps for agent in pop], max_steps).all():
         for agent in pop:  # Loop through population
             score = 0
             losses = []
@@ -144,7 +142,7 @@ if __name__ == "__main__":
                 agent.regret.append(agent.regret[-1] + 1 - reward)
 
             agent.scores.append(score)
-            agent.steps[-1] += episode_steps
+            agent.steps += episode_steps
             total_steps += episode_steps
             pbar.update(episode_steps // len(pop))
 
@@ -168,21 +166,17 @@ if __name__ == "__main__":
 
         pbar.write(
             f"--- Global steps {total_steps} ---\n"
-            f"Steps: {[agent.steps[-1] for agent in pop]}\n"
+            f"Steps: {[agent.steps for agent in pop]}\n"
             f"Regret: {[agent.regret[-1] for agent in pop]}\n"
             f"Fitnesses: {[f'{fitness:.2f}' for fitness in fitnesses]}\n"
             f"5 fitness avgs: {[f'{np.mean(agent.fitness[-5:]):.2f}' for agent in pop]}\n",
         )
 
-        if pop[0].steps[-1] // evo_steps > evo_count:
+        if pop[0].steps // evo_steps > evo_count:
             # Tournament selection and population mutation
             _, pop = tournament.select(pop)
             pop = mutations.mutation(pop)
             evo_count += 1
-
-        # Update step counter
-        for agent in pop:
-            agent.steps.append(agent.steps[-1])
 
     pbar.close()
     env.close()

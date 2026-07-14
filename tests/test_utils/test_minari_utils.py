@@ -153,16 +153,16 @@ class TestLoadMinariDataset:
         # test load a dataset absent in local
         with pytest.raises(
             FileNotFoundError,
-            match=f"No local Dataset found for dataset id {dataset_id}. check https://minari.farama.org/ "
-            "for more details on remote dataset. For loading a remote dataset assign remote=True",
+            match=f"No local Dataset found for dataset id {dataset_id}. Check https://minari.farama.org/ "
+            "for more details on remote datasets. For loading a remote dataset assign remote=True",
         ):
             minari_utils.load_minari_dataset(dataset_id)
 
         # test load a dataset absent in remote
         with pytest.raises(
             KeyError,
-            match=r"Enter a valid remote Minari Dataset ID. check https://minari.farama.org/ "
-            r"for more details.",
+            match=r"Enter a valid remote Minari Dataset ID\. "
+            r"Check https://minari\.farama\.org/ for more details\.",
         ):
             minari_utils.load_minari_dataset(dataset_id, remote=True)
 

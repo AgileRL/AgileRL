@@ -1,7 +1,7 @@
 .. _LLM_Finetuning_tutorials:
 
-LLM Fine-Tuning Tutorials
-=========================
+LLM Fine-Tuning
+===============
 
 These tutorials provide an introductory guide to using `AgileRL <https://github.com/AgileRL/AgileRL>`_
 for fine-tuning LLMs.

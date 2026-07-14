@@ -9,6 +9,7 @@ from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
 from gymnasium.spaces import Box, Discrete
 from pettingzoo import ParallelEnv
+from tensordict import TensorDict
 from torch import nn, optim
 from torch._dynamo import OptimizedModule
 
@@ -28,11 +29,9 @@ from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
     assert_not_equal_state_dict,
     assert_state_dicts_equal,
+    assert_transpose_image_observation_called,
+    patch_transpose_image_observation,
     skip_torch_compile_on_windows_cpu,
-)
-from tests.helpers.algorithm_coverage import (
-    assert_swap_channels_called,
-    patch_obs_channels_to_first,
 )
 from tests.pz_vector_test_utils import make_sync_multi_agent_vec_env
 
@@ -255,7 +254,16 @@ def accelerated_experiences(
             agent: torch.randn(batch_size, *state_size) for agent in agent_ids
         }
 
-    return states, actions, rewards, next_states, dones
+    return TensorDict(
+        {
+            "obs": TensorDict(states, batch_size=[batch_size]),
+            "action": TensorDict(actions, batch_size=[batch_size]),
+            "reward": TensorDict(rewards, batch_size=[batch_size]),
+            "next_obs": TensorDict(next_states, batch_size=[batch_size]),
+            "done": TensorDict(dones, batch_size=[batch_size]),
+        },
+        batch_size=[batch_size],
+    )
 
 
 @pytest.fixture
@@ -304,7 +312,13 @@ def experiences(
             for agent in agent_ids
         }
 
-    return states, actions, rewards, next_states, dones
+    return {
+        "obs": states,
+        "action": actions,
+        "reward": rewards,
+        "next_obs": next_states,
+        "done": dones,
+    }
 
 
 def no_sync(self):
@@ -372,7 +386,7 @@ class TestMADDPGInit:
         assert maddpg.batch_size == batch_size
         assert maddpg.scores == []
         assert maddpg.fitness == []
-        assert maddpg.steps == [0]
+        assert maddpg.steps == 0
 
         if compile_mode is not None and accelerator is None:
             assert all(
@@ -529,7 +543,7 @@ class TestMADDPGInit:
         assert maddpg.agent_ids == agent_ids
         assert maddpg.scores == []
         assert maddpg.fitness == []
-        assert maddpg.steps == [0]
+        assert maddpg.steps == 0
         expected_optimizer_cls = (
             optim.Adam if accelerator is None else AcceleratedOptimizer
         )
@@ -650,7 +664,7 @@ class TestMADDPGInit:
         assert maddpg.agent_ids == agent_ids
         assert maddpg.scores == []
         assert maddpg.fitness == []
-        assert maddpg.steps == [0]
+        assert maddpg.steps == 0
         expected_optimizer_cls = (
             optim.Adam if accelerator is None else AcceleratedOptimizer
         )
@@ -812,7 +826,7 @@ class TestMADDPGInit:
         assert maddpg.agent_ids == agent_ids
         assert maddpg.scores == []
         assert maddpg.fitness == []
-        assert maddpg.steps == [0]
+        assert maddpg.steps == 0
 
         expected_optimizer_cls = (
             optim.Adam if accelerator is None else AcceleratedOptimizer
@@ -1481,8 +1495,69 @@ class TestMADDPGLearn:
         }
         dones = {agent_id: torch.zeros(batch_size, 1) for agent_id in agent_ids}
 
-        loss = maddpg.learn((states, actions, rewards, next_states, dones))
+        loss = maddpg.learn(
+            {
+                "obs": states,
+                "action": actions,
+                "reward": rewards,
+                "next_obs": next_states,
+                "done": dones,
+            }
+        )
         assert set(loss.keys()) == set(maddpg.shared_agent_ids)
+        maddpg.clean_up()
+
+    def test_grouped_metrics_keyed_by_shared_ids(self, ma_vector_space):
+        """Grouped MADDPG logs losses under group IDs, not raw agent IDs."""
+        agent_ids = ["agent_0", "agent_1", "other_agent_0"]
+        batch_size = 8
+        maddpg = MADDPG(
+            observation_spaces=ma_vector_space,
+            action_spaces=copy.deepcopy(ma_vector_space),
+            agent_ids=agent_ids,
+            device="cpu",
+        )
+        assert maddpg.has_grouped_agents()
+        # Metric keys follow the shared networks, not the raw env agents
+        assert maddpg.metrics.agent_ids == maddpg.shared_agent_ids
+        assert maddpg.metrics.agent_ids == ["agent", "other_agent"]
+
+        states = {
+            agent_id: torch.randn(batch_size, ma_vector_space[idx].shape[0])
+            for idx, agent_id in enumerate(agent_ids)
+        }
+        actions = {
+            agent_id: torch.randn(batch_size, ma_vector_space[idx].shape[0])
+            for idx, agent_id in enumerate(agent_ids)
+        }
+        rewards = {agent_id: torch.randn(batch_size, 1) for agent_id in agent_ids}
+        next_states = {
+            agent_id: torch.randn(batch_size, ma_vector_space[idx].shape[0])
+            for idx, agent_id in enumerate(agent_ids)
+        }
+        dones = {agent_id: torch.zeros(batch_size, 1) for agent_id in agent_ids}
+
+        maddpg.learn(
+            {
+                "obs": states,
+                "action": actions,
+                "reward": rewards,
+                "next_obs": next_states,
+                "done": dones,
+            }
+        )
+
+        # Losses are recorded per shared group, with no raw-agent keys leaking
+        critic_loss = maddpg.metrics._additional_metrics["critic_loss"]
+        assert set(critic_loss.keys()) == set(maddpg.shared_agent_ids)
+        assert "agent_0" not in critic_loss
+        # Each raw agent logs under its group, so the 2-agent "agent" group
+        # accumulates twice as many samples as the single "other_agent" agent
+        assert len(critic_loss["agent"]) == 2 * len(critic_loss["other_agent"])
+        assert all(
+            np.isfinite(maddpg.metrics.get_mean("critic_loss", g))
+            for g in maddpg.shared_agent_ids
+        )
         maddpg.clean_up()
 
     @pytest.mark.gpu
@@ -1702,11 +1777,13 @@ class TestMADDPGTest:
         env.close()
         maddpg.clean_up()
 
-    def test_with_swap_channels_path(
-        self, ma_image_space, ma_discrete_space, monkeypatch
-    ):
+    def test_with_swap_channels_path(self, ma_discrete_space, monkeypatch):
+        channels_last_box = spaces.Box(
+            low=0, high=255, shape=(32, 32, 3), dtype=np.uint8
+        )
+        ma_image_space = [channels_last_box] * 3
         env = DummyMultiEnv(ma_image_space[0], ma_discrete_space)
-        spy = patch_obs_channels_to_first(monkeypatch, "agilerl.algorithms.maddpg")
+        spy = patch_transpose_image_observation(monkeypatch)
         maddpg = MADDPG(
             observation_spaces=ma_image_space,
             action_spaces=ma_discrete_space,
@@ -1714,11 +1791,10 @@ class TestMADDPGTest:
             device="cpu",
             torch_compiler=None,
         )
-        mean_score = maddpg.test(
-            env, swap_channels=True, max_steps=1, loop=1, sum_scores=True
-        )
+        assert maddpg.swap_channels is True
+        mean_score = maddpg.test(env, max_steps=1, loop=1, sum_scores=True)
         assert isinstance(mean_score, float)
-        assert_swap_channels_called(spy)
+        assert_transpose_image_observation_called(spy)
         env.close()
         maddpg.clean_up()
 
@@ -1877,7 +1953,13 @@ class TestMADDPGClone:
         }
         dones = {agent_id: torch.zeros(batch_size, 1) for agent_id in agent_ids}
 
-        experiences = states, actions, rewards, next_states, dones
+        experiences = {
+            "obs": states,
+            "action": actions,
+            "reward": rewards,
+            "next_obs": next_states,
+            "done": dones,
+        }
         maddpg.learn(experiences)
         clone_agent = maddpg.clone()
         assert isinstance(clone_agent, MADDPG)

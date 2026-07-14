@@ -3,20 +3,27 @@ from typing import Any
 
 import numpy as np
 import torch
+from accelerate import Accelerator
 from gymnasium import spaces
 from torch import nn, optim
 from torch.nn.utils import clip_grad_norm_
 
 from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
-from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.algorithms.core.registry import (
+    HyperparameterConfig,
+    NetworkGroup,
+    make_default_hp_config,
+)
 from agilerl.modules.base import EvolvableModule
 from agilerl.networks.q_networks import QNetwork
-from agilerl.typing import GymEnvType, ObservationType
-from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
+from agilerl.typing import ExperiencesType, GymEnvType, ObservationType
+from agilerl.utils.algo_utils import make_safe_deepcopies
 
 
 class CQN(RLAlgorithm):
-    """The CQN algorithm class. CQN paper: https://arxiv.org/abs/2006.04779.
+    """Conservative Q-Learning for Offline Reinforcement Learning.
+
+    Paper: https://arxiv.org/abs/2006.04779
 
     :param observation_space: The observation space of the environment.
     :type observation_space: spaces.Space
@@ -71,7 +78,7 @@ class CQN(RLAlgorithm):
         mut: str | None = None,
         actor_network: EvolvableModule | None = None,
         device: str = "cpu",
-        accelerator: Any | None = None,
+        accelerator: Accelerator | None = None,
         wrap: bool = True,
     ) -> None:
 
@@ -113,6 +120,13 @@ class CQN(RLAlgorithm):
         self.double = double
         self.net_config = net_config
 
+        # Default RL hyperparameters to mutate when doing Evo-HPO
+        self.hp_config = self.hp_config or make_default_hp_config(
+            lr=self.lr,
+            batch_size=self.batch_size,
+            learn_step=self.learn_step,
+        )
+
         if actor_network is not None:
             if not isinstance(actor_network, EvolvableModule):
                 msg = f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule."
@@ -130,8 +144,8 @@ class CQN(RLAlgorithm):
 
             def create_actor() -> QNetwork:
                 return QNetwork(
-                    observation_space=observation_space,
-                    action_space=action_space,
+                    observation_space=self.observation_space,
+                    action_space=self.action_space,
                     device=self.device,
                     **net_config,
                 )
@@ -161,6 +175,9 @@ class CQN(RLAlgorithm):
                 policy=True,
             ),
         )
+
+        # Register metrics to keep track of during training
+        self.metrics.register("loss")
 
     def get_action(
         self,
@@ -213,16 +230,21 @@ class CQN(RLAlgorithm):
 
         return action
 
-    def learn(self, experiences: tuple[torch.Tensor, ...]) -> float:
+    def learn(self, experiences: ExperiencesType) -> float:
         """Update agent network parameters to learn from experiences.
 
-        :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
-        :type obs: list[torch.Tensor[float]]
+        :param experiences: TensorDict of batched observations, actions, rewards, next_observations, dones.
+        :type experiences: tensordict.TensorDict
 
         :return: Loss from learning
         :rtype: float
         """
-        states, actions, rewards, next_states, dones = experiences
+        states = experiences["obs"]
+        actions = experiences["action"]
+        rewards = experiences["reward"]
+        next_states = experiences["next_obs"]
+        dones = experiences["done"]
+
         if self.accelerator is not None:
             actions = actions.to(self.accelerator.device)
             rewards = rewards.to(self.accelerator.device)
@@ -262,7 +284,9 @@ class CQN(RLAlgorithm):
         # soft update target network
         self.soft_update()
 
-        return q1_loss.item()
+        loss = q1_loss.item()
+        self.metrics.log("loss", loss)
+        return loss
 
     def soft_update(self) -> None:
         """Soft updates target network."""
@@ -278,7 +302,6 @@ class CQN(RLAlgorithm):
     def test(
         self,
         env: GymEnvType,
-        swap_channels: bool = False,
         max_steps: int | None = None,
         loop: int = 3,
     ) -> float:
@@ -286,8 +309,6 @@ class CQN(RLAlgorithm):
 
         :param env: The environment to be tested in
         :type env: Gym-style environment
-        :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
-        :type swap_channels: bool, optional
         :param max_steps: Maximum number of testing steps, defaults to None.
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
@@ -305,9 +326,6 @@ class CQN(RLAlgorithm):
                 finished = np.zeros(num_envs)
                 step = 0
                 while not np.all(finished):
-                    if swap_channels:
-                        obs = obs_channels_to_first(obs)
-
                     action_mask = info.get("action_mask", None)
                     action = self.get_action(obs, epsilon=0, action_mask=action_mask)
                     obs, reward, done, trunc, info = env.step(action)
@@ -321,5 +339,5 @@ class CQN(RLAlgorithm):
                             finished[idx] = 1
                 rewards.append(np.mean(completed_episode_scores))
         mean_fit = np.mean(rewards)
-        self.fitness.append(mean_fit)
+        self.metrics.add_fitness(mean_fit)
         return mean_fit

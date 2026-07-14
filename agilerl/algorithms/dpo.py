@@ -21,13 +21,16 @@ from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.protocols import PreTrainedModelProtocol
 from agilerl.typing import ExperiencesType, LLMObsType
 from agilerl.utils.algo_utils import get_experiences_samples
+from agilerl.utils.llm_utils import aggregate_metrics_dict
 
 if HAS_LIGER_KERNEL:
     from agilerl.algorithms.core.llm_ops.fused_loss import LigerDPOWithAlpha
 
 
 class DPO(LLMAlgorithm):
-    """The DPO algorithm class. DPO paper: https://arxiv.org/pdf/2305.18290.
+    """Direct Preference Optimization (DPO).
+
+    Paper: https://arxiv.org/pdf/2305.18290
 
     :param pad_token_id: Pad token id
     :type pad_token_id: int
@@ -82,22 +85,9 @@ class DPO(LLMAlgorithm):
         to ``False`` otherwise). When ``training=False`` the standard
         path is always used regardless of this flag.
     :type use_liger_loss: bool, optional
-    :param fused_loss_chunk_rows: **Liger path only** (``use_liger_loss=True``).
-        Number of *sequences* per chunk for the Liger fused DPO kernel — the DPO
-        preference loss couples a sequence's tokens (it needs the per-sequence
-        summed log-prob), so this kernel chunks over sequences, not tokens, and
-        gives *no* token-level memory bound (peak scales with the longest
-        sequence's ``(seq_len, vocab)`` logits). ``None`` (default) keeps the
-        previous one-sequence-per-chunk behaviour; raise it to trade memory for
-        fewer, larger chunks.
-    :type fused_loss_chunk_rows: int | None, optional
-    :param fused_logprobs_chunk_rows: **Standard (non-liger) path only.** Rows
-        (tokens) per ``(chunk_rows, vocab)`` logit tile when computing per-token
-        log-probs via the fused-linear-logprob path. This is the memory-bounded
-        knob: peak logits memory is ``O(chunk_rows * vocab)`` regardless of
-        batch/sequence length, so it is the way to tune DPO's peak memory by
-        token budget. ``None`` (default) auto-tunes to a ~256 MB fp32 tile.
-    :type fused_logprobs_chunk_rows: int | None, optional
+    :param chunk_rows: Primary chunk-size knob for fused logit tiles used by
+        both standard and Liger paths.
+    :type chunk_rows: int | None, optional
     :param reduce_memory_peak: Deprecated and ignored; previously hinted
         peak-memory batching. Configure ``micro_batch_size_per_gpu`` instead.
     :type reduce_memory_peak: bool, optional
@@ -155,8 +145,7 @@ class DPO(LLMAlgorithm):
         gradient_checkpointing: bool = True,
         torch_compiler: str | None = None,
         use_liger_loss: bool = False,
-        fused_loss_chunk_rows: int | None = None,
-        fused_logprobs_chunk_rows: int | None = None,
+        chunk_rows: int | None = None,
         reduce_memory_peak: bool = False,
         cast_logprobs_to_fp32: bool = True,
         use_separate_reference_adapter: bool = True,
@@ -186,8 +175,7 @@ class DPO(LLMAlgorithm):
             pad_token_id=pad_token_id,
             pad_token=pad_token,
             use_liger_loss=use_liger_loss,
-            fused_loss_chunk_rows=fused_loss_chunk_rows,
-            fused_logprobs_chunk_rows=fused_logprobs_chunk_rows,
+            chunk_rows=chunk_rows,
             lora_config=lora_config,
             model_name=model_name,
             actor_network=actor_network,
@@ -222,6 +210,12 @@ class DPO(LLMAlgorithm):
         if self.wrap:
             self.wrap_models()
 
+        # Register metrics to keep track of during training
+        self.metrics.register("loss")
+        self.metrics.register("chosen_reward")
+        self.metrics.register("rejected_reward")
+        self.metrics.register("reward_margin")
+
     def get_action(
         self,
         obs: LLMObsType,
@@ -255,7 +249,7 @@ class DPO(LLMAlgorithm):
         :type experiences: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
         :param training: Whether the agent is training or not
         :type training: bool
-        :return: Dict with keys ``mean_loss``, ``mean_chosen_reward``, ``mean_rejected_reward``.
+        :return: Dict with keys ``loss``, ``chosen_reward``, ``rejected_reward``.
         :rtype: dict[str, float]
         """
         gc.collect()
@@ -280,8 +274,10 @@ class DPO(LLMAlgorithm):
             == chosen_attention_mask.shape[1]
             == rejected_attention_mask.shape[1]
         ), "All tensors must have the same max length"
+
         max_length = chosen_input_ids.shape[1]
         prompt_lengths: list[int] = experiences["prompt_lengths"]
+
         # Build the response mask on CPU (same device as dataloader tensors).
         prompt_masks = LLMAlgorithm._create_prompt_masks(
             prompt_lengths,
@@ -298,9 +294,9 @@ class DPO(LLMAlgorithm):
         )
         batch_idxs = np.arange(num_samples)
         learn_metrics = {
-            "mean_loss": 0.0,
-            "mean_chosen_reward": 0.0,
-            "mean_rejected_reward": 0.0,
+            "loss": 0.0,
+            "chosen_reward": 0.0,
+            "rejected_reward": 0.0,
         }
         ref_rejected_log_probs, ref_chosen_log_probs = None, None
         if not self.use_liger_loss:
@@ -340,11 +336,27 @@ class DPO(LLMAlgorithm):
                 )
                 if training:
                     self._backward_pass(loss)
-                learn_metrics["mean_loss"] += loss.item()
-                learn_metrics["mean_chosen_reward"] += chosen_reward.mean().item()
-                learn_metrics["mean_rejected_reward"] += rejected_reward.mean().item()
-        updates = num_samples
-        return {key: value / updates for key, value in learn_metrics.items()}
+
+                learn_metrics["loss"] += loss.item()
+                learn_metrics["chosen_reward"] += chosen_reward.mean().item()
+                learn_metrics["rejected_reward"] += rejected_reward.mean().item()
+
+        learn_metrics = {
+            key: value / num_samples for key, value in learn_metrics.items()
+        }
+
+        # Aggregate metrics across GPUs for both train/test paths.
+        agg = aggregate_metrics_dict(self.accelerator, learn_metrics)
+
+        if training:
+            self.metrics.log("loss", agg["loss"])
+            self.metrics.log("chosen_reward", agg["chosen_reward"])
+            self.metrics.log("rejected_reward", agg["rejected_reward"])
+            self.metrics.log(
+                "reward_margin", agg["chosen_reward"] - agg["rejected_reward"]
+            )
+
+        return learn_metrics
 
     def _dpo_loss(
         self,
@@ -614,7 +626,7 @@ class DPO(LLMAlgorithm):
             True,  # compiled
             True,  # use_ref_model
             False,  # average_log_prob (sum, matching _dpo_loss)
-            self.fused_loss_chunk_rows or 1,  # chunk_size (sequences per chunk)
+            self.chunk_rows or 1,  # chunk_size (sequences per chunk)
             "sigmoid",  # loss_type
         )
         # aux = (chosen_logps, rejected_logps, chosen_logits_mean, rejected_logits_mean,
@@ -662,11 +674,11 @@ class DPO(LLMAlgorithm):
             rewards = []
             for _ in range(loop):
                 learn_result = self.learn(prompts, training=False)
-                chosen_reward = learn_result["mean_chosen_reward"]
-                rejected_reward = learn_result["mean_rejected_reward"]
+                chosen_reward = learn_result["chosen_reward"]
+                rejected_reward = learn_result["rejected_reward"]
                 reward_margin = chosen_reward - rejected_reward
                 rewards.append(np.asarray(reward_margin).item())
                 prompts = env.step()
             mean_fit = float(np.mean(rewards))
-        self.fitness.append(mean_fit)
+        self.metrics.add_fitness(mean_fit)
         return np.array(mean_fit)

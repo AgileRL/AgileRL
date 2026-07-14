@@ -7,10 +7,10 @@ from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.algorithms import GRPO
 from agilerl.training.train_llm import finetune_llm_reasoning
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.llm_envs import ReasoningGym
-from agilerl.utils.utils import create_population
 
 if HAS_LLM_DEPENDENCIES:
     from datasets import load_dataset
@@ -144,37 +144,37 @@ def main(init_hp, mut_p):
         ),
     )
 
-    # Define the algorithm kwargs
-    algo_kwargs = {
-        "model_name": MODEL_PATH,
-        "lora_config": LoraConfig(
+    pop = GRPO.population(
+        size=init_hp["POP_SIZE"],
+        accelerator=accelerator,
+        hp_config=hp_config,
+        model_name=MODEL_PATH,
+        lora_config=LoraConfig(
             r=16,
             lora_alpha=64,
             target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
             lora_dropout=0.05,
             bias="none",
         ),
-        "use_vllm": USE_VLLM,
-        "vllm_config": VLLMConfig(sleep_mode=False, max_num_seqs=4),
-        "pad_token_id": tokenizer.pad_token_id,
-        "pad_token": tokenizer.pad_token,
-    }
-
-    pop = create_population(
-        algo=init_hp["ALGO"],
-        net_config=None,
-        INIT_HP=init_hp,
-        hp_config=hp_config,
-        population_size=init_hp["POP_SIZE"],
-        accelerator=accelerator,
-        algo_kwargs=algo_kwargs,
+        use_vllm=USE_VLLM,
+        vllm_config=VLLMConfig(sleep_mode=False, max_num_seqs=4),
+        pad_token_id=tokenizer.pad_token_id,
+        pad_token=tokenizer.pad_token,
+        batch_size=init_hp["BATCH_SIZE"],
+        beta=init_hp["BETA"],
+        lr=init_hp["LR"],
+        clip_coef=init_hp["CLIP_COEF"],
+        max_grad_norm=init_hp["MAX_GRAD_NORM"],
+        update_epochs=init_hp["UPDATE_EPOCHS"],
+        group_size=init_hp["GROUP_SIZE"],
+        temperature=init_hp["TEMPERATURE"],
+        max_model_len=init_hp["MAX_MODEL_LEN"],
     )
 
     tournament = TournamentSelection(
         init_hp["TOURN_SIZE"],
         init_hp["ELITISM"],
         init_hp["POP_SIZE"],
-        init_hp["EVAL_LOOP"],
     )
 
     mutations = Mutations(

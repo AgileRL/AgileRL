@@ -1,7 +1,7 @@
 .. _PettingZoo_tutorials:
 
-PettingZoo Multi-agent Tutorials
-================================
+PettingZoo Multi-agent
+======================
 
 These tutorials provide an introductory guide to using `AgileRL <https://github.com/AgileRL/AgileRL>`_ with
 `PettingZoo <https://pettingzoo.farama.org/>`_. AgileRL's multi-agent algorithms make use of the PettingZoo

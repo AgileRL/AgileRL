@@ -1,5 +1,5 @@
 Evolvable Networks Utils
-=======================
+========================
 
 Model Compilation
 ~~~~~~~~~~~~~~~~~
@@ -47,14 +47,14 @@ Layer Factory Functions
 .. autofunction:: agilerl.utils.evolvable_networks.get_pooling
 
 Weight Initialization
-~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~
 
 .. autofunction:: agilerl.utils.evolvable_networks.layer_init
 
 .. autofunction:: agilerl.utils.evolvable_networks.init_weights_gaussian
 
 Network Creation
-~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~
 
 .. autofunction:: agilerl.utils.evolvable_networks.create_cnn
 
