@@ -1235,6 +1235,79 @@ class TestPPOTest:
         with pytest.raises(ValueError, match="max_turns"):
             ppo.test(DummyMultiTurnEpisodeEnvNoMaxTurns(), loop=1)
 
+    def test_test_method_multiturn_continues_when_not_done(self):
+        """Cover ``action_prompt = next_prompt`` when the episode spans turns."""
+
+        class DummyMultiTurnContinueEnv:
+            max_turns = 2
+
+            def __init__(self):
+                self._step_count = 0
+                self.prompt_a = {
+                    "input_ids": torch.ones(1, 4, dtype=torch.long),
+                    "attention_mask": torch.ones(1, 4, dtype=torch.long),
+                }
+                self.prompt_b = {
+                    "input_ids": torch.ones(1, 5, dtype=torch.long),
+                    "attention_mask": torch.ones(1, 5, dtype=torch.long),
+                }
+
+            def reset(self, seed=None):
+                del seed
+                self._step_count = 0
+                return self.prompt_a, {}
+
+            def step(self, full_completion_ids):
+                del full_completion_ids
+                self._step_count += 1
+                if self._step_count == 1:
+                    return self.prompt_b, 0.5, False, False, {}
+                return {}, 1.0, True, False, {}
+
+            def close(self):
+                return None
+
+        ppo = _cpu_llmppo()
+        completion = torch.ones(1, 6, dtype=torch.long)
+        with patch.object(
+            ppo, "get_action", return_value=ActionResult([completion], None)
+        ) as get_action:
+            out = ppo.test(DummyMultiTurnContinueEnv(), loop=1)
+
+        assert out.shape == ()
+        assert get_action.call_count == 2
+        assert get_action.call_args_list[0].args[0][0]["input_ids"].shape[-1] == 4
+        assert get_action.call_args_list[1].args[0][0]["input_ids"].shape[-1] == 5
+
+    def test_test_method_multiturn_max_turns_from_kwargs(self):
+        class DummyMultiTurnEnvKwargMaxTurns:
+            # Attribute present for Protocol checks; falsy so kwargs wins.
+            max_turns = None
+
+            def reset(self, seed=None):
+                del seed
+                return {
+                    "input_ids": torch.ones(1, 4, dtype=torch.long),
+                    "attention_mask": torch.ones(1, 4, dtype=torch.long),
+                }, {}
+
+            def step(self, full_completion_ids):
+                del full_completion_ids
+                return {}, 1.0, True, False, {}
+
+            def close(self):
+                return None
+
+        ppo = _cpu_llmppo()
+        completion = torch.ones(1, 6, dtype=torch.long)
+        with patch.object(
+            ppo, "get_action", return_value=ActionResult([completion], None)
+        ) as get_action:
+            out = ppo.test(DummyMultiTurnEnvKwargMaxTurns(), loop=1, max_turns=2)
+
+        assert out.shape == ()
+        assert get_action.call_count == 2
+
     def test_test_method_unknown_env_typeerror(self):
         ppo = _cpu_llmppo()
         with pytest.raises(TypeError, match="env must be a ReasoningGym"):

@@ -1842,6 +1842,132 @@ def test_report_metrics_called_on_non_main_process(loop):
         )
 
 
+def test_finetune_llm_reasoning_aligns_completion_shapes_before_learn():
+    """When Liger token-IS needs cross-rank T sync, align before learn()."""
+    mock_agent = _mock_grpo_agent()
+    mock_agent.pad_token_id = 0
+    mock_agent.use_liger_loss = True
+    mock_agent.importance_sampling_level = "token"
+    mock_agent.get_action.return_value = ActionResult(
+        completion_ids=[torch.ones(1, 4, dtype=torch.long)],
+        action_masks=[torch.ones(1, 3, dtype=torch.bool)],
+        sampling_logps=None,
+    )
+
+    mock_env = MagicMock()
+    mock_env.__len__.return_value = 1
+    mock_env.reset.return_value = "prompts"
+    mock_env.step.return_value = ("next", torch.tensor([1.0]))
+    mock_env.data_batch_size_per_gpu = 1
+    mock_env.num_epochs = 0
+
+    acc = MagicMock()
+    acc.is_main_process = True
+    acc.num_processes = 2
+
+    aligned = (
+        torch.ones(1, 6, dtype=torch.long),
+        torch.ones(1, 5, dtype=torch.bool),
+        torch.tensor([1.0]),
+    )
+    with (
+        patch(
+            "agilerl.training.train_llm.default_progress_bar",
+            return_value=MagicMock(),
+        ),
+        patch("agilerl.training.train_llm.init_loggers", return_value=[]),
+        patch("agilerl.training.train_llm.safe_aggregate_metrics", return_value=0.5),
+        patch("agilerl.training.train_llm.save_llm_checkpoint"),
+        patch(
+            "agilerl.training.train_llm.needs_cross_rank_seq_padding",
+            return_value=True,
+        ) as mock_needs,
+        patch(
+            "agilerl.training.train_llm.align_completion_batch_shapes_across_ranks",
+            return_value=aligned,
+        ) as mock_align,
+        patch.object(Population, "report_metrics", autospec=True),
+    ):
+        finetune_llm_reasoning(
+            pop=[mock_agent],
+            env=mock_env,
+            max_steps=1,
+            evaluation_interval=100,
+            verbose=False,
+            accelerator=acc,
+        )
+
+    mock_needs.assert_called()
+    mock_align.assert_called()
+    learn_batch = mock_agent.learn.call_args.args[0]
+    assert learn_batch[0].shape == (1, 6)
+    assert learn_batch[1].shape == (1, 5)
+
+
+def test_finetune_llm_multiturn_aligns_and_pads_turn_ids():
+    """Cross-rank T pad must also extend turn_ids to the padded mask length."""
+    mock_agent = _make_multiturn_mock_agent(spec=GRPO)
+    mock_agent.pad_token_id = 0
+    mock_agent.use_liger_loss = True
+    mock_agent.importance_sampling_level = "token"
+
+    aligned_ids = torch.ones(1, 10, dtype=torch.long)
+    aligned_masks = torch.ones(1, 9, dtype=torch.bool)
+    aligned_rewards = torch.ones(1, 2, dtype=torch.float32)
+    short_turn_ids = torch.zeros(1, 7, dtype=torch.long)
+    rewards_2d = torch.ones(1, 2, dtype=torch.float32)
+
+    acc = MagicMock()
+    acc.is_main_process = True
+    acc.num_processes = 2
+
+    with (
+        patch(
+            "agilerl.training.train_llm.default_progress_bar",
+            return_value=MagicMock(),
+        ),
+        patch("agilerl.training.train_llm.init_loggers", return_value=[]),
+        patch("agilerl.training.train_llm.safe_aggregate_metrics", return_value=0.5),
+        patch("agilerl.training.train_llm.save_llm_checkpoint"),
+        patch("agilerl.training.train_llm.SyncMultiTurnVecEnv"),
+        patch(
+            "agilerl.training.train_llm.collect_rollouts_llm",
+            return_value=_multiturn_collect_return(batch_steps=2),
+        ),
+        patch(
+            "agilerl.training.train_llm.stack_and_pad_experiences",
+            side_effect=[
+                (short_turn_ids,),
+                (rewards_2d,),
+            ],
+        ),
+        patch(
+            "agilerl.training.train_llm.needs_cross_rank_seq_padding",
+            return_value=True,
+        ),
+        patch(
+            "agilerl.training.train_llm.align_completion_batch_shapes_across_ranks",
+            return_value=(aligned_ids, aligned_masks, aligned_rewards),
+        ),
+        patch.object(Population, "report_metrics", autospec=True),
+    ):
+        finetune_llm_multiturn(
+            pop=[mock_agent],
+            env_factory=MagicMock(),
+            max_turns=2,
+            init_hp={"BATCH_SIZE": 1, "ALGO": mock_agent.algo},
+            max_steps=2,
+            evaluation_interval=100,
+            verbose=False,
+            accelerator=acc,
+        )
+
+    assert mock_agent.learn.call_count >= 1
+    turn_ids = mock_agent.learn.call_args.kwargs["turn_ids"]
+    assert turn_ids.shape == (1, 9)
+    assert torch.all(turn_ids[:, 7:] == -1)
+
+
 # ---------------------------------------------------------------------------
 # Module-level: env/env_fn validation tests
 # ---------------------------------------------------------------------------
