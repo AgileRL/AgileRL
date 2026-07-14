@@ -1337,7 +1337,7 @@ wheels = [
 
 [[package]]
 name = "deepspeed"
-version = "0.19.1"
+version = "0.19.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "einops", marker = "(python_full_version < '3.11' and sys_platform == 'win32') or (sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32')" },
@@ -1354,7 +1354,7 @@ dependencies = [
     { name = "torch", marker = "(python_full_version < '3.11' and sys_platform == 'win32') or (sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32')" },
     { name = "tqdm", marker = "(python_full_version < '3.11' and sys_platform == 'win32') or (sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32')" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f0/5f/32c0f354c3fa421bed077a108d24d62ed060c695633092517d63c190094a/deepspeed-0.19.1.tar.gz", hash = "sha256:75013c83cf0032046b34c5c9e1dfd02a5a32bfad41919e199fa30ba6fb950d4d", size = 1697014, upload-time = "2026-05-30T12:55:09.879Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/62/cc/1bd9a0f1545fa57a45f98597a78ef6b39ae1fac1afb3e14c70cb8b02455e/deepspeed-0.19.2.tar.gz", hash = "sha256:7e854b6ebe3d2bfa239f82958372927631c74e5324c7f08f17ce7ff5f6b06969", size = 1756950, upload-time = "2026-06-16T20:53:22.919Z" }
 
 [[package]]
 name = "deprecation"
