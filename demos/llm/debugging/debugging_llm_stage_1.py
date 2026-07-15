@@ -11,14 +11,13 @@ if not HAS_LLM_DEPENDENCIES:
     raise ImportError("LLM dependencies are not installed.")
 
 import torch
-from agilerl.wrappers.gem_wrappers import TokenObservationWrapper
 from config_load import load_debug_config
 from llm_debug_utils import lora_config_from_dict
 from tiny_model import TinyDigitTokenizer, build_tiny_actor_network
 
 from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE
-from agilerl.training import train_llm
-from agilerl.training.train_llm import finetune_llm_multiturn
+from agilerl.llm_envs import TokenObservationWrapper
+from agilerl.training.llm import finetune_llm_multiturn
 from agilerl.utils.llm_utils import create_llm_accelerator, masked_whiten
 from agilerl.utils.probe_envs_llm import ConditionalTargetEnv
 from agilerl.utils.utils import create_population
@@ -181,19 +180,14 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
             max_output_tokens=max_new,
         )
 
-    original_save = train_llm.save_llm_checkpoint
-    train_llm.save_llm_checkpoint = lambda *args, **kwargs: None
-    try:
-        finetune_llm_multiturn(
-            pop=[agent],
-            max_turns=1,
-            init_hp=init_hp,
-            max_steps=int(dbg["max_sample_steps"]),
-            evaluation_interval=int(dbg["evaluation_interval"]),
-            env_factory=env_factory,
-        )
-    finally:
-        train_llm.save_llm_checkpoint = original_save
+    finetune_llm_multiturn(
+        pop=[agent],
+        max_turns=1,
+        init_hp=init_hp,
+        max_steps=int(dbg["max_sample_steps"]),
+        evaluation_interval=int(dbg["evaluation_interval"]),
+        env_factory=env_factory,
+    )
 
     post_acc, post_class = evaluate_accuracy(
         agent, tokenizer, num_episodes=eval_eps, greedy=False

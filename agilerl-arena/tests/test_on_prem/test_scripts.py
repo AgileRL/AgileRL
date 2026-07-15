@@ -54,12 +54,14 @@ class TestShellRunner:
 
 class TestStageFailure:
     def test_formats_stage_named_message(self) -> None:
-        exc = StageFailed("install-docker.sh", 2, "boom details")
+        exc = StageFailed(
+            "install-docker.sh", 2, "install-docker.sh: daemon not running"
+        )
         err = stage_failure("Installing Docker", "manager", exc, index=1, total=7)
         message = str(err)
         assert "Stage 1/7" in message
         assert "Installing Docker" in message
-        assert "boom details" in message
+        assert "install-docker.sh: daemon not running" in message
 
 
 class TestBundleScriptRunner:
@@ -98,7 +100,7 @@ class TestBundleScriptRunner:
     def test_raises_stage_failed_with_captured_output(self, tmp_path: Path) -> None:
         script = tmp_path / "go.sh"
         script.write_text("#!/bin/sh\n", encoding="utf-8")
-        completed = MagicMock(returncode=2, stdout="boom details")
+        completed = MagicMock(returncode=2, stdout="script failed: command not found")
         with (
             patch(
                 "agilerl.arena.on_prem.scripts._shell_runner",
@@ -112,7 +114,7 @@ class TestBundleScriptRunner:
         ):
             BundleScriptRunner(tmp_path, env={}).run("go.sh", [])
         assert excinfo.value.returncode == 2
-        assert excinfo.value.output == "boom details"
+        assert excinfo.value.output == "script failed: command not found"
 
     def test_streams_live_when_verbose(self, tmp_path: Path) -> None:
         script = tmp_path / "go.sh"

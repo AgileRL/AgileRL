@@ -68,12 +68,12 @@ class TestFusedLogprobChunkDispatch:
         assert _FUSED_LOGPROB_COMPILE_STATE["fn"] is not None
 
     def test_compiled_failure_latches_eager_fallback(self):
-        def boom(*args, **kwargs):
+        def _raise_compile_error(*args, **kwargs):
             msg = "triton backend exploded"
             raise RuntimeError(msg)
 
         expected = _fused_logprob_chunk(*_args())
-        with patch("torch.compile", side_effect=lambda fn, **kw: boom):
+        with patch("torch.compile", side_effect=lambda fn, **kw: _raise_compile_error):
             got = _fused_logprob_chunk_dispatch(torch.device("cuda"), *_args())
         assert torch.allclose(got, expected)
         assert _FUSED_LOGPROB_COMPILE_STATE["disabled"] is True

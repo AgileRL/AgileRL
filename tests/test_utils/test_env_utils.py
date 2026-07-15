@@ -47,7 +47,9 @@ class TestGetRewardFn:
 
     def test_import_error_wrapped(self, tmp_path):
         bad_file = tmp_path / "bad.py"
-        bad_file.write_text("raise RuntimeError('boom')\n", encoding="utf-8")
+        bad_file.write_text(
+            "raise RuntimeError('intentional import failure')\n", encoding="utf-8"
+        )
         with pytest.raises(ValueError, match="Error importing reward function"):
             env_utils.get_reward_fn("reward", str(bad_file))
 

@@ -87,16 +87,25 @@ class StdOutLogger(Logger):
     :type pbar: tqdm | None
     """
 
-    def __init__(self, pbar: tqdm | None = None) -> None:
+    def __init__(
+        self, pbar: tqdm | None = None, accelerator: Accelerator | None = None
+    ) -> None:
         self._pbar = pbar
         self._notebook = _is_notebook()
+        self._accelerator = accelerator
 
     def write(self, report: MetricsReport) -> None:
         """Write the metrics report to the console.
 
+        Only the main process emits output; non-main ranks return without
+        printing so distributed runs (where ``report_metrics`` is called on
+        every rank to keep collectives symmetric) don't duplicate the table.
+
         :param report: The metrics report to write.
         :type report: MetricsReport
         """
+        if self._accelerator is not None and not self._accelerator.is_main_process:
+            return
         text = str(report)
         if self._pbar is not None and not self._notebook:
             self._pbar.write(text)

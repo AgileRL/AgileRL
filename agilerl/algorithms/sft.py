@@ -394,4 +394,6 @@ class SFT(LLMAlgorithm):
                 prompts = env.step()
             mean_fit = -float(np.mean(losses))
         self.metrics.add_fitness(mean_fit)
+        if self.accelerator is not None:
+            self.accelerator.wait_for_everyone()
         return np.array(mean_fit)

@@ -36,7 +36,7 @@ Dependencies
     from agilerl.utils.algo_utils import VLLMConfig
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
-    from agilerl.training.train_llm import finetune_llm_reasoning
+    from agilerl.training.llm import finetune_llm_reasoning
     from agilerl.llm_envs import ReasoningGym
 
 Defining Hyperparameters
@@ -325,7 +325,7 @@ The ``Mutations()`` class is used to mutate agents with pre-set probabilities. T
 
 Training and Saving an Agent
 ----------------------------
-The simplest way to train an AgileRL agent is to use the :meth:`finetune_llm_reasoning() <agilerl.training.train_llm.finetune_llm_reasoning>` function.
+The simplest way to train an AgileRL agent is to use the :meth:`finetune_llm_reasoning() <agilerl.training.llm.reasoning.finetune_llm_reasoning>` function.
 
 .. code-block:: python
 
@@ -407,7 +407,7 @@ function and is an example of how we might choose to make use of a population of
     .. code-block:: python
 
         from agilerl.utils.llm_utils import aggregate_metrics_across_gpus
-        from agilerl.training.train_llm import tournament_selection_and_mutation
+        from agilerl.utils.utils import tournament_selection_and_mutation
         from tqdm import trange
         import numpy as np
         import torch

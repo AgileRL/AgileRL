@@ -230,6 +230,7 @@ class TestCollectRolloutsLlmGrpo:
         env = SyncMultiTurnVecEnv(env_factory=env_fn, batch_size=1, group_size=1)
         agent = MagicMock()
         agent.__class__ = GRPO
+        agent.accelerator = None
         agent.get_action.return_value = ActionResult(
             completion_ids=[torch.tensor([[1, 2]], dtype=torch.long)],
             action_masks=None,
@@ -249,6 +250,106 @@ class TestCollectRolloutsLlmGrpo:
         assert call_kwargs["repeat_prompts"] is False
         assert call_kwargs["training"] is True
         env.close()
+
+    def test_early_exit_when_local_trajectories_done(self):
+        """Ranks stop calling get_action once local prompts are None."""
+        env = MagicMock()
+        prompt = {"input_ids": torch.tensor([[1, 2]])}
+        env.reset.return_value = prompt
+        env.step.return_value = None
+        env.get_trajectories.return_value = (
+            [torch.ones(1, 2, dtype=torch.long)],
+            [torch.ones(1, 1, dtype=torch.bool)],
+            [torch.zeros(1, 1, dtype=torch.long)],
+            [torch.ones(1, dtype=torch.float32)],
+            1,
+            None,
+        )
+
+        agent = MagicMock()
+        agent.__class__ = GRPO
+        agent.accelerator = None
+        agent.get_action.return_value = ActionResult(
+            completion_ids=[torch.tensor([[1, 2]], dtype=torch.long)],
+            action_masks=None,
+            sampling_logps=None,
+        )
+
+        collect_rollouts_llm(
+            agent=agent,
+            env=env,
+            n_steps=3,
+            batch_size=1,
+            group_seed=0,
+        )
+
+        assert agent.get_action.call_count == 1
+        assert env.step.call_count == 1
+
+    def test_waits_for_everyone_when_accelerator_present(self):
+        env = MagicMock()
+        env.reset.return_value = None
+        env.get_trajectories.return_value = (
+            [],
+            [],
+            [],
+            [],
+            0,
+            None,
+        )
+        agent = MagicMock()
+        agent.__class__ = GRPO
+        acc = MagicMock()
+        agent.accelerator = acc
+
+        collect_rollouts_llm(
+            agent=agent,
+            env=env,
+            n_steps=2,
+            batch_size=1,
+            group_seed=0,
+        )
+
+        agent.get_action.assert_not_called()
+        acc.wait_for_everyone.assert_called_once()
+
+    def test_non_grpo_get_action_signature(self):
+        """Non-GRPO agents use get_action(prompts, training=True)."""
+        from agilerl.algorithms.ppo_llm import PPO as LLMPPO
+
+        env = MagicMock()
+        prompt = {"input_ids": torch.tensor([[1, 2]])}
+        env.reset.return_value = prompt
+        env.step.return_value = None
+        env.get_trajectories.return_value = (
+            [torch.ones(1, 2, dtype=torch.long)],
+            [torch.ones(1, 1, dtype=torch.bool)],
+            [torch.zeros(1, 1, dtype=torch.long)],
+            [torch.ones(1, dtype=torch.float32)],
+            1,
+            None,
+        )
+
+        agent = MagicMock()
+        agent.__class__ = LLMPPO
+        agent.accelerator = None
+        agent.get_action.return_value = ActionResult(
+            completion_ids=[torch.tensor([[1, 2]], dtype=torch.long)],
+            action_masks=None,
+            sampling_logps=None,
+        )
+
+        collect_rollouts_llm(
+            agent=agent,
+            env=env,
+            n_steps=1,
+            batch_size=1,
+            group_seed=0,
+        )
+
+        agent.get_action.assert_called_once()
+        assert agent.get_action.call_args.kwargs.get("training") is True
+        assert "repeat_prompts" not in agent.get_action.call_args.kwargs
 
 
 class DummyEnv:

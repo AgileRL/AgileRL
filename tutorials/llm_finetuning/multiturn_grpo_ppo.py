@@ -16,7 +16,7 @@ from transformers import AutoTokenizer
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE
-from agilerl.training.train_llm import finetune_llm_multiturn
+from agilerl.training.llm import finetune_llm_multiturn
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import create_llm_accelerator
 from agilerl.llm_envs import TokenObservationWrapper

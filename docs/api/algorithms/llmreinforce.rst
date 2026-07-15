@@ -86,12 +86,12 @@ Training
 --------
 
 Typical training entry points are ``finetune_llm_reasoning`` and
-``finetune_llm_multiturn`` in ``agilerl.training.train_llm``.
+``finetune_llm_multiturn`` in ``agilerl.training.llm.multiturn``.
 
 .. code-block:: python
 
   from datasets import Dataset
-  from agilerl.training.train_llm import (
+  from agilerl.training.llm import (
       finetune_llm_multiturn,
       finetune_llm_reasoning,
   )

@@ -15,7 +15,7 @@ from tiny_model import TinyDigitTokenizer, build_tiny_actor_network
 
 from agilerl.algorithms import LLMPPO
 from agilerl.utils.algo_utils import stack_and_pad_experiences
-from agilerl.utils.llm_utils import ReasoningGym
+from agilerl.llm_envs import ReasoningGym
 
 
 def constant_reward_factory(value: float):

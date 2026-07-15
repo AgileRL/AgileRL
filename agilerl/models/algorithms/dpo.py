@@ -28,6 +28,6 @@ class DPOSpec(LLMAlgorithmSpec):
         :return: Training function
         :rtype: Callable[..., Any]
         """
-        from agilerl.training.train_llm import finetune_llm_preference
+        from agilerl.training.llm import finetune_llm_preference
 
         return finetune_llm_preference

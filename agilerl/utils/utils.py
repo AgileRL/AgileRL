@@ -1411,7 +1411,7 @@ def init_loggers(
     """
     loggers = []
     if verbose:
-        loggers.append(StdOutLogger(pbar))
+        loggers.append(StdOutLogger(pbar, accelerator))
 
     if wb:
         init_wandb_kwargs: dict[str, Any] = {

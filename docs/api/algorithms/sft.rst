@@ -84,7 +84,7 @@ To train an SFT agent on a single SFT gym environment, use the :ref:`finetune_ll
 
 .. code-block:: python
 
-  from agilerl.training.train_llm import finetune_llm_sft
+  from agilerl.training.llm import finetune_llm_sft
 
   finetune_llm_sft(
     pop=[agent],

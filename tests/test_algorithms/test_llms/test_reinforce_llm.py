@@ -994,25 +994,20 @@ class TestREINFORCETest:
 
             def __init__(self):
                 self._step_count = 0
+                self.valid_prompt = {
+                    "input_ids": torch.ones(1, 4, dtype=torch.long),
+                    "attention_mask": torch.ones(1, 4, dtype=torch.long),
+                }
 
             def reset(self, seed=None):
                 del seed
                 self._step_count = 0
-                prompt = {
-                    "input_ids": torch.ones(1, 4, dtype=torch.long),
-                    "attention_mask": torch.ones(1, 4, dtype=torch.long),
-                }
-                return prompt, {}
+                return self.valid_prompt, {}
 
             def step(self, full_completion_ids):
                 del full_completion_ids
                 self._step_count += 1
-                prompt = {
-                    "input_ids": torch.ones(1, 4, dtype=torch.long),
-                    "attention_mask": torch.ones(1, 4, dtype=torch.long),
-                }
-                terminated = self._step_count >= 2
-                return prompt, 1.0, terminated, False, {}
+                return {}, 1.0, True, False, {}
 
             def get_episode_data(self):
                 return (
@@ -1036,8 +1031,83 @@ class TestREINFORCETest:
 
         assert out.shape == ()
         assert out.item() == pytest.approx(1.0)
-        assert get_action.call_count == 4
+        # One real turn per episode (early terminate); no dummy padding turns.
+        assert get_action.call_count == 2
+        for call in get_action.call_args_list:
+            assert call.args[0][0] is env.valid_prompt
         assert rf.fitness[-1] == pytest.approx(1.0)
+
+    def test_test_method_waits_for_everyone(self):
+        class DummyMultiTurnEpisodeEnv:
+            max_turns = 1
+
+            def reset(self, seed=None):
+                del seed
+                return {
+                    "input_ids": torch.ones(1, 4, dtype=torch.long),
+                    "attention_mask": torch.ones(1, 4, dtype=torch.long),
+                }, {}
+
+            def step(self, full_completion_ids):
+                del full_completion_ids
+                return {}, 1.0, True, False, {}
+
+            def close(self):
+                return None
+
+        rf = _cpu_llmreinforce()
+        acc = MagicMock()
+        rf.accelerator = acc
+        completion = torch.ones(1, 6, dtype=torch.long)
+        with patch.object(
+            rf, "get_action", return_value=ActionResult([completion], None)
+        ):
+            rf.test(DummyMultiTurnEpisodeEnv(), loop=1)
+        acc.wait_for_everyone.assert_called()
+
+    def test_test_method_multiturn_continues_when_not_done(self):
+        """Cover prompt update when the episode spans turns."""
+
+        class DummyMultiTurnContinueEnv:
+            max_turns = 2
+
+            def __init__(self):
+                self._step_count = 0
+                self.prompt_a = {
+                    "input_ids": torch.ones(1, 4, dtype=torch.long),
+                    "attention_mask": torch.ones(1, 4, dtype=torch.long),
+                }
+                self.prompt_b = {
+                    "input_ids": torch.ones(1, 5, dtype=torch.long),
+                    "attention_mask": torch.ones(1, 5, dtype=torch.long),
+                }
+
+            def reset(self, seed=None):
+                del seed
+                self._step_count = 0
+                return self.prompt_a, {}
+
+            def step(self, full_completion_ids):
+                del full_completion_ids
+                self._step_count += 1
+                if self._step_count == 1:
+                    return self.prompt_b, 0.5, False, False, {}
+                return {}, 1.0, True, False, {}
+
+            def close(self):
+                return None
+
+        rf = _cpu_llmreinforce()
+        completion = torch.ones(1, 6, dtype=torch.long)
+        with patch.object(
+            rf, "get_action", return_value=ActionResult([completion], None)
+        ) as get_action:
+            out = rf.test(DummyMultiTurnContinueEnv(), loop=1)
+
+        assert out.shape == ()
+        assert get_action.call_count == 2
+        assert get_action.call_args_list[0].args[0][0]["input_ids"].shape[-1] == 4
+        assert get_action.call_args_list[1].args[0][0]["input_ids"].shape[-1] == 5
 
     def test_test_method_unknown_env_typeerror(self):
         rf = _cpu_llmreinforce()

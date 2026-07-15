@@ -1001,6 +1001,25 @@ class TestInitLoggers:
         assert isinstance(loggers[1], CSVLogger)
         mock_sw.assert_called_once()
 
+    def test_stdout_logger_receives_accelerator(self):
+        """StdOutLogger must get the accelerator so non-main ranks skip prints
+        when report_metrics is called on every rank.
+        """
+        from agilerl.logger import StdOutLogger
+
+        acc = MagicMock()
+        pbar = MagicMock()
+        loggers = init_loggers(
+            algo="GRPO",
+            env_name="gsm8k",
+            pbar=pbar,
+            verbose=True,
+            accelerator=acc,
+        )
+        assert len(loggers) == 1
+        assert isinstance(loggers[0], StdOutLogger)
+        assert loggers[0]._accelerator is acc
+
 
 class TestTournamentSelectionAndMutation:
     def test_no_accelerator(self):

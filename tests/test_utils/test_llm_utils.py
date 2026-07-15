@@ -2219,11 +2219,13 @@ class TestPatchFlexAttentionKernelOptions:
         registry, _ = self._install_fake_flex(monkeypatch)
         monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
 
-        def _boom():
+        def _raise_capability_error():
             msg = "no device"
             raise RuntimeError(msg)
 
-        monkeypatch.setattr(torch.cuda, "get_device_capability", _boom)
+        monkeypatch.setattr(
+            torch.cuda, "get_device_capability", _raise_capability_error
+        )
         patch_flex_attention_kernel_options()
         assert "flex_attention" in registry
 
@@ -2458,7 +2460,7 @@ class TestCollectTrainableParamStats:
     def test_introspection_failure_swallowed_as_empty_dict(self):
         class _ExplodingActor:
             def parameters(self):
-                msg = "boom"
+                msg = "parameter introspection failed"
                 raise RuntimeError(msg)
 
         agent = SimpleNamespace(actor=_ExplodingActor())
@@ -2792,3 +2794,244 @@ class TestSavePeftAdapterForVllmRollout:
                 "actor",
                 target_modules=["q_proj"],
             )
+
+
+class TestCrossRankLigerAlign:
+    def test_needs_cross_rank_seq_padding_gates_on_liger_token_is(self):
+        assert not llm_utils_module.needs_cross_rank_seq_padding(
+            SimpleNamespace(use_liger_loss=True, importance_sampling_level="token"),
+            world_size=1,
+        )
+        assert not llm_utils_module.needs_cross_rank_seq_padding(
+            SimpleNamespace(use_liger_loss=False, importance_sampling_level="token"),
+            world_size=2,
+        )
+        assert not llm_utils_module.needs_cross_rank_seq_padding(
+            SimpleNamespace(
+                use_liger_loss=True, importance_sampling_level="trajectory"
+            ),
+            world_size=2,
+        )
+        # Missing attrs: use_liger_loss defaults False; IS level defaults "token".
+        assert not llm_utils_module.needs_cross_rank_seq_padding(
+            SimpleNamespace(),
+            world_size=2,
+        )
+        assert llm_utils_module.needs_cross_rank_seq_padding(
+            SimpleNamespace(use_liger_loss=True, importance_sampling_level="token"),
+            world_size=2,
+        )
+        assert llm_utils_module.needs_cross_rank_seq_padding(
+            SimpleNamespace(use_liger_loss=True),  # default IS level is token
+            world_size=2,
+        )
+
+    def test_allreduce_minmax_int_uses_accelerator_gather(self):
+        acc = MagicMock()
+        acc.device = torch.device("cpu")
+        acc.gather.side_effect = lambda t: torch.tensor([2, 5], dtype=t.dtype)
+
+        min_v, max_v = llm_utils_module.allreduce_minmax_int(3, acc)
+        assert (min_v, max_v) == (2, 5)
+        acc.gather.assert_called_once()
+        gathered_arg = acc.gather.call_args.args[0]
+        assert gathered_arg.tolist() == [3]
+        assert gathered_arg.dtype == torch.long
+
+    def test_pad_completion_batch_to_seq_len_happy_and_noop(self):
+        ids = torch.ones(2, 3, dtype=torch.long)
+        masks = torch.ones(2, 2, dtype=torch.bool)
+
+        same_ids, same_masks = llm_utils_module.pad_completion_batch_to_seq_len(
+            ids, masks, target_seq_len=3, pad_token_id=0
+        )
+        assert same_ids is ids
+        assert same_masks is masks
+
+        pad_ids, pad_masks = llm_utils_module.pad_completion_batch_to_seq_len(
+            ids, masks, target_seq_len=5, pad_token_id=9
+        )
+        assert pad_ids.shape == (2, 5)
+        assert pad_masks.shape == (2, 4)
+        assert torch.all(pad_ids[:, 3:] == 9)
+        assert torch.all(~pad_masks[:, 2:])
+
+    @pytest.mark.parametrize(
+        ("ids", "masks", "target", "match"),
+        [
+            (
+                torch.ones(2, dtype=torch.long),
+                torch.ones(2, 1, dtype=torch.bool),
+                2,
+                "completion_ids must be \\(B, T\\)",
+            ),
+            (
+                torch.ones(2, 3, dtype=torch.long),
+                torch.ones(2, dtype=torch.bool),
+                3,
+                "action_masks must be \\(B, T-1\\)",
+            ),
+            (
+                torch.ones(2, 3, dtype=torch.long),
+                torch.ones(2, 1, dtype=torch.bool),
+                3,
+                "action_masks length",
+            ),
+            (
+                torch.ones(2, 3, dtype=torch.long),
+                torch.ones(2, 2, dtype=torch.bool),
+                2,
+                "target_seq_len",
+            ),
+        ],
+    )
+    def test_pad_completion_batch_to_seq_len_validation_errors(
+        self, ids, masks, target, match
+    ):
+        with pytest.raises(ValueError, match=match):
+            llm_utils_module.pad_completion_batch_to_seq_len(
+                ids, masks, target_seq_len=target, pad_token_id=0
+            )
+
+    def test_pad_completion_batch_to_seq_len_post_pad_shape_guards(self):
+        ids = torch.ones(2, 3, dtype=torch.long)
+        masks = torch.ones(2, 2, dtype=torch.bool)
+
+        with patch(
+            "torch.nn.functional.pad",
+            side_effect=[
+                torch.ones(2, 4, dtype=torch.long),  # wrong T for target=5
+                torch.ones(2, 4, dtype=torch.bool),
+            ],
+        ):
+            with pytest.raises(RuntimeError, match="padded completions shape"):
+                llm_utils_module.pad_completion_batch_to_seq_len(
+                    ids, masks, target_seq_len=5, pad_token_id=0
+                )
+
+        with patch(
+            "torch.nn.functional.pad",
+            side_effect=[
+                torch.ones(2, 5, dtype=torch.long),
+                torch.ones(2, 3, dtype=torch.bool),  # wrong mask len
+            ],
+        ):
+            with pytest.raises(RuntimeError, match="padded masks shape"):
+                llm_utils_module.pad_completion_batch_to_seq_len(
+                    ids, masks, target_seq_len=5, pad_token_id=0
+                )
+
+    def test_align_completion_batch_shapes_pads_short_rank(self):
+        short_ids = [
+            torch.ones(1, 4, dtype=torch.long),
+            torch.ones(1, 3, dtype=torch.long),
+        ]
+        short_mask = [
+            torch.ones(1, 3, dtype=torch.bool),
+            torch.ones(1, 2, dtype=torch.bool),
+        ]
+        rewards = torch.zeros(2, dtype=torch.float32)
+
+        def fake_minmax(value):
+            # After local stack/pad, T=4; pretend peer has T=6.
+            return (4, 6) if value == 4 else (value, value)
+
+        out_ids, out_mask, out_rewards = (
+            llm_utils_module.align_completion_batch_shapes_across_ranks(
+                short_ids,
+                short_mask,
+                rewards,
+                pad_token_id=0,
+                accelerator=MagicMock(),
+                minmax_fn=fake_minmax,
+            )
+        )
+        assert out_ids.shape == (2, 6)
+        assert out_mask.shape == (2, 5)
+        assert out_rewards.shape == (2,)
+        assert torch.all(out_ids[:, 4:] == 0)
+        assert torch.all(~out_mask[:, 3:])
+
+    def test_align_completion_batch_shapes_noop_when_t_already_global_max(self):
+        ids = [torch.ones(1, 4, dtype=torch.long)]
+        masks = [torch.ones(1, 3, dtype=torch.bool)]
+        rewards = torch.zeros(1, dtype=torch.float32)
+
+        def fake_minmax(value):
+            return (value, value)
+
+        out_ids, out_mask, _ = (
+            llm_utils_module.align_completion_batch_shapes_across_ranks(
+                ids,
+                masks,
+                rewards,
+                pad_token_id=0,
+                accelerator=MagicMock(),
+                minmax_fn=fake_minmax,
+            )
+        )
+        assert out_ids.shape == (1, 4)
+        assert out_mask.shape == (1, 3)
+
+    def test_align_completion_batch_shapes_raises_on_b_diverge(self):
+        ids = [torch.ones(1, 3, dtype=torch.long)]
+        masks = [torch.ones(1, 2, dtype=torch.bool)]
+        rewards = torch.zeros(1, dtype=torch.float32)
+
+        def fake_minmax(value):
+            # Local B=1 after stack; pretend peer has B=2.
+            return (1, 2) if value == 1 else (value, value)
+
+        with pytest.raises(RuntimeError, match="row counts diverge"):
+            llm_utils_module.align_completion_batch_shapes_across_ranks(
+                ids,
+                masks,
+                rewards,
+                pad_token_id=0,
+                accelerator=MagicMock(),
+                minmax_fn=fake_minmax,
+            )
+
+    def test_align_completion_batch_shapes_raises_when_t_mismatch_after_sync(self):
+        ids = [torch.ones(1, 4, dtype=torch.long)]
+        masks = [torch.ones(1, 3, dtype=torch.bool)]
+        rewards = torch.zeros(1, dtype=torch.float32)
+
+        def fake_minmax(value):
+            # B agrees; global max T claims 6 while local is 4 and min==max so
+            # we skip padding → assert fires.
+            if value == 1:
+                return (1, 1)
+            return (6, 6)
+
+        with pytest.raises(RuntimeError, match="Cross-rank seq align failed"):
+            llm_utils_module.align_completion_batch_shapes_across_ranks(
+                ids,
+                masks,
+                rewards,
+                pad_token_id=0,
+                accelerator=MagicMock(),
+                minmax_fn=fake_minmax,
+            )
+
+    def test_align_uses_allreduce_minmax_when_minmax_fn_omitted(self):
+        ids = [torch.ones(1, 3, dtype=torch.long)]
+        masks = [torch.ones(1, 2, dtype=torch.bool)]
+        rewards = torch.zeros(1, dtype=torch.float32)
+        acc = MagicMock()
+
+        with patch.object(
+            llm_utils_module,
+            "allreduce_minmax_int",
+            side_effect=lambda value, _acc: (value, value),
+        ) as mock_minmax:
+            out_ids, _, _ = llm_utils_module.align_completion_batch_shapes_across_ranks(
+                ids,
+                masks,
+                rewards,
+                pad_token_id=0,
+                accelerator=acc,
+            )
+        assert out_ids.shape == (1, 3)
+        assert mock_minmax.call_count == 2  # B then T
+        assert mock_minmax.call_args_list[0].args[1] is acc

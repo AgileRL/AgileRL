@@ -115,7 +115,7 @@ Dependencies
     import yaml
     from transformers import AutoTokenizer
     from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE
-    from agilerl.training.train_llm import finetune_llm_multiturn
+    from agilerl.training.llm import finetune_llm_multiturn
     from agilerl.utils.algo_utils import VLLMConfig
     from agilerl.utils.llm_utils import create_llm_accelerator
     from agilerl.llm_envs import TokenObservationWrapper
@@ -128,7 +128,7 @@ All runs use:
 * Environment: ``game:GuessTheNumber-v0-easy``
 * Model: ``Qwen/Qwen2.5-0.5B-Instruct``
 * Wrapper: :class:`TokenObservationWrapper <agilerl.llm_envs.TokenObservationWrapper>`
-* Training loop: :meth:`finetune_llm_multiturn() <agilerl.training.train_llm.finetune_llm_multiturn>`
+* Training loop: :meth:`finetune_llm_multiturn() <agilerl.training.llm.multiturn.finetune_llm_multiturn>`
 * Population size: ``1``
 * Evolution/HPO: disabled
 
@@ -308,7 +308,7 @@ These values are intentionally conservative and align with the shipped configs:
 .. note::
 
    For GRPO, ``batch_size`` and ``group_size`` must satisfy divisibility constraints in
-   :meth:`finetune_llm_multiturn() <agilerl.training.train_llm.finetune_llm_multiturn>`.
+   :meth:`finetune_llm_multiturn() <agilerl.training.llm.multiturn.finetune_llm_multiturn>`.
 
 Train call (no evo/HPO)
 -----------------------

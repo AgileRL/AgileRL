@@ -696,6 +696,8 @@ class REINFORCE(LLMAlgorithm):
         self,
         env: ReasoningGym | MultiTurnEnv,
         loop: int = 1,
+        *args: Any,
+        **kwargs: Any,
     ) -> torch.Tensor:
         """Return fitness (test) score tensor of llm on test sub-set.
 
@@ -730,24 +732,21 @@ class REINFORCE(LLMAlgorithm):
                 for _ in range(loop):
                     prompt_dict, _info = env.reset()
                     terminated, truncated = False, False
-
                     while not terminated and not truncated:
                         completion_ids = self.get_action(
                             [prompt_dict],
                             training=False,
                         ).completion_ids
                         full = completion_ids[0]
-                        prompt_dict, reward, terminated, truncated, _step_info = (
-                            env.step(
-                                full,
-                            )
+                        prompt_dict, reward, terminated, truncated, _info = env.step(
+                            full,
                         )
                         all_rewards.append(
                             torch.tensor(
                                 [float(reward)],
                                 dtype=torch.float32,
                                 device=full.device,
-                            ),
+                            )
                         )
                 reward_tensor = torch.cat(all_rewards)
             else:
@@ -758,6 +757,8 @@ class REINFORCE(LLMAlgorithm):
                 raise TypeError(msg)
         mean_fit = torch.mean(reward_tensor.float()).item()
         self.metrics.add_fitness(mean_fit)
+        if self.accelerator is not None:
+            self.accelerator.wait_for_everyone()
         return np.array(mean_fit)
 
     def _validate_core_args(

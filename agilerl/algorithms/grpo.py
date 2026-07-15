@@ -10,7 +10,9 @@ import numpy as np
 import torch
 
 from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
-from agilerl.utils.llm_utils import calculate_k3_kl
+from agilerl.utils.llm_utils import (
+    calculate_k3_kl,
+)
 
 if TYPE_CHECKING:
     from accelerate import Accelerator
@@ -717,6 +719,8 @@ class GRPO(LLMAlgorithm):
                 raise TypeError(msg)
         mean_fit = torch.mean(reward_tensor).item()
         self.metrics.add_fitness(mean_fit)
+        if self.accelerator is not None:
+            self.accelerator.wait_for_everyone()
         return np.array(mean_fit)
 
     def _validate_core_args(

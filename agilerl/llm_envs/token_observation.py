@@ -408,15 +408,20 @@ class TokenObservationWrapper:
         action_mask = torch.zeros(1, seq_len - 1, dtype=torch.bool)
         turn_ids = torch.full((1, seq_len - 1), -1, dtype=torch.long)
 
+        # Positions covered by model generations (pre-shift). Used below so we
+        # do not strip EOS when ``pad_token_id == eos_token_id`` (common after
+        gen_span = torch.zeros(seq_len, dtype=torch.bool)
         for gen_start, gen_end, tidx in self.turn_boundaries:
             mask_start = gen_start - 1
             mask_end = gen_end - 1
             if mask_start >= 0 and mask_end <= seq_len - 1:
                 action_mask[0, mask_start:mask_end] = True
                 turn_ids[0, mask_start:mask_end] = tidx
+            if 0 <= gen_start < gen_end <= seq_len:
+                gen_span[gen_start:gen_end] = True
 
         if self.pad_id is not None:
-            pad_positions = self.full_ids[0, 1:] == self.pad_id
+            pad_positions = (self.full_ids[0, 1:] == self.pad_id) & ~gen_span[1:]
             action_mask[0, pad_positions] = False
             turn_ids[0, pad_positions] = -1
 

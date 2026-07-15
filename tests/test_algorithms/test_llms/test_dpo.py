@@ -2,7 +2,7 @@ import copy
 import gc
 import tempfile
 from unittest import mock
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -528,6 +528,28 @@ class TestDPOTest:
         assert isinstance(fitness, np.ndarray)
         dpo.clean_up()
         AcceleratorState._reset_state(True)
+
+    def test_dpo_test_method_waits_for_everyone(self):
+        class DummyPreferenceEnv:
+            def eval_mode(self):
+                return contextlib.nullcontext()
+
+            def reset(self):
+                return {"prompts": []}
+
+            def step(self):
+                return {"prompts": []}
+
+        dpo = _make_cpu_dpo_for_branch_tests()
+        acc = MagicMock()
+        dpo.accelerator = acc
+        with patch.object(
+            dpo,
+            "learn",
+            return_value={"chosen_reward": 1.0, "rejected_reward": 0.0},
+        ):
+            dpo.test(DummyPreferenceEnv(), loop=1)
+        acc.wait_for_everyone.assert_called()
 
 
 class TestDPOLigerUnavailableBehaviour:

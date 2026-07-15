@@ -19,8 +19,7 @@ from tiny_model import TinyDigitTokenizer, build_tiny_actor_network
 from transformers import AutoTokenizer
 
 from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE
-from agilerl.training import train_llm
-from agilerl.training.train_llm import finetune_llm_multiturn
+from agilerl.training.llm import finetune_llm_multiturn
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import create_llm_accelerator
 from agilerl.utils.probe_envs_llm import GridNavigationEnv
@@ -28,12 +27,10 @@ from agilerl.utils.utils import create_population
 
 
 def _prompt_dict_from_encoded(
-    tokenizer: Any, prompt_encoded: dict[str, torch.Tensor]
+    prompt_encoded: dict[str, torch.Tensor],
 ) -> dict[str, Any]:
-    del tokenizer
-    input_ids = prompt_encoded["input_ids"]
     return {
-        "input_ids": input_ids,
+        "input_ids": prompt_encoded["input_ids"],
         "attention_mask": prompt_encoded["attention_mask"],
     }
 
@@ -79,7 +76,7 @@ def evaluate_accuracy(
                 )
 
                 for _turn_idx in range(max_turns):
-                    prompt_dict = _prompt_dict_from_encoded(tokenizer, prompt_encoded)
+                    prompt_dict = _prompt_dict_from_encoded(prompt_encoded)
                     prompt_len = prompt_dict["input_ids"].shape[1]
 
                     completion_ids, _ = agent.get_action([prompt_dict], training=False)
@@ -163,9 +160,7 @@ def detailed_eval(
                     actions: list[str] = []
                     success = False
                     for _ in range(max_turns):
-                        prompt_dict = _prompt_dict_from_encoded(
-                            tokenizer, prompt_encoded
-                        )
+                        prompt_dict = _prompt_dict_from_encoded(prompt_encoded)
                         prompt_len = prompt_dict["input_ids"].shape[1]
                         completion_ids, _ = agent.get_action(
                             [prompt_dict],
@@ -297,71 +292,63 @@ def run_single_seed(cfg: dict, seed: int) -> tuple[float, float]:
     if suppress is not None:
         agent.generation_config.suppress_tokens = list(suppress)
 
-    try:
-        pre_acc = evaluate_accuracy(
-            agent, tokenizer, grid_size, max_turns, eval_eps, greedy=False
-        )
-        pre_acc_g = evaluate_accuracy(
-            agent, tokenizer, grid_size, max_turns, eval_eps, greedy=True
-        )
-        print(
-            f"[seed={seed}] pre-train acc (sampled/greedy): {pre_acc:.3f}/{pre_acc_g:.3f}"
-        )
-        print("\nPre-training detailed eval:")
-        detailed_eval(agent, tokenizer, grid_size, max_turns)
+    pre_acc = evaluate_accuracy(
+        agent, tokenizer, grid_size, max_turns, eval_eps, greedy=False
+    )
+    pre_acc_g = evaluate_accuracy(
+        agent, tokenizer, grid_size, max_turns, eval_eps, greedy=True
+    )
+    print(
+        f"[seed={seed}] pre-train acc (sampled/greedy): {pre_acc:.3f}/{pre_acc_g:.3f}"
+    )
+    print("\nPre-training detailed eval:")
+    detailed_eval(agent, tokenizer, grid_size, max_turns)
 
-        def env_factory() -> TokenObservationWrapper:
-            return TokenObservationWrapper(
-                GridNavigationEnv(
-                    grid_size=grid_size,
-                    max_turns=max_turns,
-                    seed=rng.randint(0, 2**31),
-                ),
-                tokenizer,
-                max_turns,
-                tokenizer.pad_token_id,
-                apply_chat_template=False,
-                max_model_len=max_ctx,
-                max_output_tokens=max_new,
-            )
-
-        original_save = train_llm.save_llm_checkpoint
-        train_llm.save_llm_checkpoint = lambda *args, **kwargs: None
-        try:
-            finetune_llm_multiturn(
-                pop=[agent],
+    def env_factory() -> TokenObservationWrapper:
+        return TokenObservationWrapper(
+            GridNavigationEnv(
+                grid_size=grid_size,
                 max_turns=max_turns,
-                init_hp=init_hp,
-                max_steps=int(dbg["max_sample_steps"]),
-                evaluation_interval=int(dbg["evaluation_interval"]),
-                wb=False,
-                save_elite=False,
-                verbose=True,
-                accelerator=accelerator,
-                env_factory=env_factory,
-            )
-        finally:
-            train_llm.save_llm_checkpoint = original_save
+                seed=rng.randint(0, 2**31),
+            ),
+            tokenizer,
+            max_turns,
+            tokenizer.pad_token_id,
+            apply_chat_template=False,
+            max_model_len=max_ctx,
+            max_output_tokens=max_new,
+        )
 
-        post_acc = evaluate_accuracy(
-            agent, tokenizer, grid_size, max_turns, eval_eps, greedy=False
-        )
-        post_acc_g = evaluate_accuracy(
-            agent, tokenizer, grid_size, max_turns, eval_eps, greedy=True
-        )
-        print(
-            f"\n[seed={seed}] post-train acc (sampled/greedy): "
-            f"{post_acc:.3f}/{post_acc_g:.3f}"
-        )
-        print(
-            f"[seed={seed}] improvement (sampled/greedy): "
-            f"{post_acc - pre_acc:+.3f}/{post_acc_g - pre_acc_g:+.3f}"
-        )
-        print("\nPost-training detailed eval:")
-        detailed_eval(agent, tokenizer, grid_size, max_turns)
-        return post_acc - pre_acc, post_acc_g - pre_acc_g
-    finally:
-        pass
+    finetune_llm_multiturn(
+        pop=[agent],
+        max_turns=max_turns,
+        init_hp=init_hp,
+        max_steps=int(dbg["max_sample_steps"]),
+        evaluation_interval=int(dbg["evaluation_interval"]),
+        wb=False,
+        save_elite=False,
+        verbose=True,
+        accelerator=accelerator,
+        env_factory=env_factory,
+    )
+
+    post_acc = evaluate_accuracy(
+        agent, tokenizer, grid_size, max_turns, eval_eps, greedy=False
+    )
+    post_acc_g = evaluate_accuracy(
+        agent, tokenizer, grid_size, max_turns, eval_eps, greedy=True
+    )
+    print(
+        f"\n[seed={seed}] post-train acc (sampled/greedy): "
+        f"{post_acc:.3f}/{post_acc_g:.3f}"
+    )
+    print(
+        f"[seed={seed}] improvement (sampled/greedy): "
+        f"{post_acc - pre_acc:+.3f}/{post_acc_g - pre_acc_g:+.3f}"
+    )
+    print("\nPost-training detailed eval:")
+    detailed_eval(agent, tokenizer, grid_size, max_turns)
+    return post_acc - pre_acc, post_acc_g - pre_acc_g
 
 
 def main(cfg: dict) -> None:

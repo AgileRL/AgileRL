@@ -1,6 +1,6 @@
 ---
 # CISPO quant bench — shrunk variant for a fast learning-signal smoke run on a
-# small dense model (Qwen2.5-1.5B-Instruct) on the easy 4x4 Sudoku env.
+# small dense model (ibm-granite/granite-3.3-2b-base) on the easy 4x4 Sudoku env.
 # Validates the colocated native-sleep path end to end (bnb nf4 trainer + vLLM
 # bitsandbytes rollout, sleep/wake each cycle, trainer base offloaded during
 # rollout). Set algorithm.quantization to none | int8 | nf4 to switch recipe.
@@ -18,13 +18,14 @@ algorithm:
     advantage_granularity: turn
     importance_sampling_level: token
     adv_norm: mean_only
-    filter_zero_adv: true
-    max_output_tokens: 1024
+    filter_zero_adv: false
+    max_output_tokens: 64
     use_liger_loss: true
     use_sequence_packing: true
     vllm_importance_sampling_correction: true
     attn_implementation: flex_attention
     quantization: nf4
+    chunk_rows: 64
     activation_offload: true
     use_vllm: true
     vllm_config:
@@ -35,8 +36,8 @@ algorithm:
 
 environment:
     env_type: multiturn
-    env_name: game:Sudoku-v0-easy
-    max_turns: 8
+    env_name: game:GuessTheNumber-v0-easy
+    max_turns: 5
     max_reward: 1.0
 
 training:

@@ -1118,7 +1118,7 @@ class TestLLMPPOSpec:
         from agilerl.models.algorithms.llmppo import LLMPPOSpec
 
         fn = LLMPPOSpec.get_training_fn(multiturn=True)
-        from agilerl.training.train_llm import finetune_llm_multiturn
+        from agilerl.training.llm import finetune_llm_multiturn
 
         assert fn is finetune_llm_multiturn
 
@@ -1126,7 +1126,7 @@ class TestLLMPPOSpec:
         from agilerl.models.algorithms.llmppo import LLMPPOSpec
 
         fn = LLMPPOSpec.get_training_fn(multiturn=False)
-        from agilerl.training.train_llm import finetune_llm_reasoning
+        from agilerl.training.llm import finetune_llm_reasoning
 
         assert fn is finetune_llm_reasoning
 
@@ -1152,7 +1152,7 @@ class TestLLMREINFORCESpec:
         from agilerl.models.algorithms.llmreinforce import LLMREINFORCESpec
 
         fn = LLMREINFORCESpec.get_training_fn(multiturn=True)
-        from agilerl.training.train_llm import finetune_llm_multiturn
+        from agilerl.training.llm import finetune_llm_multiturn
 
         assert fn is finetune_llm_multiturn
 
@@ -1160,7 +1160,7 @@ class TestLLMREINFORCESpec:
         from agilerl.models.algorithms.llmreinforce import LLMREINFORCESpec
 
         fn = LLMREINFORCESpec.get_training_fn(multiturn=False)
-        from agilerl.training.train_llm import finetune_llm_reasoning
+        from agilerl.training.llm import finetune_llm_reasoning
 
         assert fn is finetune_llm_reasoning
 
@@ -1172,7 +1172,7 @@ class TestCISPOSpec:
         from agilerl.models.algorithms.cispo import CISPOSpec
 
         fn = CISPOSpec.get_training_fn(multiturn=True)
-        from agilerl.training.train_llm import finetune_llm_multiturn
+        from agilerl.training.llm import finetune_llm_multiturn
 
         assert fn is finetune_llm_multiturn
 
@@ -1180,7 +1180,7 @@ class TestCISPOSpec:
         from agilerl.models.algorithms.cispo import CISPOSpec
 
         fn = CISPOSpec.get_training_fn(multiturn=False)
-        from agilerl.training.train_llm import finetune_llm_reasoning
+        from agilerl.training.llm import finetune_llm_reasoning
 
         assert fn is finetune_llm_reasoning
 
@@ -1192,7 +1192,7 @@ class TestGSPOSpec:
         from agilerl.models.algorithms.gspo import GSPOSpec
 
         fn = GSPOSpec.get_training_fn(multiturn=True)
-        from agilerl.training.train_llm import finetune_llm_multiturn
+        from agilerl.training.llm import finetune_llm_multiturn
 
         assert fn is finetune_llm_multiturn
 
@@ -1200,7 +1200,7 @@ class TestGSPOSpec:
         from agilerl.models.algorithms.gspo import GSPOSpec
 
         fn = GSPOSpec.get_training_fn(multiturn=False)
-        from agilerl.training.train_llm import finetune_llm_reasoning
+        from agilerl.training.llm import finetune_llm_reasoning
 
         assert fn is finetune_llm_reasoning
 
@@ -1222,7 +1222,7 @@ class TestSFTSpec:
         from agilerl.models.algorithms.sft import SFTSpec
 
         fn = SFTSpec.get_training_fn()
-        from agilerl.training.train_llm import finetune_llm_sft
+        from agilerl.training.llm import finetune_llm_sft
 
         assert fn is finetune_llm_sft
 
