@@ -6,7 +6,6 @@ from typing import Any
 import numpy as np
 import torch
 from gymnasium import spaces
-from tensordict import TensorDict
 from torch import optim
 from torch.nn.utils import clip_grad_norm_
 
@@ -24,6 +23,7 @@ from agilerl.networks.value_networks import ValueNetwork
 from agilerl.typing import (
     ArrayOrTensor,
     BPTTSequenceType,
+    ExperiencesType,
     GymEnvType,
     SupportedObservationSpace,
 )
@@ -621,20 +621,24 @@ class PPO(RLAlgorithm):
             values_np,
         )
 
-    def learn(self) -> float:
+    def learn(self, experiences: ExperiencesType | None = None) -> float:
         """Update agent network parameters to learn from experiences.
 
+        :param experiences: Optional pre-collected rollout batch. When ``None``
+            (the default), samples are drawn from the agent's internal rollout
+            buffer.
+        :type experiences: ExperiencesType | None
         :return: Mean loss value from training.
         :rtype: float
         """
         if self.recurrent:
             return self._learn_from_rollout_buffer_bptt()
 
-        return self._learn_from_rollout_buffer_flat()
+        return self._learn_from_rollout_buffer_flat(experiences)
 
     def _learn_from_rollout_buffer_flat(
         self,
-        buffer_td_external: TensorDict | None = None,
+        buffer_td_external: ExperiencesType | None = None,
     ) -> float:
         """Learning procedure using flattened samples (no BPTT)."""
         if buffer_td_external is not None:

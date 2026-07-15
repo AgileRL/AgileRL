@@ -225,14 +225,18 @@ class Trainer(ABC):
         raise NotImplementedError(msg)
 
     @abstractmethod
-    def train(self, *args: Any, **kwargs: Any) -> tuple[PopulationT, list[float]]:
+    def train(self) -> tuple[PopulationT, list[float]] | dict[str, Any]:
         """Run the training loop.
 
-        :returns: A tuple of ``(population, fitnesses)`` where
-            *population* is the final evolved population and
-            *fitnesses* contains each agent's fitness from the final
-            evaluation round.
-        :rtype: tuple[PopulationT, list[float]]
+        - :class:`LocalTrainer` runs training locally and returns a tuple of
+          ``(population, fitnesses)`` where *population* is the final evolved
+          population and *fitnesses* contains each agent's fitness from the
+          final evaluation round.
+        - :class:`ArenaTrainer` submits a job to Arena and returns the API
+          response as a ``dict``.
+
+        :returns: The training result, whose type depends on the trainer.
+        :rtype: tuple[PopulationT, list[float]] | dict[str, Any]
         """
         msg = "Trainer subclass must implement train method."
         raise NotImplementedError(msg)
@@ -622,7 +626,6 @@ class LocalTrainer(Trainer):
 
     def train(
         self,
-        *,
         verbose: bool = True,
         save_elite: bool = False,
         elite_path: str | None = None,
@@ -861,7 +864,6 @@ class ArenaTrainer(Trainer):
 
     def train(
         self,
-        *,
         resource_id: str | int | None = None,
         num_nodes: int | None = None,
         project: str | None = None,

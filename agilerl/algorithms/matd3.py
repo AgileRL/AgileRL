@@ -943,9 +943,9 @@ class MATD3(MultiAgentRLAlgorithm):
 
         # Log metrics
         if actor_loss is not None:
-            self.metrics.log("actor_loss", network_id, actor_loss)
+            self.metrics.log("actor_loss", actor_loss, network_id)
 
-        self.metrics.log("critic_loss", network_id, critic_loss)
+        self.metrics.log("critic_loss", critic_loss, network_id)
         return actor_loss, critic_loss
 
     def soft_update(self, net: nn.Module, target: nn.Module) -> None:

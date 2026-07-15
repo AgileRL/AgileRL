@@ -428,7 +428,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         raise NotImplementedError
 
     @abstractmethod
-    def learn(self, experiences: ExperiencesType, **kwargs) -> Any:
+    def learn(self, experiences: ExperiencesType) -> Any:
         """Abstract method for learning the algorithm."""
         raise NotImplementedError
 
@@ -1482,6 +1482,8 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
     :param name: Name of the algorithm, defaults to the class name
     :type name: str | None, optional
     """
+
+    metrics: MultiAgentMetrics
 
     possible_observation_spaces: dict[str, spaces.Space]
     possible_action_spaces: dict[str, spaces.Space]
