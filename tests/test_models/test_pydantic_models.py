@@ -721,6 +721,31 @@ class TestAlgoSpecClassVars:
         mock_algo.load_checkpoint.assert_called_once_with("/some/path")
 
 
+class TestBuildAlgorithmMissingArgsRaise:
+    """build_algorithm overrides reject missing required inputs."""
+
+    def test_rl_spec_requires_spaces_and_index(self):
+        from agilerl.models.algo import RLAlgorithmSpec
+
+        spec = RLAlgorithmSpec(learn_step=1)
+        with pytest.raises(ValueError, match="observation_space"):
+            spec.build_algorithm()
+
+    def test_multi_agent_spec_requires_spaces_and_index(self):
+        from agilerl.models.algo import MultiAgentRLAlgorithmSpec
+
+        spec = MultiAgentRLAlgorithmSpec()
+        with pytest.raises(ValueError, match="observation_spaces"):
+            spec.build_algorithm()
+
+    def test_llm_spec_requires_tokenizer(self):
+        from agilerl.models.algo import LLMAlgorithmSpec
+
+        spec = LLMAlgorithmSpec.__new__(LLMAlgorithmSpec)
+        with pytest.raises(ValueError, match="requires a tokenizer"):
+            spec.build_algorithm()
+
+
 class TestBuildAlgorithmForwardsOnlySetFields:
     """Unset spec fields must fall through to the algorithm's own defaults."""
 

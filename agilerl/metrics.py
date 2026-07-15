@@ -289,6 +289,18 @@ class MultiAgentMetrics(BaseMetrics):
         self.agent_ids: list[str] = list(agent_ids)
         self.scores: list[float] | list[list[float]] = []
 
+    def __eq__(self, other: object) -> bool:
+        """Compare metrics by tracked state, including sub-agent identifiers.
+
+        :param other: Other metrics to compare.
+        :type other: object
+        :returns: True if the metrics are equal, False otherwise.
+        :rtype: bool
+        """
+        if not isinstance(other, MultiAgentMetrics):
+            return NotImplemented
+        return self.agent_ids == other.agent_ids and super().__eq__(other)
+
     def _init_metric(self, name: str) -> None:
         """Initialize storage for a newly registered metric.
 

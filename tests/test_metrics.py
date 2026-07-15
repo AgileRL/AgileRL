@@ -262,6 +262,23 @@ class TestBaseMetricsEquality:
         assert a == b
 
 
+class TestMultiAgentMetricsEquality:
+    def test_equal_same_agent_ids(self):
+        a = MultiAgentMetrics(["a", "b"])
+        b = MultiAgentMetrics(["a", "b"])
+        assert a == b
+
+    def test_not_equal_different_agent_ids(self):
+        a = MultiAgentMetrics(["a", "b"])
+        b = MultiAgentMetrics(["a", "c"])
+        assert a != b
+
+    def test_not_equal_different_type(self):
+        a = MultiAgentMetrics(["a", "b"])
+        assert a.__eq__("not_metrics") is NotImplemented
+        assert a.__eq__(AgentMetrics()) is NotImplemented
+
+
 class TestBaseMetricsRegisterGuard:
     def test_duplicate_scalar_raises(self):
         m = AgentMetrics()
