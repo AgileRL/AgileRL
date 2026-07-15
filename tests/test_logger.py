@@ -59,7 +59,7 @@ class TestOnMainProcess:
         acc.is_main_process = True
 
         def _raise_in_context():
-            msg = "boom"
+            msg = "simulated failure on main process"
             with Logger.on_main_process(acc):
                 raise RuntimeError(msg)
 

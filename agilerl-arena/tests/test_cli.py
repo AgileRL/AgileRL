@@ -189,7 +189,7 @@ class TestArenaClientContextManager:
             upload_timeout=300,
         )
         mock_client.get_current_user.side_effect = ArenaAPIError(
-            "boom", status_code=500
+            "internal server error", status_code=500
         )
         with patch("agilerl.arena.config.build_client", return_value=mock_client):
             with patch("agilerl.arena.config.handle_error") as mock_handle:

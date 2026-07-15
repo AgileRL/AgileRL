@@ -219,7 +219,9 @@ class TestSwarmInstaller:
             patch.object(
                 BundleScriptRunner,
                 "run",
-                side_effect=StageFailed("install-docker.sh", 1, "kaboom"),
+                side_effect=StageFailed(
+                    "install-docker.sh", 1, "docker install failed: daemon not running"
+                ),
             ),
             pytest.raises(ClickException) as excinfo,
         ):
@@ -227,7 +229,7 @@ class TestSwarmInstaller:
         message = str(excinfo.value)
         assert "Stage 1/" in message
         assert "Installing Docker Engine" in message  # human label, not script name
-        assert "kaboom" in message  # captured output surfaced
+        assert "docker install failed: daemon not running" in message
 
     def test_verify_quotes_stack_name(self, api: OnPremApi) -> None:
         inst = SwarmInstaller(
@@ -755,7 +757,9 @@ class TestHelmInstallerExtraPaths:
             patch.object(
                 BundleScriptRunner,
                 "run",
-                side_effect=StageFailed("setup.sh", 1, "boom"),
+                side_effect=StageFailed(
+                    "setup.sh", 1, "setup failed: cluster unreachable"
+                ),
             ),
         ):
             with pytest.raises(ClickException):
@@ -769,7 +773,9 @@ class TestHelmInstallerExtraPaths:
         with patch.object(
             BundleScriptRunner,
             "run",
-            side_effect=StageFailed("validate.sh", 1, "boom"),
+            side_effect=StageFailed(
+                "validate.sh", 1, "validation failed: resources missing"
+            ),
         ):
             with pytest.raises(ClickException):
                 inst.verify(helm_bundle)

@@ -1670,7 +1670,9 @@ class TestInferenceDeployments:
         self, api_key_client
     ):
         original = ArenaAPIError(
-            "boom", status_code=400, cli_hint="Run 'arena login' first."
+            "deployment query failed",
+            status_code=400,
+            cli_hint="Run 'arena login' first.",
         )
         api_key_client._request = MagicMock(side_effect=original)
         with pytest.raises(ArenaAPIError) as exc_info:
@@ -1855,7 +1857,7 @@ class TestGetCliCapabilities:
             with patch.object(
                 api_key_client._http,
                 "request",
-                side_effect=httpx.ConnectError("boom"),
+                side_effect=httpx.ConnectError("connection refused"),
             ):
                 result = api_key_client._get_cli_capabilities(force_refresh=True)
         assert result is None

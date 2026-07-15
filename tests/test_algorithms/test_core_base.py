@@ -2470,8 +2470,10 @@ class TestGetLmHeadParentAndPatch:
 
     def test_patch_restores_on_exception(self) -> None:
         agent, original = self._agent_with_real_lm_head()
-        msg = "boom"
-        with pytest.raises(RuntimeError, match="boom"):
+        msg = "simulated failure inside lm_head patch"
+        with pytest.raises(
+            RuntimeError, match="simulated failure inside lm_head patch"
+        ):
             with agent._patch_lm_head_to_identity():
                 raise RuntimeError(msg)
         assert agent.actor.base_model.model.lm_head is original

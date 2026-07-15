@@ -2219,11 +2219,13 @@ class TestPatchFlexAttentionKernelOptions:
         registry, _ = self._install_fake_flex(monkeypatch)
         monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
 
-        def _boom():
+        def _raise_capability_error():
             msg = "no device"
             raise RuntimeError(msg)
 
-        monkeypatch.setattr(torch.cuda, "get_device_capability", _boom)
+        monkeypatch.setattr(
+            torch.cuda, "get_device_capability", _raise_capability_error
+        )
         patch_flex_attention_kernel_options()
         assert "flex_attention" in registry
 
@@ -2458,7 +2460,7 @@ class TestCollectTrainableParamStats:
     def test_introspection_failure_swallowed_as_empty_dict(self):
         class _ExplodingActor:
             def parameters(self):
-                msg = "boom"
+                msg = "parameter introspection failed"
                 raise RuntimeError(msg)
 
         agent = SimpleNamespace(actor=_ExplodingActor())

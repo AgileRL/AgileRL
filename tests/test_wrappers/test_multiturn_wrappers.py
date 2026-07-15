@@ -1001,7 +1001,7 @@ class TestSearchToolSearch:
 
         def _fail_get(url, params, timeout):
             del url, params, timeout
-            msg = "boom"
+            msg = "search request failed"
             raise RuntimeError(msg)
 
         monkeypatch.setattr("agilerl.llm_envs.requests.get", _fail_get)

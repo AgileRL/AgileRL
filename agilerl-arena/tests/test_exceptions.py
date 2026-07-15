@@ -24,12 +24,12 @@ class TestArenaError:
         assert issubclass(ArenaError, Exception)
 
     def test_can_be_raised_and_caught(self):
-        msg = "boom"
+        msg = "arena operation failed"
 
         def _raise():
             raise ArenaError(msg)
 
-        with pytest.raises(ArenaError, match="boom"):
+        with pytest.raises(ArenaError, match="arena operation failed"):
             _raise()
 
 
