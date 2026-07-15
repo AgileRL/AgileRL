@@ -332,7 +332,8 @@ class MultiAgentMetrics(BaseMetrics):
         :type agent_id: str | None
         """
         if agent_id is None:
-            raise ValueError("agent_id must be provided for multi-agent metrics.")
+            msg = "agent_id must be provided for multi-agent metrics."
+            raise ValueError(msg)
         self._additional_metrics[name][agent_id].append(float(value))
 
     def log_histogram(
