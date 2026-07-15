@@ -3184,21 +3184,81 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             return broadcast_object_list([temp_dir], from_process=0)[0]
         return temp_dir
 
-    def _save_clone_distributed_actor_state(self, work_dir: str) -> None:
-        """Save distributed actor state for ZeRO-2/3 clone workflows.
+    def _uses_quantized_clone_rebuild(self) -> bool:
+        """Whether clone should rebuild the actor from pretrained + BitsAndBytes.
+
+        QLoRA / bitsandbytes bases store packed ``Params4bit`` tensors. A dense
+        ``clone_llm`` shell cannot load those shapes from a DeepSpeed checkpoint,
+        so quantized clones reload the base via ``from_pretrained`` and transfer
+        only adapter (and optimizer) state.
+        """
+        return self.quantization_config is not None
+
+    def _save_clone_adapter_weights(self, work_dir: str) -> None:
+        """Persist PEFT adapters for a quantized rebuild-from-pretrained clone.
+
+        Used when ZeRO-2/3 DeepSpeed sharding is not available (or not needed)
+        to move adapter weights onto a freshly loaded quantized base.
 
         :param work_dir: Shared clone workspace directory.
         :type work_dir: str
         """
+        adapter_dir = f"{work_dir}/adapters"
+        model_ref = self._get_unwrapped_actor()
+        with gather_if_zero3(self.zero_stage, list(model_ref.parameters())):
+            model_ref.save_pretrained(
+                save_directory=adapter_dir,
+                selected_adapters=self.selected_adapters,
+                is_main_process=self.accelerator is None
+                or self.accelerator.is_main_process,
+            )
+        if self.accelerator is not None:
+            self.accelerator.wait_for_everyone()
+
+    def _load_clone_adapter_weights(self, work_dir: str) -> None:
+        """Load PEFT adapters saved by :meth:`_save_clone_adapter_weights`.
+
+        :param work_dir: Shared clone workspace directory.
+        :type work_dir: str
+        """
+        adapter_dir = f"{work_dir}/adapters"
+        for adapter_name in self.selected_adapters:
+            self._load_adapter_weights(adapter_dir, adapter_name)
+
+    def _save_clone_distributed_actor_state(self, work_dir: str) -> None:
+        """Save distributed actor state for ZeRO-2/3 clone workflows.
+
+        Quantized clones also write PEFT adapters when ZeRO stage is below 2 so
+        the rebuild-from-pretrained path can restore LoRA weights without a
+        DeepSpeed module load of packed nf4 base tensors.
+
+        :param work_dir: Shared clone workspace directory.
+        :type work_dir: str
+        """
+        quant_rebuild = self._uses_quantized_clone_rebuild()
+        if quant_rebuild and (
+            self.accelerator is None or self.zero_stage is None or self.zero_stage < 2
+        ):
+            self._save_clone_adapter_weights(work_dir)
+
         if self.accelerator is None or self.zero_stage is None or self.zero_stage < 2:
             return
 
         self.accelerator.wait_for_everyone()
-        self._save_distributed_actor(f"{work_dir}/agent_{self.index}")
+        # Quantized: exclude frozen base so DeepSpeed never round-trips packed
+        # Params4bit into a freshly loaded nf4 shell (adapters + opt only).
+        self._save_distributed_actor(
+            f"{work_dir}/agent_{self.index}",
+            lora_only=quant_rebuild,
+        )
         self.accelerator.wait_for_everyone()
 
     def _create_clone_instance(self) -> Self:
         """Instantiate a clone with cloned actor weights and runtime args.
+
+        Quantized clones pass ``actor_network=None`` so init reloads the base
+        with ``BitsAndBytesConfig`` and re-attaches adapters; adapter weights
+        are restored after ``wrap_models`` via DeepSpeed (ZeRO≥2) or PEFT files.
 
         :return: Newly constructed clone instance.
         :rtype: Self
@@ -3209,7 +3269,13 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         )
         input_args["wrap"] = False
         input_args["clone"] = True
-        input_args["actor_network"] = self._clone_actor_network()
+        if self._uses_quantized_clone_rebuild():
+            # Rebuild via from_pretrained + quantization_config; adapters are
+            # attached because actor_network is None (see _setup_actors).
+            input_args["actor_network"] = None
+            input_args["model_name"] = self.pretrained_model_name_or_path
+        else:
+            input_args["actor_network"] = self._clone_actor_network()
         input_args["accelerator"] = (
             Accelerator() if self.accelerator is not None else None
         )
@@ -3257,6 +3323,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         clone.lr_scheduler = None
         self.lr_scheduler = None
+        sleep_mode = bool(
+            self.use_vllm
+            and self.vllm_config is not None
+            and self.vllm_config.sleep_mode
+        )
         if self.use_vllm:
             original_llm = self.llm
             cloned_llm = clone.llm
@@ -3269,8 +3340,31 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.lr_scheduler = original_lr_scheduler
 
         if self.use_vllm:
-            clone.llm = cloned_llm
-            self.llm = original_llm
+            if sleep_mode:
+                # CuMem is process-global: transfer the single sleep-mode engine
+                # to the clone. Tournament selection cleans up the parent next.
+                clone.llm = original_llm
+                self.llm = None
+                for attr in (
+                    "_vllm_awake",
+                    "_vllm_moved",
+                    "_vllm_lora_loaded",
+                    "_vllm_lora_staging_dir",
+                    "_vllm_lora_staging_dir_is_temp",
+                    "_vllm_rollout_lora_request",
+                    "_vllm_rollout_adapter",
+                    "tp_group",
+                ):
+                    if hasattr(self, attr):
+                        setattr(clone, attr, getattr(self, attr))
+                # Prevent parent ``clean_up`` from deleting the staging dir the
+                # clone still owns.
+                self._vllm_lora_staging_dir = None
+                self._vllm_lora_loaded = False
+                self._vllm_rollout_lora_request = None
+            else:
+                clone.llm = cloned_llm
+                self.llm = original_llm
         return clone
 
     def _restore_clone_optimizer_and_scheduler(self, clone: Self) -> None:
@@ -3291,6 +3385,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def _load_clone_distributed_actor_state(self, clone: Self, work_dir: str) -> None:
         """Load saved distributed actor state into clone for ZeRO-2/3.
 
+        Quantized clones without ZeRO≥2 restore adapters from the PEFT files
+        written by :meth:`_save_clone_distributed_actor_state`.
+
         :param clone: Clone instance receiving distributed actor state.
         :type clone: Self
         :param work_dir: Shared clone workspace directory.
@@ -3300,6 +3397,14 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             clone.accelerator.wait_for_everyone()
             clone._load_distributed_actor(f"{work_dir}/agent_{self.index}")
             clone.accelerator.wait_for_everyone()
+        elif self._uses_quantized_clone_rebuild():
+            clone._load_clone_adapter_weights(work_dir)
+            if self.use_value_head:
+                clone_actor = clone._get_unwrapped_actor()
+                parent_actor = self._get_unwrapped_actor()
+                clone_actor.v_head.load_state_dict(parent_actor.v_head.state_dict())
+            if self.accelerator is not None:
+                self.accelerator.wait_for_everyone()
         elif self.accelerator is not None:
             self.accelerator.wait_for_everyone()
 
@@ -3745,18 +3850,27 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     ) -> None:
         """Build the actor(s), routing through the colocated-vLLM path when enabled.
 
-        ``clone=True`` reuses an already-adapted model (no new adapters);
-        ``clone=False`` attaches AgileRL adapters (``add_adapters = not clone``).
+        ``clone=True`` with a pre-built PEFT ``actor_network`` reuses it (no new
+        adapters). Quantized clones pass ``actor_network=None`` so the base is
+        reloaded with ``BitsAndBytesConfig``; adapters must still be attached
+        before the LoRA-only DeepSpeed / PEFT weight restore.
         """
+        # Rebuild-from-pretrained (actor_network is None) always needs adapters,
+        # including when clone=True for the quantized path.
+        add_adapters = (not clone) or (actor_network is None)
         if self.use_vllm:
-            self._initialize_colocated_vllm_and_actors(actor_network, not clone)
+            self._initialize_colocated_vllm_and_actors(
+                actor_network, add_adapters=add_adapters, clone=clone
+            )
         else:
-            self._initialize_actors(actor_network, not clone)
+            self._initialize_actors(actor_network, add_adapters)
 
     def _initialize_colocated_vllm_and_actors(
         self,
         base_model: PreTrainedModelProtocol | None,
         add_adapters: bool = True,
+        *,
+        clone: bool = False,
     ) -> None:
         """Initialize a colocated vLLM rollout engine + the HF/PEFT trainer.
 
@@ -3779,7 +3893,20 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         loaded from ``pretrained_model_name_or_path``) or a fully-built,
         already-adapted actor copy for a clone (``add_adapters=False``), reused
         as-is.
+
+        **Sleep-mode clones** do not construct a second ``LLM``: CuMem is
+        process-global (one sleep-mode engine per process). The parent's engine
+        is transferred in :meth:`_copy_clone_attributes` after construction.
         """
+        # Sleep-mode CuMem forbids a second in-process engine. Build the
+        # trainer only; ``clone()`` moves the parent's ``llm`` onto this instance.
+        if clone and self.vllm_config is not None and self.vllm_config.sleep_mode:
+            self.llm = None
+            self._initialize_actors(base_model, add_adapters)
+            if self.accelerator is not None:
+                self.accelerator.wait_for_everyone()
+            return
+
         main = self.accelerator is None or self.accelerator.process_index == 0
         if self._trainer_should_load_before_vllm(base_model):
             if main:

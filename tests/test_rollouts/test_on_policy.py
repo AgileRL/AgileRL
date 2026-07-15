@@ -13,7 +13,6 @@ from agilerl.llm_envs import (
     TokenObservationWrapper,
 )
 from agilerl.rollouts.on_policy import (
-    _any_rank_active,
     _collect_rollouts,
     collect_rollouts,
     collect_rollouts_llm,
@@ -212,32 +211,6 @@ class TestCollectRolloutsLlm:
         env.close()
 
 
-class TestAnyRankActive:
-    def test_single_process_returns_local_flag(self):
-        agent = MagicMock()
-        agent.accelerator = None
-        assert _any_rank_active(agent, True) is True
-        assert _any_rank_active(agent, False) is False
-
-        agent.accelerator = MagicMock(num_processes=1)
-        assert _any_rank_active(agent, False) is False
-
-    def test_multi_process_gathers_active_flag(self):
-        agent = MagicMock()
-        acc = MagicMock()
-        acc.num_processes = 2
-        acc.device = torch.device("cpu")
-        acc.gather.side_effect = lambda t: torch.tensor([0, 1], dtype=t.dtype)
-        agent.accelerator = acc
-
-        assert _any_rank_active(agent, False) is True
-        acc.gather.assert_called_once()
-        assert acc.gather.call_args.args[0].tolist() == [0]
-
-        acc.gather.side_effect = lambda t: torch.tensor([0, 0], dtype=t.dtype)
-        assert _any_rank_active(agent, False) is False
-
-
 class TestCollectRolloutsLlmGrpo:
     def test_collect_rollouts_llm_grpo_uses_repeat_prompts_false(self):
         """GRPO must not repeat prompts during on-policy LLM rollout collection."""
@@ -257,6 +230,7 @@ class TestCollectRolloutsLlmGrpo:
         env = SyncMultiTurnVecEnv(env_factory=env_fn, batch_size=1, group_size=1)
         agent = MagicMock()
         agent.__class__ = GRPO
+        agent.accelerator = None
         agent.get_action.return_value = ActionResult(
             completion_ids=[torch.tensor([[1, 2]], dtype=torch.long)],
             action_masks=None,
@@ -277,20 +251,19 @@ class TestCollectRolloutsLlmGrpo:
         assert call_kwargs["training"] is True
         env.close()
 
-    def test_dummy_generation_turn_when_local_finished_peers_active(self):
-        """Idle local rank must still call get_action so collectives stay matched."""
+    def test_early_exit_when_local_trajectories_done(self):
+        """Ranks stop calling get_action once local prompts are None."""
         env = MagicMock()
         prompt = {"input_ids": torch.tensor([[1, 2]])}
         env.reset.return_value = prompt
-        # First step ends the local trajectory; peers remain active for turn 2.
         env.step.return_value = None
         env.get_trajectories.return_value = (
             [torch.ones(1, 2, dtype=torch.long)],
             [torch.ones(1, 1, dtype=torch.bool)],
             [torch.zeros(1, 1, dtype=torch.long)],
             [torch.ones(1, dtype=torch.float32)],
-            1,  # batch_steps
-            None,  # sampling_logps
+            1,
+            None,
         )
 
         agent = MagicMock()
@@ -302,48 +275,46 @@ class TestCollectRolloutsLlmGrpo:
             sampling_logps=None,
         )
 
-        with patch(
-            "agilerl.rollouts.on_policy._any_rank_active",
-            side_effect=[True, True, False],
-        ):
-            collect_rollouts_llm(
-                agent=agent,
-                env=env,
-                n_steps=3,
-                batch_size=1,
-                group_seed=0,
-            )
+        collect_rollouts_llm(
+            agent=agent,
+            env=env,
+            n_steps=3,
+            batch_size=1,
+            group_seed=0,
+        )
 
-        assert agent.get_action.call_count == 2
-        # Second call uses cached last_prompts (dummy turn); env.step only once.
+        assert agent.get_action.call_count == 1
         assert env.step.call_count == 1
-        second_prompts = agent.get_action.call_args_list[1].args[0]
-        assert second_prompts is prompt
 
-    def test_dummy_turn_without_cached_prompts_raises(self):
+    def test_waits_for_everyone_when_accelerator_present(self):
         env = MagicMock()
-        env.reset.return_value = None  # never active locally
+        env.reset.return_value = None
+        env.get_trajectories.return_value = (
+            [],
+            [],
+            [],
+            [],
+            0,
+            None,
+        )
         agent = MagicMock()
         agent.__class__ = GRPO
-        agent.accelerator = None
+        acc = MagicMock()
+        agent.accelerator = acc
 
-        with (
-            patch(
-                "agilerl.rollouts.on_policy._any_rank_active",
-                return_value=True,
-            ),
-            pytest.raises(RuntimeError, match="no cached last_prompts"),
-        ):
-            collect_rollouts_llm(
-                agent=agent,
-                env=env,
-                n_steps=1,
-                batch_size=1,
-                group_seed=0,
-            )
+        collect_rollouts_llm(
+            agent=agent,
+            env=env,
+            n_steps=2,
+            batch_size=1,
+            group_seed=0,
+        )
 
-    def test_dummy_generation_turn_non_grpo_get_action_signature(self):
-        """Non-GRPO agents use get_action(prompts, training=True) on dummy turns."""
+        agent.get_action.assert_not_called()
+        acc.wait_for_everyone.assert_called_once()
+
+    def test_non_grpo_get_action_signature(self):
+        """Non-GRPO agents use get_action(prompts, training=True)."""
         from agilerl.algorithms.ppo_llm import PPO as LLMPPO
 
         env = MagicMock()
@@ -368,23 +339,17 @@ class TestCollectRolloutsLlmGrpo:
             sampling_logps=None,
         )
 
-        with patch(
-            "agilerl.rollouts.on_policy._any_rank_active",
-            side_effect=[True, True, False],
-        ):
-            collect_rollouts_llm(
-                agent=agent,
-                env=env,
-                n_steps=3,
-                batch_size=1,
-                group_seed=0,
-            )
+        collect_rollouts_llm(
+            agent=agent,
+            env=env,
+            n_steps=1,
+            batch_size=1,
+            group_seed=0,
+        )
 
-        assert agent.get_action.call_count == 2
-        # Second call is the dummy turn with cached prompts.
-        assert agent.get_action.call_args_list[1].args[0] is prompt
-        assert agent.get_action.call_args_list[1].kwargs.get("training") is True
-        assert "repeat_prompts" not in agent.get_action.call_args_list[1].kwargs
+        agent.get_action.assert_called_once()
+        assert agent.get_action.call_args.kwargs.get("training") is True
+        assert "repeat_prompts" not in agent.get_action.call_args.kwargs
 
 
 class DummyEnv:

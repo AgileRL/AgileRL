@@ -239,24 +239,6 @@ def collect_rollouts_recurrent(
     return _collect_rollouts(agent, env, n_steps, recurrent=True, **kwargs)
 
 
-def _any_rank_active(agent: Any, local_active: bool) -> bool:
-    """Return True if *any* distributed rank still has active trajectories.
-
-    Keeps the multi-turn rollout loop length identical across ranks so every
-    rank issues the same number of generation collectives.
-    """
-    accelerator = getattr(agent, "accelerator", None)
-    if accelerator is None or int(accelerator.num_processes) <= 1:
-        return local_active
-    flag = torch.tensor(
-        [1 if local_active else 0],
-        device=accelerator.device,
-        dtype=torch.long,
-    )
-    gathered = accelerator.gather(flag)
-    return bool(int(gathered.max().item()) > 0)
-
-
 def collect_rollouts_llm(
     agent: LLMPPO | LLMREINFORCE | GRPO,
     env: SyncMultiTurnVecEnv,
@@ -295,34 +277,25 @@ def collect_rollouts_llm(
         seed=group_seed,
     )
 
-    last_prompts = prompts
+    # Colocated vLLM requires tensor_parallel_size==1, and the per-generate DP
+    # barrier was removed, so ranks may early-exit independently. Rejoin once
+    # at the end before train_llm's cross-rank T align / learn.
     for _turn_idx in range(n_steps):
-        local_active = prompts is not None
-        if not _any_rank_active(agent, local_active):
+        if prompts is None:
             break
-        gen_prompts = prompts if local_active else last_prompts
-        if gen_prompts is None:
-            # Peer ranks are still active (otherwise ``_any_rank_active`` would
-            # have broken). Breaking here would desync get_action collectives
-            # and the subsequent cross-rank T pad before learn().
-            msg = (
-                "Cannot run a dummy generation turn: this rank has no cached "
-                "last_prompts while other ranks still have active trajectories."
-            )
-            raise RuntimeError(msg)
         if isinstance(agent, GRPO):
             action_result = agent.get_action(
-                gen_prompts,
+                prompts,
                 training=True,
                 repeat_prompts=False,
             )
         else:
-            action_result = agent.get_action(gen_prompts, training=True)
-        if local_active:
-            last_prompts = prompts
-            prompts = env.step(
-                action_result.completion_ids, action_result.sampling_logps
-            )
+            action_result = agent.get_action(prompts, training=True)
+        prompts = env.step(action_result.completion_ids, action_result.sampling_logps)
+
+    accelerator = getattr(agent, "accelerator", None)
+    if accelerator is not None:
+        accelerator.wait_for_everyone()
 
     (
         completion_ids_list,

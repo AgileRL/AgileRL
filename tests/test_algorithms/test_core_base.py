@@ -61,9 +61,10 @@ import re
 import shutil
 import sys
 import warnings
+from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import MagicMock, PropertyMock, call, patch
 
 import dill
 import numpy as np
@@ -5024,6 +5025,180 @@ class TestLLMCloneWithDeepSpeed:
         assert result is cloned
 
 
+class TestLLMQuantizedClone:
+    """QLoRA / bitsandbytes clones rebuild the base and transfer LoRA only."""
+
+    def test_create_clone_instance_rebuilds_from_pretrained(self):
+        agent = _make_llm_agent(accelerator=None)
+        agent.quantization_config = MagicMock(name="bnb_config")
+        agent.pretrained_model_name_or_path = "org/model"
+        agent.zero_stage = None
+
+        captured: dict = {}
+
+        def _fake_ctor(*args, **kwargs):
+            captured.update(kwargs)
+            return MagicMock(name="clone_instance")
+
+        with (
+            patch.object(
+                EvolvableAlgorithm,
+                "inspect_attributes",
+                return_value={
+                    "index": 0,
+                    "batch_size": 4,
+                    "lr": 1e-4,
+                    "max_grad_norm": 0.0,
+                    "clone": False,
+                    "calc_position_embeddings": False,
+                    "seed": 42,
+                    "pad_token_id": 0,
+                    "pad_token": "<pad>",
+                    "use_liger_loss": False,
+                    "lora_config": MagicMock(),
+                    "device": "cpu",
+                    "quantization_config": agent.quantization_config,
+                },
+            ),
+            patch.object(
+                LLMAlgorithm,
+                "_clone_actor_network",
+                side_effect=AssertionError("dense clone_llm must not run for quant"),
+            ),
+            patch.object(_RegistryMeta, "__call__", side_effect=_fake_ctor),
+        ):
+            agent._create_clone_instance()
+
+        assert captured["actor_network"] is None
+        assert captured["model_name"] == "org/model"
+        assert captured["clone"] is True
+        assert captured["wrap"] is False
+
+    def test_save_clone_distributed_uses_lora_only_under_zero2(self):
+        acc = _make_mock_accelerator(num_processes=1)
+        agent = _make_llm_agent(accelerator=acc)
+        agent.zero_stage = 2
+        agent.quantization_config = MagicMock(name="bnb_config")
+        agent.index = 0
+
+        with patch.object(LLMAlgorithm, "_save_distributed_actor") as mock_save:
+            agent._save_clone_distributed_actor_state("/tmp/work")
+
+        mock_save.assert_called_once_with("/tmp/work/agent_0", lora_only=True)
+
+    def test_save_clone_without_zero2_writes_peft_adapters(self):
+        agent = _make_llm_agent(accelerator=None)
+        agent.zero_stage = None
+        agent.quantization_config = MagicMock(name="bnb_config")
+
+        with patch.object(LLMAlgorithm, "_save_clone_adapter_weights") as mock_adapters:
+            agent._save_clone_distributed_actor_state("/tmp/work")
+
+        mock_adapters.assert_called_once_with("/tmp/work")
+
+    def test_save_clone_adapter_weights_calls_save_pretrained(self):
+        acc = _make_mock_accelerator(num_processes=1)
+        agent = _make_llm_agent(accelerator=acc)
+        agent.zero_stage = None
+        agent.selected_adapters = ("actor", "reference")
+        model_ref = MagicMock(name="actor")
+
+        with (
+            patch.object(LLMAlgorithm, "_get_unwrapped_actor", return_value=model_ref),
+            patch(
+                "agilerl.algorithms.core.base.gather_if_zero3",
+                return_value=nullcontext(),
+            ),
+        ):
+            agent._save_clone_adapter_weights("/tmp/work")
+
+        model_ref.save_pretrained.assert_called_once_with(
+            save_directory="/tmp/work/adapters",
+            selected_adapters=("actor", "reference"),
+            is_main_process=True,
+        )
+        acc.wait_for_everyone.assert_called()
+
+    def test_load_clone_adapter_weights_iterates_selected_adapters(self):
+        agent = _make_llm_agent(accelerator=None)
+        agent.selected_adapters = ("actor", "reference")
+
+        with patch.object(LLMAlgorithm, "_load_adapter_weights") as mock_load:
+            agent._load_clone_adapter_weights("/tmp/work")
+
+        assert mock_load.call_args_list == [
+            call("/tmp/work/adapters", "actor"),
+            call("/tmp/work/adapters", "reference"),
+        ]
+
+    def test_load_clone_without_zero2_restores_peft_adapters(self):
+        agent = _make_llm_agent(accelerator=None)
+        agent.zero_stage = None
+        agent.quantization_config = MagicMock(name="bnb_config")
+        agent.use_value_head = False
+        clone = MagicMock()
+
+        with patch.object(clone, "_load_clone_adapter_weights") as mock_load:
+            agent._load_clone_distributed_actor_state(clone, "/tmp/work")
+
+        mock_load.assert_called_once_with("/tmp/work")
+
+    def test_load_clone_without_zero2_copies_value_head_and_barrier(self):
+        acc = _make_mock_accelerator(num_processes=1)
+        agent = _make_llm_agent(accelerator=acc)
+        agent.zero_stage = None
+        agent.quantization_config = MagicMock(name="bnb_config")
+        agent.use_value_head = True
+
+        parent_actor = MagicMock(name="parent_actor")
+        parent_v_head_state = {"w": 1.0}
+        parent_actor.v_head.state_dict.return_value = parent_v_head_state
+        clone = MagicMock()
+        clone_actor = MagicMock(name="clone_actor")
+
+        with (
+            patch.object(
+                LLMAlgorithm, "_get_unwrapped_actor", return_value=parent_actor
+            ),
+            patch.object(clone, "_load_clone_adapter_weights"),
+            patch.object(clone, "_get_unwrapped_actor", return_value=clone_actor),
+        ):
+            agent._load_clone_distributed_actor_state(clone, "/tmp/work")
+
+        clone_actor.v_head.load_state_dict.assert_called_once_with(parent_v_head_state)
+        acc.wait_for_everyone.assert_called()
+
+    def test_setup_actors_attaches_adapters_when_rebuild_from_pretrained(self):
+        agent = _make_llm_agent(accelerator=None, clone=True)
+        agent.use_vllm = False
+
+        with patch.object(LLMAlgorithm, "_initialize_actors") as mock_init:
+            agent._setup_actors(None, clone=True)
+
+        mock_init.assert_called_once_with(None, True)
+
+    def test_setup_actors_skips_adapters_for_dense_peft_clone(self):
+        agent = _make_llm_agent(accelerator=None, clone=True)
+        agent.use_vllm = False
+        peft_net = MagicMock(name="peft_actor")
+
+        with patch.object(LLMAlgorithm, "_initialize_actors") as mock_init:
+            agent._setup_actors(peft_net, clone=True)
+
+        mock_init.assert_called_once_with(peft_net, False)
+
+    def test_setup_actors_routes_quant_clone_through_colocated_vllm(self):
+        agent = _make_llm_agent(accelerator=None, clone=True)
+        agent.use_vllm = True
+
+        with patch.object(
+            LLMAlgorithm, "_initialize_colocated_vllm_and_actors"
+        ) as mock_vllm:
+            agent._setup_actors(None, clone=True)
+
+        mock_vllm.assert_called_once_with(None, add_adapters=True, clone=True)
+
+
 class TestLLMCloneWithVllm:
     """clone preserves vllm references during attribute copying."""
 
@@ -5078,6 +5253,74 @@ class TestLLMCloneWithVllm:
             result = LLMAlgorithm.clone(agent, index=2)
         assert result is cloned
         assert agent.llm is not None
+
+    def test_clone_sleep_mode_transfers_vllm_engine(self):
+        """Sleep-mode CuMem is process-global: clone must reuse the parent's llm."""
+        from agilerl.utils.algo_utils import VLLMConfig
+
+        agent = _make_llm_agent(accelerator=None, clone=True)
+        agent.accelerator = None
+        agent.zero_stage = -1
+        agent.use_vllm = True
+        agent.vllm_config = VLLMConfig(sleep_mode=True)
+        parent_llm = MagicMock(name="parent_llm")
+        agent.llm = parent_llm
+        agent._vllm_awake = False
+        agent._vllm_moved = True
+        agent._vllm_lora_loaded = True
+        agent._vllm_lora_staging_dir = MagicMock(name="staging")
+        agent._vllm_lora_staging_dir_is_temp = True
+        agent._vllm_rollout_lora_request = MagicMock(name="lora_req")
+        agent.lr_scheduler = MagicMock()
+        agent.lr_scheduler.state_dict.return_value = {"step": 0}
+        agent.optimizer.optimizer.state_dict.return_value = {}
+
+        cloned = MagicMock()
+        cloned.accelerator = None
+        cloned.lr_scheduler = MagicMock()
+        cloned.optimizer = MagicMock()
+        cloned.optimizer.optimizer = MagicMock()
+        cloned.llm = None  # sleep-mode clone skips LLM construction
+        cloned.use_vllm = True
+
+        with (
+            patch(
+                "agilerl.algorithms.core.base.clone_tensors_for_torch_save",
+                return_value={},
+                create=True,
+            ),
+            patch("agilerl.algorithms.core.base.clone_llm", return_value=MagicMock()),
+            patch.object(
+                EvolvableAlgorithm,
+                "inspect_attributes",
+                return_value={
+                    "index": 0,
+                    "batch_size": 4,
+                    "lr": 1e-4,
+                    "max_grad_norm": 0.0,
+                    "clone": True,
+                    "calc_position_embeddings": False,
+                    "seed": 42,
+                    "pad_token_id": 0,
+                    "pad_token": "<pad>",
+                    "use_liger_loss": False,
+                    "lora_config": MagicMock(),
+                    "actor_network": MagicMock(),
+                    "device": "cpu",
+                },
+            ),
+            patch.object(EvolvableAlgorithm, "copy_attributes", return_value=cloned),
+            patch.object(_RegistryMeta, "__call__", return_value=cloned),
+            patch.object(LLMAlgorithm, "wrap_models"),
+        ):
+            result = LLMAlgorithm.clone(agent, index=2)
+
+        assert result is cloned
+        assert cloned.llm is parent_llm
+        assert agent.llm is None
+        assert agent._vllm_lora_staging_dir is None
+        assert cloned._vllm_moved is True
+        assert cloned._vllm_lora_staging_dir is not None
 
 
 class TestLLMInitializeActors:
