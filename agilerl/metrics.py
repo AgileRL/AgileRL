@@ -315,7 +315,7 @@ class MultiAgentMetrics(BaseMetrics):
             for agent_id in self.agent_ids
         }
 
-    def log(self, name: str, value: float, agent_id: str = "") -> None:
+    def log(self, name: str, value: float, agent_id: str) -> None:
         """Append a value to the accumulator for a registered metric and sub-agent.
 
         Example:
@@ -333,7 +333,7 @@ class MultiAgentMetrics(BaseMetrics):
         """
         self._additional_metrics[name][agent_id].append(float(value))
 
-    def log_histogram(self, name: str, values: np.ndarray, agent_id: str = "") -> None:
+    def log_histogram(self, name: str, values: np.ndarray, agent_id: str) -> None:
         """Extend the accumulator with raw sample values for a histogram metric.
 
         :param name: Previously registered non-scalar metric name.
