@@ -142,6 +142,14 @@ class TestMultiAgentMetricsLog:
         assert m._additional_metrics["loss"]["a"] == [0.1, 0.3]
         assert m._additional_metrics["loss"]["b"] == [0.2]
 
+    def test_log_requires_agent_id(self):
+        m = MultiAgentMetrics(["a", "b"])
+        m.register("loss")
+        with pytest.raises(
+            ValueError, match="agent_id must be provided for multi-agent metrics"
+        ):
+            m.log("loss", 0.1)
+
     def test_log_histogram_per_agent(self):
         m = MultiAgentMetrics(["a", "b"])
         m.register_histogram("dist")
