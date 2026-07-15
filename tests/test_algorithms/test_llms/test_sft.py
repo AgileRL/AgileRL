@@ -2,6 +2,7 @@ import copy
 import gc
 import tempfile
 from unittest import mock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -511,6 +512,44 @@ class TestSFTTest:
         assert len(sft.fitness) == 1
         sft.clean_up()
         AcceleratorState._reset_state(True)
+
+    def test_sft_test_method_waits_for_everyone(self):
+        import contextlib
+
+        class DummySFTEnv:
+            def eval_mode(self):
+                return contextlib.nullcontext()
+
+            def reset(self):
+                return {"prompts": []}
+
+            def step(self):
+                return {"prompts": []}
+
+        sft = SFT(
+            actor_network=create_module(
+                input_size=10, max_tokens=20, vocab_size=100, device="cpu"
+            ),
+            pad_token_id=99,
+            pad_token="<pad>",
+            lora_config=LoraConfig(
+                r=4,
+                lora_alpha=16,
+                target_modules=["linear_1"],
+                task_type="CAUSAL_LM",
+                lora_dropout=0.05,
+            ),
+            accelerator=None,
+            device="cpu",
+            micro_batch_size_per_gpu=1,
+            use_liger_loss=False,
+        )
+        acc = MagicMock()
+        sft.accelerator = acc
+        with patch.object(sft, "learn", return_value={"loss": 1.0}):
+            sft.test(DummySFTEnv(), loop=1)
+        acc.wait_for_everyone.assert_called()
+        sft.clean_up()
 
 
 class TestSFTLigerUnavailableBehaviour:

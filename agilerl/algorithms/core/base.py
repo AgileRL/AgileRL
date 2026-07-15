@@ -4946,9 +4946,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             for max_output_token in all_max_output_tokens
         ]
 
-        if self.accelerator is not None:
-            self.accelerator.wait_for_everyone()
-
         generate_kwargs: dict[str, Any] = {
             "sampling_params": sampling_params,
             "use_tqdm": False,

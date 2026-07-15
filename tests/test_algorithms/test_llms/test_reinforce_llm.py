@@ -1007,8 +1007,6 @@ class TestREINFORCETest:
             def step(self, full_completion_ids):
                 del full_completion_ids
                 self._step_count += 1
-                # Terminate early and return empty obs so dummy turns must
-                # replay the last valid prompt rather than feeding ``{}``.
                 return {}, 1.0, True, False, {}
 
             def get_episode_data(self):
@@ -1033,17 +1031,15 @@ class TestREINFORCETest:
 
         assert out.shape == ()
         assert out.item() == pytest.approx(1.0)
-        # max_turns * loop, including dummy turns after early termination.
-        assert get_action.call_count == 4
+        # One real turn per episode (early terminate); no dummy padding turns.
+        assert get_action.call_count == 2
         for call in get_action.call_args_list:
             assert call.args[0][0] is env.valid_prompt
         assert rf.fitness[-1] == pytest.approx(1.0)
 
-    def test_test_method_multiturn_requires_max_turns(self):
-        class DummyMultiTurnEpisodeEnvNoMaxTurns:
-            # Present for Protocol isinstance checks; invalid value triggers
-            # the fixed-length eval loop guard.
-            max_turns = None
+    def test_test_method_waits_for_everyone(self):
+        class DummyMultiTurnEpisodeEnv:
+            max_turns = 1
 
             def reset(self, seed=None):
                 del seed
@@ -1060,11 +1056,17 @@ class TestREINFORCETest:
                 return None
 
         rf = _cpu_llmreinforce()
-        with pytest.raises(ValueError, match="max_turns"):
-            rf.test(DummyMultiTurnEpisodeEnvNoMaxTurns(), loop=1)
+        acc = MagicMock()
+        rf.accelerator = acc
+        completion = torch.ones(1, 6, dtype=torch.long)
+        with patch.object(
+            rf, "get_action", return_value=ActionResult([completion], None)
+        ):
+            rf.test(DummyMultiTurnEpisodeEnv(), loop=1)
+        acc.wait_for_everyone.assert_called()
 
     def test_test_method_multiturn_continues_when_not_done(self):
-        """Cover ``action_prompt = next_prompt`` when the episode spans turns."""
+        """Cover prompt update when the episode spans turns."""
 
         class DummyMultiTurnContinueEnv:
             max_turns = 2
@@ -1106,35 +1108,6 @@ class TestREINFORCETest:
         assert get_action.call_count == 2
         assert get_action.call_args_list[0].args[0][0]["input_ids"].shape[-1] == 4
         assert get_action.call_args_list[1].args[0][0]["input_ids"].shape[-1] == 5
-
-    def test_test_method_multiturn_max_turns_from_kwargs(self):
-        class DummyMultiTurnEnvKwargMaxTurns:
-            # Attribute present for Protocol checks; falsy so kwargs wins.
-            max_turns = None
-
-            def reset(self, seed=None):
-                del seed
-                return {
-                    "input_ids": torch.ones(1, 4, dtype=torch.long),
-                    "attention_mask": torch.ones(1, 4, dtype=torch.long),
-                }, {}
-
-            def step(self, full_completion_ids):
-                del full_completion_ids
-                return {}, 1.0, True, False, {}
-
-            def close(self):
-                return None
-
-        rf = _cpu_llmreinforce()
-        completion = torch.ones(1, 6, dtype=torch.long)
-        with patch.object(
-            rf, "get_action", return_value=ActionResult([completion], None)
-        ) as get_action:
-            out = rf.test(DummyMultiTurnEnvKwargMaxTurns(), loop=1, max_turns=2)
-
-        assert out.shape == ()
-        assert get_action.call_count == 2
 
     def test_test_method_unknown_env_typeerror(self):
         rf = _cpu_llmreinforce()

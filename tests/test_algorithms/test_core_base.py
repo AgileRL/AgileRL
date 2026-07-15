@@ -5869,7 +5869,7 @@ class TestLLMGenerateWithVllmColocateFullPaths:
 
 
 class TestLLMGenerateWithVllmColocateAccelerator:
-    """_generate_with_vllm_colocate waits for all processes with accelerator."""
+    """_generate_with_vllm_colocate does not world-barrier before generate."""
 
     def test_generate_with_vllm_colocate_with_accelerator(self):
         acc = _make_mock_accelerator()
@@ -5914,7 +5914,7 @@ class TestLLMGenerateWithVllmColocateAccelerator:
             completion_ids, _action_masks, _ = agent._generate_with_vllm_colocate(
                 prompts, group_size=2, temperature=0.9
             )
-        acc.wait_for_everyone.assert_called()
+        acc.wait_for_everyone.assert_not_called()
         assert len(completion_ids) == 1
 
 

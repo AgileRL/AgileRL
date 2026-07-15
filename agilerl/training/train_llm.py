@@ -385,8 +385,6 @@ def finetune_llm_reasoning(
         if (i + 1) % evaluation_interval == 0:
             for idx, agent in enumerate(population.agents):
                 agent.test(envs[idx] if uses_env_fn else envs[0])
-            if accelerator is not None:
-                accelerator.wait_for_everyone()
 
         # Report progress. ``report_metrics`` runs collective ops (logger
         # barriers + gather) so it MUST run on every rank; console output is
@@ -626,9 +624,6 @@ def finetune_llm_preference(
             for idx, agent in enumerate(population.agents):
                 agent.test(envs[idx] if uses_env_fn else envs[0])
 
-            if accelerator is not None:
-                accelerator.wait_for_everyone()
-
         # Report progress. ``report_metrics`` runs collective ops (logger
         # barriers + gather) so it MUST run on every rank; console output is
         # guarded inside the loggers.
@@ -849,9 +844,6 @@ def finetune_llm_sft(
         if (i + 1) % evaluation_interval == 0:
             for agent in population.agents:
                 agent.test(env)
-
-            if accelerator is not None:
-                accelerator.wait_for_everyone()
 
         # Report progress. ``report_metrics`` runs collective ops (logger
         # barriers + gather) so it MUST run on every rank; console output is

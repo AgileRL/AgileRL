@@ -728,46 +728,26 @@ class REINFORCE(LLMAlgorithm):
                     rewards.append(reward)
                 reward_tensor = torch.cat(rewards)
             elif isinstance(env, MultiTurnEnv):
-                max_turns = getattr(env, "max_turns", None) or kwargs.get(
-                    "max_turns", None
-                )
-                if not isinstance(max_turns, int) or max_turns < 1:
-                    msg = (
-                        "MultiTurnEnv must define a positive integer "
-                        "'max_turns' (via the env attribute or the "
-                        f"'max_turns' kwarg); got {max_turns!r}. This is "
-                        "required to keep the get_action collective "
-                        "schedule symmetric across ranks."
-                    )
-                    raise ValueError(msg)
                 all_rewards: list[torch.Tensor] = []
                 for _ in range(loop):
-                    action_prompt, _info = env.reset()
-                    done = False
-                    for _ in range(max_turns):
+                    prompt_dict, _info = env.reset()
+                    terminated, truncated = False, False
+                    while not terminated and not truncated:
                         completion_ids = self.get_action(
-                            [action_prompt],
+                            [prompt_dict],
                             training=False,
                         ).completion_ids
-                        if not done:
-                            full = completion_ids[0]
-                            (
-                                next_prompt,
-                                reward,
-                                terminated,
-                                truncated,
-                                _info,
-                            ) = env.step(full)
-                            all_rewards.append(
-                                torch.tensor(
-                                    [float(reward)],
-                                    dtype=torch.float32,
-                                    device=full.device,
-                                )
+                        full = completion_ids[0]
+                        prompt_dict, reward, terminated, truncated, _info = env.step(
+                            full,
+                        )
+                        all_rewards.append(
+                            torch.tensor(
+                                [float(reward)],
+                                dtype=torch.float32,
+                                device=full.device,
                             )
-                            done = terminated or truncated
-                            if not done:
-                                action_prompt = next_prompt
+                        )
                 reward_tensor = torch.cat(all_rewards)
             else:
                 msg = (
@@ -777,6 +757,8 @@ class REINFORCE(LLMAlgorithm):
                 raise TypeError(msg)
         mean_fit = torch.mean(reward_tensor.float()).item()
         self.metrics.add_fitness(mean_fit)
+        if self.accelerator is not None:
+            self.accelerator.wait_for_everyone()
         return np.array(mean_fit)
 
     def _validate_core_args(
