@@ -386,9 +386,7 @@ def finetune_llm_reasoning(
             for idx, agent in enumerate(population.agents):
                 agent.test(envs[idx] if uses_env_fn else envs[0])
 
-        # Report progress. ``report_metrics`` runs collective ops (logger
-        # barriers + gather) so it MUST run on every rank; console output is
-        # guarded inside the loggers.
+        # Report progress
         if accelerator is None or accelerator.is_main_process:
             increment = min(effective_data_batch_size, max_steps - displayed_steps)
             if increment > 0:
@@ -624,9 +622,7 @@ def finetune_llm_preference(
             for idx, agent in enumerate(population.agents):
                 agent.test(envs[idx] if uses_env_fn else envs[0])
 
-        # Report progress. ``report_metrics`` runs collective ops (logger
-        # barriers + gather) so it MUST run on every rank; console output is
-        # guarded inside the loggers.
+        # Report progress
         if accelerator is None or accelerator.is_main_process:
             increment = min(effective_data_batch_size, max_steps - displayed_steps)
             if increment > 0:
@@ -845,9 +841,7 @@ def finetune_llm_sft(
             for agent in population.agents:
                 agent.test(env)
 
-        # Report progress. ``report_metrics`` runs collective ops (logger
-        # barriers + gather) so it MUST run on every rank; console output is
-        # guarded inside the loggers.
+        # Report progress
         if accelerator is None or accelerator.is_main_process:
             increment = min(effective_data_batch_size, max_steps - displayed_steps)
             if increment > 0:
@@ -1186,9 +1180,7 @@ def finetune_llm_multiturn(
             if (i + 1) % evaluation_interval == 0:
                 agent.test(test_env)
 
-        # Report training metrics. ``report_metrics`` performs collective ops
-        # (logger ``wait_for_everyone`` barriers + ``accelerator.gather``) so it
-        # MUST run on every rank; console output is guarded inside the loggers.
+        # Report training metrics
         if accelerator is None or accelerator.is_main_process:
             pbar.update(iteration_steps // len(population.agents))
         population.report_metrics(clear=True)
