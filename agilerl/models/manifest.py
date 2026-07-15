@@ -24,7 +24,14 @@ from agilerl.models.algo import (
     AlgoSpecT,
     LLMAlgorithmSpec,
 )
-from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
+from agilerl.models.hpo import (
+    MultiFrequencyStrategySpec,
+    MutationSpec,
+    SelectionStrategySpec,
+    TournamentSelectionSpec,
+    default_selection_strategy,
+    resolve_multi_frequency_strategy_pop_size,
+)
 from agilerl.models.networks import (
     FinetuningNetworkSpec,
     NetworkSpec,
@@ -269,7 +276,24 @@ class TrainingManifest(BaseModel):
     network: NetworkFromManifest | None = Field(default=None)
     mutation: MutationSpec | None = Field(default=None)
     replay_buffer: ReplayBufferSpec | None = Field(default=None)
-    tournament_selection: TournamentSelectionSpec | None = Field(default=None)
+    tournament_selection: Annotated[
+        SelectionStrategySpec | None,
+        BeforeValidator(default_selection_strategy),
+    ] = Field(default=None)
+
+    @model_validator(mode="after")
+    def _validate_hpo_regime(self) -> Self:
+        """Derive pop_size when MF-PBT is the configured selection strategy.
+
+        :raises ValueError: If an explicit pop_size conflicts with the derived value.
+        :return: The validated manifest.
+        :rtype: Self
+        """
+        if isinstance(self.tournament_selection, MultiFrequencyStrategySpec):
+            resolve_multi_frequency_strategy_pop_size(
+                self.tournament_selection, self.training
+            )
+        return self
 
     @model_validator(mode="after")
     def _process_manifest(self) -> Self:
@@ -355,6 +379,7 @@ class TrainingManifest(BaseModel):
         mutation: MutationSpec | None = None,
         replay_buffer: ReplayBufferSpec | None = None,
         tournament_selection: TournamentSelectionSpec | None = None,
+        multi_frequency_strategy: MultiFrequencyStrategySpec | None = None,
     ) -> TrainingManifest:
         """Build a validated core manifest from trainer component specs.
 
@@ -370,6 +395,10 @@ class TrainingManifest(BaseModel):
         :type replay_buffer: ReplayBufferSpec | None
         :param tournament_selection: Optional tournament-selection spec.
         :type tournament_selection: TournamentSelectionSpec | None
+        :param multi_frequency_strategy: Optional MF-PBT spec (mutually exclusive with
+            tournament_selection; both collapse into the single tournament_selection
+            manifest field, discriminated by selection_strategy).
+        :type multi_frequency_strategy: MultiFrequencyStrategySpec | None
         :returns: A validated :class:`TrainingManifest`.
         :rtype: TrainingManifest
         """
@@ -382,6 +411,18 @@ class TrainingManifest(BaseModel):
                 return value.model_dump(mode="json", exclude_none=True)
             return value
 
+        # Tournament and MF-PBT are mutually exclusive
+        selection = (
+            multi_frequency_strategy
+            if multi_frequency_strategy is not None
+            else tournament_selection
+        )
+        selection_cls = (
+            MultiFrequencyStrategySpec
+            if isinstance(selection, MultiFrequencyStrategySpec)
+            else TournamentSelectionSpec
+        )
+
         return cls(
             algorithm=algorithm,
             environment=environment,
@@ -389,7 +430,7 @@ class TrainingManifest(BaseModel):
             network=cls._network_from_algorithm(algorithm),
             mutation=_coerce(mutation, MutationSpec),
             replay_buffer=_coerce(replay_buffer, ReplayBufferSpec),
-            tournament_selection=_coerce(tournament_selection, TournamentSelectionSpec),
+            tournament_selection=_coerce(selection, selection_cls),
         )
 
     @classmethod

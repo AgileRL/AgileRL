@@ -26,6 +26,7 @@ from agilerl.components.replay_buffer import (
     PrioritizedReplayBuffer,
     ReplayBuffer,
 )
+from agilerl.hpo.multi_frequency import MultiFrequencyStrategy
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.llm_envs import PreferenceGym, ReasoningGym, SFTGym
@@ -34,7 +35,11 @@ from agilerl.models.algo import (
     MultiAgentRLAlgorithmSpec,
     RLAlgorithmSpec,
 )
-from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
+from agilerl.models.hpo import (
+    MultiFrequencyStrategySpec,
+    MutationSpec,
+    TournamentSelectionSpec,
+)
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
 from agilerl.typing import GymEnvType, PzEnvType
 from agilerl.wrappers.learning import BanditEnv
@@ -132,6 +137,7 @@ def create_population_from_spec(
     resume_from_checkpoint: str | None = None,
     accelerator: Accelerator | None = None,
     tokenizer: AutoTokenizer | None = None,
+    multi_frequency_strategy_spec: MultiFrequencyStrategySpec | None = None,
 ) -> PopulationT:
     """Instantiate a population of agents from an algorithm spec.
 
@@ -153,6 +159,8 @@ def create_population_from_spec(
     :type accelerator: Accelerator | None
     :param tokenizer: Pre-loaded HuggingFace tokenizer for LLM algorithms.
     :type tokenizer: AutoTokenizer | None
+    :param multi_frequency_strategy_spec: Optional MF-PBT spec.
+    :type multi_frequency_strategy_spec: MultiFrequencyStrategySpec | None
     :returns: A list of algorithm instances.
     :rtype: PopulationT
     """
@@ -181,7 +189,7 @@ def create_population_from_spec(
         ):
             algo_spec.n_step = replay_buffer_spec.n_step_buffer_args.n_step
 
-        return [
+        population = [
             algo_spec.build_algorithm(
                 observation_space,
                 action_space,
@@ -192,6 +200,8 @@ def create_population_from_spec(
             )
             for i in range(population_size)
         ]
+        _assign_subpopulations(population, multi_frequency_strategy_spec)
+        return population
 
     # LLM algorithms — build agent 0 fully, then clone the actor for agents 1..N.
     # Each agent beyond the first gets a fresh Accelerator to avoid sharing the
@@ -229,7 +239,28 @@ def create_population_from_spec(
                 actor_network=cloned_actor,
             )
         )
+    _assign_subpopulations(population, multi_frequency_strategy_spec)
     return population
+
+
+def _assign_subpopulations(
+    population: PopulationT,
+    multi_frequency_strategy_spec: MultiFrequencyStrategySpec | None,
+) -> None:
+    """Tag each agent with its MF-PBT subpopulation.
+
+    :param population: The freshly-built population.
+    :type population: PopulationT
+    :param multi_frequency_strategy_spec: The MF-PBT spec, or None under tournament/no-HPO.
+    :type multi_frequency_strategy_spec: MultiFrequencyStrategySpec | None
+    """
+    if multi_frequency_strategy_spec is None:
+        return
+    n_ind = multi_frequency_strategy_spec.n_individuals_per_subpopulation
+    for agent in population:
+        agent.subpopulation = MultiFrequencyStrategy.subpopulation_for_index(
+            agent.index, n_ind
+        )
 
 
 def build_mutations_from_spec(
@@ -286,6 +317,40 @@ def build_tournament_from_spec(
         tournament_size=tournament_spec.tournament_size,
         elitism=tournament_spec.elitism,
         population_size=training_spec.pop_size,
+    )
+
+
+def build_multi_frequency_strategy_from_spec(
+    multi_frequency_strategy_spec: MultiFrequencyStrategySpec | None,
+    training_spec: TrainingSpec,
+    seed: int | None = None,
+) -> MultiFrequencyStrategy | None:
+    """Convert a spec into a :class:`MultiFrequencyStrategy` instance.
+
+    :param multi_frequency_strategy_spec: MF-PBT specification.
+    :type multi_frequency_strategy_spec: MultiFrequencyStrategySpec | None
+    :param training_spec: Training specification (carries the derived pop_size).
+    :type training_spec: TrainingSpec
+    :param seed: The run's global seed, forwarded to the operator's RNG so the
+        winner-clone selection varies (reproducibly) with the run seed, defaults to
+        None.
+    :type seed: int | None
+    :returns: A :class:`MultiFrequencyStrategy` instance, or None if *multi_frequency_strategy_spec*
+        is None.
+    :rtype: MultiFrequencyStrategy | None
+    """
+    if multi_frequency_strategy_spec is None:
+        return None
+
+    return MultiFrequencyStrategy(
+        n_subpopulations=multi_frequency_strategy_spec.n_subpopulations,
+        n_individuals_per_subpopulation=multi_frequency_strategy_spec.n_individuals_per_subpopulation,
+        evolution_frequency_ratios=multi_frequency_strategy_spec.evolution_frequency_ratios,
+        n_winners=multi_frequency_strategy_spec.n_winners,
+        n_survivors=multi_frequency_strategy_spec.n_survivors,
+        n_open_for_migration=multi_frequency_strategy_spec.n_open_for_migration,
+        n_losers=multi_frequency_strategy_spec.n_losers,
+        seed=seed,
     )
 
 

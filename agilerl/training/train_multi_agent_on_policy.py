@@ -9,6 +9,7 @@ from gymnasium import spaces
 from pettingzoo import ParallelEnv
 
 from agilerl.algorithms import IPPO
+from agilerl.hpo.multi_frequency import MultiFrequencyStrategy
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks import StochasticActor
@@ -16,8 +17,9 @@ from agilerl.population import Population
 from agilerl.utils.utils import (
     default_progress_bar,
     init_loggers,
+    resolve_selection_strategy,
+    run_selection_and_mutation,
     save_population_checkpoint,
-    tournament_selection_and_mutation,
 )
 from agilerl.vector import PzDummyVecEnv
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
@@ -45,6 +47,7 @@ def train_multi_agent_on_policy(
     eval_steps: int | None = None,
     eval_loop: int = 1,
     target: float | None = None,
+    selection_strategy: TournamentSelection | MultiFrequencyStrategy | None = None,
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
     checkpoint: int | None = None,
@@ -88,7 +91,13 @@ def train_multi_agent_on_policy(
     :type eval_loop: int, optional
     :param target: Target score for early stopping, defaults to None
     :type target: float, optional
-    :param tournament: Tournament selection object, defaults to None
+    :param selection_strategy: selection strategy driving population evolution. A
+        :class:`~agilerl.hpo.tournament.TournamentSelection` or
+        :class:`~agilerl.hpo.multi_frequency.MultiFrequencyStrategy` (MF-PBT) object,
+        defaults to None
+    :type selection_strategy: object, optional
+    :param tournament: Deprecated alias for selection_strategy (a
+        :class:`~agilerl.hpo.tournament.TournamentSelection` object), defaults to None
     :type tournament: object, optional
     :param mutation: Mutation object, defaults to None
     :type mutation: object, optional
@@ -118,6 +127,7 @@ def train_multi_agent_on_policy(
     :param wandb_kwargs: Additional kwargs to pass to wandb.init()
     :type wandb_kwargs: dict, optional
     """
+    selection_strategy = resolve_selection_strategy(selection_strategy, tournament)
     assert isinstance(
         algo,
         str,
@@ -363,12 +373,12 @@ def train_multi_agent_on_policy(
             pbar.close()
             return population.agents, population.last_fitnesses
 
-        # Tournament selection and population mutation
-        if tournament and mutation is not None:
+        # Perform HPO
+        if selection_strategy is not None and mutation is not None:
             population.update(
-                tournament_selection_and_mutation(
+                run_selection_and_mutation(
+                    selection_strategy,
                     population=population.agents,
-                    tournament=tournament,
                     mutation=mutation,
                     env_name=env_name,
                     algo=algo,

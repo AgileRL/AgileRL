@@ -19,6 +19,7 @@ from agilerl.models import (
     ALGO_REGISTRY,
     AlgoSpecT,
     LLMAlgorithmSpec,
+    MultiFrequencyStrategySpec,
     MutationSpec,
     ReplayBufferSpec,
     TournamentSelectionSpec,
@@ -39,8 +40,14 @@ from agilerl.models.networks import (
     infer_encoder_arch,
     network_arch_is_resolvable,
 )
+from agilerl.models.hpo import (
+    check_selection_strategy_exclusive,
+    resolve_multi_frequency_strategy_pop_size,
+    split_selection_spec,
+)
 from agilerl.utils.trainer_utils import (
     EnvironmentT,
+    build_multi_frequency_strategy_from_spec,
     build_mutations_from_spec,
     build_replay_buffer_from_spec,
     build_tournament_from_spec,
@@ -92,6 +99,9 @@ class Trainer(ABC):
     :type mutation: MutationSpec | None
     :param tournament: Tournament selection configuration.
     :type tournament: TournamentSelectionSpec | None
+    :param multi_frequency_strategy: MF-PBT (Multiple-Frequencies PBT) configuration.  Mutually
+        exclusive with tournament, which it replaces as the selection strategy.
+    :type multi_frequency_strategy: MultiFrequencyStrategySpec | None
     :param replay_buffer: Replay buffer configuration.  Off-policy algorithms
         auto-create a default buffer when this is ``None``.
     :type replay_buffer: ReplayBufferT | None
@@ -110,6 +120,7 @@ class Trainer(ABC):
         training: TrainingSpec | None = None,
         mutation: MutationSpec | None = None,
         tournament: TournamentSelectionSpec | None = None,
+        multi_frequency_strategy: MultiFrequencyStrategySpec | None = None,
         replay_buffer: ReplayBufferT | None = None,
         *,
         resume_from_checkpoint: str | None = None,
@@ -125,15 +136,27 @@ class Trainer(ABC):
         if isinstance(environment, str):
             environment = self._env_spec_from_string(algorithm, environment)
 
+        # MF-PBT replaces tournament selection, so the two are mutually exclusive.
+        # This is enforced on the constructor path too
+        check_selection_strategy_exclusive(tournament, multi_frequency_strategy)
+
         self.algorithm_spec = algorithm
         self.env_spec = environment
         self.training_spec = training or TrainingSpec()
         self.mutation_spec = mutation
         self.tournament_selection_spec = tournament
+        self.multi_frequency_strategy_spec = multi_frequency_strategy
         self.replay_buffer_spec = replay_buffer
         self.device = device
         self.accelerator = accelerator
         self._resume_checkpoint = resume_from_checkpoint
+
+        resolve_multi_frequency_strategy_pop_size(
+            multi_frequency_strategy, self.training_spec
+        )
+        if multi_frequency_strategy is not None and accelerator is not None:
+            msg = "MF-PBT does not support the Accelerate (multi-process) path."
+            raise NotImplementedError(msg)
 
     @staticmethod
     def _env_spec_from_string(
@@ -196,12 +219,18 @@ class Trainer(ABC):
             else manifest
         )
         env_spec = cls._resolve_env_spec(validated_manifest)
+        # The manifest carries one discriminated tournament_selection field; route it
+        # to the constructor's tournament / multi_frequency_strategy kwargs.
+        tournament, multi_frequency_strategy = split_selection_spec(
+            validated_manifest.tournament_selection
+        )
         return cls(
             algorithm=validated_manifest.algorithm,
             environment=env_spec,
             training=validated_manifest.training,
             mutation=validated_manifest.mutation,
-            tournament=validated_manifest.tournament_selection,
+            tournament=tournament,
+            multi_frequency_strategy=multi_frequency_strategy,
             replay_buffer=validated_manifest.replay_buffer,
         )
 
@@ -259,6 +288,9 @@ class LocalTrainer(Trainer):
     :type mutation: MutationSpec | Mutations | None
     :param tournament: Tournament selection configuration.
     :type tournament: TournamentSelectionSpec | TournamentSelection | None
+    :param multi_frequency_strategy: MF-PBT (Multiple-Frequencies PBT) configuration.  Mutually
+        exclusive with tournament, which it replaces as the selection strategy.
+    :type multi_frequency_strategy: MultiFrequencyStrategySpec | None
     :param replay_buffer: Replay buffer configuration.
     :type replay_buffer: ReplayBufferSpec | ReplayBuffer | None
     :param hpo: Whether to enable evolutionary HPO using default mutation probabilities, tournament selection,
@@ -279,6 +311,7 @@ class LocalTrainer(Trainer):
         training: TrainingSpec | None = None,
         mutation: MutationSpec | None = None,
         tournament: TournamentSelectionSpec | None = None,
+        multi_frequency_strategy: MultiFrequencyStrategySpec | None = None,
         replay_buffer: ReplayBufferT | None = None,
         hpo: bool = False,
         resume_from_checkpoint: str | None = None,
@@ -292,18 +325,21 @@ class LocalTrainer(Trainer):
             training=training,
             mutation=mutation,
             tournament=tournament,
+            multi_frequency_strategy=multi_frequency_strategy,
             replay_buffer=replay_buffer,
             resume_from_checkpoint=resume_from_checkpoint,
             device=device,
             accelerator=accelerator,
         )
 
-        # If HPO is enabled, use default mutation probabilities, tournament selection, and RL hyperparameters to mutate
+        # If HPO is enabled, use default mutation probabilities, RL hyperparameters
+        # to mutate, and, unless MF-PBT is configured, default tournament selection.
         if hpo:
             self.mutation_spec = self.mutation_spec or MutationSpec()
-            self.tournament_selection_spec = (
-                self.tournament_selection_spec or TournamentSelectionSpec()
-            )
+            if self.multi_frequency_strategy_spec is None:
+                self.tournament_selection_spec = (
+                    self.tournament_selection_spec or TournamentSelectionSpec()
+                )
 
         # LLM algorithms require a DeepSpeed-aware accelerator
         if (
@@ -339,12 +375,24 @@ class LocalTrainer(Trainer):
             accelerator=self.accelerator,
             tokenizer=self.tokenizer,
             resume_from_checkpoint=self._resume_checkpoint,
+            multi_frequency_strategy_spec=self.multi_frequency_strategy_spec,
         )
         self.mutations = build_mutations_from_spec(
             self.mutation_spec, self.device, accelerator=self.accelerator
         )
         self.tournament_selection = build_tournament_from_spec(
             self.tournament_selection_spec, self.training_spec
+        )
+        multi_frequency_strategy_seed = (
+            self.mutation_spec.rand_seed if self.mutation_spec is not None else None
+        )
+        self.multi_frequency_strategy = build_multi_frequency_strategy_from_spec(
+            self.multi_frequency_strategy_spec,
+            self.training_spec,
+            seed=multi_frequency_strategy_seed,
+        )
+        self.selection_strategy = (
+            self.multi_frequency_strategy or self.tournament_selection
         )
         self.memory = build_replay_buffer_from_spec(
             self.algorithm_spec, self.replay_buffer_spec, self.device
@@ -616,6 +664,7 @@ class LocalTrainer(Trainer):
             mutation=self.mutation_spec,
             replay_buffer=self.replay_buffer_spec,
             tournament_selection=self.tournament_selection_spec,
+            multi_frequency_strategy=self.multi_frequency_strategy_spec,
         )
         return manifest.model_dump(mode="json", exclude_none=True)
 
@@ -676,7 +725,7 @@ class LocalTrainer(Trainer):
             "init_hp": manifest,
             "max_steps": self.training_spec.max_steps,
             "evo_steps": evo_steps,
-            "tournament": self.tournament_selection,
+            "selection_strategy": self.selection_strategy,
             "mutation": self.mutations,
             "save_elite": save_elite,
             "elite_path": elite_path,

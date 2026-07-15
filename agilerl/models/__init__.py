@@ -26,9 +26,12 @@ from agilerl.models.algorithms import (  # noqa: F401
     TD3Spec,
 )
 from agilerl.models.hpo import (  # noqa: F401
+    MultiFrequencyStrategySpec,
     MutationProbabilities,
     MutationSpec,
+    SelectionStrategySpec,
     TournamentSelectionSpec,
+    split_selection_spec,
 )
 from agilerl.models.manifest import TrainingManifest  # noqa: F401
 from agilerl.models.networks import (  # noqa: F401

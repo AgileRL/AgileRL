@@ -3,18 +3,19 @@ import os
 import warnings
 from collections.abc import Callable
 from datetime import datetime
+from functools import singledispatch
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import gymnasium as gym
 import numpy as np
 import tqdm
-import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
 from pettingzoo.utils.env import ParallelEnv
 
+import wandb
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import (
     CQN,
@@ -31,6 +32,7 @@ from agilerl.algorithms import (
 )
 from agilerl.algorithms.core import EvolvableAlgorithm, LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig
+from agilerl.hpo.multi_frequency import MultiFrequencyStrategy
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.logger import CSVLogger, StdOutLogger, TensorboardLogger, WandbLogger
@@ -1286,6 +1288,225 @@ def tournament_selection_and_mutation(
         elite.save_checkpoint(f"{elite_save_path}.pt")
 
     return population
+
+
+def multi_frequency_selection_and_mutation(
+    population: PopulationType,
+    multi_frequency_strategy: MultiFrequencyStrategy,
+    *,
+    mutation: Mutations,
+    env_name: str = "env",
+    algo: str | None = None,
+    save_elite: bool = False,
+    elite_path: str | None = None,
+    accelerator: Accelerator | None = None,
+    language_model: bool | None = False,
+) -> PopulationType:
+    """Run one MF-PBT evolution cycle over the whole population.
+
+    The counterpart to :func:`tournament_selection_and_mutation` for the MF-PBT
+    regime. The global elite is saved (if requested) before any evolution; then each
+    subpopulation whose frequency counter has reached its delta_i is evolved
+    and migrated.
+
+    :param population: Population of agents.
+    :type population: list[PopulationType]
+    :param multi_frequency_strategy: The MF-PBT evolution operator.
+    :type multi_frequency_strategy: MultiFrequencyStrategy
+    :param mutation: Mutation object used to perturb the winner-clones.
+    :type mutation: Mutations
+    :param env_name: Environment name, defaults to "env".
+    :type env_name: str, optional
+    :param algo: Algorithm name (for the elite checkpoint filename), defaults to None.
+    :type algo: str, optional
+    :param save_elite: Flag to save the global elite agent, defaults to False.
+    :type save_elite: bool, optional
+    :param elite_path: Path to save the elite agent, defaults to None.
+    :type elite_path: str, optional
+    :param accelerator: Unsupported by MF-PBT; a non-None value raises.
+    :type accelerator: accelerate.Accelerator(), optional
+    :param language_model: Unused; MF-PBT does not support LLM training.
+    :type language_model: bool, optional
+    :raises NotImplementedError: If an accelerator is supplied.
+    :return: Population of agents after one MF-PBT evolution cycle.
+    :rtype: list[PopulationType]
+    """
+    if accelerator is not None:
+        msg = "MF-PBT does not support the Accelerate (multi-process) path."
+        raise NotImplementedError(msg)
+
+    multi_frequency_strategy._assign_initial_subpopulations(population)
+    multi_frequency_strategy._sync_index(population)
+
+    if save_elite:
+        elite_agent = max(
+            population,
+            key=lambda a: multi_frequency_strategy._scalar_fitness(a.fitness[-1]),
+        )
+        algo_name = algo or population[0].__class__.__name__
+        elite_save_path = (
+            elite_path.split(".pt")[0]
+            if elite_path is not None
+            else f"{env_name}-elite_{algo_name}"
+        )
+        elite_agent.save_checkpoint(f"{elite_save_path}.pt")
+
+    # This frozen snapshot is the migrant-source pool that makes MF-PBT independent
+    # of the order in which subpopulations are processed
+    frozen_population = list(population)
+
+    for i in range(multi_frequency_strategy.n_subpopulations):
+        multi_frequency_strategy.counters[i] += 1
+        if multi_frequency_strategy.counters[i] < multi_frequency_strategy.deltas[i]:
+            continue
+        multi_frequency_strategy.counters[i] = 0
+        population = multi_frequency_strategy.evolution(population, i, mutation)
+        population = multi_frequency_strategy.migration(
+            population, i, external_pool=frozen_population
+        )
+
+    return population
+
+
+def resolve_selection_strategy(
+    selection_strategy: TournamentSelection | MultiFrequencyStrategy | None,
+    tournament: TournamentSelection | None,
+) -> TournamentSelection | MultiFrequencyStrategy | None:
+    """Fold the deprecated tournament trainer argument into selection_strategy.
+
+    :param selection_strategy: The selection strategy passed via the new argument.
+    :type selection_strategy: TournamentSelection | MultiFrequencyStrategy | None
+    :param tournament: The strategy passed via the deprecated tournament argument.
+    :type tournament: TournamentSelection | None
+    :return: The resolved selection strategy.
+    :rtype: TournamentSelection | MultiFrequencyStrategy | None
+    """
+    if tournament is None:
+        return selection_strategy
+    warnings.warn(
+        "The 'tournament' argument to the AgileRL trainers is deprecated; pass the "
+        "selection strategy via 'selection_strategy' instead.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+    if selection_strategy is None:
+        return tournament
+    if selection_strategy is not tournament:
+        warnings.warn(
+            "Both 'selection_strategy' and the deprecated 'tournament' argument were "
+            "provided; ignoring 'tournament'.",
+            stacklevel=3,
+        )
+    return selection_strategy
+
+
+@singledispatch
+def run_selection_and_mutation(
+    selection_strategy: TournamentSelection | MultiFrequencyStrategy | None,
+    *,
+    population: PopulationType,
+    mutation: Mutations,
+    env_name: str,
+    algo: str | None = None,
+    elite_path: str | None = None,
+    save_elite: bool = False,
+    accelerator: Accelerator | None = None,
+    language_model: bool = False,
+) -> PopulationType:
+    """Evolve a population with the given selection strategy, dispatched by its type.
+
+    :param selection_strategy: The selection strategy driving population evolution.
+    :type selection_strategy: TournamentSelection | MultiFrequencyStrategy | None
+    :param population: Population of agents.
+    :type population: list[PopulationType]
+    :param mutation: Mutation object.
+    :type mutation: Mutations
+    :param env_name: Environment name.
+    :type env_name: str
+    :param algo: Algorithm name, defaults to None.
+    :type algo: str, optional
+    :param elite_path: Path to save the elite agent, defaults to None.
+    :type elite_path: str, optional
+    :param save_elite: Flag to save the elite agent, defaults to False.
+    :type save_elite: bool, optional
+    :param accelerator: Accelerator for distributed computing, defaults to None.
+    :type accelerator: accelerate.Accelerator(), optional
+    :param language_model: Flag indicating an LLM environment, defaults to False.
+    :type language_model: bool, optional
+    :return: Population of agents after evolution.
+    :rtype: list[PopulationType]
+    """
+    if selection_strategy is None:
+        return population
+    # Backward compatibility: a duck-typed tournament object (anything exposing
+    # select but not a TournamentSelection subclass) routes to the same handler
+    return _run_tournament_selection_and_mutation(
+        selection_strategy,
+        population=population,
+        mutation=mutation,
+        env_name=env_name,
+        algo=algo,
+        elite_path=elite_path,
+        save_elite=save_elite,
+        accelerator=accelerator,
+        language_model=language_model,
+    )
+
+
+@run_selection_and_mutation.register
+def _run_tournament_selection_and_mutation(
+    selection_strategy: TournamentSelection,
+    *,
+    population: PopulationType,
+    mutation: Mutations,
+    env_name: str,
+    algo: str | None = None,
+    elite_path: str | None = None,
+    save_elite: bool = False,
+    accelerator: Accelerator | None = None,
+    language_model: bool = False,
+) -> PopulationType:
+    """Dispatch to tournament selection + mutation."""
+    return tournament_selection_and_mutation(
+        population=population,
+        tournament=selection_strategy,
+        mutation=mutation,
+        env_name=env_name,
+        algo=algo,
+        elite_path=elite_path,
+        save_elite=save_elite,
+        accelerator=accelerator,
+        language_model=language_model,
+    )
+
+
+@run_selection_and_mutation.register
+def _run_multi_frequency_selection_and_mutation(
+    selection_strategy: MultiFrequencyStrategy,
+    *,
+    population: PopulationType,
+    mutation: Mutations,
+    env_name: str,
+    algo: str | None = None,
+    elite_path: str | None = None,
+    save_elite: bool = False,
+    accelerator: Accelerator | None = None,
+    language_model: bool = False,
+) -> PopulationType:
+    """Dispatch to multi-frequency selection + mutation."""
+    if language_model:
+        msg = "MF-PBT strategy does not support language_model=True."
+        raise NotImplementedError(msg)
+    return multi_frequency_selection_and_mutation(
+        population=population,
+        multi_frequency_strategy=selection_strategy,
+        mutation=mutation,
+        env_name=env_name,
+        algo=algo,
+        save_elite=save_elite,
+        elite_path=elite_path,
+        accelerator=accelerator,
+    )
 
 
 def init_wandb(

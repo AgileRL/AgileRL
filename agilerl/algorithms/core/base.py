@@ -336,6 +336,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         self._index = index
         self.registry = MutationRegistry(hp_config)
         self.training = True
+        self.subpopulation: int | None = None
 
     @property
     def index(self) -> int:
