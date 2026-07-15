@@ -62,15 +62,10 @@ jobs:
                   restore-keys: inductor-${{ matrix.python-version }}-
 
             - name: Install dependencies
-              # swig is on the runner image (needed to build box2d-py from source).
               run: |
                   uv sync --locked --all-groups --extra all
                   echo "$UV_PROJECT_ENVIRONMENT/bin" >> $GITHUB_PATH
 
-            # run-tests.sh: `--import-mode=importlib`, arena PYTHONPATH, and
-            # separate `tests` / `agilerl-arena/tests` runs (avoids dual-conftest
-            # ImportPathMismatchError). xdist `-n auto --dist loadgroup` and the
-            # gputest0..3 load groups still come from pyproject / conftest.
             - name: Run tests
               run: |
                   rm -f .coverage .coverage.*
