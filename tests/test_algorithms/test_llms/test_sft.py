@@ -549,7 +549,6 @@ class TestSFTTest:
         with patch.object(sft, "learn", return_value={"loss": 1.0}):
             sft.test(DummySFTEnv(), loop=1)
         acc.wait_for_everyone.assert_called()
-        sft.clean_up()
 
 
 class TestSFTLigerUnavailableBehaviour:

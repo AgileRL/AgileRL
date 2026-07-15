@@ -4910,7 +4910,6 @@ class TestGRPOTest:
         ):
             grpo.test(DummyMultiTurnEpisodeEnv(), loop=1)
         acc.wait_for_everyone.assert_called()
-        grpo.clean_up()
 
     def test_grpo_test_method_multiturn_continues_when_not_done(self):
         """Cover prompt update when the episode spans turns."""

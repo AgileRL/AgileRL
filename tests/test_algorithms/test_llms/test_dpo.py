@@ -550,7 +550,6 @@ class TestDPOTest:
         ):
             dpo.test(DummyPreferenceEnv(), loop=1)
         acc.wait_for_everyone.assert_called()
-        dpo.clean_up()
 
 
 class TestDPOLigerUnavailableBehaviour:
