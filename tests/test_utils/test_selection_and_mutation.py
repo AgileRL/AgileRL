@@ -30,7 +30,7 @@ class FakeAgent:
 class FakeMutations:
     mutate_elite = False
 
-    def mutation(self, population, pre_training_mut=False):
+    def mutation(self, population, pre_training_mut=False, indices=None):
         return population
 
 
@@ -134,6 +134,23 @@ def test_dispatch_routes_duck_typed_tournament(monkeypatch):
     assert called["tournament"] is duck
 
 
+def _stub_operator_steps(strategy):
+    """Stub the per-subpopulation clone/migrate steps.
+
+    Lets the fake agents drive the scheduling/elite logic without needing clone or
+    a full registry; select still runs its real counter and bracketing logic.
+    """
+    strategy._clone_winners_over_losers = lambda population, winners, losers, subpop: (
+        population,
+        [],
+    )
+    strategy._migrate = (
+        lambda population, subpop, winners, open_for_migration, external_pool: (
+            population
+        )
+    )
+
+
 def test_orchestration_schedules_subpops_at_their_frequencies():
     strategy = make_strategy(n_subpop=3, n_ind=4, ratios=[1, 2, 3])
     pop = make_population({0: [4, 3, 2, 1], 1: [8, 7, 6, 5], 2: [12, 11, 10, 9]})
@@ -141,10 +158,17 @@ def test_orchestration_schedules_subpops_at_their_frequencies():
 
     fired = []  # (cycle, subpop)
     cycle = {"n": 0}
-    strategy.evolution = lambda population, subpop, mutation: (
-        fired.append((cycle["n"], subpop)) or population
+
+    def fake_clone(population, winners, losers, subpop):
+        fired.append((cycle["n"], subpop))
+        return population, []
+
+    strategy._clone_winners_over_losers = fake_clone
+    strategy._migrate = (
+        lambda population, subpop, winners, open_for_migration, external_pool: (
+            population
+        )
     )
-    strategy.migration = lambda population, subpop, external_pool=None: population
 
     for c in range(1, 7):
         cycle["n"] = c
@@ -161,8 +185,7 @@ def test_orchestration_saves_global_elite(tmp_path):
     elite_path = str(tmp_path / "best.pt")
     # Elite is saved before any subpopulation evolves; stub the operator steps so
     # the fake agents need only ``save_checkpoint``.
-    strategy.evolution = lambda population, subpop, mutation: population
-    strategy.migration = lambda population, subpop, external_pool=None: population
+    _stub_operator_steps(strategy)
 
     multi_frequency_selection_and_mutation(
         pop, strategy, mutation=FakeMutations(), save_elite=True, elite_path=elite_path
@@ -185,8 +208,7 @@ def test_orchestration_assigns_missing_subpopulations():
     pop = make_population({None: [8, 7, 6, 5, 4, 3, 2, 1]})
     for agent in pop:
         agent.subpopulation = None
-    strategy.evolution = lambda population, subpop, mutation: population
-    strategy.migration = lambda population, subpop, external_pool=None: population
+    _stub_operator_steps(strategy)
 
     multi_frequency_selection_and_mutation(pop, strategy, mutation=FakeMutations())
 
@@ -198,28 +220,29 @@ def test_orchestration_migrates_against_pre_evolution_snapshot():
     pop = make_population({0: [4, 3, 2, 1], 1: [8, 7, 6, 5]})
     snapshot = list(pop)
 
-    # Evolution swaps in fresh objects, so sourcing from the live (evolved) population
-    # would be visibly different from the pre-evolution snapshot.
-    def fake_evolution(population, subpop, mutation):
-        return [
+    # Cloning swaps in fresh objects, so sourcing migrants from the live (evolved)
+    # population would be visibly different from the pre-evolution snapshot.
+    def fake_clone(population, winners, losers, subpop):
+        fresh = [
             FakeAgent(100 + i, a.subpopulation, a.fitness[-1])
             for i, a in enumerate(population)
         ]
+        return fresh, []
 
     captured: dict[int, list] = {}
 
-    def fake_migration(population, subpop, external_pool):
+    def fake_migrate(population, subpop, winners, open_for_migration, external_pool):
         captured[subpop] = external_pool
         return population
 
-    strategy.evolution = fake_evolution
-    strategy.migration = fake_migration
+    strategy._clone_winners_over_losers = fake_clone
+    strategy._migrate = fake_migrate
     strategy.counters = [0, 1]  # a single cycle then fires BOTH subpopulations
 
     multi_frequency_selection_and_mutation(pop, strategy, mutation=FakeMutations())
 
     # Both subpopulations fired, and each migration saw the identical pre-evolution
-    # snapshot -- subpop 1 ran after subpop 0's evolution replaced the live objects.
+    # snapshot -- subpop 1 ran after subpop 0's cloning replaced the live objects.
     assert set(captured) == {0, 1}
     assert captured[0] == snapshot
     assert captured[1] == snapshot

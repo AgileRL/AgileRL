@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import math
-
 import numpy as np
 import pytest
 
@@ -80,7 +78,6 @@ class FakeAgent:
         self.registry = FakeRegistry(["lr", "batch_size"])
         self.optimizer = FakeOptimizerWrapper(lr)
         self.reinit_called = False
-        self.perturbed = False
 
     def clone(self, index=None, wrap=False):
         new = FakeAgent(
@@ -106,22 +103,6 @@ class FakeAgent:
             fh.write("checkpoint")
 
 
-class FakeMutations:
-    """Records the mutate_elite flag seen and marks every perturbed agent."""
-
-    def __init__(self, mutate_elite=False):
-        self.mutate_elite = mutate_elite
-        self.seen_mutate_elite = None
-        self.perturbed_agents = []
-
-    def mutation(self, population, pre_training_mut=False):
-        self.seen_mutate_elite = self.mutate_elite
-        for agent in population:
-            agent.perturbed = True
-            self.perturbed_agents.append(agent)
-        return population
-
-
 def make_population(subpop_fitnesses, weights=None):
     """Build a population with unique indices."""
     population = []
@@ -144,6 +125,22 @@ def make_strategy(n_subpop=2, n_ind=4, ratios=None, w=1, s=1, o=1, ln=1, seed=42
         n_open_for_migration=o,
         n_losers=ln,
         seed=seed,
+    )
+
+
+def new_agents(before, after):
+    """Agents in after that are not one of the objects in before."""
+    before_ids = {id(a) for a in before}
+    return [a for a in after if id(a) not in before_ids]
+
+
+def run_migration(strategy, population, subpop, external_pool):
+    """Bracket then migrate."""
+    winners, _survivors, open_for_migration, _losers = strategy.brackets(
+        population, subpop
+    )
+    return strategy._migrate(
+        population, subpop, winners, open_for_migration, external_pool
     )
 
 
@@ -397,59 +394,51 @@ def test_brackets_rejects_wrong_member_count():
         strategy.brackets(pop, subpop=0)
 
 
-def test_evolution_preserves_sizes_and_perturbs_fresh_clones():
+def test_clone_winners_over_losers_replaces_losers_with_fresh_winner_clones():
     strategy = make_strategy(n_subpop=2, n_ind=4)
     pop = make_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
     max_index_before = max(a.index for a in pop)
-    fm = FakeMutations(mutate_elite=False)
+    winners, _s, _o, losers = strategy.brackets(pop, subpop=0)
 
-    evolved = strategy.evolution(pop, subpop=0, mutation=fm)
+    new_pop, new_indices = strategy._clone_winners_over_losers(
+        pop, winners, losers, subpop=0
+    )
 
-    assert len(evolved) == len(pop)
-    assert sum(a.subpopulation == 0 for a in evolved) == 4
-    # The loser (fitness 1.0) was removed
-    assert 1.0 not in [a.fitness[-1] for a in evolved if a.subpopulation == 0]
-    # Exactly one fresh clone was introduced
-    new_clones = [
-        a for a in evolved if a.subpopulation == 0 and a.fitness[-1] == -math.inf
-    ]
-    assert len(new_clones) == 1
-    assert new_clones[0].index > max_index_before
-    # Every introduced clone was perturbed
-    assert all(a.perturbed for a in new_clones)
-    assert fm.seen_mutate_elite is True
-
-
-def test_evolution_restores_mutate_elite_flag():
-    strategy = make_strategy(n_subpop=2, n_ind=4)
-    pop = make_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
-    fm = FakeMutations(mutate_elite=False)
-
-    strategy.evolution(pop, subpop=0, mutation=fm)
-
-    assert fm.mutate_elite is False  # forced True during, restored after
+    assert len(new_pop) == len(pop)
+    assert sum(a.subpopulation == 0 for a in new_pop) == 4
+    # The loser (fitness 1.0) was replaced
+    assert 1.0 not in [a.fitness[-1] for a in new_pop if a.subpopulation == 0]
+    clones = new_agents(pop, new_pop)
+    assert len(clones) == 1
+    clone = clones[0]
+    assert clone.index in new_indices
+    assert clone.index > max_index_before
+    assert clone.subpopulation == 0
+    # The clone inherits its winner-parent's fitness (4.0)
+    assert clone.fitness[-1] == 4.0
 
 
-def test_evolution_does_not_mutate_input_population_list():
-    # Evolution must return a new population rather than mutating the one it's handed
+def test_clone_winners_over_losers_returns_new_list():
+    # Cloning must return a new population rather than mutating the one it's handed
     strategy = make_strategy()
     pop = make_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
     pop_copy = list(pop)
+    winners, _s, _o, losers = strategy.brackets(pop, subpop=0)
 
-    strategy.evolution(pop, subpop=0, mutation=FakeMutations())
+    strategy._clone_winners_over_losers(pop, winners, losers, subpop=0)
 
     assert pop == pop_copy
 
 
-def test_evolution_clones_are_independent_of_parents():
+def test_clone_winners_over_losers_clones_are_independent_of_parents():
     strategy = make_strategy(n_subpop=2, n_ind=4, w=1, s=0, o=1, ln=2)
     pop = make_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
     winner = next(a for a in pop if a.subpopulation == 0 and a.fitness[-1] == 4.0)
+    winners, _s, _o, losers = strategy.brackets(pop, subpop=0)
 
-    evolved = strategy.evolution(pop, subpop=0, mutation=FakeMutations())
+    new_pop, _ = strategy._clone_winners_over_losers(pop, winners, losers, subpop=0)
 
-    clones = [a for a in evolved if a.fitness[-1] == -math.inf]
-    for clone in clones:
+    for clone in new_agents(pop, new_pop):
         assert clone is not winner
         assert clone.index != winner.index
         # Mutating the clone's HP must not touch the parent's
@@ -457,7 +446,23 @@ def test_evolution_clones_are_independent_of_parents():
         assert winner.registry.hp_config["lr"].value != 999.0
 
 
-def test_evolution_winner_clone_selection_is_reproducible():
+def test_clone_winners_over_losers_with_zero_survivors_replaces_every_loser():
+    # Brackets 1/0/1/2: one winner, no survivors, one open, two losers.
+    strategy = make_strategy(n_subpop=2, n_ind=4, w=1, s=0, o=1, ln=2)
+    pop = make_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
+    winners, _s, _o, losers = strategy.brackets(pop, subpop=0)
+
+    new_pop, new_indices = strategy._clone_winners_over_losers(
+        pop, winners, losers, subpop=0
+    )
+
+    assert sum(a.subpopulation == 0 for a in new_pop) == 4
+    clones = new_agents(pop, new_pop)
+    assert len(clones) == 2
+    assert {c.index for c in clones} == set(new_indices)
+
+
+def test_clone_winner_selection_is_reproducible():
     weights = {0: ["W_a", "W_b", "m", "x", "y"], 1: ["a", "b", "c", "d", "e"]}
     pop_kwargs = {
         "subpop_fitnesses": {0: [5.0, 4.0, 3.0, 2.0, 1.0], 1: [10, 9, 8, 7, 6]},
@@ -467,15 +472,14 @@ def test_evolution_winner_clone_selection_is_reproducible():
     def run():
         pop = make_population(**pop_kwargs)
         strategy = make_strategy(n_ind=5, w=2, s=0, o=1, ln=2, seed=7)
-        evolved = strategy.evolution(
-            pop, subpop=0, mutation=FakeMutations(mutate_elite=True)
-        )
-        return sorted(a.weights for a in evolved if a.fitness[-1] == -math.inf)
+        winners, _s, _o, losers = strategy.brackets(pop, subpop=0)
+        new_pop, _ = strategy._clone_winners_over_losers(pop, winners, losers, subpop=0)
+        return sorted(a.weights for a in new_agents(pop, new_pop))
 
     assert run() == run()  # identical winner picks for the same seed
 
 
-def test_evolution_winner_clone_selection_varies_with_seed():
+def test_clone_winner_selection_varies_with_seed():
     weights = {0: ["W_a", "W_b", "m", "x", "y"], 1: ["a", "b", "c", "d", "e"]}
     pop_kwargs = {
         "subpop_fitnesses": {0: [5.0, 4.0, 3.0, 2.0, 1.0], 1: [10, 9, 8, 7, 6]},
@@ -484,19 +488,66 @@ def test_evolution_winner_clone_selection_varies_with_seed():
 
     def run(seed):
         picks = []
-        # Several evolution rounds so the seeded stream can diverge
+        # Several cloning rounds so the seeded stream can diverge
         for _ in range(6):
             pop = make_population(**pop_kwargs)
             strategy = make_strategy(n_ind=5, w=2, s=0, o=1, ln=2, seed=seed)
-            evolved = strategy.evolution(
-                pop, subpop=0, mutation=FakeMutations(mutate_elite=True)
+            winners, _s, _o, losers = strategy.brackets(pop, subpop=0)
+            new_pop, _ = strategy._clone_winners_over_losers(
+                pop, winners, losers, subpop=0
             )
-            picks.append(
-                tuple(a.weights for a in evolved if a.fitness[-1] == -math.inf)
-            )
+            picks.append(tuple(a.weights for a in new_agents(pop, new_pop)))
         return picks
 
     assert run(1) != run(2)
+
+
+def test_select_evolves_each_subpopulation_at_its_frequency():
+    strategy = make_strategy(n_subpop=3, n_ind=4, ratios=[1, 2, 3])
+    fired = []  # (cycle, subpop)
+    cycle = {"n": 0}
+
+    def fake_clone(population, winners, losers, subpop):
+        fired.append((cycle["n"], subpop))
+        return population, []
+
+    strategy._clone_winners_over_losers = fake_clone
+    strategy._migrate = (
+        lambda population, subpop, winners, open_for_migration, external_pool: (
+            population
+        )
+    )
+
+    for c in range(1, 7):
+        cycle["n"] = c
+        pop = make_population({0: [4, 3, 2, 1], 1: [8, 7, 6, 5], 2: [12, 11, 10, 9]})
+        strategy.select(pop)
+
+    assert [c for c, s in fired if s == 0] == [1, 2, 3, 4, 5, 6]  # delta=1
+    assert [c for c, s in fired if s == 1] == [2, 4, 6]  # delta=2
+    assert [c for c, s in fired if s == 2] == [3, 6]  # delta=3
+
+
+def test_select_returns_new_population_and_only_clone_indices():
+    # Subpop 0 (delta 1) is due on cycle 1; subpop 1 (delta 2) is not.
+    strategy = make_strategy(n_subpop=2, n_ind=4, ratios=[1, 2])
+    pop = make_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
+
+    new_pop, indices = strategy.select(pop)
+
+    assert len(new_pop) == 8
+    assert strategy.counters == [0, 1]
+    # Only the due subpopulation introduced fresh agents
+    fresh = new_agents(pop, new_pop)
+    assert fresh
+    assert all(a.subpopulation == 0 for a in fresh)
+    # Exactly the winner-clone is marked for mutation, never the migrant
+    assert len(indices) == 1
+    clone = next(a for a in fresh if a.index in indices)
+    assert clone.fitness[-1] == 4.0
+    # The not-due subpopulation is left entirely untouched
+    original_subpop1 = [a for a in pop if a.subpopulation == 1]
+    assert all(a in new_pop for a in original_subpop1)
 
 
 def test_migration_slow_to_fast_keeps_external_weights_but_elite_hps():
@@ -512,11 +563,9 @@ def test_migration_slow_to_fast_keeps_external_weights_but_elite_hps():
         else:
             a.lr = 0.001
 
-    migrated = strategy.migration(pop, subpop=1, external_pool=pop)
+    migrated = run_migration(strategy, pop, subpop=1, external_pool=pop)
 
-    movers = [
-        a for a in migrated if a.subpopulation == 1 and a.fitness[-1] == -math.inf
-    ]
+    movers = new_agents(pop, migrated)
     assert len(movers) == 1
     mover = movers[0]
     assert mover.weights == "EXT"
@@ -538,11 +587,9 @@ def test_migration_full_clone_when_external_not_faster():
             a.weights = "EXT"
             a.lr = 0.5
 
-    migrated = strategy.migration(pop, subpop=0, external_pool=pop)
+    migrated = run_migration(strategy, pop, subpop=0, external_pool=pop)
 
-    movers = [
-        a for a in migrated if a.subpopulation == 0 and a.fitness[-1] == -math.inf
-    ]
+    movers = new_agents(pop, migrated)
     assert len(movers) == 1
     assert movers[0].weights == "EXT"
     assert movers[0].lr == 0.5
@@ -553,9 +600,9 @@ def test_migration_migrant_is_independent_of_external_parent():
     pop = make_population({0: [5.0, 4.0, 3.0, 2.0], 1: [9.0, 8.0, 7.0, 6.0]})
     external = next(a for a in pop if a.subpopulation == 1 and a.fitness[-1] == 9.0)
 
-    migrated = strategy.migration(pop, subpop=0, external_pool=pop)
+    migrated = run_migration(strategy, pop, subpop=0, external_pool=pop)
 
-    mover = next(a for a in migrated if a.fitness[-1] == -math.inf)
+    mover = new_agents(pop, migrated)[0]
     assert mover is not external
     assert mover.index != external.index
 
@@ -566,12 +613,10 @@ def test_migration_skips_when_open_agent_already_better():
     pop = make_population({0: [100.0, 99.0, 98.0, 1.0], 1: [9.0, 8.0, 7.0, 6.0]})
     open_agent = next(a for a in pop if a.subpopulation == 0 and a.fitness[-1] == 98.0)
 
-    migrated = strategy.migration(pop, subpop=0, external_pool=pop)
+    migrated = run_migration(strategy, pop, subpop=0, external_pool=pop)
 
     assert open_agent in migrated
-    assert not [
-        a for a in migrated if a.subpopulation == 0 and a.fitness[-1] == -math.inf
-    ]
+    assert not new_agents(pop, migrated)
 
 
 def test_migration_sources_migrants_from_external_pool_not_live_population():
@@ -579,21 +624,18 @@ def test_migration_sources_migrants_from_external_pool_not_live_population():
     pop = make_population({0: [4.0, 3.0, 2.0, 1.0], 1: [5.0, 4.0, 3.0, 2.0]})
     for a in pop:  # subpop 0 already evolved this cycle -> its members are spent
         if a.subpopulation == 0:
-            a.fitness = [-math.inf]
             a.weights = "SPENT"
     frozen = make_population({0: [9.0, 8.0, 7.0, 6.0], 1: [5.0, 4.0, 3.0, 2.0]})
     for a in frozen:
         if a.subpopulation == 0:
             a.weights = "FROZEN"
 
-    migrated = strategy.migration(pop, subpop=1, external_pool=frozen)
+    migrated = run_migration(strategy, pop, subpop=1, external_pool=frozen)
 
-    movers = [
-        a for a in migrated if a.subpopulation == 1 and a.fitness[-1] == -math.inf
-    ]
+    movers = new_agents(pop, migrated)
     assert len(movers) == 1
-    # The migrant carries the frozen agent's weights, proving it was sourced from the
-    # snapshot. The live -inf clones would never have been selected
+    # The migrant carries the frozen agent's weights, proving it was sourced from
+    # the snapshot
     assert movers[0].weights == "FROZEN"
 
 
@@ -615,11 +657,9 @@ def test_migration_advances_external_pointer_only_on_success():
     e0.weights = "E0"
     open1 = next(a for a in pop if a.subpopulation == 0 and a.fitness[-1] == 20.0)
 
-    migrated = strategy.migration(pop, subpop=0, external_pool=pop)
+    migrated = run_migration(strategy, pop, subpop=0, external_pool=pop)
 
-    migrants = [
-        a for a in migrated if a.subpopulation == 0 and a.fitness[-1] == -math.inf
-    ]
+    migrants = new_agents(pop, migrated)
     assert len(migrants) == 1
     assert migrants[0].weights == "E0"
     assert open1 in migrated
@@ -643,23 +683,9 @@ def test_migration_holds_external_pointer_on_skip():
     e0.weights = "E0"
     open0 = next(a for a in pop if a.subpopulation == 0 and a.fitness[-1] == 30.0)
 
-    migrated = strategy.migration(pop, subpop=0, external_pool=pop)
+    migrated = run_migration(strategy, pop, subpop=0, external_pool=pop)
 
-    migrants = [
-        a for a in migrated if a.subpopulation == 0 and a.fitness[-1] == -math.inf
-    ]
+    migrants = new_agents(pop, migrated)
     assert len(migrants) == 1
     assert migrants[0].weights == "E0"
     assert open0 in migrated
-
-
-def test_evolution_with_zero_survivors_replaces_every_loser():
-    # Brackets 1/0/1/2: one winner, no survivors, one open, two losers.
-    strategy = make_strategy(n_subpop=2, n_ind=4, w=1, s=0, o=1, ln=2)
-    pop = make_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
-
-    evolved = strategy.evolution(pop, subpop=0, mutation=FakeMutations())
-
-    assert sum(a.subpopulation == 0 for a in evolved) == 4
-    clones = [a for a in evolved if a.subpopulation == 0 and a.fitness[-1] == -math.inf]
-    assert len(clones) == 2

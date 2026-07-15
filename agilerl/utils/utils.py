@@ -1335,9 +1335,6 @@ def multi_frequency_selection_and_mutation(
         msg = "MF-PBT does not support the Accelerate (multi-process) path."
         raise NotImplementedError(msg)
 
-    multi_frequency_strategy._assign_initial_subpopulations(population)
-    multi_frequency_strategy._sync_index(population)
-
     if save_elite:
         elite_agent = max(
             population,
@@ -1351,21 +1348,8 @@ def multi_frequency_selection_and_mutation(
         )
         elite_agent.save_checkpoint(f"{elite_save_path}.pt")
 
-    # This frozen snapshot is the migrant-source pool that makes MF-PBT independent
-    # of the order in which subpopulations are processed
-    frozen_population = list(population)
-
-    for i in range(multi_frequency_strategy.n_subpopulations):
-        multi_frequency_strategy.counters[i] += 1
-        if multi_frequency_strategy.counters[i] < multi_frequency_strategy.deltas[i]:
-            continue
-        multi_frequency_strategy.counters[i] = 0
-        population = multi_frequency_strategy.evolution(population, i, mutation)
-        population = multi_frequency_strategy.migration(
-            population, i, external_pool=frozen_population
-        )
-
-    return population
+    population, indices_to_mutate = multi_frequency_strategy.select(population)
+    return mutation.mutation(population, indices=indices_to_mutate)
 
 
 def resolve_selection_strategy(

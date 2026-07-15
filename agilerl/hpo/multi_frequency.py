@@ -14,7 +14,7 @@ the greediness that makes single-frequency PBT settle into local optima.
 Each subpopulation is partitioned by within-subpopulation fitness rank into four
 brackets (*winners*, *survivors*, *open-for-migration* and *losers*) that drive
 exploitation (clone a winner over a loser, then perturb), preservation (survivors
-and open agents are untouched by :meth:`~MultiFrequencyStrategy.evolution`) and the
+and open agents are untouched by :meth:`~MultiFrequencyStrategy.select`) and the
 asymmetric cross-frequency *migration* of Algorithm 2 of the paper.
 
 The orchestration that schedules subpopulations by frequency and saves the global
@@ -27,15 +27,11 @@ supported: an accelerator is rejected by the orchestrator with
 from __future__ import annotations
 
 import copy
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
 
-if TYPE_CHECKING:  # pragma: no cover - typing only
-    from agilerl.hpo.mutation import Mutations
-
 PopulationType = list[Any]
-NEG_INF = float("-inf")
 
 
 class MultiFrequencyStrategy:
@@ -63,8 +59,8 @@ class MultiFrequencyStrategy:
         n_ind - n_winners - n_survivors - n_open_for_migration).
     :type n_losers: int | None
     :param seed: Seed for the reproducible winner-clone selection in
-        :meth:`evolution`, derived from the run's global seed. None leaves the
-        RNG unseeded.
+        :meth:`_clone_winners_over_losers`, derived from the run's global seed. None
+        leaves the RNG unseeded.
     :type seed: int | None
     :raises ValueError: If n_subpopulations < 2 (migration has nothing to draw
         from with a single subpopulation), n_individuals_per_subpopulation < 3,
@@ -351,55 +347,88 @@ class MultiFrequencyStrategy:
         losers = members[n_w + n_s + n_o :]
         return winners, survivors, open_for_migration, losers
 
-    def evolution(
-        self, population: PopulationType, subpop: int, mutation: Mutations
-    ) -> PopulationType:
-        """Replace a subpopulation's losers with perturbed winner-clones.
+    def select(self, population: PopulationType) -> tuple[PopulationType, list[int]]:
+        """Select the agents to be migrated and mutated during an MF-PBT evolution cycle.
 
         :param population: The whole population.
         :type population: list
-        :param subpop: The subpopulation id to evolve.
+        :return: (population, indices_to_mutate). The evolved population with migrants
+            and clones, and the indices of the winner clones to be perturbed.
+        :rtype: tuple[list, list[int]]
+        """
+        self._assign_initial_subpopulations(population)
+        self._sync_index(population)
+
+        # The frozen snapshot makes migrations independent of the order in which
+        # subpopulations are processed
+        frozen = list(population)
+        updated = list(population)
+        indices_to_mutate: list[int] = []
+
+        for subpop in range(self.n_subpopulations):
+            self.counters[subpop] += 1
+            if self.counters[subpop] < self.deltas[subpop]:
+                continue
+            self.counters[subpop] = 0
+
+            winners, _survivors, open_for_migration, losers = self.brackets(
+                updated, subpop
+            )
+            updated, clone_indices = self._clone_winners_over_losers(
+                updated, winners, losers, subpop
+            )
+            indices_to_mutate.extend(clone_indices)
+            updated = self._migrate(
+                updated, subpop, winners, open_for_migration, external_pool=frozen
+            )
+
+        return updated, indices_to_mutate
+
+    def _clone_winners_over_losers(
+        self,
+        population: PopulationType,
+        winners: PopulationType,
+        losers: PopulationType,
+        subpop: int,
+    ) -> tuple[PopulationType, list[int]]:
+        """Replace each loser with a clone of a uniformly-random winner.
+
+        :param population: The whole population (not mutated in place).
+        :type population: list
+        :param winners: The subpopulation's winners bracket to clone from.
+        :type winners: list
+        :param losers: The subpopulation's losers bracket to replace.
+        :type losers: list
+        :param subpop: The subpopulation id the clones belong to.
         :type subpop: int
-        :param mutation: The mutation operator used to perturb the winner-clones.
-        :type mutation: ~agilerl.hpo.mutation.Mutations
-        :return: A new population list (the caller's list is not mutated).
-        :rtype: list
+        :return: (new_population, clone_indices). A new population list with the
+            losers replaced, and the clones' indices to be perturbed.
+        :rtype: tuple[list, list[int]]
         """
         self._sync_index(population)
-        winners, _survivors, _open, losers = self.brackets(population, subpop)
-
-        loser_ids = {id(a) for a in losers}
-        retained = [a for a in population if id(a) not in loser_ids]
-
-        clones: PopulationType = []
-        for _ in losers:
+        clone_for_loser: dict[int, Any] = {}
+        clone_indices: list[int] = []
+        for loser in losers:
             winner = winners[int(self.rng.integers(len(winners)))]
             clone = winner.clone(index=self._next_index(), wrap=False)
             clone.subpopulation = subpop
-            # The fitness of the loser replacement is set to -inf
-            clone.fitness = [NEG_INF]
-            clones.append(clone)
+            clone_for_loser[id(loser)] = clone
+            clone_indices.append(clone.index)
+        new_population = [clone_for_loser.get(id(a), a) for a in population]
+        return new_population, clone_indices
 
-        # Perturb every introduced clone, forcing mutate_elite so none is skipped
-        prev_mutate_elite = mutation.mutate_elite
-        mutation.mutate_elite = True
-        try:
-            clones = mutation.mutation(clones)
-        finally:
-            mutation.mutate_elite = prev_mutate_elite
-
-        return retained + clones
-
-    def migration(
+    def _migrate(
         self,
         population: PopulationType,
         subpop: int,
+        winners: PopulationType,
+        open_for_migration: PopulationType,
         external_pool: PopulationType,
     ) -> PopulationType:
         """Asymmetrically migrate stronger agents into the open-for-migration slots.
 
         Implements Algorithm 2 of the paper. For each open-for-migration agent (best
-        first), it is compared with the next-best agent drawn from the *other*
+        first), it is compared with the next-best agent drawn from the other
         subpopulations of external_pool. If the open agent is at least as good, no
         migration happens (and the external pointer does not advance). Otherwise the
         external agent migrates in: if it comes from a faster-evolving subpopulation
@@ -408,10 +437,16 @@ class MultiFrequencyStrategy:
         learning rate is updated in place to the elite value, preserving its Adam
         moments); otherwise it is cloned in full.
 
-        :param population: The live population, used for bracketing and substitution.
+        :param population: The live population, used for substitution.
         :type population: list
         :param subpop: The subpopulation id to migrate into.
         :type subpop: int
+        :param winners: The subpopulation's winners bracket; winners[0] is the
+            elite whose hyperparameters a weights-only migrant adopts.
+        :type winners: list
+        :param open_for_migration: The subpopulation's open-for-migration bracket
+            (best first) whose slots migrants may fill.
+        :type open_for_migration: list
         :param external_pool: The pre-evolution population snapshot that migrant
             sources are drawn from.
         :type external_pool: list
@@ -419,9 +454,6 @@ class MultiFrequencyStrategy:
         :rtype: list
         """
         self._sync_index(population)
-        winners, _survivors, open_for_migration, _losers = self.brackets(
-            population, subpop
-        )
         elite = winners[0]
         # Ranked agents from other subpopulations
         external = self._rank([a for a in external_pool if a.subpopulation != subpop])
@@ -457,8 +489,6 @@ class MultiFrequencyStrategy:
         """
         migrant = external.clone(index=self._next_index(), wrap=False)
         migrant.subpopulation = subpop
-        # The migrant's fitness is set to -inf
-        migrant.fitness = [NEG_INF]
         return migrant
 
     def _migrate_weights(self, external: Any, elite: Any, subpop: int) -> Any:
@@ -498,7 +528,6 @@ class MultiFrequencyStrategy:
             if any(name in changed_set for name in lr_attr_names):
                 self._set_optimizer_lr(migrant, opt_config)
         migrant.subpopulation = subpop
-        migrant.fitness = [NEG_INF]
         return migrant
 
     @staticmethod

@@ -316,6 +316,7 @@ class Mutations:
         self,
         population: PopulationType,
         pre_training_mut: bool = False,
+        indices: list[int] | None = None,
     ) -> PopulationType:
         """Return a mutated population of agents. See :ref:`evo_hyperparam_opt` for more details.
 
@@ -323,6 +324,9 @@ class Mutations:
         :type population: list[EvolvableAlgorithm]
         :param pre_training_mut: Boolean flag indicating if the mutation is before the training loop
         :type pre_training_mut: bool, optional
+        :param indices: When given, mutate only the agents whose index appears in this list.
+            Defaults to None (backward compatibility)
+        :type indices: list[int], optional
 
         :return: Mutated population
         :rtype: list[EvolvableAlgorithm]
@@ -334,6 +338,11 @@ class Mutations:
         mutation_proba = (
             self.pretraining_mut_proba if pre_training_mut else self.mut_proba
         )
+
+        if indices is not None:
+            return self._mutate_selected(
+                population, mutation_options, mutation_proba, indices
+            )
 
         # Randomly choose mutation for each agent in population from options with
         # relative probabilities
@@ -355,6 +364,66 @@ class Mutations:
 
             agent = mutation(agent)  # Call sampled mutation for individual
             agent.mutation_hook()  # Call hooks specified by user
+
+            if wrapped_ind:
+                individual.agent = agent
+            else:
+                individual = agent
+
+            mutated_population.append(individual)
+
+        return mutated_population
+
+    def _mutate_selected(
+        self,
+        population: PopulationType,
+        mutation_options: list[MutationMethod],
+        mutation_proba: list[float],
+        indices: list[int],
+    ) -> PopulationType:
+        """Mutate only the agents whose globally-unique index is in indices.
+
+        :param population: The whole population.
+        :type population: list[EvolvableAlgorithm]
+        :param mutation_options: Candidate mutation methods.
+        :type mutation_options: list[MutationMethod]
+        :param mutation_proba: Relative probabilities of ``mutation_options``.
+        :type mutation_proba: list[float]
+        :param indices: Indices of the agents to mutate.
+        :type indices: list[int]
+        :return: The population with the selected agents mutated.
+        :rtype: list[EvolvableAlgorithm]
+        """
+        target_ids = set(indices)
+        targets = [
+            individual
+            for individual in population
+            if (
+                individual.agent if isinstance(individual, AgentWrapper) else individual
+            ).index
+            in target_ids
+        ]
+        mutation_choice: list[MutationMethod] = self.rng.choice(
+            mutation_options,
+            len(targets),
+            p=mutation_proba,
+        )
+        chosen = {
+            id(individual): mutation
+            for individual, mutation in zip(targets, mutation_choice, strict=False)
+        }
+
+        mutated_population = []
+        for individual in population:
+            mutation = chosen.get(id(individual))
+            if mutation is None:  # a non-selected agent passes through untouched
+                mutated_population.append(individual)
+                continue
+            wrapped_ind = isinstance(individual, AgentWrapper)
+            agent = individual.agent if wrapped_ind else individual
+
+            agent = mutation(agent)
+            agent.mutation_hook()
 
             if wrapped_ind:
                 individual.agent = agent

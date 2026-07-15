@@ -2276,3 +2276,94 @@ def test_get_offspring_eval_modules_returns_policy_and_modules(
     assert isinstance(policy, dict)
     assert isinstance(offspring_evals, dict)
     assert len(policy) >= 1
+
+
+class _IndexedAgent:
+    """Minimal agent stand-in for the indices-path mutation tests."""
+
+    def __init__(self, index):
+        self.index = index
+        self.mut = None
+        self.hook_calls = 0
+
+    def mutation_hook(self):
+        self.hook_calls += 1
+
+
+def _tagging_mutations(mutate_elite=True, seed=0):
+    """A mutations class whose only mutation tags the agent."""
+    muts = Mutations(1, 0, 0, 0, 0, 0, rand_seed=seed, mutate_elite=mutate_elite)
+
+    def tag(agent):
+        agent.mut = "tagged"
+        return agent
+
+    muts.mut_options = (tag,)
+    muts.mut_proba = np.array([1.0])
+    return muts
+
+
+def test_mutation_indices_only_mutates_selected_agents():
+    muts = _tagging_mutations()
+    pop = [_IndexedAgent(i) for i in range(5)]
+
+    out = muts.mutation(pop, indices=[pop[1].index, pop[3].index])
+
+    assert len(out) == 5
+
+    for i in (1, 3):
+        assert pop[i].mut == "tagged"
+        assert pop[i].hook_calls == 1
+
+    for i in (0, 2, 4):
+        assert out[i] is pop[i]
+        assert pop[i].mut is None
+        assert pop[i].hook_calls == 0
+
+
+def test_mutation_indices_none_mutates_whole_population():
+    muts = _tagging_mutations()
+    pop = [_IndexedAgent(i) for i in range(4)]
+
+    muts.mutation(pop, indices=None)
+
+    assert all(a.mut == "tagged" for a in pop)
+    assert all(a.hook_calls == 1 for a in pop)
+
+
+def test_mutation_empty_indices_is_a_noop():
+    muts = _tagging_mutations()
+    pop = [_IndexedAgent(i) for i in range(4)]
+
+    out = muts.mutation(pop, indices=[])
+
+    assert out == pop
+    assert all(a.mut is None for a in pop)
+    assert all(a.hook_calls == 0 for a in pop)
+
+
+def test_mutation_indices_path_ignores_elite_skip():
+    # On the whole-population path with mutate_elite=False, agent 0 is spared
+    # (no_mutation). On the indices path the caller has already chosen exactly
+    # which agents to mutate, so the elite-skip must not apply.
+    pop = [_IndexedAgent(i) for i in range(4)]
+    _tagging_mutations(mutate_elite=False).mutation(pop, indices=None)
+    assert pop[0].mut == "None"
+
+    pop = [_IndexedAgent(i) for i in range(4)]
+    _tagging_mutations(mutate_elite=False).mutation(pop, indices=[pop[0].index])
+    assert pop[0].mut == "tagged"
+
+
+def test_mutation_indices_draws_exactly_one_choice_per_target():
+    muts = _tagging_mutations(seed=123)
+    pop = [_IndexedAgent(i) for i in range(5)]
+    muts.mutation(pop, indices=[pop[1].index, pop[4].index])
+
+    reference = _tagging_mutations(seed=123)
+    reference.rng.choice(reference.mut_options, 2, p=reference.mut_proba)
+
+    assert (
+        muts.rng.bit_generator.state["state"]
+        == reference.rng.bit_generator.state["state"]
+    )
