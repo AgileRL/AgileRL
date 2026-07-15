@@ -135,7 +135,6 @@ class MergeEnv(gym.Env):
         for i in range(ACTION_FREQUENCY):
             bs.sim.step()
             if self.render_mode == "human":
-                observation = self._get_obs()
                 self._render_frame()
 
         observation = self._get_obs()

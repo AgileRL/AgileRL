@@ -315,7 +315,7 @@ class MultiAgentMetrics(BaseMetrics):
             for agent_id in self.agent_ids
         }
 
-    def log(self, name: str, value: float, agent_id: str) -> None:
+    def log(self, name: str, value: float, agent_id: str | None = None) -> None:
         """Append a value to the accumulator for a registered metric and sub-agent.
 
         Example:
@@ -329,21 +329,27 @@ class MultiAgentMetrics(BaseMetrics):
         :param value: Scalar metric value.
         :type value: float
         :param agent_id: Sub-agent identifier.
-        :type agent_id: str
+        :type agent_id: str | None
         """
+        if agent_id is None:
+            raise ValueError("agent_id must be provided for multi-agent metrics.")
         self._additional_metrics[name][agent_id].append(float(value))
 
-    def log_histogram(self, name: str, values: np.ndarray, agent_id: str) -> None:
+    def log_histogram(
+        self, name: str, values: np.ndarray, agent_id: str | None = None
+    ) -> None:
         """Extend the accumulator with raw sample values for a histogram metric.
 
         :param name: Previously registered non-scalar metric name.
         :type name: str
         :param values: Array of raw sample values (e.g. action indices).
         :type values: numpy.ndarray
-        :param agent_id: Sub-agent identifier.
-        :type agent_id: str
+        :param agent_id: Sub-agent identifier. If omitted, defaults to the first
+            configured sub-agent.
+        :type agent_id: str | None
         """
-        self._nonscalar_metrics[name][agent_id].extend(values.tolist())
+        resolved_agent_id = agent_id if agent_id is not None else self.agent_ids[0]
+        self._nonscalar_metrics[name][resolved_agent_id].extend(values.tolist())
 
     def get_mean(self, name: str, agent_id: str) -> float:
         """Return the mean of accumulated values for a registered metric and sub-agent.
