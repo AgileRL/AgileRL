@@ -5198,6 +5198,29 @@ class TestLLMQuantizedClone:
 
         mock_vllm.assert_called_once_with(None, add_adapters=True, clone=True)
 
+    def test_colocated_sleep_mode_clone_skips_second_vllm_engine(self):
+        """Sleep-mode clones build the trainer only; parent's llm is moved later."""
+        from agilerl.utils.algo_utils import VLLMConfig
+
+        acc = _make_mock_accelerator(num_processes=1)
+        agent = _make_llm_agent(accelerator=acc, clone=True)
+        agent.use_vllm = True
+        agent.vllm_config = VLLMConfig(sleep_mode=True)
+        agent.llm = MagicMock(name="stale_llm")
+
+        with (
+            patch.object(LLMAlgorithm, "_initialize_actors") as mock_init,
+            patch.object(LLMAlgorithm, "_configure_vllm") as mock_configure,
+        ):
+            agent._initialize_colocated_vllm_and_actors(
+                None, add_adapters=True, clone=True
+            )
+
+        assert agent.llm is None
+        mock_init.assert_called_once_with(None, True)
+        mock_configure.assert_not_called()
+        acc.wait_for_everyone.assert_called()
+
 
 class TestLLMCloneWithVllm:
     """clone preserves vllm references during attribute copying."""
