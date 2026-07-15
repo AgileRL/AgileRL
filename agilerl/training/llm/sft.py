@@ -7,7 +7,7 @@ from agilerl.algorithms.sft import SFT
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
-from agilerl.training.llm._helpers import (
+from agilerl.training.llm.common import (
     _compute_training_steps,
     _validate_finetune_args,
 )
@@ -217,7 +217,15 @@ def finetune_llm_sft(
                 ):
                     checkpoint_due = True
                     next_checkpoint_step += checkpoint_steps
-            if total_steps >= max_steps and not max_steps_checkpoint_saved:
+            if (
+                total_steps >= max_steps
+                and not max_steps_checkpoint_saved
+                and (
+                    checkpoint_steps is not None
+                    or checkpoint_path is not None
+                    or elite_path is not None
+                )
+            ):
                 checkpoint_due = True
                 max_steps_checkpoint_saved = True
             if checkpoint_due:

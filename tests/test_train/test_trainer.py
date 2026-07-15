@@ -1230,12 +1230,12 @@ class TestLLMSpecConstruction:
         assert grpo_spec.group_size == 4
 
     def test_dpo_training_fn(self, dpo_spec):
-        from agilerl.training.train_llm import finetune_llm_preference
+        from agilerl.training.llm import finetune_llm_preference
 
         assert dpo_spec.get_training_fn() is finetune_llm_preference
 
     def test_grpo_training_fn(self, grpo_spec):
-        from agilerl.training.train_llm import finetune_llm_reasoning
+        from agilerl.training.llm import finetune_llm_reasoning
 
         assert grpo_spec.get_training_fn() is finetune_llm_reasoning
 
@@ -2316,13 +2316,13 @@ class TestGRPOSpecMultiturn:
     """Verify GRPOSpec returns the correct training function."""
 
     def test_single_turn_training_fn(self):
-        from agilerl.training.train_llm import finetune_llm_reasoning
+        from agilerl.training.llm import finetune_llm_reasoning
 
         fn = _GRPOSpec.get_training_fn()
         assert fn is finetune_llm_reasoning
 
     def test_multiturn_training_fn(self):
-        from agilerl.training.train_llm import finetune_llm_multiturn
+        from agilerl.training.llm import finetune_llm_multiturn
 
         fn = _GRPOSpec.get_training_fn(multiturn=True)
         assert fn is finetune_llm_multiturn
@@ -2380,7 +2380,7 @@ class TestLocalTrainerMultiturn:
         assert trainer.env is None
         assert trainer.env_factory is not None
         mock_factory_method.assert_called_once()
-        from agilerl.training.train_llm import finetune_llm_multiturn
+        from agilerl.training.llm import finetune_llm_multiturn
 
         assert trainer.train_fn is finetune_llm_multiturn
 

@@ -55,7 +55,7 @@ class LLMREINFORCESpec(LLMAlgorithmSpec):
         :return: Training function
         :rtype: Callable[..., Any]
         """
-        from agilerl.training.train_llm import (
+        from agilerl.training.llm import (
             finetune_llm_multiturn,
             finetune_llm_reasoning,
         )

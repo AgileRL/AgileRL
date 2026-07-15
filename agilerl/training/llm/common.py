@@ -132,8 +132,3 @@ def _num_epochs_reached(
     if not all(isinstance(c, int) for c in epoch_counts):
         return False
     return all(c >= num_epochs for c in epoch_counts)
-
-
-# ---------------------------------------------------------------------------
-# Public training entry points
-# ---------------------------------------------------------------------------

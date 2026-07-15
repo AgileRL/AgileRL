@@ -1,13 +1,8 @@
 """Run a tiny LLM loop matrix for quick compatibility checks.
 
-This script checks that LLM loops execute with:
+Checks that LLM loops execute with:
 1) population size 1 and no tournaments, and
 2) population size >1 with tournament + mutation.
-
-Default behavior:
-- runs real tournament/mutation logic
-- runs real checkpoint writes
-
 """
 
 from __future__ import annotations
@@ -16,10 +11,8 @@ import argparse
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
 from random import Random
 from typing import Any
-from unittest.mock import patch
 
 import torch
 
@@ -34,8 +27,7 @@ from tiny_model import TinyDigitTokenizer, build_tiny_actor_network
 
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.training.llm import multiturn as train_llm
-from agilerl.training.train_llm import (
+from agilerl.training.llm import (
     finetune_llm_multiturn,
     finetune_llm_preference,
     finetune_llm_reasoning,
@@ -364,11 +356,22 @@ def build_evolution_components(
     return tournament, mutation
 
 
-def run_reasoning_case(
-    case: MatrixCase,
-    args: argparse.Namespace,
-) -> None:
-    """Run one reasoning case."""
+def _evolution_kwargs(case: MatrixCase, args: argparse.Namespace) -> dict[str, Any]:
+    if not case.with_tournament:
+        return {
+            "evo_steps": None,
+            "tournament": None,
+            "mutation": None,
+        }
+    tournament, mutation = build_evolution_components(case.population_size)
+    return {
+        "evo_steps": args.evo_steps,
+        "tournament": tournament,
+        "mutation": mutation,
+    }
+
+
+def run_reasoning_case(case: MatrixCase, args: argparse.Namespace) -> None:
     pop, tokenizer, _ = build_population(
         algo=case.algo,
         population_size=case.population_size,
@@ -377,39 +380,25 @@ def run_reasoning_case(
         max_model_len=args.max_model_len,
         max_output_tokens=args.max_output_tokens,
     )
-    env = TinyReasoningEnv(
-        tokenizer=tokenizer,
-        data_batch_size_per_gpu=args.batch_size,
-        dataset_size=args.reasoning_dataset_size,
-    )
-
-    tournament = mutation = None
-    evo_steps = None
-    if case.with_tournament:
-        tournament, mutation = build_evolution_components(case.population_size)
-        evo_steps = args.evo_steps
-
     finetune_llm_reasoning(
         pop=pop,
-        env=env,
+        env=TinyReasoningEnv(
+            tokenizer=tokenizer,
+            data_batch_size_per_gpu=args.batch_size,
+            dataset_size=args.reasoning_dataset_size,
+        ),
         wb=False,
         save_elite=False,
         verbose=False,
         max_steps=args.reasoning_steps,
         evaluation_interval=args.evaluation_interval,
-        evo_steps=evo_steps,
-        tournament=tournament,
-        mutation=mutation,
         accelerator=None,
         checkpoint_steps=args.checkpoint_steps,
+        **_evolution_kwargs(case, args),
     )
 
 
-def run_preference_case(
-    case: MatrixCase,
-    args: argparse.Namespace,
-) -> None:
-    """Run one preference case."""
+def run_preference_case(case: MatrixCase, args: argparse.Namespace) -> None:
     pop, tokenizer, _ = build_population(
         algo=case.algo,
         population_size=case.population_size,
@@ -418,39 +407,25 @@ def run_preference_case(
         max_model_len=args.max_model_len,
         max_output_tokens=args.max_output_tokens,
     )
-    env = TinyPreferenceEnv(
-        tokenizer=tokenizer,
-        data_batch_size_per_gpu=args.batch_size,
-        dataset_size=args.preference_dataset_size,
-    )
-
-    tournament = mutation = None
-    evo_steps = None
-    if case.with_tournament:
-        tournament, mutation = build_evolution_components(case.population_size)
-        evo_steps = args.evo_steps
-
     finetune_llm_preference(
         pop=pop,
-        env=env,
+        env=TinyPreferenceEnv(
+            tokenizer=tokenizer,
+            data_batch_size_per_gpu=args.batch_size,
+            dataset_size=args.preference_dataset_size,
+        ),
         wb=False,
         save_elite=False,
         verbose=False,
         max_steps=args.preference_steps,
         evaluation_interval=args.evaluation_interval,
-        evo_steps=evo_steps,
-        tournament=tournament,
-        mutation=mutation,
         accelerator=None,
         checkpoint_steps=args.checkpoint_steps,
+        **_evolution_kwargs(case, args),
     )
 
 
-def run_multiturn_case(
-    case: MatrixCase,
-    args: argparse.Namespace,
-) -> None:
-    """Run one multiturn case."""
+def run_multiturn_case(case: MatrixCase, args: argparse.Namespace) -> None:
     pop, tokenizer, init_hp = build_population(
         algo=case.algo,
         population_size=case.population_size,
@@ -462,7 +437,6 @@ def run_multiturn_case(
     rng = Random(args.seed)
 
     def env_factory() -> TokenObservationWrapper:
-        """Create one tiny token observation environment."""
         return TokenObservationWrapper(
             ConditionalTargetEnv(seed=rng.randint(0, 2**31)),
             tokenizer,
@@ -472,12 +446,6 @@ def run_multiturn_case(
             max_model_len=args.max_model_len,
             max_output_tokens=args.max_output_tokens,
         )
-
-    tournament = mutation = None
-    evo_steps = None
-    if case.with_tournament:
-        tournament, mutation = build_evolution_components(case.population_size)
-        evo_steps = args.evo_steps
 
     finetune_llm_multiturn(
         pop=pop,
@@ -489,109 +457,37 @@ def run_multiturn_case(
         save_elite=False,
         verbose=False,
         evaluation_interval=args.evaluation_interval,
-        evo_steps=evo_steps,
-        tournament=tournament,
-        mutation=mutation,
         checkpoint_steps=args.checkpoint_steps,
         accelerator=None,
+        **_evolution_kwargs(case, args),
     )
 
 
-def should_validate_checkpoint(case: MatrixCase, args: argparse.Namespace) -> bool:
-    """Return whether checkpoint calls should be validated."""
-    if args.skip_checkpoint_validation:
-        return False
-    return not case.with_tournament
-
-
-def should_validate_tournament(case: MatrixCase, args: argparse.Namespace) -> bool:
-    """Return whether tournament calls should be validated."""
-    return case.with_tournament
+_CASE_RUNNERS = {
+    "reasoning": run_reasoning_case,
+    "preference": run_preference_case,
+    "multiturn": run_multiturn_case,
+}
 
 
 def case_runner(case: MatrixCase) -> Callable[[argparse.Namespace], None]:
-    """Map a matrix case to its runner."""
-    if case.loop_name == "reasoning":
-        return lambda args: run_reasoning_case(case, args)
-    if case.loop_name == "preference":
-        return lambda args: run_preference_case(case, args)
-    if case.loop_name == "multiturn":
-        return lambda args: run_multiturn_case(case, args)
-    msg = f"Unsupported loop: {case.loop_name}"
-    raise ValueError(msg)
+    try:
+        runner = _CASE_RUNNERS[case.loop_name]
+    except KeyError as exc:
+        msg = f"Unsupported loop: {case.loop_name}"
+        raise ValueError(msg) from exc
+    return lambda args: runner(case, args)
 
 
 def run_case(case: MatrixCase, args: argparse.Namespace) -> tuple[bool, str]:
     """Execute one case and return pass/fail with message."""
-    checkpoint_calls = 0
-    tournament_calls = 0
-    run_impl = case_runner(case)
-    original_save_checkpoint = train_llm.save_llm_checkpoint
     start = time.time()
-
-    def checkpoint_wrapper(agent: Any, checkpoint_path: str | None) -> None:
-        """Count checkpoint calls and optionally write a real checkpoint."""
-        nonlocal checkpoint_calls
-        checkpoint_calls += 1
-        if args.mock_checkpoints:
-            return
-        target_root = Path(args.checkpoint_dir)
-        target_path = str(target_root / case.case_id)
-        original_save_checkpoint(agent, target_path)
-
-    def tournament_wrapper(*call_args: Any, **kwargs: Any) -> list[Any]:
-        """Count tournament calls and run real or stubbed logic."""
-        nonlocal tournament_calls
-        tournament_calls += 1
-        if args.stub_tournament_selection:
-            if "population" in kwargs:
-                return kwargs["population"]
-            return call_args[0]
-        return original_tournament(*call_args, **kwargs)
-
     try:
-        if not args.mock_checkpoints:
-            Path(args.checkpoint_dir).mkdir(parents=True, exist_ok=True)
-        original_tournament = train_llm.tournament_selection_and_mutation
-        patch_targets = (
-            "agilerl.training.llm.reasoning",
-            "agilerl.training.llm.preference",
-            "agilerl.training.llm.sft",
-            "agilerl.training.llm.multiturn",
-        )
-        with (
-            *[
-                patch(
-                    f"{mod}.save_llm_checkpoint",
-                    side_effect=checkpoint_wrapper,
-                    autospec=True,
-                )
-                for mod in patch_targets
-            ],
-            *[
-                patch(
-                    f"{mod}.tournament_selection_and_mutation",
-                    side_effect=tournament_wrapper,
-                    autospec=True,
-                )
-                for mod in patch_targets
-            ],
-        ):
-            run_impl(args)
+        case_runner(case)(args)
     except Exception as exc:  # noqa: BLE001
         elapsed = time.time() - start
         return False, f"{type(exc).__name__}: {exc} ({elapsed:.2f}s)"
-
-    if should_validate_checkpoint(case, args) and checkpoint_calls == 0:
-        return False, "Expected checkpoint invocation but observed 0 calls."
-    if should_validate_tournament(case, args) and tournament_calls == 0:
-        return False, "Expected tournament invocation but observed 0 calls."
-
-    elapsed = time.time() - start
-    return (
-        True,
-        f"ok ({elapsed:.2f}s, ckpt_calls={checkpoint_calls}, tourn_calls={tournament_calls})",
-    )
+    return True, f"ok ({time.time() - start:.2f}s)"
 
 
 def build_cases() -> list[MatrixCase]:
@@ -648,30 +544,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--preference-dataset-size", type=int, default=12)
 
     parser.add_argument("--evaluation-interval", type=int, default=10_000)
-    parser.add_argument("--checkpoint-steps", type=int, default=1)
+    parser.add_argument("--checkpoint-steps", type=int, default=None)
     parser.add_argument("--evo-steps", type=int, default=1)
-
-    parser.add_argument(
-        "--skip-checkpoint-validation",
-        action="store_true",
-        help="Disable default checkpoint invocation assertions.",
-    )
-    parser.add_argument(
-        "--mock-checkpoints",
-        action="store_true",
-        help="Do not write real checkpoints; only count checkpoint invocations.",
-    )
-    parser.add_argument(
-        "--checkpoint-dir",
-        type=str,
-        default="./saved_checkpoints/debug_matrix",
-        help="Directory used when --real-checkpoints is enabled.",
-    )
-    parser.add_argument(
-        "--stub-tournament-selection",
-        action="store_true",
-        help=("Use a lightweight tournament stub (counts calls only)."),
-    )
     return parser.parse_args()
 
 

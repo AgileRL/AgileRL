@@ -1,5 +1,5 @@
 import itertools
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from unittest.mock import ANY, MagicMock, Mock, call, patch
 
 import pytest
@@ -17,7 +17,7 @@ from agilerl.algorithms.core.base import MultiAgentRLAlgorithm
 from agilerl.algorithms.sft import SFT
 from agilerl.population import Population
 from agilerl.rollouts.on_policy import collect_rollouts_llm
-from agilerl.training.train_llm import (
+from agilerl.training.llm import (
     finetune_llm_multiturn,
     finetune_llm_preference,
     finetune_llm_reasoning,
@@ -27,8 +27,16 @@ from agilerl.training.train_llm import (
 pytestmark = pytest.mark.llm
 
 
+def test_train_llm_module_emits_deprecation_warning():
+    import importlib
+    import sys
+
+    sys.modules.pop("agilerl.training.train_llm", None)
+    with pytest.warns(FutureWarning, match="agilerl.training.train_llm is deprecated"):
+        importlib.import_module("agilerl.training.train_llm")
+
+
 def _finetune_module_path(finetune_fn):
-    """Return the implementation module path for patching finetune helpers."""
     return {
         finetune_llm_reasoning: "agilerl.training.llm.reasoning",
         finetune_llm_preference: "agilerl.training.llm.preference",
@@ -1288,10 +1296,8 @@ class TestFinetuneLlmMultiturn:
         assert mock_collect.call_count == num_outer
         assert mock_agent.learn.call_count == num_outer
         assert mock_agent.test.call_count == 0
-        # GRPO/CISPO/GSPO now also receive turn_ids in the multi-turn loop
-        # (turn-level importance sampling + per-turn group-relative advantages).
         mock_agent.learn.assert_called_with(ANY, turn_ids=ANY)
-        assert mock_save.call_count == 1
+        assert mock_save.call_count == 0
 
     def test_finetune_llm_multiturn_forwards_sampling_logps_to_learn(self):
         """When the rollout captures sampling logps, they're forwarded to
@@ -2182,9 +2188,13 @@ def test_finetune_llm_checkpoint_triggering_non_divisible_steps(finetune_fn):
     mod = _finetune_module_path(finetune_fn)
     with (
         patch(f"{mod}.default_progress_bar") as mock_pbar_fn,
-        patch(f"{mod}.safe_aggregate_metrics", return_value=0.5, create=True),
         patch(f"{mod}.save_llm_checkpoint") as mock_save,
         patch(f"{mod}.init_loggers", return_value=[]),
+        (
+            patch(f"{mod}.safe_aggregate_metrics", return_value=0.5)
+            if mod == "agilerl.training.llm.reasoning"
+            else nullcontext()
+        ),
     ):
         mock_pbar_fn.return_value = MagicMock()
         finetune_fn(
@@ -2248,8 +2258,12 @@ def test_inner_loop_breaks_after_max_steps_first_agent(finetune_fn, agent_spec):
         _population_init_skip_per_mock_class(),
         patch(f"{mod}.default_progress_bar") as mock_pbar_fn,
         patch(f"{mod}.save_llm_checkpoint"),
-        patch(f"{mod}.safe_aggregate_metrics", return_value=0.5, create=True),
         patch(f"{mod}.init_loggers", return_value=[]),
+        (
+            patch(f"{mod}.safe_aggregate_metrics", return_value=0.5)
+            if mod == "agilerl.training.llm.reasoning"
+            else nullcontext()
+        ),
     ):
         mock_pbar_fn.return_value = MagicMock()
         finetune_fn(

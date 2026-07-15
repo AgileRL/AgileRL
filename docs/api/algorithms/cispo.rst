@@ -51,7 +51,7 @@ as ``finetune_llm_reasoning`` or ``finetune_llm_multiturn``.
 
   from datasets import Dataset
   from agilerl.llm_envs import ReasoningGym, TokenObservationWrapper
-  from agilerl.training.train_llm import (
+  from agilerl.training.llm import (
       finetune_llm_multiturn,
       finetune_llm_reasoning,
   )

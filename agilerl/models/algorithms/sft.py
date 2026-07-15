@@ -28,6 +28,6 @@ class SFTSpec(LLMAlgorithmSpec):
         :return: Training function
         :rtype: Callable[..., Any]
         """
-        from agilerl.training.train_llm import finetune_llm_sft
+        from agilerl.training.llm import finetune_llm_sft
 
         return finetune_llm_sft

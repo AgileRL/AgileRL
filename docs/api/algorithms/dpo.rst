@@ -74,7 +74,7 @@ To train a DPO agent on a single preference gym environment, use the :ref:`finet
 
 .. code-block:: python
 
-  from agilerl.training.train_llm import finetune_llm_preference
+  from agilerl.training.llm import finetune_llm_preference
 
   finetune_llm_preference(
     [agent],

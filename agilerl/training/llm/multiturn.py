@@ -11,7 +11,7 @@ from agilerl.algorithms import GRPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
-from agilerl.training.llm._helpers import _validate_finetune_args
+from agilerl.training.llm.common import _validate_finetune_args
 from agilerl.utils.llm_utils import (
     align_completion_batch_shapes_across_ranks,
     needs_cross_rank_seq_padding,
@@ -349,7 +349,15 @@ def finetune_llm_multiturn(
                 ):
                     checkpoint_due = True
                     next_checkpoint_step += checkpoint_steps
-            if total_steps >= max_steps and not max_steps_checkpoint_saved:
+            if (
+                total_steps >= max_steps
+                and not max_steps_checkpoint_saved
+                and (
+                    checkpoint_steps is not None
+                    or checkpoint_path is not None
+                    or elite_path is not None
+                )
+            ):
                 checkpoint_due = True
                 max_steps_checkpoint_saved = True
             if checkpoint_due:
