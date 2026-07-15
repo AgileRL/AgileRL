@@ -18,36 +18,119 @@ AgileRL's offline RL training framework enables you to leverage evolutionary HPO
    * - :ref:`ILQL <ilql>`
      - --
 
+Training with LocalTrainer
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The simplest way to train an offline RL agent is with a YAML manifest and the
+:class:`~agilerl.training.trainer.LocalTrainer`. This handles population
+creation, dataset loading, replay buffers, evolutionary HPO, and the training
+loop automatically.
+
+Below is an example manifest for training CQN on the CartPole-v1 environment (Minari dataset).
+
+.. collapse:: cqn.yaml
+
+   .. code-block:: yaml
+
+      algorithm:
+        name: CQN
+        batch_size: 256
+        lr: 0.001
+        learn_step: 1
+        gamma: 0.99
+        tau: 0.001
+        double: true
+
+      environment:
+        name: CartPole-v1
+        num_envs: 16
+        minari_dataset_id: cartpole/random-v0
+
+      training:
+        max_steps: 50_000
+        target_score: 200.0
+        pop_size: 4
+        evo_steps: 5_000
+        learning_delay: 1000
+
+      network:
+        latent_dim: 64
+        encoder_config:
+          hidden_size: [64]
+        head_config:
+          hidden_size: [64]
+
+      replay_buffer:
+        max_size: 100_000
+
+      mutation:
+        probabilities:
+          no_mut: 0.4
+          arch_mut: 0.2
+          new_layer: 0.2
+          params_mut: 0.2
+          act_mut: 0.2
+          rl_hp_mut: 0.2
+        rl_hp_selection:
+          lr:   { min: 0.0001, max: 0.01 }
+          batch_size: { min: 8, max: 1024 }
+        mutation_sd: 0.1
+        rand_seed: 42
+
+      tournament_selection:
+        tournament_size: 2
+        elitism: true
+
+.. tab-set::
+
+   .. tab-item:: Python
+
+      .. code-block:: python
+
+         from agilerl import LocalTrainer
+
+         trainer = LocalTrainer.from_manifest("cqn.yaml")
+         population, fitnesses = trainer.train()
+
+   .. tab-item:: CLI
+
+      .. code-block:: bash
+
+         python -m agilerl.train cqn.yaml
+
+.. seealso::
+
+   :ref:`trainers` for full manifest reference and additional options.
+
+
+Customised Training Pipeline
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
 .. _initpop_offline:
 
 Population Creation and Environment Setup
------------------------------------------
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 To perform evolutionary HPO, we require a population of agents. Individuals in this population will share experiences but learn individually, allowing us to
 determine the efficacy of certain hyperparameters. Individual agents which learn best are more likely to survive until the next generation, and so their hyperparameters
-are more likely to remain present in the population. The sequence of evolution (tournament selection followed by mutation) is detailed further below.
+are more likely to remain present in the population. The sequence of evolution (tournament selection followed by mutation) is detailed further below. The referenced
+CartPole-v1 dataset can be found in the `AgileRL repository <https://github.com/AgileRL/AgileRL/blob/main/data/cartpole/>`_.
 
 .. collapse:: Population Creation and Environment Setup
+    :open:
 
     .. code-block:: python
 
-        from agilerl.utils.utils import create_population, make_vect_envs
         import gymnasium as gym
         import h5py
         import torch
 
+        from agilerl.algorithms import CQN
+        from agilerl.utils.utils import make_vect_envs
+
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        INIT_HP = {
-            "DOUBLE": True,  # Use double Q-learning
-            "BATCH_SIZE": 128,  # Batch size
-            "LR": 1e-3,  # Learning rate
-            "GAMMA": 0.99,  # Discount factor
-            "LEARN_STEP": 1,  # Learning frequency
-            "TAU": 1e-3,  # For soft update of target network parameters
-            "POP_SIZE": 4,  # Population size
-        }
-
+        # Create environment and load offline dataset
         num_envs = 1
         env = make_vect_envs("CartPole-v1", num_envs=num_envs)  # Create environment
         dataset = h5py.File("data/cartpole/cartpole_random_v1.1.0.h5", "r")  # Load dataset
@@ -55,29 +138,36 @@ are more likely to remain present in the population. The sequence of evolution (
         observation_space = env.single_observation_space
         action_space = env.single_action_space
 
-        # RL hyperparameter configuration for mutations
-        hp_config = HyperparameterConfig(
-            lr = RLParameter(min=1e-4, max=1e-2),
-            batch_size = RLParameter(min=8, max=64),
-            learn_step = RLParameter(min=1, max=120, grow_factor=1.5, shrink_factor=0.75)
-        )
+        # Configure network architecture
+        net_config = {
+            "encoder_config": {"hidden_size": [32, 32]},  # Encoder hidden size
+            "head_config": {"hidden_size": [32]},  # Head hidden size
+        }
 
-        pop = create_population(
-            algo="CQN",  # Algorithm
-            observation_space=observation_space,  # State dimension
-            action_space=action_space,  # Action dimension
-            net_config=NET_CONFIG,  # Network configuration
-            INIT_HP=INIT_HP,  # Initial hyperparameters
-            hp_config=hp_config,  # RL hyperparameters configuration
-            population_size=INIT_HP["POP_SIZE"],  # Population size
-            num_envs=num_envs,  # Number of vectorized envs
+        # Algorithm hyperparameters
+        init_hp = {
+            "double": True,
+            "batch_size": 128,
+            "lr": 1e-3,
+            "gamma": 0.99,
+            "learn_step": 1,
+            "tau": 1e-3,
+        }
+
+        # Initialize population
+        pop = CQN.population(
+            size=4,
+            observation_space=observation_space,
+            action_space=action_space,
+            net_config=net_config,
             device=device,
+            **init_hp,
         )
 
 .. _memory_offline:
 
 Experience Replay
------------------
+^^^^^^^^^^^^^^^^^
 
 In order to efficiently train a population of RL agents, off-policy algorithms must be used to share memory within populations. This reduces the exploration needed
 by an individual agent because it allows faster learning from the behaviour of other agents. For example, if you were able to watch a bunch of people attempt to solve
@@ -100,7 +190,6 @@ We must fill the replay buffer with our offline data so that we can sample and l
         device=device,
     )
 
-    print("Filling replay buffer with dataset...")
     # Save transitions to replay buffer
     dataset_length = dataset["rewards"].shape[0]
     for i in trange(dataset_length - 1):
@@ -124,10 +213,43 @@ We must fill the replay buffer with our offline data so that we can sample and l
         memory.add(transition.to_tensordict())
 
 
+Evolutionary HPO
+^^^^^^^^^^^^^^^^^
+
+Tournament selection is used to select the agents from a population which will make up the next generation of agents.
+Mutation is periodically used to explore the hyperparameter space.
+
+.. code-block:: python
+
+    from agilerl.hpo.mutation import Mutations
+    from agilerl.hpo.tournament import TournamentSelection
+
+    tournament = TournamentSelection(
+        tournament_size=2,  # Tournament selection size
+        elitism=True,  # Elitism in tournament selection
+        population_size=4,  # Population size
+    )
+
+    mutations = Mutations(
+        no_mutation=0.4,  # No mutation
+        architecture=0.2,  # Architecture mutation
+        new_layer_prob=0.2,  # New layer mutation
+        parameters=0.2,  # Network parameters mutation
+        activation=0,  # Activation layer mutation
+        rl_hp=0.2,  # Learning HP mutation
+        mutation_sd=0.1,  # Mutation strength
+        rand_seed=1,  # Random seed
+        device=device,
+    )
+
+.. seealso::
+
+   :ref:`evo_hyperparam_opt` for details on how evolutionary HPO works.
+
 .. _trainloop_offline:
 
 Training Loop
--------------
+^^^^^^^^^^^^^
 
 Now it is time to insert the evolutionary HPO components into our training loop. If you are using a Gym-style environment, it is
 easiest to use our training function, which returns a population of trained agents and logged training metrics.
@@ -142,6 +264,7 @@ easiest to use our training function, which returns a population of trained agen
         dataset=dataset,  # Offline dataset
         pop=pop,  # Population of agents
         memory=memory,  # Replay buffer
+        init_hp=init_hp,  # Algorithm hyperparameters
         max_steps=500000,  # Max number of training steps
         evo_steps=10000,  # Evolution frequency
         eval_steps=None,  # Evaluation steps
@@ -164,27 +287,13 @@ Alternatively, use a custom training loop. Combining all of the above:
         import torch
         from tqdm import trange
 
+        from agilerl.algorithms import CQN
         from agilerl.components.replay_buffer import ReplayBuffer
         from agilerl.hpo.mutation import Mutations
         from agilerl.hpo.tournament import TournamentSelection
-        from agilerl.utils.utils import create_population, make_vect_envs
+        from agilerl.utils.utils import make_vect_envs, default_progress_bar
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        NET_CONFIG = {
-            "encoder_config": {"hidden_size": [32, 32], "activation": "ReLU"},  # Encoder config
-            "head_config": {"hidden_size": [32]},  # Head hidden size
-        }
-
-        INIT_HP = {
-            "DOUBLE": True,  # Use double Q-learning
-            "BATCH_SIZE": 128,  # Batch size
-            "LR": 1e-3,  # Learning rate
-            "GAMMA": 0.99,  # Discount factor
-            "LEARN_STEP": 1,  # Learning frequency
-            "TAU": 1e-3,  # For soft update of target network parameters
-            "POP_SIZE": 4,  # Population size
-        }
 
         # Create vectorized environment
         num_envs = 1
@@ -193,15 +302,31 @@ Alternatively, use a custom training loop. Combining all of the above:
         observation_space = env.single_observation_space
         action_space = env.single_action_space
 
-        pop = create_population(
-            algo="CQN",  # Algorithm
-            observation_space=observation_space,  # State dimension
-            action_space=action_space,  # Action dimension
-            net_config=NET_CONFIG,  # Network configuration
-            INIT_HP=INIT_HP,  # Initial hyperparameters
-            population_size=INIT_HP["POP_SIZE"],  # Population size
-            num_envs=num_envs,  # Number of vectorized envs
+        # Configure network architecture
+        net_config = {
+            "encoder_config": {"hidden_size": [32, 32], "activation": "ReLU"},  # Encoder config
+            "head_config": {"hidden_size": [32]},  # Head hidden size
+        }
+
+        # Algorithm hyperparameters
+        init_hp = {
+            "double": True,
+            "batch_size": 128,
+            "lr": 1e-3,
+            "gamma": 0.99,
+            "learn_step": 1,
+            "tau": 1e-3,
+        }
+
+        # Initialize population
+        population_size = 4
+        pop = CQN.population(
+            size=population_size,
+            observation_space=observation_space,
+            action_space=action_space,
+            net_config=net_config,
             device=device,
+            **init_hp,
         )
 
         memory = ReplayBuffer(
@@ -232,13 +357,12 @@ Alternatively, use a custom training loop. Combining all of the above:
 
             memory.add(transition.to_tensordict())
 
+        # Tournament and mutations for Evo-HPO
         tournament = TournamentSelection(
             tournament_size=2,  # Tournament selection size
             elitism=True,  # Elitism in tournament selection
-            population_size=INIT_HP["POP_SIZE"],  # Population size
-            eval_loop=1,  # Evaluate using last N fitness scores
+            population_size=population_size,  # Population size
         )
-
         mutations = Mutations(
             no_mutation=0.4,  # No mutation
             architecture=0.2,  # Architecture mutation
@@ -252,23 +376,22 @@ Alternatively, use a custom training loop. Combining all of the above:
         )
 
         max_steps = 200000  # Max steps
-
         evo_steps = 10000  # Evolution frequency
         eval_steps = None  # Evaluation steps per episode - go until done
         eval_loop = 1  # Number of evaluation episodes
-
         total_steps = 0
 
         # TRAINING LOOP
-        print("Training...")
-        pbar = trange(max_steps, unit="step")
-        while np.less([agent.steps[-1] for agent in pop], max_steps).all():
+        pbar = default_progress_bar(max_steps)
+        while np.less([agent.steps for agent in pop], max_steps).all():
             for agent in pop:  # Loop through population
-                for idx_step in range(max_steps):
+                for idx_step in range(evo_steps):
                     experiences = memory.sample(agent.batch_size)  # Sample replay buffer
                     agent.learn(experiences)  # Learn according to agent's RL algorithm
-                total_steps += max_steps
-                agent.steps[-1] += max_steps
+
+                total_steps += evo_steps
+                agent.steps += evo_steps
+                pbar.update(evo_steps // len(pop))
 
             # Evaluate population
             fitnesses = [
@@ -280,21 +403,16 @@ Alternatively, use a custom training loop. Combining all of the above:
                 for agent in pop
             ]
 
-            print(f"--- Global Steps {total_steps} ---")
-            print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
-            print(f"Steps {[agent.steps[-1] for agent in pop]}")
-            print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
-            print(
+            pbar.write(
+                f"--- Global Steps {total_steps} ---\n"
+                f"Steps: {[agent.steps for agent in pop]}\n"
+                f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}\n'
                 f'5 fitness avgs: {["%.2f"%np.mean(agent.fitness[-5:]) for agent in pop]}'
             )
 
             # Tournament selection and population mutation
             elite, pop = tournament.select(pop)
             pop = mutations.mutation(pop)
-
-            # Update step counter
-            for agent in pop:
-                agent.steps.append(agent.steps[-1])
 
         pbar.close()
         env.close()

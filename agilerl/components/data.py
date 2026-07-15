@@ -9,7 +9,7 @@ from tensordict import TensorDict, tensorclass
 from torch.utils.data import IterableDataset
 
 from agilerl.components import ReplayBuffer
-from agilerl.typing import ArrayOrTensor, ObservationType
+from agilerl.typing import ArrayOrTensor, MultiAgentObservationType, ObservationType
 
 
 def to_tensordict(
@@ -91,6 +91,55 @@ class Transition:
 
         if self.reward.ndim == 0:
             self.reward = self.reward.unsqueeze(-1)
+
+
+def _to_agent_td(data: dict) -> TensorDict:
+    """Convert a per-agent dict to a :class:`TensorDict`.
+
+    Each value can be an array/tensor (flat obs) **or** a dict/tuple
+    (dict/tuple observation space), in which case it is recursively
+    converted via :func:`to_tensordict`.
+    """
+    converted = {}
+    for agent_id, value in data.items():
+        if isinstance(value, (dict, tuple)):
+            converted[agent_id] = to_tensordict(value)
+        else:
+            converted[agent_id] = to_torch_tensor(value)
+    return TensorDict(converted)
+
+
+@tensorclass
+class MultiAgentTransition:
+    """Multi-agent analogue of :class:`Transition`.
+
+    Each field is a ``dict[agent_id, array | dict]`` that is converted to a
+    sub-:class:`TensorDict` on construction.  Dict/tuple observation spaces
+    are handled automatically.
+
+    Usage mirrors single-agent :class:`Transition`::
+
+        transition = MultiAgentTransition(
+            obs=obs, action=action, reward=reward,
+            next_obs=next_obs, done=done,
+        )
+        td = transition.to_tensordict()
+        td.batch_size = [num_envs]
+        memory.add(td)
+    """
+
+    obs: MultiAgentObservationType
+    action: dict[str, ArrayOrTensor]
+    reward: dict[str, ArrayOrTensor]
+    next_obs: MultiAgentObservationType
+    done: dict[str, ArrayOrTensor]
+
+    def __post_init__(self) -> None:
+        self.obs = _to_agent_td(self.obs)
+        self.next_obs = _to_agent_td(self.next_obs)
+        self.action = _to_agent_td(self.action)
+        self.reward = _to_agent_td(self.reward)
+        self.done = _to_agent_td(self.done)
 
 
 class ReplayDataset(IterableDataset):

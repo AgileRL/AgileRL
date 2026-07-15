@@ -7,8 +7,8 @@ LLM REINFORCE
 score-function policy-gradient method. ``LLMREINFORCE`` brings this approach to
 causal language model finetuning with turn-aware trajectories.
 
-In AgileRL, the algorithm uses Return Batch Normalization (ReBN) — as
-popularized by the `GEM paper <https://arxiv.org/abs/2510.01051>`_ — to
+In AgileRL, the algorithm uses Return Batch Normalization (ReBN), as
+popularized by the `GEM paper <https://arxiv.org/abs/2510.01051>`_, to
 improve stability in practice:
 
 * **Turn-level Monte Carlo returns:** discounted returns are computed across
@@ -24,16 +24,16 @@ Variance Reduction
 LLM policy-gradient algorithms differ mostly in *how* they reduce the variance
 of the Monte Carlo return signal. Three families show up in this codebase:
 
-* **Learned value baseline (:ref:`LLM PPO<llmppo>`)** — subtract a learned
+* **Learned value baseline (:ref:`LLM PPO<llmppo>`)**: subtract a learned
   state-value estimate to form an advantage. Strong asymptotic variance
   reduction, but spends parameters and compute on a value head and is
   sensitive to value-function staleness.
-* **Group-relative normalization (:ref:`GRPO<grpo>` and variants)** — sample
+* **Group-relative normalization (:ref:`GRPO<grpo>` and variants)**: sample
   a group of ``G`` rollouts per prompt and z-score their returns within the
   group. No critic to train; effective when rewards are sparse and rollouts
   are cheap, but the baseline degenerates as the group's returns collapse and
   it ties variance reduction to having a large group size.
-* **Return Batch Normalization (this algorithm)** — z-score returns across
+* **Return Batch Normalization (this algorithm)**: z-score returns across
   every valid ``(sample, turn)`` pair in the batch. No critic and no group
   requirement, and it remains well-defined under arbitrary discount factors
   and per-step dense rewards (where group-relative normalization is
@@ -44,8 +44,8 @@ of the Monte Carlo return signal. Three families show up in this codebase:
 .. note::
 
    ReBN itself is a specific application of the long-standing "advantage
-   normalization" trick — z-scoring the policy-gradient signal across a
-   batch — that has been standard in PPO implementations since
+   normalization" trick (z-scoring the policy-gradient signal across a
+   batch) that has been standard in PPO implementations since
    `OpenAI Baselines <https://github.com/openai/baselines>`_ and was
    systematically studied by
    `Engstrom et al. 2020 <https://arxiv.org/abs/2005.12729>`_ and
@@ -86,12 +86,12 @@ Training
 --------
 
 Typical training entry points are ``finetune_llm_reasoning`` and
-``finetune_llm_multiturn`` in ``agilerl.training.train_llm``.
+``finetune_llm_multiturn`` in ``agilerl.training.llm.multiturn``.
 
 .. code-block:: python
 
   from datasets import Dataset
-  from agilerl.training.train_llm import (
+  from agilerl.training.llm import (
       finetune_llm_multiturn,
       finetune_llm_reasoning,
   )

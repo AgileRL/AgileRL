@@ -1,6 +1,6 @@
 [project]
 name = "agilerl"
-version = "2.7.1"
+version = "2.8.0"
 description = "AgileRL is a deep reinforcement learning library focused on improving RL development through RLOps."
 authors = [{ name = "Nick Ustaran-Anderegg", email = "dev@agilerl.com" }]
 license = "Apache-2.0"
@@ -22,14 +22,20 @@ dependencies = [
     "numpy>=2.0.0,<3.0",
     "omegaconf>=2.3.0",
     "pandas>=2.2.3",
-    "pettingzoo>=1.23.1",
+    # <1.25: the MPE envs (used by the multi-agent test fixtures) were moved out
+    # of pettingzoo into the separate mpe2 package as of 1.25.
+    "pettingzoo>=1.23.1,<1.25",
     "jax[cpu]>=0.4.31",
+    "lazy-loader>=0.4",
     "packaging>=20.0",
     "pre-commit>=3.8.0",
+    "pydantic>=2.0,<3",
     "pygame>=2.6.0",
     "pymunk>=6.2,<7.3",
     "redis>=4.4.4,<8.1.0",
+    "rich>=13.0,<14",
     "SuperSuit>=3.9.0",
+    "tabulate>=0.9.0",
     "termcolor>=1.1.0",
     "torch>=2.11.0",
     "tensordict==0.13.0",
@@ -51,6 +57,9 @@ llm = [
     "transformers==5.11.0",
     "vllm>=0.23; sys_platform == 'linux'",
 ]
+arena = [
+    "agilerl-arena==0.1.0",
+]
 all = [
     "swig>=4.4.1; sys_platform != 'win32'",
     "gymnasium[box2d]>=1.0.0; sys_platform != 'win32'",
@@ -61,6 +70,7 @@ all = [
     "peft==0.19.1",
     "transformers==5.11.0",
     "vllm>=0.23; sys_platform == 'linux'",
+    "agilerl-arena==0.1.0",
 ]
 
 [dependency-groups]
@@ -73,11 +83,21 @@ dev = [
 ]
 docs = [
     "furo>=2025.12.19",
+    "sphinx>=7,<9",
+    "sphinx-autobuild>=2024.10.3",
+    "sphinx-copybutton>=0.5",
+    "sphinx-design>=0.6",
     "sphinx-github-changelog>=1.7.1",
     "sphinx-notfound-page>=1.1.0",
     "sphinx-toolbox>=4.1.2",
     "sphinxcontrib-googleanalytics>=0.5",
 ]
+
+[tool.uv.workspace]
+members = ["agilerl-arena"]
+
+[tool.uv.sources]
+agilerl-arena = { workspace = true }
 
 [tool.pytest.ini_options]
 addopts = [
@@ -108,8 +128,8 @@ markers = [
 ]
 
 [tool.coverage.run]
+source = ["agilerl", "agilerl-arena/agilerl"]
 parallel = true
-source = ["agilerl"]
 concurrency = ["multiprocessing", "thread"]
 sigterm = true
 
@@ -151,14 +171,16 @@ override-dependencies = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["agilerl"]
+exclude = ["agilerl/arena"]
 
 [tool.hatch.build.targets.sdist]
-exclude = ["tutorials"]
+include = ["agilerl", "README.md", "LICENSE", "pyproject.toml"]
+exclude = ["agilerl-arena", "agilerl/arena"]
 
 [tool.ruff]
 target-version = "py310"
 line-length = 88
-extend-exclude = ["tests/assets/tiny_llm"]
+extend-exclude = ["tests/assets/tiny_llm", "docs/_static/examples"]
 
 [tool.ruff.lint]
 select = ["ALL"]
@@ -182,7 +204,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"{agilerl,tests}/**" = [
+"{agilerl,agilerl-arena/agilerl,tests,agilerl-arena/tests}/**" = [
     "D1",            # missing docstrings in public modules/classes/methods/packages
     "D205",          # 1 blank line between summary and description
     "D4",            # first line punctuation/period (conflicts with multi-line)
@@ -196,7 +218,7 @@ ignore = [
     "ERA001",        # commented-out code (kept for reference)
     "SLF001",        # private member access (torch/accelerate internals)
     "NPY002",        # legacy np.random
-    "TC001", "TC003",# type-checking block imports
+    "TC001", "TC002", "TC003",# type-checking block imports
     "A002",          # argument shadowing builtin (input)
     "PIE790",        # unnecessary ...
     "PD011",         # .values -> .to_numpy()

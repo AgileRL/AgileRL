@@ -5,12 +5,17 @@ from typing import Any
 
 import numpy as np
 import torch
+from accelerate import Accelerator
 from gymnasium import spaces
 from torch import nn, optim
 from torch.nn.utils import clip_grad_norm_
 
 from agilerl.algorithms.core import MultiAgentRLAlgorithm, OptimizerWrapper
-from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.algorithms.core.registry import (
+    HyperparameterConfig,
+    NetworkGroup,
+    make_default_hp_config,
+)
 from agilerl.modules import EvolvableModule, ModuleDict
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import StochasticActor
@@ -24,16 +29,17 @@ from agilerl.typing import (
     ObservationType,
     PzEnvType,
     StandardTensorDict,
+    SupportedObservationSpace,
     TorchObsType,
 )
 from agilerl.utils.algo_utils import (
     apply_env_defined_actions,
     concatenate_experiences_into_batches,
+    configure_tf32_precision,
     get_experiences_samples,
     get_vect_dim,
     key_in_nested_dict,
     make_safe_deepcopies,
-    obs_channels_to_first,
     vectorize_experiences_by_agent,
 )
 from agilerl.utils.algo_utils import (
@@ -42,12 +48,12 @@ from agilerl.utils.algo_utils import (
 
 
 class IPPO(MultiAgentRLAlgorithm):
-    """Independent Proximal Policy Optimization (IPPO) algorithm.
+    """Independent Proximal Policy Optimization (IPPO).
 
     Paper: https://arxiv.org/pdf/2011.09533
 
     :param observation_spaces: Observation space for each agent
-    :type observation_spaces: list[spaces.Space] | spaces.Dict
+    :type observation_spaces: list[SupportedObservationSpace] | spaces.Dict
     :param action_spaces: Action space for each agent
     :type action_spaces: list[spaces.Space] | spaces.Dict
     :param agent_ids: Agent ID for each agent
@@ -108,7 +114,7 @@ class IPPO(MultiAgentRLAlgorithm):
 
     def __init__(
         self,
-        observation_spaces: list[spaces.Space] | spaces.Dict,
+        observation_spaces: list[SupportedObservationSpace] | spaces.Dict,
         action_spaces: list[spaces.Space] | spaces.Dict,
         agent_ids: list[str] | None = None,
         index: int = 0,
@@ -132,7 +138,7 @@ class IPPO(MultiAgentRLAlgorithm):
         critic_networks: ModuleDict | None = None,
         action_batch_size: int | None = None,
         device: str = "cpu",
-        accelerator: Any | None = None,
+        accelerator: Accelerator | None = None,
         torch_compiler: str | None = None,
         wrap: bool = True,
     ) -> None:
@@ -234,6 +240,13 @@ class IPPO(MultiAgentRLAlgorithm):
         self.update_epochs = update_epochs
         self.action_batch_size = action_batch_size
 
+        # Default RL hyperparameters to mutate when doing Evo-HPO
+        self.hp_config = self.hp_config or make_default_hp_config(
+            lr=self.lr,
+            batch_size=self.batch_size,
+            learn_step=self.learn_step,
+        )
+
         if actor_networks is not None and critic_networks is not None:
             if isinstance(actor_networks, list):
                 assert len(actor_networks) == len(
@@ -302,6 +315,7 @@ class IPPO(MultiAgentRLAlgorithm):
                 if head_config is not None:
                     critic_head_config = copy.deepcopy(head_config)
                     critic_head_config["output_activation"] = None
+                    critic_net_config.pop("squash_output", None)
                 else:
                     critic_head_config = MlpNetConfig(hidden_size=[64])
 
@@ -354,7 +368,7 @@ class IPPO(MultiAgentRLAlgorithm):
                 )
                 self.torch_compiler = "default"
 
-            torch.set_float32_matmul_precision("high")
+            configure_tf32_precision()
             self.recompile()
 
         self.criterion = nn.MSELoss()
@@ -371,6 +385,10 @@ class IPPO(MultiAgentRLAlgorithm):
                 eval_network=self.critics,
             ),
         )
+
+        # Register metrics to keep track of during training
+        for metric_name in ("loss", "policy_loss", "value_loss", "entropy_loss"):
+            self.metrics.register(metric_name)
 
     def process_infos(
         self,
@@ -601,10 +619,10 @@ class IPPO(MultiAgentRLAlgorithm):
 
         :param experiences: Tuple of dictionaries containing batched states, actions,
             rewards, next_states, dones in that order for each individual agent.
-        :type experiences: tuple[dict[str, torch.Tensor]]
+        :type experiences: ExperiencesType
 
         :return: Loss dictionary
-        :rtype: dict[str, torch.Tensor]
+        :rtype: StandardTensorDict
         """
         # Process experiences
         states, actions, log_probs, rewards, dones, values, next_states, next_dones = (
@@ -621,6 +639,7 @@ class IPPO(MultiAgentRLAlgorithm):
             action_space = self.action_space[agent_id]
 
             loss_dict[f"{agent_id}"] = self._learn_individual(
+                agent_id=agent_id,
                 experiences=(
                     state,
                     actions[agent_id],
@@ -643,6 +662,7 @@ class IPPO(MultiAgentRLAlgorithm):
 
     def _learn_individual(
         self,
+        agent_id: str,
         experiences: ExperiencesType,
         actor: EvolvableModule | StochasticActor,
         critic: EvolvableModule | ValueNetwork,
@@ -654,6 +674,8 @@ class IPPO(MultiAgentRLAlgorithm):
         """Inner call to each agent for the learning/algo training steps,
         essentially the PPO learn method. Applies all forward/backward props.
 
+        :param agent_id: ID of the agent
+        :type agent_id: str
         :param experience: States, actions, log_probs, rewards, dones, values, next_state, next_done in
             that order, organised by shared agent id
         :type experience: tuple[numpy.ndarray | dict[str, numpy.ndarray], ...]
@@ -670,7 +692,7 @@ class IPPO(MultiAgentRLAlgorithm):
         :param action_space: Action space for the agent
         :type action_space: gymnasium.spaces
         """
-        states, actions, log_probs, rewards, dones, values, next_state, next_done = (
+        obs, actions, log_probs, rewards, dones, values, next_obs, next_done = (
             experiences
         )
 
@@ -682,7 +704,7 @@ class IPPO(MultiAgentRLAlgorithm):
         rewards = rewards.squeeze()
         dones = dones.squeeze()
         values = values.squeeze()
-        next_state = vectorize_experiences_by_agent(next_state, dim=0)
+        next_obs = vectorize_experiences_by_agent(next_obs, dim=0)
         next_done = vectorize_experiences_by_agent(next_done, dim=0)
 
         with torch.no_grad():
@@ -692,13 +714,14 @@ class IPPO(MultiAgentRLAlgorithm):
             values = values.reshape(num_steps, -1)
             next_done = next_done.reshape(1, -1)
 
-            next_state = preprocess_observation_fn(
+            next_obs = preprocess_observation_fn(
                 obs_space,
-                next_state,
+                next_obs,
                 self.device,
                 self.normalize_images,
+                swap_channels=self.swap_channels,
             )
-            next_value = critic(next_state).reshape(1, -1).cpu()
+            next_value = critic(next_obs).reshape(1, -1).cpu()
             advantages = torch.zeros_like(rewards).float()
             last_gae_lambda = 0
             for t in reversed(range(num_steps)):
@@ -724,28 +747,33 @@ class IPPO(MultiAgentRLAlgorithm):
             values = values.reshape((-1,))
             returns = advantages + values
 
-        states = concatenate_experiences_into_batches(states, obs_space)
+        obs = concatenate_experiences_into_batches(obs, obs_space)
         actions = concatenate_experiences_into_batches(
             actions,
             action_space,
             actions=True,
         )
         log_probs = log_probs.reshape((-1,))
-        experiences = (states, actions, log_probs, advantages, returns, values)
+        experiences = (obs, actions, log_probs, advantages, returns, values)
 
         # Move experiences to algo device
         experiences = self.to_device(*experiences)
 
         num_samples = experiences[4].size(0)
         batch_idxs = np.arange(num_samples)
-        mean_loss = 0
+        learn_metrics = {
+            "loss": 0.0,
+            "policy_loss": 0.0,
+            "value_loss": 0.0,
+            "entropy_loss": 0.0,
+        }
         approx_kl = torch.tensor(float("inf"))
         for _ in range(self.update_epochs):
             np.random.shuffle(batch_idxs)
             for start in range(0, num_samples, self.batch_size):
                 minibatch_idxs = batch_idxs[start : start + self.batch_size]
                 (
-                    batch_states,
+                    batch_obs,
                     batch_actions,
                     batch_log_probs,
                     batch_advantages,
@@ -760,14 +788,15 @@ class IPPO(MultiAgentRLAlgorithm):
                 batch_values = batch_values.squeeze()
 
                 if len(minibatch_idxs) > 1:
-                    batch_states = preprocess_observation_fn(
+                    batch_obs = preprocess_observation_fn(
                         obs_space,
-                        batch_states,
+                        batch_obs,
                         self.device,
                         self.normalize_images,
+                        swap_channels=self.swap_channels,
                     )
-                    _, _, entropy = actor(batch_states)
-                    value = critic(batch_states).squeeze(-1)
+                    _, _, entropy = actor(batch_obs)
+                    value = critic(batch_obs).squeeze(-1)
 
                     log_prob = actor.action_log_prob(batch_actions)
 
@@ -827,18 +856,27 @@ class IPPO(MultiAgentRLAlgorithm):
                     clip_grad_norm_(critic.parameters(), self.max_grad_norm)
                     critic_optimizer.step()
 
-                    mean_loss += actor_loss.item() + critic_loss.item()
+                    learn_metrics["loss"] += actor_loss.item() + critic_loss.item()
+                    learn_metrics["policy_loss"] += pg_loss.item()
+                    learn_metrics["value_loss"] += v_loss.item()
+                    learn_metrics["entropy_loss"] += entropy_loss.item()
 
+            # Early stopping for the epoch if KL divergence target is exceeded
             if self.target_kl is not None and approx_kl > self.target_kl:
                 break
 
-        mean_loss /= num_samples * self.update_epochs
-        return mean_loss
+        # Log metrics
+        learn_metrics = {
+            k: v / (num_samples * self.update_epochs) for k, v in learn_metrics.items()
+        }
+        for key, value in learn_metrics.items():
+            self.metrics.log(key, value, agent_id=agent_id)
+
+        return learn_metrics["loss"]
 
     def test(
         self,
         env: PzEnvType,
-        swap_channels: bool = False,
         max_steps: int | None = None,
         loop: int = 3,
         sum_scores: bool = True,
@@ -847,8 +885,6 @@ class IPPO(MultiAgentRLAlgorithm):
 
         :param env: The environment to be tested in
         :type env: PettingZoo environment
-        :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
-        :type swap_channels: bool, optional
         :param max_steps: Maximum number of testing steps, defaults to None
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
@@ -884,12 +920,6 @@ class IPPO(MultiAgentRLAlgorithm):
                 step = 0
                 while not np.all(finished):
                     step += 1
-                    if swap_channels:
-                        obs = {
-                            agent_id: obs_channels_to_first(s)
-                            for agent_id, s in obs.items()
-                        }
-
                     # Get next action from agent
                     action, _, _, _ = self.get_action(obs=obs, infos=info)
 
@@ -952,5 +982,5 @@ class IPPO(MultiAgentRLAlgorithm):
 
         mean_fit = np.mean(rewards, axis=0)
         mean_fit = mean_fit[0] if sum_scores else mean_fit
-        self.fitness.append(mean_fit)
+        self.metrics.add_fitness(mean_fit)
         return float(mean_fit) if sum_scores else mean_fit

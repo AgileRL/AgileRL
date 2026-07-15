@@ -516,7 +516,7 @@ class TestREINFORCEInit:
                 gradient_checkpointing=False,
             )
 
-    def test_init_fused_loss_chunk_rows_must_be_positive(self):
+    def test_init_chunk_rows_must_be_positive(self):
         actor = create_dummy_actor(10, 8, 100, "cpu")
         lora = LoraConfig(
             r=4,
@@ -524,22 +524,20 @@ class TestREINFORCEInit:
             target_modules=["lin"],
             task_type="CAUSAL_LM",
         )
-        with pytest.raises(
-            ValueError, match="fused_loss_chunk_rows must be a positive int"
-        ):
+        with pytest.raises(ValueError, match="chunk_rows must be a positive int"):
             REINFORCE(
                 actor_network=actor,
                 pad_token_id=99,
                 pad_token="<pad>",
                 lora_config=lora,
-                fused_loss_chunk_rows=0,
+                chunk_rows=0,
                 wrap=False,
                 gradient_checkpointing=False,
             )
 
-    def test_init_stores_fused_loss_chunk_rows(self):
-        rf = _cpu_llmreinforce(fused_loss_chunk_rows=256)
-        assert rf.fused_loss_chunk_rows == 256
+    def test_init_stores_chunk_rows(self):
+        rf = _cpu_llmreinforce(chunk_rows=256)
+        assert rf.chunk_rows == 256
 
     def test_init_turn_ratio_pooling_must_be_valid(self):
         actor = create_dummy_actor(10, 8, 100, "cpu")
@@ -902,7 +900,7 @@ class TestREINFORCELearn:
         ) as mock_prepare_vllm_for_training:
             metrics = rf.learn((completions, action_masks, rewards), turn_ids=turn_ids)
         assert mock_prepare_vllm_for_training.call_count == 1
-        for key in ("mean_loss", "mean_kl", "mean_pg_loss", "mean_entropy"):
+        for key in ("loss", "kl", "entropy"):
             assert key in metrics
             assert isinstance(metrics[key], float)
             assert torch.isfinite(torch.tensor(metrics[key]))
@@ -996,25 +994,20 @@ class TestREINFORCETest:
 
             def __init__(self):
                 self._step_count = 0
+                self.valid_prompt = {
+                    "input_ids": torch.ones(1, 4, dtype=torch.long),
+                    "attention_mask": torch.ones(1, 4, dtype=torch.long),
+                }
 
             def reset(self, seed=None):
                 del seed
                 self._step_count = 0
-                prompt = {
-                    "input_ids": torch.ones(1, 4, dtype=torch.long),
-                    "attention_mask": torch.ones(1, 4, dtype=torch.long),
-                }
-                return prompt, {}
+                return self.valid_prompt, {}
 
             def step(self, full_completion_ids):
                 del full_completion_ids
                 self._step_count += 1
-                prompt = {
-                    "input_ids": torch.ones(1, 4, dtype=torch.long),
-                    "attention_mask": torch.ones(1, 4, dtype=torch.long),
-                }
-                terminated = self._step_count >= 2
-                return prompt, 1.0, terminated, False, {}
+                return {}, 1.0, True, False, {}
 
             def get_episode_data(self):
                 return (
@@ -1038,8 +1031,83 @@ class TestREINFORCETest:
 
         assert out.shape == ()
         assert out.item() == pytest.approx(1.0)
-        assert get_action.call_count == 4
+        # One real turn per episode (early terminate); no dummy padding turns.
+        assert get_action.call_count == 2
+        for call in get_action.call_args_list:
+            assert call.args[0][0] is env.valid_prompt
         assert rf.fitness[-1] == pytest.approx(1.0)
+
+    def test_test_method_waits_for_everyone(self):
+        class DummyMultiTurnEpisodeEnv:
+            max_turns = 1
+
+            def reset(self, seed=None):
+                del seed
+                return {
+                    "input_ids": torch.ones(1, 4, dtype=torch.long),
+                    "attention_mask": torch.ones(1, 4, dtype=torch.long),
+                }, {}
+
+            def step(self, full_completion_ids):
+                del full_completion_ids
+                return {}, 1.0, True, False, {}
+
+            def close(self):
+                return None
+
+        rf = _cpu_llmreinforce()
+        acc = MagicMock()
+        rf.accelerator = acc
+        completion = torch.ones(1, 6, dtype=torch.long)
+        with patch.object(
+            rf, "get_action", return_value=ActionResult([completion], None)
+        ):
+            rf.test(DummyMultiTurnEpisodeEnv(), loop=1)
+        acc.wait_for_everyone.assert_called()
+
+    def test_test_method_multiturn_continues_when_not_done(self):
+        """Cover prompt update when the episode spans turns."""
+
+        class DummyMultiTurnContinueEnv:
+            max_turns = 2
+
+            def __init__(self):
+                self._step_count = 0
+                self.prompt_a = {
+                    "input_ids": torch.ones(1, 4, dtype=torch.long),
+                    "attention_mask": torch.ones(1, 4, dtype=torch.long),
+                }
+                self.prompt_b = {
+                    "input_ids": torch.ones(1, 5, dtype=torch.long),
+                    "attention_mask": torch.ones(1, 5, dtype=torch.long),
+                }
+
+            def reset(self, seed=None):
+                del seed
+                self._step_count = 0
+                return self.prompt_a, {}
+
+            def step(self, full_completion_ids):
+                del full_completion_ids
+                self._step_count += 1
+                if self._step_count == 1:
+                    return self.prompt_b, 0.5, False, False, {}
+                return {}, 1.0, True, False, {}
+
+            def close(self):
+                return None
+
+        rf = _cpu_llmreinforce()
+        completion = torch.ones(1, 6, dtype=torch.long)
+        with patch.object(
+            rf, "get_action", return_value=ActionResult([completion], None)
+        ) as get_action:
+            out = rf.test(DummyMultiTurnContinueEnv(), loop=1)
+
+        assert out.shape == ()
+        assert get_action.call_count == 2
+        assert get_action.call_args_list[0].args[0][0]["input_ids"].shape[-1] == 4
+        assert get_action.call_args_list[1].args[0][0]["input_ids"].shape[-1] == 5
 
     def test_test_method_unknown_env_typeerror(self):
         rf = _cpu_llmreinforce()
@@ -1173,8 +1241,8 @@ class TestReinforceLossLiger:
         assert ratio is not None
         assert torch.all(ratio <= rf.vllm_importance_sampling_cap)
 
-    def test_forwards_configured_fused_loss_chunk_rows(self) -> None:
-        rf = _cpu_llmreinforce(fused_loss_chunk_rows=123)
+    def test_forwards_configured_chunk_rows(self) -> None:
+        rf = _cpu_llmreinforce(chunk_rows=123)
         B, T = 2, 5
         ids = torch.randint(1, 50, (B, T), dtype=torch.long)
         mask = torch.ones(B, T - 1, dtype=torch.float32)
@@ -1317,9 +1385,9 @@ class TestREINFORCELearnWithLiger:
         learn_out = rf.learn((completions, action_masks, rewards), turn_ids=turn_ids)
 
         assert rf._reinforce_loss_liger.call_count >= 1
-        assert learn_out["mean_loss"] == pytest.approx(0.3, rel=1e-6)
-        assert learn_out["mean_kl"] == pytest.approx(0.05, rel=1e-6)
-        assert learn_out["mean_pg_loss"] == pytest.approx(0.25, rel=1e-6)
+        assert learn_out["loss"] == pytest.approx(0.3, rel=1e-6)
+        assert learn_out["kl"] == pytest.approx(0.05, rel=1e-6)
+        assert learn_out["pg_loss"] == pytest.approx(0.25, rel=1e-6)
 
     def test_learn_liger_token_with_sampling_logps_uses_fused_kernel(self, monkeypatch):
         """token-level use_liger_loss=True + captured vLLM logprobs: the
@@ -1408,7 +1476,7 @@ class TestREINFORCELearnWithLiger:
         rf._reinforce_loss_liger.assert_not_called()
         assert rf._is_correction_liger_warned is True
         assert "vllm_is_delta_mean" in metrics
-        assert torch.isfinite(torch.tensor(metrics["mean_loss"]))
+        assert torch.isfinite(torch.tensor(metrics["loss"]))
 
 
 class TestREINFORCEVllmISCorrection:
@@ -1446,7 +1514,7 @@ class TestREINFORCEVllmISCorrection:
             assert key in metrics
             assert isinstance(metrics[key], float)
         assert metrics["vllm_is_ratio_mean"] > 0
-        assert torch.isfinite(torch.tensor(metrics["mean_loss"]))
+        assert torch.isfinite(torch.tensor(metrics["loss"]))
 
 
 class TestREINFORCESequencePacking:
@@ -1468,4 +1536,4 @@ class TestREINFORCESequencePacking:
         )[:, : seq_len - 1]
         rewards = torch.tensor([[0.5, -0.5]], dtype=torch.float32)
         metrics = rf.learn((completions, action_masks, rewards), turn_ids=turn_ids)
-        assert torch.isfinite(torch.tensor(metrics["mean_loss"]))
+        assert torch.isfinite(torch.tensor(metrics["loss"]))

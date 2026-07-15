@@ -1,11 +1,16 @@
 import random
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
 from gymnasium import spaces
 from torch import nn
 from tqdm import trange
+
+from agilerl.components.data import MultiAgentTransition
+
+if TYPE_CHECKING:
+    from tensordict import TensorDictBase
 
 
 class ConstantRewardEnv:
@@ -1891,14 +1896,16 @@ def check_policy_q_learning_with_probe_env(
         mem_next_state = {
             agent_id: np.expand_dims(ns, 0) for agent_id, ns in next_state.items()
         }
-        memory.save_to_memory(
-            state,
-            raw_action,
-            reward,
-            mem_next_state,
-            done,
-            is_vectorised=True,
+        transition: TensorDictBase = MultiAgentTransition(
+            obs=state,
+            action=raw_action,
+            reward=reward,
+            next_obs=mem_next_state,
+            done=done,
         )
+        transition = transition.to_tensordict()
+        transition.batch_size = [1]
+        memory.add(transition)
         state = next_state
         if done[agent.agent_ids[0]]:
             state, _ = env.reset()
@@ -1906,8 +1913,6 @@ def check_policy_q_learning_with_probe_env(
     # Learn from experiences
     for _ in trange(learn_steps):
         experiences = memory.sample(agent.batch_size)
-
-        # Learn according to agent's RL algorithm
         agent.learn(experiences)
 
     agent.set_training_mode(False)

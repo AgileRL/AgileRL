@@ -10,6 +10,7 @@ from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import ActionResult, LLMAlgorithm
 from agilerl.algorithms.core.llm_ops.fused_lora import clear_fused_adapter_routing
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.llm_envs import ReasoningGym
 
 if HAS_LIGER_KERNEL:
     from agilerl.algorithms.core.llm_ops.fused_loss import (
@@ -36,7 +37,7 @@ from agilerl.utils.algo_utils import (
 )
 from agilerl.utils.llm_utils import (
     BitsAndBytesConfig,
-    ReasoningGym,
+    aggregate_metrics_dict,
     build_completion_mask,
     calculate_k3_kl,
     clipped_is_surrogate,
@@ -197,12 +198,9 @@ class PPO(LLMAlgorithm):
         it in the input dtype, saving a little memory at the cost of a per-token
         bf16 quantisation error that can bias importance-sampling ratios.
     :type cast_logprobs_to_fp32: bool, optional
-    :param fused_logprobs_chunk_rows: Standard (non-Liger) path only. Rows
-        (tokens) per ``(chunk_rows, vocab)`` logit tile when computing per-token
-        log-probs via the fused-linear-logprob path. Peak logits memory is
-        ``O(chunk_rows * vocab)`` regardless of batch/sequence length. ``None``
-        (default) auto-tunes to a ~256 MB fp32 tile.
-    :type fused_logprobs_chunk_rows: int | None, optional
+    :param chunk_rows: Primary chunk-size knob for fused logit tiles. Applies
+        to both standard and Liger paths.
+    :type chunk_rows: int | None, optional
     :param use_liger_loss: Use the Liger fused policy loss, defaults to ``False``
         (requires ``liger-kernel``). **Recommended for PPO**: via AgileRL's
         ``LigerFusedLinearPolicyLossFunction`` (not the upstream Liger GRPO
@@ -221,12 +219,6 @@ class PPO(LLMAlgorithm):
         memory (the win grows with sequence length); a no-op during rollout /
         reference forwards.
     :type activation_offload: bool, optional
-    :param fused_loss_chunk_rows: Rows per ``(chunk_rows, vocab)`` logit tile in
-        the token-level Liger fused policy loss. ``None`` (default) auto-tunes to
-        a ~256 MB fp32 logit workspace — the same heuristic as
-        ``fused_logprobs_chunk_rows`` on the standard path; pass an int to
-        override.
-    :type fused_loss_chunk_rows: int | None, optional
     :param vllm_importance_sampling_correction: When ``True`` (default) and
         ``use_vllm=True``, correct the rollout/trainer log-prob mismatch by
         weighting each training token by ``clamp(exp(trainer - sampling),
@@ -303,13 +295,12 @@ class PPO(LLMAlgorithm):
         torch_compiler: str | None = None,
         reduce_memory_peak: bool = False,
         cast_logprobs_to_fp32: bool = True,
-        fused_logprobs_chunk_rows: int | None = None,
+        chunk_rows: int | None = None,
         use_liger_loss: bool = False,
         quantization_config: BitsAndBytesConfig | None = None,
         activation_offload: bool = False,
         use_sequence_packing: bool = False,
         lora_target_scope: str | None = None,
-        fused_loss_chunk_rows: int | None = None,
         vllm_importance_sampling_correction: bool = True,
         vllm_importance_sampling_cap: float = 2.0,
     ) -> None:
@@ -349,12 +340,11 @@ class PPO(LLMAlgorithm):
             torch_compiler=torch_compiler,
             reduce_memory_peak=reduce_memory_peak,
             cast_logprobs_to_fp32=cast_logprobs_to_fp32,
-            fused_logprobs_chunk_rows=fused_logprobs_chunk_rows,
+            chunk_rows=chunk_rows,
             quantization_config=quantization_config,
             activation_offload=activation_offload,
             use_sequence_packing=use_sequence_packing,
             lora_target_scope=lora_target_scope,
-            fused_loss_chunk_rows=fused_loss_chunk_rows,
             vllm_importance_sampling_correction=vllm_importance_sampling_correction,
             vllm_importance_sampling_cap=vllm_importance_sampling_cap,
         )
@@ -395,6 +385,18 @@ class PPO(LLMAlgorithm):
         self.register_network_group(NetworkGroup(eval_network=self.actor, policy=True))
         if self.wrap:
             self.wrap_models()
+
+        # Register algorithm metrics
+        for m in (
+            "loss",
+            "pg_loss",
+            "vf_loss",
+            "kl",
+            "entropy",
+            "clipfrac",
+            "completion_length",
+        ):
+            self.metrics.register(m)
 
     def get_action(
         self,
@@ -511,7 +513,6 @@ class PPO(LLMAlgorithm):
         :rtype: dict[str, float]
         """
         self._prepare_vllm_for_training()
-
         with self.memory_efficient_params_context():
             completion_ids, action_masks, rewards = stack_and_pad_experiences(
                 *experiences,
@@ -546,12 +547,12 @@ class PPO(LLMAlgorithm):
             )
             updates = 0
             learn_metrics = {
-                "mean_loss": 0.0,
-                "mean_pg_loss": 0.0,
-                "mean_vf_loss": 0.0,
-                "mean_kl": 0.0,
-                "mean_entropy": 0.0,
-                "mean_clipfrac": 0.0,
+                "loss": 0.0,
+                "pg_loss": 0.0,
+                "vf_loss": 0.0,
+                "kl": 0.0,
+                "entropy": 0.0,
+                "clipfrac": 0.0,
             }
             reference_log_probs, old_log_probs, old_values = (
                 self._fused_forward_no_grad(
@@ -663,12 +664,12 @@ class PPO(LLMAlgorithm):
                         )
                         self._backward_pass(total_loss)
                         clear_fused_adapter_routing(self._get_unwrapped_actor())
-                        learn_metrics["mean_kl"] += metrics["kl"]
-                        learn_metrics["mean_entropy"] += metrics["entropy"]
-                        learn_metrics["mean_clipfrac"] += metrics["clipfrac"]
-                        learn_metrics["mean_pg_loss"] += metrics["pg_loss"]
-                        learn_metrics["mean_vf_loss"] += metrics["vf_loss"]
-                        learn_metrics["mean_loss"] += total_loss.item()
+                        learn_metrics["kl"] += metrics["kl"]
+                        learn_metrics["entropy"] += metrics["entropy"]
+                        learn_metrics["clipfrac"] += metrics["clipfrac"]
+                        learn_metrics["pg_loss"] += metrics["pg_loss"]
+                        learn_metrics["vf_loss"] += metrics["vf_loss"]
+                        learn_metrics["loss"] += total_loss.item()
                         updates += 1
                         continue
 
@@ -762,26 +763,48 @@ class PPO(LLMAlgorithm):
                     self._backward_pass(total_loss)
                     clear_fused_adapter_routing(self._get_unwrapped_actor())
 
-                    learn_metrics["mean_kl"] += kl_loss.item()
-                    learn_metrics["mean_entropy"] += masked_entropy.mean().item()
-                    learn_metrics["mean_clipfrac"] += clipfrac.item()
-                    learn_metrics["mean_pg_loss"] += pg_loss.mean().item()
-                    learn_metrics["mean_vf_loss"] += vf_loss.mean().item()
-                    learn_metrics["mean_loss"] += total_loss.item()
+                    learn_metrics["kl"] += kl_loss.item()
+                    learn_metrics["entropy"] += masked_entropy.mean().item()
+                    learn_metrics["clipfrac"] += clipfrac.item()
+                    learn_metrics["pg_loss"] += pg_loss.mean().item()
+                    learn_metrics["vf_loss"] += vf_loss.mean().item()
+                    learn_metrics["loss"] += total_loss.item()
                     updates += 1
 
-        result = {
+        averaged = {
             metric: value / max(updates, 1) for metric, value in learn_metrics.items()
         }
+        result = dict(averaged)
         # Sampling-mismatch metrics are computed once over the full batch, so
         # they bypass the per-update averaging above.
         result.update(is_metrics)
+
+        # Wire averaged metrics into the metrics tracker (new API).
+        completion_length = np.mean([c.shape[-1] for c in experiences[0]])
+        agg = aggregate_metrics_dict(
+            self.accelerator,
+            {
+                "loss": averaged["loss"],
+                "pg_loss": averaged["pg_loss"],
+                "vf_loss": averaged["vf_loss"],
+                "kl": averaged["kl"],
+                "entropy": averaged["entropy"],
+                "clipfrac": averaged["clipfrac"],
+                "completion_length": completion_length,
+            },
+        )
+        agg["completion_length"] = int(agg["completion_length"])
+        for key, value in agg.items():
+            self.metrics.log(key, value)
+
         return result
 
     def test(
         self,
         env: ReasoningGym | MultiTurnEnv,
         loop: int = 1,
+        *args: Any,
+        **kwargs: Any,
     ) -> torch.Tensor:
         """Return fitness (test) score tensor of llm on test sub-set.
 
@@ -816,24 +839,21 @@ class PPO(LLMAlgorithm):
                 for _ in range(loop):
                     prompt_dict, _info = env.reset()
                     terminated, truncated = False, False
-
                     while not terminated and not truncated:
                         completion_ids = self.get_action(
                             [prompt_dict],
                             training=False,
                         ).completion_ids
                         full = completion_ids[0]
-                        prompt_dict, reward, terminated, truncated, _step_info = (
-                            env.step(
-                                full,
-                            )
+                        prompt_dict, reward, terminated, truncated, _info = env.step(
+                            full,
                         )
                         all_rewards.append(
                             torch.tensor(
                                 [float(reward)],
                                 dtype=torch.float32,
                                 device=full.device,
-                            ),
+                            )
                         )
                 reward_tensor = torch.cat(all_rewards)
             else:
@@ -843,7 +863,9 @@ class PPO(LLMAlgorithm):
                 )
                 raise TypeError(msg)
         mean_fit = torch.mean(reward_tensor.float()).item()
-        self.fitness.append(mean_fit)
+        self.metrics.add_fitness(mean_fit)
+        if self.accelerator is not None:
+            self.accelerator.wait_for_everyone()
         return np.array(mean_fit)
 
     def _validate_core_args(
@@ -1335,7 +1357,7 @@ class PPO(LLMAlgorithm):
             full_turn_mask=full_turn_mask,
             max_turns=max_turns,
             token_chunk_size=self._resolve_fused_chunk_rows(
-                lm_head_weight.shape[0], self.fused_loss_chunk_rows
+                lm_head_weight.shape[0], self.chunk_rows
             ),
             turn_log_ratio_reduction=self.turn_ratio_pooling,
             vllm_is_ratio=vllm_is_ratio,

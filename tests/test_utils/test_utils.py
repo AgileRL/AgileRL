@@ -10,7 +10,7 @@ from accelerate import Accelerator, DeepSpeedPlugin
 from gymnasium import spaces
 from peft import LoraConfig
 
-from agilerl import HAS_LLM_DEPENDENCIES
+from agilerl import HAS_DEEPSPEED, HAS_LLM_DEPENDENCIES, HAS_VLLM
 from agilerl.algorithms import (
     CQN,
     DDPG,
@@ -32,20 +32,21 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.typing import BatchDimension
 from agilerl.utils.algo_utils import CosineLRScheduleConfig
-from agilerl.utils.utils import (
+from agilerl.utils.llm_utils import (
     aggregate_metrics_across_gpus,
+    gather_tensor,
+)
+from agilerl.utils.utils import (
     calculate_vectorized_scores,
     consolidate_mutations,
     create_population,
     default_progress_bar,
-    gather_tensor,
     get_env_defined_actions,
+    init_loggers,
     init_wandb,
     make_multi_agent_vect_envs,
     make_skill_vect_envs,
     make_vect_envs,
-    observation_space_channels_to_first,
-    plot_population_score,
     print_hyperparams,
     save_llm_checkpoint,
     save_population_checkpoint,
@@ -53,9 +54,10 @@ from agilerl.utils.utils import (
     tournament_selection_and_mutation,
 )
 from agilerl.wrappers.learning import Skill
-from tests.test_algorithms.test_llms.test_grpo import (
-    create_module as create_dummy_lm_for_reinforce,
-)
+
+create_module = None
+if HAS_DEEPSPEED and HAS_VLLM:
+    from tests.test_algorithms.test_llms.test_grpo import create_module
 
 # Shared HP dict that can be used by any algorithm
 SHARED_INIT_HP = {
@@ -87,7 +89,6 @@ SHARED_INIT_HP = {
     "AGENT_IDS": ["agent1", "agent2"],
     "LAMBDA": 1.0,
     "REG": 0.000625,
-    "CHANNELS_LAST": False,
     "O_U_NOISE": True,
     "EXPL_NOISE": 0.1,
     "MEAN_NOISE": 0.0,
@@ -116,46 +117,30 @@ class TestMakeVectEnvs:
         assert isinstance(env, gym.vector.SyncVectorEnv)
         assert env.num_envs == 2
 
+    def test_extra_wrappers_applied(self):
+        class MarkingWrapper(gym.Wrapper):
+            def __init__(self, env):
+                super().__init__(env)
+                self.marked = True
+
+        env = make_vect_envs(
+            "CartPole-v1",
+            num_envs=1,
+            should_async_vector=False,
+            extra_wrappers=[MarkingWrapper],
+        )
+        try:
+            assert isinstance(env.envs[0], MarkingWrapper)
+            assert env.envs[0].marked is True
+        finally:
+            env.close()
+
     # Returns an AsyncVectorEnv object when given a valid environment name and number of environments
     def test_returns_asyncvectorenv_object(self):
         num_envs = 3
         env = make_vect_envs("CartPole-v1", num_envs=num_envs)
         assert isinstance(env, gym.vector.AsyncVectorEnv)
         assert env.num_envs == num_envs
-
-
-class TestObservationSpaceChannelsToFirst:
-    def test_box(self):
-        space = spaces.Box(0, 255, shape=(32, 32, 3), dtype="uint8")
-        result = observation_space_channels_to_first(space)
-        assert result.shape == (3, 32, 32)
-
-    def test_dict(self):
-        space = spaces.Dict(
-            {
-                "img": spaces.Box(0, 255, shape=(16, 16, 4), dtype="uint8"),
-                "vec": spaces.Box(0, 1, shape=(4,), dtype="float32"),
-            }
-        )
-        result = observation_space_channels_to_first(space)
-        assert result["img"].shape == (4, 16, 16)
-        assert result["vec"].shape == (4,)
-
-    def test_tuple(self):
-        space = spaces.Tuple(
-            (
-                spaces.Box(0, 255, shape=(8, 8, 2), dtype="uint8"),
-                spaces.Discrete(5),
-            )
-        )
-        result = observation_space_channels_to_first(space)
-        assert result.spaces[0].shape == (2, 8, 8)
-        assert isinstance(result.spaces[1], spaces.Discrete)
-
-    def test_discrete_passthrough(self):
-        space = spaces.Discrete(5)
-        result = observation_space_channels_to_first(space)
-        assert result == space
 
 
 def test_suppress_verbose_logging():
@@ -195,7 +180,7 @@ class TestSavePopulationCheckpoint:
             MagicMock(spec=EvolvableAlgorithm),
         ]
         for _i, agent in enumerate(pop):
-            agent.steps = [100, 200]
+            agent.steps = 200
             agent.save_checkpoint = MagicMock()
         save_path = str(tmp_path / "ckpt")
         save_population_checkpoint(pop, save_path, overwrite_checkpoints=True)
@@ -205,7 +190,7 @@ class TestSavePopulationCheckpoint:
     def test_with_accelerator(self, tmp_path):
         pop = [MagicMock(spec=EvolvableAlgorithm), MagicMock(spec=EvolvableAlgorithm)]
         for agent in pop:
-            agent.steps = [100, 200]
+            agent.steps = 200
             agent.save_checkpoint = MagicMock()
             agent.unwrap_models = MagicMock()
             agent.wrap_models = MagicMock()
@@ -238,6 +223,35 @@ def test_make_multi_agent_vect_envs_returns_asyncvectorenv_object():
     )
     env.close()
     assert env.num_envs == num_envs
+
+
+def test_make_multi_agent_vect_envs_extra_wrappers():
+    from pettingzoo.utils.wrappers import BaseWrapper
+
+    from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
+    from tests.pz_vector_test_utils import speaker_listener_like_env
+
+    class MarkingWrapper(BaseWrapper):
+        def __init__(self, env):
+            super().__init__(env)
+            self.marked = True
+
+    with patch(
+        "agilerl.utils.utils.AsyncPettingZooVecEnv",
+        wraps=AsyncPettingZooVecEnv,
+    ) as mock_cls:
+        env = make_multi_agent_vect_envs(
+            speaker_listener_like_env,
+            num_envs=1,
+            extra_wrappers=[MarkingWrapper],
+            continuous_actions=False,
+        )
+        try:
+            built = mock_cls.call_args[1]["env_fns"][0]()
+            assert isinstance(built, MarkingWrapper)
+            assert built.marked is True
+        finally:
+            env.close()
 
 
 # Returns an AsyncVectorEnv object when given a valid environment name and number of environments
@@ -349,8 +363,8 @@ class TestCreatePopulation:
                 assert agent.accelerator is None
 
     @pytest.mark.skipif(
-        not HAS_LLM_DEPENDENCIES,
-        reason="agilerl[llm] not installed",
+        not (HAS_DEEPSPEED and HAS_VLLM),
+        reason="Need to install agilerl with deepspeed + vllm",
     )
     @pytest.mark.parametrize(
         ("algo", "expected_type"),
@@ -383,7 +397,7 @@ class TestCreatePopulation:
             "task_type": "CAUSAL_LM",
             "lora_dropout": 0.05,
         }
-        actor = create_dummy_lm_for_reinforce(
+        actor = create_module(
             input_size=10,
             max_tokens=20,
             vocab_size=1000,
@@ -678,13 +692,16 @@ class TestCreatePopulation:
         assert call_kw["use_liger_loss"] is True
         assert call_kw["cast_logprobs_to_fp32"] is False
 
+    @pytest.mark.skipif(
+        not (HAS_DEEPSPEED and HAS_VLLM),
+        reason="Need to install agilerl with deepspeed + vllm",
+    )
     def test_sft_cpu(self):
         """Exercise ``create_population`` SFT branch (clone after first agent)."""
         pytest.importorskip("peft")
         from peft import LoraConfig
 
         from agilerl.algorithms.sft import SFT
-        from tests.test_algorithms.test_llms.test_grpo import create_module
 
         lora_config = LoraConfig(
             r=8,
@@ -709,13 +726,16 @@ class TestCreatePopulation:
         assert len(pop) == 2
         assert all(isinstance(agent, SFT) for agent in pop)
 
+    @pytest.mark.skipif(
+        not (HAS_DEEPSPEED and HAS_VLLM),
+        reason="Need to install agilerl with deepspeed + vllm",
+    )
     def test_dpo_cpu(self):
         """Exercise ``create_population`` DPO branch (clone after first agent)."""
         pytest.importorskip("peft")
         from peft import LoraConfig
 
         from agilerl.algorithms.dpo import DPO
-        from tests.test_algorithms.test_llms.test_grpo import create_module
 
         lora_config = LoraConfig(
             r=8,
@@ -876,28 +896,6 @@ class TestPrintHyperparams:
             mock_print.assert_called_once_with(expected_output)
 
 
-# The function should correctly plot the fitness scores of all agents in the population.
-@patch("agilerl.utils.utils.plt")
-def test_plot_population_score_all_agents(mock_plt):
-    # Create a population of agents with fitness scores
-    class Agent:
-        def __init__(self, fitness):
-            self.fitness = fitness
-            self.steps = list(range(len(fitness) + 1))
-
-    pop = [Agent([1, 2, 3]), Agent([4, 5, 6]), Agent([7, 8, 9])]
-
-    # Call the function under test
-    plot_population_score(pop)
-
-    # Assert plotting functions have been called with expected args
-    mock_plt.title.assert_called_once_with("Score History - Mutations")
-    mock_plt.xlabel.assert_called_once_with("Steps")
-
-    # Assert plt.figure got called
-    assert mock_plt.figure.called
-
-
 class TestSaveLlmCheckpoint:
     def test_save_with_accelerator(self, tmp_path):
         """Test saving checkpoint when agent has an accelerator."""
@@ -981,11 +979,53 @@ class TestInitWandb:
             assert mock_wandb.init.call_args[1]["config"].get("MUT_1") == 0.5
 
 
+class TestInitLoggers:
+    def test_tensorboard_and_csv_loggers(self, tmp_path):
+        from agilerl.logger import CSVLogger, TensorboardLogger
+
+        mock_sw = MagicMock()
+        pbar = MagicMock()
+        with patch("agilerl.logger.SummaryWriter", mock_sw):
+            loggers = init_loggers(
+                algo="PPO",
+                env_name="CartPole-v1",
+                pbar=pbar,
+                verbose=False,
+                tensorboard=True,
+                csv=True,
+                tensorboard_log_dir=str(tmp_path / "tb"),
+                csv_log_dir=str(tmp_path / "csv"),
+            )
+        assert len(loggers) == 2
+        assert isinstance(loggers[0], TensorboardLogger)
+        assert isinstance(loggers[1], CSVLogger)
+        mock_sw.assert_called_once()
+
+    def test_stdout_logger_receives_accelerator(self):
+        """StdOutLogger must get the accelerator so non-main ranks skip prints
+        when report_metrics is called on every rank.
+        """
+        from agilerl.logger import StdOutLogger
+
+        acc = MagicMock()
+        pbar = MagicMock()
+        loggers = init_loggers(
+            algo="GRPO",
+            env_name="gsm8k",
+            pbar=pbar,
+            verbose=True,
+            accelerator=acc,
+        )
+        assert len(loggers) == 1
+        assert isinstance(loggers[0], StdOutLogger)
+        assert loggers[0]._accelerator is acc
+
+
 class TestTournamentSelectionAndMutation:
     def test_no_accelerator(self):
         population = [MagicMock(spec=EvolvableAlgorithm) for _ in range(3)]
         for agent in population:
-            agent.steps = [100]
+            agent.steps = 100
         tournament = MagicMock(spec=TournamentSelection)
         tournament.select = Mock(return_value=(population[0], population))
         mutation = MagicMock(spec=Mutations)
@@ -1001,7 +1041,7 @@ class TestTournamentSelectionAndMutation:
         """Worker process loads checkpoints saved by main process."""
         population = [MagicMock(spec=EvolvableAlgorithm) for _ in range(2)]
         for agent in population:
-            agent.steps = [100]
+            agent.steps = 100
             agent.load_checkpoint = Mock()
             agent.unwrap_models = Mock()
             agent.wrap_models = Mock()
@@ -1029,7 +1069,7 @@ class TestTournamentSelectionAndMutation:
     def test_save_elite_with_path(self):
         population = [MagicMock(spec=EvolvableAlgorithm) for _ in range(2)]
         elite = population[0]
-        elite.steps = [100]
+        elite.steps = 100
         elite.save_checkpoint = Mock()
         tournament = MagicMock(spec=TournamentSelection)
         tournament.select = Mock(return_value=(elite, population))
@@ -1047,7 +1087,7 @@ class TestTournamentSelectionAndMutation:
         elite.save_checkpoint.assert_called_once_with("/tmp/elite.pt")
 
     def test_language_model(self):
-        """Test tournament_selection_and_mutation with language model."""
+        """Test tournament_selection_and_mutation with language model"""
         population = [MagicMock(spec=LLMAlgorithm) for _ in range(3)]
         for agent in population:
             agent.mut = "lr"
@@ -1099,7 +1139,7 @@ class TestTournamentSelectionAndMutation:
 
 class TestGatherTensor:
     def test_with_tensor_input(self):
-        """Test gather_tensor with tensor input."""
+        """Test gather_tensor with tensor input"""
         accelerator = Accelerator()
 
         input_tensor = torch.tensor([1, 2, 3], device=accelerator.device)
@@ -1111,7 +1151,7 @@ class TestGatherTensor:
         assert torch.equal(gathered, input_tensor)
 
     def test_with_non_tensor_input(self):
-        """Test gather_tensor with non-tensor input."""
+        """Test gather_tensor with non-tensor input"""
         input_list = [1, 2, 3]
 
         accelerator = Accelerator()
@@ -1123,7 +1163,7 @@ class TestGatherTensor:
         assert torch.equal(gathered, torch.tensor(input_list).to(accelerator.device))
 
     def test_device(self):
-        """Test that tensor is moved to accelerator device."""
+        """Test that tensor is moved to accelerator device"""
         input_tensor = torch.tensor([1, 2, 3])
 
         accelerator = Accelerator()
@@ -1134,7 +1174,7 @@ class TestGatherTensor:
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     def test_distributed(self):
-        """Test gather_tensor in distributed setting."""
+        """Test gather_tensor in distributed setting"""
         accelerator = Accelerator()
 
         rank = accelerator.process_index
@@ -1151,7 +1191,7 @@ class TestGatherTensor:
 
 class TestAggregateMetricsAcrossGpus:
     def test_single_process(self):
-        """Test aggregate_metrics_across_gpus with single process."""
+        """Test aggregate_metrics_across_gpus with single process"""
         accelerator = Accelerator()
 
         metric_tensor = torch.tensor([1.0, 2.0, 3.0], device=accelerator.device)
@@ -1162,7 +1202,7 @@ class TestAggregateMetricsAcrossGpus:
         assert isinstance(result, float)
 
     def test_with_scalar(self):
-        """Test aggregate_metrics_across_gpus with scalar input."""
+        """Test aggregate_metrics_across_gpus with scalar input"""
         accelerator = Accelerator()
 
         metric_tensor = torch.tensor(5.0, device=accelerator.device)
@@ -1174,7 +1214,7 @@ class TestAggregateMetricsAcrossGpus:
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     def test_distributed(self):
-        """Test aggregate_metrics_across_gpus in distributed setting."""
+        """Test aggregate_metrics_across_gpus in distributed setting"""
         accelerator = Accelerator()
 
         rank = accelerator.process_index
@@ -1190,7 +1230,7 @@ class TestAggregateMetricsAcrossGpus:
         )  # Allow for small floating point differences
 
     def test_with_negative_values(self):
-        """Test aggregate_metrics_across_gpus with negative values."""
+        """Test aggregate_metrics_across_gpus with negative values"""
         accelerator = Accelerator()
 
         metric_tensor = torch.tensor([-1.0, -2.0, -3.0], device=accelerator.device)
@@ -1201,7 +1241,7 @@ class TestAggregateMetricsAcrossGpus:
         assert isinstance(result, float)
 
     def test_with_zero_values(self):
-        """Test aggregate_metrics_across_gpus with zero values."""
+        """Test aggregate_metrics_across_gpus with zero values"""
         accelerator = Accelerator()
 
         metric_tensor = torch.tensor([0.0, 0.0, 0.0], device=accelerator.device)
@@ -1214,12 +1254,9 @@ class TestAggregateMetricsAcrossGpus:
 
 class TestConsolidateMutations:
     def test_warning_if_not_llm_algorithm(self):
-        """Test consolidate_mutations."""
+        """Test consolidate_mutations"""
         population = [Mock() for _ in range(3)]
-        with pytest.warns(
-            UserWarning,
-            match="Consolidate mutations is only supported for LLMAlgorithm",
-        ):
+        with pytest.warns(UserWarning, match="Consolidate mutations is only supported"):
             consolidate_mutations(population)
 
     @pytest.mark.skipif(
@@ -1264,6 +1301,8 @@ def test_check_box2d_available_raises_when_box2d_missing(monkeypatch):
 
     with pytest.raises(ImportError, match="Box2D physics engine"):
         _check_box2d_available("LunarLander-v2")
+
+    real_import = builtins.__import__
 
 
 class TestCheckBox2dAvailable:
@@ -1535,7 +1574,10 @@ class TestPrepareLlmAlgoKwargsLoraDefaults:
         assert merged["lora_config"] is explicit
 
 
-@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="agilerl[llm] not installed")
+@pytest.mark.skipif(
+    not (HAS_DEEPSPEED and HAS_VLLM),
+    reason="Need to install agilerl with deepspeed + vllm",
+)
 class TestCreatePopulationLlmTorchCompiler:
     """``create_population`` should forward ``torch_compiler`` into every LLM
     branch's kwargs (GRPO/CISPO/GSPO, SFT, DPO, LLMPPO, LLMREINFORCE).
@@ -1543,11 +1585,7 @@ class TestCreatePopulationLlmTorchCompiler:
 
     @pytest.fixture
     def actor(self):
-        from tests.test_algorithms.test_llms.test_grpo import (
-            create_module as create_dummy_lm,
-        )
-
-        return create_dummy_lm(input_size=5, max_tokens=10, vocab_size=30, device="cpu")
+        return create_module(input_size=5, max_tokens=10, vocab_size=30, device="cpu")
 
     @pytest.fixture
     def init_hp(self):
@@ -1687,26 +1725,26 @@ class TestAggregateMetricsNoAccelerator:
         assert result == 1.5
 
     def test_safe_aggregate_with_tensor_no_accelerator(self):
-        from agilerl.utils.utils import safe_aggregate_metrics
+        from agilerl.utils.llm_utils import safe_aggregate_metrics
 
         result = safe_aggregate_metrics(None, torch.tensor([2.0, 4.0]))
         assert isinstance(result, float)
         assert result == pytest.approx(3.0)
 
     def test_safe_aggregate_with_ndarray_no_accelerator(self):
-        from agilerl.utils.utils import safe_aggregate_metrics
+        from agilerl.utils.llm_utils import safe_aggregate_metrics
 
         result = safe_aggregate_metrics(None, np.array([3.0, 5.0, 7.0]))
         assert isinstance(result, float)
         assert result == pytest.approx(5.0)
 
     def test_safe_aggregate_with_plain_float_no_accelerator(self):
-        from agilerl.utils.utils import safe_aggregate_metrics
+        from agilerl.utils.llm_utils import safe_aggregate_metrics
 
         assert safe_aggregate_metrics(None, 2.5) == 2.5
 
     def test_safe_aggregate_with_accelerator_delegates(self):
-        from agilerl.utils.utils import safe_aggregate_metrics
+        from agilerl.utils.llm_utils import safe_aggregate_metrics
 
         accelerator = Accelerator()
         result = safe_aggregate_metrics(
@@ -1714,3 +1752,17 @@ class TestAggregateMetricsNoAccelerator:
             torch.tensor([1.0, 3.0], device=accelerator.device),
         )
         assert result == pytest.approx(2.0)
+
+
+class TestDistributedWorldSize:
+    def test_returns_one_without_accelerator(self):
+        from agilerl.utils.utils import _distributed_world_size
+
+        assert _distributed_world_size(None) == 1
+
+    def test_uses_accelerator_num_processes(self):
+        from agilerl.utils.utils import _distributed_world_size
+
+        accelerator = MagicMock()
+        accelerator.num_processes = 4
+        assert _distributed_world_size(accelerator) == 4

@@ -1,0 +1,4 @@
+---
+# Keyword arguments passed to the environment's constructor.
+# MergeEnv only takes render_mode, which we leave unset for headless training.
+render_mode:

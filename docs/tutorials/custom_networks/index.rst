@@ -1,8 +1,8 @@
 .. _Custom_networks_tutorials:
 .. _custom_network_architectures:
 
-Creating Custom Networks Tutorials
-=====================================
+Creating Custom Networks
+========================
 
 These tutorials provide an introductory guide to using `AgileRL <https://github.com/AgileRL/AgileRL>`_
 to build custom evolvable modules and networks for arbitrarily complex use-cases.

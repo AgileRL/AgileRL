@@ -10,7 +10,7 @@ import shutil
 import tempfile
 import warnings
 from abc import ABC, ABCMeta, abstractmethod
-from collections import OrderedDict, defaultdict
+from collections import OrderedDict, defaultdict, deque
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
@@ -50,6 +50,7 @@ from agilerl.algorithms.core.registry import (
     NetworkGroup,
     OptimizerConfig,
 )
+from agilerl.metrics import AgentMetrics, MultiAgentMetrics
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.protocols import (
@@ -88,6 +89,7 @@ from agilerl.utils.algo_utils import (
     chkpt_attribute_to_device,
     clone_llm,
     concatenate_tensors,
+    configure_tf32_precision,
     create_warmup_cosine_scheduler,
     filter_init_dict,
     get_input_size_from_space,
@@ -95,10 +97,12 @@ from agilerl.utils.algo_utils import (
     isroutine,
     key_in_nested_dict,
     module_checkpoint_dict,
+    needs_image_transpose,
     preprocess_observation,
     recursive_check_module_attrs,
     stack_and_pad_experiences,
     stack_experiences,
+    transpose_image_space,
 )
 from agilerl.utils.evolvable_networks import (
     compile_model,
@@ -128,20 +132,6 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     )
     from safetensors.torch import load_file
 
-    from agilerl.utils.llm_utils import (
-        adapt_lora_config_for_model,
-        create_model_from_name_or_path,
-        format_colocated_vllm_oom_hint,
-        gather_if_zero3,
-        log_cuda_memory_snapshot,
-    )
-
-if TYPE_CHECKING or HAS_DEEPSPEED:
-    from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
-
-if TYPE_CHECKING or HAS_VLLM:
-    from vllm import LLM, CompletionOutput, SamplingParams
-
     from agilerl.algorithms.core.llm_ops.fused_lora import (
         clear_fused_adapter_routing,
         patch_lora_for_fused_forward,
@@ -151,7 +141,9 @@ if TYPE_CHECKING or HAS_VLLM:
         patch_vllm_lora_keep_resident,
         patch_vllm_strip_multimodal_towers,
     )
+    from agilerl.utils.algo_utils import clone_llm
     from agilerl.utils.llm_utils import (
+        adapt_lora_config_for_model,
         align_deepspeed_lr,
         build_completion_mask,
         build_vllm_llm_init_kwargs,
@@ -159,12 +151,24 @@ if TYPE_CHECKING or HAS_VLLM:
         create_model_from_name_or_path,
         gather_if_zero3,
         get_model_name_or_path,
+        get_state_dict,
+        log_cuda_memory_snapshot,
         move_params_to_cpu,
         move_params_to_gpu,
         offload_colocated_trainer_from_gpu,
         save_peft_adapter_for_vllm_rollout,
         stitch_completion_after_windowed_vllm_generate,
     )
+
+if TYPE_CHECKING or HAS_DEEPSPEED:
+    from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
+
+if TYPE_CHECKING:
+    from vllm import LLM, CompletionOutput, SamplingParams
+elif HAS_VLLM:
+    from vllm import LLM, CompletionOutput, SamplingParams
+else:
+    LLM = CompletionOutput = SamplingParams = None
 
 __all__ = ["ActionResult", "EvolvableAlgorithm", "MultiAgentRLAlgorithm", "RLAlgorithm"]
 
@@ -186,7 +190,9 @@ class _RegistryMeta(type):
         # Create the instance
         instance: EvolvableAlgorithm = super().__call__(*args, **kwargs)  # type: ignore[misc]
 
-        # Call the base class post_init_hook after all initialization
+        # Initialize the MutationRegistry -> ensures that all of the networks and
+        # optimizers are registered with the algorithm, and that the specified hyperparameters
+        # to mutate have been set as attributes in the algorithm.
         if isinstance(instance, cls) and hasattr(instance, "_registry_init"):
             instance._registry_init()
 
@@ -294,6 +300,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
     :type name: str | None, optional
     """
 
+    metrics: AgentMetrics | MultiAgentMetrics
+
     def __init__(
         self,
         index: int,
@@ -323,13 +331,9 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         self.accelerator = accelerator
         self.device = device if self.accelerator is None else self.accelerator.device
         self.torch_compiler = torch_compiler
-        self.algo = name if name is not None else self.__class__.__name__
-
+        self.algo = name or self.__class__.__name__
         self._mut = None
         self._index = index
-        self.scores = []
-        self.fitness = []
-        self.steps = [0]
         self.registry = MutationRegistry(hp_config)
         self.training = True
 
@@ -353,6 +357,64 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         """Set the mutation object of the algorithm."""
         self._mut = value
 
+    @property
+    def hp_config(self) -> HyperparameterConfig:
+        """Return the hyperparameter configuration for Evo-HPO mutations."""
+        return self.registry.hp_config
+
+    @hp_config.setter
+    def hp_config(self, value: HyperparameterConfig) -> None:
+        """Set the hyperparameter configuration for Evo-HPO mutations."""
+        self.registry.hp_config = value
+
+    @property
+    def steps(self) -> int:
+        """Cumulative global step count."""
+        return self.metrics.steps
+
+    @steps.setter
+    def steps(self, value: int) -> None:
+        self.metrics.steps = value
+
+    @property
+    def scores(self) -> list[float]:
+        """Per-episode scores."""
+        return self.metrics.scores
+
+    @scores.setter
+    def scores(self, value: list[float]) -> None:
+        self.metrics.scores = value
+
+    @property
+    def fitness(self) -> list[float]:
+        """Fitness history."""
+        return list(self.metrics.fitness)
+
+    @fitness.setter
+    def fitness(self, value: Iterable[float]) -> None:
+        maxlen = self.metrics.fitness.maxlen
+        self.metrics.fitness = deque(value, maxlen=maxlen)
+
+    def add_scores(self, scores: list[float]) -> None:
+        """Add scores to the metrics.
+
+        :param scores: List of scores to add.
+        :type scores: list[float]
+        """
+        self.metrics.add_scores(scores)
+
+    def init_training_step(self) -> None:
+        """Initialize the training step for metrics tracking."""
+        self.metrics.init_training_step()
+
+    def finalize_training_step(self, num_steps: int) -> None:
+        """Finalize the training step for metrics tracking.
+
+        :param num_steps: Number of steps taken during the training step.
+        :type num_steps: int
+        """
+        self.metrics.finalize_training_step(num_steps)
+
     @abstractmethod
     def preprocess_observation(self, observation: ObservationType) -> TorchObsType:
         """Preprocesses observations for forward pass through neural network.
@@ -366,7 +428,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         raise NotImplementedError
 
     @abstractmethod
-    def learn(self, experiences: ExperiencesType, **kwargs) -> Any:
+    def learn(self, experiences: ExperiencesType) -> Any:
         """Abstract method for learning the algorithm."""
         raise NotImplementedError
 
@@ -541,32 +603,49 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         size: int,
         observation_space: GymSpaceType,
         action_space: GymSpaceType,
+        device: str = "cpu",
         wrapper_cls: type[SelfAgentWrapper] | None = None,
         wrapper_kwargs: dict[str, Any] | None = None,
+        resume_from_checkpoint: str | None = None,
         **kwargs,
     ) -> list[Self | SelfAgentWrapper]:
         """Create a population of algorithms.
 
         :param size: The size of the population.
-        :type size: int.
-
+        :type size: int
+        :param observation_space: The observation space.
+        :type observation_space: GymSpaceType
+        :param action_space: The action space.
+        :type action_space: GymSpaceType
+        :param device: Torch device string. Defaults to ``"cpu"``.
+        :type device: str
+        :param wrapper_cls: Optional wrapper class to apply to each agent.
+        :type wrapper_cls: type | None
+        :param wrapper_kwargs: Keyword arguments for the wrapper class.
+        :type wrapper_kwargs: dict[str, Any] | None
+        :param resume_from_checkpoint: Path to checkpoint to resume from.
+        :type resume_from_checkpoint: str | None
+        :param kwargs: Additional keyword arguments to pass to the algorithm constructor.
+        :type kwargs: Any
         :return: A list of algorithms.
-        :rtype: list[EvolvableAlgorithm].
+        :rtype: list[EvolvableAlgorithm]
         """
         if wrapper_kwargs is None:
             wrapper_kwargs = {}
-        if wrapper_cls is not None:
-            return [
-                wrapper_cls(
-                    cls(observation_space, action_space, index=i, **kwargs),
-                    **wrapper_kwargs,
-                )
-                for i in range(size)
-            ]
 
-        return [
-            cls(observation_space, action_space, index=i, **kwargs) for i in range(size)
-        ]
+        population: list[Self | SelfAgentWrapper] = []
+        for i in range(size):
+            agent = cls(
+                observation_space, action_space, index=i, device=device, **kwargs
+            )
+            if resume_from_checkpoint is not None:
+                agent.load_checkpoint(resume_from_checkpoint)
+                agent.index = i
+            if wrapper_cls is not None:
+                agent = wrapper_cls(agent, **wrapper_kwargs)
+            population.append(agent)
+
+        return population
 
     def __setattr__(self, name: str, value: Any) -> None:
         """Set the attribute of the algorithm. If the attribute is an OptimizerWrapper,
@@ -701,9 +780,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
         if isinstance(self, LLMAlgorithm):
             if hasattr(self.actor, "optimizer"):
-                optimizer = (
-                    self.actor.optimizer
-                )  # If the optimizer is defined in the deepspeed config, we do this
+                # If the optimizer is defined in the deepspeed config, we do this
+                optimizer = self.actor.optimizer
             else:
                 optimizer = opt.optimizer
 
@@ -959,7 +1037,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         if self.accelerator is not None and wrap:
             clone.wrap_models()
         elif self.torch_compiler:
-            torch.set_float32_matmul_precision("high")
+            configure_tf32_precision()
             clone.recompile()
 
         # Copy non-evolvable attributes back to clone
@@ -1090,6 +1168,11 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
         # Load other attributes
         checkpoint.pop("network_info")
+        # Pre-2.8 checkpoints stored ``steps`` as a cumulative list; coerce to
+        # the int expected by the metrics tracker.
+        if isinstance(checkpoint.get("steps"), (list, tuple)):
+            legacy_steps = checkpoint["steps"]
+            checkpoint["steps"] = int(legacy_steps[-1]) if len(legacy_steps) else 0
         for attribute, value in checkpoint.items():
             if isinstance(value, torch.Tensor) and isinstance(
                 getattr(self, attribute, None), torch.Tensor
@@ -1101,7 +1184,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         if self.accelerator is not None:
             self.wrap_models()
         elif self.torch_compiler:
-            torch.set_float32_matmul_precision("high")
+            configure_tf32_precision()
             self.recompile()
 
     @classmethod
@@ -1275,7 +1358,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         if accelerator is not None:
             self.wrap_models()
         elif self.torch_compiler:
-            torch.set_float32_matmul_precision("high")
+            configure_tf32_precision()
             self.recompile()
 
         # Check for agent wrapper
@@ -1344,13 +1427,23 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
         self.action_space = action_space
         self.normalize_images = normalize_images
         self.action_dim = get_output_size_from_space(self.action_space)
+        self.swap_channels = needs_image_transpose(self.observation_space)
+        self.env_observation_space = observation_space
+        if self.swap_channels:
+            logger.warning(
+                "Found channels-last observation space. "
+                "AgileRL automatically transposes images to be channels-first to support PyTorch convolutions.",
+                stacklevel=2,
+            )
+            self.observation_space = transpose_image_space(self.observation_space)
+
+        self.metrics = AgentMetrics()
 
     def preprocess_observation(self, observation: ObservationType) -> TorchObsType:
         """Preprocesses observations for forward pass through neural network.
 
-        :param observations: Observations of environment
-        :type observations: ObservationType
-
+        :param observation: Observations of environment
+        :type observation: ObservationType
         :return: Preprocessed observations
         :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or tuple[torch.Tensor[float], ...]
         """
@@ -1359,6 +1452,7 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
             observation=observation,
             device=self.device,
             normalize_images=self.normalize_images,
+            swap_channels=self.swap_channels,
         )
 
 
@@ -1388,6 +1482,8 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
     :param name: Name of the algorithm, defaults to the class name
     :type name: str | None, optional
     """
+
+    metrics: MultiAgentMetrics
 
     possible_observation_spaces: dict[str, spaces.Space]
     possible_action_spaces: dict[str, spaces.Space]
@@ -1458,6 +1554,19 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         self.action_spaces = list(self.possible_action_spaces.values())
         self.action_dims = get_output_size_from_space(self.possible_action_spaces)
 
+        # Check if any observation space is channels-last and transpose if necessary
+        self.swap_channels = needs_image_transpose(self.possible_observation_spaces)
+        self.env_observation_spaces = self.possible_observation_spaces
+        if self.swap_channels:
+            logger.warning(
+                "Found channels-last observation space. "
+                "AgileRL automatically transposes images to be channels-first to support PyTorch convolutions.",
+                stacklevel=2,
+            )
+            self.possible_observation_spaces = transpose_image_space(
+                self.possible_observation_spaces
+            )
+
         # Determine groups of agents from their IDs
         self.shared_agent_ids = []
         self.grouped_agents = defaultdict(list)
@@ -1511,6 +1620,10 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             self.observation_space = self.possible_observation_spaces
             self.action_space = self.possible_action_spaces
 
+        # Track multi-agent metrics using the effective training IDs. In grouped
+        # setups this corresponds to shared group IDs; otherwise raw agent IDs.
+        self.metrics = MultiAgentMetrics(list(self.observation_space.keys()))
+
     def _registry_init(self) -> None:
         super()._registry_init()
 
@@ -1520,9 +1633,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         for name, network in self.evolvable_attributes(networks_only=True).items():
             if isinstance(network, ModuleDict):
                 for key in network:
-                    if (key not in self.agent_ids) and (
-                        key not in self.shared_agent_ids
-                    ):
+                    if key not in set(self.agent_ids + self.shared_agent_ids):
                         msg = (
                             f"Network '{name}' contains key '{key}' which is not present in `self.agent_ids` "
                             f"or `self.shared_agent_ids`. Please initialize multi-agent networks through agilerl.modules.ModuleDict "
@@ -1539,6 +1650,45 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         :rtype: bool
         """
         return len(self.shared_agent_ids) < len(self.agent_ids)
+
+    def add_scores(self, scores: list[float] | list[list[float]]) -> None:
+        """Add scores to the metrics, aggregating sub-agents into their groups.
+
+        Multi-agent training loops collect non-summed score rows with one
+        entry per environment agent. When agents share policies (grouped
+        setups) the metrics track group IDs instead, so each row is reduced
+        to the mean score per group before being recorded.
+
+        :param scores: List of scores (or per-agent score rows) to add.
+        :type scores: list[float] | list[list[float]]
+        """
+        is_nested = bool(scores) and isinstance(scores[0], (list, np.ndarray))
+        # Grouped setups track metrics under group IDs, so per-env-agent rows
+        # must be reduced to a per-group mean before being recorded.
+        is_grouped = (
+            is_nested
+            and self.has_grouped_agents()
+            and self.metrics.agent_ids == self.shared_agent_ids
+        )
+        if is_grouped:
+            # The only row shape these loops produce is one entry per raw env
+            # agent; anything else would mislabel group columns if passed
+            # through, so fail loudly rather than silently misrecord.
+            assert len(scores[0]) == len(self.agent_ids), (
+                "Grouped multi-agent scores expected one entry per agent "
+                f"({len(self.agent_ids)} agents: {self.agent_ids}), got rows of "
+                f"length {len(scores[0])}."
+            )
+            column = {aid: idx for idx, aid in enumerate(self.agent_ids)}
+            group_columns = [
+                [column[aid] for aid in self.grouped_agents[gid]]
+                for gid in self.shared_agent_ids
+            ]
+            scores = [
+                [float(np.mean([row[idx] for idx in cols])) for cols in group_columns]
+                for row in scores
+            ]
+        super().add_scores(scores)
 
     def get_setup(self) -> MultiAgentSetup:
         """Get the type of multi-agent setup, as determined by the observation spaces of the agents.
@@ -1578,7 +1728,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         :type group_ids: list[str] | None
 
         :return: Preprocessed observations
-        :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or tuple[torch.Tensor[float], ...]
+        :rtype: dict[str, TorchObsType]
         """
         if group_ids is None:
             preprocessed = {}
@@ -1606,10 +1756,10 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
                     observation=agent_obs,
                     device=self.device,
                     normalize_images=self.normalize_images,
+                    swap_channels=self.swap_channels,
                     placeholder_value=self.placeholder_value,
                 )
             )
-
         for output_id in list(preprocessed.keys()):
             if not preprocessed[output_id]:
                 continue
@@ -1856,6 +2006,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
     ####---------------------------------------####
     #### Grouped Multi-Agent Utility Functions ####
     ####---------------------------------------####
+
     def get_group_id(self, agent_id: str) -> str:
         """Get the group ID for an agent.
 
@@ -2091,18 +2242,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     :param lora_target_scope: Optional PEFT LoRA path scope for multimodal models
         (e.g. ``"language_model"``). Passed to :func:`adapt_lora_config_for_model`.
     :type lora_target_scope: str | None, optional
-    :param fused_logprobs_chunk_rows: Standard (non-Liger) path only. Rows
-        (tokens) per ``(chunk_rows, vocab)`` logit tile when computing per-token
-        log-probs via the fused-linear-logprob path. Peak logits memory is
-        ``O(chunk_rows * vocab)`` regardless of batch/sequence length. ``None``
-        (default) auto-tunes to a ~256 MB fp32 tile.
-    :type fused_logprobs_chunk_rows: int | None, optional
-    :param fused_loss_chunk_rows: Rows per ``(chunk_rows, vocab)`` logit tile in
-        the token-level Liger fused policy loss. ``None`` (default) auto-tunes to
-        a ~256 MB fp32 logit workspace — the same heuristic as
-        ``fused_logprobs_chunk_rows`` on the standard path; pass an int to
-        override.
-    :type fused_loss_chunk_rows: int | None, optional
+    :param chunk_rows: Primary chunk-size knob for fused logit tiles used by
+        both the standard fused-logprob path and the Liger fused-loss path.
+        ``None`` (default) preserves each path's auto-tuned behavior.
+    :type chunk_rows: int | None, optional
     :param vllm_importance_sampling_correction: When ``True`` (default) and
         ``use_vllm=True``, correct the rollout/trainer log-prob mismatch by
         weighting each training token by ``clamp(exp(trainer - sampling),
@@ -2191,8 +2334,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         activation_offload: bool = False,
         use_sequence_packing: bool = False,
         lora_target_scope: str | None = None,
-        fused_logprobs_chunk_rows: int | None = None,
-        fused_loss_chunk_rows: int | None = None,
+        chunk_rows: int | None = None,
         vllm_importance_sampling_correction: bool = True,
         vllm_importance_sampling_cap: float = 2.0,
     ) -> None:
@@ -2355,10 +2497,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.wrap = wrap
         self.use_separate_reference_adapter = use_separate_reference_adapter
         self.cast_logprobs_to_fp32 = cast_logprobs_to_fp32
-        # Per-chunk row count for the fused-linear-logprob workspace. ``None``
-        # uses a vocab-aware ~256 MB-workspace heuristic;
-        # set explicitly to trade kernel-launch count vs ``rows * vocab`` peak.
-        self.fused_logprobs_chunk_rows = fused_logprobs_chunk_rows
+        if chunk_rows is not None and chunk_rows <= 0:
+            msg = f"chunk_rows must be a positive int or None, got {chunk_rows}."
+            raise ValueError(msg)
+        self.chunk_rows = chunk_rows
         # vLLM sampling-mismatch correction (truncated importance sampling).
         # The rollout is drawn from vLLM but the loss treats the trainer's
         # recomputed ``old_log_probs`` as the behaviour policy; the two differ
@@ -2374,13 +2516,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         # Kept on even when use_vllm=False: decoupled rollouts still sample
         # from a separate vLLM engine.
         self._is_correction_liger_warned = False
-        if fused_loss_chunk_rows is not None and fused_loss_chunk_rows <= 0:
-            msg = (
-                f"fused_loss_chunk_rows must be a positive int or None, "
-                f"got {fused_loss_chunk_rows}."
-            )
-            raise ValueError(msg)
-        self.fused_loss_chunk_rows = fused_loss_chunk_rows
         # Warn-once flag for the canonical Liger + non-token importance-sampling
         # "not memory-bounded" warning (see :meth:`_warn_liger_non_token_is`).
         self._liger_non_token_warned = False
@@ -2405,6 +2540,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self._vllm_moved = False
         self._vllm_lora_loaded = False
         self._vllm_lora_staging_dir: Path | None = None
+        self._vllm_lora_staging_dir_is_temp = True
         self._vllm_rollout_lora_request: Any | None = None
         # Colocated vLLM (use_vllm=True) runs the rollout engine and the HF
         # trainer in one process. Each holds its OWN base: vLLM cycles its base
@@ -2426,6 +2562,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 )
                 raise ValueError(msg)
         self.rng = np.random.RandomState(seed)
+        self.metrics = AgentMetrics()
 
     def preprocess_observation(self, observation: ObservationType) -> TorchObsType:
         """Preprocess observations (dummy) for forward pass through neural network.
@@ -2464,23 +2601,25 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         Behaviour per cell of the ``(lora_only, save_optimizer, deepspeed)``
         grid:
 
-          Plain (no accelerator):
-            lora_only=T, save_optimizer=T  ->  PEFT adapter dirs on disk +
-                                                 optimizer state in ``attributes.pt``
-            lora_only=T, save_optimizer=F  ->  PEFT adapter dirs only
-            lora_only=F, save_optimizer=T  ->  full actor state_dict +
-                                                 optimizer state in ``attributes.pt``
-            lora_only=F, save_optimizer=F  ->  full actor state_dict in ``attributes.pt``
+        **Plain (no accelerator):**
 
-          DeepSpeed:
-            lora_only=T, save_optimizer=T  ->  engine tag dir (frozen params
-                                                 excluded) + PEFT adapter dirs
-            lora_only=T, save_optimizer=F  ->  PEFT adapter dirs only
-            lora_only=F, save_optimizer=T  ->  engine tag dir (frozen params
-                                                 included)
-            lora_only=F, save_optimizer=F  ->  gathered (ZeRO-3 aware) actor
-                                                 state_dict injected into
-                                                 ``attributes.pt``
+        - ``lora_only=T, save_optimizer=T`` -- PEFT adapter dirs on disk +
+          optimizer state in ``attributes.pt``
+        - ``lora_only=T, save_optimizer=F`` -- PEFT adapter dirs only
+        - ``lora_only=F, save_optimizer=T`` -- full actor state_dict +
+          optimizer state in ``attributes.pt``
+        - ``lora_only=F, save_optimizer=F`` -- full actor state_dict in
+          ``attributes.pt``
+
+        **DeepSpeed:**
+
+        - ``lora_only=T, save_optimizer=T`` -- engine tag dir (frozen params
+          excluded) + PEFT adapter dirs
+        - ``lora_only=T, save_optimizer=F`` -- PEFT adapter dirs only
+        - ``lora_only=F, save_optimizer=T`` -- engine tag dir (frozen params
+          included)
+        - ``lora_only=F, save_optimizer=F`` -- gathered (ZeRO-3 aware) actor
+          state_dict injected into ``attributes.pt``
 
         :param path: Directory to write the checkpoint into.
         :type path: str
@@ -2603,22 +2742,24 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         a mismatch raises ``ValueError`` (re-create the agent with the
         checkpoint's LoRA config to load it).
 
-          No DeepSpeed:
-            lora_only=T, load_optimizer=T  ->  PEFT adapter load + optimizer
-                                                 state from ``attributes.pt``
-            lora_only=T, load_optimizer=F  ->  PEFT adapter load only
-            lora_only=F, load_optimizer=T  ->  torch load of actor +
-                                                 optimizer from ``attributes.pt``
-            lora_only=F, load_optimizer=F  ->  torch load of actor only
+        **No DeepSpeed:**
 
-          DeepSpeed:
-            lora_only=T, load_optimizer=T  ->  DeepSpeed engine load from
-                                                 ``<path>/save_checkpoint``
-            lora_only=T, load_optimizer=F  ->  PEFT adapter load
-            lora_only=F, load_optimizer=T  ->  DeepSpeed engine load from
-                                                 ``<path>/save_checkpoint``
-            lora_only=F, load_optimizer=F  ->  ``actor.load_state_dict(...)``
-                                                 from ``attributes.pt``
+        - ``lora_only=T, load_optimizer=T`` -- PEFT adapter load + optimizer
+          state from ``attributes.pt``
+        - ``lora_only=T, load_optimizer=F`` -- PEFT adapter load only
+        - ``lora_only=F, load_optimizer=T`` -- torch load of actor +
+          optimizer from ``attributes.pt``
+        - ``lora_only=F, load_optimizer=F`` -- torch load of actor only
+
+        **DeepSpeed:**
+
+        - ``lora_only=T, load_optimizer=T`` -- DeepSpeed engine load from
+          ``<path>/save_checkpoint``
+        - ``lora_only=T, load_optimizer=F`` -- PEFT adapter load
+        - ``lora_only=F, load_optimizer=T`` -- DeepSpeed engine load from
+          ``<path>/save_checkpoint``
+        - ``lora_only=F, load_optimizer=F`` -- ``actor.load_state_dict(...)``
+          from ``attributes.pt``
 
         When ``load_optimizer=True`` but the checkpoint contains no optimizer
         state (e.g. it was saved with ``save_optimizer=False``), a
@@ -2846,6 +2987,66 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             msg,
         )
 
+    @classmethod
+    def population(
+        cls,
+        size: int,
+        accelerator: Accelerator | None = None,
+        device: str | torch.device = "cpu",
+        resume_from_checkpoint: str | None = None,
+        **kwargs: Any,
+    ) -> list[Self]:
+        """Create a population of LLM algorithms.
+
+        Builds agent 0 fully (loading the model from disk), then clones the actor
+        network for agents 1..N using :func:`clone_llm`. Each agent beyond the
+        first receives a fresh ``Accelerator`` instance to avoid sharing the same
+        DeepSpeed distributed context.
+
+        :param size: The size of the population.
+        :type size: int
+        :param accelerator: HuggingFace ``Accelerator`` instance for agent 0.
+        :type accelerator: Accelerator | None
+        :param device: Torch device string. Defaults to ``"cpu"``.
+        :type device: str | torch.device
+        :param resume_from_checkpoint: Path to checkpoint to resume from.
+        :type resume_from_checkpoint: str | None
+        :return: A list of LLM algorithms.
+        :rtype: list[LLMAlgorithm]
+        """
+        agent_0 = cls(index=0, accelerator=accelerator, device=device, **kwargs)
+        if resume_from_checkpoint is not None:
+            agent_0.load_checkpoint(resume_from_checkpoint)
+            agent_0.index = 0
+
+        population: list[Self] = [agent_0]
+        for i in range(1, size):
+            agent_accelerator = Accelerator() if accelerator is not None else None
+            cloned_actor = clone_llm(
+                agent_0.actor,
+                zero_stage=0,
+                state_dict=(
+                    agent_0.actor.state_dict()
+                    if accelerator is None
+                    else get_state_dict(agent_0.actor)
+                ),
+            )
+            clone_kwargs = dict(kwargs)
+            clone_kwargs.pop("actor_network", None)
+            agent = cls(
+                index=i,
+                accelerator=agent_accelerator,
+                device=device,
+                actor_network=cloned_actor,
+                **clone_kwargs,
+            )
+            if resume_from_checkpoint is not None:
+                agent.load_checkpoint(resume_from_checkpoint)
+                agent.index = i
+            population.append(agent)
+
+        return population
+
     def wrap_models(self) -> None:
         """Wrap the models in the accelerator, DeepSpeed objects must be wrapped at the same time,
         not individually.
@@ -2983,21 +3184,81 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             return broadcast_object_list([temp_dir], from_process=0)[0]
         return temp_dir
 
-    def _save_clone_distributed_actor_state(self, work_dir: str) -> None:
-        """Save distributed actor state for ZeRO-2/3 clone workflows.
+    def _uses_quantized_clone_rebuild(self) -> bool:
+        """Whether clone should rebuild the actor from pretrained + BitsAndBytes.
+
+        QLoRA / bitsandbytes bases store packed ``Params4bit`` tensors. A dense
+        ``clone_llm`` shell cannot load those shapes from a DeepSpeed checkpoint,
+        so quantized clones reload the base via ``from_pretrained`` and transfer
+        only adapter (and optimizer) state.
+        """
+        return self.quantization_config is not None
+
+    def _save_clone_adapter_weights(self, work_dir: str) -> None:
+        """Persist PEFT adapters for a quantized rebuild-from-pretrained clone.
+
+        Used when ZeRO-2/3 DeepSpeed sharding is not available (or not needed)
+        to move adapter weights onto a freshly loaded quantized base.
 
         :param work_dir: Shared clone workspace directory.
         :type work_dir: str
         """
+        adapter_dir = f"{work_dir}/adapters"
+        model_ref = self._get_unwrapped_actor()
+        with gather_if_zero3(self.zero_stage, list(model_ref.parameters())):
+            model_ref.save_pretrained(
+                save_directory=adapter_dir,
+                selected_adapters=self.selected_adapters,
+                is_main_process=self.accelerator is None
+                or self.accelerator.is_main_process,
+            )
+        if self.accelerator is not None:
+            self.accelerator.wait_for_everyone()
+
+    def _load_clone_adapter_weights(self, work_dir: str) -> None:
+        """Load PEFT adapters saved by :meth:`_save_clone_adapter_weights`.
+
+        :param work_dir: Shared clone workspace directory.
+        :type work_dir: str
+        """
+        adapter_dir = f"{work_dir}/adapters"
+        for adapter_name in self.selected_adapters:
+            self._load_adapter_weights(adapter_dir, adapter_name)
+
+    def _save_clone_distributed_actor_state(self, work_dir: str) -> None:
+        """Save distributed actor state for ZeRO-2/3 clone workflows.
+
+        Quantized clones also write PEFT adapters when ZeRO stage is below 2 so
+        the rebuild-from-pretrained path can restore LoRA weights without a
+        DeepSpeed module load of packed nf4 base tensors.
+
+        :param work_dir: Shared clone workspace directory.
+        :type work_dir: str
+        """
+        quant_rebuild = self._uses_quantized_clone_rebuild()
+        if quant_rebuild and (
+            self.accelerator is None or self.zero_stage is None or self.zero_stage < 2
+        ):
+            self._save_clone_adapter_weights(work_dir)
+
         if self.accelerator is None or self.zero_stage is None or self.zero_stage < 2:
             return
 
         self.accelerator.wait_for_everyone()
-        self._save_distributed_actor(f"{work_dir}/agent_{self.index}")
+        # Quantized: exclude frozen base so DeepSpeed never round-trips packed
+        # Params4bit into a freshly loaded nf4 shell (adapters + opt only).
+        self._save_distributed_actor(
+            f"{work_dir}/agent_{self.index}",
+            lora_only=quant_rebuild,
+        )
         self.accelerator.wait_for_everyone()
 
     def _create_clone_instance(self) -> Self:
         """Instantiate a clone with cloned actor weights and runtime args.
+
+        Quantized clones pass ``actor_network=None`` so init reloads the base
+        with ``BitsAndBytesConfig`` and re-attaches adapters; adapter weights
+        are restored after ``wrap_models`` via DeepSpeed (ZeRO≥2) or PEFT files.
 
         :return: Newly constructed clone instance.
         :rtype: Self
@@ -3008,7 +3269,13 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         )
         input_args["wrap"] = False
         input_args["clone"] = True
-        input_args["actor_network"] = self._clone_actor_network()
+        if self._uses_quantized_clone_rebuild():
+            # Rebuild via from_pretrained + quantization_config; adapters are
+            # attached because actor_network is None (see _setup_actors).
+            input_args["actor_network"] = None
+            input_args["model_name"] = self.pretrained_model_name_or_path
+        else:
+            input_args["actor_network"] = self._clone_actor_network()
         input_args["accelerator"] = (
             Accelerator() if self.accelerator is not None else None
         )
@@ -3056,6 +3323,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
         clone.lr_scheduler = None
         self.lr_scheduler = None
+        sleep_mode = bool(
+            self.use_vllm
+            and self.vllm_config is not None
+            and self.vllm_config.sleep_mode
+        )
         if self.use_vllm:
             original_llm = self.llm
             cloned_llm = clone.llm
@@ -3068,8 +3340,31 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.lr_scheduler = original_lr_scheduler
 
         if self.use_vllm:
-            clone.llm = cloned_llm
-            self.llm = original_llm
+            if sleep_mode:
+                # CuMem is process-global: transfer the single sleep-mode engine
+                # to the clone. Tournament selection cleans up the parent next.
+                clone.llm = original_llm
+                self.llm = None
+                for attr in (
+                    "_vllm_awake",
+                    "_vllm_moved",
+                    "_vllm_lora_loaded",
+                    "_vllm_lora_staging_dir",
+                    "_vllm_lora_staging_dir_is_temp",
+                    "_vllm_rollout_lora_request",
+                    "_vllm_rollout_adapter",
+                    "tp_group",
+                ):
+                    if hasattr(self, attr):
+                        setattr(clone, attr, getattr(self, attr))
+                # Prevent parent ``clean_up`` from deleting the staging dir the
+                # clone still owns.
+                self._vllm_lora_staging_dir = None
+                self._vllm_lora_loaded = False
+                self._vllm_rollout_lora_request = None
+            else:
+                clone.llm = cloned_llm
+                self.llm = original_llm
         return clone
 
     def _restore_clone_optimizer_and_scheduler(self, clone: Self) -> None:
@@ -3090,6 +3385,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def _load_clone_distributed_actor_state(self, clone: Self, work_dir: str) -> None:
         """Load saved distributed actor state into clone for ZeRO-2/3.
 
+        Quantized clones without ZeRO≥2 restore adapters from the PEFT files
+        written by :meth:`_save_clone_distributed_actor_state`.
+
         :param clone: Clone instance receiving distributed actor state.
         :type clone: Self
         :param work_dir: Shared clone workspace directory.
@@ -3099,6 +3397,14 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             clone.accelerator.wait_for_everyone()
             clone._load_distributed_actor(f"{work_dir}/agent_{self.index}")
             clone.accelerator.wait_for_everyone()
+        elif self._uses_quantized_clone_rebuild():
+            clone._load_clone_adapter_weights(work_dir)
+            if self.use_value_head:
+                clone_actor = clone._get_unwrapped_actor()
+                parent_actor = self._get_unwrapped_actor()
+                clone_actor.v_head.load_state_dict(parent_actor.v_head.state_dict())
+            if self.accelerator is not None:
+                self.accelerator.wait_for_everyone()
         elif self.accelerator is not None:
             self.accelerator.wait_for_everyone()
 
@@ -3544,18 +3850,27 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     ) -> None:
         """Build the actor(s), routing through the colocated-vLLM path when enabled.
 
-        ``clone=True`` reuses an already-adapted model (no new adapters);
-        ``clone=False`` attaches AgileRL adapters (``add_adapters = not clone``).
+        ``clone=True`` with a pre-built PEFT ``actor_network`` reuses it (no new
+        adapters). Quantized clones pass ``actor_network=None`` so the base is
+        reloaded with ``BitsAndBytesConfig``; adapters must still be attached
+        before the LoRA-only DeepSpeed / PEFT weight restore.
         """
+        # Rebuild-from-pretrained (actor_network is None) always needs adapters,
+        # including when clone=True for the quantized path.
+        add_adapters = (not clone) or (actor_network is None)
         if self.use_vllm:
-            self._initialize_colocated_vllm_and_actors(actor_network, not clone)
+            self._initialize_colocated_vllm_and_actors(
+                actor_network, add_adapters=add_adapters, clone=clone
+            )
         else:
-            self._initialize_actors(actor_network, not clone)
+            self._initialize_actors(actor_network, add_adapters)
 
     def _initialize_colocated_vllm_and_actors(
         self,
         base_model: PreTrainedModelProtocol | None,
         add_adapters: bool = True,
+        *,
+        clone: bool = False,
     ) -> None:
         """Initialize a colocated vLLM rollout engine + the HF/PEFT trainer.
 
@@ -3578,7 +3893,20 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         loaded from ``pretrained_model_name_or_path``) or a fully-built,
         already-adapted actor copy for a clone (``add_adapters=False``), reused
         as-is.
+
+        **Sleep-mode clones** do not construct a second ``LLM``: CuMem is
+        process-global (one sleep-mode engine per process). The parent's engine
+        is transferred in :meth:`_copy_clone_attributes` after construction.
         """
+        # Sleep-mode CuMem forbids a second in-process engine. Build the
+        # trainer only; ``clone()`` moves the parent's ``llm`` onto this instance.
+        if clone and self.vllm_config is not None and self.vllm_config.sleep_mode:
+            self.llm = None
+            self._initialize_actors(base_model, add_adapters)
+            if self.accelerator is not None:
+                self.accelerator.wait_for_everyone()
+            return
+
         main = self.accelerator is None or self.accelerator.process_index == 0
         if self._trainer_should_load_before_vllm(base_model):
             if main:
@@ -3988,7 +4316,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 fused_ids[start:end, 1:],
                 temperature=self.temperature,
                 cast_to_fp32=self.cast_logprobs_to_fp32,
-                _chunk_rows=self.fused_logprobs_chunk_rows,
+                chunk_rows=self.chunk_rows,
             )
             del first
 
@@ -4163,7 +4491,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             packed.input_ids[:, 1:],
             temperature=self.temperature,
             cast_to_fp32=self.cast_logprobs_to_fp32,
-            _chunk_rows=self.fused_logprobs_chunk_rows,
+            chunk_rows=self.chunk_rows,
         )
         log_probs = unpack_logprobs(packed_lp, packed)
 
@@ -4387,7 +4715,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                         packed.input_ids[:, 1:],
                         temperature=self.temperature,
                         cast_to_fp32=self.cast_logprobs_to_fp32,
-                        _chunk_rows=self.fused_logprobs_chunk_rows,
+                        chunk_rows=self.chunk_rows,
                     )
                     # Map back to the dense (mb, T-1) frame so the loss path is
                     # unchanged; cross-segment boundary predictions are dropped.
@@ -4401,7 +4729,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                         batch_ids[:, 1:],
                         temperature=self.temperature,
                         cast_to_fp32=self.cast_logprobs_to_fp32,
-                        _chunk_rows=self.fused_logprobs_chunk_rows,
+                        chunk_rows=self.chunk_rows,
                     )
 
                 first = None
@@ -4483,13 +4811,17 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def _ensure_vllm_lora_staging_dir(self) -> Path:
         """Resolve (once) the dir the rollout LoRA adapter is exported to.
 
-        Honours ``VLLMConfig.lora_staging_dir`` when set — e.g. a shared/NFS
-        path that a colocated Ray rollout worker reads the adapter from — by
-        creating it (parents included) and marking it non-temporary so
-        ``clean_up`` never deletes it. Otherwise falls back to a process-private
-        ``mkdtemp`` that ``clean_up`` removes. Idempotent: both the colocated
-        init (``_configure_vllm``) and every adapter sync (``_move_lora_to_vllm``)
-        call this, so the same directory is used throughout the agent's life.
+        The staging dir is always process-private: each rank exports its own
+        adapter copy and reads it back locally, so ranks never race on shared
+        files. Honours ``VLLMConfig.lora_staging_dir`` when set — e.g. a known
+        path that orchestrated deployments expect the adapter under — staging
+        in a ``rank_<process_index>`` subdirectory of that root when
+        distributed. The dir is created (parents included) and marked
+        non-temporary so ``clean_up`` never deletes it. Otherwise falls back
+        to a process-private ``mkdtemp`` that ``clean_up`` removes.
+        Idempotent: both the colocated init (``_configure_vllm``) and every
+        adapter sync (``_move_lora_to_vllm``) call this, so the same directory
+        is used throughout the agent's life.
 
         :return: The resolved staging directory.
         :rtype: pathlib.Path
@@ -4497,8 +4829,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         if self._vllm_lora_staging_dir is None:
             configured = getattr(self.vllm_config, "lora_staging_dir", None)
             if configured is not None:
-                self._vllm_lora_staging_dir = Path(configured)
-                self._vllm_lora_staging_dir.mkdir(parents=True, exist_ok=True)
+                staging_dir = Path(configured)
+                if self.accelerator is not None and self.accelerator.num_processes > 1:
+                    staging_dir = staging_dir / f"rank_{self.accelerator.process_index}"
+                staging_dir.mkdir(parents=True, exist_ok=True)
+                self._vllm_lora_staging_dir = staging_dir
                 self._vllm_lora_staging_dir_is_temp = False
             else:
                 self._vllm_lora_staging_dir = Path(
@@ -4521,12 +4856,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         peft_ref = self._get_peft_model_for_vllm_sync()
         peft_ref.set_adapter(self._vllm_rollout_adapter)
 
-        # Export to a fixed staging dir + id and refresh the resident rollout
-        # slot in place: ``load_inplace`` (2nd sync onward) re-reads the updated
-        # weights from disk, and the fixed id avoids per-sync CUDA-graph
-        # accumulation that would grow GPU memory across iterations.
         staging_dir = self._ensure_vllm_lora_staging_dir()
-        is_main_process = self.accelerator is None or self.accelerator.is_main_process
         with gather_if_zero3(self.zero_stage, list(peft_ref.parameters())):
             if self.lora_config is None:
                 msg = "lora_config is required for vLLM LoRA adapter export."
@@ -4536,33 +4866,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 staging_dir,
                 self._vllm_rollout_adapter,
                 target_modules=self.lora_config.target_modules,
-                is_main_process=is_main_process,
             )
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
-        if not adapter_path.is_dir():
-            msg = (
-                f"PEFT adapter export for {self._vllm_rollout_adapter!r} not found under "
-                f"{staging_dir}. Expected {adapter_path} or adapter_config.json in "
-                f"{staging_dir}."
-            )
-            raise FileNotFoundError(msg)
-
-        if is_main_process and logger.isEnabledFor(logging.DEBUG):
-            # Sum of L2 norms of the trained-from-zero LoRA-B weights; a value
-            # that changes across syncs confirms the trainer is exporting
-            # updated weights into the rollout adapter. Gated on the standard
-            # logging level (the norm reduction costs a GPU sync).
-            lora_b_sq = sum(
-                float(p.detach().float().pow(2).sum().item())
-                for n, p in peft_ref.named_parameters()
-                if "lora_B" in n and self._vllm_rollout_adapter in n
-            )
-            logger.debug(
-                "lora-sync: actor lora_B L2=%.6f path=%s",
-                lora_b_sq**0.5,
-                adapter_path,
-            )
 
         # One-shot refresh of the resident slot. ``load_inplace`` forces vLLM to
         # re-read the (updated) adapter weights from disk; required from the second
@@ -4571,11 +4877,19 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             adapter_path,
             load_inplace=self._vllm_lora_loaded,
         )
-        loaded = self.llm.llm_engine.add_lora(refresh_request)
+        lora_device = torch.device(self.device)
+        if lora_device.type == "cuda":
+            # Pin the CUDA context to this agent's device: vLLM's LoRA copy
+            # kernels otherwise launch on the process-default device.
+            with torch.cuda.device(lora_device):
+                loaded = self.llm.llm_engine.add_lora(refresh_request)
+        else:
+            loaded = self.llm.llm_engine.add_lora(refresh_request)
         if not loaded:
             msg = (
-                f"vLLM failed to load LoRA adapter from {adapter_path}. "
-                "Check max_lora_rank / target module names match the trainer."
+                "vLLM failed to load LoRA adapter from "
+                f"{adapter_path}. Check max_lora_rank / target module "
+                "names match the trainer."
             )
             raise RuntimeError(msg)
 
@@ -4759,9 +5073,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             for max_output_token in all_max_output_tokens
         ]
 
-        if self.accelerator is not None:
-            self.accelerator.wait_for_everyone()
-
         generate_kwargs: dict[str, Any] = {
             "sampling_params": sampling_params,
             "use_tqdm": False,
@@ -4864,13 +5175,13 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         logits: torch.Tensor,
         index: torch.Tensor,
         cast_to_fp32: bool = True,
-        _chunk_rows: int = 1,
+        chunk_rows: int = 1,
     ) -> torch.Tensor:
         """Calculate log probabilities for previously generated token ids.
 
-        Processes ``_chunk_rows`` rows at a time so peak memory stays bounded to
-        ``(_chunk_rows, seq_len, vocab_size)`` rather than the full batch, avoiding
-        OOM on large-vocabulary models. Default ``_chunk_rows=1`` minimizes the
+        Processes ``chunk_rows`` rows at a time so peak memory stays bounded to
+        ``(chunk_rows, seq_len, vocab_size)`` rather than the full batch, avoiding
+        OOM on large-vocabulary models. Default ``chunk_rows=1`` minimizes the
         fp32 workspace at the cost of more kernel launches; raise to amortize
         launch overhead when memory headroom allows.
 
@@ -4907,12 +5218,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             result = target - log_z
             return result.to(orig_dtype) if cast_to_fp32 else result
 
-        if B <= _chunk_rows:
+        if B <= chunk_rows:
             return _logprobs_chunk(logits, index)
 
         per_token_logps = []
-        for start in range(0, B, _chunk_rows):
-            end = min(start + _chunk_rows, B)
+        for start in range(0, B, chunk_rows):
+            end = min(start + chunk_rows, B)
             per_token_logps.append(
                 _logprobs_chunk(logits[start:end], index[start:end]),
             )
@@ -4922,10 +5233,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def _resolve_fused_chunk_rows(vocab_size: int, explicit: int | None = None) -> int:
         """Rows per fused ``(chunk_rows, vocab)`` logit tile.
 
-        Shared by the fused-linear-logprob (standard) path
-        (``fused_logprobs_chunk_rows``) and the Liger fused-loss path
-        (``fused_loss_chunk_rows``) so both bound their per-chunk logit
-        workspace identically. A positive ``explicit`` overrides; ``None``
+        Shared by the fused-linear-logprob (standard) path and the Liger
+        fused-loss path so both bound their per-chunk logit workspace
+        identically. A positive ``explicit`` overrides; ``None``
         auto-tunes to a ~256 MB fp32 logit workspace (fewer rows at larger
         vocab), clamped to ``[128, 4096]``.
 
@@ -4949,12 +5259,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         target_ids: torch.Tensor,
         temperature: float = 1.0,
         cast_to_fp32: bool = True,
-        _chunk_rows: int | None = None,
+        chunk_rows: int | None = None,
     ) -> torch.Tensor:
         """Per-token target logprobs without materializing the full ``(B, T, V)``
         logits tensor.
 
-        Tiles flat over ``(B*T)`` with workspace bounded to ``(_chunk_rows, V)``
+        Tiles flat over ``(B*T)`` with workspace bounded to ``(chunk_rows, V)``
         per iteration. Counterpart of :meth:`_logprobs_from_logits` for
         callers that hold hidden states and the lm_head separately. **No-grad
         only** — gradients won't flow to ``lm_head_weight`` from this fn. The
@@ -4982,16 +5292,16 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             in fp32 then cast back. Same semantics as
             :meth:`_logprobs_from_logits`.
         :type cast_to_fp32: bool, optional
-        :param _chunk_rows: rows of the flattened ``(B*T)`` workspace per
-            iteration; trades launch count vs ``_chunk_rows * V`` peak. When
+        :param chunk_rows: rows of the flattened ``(B*T)`` workspace per
+            iteration; trades launch count vs ``chunk_rows * V`` peak. When
             ``None`` (default) it is resolved from the vocab size via
             a ~256 MB fp32 workspace heuristic.
-        :type _chunk_rows: int | None, optional
+        :type chunk_rows: int | None, optional
         :return: ``(B, T)`` per-token logprobs in ``hidden.dtype``.
         :rtype: torch.Tensor
         """
-        _chunk_rows = LLMAlgorithm._resolve_fused_chunk_rows(
-            lm_head_weight.shape[0], _chunk_rows
+        chunk_rows = LLMAlgorithm._resolve_fused_chunk_rows(
+            lm_head_weight.shape[0], chunk_rows
         )
         return fused_linear_logprobs_chunked(
             hidden,
@@ -5000,7 +5310,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             target_ids,
             temperature=temperature,
             cast_to_fp32=cast_to_fp32,
-            chunk_rows=_chunk_rows,
+            chunk_rows=chunk_rows,
         )
 
     @staticmethod
@@ -5011,7 +5321,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         target_ids: torch.Tensor,
         temperature: float = 1.0,
         cast_to_fp32: bool = True,
-        _chunk_rows: int | None = None,
+        chunk_rows: int | None = None,
     ) -> torch.Tensor:
         """Gradient-aware version of :meth:`_logprobs_from_hidden_fused`.
 
@@ -5037,15 +5347,15 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :type temperature: float, optional
         :param cast_to_fp32: run the per-chunk reduction in fp32.
         :type cast_to_fp32: bool, optional
-        :param _chunk_rows: rows of the flattened ``(B*T)`` workspace per chunk.
+        :param chunk_rows: rows of the flattened ``(B*T)`` workspace per chunk.
             When ``None`` (default) it is resolved from the vocab size via
             a ~256 MB fp32 workspace heuristic.
-        :type _chunk_rows: int | None, optional
+        :type chunk_rows: int | None, optional
         :return: ``(B, T)`` per-token logprobs in ``hidden.dtype``.
         :rtype: torch.Tensor
         """
-        _chunk_rows = LLMAlgorithm._resolve_fused_chunk_rows(
-            lm_head_weight.shape[0], _chunk_rows
+        chunk_rows = LLMAlgorithm._resolve_fused_chunk_rows(
+            lm_head_weight.shape[0], chunk_rows
         )
         return FusedLinearLogProbsFunction.apply(
             hidden,
@@ -5054,7 +5364,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             target_ids,
             temperature,
             cast_to_fp32,
-            _chunk_rows,
+            chunk_rows,
         )
 
     def _configure_batch_size_per_process(
@@ -5516,10 +5826,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def _sleep_vllm_after_init(self) -> None:
         """Put the colocated engine to sleep once after construction.
 
-        Native ``sleep(level=1)``: vLLM backs its base up to host RAM and frees
-        the KV cache; ``wake_up()`` restores the base (dense or bnb 4-bit).
+        Native ``sleep(level=sleep_mode_level)``: vLLM cycles its allocator
+        state based on the configured sleep level; ``wake_up()`` restores the
+        engine allocations.
         """
-        self.llm.sleep(level=1)
+        self.llm.sleep(level=self.vllm_config.sleep_mode_level)
         self._vllm_awake = False
         if self.accelerator is None or self.accelerator.is_main_process:
             log_cuda_memory_snapshot("vLLM sleep complete")
@@ -5645,15 +5956,16 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
     def _prepare_vllm_for_training(self) -> None:
         """Prepare vLLM for learning."""
-        if self._vllm_awake and (
-            self.accelerator is None or self.accelerator.is_main_process
-        ):
+        if not self.use_vllm:
+            return
+        # Every rank holds its own colocated engine (external_launcher), so
+        # every rank must sleep it — not just the main process.
+        if self.vllm_config.sleep_mode and self._vllm_awake:
             torch.cuda.empty_cache()
-            self.llm.sleep(level=1)
+            self.llm.sleep(level=self.vllm_config.sleep_mode_level)
             self._vllm_awake = False
 
-        if self.use_vllm:
-            self._vllm_moved = False
+        self._vllm_moved = False
 
     def _prepare_vllm_for_generation(self) -> None:
         if self.use_memory_efficient_params:
@@ -5666,35 +5978,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 log_cuda_memory_snapshot(
                     "trainer base offloaded to CPU (before vLLM wake)"
                 )
-        if not self._vllm_awake and (
-            self.accelerator is None or self.accelerator.is_main_process
-        ):
+        # Every rank holds its own colocated engine, and _sleep_vllm_after_init
+        # slept them all; we wake them all here.
+        if self.vllm_config.sleep_mode and not self._vllm_awake:
             torch.cuda.empty_cache()
-            device_index = (
-                self.accelerator.local_process_index
-                if self.accelerator is not None
-                else 0
-            )
-            try:
-                self.llm.wake_up()
-            except RuntimeError as err:  # pragma: no cover
-                err_text = str(err).lower()
-                if "out of memory" in err_text or "cuda error" in err_text:
-                    vcfg = self.vllm_config
-                    hint = format_colocated_vllm_oom_hint(
-                        device_index,
-                        kv_cache_memory_bytes=(
-                            vcfg.kv_cache_memory_bytes if vcfg is not None else None
-                        ),
-                        gpu_memory_utilization=(
-                            vcfg.gpu_memory_utilization if vcfg is not None else None
-                        ),
-                        max_model_len=getattr(self, "max_model_len", None),
-                        trainer_on_gpu=not self.use_memory_efficient_params,
-                    )
-                    msg = f"vLLM wake_up failed (GPU OOM).\n{hint}"
-                    raise RuntimeError(msg) from err
-                raise
+            self.llm.wake_up()
             self._vllm_awake = True
             if self.accelerator is None or self.accelerator.is_main_process:
                 log_cuda_memory_snapshot("vLLM base restored on GPU (after wake)")

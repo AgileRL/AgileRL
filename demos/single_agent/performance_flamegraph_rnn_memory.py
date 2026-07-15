@@ -153,7 +153,6 @@ INIT_HP = {
     "RECURRENT": recurrent,
     "ACTION_STD_INIT": 0.6,
     "TARGET_KL": None,
-    "CHANNELS_LAST": False,
 }
 
 

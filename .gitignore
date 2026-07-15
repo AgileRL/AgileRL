@@ -1,3 +1,6 @@
+# Symlink for Pylance/Pyright type checking of namespace package (repo root only)
+/agilerl/arena
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -113,8 +116,10 @@ celerybeat.pid
 .claude/
 .venv*/
 venv/
+.envrc
 env.bak/
 venv.bak/
+.cursor/
 
 # Spyder project settings
 .spyderproject
@@ -136,6 +141,7 @@ dmypy.json
 
 # Saved models
 outputs/
+tensorboard_logs/
 
 # Ruff
 .ruff_cache/
@@ -143,6 +149,8 @@ outputs/
 # Large data files
 data/wordle/
 data/wordle.zip
+*.tar.gz
+*metrics.csv
 
 # WandB
 wandb/
@@ -153,3 +161,9 @@ wandb/
 # AI assistant instructions
 CLAUDE.md
 AGENTS.md
+
+# Symlink for type-checking (repo root only)
+/agilerl/arena/
+
+# Local Arena client backend switcher (dev tooling)
+/set-local-client.sh

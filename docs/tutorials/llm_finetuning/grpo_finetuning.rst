@@ -45,7 +45,7 @@ Dependencies
     from torch.utils.data import Dataset
     from transformers import AutoTokenizer
     from agilerl.algorithms import GRPO
-    from agilerl.training.train_llm import finetune_llm_reasoning
+    from agilerl.training.llm import finetune_llm_reasoning
     from agilerl.llm_envs import ReasoningGym
 
 
@@ -239,7 +239,7 @@ training in this tutorial, we use deepspeed and accelerate.
 
 Training and Saving an Agent
 ----------------------------
-The simplest way to train an AgileRL agent is to use the :meth:`finetune_llm_reasoning() <agilerl.training.train_llm.finetune_llm_reasoning>` function.
+The simplest way to train an AgileRL agent is to use the :meth:`finetune_llm_reasoning() <agilerl.training.llm.reasoning.finetune_llm_reasoning>` function.
 This training function will orchestrate the training process, removing the the need to implement a training loop, and will save
 checkpoints of the trained agent that can be used later for inference. It also uses Weights and Biases for tracking.
 
@@ -319,7 +319,7 @@ function and is an example of how we might choose to train our agent to exhibit 
 
         from tqdm import trange
         import torch.distributed as dist
-        from agilerl.utils.utils import gather_tensor, aggregate_metrics_across_gpus
+        from agilerl.utils.llm_utils import gather_tensor, aggregate_metrics_across_gpus
 
         evaluation_interval = 5
         max_reward = 2.0

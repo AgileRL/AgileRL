@@ -1,33 +1,38 @@
+.. _custom_algorithms:
+
 Creating Custom Algorithms
 ==========================
 
 To create a custom algorithm, you must inherit from :class:`RLAlgorithm <agilerl.algorithms.core.base.RLAlgorithm>` for
 single-agent algorithms or :class:`MultiAgentRLAlgorithm <agilerl.algorithms.core.base.MultiAgentRLAlgorithm>` for multi-agent
-algorithms. For an overview of the class hierarchy and the philosophy behind it please refer to :ref:`base_algorithm`. We have implemented
-this hierarchy with the idea of making evolutionary hyperparameter optimization as seamless as possible, and have users focus on their
-implementation only. The key components in developing a custom AgileRL algorithm are the following:
+algorithms. We have implemented this hierarchy with the idea of making evolutionary hyperparameter optimization as seamless as possible,
+and have users focus on their implementation only. Here we go over the key components in developing a custom AgileRL algorithm.
+
+.. seealso::
+
+   :ref:`base_algorithm` for an overview of the class hierarchy and the philosophy behind it.
 
 Network Groups
---------------
+~~~~~~~~~~~~~~
 
-Users must specify the "network groups" in their algorithm. A network group is a group of networks that work hand in hand with a common objective,
-and is registered through a :class:`NetworkGroup <agilerl.algorithms.core.registry.NetworkGroup>` object, which contains at least one
+Users must specify the "network groups" in their algorithm. A network group is a group of networks that work hand in hand with a common objective in an RL algorithm.
+They are registered through the :class:`NetworkGroup <agilerl.algorithms.core.registry.NetworkGroup>` class, which contains at least one
 **evaluation** network (i.e. a network that is optimized during training e.g. the Q-network in DQN) and, optionally, "shared" networks that share
 parameters with the evaluation network in the group but aren't optimized during training directly (e.g. the target network in DQN). An RL algorithm
-must also contain one :class:`NetworkGroup <agilerl.algorithms.core.registry.NetworkGroup>` corresponding to the policy (i.e. the network used to
-select actions), signalled by setting ``policy=True`` in the :class:`NetworkGroup <agilerl.algorithms.core.registry.NetworkGroup>` object.
+must also contain one group corresponding to the policy (i.e. the network used to
+select actions), signalled by setting ``policy=True`` in the constructor.
 
 PPO Example
-~~~~~~~~~~~
+^^^^^^^^^^^
 
-In PPO, we would need to define two network groups, since there are two different networks that are optimized during training. The first network group
+In PPO, we need to define two network groups, since there are two different networks that are optimized during training. The first network group
 corresponds to the actor network and the second to the critic network. The actor network is responsible for selecting actions, and is therefore signalled
 as the policy. In this case, there are no networks that share parameters with the actor or the critic so we can bypass the ``shared`` argument. We can
 register these groups as follows through the ``register_network_group`` method of the algorithm:
 
 .. code-block:: python
 
-    # Register network groups for mutations
+    # NOTE: Must register network groups in the __init__ method of the algorithm
     self.register_network_group(
         NetworkGroup(
             eval=self.actor,
@@ -41,7 +46,7 @@ register these groups as follows through the ``register_network_group`` method o
     )
 
 OptimizerWrapper
-----------------
+~~~~~~~~~~~~~~~~
 
 The last thing users should do when creating a custom algorithm is wrap their optimizers in an :class:`OptimizerWrapper <agilerl.algorithms.core.optimizer_wrapper.OptimizerWrapper>`,
 specifying the networks that the optimizer is responsible for. Since we are mutating network architectures during training, we need to have knowledge of
@@ -61,7 +66,7 @@ so we can wrap it as follows:
     )
 
 
-.. note::
+.. warning::
     All of the network groups and optimizers of an algorithm should by convention all be defined in the ``__init__`` method of the algorithm. When initializing
     an ``OptimizerWrapper``, we require users to pass either a network or a list of networks that are stored as attributes in the algorithm (i.e. preceded by ``self.``).
 
@@ -70,6 +75,10 @@ Finally, users only need to implement the following methods to train agents with
 1. :meth:`learn() <agilerl.algorithms.core.base.EvolvableAlgorithm.learn>`: Responsible for updating the parameters of the networks and the optimizer after collecting
 a set of experiences from the environment.
 
-2. :meth:`get_action() <agilerl.algorithms.core.base.EvolvableAlgorithm.get_action>`: Select action/s from a given observation or batch of observations.
+1. :meth:`get_action() <agilerl.algorithms.core.base.EvolvableAlgorithm.get_action>`: Select action/s from a given observation or batch of observations.
 
-3. :meth:`test() <agilerl.algorithms.core.base.EvolvableAlgorithm.test>`: Test the agent in the environment without updating the parameters of the networks.
+2. :meth:`test() <agilerl.algorithms.core.base.EvolvableAlgorithm.test>`: Test the agent in the environment without updating the parameters of the networks.
+
+.. seealso::
+
+   :ref:`evo_hyperparam_opt` for details on how evolutionary hyperparameter optimization works in AgileRL.

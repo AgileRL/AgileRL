@@ -6,44 +6,53 @@ from typing import Any
 
 import numpy as np
 import torch
+from accelerate import Accelerator
 from gymnasium import spaces
 from torch import nn, optim
 
 from agilerl.algorithms.core import MultiAgentRLAlgorithm, OptimizerWrapper
-from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.algorithms.core.registry import (
+    HyperparameterConfig,
+    NetworkGroup,
+    make_default_hp_config,
+)
 from agilerl.modules.base import EvolvableModule, ModuleDict
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.typing import (
     ArrayDict,
+    ExperiencesType,
     InfosDict,
     MultiAgentModule,
     ObservationType,
     PzEnvType,
     StandardTensorDict,
+    SupportedObservationSpace,
 )
 from agilerl.utils.algo_utils import (
     apply_env_defined_actions,
     concatenate_spaces,
+    configure_tf32_precision,
     format_shared_critic_encoder,
     get_deepest_head_config,
     get_vect_dim,
     key_in_nested_dict,
     make_safe_deepcopies,
-    obs_channels_to_first,
 )
+
+SupportedActionSpace = spaces.Discrete | spaces.Box
 
 
 class MATD3(MultiAgentRLAlgorithm):
-    """Multi-Agent Twin Delayed Deep Deterministic Policy Gradient (MATD3) algorithm.
+    """Multi-Agent Twin Delayed Deep Deterministic Policy Gradient (MATD3).
 
     Paper: https://arxiv.org/abs/1910.01465
 
     :param observation_spaces: Observation space for each agent
-    :type observation_spaces: list[spaces.Space] | spaces.Dict
+    :type observation_spaces: list[SupportedObservationSpace] | spaces.Dict
     :param action_spaces: Action space for each agent
-    :type action_spaces: list[spaces.Space] | spaces.Dict
+    :type action_spaces: list[SupportedActionSpace] | spaces.Dict
     :param agent_ids: Agent ID for each agent
     :type agent_ids: list[str] | None, optional
     :param O_U_noise: Use Ornstein Uhlenbeck action noise for exploration. If False, uses Gaussian noise. Defaults to True
@@ -96,7 +105,7 @@ class MATD3(MultiAgentRLAlgorithm):
     :type wrap: bool, optional
     """
 
-    possible_action_spaces: dict[str, spaces.Box | spaces.Discrete]
+    possible_action_spaces: dict[str, SupportedActionSpace]
 
     actors: MultiAgentModule[DeterministicActor]
     actor_targets: MultiAgentModule[DeterministicActor]
@@ -107,8 +116,8 @@ class MATD3(MultiAgentRLAlgorithm):
 
     def __init__(
         self,
-        observation_spaces: list[spaces.Space] | spaces.Dict,
-        action_spaces: list[spaces.Space] | spaces.Dict,
+        observation_spaces: list[SupportedObservationSpace] | spaces.Dict,
+        action_spaces: list[SupportedActionSpace] | spaces.Dict,
         agent_ids: list[str] | None = None,
         O_U_noise: bool = True,
         expl_noise: float = 0.1,
@@ -131,7 +140,7 @@ class MATD3(MultiAgentRLAlgorithm):
         actor_networks: ModuleDict | None = None,
         critic_networks: list[ModuleDict] | None = None,
         device: str = "cpu",
-        accelerator: Any | None = None,
+        accelerator: Accelerator | None = None,
         torch_compiler: str | None = None,
         wrap: bool = True,
     ) -> None:
@@ -186,6 +195,14 @@ class MATD3(MultiAgentRLAlgorithm):
         self.theta = theta
         self.dt = dt
         self.sqdt = dt ** (0.5)
+
+        # Default RL hyperparameters to mutate when doing Evo-HPO
+        self.hp_config = self.hp_config or make_default_hp_config(
+            lr_actor=self.lr_actor,
+            lr_critic=self.lr_critic,
+            batch_size=self.batch_size,
+            learn_step=self.learn_step,
+        )
 
         # Initialise noise for exploration
         self.sample_gaussian = {
@@ -467,7 +484,7 @@ class MATD3(MultiAgentRLAlgorithm):
                 )
                 self.torch_compiler = "default"
 
-            torch.set_float32_matmul_precision("high")
+            configure_tf32_precision()
             self.recompile()
 
         self.criterion = nn.MSELoss()
@@ -492,6 +509,10 @@ class MATD3(MultiAgentRLAlgorithm):
                 shared_networks=self.critic_targets_2,
             ),
         )
+
+        # Register metrics to keep track of during training
+        self.metrics.register("actor_loss")
+        self.metrics.register("critic_loss")
 
     def process_infos(
         self,
@@ -689,19 +710,22 @@ class MATD3(MultiAgentRLAlgorithm):
                 self.current_noise[agent_id][idx, :] = 0
 
     def learn(
-        self,
-        experiences: tuple[StandardTensorDict, ...],
+        self, experiences: ExperiencesType
     ) -> dict[str, tuple[float | None, float]]:
         """Update agent network parameters from the gathered experiences.
 
-        :param experience: Tuple of dictionaries containing batched states, actions,
-            rewards, next_states, dones in that order for each individual agent.
-        :type experience: tuple[dict[str, torch.Tensor]]
+        :param experiences: TensorDict of nested per-agent observations, actions,
+            rewards, next_observations, dones.
+        :type experiences: TensorDict
 
         :return: Losses for each agent
-        :rtype: dict[str, float]
+        :rtype: dict[str, tuple[float | None, float]]
         """
-        states, actions, rewards, next_states, dones = experiences
+        states = experiences["obs"]
+        actions = experiences["action"]
+        rewards = experiences["reward"]
+        next_states = experiences["next_obs"]
+        dones = experiences["done"]
 
         actions = {
             agent_id: agent_actions.to(self.device)
@@ -914,7 +938,15 @@ class MATD3(MultiAgentRLAlgorithm):
                 actor_loss.backward()
             actor_optimizer.step()
 
-        return actor_loss.item() if actor_loss is not None else None, critic_loss.item()
+        actor_loss = actor_loss.item() if actor_loss is not None else None
+        critic_loss = critic_loss.item()
+
+        # Log metrics
+        if actor_loss is not None:
+            self.metrics.log("actor_loss", actor_loss, network_id)
+
+        self.metrics.log("critic_loss", critic_loss, network_id)
+        return actor_loss, critic_loss
 
     def soft_update(self, net: nn.Module, target: nn.Module) -> None:
         """Soft updates target network.
@@ -934,7 +966,6 @@ class MATD3(MultiAgentRLAlgorithm):
     def test(
         self,
         env: PzEnvType,
-        swap_channels: bool = False,
         max_steps: int | None = None,
         loop: int = 3,
         sum_scores: bool = True,
@@ -943,8 +974,6 @@ class MATD3(MultiAgentRLAlgorithm):
 
         :param env: The environment to be tested in
         :type env: Gym-style environment
-        :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
-        :type swap_channels: bool, optional
         :param max_steps: Maximum number of testing steps, defaults to None
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
@@ -978,13 +1007,6 @@ class MATD3(MultiAgentRLAlgorithm):
                 step = 0
                 while not np.all(finished):
                     step += 1
-                    if swap_channels:
-                        expand_dims = not is_vectorised
-                        obs = {
-                            agent_id: obs_channels_to_first(s, expand_dims)
-                            for agent_id, s in obs.items()
-                        }
-
                     action, _ = self.get_action(
                         obs,
                         infos=info,
@@ -1048,5 +1070,5 @@ class MATD3(MultiAgentRLAlgorithm):
 
         mean_fit = np.mean(rewards, axis=0)
         mean_fit = mean_fit[0] if sum_scores else mean_fit
-        self.fitness.append(mean_fit)
+        self.metrics.add_fitness(mean_fit)
         return mean_fit

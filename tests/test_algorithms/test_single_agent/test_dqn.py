@@ -15,12 +15,10 @@ from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import (
     assert_state_dicts_equal,
+    assert_transpose_image_observation_called,
     get_experiences_batch,
     get_sample_from_space,
-)
-from tests.helpers.algorithm_coverage import (
-    assert_swap_channels_called,
-    patch_obs_channels_to_first,
+    patch_transpose_image_observation,
 )
 
 
@@ -93,7 +91,7 @@ class TestDQNInit:
         assert dqn.index == 0
         assert dqn.scores == []
         assert dqn.fitness == []
-        assert dqn.steps == [0]
+        assert dqn.steps == 0
         assert dqn.double is False
         assert isinstance(dqn.actor.encoder, encoder_cls)
         assert isinstance(dqn.actor_target.encoder, encoder_cls)
@@ -162,7 +160,7 @@ class TestDQNInit:
         assert dqn.index == 0
         assert dqn.scores == []
         assert dqn.fitness == []
-        assert dqn.steps == [0]
+        assert dqn.steps == 0
         assert dqn.double is False
         assert isinstance(dqn.optimizer.optimizer, optim.Adam)
         assert isinstance(dqn.criterion, nn.MSELoss)
@@ -216,7 +214,7 @@ class TestDQNInit:
         assert dqn.index == 0
         assert dqn.scores == []
         assert dqn.fitness == []
-        assert dqn.steps == [0]
+        assert dqn.steps == 0
         assert dqn.double is False
         assert isinstance(dqn.optimizer.optimizer, optim.Adam)
         assert isinstance(dqn.criterion, nn.MSELoss)
@@ -509,13 +507,17 @@ class TestDQNTest:
         assert isinstance(mean_score, float)
         agent.clean_up()
 
-    def test_swap_channels_path(self, image_space, discrete_space, monkeypatch):
-        env = DummyEnv(observation_space=image_space, vect=False, num_envs=1)
-        spy = patch_obs_channels_to_first(monkeypatch, "agilerl.algorithms.dqn")
-        agent = DQN(observation_space=image_space, action_space=discrete_space)
-        mean_score = agent.test(env, swap_channels=True, max_steps=1, loop=1)
+    def test_swap_channels_path(self, discrete_space, monkeypatch):
+        channels_last_box = spaces.Box(
+            low=0, high=255, shape=(32, 32, 3), dtype=np.uint8
+        )
+        env = DummyEnv(observation_space=channels_last_box, vect=False, num_envs=1)
+        spy = patch_transpose_image_observation(monkeypatch)
+        agent = DQN(observation_space=channels_last_box, action_space=discrete_space)
+        assert agent.swap_channels is True
+        mean_score = agent.test(env, max_steps=1, loop=1)
         assert isinstance(mean_score, float)
-        assert_swap_channels_called(spy)
+        assert_transpose_image_observation_called(spy)
         agent.clean_up()
 
 

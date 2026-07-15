@@ -8,11 +8,12 @@ import re
 import shutil
 import textwrap
 import warnings
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 from accelerate import Accelerator
 from torch import nn
@@ -165,6 +166,229 @@ def normalize_reasoning_prompt_batch(
             for sample in result:
                 sample[key] = value
     return result
+
+
+def gather_tensor(
+    tensor: torch.Tensor | float,
+    accelerator: Accelerator,
+) -> torch.Tensor:
+    """Gather tensors from gpus.
+
+    :param tensor: Tensor to gather
+    :type tensor: torch.Tensor
+    :param accelerator: Accelerator object
+    :type accelerator: accelerate.Accelerator
+    :return: Stacked tensors
+    :rtype: torch.Tensor
+    """
+    if not isinstance(tensor, torch.Tensor):
+        tensor = torch.tensor(tensor, device=accelerator.device)
+    tensor = tensor.to(accelerator.device)
+    return accelerator.gather(tensor)
+
+
+def needs_cross_rank_seq_padding(algo: Any, *, world_size: int) -> bool:
+    """Return whether ranks must sync completion seq lengths before ``learn()``.
+
+    Multi-rank Liger token-level losses chunk over ``B * (T - 1)`` and issue one
+    NCCL allreduce per chunk (DAPO/CISPO normaliser). Divergent per-rank ``T``
+    after local ``stack_and_pad`` therefore deadlocks. Gate on that mechanism,
+    not on a specific algorithm name.
+    """
+    if world_size <= 1:
+        return False
+    if not getattr(algo, "use_liger_loss", False):
+        return False
+    return getattr(algo, "importance_sampling_level", "token") == "token"
+
+
+def allreduce_minmax_int(value: int, accelerator: Accelerator) -> tuple[int, int]:
+    """Return ``(min, max)`` of ``value`` across Accelerate ranks.
+
+    Uses :meth:`Accelerator.gather` so the reduction participates in the same
+    process-group bookkeeping as the rest of the Accelerate/DeepSpeed run
+    (plain ``torch.distributed.all_reduce`` on the default group is easy to
+    desync from DeepSpeed's communicator set).
+    """
+    t = torch.tensor([int(value)], device=accelerator.device, dtype=torch.long)
+    gathered = accelerator.gather(t)
+    return int(gathered.min().item()), int(gathered.max().item())
+
+
+def pad_completion_batch_to_seq_len(
+    completion_ids: torch.Tensor,
+    action_masks: torch.Tensor,
+    *,
+    target_seq_len: int,
+    pad_token_id: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Right-pad stacked completions/masks to ``target_seq_len`` / ``target-1``.
+
+    Pad positions use ``pad_token_id`` and ``False`` so they contribute nothing
+    to the masked CISPO/Liger objective.
+    """
+    required_dims = 2
+    if completion_ids.dim() != required_dims:
+        msg = f"completion_ids must be (B, T), got shape {tuple(completion_ids.shape)}"
+        raise ValueError(msg)
+    if action_masks.dim() != required_dims:
+        msg = f"action_masks must be (B, T-1), got shape {tuple(action_masks.shape)}"
+        raise ValueError(msg)
+
+    batch, seq_len = completion_ids.shape
+    mask_len = action_masks.shape[1]
+    if mask_len != seq_len - 1:
+        msg = (
+            f"action_masks length ({mask_len}) must be completion_ids length "
+            f"({seq_len}) - 1"
+        )
+        raise ValueError(msg)
+    if target_seq_len < seq_len:
+        msg = f"target_seq_len ({target_seq_len}) must be >= local seq_len ({seq_len})"
+        raise ValueError(msg)
+    if target_seq_len == seq_len:
+        return completion_ids, action_masks
+
+    pad_t = target_seq_len - seq_len
+    completion_ids = torch.nn.functional.pad(
+        completion_ids,
+        (0, pad_t),
+        value=pad_token_id,
+    )
+    action_masks = torch.nn.functional.pad(
+        action_masks,
+        (0, pad_t),
+        value=False,
+    )
+    if completion_ids.shape != (batch, target_seq_len):
+        msg = (
+            f"padded completions shape {tuple(completion_ids.shape)} != "
+            f"({batch}, {target_seq_len})"
+        )
+        raise RuntimeError(msg)
+    if action_masks.shape != (batch, target_seq_len - 1):
+        msg = (
+            f"padded masks shape {tuple(action_masks.shape)} != "
+            f"({batch}, {target_seq_len - 1})"
+        )
+        raise RuntimeError(msg)
+    return completion_ids, action_masks
+
+
+def align_completion_batch_shapes_across_ranks(
+    completion_ids: Any,
+    action_masks: Any,
+    rewards: Any,
+    *,
+    pad_token_id: int,
+    accelerator: Accelerator,
+    minmax_fn: Callable[[int], tuple[int, int]] | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Locally stack/pad, then sync ``T`` across ranks. Raise if ``B`` diverges.
+
+    Call immediately before ``learn()`` when
+    :func:`needs_cross_rank_seq_padding` is true. Shorter ranks are right-padded
+    to the global max ``T`` so Liger token-level chunk collectives stay in
+    lockstep.
+    """
+    # Lazy import avoids a circular dependency with algo_utils -> llm_utils.
+    from agilerl.utils.algo_utils import stack_and_pad_experiences
+
+    completion_ids, action_masks, rewards = stack_and_pad_experiences(
+        completion_ids,
+        action_masks,
+        rewards,
+        padding_values=[pad_token_id, False, 0.0],
+    )
+    local_b = int(completion_ids.shape[0])
+    local_t = int(completion_ids.shape[1])
+    reduce_fn = minmax_fn or (lambda value: allreduce_minmax_int(value, accelerator))
+
+    min_b, max_b = reduce_fn(local_b)
+    if min_b != max_b:
+        msg = (
+            f"Completion batch row counts diverge across ranks "
+            f"(local B={local_b}, min={min_b}, max={max_b}); refusing to pad "
+            f"rows. Check dataloader / data_batch_size_per_gpu sharding."
+        )
+        raise RuntimeError(msg)
+
+    min_t, max_t = reduce_fn(local_t)
+    if min_t != max_t and local_t < max_t:
+        completion_ids, action_masks = pad_completion_batch_to_seq_len(
+            completion_ids,
+            action_masks,
+            target_seq_len=max_t,
+            pad_token_id=pad_token_id,
+        )
+    if int(completion_ids.shape[1]) != max_t:
+        msg = (
+            f"Cross-rank seq align failed: local T={completion_ids.shape[1]} "
+            f"!= global max T={max_t}"
+        )
+        raise RuntimeError(msg)
+    return completion_ids, action_masks, rewards
+
+
+def aggregate_metrics_across_gpus(
+    accelerator: Accelerator | None,
+    metric_tensor: torch.Tensor | float,
+) -> float:
+    """Aggregate gathered tensors.
+
+    :param accelerator: Accelerator object
+    :type accelerator: accelerate.Accelerator | None
+    :param metric_tensor: Metrics
+    :type metric_tensor: torch.Tensor
+    :return: Mean metric
+    :rtype: float
+    """
+    if accelerator is None:
+        if isinstance(metric_tensor, torch.Tensor):
+            return metric_tensor.float().mean().item()
+        return float(metric_tensor)
+    all_metrics = gather_tensor(metric_tensor, accelerator)
+    return all_metrics.mean().item()
+
+
+def safe_aggregate_metrics(
+    accelerator: Accelerator | None,
+    metrics: torch.Tensor | np.ndarray | float,
+) -> float:
+    """Aggregate metrics generically, handling both when an accelerator is being used and when it isn't.
+
+    :param accelerator: Accelerator object
+    :type accelerator: Accelerator | None
+    :param metrics: Metrics
+    :type metrics: torch.Tensor | np.ndarray | float
+    :return: Mean metric
+    :rtype: float
+    """
+    if accelerator is None:
+        if isinstance(metrics, (torch.Tensor, np.ndarray)):
+            return float(
+                np.mean(metrics)
+                if isinstance(metrics, np.ndarray)
+                else metrics.float().mean().item()
+            )
+        return float(metrics)
+    return aggregate_metrics_across_gpus(accelerator, metrics)
+
+
+def aggregate_metrics_dict(
+    accelerator: Accelerator | None,
+    metrics: dict[str, torch.Tensor | np.ndarray | float],
+) -> dict[str, float]:
+    """Aggregate all values in a metrics dict across GPUs (or locally if no accelerator).
+
+    :param accelerator: Accelerator object (or None for single-device).
+    :type accelerator: Accelerator | None
+    :param metrics: Dictionary mapping metric names to raw values.
+    :type metrics: dict[str, torch.Tensor | np.ndarray | float]
+    :return: Dictionary with all values aggregated to floats.
+    :rtype: dict[str, float]
+    """
+    return {k: safe_aggregate_metrics(accelerator, v) for k, v in metrics.items()}
 
 
 @contextmanager
@@ -1765,20 +1989,6 @@ def resolve_vllm_max_num_batched_tokens(
     return min(worst_case, concurrent_budget)
 
 
-def resolve_peft_adapter_export_dir(staging_dir: Path, adapter_name: str) -> Path:
-    """Return the directory vLLM expects for a PEFT adapter export.
-
-    ``PeftModel.save_pretrained(..., selected_adapters=[name])`` normally writes
-    ``staging_dir/name/``; some layouts write directly into ``staging_dir``.
-    """
-    nested = staging_dir / adapter_name
-    if nested.is_dir() and (nested / "adapter_config.json").is_file():
-        return nested
-    if (staging_dir / "adapter_config.json").is_file():
-        return staging_dir
-    return nested
-
-
 def build_vllm_llm_init_kwargs(
     vllm_config: Any,
     *,
@@ -1905,13 +2115,14 @@ def save_peft_adapter_for_vllm_rollout(
     adapter_name: str,
     *,
     target_modules: str | list[str],
-    is_main_process: bool = True,
 ) -> Path:
     """Export a PEFT adapter checkpoint that vLLM can load for colocated rollout.
 
     Keeps only tensors that match the same ``target_modules`` spec used for PEFT
     training (from :func:`adapt_lora_config_for_model`). Rewrites ClippableLinear
-    ``.linear`` suffixes in keys for vLLM.
+    ``.linear`` suffixes in keys for vLLM. ``staging_dir`` must be
+    process-private (AgileRL stages per-rank when distributed): every caller
+    writes the adapter files.
     """
     if not HAS_LLM_DEPENDENCIES:
         msg = "save_peft_adapter_for_vllm_rollout requires peft and transformers."
@@ -1920,11 +2131,7 @@ def save_peft_adapter_for_vllm_rollout(
     from peft import get_peft_model_state_dict
     from safetensors.torch import save_file
 
-    staging = Path(staging_dir)
-    adapter_path = staging / adapter_name
-    if not is_main_process:
-        return resolve_peft_adapter_export_dir(staging, adapter_name)
-
+    adapter_path = Path(staging_dir) / adapter_name
     state = get_peft_model_state_dict(peft_model, adapter_name=adapter_name)
     n_before = len(state)
     state = filter_peft_state_dict_for_vllm_lora(state, target_modules)

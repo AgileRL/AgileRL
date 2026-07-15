@@ -48,7 +48,7 @@ entry points such as ``finetune_llm_reasoning`` and
 
   from datasets import Dataset
   from agilerl.llm_envs import ReasoningGym, TokenObservationWrapper
-  from agilerl.training.train_llm import (
+  from agilerl.training.llm import (
       finetune_llm_multiturn,
       finetune_llm_reasoning,
   )

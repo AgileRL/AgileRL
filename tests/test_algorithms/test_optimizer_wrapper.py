@@ -88,7 +88,7 @@ class MockAlgorithm(RLAlgorithm):
     def learn(self, experiences):
         return 0.0
 
-    def test(self, env, swap_channels=False, max_steps=None, loop=3):
+    def test(self, env, max_steps=None, loop=3):
         return 0.0
 
 
@@ -156,7 +156,7 @@ class MockMultiAgentAlgorithm(MultiAgentRLAlgorithm):
     def learn(self, experiences):
         return 0.0
 
-    def test(self, env, swap_channels=False, max_steps=None, loop=3):
+    def test(self, env, max_steps=None, loop=3):
         return 0.0
 
 

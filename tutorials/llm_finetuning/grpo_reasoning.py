@@ -7,7 +7,7 @@ from torch.utils.data import Dataset
 from transformers import AutoTokenizer
 
 from agilerl.algorithms import GRPO
-from agilerl.training.train_llm import finetune_llm_reasoning
+from agilerl.training.llm import finetune_llm_reasoning
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.llm_envs import ReasoningGym
 

@@ -6,15 +6,19 @@ on:
         branches: [main, nightly]
         paths:
             - agilerl/**
+            - agilerl-arena/**
             - tests/**
             - .github/workflows/**
             - pyproject.toml
+            - uv.lock
     pull_request:
         paths:
             - agilerl/**
+            - agilerl-arena/**
             - tests/**
             - .github/workflows/**
             - pyproject.toml
+            - uv.lock
 
 concurrency:
     group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
@@ -31,12 +35,6 @@ jobs:
             max-parallel: 4
             matrix:
                 python-version: ['3.10', '3.11', '3.12', '3.13']
-
-        container:
-            image: pytorch/pytorch:2.11.0-cuda13.0-cudnn9-devel
-            options: --user root
-
-        # Workspace (/__w) is ~1GB with little free space; root (/) has plenty. Put cache and venv on /.
         env:
             UV_CACHE_DIR: /tmp/uv-cache
             UV_PROJECT_ENVIRONMENT: /tmp/agilerl-venv
@@ -49,7 +47,6 @@ jobs:
               with:
                   enable-cache: true
                   python-version: ${{ matrix.python-version }}
-
             - name: Cache HuggingFace models
               uses: actions/cache@v4
               with:
@@ -65,28 +62,14 @@ jobs:
                   restore-keys: inductor-${{ matrix.python-version }}-
 
             - name: Install dependencies
-              # swig is needed to build box2d-py from source (no pre-built wheels for py3.10+).
               run: |
                   uv sync --locked --all-groups --extra all
                   echo "$UV_PROJECT_ENVIRONMENT/bin" >> $GITHUB_PATH
 
-            - name: Reset coverage data
-              run: rm -f .coverage .coverage.*
-
-            # Single phase: `-n auto --dist loadgroup` from pyproject gives 8
-            # workers on the gha-runner-scale-set node. `vllm`- and `gpu`-marked
-            # tests share the 4 `gputest0..gputest3` xdist groups defined in
-            # `tests/conftest.py`, which caps GPU-touching concurrency at 4
-            # workers regardless of -n; the remaining ~4 workers fan out across
-            # CPU-only tests. See the `pytest_collection_modifyitems` docstring
-            # for the GPU-memory and port-race rationale behind the 4-group cap.
-            #
-            # Single invocation = single coverage run; pytest-cov auto-combines
-            # the per-worker `.coverage.*` shards before writing `coverage.xml`,
-            # so we don't need a manual `coverage combine` step (which was
-            # tripping over corrupted shards under the old two-phase setup).
             - name: Run tests
-              run: uv run pytest --exitfirst --cov=agilerl --cov-report=xml --durations=0 --durations-min=1.0
+              run: |
+                  rm -f .coverage .coverage.*
+                  bash scripts/run-tests.sh cov --exitfirst --cov-report=xml --durations=0 --durations-min=1.0
 
             - name: Upload coverage reports to Codecov
               uses: codecov/codecov-action@v3

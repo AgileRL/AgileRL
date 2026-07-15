@@ -6,11 +6,16 @@ from typing import Any
 
 import numpy as np
 import torch
+from accelerate import Accelerator
 from gymnasium import spaces
 from torch import nn, optim
 
 from agilerl.algorithms.core import MultiAgentRLAlgorithm, OptimizerWrapper
-from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.algorithms.core.registry import (
+    HyperparameterConfig,
+    NetworkGroup,
+    make_default_hp_config,
+)
 from agilerl.modules import EvolvableModule, ModuleDict
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks import ContinuousQNetwork, DeterministicActor
@@ -22,29 +27,29 @@ from agilerl.typing import (
     ObservationType,
     PzEnvType,
     StandardTensorDict,
-    SupportedObsSpaces,
+    SupportedObservationSpace,
 )
 from agilerl.utils.algo_utils import (
     apply_env_defined_actions,
     concatenate_spaces,
+    configure_tf32_precision,
     format_shared_critic_encoder,
     get_deepest_head_config,
     get_vect_dim,
     key_in_nested_dict,
     make_safe_deepcopies,
-    obs_channels_to_first,
 )
 
-SupportedActionSpaces = spaces.Discrete | spaces.Box
+SupportedActionSpace = spaces.Discrete | spaces.Box
 
 
 class MADDPG(MultiAgentRLAlgorithm):
-    """Multi-Agent Deep Deterministic Policy Gradient (MADDPG) algorithm.
+    """Multi-Agent Deep Deterministic Policy Gradient (MADDPG).
 
     Paper: https://arxiv.org/abs/1706.02275
 
     :param observation_spaces: Observation space for each agent
-    :type observation_spaces: list[spaces.Space] | spaces.Dict
+    :type observation_spaces: list[SupportedObservationSpace] | spaces.Dict
     :param action_spaces: Action space for each agent
     :type action_spaces: list[spaces.Space] | spaces.Dict
     :param agent_ids: Agent ID for each agent
@@ -106,8 +111,8 @@ class MADDPG(MultiAgentRLAlgorithm):
 
     def __init__(
         self,
-        observation_spaces: list[SupportedObsSpaces] | spaces.Dict,
-        action_spaces: list[SupportedActionSpaces] | spaces.Dict,
+        observation_spaces: list[SupportedObservationSpace] | spaces.Dict,
+        action_spaces: list[SupportedActionSpace] | spaces.Dict,
         agent_ids: list[str] | None = None,
         O_U_noise: bool = True,
         expl_noise: float = 0.1,
@@ -129,7 +134,7 @@ class MADDPG(MultiAgentRLAlgorithm):
         actor_networks: MultiAgentModule | None = None,
         critic_networks: MultiAgentModule | None = None,
         device: str = "cpu",
-        accelerator: Any | None = None,
+        accelerator: Accelerator | None = None,
         torch_compiler: str | None = None,
         wrap: bool = True,
     ) -> None:
@@ -182,6 +187,14 @@ class MADDPG(MultiAgentRLAlgorithm):
         self.theta = theta
         self.dt = dt
         self.sqdt = dt ** (0.5)
+
+        # Default RL hyperparameters to mutate when doing Evo-HPO
+        self.hp_config = self.hp_config or make_default_hp_config(
+            lr_actor=self.lr_actor,
+            lr_critic=self.lr_critic,
+            batch_size=self.batch_size,
+            learn_step=self.learn_step,
+        )
 
         # Initialise noise for exploration
         self.sample_gaussian = {
@@ -415,7 +428,7 @@ class MADDPG(MultiAgentRLAlgorithm):
                 )
                 self.torch_compiler = "default"
 
-            torch.set_float32_matmul_precision("high")
+            configure_tf32_precision()
             self.recompile()
 
         self.criterion = nn.MSELoss()
@@ -434,6 +447,10 @@ class MADDPG(MultiAgentRLAlgorithm):
                 shared_networks=self.critic_targets,
             ),
         )
+
+        # Register metrics to keep track of during training
+        self.metrics.register("actor_loss")
+        self.metrics.register("critic_loss")
 
     def process_infos(
         self,
@@ -631,14 +648,18 @@ class MADDPG(MultiAgentRLAlgorithm):
     def learn(self, experiences: ExperiencesType) -> dict[str, tuple[float, float]]:
         """Update agent network parameters from the gathered experiences.
 
-        :param experience: Tuple of dictionaries containing batched states, actions,
-            rewards, next_states, dones in that order for each individual agent.
-        :type experience: tuple[dict[str, torch.Tensor]]
+        :param experiences: TensorDict of nested per-agent observations, actions,
+            rewards, next_observations, dones.
+        :type experiences: TensorDict
 
         :return: Loss dictionary
         :rtype: dict[str, torch.Tensor]
         """
-        states, actions, rewards, next_states, dones = experiences
+        states = experiences["obs"]
+        actions = experiences["action"]
+        rewards = experiences["reward"]
+        next_states = experiences["next_obs"]
+        dones = experiences["done"]
 
         actions = {
             agent_id: agent_actions.to(self.device)
@@ -774,11 +795,11 @@ class MADDPG(MultiAgentRLAlgorithm):
             dones[agent_id],
         ).to(torch.uint8)
 
+        # Compute target Q-value for critic loss
         y_j = (
             rewards[agent_id] + (1 - dones[agent_id]) * self.gamma * q_value_next_state
         )
-
-        critic_loss = self.criterion(q_value, y_j)
+        critic_loss: torch.Tensor = self.criterion(q_value, y_j)
 
         # critic loss backprop
         critic_optimizer.zero_grad()
@@ -818,7 +839,14 @@ class MADDPG(MultiAgentRLAlgorithm):
             actor_loss.backward()
         actor_optimizer.step()
 
-        return actor_loss.item(), critic_loss.item()
+        actor_loss = actor_loss.item()
+        critic_loss = critic_loss.item()
+
+        # Log metrics
+        network_id = self.get_network_id(agent_id)
+        self.metrics.log("actor_loss", actor_loss, network_id)
+        self.metrics.log("critic_loss", critic_loss, network_id)
+        return actor_loss, critic_loss
 
     def soft_update(self, net: nn.Module, target: nn.Module) -> None:
         """Soft updates target network.
@@ -838,7 +866,6 @@ class MADDPG(MultiAgentRLAlgorithm):
     def test(
         self,
         env: PzEnvType,
-        swap_channels: bool = False,
         max_steps: int | None = None,
         loop: int = 3,
         sum_scores: bool = True,
@@ -847,8 +874,6 @@ class MADDPG(MultiAgentRLAlgorithm):
 
         :param env: The environment to be tested in
         :type env: Gym-style environment
-        :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
-        :type swap_channels: bool, optional
         :param max_steps: Maximum number of testing steps, defaults to None
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
@@ -884,13 +909,6 @@ class MADDPG(MultiAgentRLAlgorithm):
                 step = 0
                 while not np.all(finished):
                     step += 1
-                    if swap_channels:
-                        expand_dims = not is_vectorised
-                        obs = {
-                            agent_id: obs_channels_to_first(s, expand_dims)
-                            for agent_id, s in obs.items()
-                        }
-
                     action, _ = self.get_action(
                         obs,
                         infos=info,
@@ -954,5 +972,5 @@ class MADDPG(MultiAgentRLAlgorithm):
 
         mean_fit = np.mean(rewards, axis=0)
         mean_fit = mean_fit[0] if sum_scores else mean_fit
-        self.fitness.append(mean_fit)
+        self.metrics.add_fitness(mean_fit)
         return mean_fit

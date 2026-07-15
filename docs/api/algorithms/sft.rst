@@ -10,8 +10,8 @@ never penalised for how it encodes the prompt.
 
 SFT is typically the *first* stage of a two-step alignment pipeline:
 
-* **SFT** (this class) — warm-up the model to follow instructions by minimising cross-entropy on ``(prompt, good_response)`` pairs.
-* **DPO** — further align the SFT-initialised model using ``(prompt, chosen_response, rejected_response)`` triples.
+* **SFT** (this class): warm-up the model to follow instructions by minimising cross-entropy on ``(prompt, good_response)`` pairs.
+* **DPO**: further align the SFT-initialised model using ``(prompt, chosen_response, rejected_response)`` triples.
 
 This technique is surprisingly effective, as pre-trained LLMs have been shown to easily adapt to a relatively small
 amount of new data.
@@ -84,7 +84,7 @@ To train an SFT agent on a single SFT gym environment, use the :ref:`finetune_ll
 
 .. code-block:: python
 
-  from agilerl.training.train_llm import finetune_llm_sft
+  from agilerl.training.llm import finetune_llm_sft
 
   finetune_llm_sft(
     pop=[agent],

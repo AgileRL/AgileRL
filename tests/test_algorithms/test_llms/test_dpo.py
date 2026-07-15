@@ -2,7 +2,7 @@ import copy
 import gc
 import tempfile
 from unittest import mock
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -280,7 +280,7 @@ class TestDPOInit:
         assert dpo.index == 0
         assert dpo.scores == []
         assert dpo.fitness == []
-        assert dpo.steps == [0]
+        assert dpo.steps == 0
         if config is not None:
             assert isinstance(dpo.actor, DeepSpeedEngine)
             if not use_deepspeed_optimizer:
@@ -419,9 +419,9 @@ class TestDPOLearn:
         prompts = env.reset()
         pre_learn_actor_state_dict = copy.deepcopy(dpo.actor.state_dict())
         learn_result = dpo.learn(prompts)
-        loss = learn_result["mean_loss"]
-        chosen_reward = learn_result["mean_chosen_reward"]
-        rejected_reward = learn_result["mean_rejected_reward"]
+        loss = learn_result["loss"]
+        chosen_reward = learn_result["chosen_reward"]
+        rejected_reward = learn_result["rejected_reward"]
 
         assert isinstance(loss, float)
         assert isinstance(chosen_reward, float)
@@ -528,6 +528,28 @@ class TestDPOTest:
         assert isinstance(fitness, np.ndarray)
         dpo.clean_up()
         AcceleratorState._reset_state(True)
+
+    def test_dpo_test_method_waits_for_everyone(self):
+        class DummyPreferenceEnv:
+            def eval_mode(self):
+                return contextlib.nullcontext()
+
+            def reset(self):
+                return {"prompts": []}
+
+            def step(self):
+                return {"prompts": []}
+
+        dpo = _make_cpu_dpo_for_branch_tests()
+        acc = MagicMock()
+        dpo.accelerator = acc
+        with patch.object(
+            dpo,
+            "learn",
+            return_value={"chosen_reward": 1.0, "rejected_reward": 0.0},
+        ):
+            dpo.test(DummyPreferenceEnv(), loop=1)
+        acc.wait_for_everyone.assert_called()
 
 
 class TestDPOLigerUnavailableBehaviour:

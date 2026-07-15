@@ -55,12 +55,6 @@ def _collect_rollouts(
     :return: The observation, done flag, scores, and info for the current step.
     :rtype: tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]
     """
-    if not agent.use_rollout_buffer:
-        msg = "collect_rollouts can only be used when use_rollout_buffer=True"
-        raise RuntimeError(
-            msg,
-        )
-
     if (
         last_obs is None
         and last_done is None
@@ -283,6 +277,9 @@ def collect_rollouts_llm(
         seed=group_seed,
     )
 
+    # Colocated vLLM requires tensor_parallel_size==1, and the per-generate DP
+    # barrier was removed, so ranks may early-exit independently. Rejoin once
+    # at the end before train_llm's cross-rank T align / learn.
     for _turn_idx in range(n_steps):
         if prompts is None:
             break
@@ -295,6 +292,10 @@ def collect_rollouts_llm(
         else:
             action_result = agent.get_action(prompts, training=True)
         prompts = env.step(action_result.completion_ids, action_result.sampling_logps)
+
+    accelerator = getattr(agent, "accelerator", None)
+    if accelerator is not None:
+        accelerator.wait_for_everyone()
 
     (
         completion_ids_list,

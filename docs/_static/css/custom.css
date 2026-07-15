@@ -1,0 +1,50 @@
+/* .. tutorial:: — matches Furo admonition styling (left accent + title band + icon) */
+:root {
+  --color-admonition-title--tutorial: #6c4ca3;
+  --color-admonition-title-background--tutorial: rgba(126, 87, 194, 0.1);
+}
+
+[data-theme="dark"] {
+  --color-admonition-title--tutorial: #b39ddb;
+  --color-admonition-title-background--tutorial: rgba(179, 157, 219, 0.08);
+}
+
+.admonition.tutorial {
+  border-left-color: var(--color-admonition-title--tutorial);
+}
+
+.admonition.tutorial > .admonition-title {
+  background-color: var(--color-admonition-title-background--tutorial);
+}
+
+.admonition.tutorial > .admonition-title::before {
+  background-color: var(--color-admonition-title--tutorial);
+  mask-image: var(--icon-pencil);
+  mask-repeat: no-repeat;
+}
+
+/* Tutorial link + indented description (definition list) */
+.admonition.tutorial dl {
+  margin: 0;
+}
+
+.admonition.tutorial dl dt {
+  margin-bottom: 0.15em;
+}
+
+.admonition.tutorial dl dd {
+  margin: 0 0 0.75em 1.25em;
+  font-size: 0.875em;
+  line-height: 1.45;
+  color: var(--color-foreground-secondary);
+}
+
+.admonition.tutorial dl dd > p {
+  margin: 0;
+}
+
+/* .. container:: scrollable-output — cap tall terminal transcripts and scroll */
+.scrollable-output pre {
+  max-height: 28rem;
+  overflow: auto;
+}

@@ -50,7 +50,7 @@ from agilerl.algorithms.dpo import DPO
 from agilerl.algorithms.sft import SFT
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.training.train_llm import finetune_llm_preference, finetune_llm_sft
+from agilerl.training.llm import finetune_llm_preference, finetune_llm_sft
 from agilerl.utils.llm_utils import compare_responses, sample_eval_prompts
 from agilerl.llm_envs import PreferenceGym, SFTGym
 

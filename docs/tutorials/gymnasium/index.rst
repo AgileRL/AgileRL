@@ -1,7 +1,7 @@
 .. _Gymnasium_tutorials:
 
-Gymnasium Single-agent Tutorials
-================================
+Gymnasium Single-agent
+======================
 
 These tutorials provide an introductory guide to using `AgileRL <https://github.com/AgileRL/AgileRL>`_
 with `Gymnasium <https://gymnasium.farama.org/>`_.

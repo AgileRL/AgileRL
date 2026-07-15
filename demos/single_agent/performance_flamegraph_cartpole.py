@@ -57,7 +57,6 @@ INIT_HP = {
     # PPO Specific
     "ACTION_STD_INIT": 0.6,  # Only used for continuous actions
     "TARGET_KL": None,
-    "CHANNELS_LAST": False,  # CartPole obs are 1D
 }
 
 # =====================================================================

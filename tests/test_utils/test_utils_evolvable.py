@@ -95,13 +95,13 @@ def test_config_from_dict():
         config_from_dict({"unknown_key": 1})
 
 
-def test_config_from_dict_hidden_size_num_layers_selects_lstm():
+def test_config_from_dict_hidden_state_size_selects_lstm():
     from agilerl.modules.configs import LstmNetConfig
 
-    lstm_cfg = LstmNetConfig(hidden_state_size=64, num_layers=2)
-    with patch.object(LstmNetConfig, "from_dict", return_value=lstm_cfg):
-        cfg = config_from_dict({"hidden_size": 128, "num_layers": 2})
-    assert cfg is lstm_cfg
+    cfg = config_from_dict({"hidden_state_size": 128, "num_layers": 2})
+    assert isinstance(cfg, LstmNetConfig)
+    assert cfg.hidden_state_size == 128
+    assert cfg.num_layers == 2
 
 
 def test_tuple_to_dict_space():

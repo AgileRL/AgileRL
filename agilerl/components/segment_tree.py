@@ -1,6 +1,8 @@
 import operator
 from collections.abc import Callable
 
+import numpy as np
+
 
 class SegmentTree:
     """Create SegmentTree.
@@ -22,8 +24,11 @@ class SegmentTree:
             "capacity must be positive and a power of 2."
         )
         self.capacity = capacity
-        self.tree = [init_value for _ in range(2 * capacity)]
+        self.tree = np.full(2 * capacity, init_value, dtype=np.float64)
         self.operation = operation
+        # Vectorised counterpart of ``operation`` used by the batch helpers. The
+        # only concrete trees are sum (operator.add) and min (builtin ``min``).
+        self._reduce = np.add if operation is operator.add else np.minimum
 
     def _operate_helper(
         self,
@@ -105,7 +110,42 @@ class SegmentTree:
         """
         assert 0 <= idx < self.capacity
 
-        return self.tree[self.capacity + idx]
+        return float(self.tree[self.capacity + idx])
+
+    def get_batch(self, indices: np.ndarray) -> np.ndarray:
+        """Vectorised leaf read for many indices at once.
+
+        :param indices: Leaf indices in ``[0, capacity)``.
+        :type indices: np.ndarray
+        :return: Leaf values, one per index.
+        :rtype: np.ndarray
+        """
+        return self.tree[self.capacity + np.asarray(indices, dtype=np.intp)]
+
+    def update_batch(self, indices: np.ndarray, values: np.ndarray) -> None:
+        """Set many leaf values at once and update their ancestors.
+
+        :param indices: Leaf indices in ``[0, capacity)``.
+        :type indices: np.ndarray
+        :param values: New leaf values, one per index.
+        :type values: np.ndarray
+        """
+        indices = np.asarray(indices, dtype=np.intp)
+        if indices.size == 0:
+            return
+
+        leaf_pos = self.capacity + indices
+        self.tree[leaf_pos] = np.asarray(values, dtype=self.tree.dtype)
+
+        parents = np.unique(leaf_pos >> 1)
+        while parents.size and parents[0] >= 1:
+            self.tree[parents] = self._reduce(
+                self.tree[parents << 1],
+                self.tree[(parents << 1) + 1],
+            )
+            if parents[0] == 1:
+                break
+            parents = np.unique(parents >> 1)
 
 
 class SumSegmentTree(SegmentTree):
@@ -131,7 +171,7 @@ class SumSegmentTree(SegmentTree):
         :return: Sum of elements in range [start, end)
         :rtype: float
         """
-        return super().operate(start, end)
+        return float(super().operate(start, end))
 
     def retrieve(self, upperbound: float) -> int:
         """Find the highest index `i` about `upperbound` in the tree.
@@ -141,7 +181,6 @@ class SumSegmentTree(SegmentTree):
         :return: Index where cumulative sum is <= upperbound
         :rtype: int
         """
-        # TODO: Check assert case and fix bug
         assert 0 <= upperbound <= self.sum() + 1e-5, f"upperbound: {upperbound}"
 
         idx = 1
@@ -153,6 +192,27 @@ class SumSegmentTree(SegmentTree):
             else:
                 upperbound -= self.tree[left]
                 idx = right
+        return idx - self.capacity
+
+    def retrieve_batch(self, upperbounds: np.ndarray) -> np.ndarray:
+        """Vectorised :meth:`retrieve` for a whole batch of upper bounds.
+
+        :param upperbounds: Upper bounds for cumulative sum, one per sample.
+        :type upperbounds: np.ndarray
+        :return: Leaf indices in ``[0, capacity)``, one per upper bound.
+        :rtype: np.ndarray
+        """
+        ub = np.asarray(upperbounds, dtype=np.float64).copy()
+        idx = np.ones(ub.shape, dtype=np.intp)  # start every query at the root
+
+        while idx[0] < self.capacity:  # complete tree -> all leaves at same depth
+            left = idx << 1
+            left_sum = self.tree[left]
+            go_left = left_sum > ub
+            # Right branch subtracts the left subtree's mass from the budget.
+            ub = np.where(go_left, ub, ub - left_sum)
+            idx = np.where(go_left, left, left + 1)
+
         return idx - self.capacity
 
 
@@ -179,4 +239,4 @@ class MinSegmentTree(SegmentTree):
         :return: Minimum element in range [start, end)
         :rtype: float
         """
-        return super().operate(start, end)
+        return float(super().operate(start, end))
