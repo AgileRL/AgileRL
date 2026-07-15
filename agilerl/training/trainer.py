@@ -173,21 +173,20 @@ class Trainer(ABC):
     def from_manifest(
         cls,
         manifest: str | Path | dict[str, Any] | TrainingManifest,
-        *,
-        resume_from_checkpoint: str | None = None,
-        device: str | torch.device = "cpu",
-        accelerator: Accelerator | None = None,
+        **kwargs: Any,
     ) -> Self:
         """Instantiate a :class:`Trainer` from a JSON-style manifest or a TrainingManifest instance.
 
+        The manifest supplies the algorithm, environment, and training
+        configuration; any trainer-specific construction arguments are passed
+        through as keyword arguments (e.g. ``device``, ``accelerator``, and
+        ``resume_from_checkpoint`` for :class:`LocalTrainer`, or ``client`` and
+        ``api_key`` for :class:`ArenaTrainer`).
+
         :param manifest: Path to a YAML/JSON file, or a raw dict, or a TrainingManifest instance.
         :type manifest: str | Path | dict[str, Any] | TrainingManifest
-        :param resume_from_checkpoint: Path to resume from checkpoint.
-        :type resume_from_checkpoint: str | None
-        :param device: Torch device string (e.g. ``"cpu"``, ``"cuda"``).
-        :type device: str | torch.device
-        :param accelerator: Accelerator instance.
-        :type accelerator: Accelerator | None
+        :param kwargs: Trainer-specific construction arguments forwarded to the
+            subclass constructor.
         :returns: A fully configured :class:`Trainer` instance.
         :rtype: SelfTrainerT
         """
@@ -204,9 +203,6 @@ class Trainer(ABC):
             mutation=validated_manifest.mutation,
             tournament=validated_manifest.tournament_selection,
             replay_buffer=validated_manifest.replay_buffer,
-            resume_from_checkpoint=resume_from_checkpoint,
-            device=device,
-            accelerator=accelerator,
         )
 
     @classmethod
@@ -225,14 +221,18 @@ class Trainer(ABC):
         raise NotImplementedError(msg)
 
     @abstractmethod
-    def train(self, *args: Any, **kwargs: Any) -> tuple[PopulationT, list[float]]:
+    def train(self) -> tuple[PopulationT, list[float]] | dict[str, Any]:
         """Run the training loop.
 
-        :returns: A tuple of ``(population, fitnesses)`` where
-            *population* is the final evolved population and
-            *fitnesses* contains each agent's fitness from the final
-            evaluation round.
-        :rtype: tuple[PopulationT, list[float]]
+        - :class:`LocalTrainer` runs training locally and returns a tuple of
+          ``(population, fitnesses)`` where *population* is the final evolved
+          population and *fitnesses* contains each agent's fitness from the
+          final evaluation round.
+        - :class:`ArenaTrainer` submits a job to Arena and returns the API
+          response as a ``dict``.
+
+        :returns: The training result, whose type depends on the trainer.
+        :rtype: tuple[PopulationT, list[float]] | dict[str, Any]
         """
         msg = "Trainer subclass must implement train method."
         raise NotImplementedError(msg)
@@ -280,9 +280,8 @@ class LocalTrainer(Trainer):
         mutation: MutationSpec | None = None,
         tournament: TournamentSelectionSpec | None = None,
         replay_buffer: ReplayBufferT | None = None,
-        *,
-        resume_from_checkpoint: str | None = None,
         hpo: bool = False,
+        resume_from_checkpoint: str | None = None,
         device: str | torch.device = "cpu",
         accelerator: Accelerator | None = None,
     ) -> None:
@@ -622,7 +621,6 @@ class LocalTrainer(Trainer):
 
     def train(
         self,
-        *,
         verbose: bool = True,
         save_elite: bool = False,
         elite_path: str | None = None,
@@ -777,7 +775,6 @@ class ArenaTrainer(Trainer):
     def from_manifest(
         cls,
         manifest: str | Path | dict[str, Any],
-        *,
         client: ArenaClient | None = None,
         api_key: str | None = None,
     ) -> Self:
@@ -861,7 +858,6 @@ class ArenaTrainer(Trainer):
 
     def train(
         self,
-        *,
         resource_id: str | int | None = None,
         num_nodes: int | None = None,
         project: str | None = None,

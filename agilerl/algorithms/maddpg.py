@@ -844,8 +844,8 @@ class MADDPG(MultiAgentRLAlgorithm):
 
         # Log metrics
         network_id = self.get_network_id(agent_id)
-        self.metrics.log("actor_loss", network_id, actor_loss)
-        self.metrics.log("critic_loss", network_id, critic_loss)
+        self.metrics.log("actor_loss", actor_loss, network_id)
+        self.metrics.log("critic_loss", critic_loss, network_id)
         return actor_loss, critic_loss
 
     def soft_update(self, net: nn.Module, target: nn.Module) -> None:

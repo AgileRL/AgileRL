@@ -136,17 +136,17 @@ class TestMultiAgentMetricsLog:
     def test_log_appends_per_agent(self):
         m = MultiAgentMetrics(["a", "b"])
         m.register("loss")
-        m.log("loss", "a", 0.1)
-        m.log("loss", "b", 0.2)
-        m.log("loss", "a", 0.3)
+        m.log("loss", 0.1, "a")
+        m.log("loss", 0.2, "b")
+        m.log("loss", 0.3, "a")
         assert m._additional_metrics["loss"]["a"] == [0.1, 0.3]
         assert m._additional_metrics["loss"]["b"] == [0.2]
 
     def test_log_histogram_per_agent(self):
         m = MultiAgentMetrics(["a", "b"])
         m.register_histogram("dist")
-        m.log_histogram("dist", "a", np.array([1, 2]))
-        m.log_histogram("dist", "b", np.array([3]))
+        m.log_histogram("dist", np.array([1, 2]), "a")
+        m.log_histogram("dist", np.array([3]), "b")
         assert list(m._nonscalar_metrics["dist"]["a"]) == [1, 2]
         assert list(m._nonscalar_metrics["dist"]["b"]) == [3]
 
@@ -155,8 +155,8 @@ class TestMultiAgentMetricsGetMean:
     def test_get_mean_per_agent(self):
         m = MultiAgentMetrics(["a", "b"])
         m.register("reward")
-        m.log("reward", "a", 10.0)
-        m.log("reward", "a", 20.0)
+        m.log("reward", 10.0, "a")
+        m.log("reward", 20.0, "a")
         assert m.get_mean("reward", "a") == pytest.approx(15.0)
 
     def test_get_mean_empty_returns_nan(self):
@@ -169,7 +169,7 @@ class TestMultiAgentMetricsGetHistogram:
     def test_get_histogram_returns_array(self):
         m = MultiAgentMetrics(["a"])
         m.register_histogram("dist")
-        m.log_histogram("dist", "a", np.array([5, 6, 7]))
+        m.log_histogram("dist", np.array([5, 6, 7]), "a")
         result = m.get_histogram("dist", "a")
         np.testing.assert_array_equal(result, [5, 6, 7])
 
@@ -184,8 +184,8 @@ class TestMultiAgentMetricsClear:
         m = MultiAgentMetrics(["a", "b"])
         m.register("loss")
         m.register_histogram("actions")
-        m.log("loss", "a", 1.0)
-        m.log_histogram("actions", "b", np.array([2]))
+        m.log("loss", 1.0, "a")
+        m.log_histogram("actions", np.array([2]), "b")
         m.scores.extend([10.0])
 
         m.clear()
@@ -407,5 +407,5 @@ class TestNonscalarWindow:
     def test_multi_agent_histogram_accumulation_is_bounded(self):
         m = MultiAgentMetrics(["a"], nonscalar_window=3)
         m.register_histogram("actions")
-        m.log_histogram("actions", "a", np.arange(5))
+        m.log_histogram("actions", np.arange(5), "a")
         assert list(m._nonscalar_metrics["actions"]["a"]) == [2, 3, 4]

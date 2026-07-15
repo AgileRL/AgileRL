@@ -870,7 +870,7 @@ class IPPO(MultiAgentRLAlgorithm):
             k: v / (num_samples * self.update_epochs) for k, v in learn_metrics.items()
         }
         for key, value in learn_metrics.items():
-            self.metrics.log(key, agent_id, value)
+            self.metrics.log(key, value, agent_id=agent_id)
 
         return learn_metrics["loss"]
 

@@ -53,7 +53,7 @@ class BaseMetrics(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def log(self, name: str, *, value: float) -> None:
+    def log(self, name: str, value: float) -> None:
         """Log a value to the accumulator for a registered metric."""
         raise NotImplementedError
 
@@ -315,33 +315,33 @@ class MultiAgentMetrics(BaseMetrics):
             for agent_id in self.agent_ids
         }
 
-    def log(self, name: str, agent_id: str, value: float) -> None:
+    def log(self, name: str, value: float, agent_id: str) -> None:
         """Append a value to the accumulator for a registered metric and sub-agent.
 
         Example:
         >>> metrics = MultiAgentMetrics(["speaker_0", "speaker_1", "listener_0", "listener_1"])
-        >>> metrics.log("loss", "speaker_0", 0.1)
-        >>> metrics.log("loss", "speaker_0", 0.2)
+        >>> metrics.log("loss", 0.1, "speaker_0")
+        >>> metrics.log("loss", 0.2, "speaker_0")
         >>> metrics.get_mean("loss", "speaker_0")
 
         :param name: Previously registered metric name.
         :type name: str
-        :param agent_id: Sub-agent identifier.
-        :type agent_id: str
         :param value: Scalar metric value.
         :type value: float
+        :param agent_id: Sub-agent identifier.
+        :type agent_id: str
         """
         self._additional_metrics[name][agent_id].append(float(value))
 
-    def log_histogram(self, name: str, agent_id: str, values: np.ndarray) -> None:
+    def log_histogram(self, name: str, values: np.ndarray, agent_id: str) -> None:
         """Extend the accumulator with raw sample values for a histogram metric.
 
         :param name: Previously registered non-scalar metric name.
         :type name: str
-        :param agent_id: Sub-agent identifier.
-        :type agent_id: str
         :param values: Array of raw sample values (e.g. action indices).
         :type values: numpy.ndarray
+        :param agent_id: Sub-agent identifier.
+        :type agent_id: str
         """
         self._nonscalar_metrics[name][agent_id].extend(values.tolist())
 
