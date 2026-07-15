@@ -34,7 +34,7 @@ from tiny_model import TinyDigitTokenizer, build_tiny_actor_network
 
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.training import train_llm
+from agilerl.training.llm import multiturn as train_llm
 from agilerl.training.train_llm import (
     finetune_llm_multiturn,
     finetune_llm_preference,
@@ -553,17 +553,29 @@ def run_case(case: MatrixCase, args: argparse.Namespace) -> tuple[bool, str]:
         if not args.mock_checkpoints:
             Path(args.checkpoint_dir).mkdir(parents=True, exist_ok=True)
         original_tournament = train_llm.tournament_selection_and_mutation
+        patch_targets = (
+            "agilerl.training.llm.reasoning",
+            "agilerl.training.llm.preference",
+            "agilerl.training.llm.sft",
+            "agilerl.training.llm.multiturn",
+        )
         with (
-            patch(
-                "agilerl.training.train_llm.save_llm_checkpoint",
-                side_effect=checkpoint_wrapper,
-                autospec=True,
-            ),
-            patch(
-                "agilerl.training.train_llm.tournament_selection_and_mutation",
-                side_effect=tournament_wrapper,
-                autospec=True,
-            ),
+            *[
+                patch(
+                    f"{mod}.save_llm_checkpoint",
+                    side_effect=checkpoint_wrapper,
+                    autospec=True,
+                )
+                for mod in patch_targets
+            ],
+            *[
+                patch(
+                    f"{mod}.tournament_selection_and_mutation",
+                    side_effect=tournament_wrapper,
+                    autospec=True,
+                )
+                for mod in patch_targets
+            ],
         ):
             run_impl(args)
     except Exception as exc:  # noqa: BLE001

@@ -27,6 +27,16 @@ from agilerl.training.train_llm import (
 pytestmark = pytest.mark.llm
 
 
+def _finetune_module_path(finetune_fn):
+    """Return the implementation module path for patching finetune helpers."""
+    return {
+        finetune_llm_reasoning: "agilerl.training.llm.reasoning",
+        finetune_llm_preference: "agilerl.training.llm.preference",
+        finetune_llm_sft: "agilerl.training.llm.sft",
+        finetune_llm_multiturn: "agilerl.training.llm.multiturn",
+    }[finetune_fn]
+
+
 @contextmanager
 def _population_init_skip_per_mock_class():
     """Bypass Population's homogeneous type() check for multiple MagicMock(spec=…) agents.
@@ -271,10 +281,12 @@ class TestFinetuneLlmReasoning:
         mock_env.data_batch_size_per_gpu = 1
 
         with (
-            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_agg,
-            patch("agilerl.training.train_llm.save_llm_checkpoint"),
-            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
+            patch(
+                "agilerl.training.llm.reasoning.default_progress_bar"
+            ) as mock_pbar_fn,
+            patch("agilerl.training.llm.reasoning.safe_aggregate_metrics") as mock_agg,
+            patch("agilerl.training.llm.reasoning.save_llm_checkpoint"),
+            patch("agilerl.training.llm.reasoning.init_loggers", return_value=[]),
         ):
             mock_pbar_fn.return_value = MagicMock()
             mock_agg.return_value = 0.5
@@ -311,10 +323,12 @@ class TestFinetuneLlmReasoning:
         mock_env.data_batch_size_per_gpu = 1
 
         with (
-            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.train_llm.init_loggers") as mock_init_loggers,
-            patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_agg,
-            patch("agilerl.training.train_llm.save_llm_checkpoint") as mock_save,
+            patch(
+                "agilerl.training.llm.reasoning.default_progress_bar"
+            ) as mock_pbar_fn,
+            patch("agilerl.training.llm.reasoning.init_loggers") as mock_init_loggers,
+            patch("agilerl.training.llm.reasoning.safe_aggregate_metrics") as mock_agg,
+            patch("agilerl.training.llm.reasoning.save_llm_checkpoint") as mock_save,
         ):
             mock_pbar_fn.return_value = MagicMock()
             mock_init_loggers.return_value = []
@@ -347,10 +361,10 @@ class TestFinetuneLlmReasoning:
         mock_env.data_batch_size_per_gpu = 1
 
         with (
-            patch("agilerl.training.train_llm.default_progress_bar"),
-            patch("agilerl.training.train_llm.init_loggers") as mock_init_loggers,
-            patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_agg,
-            patch("agilerl.training.train_llm.save_llm_checkpoint") as mock_save,
+            patch("agilerl.training.llm.reasoning.default_progress_bar"),
+            patch("agilerl.training.llm.reasoning.init_loggers") as mock_init_loggers,
+            patch("agilerl.training.llm.reasoning.safe_aggregate_metrics") as mock_agg,
+            patch("agilerl.training.llm.reasoning.save_llm_checkpoint") as mock_save,
         ):
             mock_init_loggers.return_value = []
             mock_agg.return_value = 0.5
@@ -390,12 +404,14 @@ class TestFinetuneLlmReasoning:
         mutation.activation_mut = 0
 
         with (
-            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_agg,
-            patch("agilerl.training.train_llm.save_llm_checkpoint"),
-            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
             patch(
-                "agilerl.training.train_llm.tournament_selection_and_mutation"
+                "agilerl.training.llm.reasoning.default_progress_bar"
+            ) as mock_pbar_fn,
+            patch("agilerl.training.llm.reasoning.safe_aggregate_metrics") as mock_agg,
+            patch("agilerl.training.llm.reasoning.save_llm_checkpoint"),
+            patch("agilerl.training.llm.reasoning.init_loggers", return_value=[]),
+            patch(
+                "agilerl.training.llm.reasoning.tournament_selection_and_mutation"
             ) as mock_tournament_selection_and_mutation,
         ):
             mock_pbar_fn.return_value = MagicMock()
@@ -435,12 +451,14 @@ class TestFinetuneLlmReasoning:
         mutation.activation_mut = 0
 
         with (
-            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_agg,
-            patch("agilerl.training.train_llm.save_llm_checkpoint"),
-            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
             patch(
-                "agilerl.training.train_llm.tournament_selection_and_mutation",
+                "agilerl.training.llm.reasoning.default_progress_bar"
+            ) as mock_pbar_fn,
+            patch("agilerl.training.llm.reasoning.safe_aggregate_metrics") as mock_agg,
+            patch("agilerl.training.llm.reasoning.save_llm_checkpoint"),
+            patch("agilerl.training.llm.reasoning.init_loggers", return_value=[]),
+            patch(
+                "agilerl.training.llm.reasoning.tournament_selection_and_mutation",
                 return_value=[mock_agent],
             ),
         ):
@@ -473,10 +491,12 @@ class TestFinetuneLlmReasoning:
         mock_env.data_batch_size_per_gpu = 1
 
         with (
-            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_agg,
-            patch("agilerl.training.train_llm.save_llm_checkpoint") as mock_save,
-            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
+            patch(
+                "agilerl.training.llm.reasoning.default_progress_bar"
+            ) as mock_pbar_fn,
+            patch("agilerl.training.llm.reasoning.safe_aggregate_metrics") as mock_agg,
+            patch("agilerl.training.llm.reasoning.save_llm_checkpoint") as mock_save,
+            patch("agilerl.training.llm.reasoning.init_loggers", return_value=[]),
             _population_init_skip_per_mock_class(),
         ):
             mock_pbar_fn.return_value = MagicMock()
@@ -520,12 +540,14 @@ class TestFinetuneLlmReasoning:
         mock_env.data_batch_size_per_gpu = 1
 
         with (
-            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_agg,
-            patch("agilerl.training.train_llm.save_llm_checkpoint"),
-            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
             patch(
-                "agilerl.training.train_llm.tournament_selection_and_mutation"
+                "agilerl.training.llm.reasoning.default_progress_bar"
+            ) as mock_pbar_fn,
+            patch("agilerl.training.llm.reasoning.safe_aggregate_metrics") as mock_agg,
+            patch("agilerl.training.llm.reasoning.save_llm_checkpoint"),
+            patch("agilerl.training.llm.reasoning.init_loggers", return_value=[]),
+            patch(
+                "agilerl.training.llm.reasoning.tournament_selection_and_mutation"
             ) as mock_tsm,
         ):
             mock_pbar_fn.return_value = MagicMock()
@@ -553,10 +575,12 @@ class TestFinetuneLlmReasoning:
         mock_env.data_batch_size_per_gpu = 1
 
         with (
-            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
-            patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_agg,
-            patch("agilerl.training.train_llm.save_llm_checkpoint") as mock_save,
+            patch(
+                "agilerl.training.llm.reasoning.default_progress_bar"
+            ) as mock_pbar_fn,
+            patch("agilerl.training.llm.reasoning.init_loggers", return_value=[]),
+            patch("agilerl.training.llm.reasoning.safe_aggregate_metrics") as mock_agg,
+            patch("agilerl.training.llm.reasoning.save_llm_checkpoint") as mock_save,
         ):
             mock_pbar_fn.return_value = MagicMock()
             mock_agg.return_value = 0.5
@@ -582,10 +606,12 @@ class TestFinetuneLlmReasoning:
         mock_env.data_batch_size_per_gpu = 1
 
         with (
-            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
-            patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_agg,
-            patch("agilerl.training.train_llm.save_llm_checkpoint"),
+            patch(
+                "agilerl.training.llm.reasoning.default_progress_bar"
+            ) as mock_pbar_fn,
+            patch("agilerl.training.llm.reasoning.init_loggers", return_value=[]),
+            patch("agilerl.training.llm.reasoning.safe_aggregate_metrics") as mock_agg,
+            patch("agilerl.training.llm.reasoning.save_llm_checkpoint"),
         ):
             mock_pbar_fn.return_value = MagicMock()
             mock_env.num_epochs = 2
@@ -639,12 +665,15 @@ class TestFinetuneLlmReasoning:
 
         with (
             _population_init_skip_per_mock_class(),
-            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
             patch(
-                "agilerl.training.train_llm.safe_aggregate_metrics", return_value=0.5
+                "agilerl.training.llm.reasoning.default_progress_bar"
+            ) as mock_pbar_fn,
+            patch(
+                "agilerl.training.llm.reasoning.safe_aggregate_metrics",
+                return_value=0.5,
             ),
-            patch("agilerl.training.train_llm.save_llm_checkpoint"),
-            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
+            patch("agilerl.training.llm.reasoning.save_llm_checkpoint"),
+            patch("agilerl.training.llm.reasoning.init_loggers", return_value=[]),
         ):
             mock_pbar_fn.return_value = MagicMock()
             finetune_llm_reasoning(
@@ -670,10 +699,12 @@ class TestFinetuneLlmReasoning:
         mock_env.data_batch_size_per_gpu = 1
 
         with (
-            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_agg,
-            patch("agilerl.training.train_llm.save_llm_checkpoint"),
-            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
+            patch(
+                "agilerl.training.llm.reasoning.default_progress_bar"
+            ) as mock_pbar_fn,
+            patch("agilerl.training.llm.reasoning.safe_aggregate_metrics") as mock_agg,
+            patch("agilerl.training.llm.reasoning.save_llm_checkpoint"),
+            patch("agilerl.training.llm.reasoning.init_loggers", return_value=[]),
         ):
             mock_pbar_fn.return_value = MagicMock()
             mock_agg.return_value = 0.5
@@ -702,9 +733,11 @@ class TestFinetuneLlmReasoning:
         mock_env.data_batch_size_per_gpu = 1
 
         with (
-            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.train_llm.save_llm_checkpoint"),
-            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
+            patch(
+                "agilerl.training.llm.reasoning.default_progress_bar"
+            ) as mock_pbar_fn,
+            patch("agilerl.training.llm.reasoning.save_llm_checkpoint"),
+            patch("agilerl.training.llm.reasoning.init_loggers", return_value=[]),
         ):
             mock_pbar_fn.return_value = MagicMock()
             finetune_llm_reasoning(
@@ -753,9 +786,11 @@ class TestFinetuneLlmPreference:
         mock_env = self._pref_env(length=1)
 
         with (
-            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.train_llm.save_llm_checkpoint") as mock_save,
-            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
+            patch(
+                "agilerl.training.llm.preference.default_progress_bar"
+            ) as mock_pbar_fn,
+            patch("agilerl.training.llm.preference.save_llm_checkpoint") as mock_save,
+            patch("agilerl.training.llm.preference.init_loggers", return_value=[]),
             _population_init_skip_per_mock_class(),
         ):
             mock_pbar_fn.return_value = MagicMock()
@@ -775,9 +810,11 @@ class TestFinetuneLlmPreference:
         mock_env = self._pref_env()
 
         with (
-            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.train_llm.save_llm_checkpoint"),
-            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
+            patch(
+                "agilerl.training.llm.preference.default_progress_bar"
+            ) as mock_pbar_fn,
+            patch("agilerl.training.llm.preference.save_llm_checkpoint"),
+            patch("agilerl.training.llm.preference.init_loggers", return_value=[]),
         ):
             mock_pbar_fn.return_value = MagicMock()
             finetune_llm_preference(
@@ -799,9 +836,11 @@ class TestFinetuneLlmPreference:
         mock_env = self._pref_env()
 
         with (
-            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.train_llm.init_loggers") as mock_init_loggers,
-            patch("agilerl.training.train_llm.save_llm_checkpoint") as mock_save,
+            patch(
+                "agilerl.training.llm.preference.default_progress_bar"
+            ) as mock_pbar_fn,
+            patch("agilerl.training.llm.preference.init_loggers") as mock_init_loggers,
+            patch("agilerl.training.llm.preference.save_llm_checkpoint") as mock_save,
         ):
             mock_pbar_fn.return_value = MagicMock()
             mock_init_loggers.return_value = []
@@ -839,11 +878,13 @@ class TestFinetuneLlmPreference:
         mutation.activation_mut = 0
 
         with (
-            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.train_llm.save_llm_checkpoint"),
-            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
             patch(
-                "agilerl.training.train_llm.tournament_selection_and_mutation"
+                "agilerl.training.llm.preference.default_progress_bar"
+            ) as mock_pbar_fn,
+            patch("agilerl.training.llm.preference.save_llm_checkpoint"),
+            patch("agilerl.training.llm.preference.init_loggers", return_value=[]),
+            patch(
+                "agilerl.training.llm.preference.tournament_selection_and_mutation"
             ) as mock_tsm,
         ):
             mock_pbar_fn.return_value = MagicMock()
@@ -869,11 +910,13 @@ class TestFinetuneLlmPreference:
         mock_env = self._pref_env()
 
         with (
-            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.train_llm.save_llm_checkpoint"),
-            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
             patch(
-                "agilerl.training.train_llm.tournament_selection_and_mutation"
+                "agilerl.training.llm.preference.default_progress_bar"
+            ) as mock_pbar_fn,
+            patch("agilerl.training.llm.preference.save_llm_checkpoint"),
+            patch("agilerl.training.llm.preference.init_loggers", return_value=[]),
+            patch(
+                "agilerl.training.llm.preference.tournament_selection_and_mutation"
             ) as mock_tsm,
         ):
             mock_pbar_fn.return_value = MagicMock()
@@ -894,9 +937,11 @@ class TestFinetuneLlmPreference:
         mock_env = self._pref_env()
 
         with (
-            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
-            patch("agilerl.training.train_llm.save_llm_checkpoint"),
+            patch(
+                "agilerl.training.llm.preference.default_progress_bar"
+            ) as mock_pbar_fn,
+            patch("agilerl.training.llm.preference.init_loggers", return_value=[]),
+            patch("agilerl.training.llm.preference.save_llm_checkpoint"),
         ):
             mock_pbar_fn.return_value = MagicMock()
             mock_env.num_epochs = 2
@@ -948,12 +993,11 @@ class TestFinetuneLlmPreference:
 
         with (
             _population_init_skip_per_mock_class(),
-            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
             patch(
-                "agilerl.training.train_llm.safe_aggregate_metrics", return_value=0.5
-            ),
-            patch("agilerl.training.train_llm.save_llm_checkpoint"),
-            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
+                "agilerl.training.llm.preference.default_progress_bar"
+            ) as mock_pbar_fn,
+            patch("agilerl.training.llm.preference.save_llm_checkpoint"),
+            patch("agilerl.training.llm.preference.init_loggers", return_value=[]),
         ):
             mock_pbar_fn.return_value = MagicMock()
             finetune_llm_preference(
@@ -990,9 +1034,9 @@ class TestFinetuneLlmSft:
         mock_env.num_epochs = 1
 
         with (
-            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.train_llm.save_llm_checkpoint") as mock_save,
-            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
+            patch("agilerl.training.llm.sft.default_progress_bar") as mock_pbar_fn,
+            patch("agilerl.training.llm.sft.save_llm_checkpoint") as mock_save,
+            patch("agilerl.training.llm.sft.init_loggers", return_value=[]),
             _population_init_skip_per_mock_class(),
         ):
             mock_pbar_fn.return_value = MagicMock()
@@ -1017,9 +1061,9 @@ class TestFinetuneLlmSft:
         mock_env.data_batch_size_per_gpu = 1
 
         with (
-            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.train_llm.save_llm_checkpoint"),
-            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
+            patch("agilerl.training.llm.sft.default_progress_bar") as mock_pbar_fn,
+            patch("agilerl.training.llm.sft.save_llm_checkpoint"),
+            patch("agilerl.training.llm.sft.init_loggers", return_value=[]),
         ):
             mock_pbar_fn.return_value = MagicMock()
             finetune_llm_sft(
@@ -1045,9 +1089,9 @@ class TestFinetuneLlmSft:
         mock_env.data_batch_size_per_gpu = 1
 
         with (
-            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.train_llm.init_loggers") as mock_init_loggers,
-            patch("agilerl.training.train_llm.save_llm_checkpoint") as mock_save,
+            patch("agilerl.training.llm.sft.default_progress_bar") as mock_pbar_fn,
+            patch("agilerl.training.llm.sft.init_loggers") as mock_init_loggers,
+            patch("agilerl.training.llm.sft.save_llm_checkpoint") as mock_save,
         ):
             mock_pbar_fn.return_value = MagicMock()
             mock_init_loggers.return_value = []
@@ -1090,11 +1134,11 @@ class TestFinetuneLlmSft:
         mutation.activation_mut = 0
 
         with (
-            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.train_llm.save_llm_checkpoint"),
-            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
+            patch("agilerl.training.llm.sft.default_progress_bar") as mock_pbar_fn,
+            patch("agilerl.training.llm.sft.save_llm_checkpoint"),
+            patch("agilerl.training.llm.sft.init_loggers", return_value=[]),
             patch(
-                "agilerl.training.train_llm.tournament_selection_and_mutation"
+                "agilerl.training.llm.sft.tournament_selection_and_mutation"
             ) as mock_tsm,
         ):
             mock_pbar_fn.return_value = MagicMock()
@@ -1125,9 +1169,9 @@ class TestFinetuneLlmSft:
         mock_env.data_batch_size_per_gpu = 1
 
         with (
-            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.train_llm.save_llm_checkpoint"),
-            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
+            patch("agilerl.training.llm.sft.default_progress_bar") as mock_pbar_fn,
+            patch("agilerl.training.llm.sft.save_llm_checkpoint"),
+            patch("agilerl.training.llm.sft.init_loggers", return_value=[]),
         ):
             mock_pbar_fn.return_value = MagicMock()
             with pytest.warns(UserWarning, match="num_epochs"):
@@ -1150,9 +1194,9 @@ class TestFinetuneLlmSft:
         mock_env.data_batch_size_per_gpu = 1
 
         with (
-            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
-            patch("agilerl.training.train_llm.save_llm_checkpoint"),
+            patch("agilerl.training.llm.sft.default_progress_bar") as mock_pbar_fn,
+            patch("agilerl.training.llm.sft.init_loggers", return_value=[]),
+            patch("agilerl.training.llm.sft.save_llm_checkpoint"),
         ):
             mock_pbar_fn.return_value = MagicMock()
             mock_env.num_epochs = 2
@@ -1208,13 +1252,19 @@ class TestFinetuneLlmMultiturn:
         max_steps = 9
 
         with (
-            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
-            patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_agg,
-            patch("agilerl.training.train_llm.save_llm_checkpoint") as mock_save,
-            patch("agilerl.training.train_llm.SyncMultiTurnVecEnv"),
-            patch("agilerl.training.train_llm.collect_rollouts_llm") as mock_collect,
-            patch("agilerl.training.train_llm.stack_and_pad_experiences") as mock_stack,
+            patch(
+                "agilerl.training.llm.multiturn.default_progress_bar"
+            ) as mock_pbar_fn,
+            patch("agilerl.training.llm.multiturn.init_loggers", return_value=[]),
+            patch("agilerl.training.llm.multiturn.safe_aggregate_metrics") as mock_agg,
+            patch("agilerl.training.llm.multiturn.save_llm_checkpoint") as mock_save,
+            patch("agilerl.training.llm.multiturn.SyncMultiTurnVecEnv"),
+            patch(
+                "agilerl.training.llm.multiturn.collect_rollouts_llm"
+            ) as mock_collect,
+            patch(
+                "agilerl.training.llm.multiturn.stack_and_pad_experiences"
+            ) as mock_stack,
         ):
             mock_pbar_fn.return_value = MagicMock()
             mock_agg.return_value = 0.5
@@ -1260,21 +1310,23 @@ class TestFinetuneLlmMultiturn:
         )
         with (
             patch(
-                "agilerl.training.train_llm.default_progress_bar",
+                "agilerl.training.llm.multiturn.default_progress_bar",
                 return_value=MagicMock(),
             ),
-            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
+            patch("agilerl.training.llm.multiturn.init_loggers", return_value=[]),
             patch(
-                "agilerl.training.train_llm.safe_aggregate_metrics",
+                "agilerl.training.llm.multiturn.safe_aggregate_metrics",
                 return_value=0.5,
             ),
-            patch("agilerl.training.train_llm.save_llm_checkpoint"),
-            patch("agilerl.training.train_llm.SyncMultiTurnVecEnv"),
+            patch("agilerl.training.llm.multiturn.save_llm_checkpoint"),
+            patch("agilerl.training.llm.multiturn.SyncMultiTurnVecEnv"),
             patch(
-                "agilerl.training.train_llm.collect_rollouts_llm",
+                "agilerl.training.llm.multiturn.collect_rollouts_llm",
                 return_value=rollout_return,
             ),
-            patch("agilerl.training.train_llm.stack_and_pad_experiences") as mock_stack,
+            patch(
+                "agilerl.training.llm.multiturn.stack_and_pad_experiences"
+            ) as mock_stack,
         ):
             mock_stack.return_value = (torch.zeros(1, 8, dtype=torch.long),)
             finetune_llm_multiturn(
@@ -1303,13 +1355,13 @@ class TestFinetuneLlmMultiturn:
         mock_agent.batch_size_per_process = 16
         with (
             patch(
-                "agilerl.training.train_llm.default_progress_bar",
+                "agilerl.training.llm.multiturn.default_progress_bar",
                 return_value=MagicMock(),
             ),
-            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
-            patch("agilerl.training.train_llm.SyncMultiTurnVecEnv"),
+            patch("agilerl.training.llm.multiturn.init_loggers", return_value=[]),
+            patch("agilerl.training.llm.multiturn.SyncMultiTurnVecEnv"),
             patch(
-                "agilerl.training.train_llm.collect_rollouts_llm",
+                "agilerl.training.llm.multiturn.collect_rollouts_llm",
                 side_effect=RuntimeError("reached rollout"),
             ),
             pytest.raises(RuntimeError, match="reached rollout"),
@@ -1329,13 +1381,19 @@ class TestFinetuneLlmMultiturn:
         mock_agent = _make_multiturn_mock_agent()
 
         with (
-            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.train_llm.init_loggers") as mock_init_loggers,
-            patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_agg,
-            patch("agilerl.training.train_llm.save_llm_checkpoint") as mock_save,
-            patch("agilerl.training.train_llm.SyncMultiTurnVecEnv"),
-            patch("agilerl.training.train_llm.collect_rollouts_llm") as mock_collect,
-            patch("agilerl.training.train_llm.stack_and_pad_experiences") as mock_stack,
+            patch(
+                "agilerl.training.llm.multiturn.default_progress_bar"
+            ) as mock_pbar_fn,
+            patch("agilerl.training.llm.multiturn.init_loggers") as mock_init_loggers,
+            patch("agilerl.training.llm.multiturn.safe_aggregate_metrics") as mock_agg,
+            patch("agilerl.training.llm.multiturn.save_llm_checkpoint") as mock_save,
+            patch("agilerl.training.llm.multiturn.SyncMultiTurnVecEnv"),
+            patch(
+                "agilerl.training.llm.multiturn.collect_rollouts_llm"
+            ) as mock_collect,
+            patch(
+                "agilerl.training.llm.multiturn.stack_and_pad_experiences"
+            ) as mock_stack,
         ):
             mock_pbar_fn.return_value = MagicMock()
             mock_init_loggers.return_value = []
@@ -1371,15 +1429,21 @@ class TestFinetuneLlmMultiturn:
         mutation.activation_mut = 0
 
         with (
-            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
-            patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_agg,
-            patch("agilerl.training.train_llm.save_llm_checkpoint") as mock_save,
-            patch("agilerl.training.train_llm.SyncMultiTurnVecEnv"),
-            patch("agilerl.training.train_llm.collect_rollouts_llm") as mock_collect,
-            patch("agilerl.training.train_llm.stack_and_pad_experiences") as mock_stack,
             patch(
-                "agilerl.training.train_llm.tournament_selection_and_mutation"
+                "agilerl.training.llm.multiturn.default_progress_bar"
+            ) as mock_pbar_fn,
+            patch("agilerl.training.llm.multiturn.init_loggers", return_value=[]),
+            patch("agilerl.training.llm.multiturn.safe_aggregate_metrics") as mock_agg,
+            patch("agilerl.training.llm.multiturn.save_llm_checkpoint") as mock_save,
+            patch("agilerl.training.llm.multiturn.SyncMultiTurnVecEnv"),
+            patch(
+                "agilerl.training.llm.multiturn.collect_rollouts_llm"
+            ) as mock_collect,
+            patch(
+                "agilerl.training.llm.multiturn.stack_and_pad_experiences"
+            ) as mock_stack,
+            patch(
+                "agilerl.training.llm.multiturn.tournament_selection_and_mutation"
             ) as mock_tourn,
         ):
             mock_pbar_fn.return_value = MagicMock()
@@ -1463,13 +1527,19 @@ class TestFinetuneLlmMultiturn:
         mock_agent = _make_multiturn_mock_agent()
 
         with (
-            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
-            patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_agg,
-            patch("agilerl.training.train_llm.save_llm_checkpoint"),
-            patch("agilerl.training.train_llm.SyncMultiTurnVecEnv"),
-            patch("agilerl.training.train_llm.collect_rollouts_llm") as mock_collect,
-            patch("agilerl.training.train_llm.stack_and_pad_experiences") as mock_stack,
+            patch(
+                "agilerl.training.llm.multiturn.default_progress_bar"
+            ) as mock_pbar_fn,
+            patch("agilerl.training.llm.multiturn.init_loggers", return_value=[]),
+            patch("agilerl.training.llm.multiturn.safe_aggregate_metrics") as mock_agg,
+            patch("agilerl.training.llm.multiturn.save_llm_checkpoint"),
+            patch("agilerl.training.llm.multiturn.SyncMultiTurnVecEnv"),
+            patch(
+                "agilerl.training.llm.multiturn.collect_rollouts_llm"
+            ) as mock_collect,
+            patch(
+                "agilerl.training.llm.multiturn.stack_and_pad_experiences"
+            ) as mock_stack,
         ):
             mock_pbar_fn.return_value = MagicMock()
             mock_agg.return_value = 0.5
@@ -1496,13 +1566,19 @@ class TestFinetuneLlmMultiturn:
         mock_agent.metrics.additional_metrics = ["loss", "mean_reward"]
 
         with (
-            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
-            patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_agg,
-            patch("agilerl.training.train_llm.save_llm_checkpoint"),
-            patch("agilerl.training.train_llm.SyncMultiTurnVecEnv"),
-            patch("agilerl.training.train_llm.collect_rollouts_llm") as mock_collect,
-            patch("agilerl.training.train_llm.stack_and_pad_experiences") as mock_stack,
+            patch(
+                "agilerl.training.llm.multiturn.default_progress_bar"
+            ) as mock_pbar_fn,
+            patch("agilerl.training.llm.multiturn.init_loggers", return_value=[]),
+            patch("agilerl.training.llm.multiturn.safe_aggregate_metrics") as mock_agg,
+            patch("agilerl.training.llm.multiturn.save_llm_checkpoint"),
+            patch("agilerl.training.llm.multiturn.SyncMultiTurnVecEnv"),
+            patch(
+                "agilerl.training.llm.multiturn.collect_rollouts_llm"
+            ) as mock_collect,
+            patch(
+                "agilerl.training.llm.multiturn.stack_and_pad_experiences"
+            ) as mock_stack,
         ):
             mock_pbar_fn.return_value = MagicMock()
             mock_agg.return_value = 0.5
@@ -1526,15 +1602,21 @@ class TestFinetuneLlmMultiturn:
         mock_agent = _make_multiturn_mock_agent()
 
         with (
-            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
-            patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_agg,
-            patch("agilerl.training.train_llm.save_llm_checkpoint"),
-            patch("agilerl.training.train_llm.SyncMultiTurnVecEnv"),
-            patch("agilerl.training.train_llm.collect_rollouts_llm") as mock_collect,
-            patch("agilerl.training.train_llm.stack_and_pad_experiences") as mock_stack,
             patch(
-                "agilerl.training.train_llm.time.monotonic",
+                "agilerl.training.llm.multiturn.default_progress_bar"
+            ) as mock_pbar_fn,
+            patch("agilerl.training.llm.multiturn.init_loggers", return_value=[]),
+            patch("agilerl.training.llm.multiturn.safe_aggregate_metrics") as mock_agg,
+            patch("agilerl.training.llm.multiturn.save_llm_checkpoint"),
+            patch("agilerl.training.llm.multiturn.SyncMultiTurnVecEnv"),
+            patch(
+                "agilerl.training.llm.multiturn.collect_rollouts_llm"
+            ) as mock_collect,
+            patch(
+                "agilerl.training.llm.multiturn.stack_and_pad_experiences"
+            ) as mock_stack,
+            patch(
+                "agilerl.training.llm.multiturn.time.monotonic",
                 side_effect=itertools.count(100, 100).__next__,
             ),
         ):
@@ -1563,13 +1645,19 @@ class TestFinetuneLlmMultiturn:
         max_steps = 9
 
         with (
-            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
-            patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_agg,
-            patch("agilerl.training.train_llm.save_llm_checkpoint"),
-            patch("agilerl.training.train_llm.SyncMultiTurnVecEnv"),
-            patch("agilerl.training.train_llm.collect_rollouts_llm") as mock_collect,
-            patch("agilerl.training.train_llm.stack_and_pad_experiences") as mock_stack,
+            patch(
+                "agilerl.training.llm.multiturn.default_progress_bar"
+            ) as mock_pbar_fn,
+            patch("agilerl.training.llm.multiturn.init_loggers", return_value=[]),
+            patch("agilerl.training.llm.multiturn.safe_aggregate_metrics") as mock_agg,
+            patch("agilerl.training.llm.multiturn.save_llm_checkpoint"),
+            patch("agilerl.training.llm.multiturn.SyncMultiTurnVecEnv"),
+            patch(
+                "agilerl.training.llm.multiturn.collect_rollouts_llm"
+            ) as mock_collect,
+            patch(
+                "agilerl.training.llm.multiturn.stack_and_pad_experiences"
+            ) as mock_stack,
         ):
             mock_pbar_fn.return_value = MagicMock()
             mock_agg.return_value = 0.5
@@ -1598,13 +1686,19 @@ class TestFinetuneLlmMultiturn:
         stronger.fitness = [0.9]
 
         with (
-            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
-            patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_agg,
-            patch("agilerl.training.train_llm.save_llm_checkpoint") as mock_save,
-            patch("agilerl.training.train_llm.SyncMultiTurnVecEnv"),
-            patch("agilerl.training.train_llm.collect_rollouts_llm") as mock_collect,
-            patch("agilerl.training.train_llm.stack_and_pad_experiences") as mock_stack,
+            patch(
+                "agilerl.training.llm.multiturn.default_progress_bar"
+            ) as mock_pbar_fn,
+            patch("agilerl.training.llm.multiturn.init_loggers", return_value=[]),
+            patch("agilerl.training.llm.multiturn.safe_aggregate_metrics") as mock_agg,
+            patch("agilerl.training.llm.multiturn.save_llm_checkpoint") as mock_save,
+            patch("agilerl.training.llm.multiturn.SyncMultiTurnVecEnv"),
+            patch(
+                "agilerl.training.llm.multiturn.collect_rollouts_llm"
+            ) as mock_collect,
+            patch(
+                "agilerl.training.llm.multiturn.stack_and_pad_experiences"
+            ) as mock_stack,
             _population_init_skip_per_mock_class(),
         ):
             mock_pbar_fn.return_value = MagicMock()
@@ -1632,13 +1726,19 @@ class TestFinetuneLlmMultiturn:
         mock_agent.algo = "LLMPPO"
 
         with (
-            patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
-            patch("agilerl.training.train_llm.init_loggers") as mock_init_loggers,
-            patch("agilerl.training.train_llm.safe_aggregate_metrics") as mock_agg,
-            patch("agilerl.training.train_llm.save_llm_checkpoint"),
-            patch("agilerl.training.train_llm.SyncMultiTurnVecEnv"),
-            patch("agilerl.training.train_llm.collect_rollouts_llm") as mock_collect,
-            patch("agilerl.training.train_llm.stack_and_pad_experiences") as mock_stack,
+            patch(
+                "agilerl.training.llm.multiturn.default_progress_bar"
+            ) as mock_pbar_fn,
+            patch("agilerl.training.llm.multiturn.init_loggers") as mock_init_loggers,
+            patch("agilerl.training.llm.multiturn.safe_aggregate_metrics") as mock_agg,
+            patch("agilerl.training.llm.multiturn.save_llm_checkpoint"),
+            patch("agilerl.training.llm.multiturn.SyncMultiTurnVecEnv"),
+            patch(
+                "agilerl.training.llm.multiturn.collect_rollouts_llm"
+            ) as mock_collect,
+            patch(
+                "agilerl.training.llm.multiturn.stack_and_pad_experiences"
+            ) as mock_stack,
         ):
             mock_pbar_fn.return_value = MagicMock()
             mock_init_loggers.return_value = []
@@ -1679,13 +1779,13 @@ class TestFinetuneLlmMultiturn:
 
         with (
             patch(
-                "agilerl.training.train_llm.default_progress_bar",
+                "agilerl.training.llm.multiturn.default_progress_bar",
                 return_value=MagicMock(),
             ),
-            patch("agilerl.training.train_llm.init_loggers", return_value=[]),
-            patch("agilerl.training.train_llm.SyncMultiTurnVecEnv"),
+            patch("agilerl.training.llm.multiturn.init_loggers", return_value=[]),
+            patch("agilerl.training.llm.multiturn.SyncMultiTurnVecEnv"),
             patch(
-                "agilerl.training.train_llm.collect_rollouts_llm",
+                "agilerl.training.llm.multiturn.collect_rollouts_llm",
                 side_effect=RuntimeError("reached rollout"),
             ),
             pytest.raises(RuntimeError, match="reached rollout"),
@@ -1730,15 +1830,15 @@ def test_report_metrics_called_on_non_main_process(loop):
             mock_env.data_batch_size_per_gpu = 1
             with (
                 patch(
-                    "agilerl.training.train_llm.default_progress_bar",
+                    "agilerl.training.llm.reasoning.default_progress_bar",
                     return_value=MagicMock(),
                 ),
-                patch("agilerl.training.train_llm.init_loggers", return_value=[]),
+                patch("agilerl.training.llm.reasoning.init_loggers", return_value=[]),
                 patch(
-                    "agilerl.training.train_llm.safe_aggregate_metrics",
+                    "agilerl.training.llm.reasoning.safe_aggregate_metrics",
                     return_value=0.5,
                 ),
-                patch("agilerl.training.train_llm.save_llm_checkpoint"),
+                patch("agilerl.training.llm.reasoning.save_llm_checkpoint"),
             ):
                 finetune_llm_reasoning(
                     pop=[mock_agent],
@@ -1757,15 +1857,11 @@ def test_report_metrics_called_on_non_main_process(loop):
             mock_env.data_batch_size_per_gpu = 1
             with (
                 patch(
-                    "agilerl.training.train_llm.default_progress_bar",
+                    "agilerl.training.llm.preference.default_progress_bar",
                     return_value=MagicMock(),
                 ),
-                patch("agilerl.training.train_llm.init_loggers", return_value=[]),
-                patch(
-                    "agilerl.training.train_llm.safe_aggregate_metrics",
-                    return_value=0.5,
-                ),
-                patch("agilerl.training.train_llm.save_llm_checkpoint"),
+                patch("agilerl.training.llm.preference.init_loggers", return_value=[]),
+                patch("agilerl.training.llm.preference.save_llm_checkpoint"),
             ):
                 finetune_llm_preference(
                     pop=[mock_agent],
@@ -1784,15 +1880,11 @@ def test_report_metrics_called_on_non_main_process(loop):
             mock_env.data_batch_size_per_gpu = 1
             with (
                 patch(
-                    "agilerl.training.train_llm.default_progress_bar",
+                    "agilerl.training.llm.sft.default_progress_bar",
                     return_value=MagicMock(),
                 ),
-                patch("agilerl.training.train_llm.init_loggers", return_value=[]),
-                patch(
-                    "agilerl.training.train_llm.safe_aggregate_metrics",
-                    return_value=0.5,
-                ),
-                patch("agilerl.training.train_llm.save_llm_checkpoint"),
+                patch("agilerl.training.llm.sft.init_loggers", return_value=[]),
+                patch("agilerl.training.llm.sft.save_llm_checkpoint"),
             ):
                 finetune_llm_sft(
                     pop=[mock_agent],
@@ -1806,22 +1898,22 @@ def test_report_metrics_called_on_non_main_process(loop):
             mock_agent = _make_multiturn_mock_agent(spec=GRPO)
             with (
                 patch(
-                    "agilerl.training.train_llm.default_progress_bar",
+                    "agilerl.training.llm.multiturn.default_progress_bar",
                     return_value=MagicMock(),
                 ),
-                patch("agilerl.training.train_llm.init_loggers", return_value=[]),
+                patch("agilerl.training.llm.multiturn.init_loggers", return_value=[]),
                 patch(
-                    "agilerl.training.train_llm.safe_aggregate_metrics",
+                    "agilerl.training.llm.multiturn.safe_aggregate_metrics",
                     return_value=0.5,
                 ),
-                patch("agilerl.training.train_llm.save_llm_checkpoint"),
-                patch("agilerl.training.train_llm.SyncMultiTurnVecEnv"),
+                patch("agilerl.training.llm.multiturn.save_llm_checkpoint"),
+                patch("agilerl.training.llm.multiturn.SyncMultiTurnVecEnv"),
                 patch(
-                    "agilerl.training.train_llm.collect_rollouts_llm",
+                    "agilerl.training.llm.multiturn.collect_rollouts_llm",
                     return_value=_multiturn_collect_return(batch_steps=2),
                 ),
                 patch(
-                    "agilerl.training.train_llm.stack_and_pad_experiences",
+                    "agilerl.training.llm.multiturn.stack_and_pad_experiences",
                     return_value=(torch.zeros(1, 8, dtype=torch.long),),
                 ),
             ):
@@ -1872,18 +1964,20 @@ def test_finetune_llm_reasoning_aligns_completion_shapes_before_learn():
     )
     with (
         patch(
-            "agilerl.training.train_llm.default_progress_bar",
+            "agilerl.training.llm.reasoning.default_progress_bar",
             return_value=MagicMock(),
         ),
-        patch("agilerl.training.train_llm.init_loggers", return_value=[]),
-        patch("agilerl.training.train_llm.safe_aggregate_metrics", return_value=0.5),
-        patch("agilerl.training.train_llm.save_llm_checkpoint"),
+        patch("agilerl.training.llm.reasoning.init_loggers", return_value=[]),
         patch(
-            "agilerl.training.train_llm.needs_cross_rank_seq_padding",
+            "agilerl.training.llm.reasoning.safe_aggregate_metrics", return_value=0.5
+        ),
+        patch("agilerl.training.llm.reasoning.save_llm_checkpoint"),
+        patch(
+            "agilerl.training.llm.reasoning.needs_cross_rank_seq_padding",
             return_value=True,
         ) as mock_needs,
         patch(
-            "agilerl.training.train_llm.align_completion_batch_shapes_across_ranks",
+            "agilerl.training.llm.reasoning.align_completion_batch_shapes_across_ranks",
             return_value=aligned,
         ) as mock_align,
         patch.object(Population, "report_metrics", autospec=True),
@@ -1923,30 +2017,32 @@ def test_finetune_llm_multiturn_aligns_and_pads_turn_ids():
 
     with (
         patch(
-            "agilerl.training.train_llm.default_progress_bar",
+            "agilerl.training.llm.multiturn.default_progress_bar",
             return_value=MagicMock(),
         ),
-        patch("agilerl.training.train_llm.init_loggers", return_value=[]),
-        patch("agilerl.training.train_llm.safe_aggregate_metrics", return_value=0.5),
-        patch("agilerl.training.train_llm.save_llm_checkpoint"),
-        patch("agilerl.training.train_llm.SyncMultiTurnVecEnv"),
+        patch("agilerl.training.llm.multiturn.init_loggers", return_value=[]),
         patch(
-            "agilerl.training.train_llm.collect_rollouts_llm",
+            "agilerl.training.llm.multiturn.safe_aggregate_metrics", return_value=0.5
+        ),
+        patch("agilerl.training.llm.multiturn.save_llm_checkpoint"),
+        patch("agilerl.training.llm.multiturn.SyncMultiTurnVecEnv"),
+        patch(
+            "agilerl.training.llm.multiturn.collect_rollouts_llm",
             return_value=_multiturn_collect_return(batch_steps=2),
         ),
         patch(
-            "agilerl.training.train_llm.stack_and_pad_experiences",
+            "agilerl.training.llm.multiturn.stack_and_pad_experiences",
             side_effect=[
                 (short_turn_ids,),
                 (rewards_2d,),
             ],
         ),
         patch(
-            "agilerl.training.train_llm.needs_cross_rank_seq_padding",
+            "agilerl.training.llm.multiturn.needs_cross_rank_seq_padding",
             return_value=True,
         ),
         patch(
-            "agilerl.training.train_llm.align_completion_batch_shapes_across_ranks",
+            "agilerl.training.llm.multiturn.align_completion_batch_shapes_across_ranks",
             return_value=(aligned_ids, aligned_masks, aligned_rewards),
         ),
         patch.object(Population, "report_metrics", autospec=True),
@@ -2083,11 +2179,12 @@ def test_finetune_llm_checkpoint_triggering_non_divisible_steps(finetune_fn):
     env.data_batch_size_per_gpu = 1
     env.num_epochs = 0
 
+    mod = _finetune_module_path(finetune_fn)
     with (
-        patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
-        patch("agilerl.training.train_llm.safe_aggregate_metrics", return_value=0.5),
-        patch("agilerl.training.train_llm.save_llm_checkpoint") as mock_save,
-        patch("agilerl.training.train_llm.init_loggers", return_value=[]),
+        patch(f"{mod}.default_progress_bar") as mock_pbar_fn,
+        patch(f"{mod}.safe_aggregate_metrics", return_value=0.5, create=True),
+        patch(f"{mod}.save_llm_checkpoint") as mock_save,
+        patch(f"{mod}.init_loggers", return_value=[]),
     ):
         mock_pbar_fn.return_value = MagicMock()
         finetune_fn(
@@ -2146,12 +2243,13 @@ def test_inner_loop_breaks_after_max_steps_first_agent(finetune_fn, agent_spec):
 
     env.data_batch_size_per_gpu = 1
 
+    mod = _finetune_module_path(finetune_fn)
     with (
         _population_init_skip_per_mock_class(),
-        patch("agilerl.training.train_llm.default_progress_bar") as mock_pbar_fn,
-        patch("agilerl.training.train_llm.save_llm_checkpoint"),
-        patch("agilerl.training.train_llm.safe_aggregate_metrics", return_value=0.5),
-        patch("agilerl.training.train_llm.init_loggers", return_value=[]),
+        patch(f"{mod}.default_progress_bar") as mock_pbar_fn,
+        patch(f"{mod}.save_llm_checkpoint"),
+        patch(f"{mod}.safe_aggregate_metrics", return_value=0.5, create=True),
+        patch(f"{mod}.init_loggers", return_value=[]),
     ):
         mock_pbar_fn.return_value = MagicMock()
         finetune_fn(

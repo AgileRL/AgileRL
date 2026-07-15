@@ -19,7 +19,7 @@ from tiny_model import TinyDigitTokenizer, build_tiny_actor_network
 from transformers import AutoTokenizer
 
 from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE
-from agilerl.training import train_llm
+from agilerl.training.llm import multiturn as train_llm
 from agilerl.training.train_llm import finetune_llm_multiturn
 from agilerl.utils.algo_utils import VLLMConfig
 from agilerl.utils.llm_utils import create_llm_accelerator
