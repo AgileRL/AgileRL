@@ -1,4 +1,5 @@
 import copy
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -400,3 +401,24 @@ class TestLayerCache:
         assert layers == [model.proj]
         assert model._fused_lora_layers is layers
         assert _get_cached_lora_layers(model) is layers
+
+
+class TestPeftNotInstalled:
+    """When PEFT is absent, ``LoraLayer`` is ``None`` and the helpers degrade
+    to no-ops rather than crashing (the plain base model runs unfused).
+    """
+
+    def test_get_cached_lora_layers_returns_empty(self):
+        model = _build_model()
+        with patch("agilerl.algorithms.core.llm_ops.fused_lora.LoraLayer", None):
+            assert _get_cached_lora_layers(model) == []
+        # No LoRA layers were discovered, so nothing was cached.
+        assert not hasattr(model, "_fused_lora_layers")
+
+    def test_patch_is_a_noop(self):
+        model = _build_model()
+        with patch("agilerl.algorithms.core.llm_ops.fused_lora.LoraLayer", None):
+            patch_lora_for_fused_forward(model)
+        # The forward was not swapped and no routing state was installed.
+        assert "forward" not in model.proj.__dict__
+        assert not hasattr(model.proj, "_fused_adapter_routing")
