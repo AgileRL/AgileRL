@@ -6,9 +6,7 @@ from peft import LoraConfig, inject_adapter_in_model
 from torch import nn
 
 from agilerl.algorithms.core.llm_ops.fused_lora import (
-    _contiguous_groups,
     _get_cached_lora_layers,
-    _groups_for_leading_dim,
     clear_fused_adapter_routing,
     patch_lora_for_fused_forward,
     set_fused_adapter_routing,
@@ -102,38 +100,6 @@ class _ViewLinear(nn.Module):
 
     def forward(self, x):
         return _ViewMatmul.apply(x, self.weight)
-
-
-class TestContiguousGroups:
-    def test_runs_are_compressed_in_order(self):
-        assert _contiguous_groups(["a", "a", "b", "a"]) == [
-            ("a", 0, 2),
-            ("b", 2, 3),
-            ("a", 3, 4),
-        ]
-
-    def test_empty_routing_raises(self):
-        with pytest.raises(ValueError, match="at least one row"):
-            _contiguous_groups([])
-
-
-class TestGroupsForLeadingDim:
-    def test_matching_leading_dim_returns_groups_unchanged(self):
-        groups = [("actor", 0, 2), ("critic", 2, 4)]
-        assert _groups_for_leading_dim(groups, 4) is groups
-
-    def test_whole_multiple_scales_each_run(self):
-        # Row-major flatten of (batch=4, seq=3): sample i covers rows
-        # [3i, 3i + 3), so every run scales by 3.
-        groups = [("actor", 0, 2), ("critic", 2, 4)]
-        assert _groups_for_leading_dim(groups, 12) == [
-            ("actor", 0, 6),
-            ("critic", 6, 12),
-        ]
-
-    def test_non_divisible_leading_dim_raises(self):
-        with pytest.raises(ValueError, match="covers 4 rows"):
-            _groups_for_leading_dim([("actor", 0, 4)], 7)
 
 
 class TestRoutedForward:
@@ -320,6 +286,12 @@ class TestSetFusedAdapterRoutingGuards:
         with pytest.raises(ValueError, match="critc"):
             set_fused_adapter_routing(model, ["actor", "critc"])
 
+    def test_empty_routing_raises(self):
+        model = _build_model()
+        patch_lora_for_fused_forward(model)
+        with pytest.raises(ValueError, match="at least one row"):
+            set_fused_adapter_routing(model, [])
+
     def test_merged_adapters_raise(self):
         model = _build_model(adapters=("actor",))
         patch_lora_for_fused_forward(model)
@@ -336,7 +308,7 @@ class TestSetFusedAdapterRoutingGuards:
     def test_clear_on_unpatched_model_does_not_mask_the_patch_check(self):
         model = _build_model()
         clear_fused_adapter_routing(model)
-        assert not hasattr(model.proj, "_fused_adapter_groups")
+        assert not hasattr(model.proj, "_fused_adapter_routing")
         with pytest.raises(RuntimeError, match="patch_lora_for_fused_forward"):
             set_fused_adapter_routing(model, ["actor"])
 
@@ -359,7 +331,7 @@ class TestPatchLifecycle:
 
         assert len(model._fused_lora_layers) == 2
         set_fused_adapter_routing(model, ["actor"])
-        assert model.late.proj._fused_adapter_groups == [("actor", 0, 1)]
+        assert model.late.proj._fused_adapter_routing == ["actor"]
 
     def test_unpatch_restores_original_forward_and_state(self):
         model = _build_model()
@@ -372,7 +344,7 @@ class TestPatchLifecycle:
         unpatch_lora_for_fused_forward(model)
 
         assert "forward" not in model.proj.__dict__
-        assert not hasattr(model.proj, "_fused_adapter_groups")
+        assert not hasattr(model.proj, "_fused_adapter_routing")
         assert not hasattr(model, "_fused_lora_layers")
         assert torch.allclose(model(x), ref, atol=1e-6)
         with pytest.raises(RuntimeError, match="patch_lora_for_fused_forward"):
@@ -381,7 +353,7 @@ class TestPatchLifecycle:
     def test_unpatch_on_never_patched_model_is_noop(self):
         model = _build_model()
         unpatch_lora_for_fused_forward(model)
-        assert not hasattr(model.proj, "_fused_adapter_groups")
+        assert not hasattr(model.proj, "_fused_adapter_routing")
 
     def test_deepcopy_rebinds_routed_forward_to_the_copy(self):
         model = _build_model()
@@ -393,7 +365,7 @@ class TestPatchLifecycle:
         set_fused_adapter_routing(clone, ["actor", "critic"])
         _ = clone(x)
         # The original stays unrouted.
-        assert model.proj._fused_adapter_groups is None
+        assert model.proj._fused_adapter_routing is None
 
 
 class _CacheRejectingModel(nn.Module):

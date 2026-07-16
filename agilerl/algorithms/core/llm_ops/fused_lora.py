@@ -27,39 +27,6 @@ try:
 except ImportError:  # pragma: no cover
     LoraLayer = None  # type: ignore[assignment, misc]
 
-# The batch is a stack of rows, and ``routing`` labels each row with an adapter
-# name. ``_contiguous_groups`` collapses consecutive same-name rows into one
-# ``(name, start, stop)`` run, where ``[start, stop)`` are the row indices that
-# adapter owns. Worked example — routing for a
-# 4-row batch::
-#
-#     routing   = ["actor", "actor", "critic", "critic"]
-#     row index =    0         1         2          3
-#
-# becomes two groups::
-#
-#     ("actor",  0, 2)   ->  rows 0, 1  (start=0, stop=2)
-#     ("critic", 2, 4)   ->  rows 2, 3  (start=2, stop=4)
-AdapterGroups = list[tuple[str, int, int]]
-
-
-def _contiguous_groups(routing: Sequence[str]) -> AdapterGroups:
-    """Compress a per-row adapter list into ``(name, start, stop)`` runs.
-
-    :param routing: Adapter name for each batch row.
-    :raises ValueError: If *routing* is empty.
-    """
-    groups: AdapterGroups = []
-    start = 0
-    for name, run in itertools.groupby(routing):
-        stop = start + sum(1 for _ in run)
-        groups.append((name, start, stop))
-        start = stop
-    if not groups:
-        msg = "Fused adapter routing must name at least one row."
-        raise ValueError(msg)
-    return groups
-
 
 def _lora_delta(layer: nn.Module, adapter: str, rows: torch.Tensor) -> torch.Tensor:
     """One adapter's low-rank delta for a slice of input rows."""
@@ -68,7 +35,7 @@ def _lora_delta(layer: nn.Module, adapter: str, rows: torch.Tensor) -> torch.Ten
     return layer.lora_B[adapter](lora_a(rows)) * layer.scaling[adapter]
 
 
-def _needs_peft_mixed_forward(layer: nn.Module, groups: AdapterGroups) -> bool:
+def _needs_peft_mixed_forward(layer: nn.Module, routing: Sequence[str]) -> bool:
     """Whether any routed adapter needs PEFT's own mixed-batch forward.
 
     The sliced path computes the standard linear delta; embedding adapters
@@ -77,32 +44,7 @@ def _needs_peft_mixed_forward(layer: nn.Module, groups: AdapterGroups) -> bool:
     """
     embedding = getattr(layer, "lora_embedding_A", None) or {}
     variants = getattr(layer, "lora_variant", None) or {}
-    return any(name in embedding or name in variants for name, _, _ in groups)
-
-
-def _groups_for_leading_dim(groups: AdapterGroups, n_rows: int) -> AdapterGroups:
-    """Rescale routing groups to a layer input with *n_rows* leading rows.
-
-    Some layers flatten ``(batch, seq, hidden)`` to ``(batch * seq, hidden)``
-    before their linears (OPT's MLP, MoE experts). The flatten is row-major,
-    so sample ``i`` becomes the contiguous run ``[i * seq, (i + 1) * seq)``
-    and the groups scale by ``seq``. No-op when the leading dim already
-    matches the routed batch.
-
-    :raises ValueError: If *n_rows* is not a whole multiple of the routed
-        batch — the routing cannot be lined up with this input.
-    """
-    n_samples = groups[-1][2]
-    if n_rows == n_samples:
-        return groups
-    if n_rows % n_samples != 0:
-        msg = (
-            f"Fused adapter routing covers {n_samples} rows but the input's "
-            f"leading dimension is {n_rows}."
-        )
-        raise ValueError(msg)
-    factor = n_rows // n_samples
-    return [(name, start * factor, stop * factor) for name, start, stop in groups]
+    return any(name in embedding or name in variants for name in set(routing))
 
 
 def _routed_forward(
@@ -113,40 +55,48 @@ def _routed_forward(
 ) -> torch.Tensor:
     """Replacement ``forward`` installed on patched LoRA layers.
 
-    Runs the layer's ordinary single-adapter forward until routing is set.
-    Adapters that do not wrap this layer leave their rows on the base output,
-    matching PEFT's mixed-batch behaviour.
+    ``routing`` names the adapter for each batch row (e.g. ``["actor"] * B +
+    ["critic"] * B``). Same-adapter rows are contiguous, so we run the base
+    layer once and add each adapter's delta to its slice — walking the
+    contiguous runs with :func:`itertools.groupby`. ``"__base__"`` and
+    adapters that don't wrap this layer leave their rows on the base output,
+    matching PEFT's mixed-batch behaviour. Falls back to the layer's ordinary
+    forward while routing is unset.
     """
-    groups = layer._fused_adapter_groups
-    if groups is None:
+    routing = layer._fused_adapter_routing
+    if routing is None:
         return type(layer).forward(layer, x, *forward_args, **forward_kwargs)
 
-    groups = _groups_for_leading_dim(groups, x.shape[0])
+    # Layers that flatten (batch, seq, hidden) -> (batch * seq, hidden) before
+    # their linears (OPT's MLP, MoE experts) show seq rows per routed sample.
+    # The flatten is row-major, so each run just covers ``factor`` times as
+    # many contiguous rows.
+    factor, remainder = divmod(x.shape[0], len(routing))
+    if remainder:
+        msg = (
+            f"Fused adapter routing covers {len(routing)} rows but the layer "
+            f"input's leading dimension is {x.shape[0]}."
+        )
+        raise ValueError(msg)
 
-    if _needs_peft_mixed_forward(layer, groups):
-        adapter_names = [
-            name for name, start, stop in groups for _ in range(stop - start)
-        ]
+    if _needs_peft_mixed_forward(layer, routing):
+        names = [name for name in routing for _ in range(factor)]
         return layer._mixed_batch_forward(
-            x, *forward_args, adapter_names=adapter_names, **forward_kwargs
+            x, *forward_args, adapter_names=names, **forward_kwargs
         )
 
     base_out = layer.base_layer(x, *forward_args, **forward_kwargs)
 
-    if len(groups) == 1:
-        name = groups[0][0]
-        if name == "__base__" or name not in layer.lora_A:
-            return base_out
-        return base_out + _lora_delta(layer, name, x).to(base_out.dtype)
-
     pieces = []
-    for name, start, stop in groups:
-        rows = base_out.narrow(0, start, stop - start)
+    start = 0
+    for name, run in itertools.groupby(routing):
+        n = sum(1 for _ in run) * factor
+        rows = base_out.narrow(0, start, n)
         if name != "__base__" and name in layer.lora_A:
-            delta = _lora_delta(layer, name, x.narrow(0, start, stop - start))
-            rows = rows + delta.to(rows.dtype)
+            rows = rows + _lora_delta(layer, name, x.narrow(0, start, n)).to(rows.dtype)
         pieces.append(rows)
-    return torch.cat(pieces)
+        start += n
+    return pieces[0] if len(pieces) == 1 else torch.cat(pieces)
 
 
 def _store_layer_cache(model: nn.Module, layers: list[nn.Module]) -> None:
@@ -157,7 +107,11 @@ def _store_layer_cache(model: nn.Module, layers: list[nn.Module]) -> None:
 
 
 def _get_cached_lora_layers(model: nn.Module) -> list[nn.Module]:
-    """All ``LoraLayer`` modules under *model*, cached after the first traversal."""
+    """All ``LoraLayer`` modules under *model*, cached after the first traversal.
+
+    :param model: A ``PeftModel`` or any module containing ``LoraLayer`` s.
+    :return: The LoRA layers under *model*.
+    """
     cached = getattr(model, "_fused_lora_layers", None)
     if cached is not None:
         return cached
@@ -170,90 +124,16 @@ def _get_cached_lora_layers(model: nn.Module) -> list[nn.Module]:
     return layers
 
 
-def patch_lora_for_fused_forward(model: nn.Module) -> None:
-    """Swap every LoRA layer's ``forward`` for the fused-routing forward.
-
-    Routing starts inactive, so the patched layers behave exactly as before
-    until ``set_fused_adapter_routing`` is called. Idempotent — call again
-    after adding adapters that wrap new modules; only the new layers are
-    patched and the cached layer list is refreshed either way.
-
-    :param model: A ``PeftModel`` or any module containing ``LoraLayer`` s.
-    """
-    if LoraLayer is None:
-        return
-    layers: list[nn.Module] = []
-    for module in nn.Module.modules(model):
-        if not isinstance(module, LoraLayer):
-            continue
-        layers.append(module)
-        if not hasattr(module, "_fused_adapter_groups"):
-            module._fused_adapter_groups = None  # type: ignore[attr-defined]
-            module.forward = partial(_routed_forward, module)  # type: ignore[method-assign]
-    _store_layer_cache(model, layers)
-
-
-def unpatch_lora_for_fused_forward(model: nn.Module) -> None:
-    """Restore every LoRA layer's original ``forward`` and drop routing state.
-
-    After this, ``set_fused_adapter_routing`` raises until the model is
-    patched again.
-
-    :param model: The model to release from fused-routing control.
-    """
-    for module in _get_cached_lora_layers(model):
-        if hasattr(module, "_fused_adapter_groups"):
-            del module._fused_adapter_groups
-            del module.forward
-    if hasattr(model, "_fused_lora_layers"):
-        del model._fused_lora_layers
-
-
-def set_fused_adapter_routing(model: nn.Module, routing: Sequence[str]) -> None:
-    """Route each row of the next forward's batch through its own adapter.
-
-    Routing stays active — including for gradient-checkpoint recomputation
-    during ``backward()`` — until ``clear_fused_adapter_routing`` is called.
-
-    :param model: The patched model whose LoRA layers should route rows.
-    :param routing: Adapter name per batch row, e.g. ``["actor"] * B +
-        ["critic"] * B``. ``"__base__"`` runs a row through the frozen base
-        weights with no delta.
-    :raises RuntimeError: If LoRA layers are unpatched (the routing would be
-        silently ignored) or have adapters merged into the base weights.
-    :raises ValueError: If *routing* is empty, names an unknown adapter, or
-        names a DoRA adapter (unsupported, as in PEFT's mixed-batch forward).
-    """
-    layers = _get_cached_lora_layers(model)
-    if not layers:
-        # Plain base model (no adapters) or PEFT not installed: nothing to
-        # route, and the unfused forward is already correct.
-        return
-    if any(not hasattr(m, "_fused_adapter_groups") for m in layers):
-        msg = (
-            "set_fused_adapter_routing called on a model with LoRA layers that "
-            "have no fused-routing forward; the routing would be silently "
-            "ignored. Call patch_lora_for_fused_forward(model) first (again, "
-            "if adapters were added after the last call)."
-        )
-        raise RuntimeError(msg)
-
-    groups = _contiguous_groups(routing)
-    _validate_routing(layers, groups)
-    for module in layers:
-        module._fused_adapter_groups = groups  # type: ignore[attr-defined]
-
-
-def _validate_routing(layers: list[nn.Module], groups: AdapterGroups) -> None:
+def _validate_routing(layers: list[nn.Module], routing: Sequence[str]) -> None:
     """Reject routings PEFT would compute silently wrongly (unknown names)
     or that the fused forward cannot compute (merged weights, DoRA).
 
     :param layers: All LoRA layers under the model.
-    :param groups: Contiguous runs of adapter names in the routing.
+    :param routing: Adapter name per batch row.
     :raises RuntimeError: If any layer has merged adapters.
     :raises ValueError: If any adapter name is unknown or a DoRA adapter.
     """
-    requested = {name for name, _, _ in groups if name != "__base__"}
+    requested = set(routing) - {"__base__"}
     available: set[str] = set()
     for module in layers:
         if getattr(module, "merged", False):
@@ -283,11 +163,88 @@ def _validate_routing(layers: list[nn.Module], groups: AdapterGroups) -> None:
         raise ValueError(msg)
 
 
+def patch_lora_for_fused_forward(model: nn.Module) -> None:
+    """Swap every LoRA layer's ``forward`` for the fused-routing forward.
+
+    Routing starts inactive, so the patched layers behave exactly as before
+    until ``set_fused_adapter_routing`` is called. Idempotent — call again
+    after adding adapters that wrap new modules; only the new layers are
+    patched and the cached layer list is refreshed either way.
+
+    :param model: A ``PeftModel`` or any module containing ``LoraLayer`` s.
+    """
+    if LoraLayer is None:
+        return
+    layers: list[nn.Module] = []
+    for module in nn.Module.modules(model):
+        if not isinstance(module, LoraLayer):
+            continue
+        layers.append(module)
+        if not hasattr(module, "_fused_adapter_routing"):
+            module._fused_adapter_routing = None  # type: ignore[attr-defined]
+            module.forward = partial(_routed_forward, module)  # type: ignore[method-assign]
+    _store_layer_cache(model, layers)
+
+
+def unpatch_lora_for_fused_forward(model: nn.Module) -> None:
+    """Restore every LoRA layer's original ``forward`` and drop routing state.
+
+    After this, ``set_fused_adapter_routing`` raises until the model is
+    patched again.
+
+    :param model: The model to release from fused-routing control.
+    """
+    for module in _get_cached_lora_layers(model):
+        if hasattr(module, "_fused_adapter_routing"):
+            del module._fused_adapter_routing
+            del module.forward
+    if hasattr(model, "_fused_lora_layers"):
+        del model._fused_lora_layers
+
+
+def set_fused_adapter_routing(model: nn.Module, routing: Sequence[str]) -> None:
+    """Route each row of the next forward's batch through its own adapter.
+
+    Routing stays active — including for gradient-checkpoint recomputation
+    during ``backward()`` — until ``clear_fused_adapter_routing`` is called.
+
+    :param model: The patched model whose LoRA layers should route rows.
+    :param routing: Adapter name per batch row, e.g. ``["actor"] * B +
+        ["critic"] * B``. ``"__base__"`` runs a row through the frozen base
+        weights with no delta.
+    :raises RuntimeError: If LoRA layers are unpatched (the routing would be
+        silently ignored) or have adapters merged into the base weights.
+    :raises ValueError: If *routing* is empty, names an unknown adapter, or
+        names a DoRA adapter (unsupported, as in PEFT's mixed-batch forward).
+    """
+    layers = _get_cached_lora_layers(model)
+    if not layers:
+        # Plain base model (no adapters) or PEFT not installed: nothing to
+        # route, and the unfused forward is already correct.
+        return
+    if any(not hasattr(m, "_fused_adapter_routing") for m in layers):
+        msg = (
+            "set_fused_adapter_routing called on a model with LoRA layers that "
+            "have no fused-routing forward; the routing would be silently "
+            "ignored. Call patch_lora_for_fused_forward(model) first (again, "
+            "if adapters were added after the last call)."
+        )
+        raise RuntimeError(msg)
+
+    routing = list(routing)
+    if not routing:
+        msg = "Fused adapter routing must name at least one row."
+        raise ValueError(msg)
+    _validate_routing(layers, routing)
+    for module in layers:
+        module._fused_adapter_routing = routing  # type: ignore[attr-defined]
+
+
 def clear_fused_adapter_routing(model: nn.Module) -> None:
     """Deactivate fused routing, restoring standard single-adapter forward.
 
     :param model: The model whose LoRA layers should clear fused routing.
     """
     for module in _get_cached_lora_layers(model):
-        if hasattr(module, "_fused_adapter_groups"):
-            module._fused_adapter_groups = None  # type: ignore[attr-defined]
+        if hasattr(module, "_fused_adapter_routing"):
+            module._fused_adapter_routing = None  # type: ignore[attr-defined]
