@@ -273,6 +273,18 @@ def train_llm_rollout(
 
                 agg_score = safe_aggregate_metrics(accelerator, mean_score)
 
+                component_means = rollout_env.get_reward_component_means()
+                if component_means:
+                    for name, mean_value in component_means.items():
+                        if name not in agent.metrics.additional_metrics:
+                            agent.metrics.register(name)
+                        component_tensor = mean_score.new_tensor(mean_value)
+                        agg_component = safe_aggregate_metrics(
+                            accelerator, component_tensor
+                        )
+                        if accelerator is None or accelerator.is_main_process:
+                            agent.metrics.log(name, agg_component)
+
                 if max_reward is not None:
                     if "accuracy" not in agent.metrics.additional_metrics:
                         agent.metrics.register("accuracy")

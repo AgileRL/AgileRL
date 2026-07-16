@@ -129,15 +129,23 @@ class OpenEnvWrapper(Environment):
     ) -> TextObservation:
         """Step the inner env with the action's text, returning a ``TextObservation``."""
         del timeout_s, kwargs
-        prompt, reward, terminated, truncated, _info = _normalize_step(
+        prompt, reward, terminated, truncated, info = _normalize_step(
             self._inner.step(action.message)
         )
         self._state.step_count += 1
+        # Prefix/suffix are folded into ``prompt``; remaining info keys (e.g.
+        # ``reward_components``) are kept on metadata for in-process clients.
+        metadata = {
+            key: value
+            for key, value in (info or {}).items()
+            if key not in ("prefix", "suffix")
+        }
         return TextObservation(
             prompt=prompt,
             reward=reward,
             done=bool(terminated or truncated),
             truncated=bool(truncated),
+            metadata=metadata,
         )
 
     @property
@@ -363,7 +371,7 @@ class LocalEnvClient:
             float(obs.reward) if obs.reward is not None else 0.0,
             bool(obs.done) and not truncated,
             truncated,
-            {},
+            dict(obs.metadata) if obs.metadata else {},
         )
 
     def close(self) -> None:

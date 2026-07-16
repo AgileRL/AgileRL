@@ -485,6 +485,245 @@ class TestRolloutEnvFromDataset:
             )
 
 
+class TestRolloutEnvFromDatasetMultiReward:
+    """from_dataset accepts a named weighted reward list and composes a scalar."""
+
+    _ROWS: ClassVar[list[dict]] = [
+        {"question": "q0", "answer": "a0"},
+        {"question": "q1", "answer": "a1"},
+    ]
+
+    def _step_once(self, reward_fn):
+        # Arrange / Act helper: one reset+step on a tiny dataset env.
+        env = RolloutEnv.from_dataset(
+            self._ROWS,
+            reward_fn,
+            _ChrTokenizer(),
+            pad_id=None,
+            apply_chat_template=False,
+        )
+        obs, _info = env.reset(row_index=0)
+        gen = torch.tensor([[ord("z")]], dtype=torch.long)
+        return env, env.step(torch.cat([obs["input_ids"], gen], dim=1))
+
+    def test_weighted_sum_returns_scalar_and_raw_components_in_info(self) -> None:
+        # Arrange
+        reward_fn = [
+            ("format", lambda c, a, q: 1.0, 0.1),
+            ("correctness", lambda c, a, q: 0.0, 1.0),
+        ]
+
+        # Act
+        _env, (_obs, reward, terminated, truncated, info) = self._step_once(reward_fn)
+
+        # Assert
+        assert reward == pytest.approx(0.1)
+        assert info["reward_components"] == {"format": 1.0, "correctness": 0.0}
+        assert terminated is True
+        assert truncated is False
+
+    def test_default_weight_is_one_when_omitted(self) -> None:
+        # Arrange
+        reward_fn = [
+            ("format", lambda c, a, q: 0.5),
+            ("correctness", lambda c, a, q: 1.5),
+        ]
+
+        # Act
+        _env, (_obs, reward, _t, _tr, info) = self._step_once(reward_fn)
+
+        # Assert
+        assert reward == pytest.approx(2.0)
+        assert info["reward_components"] == {"format": 0.5, "correctness": 1.5}
+
+    def test_single_callable_has_no_reward_components_key(self) -> None:
+        # Arrange / Act
+        _env, (_obs, reward, _t, _tr, info) = self._step_once(lambda c, a, q: 0.75)
+
+        # Assert
+        assert reward == pytest.approx(0.75)
+        assert "reward_components" not in info
+
+    def test_zero_weight_excluded_from_total_but_present_in_info(self) -> None:
+        # Arrange
+        reward_fn = [
+            ("format", lambda c, a, q: 1.0, 0.0),
+            ("correctness", lambda c, a, q: 2.0, 1.0),
+        ]
+
+        # Act
+        _env, (_obs, reward, _t, _tr, info) = self._step_once(reward_fn)
+
+        # Assert
+        assert reward == pytest.approx(2.0)
+        assert info["reward_components"] == {"format": 1.0, "correctness": 2.0}
+
+    def test_empty_list_raises(self) -> None:
+        with pytest.raises(ValueError, match="empty"):
+            RolloutEnv.from_dataset(
+                self._ROWS, [], _ChrTokenizer(), pad_id=None, apply_chat_template=False
+            )
+
+    def test_duplicate_names_raise(self) -> None:
+        with pytest.raises(ValueError, match="duplicate"):
+            RolloutEnv.from_dataset(
+                self._ROWS,
+                [
+                    ("format", lambda c, a, q: 1.0),
+                    ("format", lambda c, a, q: 0.0),
+                ],
+                _ChrTokenizer(),
+                pad_id=None,
+                apply_chat_template=False,
+            )
+
+    @pytest.mark.parametrize("weight", [float("nan"), float("inf")])
+    def test_non_finite_weight_raises(self, weight: float) -> None:
+        with pytest.raises(ValueError, match="finite"):
+            RolloutEnv.from_dataset(
+                self._ROWS,
+                [("format", lambda c, a, q: 1.0, weight)],
+                _ChrTokenizer(),
+                pad_id=None,
+                apply_chat_template=False,
+            )
+
+    def test_bad_tuple_arity_raises(self) -> None:
+        with pytest.raises(TypeError, match="name, fn"):
+            RolloutEnv.from_dataset(
+                self._ROWS,
+                [("format",)],
+                _ChrTokenizer(),
+                pad_id=None,
+                apply_chat_template=False,
+            )
+
+    def test_single_tuple_as_reward_fn_raises(self) -> None:
+        with pytest.raises(TypeError, match="single tuple"):
+            RolloutEnv.from_dataset(
+                self._ROWS,
+                ("format", lambda c, a, q: 1.0),
+                _ChrTokenizer(),
+                pad_id=None,
+                apply_chat_template=False,
+            )
+
+    def test_anonymous_callable_list_raises(self) -> None:
+        with pytest.raises(TypeError, match="name, fn"):
+            RolloutEnv.from_dataset(
+                self._ROWS,
+                [lambda c, a, q: 1.0, lambda c, a, q: 0.0],
+                _ChrTokenizer(),
+                pad_id=None,
+                apply_chat_template=False,
+            )
+
+
+class TestRolloutEnvStepApplyRewardComponents:
+    """RolloutEnv records reward_components from step info into episode sums."""
+
+    _ROWS: ClassVar[list[dict]] = [{"question": "q0", "answer": "a0"}]
+
+    def test_components_in_info_accumulate_in_sums(self) -> None:
+        # Arrange
+        env = RolloutEnv.from_dataset(
+            self._ROWS,
+            [
+                ("format", lambda c, a, q: 1.0, 0.1),
+                ("correctness", lambda c, a, q: 0.0, 1.0),
+            ],
+            _ChrTokenizer(),
+            pad_id=None,
+            apply_chat_template=False,
+        )
+        obs, _info = env.reset(row_index=0)
+        gen = torch.tensor([[ord("z")]], dtype=torch.long)
+
+        # Act
+        env.step(torch.cat([obs["input_ids"], gen], dim=1))
+
+        # Assert
+        assert env.reward_component_sums == {"format": 1.0, "correctness": 0.0}
+
+    def test_missing_reward_components_leaves_sums_empty(self) -> None:
+        # Arrange
+        env = RolloutEnv.from_dataset(
+            self._ROWS,
+            lambda c, a, q: 0.5,
+            _ChrTokenizer(),
+            pad_id=None,
+            apply_chat_template=False,
+        )
+        obs, _info = env.reset(row_index=0)
+        gen = torch.tensor([[ord("z")]], dtype=torch.long)
+
+        # Act
+        env.step(torch.cat([obs["input_ids"], gen], dim=1))
+
+        # Assert
+        assert env.reward_component_sums == {}
+
+    def test_reset_clears_component_sums(self) -> None:
+        # Arrange
+        env = RolloutEnv.from_dataset(
+            self._ROWS,
+            [("format", lambda c, a, q: 1.0)],
+            _ChrTokenizer(),
+            pad_id=None,
+            apply_chat_template=False,
+        )
+        obs, _info = env.reset(row_index=0)
+        gen = torch.tensor([[ord("z")]], dtype=torch.long)
+        env.step(torch.cat([obs["input_ids"], gen], dim=1))
+        assert env.reward_component_sums == {"format": 1.0}
+
+        # Act
+        env.reset(row_index=0)
+
+        # Assert
+        assert env.reward_component_sums == {}
+
+
+class TestBatchRolloutEnvGetRewardComponentMeans:
+    """BatchRolloutEnv averages per-episode component sums across envs."""
+
+    def test_means_are_episode_sums_averaged_over_envs(self) -> None:
+        # Arrange
+        vec = BatchRolloutEnv(env_factory=_SyncStubEnv, batch_size=2, group_size=1)
+        vec.reset(seed=0)
+        vec.envs[0].reward_component_sums = {"format": 1.0, "correctness": 0.0}
+        vec.envs[1].reward_component_sums = {"format": 3.0, "correctness": 2.0}
+
+        # Act
+        means = vec.get_reward_component_means()
+
+        # Assert
+        assert means == {"format": 2.0, "correctness": 1.0}
+
+    def test_partial_keys_mean_only_over_reporters(self) -> None:
+        # Arrange
+        vec = BatchRolloutEnv(env_factory=_SyncStubEnv, batch_size=2, group_size=1)
+        vec.reset(seed=0)
+        vec.envs[0].reward_component_sums = {"format": 1.0}
+        vec.envs[1].reward_component_sums = {"format": 3.0, "correctness": 4.0}
+
+        # Act
+        means = vec.get_reward_component_means()
+
+        # Assert
+        assert means == {"format": 2.0, "correctness": 4.0}
+
+    def test_empty_dict_when_no_env_has_components(self) -> None:
+        # Arrange
+        vec = BatchRolloutEnv(env_factory=_SyncStubEnv, batch_size=2, group_size=1)
+        vec.reset(seed=0)
+        for env in vec.envs:
+            env.reward_component_sums = {}
+
+        # Act / Assert
+        assert vec.get_reward_component_means() == {}
+
+
 class _SyncStubEnv(RolloutEnvDoubleMixin):
     dataset_size = 0
 
@@ -495,11 +734,13 @@ class _SyncStubEnv(RolloutEnvDoubleMixin):
         self.done = False
         self.current_prompt: dict = {}
         self.sampling_logps: list[torch.Tensor] = []
+        self.reward_component_sums: dict[str, float] = {}
 
     def reset(self, seed: int | None = None):
         self.reset_calls.append(seed)
         self.done = False
         self.sampling_logps = []
+        self.reward_component_sums = {}
         self.current_prompt = {
             "input_ids": torch.ones(1, 3, dtype=torch.long),
             "attention_mask": torch.ones(1, 3, dtype=torch.long),
