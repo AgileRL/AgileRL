@@ -325,7 +325,7 @@ class Mutations:
         :param pre_training_mut: Boolean flag indicating if the mutation is before the training loop
         :type pre_training_mut: bool, optional
         :param indices: When given, mutate only the agents whose index appears in this list.
-            Defaults to None (backward compatibility)
+            Defaults to None
         :type indices: list[int], optional
 
         :return: Mutated population

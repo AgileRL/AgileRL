@@ -12,7 +12,7 @@ from agilerl.algorithms import MADDPG, MATD3
 from agilerl.components.data import MultiAgentTransition, ReplayDataset
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.sampler import Sampler
-from agilerl.hpo.multi_frequency import MultiFrequencyStrategy
+from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
@@ -50,7 +50,7 @@ def train_multi_agent_off_policy(
     eval_loop: int = 1,
     learning_delay: int = 0,
     target: float | None = None,
-    selection_strategy: TournamentSelection | MultiFrequencyStrategy | None = None,
+    selection_strategy: TournamentSelection | MultiFrequencySelection | None = None,
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
     checkpoint: int | None = None,
@@ -101,7 +101,7 @@ def train_multi_agent_off_policy(
     :type target: float, optional
     :param selection_strategy: selection strategy driving population evolution. A
         :class:`~agilerl.hpo.tournament.TournamentSelection` or
-        :class:`~agilerl.hpo.multi_frequency.MultiFrequencyStrategy` (MF-PBT) object,
+        :class:`~agilerl.hpo.multi_frequency.MultiFrequencySelection` (MF-PBT) object,
         defaults to None
     :type selection_strategy: object, optional
     :param tournament: Deprecated alias for selection_strategy (a

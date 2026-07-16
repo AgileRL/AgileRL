@@ -1,9 +1,9 @@
-"""Integration tests for MF-PBT wiring and cross-family operation."""
+"""Integration tests for multi-frequency selection wiring and cross-family operation."""
 
 from __future__ import annotations
 
 from collections import Counter
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from gymnasium.spaces import Box, Discrete
@@ -11,12 +11,12 @@ from gymnasium.spaces import Box, Discrete
 from agilerl.algorithms import CQN, DQN, IPPO, MADDPG, NeuralUCB
 from agilerl.algorithms.core.base import EvolvableAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
-from agilerl.hpo.multi_frequency import MultiFrequencyStrategy
+from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.hpo.mutation import Mutations
 from agilerl.models import PPOSpec
 from agilerl.models.env import GymEnvSpec
 from agilerl.models.hpo import (
-    MultiFrequencyStrategySpec,
+    MultiFrequencySelectionSpec,
     MutationProbabilities,
     MutationSpec,
     RLHyperparameter,
@@ -55,7 +55,7 @@ def _make_ppo_trainer(
     training: TrainingSpec | None = None,
     accelerator: object | None = None,
 ) -> LocalTrainer:
-    multi_frequency_strategy = MultiFrequencyStrategySpec(
+    multi_frequency_selection = MultiFrequencySelectionSpec(
         n_subpopulations=2,
         n_individuals_per_subpopulation=4,
         evolution_frequency_ratios=[1, 2],
@@ -85,24 +85,24 @@ def _make_ppo_trainer(
             environment=GymEnvSpec(name="CartPole-v1", num_envs=1),
             training=training or TrainingSpec(max_steps=200, evo_steps=50, pop_size=8),
             mutation=mutation,
-            multi_frequency_strategy=multi_frequency_strategy,
+            multi_frequency_selection=multi_frequency_selection,
             accelerator=accelerator,
         )
 
 
-def test_localtrainer_builds_mfpbt_and_tags_subpopulations():
+def test_localtrainer_builds_multi_frequency_and_tags_subpopulations():
     trainer = _make_ppo_trainer()
 
-    assert isinstance(trainer.multi_frequency_strategy, MultiFrequencyStrategy)
+    assert isinstance(trainer.multi_frequency_selection, MultiFrequencySelection)
     assert trainer.tournament_selection is None
-    assert trainer.selection_strategy is trainer.multi_frequency_strategy
+    assert trainer.selection_strategy is trainer.multi_frequency_selection
     subpops = sorted(a.subpopulation for a in trainer.population)
     assert subpops == [0, 0, 0, 0, 1, 1, 1, 1]
     assert len({a.index for a in trainer.population}) == 8
 
 
-def test_localtrainer_rejects_both_mfpbt_and_tournament():
-    multi_frequency_strategy = MultiFrequencyStrategySpec(
+def test_localtrainer_rejects_both_multi_frequency_and_tournament():
+    multi_frequency_selection = MultiFrequencySelectionSpec(
         n_subpopulations=2,
         n_individuals_per_subpopulation=4,
         evolution_frequency_ratios=[1, 2],
@@ -126,7 +126,7 @@ def test_localtrainer_rejects_both_mfpbt_and_tournament():
             algorithm=ppo,
             environment=GymEnvSpec(name="CartPole-v1", num_envs=1),
             training=TrainingSpec(max_steps=200, evo_steps=50, pop_size=8),
-            multi_frequency_strategy=multi_frequency_strategy,
+            multi_frequency_selection=multi_frequency_selection,
             tournament=TournamentSelectionSpec(tournament_size=2, elitism=True),
         )
 
@@ -140,39 +140,48 @@ def test_localtrainer_derives_pop_size_without_manifest():
 
 
 def test_localtrainer_rejects_conflicting_pop_size_without_manifest():
-    with pytest.raises(ValueError, match="conflicts with the MF-PBT"):
+    with pytest.raises(ValueError, match="derived value"):
         _make_ppo_trainer(
             training=TrainingSpec(max_steps=200, evo_steps=50, pop_size=4)
         )
 
 
-def test_localtrainer_rejects_mfpbt_with_accelerator():
-    with pytest.raises(NotImplementedError, match="Accelerate"):
-        _make_ppo_trainer(accelerator=object())
+def test_localtrainer_accepts_multi_frequency_with_accelerator():
+    accelerator = MagicMock()
+    fake_population = [MagicMock() for _ in range(8)]
+    with patch(
+        "agilerl.training.trainer.create_population_from_spec",
+        return_value=fake_population,
+    ):
+        trainer = _make_ppo_trainer(accelerator=accelerator)
+
+    assert trainer.accelerator is accelerator
+    assert isinstance(trainer.multi_frequency_selection, MultiFrequencySelection)
+    assert trainer.selection_strategy is trainer.multi_frequency_selection
 
 
-def test_mfpbt_trainer_to_manifest_round_trips():
+def test_multi_frequency_trainer_to_manifest_round_trips():
     trainer = _make_ppo_trainer()
 
     manifest = trainer.to_manifest()
 
     # The manifest validator must not reject its own derived pop_size on this round-trip
     assert manifest["training"]["pop_size"] == 8  # 2 subpops x 4 individuals
-    # MF-PBT serializes under the single discriminated tournament_selection field
+    # Multi-frequency selection serializes under the single discriminated tournament_selection field
     assert manifest["tournament_selection"]["selection_strategy"] == "multi_frequency"
-    assert "multi_frequency_strategy" not in manifest
+    assert "multi_frequency_selection" not in manifest
 
 
-def test_mfpbt_manifest_round_trip_rebuilds_via_unified_block():
+def test_multi_frequency_manifest_round_trip_rebuilds_via_unified_block():
     trainer = _make_ppo_trainer()
     manifest = trainer.to_manifest()
 
     with patch.object(LocalTrainer, "_make_env", return_value=_DummyEnv()):
         rebuilt = LocalTrainer.from_manifest(manifest)
 
-    assert isinstance(rebuilt.multi_frequency_strategy, MultiFrequencyStrategy)
+    assert isinstance(rebuilt.multi_frequency_selection, MultiFrequencySelection)
     assert rebuilt.tournament_selection is None
-    assert rebuilt.selection_strategy is rebuilt.multi_frequency_strategy
+    assert rebuilt.selection_strategy is rebuilt.multi_frequency_selection
     assert rebuilt.training_spec.pop_size == 8
 
 
@@ -190,8 +199,8 @@ def test_migration_weights_resizes_rollout_buffer():
     elite.learn_step = 512
     elite.mutation_hook()  # buffer sized to 512
 
-    trainer.multi_frequency_strategy._sync_index(agents)
-    migrant = trainer.multi_frequency_strategy._migrate_weights(
+    trainer.multi_frequency_selection._sync_index(agents)
+    migrant = trainer.multi_frequency_selection._migrate_weights(
         external, elite, subpop=1
     )
 
@@ -200,7 +209,7 @@ def test_migration_weights_resizes_rollout_buffer():
     assert migrant.rollout_buffer.capacity == -(512 // -migrant.num_envs)
 
 
-def test_mfpbt_evolves_real_ppo_population_across_cycles():
+def test_multi_frequency_evolves_real_ppo_population_across_cycles():
     trainer = _make_ppo_trainer()
     agents = list(trainer.population)
 
@@ -209,7 +218,7 @@ def test_mfpbt_evolves_real_ppo_population_across_cycles():
             agent.fitness = [float((cycle + offset) % 8)]
         agents = multi_frequency_selection_and_mutation(
             agents,
-            trainer.multi_frequency_strategy,
+            trainer.multi_frequency_selection,
             mutation=trainer.mutations,
             env_name="CartPole-v1",
             algo="PPO",
@@ -284,12 +293,12 @@ CROSS_FAMILY = {
 
 
 @pytest.mark.parametrize("family", list(CROSS_FAMILY), ids=list(CROSS_FAMILY))
-def test_mfpbt_evolves_real_population_of_every_family(family):
+def test_multi_frequency_evolves_real_population_of_every_family(family):
     algo_name, build_population = CROSS_FAMILY[family]
     population = build_population()
     for agent in population:
         agent.subpopulation = agent.index // 4
-    strategy = MultiFrequencyStrategy(
+    strategy = MultiFrequencySelection(
         n_subpopulations=2,
         n_individuals_per_subpopulation=4,
         evolution_frequency_ratios=[1, 2],

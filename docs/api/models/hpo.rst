@@ -4,7 +4,7 @@ HPO Specifications
 A training manifest selects its evolution regime through the single
 ``tournament_selection`` block, a discriminated union keyed on ``selection_strategy``:
 ``tournament`` (the default) validates the block as :class:`TournamentSelectionSpec`, and
-``multi_frequency`` validates it as :class:`MultiFrequencyStrategySpec`. The two regimes
+``multi_frequency`` validates it as :class:`MultiFrequencySelectionSpec`. The two regimes
 are therefore mutually exclusive by construction, and a block that omits
 ``selection_strategy`` is treated as tournament selection so existing configs are
 unchanged.
@@ -18,5 +18,5 @@ unchanged.
 .. autoclass:: agilerl.models.hpo.TournamentSelectionSpec
    :members:
 
-.. autoclass:: agilerl.models.hpo.MultiFrequencyStrategySpec
+.. autoclass:: agilerl.models.hpo.MultiFrequencySelectionSpec
    :members:

@@ -131,20 +131,24 @@ class TestCreatePopulationLLM:
         assert len(pop) == 2
 
 
-class TestBuildMfPbtFromSpec:
+class TestBuildMultiFrequencyFromSpec:
     def test_returns_none_when_spec_is_none(self):
         from agilerl.models.training import TrainingSpec
-        from agilerl.utils.trainer_utils import build_multi_frequency_strategy_from_spec
+        from agilerl.utils.trainer_utils import (
+            build_multi_frequency_selection_from_spec,
+        )
 
-        assert build_multi_frequency_strategy_from_spec(None, TrainingSpec()) is None
+        assert build_multi_frequency_selection_from_spec(None, TrainingSpec()) is None
 
     def test_builds_strategy_and_forwards_seed(self):
-        from agilerl.hpo.multi_frequency import MultiFrequencyStrategy
-        from agilerl.models.hpo import MultiFrequencyStrategySpec
+        from agilerl.hpo.multi_frequency import MultiFrequencySelection
+        from agilerl.models.hpo import MultiFrequencySelectionSpec
         from agilerl.models.training import TrainingSpec
-        from agilerl.utils.trainer_utils import build_multi_frequency_strategy_from_spec
+        from agilerl.utils.trainer_utils import (
+            build_multi_frequency_selection_from_spec,
+        )
 
-        spec = MultiFrequencyStrategySpec(
+        spec = MultiFrequencySelectionSpec(
             n_subpopulations=2,
             n_individuals_per_subpopulation=4,
             evolution_frequency_ratios=[1, 2],
@@ -153,16 +157,16 @@ class TestBuildMfPbtFromSpec:
             n_open_for_migration=1,
             n_losers=1,
         )
-        strategy = build_multi_frequency_strategy_from_spec(
+        strategy = build_multi_frequency_selection_from_spec(
             spec, TrainingSpec(pop_size=8), seed=123
         )
 
-        assert isinstance(strategy, MultiFrequencyStrategy)
+        assert isinstance(strategy, MultiFrequencySelection)
         assert strategy.n_subpopulations == 2
         assert strategy.deltas == [1, 2]
         assert strategy.bracket_sizes == (1, 1, 1, 1)
 
-        seeded = build_multi_frequency_strategy_from_spec(
+        seeded = build_multi_frequency_selection_from_spec(
             spec, TrainingSpec(pop_size=8), seed=123
         )
         assert strategy.rng.integers(1_000_000) == seeded.rng.integers(1_000_000)
@@ -170,11 +174,11 @@ class TestBuildMfPbtFromSpec:
 
 class TestAssignSubpopulations:
     def test_tags_agents_by_contiguous_index_blocks(self):
-        from agilerl.models.hpo import MultiFrequencyStrategySpec
+        from agilerl.models.hpo import MultiFrequencySelectionSpec
         from agilerl.utils.trainer_utils import _assign_subpopulations
 
         agents = [MagicMock(index=i, subpopulation=None) for i in range(8)]
-        spec = MultiFrequencyStrategySpec(
+        spec = MultiFrequencySelectionSpec(
             n_subpopulations=2, n_individuals_per_subpopulation=4
         )
         _assign_subpopulations(agents, spec)

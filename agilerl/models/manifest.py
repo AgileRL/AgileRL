@@ -25,12 +25,12 @@ from agilerl.models.algo import (
     LLMAlgorithmSpec,
 )
 from agilerl.models.hpo import (
-    MultiFrequencyStrategySpec,
+    MultiFrequencySelectionSpec,
     MutationSpec,
     SelectionStrategySpec,
     TournamentSelectionSpec,
     default_selection_strategy,
-    resolve_multi_frequency_strategy_pop_size,
+    resolve_multi_frequency_selection_pop_size,
 )
 from agilerl.models.networks import (
     FinetuningNetworkSpec,
@@ -289,8 +289,8 @@ class TrainingManifest(BaseModel):
         :return: The validated manifest.
         :rtype: Self
         """
-        if isinstance(self.tournament_selection, MultiFrequencyStrategySpec):
-            resolve_multi_frequency_strategy_pop_size(
+        if isinstance(self.tournament_selection, MultiFrequencySelectionSpec):
+            resolve_multi_frequency_selection_pop_size(
                 self.tournament_selection, self.training
             )
         return self
@@ -379,7 +379,7 @@ class TrainingManifest(BaseModel):
         mutation: MutationSpec | None = None,
         replay_buffer: ReplayBufferSpec | None = None,
         tournament_selection: TournamentSelectionSpec | None = None,
-        multi_frequency_strategy: MultiFrequencyStrategySpec | None = None,
+        multi_frequency_selection: MultiFrequencySelectionSpec | None = None,
     ) -> TrainingManifest:
         """Build a validated core manifest from trainer component specs.
 
@@ -395,10 +395,10 @@ class TrainingManifest(BaseModel):
         :type replay_buffer: ReplayBufferSpec | None
         :param tournament_selection: Optional tournament-selection spec.
         :type tournament_selection: TournamentSelectionSpec | None
-        :param multi_frequency_strategy: Optional MF-PBT spec (mutually exclusive with
+        :param multi_frequency_selection: Optional MF-PBT spec (mutually exclusive with
             tournament_selection; both collapse into the single tournament_selection
             manifest field, discriminated by selection_strategy).
-        :type multi_frequency_strategy: MultiFrequencyStrategySpec | None
+        :type multi_frequency_selection: MultiFrequencySelectionSpec | None
         :returns: A validated :class:`TrainingManifest`.
         :rtype: TrainingManifest
         """
@@ -413,13 +413,13 @@ class TrainingManifest(BaseModel):
 
         # Tournament and MF-PBT are mutually exclusive
         selection = (
-            multi_frequency_strategy
-            if multi_frequency_strategy is not None
+            multi_frequency_selection
+            if multi_frequency_selection is not None
             else tournament_selection
         )
         selection_cls = (
-            MultiFrequencyStrategySpec
-            if isinstance(selection, MultiFrequencyStrategySpec)
+            MultiFrequencySelectionSpec
+            if isinstance(selection, MultiFrequencySelectionSpec)
             else TournamentSelectionSpec
         )
 

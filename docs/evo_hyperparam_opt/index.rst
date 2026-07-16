@@ -10,19 +10,17 @@ AgileRL is initially focused on improving HPO for RL in order to allow faster de
 Evolutionary algorithms have been shown to allow faster, automatic convergence to optimal hyperparameters than other HPO methods by taking advantage of
 shared memory between a population of agents acting in identical environments.
 
-At regular intervals, after learning from shared experiences, a population of agents can be evaluated in an environment. Through tournament selection, the
-best agents are selected to survive until the next generation, and their offspring are mutated to further explore the hyperparameter space.
-Eventually, the optimal hyperparameters for learning in a given environment can be reached in significantly less steps than are required using other HPO methods.
-
-.. figure:: https://github.com/AgileRL/AgileRL/assets/118982716/27260e5a-80cb-4950-a858-21d1debb5d21
-   :align: center
-
-   Our evolutionary approach allows for HPO in a single training run compared to Bayesian methods that require multiple sequential training runs
-   to achieve similar, and often inferior, results.
+At regular intervals, after learning from shared experiences, a population of agents can be evaluated in an environment. Each evolution step then has two parts. First, a **selection strategy** reshapes the population — preserving the strongest agents and nominating which agents to perturb. Then a shared **mutation** step perturbs those nominated agents to further explore the hyperparameter and architecture space. AgileRL provides two interchangeable selection strategies — :ref:`tournament selection <tournament_selection>` (the default) and :ref:`multi-frequency selection <multi_frequency_selection>` — and both hand their nominated agents to the same :ref:`mutation <mutations>` operators. In short, a selection strategy decides *which* agents are perturbed, while mutation decides *how*.
 
 .. toctree::
+   :hidden:
    :maxdepth: 1
 
    tournament_selection
    mutation
    multi_frequency
+
+.. figure:: ../_static/agilerl_hpo_loop.png
+   :align: center
+
+   The AgileRL evolutionary hyperparameter optimization loop.

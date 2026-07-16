@@ -32,7 +32,7 @@ from agilerl.algorithms import (
 )
 from agilerl.algorithms.core import EvolvableAlgorithm, LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig
-from agilerl.hpo.multi_frequency import MultiFrequencyStrategy
+from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.logger import CSVLogger, StdOutLogger, TensorboardLogger, WandbLogger
@@ -1292,7 +1292,7 @@ def tournament_selection_and_mutation(
 
 def multi_frequency_selection_and_mutation(
     population: PopulationType,
-    multi_frequency_strategy: MultiFrequencyStrategy,
+    multi_frequency_selection: MultiFrequencySelection,
     *,
     mutation: Mutations,
     env_name: str = "env",
@@ -1311,8 +1311,8 @@ def multi_frequency_selection_and_mutation(
 
     :param population: Population of agents.
     :type population: list[PopulationType]
-    :param multi_frequency_strategy: The MF-PBT evolution operator.
-    :type multi_frequency_strategy: MultiFrequencyStrategy
+    :param multi_frequency_selection: The MF-PBT evolution operator.
+    :type multi_frequency_selection: MultiFrequencySelection
     :param mutation: Mutation object used to perturb the winner-clones.
     :type mutation: Mutations
     :param env_name: Environment name, defaults to "env".
@@ -1323,47 +1323,70 @@ def multi_frequency_selection_and_mutation(
     :type save_elite: bool, optional
     :param elite_path: Path to save the elite agent, defaults to None.
     :type elite_path: str, optional
-    :param accelerator: Unsupported by MF-PBT; a non-None value raises.
+    :param accelerator: Accelerator for distributed computing, defaults to None.
     :type accelerator: accelerate.Accelerator(), optional
     :param language_model: Unused; MF-PBT does not support LLM training.
     :type language_model: bool, optional
-    :raises NotImplementedError: If an accelerator is supplied.
     :return: Population of agents after one MF-PBT evolution cycle.
     :rtype: list[PopulationType]
     """
+    algo = algo or population[0].__class__.__name__
+
     if accelerator is not None:
-        msg = "MF-PBT does not support the Accelerate (multi-process) path."
-        raise NotImplementedError(msg)
+        accel_temp_models_path = f"models/{env_name}"
+        if accelerator.is_main_process:
+            Path(accel_temp_models_path).mkdir(parents=True, exist_ok=True)
+        # Unwrap every model from the accelerator before any cloning/mutation
+        accelerator.wait_for_everyone()
+        for model in population:
+            model.unwrap_models()
+        accelerator.wait_for_everyone()
 
-    if save_elite:
-        elite_agent = max(
-            population,
-            key=lambda a: multi_frequency_strategy._scalar_fitness(a.fitness[-1]),
-        )
-        algo_name = algo or population[0].__class__.__name__
-        elite_save_path = (
-            elite_path.split(".pt")[0]
-            if elite_path is not None
-            else f"{env_name}-elite_{algo_name}"
-        )
-        elite_agent.save_checkpoint(f"{elite_save_path}.pt")
+    if accelerator is None or accelerator.is_main_process:
+        if save_elite:
+            elite_agent = max(
+                population,
+                key=lambda a: multi_frequency_selection._scalar_fitness(a.fitness[-1]),
+            )
+            elite_save_path = (
+                elite_path.split(".pt")[0]
+                if elite_path is not None
+                else f"{env_name}-elite_{algo}"
+            )
+            elite_agent.save_checkpoint(f"{elite_save_path}.pt")
 
-    population, indices_to_mutate = multi_frequency_strategy.select(population)
-    return mutation.mutation(population, indices=indices_to_mutate)
+        population, indices_to_mutate = multi_frequency_selection.select(population)
+        population = mutation.mutation(population, indices=indices_to_mutate)
+
+        if accelerator is not None:
+            for pop_i, model in enumerate(population):
+                model.save_checkpoint(f"{accel_temp_models_path}/{algo}_{pop_i}.pt")
+
+    if accelerator is not None:
+        # Broadcast the evolved population to the other ranks, then re-wrap.
+        accelerator.wait_for_everyone()
+        if not accelerator.is_main_process:
+            for pop_i, model in enumerate(population):
+                model.load_checkpoint(f"{accel_temp_models_path}/{algo}_{pop_i}.pt")
+        accelerator.wait_for_everyone()
+        for model in population:
+            model.wrap_models()
+
+    return population
 
 
 def resolve_selection_strategy(
-    selection_strategy: TournamentSelection | MultiFrequencyStrategy | None,
+    selection_strategy: TournamentSelection | MultiFrequencySelection | None,
     tournament: TournamentSelection | None,
-) -> TournamentSelection | MultiFrequencyStrategy | None:
+) -> TournamentSelection | MultiFrequencySelection | None:
     """Fold the deprecated tournament trainer argument into selection_strategy.
 
     :param selection_strategy: The selection strategy passed via the new argument.
-    :type selection_strategy: TournamentSelection | MultiFrequencyStrategy | None
+    :type selection_strategy: TournamentSelection | MultiFrequencySelection | None
     :param tournament: The strategy passed via the deprecated tournament argument.
     :type tournament: TournamentSelection | None
     :return: The resolved selection strategy.
-    :rtype: TournamentSelection | MultiFrequencyStrategy | None
+    :rtype: TournamentSelection | MultiFrequencySelection | None
     """
     if tournament is None:
         return selection_strategy
@@ -1386,7 +1409,7 @@ def resolve_selection_strategy(
 
 @singledispatch
 def run_selection_and_mutation(
-    selection_strategy: TournamentSelection | MultiFrequencyStrategy | None,
+    selection_strategy: TournamentSelection | MultiFrequencySelection | None,
     *,
     population: PopulationType,
     mutation: Mutations,
@@ -1400,7 +1423,7 @@ def run_selection_and_mutation(
     """Evolve a population with the given selection strategy, dispatched by its type.
 
     :param selection_strategy: The selection strategy driving population evolution.
-    :type selection_strategy: TournamentSelection | MultiFrequencyStrategy | None
+    :type selection_strategy: TournamentSelection | MultiFrequencySelection | None
     :param population: Population of agents.
     :type population: list[PopulationType]
     :param mutation: Mutation object.
@@ -1466,7 +1489,7 @@ def _run_tournament_selection_and_mutation(
 
 @run_selection_and_mutation.register
 def _run_multi_frequency_selection_and_mutation(
-    selection_strategy: MultiFrequencyStrategy,
+    selection_strategy: MultiFrequencySelection,
     *,
     population: PopulationType,
     mutation: Mutations,
@@ -1479,11 +1502,11 @@ def _run_multi_frequency_selection_and_mutation(
 ) -> PopulationType:
     """Dispatch to multi-frequency selection + mutation."""
     if language_model:
-        msg = "MF-PBT strategy does not support language_model=True."
+        msg = "MF-PBT selection does not support language_model=True."
         raise NotImplementedError(msg)
     return multi_frequency_selection_and_mutation(
         population=population,
-        multi_frequency_strategy=selection_strategy,
+        multi_frequency_selection=selection_strategy,
         mutation=mutation,
         env_name=env_name,
         algo=algo,

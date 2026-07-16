@@ -91,8 +91,8 @@ class TournamentSelectionSpec(BaseModel):
     elitism: bool = True
 
 
-class MultiFrequencyStrategySpec(BaseModel):
-    """Pydantic model for the MultiFrequencyStrategy object.
+class MultiFrequencySelectionSpec(BaseModel):
+    """Pydantic model for the MultiFrequencySelection object.
 
     :param selection_strategy: Discriminator selecting this (MF-PBT) branch of the
         manifest's tournament_selection union. Fixed to "multi_frequency".
@@ -199,46 +199,46 @@ def default_selection_strategy(value: Any) -> Any:
 
 
 SelectionStrategySpec = Annotated[
-    TournamentSelectionSpec | MultiFrequencyStrategySpec,
+    TournamentSelectionSpec | MultiFrequencySelectionSpec,
     Field(discriminator="selection_strategy"),
 ]
 """Discriminated union for the manifest's tournament_selection block."""
 
 
 def split_selection_spec(
-    selection: TournamentSelectionSpec | MultiFrequencyStrategySpec | None,
-) -> tuple[TournamentSelectionSpec | None, MultiFrequencyStrategySpec | None]:
+    selection: TournamentSelectionSpec | MultiFrequencySelectionSpec | None,
+) -> tuple[TournamentSelectionSpec | None, MultiFrequencySelectionSpec | None]:
     """Split a unified tournament_selection value into the two trainer kwargs.
 
     :param selection: The resolved tournament_selection spec, or None when unset.
-    :type selection: TournamentSelectionSpec | MultiFrequencyStrategySpec | None
-    :returns: (tournament_spec, multi_frequency_strategy_spec) with at most one set.
-    :rtype: tuple[TournamentSelectionSpec | None, MultiFrequencyStrategySpec | None]
+    :type selection: TournamentSelectionSpec | MultiFrequencySelectionSpec | None
+    :returns: (tournament_spec, multi_frequency_selection_spec) with at most one set.
+    :rtype: tuple[TournamentSelectionSpec | None, MultiFrequencySelectionSpec | None]
     """
-    if isinstance(selection, MultiFrequencyStrategySpec):
+    if isinstance(selection, MultiFrequencySelectionSpec):
         return None, selection
     return selection, None
 
 
 def check_selection_strategy_exclusive(
     tournament_selection: TournamentSelectionSpec | None,
-    multi_frequency_strategy_spec: MultiFrequencyStrategySpec | None,
+    multi_frequency_selection_spec: MultiFrequencySelectionSpec | None,
 ) -> None:
     """Reject configuring MF-PBT and tournament selection together in the trainer.
 
     :param tournament_selection: Tournament-selection spec, or None when unset.
     :type tournament_selection: TournamentSelectionSpec | None
-    :param multi_frequency_strategy_spec: MF-PBT spec, or None when unset.
-    :type multi_frequency_strategy_spec: MultiFrequencyStrategySpec | None
+    :param multi_frequency_selection_spec: MF-PBT spec, or None when unset.
+    :type multi_frequency_selection_spec: MultiFrequencySelectionSpec | None
     :raises ValueError: If both strategies are configured simultaneously.
     """
-    if multi_frequency_strategy_spec is not None and tournament_selection is not None:
-        msg = "Cannot set both 'tournament_selection' and 'multi_frequency_strategy'."
+    if multi_frequency_selection_spec is not None and tournament_selection is not None:
+        msg = "Cannot set both 'tournament_selection' and 'multi_frequency_selection'."
         raise ValueError(msg)
 
 
-def resolve_multi_frequency_strategy_pop_size(
-    multi_frequency_strategy_spec: MultiFrequencyStrategySpec | None,
+def resolve_multi_frequency_selection_pop_size(
+    multi_frequency_selection_spec: MultiFrequencySelectionSpec | None,
     training: TrainingSpec,
 ) -> None:
     """Derive and enforce the MF-PBT population size on a training spec, in place.
@@ -248,20 +248,20 @@ def resolve_multi_frequency_strategy_pop_size(
     n_individuals_per_subpopulation. This writes that derived value onto *training*
     and rejects an explicit pop_size (or its population_size alias) that contradicts it.
 
-    :param multi_frequency_strategy_spec: MF-PBT spec, or None when unset.
-    :type multi_frequency_strategy_spec: MultiFrequencyStrategySpec | None
+    :param multi_frequency_selection_spec: MF-PBT spec, or None when unset.
+    :type multi_frequency_selection_spec: MultiFrequencySelectionSpec | None
     :param training: Training spec updated in place; its pop_size is set to the
         derived value.
     :type training: ~agilerl.models.training.TrainingSpec
     :raises ValueError: If an explicitly-set pop_size conflicts with the derived
         value.
     """
-    if multi_frequency_strategy_spec is None:
+    if multi_frequency_selection_spec is None:
         return
 
     derived = (
-        multi_frequency_strategy_spec.n_subpopulations
-        * multi_frequency_strategy_spec.n_individuals_per_subpopulation
+        multi_frequency_selection_spec.n_subpopulations
+        * multi_frequency_selection_spec.n_individuals_per_subpopulation
     )
     pop_size_set = (
         "pop_size" in training.model_fields_set
@@ -271,7 +271,7 @@ def resolve_multi_frequency_strategy_pop_size(
         msg = (
             f"'pop_size' ({training.pop_size}) conflicts with the MF-PBT "
             "derived value n_subpopulations * n_individuals_per_subpopulation "
-            f"= {derived}. Omit 'pop_size' when 'multi_frequency_strategy' is configured; it is "
+            f"= {derived}. Omit 'pop_size' when 'multi_frequency_selection' is configured; it is "
             "derived automatically."
         )
         raise ValueError(msg)

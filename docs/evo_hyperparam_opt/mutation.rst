@@ -17,7 +17,9 @@ The :class:`Mutations <agilerl.hpo.mutation.Mutations>` class is used to mutate 
 
 :func:`Mutations.mutation(population) <agilerl.hpo.mutation.Mutations.mutation>` returns a mutated population.
 
-Tournament selection and mutations are applied sequentially to fully evolve a population between evaluation and learning cycles.
+Mutation is the shared *explore* step of the evolutionary loop: after a selection strategy has reshaped the population, mutation perturbs the nominated agents to trial new hyperparameter and architecture combinations. The selection strategy decides *which* agents are mutated, while ``Mutations`` decides *how*.
+
+Which agents get mutated is carried by the optional ``indices`` argument of :func:`Mutations.mutation() <agilerl.hpo.mutation.Mutations.mutation>`. :ref:`Tournament selection <tournament_selection>` mutates the whole new generation (``indices=None``), whereas :ref:`multi-frequency selection <multi_frequency_selection>` mutates only the clones that replace each subpopulation's losers, whose indices :func:`select() <agilerl.hpo.multi_frequency.MultiFrequencySelection.select>` returns.
 
 .. code-block:: python
 

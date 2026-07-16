@@ -14,14 +14,14 @@ the greediness that makes single-frequency PBT settle into local optima.
 Each subpopulation is partitioned by within-subpopulation fitness rank into four
 brackets (*winners*, *survivors*, *open-for-migration* and *losers*) that drive
 exploitation (clone a winner over a loser, then perturb), preservation (survivors
-and open agents are untouched by :meth:`~MultiFrequencyStrategy.select`) and the
+and open agents are untouched by :meth:`~MultiFrequencySelection.select`) and the
 asymmetric cross-frequency *migration* of Algorithm 2 of the paper.
 
 The orchestration that schedules subpopulations by frequency and saves the global
 elite lives in :func:`agilerl.utils.utils.multi_frequency_selection_and_mutation`;
-this module holds only the operator. The single-process path is the only one
-supported: an accelerator is rejected by the orchestrator with
-:class:`NotImplementedError`.
+this module holds only the operator. Under an :class:`~accelerate.Accelerator` that
+orchestrator runs the evolve step on the main process and broadcasts the result to the
+other ranks via a checkpoint round-trip, so this operator itself stays process-agnostic.
 """
 
 from __future__ import annotations
@@ -34,8 +34,8 @@ import numpy as np
 PopulationType = list[Any]
 
 
-class MultiFrequencyStrategy:
-    """The MF-PBT operator.
+class MultiFrequencySelection:
+    """The multi-frequency selection operator needed in MF-PBT.
 
     :param n_subpopulations: Number of subpopulations (>= 2; None -> 2).
     :type n_subpopulations: int | None
@@ -51,9 +51,8 @@ class MultiFrequencyStrategy:
     :type n_winners: int | None
     :param n_survivors: Agents in the survivors bracket (>= 0; None -> 0).
     :type n_survivors: int | None
-    :param n_open_for_migration: Agents in the open-for-migration bracket (>= 1,
-        which in turn requires n_subpopulations >= 2; None ->
-        round(0.25 * n_individuals_per_subpopulation)).
+    :param n_open_for_migration: Agents in the open-for-migration bracket (>= 1;
+        None -> round(0.25 * n_individuals_per_subpopulation)).
     :type n_open_for_migration: int | None
     :param n_losers: Agents in the losers bracket (>= 1; None -> the remainder
         n_ind - n_winners - n_survivors - n_open_for_migration).
@@ -276,7 +275,7 @@ class MultiFrequencyStrategy:
         return self._max_index
 
     @staticmethod
-    def subpopulation_for_index(
+    def _subpopulation_for_index(
         index: int, n_individuals_per_subpopulation: int
     ) -> int:
         """Map an agent index to its subpopulation id.
@@ -314,11 +313,11 @@ class MultiFrequencyStrategy:
             raise ValueError(msg)
         for agent in population:
             if getattr(agent, "subpopulation", None) is None:
-                agent.subpopulation = self.subpopulation_for_index(
+                agent.subpopulation = self._subpopulation_for_index(
                     agent.index, self.n_individuals_per_subpopulation
                 )
 
-    def brackets(
+    def _brackets(
         self, population: PopulationType, subpop: int
     ) -> tuple[PopulationType, PopulationType, PopulationType, PopulationType]:
         """Partition a subpopulation's members into the four ranked brackets.
@@ -371,7 +370,7 @@ class MultiFrequencyStrategy:
                 continue
             self.counters[subpop] = 0
 
-            winners, _survivors, open_for_migration, losers = self.brackets(
+            winners, _survivors, open_for_migration, losers = self._brackets(
                 updated, subpop
             )
             updated, clone_indices = self._clone_winners_over_losers(
@@ -432,10 +431,9 @@ class MultiFrequencyStrategy:
         subpopulations of external_pool. If the open agent is at least as good, no
         migration happens (and the external pointer does not advance). Otherwise the
         external agent migrates in: if it comes from a faster-evolving subpopulation
-        (smaller delta) only its networks/optimizer are imported while its mutable
-        hyperparameters are reset to the studied subpopulation's elite (the optimizer
-        learning rate is updated in place to the elite value, preserving its Adam
-        moments); otherwise it is cloned in full.
+        (smaller delta) only its networks are imported while its mutable
+        hyperparameters are reset to the studied subpopulation's elite; otherwise it is
+        cloned in full.
 
         :param population: The live population, used for substitution.
         :type population: list
@@ -518,39 +516,12 @@ class MultiFrequencyStrategy:
         # Re-run the registered mutation hooks so HP-derived state is rebuilt for the
         # new values (e.g. PPO sizes its rollout buffer from learn_step via a hook)
         migrant.mutation_hook()
-        # The networks were cloned whole from external (architecture unchanged),
-        # so the optimizers do not need rebuilding. Therefore, the LR is updated and
-        # the Adam moments are preserved
+        # Rebuild every optimizer whose learning rate was reset to the elite's
         changed_set = set(changed)
         for opt_config in migrant.registry.optimizers:
             lr_attr = opt_config.lr
             lr_attr_names = lr_attr if isinstance(lr_attr, tuple) else (lr_attr,)
             if any(name in changed_set for name in lr_attr_names):
-                self._set_optimizer_lr(migrant, opt_config)
+                migrant.reinit_optimizers(optimizer=opt_config)
         migrant.subpopulation = subpop
         return migrant
-
-    @staticmethod
-    def _set_optimizer_lr(agent: Any, opt_config: Any) -> None:
-        """Update an optimizer's learning rate in place, preserving its state.
-
-        :param agent: The migrant agent whose optimizer is updated.
-        :type agent: ~agilerl.algorithms.core.base.EvolvableAlgorithm
-        :param opt_config: The optimizer configuration to update.
-        :type opt_config: ~agilerl.algorithms.core.optimizer_wrapper.OptimizerConfig
-        """
-        if isinstance(opt_config.lr, tuple):
-            agent.reinit_optimizers(optimizer=opt_config)
-            return
-
-        new_lr = getattr(agent, opt_config.lr)
-        wrapper = getattr(agent, opt_config.name)
-        wrapper.lr = new_lr
-        optimizers = (
-            wrapper.optimizer.values()
-            if isinstance(wrapper.optimizer, dict)
-            else [wrapper.optimizer]
-        )
-        for optimizer in optimizers:
-            for group in optimizer.param_groups:
-                group["lr"] = new_lr

@@ -2303,6 +2303,23 @@ def _tagging_mutations(mutate_elite=True, seed=0):
     return muts
 
 
+def _labelled_mutations(seed=0):
+    """A mutations class offering two distinguishable, tagging mutations."""
+    muts = Mutations(1, 0, 0, 0, 0, 0, rand_seed=seed)
+
+    def tag_a(agent):
+        agent.mut = "A"
+        return agent
+
+    def tag_b(agent):
+        agent.mut = "B"
+        return agent
+
+    muts.mut_options = (tag_a, tag_b)
+    muts.mut_proba = np.array([0.5, 0.5])
+    return muts
+
+
 def test_mutation_indices_only_mutates_selected_agents():
     muts = _tagging_mutations()
     pop = [_IndexedAgent(i) for i in range(5)]
@@ -2355,15 +2372,15 @@ def test_mutation_indices_path_ignores_elite_skip():
     assert pop[0].mut == "tagged"
 
 
-def test_mutation_indices_draws_exactly_one_choice_per_target():
-    muts = _tagging_mutations(seed=123)
-    pop = [_IndexedAgent(i) for i in range(5)]
-    muts.mutation(pop, indices=[pop[1].index, pop[4].index])
+def test_mutation_indices_selection_is_reproducible():
+    def run():
+        muts = _labelled_mutations(seed=123)
+        pop = [_IndexedAgent(i) for i in range(5)]
+        muts.mutation(pop, indices=[pop[1].index, pop[4].index])
+        return pop
 
-    reference = _tagging_mutations(seed=123)
-    reference.rng.choice(reference.mut_options, 2, p=reference.mut_proba)
+    first, second = run(), run()
 
-    assert (
-        muts.rng.bit_generator.state["state"]
-        == reference.rng.bit_generator.state["state"]
-    )
+    assert [first[1].mut, first[4].mut] == [second[1].mut, second[4].mut]
+    assert all(a.mut in ("A", "B") for a in (first[1], first[4]))
+    assert [first[i].mut for i in (0, 2, 3)] == [None, None, None]

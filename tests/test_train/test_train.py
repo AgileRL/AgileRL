@@ -36,7 +36,7 @@ from agilerl.components.replay_buffer import (
     PrioritizedReplayBuffer,
     ReplayBuffer,
 )
-from agilerl.hpo.multi_frequency import MultiFrequencyStrategy
+from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.metrics import AgentMetrics, MultiAgentMetrics
 from agilerl.population import Population
 from agilerl.training.train_bandits import train_bandits
@@ -74,15 +74,15 @@ def _assert_wandb_summary_log(mock_wandb_log: MagicMock) -> None:
         assert key in logged
 
 
-def _make_mfpbt_strategy(seed: int = 0) -> MultiFrequencyStrategy:
-    """Build a six-slot MF-PBT strategy (2 subpops x 3) for trainer-routing tests.
+def _make_multi_frequency_selection(seed: int = 0) -> MultiFrequencySelection:
+    """Build a six-slot multi-frequency selection (2 subpops x 3) for trainer-routing tests.
 
-    :param seed: Seed for the strategy's RNG, defaults to 0.
+    :param seed: Seed for the selection's RNG, defaults to 0.
     :type seed: int, optional
-    :return: A six-slot MF-PBT strategy with fast/slow subpopulation frequencies.
-    :rtype: MultiFrequencyStrategy
+    :return: A six-slot multi-frequency selection with fast/slow subpopulation frequencies.
+    :rtype: MultiFrequencySelection
     """
-    return MultiFrequencyStrategy(
+    return MultiFrequencySelection(
         n_subpopulations=2,
         n_individuals_per_subpopulation=3,
         evolution_frequency_ratios=[1, 2],
@@ -1400,10 +1400,10 @@ class TestTrainOffPolicy:
         assert len(pop) == len(population_off_policy)
 
     @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
-    def test_train_off_policy_routes_mfpbt_strategy(
+    def test_train_off_policy_routes_multi_frequency_selection(
         self, env, population_off_policy, mutations, memory
     ):
-        multi_frequency_strategy = _make_mfpbt_strategy()
+        multi_frequency_selection = _make_multi_frequency_selection()
         with patch(
             "agilerl.utils.utils.multi_frequency_selection_and_mutation",
             side_effect=lambda population, **kwargs: population,
@@ -1420,14 +1420,15 @@ class TestTrainOffPolicy:
                 evo_steps=50,
                 eval_loop=1,
                 n_step_memory=None,
-                selection_strategy=multi_frequency_strategy,
+                selection_strategy=multi_frequency_selection,
                 mutation=mutations,
                 wb=False,
             )
 
         spy.assert_called_once()
         assert (
-            spy.call_args.kwargs["multi_frequency_strategy"] is multi_frequency_strategy
+            spy.call_args.kwargs["multi_frequency_selection"]
+            is multi_frequency_selection
         )
         assert len(pop) == len(population_off_policy)
 
@@ -2540,10 +2541,10 @@ class TestTrainOnPolicy:
                 mocked_agent_on_policy.unwrap_models.assert_called()
 
     @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
-    def test_train_on_policy_routes_mfpbt_strategy(
+    def test_train_on_policy_routes_multi_frequency_selection(
         self, env, population_on_policy, mutations
     ):
-        multi_frequency_strategy = _make_mfpbt_strategy()
+        multi_frequency_selection = _make_multi_frequency_selection()
         with patch(
             "agilerl.utils.utils.multi_frequency_selection_and_mutation",
             side_effect=lambda population, **kwargs: population,
@@ -2558,14 +2559,15 @@ class TestTrainOnPolicy:
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                selection_strategy=multi_frequency_strategy,
+                selection_strategy=multi_frequency_selection,
                 mutation=mutations,
                 wb=False,
             )
 
         spy.assert_called_once()
         assert (
-            spy.call_args.kwargs["multi_frequency_strategy"] is multi_frequency_strategy
+            spy.call_args.kwargs["multi_frequency_selection"]
+            is multi_frequency_selection
         )
         assert len(pop) == len(population_on_policy)
 
@@ -3121,10 +3123,10 @@ class TestTrainMultiAgentOffPolicy:
 
     @pytest.mark.parametrize("on_policy", [False])
     @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
-    def test_train_multi_agent_off_policy_routes_mfpbt_strategy(
+    def test_train_multi_agent_off_policy_routes_multi_frequency_selection(
         self, multi_env, population_multi_agent, on_policy, multi_memory, mutations
     ):
-        multi_frequency_strategy = _make_mfpbt_strategy()
+        multi_frequency_selection = _make_multi_frequency_selection()
         with patch(
             "agilerl.utils.utils.multi_frequency_selection_and_mutation",
             side_effect=lambda population, **kwargs: population,
@@ -3140,13 +3142,14 @@ class TestTrainMultiAgentOffPolicy:
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                selection_strategy=multi_frequency_strategy,
+                selection_strategy=multi_frequency_selection,
                 mutation=mutations,
             )
 
         spy.assert_called_once()
         assert (
-            spy.call_args.kwargs["multi_frequency_strategy"] is multi_frequency_strategy
+            spy.call_args.kwargs["multi_frequency_selection"]
+            is multi_frequency_selection
         )
         assert len(pop) == len(population_multi_agent)
 
@@ -3781,10 +3784,10 @@ class TestTrainMultiAgentOnPolicy:
 
     @pytest.mark.parametrize("on_policy", [True])
     @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
-    def test_train_multi_agent_on_policy_routes_mfpbt_strategy(
+    def test_train_multi_agent_on_policy_routes_multi_frequency_selection(
         self, multi_env, population_multi_agent, on_policy, mutations
     ):
-        multi_frequency_strategy = _make_mfpbt_strategy()
+        multi_frequency_selection = _make_multi_frequency_selection()
         with patch(
             "agilerl.utils.utils.multi_frequency_selection_and_mutation",
             side_effect=lambda population, **kwargs: population,
@@ -3799,13 +3802,14 @@ class TestTrainMultiAgentOnPolicy:
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                selection_strategy=multi_frequency_strategy,
+                selection_strategy=multi_frequency_selection,
                 mutation=mutations,
             )
 
         spy.assert_called_once()
         assert (
-            spy.call_args.kwargs["multi_frequency_strategy"] is multi_frequency_strategy
+            spy.call_args.kwargs["multi_frequency_selection"]
+            is multi_frequency_selection
         )
         assert len(pop) == len(population_multi_agent)
 
@@ -4383,7 +4387,7 @@ class TestTrainOffline:
             assert len(pop) == len(population_off_policy)
 
     @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
-    def test_train_offline_routes_mfpbt_strategy(
+    def test_train_offline_routes_multi_frequency_selection(
         self,
         env,
         population_off_policy,
@@ -4392,7 +4396,7 @@ class TestTrainOffline:
         offline_init_hp,
         dummy_h5py_data,
     ):
-        multi_frequency_strategy = _make_mfpbt_strategy()
+        multi_frequency_selection = _make_multi_frequency_selection()
         with patch(
             "agilerl.utils.utils.multi_frequency_selection_and_mutation",
             side_effect=lambda population, **kwargs: population,
@@ -4409,14 +4413,15 @@ class TestTrainOffline:
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                selection_strategy=multi_frequency_strategy,
+                selection_strategy=multi_frequency_selection,
                 mutation=mutations,
                 wb=False,
             )
 
         spy.assert_called_once()
         assert (
-            spy.call_args.kwargs["multi_frequency_strategy"] is multi_frequency_strategy
+            spy.call_args.kwargs["multi_frequency_selection"]
+            is multi_frequency_selection
         )
         assert len(pop) == len(population_off_policy)
 
@@ -4873,10 +4878,10 @@ class TestTrainBandits:
         assert len(pop) == len(population_bandit)
 
     @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
-    def test_train_bandit_routes_mfpbt_strategy(
+    def test_train_bandit_routes_multi_frequency_selection(
         self, bandit_env, population_bandit, mutations, bandit_memory
     ):
-        multi_frequency_strategy = _make_mfpbt_strategy()
+        multi_frequency_selection = _make_multi_frequency_selection()
         with patch(
             "agilerl.utils.utils.multi_frequency_selection_and_mutation",
             side_effect=lambda population, **kwargs: population,
@@ -4894,14 +4899,15 @@ class TestTrainBandits:
                 evo_steps=50,
                 eval_steps=5,
                 eval_loop=1,
-                selection_strategy=multi_frequency_strategy,
+                selection_strategy=multi_frequency_selection,
                 mutation=mutations,
                 wb=False,
             )
 
         spy.assert_called_once()
         assert (
-            spy.call_args.kwargs["multi_frequency_strategy"] is multi_frequency_strategy
+            spy.call_args.kwargs["multi_frequency_selection"]
+            is multi_frequency_selection
         )
         assert len(pop) == len(population_bandit)
 

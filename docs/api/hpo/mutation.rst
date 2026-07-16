@@ -15,7 +15,7 @@ The :class:`Mutations <agilerl.hpo.mutation.Mutations>` class is used to mutate 
 
 :func:`Mutations.mutation(population) <agilerl.hpo.mutation.Mutations.mutation>` returns a mutated population.
 
-Tournament selection and mutation should be applied sequentially to fully evolve a population between evaluation and learning cycles.
+A selection strategy and mutation are applied sequentially to fully evolve a population between evaluation and learning cycles: the selection strategy nominates which agents to perturb, and mutation perturbs them. See :ref:`evo_hyperparam_opt` for the two available selection strategies.
 
 .. code-block:: python
 
