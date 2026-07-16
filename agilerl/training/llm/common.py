@@ -1,13 +1,19 @@
+"""Shared helpers for the LLM finetuning entry points.
+
+Imported by both :mod:`agilerl.training.llm.rollout` (generative rollout
+training) and :mod:`agilerl.training.llm.dataset` (teacher-forced dataset
+training).
+"""
+
 import warnings
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
 
-from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 
-if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
-    from agilerl.llm_envs import PreferenceGym, ReasoningGym
+if TYPE_CHECKING:
+    from agilerl.llm_envs import DatasetEnv
 
 
 def _validate_finetune_args(
@@ -21,7 +27,7 @@ def _validate_finetune_args(
     algorithm_type_error: str,
     *,
     checkpoint_steps: int | None = None,
-    algo: Literal["grpo", "dpo", "sft", "multiturn"],
+    algo: Literal["grpo", "dpo", "sft", "rollout"],
 ) -> None:
     if evo_steps is not None and (tournament is None or mutation is None):
         warnings.warn(
@@ -88,19 +94,19 @@ def _compute_training_steps(
 
 def _resolve_training_envs(
     pop: list[Any],
-    env: ReasoningGym | PreferenceGym | None,
-    env_fn: Callable[[], ReasoningGym | PreferenceGym] | None,
-) -> tuple[list[ReasoningGym | PreferenceGym], bool]:
+    env: "DatasetEnv | None",
+    env_fn: "Callable[[], DatasetEnv] | None",
+) -> "tuple[list[DatasetEnv], bool]":
     """Resolve shared or per-agent training environments.
 
     :param pop: Population of agents being trained.
-    :type pop: PopulationType
+    :type pop: list[Any]
     :param env: Shared environment instance.
-    :type env: ReasoningGym | PreferenceGym | None
-    :param env_fn: Factory that creates one environment per agent.
-    :type env_fn: Callable[[], ReasoningGym | PreferenceGym] | None
+    :type env: DatasetEnv | None
+    :param env_fn: Factory for creating one environment per agent.
+    :type env_fn: Callable[[], DatasetEnv] | None
     :return: Environment list (aligned with population) and whether env_fn mode is active.
-    :rtype: tuple[list, bool]
+    :rtype: tuple[list[DatasetEnv], bool]
     """
     if env is not None and env_fn is not None:
         msg = "Provide exactly one of 'env' or 'env_fn', not both."
@@ -120,15 +126,3 @@ def _resolve_training_envs(
         )
     assert env is not None
     return [env], False
-
-
-def _num_epochs_reached(
-    envs: list[ReasoningGym | PreferenceGym], num_epochs: int | None
-) -> bool:
-    """Check whether all active environments have reached the epoch budget."""
-    if num_epochs is None:
-        return False
-    epoch_counts = [getattr(e, "num_epochs", None) for e in envs]
-    if not all(isinstance(c, int) for c in epoch_counts):
-        return False
-    return all(c >= num_epochs for c in epoch_counts)

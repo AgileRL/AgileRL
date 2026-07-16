@@ -65,19 +65,20 @@ Evaluate a saved checkpoint interactively:
 Minimal benchmarking scripts (no CLI args, default configs) are also available at
 ``benchmarking/benchmarking_sft.py`` and ``benchmarking/benchmarking_dpo.py``.
 
-The first block of code applies the model's tokenizer to the dataset, and creates an SFTGym environment. This is a wrapper around the dataset that allows for easy training of the LLM.
+The first block of code applies the model's tokenizer to the dataset, and creates an SFT ``DatasetEnv`` environment (``objective="sft"``). This wraps the dataset so the LLM can be trained easily.
 
 .. code-block:: python
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
     tokenizer.pad_token = tokenizer.eos_token
     train_dataset, test_dataset = make_dataset(DATASET)
-    env = SFTGym(
+    env = DatasetEnv(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
-        data_batch_size_per_gpu=16,
+        objective="sft",
         response_column="chosen",
+        data_batch_size_per_gpu=16,
         accelerator=accelerator,
     )
 

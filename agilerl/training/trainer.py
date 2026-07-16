@@ -95,8 +95,13 @@ class Trainer(ABC):
     :param replay_buffer: Replay buffer configuration.  Off-policy algorithms
         auto-create a default buffer when this is ``None``.
     :type replay_buffer: ReplayBufferT | None
-    :param resume_from_checkpoint: Path to resume from checkpoint.
+    :param resume_from_checkpoint: Checkpoint to continue an interrupted run from,
+        restoring optimizer state and the hyperparameters it belongs to. Mutually
+        exclusive with ``load_weights_from``.
     :type resume_from_checkpoint: str | None
+    :param load_weights_from: Checkpoint to warm-start a new run from, taking only
+        the weights. Mutually exclusive with ``resume_from_checkpoint``.
+    :type load_weights_from: str | None
     :param device: Torch device (e.g. ``"cpu"``, ``"cuda"``).
     :type device: str | torch.device
     :param accelerator: Accelerator instance.
@@ -113,6 +118,7 @@ class Trainer(ABC):
         replay_buffer: ReplayBufferT | None = None,
         *,
         resume_from_checkpoint: str | None = None,
+        load_weights_from: str | None = None,
         device: str | torch.device = "cpu",
         accelerator: Accelerator | None = None,
     ) -> None:
@@ -134,6 +140,7 @@ class Trainer(ABC):
         self.device = device
         self.accelerator = accelerator
         self._resume_checkpoint = resume_from_checkpoint
+        self._load_weights_from = load_weights_from
 
     @staticmethod
     def _env_spec_from_string(
@@ -173,7 +180,11 @@ class Trainer(ABC):
     def from_manifest(
         cls,
         manifest: str | Path | dict[str, Any] | TrainingManifest,
-        **kwargs: Any,
+        *,
+        resume_from_checkpoint: str | None = None,
+        load_weights_from: str | None = None,
+        device: str | torch.device = "cpu",
+        accelerator: Accelerator | None = None,
     ) -> Self:
         """Instantiate a :class:`Trainer` from a JSON-style manifest or a TrainingManifest instance.
 
@@ -185,8 +196,17 @@ class Trainer(ABC):
 
         :param manifest: Path to a YAML/JSON file, or a raw dict, or a TrainingManifest instance.
         :type manifest: str | Path | dict[str, Any] | TrainingManifest
-        :param kwargs: Trainer-specific construction arguments forwarded to the
-            subclass constructor.
+        :param resume_from_checkpoint: Checkpoint to continue an interrupted run
+            from, restoring optimizer state and the hyperparameters it belongs to.
+            Mutually exclusive with ``load_weights_from``.
+        :type resume_from_checkpoint: str | None
+        :param load_weights_from: Checkpoint to warm-start a new run from, taking
+            only the weights. Mutually exclusive with ``resume_from_checkpoint``.
+        :type load_weights_from: str | None
+        :param device: Torch device string (e.g. ``"cpu"``, ``"cuda"``).
+        :type device: str | torch.device
+        :param accelerator: Accelerator instance.
+        :type accelerator: Accelerator | None
         :returns: A fully configured :class:`Trainer` instance.
         :rtype: SelfTrainerT
         """
@@ -203,6 +223,10 @@ class Trainer(ABC):
             mutation=validated_manifest.mutation,
             tournament=validated_manifest.tournament_selection,
             replay_buffer=validated_manifest.replay_buffer,
+            resume_from_checkpoint=resume_from_checkpoint,
+            load_weights_from=load_weights_from,
+            device=device,
+            accelerator=accelerator,
         )
 
     @classmethod
@@ -264,8 +288,13 @@ class LocalTrainer(Trainer):
     :param hpo: Whether to enable evolutionary HPO using default mutation probabilities, tournament selection,
         and RL hyperparameters to mutate. Defaults to ``False``.
     :type hpo: bool
-    :param resume_from_checkpoint: Path to resume from checkpoint.
+    :param resume_from_checkpoint: Checkpoint to continue an interrupted run from,
+        restoring optimizer state and the hyperparameters it belongs to. Mutually
+        exclusive with ``load_weights_from``.
     :type resume_from_checkpoint: str | None
+    :param load_weights_from: Checkpoint to warm-start a new run from, taking only
+        the weights. Mutually exclusive with ``resume_from_checkpoint``.
+    :type load_weights_from: str | None
     :param device: Torch device string (e.g. ``"cpu"``, ``"cuda"``).
     :type device: str
     :param accelerator: Accelerator instance.
@@ -280,8 +309,10 @@ class LocalTrainer(Trainer):
         mutation: MutationSpec | None = None,
         tournament: TournamentSelectionSpec | None = None,
         replay_buffer: ReplayBufferT | None = None,
-        hpo: bool = False,
+        *,
         resume_from_checkpoint: str | None = None,
+        load_weights_from: str | None = None,
+        hpo: bool = False,
         device: str | torch.device = "cpu",
         accelerator: Accelerator | None = None,
     ) -> None:
@@ -294,6 +325,7 @@ class LocalTrainer(Trainer):
             tournament=tournament,
             replay_buffer=replay_buffer,
             resume_from_checkpoint=resume_from_checkpoint,
+            load_weights_from=load_weights_from,
             device=device,
             accelerator=accelerator,
         )
@@ -339,6 +371,7 @@ class LocalTrainer(Trainer):
             accelerator=self.accelerator,
             tokenizer=self.tokenizer,
             resume_from_checkpoint=self._resume_checkpoint,
+            load_weights_from=self._load_weights_from,
         )
         self.mutations = build_mutations_from_spec(
             self.mutation_spec, self.device, accelerator=self.accelerator
@@ -354,21 +387,21 @@ class LocalTrainer(Trainer):
             if self.replay_buffer_spec is not None
             else None
         )
-        self._multiturn = (
+        self._rollout = (
             isinstance(self.env_spec, LLMEnvSpec)
-            and self.env_spec.env_type == LLMEnvType.MULTITURN
+            and self.env_spec.env_type == LLMEnvType.ROLLOUT
         )
 
-        # Multi-turn LLM training requires an env factory rather than an instantiated environment.
-        if self._multiturn:
+        # Rollout training needs an env factory rather than an instantiated environment.
+        if self._rollout:
             max_model_len = getattr(self.algorithm_spec, "max_model_len", None)
             max_output_tokens = getattr(self.algorithm_spec, "max_output_tokens", None)
-            self.env_factory = self.env_spec.make_multiturn_env_factory(
+            self.env_factory = self.env_spec.make_rollout_env_factory(
                 self.tokenizer,
                 max_model_len=max_model_len,
                 max_output_tokens=max_output_tokens,
             )
-            self.train_fn = self.algorithm_spec.get_training_fn(multiturn=True)
+            self.train_fn = self.algorithm_spec.get_training_fn()
         else:
             self.env_factory = None
             self.train_fn = self.algorithm_spec.get_training_fn()
@@ -558,7 +591,8 @@ class LocalTrainer(Trainer):
         :rtype: GymEnvType | PzEnvType | LLMEnvType | BanditEnv
         """
         if isinstance(self.env_spec, LLMEnvSpec):
-            if self.env_spec.env_type == LLMEnvType.MULTITURN:
+            # Rollout envs are built per-trajectory by ``make_rollout_env_factory``.
+            if self.env_spec.env_type == LLMEnvType.ROLLOUT:
                 return None
 
             # Some LLMEnvSpec fields are dependent on the algo configuration
@@ -590,6 +624,8 @@ class LocalTrainer(Trainer):
 
         if agent_type == AgentType.LLMAgent:
             env_data.setdefault("env_type", manifest.algorithm.env_type)
+            if manifest.algorithm.objective is not None:
+                env_data.setdefault("objective", manifest.algorithm.objective)
             return LLMEnvSpec(**env_data)
 
         if agent_type == AgentType.MultiAgent:
@@ -689,7 +725,7 @@ class LocalTrainer(Trainer):
             "wandb_kwargs": wandb_kwargs,
         }
 
-        if self._multiturn:
+        if self._rollout:
             kwargs["env_factory"] = self.env_factory
             kwargs["max_turns"] = self.env_spec.max_turns
         else:

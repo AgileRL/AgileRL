@@ -24,7 +24,7 @@ develop *agency* and can be described as **agents**.
    * - :ref:`CISPO<cispo>` and :ref:`GSPO<gspo>`
      - GRPO specializations with alternative loss objectives (see the :ref:`GRPO tutorial<grpo_tutorial>`).
    * - :ref:`LLM PPO<llmppo>`, :ref:`LLM REINFORCE<llmreinforce>` and :ref:`GRPO<grpo>`
-     - :ref:`Multi-turn finetuning with LLMPPO, LLMREINFORCE, and GRPO<multiturn_grpo_ppo_tutorial>`
+     - :ref:`Multi-turn finetuning with LLMPPO, LLMREINFORCE, and GRPO<env_grpo_ppo_tutorial>`
    * - :ref:`SFT<sft>` and :ref:`DPO<dpo>`
      - :ref:`LLM fine-tuning with SFT and DPO<sft_dpo_finetuning>`
 
@@ -66,6 +66,7 @@ This example demonstrates how to use the GRPO algorithm to fine-tune a LLM on a 
 .. toctree::
    :hidden:
 
+   environments
    fused_logprobs
    quantization
    llm_checkpoints
@@ -89,7 +90,7 @@ This example demonstrates how to use the GRPO algorithm to fine-tune a LLM on a 
    :ref:`llm_finetuning_hpo`
       Evolutionary HPO for GRPO fine-tuning.
 
-   :ref:`multiturn_grpo_ppo_tutorial`
+   :ref:`env_grpo_ppo_tutorial`
       Multi-turn GRPO and PPO for LLMs.
 
 .. note::

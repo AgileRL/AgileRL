@@ -1754,15 +1754,36 @@ class TestAggregateMetricsNoAccelerator:
         assert result == pytest.approx(2.0)
 
 
-class TestDistributedWorldSize:
-    def test_returns_one_without_accelerator(self):
+class TestDistributedHelpers:
+    """World size / rank helpers: Accelerate, torch.distributed, single-process."""
+
+    def test_world_size_prefers_accelerator(self):
         from agilerl.utils.utils import _distributed_world_size
 
-        assert _distributed_world_size(None) == 1
-
-    def test_uses_accelerator_num_processes(self):
-        from agilerl.utils.utils import _distributed_world_size
-
-        accelerator = MagicMock()
-        accelerator.num_processes = 4
+        accelerator = MagicMock(num_processes=4)
         assert _distributed_world_size(accelerator) == 4
+
+    def test_rank_prefers_accelerator(self):
+        from agilerl.utils.utils import _distributed_rank
+
+        accelerator = MagicMock(process_index=2)
+        assert _distributed_rank(accelerator) == 2
+
+    def test_world_size_and_rank_fall_back_to_single_process(self):
+        from agilerl.utils.utils import _distributed_rank, _distributed_world_size
+
+        with patch("torch.distributed.is_available", return_value=False):
+            assert _distributed_world_size(None) == 1
+            assert _distributed_rank(None) == 0
+
+    def test_world_size_and_rank_use_torch_distributed(self):
+        from agilerl.utils.utils import _distributed_rank, _distributed_world_size
+
+        with (
+            patch("torch.distributed.is_available", return_value=True),
+            patch("torch.distributed.is_initialized", return_value=True),
+            patch("torch.distributed.get_world_size", return_value=8),
+            patch("torch.distributed.get_rank", return_value=3),
+        ):
+            assert _distributed_world_size(None) == 8
+            assert _distributed_rank(None) == 3

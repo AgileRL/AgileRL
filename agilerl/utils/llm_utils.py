@@ -11,7 +11,7 @@ import warnings
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -19,7 +19,11 @@ from accelerate import Accelerator
 from torch import nn
 
 from agilerl import HAS_DEEPSPEED, HAS_LLM_DEPENDENCIES
-from agilerl.typing import ReasoningPrompts
+from agilerl.typing import RolloutPrompts
+
+if TYPE_CHECKING:
+    from transformers import AutoTokenizer
+    from transformers.tokenization_utils_base import BatchEncoding
 
 logger = logging.getLogger(__name__)
 
@@ -36,10 +40,6 @@ else:
     AutoModelForCausalLMWithValueHead = Any  # type: ignore[assignment,misc]
     BitsAndBytesConfig = Any  # type: ignore[assignment,misc]
 
-_DEPRECATED_LLM_ENV_NAMES = frozenset(
-    ("apply_chat_template", "ReasoningGym", "PreferenceGym", "SFTGym"),
-)
-
 # Named bitsandbytes quantization presets
 _BNB_QUANT_PRESETS = frozenset({"none", "int8", "nf4"})
 
@@ -48,31 +48,71 @@ _BNB_QUANT_PRESETS = frozenset({"none", "int8", "nf4"})
 _CLIPPABLE_LINEAR_WRAPPER_SUFFIX = "ClippableLinear"
 
 
-def __getattr__(name: str) -> Any:
-    """Lazy re-exports from ``llm_envs`` with a deprecation warning."""
-    if name in _DEPRECATED_LLM_ENV_NAMES:
-        warnings.warn(
-            (
-                f"Importing {name} from agilerl.utils.llm_utils is deprecated; "
-                "it has moved to agilerl.llm_envs. Import from "
-                "agilerl.llm_envs instead; importing from "
-                "agilerl.utils.llm_utils will be removed in a future release."
-            ),
-            FutureWarning,
-            stacklevel=2,
-        )
-        import agilerl.llm_envs as _llm_envs
+def render_chat_template(
+    conversation_template: list[dict[str, str]],
+    tokenizer: AutoTokenizer,
+    **format_kwargs: Any,
+) -> str:
+    """Format each template message and render it through the chat template.
 
-        return getattr(_llm_envs, name)
-    msg = f"module {__name__!r} has no attribute {name!r}"
-    raise AttributeError(msg)
+    :param conversation_template: Messages whose ``content`` holds
+        ``str.format`` placeholders.
+    :type conversation_template: list[dict[str, str]]
+    :param tokenizer: Tokenizer providing the chat template.
+    :type tokenizer: AutoTokenizer
+    :param format_kwargs: Values interpolated into each message's content.
+    :return: The rendered (untokenized) prompt text.
+    :rtype: str
+    """
+    formatted_conversation = [
+        {
+            "role": msg["role"],
+            "content": msg["content"].format(**format_kwargs),
+        }
+        for msg in conversation_template
+    ]
+    return tokenizer.apply_chat_template(
+        formatted_conversation,
+        tokenize=False,
+        continue_final_message=True,
+    )
 
 
-def __dir__() -> list[str]:
-    return sorted(set(globals()) | set(_DEPRECATED_LLM_ENV_NAMES))
+def apply_chat_template(
+    conversation_template: list[dict[str, str]],
+    question: str,
+    answer: str,
+    tokenizer: AutoTokenizer,
+) -> BatchEncoding:
+    """Create and tokenize a chat template for a reasoning task.
+
+    :param conversation_template: The conversation template to be tokenized.
+    :type conversation_template: list[dict[str, str]]
+    :param question: The question to be tokenized.
+    :type question: str
+    :param answer: The answer to be tokenized.
+    :type answer: str
+    :param tokenizer: The tokenizer to be used.
+    :type tokenizer: AutoTokenizer
+    :return: The tokenized prompt.
+    :rtype: BatchEncoding
+    """
+    updated_prompt = render_chat_template(
+        conversation_template,
+        tokenizer,
+        question=question,
+        answer=answer,
+    )
+    return tokenizer(
+        [updated_prompt],
+        return_tensors="pt",
+        padding=True,
+        padding_side="left",
+        return_attention_mask=True,
+    )
 
 
-def max_prompt_tokens_for_sliding_window(
+def max_prompt_tokens_for_model_len(
     max_model_len: int,
     max_output_tokens: int | None,
 ) -> int:
@@ -103,7 +143,7 @@ def validate_llm_context_lengths(
     max_model_len: int,
     max_output_tokens: int | None,
 ) -> None:
-    """Reject configs that leave no prompt room under sliding-window rollouts.
+    """Reject configs that leave no prompt room for multi-turn rollouts.
 
     :param max_model_len: Total context length (prompt + completion ceiling).
     :type max_model_len: int
@@ -118,22 +158,22 @@ def validate_llm_context_lengths(
             f"max_output_tokens ({max_output_tokens}) must be less than "
             f"max_model_len ({max_model_len}); equal or larger values leave no "
             "prompt budget for multi-turn rollouts "
-            f"(max_prompt_tokens={max_prompt_tokens_for_sliding_window(max_model_len, max_output_tokens)})."
+            f"(max_prompt_tokens={max_prompt_tokens_for_model_len(max_model_len, max_output_tokens)})."
         )
         raise ValueError(msg)
 
 
 def normalize_reasoning_prompt_batch(
-    prompts: ReasoningPrompts | list[ReasoningPrompts],
-) -> list[ReasoningPrompts]:
+    prompts: RolloutPrompts | list[RolloutPrompts],
+) -> list[RolloutPrompts]:
     """Normalize reasoning prompts into a list-of-dicts per sample.
 
     Supports both legacy list-of-dicts and stacked dict formats where tensor/list
     values are batched on dimension 0.
     :param prompts: The prompts to normalize.
-    :type prompts: ReasoningPrompts | list[ReasoningPrompts]
+    :type prompts: RolloutPrompts | list[RolloutPrompts]
     :return: The normalized prompts.
-    :rtype: list[ReasoningPrompts]
+    :rtype: list[RolloutPrompts]
     """
     if isinstance(prompts, list):
         return prompts
@@ -147,7 +187,7 @@ def normalize_reasoning_prompt_batch(
         return []
 
     # Inspect each key once and write into all output dicts in one pass
-    result: list[ReasoningPrompts] = [{} for _ in range(batch_size)]
+    result: list[RolloutPrompts] = [{} for _ in range(batch_size)]
     for key, value in prompts.items():
         if (
             isinstance(value, torch.Tensor)
@@ -1550,46 +1590,6 @@ def move_params_to_cpu(unwrapped_model: torch.nn.Module) -> None:
         torch.cuda.empty_cache()
 
 
-def stitch_completion_after_windowed_hf_generate(
-    completion_id: torch.Tensor,
-    stitch: torch.Tensor,
-    initial_len: int,
-) -> tuple[torch.Tensor, int]:
-    """Reinsert dropped middle tokens after HF ``generate`` on a windowed prompt.
-
-    ``completion_id`` is ``concat(model_input_ids, new_tokens)``. The full
-    chronological sequence is
-    ``concat(completion_id[:, :initial_len], stitch, completion_id[:, initial_len:])``.
-
-    :param completion_id: Output of ``generate`` on the truncated prompt,
-        shape ``(1, seq_len)``.
-    :type completion_id: torch.Tensor
-    :param stitch: Middle segment removed for context windowing, shape ``(1, K)``.
-    :type stitch: torch.Tensor
-    :param initial_len: ``model_window_initial_len`` (length of the initial
-        user segment within ``model_input_ids``).
-    :type initial_len: int
-    :return: Full prompt plus generation with stitch restored.
-    :rtype: torch.Tensor
-    """
-    if stitch is None:
-        return completion_id, initial_len
-    stitch = stitch.to(completion_id.device, non_blocking=True)
-    stitch_len = stitch.shape[1] if stitch is not None else 0
-    full_prompt_len = initial_len + stitch_len
-    return (
-        torch.cat(
-            [
-                completion_id[:, :initial_len],
-                stitch,
-                completion_id[:, initial_len:],
-            ],
-            dim=1,
-        ),
-        full_prompt_len,
-    )
-
-
 def build_completion_mask(
     completion_id: torch.Tensor,
     prompt_len: int | None,
@@ -1605,11 +1605,9 @@ def build_completion_mask(
         the prompt followed by generated tokens.
     :type completion_id: torch.Tensor
     :param prompt_len: Number of leading tokens to mask out (the full
-        prompt length, possibly after sliding-window stitching). ``None``
-        means "no prompt prefix" — every non-pad token is part of the
-        completion. This matches the legacy slice semantics where
-        ``mask[:, None:] = True`` set the entire dim before pads were
-        zeroed back out.
+        prompt length). ``None`` means "no prompt prefix" — every non-pad
+        token is part of the completion, so the entire dim is set before
+        pads are zeroed back out.
     :type prompt_len: int | None
     :param pad_token_id: Pad token id used to suppress padding positions.
     :type pad_token_id: int
@@ -1625,96 +1623,31 @@ def build_completion_mask(
     return mask[:, 1:]
 
 
-def stitch_completion_after_windowed_vllm_generate(
-    completion_ids: list[torch.Tensor],
-    stitch_prefixes: list[torch.Tensor],
-    group_prompts: list[dict[str, Any]],
-    group_size: int,
-    prompts: list[dict[str, Any]],
-) -> list[torch.Tensor]:
-    """Reinsert dropped middle segments into ``model_prompt | generation`` tensors.
-
-    For each logical prompt ``i``, ``block`` is
-    ``concat(trajectory_input_ids, new_tokens)`` (batched over ``group_size``).
-    When ``stitch_prefix_ids`` is non-empty, the full chronological sequence is
-    ``concat(block[:, :I], stitch, block[:, I:], dim=1)`` with
-    ``I = initial_prompt_len`` from the corresponding prompt dict.
-
-    :param completion_ids: One tensor per logical prompt: prompt+gen per row.
-    :type completion_ids: list[torch.Tensor]
-    :param stitch_prefixes: Parallel to expanded ``group_prompts``; empty
-        tensors when no windowing for that slot.
-    :type stitch_prefixes: list[torch.Tensor]
-    :param group_prompts: ``prompts`` expanded so each original prompt repeats
-        ``group_size`` times (same order as vLLM batch).
-    :type group_prompts: list[dict[str, Any]]
-    :param group_size: Number of repeated entries per logical prompt.
-    :type group_size: int
-    :param prompts: Original batch of observation dicts (length ``N``).
-    :type prompts: list[dict[str, Any]]
-    :return: Same length as ``completion_ids``, with middle stitch applied
-        where ``stitch_prefixes`` is non-empty.
-    :rtype: list[torch.Tensor]
-    """
-    if group_size != 1:
-        error_msg = f"vLLM sliding-window stitch is only implemented for group_size=1 (got {group_size})."
-        raise ValueError(error_msg)
-    stitched: list[torch.Tensor] = []
-    for i, _ in enumerate(prompts):
-        completion_i = completion_ids[i]
-        stitch_i = stitch_prefixes[group_size * i]
-        if stitch_i.shape[1] == 0:
-            stitched.append(completion_i)
-            continue
-        initial_prompt_len_raw = group_prompts[group_size * i].get("initial_prompt_len")
-        if initial_prompt_len_raw is None:
-            msg = "initial_prompt_len required when stitch_prefix_ids is non-empty"
-            raise ValueError(
-                msg,
-            )
-        initial_prompt_len_i = int(initial_prompt_len_raw)
-        group_size_i = completion_i.shape[0]
-        stitch_group_i = stitch_i.expand(group_size_i, -1)
-        stitched.append(
-            torch.cat(
-                [
-                    completion_i[:, :initial_prompt_len_i],
-                    stitch_group_i,
-                    completion_i[:, initial_prompt_len_i:],
-                ],
-                dim=1,
-            ),
-        )
-    return stitched
-
-
 def prepare_prompt_hf_generate(
-    prompt_dict: ReasoningPrompts, device: torch.device
-) -> dict[str, torch.Tensor | int]:
+    prompt_dict: RolloutPrompts, device: torch.device
+) -> dict[str, torch.Tensor]:
     """Prepare a prompt dictionary for HuggingFace generate.
 
+    ``attention_mask`` is taken from the dict when present (e.g. a padded
+    batch) and derived as all-ones otherwise (a single unpadded row, the
+    ``RolloutEnv`` observation shape).
+
     :param prompt_dict: The prompt dictionary to prepare.
-    :type prompt_dict: ReasoningPrompts
+    :type prompt_dict: RolloutPrompts
     :param device: The device to move the prompt dictionary to.
     :type device: torch.device
-    :return: The prepared prompt dictionary.
-    :rtype: dict[str, torch.Tensor | int]
+    :return: ``input_ids`` / ``attention_mask`` moved to ``device``.
+    :rtype: dict[str, torch.Tensor]
     """
-    input_ids = prompt_dict.get("trajectory_input_ids", prompt_dict["input_ids"])
-    attention_mask = prompt_dict.get(
-        "trajectory_attention_mask",
-        prompt_dict["attention_mask"],
-    )
-    stitched = prompt_dict.get("stitch_prefix_ids")
-    initial_prompt_len = prompt_dict.get("initial_prompt_len")
-    if isinstance(initial_prompt_len, torch.Tensor) and initial_prompt_len.numel() == 1:
-        initial_prompt_len = int(initial_prompt_len.item())
-
+    input_ids = prompt_dict["input_ids"].to(device)
+    attention_mask = prompt_dict.get("attention_mask")
     return {
-        "input_ids": input_ids.to(device),
-        "attention_mask": attention_mask.to(device),
-        "stitch_prefix_ids": stitched,
-        "initial_prompt_len": initial_prompt_len,
+        "input_ids": input_ids,
+        "attention_mask": (
+            torch.ones_like(input_ids)
+            if attention_mask is None
+            else attention_mask.to(device)
+        ),
     }
 
 
@@ -1778,13 +1711,13 @@ def sample_eval_prompts(
     """Randomly sample *n* ``(prompt, chosen, rejected)`` triples from
     *env*'s held-out test dataset.
 
-    Columns are resolved automatically per gym type:
+    Columns are resolved automatically per dataset ``objective``:
 
-    * :class:`SFTGym` — ``chosen`` is ``env.response_column``; ``rejected``
+    * ``objective="sft"`` — ``chosen`` is ``env.response_column``; ``rejected``
       is ``None`` (SFT has no negative example).
-    * :class:`PreferenceGym` — ``chosen`` and ``rejected`` map to the
+    * ``objective="preference"`` — ``chosen`` and ``rejected`` map to the
       dataset's ``"chosen"`` / ``"rejected"`` columns.
-    * Any other gym — both are ``None``.
+    * Any other env — both are ``None``.
 
     :param env: AgileRL gym environment with a ``test_dataloader`` attribute.
     :type env: Any
@@ -1801,9 +1734,10 @@ def sample_eval_prompts(
 
     chosen_col: str | None = None
     rejected_col: str | None = None
-    if hasattr(env, "response_column"):  # SFTGym
+    objective = getattr(env, "objective", None)
+    if objective == "sft":
         chosen_col = env.response_column
-    elif "chosen" in dataset.features:  # PreferenceGym
+    elif objective == "preference":
         chosen_col = "chosen"
         rejected_col = "rejected"
 

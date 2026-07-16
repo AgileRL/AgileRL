@@ -53,9 +53,16 @@ llm = [
     "datasets==5.0.0",
     "deepspeed>=0.19.1; sys_platform == 'linux'",
     "liger-kernel==0.8.0; sys_platform == 'linux'",
+    "openenv>=0.3.1,<0.4",
     "peft==0.19.1",
     "transformers==5.11.0",
     "vllm>=0.23; sys_platform == 'linux'",
+]
+# GEM language-game envs (https://github.com/axon-rl/gem), served via the OpenEnv
+# interface. Packaged on PyPI as ``gem-llm`` (imported as ``gem``); its ``pycosat``
+# dependency needs a C toolchain (build-essential + python3-dev) at install time.
+gem = [
+    "gem-llm",
 ]
 arena = [
     "agilerl-arena==0.1.0",
@@ -66,7 +73,9 @@ all = [
     "bitsandbytes==0.49.2; sys_platform == 'linux'",
     "datasets==5.0.0",
     "deepspeed>=0.19.1; sys_platform == 'linux'",
+    "gem-llm",
     "liger-kernel==0.8.0; sys_platform == 'linux'",
+    "openenv>=0.3.1,<0.4",
     "peft==0.19.1",
     "transformers==5.11.0",
     "vllm>=0.23; sys_platform == 'linux'",
@@ -223,4 +232,4 @@ ignore = [
     "PIE790",        # unnecessary ...
     "PD011",         # .values -> .to_numpy()
 ]
-"{benchmarking,demos,tutorials}/**" = ["ALL"]
+"{benchmarking,demos,tutorials,scripts}/**" = ["ALL"]

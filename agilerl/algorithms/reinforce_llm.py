@@ -1,5 +1,4 @@
 import warnings
-from contextlib import nullcontext
 from typing import Any, Literal
 
 import numpy as np
@@ -9,7 +8,6 @@ from accelerate import Accelerator
 from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import ActionResult, LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
-from agilerl.llm_envs import ReasoningGym
 
 if HAS_LIGER_KERNEL:
     from agilerl.algorithms.core.llm_ops.fused_loss import (
@@ -23,7 +21,6 @@ else:
     apply_fused_policy_loss = None  # type: ignore[assignment]
 from agilerl.protocols import (
     LoraConfigProtocol,
-    MultiTurnEnv,
     PeftModelProtocol,
     PreTrainedModelProtocol,
 )
@@ -43,7 +40,6 @@ from agilerl.utils.llm_utils import (
     normalize_reasoning_prompt_batch,
     pool_by_turns,
     prepare_prompt_hf_generate,
-    stitch_completion_after_windowed_hf_generate,
     validate_importance_sampling_level,
     validate_llm_context_lengths,
 )
@@ -399,24 +395,15 @@ class REINFORCE(LLMAlgorithm):
                             prompt = prepare_prompt_hf_generate(
                                 prompt_dict, actor_device
                             )
-                            stitch_ids = prompt.pop("stitch_prefix_ids", None)
-                            initial_prompt_len = prompt.pop("initial_prompt_len", None)
                             completion_id = self.actor.generate(
                                 **prompt,
                                 generation_config=self.generation_config,
-                            )
-                            completion_id, full_prompt_len = (
-                                stitch_completion_after_windowed_hf_generate(
-                                    completion_id,
-                                    stitch_ids,
-                                    initial_prompt_len,
-                                )
                             )
                             completion_ids.append(completion_id)
                             completion_masks.append(
                                 build_completion_mask(
                                     completion_id,
-                                    full_prompt_len,
+                                    None,
                                     self.pad_token_id,
                                 )
                             )
@@ -691,75 +678,6 @@ class REINFORCE(LLMAlgorithm):
             self.metrics.log(key, value)
 
         return result
-
-    def test(
-        self,
-        env: ReasoningGym | MultiTurnEnv,
-        loop: int = 1,
-        *args: Any,
-        **kwargs: Any,
-    ) -> torch.Tensor:
-        """Return fitness (test) score tensor of llm on test sub-set.
-
-        ``ReasoningGym`` (and compatible dataset envs): ``reset`` returns a batch
-        of prompt dicts; each ``step`` accepts completion id tensors and returns
-        the next batch plus rewards. ``loop`` iterations advance the test
-        dataloader that many times.
-
-        :param env: A :class:`~agilerl.utils.llm_utils.ReasoningGym` or
-            :class:`~agilerl.llm_envs.TokenObservationWrapper`.
-        :type env: ReasoningGym | MultiTurnEnv
-        :param loop: Number of outer test iterations (dataloader passes or episodes).
-        :type loop: int
-        :return: Concatenated per-step rewards from the test loop.
-        :rtype: torch.Tensor
-        """
-        eval_context = getattr(env, "eval_mode", nullcontext)
-        with eval_context():
-            if isinstance(env, ReasoningGym):
-                prompts = env.reset()
-                rewards = []
-                for _ in range(loop):
-                    completion_ids = self.get_action(
-                        prompts, training=False
-                    ).completion_ids
-                    next_prompts, reward = env.step(completion_ids)
-                    prompts = next_prompts
-                    rewards.append(reward)
-                reward_tensor = torch.cat(rewards)
-            elif isinstance(env, MultiTurnEnv):
-                all_rewards: list[torch.Tensor] = []
-                for _ in range(loop):
-                    prompt_dict, _info = env.reset()
-                    terminated, truncated = False, False
-                    while not terminated and not truncated:
-                        completion_ids = self.get_action(
-                            [prompt_dict],
-                            training=False,
-                        ).completion_ids
-                        full = completion_ids[0]
-                        prompt_dict, reward, terminated, truncated, _info = env.step(
-                            full,
-                        )
-                        all_rewards.append(
-                            torch.tensor(
-                                [float(reward)],
-                                dtype=torch.float32,
-                                device=full.device,
-                            )
-                        )
-                reward_tensor = torch.cat(all_rewards)
-            else:
-                msg = (
-                    "env must be a ReasoningGym (or subclass) or "
-                    f"MultiTurnEnv; got {type(env).__name__}"
-                )
-                raise TypeError(msg)
-        mean_fit = torch.mean(reward_tensor.float()).item()
-        self.metrics.add_fitness(mean_fit)
-        if self.accelerator is not None:
-            self.accelerator.wait_for_everyone()
-        return np.array(mean_fit)
 
     def _validate_core_args(
         self,

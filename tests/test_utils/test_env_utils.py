@@ -38,6 +38,12 @@ class TestParseEntrypoint:
     def test_parses_valid_entrypoint(self):
         assert env_utils._parse_entrypoint("env.py:MyEnv") == ("env.py", "MyEnv")
 
+    def test_windows_drive_path_splits_on_last_colon(self):
+        r"""``C:\...\file.py:Class`` splits at the trailing colon, keeping the drive."""
+        module_ref, target = env_utils._parse_entrypoint(r"C:\tmp\disk_env.py:DiskEnv")
+        assert module_ref == r"C:\tmp\disk_env.py"
+        assert target == "DiskEnv"
+
 
 class TestGetRewardFn:
     def test_missing_file_raises(self, tmp_path):

@@ -7,10 +7,10 @@ from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.algorithms import GRPO
-from agilerl.training.llm import finetune_llm_reasoning
+from agilerl.training.llm import train_llm_rollout
 from agilerl.utils.algo_utils import VLLMConfig
-from agilerl.llm_envs import ReasoningGym
+from agilerl.llm_envs import RolloutEnv
+from agilerl.utils.utils import create_population
 
 if HAS_LLM_DEPENDENCIES:
     from datasets import load_dataset
@@ -122,17 +122,30 @@ def main(init_hp, mut_p):
         {"role": "assistant", "content": "Let me solve this step by step.\n<think>"},
     ]
 
-    env = ReasoningGym(
-        train_dataset=train_dataset,
-        test_dataset=test_dataset,
-        tokenizer=tokenizer,
-        reward_fn=combined_rewards,
-        conversation_template=conversation_template,
-        data_batch_size_per_gpu=10,
-        accelerator=accelerator,
-        return_raw_completions=USE_VLLM,
-        max_context_length=init_hp["MAX_MODEL_LEN"],
-    )
+    def prompt_builder(row: dict) -> str:
+        parts = [
+            m["content"].format(question=row["question"], answer=row["answer"])
+            for m in conversation_template
+        ]
+        return "\n".join(p for p in parts if p)
+
+    # Reasoning folds into the single-turn rollout taxonomy: (question, answer)
+    # rows + a reward fn, no pre-packaged env needed — ``from_dataset`` bundles
+    # them into one. The BatchRolloutEnv owns the dataset cursor, keeping each
+    # GRPO group's dataset order deterministic and consistent.
+    def env_factory(evaluation_mode: bool = False):
+        env = RolloutEnv.from_dataset(
+            train_dataset,
+            combined_rewards,
+            tokenizer,
+            test_dataset=test_dataset,
+            prompt_builder=prompt_builder,
+            pad_id=getattr(tokenizer, "pad_token_id", None),
+            apply_chat_template=True,
+            max_model_len=init_hp["MAX_MODEL_LEN"],
+        )
+        env.evaluation_mode = evaluation_mode
+        return env
 
     hp_config = HyperparameterConfig(
         beta=RLParameter(min=mut_p["MIN_BETA"], max=mut_p["MAX_BETA"]),
@@ -189,9 +202,10 @@ def main(init_hp, mut_p):
         accelerator=accelerator,
     )
 
-    finetune_llm_reasoning(
+    train_llm_rollout(
         pop=pop,
-        env=env,
+        max_turns=1,
+        env_factory=env_factory,
         init_hp=init_hp,
         evaluation_interval=10,
         wb=True,
@@ -203,7 +217,6 @@ def main(init_hp, mut_p):
         tournament=tournament,
         accelerator=accelerator,
         verbose=True,
-        num_epochs=1,
     )
     accelerator.end_training()
 

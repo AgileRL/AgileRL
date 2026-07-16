@@ -20,9 +20,10 @@ from transformers.modeling_utils import PreTrainedModel
 
 from agilerl.algorithms.core import ActionResult
 from agilerl.algorithms.reinforce_llm import REINFORCE
+from agilerl.llm_envs import RolloutEnv
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, VLLMConfig
-from agilerl.utils.llm_utils import ReasoningGym
 from tests import TINY_LLM_FIXTURE_PATH
+from tests.helpers.rollout_doubles import FakeEnvClient
 from tests.utils import (
     assert_vllm_get_action_contract,
     make_mock_vllm_instance,
@@ -337,30 +338,51 @@ class _RebnStub:
     _resolve_advantage_granularity = REINFORCE._resolve_advantage_granularity
 
 
-def _minimal_reasoning_gym(device: str, vocab_size: int, input_size: int, bs: int):
-    env = ReasoningGym.__new__(ReasoningGym)
+def _minimal_reasoning_rollout_env(device: str, vocab_size: int, input_size: int):
+    """Single-turn reasoning ``RolloutEnv`` stub (the folded reasoning case)."""
 
-    @contextmanager
-    def eval_mode():
-        yield
+    class _SingleTurnReasoning(RolloutEnv):
+        max_turns = 1
 
-    env.eval_mode = eval_mode
+        def __init__(self):
+            self._env_client = None
+            self.done = False
 
-    def reset(reset_dataloaders=False):
-        return {
-            "input_ids": torch.randint(0, vocab_size, (bs, input_size), device=device),
-            "attention_mask": torch.ones(bs, input_size, device=device),
-            "question": [f"q_{i}" for i in range(bs)],
-            "answer": [f"a_{i}" for i in range(bs)],
-        }
+        def _prompt(self):
+            return {
+                "input_ids": torch.randint(
+                    0, vocab_size, (1, input_size), device=device
+                ),
+                "attention_mask": torch.ones(1, input_size, device=device),
+                "text": "q",
+            }
 
-    def step(completion_ids):
-        r = torch.ones(bs, device=device)
-        return reset(), r
+        def reset(self, seed=None):
+            del seed
+            self.done = False
+            return self._prompt(), {}
 
-    env.reset = reset
-    env.step = step
-    return env
+        def step(self, full_completion_ids):
+            del full_completion_ids
+            self.done = True
+            return self._prompt(), 1.0, True, False, {}
+
+        def get_episode_data(self):
+            return (
+                torch.ones(1, input_size, dtype=torch.long, device=device),
+                torch.ones(1, input_size - 1, dtype=torch.bool, device=device),
+                torch.zeros(1, input_size - 1, dtype=torch.long, device=device),
+                torch.tensor([1.0], dtype=torch.float32, device=device),
+            )
+
+        @contextmanager
+        def eval_mode(self):
+            yield
+
+        def close(self):
+            return None
+
+    return _SingleTurnReasoning()
 
 
 class TestREINFORCEInit:
@@ -829,7 +851,7 @@ class TestREINFORCELearn:
         rf.learn((completions, action_masks, rewards), turn_ids=turn_ids)
 
     @pytest.mark.parametrize("use_vllm", [False, True])
-    def test_llmreinforce_learns_multiturn(self, use_vllm):
+    def test_llmreinforce_learns_rollout(self, use_vllm):
         """Multi-turn learn path updates actor adapters without vLLM/DeepSpeed."""
         torch.manual_seed(0)
         rf = _cpu_llmreinforce(
@@ -981,33 +1003,47 @@ class TestREINFORCELearn:
 
 
 class TestREINFORCETest:
-    def test_test_method_reasoning_gym_branch(self):
+    def test_test_method_reasoning_rollout_branch(self):
         rf = _cpu_llmreinforce()
-        env = _minimal_reasoning_gym("cpu", 100, 10, 2)
-        out = rf.test(env, loop=2)
+        env = _minimal_reasoning_rollout_env("cpu", 100, 10)
+        completion = torch.ones(1, 12, dtype=torch.long)
+        action_mask = torch.ones(1, 11, dtype=torch.bool)
+        with patch.object(
+            rf, "get_action", return_value=ActionResult([completion], [action_mask])
+        ):
+            out = rf.test(env, loop=2)
         assert out.shape == ()
         assert out.item() == pytest.approx(1.0)
 
-    def test_test_method_multiturn_episode_env_branch(self):
-        class DummyMultiTurnEpisodeEnv:
+    def test_test_method_rollout_episode_env_branch(self):
+        class DummyRolloutEpisodeEnv(RolloutEnv):
             max_turns = 2
 
             def __init__(self):
                 self._step_count = 0
-                self.valid_prompt = {
-                    "input_ids": torch.ones(1, 4, dtype=torch.long),
-                    "attention_mask": torch.ones(1, 4, dtype=torch.long),
-                }
+                self._env_client = FakeEnvClient()
+                self.done = False
 
             def reset(self, seed=None):
                 del seed
                 self._step_count = 0
-                return self.valid_prompt, {}
+                self.done = False
+                prompt = {
+                    "input_ids": torch.ones(1, 4, dtype=torch.long),
+                    "attention_mask": torch.ones(1, 4, dtype=torch.long),
+                }
+                return prompt, {}
 
             def step(self, full_completion_ids):
                 del full_completion_ids
                 self._step_count += 1
-                return {}, 1.0, True, False, {}
+                prompt = {
+                    "input_ids": torch.ones(1, 4, dtype=torch.long),
+                    "attention_mask": torch.ones(1, 4, dtype=torch.long),
+                }
+                terminated = self._step_count >= 1
+                self.done = terminated
+                return prompt, 1.0, terminated, False, {}
 
             def get_episode_data(self):
                 return (
@@ -1021,7 +1057,7 @@ class TestREINFORCETest:
                 return None
 
         rf = _cpu_llmreinforce()
-        env = DummyMultiTurnEpisodeEnv()
+        env = DummyRolloutEpisodeEnv()
         completion = torch.ones(1, 6, dtype=torch.long)
         action_mask = torch.ones(1, 5, dtype=torch.bool)
         with patch.object(
@@ -1038,11 +1074,16 @@ class TestREINFORCETest:
         assert rf.fitness[-1] == pytest.approx(1.0)
 
     def test_test_method_waits_for_everyone(self):
-        class DummyMultiTurnEpisodeEnv:
+        class DummyRolloutEpisodeEnv(RolloutEnv):
             max_turns = 1
+
+            def __init__(self):
+                self._env_client = FakeEnvClient()
+                self.done = False
 
             def reset(self, seed=None):
                 del seed
+                self.done = False
                 return {
                     "input_ids": torch.ones(1, 4, dtype=torch.long),
                     "attention_mask": torch.ones(1, 4, dtype=torch.long),
@@ -1050,6 +1091,7 @@ class TestREINFORCETest:
 
             def step(self, full_completion_ids):
                 del full_completion_ids
+                self.done = True
                 return {}, 1.0, True, False, {}
 
             def close(self):
@@ -1062,17 +1104,19 @@ class TestREINFORCETest:
         with patch.object(
             rf, "get_action", return_value=ActionResult([completion], None)
         ):
-            rf.test(DummyMultiTurnEpisodeEnv(), loop=1)
+            rf.test(DummyRolloutEpisodeEnv(), loop=1)
         acc.wait_for_everyone.assert_called()
 
-    def test_test_method_multiturn_continues_when_not_done(self):
+    def test_test_method_rollout_continues_when_not_done(self):
         """Cover prompt update when the episode spans turns."""
 
-        class DummyMultiTurnContinueEnv:
+        class DummyRolloutContinueEnv(RolloutEnv):
             max_turns = 2
 
             def __init__(self):
                 self._step_count = 0
+                self._env_client = FakeEnvClient()
+                self.done = False
                 self.prompt_a = {
                     "input_ids": torch.ones(1, 4, dtype=torch.long),
                     "attention_mask": torch.ones(1, 4, dtype=torch.long),
@@ -1085,6 +1129,7 @@ class TestREINFORCETest:
             def reset(self, seed=None):
                 del seed
                 self._step_count = 0
+                self.done = False
                 return self.prompt_a, {}
 
             def step(self, full_completion_ids):
@@ -1092,6 +1137,7 @@ class TestREINFORCETest:
                 self._step_count += 1
                 if self._step_count == 1:
                     return self.prompt_b, 0.5, False, False, {}
+                self.done = True
                 return {}, 1.0, True, False, {}
 
             def close(self):
@@ -1102,7 +1148,7 @@ class TestREINFORCETest:
         with patch.object(
             rf, "get_action", return_value=ActionResult([completion], None)
         ) as get_action:
-            out = rf.test(DummyMultiTurnContinueEnv(), loop=1)
+            out = rf.test(DummyRolloutContinueEnv(), loop=1)
 
         assert out.shape == ()
         assert get_action.call_count == 2
@@ -1111,31 +1157,35 @@ class TestREINFORCETest:
 
     def test_test_method_unknown_env_typeerror(self):
         rf = _cpu_llmreinforce()
-        with pytest.raises(TypeError, match="env must be a ReasoningGym"):
+        with pytest.raises(TypeError, match="env must be a RolloutEnv"):
             rf.test(object(), loop=1)
 
     def test_test_method_token_observation_wrapper_branch(self):
         from transformers import AutoTokenizer
 
-        from agilerl.llm_envs import TokenObservationWrapper
+        from agilerl.llm_envs import OpenEnvServer, RolloutEnv
         from agilerl.utils.probe_envs_llm import ConstantTargetEnv
 
         tok = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
         if tok.pad_token_id is None:
             tok.pad_token = tok.eos_token
-        env = TokenObservationWrapper(
-            ConstantTargetEnv(target_digit="1", prompt="1"),
-            tok,
-            max_turns=1,
-            pad_id=tok.pad_token_id,
-            apply_chat_template=False,
-            max_model_len=128,
-            max_output_tokens=8,
-        )
-        rf = _cpu_llmreinforce(max_model_len=128, max_output_tokens=8)
-        out = rf.test(env, loop=1)
-        assert out.shape == ()
-        assert rf.fitness[-1] == pytest.approx(float(out))
+        server = OpenEnvServer(ConstantTargetEnv(target_digit="1", prompt="1")).start()
+        try:
+            env = RolloutEnv(
+                server.base_url,
+                tok,
+                max_turns=1,
+                pad_id=tok.pad_token_id,
+                apply_chat_template=False,
+                max_model_len=128,
+                max_output_tokens=8,
+            )
+            rf = _cpu_llmreinforce(max_model_len=128, max_output_tokens=8)
+            out = rf.test(env, loop=1)
+            assert out.shape == ()
+            assert rf.fitness[-1] == pytest.approx(float(out))
+        finally:
+            server.stop()
 
 
 class TestReinforceLossLiger:

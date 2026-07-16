@@ -4,7 +4,7 @@ from collections.abc import Callable
 from enum import Enum
 from importlib import import_module
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import gymnasium as gym
 import pandas as pd
@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from accelerate import Accelerator
     from datasets import Dataset
 
-    from agilerl.wrappers.llm_envs import PreferenceGym, ReasoningGym, SFTGym
+    from agilerl.llm_envs import DatasetEnv, RolloutEnv
 
 
 def _require_datasets() -> tuple[type[Dataset], Callable[[], Dataset]]:
@@ -50,12 +50,15 @@ def _require_datasets() -> tuple[type[Dataset], Callable[[], Dataset]]:
 
 
 class LLMEnvType(str, Enum):
-    """Type of LLM environment."""
+    """Type of LLM environment.
 
-    REASONING = "reasoning"
-    PREFERENCE = "preference"
-    SFT = "sft"
-    MULTITURN = "multiturn"
+    ``ROLLOUT`` covers every generative regime (a ``RolloutEnv``): single-turn
+    reasoning is simply ``max_turns=1``. ``DATASET`` covers the teacher-forced
+    regimes (a ``DatasetEnv``), selected by :attr:`LLMEnvSpec.objective`.
+    """
+
+    ROLLOUT = "rollout"
+    DATASET = "dataset"
 
     def __str__(self) -> str:
         return str(self.value)
@@ -299,22 +302,41 @@ class PzEnvSpec(EnvSpec):
 
 
 class LLMEnvSpec(BaseModel):
-    """Environment specification for LLM reasoning and preference training.
+    """Environment specification for LLM training.
 
-    Declaratively captures the dataset, reward function, and prompt template
-    needed to construct a :class:`~agilerl.utils.llm_utils.ReasoningGym` or
-    :class:`~agilerl.utils.llm_utils.PreferenceGym`.  Fields are aligned
+    Declaratively captures what is needed to build either a
+    :class:`~agilerl.llm_envs.RolloutEnv` (generative) or a
+    :class:`~agilerl.llm_envs.DatasetEnv` (teacher-forced). Fields are aligned
     with what Arena expects for LLM training jobs.
 
-    :param env_type: The type of LLM environment (``"reasoning"`` or
-        ``"preference"``).
+    A ``rollout`` env comes from exactly one source:
+
+    * ``dataset`` + ``reward_file_path`` / ``reward_fn_name`` / ``prompt_template``
+      -- labelled ``(question, answer)`` rows scored by a reward function
+      (single-turn; ``max_turns`` is 1).
+    * ``env_name`` -- a GEM environment id (e.g. ``"game:Sudoku-v0-easy"``).
+    * ``entrypoint`` -- a dotted path to a callable returning a text env.
+    * ``env_url`` -- a URL to an already-hosted OpenEnv service (driven over
+      HTTP); ``max_turns`` must be set since it can't be probed remotely.
+
+    ``env_name`` / ``entrypoint`` run **in-process** by default; set
+    ``served: true`` to instead host them on an in-process OpenEnv HTTP server
+    -- the local rehearsal of the ``env_url`` production transport. Transport
+    is thus a deployment concern, not a code change: the same env declaration
+    trains in-process for dev and against a served endpoint in production.
+
+    A ``dataset`` env always comes from ``dataset`` and an ``objective``.
+
+    :param env_type: ``"rollout"`` (generative) or ``"dataset"`` (teacher-forced).
     :type env_type: LLMEnvType
+    :param objective: Teacher-forced objective, required when
+        ``env_type="dataset"``: ``"preference"`` (DPO) or ``"sft"``.
+    :type objective: Literal["preference", "sft"] | None
     :param columns: Optional mapping from source dataset column names to the
-        names expected by the gym (e.g. ``{"question": "input", "answer":
-        "output"}`` for reasoning).
+        names expected downstream (e.g. ``{"nums": "question", "target": "answer"}``).
     :type columns: dict[str, str] | None
-    :param prompt_template: Chat-template configuration passed as
-        ``conversation_template`` to :class:`ReasoningGym`.
+    :param prompt_template: Chat-template configuration rendered into the prompt
+        served on reset for a dataset-backed rollout env.
     :type prompt_template: dict[str, Any] | None
     :param max_reward: Maximum achievable reward, forwarded to the LLM
         training loop for accuracy logging.
@@ -322,29 +344,38 @@ class LLMEnvSpec(BaseModel):
     :param train_test_split: Fraction of the dataset used for training.
     :type train_test_split: float
     :param reward_file_path: Path to a Python file containing the reward
-        function.  Required for reasoning environments.
+        function. Required for a dataset-backed rollout env.
     :type reward_file_path: str | None
     :param dataset: Path to a Parquet dataset file or a HuggingFace dataset.
-        Required for reasoning/preference/sft environments.
-    :type dataset: str
-    :param env_name: GEM environment id (e.g. ``"game:Sudoku-v0-easy"``).
-        Mutually exclusive with ``entrypoint``.
+    :type dataset: str | None
+    :param env_name: GEM environment id. Mutually exclusive with ``entrypoint``.
     :type env_name: str | None
-    :param entrypoint: Dotted path to a callable that returns a
-        :class:`~agilerl.protocols.MultiTurnEnv`.  Mutually exclusive with
-        ``env_name``.
+    :param entrypoint: Dotted path to a callable returning a text env.
+        Mutually exclusive with ``env_name``.
     :type entrypoint: str | None
     :param env_config: Keyword arguments forwarded to the entrypoint callable.
-        Only used when ``entrypoint`` is set.
     :type env_config: dict[str, Any] | None
-    :param max_turns: Maximum interaction turns per episode.  If ``None``
-        for multiturn environments, the value is probed from the environment.
+    :param max_turns: Maximum interaction turns per episode. If ``None`` for an
+        env-backed rollout, the value is probed from the environment.
     :type max_turns: int | None
+    :param env_url: URL of an already-hosted OpenEnv env service, driven over
+        HTTP. Mutually exclusive with the other sources; requires ``max_turns``.
+    :type env_url: str | None
+    :param served: Host an ``env_name`` / ``entrypoint`` env on an in-process
+        OpenEnv HTTP server instead of running it in-process. Defaults to False.
+    :type served: bool
+    :param mcp_tool: For an MCP-backed served env, the tool the model's text is
+        sent to. Only applies to a served env (``env_url`` or ``served``).
+    :type mcp_tool: str | None
+    :param request_timeout_s: Per-request HTTP timeout for a served env
+        (``None`` = unbounded). Only applies to a served env.
+    :type request_timeout_s: float | None
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     env_type: LLMEnvType
+    objective: Literal["preference", "sft"] | None = Field(default=None)
     dataset: str | None = Field(
         default=None, validation_alias=AliasChoices("dataset", "name")
     )
@@ -356,11 +387,20 @@ class LLMEnvSpec(BaseModel):
     reward_fn_name: str | None = Field(default=None)
     response_column: str = Field(default="response")
 
-    # Multi-turn specific fields
+    # Env-backed rollout fields
     env_name: str | None = Field(default=None)
     entrypoint: str | None = Field(default=None)
     env_config: dict[str, Any] | None = Field(default=None)
     max_turns: int | None = Field(default=None, ge=1)
+
+    # Served rollout fields: drive an env over HTTP instead of in-process. Point
+    # at an already-hosted OpenEnv service (``env_url``), or host an
+    # ``env_name`` / ``entrypoint`` env on an in-process OpenEnv server
+    # (``served``). ``mcp_tool`` / ``request_timeout_s`` tune the HTTP client.
+    env_url: str | None = Field(default=None)
+    served: bool = Field(default=False)
+    mcp_tool: str | None = Field(default=None)
+    request_timeout_s: float | None = Field(default=None, ge=0.0)
 
     # These fields are overridden given the rest of the training configuration
     data_batch_size_per_gpu: int = Field(default=8, ge=1, exclude=True)
@@ -370,66 +410,91 @@ class LLMEnvSpec(BaseModel):
 
     @property
     def name(self) -> str:
-        """Human-readable name: dataset path, GEM env name, or entrypoint."""
+        """Human-readable name: dataset path, GEM env name, URL, or entrypoint."""
         if self.dataset is not None:
             return self.dataset
         if self.env_name is not None:
             return self.env_name
-        return self.entrypoint or "multiturn"
+        if self.env_url is not None:
+            return self.env_url
+        return self.entrypoint or "rollout"
+
+    @property
+    def dataset_backed_rollout(self) -> bool:
+        """Whether this rollout env serves labelled rows scored by a reward fn."""
+        return self.env_type == LLMEnvType.ROLLOUT and self.dataset is not None
 
     @model_validator(mode="after")
-    def _validate_reasoning_fields(self) -> Self:
-        if self.env_type == LLMEnvType.REASONING:
-            if self.dataset is None:
-                msg = "dataset is required for reasoning environments"
-                raise ValueError(msg)
+    def _validate_rollout_fields(self) -> Self:
+        if self.env_type != LLMEnvType.ROLLOUT:
+            return self
+        sources = [self.dataset, self.env_name, self.entrypoint, self.env_url]
+        if sum(source is not None for source in sources) != 1:
+            msg = (
+                "Exactly one of dataset, env_name, entrypoint or env_url is "
+                "required for rollout environments."
+            )
+            raise ValueError(msg)
+        if self.env_config is not None and self.entrypoint is None:
+            msg = "env_config is only used with entrypoint, not env_name."
+            raise ValueError(msg)
+        if self.served and self.env_name is None and self.entrypoint is None:
+            msg = (
+                "served=True hosts an env_name / entrypoint env over HTTP; it "
+                "does not apply to a dataset or an already-served env_url."
+            )
+            raise ValueError(msg)
+        transport_is_http = self.env_url is not None or self.served
+        if (
+            self.mcp_tool is not None or self.request_timeout_s is not None
+        ) and not transport_is_http:
+            msg = (
+                "mcp_tool / request_timeout_s only apply to a served rollout "
+                "env (set env_url, or served=True on an env_name / entrypoint)."
+            )
+            raise ValueError(msg)
+        if self.env_url is not None and self.max_turns is None:
+            msg = (
+                "max_turns is required with env_url: a remote env's turn budget "
+                "cannot be probed, so set it explicitly (1 for single-turn)."
+            )
+            raise ValueError(msg)
+        if self.dataset is not None:
             if self.reward_file_path is None:
-                msg = "reward_file_path is required for reasoning environments"
+                msg = "reward_file_path is required for dataset-backed rollout environments"
                 raise ValueError(msg)
             if self.reward_fn_name is None:
-                msg = "reward_fn_name is required for reasoning environments"
-                raise ValueError(msg)
-            if self.prompt_template is None:
-                msg = "Prompt template is required for reasoning environments"
-                raise ValueError(msg)
-        return self
-
-    @model_validator(mode="after")
-    def _validate_preference_fields(self) -> Self:
-        if self.env_type == LLMEnvType.PREFERENCE:
-            if self.dataset is None:
-                msg = "dataset is required for preference environments"
-                raise ValueError(msg)
-            if self.reward_file_path is not None:
-                msg = "Reward file path has been specified, but is not supported for preference environments."
-                raise ValueError(msg)
-        return self
-
-    @model_validator(mode="after")
-    def _validate_sft_fields(self) -> Self:
-        if self.env_type == LLMEnvType.SFT:
-            if self.dataset is None:
-                msg = "dataset is required for SFT environments"
-                raise ValueError(msg)
-            if self.reward_file_path is not None:
-                msg = "Reward file path has been specified, but is not supported for SFT environments."
-                raise ValueError(msg)
-        return self
-
-    @model_validator(mode="after")
-    def _validate_multiturn_fields(self) -> Self:
-        if self.env_type == LLMEnvType.MULTITURN:
-            has_gem = self.env_name is not None
-            has_ep = self.entrypoint is not None
-            if has_gem == has_ep:
                 msg = (
-                    "Exactly one of env_name or entrypoint is required "
-                    "for multiturn environments."
+                    "reward_fn_name is required for dataset-backed rollout environments"
                 )
                 raise ValueError(msg)
-            if self.env_config is not None and not has_ep:
-                msg = "env_config is only used with entrypoint, not env_name."
+            if self.prompt_template is None:
+                msg = "Prompt template is required for dataset-backed rollout environments"
                 raise ValueError(msg)
+            if self.max_turns not in (None, 1):
+                msg = "A dataset-backed rollout environment is single-turn; max_turns must be 1."
+                raise ValueError(msg)
+            self.max_turns = 1
+        elif self.reward_file_path is not None:
+            msg = (
+                "Reward file path is not supported for env-backed rollout environments."
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_dataset_fields(self) -> Self:
+        if self.env_type != LLMEnvType.DATASET:
+            return self
+        if self.dataset is None:
+            msg = "dataset is required for dataset environments"
+            raise ValueError(msg)
+        if self.objective is None:
+            msg = "objective is required for dataset environments"
+            raise ValueError(msg)
+        if self.reward_file_path is not None:
+            msg = "Reward file path has been specified, but is not supported for dataset environments."
+            raise ValueError(msg)
         return self
 
     def _load_dataset_hf(self) -> tuple[Dataset, Dataset]:
@@ -473,65 +538,146 @@ class LLMEnvSpec(BaseModel):
 
     def make_env(
         self, tokenizer: Any, accelerator: Accelerator | None = None
-    ) -> ReasoningGym | PreferenceGym | SFTGym:
-        """Make the environment for the LLM agent.
+    ) -> DatasetEnv:
+        """Make the teacher-forced dataset environment for the LLM agent.
 
-        For multiturn environments, use :meth:`make_multiturn_env_factory`
-        instead — the training loop needs a factory, not a single env.
+        For rollout environments, use :meth:`make_rollout_env_factory` instead —
+        the training loop needs a factory, not a single env.
 
         :param tokenizer: The tokenizer.
         :type tokenizer: Any
         :param accelerator: The accelerator.
         :type accelerator: Accelerator | None
-        :return: The reasoning or preference gym environment.
-        :rtype: ReasoningGym | PreferenceGym | SFTGym
+        :return: The dataset environment.
+        :rtype: DatasetEnv
         """
-        if self.env_type == LLMEnvType.MULTITURN:
+        from agilerl.llm_envs import DatasetEnv
+
+        if self.env_type != LLMEnvType.DATASET:
             msg = (
-                "Multiturn environments cannot be constructed with make_env(). "
-                "Use make_multiturn_env_factory() instead."
+                "Rollout environments cannot be constructed with make_env(). "
+                "Use make_rollout_env_factory() instead."
             )
             raise TypeError(msg)
 
         train_ds, test_ds = self._load_dataset()
+        return DatasetEnv(
+            train_dataset=train_ds,
+            test_dataset=test_ds,
+            tokenizer=tokenizer,
+            objective=self.objective,
+            response_column=self.response_column,
+            data_batch_size_per_gpu=self.data_batch_size_per_gpu,
+            accelerator=accelerator,
+            max_context_length=self.max_context_length,
+            seed=self.seed if self.seed is not None else 42,
+        )
 
-        if self.env_type == LLMEnvType.REASONING:
-            return self._make_reasoning_env(train_ds, test_ds, tokenizer, accelerator)
-        if self.env_type == LLMEnvType.PREFERENCE:
-            return self._make_preference_env(train_ds, test_ds, tokenizer, accelerator)
-        if self.env_type == LLMEnvType.SFT:
-            return self._make_sft_env(train_ds, test_ds, tokenizer, accelerator)
-        msg = f"Invalid environment type: {self.env_type}"
-        raise ValueError(msg)
-
-    def make_multiturn_env_factory(
+    def make_rollout_env_factory(
         self,
         tokenizer: Any,
         *,
         max_model_len: int | None = None,
         max_output_tokens: int | None = None,
-    ) -> Callable[[], Any]:
-        """Build a factory that creates wrapped multi-turn env instances.
+    ) -> Callable[[], RolloutEnv]:
+        """Build a factory that creates fresh :class:`RolloutEnv` instances.
 
-        Each call to the returned factory creates a fresh
-        :class:`~agilerl.llm_envs.TokenObservationWrapper`.  The underlying
-        environment is either a GEM environment (``env_name``) or a custom
-        class resolved from ``entrypoint``.
+        Each call to the returned factory creates an independent env, so
+        concurrent trajectories never share state. The source is either labelled
+        dataset rows plus a reward function, a GEM environment (``env_name``), or
+        a custom callable resolved from ``entrypoint``.
 
-        If :attr:`max_turns` is ``None``, it is probed from a temporary
-        environment instance and stored back on the spec.
+        For an env-backed rollout, if :attr:`max_turns` is ``None`` it is probed
+        from a temporary environment instance and stored back on the spec.
 
         :param tokenizer: The tokenizer (shared across all instances).
         :type tokenizer: Any
-        :param max_model_len: Maximum model context length for sliding-window
-            prompt truncation inside the wrapper.
+        :param max_model_len: Maximum model context length for prompt truncation.
         :type max_model_len: int | None
         :param max_output_tokens: Maximum newly generated tokens per turn.
         :type max_output_tokens: int | None
-        :returns: A zero-argument callable that creates a wrapped env.
-        :rtype: Callable[[], TokenObservationWrapper]
+        :returns: A zero-argument callable that creates a ``RolloutEnv``.
+        :rtype: Callable[[], RolloutEnv]
         """
-        from agilerl.llm_envs import TokenObservationWrapper
+        from agilerl.llm_envs import RolloutEnv
+
+        if self.env_type != LLMEnvType.ROLLOUT:
+            msg = (
+                "Dataset environments cannot be constructed with "
+                "make_rollout_env_factory(). Use make_env() instead."
+            )
+            raise TypeError(msg)
+
+        pad_id = tokenizer.pad_token_id
+
+        if self.dataset_backed_rollout:
+            # The reward file and the dataset are read once, on the first env
+            # build, so constructing the factory stays free of I/O.
+            resolved: dict[str, Any] = {}
+
+            def _resolve() -> dict[str, Any]:
+                if not resolved:
+                    from agilerl.utils.llm_utils import render_chat_template
+
+                    conversation = make_conversation_template(
+                        prompt_template=self.prompt_template
+                    )
+
+                    def _prompt_builder(row: Any) -> str:
+                        """Render the manifest's chat template for one dataset row."""
+                        return render_chat_template(conversation, tokenizer, **row)
+
+                    train_ds, test_ds = self._load_dataset()
+                    resolved.update(
+                        train_ds=train_ds,
+                        test_ds=test_ds,
+                        prompt_builder=_prompt_builder,
+                        reward_fn=get_reward_fn(
+                            reward_fn_name=self.reward_fn_name,
+                            file_path=self.reward_file_path,
+                        ),
+                    )
+                return resolved
+
+            def _dataset_factory() -> RolloutEnv:
+                parts = _resolve()
+                return RolloutEnv.from_dataset(
+                    parts["train_ds"],
+                    parts["reward_fn"],
+                    tokenizer,
+                    test_dataset=parts["test_ds"],
+                    prompt_builder=parts["prompt_builder"],
+                    pad_id=pad_id,
+                    # ``prompt_builder`` already rendered the chat template.
+                    apply_chat_template=False,
+                    max_model_len=max_model_len,
+                    max_output_tokens=max_output_tokens,
+                )
+
+            return _dataset_factory
+
+        if self.env_url is not None:
+            url = self.env_url
+            # A remote env's turn budget can't be probed; validation requires
+            # max_turns to be set explicitly for env_url.
+            url_max_turns = self.max_turns or 1
+            mcp_tool = self.mcp_tool
+            timeout_s = self.request_timeout_s
+
+            def _url_factory() -> RolloutEnv:
+                return RolloutEnv(
+                    url,
+                    tokenizer,
+                    max_turns=url_max_turns,
+                    mcp_tool=mcp_tool,
+                    timeout_s=timeout_s,
+                    pad_id=pad_id,
+                    apply_chat_template=True,
+                    max_model_len=max_model_len,
+                    max_output_tokens=max_output_tokens,
+                )
+
+            return _url_factory
 
         if self.env_name is not None:
             try:
@@ -565,13 +711,34 @@ class LLMEnvSpec(BaseModel):
                 probe.close()
             self.max_turns = max_turns
 
-        pad_id = tokenizer.pad_token_id
+        if self.served:
+            # Host the same env on an in-process OpenEnv server and drive it
+            # over HTTP loopback (one server per concurrent rollout) — the
+            # in-process rehearsal of the ``env_url`` production transport.
+            env_display_name = self.name
+            mcp_tool = self.mcp_tool
+            timeout_s = self.request_timeout_s
 
-        def _factory() -> TokenObservationWrapper:
-            env = _make_raw_env()
-            return TokenObservationWrapper(
-                env=env,
-                tokenizer=tokenizer,
+            def _served_factory() -> RolloutEnv:
+                return RolloutEnv.serving(
+                    _make_raw_env,
+                    tokenizer,
+                    max_turns=max_turns,
+                    env_name=env_display_name,
+                    mcp_tool=mcp_tool,
+                    timeout_s=timeout_s,
+                    pad_id=pad_id,
+                    apply_chat_template=True,
+                    max_model_len=max_model_len,
+                    max_output_tokens=max_output_tokens,
+                )
+
+            return _served_factory
+
+        def _env_factory() -> RolloutEnv:
+            return RolloutEnv.local(
+                _make_raw_env(),
+                tokenizer,
                 max_turns=max_turns,
                 pad_id=pad_id,
                 apply_chat_template=True,
@@ -579,113 +746,7 @@ class LLMEnvSpec(BaseModel):
                 max_output_tokens=max_output_tokens,
             )
 
-        return _factory
-
-    def _make_reasoning_env(
-        self,
-        train_dataset: Dataset,
-        test_dataset: Dataset,
-        tokenizer: Any,
-        accelerator: Accelerator | None = None,
-    ) -> ReasoningGym:
-        """Make the reasoning gym environment.
-
-        :param train_dataset: The training dataset.
-        :type train_dataset: Dataset
-        :param test_dataset: The test dataset.
-        :type test_dataset: Dataset
-        :param tokenizer: The tokenizer.
-        :type tokenizer: Any
-        :param accelerator: The accelerator.
-        :type accelerator: Accelerator | None
-        :return: The reasoning gym environment.
-        :rtype: ReasoningGym
-        """
-        from agilerl.wrappers.llm_envs import ReasoningGym
-
-        reward_fn = get_reward_fn(
-            reward_fn_name=self.reward_fn_name, file_path=self.reward_file_path
-        )
-        conversation_template = make_conversation_template(
-            prompt_template=self.prompt_template
-        )
-        return ReasoningGym(
-            train_dataset=train_dataset,
-            test_dataset=test_dataset,
-            tokenizer=tokenizer,
-            reward_fn=reward_fn,
-            conversation_template=conversation_template,
-            data_batch_size_per_gpu=self.data_batch_size_per_gpu,
-            accelerator=accelerator,
-            max_context_length=self.max_context_length,
-            return_raw_completions=self.return_raw_completions,
-            seed=self.seed,
-        )
-
-    def _make_preference_env(
-        self,
-        train_dataset: Dataset,
-        test_dataset: Dataset,
-        tokenizer: Any,
-        accelerator: Accelerator | None = None,
-    ) -> PreferenceGym:
-        """Make the environment for the LLM agent.
-
-        :param train_dataset: The training dataset.
-        :type train_dataset: Dataset
-        :param test_dataset: The test dataset.
-        :type test_dataset: Dataset
-        :param tokenizer: The tokenizer.
-        :type tokenizer: Any
-        :param accelerator: The accelerator.
-        :type accelerator: Accelerator | None
-        :return: The preference gym environment.
-        :rtype: PreferenceGym
-        """
-        from agilerl.wrappers.llm_envs import PreferenceGym
-
-        return PreferenceGym(
-            train_dataset=train_dataset,
-            test_dataset=test_dataset,
-            tokenizer=tokenizer,
-            data_batch_size_per_gpu=self.data_batch_size_per_gpu,
-            accelerator=accelerator,
-            max_context_length=self.max_context_length,
-            seed=self.seed,
-        )
-
-    def _make_sft_env(
-        self,
-        train_dataset: Dataset,
-        test_dataset: Dataset,
-        tokenizer: Any,
-        accelerator: Accelerator | None = None,
-    ) -> SFTGym:
-        """Make the SFT gym environment.
-
-        :param train_dataset: The training dataset.
-        :type train_dataset: Dataset
-        :param test_dataset: The test dataset.
-        :type test_dataset: Dataset
-        :param tokenizer: The tokenizer.
-        :type tokenizer: Any
-        :param accelerator: The accelerator.
-        :type accelerator: Accelerator | None
-        :return: The SFT gym environment.
-        :rtype: SFTGym
-        """
-        from agilerl.wrappers.llm_envs import SFTGym
-
-        return SFTGym(
-            train_dataset=train_dataset,
-            test_dataset=test_dataset,
-            tokenizer=tokenizer,
-            data_batch_size_per_gpu=self.data_batch_size_per_gpu,
-            response_column=self.response_column,
-            accelerator=accelerator,
-            max_context_length=self.max_context_length,
-            seed=self.seed,
-        )
+        return _env_factory
 
 
 class OfflineEnvSpec(GymEnvSpec):

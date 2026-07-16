@@ -568,26 +568,29 @@ def test_protocol_type_aliases_importable():
     assert TorchObsType is not None
 
 
-class TestMultiTurnEnvProtocol:
-    """Cover the ``pass`` bodies of :class:`agilerl.protocols.MultiTurnEnv`
-    protocol methods. A subclass that doesn't override them inherits the
-    base implementation (the bare ``pass``), so invoking the inherited
-    methods runs those statements and registers coverage.
+class TestLLMEnvHierarchy:
+    """The LLM env classes live in :mod:`agilerl.llm_envs`.
+
+    The teacher-forced ``DatasetEnv`` is a ``gymnasium.Env``; the token rollout
+    ``RolloutEnv`` (an OpenEnv client driven by a URL) has its own interface and
+    shares no base with it.
     """
 
-    def test_protocol_default_method_bodies_execute(self):
-        from agilerl.protocols import MultiTurnEnv
+    def test_llm_env_hierarchy(self):
+        pytest.importorskip("datasets", reason="LLM dependencies not installed")
+        import gymnasium as gym
 
-        class _PassthroughEnv(MultiTurnEnv):
-            max_turns = 1
+        from agilerl.llm_envs import DatasetEnv, RolloutEnv
 
-        env = _PassthroughEnv()
-        # Each call executes the inherited ``pass`` body in the protocol
-        # method. Returns ``None`` (the implicit return after ``pass``);
-        # the line gets covered regardless.
-        assert env.reset(seed=0) is None
-        assert env.step(action="noop") is None
-        assert env.close() is None
+        # DatasetEnv is the teacher-forced dataset env, a gymnasium.Env.
+        assert issubclass(DatasetEnv, gym.Env)
+        # RolloutEnv is the token rollout env (an OpenEnv client), not a gym.Env.
+        assert not issubclass(RolloutEnv, gym.Env)
+        # agilerl.protocols exposes no env classes (they live in agilerl.llm_envs).
+        import agilerl.protocols as protocols
+
+        assert not hasattr(protocols, "RolloutEnv")
+        assert not hasattr(protocols, "DatasetEnv")
 
 
 class TestBanditEnvProtocol:

@@ -1,3 +1,10 @@
+"""Teacher-forced dataset training for LLM finetuning.
+
+:func:`train_llm_dataset` runs the offline dataloader loop over a
+:class:`~agilerl.llm_envs.DatasetEnv` for the preference (DPO) and SFT
+objectives.
+"""
+
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -5,16 +12,17 @@ from accelerate import Accelerator
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import DPO
+from agilerl.algorithms.sft import SFT
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
 from agilerl.training.llm.common import (
     _compute_training_steps,
-    _num_epochs_reached,
     _resolve_training_envs,
     _validate_finetune_args,
 )
 from agilerl.utils.utils import (
+    _distributed_world_size,
     default_progress_bar,
     init_loggers,
     save_llm_checkpoint,
@@ -22,19 +30,24 @@ from agilerl.utils.utils import (
 )
 
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
-    from agilerl.llm_envs import PreferenceGym
+    from agilerl.llm_envs import DatasetEnv
+
+if TYPE_CHECKING:
+    SupportedDataset = DPO | SFT
 
 
-def finetune_llm_preference(
-    pop: list[DPO],
-    env: PreferenceGym | None = None,
-    env_fn: Callable[[], PreferenceGym] | None = None,
+def train_llm_dataset(
+    pop: "list[SupportedDataset]",
+    env: "DatasetEnv | None" = None,
+    env_fn: "Callable[[], DatasetEnv] | None" = None,
     init_hp: dict[str, Any] | None = None,
     save_elite: bool | None = None,
     elite_path: str | None = None,
     wb: bool = False,
     tensorboard: bool = False,
     tensorboard_log_dir: str | None = None,
+    csv: bool = False,
+    csv_log_dir: str | None = None,
     evo_steps: int | None = None,
     checkpoint_steps: int | None = None,
     checkpoint_path: str | None = None,
@@ -47,58 +60,68 @@ def finetune_llm_preference(
     accelerator: Accelerator | None = None,
     max_steps: int | None = None,
     num_epochs: int | None = None,
-) -> list[DPO]:
-    """Finetune a population of DPO agents on pairwise preference data.
+) -> "tuple[list[SupportedDataset], Any]":
+    """Train a population of DPO or SFT agents over a ``DatasetEnv`` dataloader.
 
-    :param pop: Population of DPO agents to finetune.
-    :type pop: list[DPO]
-    :param env: Shared PreferenceGym environment. Mutually exclusive with ``env_fn``.
-    :type env: PreferenceGym | None
-    :param env_fn: Factory that creates one PreferenceGym per agent. Mutually exclusive
-        with ``env``.
-    :type env_fn: Callable[[], PreferenceGym] | None
-    :param init_hp: Initial hyperparameters for the population, defaults to None
-    :type init_hp: dict, optional
-    :param save_elite: Whether to save the elite model, defaults to None
-    :type save_elite: bool, optional
-    :param elite_path: Directory for checkpoints, defaults to None
-    :type elite_path: str, optional
-    :param wb: Whether to use Weights and Biases, defaults to False
-    :type wb: bool, optional
-    :param tensorboard: TensorBoard tracking, defaults to False
-    :type tensorboard: bool, optional
-    :param tensorboard_log_dir: Directory for TensorBoard logs, defaults to None
-    :type tensorboard_log_dir: str, optional
-    :param evo_steps: Number of steps between evolution, defaults to None
-    :type evo_steps: int, optional
-    :param checkpoint_steps: Number of steps between checkpoints, defaults to None
-    :type checkpoint_steps: int, optional
-    :param checkpoint_path: Directory for periodic checkpoints; falls back to elite_path, defaults to None
-    :type checkpoint_path: str | None, optional
-    :param tournament: Tournament selection object, defaults to None
-    :type tournament: TournamentSelection, optional
-    :param mutation: Mutation object, defaults to None
-    :type mutation: Mutations, optional
-    :param wandb_api_key: Wandb API key, defaults to None
-    :type wandb_api_key: str, optional
-    :param wandb_kwargs: Additional kwargs to pass to wandb.init()
-    :type wandb_kwargs: dict, optional
-    :param evaluation_interval: Number of steps between evaluation, defaults to 10
-    :type evaluation_interval: int, optional
-    :param verbose: Whether to print verbose output, defaults to True
-    :type verbose: bool, optional
-    :param accelerator: Accelerator object, defaults to None
-    :type accelerator: Accelerator, optional
-    :param max_steps: Maximum number of steps to run, defaults to None
-    :type max_steps: int, optional
-    :param num_epochs: Number of epochs to run, if set, takes precedence over max_steps,
-        defaults to None
-    :type num_epochs: int, optional
-    :return: The finetuned population.
-    :rtype: PopulationType
+    Each training step draws a labelled batch from the dataset environment. The
+    algorithm of ``pop[0]`` selects the regime: DPO minimises a pairwise preference
+    loss over chosen/rejected pairs, while SFT minimises the response cross-entropy.
+    Both share evolution, checkpointing, and metrics logging.
+
+    :param pop: Population of DPO or SFT agents to finetune.
+    :type pop: list[SupportedDataset]
+    :param env: Shared dataset environment that yields labelled batches.
+    :type env: DatasetEnv | None
+    :param env_fn: Optional factory that creates one dataset environment per agent.
+    :type env_fn: Callable[[], DatasetEnv] | None
+    :param init_hp: Initial hyperparameters for logging and defaults.
+    :type init_hp: dict[str, Any] | None
+    :param save_elite: Whether to save the elite checkpoint during evolution.
+    :type save_elite: bool | None
+    :param elite_path: Path used for checkpoint saving.
+    :type elite_path: str | None
+    :param wb: Whether to log metrics to Weights and Biases.
+    :type wb: bool
+    :param tensorboard: Whether to log to TensorBoard.
+    :type tensorboard: bool
+    :param tensorboard_log_dir: Directory for TensorBoard event files.
+    :type tensorboard_log_dir: str | None
+    :param csv: Whether to log aggregate metrics to CSV.
+    :type csv: bool
+    :param csv_log_dir: Path for the CSV file.
+    :type csv_log_dir: str | None
+    :param evo_steps: Number of outer iterations between evolution steps.
+    :type evo_steps: int | None
+    :param checkpoint_steps: Number of iterations between checkpoint saves when
+        evolution is disabled.
+    :type checkpoint_steps: int | None
+    :param checkpoint_path: Directory for periodic checkpoints; falls back to elite_path.
+    :type checkpoint_path: str | None
+    :param tournament: Tournament selection strategy for evolution.
+    :type tournament: TournamentSelection | None
+    :param mutation: Mutation operator used during evolution.
+    :type mutation: Mutations | None
+    :param wandb_api_key: Optional W&B API key.
+    :type wandb_api_key: str | None
+    :param wandb_kwargs: Additional kwargs forwarded to ``wandb.init()``.
+    :type wandb_kwargs: dict[str, Any] | None
+    :param evaluation_interval: Frequency (iterations) for evaluation.
+    :type evaluation_interval: int
+    :param verbose: Whether to print periodic training summaries.
+    :type verbose: bool
+    :param accelerator: Optional accelerator for distributed training.
+    :type accelerator: Accelerator | None
+    :param max_steps: Maximum step budget; defaults to dataset-driven length.
+    :type max_steps: int | None
+    :param num_epochs: Number of epochs to run; takes precedence over max_steps.
+    :type num_epochs: int | None
+    :return: The finetuned population and its last recorded fitnesses.
+    :rtype: tuple[list[SupportedDataset], Any]
     """
     envs, uses_env_fn = _resolve_training_envs(pop=pop, env=env, env_fn=env_fn)
+    env_name = envs[0].name
 
+    is_preference = isinstance(pop[0], DPO)
     _validate_finetune_args(
         evo_steps,
         tournament,
@@ -106,14 +129,15 @@ def finetune_llm_preference(
         num_epochs,
         max_steps,
         pop,
-        DPO,
+        (DPO, SFT),
         (
-            "The algorithm must be DPO for preference-based reinforcement learning. "
-            f"Got {type(pop[0])} instead."
+            "The algorithm must be DPO (preference) or SFT (supervised) for "
+            f"dataset finetuning. Got {type(pop[0])} instead."
         ),
         checkpoint_steps=checkpoint_steps,
-        algo="dpo",
+        algo="dpo" if is_preference else "sft",
     )
+
     init_hp = (
         {
             "BATCH_SIZE_PER_GPU": pop[0].batch_size_per_process,
@@ -123,7 +147,7 @@ def finetune_llm_preference(
         else init_hp
     )
 
-    data_increment = accelerator.num_processes if accelerator is not None else 1
+    data_increment = _distributed_world_size(accelerator)
     effective_data_batch_size = data_increment * envs[0].data_batch_size_per_gpu
 
     if wb:
@@ -139,75 +163,69 @@ def finetune_llm_preference(
     pbar = default_progress_bar(max_steps, accelerator)
 
     loggers = init_loggers(
-        algo=init_hp.get("ALGO", "DPO"),
-        env_name=envs[0].name,
+        algo=init_hp.get("ALGO", "DPO" if is_preference else "SFT"),
+        env_name=env_name,
         pbar=pbar,
         verbose=verbose,
         wb=wb,
         tensorboard=tensorboard,
+        csv=csv,
         tensorboard_log_dir=tensorboard_log_dir,
+        csv_log_dir=csv_log_dir,
         accelerator=accelerator,
         wandb_api_key=wandb_api_key,
         wandb_kwargs=wandb_kwargs,
         init_hyperparams=init_hp,
     )
 
-    population = Population(
-        agents=pop,
-        accelerator=accelerator,
-        loggers=loggers,
-    )
+    population = Population(agents=pop, accelerator=accelerator, loggers=loggers)
 
     total_steps = 0
     displayed_steps = 0
     next_checkpoint_step = checkpoint_steps
     max_steps_checkpoint_saved = False
 
-    if uses_env_fn:
-        prompts_by_agent = [e.reset(reset_dataloaders=True) for e in envs]
-    else:
-        prompts = envs[0].reset(reset_dataloaders=True)
-
     for i in range(training_steps):
         if accelerator is not None:
             accelerator.wait_for_everyone()
 
         for agent_idx, agent in enumerate(population.agents):
+            if total_steps >= max_steps:
+                break
             training_env = envs[agent_idx] if uses_env_fn else envs[0]
-            current_prompts = prompts_by_agent[agent_idx] if uses_env_fn else prompts
 
             agent.set_reference_policy(training_env.num_epochs)
             agent.init_training_step()
 
-            learn_result = agent.learn(current_prompts)
-            chosen_reward = learn_result["chosen_reward"]
-            rejected_reward = learn_result["rejected_reward"]
-            next_prompts_i = training_env.step()
+            # ``DatasetEnv.reset`` is the data-advancing call: each invocation
+            # returns the next collated batch (``step`` is a no-op). The first
+            # training step rewinds to the dataset start so a reused env
+            # doesn't begin mid-epoch.
+            learn_result = agent.learn(training_env.reset(reset_dataloaders=i == 0))
+            score = (
+                float(learn_result["chosen_reward"] - learn_result["rejected_reward"])
+                if is_preference
+                else -float(learn_result["loss"])
+            )
 
-            agent.add_scores([float(chosen_reward - rejected_reward)])
+            agent.add_scores([score])
             agent.finalize_training_step(training_env.data_batch_size_per_gpu)
             total_steps += effective_data_batch_size
 
-            if uses_env_fn:
-                prompts_by_agent[agent_idx] = next_prompts_i
-            else:
-                prompts = next_prompts_i
-
-        # Evaluate performance
         if (i + 1) % evaluation_interval == 0:
-            for idx, agent in enumerate(population.agents):
-                agent.test(envs[idx] if uses_env_fn else envs[0])
+            for agent_idx, agent in enumerate(population.agents):
+                agent.test(envs[agent_idx] if uses_env_fn else envs[0])
+            if accelerator is not None:
+                accelerator.wait_for_everyone()
 
-        # Report progress
         if accelerator is None or accelerator.is_main_process:
             increment = min(effective_data_batch_size, max_steps - displayed_steps)
             if increment > 0:
                 pbar.update(increment)
                 displayed_steps += increment
 
-        population.report_metrics(clear=True)
+            population.report_metrics(clear=True)
 
-        # Tournament selection and mutation
         if tournament and mutation is not None:
             if (i + 1) % evo_steps == 0:
                 if accelerator is not None:
@@ -217,7 +235,7 @@ def finetune_llm_preference(
                         population=population.agents,
                         tournament=tournament,
                         mutation=mutation,
-                        env_name=envs[0].name,
+                        env_name=env_name,
                         accelerator=accelerator,
                         language_model=True,
                         elite_path=elite_path,
@@ -237,25 +255,14 @@ def finetune_llm_preference(
                 ):
                     checkpoint_due = True
                     next_checkpoint_step += checkpoint_steps
-            if (
-                total_steps >= max_steps
-                and not max_steps_checkpoint_saved
-                and (
-                    checkpoint_steps is not None
-                    or checkpoint_path is not None
-                    or elite_path is not None
-                )
-            ):
+            if total_steps >= max_steps and not max_steps_checkpoint_saved:
                 checkpoint_due = True
                 max_steps_checkpoint_saved = True
             if checkpoint_due:
                 save_llm_checkpoint(
-                    agent,
+                    population.agents[-1],
                     checkpoint_path if checkpoint_path is not None else elite_path,
                 )
-
-        if _num_epochs_reached(envs, num_epochs):
-            break
 
     if save_elite and elite_path is not None:
         elite = max(

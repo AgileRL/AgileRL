@@ -42,7 +42,7 @@ class LLMPPOSpec(LLMAlgorithmSpec):
     turn_ratio_pooling: Literal["sum", "mean"] = Field(default="sum")
     whiten_advantages: bool = Field(default=True)
 
-    env_type: ClassVar[LLMEnvType] = "reasoning"
+    env_type: ClassVar[LLMEnvType] = "rollout"
 
     @model_validator(mode="after")
     def _validate_vllm_config(self):
@@ -52,17 +52,12 @@ class LLMPPOSpec(LLMAlgorithmSpec):
         return self
 
     @staticmethod
-    def get_training_fn(*, multiturn: bool = False) -> Callable[..., Any]:
+    def get_training_fn() -> Callable[..., Any]:
         """Get the training function for LLMPPO.
 
-        :param multiturn: If ``True``, return the multi-turn training function.
-        :type multiturn: bool
         :return: Training function
         :rtype: Callable[..., Any]
         """
-        from agilerl.training.llm import (
-            finetune_llm_multiturn,
-            finetune_llm_reasoning,
-        )
+        from agilerl.training.llm import train_llm_rollout
 
-        return finetune_llm_multiturn if multiturn else finetune_llm_reasoning
+        return train_llm_rollout

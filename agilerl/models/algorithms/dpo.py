@@ -19,7 +19,8 @@ class DPOSpec(LLMAlgorithmSpec):
 
     lr: float = Field(default=0.000005)
 
-    env_type: ClassVar[LLMEnvType] = "preference"
+    env_type: ClassVar[LLMEnvType] = "dataset"
+    objective: ClassVar[str] = "preference"
 
     @staticmethod
     def get_training_fn() -> Callable[..., Any]:
@@ -28,6 +29,6 @@ class DPOSpec(LLMAlgorithmSpec):
         :return: Training function
         :rtype: Callable[..., Any]
         """
-        from agilerl.training.llm import finetune_llm_preference
+        from agilerl.training.llm import train_llm_dataset
 
-        return finetune_llm_preference
+        return train_llm_dataset

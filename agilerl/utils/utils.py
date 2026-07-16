@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import gymnasium as gym
 import numpy as np
+import torch
 import tqdm
 import wandb
 from accelerate import Accelerator
@@ -1631,4 +1632,15 @@ def _distributed_world_size(accelerator: Accelerator | None) -> int:
     """World size for batch accounting: prefer Accelerate, else torch.distributed."""
     if accelerator is not None:
         return accelerator.num_processes
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return torch.distributed.get_world_size()
     return 1
+
+
+def _distributed_rank(accelerator: Accelerator | None) -> int:
+    """Process rank (e.g. for seed decorrelation): prefer Accelerate, else torch.distributed."""
+    if accelerator is not None:
+        return accelerator.process_index
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return torch.distributed.get_rank()
+    return 0

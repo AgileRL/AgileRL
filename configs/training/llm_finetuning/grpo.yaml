@@ -19,7 +19,7 @@ algorithm:
     reduce_memory_peak: false
 
 environment:
-    env_type: reasoning
+    env_type: rollout
     dataset: Jiayi-Pan/Countdown-Tasks-3to4
     columns:
         nums: question

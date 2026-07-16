@@ -1,18 +1,26 @@
-"""Tests for TokenObservationWrapper sliding-window prompt fields."""
+"""Tests for RolloutEnv prompt fields and context-overflow handling."""
 
 from __future__ import annotations
+
+import re
+from typing import ClassVar
 
 import pytest
 import torch
 
 from agilerl.llm_envs import (
-    FormatRewardWrapper,
-    SearchTool,
-    SyncMultiTurnVecEnv,
-    TokenObservationWrapper,
-    Trajectory,
-    TrajectoryBuffer,
+    BatchRolloutEnv,
+    RolloutEnv,
 )
+from tests.helpers.rollout_doubles import (
+    FakeEnvClient,
+    RolloutEnvDoubleMixin,
+    bare_rollout_env,
+)
+
+# The boundary marker is a per-render ``uuid4().hex`` (32 lowercase hex chars);
+# a correctly sliced boundary contains no such run.
+_UUID4_HEX = re.compile(r"[0-9a-f]{32}")
 
 
 class _StubTokenizer:
@@ -20,92 +28,12 @@ class _StubTokenizer:
         return "x" * len(ids)
 
 
-def _bare_wrapper() -> TokenObservationWrapper:
-    return TokenObservationWrapper.__new__(TokenObservationWrapper)
+def test_max_prompt_tokens_for_model_len() -> None:
+    from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
 
-
-class TestTokenObservationWrapperBuildModelPromptFields:
-    def test_build_model_prompt_fields_no_truncation(self) -> None:
-        w = _bare_wrapper()
-        w.tokenizer = _StubTokenizer()
-        w._initial_prompt_len = 3
-        w.turn_boundaries = []
-        w.full_ids = torch.tensor([[1, 2, 3, 4, 5]], dtype=torch.long)
-
-        out = w.build_model_prompt_fields(max_prompt_tokens=100)
-        assert torch.equal(out["trajectory_input_ids"], w.full_ids)
-        assert out["stitch_prefix_ids"].shape[1] == 0
-        assert out["initial_prompt_len"] == 3
-
-    def test_sliding_window_reconstructs_full_sequence(self) -> None:
-        """After dropping oldest post-initial turns, stitch + trunc[:I] + trunc[I:] equals full."""
-        w = _bare_wrapper()
-        w.tokenizer = _StubTokenizer()
-        w._initial_prompt_len = 2
-        # [init0,init1 | gen0a,gen0b | fb0a,fb0b | gen1a,gen1b | tail0,tail1]
-        w.full_ids = torch.tensor(
-            [[0, 1, 10, 11, 20, 21, 40, 41, 50, 51]], dtype=torch.long
-        )
-        w.turn_boundaries = [
-            (2, 4, 0),
-            (6, 8, 1),
-        ]
-        out = w.build_model_prompt_fields(max_prompt_tokens=6)
-        trunc = out["trajectory_input_ids"]
-        stitch = out["stitch_prefix_ids"]
-        il = out["initial_prompt_len"]
-        assert il == 2
-        merged = torch.cat([trunc[:, :il], stitch, trunc[:, il:]], dim=1)
-        assert torch.equal(merged, w.full_ids)
-
-    def test_build_model_prompt_fields_errors(self) -> None:
-        w = _bare_wrapper()
-        w.tokenizer = _StubTokenizer()
-        w.full_ids = None
-        with pytest.raises(RuntimeError, match="No prompt"):
-            w.build_model_prompt_fields(max_prompt_tokens=8)
-
-        w.full_ids = torch.tensor([[1, 2, 3]], dtype=torch.long)
-        w._initial_prompt_len = 3
-        w.turn_boundaries = []
-        with pytest.raises(RuntimeError, match="Initial prompt"):
-            w.build_model_prompt_fields(max_prompt_tokens=2)
-
-        w.full_ids = torch.tensor([[1, 2, 3, 4, 5, 6]], dtype=torch.long)
-        w._initial_prompt_len = 2
-        w.turn_boundaries = []
-        with pytest.raises(RuntimeError, match="Could not fit prompt"):
-            w.build_model_prompt_fields(max_prompt_tokens=5)
-
-    def test_build_model_prompt_fields_drop_from_ge_seq_len_branch(self) -> None:
-        w = _bare_wrapper()
-        w.tokenizer = _StubTokenizer()
-        w._initial_prompt_len = 2
-        w.full_ids = torch.tensor([[10, 11, 12, 13, 14]], dtype=torch.long)
-        w.turn_boundaries = [(5, 5, 0)]
-        out = w.build_model_prompt_fields(max_prompt_tokens=4)
-        assert torch.equal(
-            out["trajectory_input_ids"],
-            torch.tensor([[10, 11]], dtype=torch.long),
-        )
-
-
-def test_max_prompt_tokens_for_sliding_window() -> None:
-    from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
-
-    assert max_prompt_tokens_for_sliding_window(8192, 1024) == 8192 - 1024
-    assert max_prompt_tokens_for_sliding_window(100, 50) == 50
-    assert max_prompt_tokens_for_sliding_window(100, None) == 99
-
-
-def test_middle_stitch_tensor_layout_matches_vllm_colocate() -> None:
-    """Same cat layout as LLMAlgorithm._generate_with_vllm_colocate post-process."""
-    il = 2
-    stitch = torch.tensor([[30, 31]], dtype=torch.long)
-    block = torch.tensor([[0, 1, 10, 11, 100, 101]], dtype=torch.long)
-    merged = torch.cat([block[:, :il], stitch, block[:, il:]], dim=1)
-    expected = torch.tensor([[0, 1, 30, 31, 10, 11, 100, 101]], dtype=torch.long)
-    assert torch.equal(merged, expected)
+    assert max_prompt_tokens_for_model_len(8192, 1024) == 8192 - 1024
+    assert max_prompt_tokens_for_model_len(100, 50) == 50
+    assert max_prompt_tokens_for_model_len(100, None) == 99
 
 
 class _ChrTokenizer:
@@ -117,7 +45,8 @@ class _ChrTokenizer:
         t = torch.tensor(ids, dtype=torch.long)
         return {"input_ids": t, "attention_mask": torch.ones_like(t)}
 
-    def encode(self, s: str) -> list[int]:
+    def encode(self, s: str, add_special_tokens: bool = True) -> list[int]:
+        del add_special_tokens
         return [ord(c) for c in s]
 
     def decode(self, ids: list[int], skip_special_tokens: bool = True) -> str:
@@ -128,7 +57,8 @@ class _RecordingGemEnv:
     def __init__(self) -> None:
         self.last_gen: str | None = None
 
-    def reset(self):
+    def reset(self, seed: int | None = None, *, row_index: int | None = None):
+        del seed, row_index
         return "hello", {}
 
     def step(self, gen_text: str):
@@ -136,11 +66,11 @@ class _RecordingGemEnv:
         return "", 1.0, True, False, {}
 
 
-class TestTokenObservationWrapperReset:
-    def test_reset_returns_tuple_with_text_and_sets_prompt_len(self) -> None:
+class TestRolloutEnvReset:
+    def test_reset_returns_tuple_with_text_and_sets_prompt_len(self, serve_env) -> None:
         inner = _RecordingGemEnv()
-        w = TokenObservationWrapper(
-            inner,
+        w = RolloutEnv(
+            serve_env(inner),
             _ChrTokenizer(),
             max_turns=3,
             pad_id=None,
@@ -148,27 +78,16 @@ class TestTokenObservationWrapperReset:
         )
         obs, info = w.reset()
         assert isinstance(info, dict)
-        assert set(obs.keys()) >= {"input_ids", "attention_mask", "text"}
-        assert obs["text"] == "hello"
+        assert set(obs.keys()) >= {"input_ids"}
+        assert w._prompt_text == "hello"
         assert w._last_full_prompt_token_len == obs["input_ids"].shape[1]
 
-    def test_reset_seed_fallback_for_seedless_env(self) -> None:
-        w = TokenObservationWrapper(
-            _SeedlessResetEnv(),
-            _ChrTokenizer(),
-            max_turns=1,
-            pad_id=None,
-            apply_chat_template=False,
-        )
-        obs, _ = w.reset(seed=123)
-        assert "input_ids" in obs
 
-
-class TestTokenObservationWrapperStep:
-    def test_step_from_full_completion_slices_generation(self) -> None:
+class TestRolloutEnvStep:
+    def test_step_from_full_completion_slices_generation(self, serve_env) -> None:
         inner = _RecordingGemEnv()
-        w = TokenObservationWrapper(
-            inner,
+        w = RolloutEnv(
+            serve_env(inner),
             _ChrTokenizer(),
             max_turns=3,
             pad_id=None,
@@ -184,26 +103,24 @@ class TestTokenObservationWrapperStep:
         assert _pd == {}
 
     def test_step_raises_without_prior_policy_observation(self) -> None:
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w._last_full_prompt_token_len = None
         with pytest.raises(RuntimeError, match="requires a prior reset"):
             w.step(torch.ones(1, 2, dtype=torch.long))
 
-    def test_chat_template_paths_and_nonterminal_step_feedback_append(self) -> None:
+    def test_chat_template_paths_and_nonterminal_step_feedback_append(
+        self, serve_env
+    ) -> None:
         env = _NonTerminalEnv()
-        w = TokenObservationWrapper(
-            env,
+        w = RolloutEnv(
+            serve_env(env),
             _ChatTokenizer(),
             max_turns=2,
             pad_id=None,
             apply_chat_template=True,
-            max_model_len=32,
-            max_output_tokens=4,
-            enable_sliding_window=True,
         )
         obs, _ = w.reset()
         assert obs["input_ids"].dtype == torch.long
-        assert "trajectory_input_ids" in obs
 
         completion = torch.cat(
             [obs["input_ids"], torch.tensor([[7, 8]], dtype=torch.long)],
@@ -217,10 +134,10 @@ class TestTokenObservationWrapperStep:
         assert next_obs["input_ids"].shape[1] > completion.shape[1]
         assert w._feedback_texts[-1] == "F:feedback\nT"
 
-    def test_non_chat_feedback_tokenization_path(self) -> None:
+    def test_non_chat_feedback_tokenization_path(self, serve_env) -> None:
         env = _NonTerminalEnv()
-        w = TokenObservationWrapper(
-            env,
+        w = RolloutEnv(
+            serve_env(env),
             _ChrTokenizer(),
             max_turns=2,
             pad_id=None,
@@ -236,24 +153,22 @@ class TestTokenObservationWrapperStep:
         assert not truncated
         assert next_obs["input_ids"].shape[1] > completion.shape[1]
 
-    def test_strict_mode_terminates_on_context_overflow(self) -> None:
-        """When sliding window is disabled and the cumulative prompt would
-        exceed ``max_model_len - max_output_tokens``, the trajectory ends
-        with ``truncated=True`` and an ``agilerl_context_overflow``
-        breadcrumb in ``info``.
+    def test_strict_mode_terminates_on_context_overflow(self, serve_env) -> None:
+        """When the cumulative prompt would exceed
+        ``max_model_len - max_output_tokens``, the trajectory ends with
+        ``truncated=True`` and no next observation.
         """
         env = _NonTerminalEnv()
         # Tiny budget: 20 - 4 = 16 prompt tokens. Initial prompt "P:hello\nS"
         # is 9 char-tokens; +2 gen +12 feedback ("F:feedback\nT") => 23 > 16.
-        w = TokenObservationWrapper(
-            env,
+        w = RolloutEnv(
+            serve_env(env),
             _ChrTokenizer(),
             max_turns=4,
             pad_id=None,
             apply_chat_template=False,
             max_model_len=20,
             max_output_tokens=4,
-            # enable_sliding_window defaults to False (strict mode).
         )
         obs, _ = w.reset()
         completion = torch.cat(
@@ -264,50 +179,16 @@ class TestTokenObservationWrapperStep:
         assert truncated is True
         assert terminated is False
         assert next_obs == {}
-        assert "agilerl_context_overflow" in info
-        overflow = info["agilerl_context_overflow"]
-        assert overflow["max_prompt_tokens"] == 16
-        assert overflow["max_model_len"] == 20
-        assert overflow["max_output_tokens"] == 4
-        assert overflow["full_prompt_len"] > overflow["max_prompt_tokens"]
-
-    def test_sliding_window_silently_truncates_instead_of_terminating(
-        self,
-    ) -> None:
-        """Counterpart to strict-mode test: with sliding window enabled,
-        overflow is masked by dropping older turns from the prompt.
-        """
-        env = _NonTerminalEnv()
-        w = TokenObservationWrapper(
-            env,
-            _ChrTokenizer(),
-            max_turns=4,
-            pad_id=None,
-            apply_chat_template=False,
-            max_model_len=20,
-            max_output_tokens=4,
-            enable_sliding_window=True,
-        )
-        obs, _ = w.reset()
-        completion = torch.cat(
-            [obs["input_ids"], torch.tensor([[120, 121]], dtype=torch.long)],
-            dim=1,
-        )
-        next_obs, _, terminated, truncated, info = w.step(completion)
-        assert not terminated
-        assert not truncated
-        assert "agilerl_context_overflow" not in info
-        assert "trajectory_input_ids" in next_obs
-        assert next_obs["trajectory_input_ids"].shape[1] <= 16
+        assert info == {}
 
 
-class TestTokenObservationWrapperChatTemplateBoundary:
+class TestRolloutEnvChatTemplateBoundary:
     """Verify the assistant→user→assistant boundary is computed via the
     tokenizer's chat template rather than hard-coded ChatML markers.
     """
 
     def test_gemma_style_template_emits_full_boundary(self) -> None:
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w.apply_chat_template = True
         w.tokenizer = _ChatTemplateRecordingTokenizer(_render_gemma_chat)
 
@@ -317,13 +198,13 @@ class TestTokenObservationWrapperChatTemplateBoundary:
         decoded = "".join(chr(int(x)) for x in out[0].tolist())
         # Must close the assistant turn, open a user turn with the feedback,
         # close it, then open a fresh model turn. Placeholder must not leak.
-        assert TokenObservationWrapper._BOUNDARY_PLACEHOLDER not in decoded
+        assert not _UUID4_HEX.search(decoded)
         assert decoded.startswith("<end_of_turn>\n<start_of_turn>user\n")
         assert "FEEDBACK" in decoded
         assert decoded.endswith("<start_of_turn>model\n")
 
     def test_qwen_style_template_emits_full_boundary(self) -> None:
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w.apply_chat_template = True
         w.tokenizer = _ChatTemplateRecordingTokenizer(_render_chatml)
 
@@ -331,13 +212,13 @@ class TestTokenObservationWrapperChatTemplateBoundary:
 
         assert out is not None
         decoded = "".join(chr(int(x)) for x in out[0].tolist())
-        assert TokenObservationWrapper._BOUNDARY_PLACEHOLDER not in decoded
+        assert not _UUID4_HEX.search(decoded)
         assert decoded.startswith("<|im_end|>\n<|im_start|>user\n")
         assert "FEEDBACK" in decoded
         assert decoded.endswith("<|im_start|>assistant\n")
 
     def test_llama_style_template_emits_full_boundary(self) -> None:
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w.apply_chat_template = True
         w.tokenizer = _ChatTemplateRecordingTokenizer(_render_llama)
 
@@ -345,14 +226,14 @@ class TestTokenObservationWrapperChatTemplateBoundary:
 
         assert out is not None
         decoded = "".join(chr(int(x)) for x in out[0].tolist())
-        assert TokenObservationWrapper._BOUNDARY_PLACEHOLDER not in decoded
+        assert not _UUID4_HEX.search(decoded)
         # Should close assistant via <|eot_id|> then open a user header.
         assert decoded.startswith("<|eot_id|><|start_header_id|>user")
         assert "FEEDBACK" in decoded
         assert decoded.endswith("<|start_header_id|>assistant<|end_header_id|>\n\n")
 
     def test_returns_none_when_template_renderer_raises(self) -> None:
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w.apply_chat_template = True
         w.tokenizer = _ChatTemplateRecordingTokenizer(_render_raises)
         assert w._chat_template_boundary_ids("F") is None
@@ -360,7 +241,7 @@ class TestTokenObservationWrapperChatTemplateBoundary:
     def test_returns_none_when_placeholder_is_stripped(self) -> None:
         # Pathological template whose render drops content entirely; the
         # placeholder doesn't survive, so we can't slice. Caller falls back.
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w.apply_chat_template = True
         w.tokenizer = _ChatTemplateRecordingTokenizer(_render_drops_content)
         assert w._chat_template_boundary_ids("F") is None
@@ -368,7 +249,7 @@ class TestTokenObservationWrapperChatTemplateBoundary:
     def test_returns_none_when_render_is_not_a_string(self) -> None:
         # Some tokenizers tokenize regardless of ``tokenize=False`` and hand
         # back ids; we can only slice a string render, so fall back.
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w.apply_chat_template = True
         w.tokenizer = _ChatTemplateRecordingTokenizer(_render_returns_ids)
         assert w._chat_template_boundary_ids("F") is None
@@ -376,7 +257,7 @@ class TestTokenObservationWrapperChatTemplateBoundary:
     def test_returns_none_when_boundary_text_is_empty(self) -> None:
         # Render ends exactly at the placeholder -> nothing after it to
         # tokenize as the boundary, so fall back.
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w.apply_chat_template = True
         w.tokenizer = _ChatTemplateRecordingTokenizer(_render_ends_at_placeholder)
         assert w._chat_template_boundary_ids("F") is None
@@ -384,7 +265,7 @@ class TestTokenObservationWrapperChatTemplateBoundary:
     def test_returns_none_when_boundary_encodes_to_no_tokens(self) -> None:
         # A tokenizer that maps the boundary text to zero ids gives us
         # nothing to append, so fall back.
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w.apply_chat_template = True
         w.tokenizer = _EmptyEncodeTokenizer(_render_chatml)
         assert w._chat_template_boundary_ids("F") is None
@@ -393,7 +274,7 @@ class TestTokenObservationWrapperChatTemplateBoundary:
         # With a working (Gemma-style) template, _tokenize_feedback must
         # return the template-derived boundary — not the hard-coded ChatML
         # fallback markers.
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w.apply_chat_template = True
         w.tokenizer = _ChatTemplateRecordingTokenizer(_render_gemma_chat)
         out = w._tokenize_feedback("FEEDBACK")
@@ -406,7 +287,7 @@ class TestTokenObservationWrapperChatTemplateBoundary:
         # If the chat-template path returns None (no apply_chat_template at
         # all on the tokenizer), _tokenize_feedback falls back to ChatML so
         # we never crash.
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w.apply_chat_template = True
         w.tokenizer = _ChrTokenizerWithChatTemplateBroken()
         out = w._tokenize_feedback("F")
@@ -508,65 +389,130 @@ class _ChrTokenizerWithChatTemplateBroken(_ChrTokenizer):
     """Has no apply_chat_template at all, so the boundary diff path errors."""
 
 
-class TestTokenObservationWrapperPolicyObservationFromState:
-    def test_policy_observation_merges_sliding_window_when_max_model_len_set(
-        self,
-    ) -> None:
-        w = _bare_wrapper()
+class TestRolloutEnvPolicyObservationFromState:
+    def test_policy_observation_returns_current_prompt_fields(self) -> None:
+        """The policy observation carries the current ``input_ids`` directly."""
+        w = bare_rollout_env()
         w.tokenizer = _StubTokenizer()
-        w._sw_max_model_len = 100
-        w._sw_max_output_tokens = 10
-        w._sw_enabled = True
-        w._initial_prompt_len = 2
         w.full_ids = torch.tensor([[0, 1, 2, 3]], dtype=torch.long)
         w.turn_boundaries = []
         obs = w._policy_observation_from_state()
-        assert "trajectory_input_ids" in obs
-        assert "trajectory_text" in obs
-        assert obs["input_ids"].shape[1] == 4
-
-    def test_policy_observation_skips_sliding_window_by_default(self) -> None:
-        """Strict mode (sliding window disabled) does NOT emit trunc/stitch fields."""
-        w = _bare_wrapper()
-        w.tokenizer = _StubTokenizer()
-        w._sw_max_model_len = 100
-        w._sw_max_output_tokens = 10
-        w._sw_enabled = False
-        w._initial_prompt_len = 2
-        w.full_ids = torch.tensor([[0, 1, 2, 3]], dtype=torch.long)
-        w.turn_boundaries = []
-        obs = w._policy_observation_from_state()
-        assert "trajectory_input_ids" not in obs
-        assert "stitch_prefix_ids" not in obs
+        assert set(obs.keys()) == {"input_ids"}
         assert obs["input_ids"].shape[1] == 4
 
     def test_policy_observation_raises_without_full_ids(self) -> None:
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w.full_ids = None
         with pytest.raises(RuntimeError, match="No prompt"):
             w._policy_observation_from_state()
 
 
-class _SyncStubEnv:
-    def __init__(self, sw_max_model_len: int | None = None) -> None:
-        self._sw_max_model_len = sw_max_model_len
+class TestRolloutEnvFromDataset:
+    """from_dataset bundles (question, answer) rows + a reward fn into a single-turn env."""
+
+    _ROWS: ClassVar[list[dict]] = [
+        {"question": "q0", "answer": "a0"},
+        {"question": "q1", "answer": "a1"},
+        {"question": "q2", "answer": "a2"},
+    ]
+    _TEST_ROWS: ClassVar[list[dict]] = [{"question": "tq0", "answer": "ta0"}]
+
+    def _make(self):
+        calls: list[tuple] = []
+
+        def reward_fn(completion, answer, question):
+            calls.append((completion, answer, question))
+            return 1.0 if answer == "a1" else 0.25
+
+        env = RolloutEnv.from_dataset(
+            self._ROWS,
+            reward_fn,
+            _ChrTokenizer(),
+            test_dataset=self._TEST_ROWS,
+            prompt_builder=lambda row: f"P:{row['question']}",
+            pad_id=None,
+            apply_chat_template=False,
+        )
+        return env, calls
+
+    def _reset_prompt(self, env, **kwargs) -> str:
+        obs, _info = env.reset(**kwargs)
+        return _ChrTokenizer().decode(obs["input_ids"][0].tolist())
+
+    def test_reset_serves_pinned_row_and_step_scores_single_turn(self) -> None:
+        env, calls = self._make()
+        assert env.dataset_size == 3
+        obs, _info = env.reset(row_index=1)
+        assert _ChrTokenizer().decode(obs["input_ids"][0].tolist()) == "P:q1"
+        gen = torch.tensor([[ord("z")]], dtype=torch.long)
+        _obs, reward, terminated, truncated, _i = env.step(
+            torch.cat([obs["input_ids"], gen], dim=1)
+        )
+        assert calls == [("z", "a1", "q1")]
+        assert reward == 1.0
+        assert terminated is True
+        assert truncated is False
+
+    def test_bare_reset_walks_rows_and_wraps(self) -> None:
+        env, _calls = self._make()
+        prompts = [self._reset_prompt(env) for _ in range(4)]
+        assert prompts == ["P:q0", "P:q1", "P:q2", "P:q0"]
+
+    def test_eval_mode_serves_test_rows(self) -> None:
+        env, _calls = self._make()
+        with env.eval_mode():
+            assert self._reset_prompt(env, row_index=0) == "P:tq0"
+        assert self._reset_prompt(env, row_index=0) == "P:q0"
+
+    def test_default_prompt_is_str_question_without_builder(self) -> None:
+        """With no ``prompt_builder`` the prompt is ``str(question)`` verbatim."""
+        env = RolloutEnv.from_dataset(
+            self._ROWS,
+            lambda c, a, q: 0.0,
+            _ChrTokenizer(),
+            pad_id=None,
+            apply_chat_template=False,
+        )
+        assert self._reset_prompt(env, row_index=2) == "q2"
+
+    def test_max_turns_is_rejected(self) -> None:
+        with pytest.raises(TypeError, match="single-turn"):
+            RolloutEnv.from_dataset(
+                self._ROWS,
+                lambda c, a, q: 0.0,
+                _ChrTokenizer(),
+                max_turns=2,
+            )
+
+
+class _SyncStubEnv(RolloutEnvDoubleMixin):
+    dataset_size = 0
+
+    def __init__(self) -> None:
         self.turn_boundaries: list[int] = []
         self.reset_calls: list[int | None] = []
         self.close_calls = 0
+        self.done = False
+        self.current_prompt: dict = {}
+        self.sampling_logps: list[torch.Tensor] = []
 
     def reset(self, seed: int | None = None):
         self.reset_calls.append(seed)
-        return (
-            {
-                "input_ids": torch.ones(1, 3, dtype=torch.long),
-                "attention_mask": torch.ones(1, 3, dtype=torch.long),
-            },
-            {},
-        )
+        self.done = False
+        self.sampling_logps = []
+        self.current_prompt = {
+            "input_ids": torch.ones(1, 3, dtype=torch.long),
+            "attention_mask": torch.ones(1, 3, dtype=torch.long),
+        }
+        return (self.current_prompt, {})
 
-    def step(self, full_completion: torch.Tensor):
+    def step(self, full_completion: torch.Tensor, sampling_logps=None):
         del full_completion
         self.turn_boundaries.append(1)
+        if sampling_logps is not None:
+            self.sampling_logps.append(sampling_logps)
+        self.done = True
+        self.current_prompt = {}
         return ({}, 1.0, True, False, {})
 
     def close(self) -> None:
@@ -578,47 +524,48 @@ class _SyncStubEnv:
             torch.ones(1, 3, dtype=torch.bool),
             torch.zeros(1, 3, dtype=torch.long),
             torch.ones(2, dtype=torch.float32),
+            torch.cat(self.sampling_logps) if self.sampling_logps else None,
         )
 
 
-class TestSyncMultiTurnVecEnvReset:
+class TestBatchRolloutEnvReset:
     def test_sync_gem_vec_env_reset_seeds_per_batch_group(self) -> None:
-        vec_env = SyncMultiTurnVecEnv(
+        vec_env = BatchRolloutEnv(
             env_factory=_SyncStubEnv,
             batch_size=2,
             group_size=2,
         )
         _ = vec_env.reset(seed=10)
-        seen = [traj.env.reset_calls[-1] for traj in vec_env.trajectories]
+        seen = [env.reset_calls[-1] for env in vec_env.envs]
         assert seen == [10, 10, 11, 11]
 
     def test_sync_gem_vec_env_reset_with_none_seed(self) -> None:
-        vec_env = SyncMultiTurnVecEnv(
+        vec_env = BatchRolloutEnv(
             env_factory=_SyncStubEnv,
             batch_size=2,
             group_size=2,
         )
         _ = vec_env.reset(seed=None)
-        seen = [traj.env.reset_calls[-1] for traj in vec_env.trajectories]
+        seen = [env.reset_calls[-1] for env in vec_env.envs]
         assert seen == [None, None, None, None]
 
     def test_sync_gem_vec_env_reset_reuses_existing_trajectories(self) -> None:
-        vec_env = SyncMultiTurnVecEnv(
+        vec_env = BatchRolloutEnv(
             env_factory=_SyncStubEnv,
             batch_size=2,
             group_size=2,
         )
         _ = vec_env.reset(seed=10)
         _ = vec_env.reset(seed=20)
-        seen = [traj.env.reset_calls[-1] for traj in vec_env.trajectories]
+        seen = [env.reset_calls[-1] for env in vec_env.envs]
         assert seen == [20, 20, 21, 21]
 
 
-class TestSyncMultiTurnVecEnvStep:
+class TestBatchRolloutEnvStep:
     def test_sync_gem_vec_env_step_raises_when_completion_count_mismatches_active(
         self,
     ) -> None:
-        vec_env = SyncMultiTurnVecEnv(
+        vec_env = BatchRolloutEnv(
             env_factory=_SyncStubEnv,
             batch_size=1,
             group_size=2,
@@ -626,11 +573,13 @@ class TestSyncMultiTurnVecEnvStep:
         _ = vec_env.reset(seed=0)
         with pytest.raises(
             RuntimeError,
-            match="Number of completions does not match number of active trajectories",
+            match="Number of completions does not match number of active envs",
         ):
             vec_env.step([torch.ones(1, 5, dtype=torch.long)])
 
-    def test_sync_vec_env_step_happy_path_1d_and_2d_and_active_filtering(self) -> None:
+    def test_batch_rollout_env_step_happy_path_1d_and_2d_and_active_filtering(
+        self,
+    ) -> None:
         created = [
             _StepVariantEnv(done_after_step=False),
             _StepVariantEnv(done_after_step=True),
@@ -642,7 +591,7 @@ class TestSyncMultiTurnVecEnvStep:
             idx["i"] += 1
             return env
 
-        vec = SyncMultiTurnVecEnv(env_factory=_factory, batch_size=1, group_size=2)
+        vec = BatchRolloutEnv(env_factory=_factory, batch_size=1, group_size=2)
         _ = vec.reset(seed=0)
         prompts = vec.step(
             [
@@ -657,8 +606,10 @@ class TestSyncMultiTurnVecEnvStep:
         assert created[0].step_shapes == [(1, 3)]
         assert created[1].step_shapes == [(1, 3)]
 
-    def test_sync_vec_env_step_raises_on_sampling_logps_count_mismatch(self) -> None:
-        vec_env = SyncMultiTurnVecEnv(
+    def test_batch_rollout_env_step_raises_on_sampling_logps_count_mismatch(
+        self,
+    ) -> None:
+        vec_env = BatchRolloutEnv(
             env_factory=_SyncStubEnv,
             batch_size=1,
             group_size=2,
@@ -676,13 +627,15 @@ class TestSyncMultiTurnVecEnvStep:
                 sampling_logps=[torch.tensor([-0.1, -0.2])],  # 1 != 2 active
             )
 
-    def test_sync_vec_env_step_accumulates_sampling_logps_per_trajectory(self) -> None:
-        """Each turn's vLLM sampling logprobs append onto that trajectory's
-        ``Trajectory.sampling_logps``; ``None`` rows (nothing captured) are
-        skipped. ``get_trajectories`` concatenates across turns and keeps a
-        per-trajectory ``None`` for rows that never captured any.
+    def test_batch_rollout_env_step_accumulates_sampling_logps_per_trajectory(
+        self,
+    ) -> None:
+        """Each turn's vLLM sampling logprobs append onto that env's
+        ``sampling_logps``; ``None`` rows (nothing captured) are skipped.
+        ``get_trajectories`` concatenates across turns and keeps a per-env
+        ``None`` for rows that never captured any.
         """
-        vec = SyncMultiTurnVecEnv(
+        vec = BatchRolloutEnv(
             env_factory=lambda: _StepVariantEnv(done_after_step=False),
             batch_size=1,
             group_size=2,
@@ -694,22 +647,22 @@ class TestSyncMultiTurnVecEnvStep:
         ]
         _ = vec.step(completions, sampling_logps=[torch.tensor([-0.1, -0.2]), None])
         _ = vec.step(completions, sampling_logps=[torch.tensor([-0.3]), None])
-        assert len(vec.trajectories[0].sampling_logps) == 2
-        assert vec.trajectories[1].sampling_logps == []
+        assert len(vec.envs[0].sampling_logps) == 2
+        assert vec.envs[1].sampling_logps == []
 
         *_parts, sampling = vec.get_trajectories()
         assert sampling is not None
         assert torch.equal(sampling[0], torch.tensor([-0.1, -0.2, -0.3]))
         assert sampling[1] is None
 
-    def test_sync_vec_env_sampling_logps_collapse_to_none_when_uncaptured(
+    def test_batch_rollout_env_sampling_logps_collapse_to_none_when_uncaptured(
         self,
     ) -> None:
         """Without captured logprobs the rollout-wide entry is a single
         ``None`` (not a list of ``None``s), and a reset clears any logprobs
         accumulated in a previous rollout.
         """
-        vec = SyncMultiTurnVecEnv(
+        vec = BatchRolloutEnv(
             env_factory=lambda: _StepVariantEnv(done_after_step=False),
             batch_size=1,
             group_size=2,
@@ -726,72 +679,55 @@ class TestSyncMultiTurnVecEnvStep:
 
         # Captured logprobs from one rollout must not leak past a reset.
         _ = vec.step(completions, sampling_logps=[torch.tensor([-0.5]), None])
-        assert len(vec.trajectories[0].sampling_logps) == 1
+        assert len(vec.envs[0].sampling_logps) == 1
         _ = vec.reset(seed=1)
-        assert vec.trajectories[0].sampling_logps == []
+        assert vec.envs[0].sampling_logps == []
         *_parts, sampling = vec.get_trajectories()
         assert sampling is None
 
 
-class TestSyncMultiTurnVecEnvClose:
-    def test_sync_vec_env_close_calls_underlying_env_close_once(self) -> None:
-        vec_env = SyncMultiTurnVecEnv(
-            env_factory=lambda: _SyncStubEnv(sw_max_model_len=1024),
+class TestBatchRolloutEnvClose:
+    def test_batch_rollout_env_close_calls_underlying_env_close_once(self) -> None:
+        vec_env = BatchRolloutEnv(
+            env_factory=_SyncStubEnv,
             batch_size=2,
             group_size=2,
         )
         _ = vec_env.reset(seed=0)
         vec_env.close()
-        close_counts = [traj.env.close_calls for traj in vec_env.trajectories]
+        close_counts = [env.close_calls for env in vec_env.envs]
         assert close_counts == [1, 1, 1, 1]
 
-    def test_sync_vec_env_close_dedupes_same_env_instance(self) -> None:
+    def test_batch_rollout_env_close_dedupes_same_env_instance(self) -> None:
         shared = _SyncStubEnv()
-        vec = SyncMultiTurnVecEnv(
-            env_factory=lambda: shared, batch_size=2, group_size=2
-        )
+        vec = BatchRolloutEnv(env_factory=lambda: shared, batch_size=2, group_size=2)
         _ = vec.reset(seed=0)
         vec.close()
         assert shared.close_calls == 1
 
 
-class TestSyncMultiTurnVecEnvInit:
-    def test_sync_vec_env_constructor_rejects_non_positive_sizes(self) -> None:
+class TestBatchRolloutEnvInit:
+    def test_batch_rollout_env_constructor_rejects_non_positive_sizes(self) -> None:
         with pytest.raises(ValueError, match="batch_size must be > 0"):
-            _ = SyncMultiTurnVecEnv(
+            _ = BatchRolloutEnv(
                 env_factory=_SyncStubEnv,
                 batch_size=0,
                 group_size=1,
             )
         with pytest.raises(ValueError, match="group_size must be > 0"):
-            _ = SyncMultiTurnVecEnv(
+            _ = BatchRolloutEnv(
                 env_factory=_SyncStubEnv,
                 batch_size=1,
                 group_size=0,
             )
 
 
-class TestTrajectoryBufferResetTrajectory:
-    def test_trajectory_buffer_reset_trajectory_out_of_bounds(self) -> None:
-        buf = TrajectoryBuffer(batch_size=1, group_size=1)
-        with pytest.raises(IndexError, match="env_idx out of bounds"):
-            buf.reset_trajectory(seed=0, env_idx=0)
-
-    def test_trajectory_buffer_reset_trajectory_success_path(self) -> None:
-        env = _SyncStubEnv()
-        traj = Trajectory(
-            env=env,
-            batch_idx=0,
-            group_idx=0,
-            prompt={},
-            done=True,
-        )
-        buf = TrajectoryBuffer(batch_size=1, group_size=1)
-        buf.add_trajectory(traj)
-        buf.reset_trajectory(seed=5, env_idx=0)
-        assert buf[0].done is False
-        assert buf[0].prompt["input_ids"].shape == (1, 3)
-        assert env.reset_calls[-1] == 5
+def _stub_env(*, done: bool = False, prompt: dict | None = None) -> _SyncStubEnv:
+    """A stub env preset to a given pool state (``done`` / ``current_prompt``)."""
+    env = _SyncStubEnv()
+    env.done = done
+    env.current_prompt = {} if prompt is None else prompt
+    return env
 
 
 class _ChatTokenizer:
@@ -841,7 +777,7 @@ class _NestedChatTokenizer(_ChatTokenizer):
         return out
 
 
-class TestTokenObservationWrapperTokenizeInitialPrompt:
+class TestRolloutEnvTokenizeInitialPrompt:
     def test_initial_prompt_unwraps_batched_token_id_lists(self) -> None:
         """Tokenizers returning ``[[ids]]`` (batch dim) and ``[ids]`` (flat)
         from ``apply_chat_template`` must produce identical ``(1, T)``
@@ -851,22 +787,12 @@ class TestTokenObservationWrapperTokenizeInitialPrompt:
             [{"role": "user", "content": "hi"}]
         )["input_ids"]
 
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w.apply_chat_template = True
         w.tokenizer = _NestedChatTokenizer()
         out = w._tokenize_initial_prompt("hi")
-        assert out["input_ids"].shape == (1, len(flat_ids))
-        assert out["input_ids"][0].tolist() == flat_ids
-        assert torch.equal(out["attention_mask"], torch.ones_like(out["input_ids"]))
-
-
-class _SeedlessResetEnv:
-    def reset(self):
-        return "obs", {}
-
-    def step(self, gen_text: str):
-        del gen_text
-        return "done", 0.0, True, False, {}
+        assert out.shape == (1, len(flat_ids))
+        assert out[0].tolist() == flat_ids
 
 
 class _NonTerminalEnv:
@@ -874,8 +800,8 @@ class _NonTerminalEnv:
         self.calls = 0
         self.last_gen: str | None = None
 
-    def reset(self, seed: int | None = None):
-        del seed
+    def reset(self, seed: int | None = None, *, row_index: int | None = None):
+        del seed, row_index
         return "hello", {"prefix": "P:", "suffix": "S"}
 
     def step(self, gen_text: str):
@@ -886,74 +812,36 @@ class _NonTerminalEnv:
         return "done", 1.0, True, False, {}
 
 
-class TestTokenObservationWrapperFormatObs:
-    def test_format_obs_prefix_suffix_and_empty_info(self) -> None:
-        assert TokenObservationWrapper._format_obs("x", None) == "x"
-        assert (
-            TokenObservationWrapper._format_obs("x", {"prefix": "A:", "suffix": "B"})
-            == "A:x\nB"
-        )
-
-
-class TestTokenObservationWrapperGetEpisodeData:
-    def test_get_episode_data_keeps_pad_inside_generation_span(self) -> None:
-        """Pad tokens inside a turn generation stay masked as actions.
-
-        When ``pad_token_id == eos_token_id`` (typical after assigning
-        ``tokenizer.pad_token = tokenizer.eos_token``), the EOS at the end of
-        a generation must remain an action token so vLLM sampling-logprob
-        counts stay aligned for importance-sampling correction.
-        """
-        w = _bare_wrapper()
+class TestRolloutEnvGetEpisodeData:
+    def test_get_episode_data_padding_and_pad_mask(self) -> None:
+        w = bare_rollout_env()
         w.pad_id = 0
         w.max_turns = 3
-        # Token 0 at index 2 sits inside turn-0 generation [1, 3).
         w.full_ids = torch.tensor([[9, 5, 0, 7, 8]], dtype=torch.long)
         w.turn_boundaries = [(1, 3, 0), (3, 5, 1)]
         w.turn_rewards = [1.5]
-        full_ids, action_mask, turn_ids, rewards = w.get_episode_data()
+        full_ids, action_mask, turn_ids, rewards, _logps = w.get_episode_data()
         assert torch.equal(full_ids, w.full_ids)
         assert action_mask.dtype == torch.bool
         assert turn_ids.dtype == torch.long
         assert rewards.tolist() == [1.5, 0.0, 0.0]
-        # Shifted index 1 ↔ full_ids[2] == pad, but still inside gen span.
-        assert action_mask[0, 1].item() is True
-        assert turn_ids[0, 1].item() == 0
-        assert int(action_mask.sum().item()) == 4
-
-    def test_get_episode_data_clears_pad_outside_generation_span(self) -> None:
-        w = _bare_wrapper()
-        w.pad_id = 0
-        w.max_turns = 2
-        # Prompt token at index 1 is pad and outside any generation span.
-        w.full_ids = torch.tensor([[9, 0, 5, 7]], dtype=torch.long)
-        w.turn_boundaries = [(2, 4, 0)]
-        w.turn_rewards = [0.25]
-        _full_ids, action_mask, turn_ids, rewards = w.get_episode_data()
-        assert rewards.tolist() == [0.25, 0.0]
-        # Shifted index 0 ↔ full_ids[1] == pad, outside gen → cleared.
-        assert action_mask[0, 0].item() is False
-        assert turn_ids[0, 0].item() == -1
-        # Generation tokens remain actions.
-        assert action_mask[0, 1].item() is True
-        assert action_mask[0, 2].item() is True
-        assert turn_ids[0, 1].item() == 0
-        assert turn_ids[0, 2].item() == 0
+        assert action_mask[0, 1].item() is False
+        assert turn_ids[0, 1].item() == -1
 
     def test_get_episode_data_raises_without_reset(self) -> None:
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w.full_ids = None
         with pytest.raises(RuntimeError, match="No episode data"):
             w.get_episode_data()
 
 
-class TestTokenObservationWrapperGetDebugInfo:
+class TestRolloutEnvGetDebugInfo:
     def test_get_debug_info_paths(self) -> None:
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w.full_ids = None
         assert w.get_debug_info() == {"error": "No episode data"}
 
-        w = _bare_wrapper()
+        w = bare_rollout_env()
         w.tokenizer = _ChrTokenizer()
         w.pad_id = None
         w.max_turns = 2
@@ -970,307 +858,117 @@ class TestTokenObservationWrapperGetDebugInfo:
         assert info["turn_details"][0]["gen_len"] == 2
 
 
-class TestSearchToolParseAction:
-    def test_search_tool_parse_action_and_instruction(self) -> None:
-        tool = SearchTool(search_url="http://x")
-        query, parsed_action, valid = tool._parse_action("a<search> q </search>z")
-        assert (query, parsed_action, valid) == ("q", "a<search> q </search>", True)
-        assert tool._parse_action("no tags") == ("", "", False)
-        assert "<answer>" in tool.instruction_string()
+class TestBatchRolloutEnvHelpers:
+    def test_is_initialized_flips_once_all_slots_built(self) -> None:
+        vec = BatchRolloutEnv(env_factory=_SyncStubEnv, batch_size=1, group_size=2)
+        assert vec._is_initialized is False
+        for _ in range(2):
+            vec.envs.append(_SyncStubEnv())
+        assert vec._is_initialized is True
 
 
-class TestSearchToolSearch:
-    def test_search_tool_search_success_and_failure_paths(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        tool = SearchTool(search_url="http://x", topk=1, timeout=1)
-
-        class _Resp:
-            def json(self):
-                return {"results": [{"content": "first"}, {"content": "second"}]}
-
-        def _ok_get(url, params, timeout):
-            del url, params, timeout
-            return _Resp()
-
-        monkeypatch.setattr("agilerl.llm_envs.requests.get", _ok_get)
-        out = tool._search("hello")
-        assert "first" in out
-        assert "second" not in out
-
-        def _fail_get(url, params, timeout):
-            del url, params, timeout
-            msg = "search request failed"
-            raise RuntimeError(msg)
-
-        monkeypatch.setattr("agilerl.llm_envs.requests.get", _fail_get)
-        assert "[SearchTool Error:" in tool._search("hello")
-
-        no_url = SearchTool(search_url=None)
-        monkeypatch.delenv("SEARCH_URL", raising=False)
-        with pytest.raises(ValueError, match="search_url must be provided"):
-            no_url._search("x")
+class TestBatchRolloutEnvActiveEnvs:
+    def test_active_envs_excludes_done_and_preserves_list_order(self) -> None:
+        vec = BatchRolloutEnv(env_factory=_SyncStubEnv, batch_size=2, group_size=2)
+        e0 = _stub_env(done=False)
+        e1 = _stub_env(done=True)
+        e2 = _stub_env(done=False)
+        vec.envs = [e0, e1, e2]
+        # done e1 excluded; the rest keep their list (batch/group) order.
+        assert vec._active_envs() == [e0, e2]
 
 
-class TestSearchToolExecuteAction:
-    def test_search_tool_passages_to_string_and_execute_action(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        tool = SearchTool(search_url="http://x")
-        passages = [
-            {"document": {"contents": "Title A\nBody A"}},
-            {"document": {"contents": "Title B\nBody B"}},
-        ]
-        formatted = tool._passages2string(passages)
-        assert "Doc 1(Title: Title A) Body A" in formatted
-
-        valid, has_error, observation, parsed_action = tool.execute_action("nope")
-        assert (valid, has_error, observation, parsed_action) == (False, True, "", "")
-
-        monkeypatch.setattr(tool, "_search", lambda q: f"res:{q}")
-        valid, has_error, observation, parsed_action = tool.execute_action(
-            "<search>cats</search> trailing",
-        )
-        assert valid is True
-        assert has_error is False
-        assert "<information>res:cats</information>" in observation
-        assert parsed_action == "<search>cats</search>"
-
-
-class _FormatEnv:
-    def __init__(self):
-        self.state = "ok"
-
-    def reset(self, **kwargs):
-        return ("obs", kwargs)
-
-    def step(self, action: str, **kwargs):
-        del kwargs
-        return ("next", 1.0, True, False, {"correct": False, "action": action})
-
-
-class TestFormatRewardWrapperStep:
-    def test_format_reward_wrapper_branches_and_passthrough(self) -> None:
-        env = _FormatEnv()
-        wrapped = FormatRewardWrapper(env, format_bonus=0.3)
-        assert wrapped.format_bonus == 0.3
-        assert wrapped.state == "ok"
-        obs, rew, term, trunc, info = wrapped.step("<answer>bad</answer>")
-        assert (obs, term, trunc) == ("next", True, False)
-        assert info["correct"] is False
-        assert rew == 1.3
-        assert wrapped.reset(seed=7) == ("obs", {"seed": 7})
-
-        class _NoBonusEnv(_FormatEnv):
-            def step(self, action: str, **kwargs):
-                del action, kwargs
-                return ("next", 2.0, True, False, {"correct": True})
-
-        no_bonus = FormatRewardWrapper(_NoBonusEnv(), format_bonus=0.5)
-        assert no_bonus.step("<answer>good</answer>")[1] == 2.0
-
-
-class TestTrajectoryBufferInvariantsAndHelpers:
-    def test_trajectory_buffer_invariants_and_helpers(self) -> None:
-        with pytest.raises(ValueError, match="batch_size must be > 0"):
-            _ = TrajectoryBuffer(batch_size=0, group_size=1)
-        with pytest.raises(ValueError, match="group_size must be > 0"):
-            _ = TrajectoryBuffer(batch_size=1, group_size=0)
-
-        env = _SyncStubEnv()
-        t1 = Trajectory(
-            env=env,
-            batch_idx=1,
-            group_idx=0,
-            prompt={
-                "input_ids": torch.ones(1, 1, dtype=torch.long),
-                "attention_mask": torch.ones(1, 1, dtype=torch.long),
-            },
-            done=False,
-        )
-        t2 = Trajectory(
-            env=env,
-            batch_idx=0,
-            group_idx=1,
-            prompt={
-                "input_ids": torch.ones(1, 1, dtype=torch.long),
-                "attention_mask": torch.ones(1, 1, dtype=torch.long),
-            },
+class TestBatchRolloutEnvGetPrompts:
+    def test_get_prompts_returns_none_when_no_active(self) -> None:
+        vec = BatchRolloutEnv(env_factory=_SyncStubEnv, batch_size=1, group_size=2)
+        done_env = _stub_env(
             done=True,
-        )
-        buf = TrajectoryBuffer(batch_size=1, group_size=2)
-        buf.add_trajectory(t1)
-        buf.add_trajectory(t2)
-        assert buf.is_initialized is True
-        assert buf.has_active() is True
-        assert len(buf) == 2
-        assert next(iter(buf)) is t1
-        assert buf[1] is t2
-        buf.sort(key=lambda t: (t.batch_idx, t.group_idx))
-        assert [t.batch_idx for t in buf] == [0, 1]
-        buf.clear()
-        assert len(buf) == 0
-        assert buf.has_active() is False
-
-
-class TestTrajectoryBufferGetActiveTrajectories:
-    def test_trajectory_buffer_get_active_trajectories_sorting(self) -> None:
-        env = _SyncStubEnv()
-        t0 = Trajectory(
-            env=env,
-            batch_idx=1,
-            group_idx=0,
-            prompt={
-                "input_ids": torch.ones(1, 1, dtype=torch.long),
-                "attention_mask": torch.ones(1, 1, dtype=torch.long),
-            },
-            done=False,
-        )
-        t1 = Trajectory(
-            env=env,
-            batch_idx=0,
-            group_idx=1,
-            prompt={
-                "input_ids": torch.ones(1, 1, dtype=torch.long),
-                "attention_mask": torch.ones(1, 1, dtype=torch.long),
-            },
-            done=False,
-        )
-        t2 = Trajectory(
-            env=env,
-            batch_idx=0,
-            group_idx=0,
-            prompt={
-                "input_ids": torch.ones(1, 1, dtype=torch.long),
-                "attention_mask": torch.ones(1, 1, dtype=torch.long),
-            },
-            done=True,
-        )
-        buf = TrajectoryBuffer(batch_size=2, group_size=2)
-        buf.add_trajectory(t0)
-        buf.add_trajectory(t1)
-        buf.add_trajectory(t2)
-
-        unsorted_active = buf.get_active_trajectories(sorted_by_index=False)
-        assert unsorted_active == [t0, t1]
-        sorted_active = buf.get_active_trajectories(sorted_by_index=True)
-        assert sorted_active == [t1, t0]
-
-
-class TestTrajectoryBufferGetPrompts:
-    def test_trajectory_buffer_get_prompts_returns_none_when_no_active(self) -> None:
-        env = _SyncStubEnv()
-        done_traj = Trajectory(
-            env=env,
-            batch_idx=0,
-            group_idx=0,
             prompt={
                 "input_ids": torch.ones(1, 2, dtype=torch.long),
                 "attention_mask": torch.ones(1, 2, dtype=torch.long),
             },
-            done=True,
         )
-        active_traj = Trajectory(
-            env=env,
-            batch_idx=0,
-            group_idx=1,
+        active_env = _stub_env(
+            done=False,
             prompt={
                 "input_ids": torch.ones(1, 3, dtype=torch.long),
                 "attention_mask": torch.ones(1, 3, dtype=torch.long),
             },
-            done=False,
         )
-        buf = TrajectoryBuffer(batch_size=1, group_size=2)
-        buf.add_trajectory(done_traj)
-        buf.add_trajectory(active_traj)
+        vec.envs = [done_env, active_env]
 
-        prompts = buf.get_prompts()
+        prompts = vec._get_prompts()
         assert prompts is not None
         assert isinstance(prompts, list)
         assert len(prompts) == 1
         assert prompts[0]["input_ids"].shape == (1, 3)
         assert prompts[0]["attention_mask"].shape == (1, 3)
 
-        active_traj.done = True
-        assert buf.get_prompts() is None
+        active_env.done = True
+        assert vec._get_prompts() is None
 
-    def test_trajectory_buffer_stack_prompt_validation(self) -> None:
-        env = _SyncStubEnv()
-        a = Trajectory(
-            env=env,
-            batch_idx=0,
-            group_idx=0,
+    def test_get_prompts_returns_active_in_index_order(self) -> None:
+        vec = BatchRolloutEnv(env_factory=_SyncStubEnv, batch_size=1, group_size=2)
+        a = _stub_env(
+            done=False,
             prompt={
                 "input_ids": torch.ones(1, 2, dtype=torch.long),
                 "attention_mask": torch.ones(1, 2, dtype=torch.long),
-                "trajectory_input_ids": torch.ones(1, 2, dtype=torch.long),
-                "trajectory_attention_mask": torch.ones(1, 2, dtype=torch.long),
-                "stitch_prefix_ids": torch.ones(1, 1, dtype=torch.long),
-                "initial_prompt_len": 2,
             },
-            done=False,
         )
-        b = Trajectory(
-            env=env,
-            batch_idx=0,
-            group_idx=1,
+        b = _stub_env(
+            done=False,
             prompt={
                 "input_ids": torch.ones(1, 3, dtype=torch.long),
                 "attention_mask": torch.ones(1, 3, dtype=torch.long),
-                "trajectory_input_ids": torch.ones(1, 3, dtype=torch.long),
-                "trajectory_attention_mask": torch.ones(1, 3, dtype=torch.long),
-                "stitch_prefix_ids": torch.ones(1, 2, dtype=torch.long),
-                "initial_prompt_len": 3,
             },
-            done=False,
         )
-        buf = TrajectoryBuffer(batch_size=1, group_size=2)
-        buf.add_trajectory(a)
-        buf.add_trajectory(b)
-        prompts = buf.get_prompts()
+        vec.envs = [a, b]
+        prompts = vec._get_prompts()
         assert prompts is not None
         assert len(prompts) == 2
-        assert [int(p["initial_prompt_len"]) for p in prompts] == [2, 3]
+        assert [int(p["input_ids"].shape[1]) for p in prompts] == [2, 3]
         assert prompts[0]["input_ids"].shape == (1, 2)
         assert prompts[1]["input_ids"].shape == (1, 3)
 
 
-class _StepVariantEnv:
+class _StepVariantEnv(RolloutEnvDoubleMixin):
+    dataset_size = 0
+
     def __init__(self, done_after_step: bool, include_turn_boundaries: bool = True):
         self.done_after_step = done_after_step
         self.include_turn_boundaries = include_turn_boundaries
         self.step_shapes: list[tuple[int, ...]] = []
-        if include_turn_boundaries:
-            self.turn_boundaries: list[int] = []
+        self.done = False
+        self.current_prompt: dict = {}
+        self.sampling_logps: list[torch.Tensor] = []
+        self.turn_boundaries: list[int] = []
 
     def reset(self, seed: int | None = None):
         del seed
-        return (
-            {
-                "input_ids": torch.ones(1, 3, dtype=torch.long),
-                "attention_mask": torch.ones(1, 3, dtype=torch.long),
-            },
-            {},
-        )
+        self.done = False
+        self.sampling_logps = []
+        self.current_prompt = {
+            "input_ids": torch.ones(1, 3, dtype=torch.long),
+            "attention_mask": torch.ones(1, 3, dtype=torch.long),
+        }
+        return (self.current_prompt, {})
 
-    def step(self, full_completion: torch.Tensor):
+    def step(self, full_completion: torch.Tensor, sampling_logps=None):
         self.step_shapes.append(tuple(full_completion.shape))
         if self.include_turn_boundaries:
             self.turn_boundaries.append(1)
+        if sampling_logps is not None:
+            self.sampling_logps.append(sampling_logps)
         if self.done_after_step:
+            self.done = True
+            self.current_prompt = {}
             return ({}, 1.0, True, False, {})
-        return (
-            {
-                "input_ids": torch.ones(1, 4, dtype=torch.long),
-                "attention_mask": torch.ones(1, 4, dtype=torch.long),
-            },
-            0.5,
-            False,
-            False,
-            {},
-        )
+        self.current_prompt = {
+            "input_ids": torch.ones(1, 4, dtype=torch.long),
+            "attention_mask": torch.ones(1, 4, dtype=torch.long),
+        }
+        return (self.current_prompt, 0.5, False, False, {})
 
     def close(self) -> None:
         pass
@@ -1281,11 +979,12 @@ class _StepVariantEnv:
             torch.ones(1, 4, dtype=torch.bool),
             torch.zeros(1, 4, dtype=torch.long),
             torch.ones(2, dtype=torch.float32),
+            torch.cat(self.sampling_logps) if self.sampling_logps else None,
         )
 
 
-class TestSyncMultiTurnVecEnvGetTrajectories:
-    def test_sync_vec_env_get_trajectories_counts_steps_with_and_without_turn_boundaries(
+class TestBatchRolloutEnvGetTrajectories:
+    def test_batch_rollout_env_get_trajectories_counts_steps_with_and_without_turn_boundaries(
         self,
     ) -> None:
         created = [
@@ -1299,7 +998,7 @@ class TestSyncMultiTurnVecEnvGetTrajectories:
             idx["i"] += 1
             return env
 
-        vec = SyncMultiTurnVecEnv(env_factory=_factory, batch_size=1, group_size=2)
+        vec = BatchRolloutEnv(env_factory=_factory, batch_size=1, group_size=2)
         _ = vec.reset(seed=0)
         _ = vec.step(
             [
@@ -1311,3 +1010,68 @@ class TestSyncMultiTurnVecEnvGetTrajectories:
         # batch_steps is second-to-last.
         *_parts, batch_steps, _sampling_logps = vec.get_trajectories()
         assert batch_steps == 1
+
+
+def _render_ends_at_feedback(messages, add_generation_prompt: bool) -> str:
+    """Render whose last bytes are the feedback placeholder — empty suffix."""
+    del add_generation_prompt
+    # ...assistant_ph...<prefix>...feedback_ph  (nothing after feedback -> suffix "")
+    return f"A{messages[1]['content']}B{messages[2]['content']}"
+
+
+class TestRolloutEnvChatTemplateBoundaryExtra:
+    """Remaining boundary branches: the cached frame and an empty-suffix render."""
+
+    def test_boundary_frame_is_cached_after_first_render(self) -> None:
+        # A second call reuses the cached (prefix, suffix) frame instead of
+        # re-rendering the template.
+        w = bare_rollout_env()
+        w.apply_chat_template = True
+        w.tokenizer = _ChatTemplateRecordingTokenizer(_render_gemma_chat)
+        first = w._chat_template_boundary_ids("FEEDBACK")
+        assert first is not None
+        assert w._boundary_parts_known
+        second = w._chat_template_boundary_ids("FEEDBACK")
+        assert second is not None
+        assert torch.equal(first, second)
+
+    def test_returns_none_when_boundary_suffix_is_empty(self) -> None:
+        # Placeholders are found and ordered, but nothing follows the feedback
+        # slot, so the suffix is empty and we fall back.
+        w = bare_rollout_env()
+        w.apply_chat_template = True
+        w.tokenizer = _ChatTemplateRecordingTokenizer(_render_ends_at_feedback)
+        assert w._chat_template_boundary_ids("F") is None
+
+
+class TestRolloutEnvEvalMode:
+    def test_eval_mode_delegates_to_the_env_client(self) -> None:
+        """``eval_mode`` runs the block inside the client's own eval context."""
+        w = bare_rollout_env()
+        client = FakeEnvClient()
+        w._env_client = client
+        with w.eval_mode():
+            assert client.eval_mode_depth == 1
+        assert client.eval_mode_depth == 0
+        assert client.eval_mode_entries == 1
+
+
+class TestRolloutEnvStepSamplingLogps:
+    def test_step_records_sampling_logps(self, serve_env) -> None:
+        """A turn's vLLM sampling logprobs are appended to the episode's row."""
+        inner = _RecordingGemEnv()
+        w = RolloutEnv(
+            serve_env(inner),
+            _ChrTokenizer(),
+            max_turns=3,
+            pad_id=None,
+            apply_chat_template=False,
+        )
+        obs, _ = w.reset()
+        full = torch.cat(
+            [obs["input_ids"], torch.tensor([[ord("x")]], dtype=torch.long)], dim=1
+        )
+        logps = torch.tensor([-0.5])
+        w.step(full, sampling_logps=logps)
+        assert len(w.sampling_logps) == 1
+        assert torch.equal(w.sampling_logps[0], logps)
