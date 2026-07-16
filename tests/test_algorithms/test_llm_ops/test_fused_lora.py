@@ -7,10 +7,10 @@ from torch import nn
 
 from agilerl.algorithms.core.llm_ops.fused_lora import (
     _get_cached_lora_layers,
-    clear_fused_adapter_routing,
     patch_lora_for_fused_forward,
     set_fused_adapter_routing,
     unpatch_lora_for_fused_forward,
+    unset_fused_adapter_routing,
 )
 
 
@@ -194,7 +194,7 @@ class TestRoutedForward:
         assert torch.allclose(model(x), ref, atol=1e-6)
 
         set_fused_adapter_routing(model, ["critic"] * 4)
-        clear_fused_adapter_routing(model)
+        unset_fused_adapter_routing(model)
         assert torch.allclose(model(x), ref, atol=1e-6)
 
 
@@ -212,7 +212,7 @@ class TestGradients:
             name: layer.lora_A[name].weight.grad.clone() for name in ("actor", "critic")
         }
         model.zero_grad()
-        clear_fused_adapter_routing(model)
+        unset_fused_adapter_routing(model)
 
         for name, rows in (("actor", x[:2]), ("critic", x[2:])):
             layer.set_adapter(name)
@@ -307,7 +307,7 @@ class TestSetFusedAdapterRoutingGuards:
 
     def test_clear_on_unpatched_model_does_not_mask_the_patch_check(self):
         model = _build_model()
-        clear_fused_adapter_routing(model)
+        unset_fused_adapter_routing(model)
         assert not hasattr(model.proj, "_fused_adapter_routing")
         with pytest.raises(RuntimeError, match="patch_lora_for_fused_forward"):
             set_fused_adapter_routing(model, ["actor"])

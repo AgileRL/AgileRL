@@ -133,9 +133,9 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from safetensors.torch import load_file
 
     from agilerl.algorithms.core.llm_ops.fused_lora import (
-        clear_fused_adapter_routing,
         patch_lora_for_fused_forward,
         set_fused_adapter_routing,
+        unset_fused_adapter_routing,
     )
     from agilerl.algorithms.core.llm_ops.vllm_colocate import (
         patch_vllm_lora_keep_resident,
@@ -4253,7 +4253,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
            The routing is **not** cleared here — it must remain active until
            after ``backward()`` completes (for gradient checkpoint
            recomputation).  Callers must call
-           ``clear_fused_adapter_routing`` after the backward pass.
+           ``unset_fused_adapter_routing`` after the backward pass.
 
            Callers are responsible for ensuring the model is in training
            mode and adapter trainability is restored before entering the
@@ -4431,7 +4431,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 routing,
                 batch_size=batch_size,
             )
-            clear_fused_adapter_routing(self._get_unwrapped_actor())
+            unset_fused_adapter_routing(self._get_unwrapped_actor())
             ref_logprobs = log_probs[:B]
             actor_logprobs = log_probs[B : 2 * B]
             critic_values = values[2 * B :] if self.use_value_head else None

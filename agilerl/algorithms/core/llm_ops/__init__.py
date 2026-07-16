@@ -10,10 +10,10 @@ fires.
 
 from agilerl import HAS_LIGER_KERNEL
 from agilerl.algorithms.core.llm_ops.fused_lora import (
-    clear_fused_adapter_routing,
     patch_lora_for_fused_forward,
     set_fused_adapter_routing,
     unpatch_lora_for_fused_forward,
+    unset_fused_adapter_routing,
 )
 from agilerl.algorithms.core.llm_ops.vllm_colocate import (
     get_vllm_internal_model,
@@ -38,7 +38,6 @@ __all__ = [
     "LigerDPOWithAlpha",
     "LigerFusedLinearPolicyLossFunction",
     "apply_fused_policy_loss",
-    "clear_fused_adapter_routing",
     "get_vllm_internal_model",
     "llm_policy_loss_fn",
     "patch_lora_for_fused_forward",
@@ -46,4 +45,5 @@ __all__ = [
     "patch_vllm_strip_multimodal_towers",
     "set_fused_adapter_routing",
     "unpatch_lora_for_fused_forward",
+    "unset_fused_adapter_routing",
 ]

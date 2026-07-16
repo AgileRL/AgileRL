@@ -8,7 +8,7 @@ from accelerate import Accelerator
 
 from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import ActionResult, LLMAlgorithm
-from agilerl.algorithms.core.llm_ops.fused_lora import clear_fused_adapter_routing
+from agilerl.algorithms.core.llm_ops.fused_lora import unset_fused_adapter_routing
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.llm_envs import ReasoningGym
 
@@ -663,7 +663,7 @@ class PPO(LLMAlgorithm):
                             batch_sampling_log_probs,
                         )
                         self._backward_pass(total_loss)
-                        clear_fused_adapter_routing(self._get_unwrapped_actor())
+                        unset_fused_adapter_routing(self._get_unwrapped_actor())
                         learn_metrics["kl"] += metrics["kl"]
                         learn_metrics["entropy"] += metrics["entropy"]
                         learn_metrics["clipfrac"] += metrics["clipfrac"]
@@ -761,7 +761,7 @@ class PPO(LLMAlgorithm):
                     total_loss = pg_loss + vf_loss + self.beta * kl_loss
 
                     self._backward_pass(total_loss)
-                    clear_fused_adapter_routing(self._get_unwrapped_actor())
+                    unset_fused_adapter_routing(self._get_unwrapped_actor())
 
                     learn_metrics["kl"] += kl_loss.item()
                     learn_metrics["entropy"] += masked_entropy.mean().item()

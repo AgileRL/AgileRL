@@ -206,7 +206,7 @@ def set_fused_adapter_routing(model: nn.Module, routing: Sequence[str]) -> None:
     """Route each row of the next forward's batch through its own adapter.
 
     Routing stays active — including for gradient-checkpoint recomputation
-    during ``backward()`` — until ``clear_fused_adapter_routing`` is called.
+    during ``backward()`` — until ``unset_fused_adapter_routing`` is called.
 
     :param model: The patched model whose LoRA layers should route rows.
     :param routing: Adapter name per batch row, e.g. ``["actor"] * B +
@@ -240,7 +240,7 @@ def set_fused_adapter_routing(model: nn.Module, routing: Sequence[str]) -> None:
         module._fused_adapter_routing = routing  # type: ignore[attr-defined]
 
 
-def clear_fused_adapter_routing(model: nn.Module) -> None:
+def unset_fused_adapter_routing(model: nn.Module) -> None:
     """Deactivate fused routing, restoring standard single-adapter forward.
 
     :param model: The model whose LoRA layers should clear fused routing.
