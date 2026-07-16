@@ -122,8 +122,6 @@ if TYPE_CHECKING:
     from torch.optim.lr_scheduler import SequentialLR
     from transformers import BitsAndBytesConfig
 
-    from agilerl.llm_envs import RolloutEnv
-
 # Make imports visible to typechecker and import when required
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from peft import (
@@ -2613,60 +2611,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or tuple[torch.Tensor[float], ...]
         """
         return cast("TorchObsType", observation)
-
-    def test(
-        self,
-        env: RolloutEnv,
-        loop: int = 1,
-        *args: Any,
-        **kwargs: Any,
-    ) -> np.ndarray:
-        """Return fitness (test) score of the llm on the test sub-set.
-
-        Each episode runs until the env reports done (``max_turns`` at the latest).
-
-        :param env: Tokenized rollout episode environment (single- or multi-turn).
-        :type env: RolloutEnv
-        :param loop: Number of outer test iterations (episodes).
-        :type loop: int
-        :return: Zero-dimensional array holding the mean per-step reward,
-            which is also recorded in the agent's fitness history.
-        :rtype: np.ndarray
-        """
-        from agilerl.llm_envs import RolloutEnv
-
-        if not isinstance(env, RolloutEnv):
-            msg = f"env must be a RolloutEnv; got {type(env).__name__}"
-            raise TypeError(msg)
-        rewards: list[float] = []
-        with env.eval_mode():
-            for _ in range(loop):
-                prompt_dict, _info = env.reset()
-                while not env.done:
-                    completion_ids = self.get_action(
-                        [prompt_dict],
-                        training=False,
-                    ).completion_ids
-                    prompt_dict, reward, _terminated, _truncated, _info = env.step(
-                        completion_ids[0],
-                    )
-                    rewards.append(float(reward))
-        if rewards:
-            mean_fit = float(np.mean(rewards))
-        else:
-            warnings.warn(
-                "test() collected no turns (every reset was already done, e.g. "
-                "over-budget prompts); recording fitness 0.0.",
-                UserWarning,
-                stacklevel=2,
-            )
-            mean_fit = 0.0
-        self.metrics.add_fitness(mean_fit)
-        if self.accelerator is not None:
-            # Episodes early-exit at their own turn counts, so ranks reach here
-            # out of step; sync once before training resumes.
-            self.accelerator.wait_for_everyone()
-        return np.array(mean_fit)
 
     def save_checkpoint(
         self,

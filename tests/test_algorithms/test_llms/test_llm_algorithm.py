@@ -1,9 +1,9 @@
-"""CPU tests for the shared :meth:`LLMAlgorithm.test` evaluation loop.
+"""CPU tests for rollout ``test()`` evaluation loops on GRPO / PPO / REINFORCE.
 
-The method only touches ``self.get_action``, ``self.metrics`` and
-``self.accelerator`` (the end-of-eval barrier), so it is exercised here with a
-stub in place of a fully constructed algorithm — no model, GPU, deepspeed, or
-vllm required.
+Each algo owns its own ``test`` method (copies kept for clarity). The body only
+touches ``self.get_action``, ``self.metrics``, and ``self.accelerator``, so it
+is exercised here with a stub in place of a fully constructed algorithm — no
+model, GPU, deepspeed, or vllm required.
 """
 
 import numpy as np
@@ -11,18 +11,22 @@ import pytest
 import torch
 
 from agilerl.algorithms.core import ActionResult
-from agilerl.algorithms.core.base import LLMAlgorithm
+from agilerl.algorithms.grpo import GRPO
+from agilerl.algorithms.ppo_llm import PPO
+from agilerl.algorithms.reinforce_llm import REINFORCE
 from agilerl.llm_envs import RolloutEnv
 from agilerl.metrics import AgentMetrics
 from tests.helpers.rollout_doubles import FakeEnvClient
 
+_ROLLOUT_ALGOS = (GRPO, PPO, REINFORCE)
+
 
 class _StubAlgo:
-    """Minimal stand-in exposing the attributes ``LLMAlgorithm.test`` uses."""
+    """Minimal stand-in exposing the attributes rollout ``test()`` uses."""
 
     def __init__(self):
         self.metrics = AgentMetrics()
-        self.accelerator = None  # single-process: the end-of-eval barrier is a no-op
+        self.accelerator = None
 
     @property
     def fitness(self):
@@ -61,13 +65,21 @@ def _rollout_env(client: FakeEnvClient, max_turns: int, **kwargs) -> RolloutEnv:
     )
 
 
-class TestLLMAlgorithmTest:
-    def test_env_truncation_ends_each_episode_at_max_turns(self):
+class TestRolloutAlgoTest:
+    def test_each_rollout_algo_defines_own_test(self):
+        assert "test" in GRPO.__dict__
+        assert "test" in PPO.__dict__
+        assert "test" in REINFORCE.__dict__
+        assert GRPO.test is not PPO.test
+        assert PPO.test is not REINFORCE.test
+
+    @pytest.mark.parametrize("algo_cls", _ROLLOUT_ALGOS)
+    def test_env_truncation_ends_each_episode_at_max_turns(self, algo_cls):
         algo = _StubAlgo()
         client = FakeEnvClient()  # backend never ends the episode itself
         env = _rollout_env(client, max_turns=3)
 
-        out = LLMAlgorithm.test(algo, env, loop=2)
+        out = algo_cls.test(algo, env, loop=2)
 
         # Two episodes of exactly ``max_turns`` turns each, run under eval mode.
         assert client.step_calls == 2 * env.max_turns
@@ -77,17 +89,19 @@ class TestLLMAlgorithmTest:
         assert out.item() == pytest.approx(1.0)
         assert algo.fitness == [pytest.approx(1.0)]
 
-    def test_terminating_env_finishes_before_max_turns(self):
+    @pytest.mark.parametrize("algo_cls", _ROLLOUT_ALGOS)
+    def test_terminating_env_finishes_before_max_turns(self, algo_cls):
         algo = _StubAlgo()
         client = FakeEnvClient(reward=0.5, terminate_after=2)
         env = _rollout_env(client, max_turns=5)
 
-        out = LLMAlgorithm.test(algo, env, loop=1)
+        out = algo_cls.test(algo, env, loop=1)
 
         assert client.step_calls == 2
         assert out.item() == pytest.approx(0.5)
 
-    def test_done_at_reset_records_zero_fitness(self):
+    @pytest.mark.parametrize("algo_cls", _ROLLOUT_ALGOS)
+    def test_done_at_reset_records_zero_fitness(self, algo_cls):
         """An over-budget initial prompt ends the episode before any turn."""
         algo = _StubAlgo()
         env = _rollout_env(
@@ -98,16 +112,7 @@ class TestLLMAlgorithmTest:
         )
 
         with pytest.warns(UserWarning, match="collected no turns"):
-            out = LLMAlgorithm.test(algo, env, loop=1)
+            out = algo_cls.test(algo, env, loop=1)
 
         assert out.item() == 0.0
         assert algo.fitness == [0.0]
-
-    def test_subclasses_share_the_base_implementation(self):
-        from agilerl.algorithms.grpo import GRPO
-        from agilerl.algorithms.ppo_llm import PPO
-        from agilerl.algorithms.reinforce_llm import REINFORCE
-
-        assert GRPO.test is LLMAlgorithm.test
-        assert PPO.test is LLMAlgorithm.test
-        assert REINFORCE.test is LLMAlgorithm.test

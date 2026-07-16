@@ -1195,6 +1195,7 @@ class TestPPOTest:
             def __init__(self):
                 self._env_client = FakeEnvClient()
                 self.done = False
+                self._step_count = 0
                 self.valid_prompt = {
                     "input_ids": torch.ones(1, 4, dtype=torch.long),
                     "attention_mask": torch.ones(1, 4, dtype=torch.long),
@@ -1203,12 +1204,15 @@ class TestPPOTest:
             def reset(self, seed=None):
                 del seed
                 self.done = False
+                self._step_count = 0
                 return self.valid_prompt, {}
 
             def step(self, full_completion_ids):
                 del full_completion_ids
-                self.done = True
-                return {}, 1.0, True, False, {}
+                self._step_count += 1
+                terminated = self._step_count >= 1
+                self.done = terminated
+                return self.valid_prompt, 1.0, terminated, False, {}
 
             def get_episode_data(self):
                 return (
@@ -1235,10 +1239,14 @@ class TestPPOTest:
         # One real turn per episode (early terminate); no dummy padding turns.
         assert get_action.call_count == 2
         for call in get_action.call_args_list:
-            assert call.args[0][0] is env.valid_prompt
+            prompt = call.args[0][0]
+            assert torch.equal(prompt["input_ids"], env.valid_prompt["input_ids"])
+            assert torch.equal(
+                prompt["attention_mask"], env.valid_prompt["attention_mask"]
+            )
         assert ppo.fitness[-1] == pytest.approx(1.0)
 
-    def test_test_method_waits_for_everyone(self):
+    def test_test_method_with_accelerator_records_fitness(self):
         class DummyRolloutEpisodeEnv(RolloutEnv):
             max_turns = 1
 
@@ -1263,14 +1271,16 @@ class TestPPOTest:
                 return None
 
         ppo = _cpu_llmppo()
-        acc = MagicMock()
-        ppo.accelerator = acc
+        ppo.accelerator = MagicMock()
         completion = torch.ones(1, 6, dtype=torch.long)
         with patch.object(
             ppo, "get_action", return_value=ActionResult([completion], None)
         ):
-            ppo.test(DummyRolloutEpisodeEnv(), loop=1)
-        acc.wait_for_everyone.assert_called()
+            out = ppo.test(DummyRolloutEpisodeEnv(), loop=1)
+
+        assert out.shape == ()
+        assert out.item() == pytest.approx(1.0)
+        assert ppo.fitness[-1] == pytest.approx(1.0)
 
     def test_test_method_rollout_continues_when_not_done(self):
         """Cover prompt update when the episode spans turns."""

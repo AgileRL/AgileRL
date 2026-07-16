@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 import warnings
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import torch
@@ -46,6 +48,9 @@ from agilerl.utils.llm_utils import (
 
 if HAS_LLM_DEPENDENCIES:
     from transformers import GenerationConfig
+
+if TYPE_CHECKING:
+    from agilerl.llm_envs import RolloutEnv
 
 
 class REINFORCE(LLMAlgorithm):
@@ -678,6 +683,61 @@ class REINFORCE(LLMAlgorithm):
             self.metrics.log(key, value)
 
         return result
+
+    def test(
+        self,
+        env: RolloutEnv,
+        loop: int = 1,
+        *args: Any,
+        **kwargs: Any,
+    ) -> np.ndarray:
+        """Return fitness (test) score of the llm on the test sub-set.
+
+        Episodes run until the env reports itself done: ``RolloutEnv`` already
+        terminates or truncates every episode (at ``max_turns`` at the latest),
+        and a reset that is immediately done (an over-budget initial prompt)
+        contributes no turns.
+
+        :param env: Tokenized rollout episode environment (single- or multi-turn).
+        :type env: RolloutEnv
+        :param loop: Number of outer test iterations (episodes).
+        :type loop: int
+        :return: Zero-dimensional array holding the mean per-step reward,
+            which is also recorded in the agent's fitness history.
+        :rtype: np.ndarray
+        """
+        from agilerl.llm_envs import RolloutEnv
+
+        if not isinstance(env, RolloutEnv):
+            msg = f"env must be a RolloutEnv; got {type(env).__name__}"
+            raise TypeError(msg)
+        rewards: list[float] = []
+        with env.eval_mode():
+            for _ in range(loop):
+                prompt_dict, _info = env.reset()
+                while not env.done:
+                    completion_ids = self.get_action(
+                        [prompt_dict],
+                        training=False,
+                    ).completion_ids
+                    prompt_dict, reward, _terminated, _truncated, _info = env.step(
+                        completion_ids[0],
+                    )
+                    rewards.append(float(reward))
+        if rewards:
+            mean_fit = float(np.mean(rewards))
+        else:
+            warnings.warn(
+                "test() collected no turns (every reset was already done, e.g. "
+                "over-budget prompts); recording fitness 0.0.",
+                UserWarning,
+                stacklevel=2,
+            )
+            mean_fit = 0.0
+        self.metrics.add_fitness(mean_fit)
+        if self.accelerator is not None:
+            self.accelerator.wait_for_everyone()
+        return np.array(mean_fit)
 
     def _validate_core_args(
         self,
