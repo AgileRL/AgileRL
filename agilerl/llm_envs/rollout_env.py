@@ -12,6 +12,7 @@ rollouts over a batch, sharing a :class:`BatchPointer` dataset cursor.
 
 from __future__ import annotations
 
+import math
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, wait
@@ -107,6 +108,9 @@ class RolloutEnv:
         :vartype turn_boundaries: list[tuple[int, int, int]]
         :ivar turn_rewards: Per-turn rewards returned by the wrapped env.
         :vartype turn_rewards: list[float]
+        :ivar reward_component_sums: Per-episode sums of raw reward components from
+            ``info["reward_components"]`` (empty when absent).
+        :vartype reward_component_sums: dict[str, float]
         :ivar done: Whether this episode has terminated (set by ``step``).
         :vartype done: bool
         :ivar current_prompt: The latest policy-ready observation — what the
@@ -148,6 +152,7 @@ class RolloutEnv:
         self.full_ids: torch.Tensor | None = None
         self.turn_boundaries: list[tuple[int, int, int]] = []
         self.turn_rewards: list[float] = []
+        self.reward_component_sums: dict[str, float] = {}
         self._turn_idx = 0
         self._prompt_text: str = ""
         self._gen_texts: list[str] = []
@@ -297,7 +302,13 @@ class RolloutEnv:
     def from_dataset(
         cls,
         dataset: Any,
-        reward_fn: Callable[[str, Any, Any], float],
+        reward_fn: (
+            Callable[[str, Any, Any], float]
+            | list[
+                tuple[str, Callable[[str, Any, Any], float]]
+                | tuple[str, Callable[[str, Any, Any], float], float]
+            ]
+        ),
         tokenizer: Any,
         *,
         test_dataset: Any | None = None,
@@ -325,8 +336,10 @@ class RolloutEnv:
 
         :param dataset: Train rows, indexable to per-row mappings with
             ``question_column`` / ``answer_column`` keys (e.g. a ``datasets.Dataset``).
-        :param reward_fn: ``(completion, answer, question) -> float`` scorer. The
-            row's answer/question values are passed through unmodified.
+        :param reward_fn: A ``(completion, answer, question) -> float`` scorer, or a
+            list of ``(name, fn)`` / ``(name, fn, weight)`` entries. A list composes
+            a weighted sum as the learning reward and exposes raw segments in
+            ``info["reward_components"]`` (weight defaults to ``1.0``).
         :param tokenizer: Tokenizer for the token-level loop.
         :param test_dataset: Optional held-out rows served under evaluation mode
             (falls back to ``dataset`` when ``None``).
@@ -346,7 +359,7 @@ class RolloutEnv:
         env = _PromptDatasetEnv(
             dataset,
             test_dataset,
-            reward_fn,
+            _normalize_reward_fn(reward_fn),
             prompt_builder,
             question_column,
             answer_column,
@@ -594,6 +607,7 @@ class RolloutEnv:
         self.full_ids = self._tokenize_initial_prompt(obs_text)
         self.turn_boundaries = []
         self.turn_rewards = []
+        self.reward_component_sums = {}
         self._turn_idx = 0
         self._prompt_text = obs_text
         self._gen_texts = []
@@ -658,6 +672,12 @@ class RolloutEnv:
         """Apply the env round-trip result: rewards, truncation, feedback tokens."""
         next_obs, reward, terminated, truncated, info = env_result
         self.turn_rewards.append(float(reward))
+        components = info.get("reward_components") if isinstance(info, dict) else None
+        if isinstance(components, dict):
+            for name, value in components.items():
+                self.reward_component_sums[name] = self.reward_component_sums.get(
+                    name, 0.0
+                ) + float(value)
         self._turn_idx += 1
 
         # Turn cap exceeded
@@ -810,6 +830,64 @@ class RolloutEnv:
         }
 
 
+def _normalize_reward_fn(
+    reward_fn: (
+        Callable[[str, Any, Any], float]
+        | list[
+            tuple[str, Callable[[str, Any, Any], float]]
+            | tuple[str, Callable[[str, Any, Any], float], float]
+        ]
+    ),
+) -> (
+    Callable[[str, Any, Any], float]
+    | list[tuple[str, Callable[[str, Any, Any], float], float]]
+):
+    """Normalize ``from_dataset`` reward_fn to a callable or weighted named list."""
+    if callable(reward_fn) and not isinstance(reward_fn, list):
+        return reward_fn
+    if isinstance(reward_fn, tuple):
+        msg = (
+            "reward_fn must be a callable or a list of (name, fn) / "
+            "(name, fn, weight) tuples; got a single tuple"
+        )
+        raise TypeError(msg)
+    if not isinstance(reward_fn, list):
+        msg = (
+            "reward_fn must be a callable or a list of (name, fn) / "
+            f"(name, fn, weight) tuples; got {type(reward_fn).__name__}"
+        )
+        raise TypeError(msg)
+    if not reward_fn:
+        msg = "reward_fn list must not be empty"
+        raise ValueError(msg)
+
+    normalized: list[tuple[str, Callable[[str, Any, Any], float], float]] = []
+    seen: set[str] = set()
+    for i, item in enumerate(reward_fn):
+        if not isinstance(item, tuple) or len(item) not in (2, 3):
+            msg = (
+                f"reward_fn[{i}] must be (name, fn) or (name, fn, weight); got {item!r}"
+            )
+            raise TypeError(msg)
+        name, fn, *rest = item
+        if not isinstance(name, str) or not name:
+            msg = f"reward_fn[{i}] name must be a non-empty str"
+            raise TypeError(msg)
+        if name in seen:
+            msg = f"duplicate reward component name: {name!r}"
+            raise ValueError(msg)
+        if not callable(fn):
+            msg = f"reward_fn[{i}] fn must be callable"
+            raise TypeError(msg)
+        weight = 1.0 if not rest else float(rest[0])
+        if not math.isfinite(weight):
+            msg = f"reward_fn[{i}] weight must be finite; got {weight!r}"
+            raise ValueError(msg)
+        seen.add(name)
+        normalized.append((name, fn, weight))
+    return normalized
+
+
 class _PromptDatasetEnv:
     """(question, answer) rows + a reward fn, served as a single-turn text env.
 
@@ -825,14 +903,24 @@ class _PromptDatasetEnv:
         self,
         dataset: Any,
         test_dataset: Any | None,
-        reward_fn: Callable[[str, Any, Any], float],
+        reward_fn: (
+            Callable[[str, Any, Any], float]
+            | list[tuple[str, Callable[[str, Any, Any], float], float]]
+        ),
         prompt_builder: Callable[[Any], str] | None,
         question_column: str,
         answer_column: str,
     ) -> None:
         self._train = dataset
         self._test = test_dataset
-        self._reward_fn = reward_fn
+        if callable(reward_fn) and not isinstance(reward_fn, list):
+            self._reward_fn: Callable[[str, Any, Any], float] | None = reward_fn
+            self._reward_components: (
+                list[tuple[str, Callable[[str, Any, Any], float], float]] | None
+            ) = None
+        else:
+            self._reward_fn = None
+            self._reward_components = reward_fn
         self._prompt_builder = prompt_builder
         self._question_column = question_column
         self._answer_column = answer_column
@@ -873,8 +961,17 @@ class _PromptDatasetEnv:
 
     def step(self, action: str) -> tuple[str, float, bool, bool, dict[str, Any]]:
         """Score the completion against the current row; always single-turn."""
-        reward = float(self._reward_fn(action, self._answer, self._question))
-        return "", reward, True, False, {}
+        if self._reward_components is None:
+            reward = float(self._reward_fn(action, self._answer, self._question))
+            return "", reward, True, False, {}
+
+        raw: dict[str, float] = {}
+        total = 0.0
+        for name, fn, weight in self._reward_components:
+            value = float(fn(action, self._answer, self._question))
+            raw[name] = value
+            total += weight * value
+        return "", total, True, False, {"reward_components": raw}
 
 
 class BatchPointer:
@@ -1212,3 +1309,14 @@ class BatchRolloutEnv:
                 else None
             ),
         )
+
+    def get_reward_component_means(self) -> dict[str, float]:
+        """Mean of per-episode raw reward component sums across envs that reported each key."""
+        totals: dict[str, float] = {}
+        counts: dict[str, int] = {}
+        for env in self.envs:
+            sums = getattr(env, "reward_component_sums", None) or {}
+            for name, value in sums.items():
+                totals[name] = totals.get(name, 0.0) + float(value)
+                counts[name] = counts.get(name, 0) + 1
+        return {name: totals[name] / counts[name] for name in totals}

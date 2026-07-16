@@ -98,7 +98,9 @@ class OpenEnvWrapper(Environment):
     class translates between the two, letting OpenEnv's server host any local env
     unchanged. The env's ``dataset_size`` / ``tools`` are surfaced on the OpenEnv
     ``state`` so a client can read them. ``info``'s ``prefix`` / ``suffix`` are folded
-    into the prompt (OpenEnv does not round-trip observation metadata).
+    into the prompt (OpenEnv does not round-trip observation metadata over HTTP);
+    any other ``info`` keys are kept on ``TextObservation.metadata`` for in-process
+    clients.
 
     :param inner: The local env to host.
     :param env_name: Name reported in the env's OpenEnv metadata; defaults to
@@ -155,11 +157,19 @@ class OpenEnvWrapper(Environment):
             self._inner.step(action.message)
         )
         self._state.step_count += 1
+        # Prefix/suffix are folded into ``prompt``; remaining info keys (e.g.
+        # ``reward_components``) are kept on metadata for in-process clients.
+        metadata = {
+            key: value
+            for key, value in (info or {}).items()
+            if key not in ("prefix", "suffix")
+        }
         return TextObservation(
             prompt=_fold(prompt, info),
             reward=reward,
             done=bool(terminated or truncated),
             truncated=bool(truncated),
+            metadata=metadata,
         )
 
     @property
@@ -587,7 +597,7 @@ class LocalEnvClient(_EvalModeFlag):
             float(obs.reward) if obs.reward is not None else 0.0,
             bool(obs.done) and not truncated,
             truncated,
-            {},
+            dict(obs.metadata) if obs.metadata else {},
         )
 
     def close(self) -> None:
