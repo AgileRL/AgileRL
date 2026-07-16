@@ -13,8 +13,8 @@ from agilerl.utils.llm_utils import apply_chat_template
 if TYPE_CHECKING:
     from agilerl.llm_envs.openenv import (
         LocalEnvClient,
-        OpenEnvClient,
         OpenEnvServer,
+        OpenEnvSessionClient,
         OpenEnvWrapper,
         ServedEnvClient,
         TextAction,
@@ -26,8 +26,8 @@ if TYPE_CHECKING:
 _OPENENV_EXPORTS = frozenset(
     {
         "LocalEnvClient",
-        "OpenEnvClient",
         "OpenEnvServer",
+        "OpenEnvSessionClient",
         "OpenEnvWrapper",
         "ServedEnvClient",
         "TextAction",
@@ -58,8 +58,8 @@ __all__ = [
     "BatchRolloutEnv",
     "DatasetEnv",
     "LocalEnvClient",
-    "OpenEnvClient",
     "OpenEnvServer",
+    "OpenEnvSessionClient",
     "OpenEnvWrapper",
     "RolloutEnv",
     "ServedEnvClient",

@@ -600,6 +600,7 @@ class LLMEnvSpec(BaseModel):
         :rtype: Callable[[], RolloutEnv]
         """
         from agilerl.llm_envs import RolloutEnv
+        from agilerl.llm_envs.openenv import OpenEnvSessionClient
 
         if self.env_type != LLMEnvType.ROLLOUT:
             msg = (
@@ -665,12 +666,13 @@ class LLMEnvSpec(BaseModel):
             timeout_s = self.request_timeout_s
 
             def _url_factory() -> RolloutEnv:
+                # One WebSocket session per rollout, so a single hosted URL serves
+                # the whole group as concurrent, isolated episodes. The server's
+                # max_concurrent_envs must cover batch_size * group_size.
                 return RolloutEnv(
-                    url,
+                    OpenEnvSessionClient(url, mcp_tool=mcp_tool, timeout_s=timeout_s),
                     tokenizer,
                     max_turns=url_max_turns,
-                    mcp_tool=mcp_tool,
-                    timeout_s=timeout_s,
                     pad_id=pad_id,
                     apply_chat_template=True,
                     max_model_len=max_model_len,

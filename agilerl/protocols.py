@@ -663,7 +663,7 @@ class TextEnvProtocol(Protocol):
 
 
 class EnvClientProtocol(Protocol):
-    """Backend surface shared by :class:`~agilerl.llm_envs.openenv.OpenEnvClient`,
+    """Backend surface shared by :class:`~agilerl.llm_envs.openenv.OpenEnvSessionClient`,
     :class:`~agilerl.llm_envs.openenv.LocalEnvClient` and
     :class:`~agilerl.llm_envs.openenv.ServedEnvClient`.
 

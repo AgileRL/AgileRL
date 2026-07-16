@@ -1,11 +1,10 @@
-"""The OpenEnv API: reach any text env the same way — over HTTP or in-process.
+"""The OpenEnv API: reach any text env the same way — over a URL or in-process.
 
 Every LLM-training env is driven through the same two calls — ``reset()`` returns a
 prompt, ``step(text)`` returns the next prompt, a reward, and done flags — and a
-``RolloutEnv`` reaches it through a **backend**: an :class:`OpenEnvClient` when the env
-is hosted at a URL (a remote Space, or a local :class:`OpenEnvServer`), or a
-:class:`LocalEnvClient` when the env runs in the same process (no HTTP). One env is
-reached per backend — each concurrent rollout gets its own.
+``RolloutEnv`` reaches it through a **backend**: an :class:`OpenEnvSessionClient` when
+the env is hosted at a URL (a remote Space, or a local :class:`OpenEnvServer`), or a
+:class:`LocalEnvClient` when the env runs in the same process (no HTTP).
 
 The pieces here fill the gaps OpenEnv's own classes leave:
 
@@ -13,27 +12,27 @@ The pieces here fill the gaps OpenEnv's own classes leave:
   ``Environment`` so OpenEnv's server can host it.
 * :class:`OpenEnvServer` — runs OpenEnv's app on uvicorn *in-process* (a daemon thread
   on an ephemeral port, ``start`` / ``stop``); OpenEnv's own hosting is a standalone
-  blocking process. Closes the hosted env once, on stop.
-* :class:`OpenEnvClient` — a small *synchronous* httpx client for an env at a URL; an
-  async caller (e.g. a Ray actor) gets concurrency from the actor boundary, not the
-  client.
+  blocking process. Hosts a single shared env, or — with ``make_env`` +
+  ``max_concurrent_envs`` — a fresh env per WebSocket session.
+* :class:`OpenEnvSessionClient` — drives an env at a URL over an OpenEnv ``/ws``
+  session (wrapping OpenEnv's own ``SyncEnvClient``); one session per instance, so a
+  single URL serves as many concurrent, isolated episodes as the server allows.
 * :class:`LocalEnvClient` — the in-process sibling: same surface, direct calls, no
   socket.
 * :class:`ServedEnvClient` — hosts a local env on an :class:`OpenEnvServer`, drives it
-  through an :class:`OpenEnvClient`, and owns both, so one ``close`` tears everything
-  down.
+  through an :class:`OpenEnvSessionClient`, and owns both, so one ``close`` tears
+  everything down.
 
 :func:`resolve_env` turns a URL or a ``module:Class`` entrypoint into a hosted ``(url,
 server)``; :func:`load_env` just builds an entrypoint env (no hosting) for the
 in-process path.
 
-Two OpenEnv facts shape the design. Servers must run in **simulation mode**: production
-mode does not register ``/reset`` / ``/step`` / ``/state``, so the REST client cannot
-drive it. And REST holds no session state, so a served env handles one episode at a
-time — hence one server per concurrent rollout (see :meth:`RolloutEnv.serving`).
-OpenEnv's WebSocket path does support many sessions per server; a WebSocket-backed
-backend is the noted evolution if the per-rollout fleet ever becomes the bottleneck —
-today rollout concurrency comes from the distributed (Ray) collector.
+Why WebSocket sessions: OpenEnv's REST ``/reset`` / ``/step`` / ``/state`` are
+registered only in **simulation mode** and carry no session state, so one shared env
+serves one episode at a time. The ``/ws`` endpoint is served in both simulation and
+production mode and gives each connection its own env instance, so one server (one URL)
+hosts a whole rollout group as concurrent, isolated episodes — and the session client
+is the only backend that can drive a production OpenEnv deployment.
 """
 
 from __future__ import annotations
@@ -43,20 +42,21 @@ import inspect
 import logging
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any
 
-try:
-    import httpx
+from agilerl import HAS_LLM_DEPENDENCIES
+
+if HAS_LLM_DEPENDENCIES:
     from openenv.core.env_server.http_server import create_app
     from openenv.core.env_server.interfaces import Environment, EnvironmentMetadata
     from openenv.core.env_server.types import Action, Observation, State
-except ImportError as exc:  # pragma: no cover - only reachable without the llm extra
+else:  # pragma: no cover - only reachable without the llm extra
     msg = (
-        "The OpenEnv backend requires the 'openenv' and 'httpx' packages; "
-        "install them with the LLM extra: pip install agilerl[llm]."
+        "The OpenEnv backend requires the LLM extra; "
+        "install it with: pip install agilerl[llm]."
     )
-    raise ImportError(msg) from exc
+    raise ImportError(msg)
 
 from agilerl.protocols import TextEnvProtocol
 from agilerl.utils.env_utils import resolve_entrypoint_target
@@ -103,13 +103,29 @@ class OpenEnvWrapper(Environment):
     :param inner: The local env to host.
     :param env_name: Name reported in the env's OpenEnv metadata; defaults to
         ``inner``'s class name (so a client sees the real env, not ``OpenEnvWrapper``).
+    :param owns_inner: When ``True`` (the per-session hosting path), ``close``
+        closes ``inner``; when ``False`` (a single shared env driven over REST),
+        ``close`` is a no-op so the shared env outlives each per-request adapter.
     """
 
-    def __init__(self, inner: TextEnvProtocol, *, env_name: str | None = None) -> None:
+    # OpenEnv gates ``max_concurrent_envs > 1`` on this flag. In the per-session
+    # path the server calls the env factory once per WebSocket session, so each
+    # session gets its own wrapper around its own fresh ``inner`` env and distinct
+    # sessions never share env state — the isolation concurrent sessions require.
+    SUPPORTS_CONCURRENT_SESSIONS = True
+
+    def __init__(
+        self,
+        inner: TextEnvProtocol,
+        *,
+        env_name: str | None = None,
+        owns_inner: bool = False,
+    ) -> None:
         """Wrap ``inner`` as an OpenEnv environment."""
         super().__init__()
         self._inner = inner
         self._env_name = env_name
+        self._owns_inner = owns_inner
         params = inspect.signature(inner.reset).parameters
         # A ``**kwargs`` reset accepts any keyword, so every forwardable name
         # counts as supported (a delegating proxy must not lose seed/row pinning).
@@ -173,7 +189,18 @@ class OpenEnvWrapper(Environment):
         )
 
     def close(self) -> None:
-        """No-op: the wrapper is a per-request adapter and does not own the env."""
+        """Close ``inner`` when this wrapper owns it, else no-op.
+
+        The shared-inner REST path keeps this a no-op so one env survives across
+        the per-request adapters; the per-session path owns its fresh env and
+        releases it when the session ends.
+        """
+        if not self._owns_inner:
+            return
+        closer = getattr(self._inner, "close", None)
+        if callable(closer):
+            with contextlib.suppress(Exception):
+                closer()
 
 
 def _normalize_reset(result: Any) -> tuple[str, dict[str, Any]]:
@@ -226,26 +253,48 @@ class OpenEnvServer:
     Any OpenEnv client can then reach it by URL.
     This class also enables env servers to be hosted by Ray actors in their own process.
 
-    :param env: The local env to serve.
+    Pass ``env`` to host a single shared env: one session's episode at a time
+    (this is what :class:`ServedEnvClient` uses for a per-rollout server). Pass
+    ``make_env`` with ``max_concurrent_envs`` to host a *fresh env per WebSocket
+    session*: OpenEnv calls the factory once per ``/ws`` connection, so one server
+    (one URL) serves that many concurrent, isolated episodes (drive each with its
+    own :class:`OpenEnvSessionClient`). This is what lets a whole
+    :class:`~agilerl.llm_envs.rollout_env.BatchRolloutEnv` group run against a
+    single hosted env service.
+
+    :param env: A single local env, shared across a server that hosts one session.
+    :param make_env: A zero-arg factory building a fresh env per session; supply
+        with ``max_concurrent_envs`` for the concurrent-session path. Exactly one
+        of ``env`` / ``make_env`` must be given.
     :param host: Interface to bind (default loopback).
     :param port: TCP port; ``0`` lets the OS pick one.
     :param env_name: Name advertised in the env's OpenEnv metadata / schema; defaults
         to the env's class name.
+    :param max_concurrent_envs: Maximum live WebSocket sessions (env instances).
+        ``None`` leaves OpenEnv's default of one; set it to at least the rollout
+        group's size when hosting with ``make_env``.
     """
 
     def __init__(
         self,
-        env: TextEnvProtocol,
+        env: TextEnvProtocol | None = None,
         *,
+        make_env: Callable[[], TextEnvProtocol] | None = None,
         host: str = "127.0.0.1",
         port: int = 0,
         env_name: str | None = None,
+        max_concurrent_envs: int | None = None,
     ) -> None:
-        """Build (but do not start) a server hosting ``env``."""
+        """Build (but do not start) a server hosting ``env`` or ``make_env``."""
+        if (env is None) == (make_env is None):
+            msg = "OpenEnvServer requires exactly one of env or make_env"
+            raise ValueError(msg)
         self._env = env
+        self._make_env = make_env
         self._host = host
         self._port = port
         self._env_name = env_name
+        self._max_concurrent_envs = max_concurrent_envs
         self._server: Any = None
         self._thread: threading.Thread | None = None
         self._bound_port: int | None = None
@@ -263,11 +312,27 @@ class OpenEnvServer:
         """Serve in a background daemon thread (waits for bind); returns ``self``."""
         import uvicorn
 
+        env = self._env
+        make_env = self._make_env
+        env_name = self._env_name
+
+        def app_factory() -> OpenEnvWrapper:
+            # OpenEnv calls this per REST request and once per WebSocket session.
+            # ``make_env`` gives every session its own env (owned, so it is closed
+            # with the session); the shared-``env`` path reuses one across requests.
+            if make_env is not None:
+                return OpenEnvWrapper(make_env(), env_name=env_name, owns_inner=True)
+            return OpenEnvWrapper(env, env_name=env_name)
+
+        display_name = env_name or (
+            type(env).__name__ if env is not None else "OpenEnvServer"
+        )
         app = create_app(
-            lambda: OpenEnvWrapper(self._env, env_name=self._env_name),
+            app_factory,
             TextAction,
             TextObservation,
-            env_name=self._env_name or type(self._env).__name__,
+            env_name=display_name,
+            max_concurrent_envs=self._max_concurrent_envs,
         )
         config = uvicorn.Config(
             app, host=self._host, port=self._port, log_level="warning"
@@ -324,221 +389,8 @@ class OpenEnvServer:
         self.stop()
 
 
-class _EvalModeFlag:
-    """Client-side evaluation flag shared by the env clients.
-
-    ``eval_mode`` flips ``_evaluation_mode`` for the block's duration so
-    ``reset`` routes to the env's held-out split.
-    """
-
-    _evaluation_mode: bool
-
-    @contextlib.contextmanager
-    def eval_mode(self) -> Iterator[None]:
-        """Flag resets for the env's held-out split within the block."""
-        previous = self._evaluation_mode
-        self._evaluation_mode = True
-        try:
-            yield
-        finally:
-            self._evaluation_mode = previous
-
-
-class OpenEnvClient(_EvalModeFlag):
-    """Synchronous httpx client for an OpenEnv env server (text in, text out).
-
-    Implements :class:`~agilerl.protocols.EnvClientProtocol` for
-    :class:`~agilerl.llm_envs.rollout_env.RolloutEnv`.
-
-    Our rollout loop drives ``reset`` / ``step`` synchronously, but this client
-    can be used asynchronously by sitting inside an async process e.g. Ray actor.
-
-    For an external server whose env is exposed as an MCP tool rather than plain
-    ``{"message": text}`` actions, pass ``mcp_tool``: the model's text is sent as
-    ``call_tool(mcp_tool, {arg: text})`` and the tool result rendered back to text.
-    This is only a transport shim for MCP-only servers; it does not constrain how many
-    tools the environment itself supports.
-
-    :param base_url: Root URL of the env server.
-    :param headers: Optional HTTP headers (e.g. auth) sent on every request.
-    :param timeout_s: Per-request timeout in seconds. ``None`` (the default) leaves
-        requests unbounded; the value is supplied from the run manifest.
-    :param mcp_tool: Optional MCP transport adapter for external servers that expect
-        ``call_tool`` actions. When set, each step is sent as
-        ``call_tool(mcp_tool, {arg: text})``; when ``None``, actions are sent as
-        ``{"message": text}``. Multi-tool behavior remains environment-driven via the
-        env's advertised ``tools`` schemas.
-    :param arg: MCP argument name carrying the text (default ``"message"``).
-    :param instruction: Prompt returned from reset when the env's reset obs is empty.
-    """
-
-    def __init__(
-        self,
-        base_url: str,
-        *,
-        headers: dict[str, str] | None = None,
-        timeout_s: float | None = None,
-        mcp_tool: str | None = None,
-        arg: str = "message",
-        instruction: str = "",
-    ) -> None:
-        """Build a client for the OpenEnv server at ``base_url``."""
-        if not base_url:
-            msg = "OpenEnvClient requires a base_url"
-            raise ValueError(msg)
-        self._http = httpx.Client(
-            base_url=base_url.rstrip("/"), headers=headers or {}, timeout=timeout_s
-        )
-        self._mcp_tool = mcp_tool
-        self._arg = arg
-        self._instruction = instruction
-        self._evaluation_mode = False
-        self._state: dict[str, Any] | None = None
-        self._mcp_tools: list[Any] | None = None
-
-    def reset(
-        self,
-        seed: int | None = None,
-        *,
-        row_index: int | None = None,
-    ) -> tuple[str, dict[str, Any]]:
-        """Reset the env and return ``(prompt, info)``."""
-        payload: dict[str, Any] = {}
-        if seed is not None and int(seed) >= 0:
-            payload["seed"] = int(seed)
-        if row_index is not None:
-            payload["row_index"] = int(row_index)
-        if self._evaluation_mode:
-            payload["evaluation"] = True
-        data = self._post("/reset", payload)
-        return (_observation_text(data.get("observation")) or self._instruction), {}
-
-    def step(self, action: Any) -> tuple[str, float, bool, bool, dict[str, Any]]:
-        """Forward one action (model text) to the env and return the Gym 5-tuple."""
-        text = action if isinstance(action, str) else str(action)
-        if self._mcp_tool:
-            act: dict[str, Any] = {
-                "type": "call_tool",
-                "tool_name": self._mcp_tool,
-                "arguments": {self._arg: text},
-            }
-        else:
-            act = {"message": text}
-        data = self._post("/step", {"action": act})
-        obs = data.get("observation")
-        reward = data.get("reward")
-        done = bool(data.get("done", False))
-        # Our servers round-trip ``truncated`` inside the observation
-        # (:class:`TextObservation`); servers that don't send it report every end
-        # as a termination.
-        truncated = (
-            bool(obs.get("truncated", False)) if isinstance(obs, dict) else False
-        )
-        return (
-            _observation_text(obs),
-            float(reward) if reward is not None else 0.0,
-            done and not truncated,
-            truncated,
-            {},
-        )
-
-    def close(self) -> None:
-        """Best-effort ``/close``, then release the HTTP connection pool."""
-        with contextlib.suppress(Exception):
-            self._post("/close", {})
-        self._http.close()
-
-    @property
-    def dataset_size(self) -> int:
-        """Dataset rows the env serves, from ``/state`` (``0`` if not dataset-backed)."""
-        return int(self._fetch_state().get("dataset_size", 0) or 0)
-
-    @property
-    def tools(self) -> list[Any]:
-        """Tool schemas the env advertises (``/state``, then MCP ``tools/list``).
-
-        ``/state`` is our servers' channel; the MCP fallback covers external
-        OpenEnv servers that expose their tools only over ``/mcp``.
-        """
-        tools = self._fetch_state().get("tools") or []
-        if tools:
-            return tools
-        return self._fetch_mcp_tools()
-
-    def _fetch_state(self) -> dict[str, Any]:
-        """Fetch + cache the env's ``/state`` (dataset size + tool schemas).
-
-        This metadata changes training semantics — ``dataset_size`` drives batch
-        row pinning and ``tools`` reach the chat template — so transient
-        failures are retried and then raised, never silently treated as "no
-        dataset, no tools". A 404/405 means the server registers no ``/state``
-        route (e.g. a production-mode OpenEnv server) and caches as empty.
-        """
-        if self._state is not None:
-            return self._state
-        last_error: Exception | None = None
-        for backoff_s in (0.5, 1.0, 2.0, None):
-            try:
-                response = self._http.get("/state")
-            except httpx.HTTPError as exc:
-                last_error = exc
-            else:
-                if response.status_code in (404, 405):
-                    self._state = {}
-                    return self._state
-                try:
-                    response.raise_for_status()
-                    body = response.json()
-                except (httpx.HTTPStatusError, ValueError) as exc:
-                    last_error = exc
-                else:
-                    self._state = body if isinstance(body, dict) else {}
-                    return self._state
-            if backoff_s is not None:
-                time.sleep(backoff_s)
-        msg = (
-            "could not fetch /state from the OpenEnv server at "
-            f"{self._http.base_url} — dataset size and tool schemas drive "
-            "training, so this is fatal rather than silently empty. Is the "
-            "server up and running in simulation mode?"
-        )
-        raise RuntimeError(msg) from last_error
-
-    def _fetch_mcp_tools(self) -> list[Any]:
-        """Tool schemas from the server's MCP channel (``tools/list`` on ``/mcp``).
-
-        Best-effort: a server without an MCP channel simply advertises no tools,
-        so failures here are not errors (unlike ``/state``, which is strict).
-        """
-        if self._mcp_tools is not None:
-            return self._mcp_tools
-        self._mcp_tools = []
-        with contextlib.suppress(Exception):
-            response = self._http.post(
-                "/mcp",
-                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
-            )
-            response.raise_for_status()
-            body = response.json()
-            if isinstance(body, dict):
-                tools = (body.get("result") or {}).get("tools")
-                if isinstance(tools, list):
-                    self._mcp_tools = tools
-        return self._mcp_tools
-
-    def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        """POST JSON to the server and decode the object response."""
-        response = self._http.post(path, json=payload)
-        response.raise_for_status()
-        body = response.json()
-        if not isinstance(body, dict):
-            msg = f"OpenEnv {path} returned a non-object payload: {type(body)!r}"
-            raise TypeError(msg)
-        return body
-
-
-class LocalEnvClient(_EvalModeFlag):
-    """In-process backend for a local env — the no-HTTP sibling of :class:`OpenEnvClient`.
+class LocalEnvClient:
+    """In-process backend for a local env — the no-HTTP sibling of :class:`OpenEnvSessionClient`.
 
     Implements :class:`~agilerl.protocols.EnvClientProtocol` for
     :class:`~agilerl.llm_envs.rollout_env.RolloutEnv`.
@@ -548,8 +400,8 @@ class LocalEnvClient(_EvalModeFlag):
     folding live in one adapter and the in-process and HTTP transports behave
     identically on the same env — just without a server or socket. Use it (via
     :meth:`RolloutEnv.local` / :meth:`RolloutEnv.from_spec`) when the env lives
-    in the same process — e.g. inside a Ray actor; :class:`OpenEnvClient` is
-    the sibling for an env reached over a URL.
+    in the same process — e.g. inside a Ray actor; :class:`OpenEnvSessionClient`
+    is the sibling for an env reached over a URL.
 
     :param env: The local env: ``reset(seed=None[, row_index, evaluation]) ->
         (prompt, info)`` and ``step(text) -> (obs, reward, terminated, truncated, info)``.
@@ -562,6 +414,16 @@ class LocalEnvClient(_EvalModeFlag):
         self._wrapper = OpenEnvWrapper(env)
         self._instruction = instruction
         self._evaluation_mode = False
+
+    @contextlib.contextmanager
+    def eval_mode(self) -> Iterator[None]:
+        """Route resets to the env's held-out split within the block."""
+        previous = self._evaluation_mode
+        self._evaluation_mode = True
+        try:
+            yield
+        finally:
+            self._evaluation_mode = previous
 
     def reset(
         self,
@@ -608,30 +470,181 @@ class LocalEnvClient(_EvalModeFlag):
         return list(self._wrapper.state.tools or [])
 
 
+class OpenEnvSessionClient:
+    """Session backend for an OpenEnv server — one WebSocket session per instance.
+
+    Implements :class:`~agilerl.protocols.EnvClientProtocol` on top of OpenEnv's
+    own :class:`~openenv.core.GenericEnvClient` (via its synchronous wrapper).
+    Each instance opens its own ``/ws`` session, and the server builds a fresh env
+    per session, so a single URL hosts as many concurrent, isolated episodes as
+    its ``max_concurrent_envs`` allows — the backend
+    :class:`~agilerl.llm_envs.rollout_env.BatchRolloutEnv` needs to run a whole
+    group against one hosted env service. It is also the only backend that reaches
+    a **production-mode** OpenEnv server, which exposes ``/ws`` but not the REST
+    ``/reset`` / ``/step`` / ``/state`` routes.
+
+    Actions are plain ``{"message": text}`` (or ``call_tool`` when ``mcp_tool`` is
+    set) and observations are decoded by the shared :func:`_observation_text`, the
+    same contract the in-process :class:`LocalEnvClient` uses.
+
+    :param base_url: Root URL (``http(s)://`` or ``ws(s)://``) of the env server.
+    :param timeout_s: Per-message timeout in seconds. ``None`` uses OpenEnv's
+        default; the value is supplied from the run manifest.
+    :param connect_timeout_s: Timeout for establishing the session.
+    :param mcp_tool: Optional MCP transport adapter: when set, the model's text is
+        sent as ``call_tool(mcp_tool, {arg: text})`` for MCP-only servers.
+    :param arg: MCP argument name carrying the text (default ``"message"``).
+    :param instruction: Prompt returned from reset when the env's reset obs is empty.
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        timeout_s: float | None = None,
+        connect_timeout_s: float = 30.0,
+        mcp_tool: str | None = None,
+        arg: str = "message",
+        instruction: str = "",
+    ) -> None:
+        """Open a WebSocket session against the OpenEnv server at ``base_url``."""
+        if not base_url:
+            msg = "OpenEnvSessionClient requires a base_url"
+            raise ValueError(msg)
+        from openenv.core import GenericEnvClient
+
+        self._sync = GenericEnvClient(
+            base_url=base_url,
+            connect_timeout_s=connect_timeout_s,
+            message_timeout_s=timeout_s if timeout_s is not None else 60.0,
+        ).sync()
+        self._sync.connect()
+        self._mcp_tool = mcp_tool
+        self._arg = arg
+        self._instruction = instruction
+        self._evaluation_mode = False
+        self._state: dict[str, Any] | None = None
+
+    @contextlib.contextmanager
+    def eval_mode(self) -> Iterator[None]:
+        """Route resets to the env's held-out split within the block."""
+        previous = self._evaluation_mode
+        self._evaluation_mode = True
+        try:
+            yield
+        finally:
+            self._evaluation_mode = previous
+
+    def reset(
+        self,
+        seed: int | None = None,
+        *,
+        row_index: int | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        """Reset the session's env and return ``(prompt, info)``.
+
+        ``seed`` / ``row_index`` travel to the server's env reset so a rollout
+        group (one seed per batch row) resets every session to the same prompt.
+        """
+        kwargs: dict[str, Any] = {}
+        if seed is not None and int(seed) >= 0:
+            kwargs["seed"] = int(seed)
+        if row_index is not None:
+            kwargs["row_index"] = int(row_index)
+        if self._evaluation_mode:
+            kwargs["evaluation"] = True
+        result = self._sync.reset(**kwargs)
+        return (_observation_text(result.observation) or self._instruction), {}
+
+    def step(self, action: Any) -> tuple[str, float, bool, bool, dict[str, Any]]:
+        """Send one action (model text) over the session and return the Gym 5-tuple."""
+        text = action if isinstance(action, str) else str(action)
+        if self._mcp_tool:
+            act: dict[str, Any] = {
+                "type": "call_tool",
+                "tool_name": self._mcp_tool,
+                "arguments": {self._arg: text},
+            }
+        else:
+            act = {"message": text}
+        result = self._sync.step(act)
+        obs = result.observation
+        reward = result.reward
+        # Our servers round-trip ``truncated`` inside the observation
+        # (:class:`TextObservation`); a server that doesn't send it reports every
+        # end as a plain termination.
+        truncated = (
+            bool(obs.get("truncated", False)) if isinstance(obs, dict) else False
+        )
+        done = bool(result.done)
+        return (
+            _observation_text(obs),
+            float(reward) if reward is not None else 0.0,
+            done and not truncated,
+            truncated,
+            {},
+        )
+
+    def close(self) -> None:
+        """End the session and stop the client's background event loop."""
+        with contextlib.suppress(Exception):
+            self._sync.close()
+
+    @property
+    def dataset_size(self) -> int:
+        """Dataset rows the env serves, from its ``state`` (``0`` if not dataset-backed)."""
+        return int(self._fetch_state().get("dataset_size", 0) or 0)
+
+    @property
+    def tools(self) -> list[Any]:
+        """Tool schemas the env advertises over the session (empty when none)."""
+        return list(self._fetch_state().get("tools") or [])
+
+    def _fetch_state(self) -> dict[str, Any]:
+        """Fetch + cache the env's OpenEnv ``state`` (dataset size + tool schemas).
+
+        Best-effort: a server that does not answer ``state`` over the session
+        advertises no dataset and no tools rather than stalling the rollout.
+        """
+        if self._state is None:
+            try:
+                state = self._sync.state()
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "OpenEnvSessionClient could not read state; assuming no "
+                    "dataset and no tools.",
+                    exc_info=True,
+                )
+                state = {}
+            self._state = state if isinstance(state, dict) else {}
+        return self._state
+
+
 class ServedEnvClient:
     """Backend that hosts a local env on its own :class:`OpenEnvServer` and owns both halves.
 
-    It holds both the :class:`OpenEnvServer` and the :class:`OpenEnvClient` so
-    ``RolloutEnv`` sees one backend with a single ``close`` that tears both down
-    together.
+    It holds both the :class:`OpenEnvServer` and the :class:`OpenEnvSessionClient`
+    driving it, so ``RolloutEnv`` sees one backend with a single ``close`` that
+    tears both down together.
 
-    Any backend that owns transport infrastructure follows this shape: a future
-    WebSocket-session backend would likewise hold one session on a shared
-    server (letting one server host many concurrent rollouts) and release it in
-    ``close`` — with ``RolloutEnv`` unchanged.
+    This is the in-process rehearsal of the ``env_url`` transport: the owned
+    server hosts the env exactly as a remote deployment would, and the client
+    reaches it over the same WebSocket session. Each served client owns one
+    server + one session; a :class:`~agilerl.llm_envs.rollout_env.BatchRolloutEnv`
+    uses one per concurrent rollout.
 
     :param env: The local env to host (plain-text ``reset`` / ``step``).
     :param host: Interface the server binds (default loopback).
     :param port: Server TCP port; ``0`` lets the OS pick one.
     :param env_name: Name advertised in the env's OpenEnv metadata; defaults to the
         env's class name.
-    :param headers: Optional HTTP headers sent on every client request.
-    :param timeout_s: Per-request client timeout in seconds, defaults to 300 —
-        the server is our own loopback process, so a request that outlives this
+    :param timeout_s: Per-message client timeout in seconds, defaults to 300 —
+        the server is our own loopback process, so a message that outlives this
         means a hung env, and bounding it stops one stuck rollout stalling the
         whole batch forever. Pass ``None`` for unbounded (e.g. an env step that
         legitimately runs a very long tool job).
-    :param mcp_tool: Optional MCP transport adapter (see :class:`OpenEnvClient`).
+    :param mcp_tool: Optional MCP transport adapter (see
+        :class:`OpenEnvSessionClient`).
     :param arg: MCP argument name carrying the text (default ``"message"``).
     :param instruction: Prompt returned from reset when the env's reset obs is empty.
     """
@@ -643,20 +656,18 @@ class ServedEnvClient:
         host: str = "127.0.0.1",
         port: int = 0,
         env_name: str | None = None,
-        headers: dict[str, str] | None = None,
         timeout_s: float | None = 300.0,
         mcp_tool: str | None = None,
         arg: str = "message",
         instruction: str = "",
     ) -> None:
-        """Host ``env`` on a fresh server and build the client driving it."""
+        """Host ``env`` on a fresh server and open the session driving it."""
         self._server = OpenEnvServer(
             env, host=host, port=port, env_name=env_name
         ).start()
         try:
-            self._client = OpenEnvClient(
+            self._client = OpenEnvSessionClient(
                 self._server.base_url,
-                headers=headers,
                 timeout_s=timeout_s,
                 mcp_tool=mcp_tool,
                 arg=arg,
@@ -685,14 +696,13 @@ class ServedEnvClient:
         return self._client.step(action)
 
     def close(self) -> None:
-        """Stop the owned server and release the client's connection pool.
+        """End the session, then stop the owned server (which closes the env).
 
-        Idempotent. Stopping the server closes the hosted env directly, so the
-        client's ``/close`` round-trip to our own server is skipped — it would be
-        redundant and can stall teardown on a loaded process.
+        Closing the client ends the WebSocket session; stopping the server then
+        closes the hosted env directly.
         """
+        self._client.close()
         self._server.stop()
-        self._client._http.close()
 
     @property
     def dataset_size(self) -> int:

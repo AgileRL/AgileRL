@@ -2667,6 +2667,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             )
             mean_fit = 0.0
         self.metrics.add_fitness(mean_fit)
+        if self.accelerator is not None:
+            # Episodes early-exit at their own turn counts, so ranks reach here
+            # out of step; sync once before training resumes.
+            self.accelerator.wait_for_everyone()
         return np.array(mean_fit)
 
     def save_checkpoint(

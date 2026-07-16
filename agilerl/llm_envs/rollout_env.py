@@ -2,12 +2,12 @@
 
 A :class:`RolloutEnv` owns the tokenisation + turn loop and talks to its env through an
 **env client** exposing the OpenEnv ``reset`` / ``step`` calls. The env client is
-either an :class:`~agilerl.llm_envs.openenv.OpenEnvClient` (the env is hosted over a URL
-— a remote server or a local :class:`~agilerl.llm_envs.openenv.OpenEnvServer`) or a
-:class:`~agilerl.llm_envs.openenv.LocalEnvClient` (the env runs in-process, no HTTP).
-:meth:`RolloutEnv.from_spec` picks the right one from a URL or
-a ``module:Class`` entrypoint. ``BatchRolloutEnv`` maintains independent groups of these
-rollouts over a batch, sharing a :class:`BatchPointer` dataset cursor.
+either an :class:`~agilerl.llm_envs.openenv.OpenEnvSessionClient` (the env is hosted over
+a URL — a remote server or a local :class:`~agilerl.llm_envs.openenv.OpenEnvServer` —
+reached over a WebSocket session) or a :class:`~agilerl.llm_envs.openenv.LocalEnvClient`
+(the env runs in-process, no HTTP). :meth:`RolloutEnv.from_spec` picks the right one from
+a URL or a ``module:Class`` entrypoint. ``BatchRolloutEnv`` maintains independent groups
+of these rollouts over a batch, sharing a :class:`BatchPointer` dataset cursor.
 """
 
 from __future__ import annotations
@@ -32,8 +32,8 @@ class RolloutEnv:
     """Token-level rollout env: tokenisation + turn loop over a text env client.
 
     It lets a model that produces tokens interact with a text world reached through an
-    env client — an :class:`~agilerl.llm_envs.openenv.OpenEnvClient` over a URL, or an
-    in-process :class:`~agilerl.llm_envs.openenv.LocalEnvClient`: ``reset`` pulls the
+    env client — an :class:`~agilerl.llm_envs.openenv.OpenEnvSessionClient` over a URL, or
+    an in-process :class:`~agilerl.llm_envs.openenv.LocalEnvClient`: ``reset`` pulls the
     initial prompt and ``step`` sends the decoded action and reads back the next
     observation + reward — the env may score it, run a tool, or hit a sandbox. On top of
     that it exposes the token-level surface the trainer / rollout engine drive:
@@ -59,7 +59,6 @@ class RolloutEnv:
         tokenizer: Any,
         max_turns: int = 1,
         *,
-        headers: dict[str, str] | None = None,
         timeout_s: float | None = None,
         mcp_tool: str | None = None,
         pad_id: int | None = None,
@@ -69,17 +68,16 @@ class RolloutEnv:
     ) -> None:
         """Drive a text env at the token level over ``env_client`` (a URL or a client object).
 
-        :param env_client: A URL string (builds an HTTP ``OpenEnvClient``) or an
-            :class:`~agilerl.protocols.EnvClientProtocol` implementation
-            used as-is. See :meth:`local` / :meth:`from_spec` for the common cases.
+        :param env_client: A URL string (opens a WebSocket session via
+            :class:`~agilerl.llm_envs.openenv.OpenEnvSessionClient`) or an
+            :class:`~agilerl.protocols.EnvClientProtocol` implementation used
+            as-is. See :meth:`local` / :meth:`from_spec` for the common cases.
         :type env_client: str | EnvClientProtocol
         :param tokenizer: Tokenizer used to encode prompts/feedback and apply the
             chat template.
         :type tokenizer: Any
         :param max_turns: Maximum number of generation turns per episode.
         :type max_turns: int
-        :param headers: Optional HTTP headers (e.g. auth) sent on every request.
-        :type headers: dict[str, str] | None
         :param timeout_s: Per-request timeout in seconds for the OpenEnv client.
             ``None`` (the default) leaves requests unbounded; supply the value from
             the run manifest.
@@ -118,18 +116,17 @@ class RolloutEnv:
         :vartype sampling_logps: list[torch.Tensor]
         """
         self.max_turns = max_turns
-        # ``env_client`` is either a URL string (build an HTTP client) or an already-built
-        # ``EnvClientProtocol`` implementation — the latter is how ``.local`` /
-        # ``.from_spec`` plug in an in-process or custom transport. ``headers`` /
+        # ``env_client`` is either a URL string (open a WebSocket session) or an
+        # already-built ``EnvClientProtocol`` implementation — the latter is how
+        # ``.local`` / ``.from_spec`` plug in an in-process or custom transport.
         # ``timeout_s`` / ``mcp_tool`` apply only to the URL case.
         if isinstance(env_client, str):
             # Lazy: the OpenEnv backend needs the optional ``openenv`` package
             # (llm extra); an injected client keeps the core install import-free.
-            from agilerl.llm_envs.openenv import OpenEnvClient
+            from agilerl.llm_envs.openenv import OpenEnvSessionClient
 
-            self._env_client = OpenEnvClient(
+            self._env_client = OpenEnvSessionClient(
                 env_client,
-                headers=headers,
                 timeout_s=timeout_s,
                 mcp_tool=mcp_tool,
             )
@@ -169,19 +166,18 @@ class RolloutEnv:
         tokenizer: Any,
         max_turns: int = 1,
         *,
-        headers: dict[str, str] | None = None,
         timeout_s: float | None = 300.0,
         mcp_tool: str | None = None,
         env_name: str | None = None,
         **kwargs: Any,
     ) -> RolloutEnv:
-        """Host one OpenEnv server for a fresh env and drive it over HTTP.
+        """Host one OpenEnv server for a fresh env and drive it over a WebSocket session.
 
         Calls ``make_env()`` for a fresh local env and binds the ``RolloutEnv`` to a
         :class:`~agilerl.llm_envs.openenv.ServedEnvClient` — a backend that hosts the
         env on its own :class:`~agilerl.llm_envs.openenv.OpenEnvServer` and owns the
-        whole server+client pair, torn down by :meth:`close`. A served env handles
-        one episode at a time, so use this as the per-rollout ``env_factory`` to give
+        whole server+client pair, torn down by :meth:`close`. Each served client owns
+        one server + session, so use this as the per-rollout ``env_factory`` to give
         a :class:`BatchRolloutEnv` one isolated server per concurrent rollout::
 
             env_factory = lambda: RolloutEnv.serving(make_env, tokenizer, max_turns=4)
@@ -194,11 +190,10 @@ class RolloutEnv:
         :param make_env: Zero-arg factory returning a fresh local env to host.
         :param tokenizer: Tokenizer for the token-level loop.
         :param max_turns: Generation turns per episode.
-        :param headers: Optional HTTP headers sent on every client request.
         :param timeout_s: Per-request client timeout in seconds, defaults to
             300 (``None`` = unbounded); see :class:`ServedEnvClient`.
         :param mcp_tool: Optional MCP transport adapter (see
-            :class:`~agilerl.llm_envs.openenv.OpenEnvClient`).
+            :class:`~agilerl.llm_envs.openenv.OpenEnvSessionClient`).
         :param env_name: Name advertised in the served env's OpenEnv metadata.
         :param kwargs: Forwarded to :class:`RolloutEnv` (e.g. ``pad_id``,
             ``apply_chat_template``, ``max_model_len``).
@@ -209,7 +204,6 @@ class RolloutEnv:
         env_client = ServedEnvClient(
             make_env(),
             env_name=env_name,
-            headers=headers,
             timeout_s=timeout_s,
             mcp_tool=mcp_tool,
         )
@@ -257,7 +251,7 @@ class RolloutEnv:
         """Build a ``RolloutEnv`` from an env ``spec`` — a URL or a ``module:Class`` entrypoint.
 
         * a **URL** -> the env is already hosted elsewhere; drive it over an
-          :class:`OpenEnvClient` (HTTP).
+          :class:`OpenEnvSessionClient` (WebSocket session).
         * a **``module:Class`` / ``path.py:Class`` entrypoint** -> load + build the env
           with ``env_config`` and drive it **in-process** via :class:`LocalEnvClient`
           (no HTTP). Pass ``serve=True`` to instead host it on an in-process
@@ -513,11 +507,10 @@ class RolloutEnv:
         """Tool schemas the env advertises (``None`` when none) — passed to the
         chat template as ``tools=``.
 
-        Fetched from the env client on first access and cached; over HTTP the
-        fetch is strict (see
-        :meth:`~agilerl.llm_envs.openenv.OpenEnvClient._fetch_state`), so a
-        broken server fails loudly here rather than silently training without
-        tool schemas.
+        Fetched from the env client on first access and cached: an
+        :class:`~agilerl.llm_envs.openenv.OpenEnvSessionClient` reads the env's
+        OpenEnv ``state`` over its session, an in-process
+        :class:`~agilerl.llm_envs.openenv.LocalEnvClient` from the wrapper directly.
         """
         if not self._tools_known:
             self._tools = self._env_client.tools or None
@@ -753,9 +746,9 @@ class RolloutEnv:
 
         Ownership lives in the client: a
         :class:`~agilerl.llm_envs.openenv.ServedEnvClient` stops its server and
-        releases its connection pool, an
-        :class:`~agilerl.llm_envs.openenv.OpenEnvClient` sends ``/close`` and
-        releases its pool, a :class:`~agilerl.llm_envs.openenv.LocalEnvClient`
+        ends its session, an
+        :class:`~agilerl.llm_envs.openenv.OpenEnvSessionClient` ends its
+        WebSocket session, a :class:`~agilerl.llm_envs.openenv.LocalEnvClient`
         closes the wrapped env.
         """
         self._env_client.close()
