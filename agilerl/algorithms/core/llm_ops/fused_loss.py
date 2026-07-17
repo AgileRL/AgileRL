@@ -347,12 +347,7 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
             # selective-logp kernel that doesn't compose with the grad_and_value
             # transform below, so inline the numerically identical 0.7.0 math.
             if input_chunk.dtype != weight_local.dtype:
-                # Hidden and lm_head dtypes can diverge — e.g. an fp16
-                # checkpoint under the bf16 autocast, where the final norm
-                # promotes hidden states to fp32 while the lm_head weight
-                # keeps the checkpoint dtype. The matmul requires matching
-                # operands; promote so neither side is downcast (grads still
-                # flow back to the original-dtype leaves through the cast).
+                # fp16 checkpoint under bf16 autocast: fp32 hidden, fp16 head.
                 compute_dtype = torch.promote_types(
                     input_chunk.dtype, weight_local.dtype
                 )

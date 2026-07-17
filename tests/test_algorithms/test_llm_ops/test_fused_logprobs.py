@@ -86,8 +86,8 @@ class TestFusedLogprobChunkDispatch:
 
 class TestMixedDtypeOperands:
     """An fp16 checkpoint under the bf16 autocast reaches the fused matmul
-    with fp32 hidden states and an fp16 lm_head weight; the kernel must
-    promote to a common dtype rather than crash on the operand mismatch.
+    with fp32 hidden states and an fp16 lm_head weight; the kernel
+    promotes to a common dtype rather than crashing on the operand mismatch.
     """
 
     def test_chunk_promotes_mismatched_dtypes_to_common_dtype(self):
