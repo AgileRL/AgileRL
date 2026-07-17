@@ -51,6 +51,11 @@ jobs:
 
             - name: Test with pytest
               shell: bash
-              # Cap xdist at 2 workers on Windows.
-              # The -n here overrides the "-n auto" in pyproject's addopts.
+              # Pin the CPU ISA to AVX2: some Windows runners lack AVX-512, and torch/MKL
+              # kernels dispatched for it fault the process (0xc000001d). Also cap xdist
+              # at 2 workers (overrides addopts' "-n auto") to bound the blast radius if a
+              # worker still dies.
+              env:
+                  ATEN_CPU_CAPABILITY: avx2
+                  MKL_ENABLE_INSTRUCTIONS: AVX2
               run: bash scripts/run-tests.sh cov -n 2 --exitfirst -m "not llm" --cov-report=term-missing --durations=0 --durations-min=1.0
