@@ -3549,31 +3549,6 @@ class TestGRPOLearn:
                 sleep_mode=True,
                 use_liger_loss=use_liger_loss,
             )
-        if use_vllm and use_liger_loss:
-            pytest.skip("Skip vLLM learn path with liger in this mocked-call test.")
-        mock_llm_instance = make_mock_vllm_instance(vllm.LLM)
-        llm_patch_ctx = (
-            patch("agilerl.algorithms.core.base.LLM", return_value=mock_llm_instance)
-            if use_vllm
-            else nullcontext()
-        )
-        with llm_patch_ctx:
-            grpo = grpo_factory(
-                accelerator_factory,
-                model_factory,
-                config,
-                use_deepspeed_optimizer,
-                vocab_size,
-                input_size,
-                max_tokens,
-                group_size,
-                use_separate_reference_adapter,
-                use_vllm,
-                pretrained_model_name_or_path,
-                micro_batch_size_per_gpu,
-                sleep_mode=True,
-                use_liger_loss=use_liger_loss,
-            )
         completions = [
             torch.randint(
                 0,
