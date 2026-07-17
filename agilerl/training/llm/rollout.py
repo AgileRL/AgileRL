@@ -9,7 +9,6 @@ import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-import numpy as np
 from accelerate import Accelerator
 
 from agilerl import HAS_LLM_DEPENDENCIES
@@ -42,7 +41,6 @@ def train_llm_rollout(
     pop: "list[SupportedRollout]",
     max_turns: int,
     env_factory: "Callable[[], RolloutEnv]",
-    env_config: dict[str, Any] | None = None,
     init_hp: dict[str, Any] | None = None,
     max_steps: int = 32768,
     save_elite: bool | None = None,
@@ -78,11 +76,9 @@ def train_llm_rollout(
     :type pop: list[SupportedRollout]
     :param max_turns: Maximum interaction turns per episode.
     :type max_turns: int
-    :param env_factory: Factory that returns a fresh multi-turn env for each
+    :param env_factory: Zero-arg factory that returns a fresh env for each
         trajectory rollout. Required to ensure trajectory state isolation.
     :type env_factory: Callable[[], RolloutEnv]
-    :param env_config: Configuration for the environment factory.
-    :type env_config: dict[str, Any], optional
     :param init_hp: Initial hyperparameters.
     :type init_hp: dict, optional
     :param max_steps: Progress-bar budget in sample steps, defaults to 32768.
@@ -192,13 +188,13 @@ def train_llm_rollout(
     next_checkpoint_step = checkpoint_steps
     max_steps_checkpoint_saved = False
     group_size = getattr(pop[0], "group_size", 1)
-    # Fold the rank into the seed so data-parallel ranks draw decorrelated dataset
-    # rows and env tasks. The ``1 << 31`` offset is arbitrary but large enough that
-    # the rank's contribution decorrelates the RNG streams even for a small base seed.
-    group_seed = int(np.random.randint(0, 1000000)) + _distributed_rank(accelerator) * (
-        1 << 31
-    )
-    rollout_env = BatchRolloutEnv(env_factory, batch_size, group_size, env_config)
+    # Derive rollout seeding from the agent's configured seed so dataset-row
+    # order and env tasks are reproducible from the manifest, folding the rank
+    # in so data-parallel ranks draw decorrelated rows and tasks. The
+    # ``1 << 31`` offset is arbitrary but large enough that the rank's
+    # contribution decorrelates the RNG streams even for a small base seed.
+    group_seed = int(pop[0].seed) + _distributed_rank(accelerator) * (1 << 31)
+    rollout_env = BatchRolloutEnv(env_factory, batch_size, group_size)
     # ``agent.test`` expects a single ``RolloutEnv``; ``rollout_env`` is a
     # ``BatchRolloutEnv`` wrapping N inner envs whose state is mid-rollout during
     # training. A separate test env keeps evaluation isolated; it is built lazily
@@ -297,7 +293,7 @@ def train_llm_rollout(
 
                 if (i + 1) % evaluation_interval == 0:
                     if test_env is None:
-                        test_env = env_factory(**(env_config or {}))
+                        test_env = env_factory()
                     agent.test(test_env, loop=eval_loop)
                     if accelerator is not None:
                         accelerator.wait_for_everyone()

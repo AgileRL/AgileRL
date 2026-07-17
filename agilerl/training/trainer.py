@@ -596,9 +596,6 @@ class LocalTrainer(Trainer):
                 return None
 
             # Some LLMEnvSpec fields are dependent on the algo configuration
-            self.env_spec.return_raw_completions = getattr(
-                self.algorithm_spec, "use_vllm", False
-            )
             self.env_spec.max_context_length = self.algorithm_spec.max_model_len
             self.env_spec.seed = self.algorithm_spec.seed
             self.env_spec.data_batch_size_per_gpu = self.algorithm_spec.batch_size

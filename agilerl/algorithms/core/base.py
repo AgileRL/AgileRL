@@ -2485,6 +2485,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self.batch_size = batch_size
         self.lr = align_deepspeed_lr(float(lr), self.accelerator)
         self.lr_critic = lr_critic
+        # The configured (pre-rank-adjustment) seed: rollout training derives
+        # its dataset-row / env-task seeding from it, folding the rank in
+        # itself, so runs are reproducible from the manifest.
+        self.seed = seed
 
         if self.accelerator is not None:
             ds_plugin = getattr(self.accelerator.state, "deepspeed_plugin", None)

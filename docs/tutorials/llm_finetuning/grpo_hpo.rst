@@ -37,7 +37,7 @@ Dependencies
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
     from agilerl.training.llm import train_llm_rollout
-    from agilerl.llm_envs import RolloutEnv
+    from agilerl.llm_envs import ServedEnvFactory
     from agilerl.utils.utils import create_population
 
 Defining Hyperparameters
@@ -224,8 +224,9 @@ to the agent and provides the context necessary to complete the task. This is a 
 and different reasoning problems will require different conversation templates, although they can follow a similar
 format. We define the conversation template as follows (using ``question`` and ``answer`` as placeholders for the question and answer data)
 and then host a single-turn rollout env over the question and answer
-columns of our dataset with :meth:`RolloutEnv.serving <agilerl.llm_envs.RolloutEnv.serving>`
-inside an ``env_factory`` (a prompt dataset is just an environment we host).
+columns of our dataset with a :class:`ServedEnvFactory <agilerl.llm_envs.ServedEnvFactory>`
+as our ``env_factory`` (a prompt dataset is just an environment we host: one shared
+server, serving a fresh env instance to each rollout over its own WebSocket session).
 
 .. collapse:: Build the Single-Turn Rollout Environment
 
@@ -254,7 +255,7 @@ inside an ``env_factory`` (a prompt dataset is just an environment we host).
             return "\n".join(p for p in parts if p)
 
         # A single-turn rollout environment from the dataset — a prompt dataset is
-        # just an env, hosted on its own server by RolloutEnv.serving.
+        # just an env, hosted on one shared server by ServedEnvFactory.
         class PromptDataset:
             """Single-turn dataset env: serve a question on reset, score it on step."""
 
@@ -284,24 +285,21 @@ inside an ``env_factory`` (a prompt dataset is just an environment we host).
             def step(self, action):
                 return "", float(self.reward_fn(action, self._a, self._q)), True, False, {}
 
-        def env_factory(evaluation_mode: bool = False):
-            env = RolloutEnv.serving(
-                lambda: PromptDataset(
-                    questions=list(train_dataset["question"]),
-                    answers=list(train_dataset["answer"]),
-                    reward_fn=combined_rewards,
-                    prompt_builder=prompt_builder,
-                    test_questions=list(test_dataset["question"]),
-                    test_answers=list(test_dataset["answer"]),
-                ),
-                tokenizer,
-                max_turns=1,
-                pad_id=tokenizer.pad_token_id,
-                apply_chat_template=True,
-                max_model_len=1024,
-            )
-            env.evaluation_mode = evaluation_mode
-            return env
+        env_factory = ServedEnvFactory(
+            lambda: PromptDataset(
+                questions=list(train_dataset["question"]),
+                answers=list(train_dataset["answer"]),
+                reward_fn=combined_rewards,
+                prompt_builder=prompt_builder,
+                test_questions=list(test_dataset["question"]),
+                test_answers=list(test_dataset["answer"]),
+            ),
+            tokenizer,
+            max_turns=1,
+            pad_id=tokenizer.pad_token_id,
+            apply_chat_template=True,
+            max_model_len=1024,
+        )
 
 
 Create a population of GRPO Agents
@@ -550,7 +548,7 @@ Load fine-tuned LLM into vLLM Engine for inference
         seed=42,
     )
 
-    prompts = "Using each number in this list only once 33, 19, 27, 5, create an equation that equals 82. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once.""
+    prompts = "Using each number in this list only once 33, 19, 27, 5, create an equation that equals 82. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once."
     outputs = llm.generate(
         prompts,
         sampling_params=sampling_params,

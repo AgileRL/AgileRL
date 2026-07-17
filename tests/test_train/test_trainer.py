@@ -1459,7 +1459,6 @@ class TestLLMLocalTrainer:
                 training=self._training(),
             )
 
-        assert mock_llm_env_spec.return_raw_completions is False
         assert mock_llm_env_spec.max_context_length == dpo_spec.max_model_len
         assert mock_llm_env_spec.seed == dpo_spec.seed
         mock_llm_env_spec.make_env.assert_called_once_with(
@@ -2541,7 +2540,6 @@ class TestMakeEnvBranches:
             result = trainer._make_env()
 
         assert result is mock_env
-        assert trainer.env_spec.return_raw_completions is True
         assert trainer.env_spec.max_context_length == 1024
         assert trainer.env_spec.seed == 42
         assert trainer.env_spec.data_batch_size_per_gpu == 8

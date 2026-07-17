@@ -6,9 +6,11 @@ Environments (OpenEnv)
 Every LLM-training environment in AgileRL is reached the same way — **text in, text
 out** — through the `OpenEnv <https://github.com/meta-pytorch/OpenEnv>`_ contract
 (installed with the ``[llm]`` extra). A ``RolloutEnv`` drives your env through a
-**backend**: either **in-process** (a local Python env, no HTTP) or over a **URL** (a
-remote env hosted as an HTTP server). The trainer drives both identically, so a local
-env and a remote one look the same to it.
+**backend**, and the env can be deployed in three shapes: **in-process** (a local
+Python env — no server, no sockets), **served locally** (one shared in-process OpenEnv
+server, the local rehearsal of a production deployment), or **remote** (an
+already-hosted OpenEnv server reached by URL). The trainer drives all three
+identically, so a local env and a remote one look the same to it.
 
 The text contract
 -----------------
@@ -39,8 +41,10 @@ batched rollout collector builds one per rollout and tears them all down at the 
 
 This keeps the model simple and isolated: one misbehaving environment cannot corrupt
 another's state, and a stateful environment (a counter, a game, a sandbox) stays alive
-across all the turns of an episode. When the env runs over HTTP that instance is one
-server hosting one env; in-process it is just the env object itself.
+across all the turns of an episode. In-process, that instance is just the env object
+itself. Over HTTP, **one server fronts the whole batch**: each rollout opens its own
+WebSocket session and the server builds a fresh env instance for that session, so
+isolation comes from sessions, not from extra servers.
 
 Running a local environment
 ---------------------------
@@ -80,10 +84,28 @@ tutorials):
 returning ``terminated=True`` (here, on a correct guess). Single-turn *reasoning* is
 just ``max_turns=1``: the model answers once and ``step`` scores it.
 
-To **host** the env as an HTTP server instead — to expose it to other clients, or run it
-out-of-process — use :meth:`RolloutEnv.serving <agilerl.llm_envs.RolloutEnv.serving>`
+Serving locally
+---------------
+
+To **host** a single standalone env over HTTP instead, use
+:meth:`RolloutEnv.serving <agilerl.llm_envs.RolloutEnv.serving>`
 (``RolloutEnv.serving(lambda: GuessEnv(), tokenizer, …)``), which starts an in-process
-uvicorn server on an ephemeral port and drives it over HTTP.
+uvicorn server on an ephemeral port and drives it over a WebSocket session.
+
+For a **batch** — the ``env_factory`` handed to ``train_llm_rollout`` or
+``BatchRolloutEnv`` — use a
+:class:`ServedEnvFactory <agilerl.llm_envs.ServedEnvFactory>` instead. It hosts **one
+shared server** (one URL) that builds a fresh env per WebSocket session, and every
+factory call returns a ``RolloutEnv`` driving its own session — each rollout gets its
+own isolated env instance behind a single frontend, exactly how a remote deployment
+serves a rollout group. The server starts on the first factory call and stops when the
+last env it built closes:
+
+.. code-block:: python
+
+   from agilerl.llm_envs import ServedEnvFactory
+
+   env_factory = ServedEnvFactory(GuessEnv, tokenizer, max_turns=3)
 
 Connecting to a remote environment
 ----------------------------------
@@ -95,10 +117,17 @@ Space), pass its URL straight to ``RolloutEnv`` — nothing is started locally:
 
    env = RolloutEnv("https://my-env.example.com", tokenizer, max_turns=4)
 
+Each rollout opens its own ``/ws`` WebSocket session against that URL and the server
+builds a fresh env per session, so the server's ``max_concurrent_envs`` must cover
+``batch_size * group_size`` rollout sessions **plus one** for the lazily built
+evaluation env. In a run manifest, ``request_timeout_s`` bounds each message at 300
+seconds by default (``0`` disables the bound); when constructing a ``RolloutEnv``
+directly, pass ``timeout_s``.
+
 Either way the trainer drives ``env`` identically.
 :meth:`RolloutEnv.from_spec <agilerl.llm_envs.RolloutEnv.from_spec>` picks for you from a
-spec string: a URL → an HTTP client; a ``"package.module:EnvClass"`` entrypoint → loaded
-and run **in-process** (or ``serve=True`` to host it over HTTP).
+spec string: a URL → a WebSocket session client; a ``"package.module:EnvClass"``
+entrypoint → loaded and run **in-process** (or ``serve=True`` to host it over HTTP).
 
 Tools
 -----
@@ -139,10 +168,11 @@ Lifecycle
 * The environment is built once per rollout and reused for the whole run.
 * Your environment's ``close()`` (if it has one) is called **exactly once**, on teardown
   — not per step — so resources (subprocesses, connections, sandboxes) live for the whole
-  episode and are released cleanly at the end. (Over HTTP, the hosting server closes it
-  once on stop, never per request.)
-* Closing a ``RolloutEnv`` releases its backend — stopping the server it owns, or closing
-  the in-process env.
+  episode and are released cleanly at the end. (Over HTTP, the hosting server closes a
+  session's env when that session ends, never per request.)
+* Closing a ``RolloutEnv`` releases its backend — ending its session, closing the
+  in-process env, or stopping a server it owns. The last env built by a
+  ``ServedEnvFactory`` also stops the shared server when it closes.
 
 Lower-level pieces
 ------------------
@@ -152,20 +182,26 @@ Lower-level pieces
 * :class:`LocalEnvClient <agilerl.llm_envs.LocalEnvClient>` — the in-process backend:
   drives a local env's ``reset`` / ``step`` directly (no server, no socket). This is what
   :meth:`RolloutEnv.local` uses.
-* :class:`OpenEnvClient <agilerl.llm_envs.OpenEnvClient>` — the HTTP backend: a synchronous
-  client that drives a server's ``reset`` / ``step`` over a URL. (An async caller, e.g. a
-  Ray actor, gets its concurrency from the actor boundary, not the client.)
+* :class:`OpenEnvSessionClient <agilerl.llm_envs.OpenEnvSessionClient>` — the WebSocket
+  backend: a synchronous client holding one ``/ws`` session against a server, which backs
+  each session with its own env instance. (An async caller, e.g. a Ray actor, gets its
+  concurrency from the actor boundary, not the client.)
 * :class:`OpenEnvServer <agilerl.llm_envs.OpenEnvServer>` — host a local env in-process
-  (``start`` / ``stop``, or as a context manager) and read its ``base_url``. This is what
-  :meth:`RolloutEnv.serving` uses.
+  (``start`` / ``stop``, or as a context manager) and read its ``base_url``. Pass ``env``
+  for one shared env, or ``make_env`` with ``max_concurrent_envs`` for a fresh env per
+  session — the shape :class:`ServedEnvFactory <agilerl.llm_envs.ServedEnvFactory>` hosts
+  with.
+* :class:`ServedEnvClient <agilerl.llm_envs.ServedEnvClient>` — owns one server + one
+  session as a single backend. This is what :meth:`RolloutEnv.serving` uses.
 
 .. code-block:: python
 
-   from agilerl.llm_envs import OpenEnvClient, OpenEnvServer
+   from agilerl.llm_envs import OpenEnvSessionClient, OpenEnvServer
 
    with OpenEnvServer(GuessEnv()) as server:
-       client = OpenEnvClient(server.base_url)
+       client = OpenEnvSessionClient(server.base_url)
        prompt, _ = client.reset()
        obs, reward, terminated, truncated, info = client.step("5")
+       client.close()
 
 See :doc:`the API reference </api/wrappers/llm_envs>` for the full signatures.

@@ -7,6 +7,7 @@ OpenEnv protocol. These cover both halves (``OpenEnvServer`` host +
 
 from __future__ import annotations
 
+import logging
 import socket
 import threading
 import time
@@ -15,6 +16,7 @@ from typing import Any
 
 import pytest
 import torch
+import websockets.exceptions
 
 from agilerl.llm_envs import (
     BatchPointer,
@@ -25,6 +27,7 @@ from agilerl.llm_envs import (
     OpenEnvWrapper,
     RolloutEnv,
     ServedEnvClient,
+    ServedEnvFactory,
     resolve_env,
 )
 from agilerl.llm_envs import openenv as openenv_module
@@ -441,13 +444,19 @@ class TestBatchPointer:
 
 # --- /state strictness + MCP tools/list fallback ----------------------------
 class _StubSync:
-    """Stand-in for OpenEnv's ``SyncEnvClient`` — records reset/step, scripts state."""
+    """Stand-in for OpenEnv's ``SyncEnvClient`` — records reset/step, scripts errors."""
 
-    def __init__(self, state: Any = None, state_error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        state: Any = None,
+        state_error: Exception | None = None,
+        step_errors: list[Exception] | None = None,
+    ) -> None:
         self.reset_calls: list[dict[str, Any]] = []
         self.step_calls: list[Any] = []
         self._state = state if state is not None else {}
         self._state_error = state_error
+        self._step_errors = list(step_errors or [])
 
     def connect(self) -> None:
         return None
@@ -458,6 +467,8 @@ class _StubSync:
 
     def step(self, action: Any) -> Any:
         self.step_calls.append(action)
+        if self._step_errors:
+            raise self._step_errors.pop(0)
         return SimpleNamespace(observation="hi", reward=1.0, done=True)
 
     def state(self) -> Any:
@@ -498,6 +509,91 @@ def test_session_state_reports_dataset_size_and_tools() -> None:
     client = _session_client(state={"dataset_size": 5, "tools": [{"name": "t"}]})
     assert client.dataset_size == 5
     assert client.tools == [{"name": "t"}]
+
+
+# --- single-use after a transport error --------------------------------------
+def test_websocket_error_marks_the_session_broken() -> None:
+    """A dropped WebSocket propagates, then every later call fails fast."""
+    client = _session_client(
+        step_errors=[websockets.exceptions.WebSocketException("dropped")]
+    )
+    with pytest.raises(websockets.exceptions.WebSocketException, match="dropped"):
+        client.step("go")
+    with pytest.raises(RuntimeError, match="broken"):
+        client.step("go")
+    with pytest.raises(RuntimeError, match="broken"):
+        client.reset()
+
+
+def test_timeout_marks_the_session_broken() -> None:
+    """A per-message timeout is a transport error: the session is single-use."""
+    client = _session_client(step_errors=[TimeoutError("too slow")])
+    with pytest.raises(TimeoutError, match="too slow"):
+        client.step("go")
+    with pytest.raises(RuntimeError, match="broken"):
+        client.reset()
+
+
+def test_server_error_frame_leaves_the_session_usable() -> None:
+    """A plain server error frame propagates without breaking the session."""
+    client = _session_client(
+        step_errors=[RuntimeError("Server error: unsupported (code: UNKNOWN)")]
+    )
+    with pytest.raises(RuntimeError, match="UNKNOWN"):
+        client.step("go")
+    obs, reward, terminated, _truncated, _info = client.step("go")
+    assert (obs, reward, terminated) == ("hi", 1.0, True)
+
+
+# --- _fetch_state: transport errors propagate, server errors degrade ---------
+def test_state_capacity_rejection_propagates_and_breaks() -> None:
+    """A ``CAPACITY_REACHED`` rejection on ``state`` propagates and kills the session."""
+    client = _session_client(
+        state_error=RuntimeError("Server error: capacity (code: CAPACITY_REACHED)")
+    )
+    with pytest.raises(RuntimeError, match="CAPACITY_REACHED"):
+        _ = client.tools
+    with pytest.raises(RuntimeError, match="broken"):
+        client.reset()
+
+
+def test_state_server_error_degrades_with_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An unsupported ``state`` message degrades to no dataset / no tools, warns,
+    and leaves the session usable.
+    """
+    client = _session_client(
+        state_error=RuntimeError("Server error: unsupported (code: UNKNOWN)")
+    )
+    with caplog.at_level(logging.WARNING, logger="agilerl.llm_envs.openenv"):
+        assert client.tools == []
+        assert client.dataset_size == 0
+    assert "could not read state" in caplog.text
+    assert client.reset()[0] == "prompt"
+
+
+# --- timeout pass-through to OpenEnv's client --------------------------------
+def test_timeout_passes_through_to_the_openenv_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``timeout_s`` reaches ``GenericEnvClient`` verbatim; ``None`` stays unbounded."""
+    import openenv.core
+
+    captured: list[dict[str, Any]] = []
+
+    class _CapturingClient:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.append(kwargs)
+
+        def sync(self) -> Any:
+            return _StubSync()
+
+    monkeypatch.setattr(openenv.core, "GenericEnvClient", _CapturingClient)
+    OpenEnvSessionClient("http://stub.invalid", timeout_s=None)
+    OpenEnvSessionClient("http://stub.invalid", timeout_s=12.5)
+    assert captured[0]["message_timeout_s"] is None
+    assert captured[1]["message_timeout_s"] == 12.5
 
 
 # --- truncated round-trips over HTTP ----------------------------------------
@@ -813,6 +909,55 @@ def test_served_env_client_stops_server_if_client_build_fails(
     with pytest.raises(RuntimeError, match="client build failed"):
         ServedEnvClient(inner)
     assert inner.closed  # the started server was torn down, closing the env
+
+
+# --- ServedEnvFactory: one shared server, one session per env ----------------
+def _served_factory() -> ServedEnvFactory:
+    return ServedEnvFactory(
+        _CountingEnv, MiniTokenizer(), max_turns=3, apply_chat_template=False
+    )
+
+
+def test_served_env_factory_shares_one_server_with_isolated_sessions() -> None:
+    """Every factory env hits the same URL, but each session drives a fresh env."""
+    factory = _served_factory()
+    envs = [factory() for _ in range(3)]
+    try:
+        url = factory.base_url  # constant across calls: one shared server
+        first, second = envs[0]._env_client, envs[1]._env_client
+        assert first.reset()[0] == "Start.\nReply 'go'."
+        assert first.step("go")[0] == "turn 1"
+        # The second session starts its own env: its counter is untouched by
+        # the first session's steps.
+        assert second.reset()[0] == "Start.\nReply 'go'."
+        assert second.step("go")[0] == "turn 1"
+        assert first.step("go")[0] == "turn 2"
+        assert factory.base_url == url
+    finally:
+        for env in envs:
+            env.close()
+
+
+def test_served_env_factory_stops_server_with_the_last_lease() -> None:
+    """The shared server outlives all but the last env; a later call restarts it."""
+    factory = _served_factory()
+    envs = [factory() for _ in range(3)]
+    url = factory.base_url
+    envs[0].close()
+    envs[0].close()  # a double close releases its lease only once
+    envs[1].close()
+    assert factory.base_url == url  # one env still live -> server still up
+    probe = OpenEnvSessionClient(factory.base_url)
+    assert probe.reset()[0] == "Start.\nReply 'go'."  # still serving sessions
+    probe.close()
+    envs[2].close()
+    with pytest.raises(RuntimeError, match="not running"):
+        _ = factory.base_url
+    fresh = factory()  # the next call starts a fresh server
+    assert factory.base_url.startswith("http://127.0.0.1:")
+    fresh.close()
+    with pytest.raises(RuntimeError, match="not running"):
+        _ = factory.base_url
 
 
 # --- _observation_text: rendering our own + third-party observations ---------

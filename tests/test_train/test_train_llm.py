@@ -215,6 +215,7 @@ def _make_rollout_mock_agent(*, spec=LLMPPO):
     mock_agent.lr = 0.01
     mock_agent.index = 0
     mock_agent.mut = 0
+    mock_agent.seed = 42
     mock_agent.device = torch.device("cpu")
 
     metrics = MagicMock()
@@ -823,6 +824,42 @@ class TestTrainLlmRollout:
 
         _, learn_kwargs = mock_agent.learn.call_args
         assert learn_kwargs.get("sampling_logps") is sampling_logps
+
+    def test_train_llm_rollout_derives_group_seed_from_agent_seed(self):
+        """The first rollout seeds from the agent's configured seed (rank 0)."""
+        mock_agent = _make_rollout_mock_agent()
+        mock_agent.seed = 1234
+        with (
+            patch(
+                "agilerl.training.llm.rollout.default_progress_bar",
+                return_value=MagicMock(),
+            ),
+            patch("agilerl.training.llm.rollout.init_loggers", return_value=[]),
+            patch(
+                "agilerl.training.llm.rollout.safe_aggregate_metrics",
+                return_value=0.5,
+            ),
+            patch("agilerl.training.llm.rollout.save_llm_checkpoint"),
+            patch("agilerl.training.llm.rollout.BatchRolloutEnv"),
+            patch("agilerl.training.llm.rollout.collect_rollouts_llm") as mock_collect,
+            patch(
+                "agilerl.training.llm.rollout.stack_and_pad_experiences"
+            ) as mock_stack,
+        ):
+            mock_collect.return_value = _rollout_collect_return(batch_steps=3)
+            mock_stack.return_value = (torch.zeros(1, 8, dtype=torch.long),)
+            train_llm_rollout(
+                pop=[mock_agent],
+                env_factory=MagicMock(),
+                max_turns=2,
+                init_hp={"BATCH_SIZE": 1, "ALGO": mock_agent.algo},
+                max_steps=3,
+                evaluation_interval=100,
+                verbose=False,
+                accelerator=None,
+            )
+
+        assert mock_collect.call_args_list[0].kwargs["group_seed"] == 1234
 
     def test_train_llm_rollout_allows_batch_size_indivisible_by_group_size(self):
         """The batch>group case is unconstrained too: batch_size=3, group_size=2

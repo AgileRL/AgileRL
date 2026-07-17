@@ -367,8 +367,10 @@ class LLMEnvSpec(BaseModel):
     :param mcp_tool: For an MCP-backed served env, the tool the model's text is
         sent to. Only applies to a served env (``env_url`` or ``served``).
     :type mcp_tool: str | None
-    :param request_timeout_s: Per-request HTTP timeout for a served env
-        (``None`` = unbounded). Only applies to a served env.
+    :param request_timeout_s: Per-message client timeout in seconds for a
+        served env. ``None`` (the default) applies a 300 s bound; ``0``
+        disables the bound (e.g. an env step that legitimately runs a very
+        long tool job). Only applies to a served env.
     :type request_timeout_s: float | None
     """
 
@@ -404,7 +406,6 @@ class LLMEnvSpec(BaseModel):
 
     # These fields are overridden given the rest of the training configuration
     data_batch_size_per_gpu: int = Field(default=8, ge=1, exclude=True)
-    return_raw_completions: bool = Field(default=False, exclude=True)
     max_context_length: int | None = Field(default=None, exclude=True)
     seed: int | None = Field(default=None, exclude=True)
 
@@ -423,6 +424,17 @@ class LLMEnvSpec(BaseModel):
     def dataset_backed_rollout(self) -> bool:
         """Whether this rollout env serves labelled rows scored by a reward fn."""
         return self.env_type == LLMEnvType.ROLLOUT and self.dataset is not None
+
+    def _http_timeout_s(self) -> float | None:
+        """Per-message client timeout for the HTTP transports.
+
+        The manifest value when set, otherwise a 300 s default (a message that
+        outlives it means a hung env, and bounding it stops one stuck rollout
+        stalling the whole batch); ``0`` disables the bound entirely.
+        """
+        if self.request_timeout_s is None:
+            return 300.0
+        return self.request_timeout_s or None
 
     @model_validator(mode="after")
     def _validate_rollout_fields(self) -> Self:
@@ -663,12 +675,13 @@ class LLMEnvSpec(BaseModel):
             # max_turns to be set explicitly for env_url.
             url_max_turns = self.max_turns or 1
             mcp_tool = self.mcp_tool
-            timeout_s = self.request_timeout_s
+            timeout_s = self._http_timeout_s()
 
             def _url_factory() -> RolloutEnv:
                 # One WebSocket session per rollout, so a single hosted URL serves
                 # the whole group as concurrent, isolated episodes. The server's
-                # max_concurrent_envs must cover batch_size * group_size.
+                # max_concurrent_envs must cover batch_size * group_size, plus
+                # one more session for the lazily built eval env.
                 return RolloutEnv(
                     OpenEnvSessionClient(url, mcp_tool=mcp_tool, timeout_s=timeout_s),
                     tokenizer,
@@ -714,28 +727,25 @@ class LLMEnvSpec(BaseModel):
             self.max_turns = max_turns
 
         if self.served:
-            # Host the same env on an in-process OpenEnv server and drive it
-            # over HTTP loopback (one server per concurrent rollout) — the
-            # in-process rehearsal of the ``env_url`` production transport.
-            env_display_name = self.name
-            mcp_tool = self.mcp_tool
-            timeout_s = self.request_timeout_s
+            # One shared in-process OpenEnv server for the whole run: every
+            # factory call opens its own WebSocket session, and the server
+            # builds a fresh env per session — the in-process rehearsal of the
+            # ``env_url`` production topology (one frontend, N sessions), not
+            # one server per rollout.
+            from agilerl.llm_envs.openenv import ServedEnvFactory
 
-            def _served_factory() -> RolloutEnv:
-                return RolloutEnv.serving(
-                    _make_raw_env,
-                    tokenizer,
-                    max_turns=max_turns,
-                    env_name=env_display_name,
-                    mcp_tool=mcp_tool,
-                    timeout_s=timeout_s,
-                    pad_id=pad_id,
-                    apply_chat_template=True,
-                    max_model_len=max_model_len,
-                    max_output_tokens=max_output_tokens,
-                )
-
-            return _served_factory
+            return ServedEnvFactory(
+                _make_raw_env,
+                tokenizer,
+                max_turns=max_turns,
+                env_name=self.name,
+                mcp_tool=self.mcp_tool,
+                timeout_s=self._http_timeout_s(),
+                pad_id=pad_id,
+                apply_chat_template=True,
+                max_model_len=max_model_len,
+                max_output_tokens=max_output_tokens,
+            )
 
         def _env_factory() -> RolloutEnv:
             return RolloutEnv.local(

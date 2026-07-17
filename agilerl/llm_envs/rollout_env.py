@@ -176,16 +176,14 @@ class RolloutEnv:
         Calls ``make_env()`` for a fresh local env and binds the ``RolloutEnv`` to a
         :class:`~agilerl.llm_envs.openenv.ServedEnvClient` — a backend that hosts the
         env on its own :class:`~agilerl.llm_envs.openenv.OpenEnvServer` and owns the
-        whole server+client pair, torn down by :meth:`close`. Each served client owns
-        one server + session, so use this as the per-rollout ``env_factory`` to give
-        a :class:`BatchRolloutEnv` one isolated server per concurrent rollout::
-
-            env_factory = lambda: RolloutEnv.serving(make_env, tokenizer, max_turns=4)
-
-        ``BatchRolloutEnv`` calls the factory ``batch_size * group_size`` times, so the
-        number of servers is determined by the batch (one OS thread + port each). For
-        an already-running external server (a hosted Space), pass its ``url`` to the
-        :class:`RolloutEnv` constructor directly.
+        whole server+client pair, torn down by :meth:`close`. This suits one
+        standalone served env; a :class:`BatchRolloutEnv` batch should share a
+        single frontend instead — use a
+        :class:`~agilerl.llm_envs.openenv.ServedEnvFactory` as its
+        ``env_factory``, which hosts one server (one URL) serving every rollout
+        as its own WebSocket session. For an already-running external server (a
+        hosted Space), pass its ``url`` to the :class:`RolloutEnv` constructor
+        directly.
 
         :param make_env: Zero-arg factory returning a fresh local env to host.
         :param tokenizer: Tokenizer for the token-level loop.

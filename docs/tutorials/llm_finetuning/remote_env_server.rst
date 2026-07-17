@@ -11,8 +11,9 @@ connects back to it.
 
 The key property is that a **single URL serves the whole rollout group concurrently**. When the trainer
 needs ``batch_size * group_size`` rollouts, it opens that many independent **WebSocket sessions** to the
-one server, and the server spins up one isolated environment per session — automatically. You never
-orchestrate the fan-out yourself.
+one server (plus one more for the evaluation env, built lazily at the first evaluation), and the server
+spins up one isolated environment per session — automatically. You never orchestrate the fan-out
+yourself.
 
 This tutorial hosts ``game:Sudoku-v0-easy`` (from `GEM <https://github.com/axon-rl/gem>`_) on a laptop
 and trains ``Qwen/Qwen2.5-1.5B-Instruct`` with CISPO on a GPU server against it.
@@ -96,7 +97,7 @@ extra, then serve the env with :class:`~agilerl.llm_envs.openenv.OpenEnvServer`:
         host="127.0.0.1",       # loopback; exposed to the GPU box via an SSH tunnel below
         port=8000,
         env_name="sudoku-easy",
-        max_concurrent_envs=16,  # >= batch_size * group_size on the trainer
+        max_concurrent_envs=16,  # >= batch_size * group_size + 1 (eval) on the trainer
     ).start()
 
     print(f"Serving {server.base_url} (up to 16 concurrent sessions)")
@@ -114,8 +115,9 @@ Run it:
 
 .. note::
 
-    Set ``max_concurrent_envs`` to at least ``batch_size * group_size`` (plus one for evaluation). If the
-    trainer opens more sessions than the server allows, the extra connections are rejected.
+    Set ``max_concurrent_envs`` to at least ``batch_size * group_size + 1`` — the ``+ 1`` covers the
+    lazily built evaluation env's session. If the trainer opens more sessions than the server allows,
+    the extra connections are rejected.
 
 Step 2 — Expose the URL to the GPU server
 -----------------------------------------
@@ -146,7 +148,7 @@ ordinary rollout config:
     algorithm:
         name: CISPO
         batch_size: 2
-        group_size: 4          # 2 * 4 = 8 concurrent sessions
+        group_size: 4          # 2 * 4 = 8 rollout sessions (+1 for eval)
         lr: 0.00002
         max_output_tokens: 64
         use_vllm: true
@@ -174,7 +176,9 @@ ordinary rollout config:
             task_type: CAUSAL_LM
 
 Under the hood, the ``env_url`` field builds each rollout slot as
-``RolloutEnv(OpenEnvSessionClient(url, ...))`` — one WebSocket session per slot.
+``RolloutEnv(OpenEnvSessionClient(url, ...))`` — one WebSocket session per slot. Each message over a
+session is bounded by ``request_timeout_s`` (300 seconds unless the manifest sets it; ``0`` disables
+the bound).
 
 Step 4 — Launch training on the GPU server
 ------------------------------------------
@@ -208,7 +212,7 @@ Troubleshooting
   ``vllm_config.gpu_memory_utilization`` (0.7 is a good start on a 24 GB card); the trainer is offloaded
   while vLLM runs, so it can take a large share.
 - **Sessions rejected / capacity errors** — raise ``max_concurrent_envs`` on the server to at least
-  ``batch_size * group_size``.
+  ``batch_size * group_size + 1``.
 - **Connection refused from the GPU box** — the tunnel or server isn't up. Verify with a quick client on
   the GPU box: ``python -c "from agilerl.llm_envs.openenv import OpenEnvSessionClient as C; print(C('http://127.0.0.1:8000').reset(seed=0)[0][:80])"``.
 

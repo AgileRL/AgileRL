@@ -46,7 +46,7 @@ entry points such as ``train_llm_rollout``. Single-turn reasoning is the
 
 .. code-block:: python
 
-  from agilerl.llm_envs import RolloutEnv
+  from agilerl.llm_envs import ServedEnvFactory
   from agilerl.training.llm import train_llm_rollout
 
   def reward_fn(completion: str, answer: str, question: str) -> float:
@@ -83,24 +83,21 @@ entry points such as ``train_llm_rollout``. Single-turn reasoning is the
       def step(self, action):
           return "", float(self.reward_fn(action, self._a, self._q)), True, False, {}
 
-  def env_factory(evaluation_mode: bool = False):
-      env = RolloutEnv.serving(
-          lambda: PromptDataset(
-              questions=["2+2?", "Capital of France?"],
-              answers=["4", "Paris"],
-              reward_fn=reward_fn,
-              prompt_builder=lambda question: f"Q: {question}\nA:",
-              test_questions=["3+3?"],
-              test_answers=["6"],
-          ),
-          tokenizer,
-          max_turns=1,
-          pad_id=tokenizer.eos_token_id,
-          apply_chat_template=True,
-          max_model_len=1024,
-      )
-      env.evaluation_mode = evaluation_mode
-      return env
+  env_factory = ServedEnvFactory(
+      lambda: PromptDataset(
+          questions=["2+2?", "Capital of France?"],
+          answers=["4", "Paris"],
+          reward_fn=reward_fn,
+          prompt_builder=lambda question: f"Q: {question}\nA:",
+          test_questions=["3+3?"],
+          test_answers=["6"],
+      ),
+      tokenizer,
+      max_turns=1,
+      pad_id=tokenizer.eos_token_id,
+      apply_chat_template=True,
+      max_model_len=1024,
+  )
 
   trained_pop = train_llm_rollout(
       pop=[agent],
@@ -110,7 +107,8 @@ entry points such as ``train_llm_rollout``. Single-turn reasoning is the
       evaluation_interval=50,
   )
 
-  # 2) Multi-turn text environments (a factory hosted on its own OpenEnv server)
+  # 2) Multi-turn text environments (one shared OpenEnv server; each rollout
+  #    drives a fresh env instance over its own WebSocket session)
   class ToyRolloutEnv:
       def reset(self, seed=None):
           del seed
@@ -120,15 +118,14 @@ entry points such as ``train_llm_rollout``. Single-turn reasoning is the
           reward = 1.0 if "4" in action else 0.0
           return "Done.", reward, True, False, {"correct": bool(reward)}
 
-  def env_factory():
-      return RolloutEnv.serving(
-          ToyRolloutEnv,
-          tokenizer,
-          max_turns=4,
-          pad_id=tokenizer.eos_token_id,
-          max_model_len=1024,
-          max_output_tokens=128,
-      )
+  env_factory = ServedEnvFactory(
+      ToyRolloutEnv,
+      tokenizer,
+      max_turns=4,
+      pad_id=tokenizer.eos_token_id,
+      max_model_len=1024,
+      max_output_tokens=128,
+  )
 
   trained_pop = train_llm_rollout(
       pop=[agent],
