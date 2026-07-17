@@ -565,7 +565,7 @@ class TestManifestCommandCallbackBinary:
 
 
 class TestArenaArchOptional:
-    def test_arch_present_validates(self) -> None:
+    def test_arch_present_passes_network_raw(self) -> None:
         from agilerl.arena.models.manifest import TrainingManifest
 
         raw = {
@@ -578,10 +578,9 @@ class TestArenaArchOptional:
             },
         }
         out = TrainingManifest.get_validated(raw, mode="json")
-        # _ensure_platform_run_spec_keys promotes arch to the network root
-        # (and adds `name`) for the Arena platform run-spec payload shape.
-        assert out["network"]["arch"] == "mlp"
-        assert "arch" not in out["network"]["encoder_config"]
+        # `arch` is resolved server-side: the network section is passed through
+        # untouched, with no promotion or `name` injection.
+        assert out["network"] == raw["network"]
 
     def test_arch_absent_passes_network_raw(self) -> None:
         from agilerl.arena.models.manifest import TrainingManifest
