@@ -65,6 +65,8 @@ def apply_chat_template(
 class HuggingFaceGym(gym.Env, ABC):
     """Abstract base class for HuggingFace Gymnasium environments."""
 
+    _batch_state_attrs: tuple[str, ...] = ()
+
     def __init__(
         self,
         train_dataset: Dataset,
@@ -145,16 +147,18 @@ class HuggingFaceGym(gym.Env, ABC):
         """Context manager to switch to evaluation mode."""
         self.dataloader = self.test_dataloader_iter
         self.evaluation_mode = True
-        last_tokenized_prompts = None
-        if hasattr(self, "last_tokenized_prompts"):
-            last_tokenized_prompts = copy.deepcopy(self.last_tokenized_prompts)
+        batch_state = {
+            attr: copy.deepcopy(getattr(self, attr))
+            for attr in self._batch_state_attrs
+            if hasattr(self, attr)
+        }
         try:
             yield
         finally:
             self.dataloader = self.train_dataloader_iter
             self.evaluation_mode = False
-            if last_tokenized_prompts is not None:
-                self.last_tokenized_prompts = last_tokenized_prompts
+            for attr, value in batch_state.items():
+                setattr(self, attr, value)
 
     @abstractmethod
     def create_collate_fn(
