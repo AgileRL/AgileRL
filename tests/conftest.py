@@ -157,6 +157,12 @@ def pytest_collection_modifyitems(config, items):
     # regardless of -n auto's worker count. See docstring above.
     gputest_groups = [pytest.mark.xdist_group(f"gputest{i}") for i in range(4)]
     minari_group = pytest.mark.xdist_group("minari")
+    # The gem / entrypoint rollout-factory tests import env packages (gem and its
+    # deps) that install a beartype import hook; importing them from several xdist
+    # workers at once intermittently trips a beartype.claw circular import
+    # ("partially initialized module ..._clawstate"). Pin them to one worker so
+    # that import stays single-threaded.
+    env_import_group = pytest.mark.xdist_group("llm_env_import")
     # ``gpu``/``vllm``-marked tests need a usable CUDA device (real DeepSpeed
     # init, a live vLLM engine). Skip them when CUDA is unavailable — a CPU-only
     # runner, or a GPU whose driver is too old for the installed torch (the GPU
@@ -175,6 +181,10 @@ def pytest_collection_modifyitems(config, items):
                 item.add_marker(skip_no_cuda)
         elif "test_minari_utils" in item.nodeid:
             item.add_marker(minari_group)
+        elif "TestLLMEnvSpecRollout" in item.nodeid and (
+            "gem" in item.name or "entrypoint" in item.name
+        ):
+            item.add_marker(env_import_group)
 
 
 # Only clear CUDA cache when actually needed
