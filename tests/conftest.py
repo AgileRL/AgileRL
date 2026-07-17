@@ -553,8 +553,9 @@ def deepspeed_env():
 def serve_env():
     """Host local envs over OpenEnv HTTP for a test, stopping them all at teardown.
 
-    ``url = serve_env(MyEnv())`` returns a base URL to hand to ``OpenEnvClient`` /
-    ``RolloutEnv``; the server (and any others served in the same test) is shut down
+    ``url = serve_env(MyEnv())`` returns a base URL to hand to
+    ``OpenEnvSessionClient`` / ``RolloutEnv``; the server (and any others served in
+    the same test) is shut down
     when the test finishes, so individual tests stay free of start/stop boilerplate.
     """
     from agilerl.llm_envs import OpenEnvServer

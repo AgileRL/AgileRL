@@ -1,8 +1,8 @@
 """The OpenEnv env interface: client + server, resolver.
 
-Every LLM-training env is reached the same way — text in, text out, over the small
-OpenEnv HTTP protocol. These cover both halves (``OpenEnvServer`` host +
-``OpenEnvClient`` client over httpx) and the spec resolver.
+Every LLM-training env is reached the same way — text in, text out, over the
+OpenEnv protocol. These cover both halves (``OpenEnvServer`` host +
+``OpenEnvSessionClient`` over a WebSocket session) and the spec resolver.
 """
 
 from __future__ import annotations
@@ -10,9 +10,9 @@ from __future__ import annotations
 import socket
 import threading
 import time
+from types import SimpleNamespace
 from typing import Any
 
-import httpx
 import pytest
 import torch
 
@@ -20,8 +20,8 @@ from agilerl.llm_envs import (
     BatchPointer,
     BatchRolloutEnv,
     LocalEnvClient,
-    OpenEnvClient,
     OpenEnvServer,
+    OpenEnvSessionClient,
     OpenEnvWrapper,
     RolloutEnv,
     ServedEnvClient,
@@ -98,11 +98,11 @@ class _RowDatasetEnv:
 
 # --- server + client over real localhost HTTP ------------------------------
 def test_server_and_client_round_trip_over_http() -> None:
-    """``OpenEnvServer`` serves a local env; ``OpenEnvClient`` drives it over HTTP."""
+    """``OpenEnvServer`` serves a local env; ``OpenEnvSessionClient`` drives it over HTTP."""
     env = _CountingEnv(target=2)
     with OpenEnvServer(env) as server:
         assert server.base_url.startswith("http://127.0.0.1:")
-        client = OpenEnvClient(base_url=server.base_url)
+        client = OpenEnvSessionClient(base_url=server.base_url)
         prompt, info = client.reset()
         # The env's info['suffix'] is folded into the prompt (OpenEnv drops obs metadata).
         assert prompt == "Start.\nReply 'go'."
@@ -122,7 +122,8 @@ def test_serve_helper_starts_immediately() -> None:
     server = OpenEnvServer(_CountingEnv()).start()
     try:
         assert (
-            OpenEnvClient(base_url=server.base_url).reset()[0] == "Start.\nReply 'go'."
+            OpenEnvSessionClient(base_url=server.base_url).reset()[0]
+            == "Start.\nReply 'go'."
         )
     finally:
         server.stop()
@@ -133,7 +134,7 @@ def test_info_reports_dataset_size_and_tools() -> None:
     tools = [{"type": "function", "function": {"name": "calc", "parameters": {}}}]
     server = OpenEnvServer(_CountingEnv(tools=tools)).start()
     try:
-        client = OpenEnvClient(base_url=server.base_url)
+        client = OpenEnvSessionClient(base_url=server.base_url)
         assert client.dataset_size == 0  # _CountingEnv has no dataset_size
         assert client.tools == tools
     finally:
@@ -143,7 +144,7 @@ def test_info_reports_dataset_size_and_tools() -> None:
 def test_base_url_required() -> None:
     """The client needs a non-empty base URL."""
     with pytest.raises(ValueError, match="base_url"):
-        OpenEnvClient("")
+        OpenEnvSessionClient("")
 
 
 # --- gym-tuple normalisation -----------------------------------------------
@@ -288,7 +289,7 @@ def test_resolve_env_entrypoint_hosts_locally() -> None:
         },
     )
     try:
-        client = OpenEnvClient(base_url=url)
+        client = OpenEnvSessionClient(base_url=url)
         assert client.reset(row_index=0)[0] == "P:q"
         assert client.dataset_size == 1
     finally:
@@ -306,7 +307,7 @@ def test_resolve_env_disk_path_entrypoint(tmp_path: Any) -> None:
     )
     url, server = resolve_env(f"{module}:DiskEnv")
     try:
-        assert OpenEnvClient(base_url=url).reset()[0] == "from disk"
+        assert OpenEnvSessionClient(base_url=url).reset()[0] == "from disk"
     finally:
         server.stop()
 
@@ -376,9 +377,9 @@ class TestRolloutEnvFromSpec:
     """``RolloutEnv.from_spec`` routes a URL to HTTP and an entrypoint to in-process."""
 
     def test_url_builds_http_client(self) -> None:
-        """A URL spec routes to the HTTP ``OpenEnvClient`` env client."""
+        """A URL spec routes to the HTTP ``OpenEnvSessionClient`` env client."""
         env = RolloutEnv.from_spec("http://localhost:0", None, MiniTokenizer())
-        assert isinstance(env._env_client, OpenEnvClient)
+        assert isinstance(env._env_client, OpenEnvSessionClient)
         env.close()
 
     def test_entrypoint_runs_in_process(self) -> None:
@@ -439,134 +440,64 @@ class TestBatchPointer:
 
 
 # --- /state strictness + MCP tools/list fallback ----------------------------
-class _StubResponse:
-    """Minimal httpx-response stand-in for driving ``_fetch_state`` branches."""
+class _StubSync:
+    """Stand-in for OpenEnv's ``SyncEnvClient`` — records reset/step, scripts state."""
 
-    def __init__(self, status_code: int = 200, body: Any = None) -> None:
-        self.status_code = status_code
-        self._body = body if body is not None else {}
+    def __init__(self, state: Any = None, state_error: Exception | None = None) -> None:
+        self.reset_calls: list[dict[str, Any]] = []
+        self.step_calls: list[Any] = []
+        self._state = state if state is not None else {}
+        self._state_error = state_error
 
-    def raise_for_status(self) -> None:
-        if self.status_code >= 400:
-            msg = "boom"
-            raise httpx.HTTPStatusError(msg, request=None, response=None)
+    def connect(self) -> None:
+        return None
 
-    def json(self) -> Any:
-        return self._body
+    def reset(self, **kwargs: Any) -> Any:
+        self.reset_calls.append(kwargs)
+        return SimpleNamespace(observation="prompt", reward=None, done=False)
 
+    def step(self, action: Any) -> Any:
+        self.step_calls.append(action)
+        return SimpleNamespace(observation="hi", reward=1.0, done=True)
 
-class _StubHTTP:
-    """Scripted httpx.Client stand-in: one queued result per GET, a table for POSTs."""
-
-    def __init__(
-        self,
-        get_results: list[Any],
-        post_results: dict[str, Any] | None = None,
-    ) -> None:
-        self._get_results = list(get_results)
-        self._post_results = post_results or {}
-        self.base_url = "http://stub.invalid"
-        self.is_closed = False
-
-    def get(self, path: str) -> Any:
-        del path
-        result = self._get_results.pop(0)
-        if isinstance(result, Exception):
-            raise result
-        return result
-
-    def post(self, path: str, json: Any = None) -> Any:
-        del json
-        result = self._post_results[path]
-        if isinstance(result, Exception):
-            raise result
-        return result
-
-    def close(self) -> None:
-        self.is_closed = True
+    def state(self) -> Any:
+        if self._state_error is not None:
+            raise self._state_error
+        return self._state
 
 
-def _stubbed_client(
-    get_results: list[Any],
-    post_results: dict[str, Any] | None = None,
-) -> OpenEnvClient:
-    client = OpenEnvClient("http://stub.invalid")
-    client._http = _StubHTTP(get_results, post_results)
+def _session_client(**stub_kwargs: Any) -> OpenEnvSessionClient:
+    """A session client whose transport is a :class:`_StubSync` (lazy connect: no I/O)."""
+    client = OpenEnvSessionClient("http://stub.invalid")
+    client._sync = _StubSync(**stub_kwargs)
     return client
 
 
-class TestStateFetchStrictness:
-    """``/state`` drives row pinning + tool schemas, so it is fetched strictly."""
-
-    def test_transient_failure_then_success(self, monkeypatch: Any) -> None:
-        """A cold-start hiccup is retried; the eventual state is served + cached."""
-        monkeypatch.setattr(openenv_module.time, "sleep", lambda _s: None)
-        client = _stubbed_client(
-            [
-                httpx.ConnectError("cold start"),
-                _StubResponse(200, {"dataset_size": 5, "tools": [{"name": "t"}]}),
-            ]
-        )
-        assert client.dataset_size == 5
-        assert client.tools == [{"name": "t"}]  # cached: no further GETs queued
-
-    def test_persistent_failure_raises(self, monkeypatch: Any) -> None:
-        """A server that never answers /state fails the run loudly, not silently."""
-        monkeypatch.setattr(openenv_module.time, "sleep", lambda _s: None)
-        client = _stubbed_client([httpx.ConnectError("down")] * 4)
-        with pytest.raises(RuntimeError, match="/state"):
-            _ = client.dataset_size
-
-    def test_missing_route_is_empty_not_fatal(self) -> None:
-        """404/405 = no /state route (e.g. production mode): empty, no retries."""
-        client = _stubbed_client([_StubResponse(404)])
-        assert client.dataset_size == 0
-
-    def test_mcp_tools_list_fallback(self) -> None:
-        """Tools absent from /state are discovered via MCP ``tools/list``."""
-        mcp_tools = [{"name": "echo", "inputSchema": {}}]
-        client = _stubbed_client(
-            [_StubResponse(200, {"dataset_size": 0})],
-            {"/mcp": _StubResponse(200, {"result": {"tools": mcp_tools}})},
-        )
-        assert client.tools == mcp_tools
-
-    def test_no_mcp_channel_means_no_tools(self) -> None:
-        """A server with neither /state tools nor an MCP channel yields []."""
-        client = _stubbed_client(
-            [_StubResponse(200, {})],
-            {"/mcp": httpx.ConnectError("no mcp")},
-        )
-        assert client.tools == []
-
-    def test_non_object_state_payload_is_treated_as_empty(self) -> None:
-        """A non-dict ``/state`` body normalizes to ``{}``."""
-        client = _stubbed_client([_StubResponse(200, ["not", "a", "dict"])])
-        assert client.dataset_size == 0
-        assert client.tools == []
-
-
-def test_openenv_client_reset_forwards_eval_and_positive_seed_only() -> None:
-    """``reset`` sends row/eval flags and drops negative seeds."""
-    payloads: list[dict[str, Any]] = []
-    client = OpenEnvClient("http://stub.invalid")
-
-    def _capture(path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        assert path == "/reset"
-        payloads.append(payload)
-        return {"observation": "prompt"}
-
-    client._post = _capture  # type: ignore[method-assign]
-
+def test_session_reset_forwards_eval_and_positive_seed_only() -> None:
+    """``reset`` forwards row/eval flags to the session and drops negative seeds."""
+    client = _session_client()
     with client.eval_mode():
         prompt, info = client.reset(seed=-2, row_index=3)
     assert prompt == "prompt"
     assert info == {}
-    assert payloads[-1] == {"row_index": 3, "evaluation": True}
+    assert client._sync.reset_calls[-1] == {"row_index": 3, "evaluation": True}
 
-    prompt2, _ = client.reset(seed=5)
-    assert prompt2 == "prompt"
-    assert payloads[-1] == {"seed": 5}
+    client.reset(seed=5)
+    assert client._sync.reset_calls[-1] == {"seed": 5}
+
+
+def test_session_state_is_best_effort() -> None:
+    """A session that can't read state advertises no dataset and no tools."""
+    client = _session_client(state_error=RuntimeError("no state channel"))
+    assert client.dataset_size == 0
+    assert client.tools == []
+
+
+def test_session_state_reports_dataset_size_and_tools() -> None:
+    """``dataset_size`` / ``tools`` come from the env's OpenEnv state, cached."""
+    client = _session_client(state={"dataset_size": 5, "tools": [{"name": "t"}]})
+    assert client.dataset_size == 5
+    assert client.tools == [{"name": "t"}]
 
 
 # --- truncated round-trips over HTTP ----------------------------------------
@@ -585,7 +516,7 @@ class _TruncatingEnv:
 def test_truncated_round_trips_over_http() -> None:
     """The HTTP backend reports the same terminated/truncated split as local."""
     with OpenEnvServer(_TruncatingEnv()) as server:
-        client = OpenEnvClient(server.base_url)
+        client = OpenEnvSessionClient(server.base_url)
         client.reset()
         _obs, reward, terminated, truncated, _info = client.step("a")
         client.close()
@@ -594,17 +525,15 @@ def test_truncated_round_trips_over_http() -> None:
     assert terminated is False
 
 
-# --- ServedEnvClient: one owner for the server + client pair ----------------
-def test_served_env_client_owns_server_and_pool() -> None:
-    """``close`` stops the server, closes the hosted env, and releases the pool."""
+# --- ServedEnvClient: one owner for the server + session pair ----------------
+def test_served_env_client_owns_server_and_session() -> None:
+    """``close`` ends the session, stops the server, and closes the hosted env."""
     inner = _CountingEnv()
     client = ServedEnvClient(inner)
     prompt, _ = client.reset()
     assert prompt == "Start.\nReply 'go'."
-    http = client._client._http
     client.close()
     assert inner.closed  # server teardown closed the hosted env
-    assert http.is_closed  # connection pool released without a /close round-trip
     with pytest.raises(RuntimeError):
         _ = client.base_url
     client.close()  # idempotent
@@ -835,62 +764,20 @@ def test_server_start_times_out_when_never_ready(monkeypatch: Any) -> None:
     assert inner.closed  # the failed start released the hosted env
 
 
-# --- OpenEnvClient: MCP-tool action encoding + strict payloads ---------------
+# --- OpenEnvSessionClient: MCP-tool action encoding --------------------------
 def test_step_encodes_mcp_call_tool_action() -> None:
     """With ``mcp_tool`` set, the model's text is sent as a ``call_tool`` action."""
-    captured: dict[str, Any] = {}
-
-    class _CapturingHTTP(_StubHTTP):
-        def post(self, path: str, json: Any = None) -> Any:
-            captured["path"] = path
-            captured["json"] = json
-            return _StubResponse(
-                200, {"observation": "hi", "reward": 1.0, "done": True}
-            )
-
-    client = OpenEnvClient("http://stub.invalid", mcp_tool="echo", arg="text")
-    client._http = _CapturingHTTP([])
+    client = OpenEnvSessionClient("http://stub.invalid", mcp_tool="echo", arg="text")
+    client._sync = _StubSync()
     obs, reward, terminated, _truncated, _info = client.step("hello")
     assert obs == "hi"
     assert reward == 1.0
     assert terminated is True
-    assert captured["json"]["action"] == {
+    assert client._sync.step_calls[-1] == {
         "type": "call_tool",
         "tool_name": "echo",
         "arguments": {"text": "hello"},
     }
-
-
-def test_fetch_state_retries_after_bad_status(monkeypatch: Any) -> None:
-    """A transient error status is retried, then the good state is served."""
-    monkeypatch.setattr(openenv_module.time, "sleep", lambda _s: None)
-    client = _stubbed_client(
-        [_StubResponse(500), _StubResponse(200, {"dataset_size": 3})]
-    )
-    assert client.dataset_size == 3
-
-
-def test_fetch_mcp_tools_is_cached(monkeypatch: Any) -> None:
-    """The MCP ``tools/list`` result is fetched once and cached."""
-    calls = {"n": 0}
-
-    class _CountingHTTP(_StubHTTP):
-        def post(self, path: str, json: Any = None) -> Any:
-            calls["n"] += 1
-            return _StubResponse(200, {"result": {"tools": [{"name": "e"}]}})
-
-    client = OpenEnvClient("http://stub.invalid")
-    client._http = _CountingHTTP([_StubResponse(200, {"dataset_size": 0})])
-    assert client.tools == [{"name": "e"}]
-    assert client.tools == [{"name": "e"}]  # served from the cache, no second POST
-    assert calls["n"] == 1
-
-
-def test_post_rejects_non_object_payload() -> None:
-    """A non-object JSON body from the server is a clear protocol error."""
-    client = _stubbed_client([], {"/step": _StubResponse(200, ["not", "a", "dict"])})
-    with pytest.raises(TypeError, match="non-object payload"):
-        client.step("x")
 
 
 # --- LocalEnvClient / ServedEnvClient: tool schemas + delegation -------------
@@ -922,7 +809,7 @@ def test_served_env_client_stops_server_if_client_build_fails(
         msg = "client build failed"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr(openenv_module, "OpenEnvClient", _boom)
+    monkeypatch.setattr(openenv_module, "OpenEnvSessionClient", _boom)
     with pytest.raises(RuntimeError, match="client build failed"):
         ServedEnvClient(inner)
     assert inner.closed  # the started server was torn down, closing the env

@@ -943,7 +943,7 @@ class TestLLMEnvSpecRollout:
                 mcp_tool="run_code",
             )
 
-    def test_env_url_factory_builds_http_client(self):
+    def test_env_url_factory_builds_session_client(self):
         mock_tokenizer = MagicMock()
         mock_tokenizer.pad_token_id = 0
         spec = LLMEnvSpec(
@@ -954,16 +954,22 @@ class TestLLMEnvSpecRollout:
             request_timeout_s=30.0,
         )
         mock_rollout_cls = MagicMock()
-        with patch("agilerl.llm_envs.RolloutEnv", mock_rollout_cls):
+        mock_session_cls = MagicMock()
+        with (
+            patch("agilerl.llm_envs.RolloutEnv", mock_rollout_cls),
+            patch("agilerl.llm_envs.openenv.OpenEnvSessionClient", mock_session_cls),
+        ):
             spec.make_rollout_env_factory(
                 mock_tokenizer, max_model_len=512, max_output_tokens=128
             )()
+        # env_url opens a WebSocket session; the transport params bake into the client.
+        mock_session_cls.assert_called_once_with(
+            "http://env-host:8000", mcp_tool="run_code", timeout_s=30.0
+        )
         mock_rollout_cls.assert_called_once_with(
-            "http://env-host:8000",
+            mock_session_cls.return_value,
             mock_tokenizer,
             max_turns=4,
-            mcp_tool="run_code",
-            timeout_s=30.0,
             pad_id=0,
             apply_chat_template=True,
             max_model_len=512,

@@ -518,12 +518,18 @@ class OpenEnvSessionClient:
             connect_timeout_s=connect_timeout_s,
             message_timeout_s=timeout_s if timeout_s is not None else 60.0,
         ).sync()
-        self._sync.connect()
         self._mcp_tool = mcp_tool
         self._arg = arg
         self._instruction = instruction
         self._evaluation_mode = False
         self._state: dict[str, Any] | None = None
+        self._connected = False
+
+    def _connect(self) -> None:
+        """Open the session on first use (idempotent), so construction is cheap."""
+        if not self._connected:
+            self._sync.connect()
+            self._connected = True
 
     @contextlib.contextmanager
     def eval_mode(self) -> Iterator[None]:
@@ -546,6 +552,7 @@ class OpenEnvSessionClient:
         ``seed`` / ``row_index`` travel to the server's env reset so a rollout
         group (one seed per batch row) resets every session to the same prompt.
         """
+        self._connect()
         kwargs: dict[str, Any] = {}
         if seed is not None and int(seed) >= 0:
             kwargs["seed"] = int(seed)
@@ -558,6 +565,7 @@ class OpenEnvSessionClient:
 
     def step(self, action: Any) -> tuple[str, float, bool, bool, dict[str, Any]]:
         """Send one action (model text) over the session and return the Gym 5-tuple."""
+        self._connect()
         text = action if isinstance(action, str) else str(action)
         if self._mcp_tool:
             act: dict[str, Any] = {
@@ -607,6 +615,7 @@ class OpenEnvSessionClient:
         advertises no dataset and no tools rather than stalling the rollout.
         """
         if self._state is None:
+            self._connect()
             try:
                 state = self._sync.state()
             except Exception:
