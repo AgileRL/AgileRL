@@ -7,7 +7,16 @@ import logging
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
+import agilerl.arena.models.algorithms as _arena_algorithms  # noqa: F401
 import yaml
+from agilerl.arena.models.algo import (
+    ARENA_REGISTRY,
+    AlgoSpecT,
+    LLMAlgorithmSpec,
+)
+from agilerl.arena.models.hpo import MutationSpec, TournamentSelectionSpec
+from agilerl.arena.models.networks import FinetuningNetworkSpec
+from agilerl.arena.models.training import ReplayBufferSpec, TrainingSpec
 from pydantic import (
     AliasChoices,
     BaseModel,
@@ -17,16 +26,6 @@ from pydantic import (
     model_validator,
 )
 from typing_extensions import Self
-
-import agilerl.arena.models.algorithms as _arena_algorithms  # noqa: F401
-from agilerl.arena.models.algo import (
-    ARENA_REGISTRY,
-    AlgoSpecT,
-    LLMAlgorithmSpec,
-)
-from agilerl.arena.models.hpo import MutationSpec, TournamentSelectionSpec
-from agilerl.arena.models.networks import FinetuningNetworkSpec
-from agilerl.arena.models.training import ReplayBufferSpec, TrainingSpec
 
 logger = logging.getLogger(__name__)
 
