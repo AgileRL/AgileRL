@@ -554,6 +554,69 @@ class TestReasoningGymEvalMode:
         ):
             assert torch.equal(original, restored["input_ids"])
 
+    def test_eval_mode_restores_train_questions_and_answers(self):
+        """The first post-eval train step must be scored against train targets.
+
+        Regression test: eval used to leave ``questions``/``answers`` pointing
+        at the last test batch, so a remainder test batch shorter than the
+        train batch truncated the rewards and crashed ``learn()`` with a
+        rewards/completions length mismatch.
+        """
+        train_dataset = HFDataset.from_dict(
+            {
+                "question": [f"train question {i}?" for i in range(8)],
+                "answer": [f"train answer {i}" for i in range(8)],
+            },
+        )
+        # 6 test samples with batch size 4 -> the second test batch is a
+        # remainder of 2, shorter than the train batch.
+        test_dataset = HFDataset.from_dict(
+            {
+                "question": [f"test question {i}?" for i in range(6)],
+                "answer": [f"test answer {i}" for i in range(6)],
+            },
+        )
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+        seen_answers = []
+
+        def recording_reward_fn(completion, answer, question):
+            seen_answers.append(answer)
+            return 1.0
+
+        env = ReasoningGym(
+            train_dataset=train_dataset,
+            test_dataset=test_dataset,
+            tokenizer=tokenizer,
+            reward_fn=recording_reward_fn,
+            conversation_template=DUMMY_CONVERSATION_TEMPLATE,
+            data_batch_size_per_gpu=4,
+        )
+        group_size = 8
+
+        def completions_for(prompt_batch):
+            return [torch.randint(0, 1000, (group_size, 356)) for _ in prompt_batch]
+
+        prompts = env.reset()
+        prompts, _ = env.step(completions_for(prompts))
+        train_answers = list(env.answers)
+        train_questions = list(env.questions)
+
+        # One eval pass as run by GRPO.test with eval_loop=1: reset scores the
+        # full first test batch, step advances to the remainder batch.
+        with env.eval_mode():
+            eval_prompts = env.reset()
+            _, eval_rewards = env.step(completions_for(eval_prompts))
+            assert eval_rewards.shape == (4, group_size)
+            assert len(env.answers) == 2
+
+        assert env.answers == train_answers
+        assert env.questions == train_questions
+
+        seen_answers.clear()
+        _, rewards = env.step(completions_for(prompts))
+        assert rewards.shape == (len(prompts), group_size)
+        assert set(seen_answers) == set(train_answers)
+
 
 class TestPreferenceGymInit:
     @pytest.mark.parametrize("use_accelerator", [True, False])

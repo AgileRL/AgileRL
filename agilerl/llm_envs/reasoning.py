@@ -38,6 +38,8 @@ class ReasoningGym(HuggingFaceGym):
     :type seed: int
     """
 
+    _batch_state_attrs = ("last_tokenized_prompts", "questions", "answers")
+
     def __init__(
         self,
         train_dataset: Dataset,
@@ -108,7 +110,7 @@ class ReasoningGym(HuggingFaceGym):
         """Decode the completions and evaluate the rewards."""
         total_rewards = []
         for idx, (group_completion, answer, question) in enumerate(
-            zip(completions, self.answers, self.questions, strict=False),
+            zip(completions, self.answers, self.questions, strict=True),
         ):
             completion_to_decode = group_completion[
                 :,
