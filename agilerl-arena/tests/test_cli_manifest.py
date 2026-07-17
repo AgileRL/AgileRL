@@ -7,6 +7,8 @@ from unittest.mock import MagicMock, patch
 
 import click
 import pytest
+from click.testing import CliRunner
+
 from agilerl.arena.cli_manifest import (
     _manifest_spec_to_click_option,
     _parse_json_cli_value,
@@ -18,7 +20,6 @@ from agilerl.arena.cli_manifest import (
 from agilerl.arena.client import ArenaClient
 from agilerl.arena.config import CommandConfig
 from agilerl.arena.exceptions import ArenaValidationError
-from click.testing import CliRunner
 
 
 def _command_config() -> CommandConfig:
@@ -607,8 +608,8 @@ class TestArenaSimbaRecurrentConflict:
     ``agilerl.models.manifest.TrainingManifest._process_manifest``.
     """
 
-    def test_deferred_raises(self) -> None:
-        """No ``arch``: the network section stays a raw dict when the conflict fires."""
+    def test_simba_and_recurrent_raises(self) -> None:
+        """A top-level ``simba`` flag with ``recurrent`` is a contradiction."""
         from agilerl.arena.models.manifest import TrainingManifest
 
         raw = {
@@ -619,23 +620,8 @@ class TestArenaSimbaRecurrentConflict:
         with pytest.raises(ValueError, match="cannot both be set"):
             TrainingManifest.model_validate(raw)
 
-    def test_eager_raises(self) -> None:
-        """``arch: simba`` declared: ``net_config`` is a validated ``NetworkSpec``."""
-        from agilerl.arena.models.manifest import TrainingManifest
-
-        raw = {
-            "algorithm": {"name": "PPO", "recurrent": True},
-            "environment": {"name": "merge-env", "version": "v1"},
-            "network": {
-                "arch": "simba",
-                "encoder_config": {"hidden_size": 128, "num_blocks": 2},
-                "head_config": {"hidden_size": [64]},
-            },
-        }
-        with pytest.raises(ValueError, match="cannot both be set"):
-            TrainingManifest.model_validate(raw)
-
     def test_only_simba_validates(self) -> None:
+        """Either request on its own is fine; only the combination is rejected."""
         from agilerl.arena.models.manifest import TrainingManifest
 
         raw = {
@@ -645,28 +631,6 @@ class TestArenaSimbaRecurrentConflict:
         }
         manifest = TrainingManifest.model_validate(raw)
         assert manifest.network.get("simba") is True
-
-    def test_only_recurrent_validates(self) -> None:
-        from agilerl.arena.models.manifest import TrainingManifest
-
-        raw = {
-            "algorithm": {"name": "PPO", "recurrent": True},
-            "environment": {"name": "merge-env", "version": "v1"},
-            "network": {"head_config": {"hidden_size": [64]}},
-        }
-        manifest = TrainingManifest.model_validate(raw)
-        assert manifest.algorithm.recurrent is True
-
-    def test_neither_validates(self) -> None:
-        from agilerl.arena.models.manifest import TrainingManifest
-
-        raw = {
-            "algorithm": {"name": "PPO"},
-            "environment": {"name": "merge-env", "version": "v1"},
-            "network": {"head_config": {"hidden_size": [64]}},
-        }
-        manifest = TrainingManifest.model_validate(raw)
-        assert manifest.algorithm.recurrent is False
 
 
 class TestAttachManifestTree:

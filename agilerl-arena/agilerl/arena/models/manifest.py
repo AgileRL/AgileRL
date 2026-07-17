@@ -5,10 +5,20 @@ from __future__ import annotations
 import copy
 import logging
 from pathlib import Path
-from typing import Annotated, Any, Literal, get_args
+from typing import Annotated, Any, Literal
+
+import yaml
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    BeforeValidator,
+    Field,
+    PlainSerializer,
+    model_validator,
+)
+from typing_extensions import Self
 
 import agilerl.arena.models.algorithms as _arena_algorithms  # noqa: F401
-import yaml
 from agilerl.arena.models.algo import (
     ARENA_REGISTRY,
     AlgoSpecT,
@@ -20,15 +30,6 @@ from agilerl.arena.models.networks import (
     NetworkSpec,
 )
 from agilerl.arena.models.training import ReplayBufferSpec, TrainingSpec
-from pydantic import (
-    AliasChoices,
-    BaseModel,
-    BeforeValidator,
-    Field,
-    PlainSerializer,
-    model_validator,
-)
-from typing_extensions import Self
 
 logger = logging.getLogger(__name__)
 
@@ -302,32 +303,18 @@ class TrainingManifest(BaseModel):
     @model_validator(mode="after")
     def _process_manifest(self) -> Self:
         """Process the manifest for submission to Arena."""
-        # 'network' component of manifest corresponds to algorithm's underlying networks
+        # 'network' component of manifest corresponds to algorithm's underlying
+        # networks. `arch` is resolved server-side, so `net_config` is never
+        # populated on the algorithm spec here (the platform rejects a set
+        # `net_config`).
         algo_spec_cls = type(self.algorithm)
-        if self.network is not None:
-            # Resolve the raw dict into the algorithm's concrete NetworkSpec
-            # if `net_config` field is present in the algorithm spec.
-            net_config_field = algo_spec_cls.model_fields.get("net_config")
-            if net_config_field is not None:
-                # get the NetworkSpec class from the type annotation and validate
-                spec_cls: NetworkSpec = next(
-                    (
-                        t
-                        for t in get_args(net_config_field.annotation)
-                        if t is not type(None)
-                    ),
-                    None,
-                )
-                # Skip when the network has no resolvable `arch`
-                if spec_cls is not None and _network_has_arch(self.network):
-                    self.algorithm.net_config = spec_cls.model_validate(self.network)
-            # LLM algorithms expect a pretrained model
-            elif issubclass(algo_spec_cls, LLMAlgorithmSpec):
-                llm_network = FinetuningNetworkSpec.model_validate(self.network)
-                self.algorithm.pretrained_model_name_or_path = (
-                    llm_network.pretrained_model_name_or_path
-                )
-                self.algorithm.max_model_len = llm_network.max_context_length
+        # LLM algorithms expect a pretrained model
+        if self.network is not None and issubclass(algo_spec_cls, LLMAlgorithmSpec):
+            llm_network = FinetuningNetworkSpec.model_validate(self.network)
+            self.algorithm.pretrained_model_name_or_path = (
+                llm_network.pretrained_model_name_or_path
+            )
+            self.algorithm.max_model_len = llm_network.max_context_length
 
         if (
             issubclass(algo_spec_cls, LLMAlgorithmSpec)
@@ -341,13 +328,7 @@ class TrainingManifest(BaseModel):
             raise ValueError(msg)
 
         recurrent = bool(getattr(self.algorithm, "recurrent", False))
-        net_config = getattr(self.algorithm, "net_config", None)
-        if net_config is not None:
-            simba = bool(getattr(net_config, "simba", False))
-        elif isinstance(self.network, dict):
-            simba = bool(self.network.get("simba", False))
-        else:
-            simba = False
+        simba = isinstance(self.network, dict) and bool(self.network.get("simba"))
         if recurrent and simba:
             msg = (
                 "`simba` and `recurrent` cannot both be set: a network cannot use "

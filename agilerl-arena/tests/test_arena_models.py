@@ -6,6 +6,13 @@ from unittest.mock import patch
 
 import pytest
 import yaml
+from generate_arena_manifests import (
+    arena_algorithm_names,
+    generate_arena_manifests,
+    write_arena_manifest,
+)
+from pydantic import ValidationError
+
 from agilerl.arena.models import (
     ARENA_REGISTRY,
     ReplayBufferSpec,
@@ -25,12 +32,6 @@ from agilerl.arena.models.networks import (
     MlpSpec,
     QNetworkSpec,
 )
-from generate_arena_manifests import (
-    arena_algorithm_names,
-    generate_arena_manifests,
-    write_arena_manifest,
-)
-from pydantic import ValidationError
 
 
 def _manifest(**sections) -> dict:
@@ -116,8 +117,9 @@ def test_collect_unknown_fields_ignores_non_dict_raw() -> None:
 
 
 def test_known_field_names_includes_all_alias_forms() -> None:
-    from agilerl.arena.models.manifest import _known_field_names
     from pydantic import AliasChoices, BaseModel, Field
+
+    from agilerl.arena.models.manifest import _known_field_names
 
     class _M(BaseModel):
         plain: int = Field(default=0)
@@ -187,6 +189,26 @@ def test_get_validated_passes_network_raw_when_arch_missing() -> None:
     }
     payload = TrainingManifest.get_validated(_manifest(network=network))
     assert payload["network"] == network
+
+
+def test_net_config_never_set_when_arch_present() -> None:
+    """`arch` is resolved server-side, so `net_config` must never be populated on
+    the algorithm spec (a set `net_config` is rejected server-side).
+    """
+    network = {
+        "arch": "mlp",
+        "encoder_config": {"hidden_size": [64], "activation": "ReLU"},
+        "head_config": {"hidden_size": [64], "activation": "ReLU"},
+    }
+    manifest = TrainingManifest.get_validated(
+        _manifest(algorithm={"name": "DQN"}, network=network), mode="python"
+    )
+    assert manifest.algorithm.net_config is None
+
+    payload = TrainingManifest.get_validated(
+        _manifest(algorithm={"name": "DQN"}, network=network)
+    )
+    assert "net_config" not in payload["algorithm"]
 
 
 def test_get_validated_raises_for_unknown_algorithm() -> None:
