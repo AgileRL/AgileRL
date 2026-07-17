@@ -51,9 +51,6 @@ jobs:
 
             - name: Test with pytest
               shell: bash
-              # Cap xdist at 2 workers on Windows: the runner intermittently crashes a
-              # worker with a native illegal-instruction fault (0xc000001d), after which
-              # pytest-xdist's loadgroup scheduler aborts the whole run with a KeyError
-              # on the dead worker. Fewer workers shrinks that crash surface. The -n
-              # here overrides the "-n auto" in pyproject's addopts.
+              # Cap xdist at 2 workers on Windows.
+              # The -n here overrides the "-n auto" in pyproject's addopts.
               run: bash scripts/run-tests.sh cov -n 2 --exitfirst -m "not llm" --cov-report=term-missing --durations=0 --durations-min=1.0
