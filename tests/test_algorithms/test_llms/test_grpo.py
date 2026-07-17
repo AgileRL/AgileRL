@@ -3949,6 +3949,60 @@ class TestGRPOLearn:
         assert set(metrics.keys()) == {"loss", "kl", "completion_length"}
         grpo.clean_up()
 
+    @pytest.mark.gpu
+    def test_grpo_learn_with_natively_loaded_fp16_checkpoint(self):
+        """A checkpoint declaring fp16 trains without an explicit recast.
+
+        transformers honors the checkpoint's ``dtype`` (the tiny_llm fixture
+        stores float16), and under the bf16 autocast in ``_amp_ctx`` the final
+        norm promotes hidden states to fp32 while the lm_head weight stays
+        fp16 — the fused logprob matmul must reconcile the operand dtypes.
+        """
+        if not torch.cuda.is_available():
+            pytest.skip("The autocast/checkpoint dtype mismatch requires CUDA.")
+        from transformers import AutoModelForCausalLM
+
+        actor = AutoModelForCausalLM.from_pretrained(
+            TINY_LLM_FIXTURE_PATH, attn_implementation="sdpa"
+        )
+        # The fixture must keep declaring fp16 for this regression test to
+        # exercise the mixed-dtype path.
+        assert next(actor.parameters()).dtype == torch.float16
+
+        vocab_size, input_size, max_tokens, group_size = 1000, 5, 10, 2
+        grpo = GRPO(
+            actor_network=actor,
+            lr=1e-5,
+            pad_token_id=vocab_size - 1,
+            pad_token="<pad>",
+            device="cuda",
+            group_size=group_size,
+            lora_config=LoraConfig(
+                r=8,
+                lora_alpha=16,
+                target_modules=["q_proj", "v_proj"],
+                task_type="CAUSAL_LM",
+            ),
+            max_output_tokens=max_tokens,
+            max_model_len=input_size + max_tokens,
+        )
+        completions = [
+            torch.randint(
+                0, vocab_size, (group_size, input_size + max_tokens), device="cuda"
+            )
+            for _ in range(2)
+        ]
+        action_masks = [
+            torch.ones((group_size, input_size + max_tokens - 1), device="cuda")
+            for _ in range(2)
+        ]
+        rewards = torch.stack([torch.rand(group_size) for _ in range(2)], dim=0)
+
+        metrics = grpo.learn((completions, action_masks, rewards))
+        assert np.isfinite(metrics["loss"])
+        assert np.isfinite(metrics["kl"])
+        grpo.clean_up()
+
     def test_grpo_learn_calls_mps_empty_cache(
         self,
         monkeypatch: pytest.MonkeyPatch,

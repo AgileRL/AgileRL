@@ -44,6 +44,14 @@ def _fused_logprob_chunk(
     :return: ``(chunk_rows,)`` per-token logprobs.
     :rtype: torch.Tensor
     """
+    if h_chunk.dtype != lm_head_weight.dtype:
+        # Hidden and lm_head dtypes can diverge — e.g. an fp16 checkpoint under
+        # the bf16 autocast, where the final norm promotes hidden states to
+        # fp32 while the lm_head weight keeps the checkpoint dtype. The matmul
+        # requires matching operands; promote so neither side is downcast.
+        compute_dtype = torch.promote_types(h_chunk.dtype, lm_head_weight.dtype)
+        h_chunk = h_chunk.to(compute_dtype)
+        lm_head_weight = lm_head_weight.to(compute_dtype)
     logits = h_chunk @ lm_head_weight.t()
     if lm_head_bias is not None:
         logits = logits + lm_head_bias
