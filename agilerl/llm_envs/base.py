@@ -65,9 +65,6 @@ def apply_chat_template(
 class HuggingFaceGym(gym.Env, ABC):
     """Abstract base class for HuggingFace Gymnasium environments."""
 
-    #: Attributes holding the in-flight batch state. ``eval_mode`` snapshots
-    #: them on entry and restores them on exit, so the first post-eval training
-    #: ``step`` is scored against the train batch its completions came from.
     _batch_state_attrs: tuple[str, ...] = ()
 
     def __init__(
