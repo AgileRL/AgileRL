@@ -1020,30 +1020,22 @@ class TestREINFORCETest:
             max_turns = 2
 
             def __init__(self):
-                self._step_count = 0
                 self._env_client = FakeEnvClient()
                 self.done = False
+                self.valid_prompt = {
+                    "input_ids": torch.ones(1, 4, dtype=torch.long),
+                    "attention_mask": torch.ones(1, 4, dtype=torch.long),
+                }
 
             def reset(self, seed=None):
                 del seed
-                self._step_count = 0
                 self.done = False
-                prompt = {
-                    "input_ids": torch.ones(1, 4, dtype=torch.long),
-                    "attention_mask": torch.ones(1, 4, dtype=torch.long),
-                }
-                return prompt, {}
+                return self.valid_prompt, {}
 
             def step(self, full_completion_ids):
                 del full_completion_ids
-                self._step_count += 1
-                prompt = {
-                    "input_ids": torch.ones(1, 4, dtype=torch.long),
-                    "attention_mask": torch.ones(1, 4, dtype=torch.long),
-                }
-                terminated = self._step_count >= 1
-                self.done = terminated
-                return prompt, 1.0, terminated, False, {}
+                self.done = True
+                return {}, 1.0, True, False, {}
 
             def get_episode_data(self):
                 return (
