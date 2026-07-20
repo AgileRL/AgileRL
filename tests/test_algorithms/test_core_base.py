@@ -4516,6 +4516,87 @@ class TestLLMLoadDistributedActorWithAccelerator:
             agent._load_distributed_actor(str(tmp_path), tag="save_checkpoint")
 
 
+class TestLLMLoadFullModelActor:
+    """A DeepSpeed full-model warm start, from either checkpoint layout."""
+
+    def test_gathered_state_dict_is_loaded_in_place(self):
+        # Arrange -- save_optimizer=False keeps the weights in attributes.pt.
+        agent = _make_llm_agent(accelerator=_make_mock_accelerator())
+        model_ref = MagicMock()
+        model_ref.parameters.return_value = []
+        agent._get_unwrapped_actor = MagicMock(return_value=model_ref)
+        agent._load_distributed_actor = MagicMock()
+        state_dict = {"weight": torch.zeros(1)}
+        checkpoint = {"network_info": {"modules": {"actor_state_dict": state_dict}}}
+
+        # Act
+        LLMAlgorithm._load_full_model_actor(agent, "/some/path", checkpoint)
+
+        # Assert
+        model_ref.load_state_dict.assert_called_once_with(state_dict)
+        agent._load_distributed_actor.assert_not_called()
+
+    def test_missing_state_dict_falls_back_to_the_tag_directory(self):
+        # Arrange -- save_optimizer=True writes the weights to the tag dir instead.
+        agent = _make_llm_agent(accelerator=_make_mock_accelerator())
+        agent._load_distributed_actor = MagicMock()
+        agent._get_unwrapped_actor = MagicMock()
+
+        # Act
+        LLMAlgorithm._load_full_model_actor(agent, "/some/path", {})
+
+        # Assert
+        agent._load_distributed_actor.assert_called_once_with(
+            "/some/path",
+            tag="save_checkpoint",
+            load_optimizer_states=False,
+            load_lr_scheduler_states=False,
+        )
+        agent._get_unwrapped_actor.assert_not_called()
+
+    def test_deepspeed_full_model_checkpoint_routes_to_the_actor_loader(
+        self,
+        tmp_path,
+    ):
+        # Arrange -- a full-model (non-LoRA) checkpoint under DeepSpeed.
+        agent = _make_llm_agent(accelerator=_make_mock_accelerator())
+        agent._uses_deepspeed = True
+        agent._load_full_model_actor = MagicMock()
+        agent._load_model_checkpoint = MagicMock()
+        torch.save({"_lora_only": False}, str(tmp_path / "attributes.pt"))
+
+        # Act
+        LLMAlgorithm.load_weights(agent, str(tmp_path))
+
+        # Assert
+        agent._load_full_model_actor.assert_called_once()
+        agent._load_model_checkpoint.assert_not_called()
+
+    def test_deepspeed_resume_without_optimizer_loads_the_full_actor(
+        self,
+        tmp_path,
+    ):
+        # Arrange -- resuming a full-model DeepSpeed checkpoint without its
+        # optimizer shards: neither the adapter dirs nor the sharded restore
+        # apply, so only the actor weights come back.
+        agent = _make_llm_agent(accelerator=_make_mock_accelerator())
+        agent._uses_deepspeed = True
+        agent._load_full_model_actor = MagicMock()
+        agent._load_distributed_actor = MagicMock()
+        agent._load_model_checkpoint = MagicMock()
+        agent._restore_checkpoint_attributes = MagicMock()
+        torch.save({"_lora_only": False}, str(tmp_path / "attributes.pt"))
+
+        # Act
+        LLMAlgorithm.load_checkpoint(agent, str(tmp_path), load_optimizer=False)
+
+        # Assert
+        agent._load_full_model_actor.assert_called_once()
+        agent._load_distributed_actor.assert_not_called()
+        agent._load_model_checkpoint.assert_not_called()
+        agent._restore_checkpoint_attributes.assert_called_once()
+
+
 class TestLLMBackwardPassNonAccelerator:
     def test_backward_pass_calls_clip_grad_norm(self):
         agent = _make_llm_agent(accelerator=None)
