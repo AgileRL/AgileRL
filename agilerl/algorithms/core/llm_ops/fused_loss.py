@@ -329,7 +329,9 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
         grad_weight = torch.zeros_like(weight)
         grad_inputs: list[torch.Tensor] = []
         grad_bias = torch.zeros_like(bias) if bias is not None else None
-        aggregated_metrics: list[torch.Tensor] = []
+        # Scalar metrics accumulate into a zero tensor; non-scalar metrics
+        # (not produced by llm_policy_loss_fn today) collect per-chunk values.
+        aggregated_metrics: list[torch.Tensor | list[torch.Tensor]] = []
 
         full_attention_mask = attention_mask
 
@@ -415,7 +417,9 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
             )
 
         if compiled:  # pragma: no cover -- requires torch.compile warmup
-            fused_fwd_bwd = torch.compile(fused_fwd_bwd)
+            fwd_bwd_fn = torch.compile(fused_fwd_bwd)
+        else:
+            fwd_bwd_fn = fused_fwd_bwd
 
         def accumulate_chunk(
             input_chunk: torch.Tensor,
@@ -433,7 +437,7 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
                     chunk_loss,
                     chunk_metrics,
                 ),
-            ) = fused_fwd_bwd(
+            ) = fwd_bwd_fn(
                 input_chunk,
                 selected_token_ids_chunk,
                 attention_mask_chunk,
@@ -453,12 +457,12 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
                     if metric.ndim == 0:
                         aggregated_metrics.append(torch.zeros((), device=metric.device))
                     else:  # pragma: no cover -- llm_policy_loss_fn only returns scalars
-                        aggregated_metrics.append([])  # type: ignore[arg-type]
-            for i, metric in enumerate(chunk_metrics):
-                if metric.ndim == 0:
-                    aggregated_metrics[i].add_(metric)
+                        aggregated_metrics.append([])
+            for metric, acc in zip(chunk_metrics, aggregated_metrics, strict=True):
+                if isinstance(acc, torch.Tensor):
+                    acc.add_(metric)
                 else:  # pragma: no cover -- llm_policy_loss_fn only returns scalars
-                    aggregated_metrics[i].append(metric)  # type: ignore[union-attr]
+                    acc.append(metric)
 
         chunks = max(1, _input.shape[0] // chunk_size)
         _input_chunks = torch.chunk(_input, chunks=chunks, dim=0)
@@ -504,10 +508,10 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
 
         final_metrics: list[torch.Tensor] = []
         for metric in aggregated_metrics:
-            if isinstance(metric, list):  # pragma: no cover -- scalars only
-                final_metrics.append(torch.cat(metric, dim=0))
-            else:
+            if isinstance(metric, torch.Tensor):
                 final_metrics.append(metric)
+            else:  # pragma: no cover -- scalars only
+                final_metrics.append(torch.cat(metric, dim=0))
         return loss_acc, tuple(final_metrics)
 
     @staticmethod

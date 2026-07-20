@@ -15,11 +15,13 @@ class TutorialNode(nodes.Admonition, nodes.Element):
     """Tutorial callout node (styled as an admonition with a book icon)."""
 
 
-def _visit_tutorial(self, node: nodes.Element) -> None:
+def _visit_tutorial(self: Any, node: nodes.Element) -> None:
+    """Visitor bound to whichever translator the active builder uses."""
     self.visit_admonition(node)
 
 
-def _depart_tutorial(self, node: nodes.Element) -> None:
+def _depart_tutorial(self: Any, node: nodes.Element) -> None:
+    """Visitor bound to whichever translator the active builder uses."""
     self.depart_admonition(node)
 
 

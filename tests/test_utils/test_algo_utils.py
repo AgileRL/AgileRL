@@ -3,11 +3,10 @@ import glob
 import importlib
 import inspect
 import sys
-import types
 from collections import OrderedDict
 from contextlib import contextmanager
 from types import SimpleNamespace
-from typing import Union, get_args, get_origin
+from typing import Any
 from unittest.mock import MagicMock, Mock, patch
 
 import numpy as np
@@ -1748,7 +1747,7 @@ class TestRemoveNestedFiles:
 
 
 def test_algo_utils_fallback_pretrained_model_type_when_no_llm_dependencies():
-    """Test that algo_utils sets PreTrainedModelType to string union when HAS_LLM_DEPENDENCIES is False."""
+    """Test that algo_utils sets PreTrainedModelType to Any when HAS_LLM_DEPENDENCIES is False."""
     original_module = sys.modules.pop("agilerl.utils.algo_utils", None)
 
     try:
@@ -1757,12 +1756,7 @@ def test_algo_utils_fallback_pretrained_model_type_when_no_llm_dependencies():
             # Reimport the module - it will see HAS_LLM_DEPENDENCIES as False
             algo_utils_reloaded = importlib.import_module("agilerl.utils.algo_utils")
 
-            pt_type = algo_utils_reloaded.PreTrainedModelType
-            assert get_origin(pt_type) in (types.UnionType, Union)
-            args = get_args(pt_type)
-            assert len(args) == 2
-            forward_names = {getattr(a, "__forward_arg__", None) for a in args}
-            assert forward_names == {"PeftModel", "PreTrainedModel"}
+            assert algo_utils_reloaded.PreTrainedModelType is Any
     finally:
         # Restore original module in both sys.modules and the parent package
         # to avoid affecting other tests (importlib.import_module sets the

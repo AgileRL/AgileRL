@@ -90,7 +90,7 @@ def get_transformer_logs(
     attentions: list[torch.Tensor],
     model: nn.Module,
     attn_mask: torch.Tensor,
-) -> dict[str, tuple[float, int]]:
+) -> dict[str, tuple[float | torch.Tensor, int | torch.Tensor]]:
     """Extract logging information from transformer attention weights.
 
     Computes attention entropy and parameter norm for transformer models,
@@ -102,10 +102,11 @@ def get_transformer_logs(
     :type model: nn.Module
     :param attn_mask: Attention mask tensor
     :type attn_mask: torch.Tensor
-    :return: Dictionary containing attention entropy and parameter norm
-    :rtype: dict[str, tuple[float, int]]
+    :return: Dictionary containing attention entropy and parameter norm; the
+        attention-entropy pair stays as 0-dim tensors derived from ``attn_mask``.
+    :rtype: dict[str, tuple[float | torch.Tensor, int | torch.Tensor]]
     """
-    logs = {}
+    logs: dict[str, tuple[float | torch.Tensor, int | torch.Tensor]] = {}
     n = attn_mask.sum()
     model_attention_entropy = -sum(
         (
@@ -259,14 +260,14 @@ def entropy_continuous(mu: torch.Tensor, log_std: torch.Tensor) -> torch.Tensor:
 
 def sample_multi_discrete(
     logits: torch.Tensor,
-    nvec: Sequence[int],
+    nvec: Sequence[int] | np.ndarray,
 ) -> torch.Tensor:
     """Sample from independent categoricals for a MultiDiscrete action space.
 
     :param logits: Logits of the distribution.
     :type logits: torch.Tensor
     :param nvec: Number of actions for each discrete action space.
-    :type nvec: Sequence[int]
+    :type nvec: Sequence[int] | np.ndarray
     :return: Sampled action.
     :rtype: torch.Tensor
     """
@@ -283,7 +284,7 @@ def sample_multi_discrete(
 
 def log_prob_multi_discrete(
     logits: torch.Tensor,
-    nvec: Sequence[int],
+    nvec: Sequence[int] | np.ndarray,
     action: torch.Tensor,
 ) -> torch.Tensor:
     """Log probability of actions under independent categoricals.
@@ -291,7 +292,7 @@ def log_prob_multi_discrete(
     :param logits: Logits of the distribution.
     :type logits: torch.Tensor
     :param nvec: Number of actions for each discrete action space.
-    :type nvec: Sequence[int]
+    :type nvec: Sequence[int] | np.ndarray
     :param action: Action.
     :type action: torch.Tensor
     :return: Log probability of the action.
@@ -311,14 +312,14 @@ def log_prob_multi_discrete(
 
 def entropy_multi_discrete(
     logits: torch.Tensor,
-    nvec: Sequence[int],
+    nvec: Sequence[int] | np.ndarray,
 ) -> torch.Tensor:
     """Entropy of independent categoricals for MultiDiscrete.
 
     :param logits: Logits of the distribution.
     :type logits: torch.Tensor
     :param nvec: Number of actions for each discrete action space.
-    :type nvec: Sequence[int]
+    :type nvec: Sequence[int] | np.ndarray
     :return: Entropy of the distribution.
     :rtype: torch.Tensor
     """

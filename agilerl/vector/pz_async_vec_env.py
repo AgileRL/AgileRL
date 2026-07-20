@@ -104,7 +104,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
 
     def __init__(
         self,
-        env_fns: list[Callable[[], PzEnvType]],
+        env_fns: Sequence[Callable[[], PzEnvType]],
         copy: bool = True,
         context: Literal["spawn", "fork", "forkserver"] | None = None,
     ) -> None:

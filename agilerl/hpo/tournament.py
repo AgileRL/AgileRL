@@ -4,8 +4,9 @@ import numpy as np
 from accelerate.utils import broadcast_object_list
 
 from agilerl.algorithms.core.base import EvolvableAlgorithm, LLMAlgorithm
+from agilerl.protocols import EvolvableAlgorithmProtocol
 
-PopulationT = list[EvolvableAlgorithm]
+PopulationT = list[EvolvableAlgorithmProtocol]
 
 
 class TournamentSelection:
@@ -82,13 +83,13 @@ class TournamentSelection:
     def select(
         self,
         population: PopulationT,
-    ) -> tuple[EvolvableAlgorithm, PopulationT]:
+    ) -> tuple[EvolvableAlgorithmProtocol, PopulationT]:
         """Select the best agent and new population of agents following tournament selection.
 
         :param population: Population of agents
         :type population: PopulationT
         :return: Elite agent and new population
-        :rtype: tuple[EvolvableAlgorithm, PopulationT]
+        :rtype: tuple[EvolvableAlgorithmProtocol, PopulationT]
         """
         if self.language_model is None:
             self.language_model = isinstance(population[0], LLMAlgorithm)

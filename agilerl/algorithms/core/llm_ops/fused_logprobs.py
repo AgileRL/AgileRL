@@ -205,7 +205,8 @@ class FusedLinearLogProbsFunction(torch.autograd.Function):
         return logps
 
     @staticmethod
-    def backward(  # type: ignore[override]
+    # torch autograd Functions narrow the base ``*grad_outputs`` signature by design.
+    def backward(  # ty: ignore[invalid-method-override]
         ctx: Any, grad_output: torch.Tensor
     ) -> tuple[torch.Tensor | None, ...]:
         hidden, lm_head_weight, lm_head_bias, target_ids = ctx.saved_tensors

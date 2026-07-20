@@ -18,7 +18,7 @@ from __future__ import annotations
 import itertools
 from collections.abc import Sequence
 from functools import partial
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
@@ -26,17 +26,18 @@ import torch.nn as nn
 try:
     from peft.tuners.lora.layer import LoraLayer
 except ImportError:  # pragma: no cover
-    LoraLayer = None  # type: ignore[assignment, misc]
+    LoraLayer = None  # ty: ignore[invalid-assignment]
 
 
-def _lora_delta(layer: nn.Module, adapter: str, rows: torch.Tensor) -> torch.Tensor:
+def _lora_delta(layer: LoraLayer, adapter: str, rows: torch.Tensor) -> torch.Tensor:
     """One adapter's low-rank delta for a slice of input rows."""
     lora_a = layer.lora_A[adapter]
-    rows = layer.lora_dropout[adapter](rows.to(lora_a.weight.dtype))
+    lora_a_weight = cast("torch.Tensor", lora_a.weight)
+    rows = layer.lora_dropout[adapter](rows.to(lora_a_weight.dtype))
     return layer.lora_B[adapter](lora_a(rows)) * layer.scaling[adapter]
 
 
-def _needs_peft_mixed_forward(layer: nn.Module, routing: Sequence[str]) -> bool:
+def _needs_peft_mixed_forward(layer: LoraLayer, routing: Sequence[str]) -> bool:
     """Whether any routed adapter needs PEFT's own mixed-batch forward.
 
     The sliced path computes the standard linear delta; embedding adapters
@@ -49,7 +50,7 @@ def _needs_peft_mixed_forward(layer: nn.Module, routing: Sequence[str]) -> bool:
 
 
 def _routed_forward(
-    layer: nn.Module,
+    layer: LoraLayer,
     x: torch.Tensor,
     *forward_args: Any,
     **forward_kwargs: Any,
@@ -64,9 +65,14 @@ def _routed_forward(
     matching PEFT's mixed-batch behaviour. Falls back to the layer's ordinary
     forward while routing is unset.
     """
-    routing = layer._fused_adapter_routing
+    # Monkeypatched routing state installed by ``patch_lora_for_fused_forward``.
+    routing = cast(
+        "list[str] | None",
+        layer._fused_adapter_routing,  # ty: ignore[unresolved-attribute]
+    )
     if routing is None:
-        return type(layer).forward(layer, x, *forward_args, **forward_kwargs)
+        # ``forward`` comes from the concrete (nn.Module-based) LoRA subclass.
+        return type(layer).forward(layer, x, *forward_args, **forward_kwargs)  # ty: ignore[unresolved-attribute]
 
     # Layers that flatten (batch, seq, hidden) -> (batch * seq, hidden) before
     # their linears (OPT's MLP, MoE experts) show seq rows per routed sample.
@@ -100,14 +106,14 @@ def _routed_forward(
     return pieces[0] if len(pieces) == 1 else torch.cat(pieces)
 
 
-def _store_layer_cache(model: nn.Module, layers: list[nn.Module]) -> None:
+def _store_layer_cache(model: nn.Module, layers: list[LoraLayer]) -> None:
     try:
-        model._fused_lora_layers = layers  # type: ignore[attr-defined]
+        model._fused_lora_layers = layers  # ty: ignore[unresolved-attribute]
     except (AttributeError, TypeError):
         pass  # Best-effort cache; routing falls back to a module traversal.
 
 
-def _get_cached_lora_layers(model: nn.Module) -> list[nn.Module]:
+def _get_cached_lora_layers(model: nn.Module) -> list[LoraLayer]:
     """All ``LoraLayer`` modules under *model*, cached after the first traversal.
 
     :param model: A ``PeftModel`` or any module containing ``LoraLayer`` s.
@@ -120,12 +126,14 @@ def _get_cached_lora_layers(model: nn.Module) -> list[nn.Module]:
         return []
     # nn.Module.modules rather than model.modules: EvolvableModule overrides
     # modules() to return only evolvable children, which excludes LoRA layers.
-    layers = [m for m in nn.Module.modules(model) if isinstance(m, LoraLayer)]
+    layers: list[LoraLayer] = [
+        m for m in nn.Module.modules(model) if isinstance(m, LoraLayer)
+    ]
     _store_layer_cache(model, layers)
     return layers
 
 
-def _validate_routing(layers: list[nn.Module], routing: Sequence[str]) -> None:
+def _validate_routing(layers: list[LoraLayer], routing: Sequence[str]) -> None:
     """Reject routings PEFT would compute silently wrongly (unknown names)
     or that the fused forward cannot compute (merged weights, DoRA).
 
@@ -176,14 +184,14 @@ def patch_lora_for_fused_forward(model: nn.Module) -> None:
     """
     if LoraLayer is None:
         return
-    layers: list[nn.Module] = []
+    layers: list[LoraLayer] = []
     for module in nn.Module.modules(model):
         if not isinstance(module, LoraLayer):
             continue
         layers.append(module)
         if not hasattr(module, "_fused_adapter_routing"):
-            module._fused_adapter_routing = None  # type: ignore[attr-defined]
-            module.forward = partial(_routed_forward, module)  # type: ignore[method-assign]
+            module._fused_adapter_routing = None
+            module.forward = partial(_routed_forward, module)
     _store_layer_cache(model, layers)
 
 
@@ -198,7 +206,7 @@ def unpatch_lora_for_fused_forward(model: nn.Module) -> None:
     for module in _get_cached_lora_layers(model):
         if hasattr(module, "_fused_adapter_routing"):
             del module._fused_adapter_routing
-            del module.forward
+            del module.forward  # ty: ignore[unresolved-attribute]
     if hasattr(model, "_fused_lora_layers"):
         del model._fused_lora_layers
 
@@ -238,7 +246,7 @@ def set_fused_adapter_routing(model: nn.Module, routing: Sequence[str]) -> None:
         raise ValueError(msg)
     _validate_routing(layers, routing)
     for module in layers:
-        module._fused_adapter_routing = routing  # type: ignore[attr-defined]
+        module._fused_adapter_routing = routing  # ty: ignore[unresolved-attribute]
 
 
 def unset_fused_adapter_routing(model: nn.Module) -> None:
@@ -248,4 +256,4 @@ def unset_fused_adapter_routing(model: nn.Module) -> None:
     """
     for module in _get_cached_lora_layers(model):
         if hasattr(module, "_fused_adapter_routing"):
-            module._fused_adapter_routing = None  # type: ignore[attr-defined]
+            module._fused_adapter_routing = None  # ty: ignore[invalid-assignment]

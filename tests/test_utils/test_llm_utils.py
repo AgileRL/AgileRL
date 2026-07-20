@@ -1051,7 +1051,9 @@ class TestPreferenceGymInit:
 
 
 def test_llm_utils_fallback_types_when_no_llm_dependencies():
-    """Test that llm_utils sets type aliases to Any when HAS_LLM_DEPENDENCIES is False."""
+    """Test that llm_utils sets fallback sentinels when HAS_LLM_DEPENDENCIES is False:
+    annotation-only aliases fall back to Any, class sentinels to None.
+    """
     import agilerl.utils as agilerl_utils_pkg
 
     # Remove the module from cache to force reimport
@@ -1063,10 +1065,12 @@ def test_llm_utils_fallback_types_when_no_llm_dependencies():
             # Reimport the module - it will see HAS_LLM_DEPENDENCIES as False
             import agilerl.utils.llm_utils as llm_utils_reloaded
 
-            # Verify the fallback type aliases are set to Any
+            # Verify the fallback sentinels
             assert llm_utils_reloaded.PreTrainedModel is Any
             assert llm_utils_reloaded.Dataset is Any
-            assert llm_utils_reloaded.AutoModelForCausalLM is Any
+            assert llm_utils_reloaded.AutoModelForCausalLM is None
+            assert llm_utils_reloaded.AutoModelForCausalLMWithValueHead is None
+            assert llm_utils_reloaded.BitsAndBytesConfig is None
     finally:
         # Restore original module to avoid affecting other tests. Both the
         # sys.modules entry AND the parent-package attribute have to be

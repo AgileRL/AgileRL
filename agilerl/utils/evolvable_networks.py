@@ -1,6 +1,7 @@
 from collections import OrderedDict
+from collections.abc import Sequence
 from dataclasses import asdict
-from typing import Literal
+from typing import Literal, TypeVar, cast, overload
 
 import numpy as np
 import torch
@@ -27,37 +28,56 @@ from agilerl.modules.custom_components import (
 from agilerl.typing import DeviceType, NetConfigType
 
 TupleorInt = tuple[int, ...] | int
+ConvBlockType = Literal["Conv1d", "Conv2d", "Conv3d"]
+
+
+@overload
+def compile_model(
+    model: ModuleDict[EvolvableModule],
+    mode: str | None = "default",
+) -> ModuleDict[EvolvableModule]: ...
+
+
+@overload
+def compile_model(
+    model: nn.Module,
+    mode: str | None = "default",
+) -> nn.Module: ...
 
 
 def compile_model(
-    model: nn.Module | ModuleDict[EvolvableModule],
+    model: nn.Module,
     mode: str | None = "default",
-) -> OptimizedModule | ModuleDict[EvolvableModule]:
+) -> nn.Module:
     """Compiles torch model if not already compiled.
 
     :param model: torch model
     :type model: nn.Module | ModuleDict[EvolvableModule]
     :param mode: torch compile mode, defaults to "default"
     :type mode: str, optional
-    :return: compiled model
-    :rtype: OptimizedModule | ModuleDict[OptimizedModule]
+    :return: compiled model (returned unchanged when ``mode`` is None or the
+        model is already compiled)
+    :rtype: nn.Module
     """
     if isinstance(model, ModuleDict):
-        compiled_model = ModuleDict(
-            {
-                agent_id: compile_model(module, mode)
-                for agent_id, module in model.items()
-            },
-        )
-        compiled_model.last_mutation_attr = model.last_mutation_attr
+        # The isinstance check cannot recover the erased value-type parameter,
+        # but a ModuleDict's values are always nn.Modules by construction.
+        module_dict = cast("ModuleDict[nn.Module]", model)
+        compiled_model = ModuleDict()
+        for agent_id, module in module_dict.items():
+            compiled_model.add_module(agent_id, compile_model(module, mode))
+        compiled_model.last_mutation_attr = module_dict.last_mutation_attr
         return compiled_model
 
     if not isinstance(model, OptimizedModule) and mode is not None:
-        compiled_model = torch.compile(model, mode=mode, dynamic=True)
-    else:
-        compiled_model = model
+        # torch.compile's overloads type a Module input as a bare callable;
+        # at runtime compiling an nn.Module always yields an OptimizedModule.
+        return cast(
+            "OptimizedModule",
+            torch.compile(model, mode=mode, dynamic=True),
+        )
 
-    return compiled_model
+    return model
 
 
 def is_mlp_net_config(config: NetConfigType) -> bool:
@@ -229,14 +249,14 @@ def contains_moduledict(module: nn.Module) -> bool:
     return any(isinstance(submodule, nn.ModuleDict) for submodule in module.modules())
 
 
-def get_module_dict(module: nn.Module) -> nn.ModuleDict:
+def get_module_dict(module: nn.Module) -> nn.ModuleDict | None:
     """Get the ModuleDict from a module.
 
     :param module: Input module
     :type module: nn.Module
 
-    :return: ModuleDict from module
-    :rtype: dict[str, nn.Module]
+    :return: ModuleDict from module, or None if the module contains none
+    :rtype: nn.ModuleDict | None
     """
     for submodule in module.modules():
         if isinstance(submodule, nn.ModuleDict):
@@ -269,7 +289,7 @@ def get_batch_norm_layer(
 
 
 def get_conv_layer(
-    conv_layer_name: Literal["Conv2d", "Conv3d"],
+    conv_layer_name: ConvBlockType,
     in_channels: int,
     out_channels: int,
     kernel_size: TupleorInt,
@@ -301,20 +321,22 @@ def get_conv_layer(
             msg,
         )
 
-    convolutional_layers = {
+    convolutional_layers: dict[str, type[nn.Conv1d | nn.Conv2d | nn.Conv3d]] = {
         "1d": nn.Conv1d,
         "2d": nn.Conv2d,
         "3d": nn.Conv3d,
     }
 
-    # remove 'Conv' from the name if it is present
-    conv_layer_name = conv_layer_name.replace("Conv", "")
-    return convolutional_layers[conv_layer_name](
+    conv_cls = convolutional_layers[conv_layer_name.replace("Conv", "")]
+    # torch's conv stubs demand exact-arity size tuples (e.g. tuple[int, int]
+    # for Conv2d); tuple arity here is dynamic and validated at runtime against
+    # the block type (see _assert_correct_kernel_sizes in agilerl/modules/cnn.py).
+    return conv_cls(
         in_channels,
         out_channels,
-        kernel_size,
-        stride,
-        padding,
+        kernel_size,  # ty: ignore[invalid-argument-type]
+        stride,  # ty: ignore[invalid-argument-type]
+        padding,  # ty: ignore[invalid-argument-type]
         device=device,
     )
 
@@ -367,11 +389,9 @@ def get_activation(activation_name: str | None, new_gelu: bool = False) -> nn.Mo
     }
 
     activation_name = activation_name if activation_name is not None else "Identity"
-    return (
-        activation_functions[activation_name](dim=-1)
-        if activation_name == "Softmax"
-        else activation_functions[activation_name]()
-    )
+    if activation_name == "Softmax":
+        return nn.Softmax(dim=-1)
+    return activation_functions[activation_name]()
 
 
 def get_pooling(
@@ -401,17 +421,21 @@ def get_pooling(
         "AvgPool3d": nn.AvgPool3d,
     }
 
-    return pooling_functions[pooling_name](kernel_size, stride, padding)
+    # torch's AvgPool stubs demand exact-arity size tuples (e.g. tuple[int, int]
+    # for AvgPool2d); tuple arity here is dynamic and matches the pooling name
+    # at runtime.
+    return pooling_functions[pooling_name](kernel_size, stride, padding)  # ty: ignore[invalid-argument-type]
 
 
 LayerType = nn.Module | GumbelSoftmax | NoisyLinear
+LayerT = TypeVar("LayerT", bound=nn.Module)
 
 
 def layer_init(
-    layer: LayerType,
+    layer: LayerT,
     std: float = np.sqrt(2),
     bias_const: float = 0.0,
-) -> nn.Module:
+) -> LayerT:
     """Initialize the weights and biases of a layer.
 
     :param layer: The layer to initialize.
@@ -424,19 +448,23 @@ def layer_init(
     :return: The initialized layer.
     :rtype: nn.Module
     """
-    if hasattr(layer, "weight"):
-        torch.nn.init.orthogonal_(layer.weight, std)
+    weight = getattr(layer, "weight", None)
+    weight_mu = getattr(layer, "weight_mu", None)
+    weight_sigma = getattr(layer, "weight_sigma", None)
+    if isinstance(weight, torch.Tensor):
+        torch.nn.init.orthogonal_(weight, std)
+    elif isinstance(weight_mu, torch.Tensor) and isinstance(weight_sigma, torch.Tensor):
+        torch.nn.init.orthogonal_(weight_mu, std)
+        torch.nn.init.orthogonal_(weight_sigma, std)
 
-    elif hasattr(layer, "weight_mu") and hasattr(layer, "weight_sigma"):
-        torch.nn.init.orthogonal_(layer.weight_mu, std)
-        torch.nn.init.orthogonal_(layer.weight_sigma, std)
-
-    if hasattr(layer, "bias"):
-        torch.nn.init.constant_(layer.bias, bias_const)
-
-    elif hasattr(layer, "bias_mu") and hasattr(layer, "bias_sigma"):
-        torch.nn.init.constant_(layer.bias_mu, bias_const)
-        torch.nn.init.constant_(layer.bias_sigma, bias_const)
+    bias = getattr(layer, "bias", None)
+    bias_mu = getattr(layer, "bias_mu", None)
+    bias_sigma = getattr(layer, "bias_sigma", None)
+    if isinstance(bias, torch.Tensor):
+        torch.nn.init.constant_(bias, bias_const)
+    elif isinstance(bias_mu, torch.Tensor) and isinstance(bias_sigma, torch.Tensor):
+        torch.nn.init.constant_(bias_mu, bias_const)
+        torch.nn.init.constant_(bias_sigma, bias_const)
 
     return layer
 
@@ -458,29 +486,29 @@ def init_weights_gaussian(m: nn.Module, mean: float, std: float) -> None:
 
 
 def create_cnn(
-    block_type: Literal["Conv2d", "Conv3d"],
+    block_type: ConvBlockType,
     in_channels: int,
-    channel_size: list[int],
-    kernel_size: list[TupleorInt],
-    stride_size: list[TupleorInt],
+    channel_size: Sequence[int],
+    kernel_size: Sequence[TupleorInt],
+    stride_size: Sequence[TupleorInt],
     name: str = "cnn",
     init_layers: bool = True,
     layer_norm: bool = False,
     activation_fn: str = "ReLU",
     device: DeviceType = "cpu",
-) -> dict[str, nn.Module]:
+) -> OrderedDict[str, nn.Module]:
     """Build a convolutional block.
 
     :param block_type: Type of convolutional block.
-    :type block_type: Literal["Conv2d", "Conv3d"]
+    :type block_type: Literal["Conv1d", "Conv2d", "Conv3d"]
     :param in_channels: Number of input channels.
     :type in_channels: int
-    :param channel_size: List of channel sizes for each layer.
-    :type channel_size: list[int]
-    :param kernel_size: List of kernel sizes for each layer.
-    :type kernel_size: list[int]
-    :param stride_size: List of stride sizes for each layer.
-    :type stride_size: list[int]
+    :param channel_size: Channel sizes for each layer.
+    :type channel_size: Sequence[int]
+    :param kernel_size: Kernel sizes for each layer.
+    :type kernel_size: Sequence[int | tuple[int, ...]]
+    :param stride_size: Stride sizes for each layer.
+    :type stride_size: Sequence[int | tuple[int, ...]]
     :param name: Name of the block.
     :type name: str
     :param init_layers: Whether to initialize the layers. Defaults to True.
@@ -492,10 +520,10 @@ def create_cnn(
     :param device: Device to use. Defaults to "cpu".
     :type device: DeviceType, optional
 
-    :return: Convolutional block.
-    :rtype: dict[str, nn.Module]
+    :return: Convolutional block, as named modules for ``nn.Sequential``.
+    :rtype: OrderedDict[str, nn.Module]
     """
-    net_dict = OrderedDict()
+    net_dict: OrderedDict[str, nn.Module] = OrderedDict()
     channel_size = [in_channels, *channel_size]
     for l_no in range(1, len(channel_size)):
         net_dict[f"{name}_conv_layer_{l_no!s}"] = get_conv_layer(
@@ -519,9 +547,6 @@ def create_cnn(
         net_dict[f"{name}_activation_{l_no!s}"] = get_activation(activation_fn)
 
     return net_dict
-
-
-MlpLayer = nn.Linear | NoisyLinear | nn.LayerNorm
 
 
 def create_mlp(
@@ -570,7 +595,7 @@ def create_mlp(
     :return: Multi-layer perceptron.
     :rtype: nn.Sequential
     """
-    net_dict: dict[str, MlpLayer] = OrderedDict()
+    net_dict: OrderedDict[str, nn.Module] = OrderedDict()
     hidden_size = [input_size, *hidden_size]
     for l_no in range(1, len(hidden_size)):
         if noisy:  # Add linear layer
@@ -605,28 +630,30 @@ def create_mlp(
         )
 
     # Output layer
+    output_layer: NoisyLinear | nn.Linear
     if noisy:
-        output_layer = NoisyLinear(
+        noisy_output_layer = NoisyLinear(
             hidden_size[-1],
             output_size,
             noise_std,
             device=device,
         )
+        if init_layers:
+            noisy_output_layer = layer_init(noisy_output_layer)
+        if output_vanish:
+            noisy_output_layer.weight_mu.data.mul_(0.1)
+            noisy_output_layer.bias_mu.data.mul_(0.1)
+            noisy_output_layer.weight_sigma.data.mul_(0.1)
+            noisy_output_layer.bias_sigma.data.mul_(0.1)
+        output_layer = noisy_output_layer
     else:
-        output_layer = nn.Linear(hidden_size[-1], output_size, device=device)
-
-    if init_layers:
-        output_layer = layer_init(output_layer)
-
-    if output_vanish:
-        if noisy:
-            output_layer.weight_mu.data.mul_(0.1)
-            output_layer.bias_mu.data.mul_(0.1)
-            output_layer.weight_sigma.data.mul_(0.1)
-            output_layer.bias_sigma.data.mul_(0.1)
-        else:
-            output_layer.weight.data.mul_(0.1)
-            output_layer.bias.data.mul_(0.1)
+        linear_output_layer = nn.Linear(hidden_size[-1], output_size, device=device)
+        if init_layers:
+            linear_output_layer = layer_init(linear_output_layer)
+        if output_vanish:
+            linear_output_layer.weight.data.mul_(0.1)
+            linear_output_layer.bias.data.mul_(0.1)
+        output_layer = linear_output_layer
 
     net_dict[f"{name}_linear_layer_output"] = output_layer
 
@@ -650,7 +677,7 @@ def create_simba(
     hidden_size: int,
     num_blocks: int,
     output_activation: str | None = None,
-    scale_factor: float = 4.0,
+    scale_factor: int = 4,
     device: DeviceType = "cpu",
     name: str = "simba",
 ) -> nn.Sequential:
@@ -669,7 +696,7 @@ def create_simba(
     :param output_activation: Activation function for output layer.
     :type output_activation: str | None
     :param scale_factor: Scale factor for the hidden layer.
-    :type scale_factor: float, optional
+    :type scale_factor: int, optional
     :param device: Device to use. Defaults to "cpu".
     :type device: DeviceType, optional
     :param name: Name of the network.
@@ -678,15 +705,12 @@ def create_simba(
     :return: Residual block.
     :rtype: nn.Sequential
     """
-    net_dict: dict[str, nn.Module] = OrderedDict()
+    net_dict: OrderedDict[str, nn.Module] = OrderedDict()
 
     # Initial dense layer
-    net_dict[f"{name}_linear_layer_input"] = nn.Linear(
-        input_size,
-        hidden_size,
-        device=device,
-    )
-    nn.init.orthogonal_(net_dict[f"{name}_linear_layer_input"].weight)
+    input_layer = nn.Linear(input_size, hidden_size, device=device)
+    nn.init.orthogonal_(input_layer.weight)
+    net_dict[f"{name}_linear_layer_input"] = input_layer
     for l_no in range(1, num_blocks + 1):
         net_dict[f"{name}_residual_block_{l_no!s}"] = SimbaResidualBlock(
             hidden_size,
@@ -696,12 +720,9 @@ def create_simba(
 
     # Final layer norm and output dense
     net_dict[f"{name}_layer_norm_output"] = nn.LayerNorm(hidden_size, device=device)
-    net_dict[f"{name}_linear_layer_output"] = nn.Linear(
-        hidden_size,
-        output_size,
-        device=device,
-    )
-    nn.init.orthogonal_(net_dict[f"{name}_linear_layer_output"].weight)
+    output_layer = nn.Linear(hidden_size, output_size, device=device)
+    nn.init.orthogonal_(output_layer.weight)
+    net_dict[f"{name}_linear_layer_output"] = output_layer
 
     net_dict[f"{name}_activation_output"] = get_activation(
         activation_name=output_activation,
@@ -719,7 +740,7 @@ def create_resnet(
     scale_factor: int = 4,
     device: str = "cpu",
     name: str = "resnet",
-) -> dict[str, nn.Module]:
+) -> OrderedDict[str, nn.Module]:
     """Create a number of residual blocks for image-based inputs.
 
     Paper: https://arxiv.org/abs/1512.03385.
@@ -741,13 +762,13 @@ def create_resnet(
     :param name: Name of the network.
     :type name: str, default "resnet"
 
-    :return: Residual block.
-    :rtype: nn.Sequential
+    :return: Residual block, as named modules for ``nn.Sequential``.
+    :rtype: OrderedDict[str, nn.Module]
     """
-    net_dict = OrderedDict()
+    net_dict: OrderedDict[str, nn.Module] = OrderedDict()
 
     # Initial convolutional layer
-    net_dict[f"{name}_conv_input"] = nn.Conv2d(
+    input_layer = nn.Conv2d(
         input_channels,
         channel_size,
         kernel_size=kernel_size,
@@ -756,7 +777,8 @@ def create_resnet(
         bias=False,
         device=device,
     )
-    nn.init.kaiming_uniform_(net_dict[f"{name}_conv_input"].weight)
+    nn.init.kaiming_uniform_(input_layer.weight)
+    net_dict[f"{name}_conv_input"] = input_layer
 
     for l_no in range(1, num_blocks + 1):
         net_dict[f"{name}_residual_block_{l_no}"] = ResidualBlock(

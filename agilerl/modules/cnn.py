@@ -1,4 +1,3 @@
-from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
@@ -169,8 +168,8 @@ class MutableKernelSizes:
         channel_size: list[int],
         stride_size: list[int],
         input_shape: list[int],
-        kernel_size: int | tuple[int, ...] | None = None,
-    ) -> int:
+        kernel_size: float | tuple[int, ...] | None = None,
+    ) -> int | tuple[int, ...]:
         """Randomly alters convolution kernel of random CNN layer.
 
         :param hidden_layer: Depth of hidden layer to change kernel size of.
@@ -182,20 +181,22 @@ class MutableKernelSizes:
         :param input_shape: Input shape.
         :type input_shape: list[int]
         :param kernel_size: Kernel size to change to, defaults to None
-        :type kernel_size: int | tuple[int, ...], optional
+        :type kernel_size: int | float | tuple[int, ...], optional
 
-        :return: New kernel size
-        :rtype: int
+        :return: New kernel size, in the same form it is stored (tuple per
+            block when tuple-sized, scalar otherwise) so mutation replays can
+            pass it back in.
+        :rtype: int | tuple[int, ...]
         """
         if kernel_size is not None:
             if self.tuple_sizes:
                 assert isinstance(kernel_size, tuple), "Kernel size must be a tuple."
-                new_kernel_size = kernel_size[-1]
+                new_kernel_size = int(kernel_size[-1])
             else:
                 assert isinstance(
                     kernel_size,
-                    (int, np.integer),
-                ), "Kernel size must be an integer."
+                    (int, float, np.integer, np.floating),
+                ), "Kernel size must be a number."
                 new_kernel_size = int(kernel_size)
         else:
             max_kernels = self.calc_max_kernel_sizes(
@@ -227,9 +228,9 @@ class MutableKernelSizes:
                 tuple_sizes[hidden_layer] = (depth, new_kernel_size, new_kernel_size)
             elif self.cnn_block_type == "Conv1d":
                 tuple_sizes[hidden_layer] = (new_kernel_size,)
-        else:
-            self._int_sizes[hidden_layer] = new_kernel_size
+            return tuple_sizes[hidden_layer]
 
+        self._int_sizes[hidden_layer] = new_kernel_size
         return new_kernel_size
 
 
@@ -364,7 +365,7 @@ class EvolvableCNN(EvolvableModule):
         self.input_shape = input_shape
         self.channel_size = channel_size
         self.stride_size = stride_size
-        self.block_type = block_type
+        self.block_type: BlockType = block_type
         self.num_outputs = num_outputs
         self.output_activation = output_activation
         self._activation = activation
@@ -533,21 +534,18 @@ class EvolvableCNN(EvolvableModule):
         :return: The created convolutional neural network.
         :rtype: nn.Sequential
         """
-        # Build the main convolutional block. nn.Sequential requires an OrderedDict
-        # to interpret the mapping as named modules.
-        net_dict = OrderedDict(
-            create_cnn(
-                block_type=self.block_type,  # ty: ignore[invalid-argument-type]  # upstream: create_cnn in agilerl/utils/evolvable_networks.py should accept "Conv1d" in its block_type Literal
-                in_channels=in_channels,
-                channel_size=channel_size,
-                kernel_size=kernel_size,
-                stride_size=stride_size,  # ty: ignore[invalid-argument-type]  # upstream: create_cnn's stride_size should be Sequence[TupleorInt]; list[int] fails invariance
-                name=self.name,
-                init_layers=self.init_layers,
-                layer_norm=self.layer_norm,
-                activation_fn=self.activation,
-                device=self.device,
-            ),
+        # Build the main convolutional block as named modules for nn.Sequential.
+        net_dict = create_cnn(
+            block_type=self.block_type,
+            in_channels=in_channels,
+            channel_size=channel_size,
+            kernel_size=kernel_size,
+            stride_size=stride_size,
+            name=self.name,
+            init_layers=self.init_layers,
+            layer_norm=self.layer_norm,
+            activation_fn=self.activation,
+            device=self.device,
         )
 
         # Flatten image encodings and pass through a final linear layer
@@ -700,9 +698,9 @@ class EvolvableCNN(EvolvableModule):
     @mutation(MutationType.NODE)
     def change_kernel(
         self,
-        kernel_size: int | None = None,
+        kernel_size: int | tuple[int, ...] | None = None,
         hidden_layer: int | None = None,
-    ) -> dict[str, int | None]:
+    ) -> dict[str, int | tuple[int, ...] | None]:
         """Randomly alters convolution kernel of random CNN layer.
 
         :param kernel_size: Kernel size to change to, defaults to None

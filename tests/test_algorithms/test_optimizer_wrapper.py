@@ -6,7 +6,6 @@ import torch
 from gymnasium import spaces
 from torch import nn
 
-from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms.core import MultiAgentRLAlgorithm, OptimizerWrapper, RLAlgorithm
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.optimizer_wrapper import init_llm_optimizer
@@ -1171,31 +1170,19 @@ class TestOptimizerWrapper:
         assert opt.param_groups[1]["lr"] == 0.4
 
 
-def test_optimizer_wrapper_fallback_peft_type_when_no_llm_dependencies():
-    """Test that optimizer_wrapper sets PeftModel to string when HAS_LLM_DEPENDENCIES is False."""
+def test_optimizer_wrapper_importable_without_llm_dependencies():
+    """optimizer_wrapper must import cleanly when peft is unavailable."""
     original_module = sys.modules.pop("agilerl.algorithms.core.optimizer_wrapper", None)
 
     try:
-        # Patch HAS_LLM_DEPENDENCIES before reimporting
+        # Patch HAS_LLM_DEPENDENCIES before reimporting: the module no longer
+        # imports peft at runtime, so this must succeed either way.
         with patch("agilerl.HAS_LLM_DEPENDENCIES", False):
-            # Reimport the module - it will see HAS_LLM_DEPENDENCIES as False
             import agilerl.algorithms.core.optimizer_wrapper as optimizer_wrapper_reloaded
 
-            assert optimizer_wrapper_reloaded.PeftModel == "PeftModel"
+            assert hasattr(optimizer_wrapper_reloaded, "OptimizerWrapper")
     finally:
         # Restore original module to avoid affecting other tests
-        sys.modules["agilerl.algorithms.core.optimizer_wrapper"] = original_module
-
-
-@pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM dependencies not installed")
-def test_optimizer_wrapper_peft_type_when_llm_dependencies_available():
-    original_module = sys.modules.pop("agilerl.algorithms.core.optimizer_wrapper", None)
-    try:
-        with patch("agilerl.HAS_LLM_DEPENDENCIES", True):
-            import agilerl.algorithms.core.optimizer_wrapper as optimizer_wrapper_reloaded
-
-            assert optimizer_wrapper_reloaded.PeftModel.__name__ == "PeftModel"
-    finally:
         sys.modules["agilerl.algorithms.core.optimizer_wrapper"] = original_module
 
 

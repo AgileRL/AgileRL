@@ -156,8 +156,9 @@ def patch_vllm_lora_keep_resident(llm: Any) -> int:
             and hasattr(module, "lora_b_stacked")
             and not getattr(module, "_agilerl_lora_resident", False)
         ):
-            module.reset_lora = lambda *args, **kwargs: None
-            module._agilerl_lora_resident = True
+            # Deliberate monkeypatch of a live vLLM module.
+            module.reset_lora = lambda *args, **kwargs: None  # ty: ignore[unresolved-attribute]
+            module._agilerl_lora_resident = True  # ty: ignore[unresolved-attribute]
             count += 1
     return count
 

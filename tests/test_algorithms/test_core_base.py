@@ -347,7 +347,7 @@ class TestDeprecatedMethods:
             match=r"This method is deprecated\. Use get_output_size_from_space instead\.",
         ):
             dim = EvolvableAlgorithm.get_action_dim(action_space)
-        assert dim == (5,)
+        assert dim == 5
 
 
 class TestEvolvableAttributes:

@@ -21,7 +21,6 @@ from agilerl.modules import (
 from agilerl.modules.base import EvolvableModule, ModuleMeta, mutation
 from agilerl.protocols import MutationType
 from agilerl.typing import (
-    BatchDimension,
     NetConfigType,
     TorchObsType,
 )
@@ -485,12 +484,9 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                 for name, shape in get_hidden_states_shape_from_model(
                     self.encoder,
                 ).items():
-                    # shape might have a batch dimension 'BatchPlaceholder', so we need to replace it
-                    # NOTE: get_hidden_states_shape_from_model (agilerl/utils/algo_utils.py) is
-                    # wrongly annotated as dict[str, int]; the values are shape tuples.
+                    # Replace the BatchDimension sentinel with the runtime batch size
                     shape = tuple(
-                        batch_size if x == BatchDimension else x
-                        for x in shape  # ty: ignore[not-iterable]
+                        x if isinstance(x, int) else batch_size for x in shape
                     )
                     self.cached_hidden_state[name] = torch.zeros(shape).to(self.device)
             return deepcopy(self.cached_hidden_state)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import warnings
 from functools import singledispatch
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from accelerate import Accelerator
 
@@ -43,10 +43,29 @@ if TYPE_CHECKING:
     import torch
     from gymnasium import spaces
 
+    from agilerl.typing import SupportedActionSpace, SupportedObservationSpace
+
 LLMEnvType = ReasoningGym | PreferenceGym | SFTGym
 EnvironmentT = GymEnvType | PzEnvType | BanditEnv | LLMEnvType
 PopulationT = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
 BufferT = ReplayBuffer | MultiStepReplayBuffer | PrioritizedReplayBuffer
+
+
+class _SingleAgentVectorEnv(Protocol):
+    """Vectorized single-agent env exposing batch-less spaces as attributes."""
+
+    single_observation_space: spaces.Space
+    single_action_space: spaces.Space
+
+
+class _MultiAgentVectorEnv(Protocol):
+    """Vectorized multi-agent env exposing per-agent batch-less spaces."""
+
+    agents: list[str]
+
+    def single_observation_space(self, agent: str) -> spaces.Space: ...
+
+    def single_action_space(self, agent: str) -> spaces.Space: ...
 
 
 def hp_config_from_mutation_spec(spec: MutationSpec) -> HyperparameterConfig | None:
@@ -58,24 +77,29 @@ def hp_config_from_mutation_spec(spec: MutationSpec) -> HyperparameterConfig | N
     if not spec.rl_hp_selection:
         return None
 
-    return HyperparameterConfig(
-        **{
-            name: RLParameter(
-                min=hp.min,
-                max=hp.max,
-                grow_factor=hp.grow_factor,
-                shrink_factor=hp.shrink_factor,
-            )
-            for name, hp in spec.rl_hp_selection.items()
-        }
-    )
+    rl_params: dict[str, Any] = {
+        name: RLParameter(
+            min=hp.min,
+            max=hp.max,
+            grow_factor=hp.grow_factor,
+            shrink_factor=hp.shrink_factor,
+        )
+        for name, hp in spec.rl_hp_selection.items()
+    }
+    return HyperparameterConfig(**rl_params)
 
 
 @singledispatch
 def get_spaces_from_env(
     algo_spec: AlgoSpecT, env: GymEnvType | PzEnvType
-) -> tuple[dict[str, spaces.Space], dict[str, spaces.Space]]:
+) -> tuple[
+    spaces.Space | dict[str, spaces.Space],
+    spaces.Space | dict[str, spaces.Space],
+]:
     """Get the observation and action spaces from the environment.
+
+    Returns per-agent space dicts for multi-agent specs and plain spaces for
+    single-agent specs.
 
     :param algo_spec: Algorithm spec.
     :type algo_spec: AlgoSpecT
@@ -89,14 +113,14 @@ def get_spaces_from_env(
 @get_spaces_from_env.register(MultiAgentRLAlgorithmSpec)
 def get_spaces_from_env_multi_agent(
     algo_spec: MultiAgentRLAlgorithmSpec,
-    env: GymEnvType | PzEnvType,
+    env: _MultiAgentVectorEnv,
 ) -> tuple[dict[str, spaces.Space], dict[str, spaces.Space]]:
     """Get the observation and action spaces from the environment for a multi-agent algorithm.
 
     :param algo_spec: Algorithm spec.
     :type algo_spec: MultiAgentRLAlgorithmSpec
-    :param env: Environment.
-    :type env: GymEnvType | PzEnvType
+    :param env: Vectorized multi-agent environment.
+    :type env: _MultiAgentVectorEnv
     :returns: A tuple of observation and action spaces.
     :rtype: tuple[dict[str, spaces.Space], dict[str, spaces.Space]]
     """
@@ -108,14 +132,14 @@ def get_spaces_from_env_multi_agent(
 @get_spaces_from_env.register(RLAlgorithmSpec)
 def get_spaces_from_env_single_agent(
     algo_spec: RLAlgorithmSpec,
-    env: GymEnvType | PzEnvType,
+    env: _SingleAgentVectorEnv,
 ) -> tuple[spaces.Space, spaces.Space]:
     """Get the observation and action spaces from the environment for a single-agent algorithm.
 
     :param algo_spec: Algorithm spec.
     :type algo_spec: RLAlgorithmSpec
-    :param env: Environment.
-    :type env: GymEnvType | PzEnvType
+    :param env: Vectorized single-agent environment.
+    :type env: _SingleAgentVectorEnv
     :returns: A tuple of observation and action spaces.
     :rtype: tuple[spaces.Space, spaces.Space]
     """
@@ -168,7 +192,9 @@ def create_population_from_spec(
     # NOTE: We should identify these lazily during training...
     for num_envs_arg in ["num_envs", "vect_noise_dim"]:
         if hasattr(algo_spec, num_envs_arg):
-            setattr(algo_spec, num_envs_arg, env.num_envs)
+            # Only vectorized envs reach this branch; the attribute lookup is
+            # intentionally dynamic across the env union.
+            setattr(algo_spec, num_envs_arg, cast("Any", env).num_envs)
 
     # Classic RL algorithms
     if isinstance(algo_spec, (RLAlgorithmSpec, MultiAgentRLAlgorithmSpec)):
@@ -181,10 +207,26 @@ def create_population_from_spec(
         ):
             algo_spec.n_step = replay_buffer_spec.n_step_buffer_args.n_step
 
-        return [
+        # ``build_algorithm`` validates the concrete space classes at runtime;
+        # the env API only advertises ``spaces.Space``, hence the casts.
+        if isinstance(algo_spec, MultiAgentRLAlgorithmSpec):
+            multi_agent_population: PopulationT = [
+                algo_spec.build_algorithm(
+                    cast("dict[str, SupportedObservationSpace]", observation_space),
+                    cast("dict[str, SupportedActionSpace]", action_space),
+                    index=i,
+                    resume_from_checkpoint=resume_from_checkpoint,
+                    device=device,
+                    accelerator=accelerator,
+                )
+                for i in range(population_size)
+            ]
+            return multi_agent_population
+
+        single_agent_population: PopulationT = [
             algo_spec.build_algorithm(
-                observation_space,
-                action_space,
+                cast("SupportedObservationSpace", observation_space),
+                cast("SupportedActionSpace", action_space),
                 index=i,
                 resume_from_checkpoint=resume_from_checkpoint,
                 device=device,
@@ -192,6 +234,7 @@ def create_population_from_spec(
             )
             for i in range(population_size)
         ]
+        return single_agent_population
 
     # LLM algorithms — build agent 0 fully, then clone the actor for agents 1..N.
     # Each agent beyond the first gets a fresh Accelerator to avoid sharing the
@@ -210,13 +253,14 @@ def create_population_from_spec(
 
     for i in range(1, population_size):
         agent_accelerator = Accelerator() if accelerator is not None else None
+        assert agent_0.actor is not None, "Agent 0 actor is not initialized"
         cloned_actor = clone_llm(
             agent_0.actor,
             zero_stage=getattr(algo_spec, "zero_stage", 0),
             state_dict=(
                 agent_0.actor.state_dict()
                 if accelerator is None
-                else get_state_dict(agent_0.actor)
+                else get_state_dict(cast("torch.nn.Module", agent_0.actor))
             ),
         )
         population.append(
@@ -261,7 +305,7 @@ def build_mutations_from_spec(
         rl_hp=p.rl_hp_mut,
         mutation_sd=mutation_spec.mutation_sd,
         rand_seed=mutation_spec.rand_seed,
-        device=device,
+        device=str(device),
         accelerator=accelerator,
     )
 

@@ -6,7 +6,7 @@ import time
 from abc import ABC, abstractmethod
 from collections import deque
 from types import TracebackType
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar, cast
 
 import numpy as np
 
@@ -152,13 +152,16 @@ class BaseMetrics(ABC, Generic[ScalarStore, HistogramStore]):
         """
         self.fitness.append(value)
 
-    def add_scores(self, scores: list[float]) -> None:
+    def add_scores(self, scores: list[float] | list[list[float]]) -> None:
         """Add scores to the metrics.
 
-        :param scores: List of scores to add.
-        :type scores: list[float]
+        :param scores: Scores to add — flat for single-agent metrics, one row
+            of per-agent scores per entry for multi-agent metrics.
+        :type scores: list[float] | list[list[float]]
         """
-        self.scores.extend(scores)
+        # The store is flat or row-based depending on the concrete metrics
+        # class; extending with the matching shape is the caller's contract.
+        cast("list[Any]", self.scores).extend(scores)
 
     def increment_steps(self, n: int) -> None:
         """Increment the cumulative environment step count.

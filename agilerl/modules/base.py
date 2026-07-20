@@ -923,9 +923,12 @@ class ModuleDict(EvolvableModule, nn.ModuleDict, Generic[ModuleType]):
         """
         clones: dict[str, EvolvableModule] = {}
         for key, module in self.items():
-            assert isinstance(module, EvolvableModule), (
+            # torch.compile wraps modules in OptimizedModule; unwrap to reach
+            # the evolvable module (attribute forwarding did this implicitly).
+            target = module._orig_mod if isinstance(module, OptimizedModule) else module
+            assert isinstance(target, EvolvableModule), (
                 f"Cannot clone non-evolvable module under key '{key}'."
             )
-            clones[key] = module.clone()
+            clones[key] = target.clone()
 
         return ModuleDict(clones)

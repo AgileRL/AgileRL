@@ -11,7 +11,7 @@ import warnings
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -30,11 +30,13 @@ if HAS_LLM_DEPENDENCIES:
 
     from agilerl.utils.ppo_value_head import AutoModelForCausalLMWithValueHead
 else:
+    # Sentinels for missing optional LLM dependencies. All uses are gated on
+    # HAS_LLM_DEPENDENCIES, so these are never reached at runtime.
     PreTrainedModel = Any
     Dataset = Any
-    AutoModelForCausalLM = Any  # type: ignore[assignment,misc]
-    AutoModelForCausalLMWithValueHead = Any  # type: ignore[assignment,misc]
-    BitsAndBytesConfig = Any  # type: ignore[assignment,misc]
+    AutoModelForCausalLM = cast("Any", None)
+    AutoModelForCausalLMWithValueHead = cast("Any", None)
+    BitsAndBytesConfig = cast("Any", None)
 
 _DEPRECATED_LLM_ENV_NAMES = frozenset(
     ("apply_chat_template", "ReasoningGym", "PreferenceGym", "SFTGym"),
@@ -146,8 +148,10 @@ def normalize_reasoning_prompt_batch(
     if batch_size == 0:
         return []
 
-    # Inspect each key once and write into all output dicts in one pass
-    result: list[ReasoningPrompts] = [{} for _ in range(batch_size)]
+    # Inspect each key once and write into all output dicts in one pass. Keys
+    # are copied dynamically, so build plain dicts and cast on return — every
+    # output dict carries exactly the keys of the input ``ReasoningPrompts``.
+    result: list[dict[str, Any]] = [{} for _ in range(batch_size)]
     for key, value in prompts.items():
         if (
             isinstance(value, torch.Tensor)
@@ -165,17 +169,17 @@ def normalize_reasoning_prompt_batch(
         else:
             for sample in result:
                 sample[key] = value
-    return result
+    return cast("list[ReasoningPrompts]", result)
 
 
 def gather_tensor(
-    tensor: torch.Tensor | float,
+    tensor: torch.Tensor | np.ndarray | float,
     accelerator: Accelerator,
 ) -> torch.Tensor:
     """Gather tensors from gpus.
 
-    :param tensor: Tensor to gather
-    :type tensor: torch.Tensor
+    :param tensor: Tensor (or array/scalar convertible to one) to gather
+    :type tensor: torch.Tensor | np.ndarray | float
     :param accelerator: Accelerator object
     :type accelerator: accelerate.Accelerator
     :return: Stacked tensors
@@ -294,11 +298,16 @@ def align_completion_batch_shapes_across_ranks(
     # Lazy import avoids a circular dependency with algo_utils -> llm_utils.
     from agilerl.utils.algo_utils import stack_and_pad_experiences
 
-    completion_ids, action_masks, rewards = stack_and_pad_experiences(
-        completion_ids,
-        action_masks,
-        rewards,
-        padding_values=[pad_token_id, False, 0.0],
+    # stack_and_pad_experiences is typed for mixed array/tensor inputs but
+    # returns tensors for the tensor experiences passed here.
+    completion_ids, action_masks, rewards = cast(
+        "tuple[torch.Tensor, torch.Tensor, torch.Tensor]",
+        stack_and_pad_experiences(
+            completion_ids,
+            action_masks,
+            rewards,
+            padding_values=[pad_token_id, False, 0.0],
+        ),
     )
     local_b = int(completion_ids.shape[0])
     local_t = int(completion_ids.shape[1])
@@ -332,14 +341,14 @@ def align_completion_batch_shapes_across_ranks(
 
 def aggregate_metrics_across_gpus(
     accelerator: Accelerator | None,
-    metric_tensor: torch.Tensor | float,
+    metric_tensor: torch.Tensor | np.ndarray | float,
 ) -> float:
     """Aggregate gathered tensors.
 
     :param accelerator: Accelerator object
     :type accelerator: accelerate.Accelerator | None
     :param metric_tensor: Metrics
-    :type metric_tensor: torch.Tensor
+    :type metric_tensor: torch.Tensor | np.ndarray | float
     :return: Mean metric
     :rtype: float
     """
@@ -393,14 +402,14 @@ def aggregate_metrics_dict(
 
 @contextmanager
 def gather_if_zero3(
-    zero_stage: int,
+    zero_stage: int | None,
     params: list[torch.Tensor],
     modifier_rank: int | None = None,
 ) -> Generator[None, None, None]:
     """Conditional context manager for setting the zero stage for the model.
 
     :param zero_stage: The zero stage
-    :type zero_stage: int
+    :type zero_stage: int | None
     :param params: The parameters to gather
     :type params: list[torch.Tensor]
     :param modifier_rank: The modifier rank
@@ -984,7 +993,9 @@ def patch_flex_attention_kernel_options(options: dict[str, Any] | None = None) -
             module, query, key, value, attention_mask, **kwargs
         )
 
-    _flex_with_opts._agilerl_kernel_opts_patched = True
+    # Dynamic marker attribute on the wrapper function (checked via getattr
+    # above); function attributes are not statically declarable.
+    _flex_with_opts._agilerl_kernel_opts_patched = True  # ty: ignore[unresolved-attribute]
     try:
         ALL_ATTENTION_FUNCTIONS["flex_attention"] = _flex_with_opts
     except Exception:
@@ -1040,11 +1051,11 @@ def create_model_from_name_or_path(
 
 
 def masked_mean(
-    values: torch.Tensor, mask: torch.Tensor, axis: bool | None = None
+    values: torch.Tensor, mask: torch.Tensor, axis: int | None = None
 ) -> torch.Tensor:
     """Compute mean of tensor with a masked values."""
     if axis is not None:
-        return (values * mask).sum(axis=axis) / mask.sum(axis=axis)
+        return (values * mask).sum(dim=axis) / mask.sum(dim=axis)
     return (values * mask).sum() / mask.sum()
 
 
@@ -1697,7 +1708,7 @@ def stitch_completion_after_windowed_vllm_generate(
 
 def prepare_prompt_hf_generate(
     prompt_dict: ReasoningPrompts, device: torch.device
-) -> dict[str, torch.Tensor | int]:
+) -> dict[str, torch.Tensor | int | list[int] | None]:
     """Prepare a prompt dictionary for HuggingFace generate.
 
     :param prompt_dict: The prompt dictionary to prepare.
@@ -1705,13 +1716,16 @@ def prepare_prompt_hf_generate(
     :param device: The device to move the prompt dictionary to.
     :type device: torch.device
     :return: The prepared prompt dictionary.
-    :rtype: dict[str, torch.Tensor | int]
+    :rtype: dict[str, torch.Tensor | int | list[int] | None]
     """
-    input_ids = prompt_dict.get("trajectory_input_ids", prompt_dict["input_ids"])
-    attention_mask = prompt_dict.get(
-        "trajectory_attention_mask",
-        prompt_dict["attention_mask"],
-    )
+    # Trajectory keys may be absent or explicitly None (first turn); both fall
+    # back to the initial prompt tensors.
+    input_ids = prompt_dict.get("trajectory_input_ids")
+    if input_ids is None:
+        input_ids = prompt_dict["input_ids"]
+    attention_mask = prompt_dict.get("trajectory_attention_mask")
+    if attention_mask is None:
+        attention_mask = prompt_dict["attention_mask"]
     stitched = prompt_dict.get("stitch_prefix_ids")
     initial_prompt_len = prompt_dict.get("initial_prompt_len")
     if isinstance(initial_prompt_len, torch.Tensor) and initial_prompt_len.numel() == 1:
@@ -1734,7 +1748,8 @@ def get_model_name_or_path(model: PreTrainedModel) -> str:
     :rtype: str
     """
     if hasattr(model, "name_or_path"):
-        return model.name_or_path
+        # transformers models expose ``name_or_path`` as a string.
+        return cast("str", model.name_or_path)
 
     if hasattr(model, "pretrained_model") and hasattr(
         model.pretrained_model, "name_or_path"
@@ -1751,13 +1766,13 @@ def get_model_name_or_path(model: PreTrainedModel) -> str:
     raise ValueError(msg)
 
 
-def align_deepspeed_lr(lr: float, accelerator: Accelerator) -> float:
+def align_deepspeed_lr(lr: float, accelerator: Accelerator | None) -> float:
     """Align the learning rate for DeepSpeed.
 
     :param lr: The learning rate to align.
     :type lr: float
     :param accelerator: The accelerator to align the learning rate for.
-    :type accelerator: Accelerator
+    :type accelerator: Accelerator | None
     :return: The aligned learning rate.
     :rtype: float
     """

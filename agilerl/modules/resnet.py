@@ -1,4 +1,3 @@
-from collections import OrderedDict
 from typing import Any
 
 import torch
@@ -145,19 +144,16 @@ class EvolvableResNet(EvolvableModule):
         :return: The created convolutional neural network.
         :rtype: nn.Sequential
         """
-        # Build the main convolutional block. nn.Sequential requires an OrderedDict
-        # to interpret the mapping as named modules.
-        net_dict = OrderedDict(
-            create_resnet(
-                input_channels=input_shape[0],
-                channel_size=channel_size,
-                kernel_size=kernel_size,
-                stride_size=stride_size,
-                num_blocks=num_blocks,
-                scale_factor=scale_factor,
-                device=self.device,
-                name=self.name,
-            ),
+        # Build the main convolutional block as named modules for nn.Sequential.
+        net_dict = create_resnet(
+            input_channels=input_shape[0],
+            channel_size=channel_size,
+            kernel_size=kernel_size,
+            stride_size=stride_size,
+            num_blocks=num_blocks,
+            scale_factor=scale_factor,
+            device=self.device,
+            name=self.name,
         )
 
         # Flatten image encodings and pass through a final linear layer

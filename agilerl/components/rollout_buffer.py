@@ -158,13 +158,16 @@ class RolloutBuffer:
                 key: torch.zeros_like(tensor) for key, tensor in obs_dict.items()
             }
         else:
-            # For non-Dict spaces, use regular tensor allocation
+            # For non-Dict spaces, use regular tensor allocation. Tuple
+            # observation spaces are not supported by the rollout buffer, so
+            # the shape is a flat leaf shape here.
+            leaf_shape = cast("tuple[int, ...]", obs_shape)
             source_dict["observations"] = torch.zeros(
-                (self.capacity, self.num_envs, *obs_shape),
+                (self.capacity, self.num_envs, *leaf_shape),
                 dtype=torch.float32,
             )
             source_dict["next_observations"] = torch.zeros(
-                (self.capacity, self.num_envs, *obs_shape),
+                (self.capacity, self.num_envs, *leaf_shape),
                 dtype=torch.float32,
             )
 

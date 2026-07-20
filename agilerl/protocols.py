@@ -346,14 +346,24 @@ class EvolvableAlgorithmProtocol(Protocol):
     """
 
     device: str | torch.device
-    accelerator: Accelerator
-    registry: MutationRegistryProtocol
+    accelerator: Accelerator | None
+    # The concrete registry API lives in
+    # ``agilerl.algorithms.core.registry.MutationRegistry``, which this module
+    # cannot import without a cycle.
+    registry: Any
     mut: str | None
     index: int
-    scores: list[float]
     fitness: list[float]
-    steps: list[int]
+    steps: int
     torch_compiler: str | None
+
+    @property
+    def scores(self) -> list[float] | list[list[float]]:
+        """Per-episode scores (per-group score rows for multi-agent metrics)."""
+        ...
+
+    @scores.setter
+    def scores(self, value: list[float]) -> None: ...
 
     def unwrap_models(self) -> None:
         pass
@@ -361,34 +371,28 @@ class EvolvableAlgorithmProtocol(Protocol):
     def wrap_models(self) -> None:
         pass
 
+    @classmethod
     def load(
-        self: type[EvolvableAlgorithm],
+        cls,
         path: str,
-    ) -> EvolvableAlgorithm:
+        device: str | torch.device = "cpu",
+        accelerator: Accelerator | None = None,
+    ) -> Any:
         pass
 
-    def load_checkpoint(
-        self,
-        path: str,
-        device: str,
-        accelerator: Accelerator | None,
-    ) -> None:
+    def load_checkpoint(self, path: str) -> None:
         pass
 
     def save_checkpoint(self, path: str) -> None:
         pass
 
-    def learn(
-        self,
-        experiences: tuple[Iterable[ObservationType], ...],
-        **kwargs: Any,
-    ) -> None:
+    def learn(self, experiences: Any) -> Any:
         pass
 
-    def get_action(self, obs: ObservationType, **kwargs: Any) -> Any:
+    def get_action(self, obs: Any, **kwargs: Any) -> Any:
         pass
 
-    def test(self, *args: Any, **kwargs: Any) -> np.ndarray:
+    def test(self, env: Any) -> Any:
         pass
 
     def evolvable_attributes(
@@ -397,8 +401,9 @@ class EvolvableAlgorithmProtocol(Protocol):
     ) -> EvolvableAttributeDict:
         pass
 
+    @staticmethod
     def inspect_attributes(
-        self,
+        agent: Any,
         input_args_only: bool = False,
     ) -> dict[str, Any]:
         pass

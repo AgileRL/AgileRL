@@ -172,9 +172,7 @@ class TestEvolvableAlgorithmProtocol:
     ):
         inst = algo_cls(obs, act)
         EvolvableAlgorithmProtocol.save_checkpoint(inst, str(tmp_path / "ckpt.pt"))
-        EvolvableAlgorithmProtocol.load_checkpoint(
-            inst, str(tmp_path / "ckpt.pt"), "cpu", None
-        )
+        EvolvableAlgorithmProtocol.load_checkpoint(inst, str(tmp_path / "ckpt.pt"))
         _ = EvolvableAlgorithmProtocol.load(algo_cls, str(tmp_path / "ckpt.pt"))
         exp = (
             (
@@ -196,7 +194,7 @@ class TestEvolvableAlgorithmProtocol:
             )
         )
         EvolvableAlgorithmProtocol.learn(inst, exp)
-        _ = EvolvableAlgorithmProtocol.test(inst)
+        _ = EvolvableAlgorithmProtocol.test(inst, None)
         _ = EvolvableAlgorithmProtocol.clone(inst, None, False)
 
 
