@@ -227,6 +227,25 @@ class TestDatasetEnvPreferenceInit:
             )
 
 
+class TestDatasetEnvSplitValidation:
+    @pytest.mark.parametrize("empty_split", ["train", "test"])
+    def test_empty_split_is_rejected(self, empty_split):
+        """Either split being empty is a build-time error, not a silent no-op."""
+        populated = DummyPreferenceDataset(4)
+        empty = DummyPreferenceDataset(0)
+        train_dataset = empty if empty_split == "train" else populated
+        test_dataset = empty if empty_split == "test" else populated
+        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
+
+        with pytest.raises(ValueError, match="each split needs at least one row"):
+            DatasetEnv(
+                train_dataset=train_dataset,
+                test_dataset=test_dataset,
+                tokenizer=tokenizer,
+                objective="preference",
+            )
+
+
 class TestDatasetEnvPreferenceReset:
     @pytest.mark.parametrize("use_accelerator", [True, False])
     @pytest.mark.parametrize("num_samples", [20])

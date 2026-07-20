@@ -635,6 +635,49 @@ def test_served_env_client_owns_server_and_session() -> None:
     client.close()  # idempotent
 
 
+def test_served_env_client_eval_mode_serves_the_held_out_split() -> None:
+    """``eval_mode`` on a served client reaches the hosted env's reset."""
+    client = ServedEnvClient(_RowDatasetEnv())
+    try:
+        train_prompt, _ = client.reset(row_index=1)
+        with client.eval_mode():
+            eval_prompt, _ = client.reset(row_index=1)
+        after_prompt, _ = client.reset(row_index=1)
+    finally:
+        client.close()
+    assert train_prompt.startswith("row1")
+    assert eval_prompt.startswith("eval1")
+    assert after_prompt.startswith("row1")  # the block restores the train split
+
+
+class _KwargsOnlyResetEnv:
+    """An env whose ``reset`` takes only ``**kwargs`` (a delegating proxy)."""
+
+    def __init__(self) -> None:
+        self.reset_kwargs: dict[str, Any] = {}
+
+    def reset(self, **kwargs: Any) -> tuple[str, dict[str, Any]]:
+        self.reset_kwargs = kwargs
+        return "prompt", {}
+
+    def step(self, action: str) -> tuple[str, float, bool, bool, dict[str, Any]]:
+        del action
+        return "", 1.0, True, False, {}
+
+
+def test_kwargs_only_reset_still_receives_seed_and_row() -> None:
+    """A ``**kwargs`` reset counts every forwardable name as supported.
+
+    Otherwise a proxy env would silently lose the seed/row pinning that keeps a
+    rollout group on one prompt.
+    """
+    inner = _KwargsOnlyResetEnv()
+    client = LocalEnvClient(inner)
+    with client.eval_mode():
+        client.reset(seed=7, row_index=2)
+    assert inner.reset_kwargs == {"seed": 7, "row_index": 2, "evaluation": True}
+
+
 @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
 def test_server_start_fails_fast_when_port_is_taken() -> None:
     """A dead uvicorn thread is detected immediately (no 30s spin), env released."""
@@ -651,6 +694,14 @@ def test_server_start_fails_fast_when_port_is_taken() -> None:
         assert inner.closed  # the failed start did not leak the hosted env
     finally:
         blocker.close()
+
+
+def test_server_requires_exactly_one_env_source() -> None:
+    """A server hosts either one shared env or a per-session factory, never both."""
+    with pytest.raises(ValueError, match="exactly one of env or make_env"):
+        OpenEnvServer()
+    with pytest.raises(ValueError, match="exactly one of env or make_env"):
+        OpenEnvServer(_CountingEnv(), make_env=_CountingEnv)
 
 
 # --- max_turns is enforced by the env itself --------------------------------
