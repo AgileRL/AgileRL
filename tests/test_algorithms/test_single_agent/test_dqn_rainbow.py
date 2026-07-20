@@ -245,7 +245,7 @@ class TestRainbowDQNGetAction:
 
         action = dqn.get_action(state, action_mask)[0]
 
-        assert action.is_integer()
+        assert float(action).is_integer()
         assert action >= 0
         assert action < discrete_space.n
 
@@ -253,7 +253,7 @@ class TestRainbowDQNGetAction:
 
         action = dqn.get_action(state, action_mask)[0]
 
-        assert action.is_integer()
+        assert float(action).is_integer()
         assert action == 1
         dqn.clean_up()
 
