@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import ClassVar, Literal
 
+from pydantic import Field, model_validator
+
 from agilerl.arena.models.algo import LLMAlgorithmSpec, register
 from agilerl.arena.models.env import LLMEnvType
 from agilerl.arena.models.networks import CosineLRScheduleConfig, VLLMConfig
-from pydantic import Field, model_validator
 
 
 @register()

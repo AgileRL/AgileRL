@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, get_args
 
 import yaml
+
 from agilerl.arena import AgentType
 from agilerl.arena.models import TrainingManifest as ArenaManifest
 from agilerl.arena.models.algo import ARENA_REGISTRY, LLMAlgorithmSpec

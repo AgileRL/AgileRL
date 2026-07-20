@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import click
+
 from agilerl.arena.client import ManifestInvoke, ManifestParamSpec
 from agilerl.arena.config import CommandConfig, arena_client
 from agilerl.arena.exceptions import ArenaValidationError

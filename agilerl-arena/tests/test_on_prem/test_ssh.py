@@ -5,8 +5,9 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
-from agilerl.arena.on_prem.ssh import SshExecutor, SshTarget
 from click import ClickException
+
+from agilerl.arena.on_prem.ssh import SshExecutor, SshTarget
 
 
 class TestSshTarget:

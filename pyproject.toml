@@ -259,6 +259,14 @@ target-version = "py310"
 line-length = 88
 extend-exclude = ["tests/assets/tiny_llm", "docs/_static/examples"]
 
+[tool.ruff.lint.isort]
+# Pin first-party classification: `agilerl` is our own package in both
+# distributions. Without this, isort infers it from the filesystem and the
+# gitignored agilerl/arena dev symlink (created by `just typecheck`) flips
+# arena imports between first- and third-party, so local runs and
+# pre-commit.ci would reorder each other's imports indefinitely.
+known-first-party = ["agilerl"]
+
 [tool.ruff.lint]
 select = ["ALL"]
 ignore = [

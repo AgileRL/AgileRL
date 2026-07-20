@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import httpx
 import numpy as np
 import pytest
+
 from agilerl.arena.exceptions import ArenaAuthError, ArenaInferenceError
 from agilerl.arena.inference import (
     Agent,

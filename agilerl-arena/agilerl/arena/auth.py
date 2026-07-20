@@ -11,9 +11,10 @@ import webbrowser
 from pathlib import Path
 from typing import Any
 
-from agilerl.arena.exceptions import ArenaAuthError, ArenaTimeoutError
 from keycloak import KeycloakOpenID
 from keycloak.exceptions import KeycloakError
+
+from agilerl.arena.exceptions import ArenaAuthError, ArenaTimeoutError
 
 logger = logging.getLogger(__name__)
 

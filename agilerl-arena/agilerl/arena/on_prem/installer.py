@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import ClassVar
 
 import click
+
 from agilerl.arena.client import ArenaClient
 from agilerl.arena.on_prem.api import OnPremApi
 from agilerl.arena.on_prem.bundle import (

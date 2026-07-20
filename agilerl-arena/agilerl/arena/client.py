@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, BinaryIO, ClassVar, TypedDict
 
 import httpx
+from typing_extensions import Self
+
 from agilerl.arena.auth import (
     ArenaOAuth2,
     is_oauth_access_token_valid,
@@ -40,7 +42,6 @@ from agilerl.arena.utils import (
     prepare_env_upload,
     prepare_file_upload,
 )
-from typing_extensions import Self
 
 logger = logging.getLogger(__name__)
 
