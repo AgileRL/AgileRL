@@ -227,33 +227,6 @@ class TestDatasetEnvPreferenceInit:
             )
 
 
-class TestDatasetEnvPreferenceStep:
-    @pytest.mark.parametrize("use_accelerator", [True, False])
-    @pytest.mark.parametrize("num_samples", [20])
-    def test_preference_step_is_noop(
-        self,
-        preference_dataset,
-        accelerator_factory,
-        use_accelerator,
-        num_samples,
-    ):
-        """``step`` returns ``None`` and never advances the dataset cursor."""
-        train_dataset, test_dataset = preference_dataset
-        tokenizer = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)
-        data_batch_size = 8
-        env = DatasetEnv(
-            train_dataset=train_dataset,
-            test_dataset=test_dataset,
-            tokenizer=tokenizer,
-            objective="preference",
-            data_batch_size_per_gpu=data_batch_size,
-            accelerator=accelerator_factory(use_accelerator),
-        )
-        assert env.step() is None
-        assert env.step(completions=torch.zeros(1)) is None
-        assert env.num_epochs == 0  # step never advances the cursor
-
-
 class TestDatasetEnvPreferenceReset:
     @pytest.mark.parametrize("use_accelerator", [True, False])
     @pytest.mark.parametrize("num_samples", [20])
@@ -406,10 +379,6 @@ class TestDatasetEnvPreferenceReset:
         for _ in range(batches_per_epoch):
             env.reset()
         assert env.num_epochs == 0  # full epoch consumed, not yet rolled
-        # Inert calls must not advance the cursor or trip the rollover.
-        env.step()
-        env.step()
-        assert env.num_epochs == 0
         env.reset()
         assert env.num_epochs == 1  # (N+1)th fetch triggers rollover
 
@@ -566,7 +535,7 @@ class TestDatasetEnvSFTStep:
 class TestDatasetEnvSFTReset:
     @pytest.mark.parametrize("use_accelerator", [True, False])
     @pytest.mark.parametrize("num_samples", [20])
-    def test_sft_reset_returns_batch_step_is_noop(
+    def test_sft_reset_returns_batch(
         self,
         sft_dataset,
         accelerator_factory,
@@ -584,8 +553,6 @@ class TestDatasetEnvSFTReset:
             data_batch_size_per_gpu=data_batch_size,
             accelerator=accelerator_factory(use_accelerator),
         )
-        assert env.step() is None
-
         batch = env.reset()
         assert set(batch.keys()) == {
             "prompt",

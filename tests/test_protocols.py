@@ -571,9 +571,9 @@ def test_protocol_type_aliases_importable():
 class TestLLMEnvHierarchy:
     """The LLM env classes live in :mod:`agilerl.llm_envs`.
 
-    The teacher-forced ``DatasetEnv`` is a ``gymnasium.Env``; the token rollout
-    ``RolloutEnv`` (an OpenEnv client driven by a URL) has its own interface and
-    shares no base with it.
+    The teacher-forced ``DatasetEnv`` and the token rollout ``RolloutEnv``
+    (driven through an env client) each own their interface outright, sharing
+    no base with one another or with ``gymnasium``.
     """
 
     def test_llm_env_hierarchy(self):
@@ -582,9 +582,10 @@ class TestLLMEnvHierarchy:
 
         from agilerl.llm_envs import DatasetEnv, RolloutEnv
 
-        # DatasetEnv is the teacher-forced dataset env, a gymnasium.Env.
-        assert issubclass(DatasetEnv, gym.Env)
-        # RolloutEnv is the token rollout env (an OpenEnv client), not a gym.Env.
+        # Neither LLM env is a gymnasium.Env: DatasetEnv is a teacher-forced
+        # dataloader (no action, no episode) and RolloutEnv is a token harness
+        # over an env client, so both own their interfaces outright.
+        assert not issubclass(DatasetEnv, gym.Env)
         assert not issubclass(RolloutEnv, gym.Env)
         # agilerl.protocols exposes no env classes (they live in agilerl.llm_envs).
         import agilerl.protocols as protocols

@@ -14,7 +14,6 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Literal
 
-import gymnasium as gym
 import torch
 from torch.utils.data import DataLoader
 
@@ -31,7 +30,7 @@ if TYPE_CHECKING:
     ]
 
 
-class DatasetEnv(gym.Env):
+class DatasetEnv:
     """Dataset-backed LLM env for SFT and DPO (no generation).
 
     Serves batches straight from a labelled dataset: the model is scored on the
@@ -44,7 +43,8 @@ class DatasetEnv(gym.Env):
     * ``objective="sft"`` — requires ``prompt`` and ``response_column`` (default
       ``"target"``).
 
-    ``reset`` / ``step`` advance the seeded ``DataLoader`` (completions ignored).
+    ``reset`` advances the seeded ``DataLoader``; there is no ``step``, because
+    a teacher-forced batch is scored in one forward pass with no action to take.
 
     :ivar dataset_size: ``{"train": N, "test": M}`` row counts after filtering.
     :vartype dataset_size: dict[str, int]
@@ -189,18 +189,6 @@ class DatasetEnv(gym.Env):
             self._reset_dataloaders()
             self.num_epochs = 0
         return self._get_next_batch()
-
-    def step(self, completions: torch.Tensor | None = None) -> None:
-        """No-op: dataset training advances via :meth:`reset`.
-
-        Returns ``None``; ``completions`` is accepted for trainer API parity
-        (mirroring the ``env.step`` a ``RolloutEnv`` implements) and is ignored.
-
-        :param completions: Unused; accepted for API parity.
-        :type completions: torch.Tensor | None
-        :return: Always ``None``.
-        :rtype: None
-        """
 
     def _get_next_batch(self) -> Any:
         """Read one batch and cycle dataloaders at split boundaries."""
