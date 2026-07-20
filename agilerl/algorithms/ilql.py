@@ -1308,7 +1308,7 @@ class ILQL(nn.Module):
 
 
 class ILQL_Policy:
-    def __init__(self, iql_model: ILQL, kind: str, **generation_kwargs) -> None:
+    def __init__(self, iql_model: ILQL, kind: str, **generation_kwargs: Any) -> None:
         super().__init__()
         self.iql_model = iql_model
         assert kind in {"beam", "sample"}

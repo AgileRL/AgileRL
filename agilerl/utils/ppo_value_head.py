@@ -11,7 +11,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-from transformers import AutoModelForCausalLM, PreTrainedModel
+from transformers import AutoModelForCausalLM, GenerationConfig, PreTrainedModel
 
 try:
     from peft import PeftModel, get_peft_model
@@ -131,11 +131,11 @@ class AutoModelForCausalLMWithValueHead(nn.Module):
         self.pretrained_model.name_or_path = value
 
     @property
-    def generation_config(self):
+    def generation_config(self) -> GenerationConfig:
         return self.pretrained_model.generation_config
 
     @generation_config.setter
-    def generation_config(self, value) -> None:
+    def generation_config(self, value: GenerationConfig) -> None:
         self.pretrained_model.generation_config = value
 
     @property
@@ -148,7 +148,7 @@ class AutoModelForCausalLMWithValueHead(nn.Module):
         past_key_values: Any = None,
         attention_mask: torch.Tensor | None = None,
         **kwargs: Any,
-    ):
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
         if past_key_values is not None:
             kwargs["past_key_values"] = past_key_values
 
@@ -177,7 +177,7 @@ class AutoModelForCausalLMWithValueHead(nn.Module):
 
         return (lm_logits, loss, value)
 
-    def generate(self, *args: Any, **kwargs: Any):
+    def generate(self, *args: Any, **kwargs: Any) -> Any:
         return self.pretrained_model.generate(*args, **kwargs)
 
     def state_dict(self, *args: Any, **kwargs: Any) -> dict[str, torch.Tensor]:

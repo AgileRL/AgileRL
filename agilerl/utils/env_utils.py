@@ -6,7 +6,7 @@ from collections.abc import Callable
 from importlib import import_module
 from importlib import util as importlib_util
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from gymnasium.vector import AsyncVectorEnv, SyncVectorEnv
 from pettingzoo import ParallelEnv
@@ -16,6 +16,9 @@ from agilerl.vector import AsyncPettingZooVecEnv
 WrapperSpec = tuple[Any, dict[str, Any]] | str | Callable[..., Any]
 GymEnvType = AsyncVectorEnv | SyncVectorEnv
 PzEnvType = ParallelEnv | AsyncPettingZooVecEnv
+
+# Wrapped envs duck-type as the env they wrap, so wrapping preserves the type.
+EnvT = TypeVar("EnvT", bound=GymEnvType | PzEnvType)
 
 
 def make_conversation_template(prompt_template: dict[str, str]) -> list[dict[str, str]]:
@@ -35,7 +38,7 @@ def make_conversation_template(prompt_template: dict[str, str]) -> list[dict[str
     ]
 
 
-def get_reward_fn(reward_fn_name: str, file_path: str) -> Callable[[Any], float]:
+def get_reward_fn(reward_fn_name: str, file_path: str) -> Callable[..., float]:
     """Get the reward function for the environment.
 
     :param reward_fn_name: The name of the reward function to get
@@ -234,10 +237,10 @@ def _resolve_wrapper(
 
 
 def apply_wrappers(
-    env: GymEnvType | PzEnvType,
+    env: EnvT,
     wrappers: list[WrapperSpec] | None,
     path: str | None = None,
-) -> GymEnvType | PzEnvType:
+) -> EnvT:
     """Apply environment wrappers to an environment.
 
     :param env: Environment to apply wrappers to.

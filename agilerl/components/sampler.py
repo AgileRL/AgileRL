@@ -200,7 +200,7 @@ class Sampler:
         cls,
         dataset: ReplayDataset,
         batch_size: int | None = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> DataLoader:
         """Create a DataLoader with the appropriate collate function.
 

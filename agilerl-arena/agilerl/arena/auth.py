@@ -132,7 +132,7 @@ class ArenaOAuth2:
     REALM = "arena"
     CLIENT_ID = "arena-cli"
 
-    def __init__(self):
+    def __init__(self) -> None:
         # Create a Keycloak OpenID client with the configured URL, realm, and client ID.
         self.kc = KeycloakOpenID(
             server_url=os.environ.get("ARENA_KEYCLOAK_URL") or self.KEYCLOAK_URL,

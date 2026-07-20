@@ -201,7 +201,7 @@ def collect_rollouts(
     agent: SupportedOnPolicy,
     env: GymEnvType,
     n_steps: int | None = None,
-    **kwargs,
+    **kwargs: Any,
 ) -> list[float]:
     """Collect rollouts for non-recurrent on-policy algorithms.
 
@@ -222,7 +222,7 @@ def collect_rollouts_recurrent(
     agent: SupportedOnPolicy,
     env: GymEnvType,
     n_steps: int | None = None,
-    **kwargs,
+    **kwargs: Any,
 ) -> list[float]:
     """Collect rollouts for recurrent on-policy algorithms.
 
@@ -245,7 +245,7 @@ def collect_rollouts_llm(
     n_steps: int,
     batch_size: int,
     group_seed: int,
-    **kwargs,
+    **kwargs: Any,
 ) -> tuple[
     list[torch.Tensor],
     list[torch.Tensor],

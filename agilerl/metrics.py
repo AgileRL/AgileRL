@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from abc import ABC, abstractmethod
 from collections import deque
+from types import TracebackType
 from typing import Generic, TypeVar
 
 import numpy as np
@@ -83,7 +84,12 @@ class BaseMetrics(ABC, Generic[ScalarStore, HistogramStore]):
         """All registered non-scalar metric names."""
         return list(self._nonscalar_metrics.keys())
 
-    def __exit__(self, exc_type, exc_value, traceback) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
         self.clear()
 
     def __eq__(self, other: object) -> bool:

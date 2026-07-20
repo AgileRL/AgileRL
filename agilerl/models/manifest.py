@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, Literal, get_args
+from typing import TYPE_CHECKING, Annotated, Any, Literal, get_args, overload
 
 import yaml
 from pydantic import (
@@ -18,7 +18,7 @@ from pydantic import (
 )
 from typing_extensions import Self
 
-from agilerl import HAS_ARENA_DEPENDENCIES, HAS_LLM_DEPENDENCIES, AgentType
+from agilerl import HAS_ARENA_DEPENDENCIES, HAS_LLM_DEPENDENCIES
 from agilerl.models.algo import (
     ALGO_REGISTRY,
     AlgoSpecT,
@@ -36,6 +36,7 @@ from agilerl.models.training import ReplayBufferSpec, TrainingSpec
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from agilerl.arena.models import TrainingManifest as ArenaTrainingManifest
     from agilerl.models.env import GymEnvSpec, LLMEnvSpec, OfflineEnvSpec, PzEnvSpec
 
     EnvSpecT = GymEnvSpec | PzEnvSpec | OfflineEnvSpec | LLMEnvSpec
@@ -244,7 +245,7 @@ def _collect_unknown_fields(
         known = _known_field_names(model)
         dumped_section = dumped.get(section)
         if isinstance(dumped_section, dict):
-            known |= set(dumped_section)
+            known |= {str(key) for key in dumped_section}
         unknown.extend(f"{section}.{key}" for key in raw_section if key not in known)
 
     return unknown
@@ -282,7 +283,7 @@ class TrainingManifest(BaseModel):
             net_config_field = algo_spec_cls.model_fields.get("net_config")
             if net_config_field is not None:
                 # get the NetworkSpec class from the type annotation and validate
-                spec_cls: NetworkSpec = next(
+                spec_cls: type[NetworkSpec] | None = next(
                     (
                         t
                         for t in get_args(net_config_field.annotation)
@@ -291,25 +292,29 @@ class TrainingManifest(BaseModel):
                     None,
                 )
                 if spec_cls is not None:
+                    # Presence of a `net_config` model field is only known
+                    # dynamically, so the union attribute can't be narrowed.
                     if network_arch_is_resolvable(self.network):
-                        self.algorithm.net_config = spec_cls.model_validate(
+                        self.algorithm.net_config = spec_cls.model_validate(  # ty: ignore[invalid-assignment]
                             self.network
                         )
                     else:
                         # Deferred: leave the raw dict for the trainer to resolve
                         # once the observation space is known.
-                        self.algorithm.net_config = dict(self.network)
+                        self.algorithm.net_config = dict(self.network)  # ty: ignore[invalid-assignment]
             # LLM algorithms expect a pretrained model
-            elif issubclass(algo_spec_cls, LLMAlgorithmSpec):
+            elif isinstance(self.algorithm, LLMAlgorithmSpec):
                 llm_network = FinetuningNetworkSpec.model_validate(self.network)
                 self.algorithm.pretrained_model_name_or_path = (
                     llm_network.pretrained_model_name_or_path
                 )
                 self.algorithm.max_model_len = llm_network.max_context_length
-                self.algorithm.lora_config = llm_network.lora_config
+                # After validation the network spec holds the resolved peft
+                # LoraConfig; its declared type is the manifest schema.
+                self.algorithm.lora_config = llm_network.lora_config  # ty: ignore[invalid-assignment]
 
         if (
-            issubclass(algo_spec_cls, LLMAlgorithmSpec)
+            isinstance(self.algorithm, LLMAlgorithmSpec)
             and self.algorithm.pretrained_model_name_or_path is None
         ):
             msg = (
@@ -337,11 +342,15 @@ class TrainingManifest(BaseModel):
     @staticmethod
     def _network_from_algorithm(algorithm: AlgoSpecT) -> Any | None:
         """Resolve the manifest ``network`` section from an algorithm spec."""
-        if algorithm.agent_type == AgentType.LLMAgent:
-            return FinetuningNetworkSpec(
-                pretrained_model_name_or_path=algorithm.pretrained_model_name_or_path,
-                max_context_length=algorithm.max_model_len,
-                lora_config=algorithm.lora_config,
+        if isinstance(algorithm, LLMAlgorithmSpec):
+            return FinetuningNetworkSpec.model_validate(
+                {
+                    "pretrained_model_name_or_path": (
+                        algorithm.pretrained_model_name_or_path
+                    ),
+                    "max_context_length": algorithm.max_model_len,
+                    "lora_config": algorithm.lora_config,
+                }
             )
         return getattr(algorithm, "net_config", None)
 
@@ -384,7 +393,7 @@ class TrainingManifest(BaseModel):
 
         return cls(
             algorithm=algorithm,
-            environment=environment,
+            environment=_coerce_environment(environment),
             training=_coerce(training, TrainingSpec),
             network=cls._network_from_algorithm(algorithm),
             mutation=_coerce(mutation, MutationSpec),
@@ -392,13 +401,31 @@ class TrainingManifest(BaseModel):
             tournament_selection=_coerce(tournament_selection, TournamentSelectionSpec),
         )
 
+    @overload
+    @classmethod
+    def to_arena_manifest(
+        cls,
+        manifest: str | Path | dict[str, Any] | TrainingManifest,
+        *,
+        mode: Literal["json"] = ...,
+    ) -> dict[str, Any]: ...
+
+    @overload
+    @classmethod
+    def to_arena_manifest(
+        cls,
+        manifest: str | Path | dict[str, Any] | TrainingManifest,
+        *,
+        mode: Literal["python"],
+    ) -> ArenaTrainingManifest: ...
+
     @classmethod
     def to_arena_manifest(
         cls,
         manifest: str | Path | dict[str, Any] | TrainingManifest,
         *,
         mode: Literal["json", "python"] = "json",
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | ArenaTrainingManifest:
         """Validate a manifest for Arena submission.
 
         Accepts a core :class:`TrainingManifest`, a raw manifest dict, or a
@@ -422,7 +449,7 @@ class TrainingManifest(BaseModel):
 
         from agilerl.arena.models import TrainingManifest as ArenaManifest
 
-        if isinstance(manifest, cls):
+        if isinstance(manifest, TrainingManifest):
             data = manifest.model_dump(mode="json", exclude_none=True)
         elif isinstance(manifest, dict):
             data = manifest

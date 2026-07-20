@@ -45,7 +45,7 @@ class Trajectory:
 class TrajectoryBuffer:
     """Container for synchronized rollout trajectories."""
 
-    def __init__(self, batch_size: int, group_size: int):
+    def __init__(self, batch_size: int, group_size: int) -> None:
         """Initialize an empty trajectory buffer.
 
         :param batch_size: Number of logical batch items.
@@ -152,7 +152,7 @@ class SyncMultiTurnVecEnv:
         batch_size: int,
         group_size: int,
         env_config: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """Create ``batch_size * group_size`` independent environments.
 
         :param env_factory: Factory that builds one multi-turn environment.

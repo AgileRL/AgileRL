@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -53,22 +54,22 @@ class PettingZooVecEnv:
         }
 
     @property
-    def action_space(self):
+    def action_space(self) -> Callable[[str], Any]:
         """Return callable to get an agent's action space."""
         return self._get_action_space
 
     @property
-    def observation_space(self):
+    def observation_space(self) -> Callable[[str], Any]:
         """Return callable to get an agent's observation space."""
         return self._get_observation_space
 
     @property
-    def single_action_space(self):
+    def single_action_space(self) -> Callable[[str], Any]:
         """Return callable to get an agent's single action space."""
         return self._get_single_action_space
 
     @property
-    def single_observation_space(self):
+    def single_observation_space(self) -> Callable[[str], Any]:
         """Return callable to get an agent's single observation space."""
         return self._get_single_observation_space
 

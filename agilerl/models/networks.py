@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 from collections.abc import Callable
-from typing import Any, Literal, TypeVar, get_args
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, get_args
 
 from gymnasium import spaces
 from pydantic import (
@@ -13,7 +15,8 @@ from typing_extensions import Self
 
 from agilerl import HAS_LLM_DEPENDENCIES
 
-LoraConfig = None
+if TYPE_CHECKING:
+    from peft import LoraConfig
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -501,7 +504,9 @@ class FinetuningNetworkSpec(BaseModel):
 
             peft_lora = self.lora_config.model_dump()
             peft_lora["r"] = peft_lora.pop("lora_r")
-            self.lora_config = _LoraConfig(**peft_lora)
+            # After validation the field intentionally holds the resolved peft
+            # LoraConfig; the declared type is the manifest schema.
+            self.lora_config = _LoraConfig(**peft_lora)  # ty: ignore[invalid-assignment]
         return self
 
     @field_serializer("lora_config")

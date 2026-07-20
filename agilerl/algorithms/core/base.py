@@ -11,7 +11,7 @@ import tempfile
 import warnings
 from abc import ABC, ABCMeta, abstractmethod
 from collections import OrderedDict, defaultdict, deque
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Generator, Iterable, Mapping
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 from importlib.metadata import version
@@ -176,6 +176,10 @@ logger = logging.getLogger(__name__)
 
 SelfAgentWrapper = TypeVar("SelfAgentWrapper", bound=AgentWrapperProtocol)
 
+# Generic so instantiating a concrete algorithm class types as that class,
+# not as the EvolvableAlgorithm base.
+T_Algo = TypeVar("T_Algo", bound="EvolvableAlgorithm")
+
 
 class _RegistryMeta(type):
     """Metaclass to wrap registry information after algorithm is done
@@ -183,12 +187,12 @@ class _RegistryMeta(type):
     """
 
     def __call__(
-        cls: type[EvolvableAlgorithm],  # type: ignore[misc]
+        cls: type[T_Algo],  # type: ignore[misc]
         *args: Any,
         **kwargs: Any,
-    ) -> EvolvableAlgorithm:
+    ) -> T_Algo:
         # Create the instance
-        instance: EvolvableAlgorithm = super().__call__(*args, **kwargs)  # type: ignore[misc]
+        instance: T_Algo = super().__call__(*args, **kwargs)  # type: ignore[misc]
 
         # Initialize the MutationRegistry -> ensures that all of the networks and
         # optimizers are registered with the algorithm, and that the specified hyperparameters
@@ -607,7 +611,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         wrapper_cls: type[SelfAgentWrapper] | None = None,
         wrapper_kwargs: dict[str, Any] | None = None,
         resume_from_checkpoint: str | None = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> list[Self | SelfAgentWrapper]:
         """Create a population of algorithms.
 
@@ -1460,9 +1464,9 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
     """Base object for all multi-agent algorithms in the AgileRL framework.
 
     :param observation_spaces: The observation spaces of the agent environments.
-    :type observation_spaces: list[spaces.Space] | spaces.Dict
+    :type observation_spaces: list[spaces.Space] | Mapping[str, spaces.Space] | spaces.Dict
     :param action_spaces: The action spaces of the agent environments.
-    :type action_spaces: list[spaces.Space] | spaces.Dict
+    :type action_spaces: list[spaces.Space] | Mapping[str, spaces.Space] | spaces.Dict
     :param index: The index of the individual in the population.
     :type index: int.
     :param agent_ids: The agent IDs of the agents in the environment.
@@ -1495,8 +1499,12 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
     def __init__(
         self,
-        observation_spaces: Iterable[spaces.Space] | spaces.Dict,
-        action_spaces: Iterable[spaces.Space] | spaces.Dict,
+        observation_spaces: Iterable[spaces.Space]
+        | Mapping[str, spaces.Space]
+        | spaces.Dict,
+        action_spaces: Iterable[spaces.Space]
+        | Mapping[str, spaces.Space]
+        | spaces.Dict,
         index: int,
         agent_ids: Iterable[int] | None = None,
         hp_config: HyperparameterConfig | None = None,
@@ -4207,7 +4215,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         )
 
     @contextmanager
-    def _amp_ctx(self):
+    def _amp_ctx(self) -> Generator[None, None, None]:
         """Yield a ``torch.amp.autocast`` context when running without an accelerator.
 
         When an ``Accelerator`` is present it already manages mixed-precision
@@ -4224,7 +4232,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 yield
 
     @contextmanager
-    def _activation_offload_ctx(self):
+    def _activation_offload_ctx(self) -> Generator[None, None, None]:
         """Offload tensors saved for backward to pinned host RAM.
 
         When ``activation_offload`` is set, the training forward pass is run
@@ -5889,7 +5897,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         )
         raise AttributeError(err_msg)
 
-    def _get_lm_head(self):
+    def _get_lm_head(self) -> torch.nn.Module:
         """Locate the lm_head module, handling value-head, PEFT and LoRA wrappers.
 
         :return: The lm_head (or embed_out) linear layer.
@@ -5900,7 +5908,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         return getattr(parent, attr)
 
     @contextmanager
-    def _patch_lm_head_to_identity(self):
+    def _patch_lm_head_to_identity(self) -> Generator[torch.nn.Module, None, None]:
         """Temporarily replace ``lm_head`` with ``nn.Identity``.
 
         With the head identity-patched, the model's ``output.logits`` becomes

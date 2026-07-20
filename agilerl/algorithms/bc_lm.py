@@ -222,7 +222,7 @@ class BC_LM(nn.Module):
 
 
 class BC_Policy:
-    def __init__(self, bc_lm: BC_LM, kind: str, **generation_kwargs) -> None:
+    def __init__(self, bc_lm: BC_LM, kind: str, **generation_kwargs: Any) -> None:
         super().__init__()
         self.bc_lm = bc_lm
         assert kind in {"sample", "beam"}

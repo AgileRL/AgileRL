@@ -135,7 +135,8 @@ class ReplayBufferSpec(BaseModel):
 
         from agilerl.components.replay_buffer import MultiStepReplayBuffer
 
-        if not hasattr(algo_spec, "gamma"):
+        gamma = getattr(algo_spec, "gamma", None)
+        if not isinstance(gamma, (int, float)):
             msg = "Gamma must be specified for N-step buffer"
             raise ValueError(msg)
 
@@ -143,7 +144,7 @@ class ReplayBufferSpec(BaseModel):
             max_size=self.max_size,
             device=device,
             n_step=self.n_step_buffer_args.n_step,
-            gamma=algo_spec.gamma,
+            gamma=gamma,
         )
 
 

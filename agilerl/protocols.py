@@ -381,11 +381,11 @@ class EvolvableAlgorithmProtocol(Protocol):
     def learn(
         self,
         experiences: tuple[Iterable[ObservationType], ...],
-        **kwargs,
+        **kwargs: Any,
     ) -> None:
         pass
 
-    def get_action(self, obs: ObservationType, **kwargs) -> Any:
+    def get_action(self, obs: ObservationType, **kwargs: Any) -> Any:
         pass
 
     def test(self, *args: Any, **kwargs: Any) -> np.ndarray:
@@ -431,13 +431,13 @@ class AgentWrapperProtocol(Protocol, Generic[T_EvolvableAlgorithm]):
 
     agent: T_EvolvableAlgorithm
 
-    def get_action(self, obs: ObservationType, **kwargs) -> Any:
+    def get_action(self, obs: ObservationType, **kwargs: Any) -> Any:
         pass
 
     def learn(
         self,
         experiences: tuple[Iterable[ObservationType], ...],
-        **kwargs,
+        **kwargs: Any,
     ) -> None:
         pass
 

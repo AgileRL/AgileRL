@@ -1265,7 +1265,9 @@ class TestLLMGetTrainingKwargs:
         assert "num_epochs" not in kwargs
 
     def test_llm_kwargs_include_max_reward(self, grpo_spec):
-        env_spec = MagicMock(max_reward=5.0)
+        from agilerl.models.env import LLMEnvSpec
+
+        env_spec = LLMEnvSpec(env_type="preference", dataset="dummy", max_reward=5.0)
         training = TrainingSpec(max_steps=100, evo_steps=10, pop_size=2)
         kwargs = grpo_spec.get_training_kwargs(training=training, env_spec=env_spec)
         assert kwargs["max_reward"] == 5.0

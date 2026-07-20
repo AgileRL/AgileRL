@@ -6,7 +6,8 @@
 exclude: ^tests/assets/tiny_llm/
 ci:
     autoupdate_branch: nightly
-    skip: [codeql-python]
+    # ty needs the project venv for import resolution; pre-commit.ci has none.
+    skip: [codeql-python, ty]
 repos:
     - repo: https://github.com/pre-commit/pre-commit-hooks
       rev: v6.0.0
@@ -56,6 +57,12 @@ repos:
 
     - repo: local
       hooks:
+          - id: ty
+            name: ty (static type checking)
+            entry: bash -c '[ -e agilerl/arena ] || ln -s ../agilerl-arena/agilerl/arena agilerl/arena; uv run ty check agilerl agilerl/arena'
+            language: system
+            pass_filenames: false
+            files: ^(agilerl|agilerl-arena)/.*\.py$|^pyproject\.toml$
           - id: codeql-python
             name: CodeQL Python Security & Quality (manual)
             entry: python .github/codeql/run_codeql.py

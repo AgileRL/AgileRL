@@ -112,7 +112,7 @@ class GridNavigationEnv:
         max_turns: int = 5,
         step_cost: float = -0.1,
         seed: int = 42,
-    ):
+    ) -> None:
         self.grid_size = grid_size
         self.max_turns = max_turns
         self.step_cost = step_cost
@@ -121,7 +121,7 @@ class GridNavigationEnv:
         self.target = 0
         self.turn = 0
 
-    def reset(self, seed=None):
+    def reset(self, seed: int | None = None) -> tuple[str, dict]:
         if seed is not None:
             self.rng = Random(seed)
         self.position = self.rng.randint(0, self.grid_size - 1)
@@ -131,7 +131,7 @@ class GridNavigationEnv:
         obs = f"{self.position}{self.target}"
         return obs, {"position": self.position, "target": self.target}
 
-    def step(self, action):
+    def step(self, action: str) -> tuple[str, float, bool, bool, dict]:
         self.turn += 1
 
         move = None

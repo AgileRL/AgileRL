@@ -2066,7 +2066,7 @@ def clone_llm(
 class DummyOptimizer:
     """Placeholder optimizer class to pass to the OptimizerWrapper when the optimizer is defined in the deepspeed config."""
 
-    def __init__(self, params: list[torch.Tensor], **kwargs) -> None:
+    def __init__(self, params: list[torch.Tensor], **kwargs: Any) -> None:
         """Sentinel class to use for the optimizer when the optimizer is defined in the deepspeed config.
 
         :param params: Parameters to optimize.

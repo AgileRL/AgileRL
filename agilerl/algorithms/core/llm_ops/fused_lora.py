@@ -18,6 +18,7 @@ from __future__ import annotations
 import itertools
 from collections.abc import Sequence
 from functools import partial
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -50,8 +51,8 @@ def _needs_peft_mixed_forward(layer: nn.Module, routing: Sequence[str]) -> bool:
 def _routed_forward(
     layer: nn.Module,
     x: torch.Tensor,
-    *forward_args,
-    **forward_kwargs,
+    *forward_args: Any,
+    **forward_kwargs: Any,
 ) -> torch.Tensor:
     """Replacement ``forward`` installed on patched LoRA layers.
 

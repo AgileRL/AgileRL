@@ -23,12 +23,14 @@ class Tokenizer(ABC):
     def encode(
         self,
         str_: str | list[str],
-        **kwargs,
+        **kwargs: Any,
     ) -> tuple[list[int] | list[list[int]], list[int] | list[list[int]]]:
         pass
 
     @abstractmethod
-    def decode(self, tokens: list[int] | list[list[int]], **kwargs) -> str | list[str]:
+    def decode(
+        self, tokens: list[int] | list[list[int]], **kwargs: Any
+    ) -> str | list[str]:
         pass
 
     @abstractmethod

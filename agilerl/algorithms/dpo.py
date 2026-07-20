@@ -371,7 +371,7 @@ class DPO(LLMAlgorithm):
         ref_rejected_log_probs: torch.Tensor | None,
         ref_chosen_log_probs: torch.Tensor | None,
         training: bool,
-    ):
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Calculates the DPO loss.
 
         :param batch_size: Batch size
@@ -543,7 +543,7 @@ class DPO(LLMAlgorithm):
         lm_head_weight = lm_head.weight  # (vocab_size, hidden_size)
         lm_head_bias = lm_head.bias
 
-        def _get_hidden(ids, attn_mask):
+        def _get_hidden(ids: torch.Tensor, attn_mask: torch.Tensor) -> torch.Tensor:
             """Run a forward pass and return hidden states fed into the language-model head.
 
             :param ids: Token IDs ``[batch, seq_len]``.
@@ -596,7 +596,7 @@ class DPO(LLMAlgorithm):
         )  # (2B, seq_len, H)
 
         # Build shifted targets; mask prompt/padding tokens with -100
-        def _make_target(ids, mask):
+        def _make_target(ids: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
             t = ids[:, 1:].clone()  # (B, seq_len-1)
             t[~mask.bool()] = -100
             return t

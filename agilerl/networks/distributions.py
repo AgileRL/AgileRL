@@ -54,7 +54,7 @@ class TorchDistribution:
         mu: torch.Tensor | None = None,
         log_std: torch.Tensor | None = None,
         squash_output: bool = False,
-    ):
+    ) -> None:
         self.action_space = action_space
         self.logits = logits
         self.mu = mu
@@ -136,7 +136,7 @@ class EvolvableDistribution(EvolvableWrapper):
         action_std_init: float = 0.0,
         squash_output: bool = False,
         device: DeviceType = "cpu",
-    ):
+    ) -> None:
         super().__init__(network)
 
         self.action_space = action_space

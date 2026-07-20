@@ -29,7 +29,7 @@ class LLMREINFORCESpec(LLMAlgorithmSpec):
     env_type: ClassVar[LLMEnvType] = LLMEnvType.REASONING
 
     @model_validator(mode="after")
-    def _validate_vllm_config(self):
+    def _validate_vllm_config(self) -> LLMREINFORCESpec:
         if self.use_vllm and not self.vllm_config:
             msg = "VLLM config is not set, please provide a VLLM config in the algorithm section of the manifest."
             raise ValueError(msg)

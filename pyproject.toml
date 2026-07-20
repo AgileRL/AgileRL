@@ -211,9 +211,9 @@ include = [
 unresolved-import = "ignore"
 
 # Legacy modules that predate type checking. Diagnostics here are silenced
-# until each module is migrated; everything else (agilerl/arena, agilerl/models
-# __init__, metrics, typing, protocols, logger, train.py, __init__.py, ...)
-# is checked strictly.
+# until each module is migrated; everything else (agilerl/arena, agilerl/models,
+# metrics, typing, protocols, logger, train.py, __init__.py, ...) is checked
+# strictly.
 [[tool.ty.overrides]]
 include = [
     "agilerl/algorithms",
@@ -221,7 +221,6 @@ include = [
     "agilerl/data",
     "agilerl/hpo",
     "agilerl/llm_envs",
-    "agilerl/models",
     "agilerl/modules",
     "agilerl/networks",
     "agilerl/population.py",
@@ -231,7 +230,6 @@ include = [
     "agilerl/vector",
     "agilerl/wrappers",
 ]
-exclude = ["agilerl/models/__init__.py"]
 
 [tool.ty.overrides.rules]
 call-non-callable = "ignore"
@@ -269,7 +267,7 @@ ignore = [
     "D203", "D213",  # Specific docstring conflicts
     "D100", "D107",  # Missing docstrings (module/init)
     "ARG",           # All unused argument rules (ARG002, 004, etc.)
-    "ANN",           # All annotation rules (ANN002, 003, 401)
+    "ANN401",        # Any in annotations (tightening Any usage is tracked separately)
     "FBT",           # All boolean trap rules (FBT001, 002, 003)
     "PLR09",         # All "Too Many..." complexity rules (branches, args, returns)
     "C901",          # complexity
@@ -301,5 +299,8 @@ ignore = [
     "A002",          # argument shadowing builtin (input)
     "PIE790",        # unnecessary ...
     "PD011",         # .values -> .to_numpy()
+]
+"{tests,agilerl-arena/tests}/**" = [
+    "ANN",           # test signatures don't need annotations
 ]
 "{benchmarking,demos,tutorials}/**" = ["ALL"]

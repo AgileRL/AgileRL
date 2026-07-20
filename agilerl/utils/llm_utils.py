@@ -971,7 +971,14 @@ def patch_flex_attention_kernel_options(options: dict[str, Any] | None = None) -
         "num_stages": 2,
     }
 
-    def _flex_with_opts(module, query, key, value, attention_mask, **kwargs):
+    def _flex_with_opts(
+        module: torch.nn.Module,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attention_mask: Any,
+        **kwargs: Any,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         kwargs.setdefault("kernel_options", opts)
         return flex_attention_forward(
             module, query, key, value, attention_mask, **kwargs

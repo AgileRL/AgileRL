@@ -26,7 +26,7 @@ SelfEvolvableModule = TypeVar("SelfEvolvableModule", bound="EvolvableModule")
 
 def mutation(
     mutation_type: MutationType,
-    **recreate_kwargs,
+    **recreate_kwargs: Any,
 ) -> Callable[[Callable], MutationMethodProtocol]:
     """Register a method as a mutation function of a specific type (decorator). This signals
     that the module should be recreated after the function has been called on the module.
@@ -348,7 +348,7 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         for module in self.modules().values():
             module.device = value
 
-    def recreate_network(self, **kwargs) -> None:
+    def recreate_network(self, **kwargs: Any) -> None:
         """Recreate the network after a mutation has been applied. If the mutation methods of
         an `EvolvableModule` are only attributed to its nested modules, then the `recreate_network`
         method should be implemented in the nested modules and it is not required on the parent.
