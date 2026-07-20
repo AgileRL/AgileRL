@@ -370,7 +370,8 @@ class Agent:
                 "not a single array."
             )
             raise ArenaInferenceError(detail=msg)
-        # Recursive alias narrowing diverges in ty; the dict arm is dict[str, RLData].
+        # The isinstance above proves this is the dict[str, RLData] arm, but ty
+        # can't expand RLData's self-reference, so it still sees dict[?, object].
         return mask  # ty: ignore[invalid-return-type]
 
     def _merge_llm_params(
@@ -475,8 +476,9 @@ class Agent:
             if hidden_raw is not None:
                 deserialized = Agent.deserialize(hidden_raw, batched)
                 if isinstance(deserialized, dict):
-                    # Recursive alias narrowing diverges in ty; hidden-state
-                    # leaves are arrays.
+                    # Hidden state is always dict[str, ndarray], but deserialize
+                    # returns the recursive RLData alias, whose self-reference ty
+                    # can't expand to prove the values are arrays.
                     hidden_state = deserialized  # ty: ignore[invalid-assignment]
         return action, hidden_state
 

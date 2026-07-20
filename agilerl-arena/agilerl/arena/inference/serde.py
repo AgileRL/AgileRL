@@ -25,7 +25,9 @@ def serialize(data: RLData | None, batched: bool = False) -> SerializedRLData:
     :rtype: SerializedRLData
     """
     if isinstance(data, dict):
-        # Recursive alias narrowing diverges in ty; the dict arm is dict[str, RLData].
+        # RLData refers to itself, and ty can't expand that self-reference when
+        # narrowing, so it types these values as `object` rather than RLData --
+        # making both the recursive call and the returned dict look wrong.
         return {k: serialize(v, batched) for k, v in data.items()}  # ty: ignore[invalid-return-type, invalid-argument-type]
     if isinstance(data, (tuple, list)):
         return tuple(serialize(v, batched) for v in data)
@@ -73,7 +75,8 @@ def get_batch_size(observation: RLData) -> int:
     """
     while isinstance(observation, (dict, tuple)):
         if isinstance(observation, dict):
-            # Recursive alias narrowing diverges in ty; values are RLData.
+            # ty types these values as `object` rather than RLData: it can't
+            # expand RLData's self-reference when narrowing the isinstance.
             observation = next(iter(observation.values()))  # ty: ignore[invalid-assignment]
         else:
             observation = observation[0]
