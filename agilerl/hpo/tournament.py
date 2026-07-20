@@ -154,6 +154,7 @@ class TournamentSelection:
         old_population_idxs = [ind.index for ind in population]
         unwanted_agents: set[int] = set()
         elite: EvolvableAlgorithmProtocol | None = None
+        elite_idx: int | None = None
 
         if accelerator is None or (
             accelerator is not None and accelerator.is_main_process
@@ -164,7 +165,6 @@ class TournamentSelection:
                 new_population_idxs.append((elite_idx, elite_idx, True))
                 selection_size = self.population_size - 1
             else:
-                elite = population[old_population_idxs.index(elite_idx)]
                 selection_size = self.population_size
             # select parents of next gen using tournament selection
             for _ in range(selection_size):
@@ -182,12 +182,34 @@ class TournamentSelection:
         if accelerator is not None:
             accelerator.wait_for_everyone()
             if accelerator.num_processes > 1:
-                new_population_idxs, old_population_idxs, unwanted_agents = (
+                new_population_idxs, old_population_idxs, unwanted_agents, elite_idx = (
                     broadcast_object_list(
-                        [new_population_idxs, old_population_idxs, unwanted_agents],
+                        [
+                            new_population_idxs,
+                            old_population_idxs,
+                            unwanted_agents,
+                            elite_idx,
+                        ],
                         from_process=0,
                     )
                 )
+
+        # Resolved on process 0 and broadcast, so every rank has it by this point.
+        assert elite_idx is not None
+
+        # With elitism disabled the elite is not carried into the new population, so a
+        # clone has to be taken before the loops below clean the original up. When the
+        # tournament happens to draw the elite as a parent the clone made for the new
+        # population is reused instead — these agents hold multi-GB models.
+        elite_is_parent = any(idx == elite_idx for idx, *_ in new_population_idxs)
+        if not self.elitism and not elite_is_parent:
+            elite_ref = agent_slots[old_population_idxs.index(elite_idx)]
+            assert elite_ref is not None
+            if elite_ref.accelerator is not None:
+                elite_ref.accelerator.wait_for_everyone()
+            elite = elite_ref.clone(index=elite_idx, wrap=False)
+            if elite_ref.accelerator is not None:
+                elite_ref.accelerator.wait_for_everyone()
 
         # Delete any unwanted agents from memory
         for agent_idx in old_population_idxs:
@@ -226,11 +248,7 @@ class TournamentSelection:
             new_population.append(actor_parent)
 
         if elite is None:
-            msg = (
-                "Tournament selection produced no elite agent. This happens when "
-                "elitism is disabled on a non-main process, where the elite is "
-                "never resolved from the broadcast selection."
-            )
-            raise RuntimeError(msg)
+            # Elitism disabled and the elite was drawn as a tournament parent.
+            elite = index_tracker[elite_idx]
 
         return elite, new_population

@@ -24,6 +24,90 @@ create_module = None
 if HAS_DEEPSPEED and HAS_VLLM:
     from tests.test_algorithms.test_llms.test_grpo import create_module
 
+LLM_POPULATION_SIZE = 4
+
+
+def make_llm_accelerator(num_processes=1, is_main_process=True):
+    """Build a stand-in accelerator for the LLM tournament path."""
+    accelerator = MagicMock(spec=Accelerator)
+    accelerator.is_main_process = is_main_process
+    accelerator.wait_for_everyone = MagicMock()
+    accelerator.state = MagicMock()
+    accelerator.state.deepspeed_plugin = MagicMock()
+    accelerator.state.deepspeed_plugin.deepspeed_config = {
+        "zero_optimization": {"stage": 1},
+    }
+    accelerator.free_memory = lambda *args: args
+    accelerator.unwrap_model = lambda arg: arg
+    accelerator.num_processes = num_processes
+    return accelerator
+
+
+def make_llm_population(accelerator, use_accelerator=True):
+    """Build a GRPO population with ascending fitness and mocked clones.
+
+    Clones are mocks so that the tournament's clone/clean-up bookkeeping can be
+    inspected without materialising more models.
+    """
+    actor_network = create_module(
+        input_size=1,
+        max_tokens=8,
+        vocab_size=100,
+        device="cpu",
+    )
+    population = [
+        GRPO(
+            actor_network=clone_llm(actor_network, 0),
+            pad_token_id=99,
+            pad_token="<pad>",
+            hp_config=None,
+            index=idx,
+            batch_size=1,
+            beta=0.001,
+            lr=0.000005,
+            clip_coef=0.2,
+            max_grad_norm=0.1,
+            update_epochs=1,
+            group_size=2,
+            temperature=0.9,
+            calc_position_embeddings=True,
+            use_memory_efficient_params=True,
+            max_output_tokens=8,
+            min_output_tokens=None,
+            lora_config=LoraConfig(
+                r=16,
+                lora_alpha=64,
+                target_modules=["linear_1"],
+                task_type="CAUSAL_LM",
+                lora_dropout=0.05,
+            ),
+            cosine_lr_schedule_config=None,
+            accelerator=None,
+            device="cpu",
+        )
+        for idx in range(LLM_POPULATION_SIZE)
+    ]
+    for agent in population:
+        if use_accelerator:
+            agent.accelerator = accelerator
+
+    for agent in population:
+        # Create a mock clone that returns a new mock agent
+        def mock_clone(index, wrap=False, _agent=agent):
+            mock_agent = MagicMock()
+            mock_agent.index = index
+            mock_agent.accelerator = accelerator
+            mock_agent.clean_up = MagicMock()
+            mock_agent.fitness = _agent.fitness
+            return mock_agent
+
+        agent.clone = MagicMock(side_effect=mock_clone)
+
+    for idx, agent in enumerate(population):
+        agent.fitness = [1 + 3 * idx, 2 + 3 * idx, 3 + 3 * idx]
+
+    return population
+
 
 class TestTournamentSelectionInit:
     # Initializes the 'TournamentSelection' object with the given parameters.
@@ -252,113 +336,74 @@ class TestTournamentSelectionSelect:
     @pytest.mark.parametrize("elitism", [True, False])
     @pytest.mark.parametrize("num_processes", [1, 2])
     def test_language_model_tournament(self, use_accelerator, elitism, num_processes):
-        tournament_selection = TournamentSelection(3, elitism, 4)
-        population_size = 4
-
-        init_hp = {
-            "ALGO": "GRPO",
-            "BATCH_SIZE": 1,
-            "USE_MEMORY_EFFICIENT_PARAMS": True,
-            "BETA": 0.001,
-            "LR": 0.000005,
-            "CLIP_COEF": 0.2,
-            "MAX_GRAD_NORM": 0.1,
-            "UPDATE_EPOCHS": 1,
-            "GROUP_SIZE": 2,
-            "TEMPERATURE": 0.9,
-            "CALC_POSITION_EMBEDDINGS": True,
-            "MIN_OUTPUT_TOKENS": None,
-            "MAX_OUTPUT_TOKENS": 8,
-            "COSINE_lR_SCHEDULER": None,
-            "TOURN_SIZE": 2,
-            "ELITISM": True,
-            "POP_SIZE": 4,
-            "EVAL_LOOP": 1,
-            "PAD_TOKEN_ID": 99,
-        }
-        actor_network = create_module(
-            input_size=1,
-            max_tokens=init_hp["MAX_OUTPUT_TOKENS"],
-            vocab_size=100,
-            device="cpu",
-        )
-        accelerator = MagicMock(spec=Accelerator)
-        accelerator.is_main_process = True
-        accelerator.wait_for_everyone = MagicMock()
-        accelerator.state = MagicMock()
-        accelerator.state.deepspeed_plugin = MagicMock()
-        accelerator.state.deepspeed_plugin.deepspeed_config = {
-            "zero_optimization": {"stage": 1},
-        }
-        accelerator.free_memory = lambda *args: args
-        accelerator.unwrap_model = lambda arg: arg
-        accelerator.num_processes = num_processes
-
-        population = [
-            GRPO(
-                actor_network=clone_llm(actor_network, 0),
-                pad_token_id=init_hp.get("PAD_TOKEN_ID"),
-                pad_token="<pad>",
-                hp_config=None,
-                index=idx,
-                batch_size=init_hp.get("BATCH_SIZE", 1),
-                beta=init_hp.get("BETA", 0.001),
-                lr=init_hp.get("LR", 5e-7),
-                clip_coef=init_hp.get("CLIP_COEF", 0.2),
-                max_grad_norm=init_hp.get("MAX_GRAD_NORM", 0.1),
-                update_epochs=init_hp.get("UPDATE_EPOCHS", 1),
-                group_size=init_hp.get("GROUP_SIZE", 8),
-                temperature=init_hp.get("TEMPERATURE", 0.9),
-                calc_position_embeddings=init_hp.get("CALC_POSITION_EMBEDDINGS", True),
-                use_memory_efficient_params=init_hp.get(
-                    "USE_MEMORY_EFFICIENT_PARAMS",
-                    False,
-                ),
-                max_output_tokens=init_hp.get("MAX_OUTPUT_TOKENS", 1024),
-                min_output_tokens=init_hp.get("MIN_OUTPUT_TOKENS"),
-                lora_config=LoraConfig(
-                    r=16,
-                    lora_alpha=64,
-                    target_modules=["linear_1"],
-                    task_type="CAUSAL_LM",
-                    lora_dropout=0.05,
-                ),
-                cosine_lr_schedule_config=None,
-                accelerator=None,
-                device="cpu",
-            )
-            for idx in range(init_hp.get("POP_SIZE"))
-        ]
-        for agent in population:
-            if use_accelerator:
-                agent.accelerator = accelerator
-
-        for agent in population:
-            # Create a mock clone that returns a new mock agent
-            def mock_clone(new_idx, wrap=False, _agent=agent):
-                mock_agent = MagicMock()
-                mock_agent.index = new_idx
-                mock_agent.accelerator = accelerator
-                mock_agent.clean_up = MagicMock()
-                mock_agent.fitness = _agent.fitness
-                return mock_agent
-
-            agent.clone = MagicMock(side_effect=mock_clone)
-
-        population[0].fitness = [1, 2, 3]
-        population[1].fitness = [4, 5, 6]
-        population[2].fitness = [7, 8, 9]
-        population[3].fitness = [10, 11, 12]
+        tournament_selection = TournamentSelection(3, elitism, LLM_POPULATION_SIZE)
+        accelerator = make_llm_accelerator(num_processes=num_processes)
+        population = make_llm_population(accelerator, use_accelerator=use_accelerator)
 
         # Call the select method
         elite, new_population = tournament_selection.select(population)
 
         # Check if the elite agent is the best agent in the population
         assert elite.fitness == [10, 11, 12]
-        assert elite.index == 3
+        if elitism:
+            # Without elitism the elite is a standalone clone whose index depends on
+            # whether the tournament happened to draw it, so only its identity as the
+            # best performer is meaningful.
+            assert elite.index == 3
+
+        # The elite is passed to save_llm_checkpoint, which needs a live actor, so it
+        # must not be one of the originals cleaned up during selection.
+        assert elite.actor is not None
 
         # Check if the new population has the correct length
-        assert len(new_population) == population_size
+        assert len(new_population) == LLM_POPULATION_SIZE
+
+    @pytest.mark.skipif(
+        not (HAS_VLLM and HAS_DEEPSPEED),
+        reason="Need to install agilerl with deepspeed + vllm",
+    )
+    @pytest.mark.parametrize("elitism", [True, False])
+    def test_language_model_tournament_non_main_process(self, elitism, monkeypatch):
+        """Every rank resolves an elite from the broadcast selection.
+
+        Non-main ranks skip the selection block entirely. With elitism disabled the
+        broadcast carries no ``is_elite`` entry for them to resolve the elite from, so
+        they depend on the broadcast elite index. save_llm_checkpoint is collective,
+        so a rank that fails to resolve one hangs the others.
+        """
+        # Run process 0 first and capture exactly what it broadcasts.
+        broadcast_payload = []
+
+        def capture(object_list, from_process=0):
+            broadcast_payload.append(list(object_list))
+            return object_list
+
+        monkeypatch.setattr("agilerl.hpo.tournament.broadcast_object_list", capture)
+        main_accelerator = make_llm_accelerator(num_processes=2, is_main_process=True)
+        main_elite, _ = TournamentSelection(3, elitism, LLM_POPULATION_SIZE).select(
+            make_llm_population(main_accelerator),
+        )
+        assert len(broadcast_payload) == 1
+
+        # Replay that payload on a rank that ran no selection of its own.
+        monkeypatch.setattr(
+            "agilerl.hpo.tournament.broadcast_object_list",
+            lambda object_list, from_process=0: broadcast_payload[0],
+        )
+        worker_accelerator = make_llm_accelerator(
+            num_processes=2, is_main_process=False
+        )
+        worker_elite, worker_population = TournamentSelection(
+            3,
+            elitism,
+            LLM_POPULATION_SIZE,
+        ).select(make_llm_population(worker_accelerator))
+
+        # Both ranks agree on the elite, and it is usable for checkpointing.
+        assert worker_elite is not None
+        assert worker_elite.fitness == main_elite.fitness == [10, 11, 12]
+        assert worker_elite.actor is not None
+        assert len(worker_population) == LLM_POPULATION_SIZE
 
     @pytest.mark.skipif(
         not (HAS_VLLM and HAS_DEEPSPEED),
