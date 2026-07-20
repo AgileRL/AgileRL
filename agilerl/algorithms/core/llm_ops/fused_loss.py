@@ -346,6 +346,13 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
             # Liger 0.8.0 rewrote ``LigerFusedLinearPPOBase.chunk_forward`` into a
             # selective-logp kernel that doesn't compose with the grad_and_value
             # transform below, so inline the numerically identical 0.7.0 math.
+            if input_chunk.dtype != weight_local.dtype:
+                # fp16 checkpoint under bf16 autocast: fp32 hidden, fp16 head.
+                compute_dtype = torch.promote_types(
+                    input_chunk.dtype, weight_local.dtype
+                )
+                input_chunk = input_chunk.to(compute_dtype)
+                weight_local = weight_local.to(compute_dtype)
             logits = torch.matmul(input_chunk, weight_local.t())
             if bias_local is not None:
                 logits = logits + bias_local

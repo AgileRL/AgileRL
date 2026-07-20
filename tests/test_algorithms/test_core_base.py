@@ -2224,6 +2224,37 @@ class TestLogprobsFromHiddenFused:
         assert result.dtype == torch.bfloat16
         assert torch.equal(result, ref)
 
+    def test_mismatched_hidden_and_lm_head_dtypes(self) -> None:
+        """An fp16 checkpoint under the bf16 autocast yields fp32 hidden
+        states with an fp16 lm_head weight; the fused matmul promotes to a
+        common dtype instead of crashing, matching the pre-upcast reference
+        exactly (fp16 -> fp32 casts are lossless).
+        """
+        torch.manual_seed(3)
+        B, T, H, V = 2, 5, 32, 2048
+        hidden = torch.randn(B, T, H, dtype=torch.float32)
+        weight = (torch.randn(V, H) * 0.02).to(torch.float16)
+        targets = torch.randint(0, V, (B, T))
+
+        result = LLMAlgorithm._logprobs_from_hidden_fused(
+            hidden,
+            weight,
+            None,
+            targets,
+            temperature=0.9,
+            cast_to_fp32=True,
+        )
+        ref = LLMAlgorithm._logprobs_from_hidden_fused(
+            hidden,
+            weight.float(),
+            None,
+            targets,
+            temperature=0.9,
+            cast_to_fp32=True,
+        )
+        assert result.dtype == torch.float32
+        assert torch.equal(result, ref)
+
     def test_chunked_matches_unchunked(self) -> None:
         """Output is independent of ``chunk_rows`` — covers the loop
         boundary path.

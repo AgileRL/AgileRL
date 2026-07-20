@@ -44,6 +44,11 @@ def _fused_logprob_chunk(
     :return: ``(chunk_rows,)`` per-token logprobs.
     :rtype: torch.Tensor
     """
+    if h_chunk.dtype != lm_head_weight.dtype:
+        # fp16 checkpoint under bf16 autocast: fp32 hidden, fp16 head; promote to match.
+        compute_dtype = torch.promote_types(h_chunk.dtype, lm_head_weight.dtype)
+        h_chunk = h_chunk.to(compute_dtype)
+        lm_head_weight = lm_head_weight.to(compute_dtype)
     logits = h_chunk @ lm_head_weight.t()
     if lm_head_bias is not None:
         logits = logits + lm_head_bias
