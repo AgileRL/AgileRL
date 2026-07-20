@@ -290,7 +290,7 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
     """
 
     @classmethod
-    def forward(
+    def forward(  # ty: ignore[invalid-method-override]  # deliberate divergence from Liger's base signature: this loss consumes the full (chunk, T, V) log-probs that Liger >=0.8.0's base no longer exposes (only checkable where liger_kernel resolves, i.e. Linux/CI)
         cls,
         ctx: Any,
         _input: torch.Tensor,
@@ -737,7 +737,7 @@ class LigerDPOWithAlpha(LigerFusedLinearPreferenceBase):
     )
 
     @classmethod
-    def forward(
+    def forward(  # ty: ignore[invalid-method-override]  # deliberate divergence from Liger's base signature: this loss consumes the full (chunk, T, V) log-probs that Liger >=0.8.0's base no longer exposes (only checkable where liger_kernel resolves, i.e. Linux/CI)
         cls,
         ctx: Any,
         _input: torch.Tensor,

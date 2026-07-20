@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+from typing import cast
+
 import numpy as np
 from accelerate.utils import broadcast_object_list
 
@@ -50,35 +53,33 @@ class TournamentSelection:
             return float(np.mean(fitness))
         return float(fitness)
 
-    def _tournament(self, fitness_values: list[float]) -> int:
+    def _tournament(self, fitness_values: Sequence[float] | np.ndarray) -> int:
         """Perform tournament selection given a list of fitness values.
 
         :param fitness_values: List of fitness values
-        :type fitness_values: list[float]
+        :type fitness_values: Sequence[float] | np.ndarray
         :return: Index of the selected winner
         :rtype: int
         """
         selection = np.random.randint(0, len(fitness_values), size=self.tournament_size)
         selection_values = [fitness_values[i] for i in selection]
-        return selection[np.argmax(selection_values)]
+        return int(selection[np.argmax(selection_values)])
 
     def _elitism(
         self,
         population: PopulationT,
-    ) -> tuple[EvolvableAlgorithm, np.ndarray, int]:
+    ) -> tuple[EvolvableAlgorithmProtocol, np.ndarray, int]:
         """Perform elitism selection given a population of agents.
 
         :param population: Population of agents
         :type population: PopulationT
-        :return: Elite member of population, rank array, and max id
-        :rtype: tuple[EvolvableAlgorithm, np.ndarray, int]
+        :return: Best performing member of the population, rank array, and max id
+        :rtype: tuple[EvolvableAlgorithmProtocol, np.ndarray, int]
         """
         last_fitness = [self._scalar_fitness(indi.fitness[-1]) for indi in population]
         rank = np.argsort(last_fitness).argsort()
         max_id = max([ind.index for ind in population])
-        model = population[int(np.argsort(rank)[-1])]
-        elite = model.clone() if not self.language_model else model.index
-        return elite, rank, max_id
+        return population[int(np.argsort(rank)[-1])], rank, max_id
 
     def select(
         self,
@@ -103,7 +104,7 @@ class TournamentSelection:
     def _select_standard_agents(
         self,
         population: PopulationT,
-    ) -> tuple[EvolvableAlgorithm, PopulationT]:
+    ) -> tuple[EvolvableAlgorithmProtocol, PopulationT]:
         """Return best agent and new population of agents following tournament selection. Used for
         a population of :class:`RLAlgorithm <agilerl.algorithms.core.RLAlgorithm>` or
         :class:`MultiAgentRLAlgorithm <agilerl.algorithms.core.MultiAgentRLAlgorithm>` agents.
@@ -111,12 +112,13 @@ class TournamentSelection:
         :param population: Population of agents
         :type population: PopulationT
         :return: Elite agent and new population
-        :rtype: tuple[EvolvableAlgorithm, PopulationT]
+        :rtype: tuple[EvolvableAlgorithmProtocol, PopulationT]
         """
-        elite, rank, max_id = self._elitism(population)
-        new_population = []
+        best_agent, rank, max_id = self._elitism(population)
+        elite = best_agent.clone(index=None, wrap=True)
+        new_population: PopulationT = []
         if self.elitism:  # keep top agent in population
-            new_population.append(elite.clone(wrap=False))
+            new_population.append(elite.clone(index=None, wrap=False))
             selection_size = self.population_size - 1
         else:
             selection_size = self.population_size
@@ -125,7 +127,7 @@ class TournamentSelection:
         for _idx in range(selection_size):
             max_id += 1
             actor_parent = population[self._tournament(rank)]
-            new_individual = actor_parent.clone(max_id, wrap=False)
+            new_individual = actor_parent.clone(index=max_id, wrap=False)
             new_population.append(new_individual)
 
         return elite, new_population
@@ -133,24 +135,31 @@ class TournamentSelection:
     def _select_llm_agents(
         self,
         population: PopulationT,
-    ) -> tuple[LLMAlgorithm, PopulationT]:
+    ) -> tuple[EvolvableAlgorithmProtocol, PopulationT]:
         """Return best agent and new population of agents following tournament selection. Used for
         a population of :class:`LLMAlgorithm <agilerl.algorithms.core.LLMAlgorithm>` agents.
 
         :param population: Population of agents
         :type population: PopulationT
         :return: Elite agent and new population
-        :rtype: tuple[LLMAlgorithm, PopulationT]
+        :rtype: tuple[EvolvableAlgorithmProtocol, PopulationT]
         """
+        # Entries are set to None below to drop this function's *and the caller's*
+        # last references to agents that don't survive selection: LLM agents hold
+        # multi-GB models, so the memory must be released as we go.
+        agent_slots = cast("list[EvolvableAlgorithm | None]", population)
+
         accelerator = population[0].accelerator
-        new_population_idxs = []
+        new_population_idxs: list[tuple[int, int, bool]] = []
         old_population_idxs = [ind.index for ind in population]
-        unwanted_agents = {}
+        unwanted_agents: set[int] = set()
+        elite: EvolvableAlgorithmProtocol | None = None
 
         if accelerator is None or (
             accelerator is not None and accelerator.is_main_process
         ):
-            elite_idx, rank, max_id = self._elitism(population)
+            best_agent, rank, max_id = self._elitism(population)
+            elite_idx = best_agent.index
             if self.elitism:  # keep top agent in population
                 new_population_idxs.append((elite_idx, elite_idx, True))
                 selection_size = self.population_size - 1
@@ -183,33 +192,45 @@ class TournamentSelection:
         # Delete any unwanted agents from memory
         for agent_idx in old_population_idxs:
             if agent_idx in unwanted_agents:
-                agent_ref = population[old_population_idxs.index(agent_idx)]
-                if agent_ref.accelerator is not None:
-                    agent_ref.accelerator.wait_for_everyone()
-                agent_ref.clean_up()
-                if agent_ref.accelerator is not None:
-                    agent_ref.accelerator.wait_for_everyone()
-                agent_ref = None
+                unwanted_ref = agent_slots[old_population_idxs.index(agent_idx)]
+                if unwanted_ref is None:
+                    continue
+                if unwanted_ref.accelerator is not None:
+                    unwanted_ref.accelerator.wait_for_everyone()
+                unwanted_ref.clean_up()
+                if unwanted_ref.accelerator is not None:
+                    unwanted_ref.accelerator.wait_for_everyone()
 
-        new_population = []
-        index_tracker = {}
+        new_population: PopulationT = []
+        index_tracker: dict[int, EvolvableAlgorithmProtocol] = {}
         for idx_to_clone, new_idx, is_elite in new_population_idxs:
-            if (
-                agent_ref := population[old_population_idxs.index(idx_to_clone)]
-            ) is not None:
+            slot = old_population_idxs.index(idx_to_clone)
+            if (agent_ref := agent_slots[slot]) is not None:
                 if agent_ref.accelerator is not None:
                     agent_ref.accelerator.wait_for_everyone()
-                actor_parent = agent_ref.clone(new_idx, wrap=False)
+                actor_parent = agent_ref.clone(index=new_idx, wrap=False)
                 if agent_ref.accelerator is not None:
                     agent_ref.accelerator.wait_for_everyone()
                 agent_ref.clean_up()
                 if agent_ref.accelerator is not None:
                     agent_ref.accelerator.wait_for_everyone()
-                agent_ref = population[old_population_idxs.index(idx_to_clone)] = None
+                agent_slots[slot] = None
                 index_tracker[idx_to_clone] = actor_parent
             else:
-                actor_parent = index_tracker[idx_to_clone].clone(new_idx, wrap=False)
+                actor_parent = index_tracker[idx_to_clone].clone(
+                    index=new_idx,
+                    wrap=False,
+                )
             if is_elite:
                 elite = actor_parent
             new_population.append(actor_parent)
+
+        if elite is None:
+            msg = (
+                "Tournament selection produced no elite agent. This happens when "
+                "elitism is disabled on a non-main process, where the elite is "
+                "never resolved from the broadcast selection."
+            )
+            raise RuntimeError(msg)
+
         return elite, new_population

@@ -1,7 +1,7 @@
 import logging
 import warnings
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 from accelerate import Accelerator
@@ -19,11 +19,11 @@ from agilerl.utils.utils import (
     save_population_checkpoint,
     tournament_selection_and_mutation,
 )
-from agilerl.vector import PzDummyVecEnv
+from agilerl.vector import PettingZooVecEnv, PzDummyVecEnv
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
 if TYPE_CHECKING:
-    from agilerl.typing import SingleAgentModule
+    from agilerl.typing import ExperiencesType, SingleAgentModule
 
 InitDictType = dict[str, Any] | None
 MultiAgentOnPolicyAlgorithms = IPPO
@@ -59,7 +59,7 @@ def train_multi_agent_on_policy(
     accelerator: Accelerator | None = None,
     wandb_api_key: str | None = None,
     wandb_kwargs: dict[str, Any] | None = None,
-) -> tuple[PopulationType, list[float]]:
+) -> tuple[PopulationType, list[float] | list[dict[str, float]]]:
     """Run the general on-policy multi-agent RL training; returns trained population of agents
     and their fitnesses.
 
@@ -150,10 +150,12 @@ def train_multi_agent_on_policy(
         )
 
     # Ensure environment has vectorized interface
-    if not hasattr(env, "num_envs"):
-        env = PzDummyVecEnv(env)
+    vec_env = cast(
+        "PettingZooVecEnv",
+        env if hasattr(env, "num_envs") else PzDummyVecEnv(env),
+    )
 
-    num_envs = env.num_envs
+    num_envs = vec_env.num_envs
 
     save_path = (
         checkpoint_path.split(".pt")[0]
@@ -205,13 +207,15 @@ def train_multi_agent_on_policy(
             agent.set_training_mode(True)
             agent.init_training_step()
 
-            obs, info = env.reset()
+            obs, info = vec_env.reset()
             scores = (
                 np.zeros((num_envs, 1))
                 if sum_scores
                 else np.zeros((num_envs, len(agent.agent_ids)))
             )
-            completed_episode_scores = []
+            # `sum_scores` fixes the shape of every entry for the whole run: a scalar
+            # per episode when summing, otherwise a per-sub-agent row.
+            completed_episode_scores: list[float | list[float]] = []
             steps = 0
             for _ in range(-(evo_steps // -agent.learn_step)):
                 states = {agent_id: [] for agent_id in agent.agent_ids}
@@ -239,19 +243,30 @@ def train_multi_agent_on_policy(
                             else agent.get_group_id(agent_id)
                         )
                         agent_space = agent.possible_action_spaces[agent_id]
-                        policy = getattr(agent, agent.registry.policy())
+                        policy_name = agent.registry.policy()
+                        assert policy_name is not None, (
+                            "Agent registry does not define a policy network."
+                        )
+                        policy = getattr(agent, policy_name)
                         agent_policy: SingleAgentModule = policy[network_id]
 
                         if compiled_agent:
-                            agent_policy = agent_policy._orig_mod
+                            # `torch.compile` wraps the policy module; `_orig_mod` is
+                            # declared on `OptimizedModule` alone.
+                            agent_policy = agent_policy._orig_mod  # ty: ignore[unresolved-attribute]
 
                         if isinstance(agent_policy, StochasticActor) and isinstance(
                             agent_space,
                             spaces.Box,
                         ):
                             if agent_policy.squash_output:
+                                # NOTE: `StochasticActor.scale_action` takes and
+                                # returns a tensor on the policy's device, so the
+                                # scaled action reaches the environment as a tensor
+                                # rather than an array. `PPO.get_action` converts
+                                # with `.cpu().data.numpy()` after scaling.
                                 clipped_agent_action = agent_policy.scale_action(
-                                    agent_action,
+                                    agent_action,  # ty: ignore[invalid-argument-type]
                                 )
                             else:
                                 clipped_agent_action = np.clip(
@@ -264,9 +279,10 @@ def train_multi_agent_on_policy(
 
                         clipped_action[agent_id] = clipped_agent_action
 
-                    # Act in environment
-                    next_obs, reward, termination, truncation, info = env.step(
-                        clipped_action,
+                    # Act in environment. Squashed actions arrive as tensors (see the
+                    # NOTE above), which the vectorized env converts on the way in.
+                    next_obs, reward, termination, truncation, info = vec_env.step(
+                        clipped_action,  # ty: ignore[invalid-argument-type]
                     )
 
                     # Compute score increment (replace NaNs representing inactive agents with 0)
@@ -336,17 +352,21 @@ def train_multi_agent_on_policy(
                     next_done,
                 )
 
-                # Learn according to agent's RL algorithm
-                agent.learn(experiences)
+                # Learn according to agent's RL algorithm. The rollout is a tuple of
+                # per-sub-agent dictionaries, which `ExperiencesType`
+                # (agilerl/typing.py) does not yet cover.
+                agent.learn(cast("ExperiencesType", experiences))
 
-            agent.add_scores(completed_episode_scores)
+            agent.add_scores(
+                cast("list[float] | list[list[float]]", completed_episode_scores),
+            )
             agent.finalize_training_step(steps)
             pbar.update(steps // population.size)
 
         # Evaluate population
         for agent in population.agents:
             agent.test(
-                env,
+                vec_env,
                 max_steps=eval_steps,
                 loop=eval_loop,
                 sum_scores=sum_scores,
@@ -365,9 +385,13 @@ def train_multi_agent_on_policy(
 
         # Tournament selection and population mutation
         if tournament and mutation is not None:
+            # `tournament_selection_and_mutation` takes and returns an invariant
+            # `list[EvolvableAlgorithmProtocol]`, so a concrete population is assignable
+            # in neither direction; making it generic in the agent type
+            # (agilerl/utils/utils.py) removes both suppressions.
             population.update(
-                tournament_selection_and_mutation(
-                    population=population.agents,
+                tournament_selection_and_mutation(  # ty: ignore[invalid-argument-type]
+                    population=population.agents,  # ty: ignore[invalid-argument-type]
                     tournament=tournament,
                     mutation=mutation,
                     env_name=env_name,
@@ -381,8 +405,9 @@ def train_multi_agent_on_policy(
         # Save model checkpoint
         if checkpoint is not None:
             if population.local_step // checkpoint > checkpoint_count:
+                # `save_population_checkpoint` takes the same invariant list.
                 save_population_checkpoint(
-                    population=population.agents,
+                    population=population.agents,  # ty: ignore[invalid-argument-type]
                     save_path=save_path,
                     overwrite_checkpoints=overwrite_checkpoints,
                     accelerator=accelerator,

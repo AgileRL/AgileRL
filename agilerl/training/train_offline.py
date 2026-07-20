@@ -1,8 +1,9 @@
 import logging
 import warnings
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
+import gymnasium as gym
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
 
@@ -13,7 +14,6 @@ from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
-from agilerl.typing import GymEnvType
 from agilerl.utils.minari_utils import minari_to_agile_buffer
 from agilerl.utils.utils import (
     default_progress_bar,
@@ -22,6 +22,13 @@ from agilerl.utils.utils import (
     tournament_selection_and_mutation,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from tensordict import TensorDict
+
+    from agilerl.typing import ExperiencesType
+
 InitDictType = dict[str, Any] | None
 PopulationType = list[CQN]
 
@@ -29,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 def train_offline(
-    env: GymEnvType,
+    env: gym.vector.VectorEnv,
     env_name: str,
     algo: str,
     pop: PopulationType,
@@ -61,8 +68,8 @@ def train_offline(
 ) -> tuple[PopulationType, list[float]]:
     """Run the general offline RL training; returns trained population of agents and their fitnesses.
 
-    :param env: The environment to train in
-    :type env: Gym-style environment
+    :param env: The vectorized environment used to evaluate the population
+    :type env: gym.vector.VectorEnv
     :param env_name: Environment name
     :type env_name: str
     :param algo: RL algorithm name
@@ -257,9 +264,14 @@ def train_offline(
             agent.set_training_mode(True)
             agent.init_training_step()
 
+            # `Sampler.sample` is bound to one of the sampling strategies at
+            # construction time, so only its return type is statically known. The
+            # buffer hands back `TensorDict` batches, which `ExperiencesType`
+            # (agilerl/typing.py) does not yet cover - hence the cast to it.
+            sample = cast("Callable[..., TensorDict]", sampler.sample)
             for _idx_step in range(evo_steps):
-                experiences = sampler.sample(agent.batch_size)
-                agent.learn(experiences)
+                experiences = sample(agent.batch_size)
+                agent.learn(cast("ExperiencesType", experiences))
 
             agent.finalize_training_step(evo_steps)
             pbar.update(evo_steps // population.size)
@@ -281,13 +293,19 @@ def train_offline(
             logger.info("Target score has been reached. Stopping training.")
             population.finish()
             pbar.close()
-            return population.agents, population.last_fitnesses
+            # Single-agent fitnesses are scalars; `Population` types them as the
+            # wider scalar-or-per-agent-dict row shared with multi-agent training.
+            return population.agents, cast("list[float]", population.last_fitnesses)
 
         # Tournament selection and population mutation
         if tournament and mutation is not None:
+            # `tournament_selection_and_mutation` takes and returns an invariant
+            # `list[EvolvableAlgorithmProtocol]`, so a concrete population is assignable
+            # in neither direction; making it generic in the agent type
+            # (agilerl/utils/utils.py) removes both suppressions.
             population.update(
-                tournament_selection_and_mutation(
-                    population=population.agents,
+                tournament_selection_and_mutation(  # ty: ignore[invalid-argument-type]
+                    population=population.agents,  # ty: ignore[invalid-argument-type]
                     tournament=tournament,
                     mutation=mutation,
                     env_name=env_name,
@@ -301,8 +319,9 @@ def train_offline(
         # Save model checkpoint
         if checkpoint is not None:
             if population.agents[0].metrics.steps // checkpoint > checkpoint_count:
+                # `save_population_checkpoint` takes the same invariant list.
                 save_population_checkpoint(
-                    population=population.agents,
+                    population=population.agents,  # ty: ignore[invalid-argument-type]
                     save_path=save_path,
                     overwrite_checkpoints=overwrite_checkpoints,
                     accelerator=accelerator,
@@ -311,4 +330,4 @@ def train_offline(
 
     population.finish()
     pbar.close()
-    return population.agents, population.last_fitnesses
+    return population.agents, cast("list[float]", population.last_fitnesses)

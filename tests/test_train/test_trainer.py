@@ -2502,6 +2502,7 @@ class TestMakeEnvBranches:
 
     def test_llm_non_multiturn_calls_make_env(self):
         """LLMEnvSpec non-multiturn sets fields and calls make_env."""
+        from agilerl.models import LLMAlgorithmSpec
         from agilerl.models.env import LLMEnvSpec, LLMEnvType
 
         mock_env = MagicMock()
@@ -2521,7 +2522,8 @@ class TestMakeEnvBranches:
             "agilerl.training.trainer.isinstance",
             side_effect=lambda o, c: (
                 True
-                if c is LLMEnvSpec and o is trainer.env_spec
+                if (c is LLMEnvSpec and o is trainer.env_spec)
+                or (c is LLMAlgorithmSpec and o is trainer.algorithm_spec)
                 else type.__instancecheck__(c, o)
                 if isinstance(c, type)
                 else False

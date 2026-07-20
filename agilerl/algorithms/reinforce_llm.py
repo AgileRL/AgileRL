@@ -762,19 +762,13 @@ class REINFORCE(LLMAlgorithm):
         eval_context = getattr(env, "eval_mode", nullcontext)
         with eval_context():
             if isinstance(env, ReasoningGym):
-                # Upstream fix: agilerl/llm_envs/reasoning.py annotates
-                # ``reset`` as returning an (obs, info) tuple, but it returns
-                # just the prompt list.
-                prompts = cast("list[ReasoningPrompts]", env.reset())
+                prompts = env.reset()
                 rewards = []
                 for _ in range(loop):
                     completion_ids = self.get_action(
                         prompts, training=False
                     ).completion_ids
-                    # Upstream fix: agilerl/llm_envs/reasoning.py annotates
-                    # ``step`` as taking one Tensor, but it consumes the
-                    # per-trajectory completion list.
-                    next_prompts, reward = env.step(completion_ids)  # ty: ignore[invalid-argument-type]
+                    next_prompts, reward = env.step(completion_ids)
                     prompts = next_prompts
                     rewards.append(reward)
                 reward_tensor = torch.cat(rewards)

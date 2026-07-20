@@ -2,15 +2,15 @@ import logging
 import warnings
 from collections.abc import Callable
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
+import gymnasium as gym
 from accelerate import Accelerator
 
 from agilerl.algorithms import PPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
-from agilerl.typing import GymEnvType
 from agilerl.utils.utils import (
     default_progress_bar,
     init_loggers,
@@ -19,15 +19,22 @@ from agilerl.utils.utils import (
 )
 from agilerl.vector import DummyVecEnv
 
+if TYPE_CHECKING:
+    from agilerl.rollouts.on_policy import RolloutReturn
+
 InitDictType = dict[str, Any] | None
 OnPolicyAlgorithms = PPO
 PopulationType = list[OnPolicyAlgorithms]
+
+# Rollout collectors take the agent and environment positionally and the rest of
+# the rollout state by keyword.
+CollectRolloutsFn = Callable[..., "RolloutReturn"]
 
 logger = logging.getLogger(__name__)
 
 
 def train_on_policy(
-    env: GymEnvType,
+    env: gym.Env | gym.vector.VectorEnv,
     env_name: str,
     algo: str,
     pop: PopulationType,
@@ -52,9 +59,7 @@ def train_on_policy(
     accelerator: Accelerator | None = None,
     wandb_api_key: str | None = None,
     wandb_kwargs: dict[str, Any] | None = None,
-    collect_rollouts_fn: (
-        Callable[[OnPolicyAlgorithms, GymEnvType, int], None] | None
-    ) = None,
+    collect_rollouts_fn: CollectRolloutsFn | None = None,
 ) -> tuple[PopulationType, list[float]]:
     """Run the general on-policy RL training; returns trained population of agents
     and their fitnesses.
@@ -150,11 +155,15 @@ def train_on_policy(
             stacklevel=2,
         )
 
-    # Ensure environment has vectorized interface
-    if not hasattr(env, "num_envs"):
-        env = DummyVecEnv(env)
+    # Ensure environment has vectorized interface. `DummyVecEnv` duck-types the
+    # `VectorEnv` API rather than subclassing it, so the cast matches the annotations
+    # of the rollout and evaluation helpers it is handed to.
+    vec_env = cast(
+        "gym.vector.VectorEnv",
+        env if hasattr(env, "num_envs") else DummyVecEnv(env),
+    )
 
-    num_envs = env.num_envs
+    num_envs = vec_env.num_envs
     save_path = (
         checkpoint_path.split(".pt")[0]
         if checkpoint_path is not None
@@ -223,7 +232,7 @@ def train_on_policy(
                 episode_scores, last_obs, last_done, last_scores, last_info = (
                     active_collect(
                         agent,
-                        env,
+                        vec_env,
                         n_steps=n_steps,
                         last_obs=last_obs,
                         last_done=last_done,
@@ -245,7 +254,7 @@ def train_on_policy(
         # Evaluate population
         for agent in population.agents:
             agent.test(
-                env,
+                vec_env,
                 max_steps=eval_steps,
                 loop=eval_loop,
             )
@@ -259,13 +268,19 @@ def train_on_policy(
             logger.info("Target score has been reached. Stopping training.")
             population.finish()
             pbar.close()
-            return population.agents, population.last_fitnesses
+            # Single-agent fitnesses are scalars; `Population` types them as the
+            # wider scalar-or-per-agent-dict row shared with multi-agent training.
+            return population.agents, cast("list[float]", population.last_fitnesses)
 
         # Tournament selection and population mutation
         if tournament and mutation is not None:
+            # `tournament_selection_and_mutation` takes and returns an invariant
+            # `list[EvolvableAlgorithmProtocol]`, so a concrete population is assignable
+            # in neither direction; making it generic in the agent type
+            # (agilerl/utils/utils.py) removes both suppressions.
             population.update(
-                tournament_selection_and_mutation(
-                    population=population.agents,
+                tournament_selection_and_mutation(  # ty: ignore[invalid-argument-type]
+                    population=population.agents,  # ty: ignore[invalid-argument-type]
                     tournament=tournament,
                     mutation=mutation,
                     env_name=env_name,
@@ -279,8 +294,9 @@ def train_on_policy(
         # Save model checkpoint
         if checkpoint is not None:
             if population.local_step // checkpoint > checkpoint_count:
+                # `save_population_checkpoint` takes the same invariant list.
                 save_population_checkpoint(
-                    population=population.agents,
+                    population=population.agents,  # ty: ignore[invalid-argument-type]
                     save_path=save_path,
                     overwrite_checkpoints=overwrite_checkpoints,
                     accelerator=accelerator,
@@ -289,4 +305,4 @@ def train_on_policy(
 
     population.finish()
     pbar.close()
-    return population.agents, population.last_fitnesses
+    return population.agents, cast("list[float]", population.last_fitnesses)

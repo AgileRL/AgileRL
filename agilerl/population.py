@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import io
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING, Generic, TypeVar, cast
 
 import numpy as np
 from rich.console import Console
@@ -13,6 +13,7 @@ from rich.text import Text
 
 from agilerl.algorithms.core.base import MultiAgentRLAlgorithm
 from agilerl.logger import Logger
+from agilerl.metrics import MultiAgentMetrics
 from agilerl.utils.population_utils import (
     NestedMetricRow,
     ScalarMetricRow,
@@ -41,6 +42,31 @@ NestedRow = list[dict[str, float]]
 ScalarOrNestedRow = ScalarRow | NestedRow
 
 
+def _nested_entries(row: ScalarOrNestedRow) -> NestedRow:
+    """Return the per-sub-agent mappings of a metric row.
+
+    A row is homogeneous by construction; the filter recovers the nested layout
+    without asserting it.
+
+    :param row: A per-agent metric row.
+    :type row: ScalarOrNestedRow
+    :returns: The mapping entries of the row.
+    :rtype: NestedRow
+    """
+    return [value for value in row if isinstance(value, dict)]
+
+
+def _scalar_entries(row: ScalarOrNestedRow) -> ScalarRow:
+    """Return the scalar entries of a metric row.
+
+    :param row: A per-agent metric row.
+    :type row: ScalarOrNestedRow
+    :returns: The scalar entries of the row.
+    :rtype: ScalarRow
+    """
+    return [value for value in row if not isinstance(value, dict)]
+
+
 @dataclass(frozen=True)
 class PopulationMetrics:
     """Immutable snapshot of per-agent population metrics.
@@ -51,10 +77,10 @@ class PopulationMetrics:
 
     fitnesses: ScalarOrNestedRow
     scores: ScalarOrNestedRow
-    steps: ScalarRow
-    steps_per_second: ScalarRow
+    steps: list[int]
+    steps_per_second: list[float]
     mutations: list[str]
-    indices: ScalarRow
+    indices: list[int]
     additional_metrics: list[dict[str, float]]
     hyperparameters: list[dict[str, float]]
     nonscalar_additional_metrics: list[dict[str, np.ndarray | None]] = field(
@@ -78,28 +104,28 @@ class PopulationMetrics:
         if not self.fitnesses:
             return float("nan")
         if isinstance(self.fitnesses[0], dict):
-            return get_nested_mean(self.fitnesses)
-        return float(np.mean(self.fitnesses))
+            return get_nested_mean(_nested_entries(self.fitnesses))
+        return float(np.mean(_scalar_entries(self.fitnesses)))
 
     @property
     def best_fitness(self) -> float | dict[str, float]:
         if not self.fitnesses:
             return float("nan")
         if isinstance(self.fitnesses[0], dict):
-            fitnesses = self.fitnesses
+            fitnesses = _nested_entries(self.fitnesses)
             return {
                 key: float(np.nanmax([fitness[key] for fitness in fitnesses]))
                 for key in fitnesses[0]
             }
-        return float(np.max(self.fitnesses))
+        return float(np.max(_scalar_entries(self.fitnesses)))
 
     @property
     def mean_score(self) -> float | dict[str, float]:
         if not self.scores:
             return float("nan")
         if isinstance(self.scores[0], dict):
-            return get_nested_mean(self.scores)
-        return float(np.nanmean(self.scores))
+            return get_nested_mean(_nested_entries(self.scores))
+        return float(np.nanmean(_scalar_entries(self.scores)))
 
     @property
     def mean_additional_metrics(self) -> dict[str, float]:
@@ -120,9 +146,11 @@ class PopulationMetrics:
             "train/steps_per_second": self.mean_fps,
         }
 
+        # Both aggregates follow the layout of ``fitnesses``, so the guards on
+        # ``best_fitness`` only ever take the branch matching ``mean_fitness``.
         mean_fitness = self.mean_fitness
+        best_fitness = self.best_fitness
         if isinstance(mean_fitness, dict):
-            best_fitness = self.best_fitness
             for agent_id, value in mean_fitness.items():
                 d[f"eval/mean_fitness/{agent_id}"] = value
             if isinstance(best_fitness, dict):
@@ -130,7 +158,8 @@ class PopulationMetrics:
                     d[f"eval/best_fitness/{agent_id}"] = value
         else:
             d["eval/mean_fitness"] = mean_fitness
-            d["eval/best_fitness"] = self.best_fitness
+            if not isinstance(best_fitness, dict):
+                d["eval/best_fitness"] = best_fitness
 
         if self.scores:
             mean_score = self.mean_score
@@ -481,9 +510,14 @@ class Population(Generic[AgentT]):
         self.is_multi_agent = all(
             isinstance(agent, MultiAgentRLAlgorithm) for agent in self._agents
         )
-        self.additional_metric_names = sample_agent.metrics.additional_metrics
-        self.nonscalar_metric_names = sample_agent.metrics.nonscalar_metrics
-        self.agent_ids = sample_agent.metrics.agent_ids if self.is_multi_agent else None
+        sample_metrics = sample_agent.metrics
+        self.additional_metric_names = sample_metrics.additional_metrics
+        self.nonscalar_metric_names = sample_metrics.nonscalar_metrics
+        self.agent_ids = (
+            sample_metrics.agent_ids
+            if isinstance(sample_metrics, MultiAgentMetrics)
+            else None
+        )
 
     @property
     def agents(self) -> list[AgentT]:
@@ -624,7 +658,7 @@ class Population(Generic[AgentT]):
         :returns: Fitness values for each individual in population.
         :rtype: ScalarOrNestedRow
         """
-        fitnesses = []
+        fitnesses: list[float | dict[str, float]] = []
         for agent in self.agents:
             if not agent.fitness:
                 fitnesses.append(float("nan"))
@@ -642,16 +676,19 @@ class Population(Generic[AgentT]):
                 if not self.agent_ids:
                     msg = "Received nested fitness values without configured agent_ids."
                     raise ValueError(msg)
+
+                sub_fitness = list(latest_fitness)
                 fitnesses.append(
                     {
-                        agent_id: float(latest_fitness[idx])
+                        agent_id: float(sub_fitness[idx])
                         for idx, agent_id in enumerate(self.agent_ids)
                     }
                 )
             else:
                 fitnesses.append(float(latest_fitness))
 
-        return fitnesses
+        # Every agent takes the same branch above, so the row is homogeneous.
+        return cast("ScalarOrNestedRow", fitnesses)
 
     def _collect_hyperparameters(self) -> list[dict[str, float]]:
         """Collect the defined evolvable RL hyperparameters from all agents.
@@ -683,6 +720,11 @@ class Population(Generic[AgentT]):
                 for agent in self.agents
             ]
 
+        agent_ids = self.agent_ids
+        if not agent_ids:
+            msg = "Received nested scores without configured agent_ids."
+            raise ValueError(msg)
+
         # Multi-agent, non-summed: per-sub-agent mean scores
         scores: NestedRow = []
         for agent in self.agents:
@@ -691,11 +733,11 @@ class Population(Generic[AgentT]):
                 scores.append(
                     {
                         agent_id: float(mean_score_subagent[idx])
-                        for idx, agent_id in enumerate(self.agent_ids)
+                        for idx, agent_id in enumerate(agent_ids)
                     }
                 )
             else:
-                scores.append(dict.fromkeys(self.agent_ids, float("nan")))
+                scores.append(dict.fromkeys(agent_ids, float("nan")))
 
         return scores
 
@@ -705,15 +747,16 @@ class Population(Generic[AgentT]):
         :returns: Per-agent mean values for all registered additional metrics.
         :rtype: list[dict[str, float]]
         """
-        result = []
+        result: list[dict[str, float]] = []
         for agent in self.agents:
-            d = {}
+            d: dict[str, float] = {}
+            metrics = agent.metrics
             for name in self.additional_metric_names:
-                if self.is_multi_agent:
-                    for agent_id in self.agent_ids:
-                        d[f"{name}/{agent_id}"] = agent.metrics.get_mean(name, agent_id)
+                if isinstance(metrics, MultiAgentMetrics):
+                    for agent_id in metrics.agent_ids:
+                        d[f"{name}/{agent_id}"] = metrics.get_mean(name, agent_id)
                 else:
-                    d[name] = agent.metrics.get_mean(name)
+                    d[name] = metrics.get_mean(name)
             result.append(d)
         return result
 
@@ -723,16 +766,15 @@ class Population(Generic[AgentT]):
         :returns: One dict per agent mapping metric names to their accumulated arrays.
         :rtype: list[dict[str, numpy.ndarray | None]]
         """
-        result = []
+        result: list[dict[str, np.ndarray | None]] = []
         for agent in self.agents:
-            d = {}
+            d: dict[str, np.ndarray | None] = {}
+            metrics = agent.metrics
             for name in self.nonscalar_metric_names:
-                if self.is_multi_agent:
-                    for agent_id in self.agent_ids:
-                        d[f"{name}/{agent_id}"] = agent.metrics.get_histogram(
-                            name, agent_id
-                        )
+                if isinstance(metrics, MultiAgentMetrics):
+                    for agent_id in metrics.agent_ids:
+                        d[f"{name}/{agent_id}"] = metrics.get_histogram(name, agent_id)
                 else:
-                    d[name] = agent.metrics.get_histogram(name)
+                    d[name] = metrics.get_histogram(name)
             result.append(d)
         return result

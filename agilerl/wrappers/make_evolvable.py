@@ -1,6 +1,6 @@
 import warnings
 from collections import OrderedDict
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -20,7 +20,10 @@ from agilerl.utils.evolvable_networks import (
     layer_init,
 )
 
-LayerInfo = dict[str, dict[int, str]]
+# Layer information detected from an arbitrary user network. Values are heterogeneous:
+# "conv_layer_type" maps to a string, "activation_layers"/"norm_layers" to
+# ``dict[int, str]``, and "pooling_layers" to ``dict[int, dict[str, Any]]``.
+LayerInfo = dict[str, Any]
 
 
 class MakeEvolvable(EvolvableModule):
@@ -78,6 +81,25 @@ class MakeEvolvable(EvolvableModule):
 
     mlp_layer_info: LayerInfo
     cnn_layer_info: LayerInfo
+
+    # Architecture detected from the wrapped network. The convolutional attributes are
+    # only populated for networks with conv layers; the CNN code paths (including the
+    # CNN mutation methods, which are removed otherwise) are the only readers.
+    num_inputs: int
+    num_outputs: int
+    hidden_size: list[int]
+    mlp_activation: str
+    mlp_output_activation: str | None
+    arch: str
+    in_channels: int
+    channel_size: list[int]
+    kernel_size: list[tuple[int, ...]]
+    stride_size: list[tuple[int, ...]]
+    padding: list[tuple[int, ...]]
+    cnn_output_size: torch.Size
+    feature_net: nn.Module
+    value_net: nn.Module | None
+    advantage_net: nn.Module | None
 
     def __init__(
         self,
@@ -155,13 +177,16 @@ class MakeEvolvable(EvolvableModule):
             if secondary_input_tensor is not None
             else secondary_input_tensor
         )
+        # Placeholders until `detect_architecture` (or the `kwargs` clone path) fills
+        # these in. They stay `None` for MLP-only networks, whose code paths never read
+        # them: the CNN mutation methods are removed from such instances below.
         (
             self.in_channels,
             self.channel_size,
             self.kernel_size,
             self.stride_size,
             self.padding,
-        ) = (None, None, None, None, None)
+        ) = cast("Any", (None, None, None, None, None))
 
         # If first instance, network used to instantiate, upon cloning, init_dict used instead
         if not kwargs:
@@ -192,8 +217,8 @@ class MakeEvolvable(EvolvableModule):
         return self.mlp_activation
 
     @property
-    def output_activation(self) -> str:
-        """Return the output activation function."""
+    def output_activation(self) -> str | None:
+        """Return the output activation function, if the network has one."""
         return self.mlp_output_activation
 
     def get_output_dense(self) -> nn.Module:
@@ -204,7 +229,7 @@ class MakeEvolvable(EvolvableModule):
             f"{'value' if self.value_net is not None else 'feature'}_linear_layer_output",
         )
 
-    def init_weights_gaussian(
+    def init_weights_gaussian(  # ty: ignore[invalid-method-override]  # intentional redefinition: base exposes a static helper, evolvable modules expose an instance-level API
         self, std_coeff: float = 4.0, output_coeff: float = 2.0
     ) -> None:
         """Initialise network weights using Gaussian distribution.
@@ -216,7 +241,8 @@ class MakeEvolvable(EvolvableModule):
         """
         layers = list(self.feature_net.children())
         if self.arch == "cnn":
-            layers += list(self.value_net.children())
+            # Convolutional architectures always build a value net.
+            layers += list(cast("nn.Module", self.value_net).children())
 
         # Initialize network layers
         l_no = 0
@@ -264,17 +290,21 @@ class MakeEvolvable(EvolvableModule):
 
             # Concatenate actions if passed to network as a separate tensor
             if xc is not None:
+                if not isinstance(xc, torch.Tensor):
+                    xc = torch.FloatTensor(np.array(xc))
                 if self.accelerator is None:
                     xc = xc.to(self.device)
                 x = torch.cat([x, xc], dim=1)
 
-            value = self.value_net(x)
+            # Convolutional architectures always build a value net.
+            value = cast("nn.Module", self.value_net)(x)
 
         # add in cnn functionality
         if self.rainbow:
-            advantage: torch.Tensor = self.advantage_net(x)
+            # Rainbow architectures always build value and advantage nets.
+            advantage: torch.Tensor = cast("nn.Module", self.advantage_net)(x)
             if not self.cnn_layer_info:
-                value: torch.Tensor = self.value_net(x)
+                value = cast("nn.Module", self.value_net)(x)
                 value = value.view(-1, 1, self.num_atoms)
                 advantage = advantage.view(-1, self.num_outputs, self.num_atoms)
                 x = value + advantage - advantage.mean(1, keepdim=True)
@@ -295,7 +325,8 @@ class MakeEvolvable(EvolvableModule):
             x = x.clamp(min=1e-3)
 
             if q:
-                x = torch.sum(x * self.support, dim=2)
+                # Rainbow networks are always constructed with an atoms support tensor.
+                x = torch.sum(x * cast("torch.Tensor", self.support), dim=2)
         elif self.cnn_layer_info:
             if value is None:
                 msg = "Value stream is not initialized."
@@ -334,8 +365,8 @@ class MakeEvolvable(EvolvableModule):
         def register_hooks(module: nn.Module) -> None:
             def forward_hook(
                 module: nn.Module,
-                input_tensor: torch.Tensor,
-                output: torch.Tensor,
+                inputs: tuple[Any, ...],
+                output: Any,
             ) -> None:
                 # Convolutional layer detection
                 if isinstance(module, nn.modules.conv._ConvNd):
@@ -608,8 +639,16 @@ class MakeEvolvable(EvolvableModule):
                 output_layer = layer_init(output_layer)
 
             if self.output_vanish:
-                output_layer.weight.data.mul_(0.1)
-                output_layer.bias.data.mul_(0.1)
+                if isinstance(output_layer, NoisyLinear):
+                    # NoisyLinear parameterises its weights as mu/sigma pairs rather
+                    # than a single weight tensor.
+                    output_layer.weight_mu.data.mul_(0.1)
+                    output_layer.bias_mu.data.mul_(0.1)
+                    output_layer.weight_sigma.data.mul_(0.1)
+                    output_layer.bias_sigma.data.mul_(0.1)
+                else:
+                    output_layer.weight.data.mul_(0.1)
+                    output_layer.bias.data.mul_(0.1)
 
             net_dict[f"{name}_linear_layer_output"] = output_layer
             if mlp_output_activation is not None:
@@ -623,9 +662,9 @@ class MakeEvolvable(EvolvableModule):
         self,
         input_size: int,
         channel_size: list[int],
-        kernel_size: list[int],
-        stride_size: list[int],
-        padding: list[int],
+        kernel_size: list[int] | list[tuple[int, ...]],
+        stride_size: list[int] | list[tuple[int, ...]],
+        padding: list[int] | list[tuple[int, ...]],
         name: str,
     ) -> nn.Sequential:
         """Create and returns convolutional neural network.
@@ -635,11 +674,11 @@ class MakeEvolvable(EvolvableModule):
         :param channel_size: Output channel sizes for each layer
         :type channel_size: list[int]
         :param kernel_size: Kernel sizes
-        :type kernel_size: list[int] or list[tuple[int]]
+        :type kernel_size: list[int] | list[tuple[int, ...]]
         :param stride_size: Stride sizes
-        :type stride_size: list[int] or list[tuple[int]]
+        :type stride_size: list[int] | list[tuple[int, ...]]
         :param padding: Convolutional layer padding
-        :type padding: list[int] or list[tuple[int]]
+        :type padding: list[int] | list[tuple[int, ...]]
         :param name: Layer name
         :type name: str
         """
@@ -714,8 +753,15 @@ class MakeEvolvable(EvolvableModule):
 
         return nn.Sequential(net_dict)
 
-    def build_networks(self) -> tuple[nn.Module, nn.Module, nn.Module | None]:
-        """Create and returns the feature and value net."""
+    def build_networks(self) -> tuple[nn.Module, nn.Module | None, nn.Module | None]:
+        """Create and returns the feature, value and advantage nets.
+
+        The value net is only built for convolutional or Rainbow architectures, and the
+        advantage net only for Rainbow architectures.
+
+        :return: Tuple of (feature net, value net, advantage net)
+        :rtype: tuple[nn.Module, nn.Module | None, nn.Module | None]
+        """
         # Check if any CNN layers otherwise return just a mlp
         if self.cnn_layer_info:
             feature_net = self.create_cnn(
@@ -733,7 +779,8 @@ class MakeEvolvable(EvolvableModule):
             input_size = (cnn_output).to(self.device).view(1, -1).size(1)
 
             if self.secondary_input_tensor is not None:
-                input_size += self.extra_critic_dims
+                # Set alongside `secondary_input_tensor` in the constructor.
+                input_size += cast("int", self.extra_critic_dims)
 
             if self.rainbow:
                 value_net = self.create_mlp(
@@ -1292,15 +1339,17 @@ class MakeEvolvable(EvolvableModule):
             else EvolvableModule.preserve_parameters
         )
 
+        # The rebuilt nets exist whenever their current counterparts do: both come from
+        # `build_networks`, which keys them off the (unchanged) architecture.
         if self.value_net is not None:
             new_value_net = preserve_params_fn(
                 old_net=self.value_net,
-                new_net=new_value_net,
+                new_net=cast("nn.Module", new_value_net),
             )
         if self.advantage_net is not None:
             new_advantage_net = preserve_params_fn(
                 old_net=self.advantage_net,
-                new_net=new_advantage_net,
+                new_net=cast("nn.Module", new_advantage_net),
             )
         new_feature_net = preserve_params_fn(
             old_net=self.feature_net,

@@ -1,8 +1,9 @@
 import logging
 import warnings
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
+import gymnasium as gym
 import numpy as np
 import torch
 from accelerate import Accelerator
@@ -20,7 +21,6 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks.actors import DeterministicActor
 from agilerl.population import Population
-from agilerl.typing import GymEnvType
 from agilerl.utils.utils import (
     default_progress_bar,
     init_loggers,
@@ -30,7 +30,11 @@ from agilerl.utils.utils import (
 from agilerl.vector import DummyVecEnv
 
 if TYPE_CHECKING:
-    from tensordict import TensorDictBase
+    from collections.abc import Callable
+
+    from tensordict import TensorDict, TensorDictBase
+
+    from agilerl.typing import ExperiencesType
 
 InitDictType = dict[str, Any] | None
 SupportedOffPolicy = DQN | RainbowDQN | DDPG | TD3
@@ -49,33 +53,56 @@ def _learn_from_buffer(
     per: bool,
 ) -> None:
     """Execute a single learning step for the agent."""
+    # `Sampler.sample` is bound to one of the sampling strategies at construction
+    # time, so only its return type is statically known. The buffers hand back
+    # `TensorDict` batches, which `ExperiencesType` (agilerl/typing.py) does not yet
+    # cover - the casts to it below record that gap.
+    sample = cast("Callable[..., TensorDict]", sampler.sample)
+
+    # Prioritized and n-step replay are the preserve of the RainbowDQN-style
+    # algorithms: only they anneal `beta`, take `n_experiences`/`per`, and return
+    # the indices and priorities to write back. The suppressions below cover the
+    # other members of the annotated population union, and the buffer protocol
+    # (`update_priorities` lives on `PrioritizedReplayBuffer`), for a path that is
+    # gated on the buffer the caller passed in.
     if per:
-        experiences = sampler.sample(agent.batch_size, agent.beta)
+        experiences = sample(
+            agent.batch_size,
+            agent.beta,  # ty: ignore[unresolved-attribute]
+        )
         n_step_experiences = (
-            n_step_sampler.sample(experiences["idxs"])
+            cast("Callable[..., TensorDict]", n_step_sampler.sample)(
+                experiences["idxs"],
+            )
             if n_step_sampler is not None
             else None
         )
-        _loss, idxs, priorities = agent.learn(
-            experiences,
-            n_experiences=n_step_experiences,
-            per=per,
+        _loss, idxs, priorities = agent.learn(  # ty: ignore[invalid-assignment, not-iterable]
+            cast("ExperiencesType", experiences),
+            n_experiences=cast("ExperiencesType | None", n_step_experiences),  # ty: ignore[unknown-argument]
+            per=per,  # ty: ignore[unknown-argument]
         )
-        memory.update_priorities(idxs, priorities)
+        memory.update_priorities(idxs, priorities)  # ty: ignore[unresolved-attribute]
     else:
-        experiences = sampler.sample(
+        experiences = sample(
             agent.batch_size,
             return_idx=n_step_memory is not None,
         )
         if n_step_sampler is not None:
-            n_step_experiences = n_step_sampler.sample(experiences["idxs"])
-            agent.learn(experiences, n_experiences=n_step_experiences)
+            n_step_experiences = cast(
+                "Callable[..., TensorDict]",
+                n_step_sampler.sample,
+            )(experiences["idxs"])
+            agent.learn(
+                cast("ExperiencesType", experiences),
+                n_experiences=cast("ExperiencesType", n_step_experiences),  # ty: ignore[unknown-argument]
+            )
         else:
-            agent.learn(experiences)
+            agent.learn(cast("ExperiencesType", experiences))
 
 
 def train_off_policy(
-    env: GymEnvType,
+    env: gym.Env | gym.vector.VectorEnv,
     env_name: str,
     algo: str,
     pop: PopulationType,
@@ -216,11 +243,15 @@ def train_off_policy(
             stacklevel=2,
         )
 
-    # Ensure environment has vectorized interface
-    if not hasattr(env, "num_envs"):
-        env = DummyVecEnv(env)
+    # Ensure environment has vectorized interface. `DummyVecEnv` duck-types the
+    # `VectorEnv` API rather than subclassing it, so the cast matches the annotations
+    # of the algorithm methods it is handed to.
+    vec_env = cast(
+        "gym.vector.VectorEnv",
+        env if hasattr(env, "num_envs") else DummyVecEnv(env),
+    )
 
-    num_envs = env.num_envs
+    num_envs = vec_env.num_envs
 
     save_path = (
         checkpoint_path.split(".pt")[0]
@@ -288,7 +319,7 @@ def train_off_policy(
             agent.set_training_mode(True)
             agent.init_training_step()
 
-            obs, info = env.reset()
+            obs, info = vec_env.reset()
             scores = np.zeros(num_envs)
             completed_episode_scores: list[float] = []
             steps = 0
@@ -318,7 +349,7 @@ def train_off_policy(
                     action = action.cpu().numpy()
 
                 # Act in environment
-                next_obs, reward, done, trunc, info = env.step(action)
+                next_obs, reward, done, trunc, info = vec_env.step(action)
                 scores += np.array(reward)
 
                 reset_noise_indices = []
@@ -329,7 +360,12 @@ def train_off_policy(
                         reset_noise_indices.append(idx)
 
                 if isinstance(agent, (DDPG, TD3)):
-                    agent.reset_action_noise(reset_noise_indices)
+                    # `reset_action_noise` fancy-indexes with its argument, so any
+                    # sequence of indices works; widening its annotation to
+                    # `Sequence[int] | np.ndarray` upstream drops this suppression.
+                    agent.reset_action_noise(
+                        reset_noise_indices,  # ty: ignore[invalid-argument-type]
+                    )
 
                 steps += num_envs
 
@@ -359,7 +395,11 @@ def train_off_policy(
                         ((agent.metrics.steps + idx_step + 1) * num_envs / max_steps),
                         1.0,
                     )
-                    agent.beta += fraction * (1.0 - agent.beta)
+                    # `beta` is annealed by the algorithms that support prioritized
+                    # replay (RainbowDQN), not by the population union as a whole.
+                    agent.beta += fraction * (  # ty: ignore[unresolved-attribute]
+                        1.0 - agent.beta  # ty: ignore[unresolved-attribute]
+                    )
 
                 # Learn according to learning frequency
                 # Handle learn_step > num_envs
@@ -402,7 +442,7 @@ def train_off_policy(
         # Evaluate population
         for agent in population.agents:
             agent.test(
-                env,
+                vec_env,
                 max_steps=eval_steps,
                 loop=eval_loop,
             )
@@ -415,13 +455,19 @@ def train_off_policy(
             logger.info("Target score has been reached. Stopping training.")
             population.finish()
             pbar.close()
-            return population.agents, population.last_fitnesses
+            # Single-agent fitnesses are scalars; `Population` types them as the
+            # wider scalar-or-per-agent-dict row shared with multi-agent training.
+            return population.agents, cast("list[float]", population.last_fitnesses)
 
         # Tournament selection and population mutation
         if tournament and mutation is not None:
+            # `tournament_selection_and_mutation` takes and returns an invariant
+            # `list[EvolvableAlgorithmProtocol]`, so a concrete population is assignable
+            # in neither direction; making it generic in the agent type
+            # (agilerl/utils/utils.py) removes both suppressions.
             population.update(
-                tournament_selection_and_mutation(
-                    population=population.agents,
+                tournament_selection_and_mutation(  # ty: ignore[invalid-argument-type]
+                    population=population.agents,  # ty: ignore[invalid-argument-type]
                     tournament=tournament,
                     mutation=mutation,
                     env_name=env_name,
@@ -435,8 +481,9 @@ def train_off_policy(
         # Save model checkpoint
         if checkpoint is not None:
             if population.local_step // checkpoint > checkpoint_count:
+                # `save_population_checkpoint` takes the same invariant list.
                 save_population_checkpoint(
-                    population=population.agents,
+                    population=population.agents,  # ty: ignore[invalid-argument-type]
                     save_path=save_path,
                     overwrite_checkpoints=overwrite_checkpoints,
                     accelerator=accelerator,
@@ -445,4 +492,4 @@ def train_off_policy(
 
     population.finish()
     pbar.close()
-    return population.agents, population.last_fitnesses
+    return population.agents, cast("list[float]", population.last_fitnesses)

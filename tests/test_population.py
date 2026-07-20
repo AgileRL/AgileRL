@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
+from agilerl.metrics import AgentMetrics, MultiAgentMetrics
 from agilerl.population import MetricsReport, Population, PopulationMetrics
 
 
@@ -65,13 +66,18 @@ def _make_mock_agent(
     agent.index = index
     agent.fitness = fitness if fitness is not None else [1.0]
 
-    metrics = MagicMock()
+    # The collectors dispatch on the concrete metrics class, so the double has
+    # to spec the matching one.
+    metrics = MagicMock(
+        spec=MultiAgentMetrics if agent_ids is not None else AgentMetrics,
+    )
     metrics.scores = scores if scores is not None else [10.0]
     metrics.steps = steps
     metrics.steps_per_second = steps_per_second
     metrics.additional_metrics = additional_metrics or []
     metrics.nonscalar_metrics = nonscalar_metrics or []
-    metrics.agent_ids = agent_ids
+    if agent_ids is not None:
+        metrics.agent_ids = agent_ids
     metrics.get_mean = MagicMock(return_value=0.5)
     metrics.get_histogram = MagicMock(return_value=np.array([1.0, 2.0]))
     metrics.clear = MagicMock()
@@ -439,7 +445,7 @@ class TestPopulationInit:
         from agilerl.algorithms.core.base import MultiAgentRLAlgorithm
 
         agent = MagicMock(spec=MultiAgentRLAlgorithm)
-        agent.metrics = MagicMock()
+        agent.metrics = MagicMock(spec=MultiAgentMetrics)
         agent.metrics.additional_metrics = []
         agent.metrics.nonscalar_metrics = []
         agent.metrics.agent_ids = ["a0", "a1"]
@@ -712,7 +718,7 @@ class TestCollectAdditionalMetrics:
 
     def test_multi_agent(self):
         """multi-agent path with agent_ids."""
-        a = _make_mock_agent(additional_metrics=["reward"])
+        a = _make_mock_agent(additional_metrics=["reward"], agent_ids=["a0", "a1"])
         a.metrics.get_mean.side_effect = lambda name, agent_id=None: {
             ("reward", "a0"): 1.0,
             ("reward", "a1"): 2.0,
@@ -743,7 +749,7 @@ class TestCollectNonscalarMetrics:
     def test_multi_agent(self):
         """multi-agent nonscalar metrics."""
         arr = np.array([1.0, 2.0])
-        a = _make_mock_agent(nonscalar_metrics=["hist"])
+        a = _make_mock_agent(nonscalar_metrics=["hist"], agent_ids=["a0", "a1"])
         a.metrics.get_histogram.return_value = arr
 
         pop = _make_population(

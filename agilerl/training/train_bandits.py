@@ -1,7 +1,7 @@
 import logging
 import warnings
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 from accelerate import Accelerator
 from tensordict import TensorDict
@@ -21,6 +21,11 @@ from agilerl.utils.utils import (
     save_population_checkpoint,
     tournament_selection_and_mutation,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from agilerl.typing import ExperiencesType
 
 InitDictType = dict[str, Any] | None
 PopulationType = list[NeuralTS | NeuralUCB]
@@ -210,15 +215,24 @@ def train_bandits(
             agent.set_training_mode(True)
             agent.init_training_step()
 
-            score = 0
+            # `Sampler.sample` is bound to one of the sampling strategies at
+            # construction time, so only its return type is statically known. The
+            # buffer hands back `TensorDict` batches, which `ExperiencesType`
+            # (agilerl/typing.py) does not yet cover - hence the cast to it.
+            sample = cast("Callable[..., TensorDict]", sampler.sample)
+
+            score = 0.0
             context = env.reset()
             for _idx_step in range(episode_steps):
                 # Get next action from agent
                 action = agent.get_action(context)
                 next_context, reward = env.step(action)
 
-                # Save experience to replay buffer
-                transition = TensorDict({"obs": context[action], "reward": reward})
+                # Save experience to replay buffer. `TensorDict` converts array-likes
+                # and scalars, but its stub only accepts tensor collections.
+                transition = TensorDict(
+                    {"obs": context[action], "reward": reward},  # ty: ignore[invalid-argument-type]
+                )
                 transition = transition.unsqueeze(0)
                 transition.batch_size = [1]
                 memory.add(transition)
@@ -226,11 +240,16 @@ def train_bandits(
                 # Learn according to learning frequency
                 if len(memory) >= agent.batch_size:
                     for _ in range(agent.learn_step):
-                        experiences = sampler.sample(agent.batch_size)
-                        agent.learn(experiences)
+                        experiences = sample(agent.batch_size)
+                        agent.learn(cast("ExperiencesType", experiences))
 
                 score += reward
-                agent.regret.append(agent.regret[-1] + 1 - reward)
+                # Regret accumulates the fractional reward gap, so its elements are
+                # floats; the bandit algorithms initialise it as `[0]` and so infer
+                # `list[int]` - annotating it `list[float]` upstream drops this.
+                agent.regret.append(
+                    agent.regret[-1] + 1 - reward,  # ty: ignore[invalid-argument-type]
+                )
 
                 context = next_context
 
@@ -255,14 +274,20 @@ def train_bandits(
             logger.info("Target score has been reached. Stopping training.")
             population.finish()
             pbar.close()
-            return population.agents, population.last_fitnesses
+            # Single-agent fitnesses are scalars; `Population` types them as the
+            # wider scalar-or-per-agent-dict row shared with multi-agent training.
+            return population.agents, cast("list[float]", population.last_fitnesses)
 
         # Tournament selection and population mutation
         if tournament and mutation is not None:
             if (population.local_step // evo_steps) > evo_count:
+                # `tournament_selection_and_mutation` takes and returns an invariant
+                # `list[EvolvableAlgorithmProtocol]`, so a concrete population is
+                # assignable in neither direction; making it generic in the agent
+                # type (agilerl/utils/utils.py) removes both suppressions.
                 population.update(
-                    tournament_selection_and_mutation(
-                        population=population.agents,
+                    tournament_selection_and_mutation(  # ty: ignore[invalid-argument-type]
+                        population=population.agents,  # ty: ignore[invalid-argument-type]
                         tournament=tournament,
                         mutation=mutation,
                         env_name=env_name,
@@ -277,8 +302,9 @@ def train_bandits(
         # Save model checkpoint
         if checkpoint is not None:
             if population.local_step // checkpoint > checkpoint_count:
+                # `save_population_checkpoint` takes the same invariant list.
                 save_population_checkpoint(
-                    population=population.agents,
+                    population=population.agents,  # ty: ignore[invalid-argument-type]
                     save_path=save_path,
                     overwrite_checkpoints=overwrite_checkpoints,
                     accelerator=accelerator,
@@ -287,4 +313,4 @@ def train_bandits(
 
     population.finish()
     pbar.close()
-    return population.agents, population.last_fitnesses
+    return population.agents, cast("list[float]", population.last_fitnesses)

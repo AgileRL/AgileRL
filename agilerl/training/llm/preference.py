@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from accelerate import Accelerator
 
@@ -47,7 +47,7 @@ def finetune_llm_preference(
     accelerator: Accelerator | None = None,
     max_steps: int | None = None,
     num_epochs: int | None = None,
-) -> list[DPO]:
+) -> tuple[list[DPO], list[float]]:
     """Finetune a population of DPO agents on pairwise preference data.
 
     :param pop: Population of DPO agents to finetune.
@@ -209,19 +209,26 @@ def finetune_llm_preference(
 
         # Tournament selection and mutation
         if tournament and mutation is not None:
+            # `_validate_finetune_args` rejects an unset `evo_steps` here.
+            assert evo_steps is not None
             if (i + 1) % evo_steps == 0:
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
+                # `tournament_selection_and_mutation` takes and returns an
+                # invariant `list[EvolvableAlgorithmProtocol]`, so a concrete
+                # population is assignable in neither direction; making it generic
+                # in the agent type (agilerl/utils/utils.py) drops both
+                # suppressions.
                 population.update(
-                    tournament_selection_and_mutation(
-                        population=population.agents,
+                    tournament_selection_and_mutation(  # ty: ignore[invalid-argument-type]
+                        population=population.agents,  # ty: ignore[invalid-argument-type]
                         tournament=tournament,
                         mutation=mutation,
                         env_name=envs[0].name,
                         accelerator=accelerator,
                         language_model=True,
                         elite_path=elite_path,
-                        save_elite=save_elite,
+                        save_elite=bool(save_elite),
                     ),
                 )
                 if accelerator is not None:
@@ -266,4 +273,6 @@ def finetune_llm_preference(
 
     population.finish()
     pbar.close()
-    return population.agents, population.last_fitnesses
+    # LLM fitnesses are scalar mean rewards; `Population` types them as the wider
+    # scalar-or-per-agent-dict row shared with multi-agent training.
+    return population.agents, cast("list[float]", population.last_fitnesses)
