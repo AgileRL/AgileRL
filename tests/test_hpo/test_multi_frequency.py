@@ -531,10 +531,12 @@ class TestSelect:
         strategy = make_strategy(n_subpop=2, n_ind=4, ratios=[1, 2])
         pop = make_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
 
-        new_pop, indices = strategy.select(pop)
+        elite, new_pop, indices = strategy.select(pop)
 
         assert len(new_pop) == 8
         assert strategy.counters == [0, 1]
+        # The global elite is the best-fitness agent
+        assert elite.fitness[-1] == 8.0
         # Only the due subpopulation introduced fresh agents
         fresh = new_agents(pop, new_pop)
         assert fresh

@@ -28,10 +28,16 @@ def test_trainer_utils_fallback_auto_tokenizer_when_no_llm_dependencies():
 
             assert trainer_utils_reloaded.AutoTokenizer is None
     finally:
-        sys.modules["agilerl.utils.trainer_utils"] = original_module
         import agilerl.utils as _utils_pkg
 
-        _utils_pkg.trainer_utils = original_module
+        if original_module is not None:
+            sys.modules["agilerl.utils.trainer_utils"] = original_module
+            _utils_pkg.trainer_utils = original_module
+        else:
+            sys.modules.pop("agilerl.utils.trainer_utils", None)
+            _utils_pkg.trainer_utils = importlib.import_module(
+                "agilerl.utils.trainer_utils"
+            )
 
 
 class TestHpConfigFromMutationSpec:
@@ -192,3 +198,23 @@ class TestAssignSubpopulations:
         _assign_subpopulations(agents, None)
 
         assert all(a.subpopulation is None for a in agents)
+
+    def test_tags_by_slot_not_restored_index_on_resume(self):
+        """Resume must derive the layout from the population slot.
+
+        On resume_from_checkpoint every agent is rebuilt in slot order but
+        restores its own persisted index and may exceed pop_size.  So
+        the tag must come from the enumeration slot and overwrite any stale
+        restored subpopulation.
+        """
+        from agilerl.models.hpo import MultiFrequencySelectionSpec
+        from agilerl.utils.trainer_utils import _assign_subpopulations
+
+        restored_indices = [12, 5, 40, 3, 27, 9, 33, 18]
+        agents = [MagicMock(index=idx, subpopulation=99) for idx in restored_indices]
+        spec = MultiFrequencySelectionSpec(
+            n_subpopulations=2, n_individuals_per_subpopulation=4
+        )
+        _assign_subpopulations(agents, spec)
+
+        assert [a.subpopulation for a in agents] == [0, 0, 0, 0, 1, 1, 1, 1]

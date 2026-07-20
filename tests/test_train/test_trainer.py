@@ -1534,6 +1534,8 @@ class TestLLMLocalTrainer:
         assert call_kwargs["max_steps"] == 100
         assert call_kwargs["evo_steps"] == 10
         assert result == (mock_pop, [[1.0]])
+        assert "tournament" not in call_kwargs
+        assert call_kwargs["selection_strategy"] is trainer.selection_strategy
 
     # -- Missing LLM dependencies raises ImportError -----------------------
 

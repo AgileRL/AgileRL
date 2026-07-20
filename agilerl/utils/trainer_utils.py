@@ -247,9 +247,9 @@ def _assign_subpopulations(
     population: PopulationT,
     multi_frequency_selection_spec: MultiFrequencySelectionSpec | None,
 ) -> None:
-    """Tag each agent with its MF-PBT subpopulation.
+    """Tag each agent with its MF-PBT subpopulation from its population slot.
 
-    :param population: The freshly-built population.
+    :param population: The freshly-built or resumed population, in slot order.
     :type population: PopulationT
     :param multi_frequency_selection_spec: The MF-PBT spec, or None under tournament/no-HPO.
     :type multi_frequency_selection_spec: MultiFrequencySelectionSpec | None
@@ -257,9 +257,9 @@ def _assign_subpopulations(
     if multi_frequency_selection_spec is None:
         return
     n_ind = multi_frequency_selection_spec.n_individuals_per_subpopulation
-    for agent in population:
+    for slot, agent in enumerate(population):
         agent.subpopulation = MultiFrequencySelection._subpopulation_for_index(
-            agent.index, n_ind
+            slot, n_ind
         )
 
 

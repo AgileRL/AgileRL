@@ -99,7 +99,8 @@ class TestTournamentSelectionSelect:
             population[4].fitness = [13, 14, 15]
 
             # Call the select method
-            elite, new_population = tournament_selection.select(population)
+            elite, new_population, indices = tournament_selection.select(population)
+            assert indices is None
 
             # Check if the elite agent is the best agent in the population
             assert elite.fitness == [13, 14, 15]
@@ -152,7 +153,8 @@ class TestTournamentSelectionSelect:
             population[4].fitness = [13, 14, 15]
 
             # Call the select method
-            elite, new_population = tournament_selection.select(population)
+            elite, new_population, indices = tournament_selection.select(population)
+            assert indices is None
 
             # Check if the elite agent is the best agent in the population
             assert elite.fitness == [13, 14, 15]
@@ -193,7 +195,8 @@ class TestTournamentSelectionSelect:
             population[4].fitness = [13, 14, 15]
 
             # Call the select method
-            elite, new_population = tournament_selection.select(population)
+            elite, new_population, indices = tournament_selection.select(population)
+            assert indices is None
 
             # Check if the elite agent is the best agent in the population
             assert elite.fitness == [13, 14, 15]
@@ -235,7 +238,8 @@ class TestTournamentSelectionSelect:
             population[4].fitness = [13, 14, 15]
 
             # Call the select method
-            elite, new_population = tournament_selection.select(population)
+            elite, new_population, indices = tournament_selection.select(population)
+            assert indices is None
 
             # Check if the elite agent is the best agent in the population
             assert elite.fitness == [13, 14, 15]
@@ -351,7 +355,8 @@ class TestTournamentSelectionSelect:
         population[3].fitness = [10, 11, 12]
 
         # Call the select method
-        elite, new_population = tournament_selection.select(population)
+        elite, new_population, indices = tournament_selection.select(population)
+        assert indices is None
 
         # Check if the elite agent is the best agent in the population
         assert elite.fitness == [10, 11, 12]
@@ -414,11 +419,11 @@ class TestTournamentSelectionSelect:
 
             def _llm_branch(population):
                 llm_called["value"] = True
-                return (population[0], population)
+                return (population[0], population, None)
 
             def _std_branch(population):
                 std_called["value"] = True
-                return (population[0], population)
+                return (population[0], population, None)
 
             m.setattr(tournament_selection, "_select_llm_agents", _llm_branch)
             m.setattr(tournament_selection, "_select_standard_agents", _std_branch)

@@ -18,7 +18,7 @@ and open agents are untouched by :meth:`~MultiFrequencySelection.select`) and th
 asymmetric cross-frequency *migration* of Algorithm 2 of the paper.
 
 The orchestration that schedules subpopulations by frequency and saves the global
-elite lives in :func:`agilerl.utils.utils.multi_frequency_selection_and_mutation`;
+elite lives in :func:`agilerl.utils.utils.run_selection_and_mutation`;
 this module holds only the operator. Under an :class:`~accelerate.Accelerator` that
 orchestrator runs the evolve step on the main process and broadcasts the result to the
 other ranks via a checkpoint round-trip, so this operator itself stays process-agnostic.
@@ -346,17 +346,24 @@ class MultiFrequencySelection:
         losers = members[n_w + n_s + n_o :]
         return winners, survivors, open_for_migration, losers
 
-    def select(self, population: PopulationType) -> tuple[PopulationType, list[int]]:
+    def select(
+        self, population: PopulationType
+    ) -> tuple[Any, PopulationType, list[int]]:
         """Select the agents to be migrated and mutated during an MF-PBT evolution cycle.
 
         :param population: The whole population.
         :type population: list
-        :return: (population, indices_to_mutate). The evolved population with migrants
-            and clones, and the indices of the winner clones to be perturbed.
-        :rtype: tuple[list, list[int]]
+        :return: (elite, population, indices_to_mutate). A detached clone of the
+            pre-evolution global elite, the evolved population with migrants and
+            clones, and the indices of the winner clones to be perturbed.
+        :rtype: tuple[Any, list, list[int]]
         """
         self._assign_initial_subpopulations(population)
         self._sync_index(population)
+
+        elite = max(
+            population, key=lambda a: self._scalar_fitness(a.fitness[-1])
+        ).clone(wrap=False)
 
         # The frozen snapshot makes migrations independent of the order in which
         # subpopulations are processed
@@ -381,7 +388,7 @@ class MultiFrequencySelection:
                 updated, subpop, winners, open_for_migration, external_pool=frozen
             )
 
-        return updated, indices_to_mutate
+        return elite, updated, indices_to_mutate
 
     def _clone_winners_over_losers(
         self,

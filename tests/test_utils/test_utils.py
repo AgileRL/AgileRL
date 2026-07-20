@@ -48,6 +48,7 @@ from agilerl.utils.utils import (
     make_skill_vect_envs,
     make_vect_envs,
     print_hyperparams,
+    run_selection_and_mutation,
     save_llm_checkpoint,
     save_population_checkpoint,
     suppress_verbose_logging,
@@ -1021,20 +1022,25 @@ class TestInitLoggers:
         assert loggers[0]._accelerator is acc
 
 
-class TestTournamentSelectionAndMutation:
+class TestRunSelectionAndMutation:
     def test_no_accelerator(self):
         population = [MagicMock(spec=EvolvableAlgorithm) for _ in range(3)]
         for agent in population:
             agent.steps = 100
         tournament = MagicMock(spec=TournamentSelection)
-        tournament.select = Mock(return_value=(population[0], population))
+        tournament.select = Mock(return_value=(population[0], population, None))
         mutation = MagicMock(spec=Mutations)
         mutation.mutation = Mock(return_value=population)
-        result = tournament_selection_and_mutation(
-            population, tournament, mutation, "CartPole-v1", algo="DQN"
+        result = run_selection_and_mutation(
+            tournament,
+            population=population,
+            mutation=mutation,
+            env_name="CartPole-v1",
+            algo="DQN",
         )
         tournament.select.assert_called_once()
-        mutation.mutation.assert_called_once()
+        # A tournament reports indices=None
+        mutation.mutation.assert_called_once_with(population, indices=None)
         assert len(result) == 3
 
     def test_worker_loads_checkpoint(self):
@@ -1046,7 +1052,7 @@ class TestTournamentSelectionAndMutation:
             agent.unwrap_models = Mock()
             agent.wrap_models = Mock()
         tournament = MagicMock(spec=TournamentSelection)
-        tournament.select = Mock(return_value=(population[0], population))
+        tournament.select = Mock(return_value=(population[0], population, None))
         mutation = MagicMock(spec=Mutations)
         mutation.mutation = Mock(return_value=population)
         accel = MagicMock(spec=Accelerator)
@@ -1055,11 +1061,11 @@ class TestTournamentSelectionAndMutation:
 
         with patch("agilerl.utils.utils.Path") as mock_path:
             mock_path.return_value.mkdir = Mock()
-            tournament_selection_and_mutation(
-                population,
+            run_selection_and_mutation(
                 tournament,
-                mutation,
-                "CartPole-v1",
+                population=population,
+                mutation=mutation,
+                env_name="CartPole-v1",
                 algo="DQN",
                 accelerator=accel,
             )
@@ -1072,14 +1078,14 @@ class TestTournamentSelectionAndMutation:
         elite.steps = 100
         elite.save_checkpoint = Mock()
         tournament = MagicMock(spec=TournamentSelection)
-        tournament.select = Mock(return_value=(elite, population))
+        tournament.select = Mock(return_value=(elite, population, None))
         mutation = MagicMock(spec=Mutations)
         mutation.mutation = Mock(return_value=population)
-        tournament_selection_and_mutation(
-            population,
+        run_selection_and_mutation(
             tournament,
-            mutation,
-            "CartPole-v1",
+            population=population,
+            mutation=mutation,
+            env_name="CartPole-v1",
             algo="DQN",
             elite_path="/tmp/elite",
             save_elite=True,
@@ -1087,7 +1093,7 @@ class TestTournamentSelectionAndMutation:
         elite.save_checkpoint.assert_called_once_with("/tmp/elite.pt")
 
     def test_language_model(self):
-        """Test tournament_selection_and_mutation with language model"""
+        """Test run_selection_and_mutation with a language model population."""
         population = [MagicMock(spec=LLMAlgorithm) for _ in range(3)]
         for agent in population:
             agent.mut = "lr"
@@ -1100,12 +1106,9 @@ class TestTournamentSelectionAndMutation:
         tournament = MagicMock(spec=TournamentSelection)
         mutation = MagicMock(spec=Mutations)
         mutation.mutation = Mock(return_value=population)
-        tournament.select = Mock(return_value=(population[0], population))
+        tournament.select = Mock(return_value=(population[0], population, None))
         env_name = "CartPole-v1"
-        algo = None
         elite_path = None
-        save_elite = True
-        language_model = True
         accelerator = MagicMock(spec=Accelerator)
         accelerator.is_main_process = True
         accelerator.wait_for_everyone = Mock()
@@ -1118,23 +1121,42 @@ class TestTournamentSelectionAndMutation:
                 "agilerl.utils.utils.consolidate_mutations"
             ) as mock_consolidate_mutations,
         ):
-            output_pop = tournament_selection_and_mutation(
-                population,
+            output_pop = run_selection_and_mutation(
                 tournament,
-                mutation,
-                env_name,
-                algo,
-                elite_path,
-                save_elite,
-                accelerator,
-                language_model,
+                population=population,
+                mutation=mutation,
+                env_name=env_name,
+                elite_path=elite_path,
+                save_elite=True,
+                accelerator=accelerator,
+                language_model=True,
             )
             mock_save_llm_checkpoint.assert_called_once_with(population[0], elite_path)
             mock_consolidate_mutations.assert_called_once_with(output_pop)
 
         tournament.select.assert_called_once_with(population)
-        mutation.mutation.assert_called_once_with(population)
+        mutation.mutation.assert_called_once_with(population, indices=None)
         accelerator.wait_for_everyone.assert_called()
+
+
+class TestTournamentSelectionAndMutationDeprecatedShim:
+    def test_forwards_to_run_selection_and_mutation_with_warning(self):
+        population = [MagicMock(spec=EvolvableAlgorithm) for _ in range(3)]
+        for agent in population:
+            agent.steps = 100
+        tournament = MagicMock(spec=TournamentSelection)
+        tournament.select = Mock(return_value=(population[0], population, None))
+        mutation = MagicMock(spec=Mutations)
+        mutation.mutation = Mock(return_value=population)
+
+        with pytest.warns(DeprecationWarning, match="deprecated"):
+            result = tournament_selection_and_mutation(
+                population, tournament, mutation, "CartPole-v1", algo="DQN"
+            )
+
+        tournament.select.assert_called_once()
+        mutation.mutation.assert_called_once_with(population, indices=None)
+        assert len(result) == 3
 
 
 class TestGatherTensor:

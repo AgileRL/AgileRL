@@ -1,4 +1,4 @@
-"""Tests for the HPO-strategy dispatch and multi-frequency selection orchestration in utils."""
+"""Tests for the unified selection-and-mutation entry point."""
 
 from __future__ import annotations
 
@@ -6,11 +6,9 @@ import os
 
 import pytest
 
-import agilerl.utils.utils as utils
 from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.utils import (
-    multi_frequency_selection_and_mutation,
     resolve_selection_strategy,
     run_selection_and_mutation,
 )
@@ -26,6 +24,13 @@ class FakeAgent:
         self.wrap_calls = 0
         self.saved: list[str] = []
         self.loaded: list[str] = []
+
+    def clone(self, index=None, wrap=False):
+        return FakeAgent(
+            self.index if index is None else index,
+            self.subpopulation,
+            self.fitness[-1],
+        )
 
     def save_checkpoint(self, path):
         self.saved.append(path)
@@ -60,6 +65,32 @@ class FakeMutations:
         return population
 
 
+class FakeStrategy:
+    """Minimal selection strategy exposing the unified select contract."""
+
+    def __init__(self, elite, new_population, indices):
+        self._result = (elite, new_population, indices)
+        self.select_calls: list = []
+
+    def select(self, population):
+        self.select_calls.append(population)
+        return self._result
+
+
+class RecordingMutations:
+    """Mutation stub that records the indices argument of every call."""
+
+    mutate_elite = False
+
+    def __init__(self, result=None):
+        self._result = result
+        self.indices_seen: list = []
+
+    def mutation(self, population, pre_training_mut=False, indices=None):
+        self.indices_seen.append(indices)
+        return self._result if self._result is not None else population
+
+
 def make_population(subpop_fitnesses):
     population = []
     idx = 0
@@ -82,81 +113,63 @@ def make_strategy(n_subpop=2, n_ind=4, ratios=None):
     )
 
 
-class TestRunSelectionAndMutationDispatch:
-    def test_dispatch_none_returns_population_unchanged(self):
+class TestRunSelectionAndMutation:
+    def test_none_returns_population_unchanged(self):
         pop = [1, 2, 3]
         out = run_selection_and_mutation(
-            None, population=pop, mutation=FakeMutations(), env_name="env"
+            None, population=pop, mutation=RecordingMutations(), env_name="env"
         )
         assert out is pop
 
-    def test_dispatch_routes_tournament(self, monkeypatch):
-        sentinel = ["mutated"]
-        called = {}
-
-        def fake_tsm(**kwargs):
-            called.update(kwargs)
-            return sentinel
-
-        monkeypatch.setattr(utils, "tournament_selection_and_mutation", fake_tsm)
-        strategy = TournamentSelection(
-            tournament_size=2, elitism=True, population_size=4
-        )
+    def test_selects_then_mutates_with_reported_indices(self):
+        pop = [object()]
+        evolved = [object(), object()]
+        strategy = FakeStrategy(elite=None, new_population=evolved, indices=[7])
+        mutation = RecordingMutations(result=["mutated"])
 
         out = run_selection_and_mutation(
-            strategy, population=[1], mutation=FakeMutations(), env_name="env"
+            strategy, population=pop, mutation=mutation, env_name="env"
         )
 
-        assert out is sentinel
-        assert called["tournament"] is strategy
+        assert strategy.select_calls == [pop]
+        assert mutation.indices_seen == [[7]]
+        assert out == ["mutated"]
 
-    def test_dispatch_routes_multi_frequency(self, monkeypatch):
-        sentinel = ["evolved"]
-        called = {}
+    def test_tournament_style_indices_none_mutates_whole_population(self):
+        strategy = FakeStrategy(elite=None, new_population=[1], indices=None)
+        mutation = RecordingMutations()
 
-        def fake_mfsm(**kwargs):
-            called.update(kwargs)
-            return sentinel
-
-        monkeypatch.setattr(utils, "multi_frequency_selection_and_mutation", fake_mfsm)
-        strategy = make_strategy()
-
-        out = run_selection_and_mutation(
-            strategy, population=[1], mutation=FakeMutations(), env_name="env"
+        run_selection_and_mutation(
+            strategy, population=[1], mutation=mutation, env_name="env"
         )
 
-        assert out is sentinel
-        assert called["multi_frequency_selection"] is strategy
+        assert mutation.indices_seen == [None]
 
-    def test_dispatch_multi_frequency_rejects_language_model(self):
+    def test_saves_elite_from_select_result(self, tmp_path):
+        elite = FakeAgent(0, 0, 5.0)
+        strategy = FakeStrategy(elite=elite, new_population=[elite], indices=None)
+        elite_path = str(tmp_path / "elite.pt")
+
+        run_selection_and_mutation(
+            strategy,
+            population=[elite],
+            mutation=RecordingMutations(),
+            env_name="env",
+            save_elite=True,
+            elite_path=elite_path,
+        )
+
+        assert elite.saved == [elite_path]
+
+    def test_multi_frequency_rejects_language_model(self):
         with pytest.raises(NotImplementedError, match="language_model"):
             run_selection_and_mutation(
                 make_strategy(),
                 population=[1],
-                mutation=FakeMutations(),
+                mutation=RecordingMutations(),
                 env_name="env",
                 language_model=True,
             )
-
-    def test_dispatch_routes_duck_typed_tournament(self, monkeypatch):
-        # Backward compatibility: any non-None, non-multi-frequency strategy routes to the
-        # tournament path
-        sentinel = ["mutated"]
-        called = {}
-
-        def fake_tsm(**kwargs):
-            called.update(kwargs)
-            return sentinel
-
-        monkeypatch.setattr(utils, "tournament_selection_and_mutation", fake_tsm)
-        duck = object()
-
-        out = run_selection_and_mutation(
-            duck, population=[1], mutation=FakeMutations(), env_name="env"
-        )
-
-        assert out is sentinel
-        assert called["tournament"] is duck
 
 
 def _stub_operator_steps(strategy):
@@ -198,7 +211,9 @@ class TestMultiFrequencyOrchestration:
 
         for c in range(1, 7):
             cycle["n"] = c
-            multi_frequency_selection_and_mutation(pop, strategy, mutation=fm)
+            run_selection_and_mutation(
+                strategy, population=pop, mutation=fm, env_name="env"
+            )
 
         assert [c for c, s in fired if s == 0] == [1, 2, 3, 4, 5, 6]  # delta=1
         assert [c for c, s in fired if s == 1] == [2, 4, 6]  # delta=2
@@ -208,14 +223,15 @@ class TestMultiFrequencyOrchestration:
         strategy = make_strategy(n_subpop=2, n_ind=4, ratios=[1, 2])
         pop = make_population({0: [4, 3, 2, 1], 1: [8, 7, 6, 5]})
         elite_path = str(tmp_path / "best.pt")
-        # Elite is saved before any subpopulation evolves; stub the operator steps so
-        # the fake agents need only ``save_checkpoint``.
+        # Elite is the pre-evolution global best; stub the operator steps so the fake
+        # agents need only save_checkpoint
         _stub_operator_steps(strategy)
 
-        multi_frequency_selection_and_mutation(
-            pop,
+        run_selection_and_mutation(
             strategy,
+            population=pop,
             mutation=FakeMutations(),
+            env_name="env",
             save_elite=True,
             elite_path=elite_path,
         )
@@ -231,8 +247,12 @@ class TestMultiFrequencyOrchestration:
         pop = make_population({0: [4, 3, 2, 1], 1: [8, 7, 6, 5]})
         accel = FakeAccelerator(is_main_process=True)
 
-        out = multi_frequency_selection_and_mutation(
-            pop, strategy, mutation=FakeMutations(), accelerator=accel
+        out = run_selection_and_mutation(
+            strategy,
+            population=pop,
+            mutation=FakeMutations(),
+            env_name="env",
+            accelerator=accel,
         )
 
         # select() ran on the main process: subpop 0 (delta 1) fired and reset its counter,
@@ -251,8 +271,13 @@ class TestMultiFrequencyOrchestration:
         pop = make_population({0: [4, 3, 2, 1], 1: [8, 7, 6, 5]})
         accel = FakeAccelerator(is_main_process=False)
 
-        out = multi_frequency_selection_and_mutation(
-            pop, strategy, mutation=FakeMutations(), accelerator=accel, algo="DQN"
+        out = run_selection_and_mutation(
+            strategy,
+            population=pop,
+            mutation=FakeMutations(),
+            env_name="env",
+            accelerator=accel,
+            algo="DQN",
         )
 
         assert out is pop
@@ -271,7 +296,9 @@ class TestMultiFrequencyOrchestration:
             agent.subpopulation = None
         _stub_operator_steps(strategy)
 
-        multi_frequency_selection_and_mutation(pop, strategy, mutation=FakeMutations())
+        run_selection_and_mutation(
+            strategy, population=pop, mutation=FakeMutations(), env_name="env"
+        )
 
         assert sorted(a.subpopulation for a in pop) == [0, 0, 0, 0, 1, 1, 1, 1]
 
@@ -301,7 +328,9 @@ class TestMultiFrequencyOrchestration:
         strategy._migrate = fake_migrate
         strategy.counters = [0, 1]  # a single cycle then fires BOTH subpopulations
 
-        multi_frequency_selection_and_mutation(pop, strategy, mutation=FakeMutations())
+        run_selection_and_mutation(
+            strategy, population=pop, mutation=FakeMutations(), env_name="env"
+        )
 
         # Both subpopulations fired, and each migration saw the identical pre-evolution
         # snapshot -- subpop 1 ran after subpop 0's cloning replaced the live objects.

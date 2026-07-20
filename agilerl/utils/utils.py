@@ -3,7 +3,6 @@ import os
 import warnings
 from collections.abc import Callable
 from datetime import datetime
-from functools import singledispatch
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -1199,6 +1198,133 @@ def save_population_checkpoint(
             agent.save_checkpoint(current_checkpoint_path)
 
 
+def _save_standard_elite(
+    elite: Any,
+    *,
+    env_name: str,
+    algo: str,
+    elite_path: str | None,
+) -> None:
+    """Checkpoint a non-LLM elite agent to disk.
+
+    :param elite: The elite agent to save.
+    :type elite: EvolvableAlgorithm
+    :param env_name: Environment name, used to build the default filename.
+    :type env_name: str
+    :param algo: Algorithm name, used to build the default filename.
+    :type algo: str
+    :param elite_path: Explicit .pt path to save to; when None a
+        {env_name}-elite_{algo}.pt name is used.
+    :type elite_path: str | None
+    """
+    elite_save_path = (
+        elite_path.split(".pt")[0]
+        if elite_path is not None
+        else f"{env_name}-elite_{algo}"
+    )
+    elite.save_checkpoint(f"{elite_save_path}.pt")
+
+
+def run_selection_and_mutation(
+    selection_strategy: TournamentSelection | MultiFrequencySelection | None,
+    *,
+    population: PopulationType,
+    mutation: Mutations,
+    env_name: str,
+    algo: str | None = None,
+    elite_path: str | None = None,
+    save_elite: bool = False,
+    accelerator: Accelerator | None = None,
+    language_model: bool = False,
+) -> PopulationType:
+    """Evolve a population with the given selection strategy, then mutate it.
+
+    :param selection_strategy: The selection strategy driving evolution; None
+        returns the population unchanged.
+    :type selection_strategy: TournamentSelection | MultiFrequencySelection | None
+    :param population: Population of agents.
+    :type population: list[PopulationType]
+    :param mutation: Mutation object.
+    :type mutation: Mutations
+    :param env_name: Environment name.
+    :type env_name: str
+    :param algo: Algorithm name; inferred from the population when None. Defaults to None.
+    :type algo: str, optional
+    :param elite_path: Path to save the elite agent, defaults to None.
+    :type elite_path: str, optional
+    :param save_elite: Flag to save the elite agent, defaults to False.
+    :type save_elite: bool, optional
+    :param accelerator: Accelerator for distributed computing, defaults to None.
+    :type accelerator: accelerate.Accelerator(), optional
+    :param language_model: Flag indicating an LLM environment, defaults to False.
+    :type language_model: bool, optional
+    :return: Population of agents after evolution.
+    :rtype: list[PopulationType]
+    :raises NotImplementedError: When language_model=True with a non-tournament
+        strategy; MF-PBT does not support LLM finetuning.
+    """
+    if selection_strategy is None:
+        return population
+
+    if language_model and not isinstance(selection_strategy, TournamentSelection):
+        msg = "MF-PBT selection does not support language_model=True."
+        raise NotImplementedError(msg)
+
+    algo = algo or population[0].__class__.__name__
+
+    if language_model:
+        elite, population, indices = selection_strategy.select(population)
+        if accelerator is None or accelerator.is_main_process:
+            population = mutation.mutation(population, indices=indices)
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+            consolidate_mutations(population)
+            accelerator.wait_for_everyone()
+        if save_elite:
+            save_llm_checkpoint(elite, elite_path)
+        return population
+
+    elite = None
+    if accelerator is not None:
+        # Unwrap every model from the accelerator before selecting and mutating.
+        accel_temp_models_path = f"models/{env_name}"
+        if accelerator.is_main_process:
+            Path(accel_temp_models_path).mkdir(parents=True, exist_ok=True)
+        accelerator.wait_for_everyone()
+        for model in population:
+            model.unwrap_models()
+        accelerator.wait_for_everyone()
+        if accelerator.is_main_process:
+            elite, population, indices = selection_strategy.select(population)
+            population = mutation.mutation(population, indices=indices)
+            if save_elite and elite is not None:
+                _save_standard_elite(
+                    elite, env_name=env_name, algo=algo, elite_path=elite_path
+                )
+            for pop_i, model in enumerate(population):
+                model.save_checkpoint(f"{accel_temp_models_path}/{algo}_{pop_i}.pt")
+        accelerator.wait_for_everyone()
+
+        # Load the evolved models back onto the worker processes.
+        if not accelerator.is_main_process:
+            for pop_i, model in enumerate(population):
+                model.load_checkpoint(f"{accel_temp_models_path}/{algo}_{pop_i}.pt")
+        accelerator.wait_for_everyone()
+
+        # Wrap the models back onto the accelerator.
+        for model in population:
+            model.wrap_models()
+    else:
+        elite, population, indices = selection_strategy.select(population)
+        population = mutation.mutation(population, indices=indices)
+        if save_elite and elite is not None:
+            _save_standard_elite(
+                elite, env_name=env_name, algo=algo, elite_path=elite_path
+            )
+
+    return population
+
+
 def tournament_selection_and_mutation(
     population: PopulationType,
     tournament: TournamentSelection,
@@ -1210,169 +1336,47 @@ def tournament_selection_and_mutation(
     accelerator: Accelerator | None = None,
     language_model: bool | None = False,
 ) -> PopulationType:
-    """Perform tournament selection and mutation on a population of agents.
+    """Deprecated. Use :func:`run_selection_and_mutation` instead.
 
-    :param population: Population of agents
-    :type population: list[PopulationType]
-    :param tournament: Tournament selection object
-    :type tournament: TournamentSelection
-    :param mutation: Mutation object
-    :type mutation: Mutations
-    :param env_name: Environment name
-    :type env_name: str
-    :param elite_path: Path to save elite agent, defaults to None
-    :type elite_path: str, optional
-    :param save_elite: Flag to save elite agent, defaults to False
-    :type save_elite: bool, optional
-    :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
-    :param language_model: Flag to indicate if the environment is a language model, defaults to False
-    :type language_model: bool, optional
-    :return: Population of agents after tournament selection and mutation
-    :rtype: list[PopulationType]
-    """
-    if algo is None:
-        algo = population[0].__class__.__name__
-
-    if language_model:
-        elite, population = tournament.select(population)
-        if accelerator is None or accelerator.is_main_process:
-            population = mutation.mutation(population)
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
-            consolidate_mutations(population)
-            accelerator.wait_for_everyone()
-        if save_elite:
-            save_llm_checkpoint(elite, elite_path)
-        return population
-
-    elite = None
-    if accelerator is not None:
-        # Save temporary models for accelerator processes
-        accel_temp_models_path = f"models/{env_name}"
-        if accelerator.is_main_process:
-            Path(accel_temp_models_path).mkdir(parents=True, exist_ok=True)
-        # Need to unwrap models from acccelerator before selecting and mutating
-        accelerator.wait_for_everyone()
-        for model in population:
-            model.unwrap_models()
-        accelerator.wait_for_everyone()
-        # Perform tournament selection and mutation on main process
-        if accelerator.is_main_process:
-            elite, population = tournament.select(population)
-            population = mutation.mutation(population)
-            for pop_i, model in enumerate(population):
-                model.save_checkpoint(f"{accel_temp_models_path}/{algo}_{pop_i}.pt")
-        accelerator.wait_for_everyone()
-
-        # Load models back to accelerator processes
-        if not accelerator.is_main_process:
-            for pop_i, model in enumerate(population):
-                model.load_checkpoint(f"{accel_temp_models_path}/{algo}_{pop_i}.pt")
-        accelerator.wait_for_everyone()
-
-        # Wrap models back to accelerator
-        for model in population:
-            model.wrap_models()
-    else:
-        # Perform tournament selection and mutation
-        elite, population = tournament.select(population)
-        population = mutation.mutation(population)
-
-    if save_elite and elite is not None:
-        elite_save_path = (
-            elite_path.split(".pt")[0]
-            if elite_path is not None
-            else f"{env_name}-elite_{algo}"
-        )
-        elite.save_checkpoint(f"{elite_save_path}.pt")
-
-    return population
-
-
-def multi_frequency_selection_and_mutation(
-    population: PopulationType,
-    multi_frequency_selection: MultiFrequencySelection,
-    *,
-    mutation: Mutations,
-    env_name: str = "env",
-    algo: str | None = None,
-    save_elite: bool = False,
-    elite_path: str | None = None,
-    accelerator: Accelerator | None = None,
-    language_model: bool | None = False,
-) -> PopulationType:
-    """Run one MF-PBT evolution cycle over the whole population.
-
-    The counterpart to :func:`tournament_selection_and_mutation` for the MF-PBT
-    regime. The global elite is saved (if requested) before any evolution; then each
-    subpopulation whose frequency counter has reached its delta_i is evolved
-    and migrated.
 
     :param population: Population of agents.
     :type population: list[PopulationType]
-    :param multi_frequency_selection: The MF-PBT evolution operator.
-    :type multi_frequency_selection: MultiFrequencySelection
-    :param mutation: Mutation object used to perturb the winner-clones.
+    :param tournament: Tournament selection object.
+    :type tournament: TournamentSelection
+    :param mutation: Mutation object.
     :type mutation: Mutations
-    :param env_name: Environment name, defaults to "env".
-    :type env_name: str, optional
-    :param algo: Algorithm name (for the elite checkpoint filename), defaults to None.
+    :param env_name: Environment name.
+    :type env_name: str
+    :param algo: Algorithm name, defaults to None.
     :type algo: str, optional
-    :param save_elite: Flag to save the global elite agent, defaults to False.
-    :type save_elite: bool, optional
     :param elite_path: Path to save the elite agent, defaults to None.
     :type elite_path: str, optional
+    :param save_elite: Flag to save the elite agent, defaults to False.
+    :type save_elite: bool, optional
     :param accelerator: Accelerator for distributed computing, defaults to None.
     :type accelerator: accelerate.Accelerator(), optional
-    :param language_model: Unused; MF-PBT does not support LLM training.
+    :param language_model: Flag to indicate a language model environment, defaults to False.
     :type language_model: bool, optional
-    :return: Population of agents after one MF-PBT evolution cycle.
+    :return: Population of agents after tournament selection and mutation.
     :rtype: list[PopulationType]
     """
-    algo = algo or population[0].__class__.__name__
-
-    if accelerator is not None:
-        accel_temp_models_path = f"models/{env_name}"
-        if accelerator.is_main_process:
-            Path(accel_temp_models_path).mkdir(parents=True, exist_ok=True)
-        # Unwrap every model from the accelerator before any cloning/mutation
-        accelerator.wait_for_everyone()
-        for model in population:
-            model.unwrap_models()
-        accelerator.wait_for_everyone()
-
-    if accelerator is None or accelerator.is_main_process:
-        if save_elite:
-            elite_agent = max(
-                population,
-                key=lambda a: multi_frequency_selection._scalar_fitness(a.fitness[-1]),
-            )
-            elite_save_path = (
-                elite_path.split(".pt")[0]
-                if elite_path is not None
-                else f"{env_name}-elite_{algo}"
-            )
-            elite_agent.save_checkpoint(f"{elite_save_path}.pt")
-
-        population, indices_to_mutate = multi_frequency_selection.select(population)
-        population = mutation.mutation(population, indices=indices_to_mutate)
-
-        if accelerator is not None:
-            for pop_i, model in enumerate(population):
-                model.save_checkpoint(f"{accel_temp_models_path}/{algo}_{pop_i}.pt")
-
-    if accelerator is not None:
-        # Broadcast the evolved population to the other ranks, then re-wrap.
-        accelerator.wait_for_everyone()
-        if not accelerator.is_main_process:
-            for pop_i, model in enumerate(population):
-                model.load_checkpoint(f"{accel_temp_models_path}/{algo}_{pop_i}.pt")
-        accelerator.wait_for_everyone()
-        for model in population:
-            model.wrap_models()
-
-    return population
+    warnings.warn(
+        "tournament_selection_and_mutation is deprecated; use "
+        "run_selection_and_mutation instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return run_selection_and_mutation(
+        tournament,
+        population=population,
+        mutation=mutation,
+        env_name=env_name,
+        algo=algo,
+        elite_path=elite_path,
+        save_elite=save_elite,
+        accelerator=accelerator,
+        language_model=bool(language_model),
+    )
 
 
 def resolve_selection_strategy(
@@ -1405,115 +1409,6 @@ def resolve_selection_strategy(
             stacklevel=3,
         )
     return selection_strategy
-
-
-@singledispatch
-def run_selection_and_mutation(
-    selection_strategy: TournamentSelection | MultiFrequencySelection | None,
-    *,
-    population: PopulationType,
-    mutation: Mutations,
-    env_name: str,
-    algo: str | None = None,
-    elite_path: str | None = None,
-    save_elite: bool = False,
-    accelerator: Accelerator | None = None,
-    language_model: bool = False,
-) -> PopulationType:
-    """Evolve a population with the given selection strategy, dispatched by its type.
-
-    :param selection_strategy: The selection strategy driving population evolution.
-    :type selection_strategy: TournamentSelection | MultiFrequencySelection | None
-    :param population: Population of agents.
-    :type population: list[PopulationType]
-    :param mutation: Mutation object.
-    :type mutation: Mutations
-    :param env_name: Environment name.
-    :type env_name: str
-    :param algo: Algorithm name, defaults to None.
-    :type algo: str, optional
-    :param elite_path: Path to save the elite agent, defaults to None.
-    :type elite_path: str, optional
-    :param save_elite: Flag to save the elite agent, defaults to False.
-    :type save_elite: bool, optional
-    :param accelerator: Accelerator for distributed computing, defaults to None.
-    :type accelerator: accelerate.Accelerator(), optional
-    :param language_model: Flag indicating an LLM environment, defaults to False.
-    :type language_model: bool, optional
-    :return: Population of agents after evolution.
-    :rtype: list[PopulationType]
-    """
-    if selection_strategy is None:
-        return population
-    # Backward compatibility: a duck-typed tournament object (anything exposing
-    # select but not a TournamentSelection subclass) routes to the same handler
-    return _run_tournament_selection_and_mutation(
-        selection_strategy,
-        population=population,
-        mutation=mutation,
-        env_name=env_name,
-        algo=algo,
-        elite_path=elite_path,
-        save_elite=save_elite,
-        accelerator=accelerator,
-        language_model=language_model,
-    )
-
-
-@run_selection_and_mutation.register
-def _run_tournament_selection_and_mutation(
-    selection_strategy: TournamentSelection,
-    *,
-    population: PopulationType,
-    mutation: Mutations,
-    env_name: str,
-    algo: str | None = None,
-    elite_path: str | None = None,
-    save_elite: bool = False,
-    accelerator: Accelerator | None = None,
-    language_model: bool = False,
-) -> PopulationType:
-    """Dispatch to tournament selection + mutation."""
-    return tournament_selection_and_mutation(
-        population=population,
-        tournament=selection_strategy,
-        mutation=mutation,
-        env_name=env_name,
-        algo=algo,
-        elite_path=elite_path,
-        save_elite=save_elite,
-        accelerator=accelerator,
-        language_model=language_model,
-    )
-
-
-@run_selection_and_mutation.register
-def _run_multi_frequency_selection_and_mutation(
-    selection_strategy: MultiFrequencySelection,
-    *,
-    population: PopulationType,
-    mutation: Mutations,
-    env_name: str,
-    algo: str | None = None,
-    elite_path: str | None = None,
-    save_elite: bool = False,
-    accelerator: Accelerator | None = None,
-    language_model: bool = False,
-) -> PopulationType:
-    """Dispatch to multi-frequency selection + mutation."""
-    if language_model:
-        msg = "MF-PBT selection does not support language_model=True."
-        raise NotImplementedError(msg)
-    return multi_frequency_selection_and_mutation(
-        population=population,
-        multi_frequency_selection=selection_strategy,
-        mutation=mutation,
-        env_name=env_name,
-        algo=algo,
-        save_elite=save_elite,
-        elite_path=elite_path,
-        accelerator=accelerator,
-    )
 
 
 def init_wandb(

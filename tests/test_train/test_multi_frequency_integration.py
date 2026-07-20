@@ -25,7 +25,7 @@ from agilerl.models.hpo import (
 from agilerl.models.networks import MlpSpec, StochasticActorSpec
 from agilerl.models.training import TrainingSpec
 from agilerl.training.trainer import LocalTrainer
-from agilerl.utils.utils import multi_frequency_selection_and_mutation
+from agilerl.utils.utils import run_selection_and_mutation
 from tests.helper_functions import (
     generate_discrete_space,
     generate_multi_agent_box_spaces,
@@ -216,9 +216,9 @@ def test_multi_frequency_evolves_real_ppo_population_across_cycles():
     for cycle in range(3):
         for offset, agent in enumerate(agents):
             agent.fitness = [float((cycle + offset) % 8)]
-        agents = multi_frequency_selection_and_mutation(
-            agents,
+        agents = run_selection_and_mutation(
             trainer.multi_frequency_selection,
+            population=agents,
             mutation=trainer.mutations,
             env_name="CartPole-v1",
             algo="PPO",
@@ -324,8 +324,12 @@ def test_multi_frequency_evolves_real_population_of_every_family(family):
         for agent in population:
             base = 100.0 if agent.subpopulation == 0 else 0.0
             agent.fitness = [base + (agent.index % 4)]
-        population = multi_frequency_selection_and_mutation(
-            population, strategy, mutation=mutation, env_name="Env", algo=algo_name
+        population = run_selection_and_mutation(
+            strategy,
+            population=population,
+            mutation=mutation,
+            env_name="Env",
+            algo=algo_name,
         )
 
         assert len(population) == 8

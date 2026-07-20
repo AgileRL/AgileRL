@@ -26,11 +26,12 @@ shared :func:`Mutations.mutation() <agilerl.hpo.mutation.Mutations.mutation>` st
 with its ``indices`` argument so only the clones are mutated (see :ref:`mutations`).
 
 The class :class:`MultiFrequencySelection <agilerl.hpo.multi_frequency.MultiFrequencySelection>`
-implements the multi-frequency selection operator needed in MF-PBT; the per-cycle
-scheduling and elite saving live in
-:func:`multi_frequency_selection_and_mutation <agilerl.utils.utils.multi_frequency_selection_and_mutation>`,
-dispatched from the trainers via
-:func:`run_selection_and_mutation <agilerl.utils.utils.run_selection_and_mutation>`.
+implements the multi-frequency selection operator needed in MF-PBT; its
+:func:`select() <agilerl.hpo.multi_frequency.MultiFrequencySelection.select>` returns the
+global elite, the evolved population, and the winner-clone indices to mutate. The per-cycle
+scheduling and elite saving are driven from the trainers via
+:func:`run_selection_and_mutation <agilerl.utils.utils.run_selection_and_mutation>`, the single
+entry point shared with tournament selection.
 MF-PBT supports an ``accelerator`` but, at the moment,
 does not support the LLM RL algorithms.
 

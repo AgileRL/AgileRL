@@ -419,11 +419,11 @@ class TestFinetuneLlmReasoning:
             patch("agilerl.training.llm.reasoning.save_llm_checkpoint"),
             patch("agilerl.training.llm.reasoning.init_loggers", return_value=[]),
             patch(
-                "agilerl.training.llm.reasoning.tournament_selection_and_mutation"
-            ) as mock_tournament_selection_and_mutation,
+                "agilerl.training.llm.reasoning.run_selection_and_mutation"
+            ) as mock_run_selection_and_mutation,
         ):
             mock_pbar_fn.return_value = MagicMock()
-            mock_tournament_selection_and_mutation.return_value = [mock_agent]
+            mock_run_selection_and_mutation.return_value = [mock_agent]
             mock_agg.return_value = 0.5
 
             finetune_llm_reasoning(
@@ -442,7 +442,7 @@ class TestFinetuneLlmReasoning:
             assert mock_env.step.call_count == 6
             assert mock_agent.learn.call_count == 6
             assert mock_agent.test.call_count == 3
-            assert mock_tournament_selection_and_mutation.call_count == 6
+            assert mock_run_selection_and_mutation.call_count == 6
 
     def test_finetune_llm_reasoning_warns_checkpoint_steps_during_evolution(self):
         mock_agent = _mock_grpo_agent()
@@ -466,7 +466,7 @@ class TestFinetuneLlmReasoning:
             patch("agilerl.training.llm.reasoning.save_llm_checkpoint"),
             patch("agilerl.training.llm.reasoning.init_loggers", return_value=[]),
             patch(
-                "agilerl.training.llm.reasoning.tournament_selection_and_mutation",
+                "agilerl.training.llm.reasoning.run_selection_and_mutation",
                 return_value=[mock_agent],
             ),
         ):
@@ -555,7 +555,7 @@ class TestFinetuneLlmReasoning:
             patch("agilerl.training.llm.reasoning.save_llm_checkpoint"),
             patch("agilerl.training.llm.reasoning.init_loggers", return_value=[]),
             patch(
-                "agilerl.training.llm.reasoning.tournament_selection_and_mutation"
+                "agilerl.training.llm.reasoning.run_selection_and_mutation"
             ) as mock_tsm,
         ):
             mock_pbar_fn.return_value = MagicMock()
@@ -892,7 +892,7 @@ class TestFinetuneLlmPreference:
             patch("agilerl.training.llm.preference.save_llm_checkpoint"),
             patch("agilerl.training.llm.preference.init_loggers", return_value=[]),
             patch(
-                "agilerl.training.llm.preference.tournament_selection_and_mutation"
+                "agilerl.training.llm.preference.run_selection_and_mutation"
             ) as mock_tsm,
         ):
             mock_pbar_fn.return_value = MagicMock()
@@ -924,7 +924,7 @@ class TestFinetuneLlmPreference:
             patch("agilerl.training.llm.preference.save_llm_checkpoint"),
             patch("agilerl.training.llm.preference.init_loggers", return_value=[]),
             patch(
-                "agilerl.training.llm.preference.tournament_selection_and_mutation"
+                "agilerl.training.llm.preference.run_selection_and_mutation"
             ) as mock_tsm,
         ):
             mock_pbar_fn.return_value = MagicMock()
@@ -1145,9 +1145,7 @@ class TestFinetuneLlmSft:
             patch("agilerl.training.llm.sft.default_progress_bar") as mock_pbar_fn,
             patch("agilerl.training.llm.sft.save_llm_checkpoint"),
             patch("agilerl.training.llm.sft.init_loggers", return_value=[]),
-            patch(
-                "agilerl.training.llm.sft.tournament_selection_and_mutation"
-            ) as mock_tsm,
+            patch("agilerl.training.llm.sft.run_selection_and_mutation") as mock_tsm,
         ):
             mock_pbar_fn.return_value = MagicMock()
             mock_tsm.return_value = [mock_agent]
@@ -1449,7 +1447,7 @@ class TestFinetuneLlmMultiturn:
                 "agilerl.training.llm.multiturn.stack_and_pad_experiences"
             ) as mock_stack,
             patch(
-                "agilerl.training.llm.multiturn.tournament_selection_and_mutation"
+                "agilerl.training.llm.multiturn.run_selection_and_mutation"
             ) as mock_tourn,
         ):
             mock_pbar_fn.return_value = MagicMock()

@@ -34,16 +34,16 @@ from agilerl.models.env import (
     OfflineEnvSpec,
     PzEnvSpec,
 )
+from agilerl.models.hpo import (
+    check_selection_strategy_exclusive,
+    resolve_multi_frequency_selection_pop_size,
+    split_selection_spec,
+)
 from agilerl.models.networks import (
     NetworkSpec,
     encoder_spec_for_arch,
     infer_encoder_arch,
     network_arch_is_resolvable,
-)
-from agilerl.models.hpo import (
-    check_selection_strategy_exclusive,
-    resolve_multi_frequency_selection_pop_size,
-    split_selection_spec,
 )
 from agilerl.utils.trainer_utils import (
     EnvironmentT,
@@ -60,6 +60,7 @@ logger = logging.getLogger(__name__)
 EnvSpecT = GymEnvSpec | PzEnvSpec | OfflineEnvSpec | LLMEnvSpec | BanditEnvSpec
 ReplayBufferT = ReplayBufferSpec | None
 PopulationT = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
+
 
 if HAS_ARENA_DEPENDENCIES:
     from agilerl.arena import ArenaClient
