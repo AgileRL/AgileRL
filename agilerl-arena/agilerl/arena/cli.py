@@ -4,9 +4,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TypeVar
 
-import click
-
 import agilerl.arena  # noqa: F401 — configure package logging before submodules
+import click
 from agilerl.arena import console
 from agilerl.arena.cli_manifest import handle_help_option
 from agilerl.arena.config import CommandConfig, arena_client

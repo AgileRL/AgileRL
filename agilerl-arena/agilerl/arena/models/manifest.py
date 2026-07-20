@@ -7,18 +7,8 @@ import logging
 import os
 from typing import Annotated, Any, Literal, cast, get_args, overload
 
-import yaml
-from pydantic import (
-    AliasChoices,
-    BaseModel,
-    BeforeValidator,
-    Field,
-    PlainSerializer,
-    model_validator,
-)
-from typing_extensions import Self
-
 import agilerl.arena.models.algorithms as _arena_algorithms  # noqa: F401
+import yaml
 from agilerl.arena.models.algo import (
     ARENA_REGISTRY,
     AlgoSpecT,
@@ -30,6 +20,15 @@ from agilerl.arena.models.networks import (
     NetworkSpec,
 )
 from agilerl.arena.models.training import ReplayBufferSpec, TrainingSpec
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    BeforeValidator,
+    Field,
+    PlainSerializer,
+    model_validator,
+)
+from typing_extensions import Self
 
 logger = logging.getLogger(__name__)
 

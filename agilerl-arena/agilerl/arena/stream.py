@@ -10,14 +10,13 @@ from collections.abc import Callable, Generator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from typing_extensions import Self
-
 from agilerl.arena.exceptions import (
     ArenaAPIError,
     ArenaError,
     _sanitize_detail,
     resolve_api_error_class,
 )
+from typing_extensions import Self
 
 if TYPE_CHECKING:
     import httpx

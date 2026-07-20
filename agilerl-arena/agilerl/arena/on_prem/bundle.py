@@ -12,7 +12,6 @@ import zipfile
 from pathlib import Path
 
 import click
-
 from agilerl.arena.on_prem.endpoints import SetupKind
 
 

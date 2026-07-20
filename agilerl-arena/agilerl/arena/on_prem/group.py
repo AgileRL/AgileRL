@@ -12,7 +12,6 @@ import logging
 from typing import Any
 
 import click
-
 from agilerl.arena.cli_manifest import attach_manifest_tree
 from agilerl.arena.config import (
     CommandConfig,
