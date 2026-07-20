@@ -5,15 +5,16 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import ClassVar, TypeVar
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from agilerl.arena import AgentType
 from agilerl.arena.models.env import LLMEnvType
 from agilerl.arena.models.hpo import RLHyperparameter
 from agilerl.arena.models.networks import LoraConfigDict
-from pydantic import BaseModel, ConfigDict, Field
 
 logger = logging.getLogger(__name__)
 
-AlgoSpecTV = TypeVar("AlgoSpecTV", bound="AlgorithmSpec")
+AlgoSpecTV = TypeVar("AlgoSpecTV", bound="AlgoSpecT")
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,10 +22,10 @@ class RegistryEntry:
     """A single entry in the algorithm registry.
 
     :param spec_cls: The algorithm spec class.
-    :type spec_cls: type[AlgorithmSpec]
+    :type spec_cls: type[AlgoSpecT]
     """
 
-    spec_cls: type[AlgorithmSpec]
+    spec_cls: type[AlgoSpecT]
 
 
 class AlgorithmRegistry:
@@ -37,13 +38,13 @@ class AlgorithmRegistry:
     def __init__(self) -> None:
         self._entries: dict[str, RegistryEntry] = {}
 
-    def add(self, name: str, spec_cls: type[AlgorithmSpec]) -> None:
+    def add(self, name: str, spec_cls: type[AlgoSpecT]) -> None:
         """Register a spec class under *name*.
 
         :param name: Algorithm name (e.g. ``"DQN"``).
         :type name: str
         :param spec_cls: The spec class to register.
-        :type spec_cls: type[AlgorithmSpec]
+        :type spec_cls: type[AlgoSpecT]
         """
         if name in self._entries:
             logger.warning("Overriding existing registration for algorithm %r", name)
@@ -70,14 +71,14 @@ class AlgorithmRegistry:
 ARENA_REGISTRY = AlgorithmRegistry()
 
 
-def register() -> Callable[[type[AlgorithmSpec]], type[AlgorithmSpec]]:
+def register() -> Callable[[type[AlgoSpecTV]], type[AlgoSpecTV]]:
     """Class decorator that registers an algorithm spec for Arena.
 
     The registry key is derived from the spec class name by stripping
     the ``"Spec"`` suffix (e.g. ``DQNSpec`` -> ``"DQN"``).
 
     :returns: The decorator function.
-    :rtype: Callable[[type[AlgorithmSpec]], type[AlgorithmSpec]]
+    :rtype: Callable[[type[AlgoSpecTV]], type[AlgoSpecTV]]
 
     Example::
 
@@ -86,7 +87,7 @@ def register() -> Callable[[type[AlgorithmSpec]], type[AlgorithmSpec]]:
             ...
     """
 
-    def decorator(spec_cls: type[AlgorithmSpec]) -> type[AlgorithmSpec]:
+    def decorator(spec_cls: type[AlgoSpecTV]) -> type[AlgoSpecTV]:
         name = spec_cls.__name__.removesuffix("Spec")
         ARENA_REGISTRY.add(name, spec_cls)
         return spec_cls

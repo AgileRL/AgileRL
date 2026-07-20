@@ -4,11 +4,21 @@ from __future__ import annotations
 
 import copy
 import logging
-from pathlib import Path
-from typing import Annotated, Any, Literal, get_args
+import os
+from typing import Annotated, Any, Literal, cast, get_args, overload
+
+import yaml
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    BeforeValidator,
+    Field,
+    PlainSerializer,
+    model_validator,
+)
+from typing_extensions import Self
 
 import agilerl.arena.models.algorithms as _arena_algorithms  # noqa: F401
-import yaml
 from agilerl.arena.models.algo import (
     ARENA_REGISTRY,
     AlgoSpecT,
@@ -20,15 +30,6 @@ from agilerl.arena.models.networks import (
     NetworkSpec,
 )
 from agilerl.arena.models.training import ReplayBufferSpec, TrainingSpec
-from pydantic import (
-    AliasChoices,
-    BaseModel,
-    BeforeValidator,
-    Field,
-    PlainSerializer,
-    model_validator,
-)
-from typing_extensions import Self
 
 logger = logging.getLogger(__name__)
 
@@ -272,7 +273,7 @@ def _collect_unknown_fields(
         known = _known_field_names(model)
         dumped_section = dumped.get(section)
         if isinstance(dumped_section, dict):
-            known |= set(dumped_section)
+            known |= {str(key) for key in dumped_section}
         unknown.extend(f"{section}.{key}" for key in raw_section if key not in known)
 
     return unknown
@@ -310,7 +311,7 @@ class TrainingManifest(BaseModel):
             net_config_field = algo_spec_cls.model_fields.get("net_config")
             if net_config_field is not None:
                 # get the NetworkSpec class from the type annotation and validate
-                spec_cls: NetworkSpec = next(
+                spec_cls: type[NetworkSpec] | None = next(
                     (
                         t
                         for t in get_args(net_config_field.annotation)
@@ -320,9 +321,13 @@ class TrainingManifest(BaseModel):
                 )
                 # Skip when the network has no resolvable `arch`
                 if spec_cls is not None and _network_has_arch(self.network):
-                    self.algorithm.net_config = spec_cls.model_validate(self.network)
+                    # Presence of a `net_config` model field is only known
+                    # dynamically, so the union attribute can't be narrowed.
+                    self.algorithm.net_config = spec_cls.model_validate(  # ty: ignore[invalid-assignment]
+                        self.network
+                    )
             # LLM algorithms expect a pretrained model
-            elif issubclass(algo_spec_cls, LLMAlgorithmSpec):
+            elif isinstance(self.algorithm, LLMAlgorithmSpec):
                 llm_network = FinetuningNetworkSpec.model_validate(self.network)
                 self.algorithm.pretrained_model_name_or_path = (
                     llm_network.pretrained_model_name_or_path
@@ -330,7 +335,7 @@ class TrainingManifest(BaseModel):
                 self.algorithm.max_model_len = llm_network.max_context_length
 
         if (
-            issubclass(algo_spec_cls, LLMAlgorithmSpec)
+            isinstance(self.algorithm, LLMAlgorithmSpec)
             and self.algorithm.pretrained_model_name_or_path is None
         ):
             msg = (
@@ -358,24 +363,42 @@ class TrainingManifest(BaseModel):
         return self
 
     @staticmethod
-    def _load_yaml(manifest: str | Path | dict[str, Any]) -> dict[str, Any]:
+    def _load_yaml(manifest: str | os.PathLike[str] | dict[str, Any]) -> dict[str, Any]:
         """Read a YAML/JSON file or pass through a raw dict."""
-        if isinstance(manifest, (str, Path)):
-            with open(manifest) as fh:
-                return yaml.safe_load(fh)
-        return manifest
+        if isinstance(manifest, dict):
+            return cast("dict[str, Any]", manifest)
+        with open(manifest) as fh:
+            return yaml.safe_load(fh)
+
+    @overload
+    @classmethod
+    def get_validated(
+        cls,
+        manifest: str | os.PathLike[str] | dict[str, Any],
+        *,
+        mode: Literal["json"] = ...,
+    ) -> dict[str, Any]: ...
+
+    @overload
+    @classmethod
+    def get_validated(
+        cls,
+        manifest: str | os.PathLike[str] | dict[str, Any],
+        *,
+        mode: Literal["python"],
+    ) -> TrainingManifest: ...
 
     @classmethod
     def get_validated(
         cls,
-        manifest: str | Path | dict[str, Any],
+        manifest: str | os.PathLike[str] | dict[str, Any],
         *,
         mode: Literal["json", "python"] = "json",
     ) -> dict[str, Any] | TrainingManifest:
         """Validate a YAML file and return a JSON dict or :class:`TrainingManifest`.
 
         :param manifest: Path to a YAML/JSON file, or a raw dict.
-        :type manifest: str | Path | dict[str, Any]
+        :type manifest: str | os.PathLike[str] | dict[str, Any]
         :param mode: ``"json"`` for Arena submission payload, ``"python"`` for the
             validated Pydantic model.
         :type mode: Literal["json", "python"]

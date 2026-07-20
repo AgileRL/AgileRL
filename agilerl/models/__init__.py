@@ -57,7 +57,6 @@ __getattr__, __dir__, _ = lazy.attach(
     __name__,
     submod_attrs={
         "env": [
-            "ArenaEnvSpec",
             "GymEnvSpec",
             "LLMEnvSpec",
             "OfflineEnvSpec",
@@ -68,7 +67,6 @@ __getattr__, __dir__, _ = lazy.attach(
 
 if TYPE_CHECKING:
     from agilerl.models.env import (
-        ArenaEnvSpec,
         GymEnvSpec,
         LLMEnvSpec,
         OfflineEnvSpec,
@@ -76,7 +74,6 @@ if TYPE_CHECKING:
     )
 
     EnvironmentSpecT = GymEnvSpec | PzEnvSpec | LLMEnvSpec | OfflineEnvSpec
-    ArenaEnvSpecT = ArenaEnvSpec | dict[str, str]
     ReplayBufferSpecT = ReplayBufferSpec | None
     TrainingSpecT = TrainingSpec | None
     MutationSpecT = MutationSpec | None

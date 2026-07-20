@@ -535,7 +535,8 @@ class LLMEnvSpec(BaseModel):
 
         if self.env_name is not None:
             try:
-                import gem
+                # gem-llm is an optional runtime dependency, never installed for checks.
+                import gem  # ty: ignore[unresolved-import]
             except ImportError:
                 msg = (
                     f"The 'gem-llm' package is required to use env_name={self.env_name!r}. "

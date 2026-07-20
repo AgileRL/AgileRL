@@ -5,10 +5,14 @@ from __future__ import annotations
 import time
 from abc import ABC, abstractmethod
 from collections import deque
+from typing import Generic, TypeVar
 
 import numpy as np
 
-AdditionalMetricType = list[float] | dict[str, list[float]]
+# Accumulator shapes: single-agent metrics store flat lists/deques, multi-agent
+# metrics store one accumulator per sub-agent.
+ScalarStore = TypeVar("ScalarStore", list[float], dict[str, list[float]])
+HistogramStore = TypeVar("HistogramStore", deque[float], dict[str, deque[float]])
 
 # Default cap on accumulated raw histogram samples. Bundled training loops
 # clear accumulators every evo step, but custom loops may never clear, so
@@ -16,7 +20,7 @@ AdditionalMetricType = list[float] | dict[str, list[float]]
 NONSCALAR_WINDOW = 100_000
 
 
-class BaseMetrics(ABC):
+class BaseMetrics(ABC, Generic[ScalarStore, HistogramStore]):
     """Base class for per-agent metrics.
 
     :param fitness_window: Maximum number of fitness values to store.
@@ -32,8 +36,8 @@ class BaseMetrics(ABC):
         fitness_window: int = 100,
         nonscalar_window: int = NONSCALAR_WINDOW,
     ) -> None:
-        self._additional_metrics: dict[str, AdditionalMetricType] = {}
-        self._nonscalar_metrics: dict[str, deque | dict[str, deque]] = {}
+        self._additional_metrics: dict[str, ScalarStore] = {}
+        self._nonscalar_metrics: dict[str, HistogramStore] = {}
         self._hyperparameters: dict[str, float] = {}
         self._training_start_time: float = 0.0
         self._nonscalar_window = nonscalar_window
@@ -63,7 +67,9 @@ class BaseMetrics(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def get_histogram(self, name: str, *args: str) -> np.ndarray | None:
+    def get_histogram(
+        self, name: str, agent_id: str | None = None
+    ) -> np.ndarray | None:
         """Return accumulated raw values for a histogram metric."""
         raise NotImplementedError
 
@@ -170,7 +176,7 @@ class BaseMetrics(ABC):
         self.increment_steps(num_steps)
 
 
-class AgentMetrics(BaseMetrics):
+class AgentMetrics(BaseMetrics[list[float], deque[float]]):
     """Tracks training metrics for a single-agent RL algorithm instance.
 
     :param fitness_window: Maximum number of fitness values to store.
@@ -238,13 +244,18 @@ class AgentMetrics(BaseMetrics):
         if not values:
             return float("nan")
 
-        return np.mean(values)
+        return float(np.mean(values))
 
-    def get_histogram(self, name: str) -> np.ndarray | None:
+    def get_histogram(
+        self, name: str, agent_id: str | None = None
+    ) -> np.ndarray | None:
         """Return the accumulated raw values for a histogram metric.
 
         :param name: Previously registered non-scalar metric name.
         :type name: str
+        :param agent_id: Ignored; accepted for signature compatibility with
+            :class:`MultiAgentMetrics`.
+        :type agent_id: str | None
         :returns: Array of all accumulated values, or ``None`` if empty.
         :rtype: numpy.ndarray | None
         """
@@ -262,7 +273,7 @@ class AgentMetrics(BaseMetrics):
             accumulator.clear()
 
 
-class MultiAgentMetrics(BaseMetrics):
+class MultiAgentMetrics(BaseMetrics[dict[str, list[float]], dict[str, deque[float]]]):
     """Tracks training metrics for multi-agent RL algorithms.
 
     Assumes that we log metrics for each sub-agent separately. For settings
@@ -366,19 +377,23 @@ class MultiAgentMetrics(BaseMetrics):
         if not values:
             return float("nan")
 
-        return np.mean(values)
+        return float(np.mean(values))
 
-    def get_histogram(self, name: str, agent_id: str) -> np.ndarray | None:
+    def get_histogram(
+        self, name: str, agent_id: str | None = None
+    ) -> np.ndarray | None:
         """Return accumulated raw values for a histogram metric and sub-agent.
 
         :param name: Previously registered non-scalar metric name.
         :type name: str
-        :param agent_id: Sub-agent identifier.
-        :type agent_id: str
+        :param agent_id: Sub-agent identifier. If omitted, defaults to the first
+            configured sub-agent.
+        :type agent_id: str | None
         :returns: Array of all accumulated values, or ``None`` if empty.
         :rtype: numpy.ndarray | None
         """
-        values = self._nonscalar_metrics[name][agent_id]
+        resolved_agent_id = agent_id if agent_id is not None else self.agent_ids[0]
+        values = self._nonscalar_metrics[name][resolved_agent_id]
         if not values:
             return None
         return np.asarray(values)

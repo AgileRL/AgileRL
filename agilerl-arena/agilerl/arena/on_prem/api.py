@@ -8,7 +8,7 @@ commands never construct raw invoke descriptors themselves.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, cast
 
 from agilerl.arena.client import ArenaClient
 from agilerl.arena.exceptions import ArenaAPIError
@@ -40,7 +40,8 @@ def class_by_name(classes: object, name: str) -> dict[str, Any] | None:
     if len(matches) > 1:
         msg = f"Multiple on-prem classes named {name!r}; resolve duplicates in Arena first."
         raise ArenaAPIError(msg)
-    return matches[0]
+    # JSON object keys are strings; isinstance can't prove the key type.
+    return cast("dict[str, Any]", matches[0])
 
 
 class OnPremApi:

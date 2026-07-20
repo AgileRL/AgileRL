@@ -46,3 +46,16 @@ build-docs:
 #   just test [no-parallel] [cov] [pytest args...]
 test *args:
     bash scripts/run-tests.sh {{args}}
+
+# ---------------------------------------------------------------------------
+# Type checking
+# ---------------------------------------------------------------------------
+
+# Static type checking with ty (config in pyproject.toml [tool.ty]).
+# Creates the agilerl/arena dev symlink on first run: agilerl.arena is a
+# namespace portion shipped by agilerl-arena, and ty resolves it through the
+# symlink. Both paths are passed explicitly because ty does not traverse
+# symlinked directories during discovery.
+typecheck:
+    [ -e agilerl/arena ] || ln -s ../agilerl-arena/agilerl/arena agilerl/arena
+    uv run ty check agilerl agilerl/arena

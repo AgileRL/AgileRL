@@ -25,7 +25,8 @@ def serialize(data: RLData | None, batched: bool = False) -> SerializedRLData:
     :rtype: SerializedRLData
     """
     if isinstance(data, dict):
-        return {k: serialize(v, batched) for k, v in data.items()}
+        # Recursive alias narrowing diverges in ty; the dict arm is dict[str, RLData].
+        return {k: serialize(v, batched) for k, v in data.items()}  # ty: ignore[invalid-return-type, invalid-argument-type]
     if isinstance(data, (tuple, list)):
         return tuple(serialize(v, batched) for v in data)
     if data is None:
@@ -72,7 +73,8 @@ def get_batch_size(observation: RLData) -> int:
     """
     while isinstance(observation, (dict, tuple)):
         if isinstance(observation, dict):
-            observation = next(iter(observation.values()))
+            # Recursive alias narrowing diverges in ty; values are RLData.
+            observation = next(iter(observation.values()))  # ty: ignore[invalid-assignment]
         else:
             observation = observation[0]
     return observation.shape[0]

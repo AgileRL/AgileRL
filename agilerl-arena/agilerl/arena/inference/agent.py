@@ -370,7 +370,8 @@ class Agent:
                 "not a single array."
             )
             raise ArenaInferenceError(detail=msg)
-        return mask
+        # Recursive alias narrowing diverges in ty; the dict arm is dict[str, RLData].
+        return mask  # ty: ignore[invalid-return-type]
 
     def _merge_llm_params(
         self,
@@ -462,15 +463,21 @@ class Agent:
                 for agent_id, serialized in action_raw.items()
             }
         else:
-            action = Agent.deserialize(action_raw, batched)
+            deserialized_action = Agent.deserialize(action_raw, batched)
+            if deserialized_action is None:
+                msg = "Response contained no action."
+                raise ArenaInferenceError(status_code=200, detail=msg)
+            action = deserialized_action
 
-        hidden_state = None
+        hidden_state: dict[str, np.ndarray] | None = None
         if recurrent:
             hidden_raw = response_json.get("hidden_state")
             if hidden_raw is not None:
                 deserialized = Agent.deserialize(hidden_raw, batched)
                 if isinstance(deserialized, dict):
-                    hidden_state = deserialized
+                    # Recursive alias narrowing diverges in ty; hidden-state
+                    # leaves are arrays.
+                    hidden_state = deserialized  # ty: ignore[invalid-assignment]
         return action, hidden_state
 
     def status(self, *, refresh: bool = False) -> StatusResponse:
@@ -554,6 +561,9 @@ class Agent:
         )
         meta = PredictResult.model_validate(body)
         results = self.deserialize(body["results"], batched)
+        if results is None:
+            msg = "Response contained no results."
+            raise ArenaInferenceError(status_code=200, detail=msg)
         return results, meta
 
     def generate(

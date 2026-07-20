@@ -6,7 +6,7 @@ from collections.abc import Callable
 from functools import wraps
 from typing import Any, TypeVar
 
-import fastrand
+import fastrand  # ty: ignore[unresolved-import] — C extension without type stubs
 import numpy as np
 import torch
 from accelerate import Accelerator

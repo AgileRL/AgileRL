@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
+
+import click
 
 import agilerl.arena  # noqa: F401 — configure package logging before submodules
-import click
 from agilerl.arena import console
 from agilerl.arena.cli_manifest import handle_help_option
 from agilerl.arena.config import CommandConfig, arena_client
@@ -18,6 +20,9 @@ from agilerl.arena.output import (
 from agilerl.arena.utils import sort_dataset_search_by_downloads
 
 ArenaError.enable_cli_mode()
+
+# Decorated target of a click option: a plain callback or an already-built Command.
+_FC = TypeVar("_FC", bound=Callable[..., Any] | click.Command)
 
 
 @click.group(
@@ -195,7 +200,7 @@ def env() -> None:
 def env_list(
     config: CommandConfig,
     name: str | None,
-    include_arena: bool | None,
+    include_arena: bool,
 ) -> None:
     """List all available environments in Arena, and whether they have been validated and profiled."""
     with arena_client(config) as client:
@@ -478,6 +483,9 @@ def datasets_create(
         if column_mapping_file is not None
         else column_mapping
     )
+    if mapping is None:
+        msg = "Provide --column-mapping or --column-mapping-file."
+        raise click.UsageError(msg)
     with arena_client(config) as client:
         client.create_dataset(
             name=name,
@@ -754,7 +762,7 @@ def _resolve_agent_target(
     return active.deployment_name, exp, proj
 
 
-def _agent_deployment_options(func: click.Command) -> click.Command:
+def _agent_deployment_options(func: _FC) -> _FC:
     """Shared ``--refresh`` / experiment / project options for agent commands."""
     func = click.option(
         "--refresh",

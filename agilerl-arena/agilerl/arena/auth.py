@@ -11,9 +11,10 @@ import webbrowser
 from pathlib import Path
 from typing import Any
 
-from agilerl.arena.exceptions import ArenaAuthError, ArenaTimeoutError
 from keycloak import KeycloakOpenID
 from keycloak.exceptions import KeycloakError
+
+from agilerl.arena.exceptions import ArenaAuthError, ArenaTimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -97,12 +98,12 @@ def load_credentials_payload(
 
 
 def load_credentials(
-    credentials_path: Path | os.PathLike[str] = "~/.arena/credentials.json",
+    credentials_path: str | os.PathLike[str] = "~/.arena/credentials.json",
 ) -> dict[str, Any] | None:
     """Read stored credentials from ``~/.arena/credentials.json``.
 
     :param credentials_path: The path to the credentials file.
-    :type credentials_path: Path | os.PathLike[str]
+    :type credentials_path: str | os.PathLike[str]
     :returns: Token dictionary, or ``None`` if absent or malformed.
     :rtype: dict[str, Any] | None
     """

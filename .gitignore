@@ -158,10 +158,6 @@ wandb/
 # Cursor
 .cursor
 
-# AI assistant instructions
-CLAUDE.md
-AGENTS.md
-
 # Symlink for type-checking (repo root only)
 /agilerl/arena/
 

@@ -28,6 +28,8 @@ from typing import (
 import numpy as np
 import torch
 from accelerate import Accelerator
+from torch._dynamo import OptimizedModule
+from torch.nn import Module
 from torch.optim.optimizer import Optimizer
 
 NumpyObsType = np.ndarray | dict[str, np.ndarray] | tuple[np.ndarray, ...]
@@ -207,7 +209,12 @@ class EvolvableNetworkProtocol(EvolvableModuleProtocol, Protocol):
         pass
 
 
-T = TypeVar("T", bound=EvolvableModuleProtocol | EvolvableNetworkProtocol)
+# Values may also be plain torch modules or torch.compile wrappers
+# (OptimizedModule), which don't satisfy the evolvable protocols.
+T = TypeVar(
+    "T",
+    bound=Module | OptimizedModule | EvolvableModuleProtocol | EvolvableNetworkProtocol,
+)
 
 
 @runtime_checkable

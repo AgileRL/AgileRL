@@ -80,6 +80,7 @@ dev = [
     "pytest-env>=1.2.0",
     "pytest-xdist>=3.5",
     "nvidia-ml-py>=12.0.0",  # For GPU memory monitoring in tests
+    "ty>=0.0.61",
 ]
 docs = [
     "furo>=2025.12.19",
@@ -176,6 +177,84 @@ exclude = ["agilerl/arena"]
 [tool.hatch.build.targets.sdist]
 include = ["agilerl", "README.md", "LICENSE", "pyproject.toml"]
 exclude = ["agilerl-arena", "agilerl/arena"]
+
+# ---------------------------------------------------------------------------
+# ty — static type checking (run with `just typecheck`)
+# ---------------------------------------------------------------------------
+# Strict by default: any module NOT listed in the legacy override below is
+# fully checked and blocks CI. To opt a module in, remove it from the legacy
+# `include` list and fix the diagnostics that surface. `agilerl/arena` is the
+# gitignored dev symlink into agilerl-arena/agilerl/arena; `just typecheck`
+# creates it and passes both paths explicitly (ty does not traverse symlinked
+# directories during discovery).
+
+[tool.ty.environment]
+python-version = "3.10"
+
+[tool.ty.src]
+include = ["agilerl", "agilerl/arena"]
+
+# Imports that only resolve on some platforms/extras: vllm, deepspeed and
+# liger_kernel are Linux-only; Box2D needs the box2d extra. CI (Linux,
+# --extra all) resolves them; macOS/Windows checkouts cannot.
+[[tool.ty.overrides]]
+include = [
+    "agilerl/algorithms/core/base.py",
+    "agilerl/algorithms/core/llm_ops/fused_loss.py",
+    "agilerl/algorithms/grpo.py",
+    "agilerl/algorithms/sft.py",
+    "agilerl/utils/llm_utils.py",
+    "agilerl/utils/utils.py",
+]
+
+[tool.ty.overrides.rules]
+unresolved-import = "ignore"
+
+# Legacy modules that predate type checking. Diagnostics here are silenced
+# until each module is migrated; everything else (agilerl/arena, agilerl/models
+# __init__, metrics, typing, protocols, logger, train.py, __init__.py, ...)
+# is checked strictly.
+[[tool.ty.overrides]]
+include = [
+    "agilerl/algorithms",
+    "agilerl/components",
+    "agilerl/data",
+    "agilerl/hpo",
+    "agilerl/llm_envs",
+    "agilerl/models",
+    "agilerl/modules",
+    "agilerl/networks",
+    "agilerl/population.py",
+    "agilerl/rollouts",
+    "agilerl/training",
+    "agilerl/utils",
+    "agilerl/vector",
+    "agilerl/wrappers",
+]
+exclude = ["agilerl/models/__init__.py"]
+
+[tool.ty.overrides.rules]
+call-non-callable = "ignore"
+invalid-argument-type = "ignore"
+invalid-assignment = "ignore"
+invalid-key = "ignore"
+invalid-method-override = "ignore"
+invalid-parameter-default = "ignore"
+invalid-return-type = "ignore"
+invalid-type-arguments = "ignore"
+invalid-type-form = "ignore"
+invalid-yield = "ignore"
+missing-argument = "ignore"
+missing-typed-dict-key = "ignore"
+no-matching-overload = "ignore"
+not-iterable = "ignore"
+not-subscriptable = "ignore"
+too-many-positional-arguments = "ignore"
+unbound-type-variable = "ignore"
+unknown-argument = "ignore"
+unresolved-attribute = "ignore"
+unsupported-base = "ignore"
+unsupported-operator = "ignore"
 
 [tool.ruff]
 target-version = "py310"
