@@ -84,6 +84,45 @@ class TestFusedLogprobChunkDispatch:
         assert torch.allclose(again, expected)
 
 
+class TestMixedDtypeOperands:
+    """An fp16 checkpoint under the bf16 autocast reaches the fused matmul
+    with fp32 hidden states and an fp16 lm_head weight; the kernel
+    promotes to a common dtype rather than crashing on the operand mismatch.
+    """
+
+    def test_chunk_promotes_mismatched_dtypes_to_common_dtype(self):
+        torch.manual_seed(0)
+        h = torch.randn(4, 8)  # fp32 hidden (autocast-promoted final norm)
+        w = (torch.randn(16, 8) * 0.02).to(torch.float16)  # checkpoint-dtype head
+        bias = torch.randn(16).to(torch.float16)
+        targets = torch.randint(0, 16, (4,))
+
+        out = _fused_logprob_chunk(h, w, bias, targets, 1.0, True)
+        # fp16 -> fp32 casts are exact, so promoting inside the kernel must
+        # bit-match computing with pre-upcast operands.
+        expected = _fused_logprob_chunk(h, w.float(), bias.float(), targets, 1.0, True)
+        assert out.dtype == torch.float32
+        assert torch.equal(out, expected)
+
+    def test_autograd_function_backward_with_mismatched_dtypes(self):
+        torch.manual_seed(0)
+        hidden = torch.randn(2, 4, 8, requires_grad=True)
+        weight = (torch.randn(16, 8) * 0.02).to(torch.float16).requires_grad_(True)
+        targets = torch.randint(0, 16, (2, 4))
+
+        logps = FusedLinearLogProbsFunction.apply(
+            hidden, weight, None, targets, 1.0, True, 3
+        )
+        logps.sum().backward()
+        # Gradients land on the leaves in their own dtypes.
+        assert hidden.grad is not None
+        assert hidden.grad.dtype == torch.float32
+        assert weight.grad is not None
+        assert weight.grad.dtype == torch.float16
+        assert hidden.grad.abs().sum() > 0
+        assert weight.grad.abs().sum() > 0
+
+
 def test_fused_logprob_backward_skips_when_no_inputs_require_grad():
     hidden = torch.randn(1, 4, 8)
     weight = torch.randn(16, 8)

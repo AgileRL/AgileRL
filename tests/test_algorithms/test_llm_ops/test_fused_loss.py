@@ -1000,6 +1000,45 @@ class TestLigerFusedLinearPolicyLossFunction:
         assert hidden.grad.abs().sum() > 0
         assert weight.grad.abs().sum() > 0
 
+    def test_backward_with_mismatched_hidden_and_weight_dtypes(self) -> None:
+        """An fp16 checkpoint under the bf16 autocast reaches the chunked
+        matmul with fp32 hidden states and an fp16 lm_head weight; the chunk
+        promotes to a common dtype and gradients land on the leaves in their
+        own dtypes.
+        """
+        B, T, V, H = 2, 4, 16, 8
+        hidden, weight_fp32, ids, mask, adv, old_lp, _ = self._build_inputs(
+            B, T, V, H, with_ref=False
+        )
+        weight = weight_fp32.detach().to(torch.float16).requires_grad_(True)
+        loss, _ = LigerFusedLinearPolicyLossFunction.apply(
+            hidden,
+            weight,
+            ids,
+            mask,
+            adv,
+            None,
+            None,
+            old_lp,
+            0.0,
+            0.2,
+            0.2,
+            1.0,
+            False,
+            1,
+            None,
+            None,
+            None,
+        )
+        loss.backward()
+        assert torch.isfinite(loss)
+        assert hidden.grad is not None
+        assert hidden.grad.dtype == torch.float32
+        assert weight.grad is not None
+        assert weight.grad.dtype == torch.float16
+        assert hidden.grad.abs().sum() > 0
+        assert weight.grad.abs().sum() > 0
+
     def test_turn_mode_forward_runs(self) -> None:
         """Smoke test for the turn-mode branch in the autograd Function."""
         B, T, V, H = 2, 6, 16, 8
