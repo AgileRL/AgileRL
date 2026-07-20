@@ -1,3 +1,4 @@
+from collections import OrderedDict
 from typing import Any
 
 import torch
@@ -5,7 +6,7 @@ from torch import nn
 
 from agilerl.modules import EvolvableCNN
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
-from agilerl.typing import DeviceType, ObservationType
+from agilerl.typing import ObservationType
 from agilerl.utils.evolvable_networks import create_resnet, get_activation
 
 
@@ -62,7 +63,7 @@ class EvolvableResNet(EvolvableModule):
         max_blocks: int = 4,
         min_channel_size: int = 32,
         max_channel_size: int = 256,
-        device: DeviceType = "cpu",
+        device: str = "cpu",
         name: str = "resnet",
         random_seed: int | None = None,
     ) -> None:
@@ -144,16 +145,19 @@ class EvolvableResNet(EvolvableModule):
         :return: The created convolutional neural network.
         :rtype: nn.Sequential
         """
-        # Build the main convolutional block
-        net_dict = create_resnet(
-            input_channels=input_shape[0],
-            channel_size=channel_size,
-            kernel_size=kernel_size,
-            stride_size=stride_size,
-            num_blocks=num_blocks,
-            scale_factor=scale_factor,
-            device=self.device,
-            name=self.name,
+        # Build the main convolutional block. nn.Sequential requires an OrderedDict
+        # to interpret the mapping as named modules.
+        net_dict = OrderedDict(
+            create_resnet(
+                input_channels=input_shape[0],
+                channel_size=channel_size,
+                kernel_size=kernel_size,
+                stride_size=stride_size,
+                num_blocks=num_blocks,
+                scale_factor=scale_factor,
+                device=self.device,
+                name=self.name,
+            ),
         )
 
         # Flatten image encodings and pass through a final linear layer

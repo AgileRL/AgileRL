@@ -1,12 +1,13 @@
 import warnings
-from typing import Any, ClassVar
+from dataclasses import asdict
+from typing import ClassVar
 
 import torch
 from gymnasium import spaces
 
 from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
-from agilerl.networks.base import EvolvableNetwork
+from agilerl.networks.base import EvolvableNetwork, preserve_parameters
 from agilerl.networks.distributions import EvolvableDistribution
 from agilerl.typing import ArrayOrTensor, NetConfigType, TorchObsType
 from agilerl.utils.algo_utils import get_output_size_from_space
@@ -63,6 +64,7 @@ class DeterministicActor(EvolvableNetwork):
     :type encoder_name: str
     """
 
+    action_space: spaces.Box | spaces.Discrete
     supported_spaces: ClassVar[tuple[type[spaces.Space], ...]] = (
         spaces.Box,
         spaces.Discrete,
@@ -113,7 +115,7 @@ class DeterministicActor(EvolvableNetwork):
             self.action_low, self.action_high = None, None
 
         # Set output activation based on action space
-        output_activation = None
+        output_activation: str | None = None
         if isinstance(action_space, spaces.Box):
             output_activation = "Tanh"
         elif isinstance(action_space, spaces.Discrete):
@@ -121,26 +123,35 @@ class DeterministicActor(EvolvableNetwork):
 
         if head_config is not None and "output_activation" in head_config:
             user_output_activation = head_config["output_activation"]
-            if user_output_activation not in self._allowed_output_activations:
+            if (
+                isinstance(user_output_activation, str)
+                and user_output_activation in self._allowed_output_activations
+            ):
+                output_activation = user_output_activation
+            else:
                 warnings.warn(
                     f"Output activation must be one of the following: {', '.join(self._allowed_output_activations)}. "
                     f"Got {user_output_activation} instead. Using default output activation.",
                     stacklevel=2,
                 )
-            else:
-                output_activation = user_output_activation
 
         self.output_activation = output_activation
 
         if head_config is None:
-            head_config = MlpNetConfig(
-                hidden_size=[64],
-                output_activation=output_activation,
+            head_config = asdict(
+                MlpNetConfig(
+                    hidden_size=[64],
+                    output_activation=output_activation,
+                ),
             )
         else:
             head_config["output_activation"] = output_activation
 
-        self.output_size = get_output_size_from_space(self.action_space)
+        output_size = get_output_size_from_space(self.action_space)
+        assert not isinstance(output_size, (dict, tuple)), (
+            "Box and Discrete action spaces have an integer output size."
+        )
+        self.output_size = output_size
 
         self.build_network_head(head_config)  # Build network head
 
@@ -181,13 +192,11 @@ class DeterministicActor(EvolvableNetwork):
         )
         return rescaled_action.to(low.dtype)
 
-    def build_network_head(
-        self, net_config: NetConfigType | None = None, **kwargs: Any
-    ) -> None:
+    def build_network_head(self, net_config: NetConfigType) -> None:
         """Build the head of the network.
 
         :param net_config: Configuration of the head.
-        :type net_config: NetConfigType | None
+        :type net_config: NetConfigType
         """
         self.head_net = self.create_mlp(
             num_inputs=self.latent_dim,
@@ -218,7 +227,7 @@ class DeterministicActor(EvolvableNetwork):
             net_config=self.head_net.net_config,
         )
 
-        self.head_net = EvolvableModule.preserve_parameters(self.head_net, head_net)
+        self.head_net = preserve_parameters(self.head_net, head_net)
 
 
 class StochasticActor(EvolvableNetwork):
@@ -261,6 +270,9 @@ class StochasticActor(EvolvableNetwork):
     """
 
     head_net: EvolvableDistribution
+    action_space: (
+        spaces.Box | spaces.Discrete | spaces.MultiDiscrete | spaces.MultiBinary
+    )
     supported_spaces: ClassVar[tuple[type[spaces.Space], ...]] = (
         spaces.Box,
         spaces.Discrete,
@@ -303,13 +315,18 @@ class StochasticActor(EvolvableNetwork):
 
         # Require the head to output logits to parameterize a distribution
         if head_config is None:
-            head_config = MlpNetConfig(hidden_size=[64], output_activation=None)
+            head_config = asdict(MlpNetConfig(hidden_size=[64], output_activation=None))
         else:
             head_config["output_activation"] = None
 
         self.action_std_init = action_std_init
         self.squash_output = squash_output
-        self.output_size = get_output_size_from_space(self.action_space)
+
+        output_size = get_output_size_from_space(self.action_space)
+        assert not isinstance(output_size, (dict, tuple)), (
+            "Supported action spaces have an integer output size."
+        )
+        self.output_size = output_size
 
         self.build_network_head(head_config)
         self.output_activation = None
@@ -328,25 +345,23 @@ class StochasticActor(EvolvableNetwork):
         else:
             self.action_low, self.action_high = None, None
 
-        self.head_net = EvolvableDistribution(
-            action_space=action_space,
-            network=self.head_net,
-            action_std_init=action_std_init,
-            squash_output=squash_output,
-            device=device,
-        )
-
-    def build_network_head(self, net_config: NetConfigType | None = None) -> None:
+    def build_network_head(self, net_config: NetConfigType) -> None:
         """Build the head of the network.
 
         :param net_config: Configuration of the head.
-        :type net_config: NetConfigType | None
+        :type net_config: NetConfigType
         """
-        self.head_net = self.create_mlp(
-            num_inputs=self.latent_dim,
-            num_outputs=self.output_size,
-            name="actor",
-            net_config=net_config,
+        self.head_net = EvolvableDistribution(
+            action_space=self.action_space,
+            network=self.create_mlp(
+                num_inputs=self.latent_dim,
+                num_outputs=self.output_size,
+                name="actor",
+                net_config=net_config,
+            ),
+            action_std_init=self.action_std_init,
+            squash_output=self.squash_output,
+            device=self.device,
         )
 
     def scale_action(self, action: torch.Tensor) -> torch.Tensor:
@@ -357,6 +372,12 @@ class StochasticActor(EvolvableNetwork):
         :return: Scaled action.
         :rtype: torch.Tensor
         """
+        assert self.action_low is not None, (
+            "Action scaling requires a Box action space."
+        )
+        assert self.action_high is not None, (
+            "Action scaling requires a Box action space."
+        )
         return self.action_low + (
             0.5 * (action + 1.0) * (self.action_high - self.action_low)
         )
@@ -365,15 +386,15 @@ class StochasticActor(EvolvableNetwork):
         self,
         obs: TorchObsType,
         action_mask: ArrayOrTensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Forward pass of the network.
 
         :param obs: Observation input.
         :type obs: TorchObsType
         :param action_mask: Action mask.
         :type action_mask: ArrayOrTensor | None
-        :return: Action and log probability of the action.
-        :rtype: tuple[torch.Tensor, torch.Tensor]
+        :return: Action, log probability of the action, and entropy of the action distribution.
+        :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         """
         latent = self.extract_features(obs)
         action, log_prob, entropy = self.head_net.forward(latent, action_mask)
@@ -406,19 +427,17 @@ class StochasticActor(EvolvableNetwork):
         """Recreates the network with the same parameters as the current network."""
         self.recreate_encoder()
 
-        head_net = self.create_mlp(
-            num_inputs=self.latent_dim,
-            num_outputs=self.output_size,
-            name="actor",
-            net_config=self.head_net.net_config,
-        )
-
         head_net = EvolvableDistribution(
             action_space=self.action_space,
-            network=head_net,
+            network=self.create_mlp(
+                num_inputs=self.latent_dim,
+                num_outputs=self.output_size,
+                name="actor",
+                net_config=self.head_net.net_config,
+            ),
             action_std_init=self.action_std_init,
             squash_output=self.squash_output,
             device=self.device,
         )
 
-        self.head_net = EvolvableModule.preserve_parameters(self.head_net, head_net)
+        self.head_net = preserve_parameters(self.head_net, head_net)

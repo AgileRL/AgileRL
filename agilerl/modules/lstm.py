@@ -91,8 +91,12 @@ class EvolvableLSTM(EvolvableModule):
         self.model = self.create_lstm()
 
     @property
-    def hidden_state_architecture(self) -> dict[str, tuple[int, ...]]:
-        """Return the hidden state architecture."""
+    def hidden_state_architecture(
+        self,
+    ) -> dict[str, tuple[int | type[BatchDimension], ...]]:
+        """Return the hidden state architecture. The batch dimension is represented
+        by the ``BatchDimension`` sentinel since it is only known at runtime.
+        """
         # For LSTM, hidden state and cell state have shape (num_layers * num_directions, batch_size, hidden_size)
         # Assuming unidirectional LSTM (num_directions=1) !TODO: SHOULD WE HAVE A DIRECTIONAL LSTM IN THE FUTURE?
         return {
@@ -142,9 +146,9 @@ class EvolvableLSTM(EvolvableModule):
         return net_config
 
     @property
-    def activation(self) -> str:
+    def activation(self) -> str | None:
         """Return activation function."""
-        return
+        return None
 
     @activation.setter
     def activation(self, activation: str) -> None:
@@ -165,7 +169,7 @@ class EvolvableLSTM(EvolvableModule):
     def forward(
         self,
         x: ArrayOrTensor,
-        hidden_state: dict[str, ArrayOrTensor] | None = None,
+        hidden_state: dict[str, torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Forward pass of the network.
 
@@ -196,6 +200,8 @@ class EvolvableLSTM(EvolvableModule):
         if hidden_state is not None:
             h0 = hidden_state.get(f"{self.name}_h", None)
             c0 = hidden_state.get(f"{self.name}_c", None)
+            assert h0 is not None, f"Expected key '{self.name}_h' in hidden state."
+            assert c0 is not None, f"Expected key '{self.name}_c' in hidden state."
 
             # Reshape to (batch_seq_size, seq_len, features)
             sequence_input = False

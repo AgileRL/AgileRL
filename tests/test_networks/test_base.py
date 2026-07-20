@@ -515,7 +515,7 @@ class TestEvolvableNetworkBuildNetworkHead:
         with pytest.raises(
             NotImplementedError, match="build_network_head must be implemented"
         ):
-            minimal.build_network_head()
+            minimal.build_network_head({})
 
 
 class TestEvolvableNetworkInitWeightsGaussian:

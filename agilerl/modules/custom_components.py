@@ -230,7 +230,7 @@ class SimbaResidualBlock(nn.Module):
     :param hidden_size: Hidden size of the residual block
     :type hidden_size: int
     :param scale_factor: Scale factor, defaults to 4
-    :type scale_factor: float
+    :type scale_factor: int
     :param device: Device, defaults to "cpu"
     :type device
     """
@@ -238,7 +238,7 @@ class SimbaResidualBlock(nn.Module):
     def __init__(
         self,
         hidden_size: int,
-        scale_factor: float = 4,
+        scale_factor: int = 4,
         device: DeviceType = "cpu",
     ) -> None:
         super().__init__()

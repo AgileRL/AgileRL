@@ -121,7 +121,7 @@ class EvolvableSimBa(EvolvableModule):
         """Return output layer of neural network."""
         return getattr(self.model, f"{self.name}_linear_layer_output")
 
-    def init_weights_gaussian(
+    def init_weights_gaussian(  # ty: ignore[invalid-method-override]  # intentional redefinition: base exposes a static helper, evolvable modules expose an instance-level API
         self,
         std_coeff: float = 4,
         output_coeff: float = 4,

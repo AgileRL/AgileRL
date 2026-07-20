@@ -217,17 +217,11 @@ unresolved-import = "ignore"
 [[tool.ty.overrides]]
 include = [
     "agilerl/algorithms",
-    "agilerl/components",
-    "agilerl/data",
     "agilerl/hpo",
     "agilerl/llm_envs",
-    "agilerl/modules",
-    "agilerl/networks",
     "agilerl/population.py",
-    "agilerl/rollouts",
     "agilerl/training",
     "agilerl/utils",
-    "agilerl/vector",
     "agilerl/wrappers",
 ]
 

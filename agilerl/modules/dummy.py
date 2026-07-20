@@ -5,13 +5,12 @@ import torch
 from torch import nn
 
 from agilerl.modules import EvolvableModule
-from agilerl.typing import DeviceType
 
 
 def to_evolvable(
-    module_fn: Callable[[], nn.Module],
+    module_fn: Callable[..., nn.Module],
     module_kwargs: dict[str, Any],
-    device: DeviceType,
+    device: str,
 ) -> EvolvableModule:
     return DummyEvolvable(
         device=device,
@@ -30,18 +29,18 @@ class DummyEvolvable(EvolvableModule):
         class hierarchy directly. Please refer to the documentation for more information on how to do this.
 
     :param module_fn: Function that returns a PyTorch nn.Module object.
-    :type module_fn: Callable[[], nn.Module]
+    :type module_fn: Callable[..., nn.Module]
     :param module_kwargs: Keyword arguments to pass to the module_fn.
     :type module_kwargs: dict[str, Any]
     :param device: Device to run the module on.
-    :type device: DeviceType
+    :type device: str
     """
 
     def __init__(
         self,
-        device: DeviceType,
+        device: str,
         module: nn.Module | None = None,
-        module_fn: Callable[[], nn.Module] | None = None,
+        module_fn: Callable[..., nn.Module] | None = None,
         module_kwargs: dict[str, Any] | None = None,
     ) -> None:
 
@@ -53,6 +52,8 @@ class DummyEvolvable(EvolvableModule):
             module_kwargs = {}
 
         if module is None:
+            assert module_fn is not None
+            assert module_kwargs is not None
             module = module_fn(**module_kwargs).to(device)
         else:
             module = module.to(device)

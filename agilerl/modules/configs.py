@@ -1,3 +1,4 @@
+from collections.abc import ItemsView
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -48,7 +49,7 @@ class NetConfig:
     def values(self) -> list[Any]:
         return [getattr(self, key) for key in self.keys()]
 
-    def items(self) -> dict[str, Any]:
+    def items(self) -> ItemsView[str, Any]:
         return {key: getattr(self, key) for key in self.keys()}.items()
 
 
@@ -154,8 +155,8 @@ class MultiInputNetConfig(NetConfig):
     output_activation: str | None = field(default=None)
 
     # Network configurations
-    cnn_config: NetConfigType | None = field(default=None)
-    mlp_config: NetConfigType | None = field(default=None)
+    cnn_config: "NetConfigType | CnnNetConfig | None" = field(default=None)
+    mlp_config: "NetConfigType | MlpNetConfig | None" = field(default=None)
 
     # Additional settings
     init_dicts: dict[str, dict[str, Any]] = field(default_factory=dict)

@@ -8,7 +8,7 @@ import numpy as np
 from gymnasium import Env, spaces
 from gymnasium.vector.utils import batch_space
 
-from agilerl.typing import PzStepReturn
+from agilerl.typing import NumpyObsType, PzStepReturn
 from agilerl.vector.pz_vec_env import PettingZooVecEnv
 
 if TYPE_CHECKING:
@@ -133,6 +133,7 @@ def _pz_placeholder(
     if name == "info":
         return {}
     space = obs_spaces[agent]
+    assert space.shape is not None  # placeholder only used for flat obs spaces
     return np.zeros(space.shape, dtype=space.dtype)
 
 
@@ -177,7 +178,7 @@ class PzDummyVecEnv(PettingZooVecEnv):
         *,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+    ) -> tuple[dict[str, NumpyObsType], dict[str, Any]]:
         """Reset the environment and return batched observations.
 
         :param seed: Random seed for the reset.
@@ -186,11 +187,11 @@ class PzDummyVecEnv(PettingZooVecEnv):
         :type options: dict[str, Any] | None
         :returns: ``(obs, info)`` where *obs* is a dict of arrays with shape
             ``(1, ...)``.
-        :rtype: tuple[dict[str, np.ndarray], dict[str, Any]]
+        :rtype: tuple[dict[str, NumpyObsType], dict[str, Any]]
         """
         obs, info = self._env.reset(seed=seed, options=options)
 
-        batched_obs: dict[str, np.ndarray] = {}
+        batched_obs: dict[str, NumpyObsType] = {}
         for agent in self.agents:
             if agent in obs:
                 batched_obs[agent] = np.expand_dims(np.asarray(obs[agent]), axis=0)
@@ -233,7 +234,7 @@ class PzDummyVecEnv(PettingZooVecEnv):
         obs, reward, terminated, truncated, info = self._env.step(scalar_actions)
 
         # Batch all outputs, filling placeholders for inactive agents
-        batched_obs: dict[str, np.ndarray] = {}
+        batched_obs: dict[str, NumpyObsType] = {}
         batched_reward: dict[str, np.ndarray] = {}
         batched_terminated: dict[str, np.ndarray] = {}
         batched_truncated: dict[str, np.ndarray] = {}

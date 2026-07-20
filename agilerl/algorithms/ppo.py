@@ -26,6 +26,7 @@ from agilerl.typing import (
     ExperiencesType,
     GymEnvType,
     SupportedObservationSpace,
+    TorchObsType,
 )
 from agilerl.utils.algo_utils import (
     make_safe_deepcopies,
@@ -38,7 +39,7 @@ RecurrentActionReturnType = tuple[
     np.ndarray,
     np.ndarray,
     np.ndarray,
-    dict[str, ArrayOrTensor] | None,
+    dict[str, torch.Tensor] | None,
 ]
 
 
@@ -368,17 +369,17 @@ class PPO(RLAlgorithm):
 
     def _extract_hidden_state(
         self,
-        full_hidden_state: dict[str, ArrayOrTensor],
+        full_hidden_state: dict[str, torch.Tensor],
         encoder_name: str,
-    ) -> dict[str, ArrayOrTensor]:
+    ) -> dict[str, torch.Tensor]:
         """Extract hidden state components for a specific network encoder.
 
         :param full_hidden_state: Complete hidden state dictionary
-        :type full_hidden_state: dict[str, ArrayOrTensor]
+        :type full_hidden_state: dict[str, torch.Tensor]
         :param encoder_name: Name of the encoder to extract hidden states for
         :type encoder_name: str
         :return: Hidden state dictionary for the specific encoder
-        :rtype: dict[str, ArrayOrTensor]
+        :rtype: dict[str, torch.Tensor]
         """
         return {
             key: value
@@ -388,10 +389,10 @@ class PPO(RLAlgorithm):
 
     def _get_action_and_values(
         self,
-        obs: ArrayOrTensor,
+        obs: TorchObsType,
         action_mask: ArrayOrTensor | None = None,
         hidden_state: (
-            dict[str, ArrayOrTensor] | None
+            dict[str, torch.Tensor] | None
         ) = None,  # Hidden state is a dict for recurrent policies
         *,
         sample: bool = True,
@@ -400,7 +401,7 @@ class PPO(RLAlgorithm):
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
-        dict[str, ArrayOrTensor] | None,
+        dict[str, torch.Tensor] | None,
     ]:
         """Return the next action to take in the environment and the values.
 
@@ -409,11 +410,11 @@ class PPO(RLAlgorithm):
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: ArrayOrTensor | None
         :param hidden_state: Hidden state for recurrent policies, defaults to None
-        :type hidden_state: dict[str, ArrayOrTensor] | None
+        :type hidden_state: dict[str, torch.Tensor] | None
         :param sample: Whether to sample an action, defaults to True
         :type sample: bool
         :return: Action, log probability, entropy, state values, and (if recurrent) next hidden state
-        :rtype: tuple[ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor, dict[str, ArrayOrTensor] | None]
+        :rtype: tuple[ArrayOrTensor, torch.Tensor, torch.Tensor, torch.Tensor, dict[str, torch.Tensor] | None]
         """
         if hidden_state is not None:
             if self.share_encoders:
@@ -490,7 +491,7 @@ class PPO(RLAlgorithm):
             k: v.shape for k, v in self.get_initial_hidden_state(self.num_envs).items()
         }
 
-    def get_initial_hidden_state(self, num_envs: int = 1) -> dict[str, ArrayOrTensor]:
+    def get_initial_hidden_state(self, num_envs: int = 1) -> dict[str, torch.Tensor]:
         """Get the initial hidden state for the environment.
 
         The hidden states are generally cached on a per Module basis.
@@ -499,11 +500,11 @@ class PPO(RLAlgorithm):
         :param num_envs: Number of environments, defaults to 1
         :type num_envs: int, optional
         :return: Initial hidden state dictionary
-        :rtype: dict[str, ArrayOrTensor]
+        :rtype: dict[str, torch.Tensor]
         """
         # Return a batch of initial hidden states
         # Flat map them into "actor_*" and "critic_*" (if not sharing encoders)
-        flat_hidden = {}
+        flat_hidden: dict[str, torch.Tensor] = {}
 
         actor_hidden = self.actor.initialize_hidden_state(batch_size=num_envs)
         flat_hidden.update(actor_hidden)
@@ -519,7 +520,7 @@ class PPO(RLAlgorithm):
         self,
         obs: ArrayOrTensor,
         actions: ArrayOrTensor,
-        hidden_state: dict[str, ArrayOrTensor] | None = None,
+        hidden_state: dict[str, torch.Tensor] | None = None,
         action_mask: ArrayOrTensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Evaluate the actions.
@@ -529,7 +530,7 @@ class PPO(RLAlgorithm):
         :param actions: Actions to evaluate
         :type actions: ArrayOrTensor
         :param hidden_state: Hidden state for recurrent policies, defaults to None. Expected shape: dict with tensors of shape (batch_size, 1, hidden_size).
-        :type hidden_state: dict[str, ArrayOrTensor] | None
+        :type hidden_state: dict[str, torch.Tensor] | None
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: ArrayOrTensor | None
         :return: Log probability, entropy, state values
@@ -557,7 +558,7 @@ class PPO(RLAlgorithm):
         self,
         obs: ArrayOrTensor,
         action_mask: ArrayOrTensor | None = None,
-        hidden_state: dict[str, ArrayOrTensor] | None = None,
+        hidden_state: dict[str, torch.Tensor] | None = None,
         *args: Any,
         **kwargs: Any,
     ) -> ActionReturnType | RecurrentActionReturnType:
@@ -568,9 +569,9 @@ class PPO(RLAlgorithm):
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: ArrayOrTensor | None
         :param hidden_state: Hidden state for recurrent policies, defaults to None
-        :type hidden_state: dict[str, ArrayOrTensor] | None
+        :type hidden_state: dict[str, torch.Tensor] | None
         :return: Action, log probability, entropy, state values, and (if recurrent) next hidden state
-        :rtype: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, ArrayOrTensor] | None] | tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+        :rtype: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, torch.Tensor] | None] | tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
         """
         obs = self.preprocess_observation(obs)
         with torch.no_grad():

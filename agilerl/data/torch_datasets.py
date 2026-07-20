@@ -34,8 +34,8 @@ class GeneralDataset(Dataset):
     def __len__(self) -> int:
         return self.rl_dataset.size()
 
-    def __getitem__(self, i: int) -> Any:
-        return self.rl_dataset.get_item(i)
+    def __getitem__(self, index: int) -> Any:
+        return self.rl_dataset.get_item(index)
 
     def collate(self, items: list[Any]) -> Any:
         return self.rl_dataset.collate(items, self.device)

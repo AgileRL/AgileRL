@@ -1,11 +1,11 @@
 from collections.abc import Callable
-from typing import Any
+from typing import Any, SupportsInt, cast
 
 import numpy as np
 from gymnasium.spaces import Space
 from gymnasium.vector.utils import batch_space
 
-from agilerl.typing import ActionType, PzStepReturn
+from agilerl.typing import ActionType, NumpyObsType, PzStepReturn
 
 
 class PettingZooVecEnv:
@@ -41,6 +41,7 @@ class PettingZooVecEnv:
         self.closed = False
         self.num_envs = num_envs
         self.agents = possible_agents
+        self.possible_agents = possible_agents
         self.num_agents = len(self.agents)
         self._single_observation_spaces = observation_spaces
         self._single_action_spaces = action_spaces
@@ -78,7 +79,7 @@ class PettingZooVecEnv:
         *,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+    ) -> tuple[dict[str, NumpyObsType], dict[str, Any]]:
         """Reset all the environments and return two dictionaries of batched observations and infos.
 
         :param seed: Random seed, defaults to None
@@ -86,7 +87,7 @@ class PettingZooVecEnv:
         :param options: Options dictionary
         :type options: dict[str, Any]
         :return: Tuple of (observations, infos)
-        :rtype: tuple[dict[str, np.ndarray], dict[str, Any]]
+        :rtype: tuple[dict[str, NumpyObsType], dict[str, Any]]
         """
         msg = "Subclasses must implement reset()"
         raise NotImplementedError(msg)
@@ -140,7 +141,11 @@ class PettingZooVecEnv:
                     continue
 
                 agent_action = (
-                    int(agent_action) if np.isscalar(agent_action) else agent_action
+                    # Scalar actions are numeric (discrete-action envs), so
+                    # SupportsInt is safe despite np.isscalar's wider TypeIs.
+                    int(cast("SupportsInt", agent_action))
+                    if np.isscalar(agent_action)
+                    else agent_action
                 )
                 env_actions[agent_id] = agent_action
 

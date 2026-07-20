@@ -426,10 +426,10 @@ class EvolvableBERT(EvolvableModule):
         output: torch.Tensor,
         first_layer: nn.Module,
         str_first_layer: str,
-        mask: torch.Tensor,
-        src_key_padding_mask: torch.Tensor,
-        src_key_padding_mask_for_layers: torch.Tensor,
-    ) -> tuple[torch.Tensor, bool, torch.Tensor]:
+        mask: torch.Tensor | None,
+        src_key_padding_mask: torch.Tensor | None,
+        src_key_padding_mask_for_layers: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, bool, torch.Tensor | None]:
         """Return encoder output, conversion to nested and padding mask depending on if sparsity fast path possible.
         :param src: Encoder input sequence
         :type src: torch.Tensor
@@ -440,11 +440,11 @@ class EvolvableBERT(EvolvableModule):
         :param str_first_layer: Name of first layer of encoder
         :type str_first_layer: str
         :param mask: Mask for the src sequence
-        :type mask: torch.Tensor
+        :type mask: torch.Tensor | None
         :param src_key_padding_mask: Tensor mask for src keys per batch
-        :type src_key_padding_mask: torch.Tensor
+        :type src_key_padding_mask: torch.Tensor | None
         :param src_key_padding_mask_for_layers: Tensor mask for src keys per batch for layers
-        :type src_key_padding_mask_for_layers: torch.Tensor.
+        :type src_key_padding_mask_for_layers: torch.Tensor | None.
         """
         convert_to_nested = False
         if (
@@ -559,14 +559,14 @@ class EvolvableBERT(EvolvableModule):
 
         if network == "encoder":
             if hidden_layer is None:
-                hidden_layer = self.rng.integers(0, len(self.encoder_layers))
+                hidden_layer = int(self.rng.integers(0, len(self.encoder_layers)))
             else:
                 hidden_layer = min(hidden_layer, len(self.encoder_layers) - 1)
 
             self.encoder_layers[hidden_layer] += numb_new_nodes
         else:
             if hidden_layer is None:
-                hidden_layer = self.rng.integers(0, len(self.decoder_layers))
+                hidden_layer = int(self.rng.integers(0, len(self.decoder_layers)))
             else:
                 hidden_layer = min(hidden_layer, len(self.decoder_layers) - 1)
 
@@ -605,7 +605,7 @@ class EvolvableBERT(EvolvableModule):
 
         if network == "encoder":
             if hidden_layer is None:
-                hidden_layer = self.rng.integers(0, len(self.encoder_layers))
+                hidden_layer = int(self.rng.integers(0, len(self.encoder_layers)))
 
             else:
                 hidden_layer = min(hidden_layer, len(self.encoder_layers) - 1)
@@ -613,7 +613,7 @@ class EvolvableBERT(EvolvableModule):
                 self.encoder_layers[hidden_layer] -= numb_new_nodes
         else:
             if hidden_layer is None:
-                hidden_layer = self.rng.integers(0, len(self.decoder_layers))
+                hidden_layer = int(self.rng.integers(0, len(self.decoder_layers)))
             else:
                 hidden_layer = min(hidden_layer, len(self.decoder_layers) - 1)
 

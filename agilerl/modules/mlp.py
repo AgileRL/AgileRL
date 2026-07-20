@@ -167,7 +167,7 @@ class EvolvableMLP(EvolvableModule):
         """
         self._activation = activation
 
-    def init_weights_gaussian(
+    def init_weights_gaussian(  # ty: ignore[invalid-method-override]  # intentional redefinition: base exposes a static helper, evolvable modules expose an instance-level API
         self,
         std_coeff: float = 4,
         output_coeff: float = 4,
@@ -268,7 +268,7 @@ class EvolvableMLP(EvolvableModule):
         :rtype: dict[str, int]
         """
         if hidden_layer is None:
-            hidden_layer = self.rng.integers(0, len(self.hidden_size))
+            hidden_layer = int(self.rng.integers(0, len(self.hidden_size)))
         else:
             hidden_layer = min(hidden_layer, len(self.hidden_size) - 1)
 
@@ -298,7 +298,7 @@ class EvolvableMLP(EvolvableModule):
         :rtype: dict[str, int]
         """
         if hidden_layer is None:
-            hidden_layer = self.rng.integers(0, len(self.hidden_size))
+            hidden_layer = int(self.rng.integers(0, len(self.hidden_size)))
         else:
             hidden_layer = min(hidden_layer, len(self.hidden_size) - 1)
 

@@ -1,5 +1,6 @@
+from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import numpy as np
 import torch
@@ -54,7 +55,7 @@ def _assert_correct_kernel_sizes(
 @dataclass
 class MutableKernelSizes:
     sizes: list[KernelSizeType]
-    cnn_block_type: Literal["Conv2d", "Conv3d"]
+    cnn_block_type: BlockType
     sample_input: torch.Tensor | None
     rng: np.random.Generator
 
@@ -62,47 +63,62 @@ class MutableKernelSizes:
         tuple_sizes = False
         if isinstance(self.sizes[0], (tuple, list)):
             tuple_sizes = True
-            _assert_correct_kernel_sizes(self.sizes, self.cnn_block_type)
+            _assert_correct_kernel_sizes(self._tuple_sizes, self.cnn_block_type)
         elif self.cnn_block_type == "Conv3d":
             # NOTE: If kernel sizes are passed as integers in multi-agent settings, we
             # add a depth dimension of 1 for all layers. Note that for e.g. value functions
             # or Q networks it is common for the first layer to have a depth corresponding
             # to the number of agents (since we stack the observations from all agents to
             # obtain the value)
-            sizes = [(1, k_size, k_size) for k_size in self.sizes]
+            int_sizes = self._int_sizes
+            sizes: list[KernelSizeType] = [(1, k_size, k_size) for k_size in int_sizes]
 
             # We infer the depth of the first kernel from the shape of the sample input tensor
-            sizes[0] = (self.sample_input.size(2), self.sizes[0], self.sizes[0])
+            assert self.sample_input is not None, (
+                "A sample input must be provided for 3D convolutional networks."
+            )
+            sizes[0] = (self.sample_input.size(2), int_sizes[0], int_sizes[0])
             self.sizes = sizes
             tuple_sizes = True
         elif self.cnn_block_type == "Conv1d":
             # If kernel sizes are passed as integers for Conv1d, convert to (length,) tuples
-            self.sizes = [(k_size,) for k_size in self.sizes]
+            self.sizes = [(k_size,) for k_size in self._int_sizes]
             tuple_sizes = True
 
         self.tuple_sizes = tuple_sizes
 
     @property
+    def _tuple_sizes(self) -> list[tuple[int, ...]]:
+        """View of ``sizes`` under the invariant that all kernel sizes are tuples."""
+        return cast("list[tuple[int, ...]]", self.sizes)
+
+    @property
+    def _int_sizes(self) -> list[int]:
+        """View of ``sizes`` under the invariant that all kernel sizes are integers."""
+        return cast("list[int]", self.sizes)
+
+    @property
     def int_sizes(self) -> list[int]:
         if self.tuple_sizes:
-            return [k_size[-1] for k_size in self.sizes]
-        return self.sizes
+            return [k_size[-1] for k_size in self._tuple_sizes]
+        return self._int_sizes
 
     def __len__(self) -> int:
         return len(self.sizes)
 
     def add_layer(self, other: int) -> None:
+        new_size: KernelSizeType = other
         if self.tuple_sizes:
             if self.cnn_block_type == "Conv2d":
-                other = (other, other)
+                new_size = (other, other)
             elif self.cnn_block_type == "Conv3d":
                 # NOTE: Do we always want to use a depth of one when adding a layer
                 # in multi-agent settings?
-                other = (1, other, other)
+                new_size = (1, other, other)
             elif self.cnn_block_type == "Conv1d":
-                other = (other,)
+                new_size = (other,)
 
-        self.sizes += [other]
+        self.sizes += [new_size]
 
     def remove_layer(self) -> None:
         self.sizes = self.sizes[:-1]
@@ -125,7 +141,7 @@ class MutableKernelSizes:
         :return: Maximum kernel sizes for each convolutional layer.
         :rtype: list[int]
         """
-        kernel_size = self.int_sizes if self.tuple_sizes else self.sizes
+        kernel_size = self.int_sizes
         max_kernel_list = []
         height_in, width_in = input_shape[-2:]
         for idx, _ in enumerate(channel_size):
@@ -152,7 +168,7 @@ class MutableKernelSizes:
         hidden_layer: int,
         channel_size: list[int],
         stride_size: list[int],
-        input_shape: tuple[int],
+        input_shape: list[int],
         kernel_size: int | tuple[int, ...] | None = None,
     ) -> int:
         """Randomly alters convolution kernel of random CNN layer.
@@ -164,9 +180,9 @@ class MutableKernelSizes:
         :param stride_size: Stride size of each convolutional layer.
         :type stride_size: list[int]
         :param input_shape: Input shape.
-        :type input_shape: tuple[int]
+        :type input_shape: list[int]
         :param kernel_size: Kernel size to change to, defaults to None
-        :type kernel_size: int, optional
+        :type kernel_size: int | tuple[int, ...], optional
 
         :return: New kernel size
         :rtype: int
@@ -174,15 +190,13 @@ class MutableKernelSizes:
         if kernel_size is not None:
             if self.tuple_sizes:
                 assert isinstance(kernel_size, tuple), "Kernel size must be a tuple."
+                new_kernel_size = kernel_size[-1]
             else:
-                kernel_size = (
-                    int(kernel_size)
-                    if not isinstance(kernel_size, int)
-                    else kernel_size
-                )
-                assert isinstance(kernel_size, int), "Kernel size must be an integer."
-
-            new_kernel_size = kernel_size
+                assert isinstance(
+                    kernel_size,
+                    (int, np.integer),
+                ), "Kernel size must be an integer."
+                new_kernel_size = int(kernel_size)
         else:
             max_kernels = self.calc_max_kernel_sizes(
                 channel_size,
@@ -191,10 +205,7 @@ class MutableKernelSizes:
             )
 
             # Get current kernel size to avoid generating the same value
-            current_kernel_size = self.sizes[hidden_layer]
-            if self.tuple_sizes:
-                current_kernel_size = current_kernel_size[-1]
-
+            current_kernel_size = self.int_sizes[hidden_layer]
             max_kernel = max_kernels[hidden_layer]
             if max_kernel == 1:
                 new_kernel_size = 1
@@ -203,20 +214,21 @@ class MutableKernelSizes:
                     k for k in range(1, max_kernel + 1) if k != current_kernel_size
                 ]
                 if candidates:
-                    new_kernel_size = self.rng.choice(candidates)
+                    new_kernel_size = int(self.rng.choice(candidates))
                 else:
-                    new_kernel_size = self.rng.integers(1, max_kernel + 1)
+                    new_kernel_size = int(self.rng.integers(1, max_kernel + 1))
 
         if self.tuple_sizes:
+            tuple_sizes = self._tuple_sizes
             if self.cnn_block_type == "Conv2d":
-                self.sizes[hidden_layer] = (new_kernel_size, new_kernel_size)
+                tuple_sizes[hidden_layer] = (new_kernel_size, new_kernel_size)
             elif self.cnn_block_type == "Conv3d":
-                depth = self.sizes[hidden_layer][0]
-                self.sizes[hidden_layer] = (depth, new_kernel_size, new_kernel_size)
+                depth = tuple_sizes[hidden_layer][0]
+                tuple_sizes[hidden_layer] = (depth, new_kernel_size, new_kernel_size)
             elif self.cnn_block_type == "Conv1d":
-                self.sizes[hidden_layer] = (new_kernel_size,)
+                tuple_sizes[hidden_layer] = (new_kernel_size,)
         else:
-            self.sizes[hidden_layer] = new_kernel_size
+            self._int_sizes[hidden_layer] = new_kernel_size
 
         return new_kernel_size
 
@@ -399,11 +411,11 @@ class EvolvableCNN(EvolvableModule):
         return net_config
 
     @property
-    def kernel_size(self) -> list[KernelSizeType]:
+    def kernel_size(self) -> list[int]:
         """Return the kernel size of the network.
 
         :return: Kernel size
-        :rtype: list[KernelSizeType]
+        :rtype: list[int]
         """
         return self.mut_kernel_size.int_sizes
 
@@ -463,7 +475,7 @@ class EvolvableCNN(EvolvableModule):
 
         return new_net
 
-    def init_weights_gaussian(self, std_coeff: float = 4) -> None:
+    def init_weights_gaussian(self, std_coeff: float = 4) -> None:  # ty: ignore[invalid-method-override]  # intentional redefinition: base exposes a static helper, evolvable modules expose an instance-level API
         """Initialise weights of linear layer using Gaussian distribution.
 
         :param std_coeff: Standard deviation coefficient, defaults to 4
@@ -521,18 +533,21 @@ class EvolvableCNN(EvolvableModule):
         :return: The created convolutional neural network.
         :rtype: nn.Sequential
         """
-        # Build the main convolutional block
-        net_dict = create_cnn(
-            block_type=self.block_type,
-            in_channels=in_channels,
-            channel_size=channel_size,
-            kernel_size=kernel_size,
-            stride_size=stride_size,
-            name=self.name,
-            init_layers=self.init_layers,
-            layer_norm=self.layer_norm,
-            activation_fn=self.activation,
-            device=self.device,
+        # Build the main convolutional block. nn.Sequential requires an OrderedDict
+        # to interpret the mapping as named modules.
+        net_dict = OrderedDict(
+            create_cnn(
+                block_type=self.block_type,  # ty: ignore[invalid-argument-type]  # upstream: create_cnn in agilerl/utils/evolvable_networks.py should accept "Conv1d" in its block_type Literal
+                in_channels=in_channels,
+                channel_size=channel_size,
+                kernel_size=kernel_size,
+                stride_size=stride_size,  # ty: ignore[invalid-argument-type]  # upstream: create_cnn's stride_size should be Sequence[TupleorInt]; list[int] fails invariance
+                name=self.name,
+                init_layers=self.init_layers,
+                layer_norm=self.layer_norm,
+                activation_fn=self.activation,
+                device=self.device,
+            ),
         )
 
         # Flatten image encodings and pass through a final linear layer
@@ -700,7 +715,7 @@ class EvolvableCNN(EvolvableModule):
         """
         if len(self.channel_size) > 1:
             if hidden_layer is None:
-                hidden_layer = self.rng.integers(1, min(4, len(self.channel_size)))
+                hidden_layer = int(self.rng.integers(1, min(4, len(self.channel_size))))
 
             new_kernel_size = self.mut_kernel_size.change_kernel_size(
                 hidden_layer,
@@ -730,7 +745,7 @@ class EvolvableCNN(EvolvableModule):
         :rtype: dict[str, int]
         """
         if hidden_layer is None:
-            hidden_layer = self.rng.integers(0, len(self.channel_size))
+            hidden_layer = int(self.rng.integers(0, len(self.channel_size)))
         else:
             hidden_layer = min(hidden_layer, len(self.channel_size) - 1)
 
@@ -760,7 +775,7 @@ class EvolvableCNN(EvolvableModule):
         :rtype: dict[str, int | None]
         """
         if hidden_layer is None:
-            hidden_layer = self.rng.integers(0, len(self.channel_size))
+            hidden_layer = int(self.rng.integers(0, len(self.channel_size)))
         else:
             hidden_layer = min(hidden_layer, len(self.channel_size) - 1)
 
