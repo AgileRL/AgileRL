@@ -336,11 +336,11 @@ class Agent:
             )
 
     @staticmethod
-    def serialize(data: RLData | None, batched: bool = False) -> SerializedRLData:
+    def serialize(data: RLData, batched: bool = False) -> SerializedRLData:
         return _serialize(data, batched)
 
     @staticmethod
-    def deserialize(data: SerializedRLData, batched: bool = False) -> RLData | None:
+    def deserialize(data: SerializedRLData, batched: bool = False) -> RLData:
         return _deserialize(data, batched)
 
     @staticmethod
@@ -360,7 +360,7 @@ class Agent:
     @staticmethod
     def _multi_agent_mask(
         info: dict[str, RLData] | None,
-    ) -> dict[str, RLData] | None:
+    ) -> RLData:
         if info is None or "action_mask" not in info:
             return None
         mask = info["action_mask"]
@@ -370,9 +370,7 @@ class Agent:
                 "not a single array."
             )
             raise ArenaInferenceError(detail=msg)
-        # The isinstance above proves this is the dict[str, RLData] arm, but ty
-        # can't expand RLData's self-reference, so it still sees dict[?, object].
-        return mask  # ty: ignore[invalid-return-type]
+        return mask
 
     def _merge_llm_params(
         self,
@@ -395,7 +393,7 @@ class Agent:
         batched: bool,
         hidden_state: dict[str, np.ndarray] | None,
         info: dict[str, RLData] | None,
-        env_defined_actions: dict[str, RLData] | None,
+        env_defined_actions: RLData,
     ) -> dict[str, Any]:
         """Build the payload for the POST /get_action request."""
         agent = self._agent_info()
@@ -476,9 +474,9 @@ class Agent:
             if hidden_raw is not None:
                 deserialized = Agent.deserialize(hidden_raw, batched)
                 if isinstance(deserialized, dict):
-                    # Hidden state is always dict[str, ndarray], but deserialize
-                    # returns the recursive RLData alias, whose self-reference ty
-                    # can't expand to prove the values are arrays.
+                    # This field is specifically dict[str, ndarray]; deserialize
+                    # returns the general wire alias and dict invariance blocks
+                    # assigning dict[str, RLData] to it.
                     hidden_state = deserialized  # ty: ignore[invalid-assignment]
         return action, hidden_state
 
@@ -502,7 +500,7 @@ class Agent:
         batched: bool = False,
         hidden_state: dict[str, np.ndarray] | None = None,
         info: dict[str, RLData] | None = None,
-        env_defined_actions: dict[str, RLData] | None = None,
+        env_defined_actions: RLData = None,
     ) -> tuple[RLData, dict[str, np.ndarray] | None]:
         """Get actions from a deployed RL agent.
 
