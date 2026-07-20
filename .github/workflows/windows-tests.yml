@@ -49,6 +49,17 @@ jobs:
                   pip install uv
                   uv sync --locked --all-groups --extra all
 
+            - name: Show runner CPU
+              run: Get-CimInstance Win32_Processor | Select-Object Name, Manufacturer | Format-List
+
             - name: Test with pytest
               shell: bash
+              # Cap CPU-ISA dispatch at AVX2: part of the heterogeneous Azure fleet
+              # behind windows-2025 runners faults (0xc000001d, illegal instruction)
+              # in torch's native kernel threads when an above-AVX2 code path is
+              # selected. AVX2 is supported fleet-wide.
+              env:
+                  ATEN_CPU_CAPABILITY: avx2
+                  ONEDNN_MAX_CPU_ISA: AVX2
+                  MKL_ENABLE_INSTRUCTIONS: AVX2
               run: bash scripts/run-tests.sh cov --exitfirst -m "not llm" --cov-report=term-missing --durations=0 --durations-min=1.0
