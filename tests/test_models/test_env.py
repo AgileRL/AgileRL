@@ -977,7 +977,7 @@ class TestLLMEnvSpecRollout:
         )
         mock_rollout_cls.local.assert_not_called()
 
-    def test_served_factory_hosts_an_openenv_server(self):
+    def test_served_factory_shares_one_openenv_server(self):
         mock_tokenizer = MagicMock()
         mock_tokenizer.pad_token_id = 0
         spec = LLMEnvSpec(
@@ -986,21 +986,20 @@ class TestLLMEnvSpecRollout:
             max_turns=3,
             served=True,
         )
-        mock_rollout_cls = MagicMock()
-        with (
-            patch(
-                "agilerl.models.env.resolve_entrypoint_target",
-                return_value=MagicMock(),
-            ),
-            patch("agilerl.llm_envs.RolloutEnv", mock_rollout_cls),
+        with patch(
+            "agilerl.models.env.resolve_entrypoint_target",
+            return_value=MagicMock(),
         ):
-            spec.make_rollout_env_factory(mock_tokenizer)()
-        mock_rollout_cls.serving.assert_called_once()
-        call = mock_rollout_cls.serving.call_args
-        assert callable(call.args[0])  # the make_env factory serving hosts
-        assert call.kwargs["max_turns"] == 3
-        assert call.kwargs["env_name"] == "my_mod:MyEnv"
-        mock_rollout_cls.local.assert_not_called()
+            factory = spec.make_rollout_env_factory(mock_tokenizer)
+
+        from agilerl.llm_envs.openenv import ServedEnvFactory
+
+        assert isinstance(factory, ServedEnvFactory)
+        assert factory._max_turns == 3
+        assert factory._env_name == "my_mod:MyEnv"
+        assert factory._timeout_s == 300.0
+        # The shared server starts lazily with the first env, not at build time.
+        assert factory._server is None
 
     def test_rollout_max_turns_optional(self):
         spec = LLMEnvSpec(
