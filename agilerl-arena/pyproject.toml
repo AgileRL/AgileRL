@@ -15,7 +15,7 @@ dependencies = [
     "pydantic>=2.0,<3",
     "python-keycloak>=4.0,<6",
     "pyyaml>=6.0",
-    "rich>=13.0,<14",
+    "rich>=13.0,<16",
 ]
 
 [project.scripts]
