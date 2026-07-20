@@ -5,7 +5,7 @@ import torch.nn.functional as F
 
 from agilerl.modules.base import EvolvableModule
 from agilerl.modules.mlp import EvolvableMLP
-from agilerl.typing import ArrayOrTensor
+from agilerl.typing import ArrayOrTensor, DeviceType
 from agilerl.utils.evolvable_networks import create_mlp
 
 
@@ -51,7 +51,7 @@ class DuelingDistributionalMLP(EvolvableMLP):
     :param new_gelu: Use new GELU activation function, defaults to False
     :type new_gelu: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
-    :type device: str, optional
+    :type device: DeviceType, optional
     """
 
     def __init__(
@@ -74,7 +74,7 @@ class DuelingDistributionalMLP(EvolvableMLP):
         min_mlp_nodes: int = 64,
         max_mlp_nodes: int = 500,
         new_gelu: bool = False,
-        device: str = "cpu",
+        device: DeviceType = "cpu",
     ) -> None:
 
         super().__init__(

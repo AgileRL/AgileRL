@@ -3,7 +3,7 @@ from typing import Any
 import torch
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
-from agilerl.typing import ObservationType
+from agilerl.typing import DeviceType, ObservationType
 from agilerl.utils.evolvable_networks import create_simba
 
 
@@ -41,7 +41,7 @@ class EvolvableSimBa(EvolvableModule):
     :param max_mlp_nodes: Maximum number of nodes a layer can have within the network, defaults to 500
     :type max_mlp_nodes: int, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
-    :type device: str, optional
+    :type device: DeviceType, optional
     :param name: Name of the network, defaults to 'mlp'
     :type name: str, optional
     :param random_seed: Random seed to use for the network. Defaults to None.
@@ -60,7 +60,7 @@ class EvolvableSimBa(EvolvableModule):
         max_blocks: int = 4,
         min_mlp_nodes: int = 16,
         max_mlp_nodes: int = 500,
-        device: str = "cpu",
+        device: DeviceType = "cpu",
         name: str = "simba",
         random_seed: int | None = None,
     ) -> None:

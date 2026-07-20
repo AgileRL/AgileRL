@@ -103,13 +103,18 @@ class EvolvableModuleProtocol(Protocol):
     """
 
     init_dict: dict[str, Any]
-    device: DeviceType
     layer_mutation_methods: list[str]
     node_mutation_methods: list[str]
     mutation_methods: list[str]
     last_mutation_attr: str
     last_mutation: Callable[[Any], Any]
     rng: Generator | None
+
+    # Read-only: implementations narrow this (EvolvableModule exposes `str`),
+    # which a mutable member's invariance would reject.
+    @property
+    def device(self) -> DeviceType:
+        pass
 
     @property
     def activation(self) -> str | None:
@@ -205,7 +210,7 @@ class EvolvableNetworkProtocol(EvolvableModuleProtocol, Protocol):
     ) -> None:
         pass
 
-    def _build_encoder(self, *args: Any, **kwargs: Any) -> None:
+    def _build_encoder(self, *args: Any, **kwargs: Any) -> Any:
         pass
 
 
@@ -225,7 +230,9 @@ class ModuleDictProtocol(Protocol, Generic[T]):
     and aggregates mutation methods across all contained modules.
     """
 
-    device: DeviceType
+    @property
+    def device(self) -> DeviceType:
+        pass
 
     def __getitem__(self, key: str) -> T:
         pass

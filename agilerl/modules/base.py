@@ -20,6 +20,7 @@ from typing_extensions import Self
 
 from agilerl.modules.custom_components import NoisyLinear
 from agilerl.protocols import MutationMethodProtocol, MutationType
+from agilerl.typing import DeviceType
 
 SelfEvolvableModule = TypeVar("SelfEvolvableModule", bound="EvolvableModule")
 TorchModuleType = TypeVar("TorchModuleType", bound=nn.Module)
@@ -268,7 +269,7 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
     network when multiple mutation methods are applied in sequence.
 
     :param device: The device to run the network on.
-    :type device: str
+    :type device: DeviceType
     :param random_seed: The random seed to use for the network. Determines the random number generator
         stored in ``self.rng`` that can be used to sample random numbers in e.g. mutation methods.
     :type random_seed: int | None
@@ -277,7 +278,7 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
     _evolvable_modules: dict[str, "EvolvableModule"]
     _mutation_hooks: list[Callable[[], None]]
 
-    def __init__(self, device: str, random_seed: int | None = None) -> None:
+    def __init__(self, device: DeviceType, random_seed: int | None = None) -> None:
         nn.Module.__init__(self)
         self._init_surface_methods()
         self.random_seed = random_seed
@@ -342,11 +343,11 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
             module.rng = value
 
     @property
-    def device(self) -> str:
+    def device(self) -> DeviceType:
         return self._device
 
     @device.setter
-    def device(self, value: str) -> None:
+    def device(self, value: DeviceType) -> None:
         self._device = value
         for module in self.modules().values():
             module.device = value
@@ -812,13 +813,13 @@ class ModuleDict(EvolvableModule, nn.ModuleDict, Generic[ModuleType]):
     :param modules: The modules to add to the dictionary.
     :type modules: dict[str, EvolvableModule] | None
     :param device: The device to use for the modules.
-    :type device: str
+    :type device: DeviceType
     """
 
     def __init__(
         self,
         modules: dict[str, EvolvableModule] | None = None,
-        device: str = "cpu",
+        device: DeviceType = "cpu",
     ) -> None:
         super().__init__(device)
         if modules is not None:

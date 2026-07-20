@@ -6,7 +6,7 @@ import torch
 from torch import nn
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
-from agilerl.typing import ArrayOrTensor, KernelSizeType
+from agilerl.typing import ArrayOrTensor, DeviceType, KernelSizeType
 from agilerl.utils.evolvable_networks import create_cnn, get_activation
 
 BlockType = Literal["Conv1d", "Conv2d", "Conv3d"]
@@ -276,7 +276,7 @@ class EvolvableCNN(EvolvableModule):
     :param init_layers: Initialise network layers, defaults to True
     :type init_layers: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
-    :type device: str, optional
+    :type device: DeviceType, optional
     :param name: Name of the CNN, defaults to 'cnn'
     :type name: str, optional
     :param random_seed: Random seed to use for the network. Defaults to None.
@@ -300,7 +300,7 @@ class EvolvableCNN(EvolvableModule):
         max_channel_size: int = 256,
         layer_norm: bool = False,
         init_layers: bool = True,
-        device: str = "cpu",
+        device: DeviceType = "cpu",
         name: str = "cnn",
         random_seed: int | None = None,
     ) -> None:

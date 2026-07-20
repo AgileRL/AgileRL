@@ -1,6 +1,6 @@
 import warnings
 from contextlib import nullcontext
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 import torch
@@ -12,7 +12,10 @@ from agilerl.algorithms.core.llm_ops.fused_lora import unset_fused_adapter_routi
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.llm_envs import ReasoningGym
 
-if HAS_LIGER_KERNEL:
+if TYPE_CHECKING:
+    from peft import LoraConfig
+
+if HAS_LIGER_KERNEL or TYPE_CHECKING:
     from agilerl.algorithms.core.llm_ops.fused_loss import (
         LigerFusedLinearPolicyLossFunction,
         apply_fused_policy_loss,
@@ -28,7 +31,7 @@ from agilerl.protocols import (
     PeftModelProtocol,
     PreTrainedModelProtocol,
 )
-from agilerl.typing import ExperiencesType, LLMObsType
+from agilerl.typing import ExperiencesType, LLMObsType, ReasoningPrompts
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
     VLLMConfig,
@@ -323,7 +326,9 @@ class PPO(LLMAlgorithm):
             use_vllm=use_vllm,
             vllm_config=vllm_config,
             use_liger_loss=use_liger_loss,
-            lora_config=lora_config,
+            # LoraConfigProtocol mirrors peft.LoraConfig (which callers pass in
+            # practice); the base annotation requires the concrete class.
+            lora_config=cast("LoraConfig | None", lora_config),
             use_separate_reference_adapter=use_separate_reference_adapter,
             model_name=model_name,
             actor_network=actor_network,
@@ -398,6 +403,9 @@ class PPO(LLMAlgorithm):
         ):
             self.metrics.register(m)
 
+    # Upstream fix: EvolvableAlgorithm.get_action (agilerl/algorithms/core/
+    # base.py) declares ``-> ActionType``, which does not admit the LLM
+    # ``ActionResult`` tuple; LLM algorithms also narrow ``obs`` to prompts.
     def get_action(
         self,
         obs: LLMObsType,
@@ -450,17 +458,33 @@ class PPO(LLMAlgorithm):
                             prompt = prepare_prompt_hf_generate(
                                 prompt_dict, actor_device
                             )
-                            stitch_ids = prompt.pop("stitch_prefix_ids", None)
-                            initial_prompt_len = prompt.pop("initial_prompt_len", None)
+                            # ``prepare_prompt_hf_generate`` maps these keys to
+                            # device tensors, an optional stitch tensor, and a
+                            # scalar prompt length (0-dim tensors already
+                            # converted to int) for this single-prompt path.
+                            input_ids = cast("torch.Tensor", prompt["input_ids"])
+                            attention_mask = cast(
+                                "torch.Tensor", prompt["attention_mask"]
+                            )
+                            stitch_ids = cast(
+                                "torch.Tensor | None", prompt["stitch_prefix_ids"]
+                            )
+                            initial_prompt_len = cast(
+                                "int | None", prompt["initial_prompt_len"]
+                            )
                             completion_id = self.actor.generate(
-                                **prompt,
+                                input_ids=input_ids,
+                                attention_mask=attention_mask,
                                 generation_config=self.generation_config,
                             )
+                            # Upstream fix: llm_utils annotates ``stitch`` /
+                            # ``initial_len`` as non-optional although the
+                            # implementation handles (and passes through) None.
                             completion_id, full_prompt_len = (
                                 stitch_completion_after_windowed_hf_generate(
                                     completion_id,
-                                    stitch_ids,
-                                    initial_prompt_len,
+                                    stitch_ids,  # ty: ignore[invalid-argument-type]
+                                    initial_prompt_len,  # ty: ignore[invalid-argument-type]
                                 )
                             )
                             completion_ids.append(completion_id)
@@ -478,7 +502,9 @@ class PPO(LLMAlgorithm):
                     completion_masks,
                     sampling_logps,
                 ) = self._generate_with_vllm_colocate(
-                    prompt_batch,
+                    # ReasoningPrompts is a TypedDict, i.e. a plain dict at
+                    # runtime; the base helper takes untyped prompt dicts.
+                    cast("list[dict[str, Any]]", prompt_batch),
                     1,
                     temperature=self.temperature
                     if training
@@ -514,9 +540,19 @@ class PPO(LLMAlgorithm):
         """
         self._prepare_vllm_for_training()
         with self.memory_efficient_params_context():
-            completion_ids, action_masks, rewards = stack_and_pad_experiences(
-                *experiences,
-                padding_values=[self.pad_token_id, False, None],
+            # Runtime contract: experiences are the positional tuple
+            # (completion_ids, action_masks, rewards); stacking tensor lists
+            # yields one tensor per position.
+            assert isinstance(experiences, tuple), "PPO experiences must be a tuple"
+            completion_ids, action_masks, rewards = cast(
+                "tuple[torch.Tensor, torch.Tensor, torch.Tensor]",
+                stack_and_pad_experiences(
+                    *experiences,
+                    # Upstream fix: algo_utils annotates ``padding_values``
+                    # without None, but None is valid (F.pad's default zero
+                    # fill) and used for rewards.
+                    padding_values=[self.pad_token_id, False, None],  # ty: ignore[invalid-argument-type]
+                ),
             )
             completion_ids = completion_ids.to(self.device)
             action_masks = action_masks.to(self.device)
@@ -560,6 +596,8 @@ class PPO(LLMAlgorithm):
                     batch_size=batch_size,
                 )
             )
+            # PPO always trains with a value head, so critic values are present.
+            assert old_values is not None
             old_values = torch.masked_fill(old_values, ~action_mask_bool, 0.0)
 
             token_rewards = self._compute_token_rewards(
@@ -596,6 +634,9 @@ class PPO(LLMAlgorithm):
                     minibatch_idxs = batch_idxs[
                         start : min((start + batch_size), num_samples)
                     ]
+                    # ``get_experiences_samples`` indexes each input
+                    # positionally: Tensor in -> Tensor out, so the tuple
+                    # mirrors the all-Tensor inputs.
                     (
                         batch_ids,
                         batch_action_mask,
@@ -605,16 +646,19 @@ class PPO(LLMAlgorithm):
                         batch_advantages,
                         batch_old_values,
                         batch_turn_ids,
-                    ) = get_experiences_samples(
-                        minibatch_idxs,
-                        completion_ids,
-                        action_masks,
-                        old_log_probs,
-                        reference_log_probs,
-                        returns,
-                        advantages,
-                        old_values,
-                        turn_ids,
+                    ) = cast(
+                        "tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]",
+                        get_experiences_samples(
+                            minibatch_idxs,
+                            completion_ids,
+                            action_masks,
+                            old_log_probs,
+                            reference_log_probs,
+                            returns,
+                            advantages,
+                            old_values,
+                            turn_ids,
+                        ),
                     )
 
                     batch_mask_bool = batch_action_mask.bool()
@@ -678,6 +722,9 @@ class PPO(LLMAlgorithm):
                         batch_ids,
                         batch_size=batch_size,
                     )
+                    # PPO always trains with a value head, so critic values
+                    # are present.
+                    assert batch_values is not None
                     batch_log_probs = torch.masked_fill(
                         batch_log_probs, ~batch_mask_bool, 1.0
                     )
@@ -718,7 +765,7 @@ class PPO(LLMAlgorithm):
                     # Value loss granularity follows the GAE advantage axis
                     # (``ppo_granularity``), independent of the IS level.
                     if ppo_granularity == "turn":
-                        mb_num_turns = batch_turn_ids.max().item() + 1
+                        mb_num_turns = int(batch_turn_ids.max().item()) + 1
                         turn_pred = pool_by_turns(
                             batch_values,
                             batch_turn_ids,
@@ -780,7 +827,8 @@ class PPO(LLMAlgorithm):
         result.update(is_metrics)
 
         # Wire averaged metrics into the metrics tracker (new API).
-        completion_length = np.mean([c.shape[-1] for c in experiences[0]])
+        completion_list = cast("list[torch.Tensor]", experiences[0])
+        completion_length = np.mean([c.shape[-1] for c in completion_list])
         agg = aggregate_metrics_dict(
             self.accelerator,
             {
@@ -805,8 +853,8 @@ class PPO(LLMAlgorithm):
         loop: int = 1,
         *args: Any,
         **kwargs: Any,
-    ) -> torch.Tensor:
-        """Return fitness (test) score tensor of llm on test sub-set.
+    ) -> np.ndarray:
+        """Return fitness (test) score of llm on test sub-set.
 
         ``ReasoningGym`` (and compatible dataset envs): ``reset`` returns a batch
         of prompt dicts; each ``step`` accepts completion id tensors and returns
@@ -818,26 +866,35 @@ class PPO(LLMAlgorithm):
         :type env: ReasoningGym | MultiTurnEnv
         :param loop: Number of outer test iterations (dataloader passes or episodes).
         :type loop: int
-        :return: Concatenated per-step rewards from the test loop.
-        :rtype: torch.Tensor
+        :return: Mean reward from the test loop (scalar numpy array).
+        :rtype: np.ndarray
         """
         eval_context = getattr(env, "eval_mode", nullcontext)
         with eval_context():
             if isinstance(env, ReasoningGym):
-                prompts = env.reset()
+                # Upstream fix: agilerl/llm_envs/reasoning.py annotates
+                # ``reset`` as returning an (obs, info) tuple, but it returns
+                # just the prompt list.
+                prompts = cast("list[ReasoningPrompts]", env.reset())
                 rewards = []
                 for _ in range(loop):
                     completion_ids = self.get_action(
                         prompts, training=False
                     ).completion_ids
-                    next_prompts, reward = env.step(completion_ids)
+                    # Upstream fix: agilerl/llm_envs/reasoning.py annotates
+                    # ``step`` as taking one Tensor, but it consumes the
+                    # per-trajectory completion list.
+                    next_prompts, reward = env.step(completion_ids)  # ty: ignore[invalid-argument-type]
                     prompts = next_prompts
                     rewards.append(reward)
                 reward_tensor = torch.cat(rewards)
             elif isinstance(env, MultiTurnEnv):
                 all_rewards: list[torch.Tensor] = []
                 for _ in range(loop):
-                    prompt_dict, _info = env.reset()
+                    obs, _info = env.reset()
+                    # PPO requires a token-observation multi-turn env, whose
+                    # observations are ReasoningPrompts-shaped dicts.
+                    prompt_dict = cast("ReasoningPrompts", obs)
                     terminated, truncated = False, False
                     while not terminated and not truncated:
                         completion_ids = self.get_action(
@@ -845,9 +902,10 @@ class PPO(LLMAlgorithm):
                             training=False,
                         ).completion_ids
                         full = completion_ids[0]
-                        prompt_dict, reward, terminated, truncated, _info = env.step(
+                        obs, reward, terminated, truncated, _info = env.step(
                             full,
                         )
+                        prompt_dict = cast("ReasoningPrompts", obs)
                         all_rewards.append(
                             torch.tensor(
                                 [float(reward)],
@@ -988,9 +1046,12 @@ class PPO(LLMAlgorithm):
             max_output_tokens if max_output_tokens is not None else max_model_len
         )
         self.min_output_tokens = min_output_tokens
-        self.max_model_len = (
+        resolved_max_model_len = (
             max_model_len if max_model_len is not None else max_output_tokens
         )
+        # One of the two is non-None (guarded above).
+        assert resolved_max_model_len is not None
+        self.max_model_len = resolved_max_model_len
         validate_llm_context_lengths(self.max_model_len, max_output_tokens)
         self.hf_generate_chunk_size = int(
             1 if hf_generate_chunk_size is None else max(1, hf_generate_chunk_size)
@@ -1116,7 +1177,7 @@ class PPO(LLMAlgorithm):
         :rtype: tuple[torch.Tensor, torch.Tensor]
         """
         batch_size = values.shape[0]
-        num_turns = turn_ids.max().item() + 1
+        num_turns = int(turn_ids.max().item()) + 1
 
         turn_values = pool_by_turns(
             values,
@@ -1321,8 +1382,10 @@ class PPO(LLMAlgorithm):
         # logits only to discard them. lm_head_weight is passed separately to
         # LigerFusedLinearPolicyLossFunction which handles the matmul and its grad.
         lm_head = self._get_lm_head()
-        lm_head_weight = lm_head.weight
-        lm_head_bias = lm_head.bias
+        # ``nn.Module.__getattr__`` widens submodule attributes to
+        # ``Tensor | Module``; the lm_head weight/bias are parameters.
+        lm_head_weight = cast("torch.Tensor", lm_head.weight)
+        lm_head_bias = cast("torch.Tensor | None", lm_head.bias)
 
         with (
             self._patch_lm_head_to_identity(),

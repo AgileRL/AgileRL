@@ -21,6 +21,7 @@ from agilerl.modules import (
 from agilerl.modules.base import EvolvableModule, ModuleMeta, mutation
 from agilerl.protocols import MutationType
 from agilerl.typing import (
+    DeviceType,
     NetConfigType,
     TorchObsType,
 )
@@ -130,11 +131,12 @@ class NetworkMeta(ModuleMeta):
     an encoder and a head_net (named as such).
     """
 
-    def __call__(self, *args: Any, **kwargs: Any) -> "EvolvableNetwork":
-        # NOTE: ModuleMeta.__call__ (agilerl/modules/base.py) annotates its bound
-        # parameter as type[SelfEvolvableModule], which a metaclass instance cannot
-        # be shown to satisfy; the upstream fix is to type it as a plain metaclass.
-        instance: EvolvableNetwork = super().__call__(*args, **kwargs)  # ty: ignore[invalid-argument-type]
+    def __call__(
+        cls: type[SelfEvolvableNetwork],
+        *args: Any,
+        **kwargs: Any,
+    ) -> SelfEvolvableNetwork:
+        instance: SelfEvolvableNetwork = super().__call__(*args, **kwargs)
 
         # Check that the mutation methods of the network are correctly defined
         # i.e. only contain underlying methods corresponding to the encoder and head_net
@@ -188,7 +190,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         the encoder is a nn.Flatten() followed by an `EvolvableMLP`.
     :type recurrent: bool
     :param device: Device to use for the network. Defaults to "cpu".
-    :type device: str
+    :type device: DeviceType
     :param random_seed: Random seed to use for the network. Defaults to None.
     :type random_seed: int | None
     """
@@ -214,7 +216,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         latent_dim: int = 64,
         simba: bool = False,
         recurrent: bool = False,
-        device: str = "cpu",
+        device: DeviceType = "cpu",
         random_seed: int | None = None,
     ) -> None:
         super().__init__(device, random_seed)

@@ -9,7 +9,7 @@ from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.base import EvolvableNetwork, preserve_parameters
 from agilerl.networks.distributions import EvolvableDistribution
-from agilerl.typing import ArrayOrTensor, NetConfigType, TorchObsType
+from agilerl.typing import ArrayOrTensor, DeviceType, NetConfigType, TorchObsType
 from agilerl.utils.algo_utils import get_output_size_from_space
 
 
@@ -57,7 +57,7 @@ class DeterministicActor(EvolvableNetwork):
     :param recurrent: Whether to use a recurrent network.
     :type recurrent: bool
     :param device: Device to use for the network.
-    :type device: str
+    :type device: DeviceType
     :param random_seed: Random seed to use for the network. Defaults to None.
     :type random_seed: int | None
     :param encoder_name: Name of the encoder network.
@@ -89,7 +89,7 @@ class DeterministicActor(EvolvableNetwork):
         latent_dim: int = 64,
         simba: bool = False,
         recurrent: bool = False,
-        device: str = "cpu",
+        device: DeviceType = "cpu",
         random_seed: int | None = None,
         encoder_name: str = "encoder",
     ) -> None:
@@ -262,7 +262,7 @@ class StochasticActor(EvolvableNetwork):
     :param recurrent: Whether to use a recurrent network.
     :type recurrent: bool
     :param device: Device to use for the network.
-    :type device: str
+    :type device: DeviceType
     :param random_seed: Random seed to use for the network. Defaults to None.
     :type random_seed: int | None
     :param encoder_name: Name of the encoder network.
@@ -294,7 +294,7 @@ class StochasticActor(EvolvableNetwork):
         latent_dim: int = 64,
         simba: bool = False,
         recurrent: bool = False,
-        device: str = "cpu",
+        device: DeviceType = "cpu",
         random_seed: int | None = None,
         encoder_name: str = "encoder",
     ) -> None:

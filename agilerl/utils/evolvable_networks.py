@@ -738,7 +738,7 @@ def create_resnet(
     stride_size: int,
     num_blocks: int,
     scale_factor: int = 4,
-    device: str = "cpu",
+    device: DeviceType = "cpu",
     name: str = "resnet",
 ) -> OrderedDict[str, nn.Module]:
     """Create a number of residual blocks for image-based inputs.

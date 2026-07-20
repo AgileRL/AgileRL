@@ -7,7 +7,7 @@ from agilerl.modules import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.networks.base import EvolvableNetwork, preserve_parameters
-from agilerl.typing import NetConfigType, TorchObsType
+from agilerl.typing import DeviceType, NetConfigType, TorchObsType
 
 
 class ValueNetwork(EvolvableNetwork):
@@ -35,7 +35,7 @@ class ValueNetwork(EvolvableNetwork):
     :param recurrent: Whether to use a recurrent network.
     :type recurrent: bool
     :param device: Device to run the network on.
-    :type device: str
+    :type device: DeviceType
     :param random_seed: Random seed to use for the network. Defaults to None.
     :type random_seed: int | None
     """
@@ -53,7 +53,7 @@ class ValueNetwork(EvolvableNetwork):
         latent_dim: int = 64,
         simba: bool = False,
         recurrent: bool = False,
-        device: str = "cpu",
+        device: DeviceType = "cpu",
         random_seed: int | None = None,
         encoder_name: str = "encoder",
     ) -> None:

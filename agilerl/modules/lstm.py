@@ -4,7 +4,7 @@ import torch
 from torch import nn
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
-from agilerl.typing import ArrayOrTensor, BatchDimension
+from agilerl.typing import ArrayOrTensor, BatchDimension, DeviceType
 from agilerl.utils.evolvable_networks import get_activation
 
 
@@ -32,7 +32,7 @@ class EvolvableLSTM(EvolvableModule):
     :param dropout: Dropout probability between LSTM layers, defaults to 0.0
     :type dropout: float, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
-    :type device: str, optional
+    :type device: DeviceType, optional
     :param name: Name of the network, defaults to 'lstm'
     :type name: str, optional
     :param random_seed: Random seed to use for the network. Defaults to None.
@@ -51,7 +51,7 @@ class EvolvableLSTM(EvolvableModule):
         min_layers: int = 1,
         max_layers: int = 3,
         dropout: float = 0.0,
-        device: str = "cpu",
+        device: DeviceType = "cpu",
         name: str = "lstm",
         random_seed: int | None = None,
     ) -> None:

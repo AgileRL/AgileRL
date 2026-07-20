@@ -5,12 +5,13 @@ import torch
 from torch import nn
 
 from agilerl.modules import EvolvableModule
+from agilerl.typing import DeviceType
 
 
 def to_evolvable(
     module_fn: Callable[..., nn.Module],
     module_kwargs: dict[str, Any],
-    device: str,
+    device: DeviceType,
 ) -> EvolvableModule:
     return DummyEvolvable(
         device=device,
@@ -33,12 +34,12 @@ class DummyEvolvable(EvolvableModule):
     :param module_kwargs: Keyword arguments to pass to the module_fn.
     :type module_kwargs: dict[str, Any]
     :param device: Device to run the module on.
-    :type device: str
+    :type device: DeviceType
     """
 
     def __init__(
         self,
-        device: str,
+        device: DeviceType,
         module: nn.Module | None = None,
         module_fn: Callable[..., nn.Module] | None = None,
         module_kwargs: dict[str, Any] | None = None,

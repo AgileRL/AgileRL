@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, TypedDict, cast
 
 import numpy as np
 import torch
@@ -19,9 +19,17 @@ from agilerl.typing import (
     ExperiencesType,
     ObservationType,
     SupportedObservationSpace,
+    TorchObsType,
 )
 from agilerl.utils.algo_utils import make_safe_deepcopies
 from agilerl.utils.evolvable_networks import get_default_encoder_config
+
+
+class _BanditBatch(TypedDict):
+    """Field layout of a bandit replay sample (components/replay_buffer.py)."""
+
+    obs: TorchObsType
+    reward: torch.Tensor
 
 
 class NeuralTS(RLAlgorithm):
@@ -64,6 +72,9 @@ class NeuralTS(RLAlgorithm):
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """
+
+    # Bandit arms are discrete, so the network output size is a plain int
+    action_dim: int
 
     def __init__(
         self,
@@ -143,8 +154,8 @@ class NeuralTS(RLAlgorithm):
                     msg,
                 )
 
-            # Need to make deepcopies for target and detached networks
-            self.actor = make_safe_deepcopies(actor_network)
+            # Need to make deepcopies for target and detached networks.
+            self.actor = make_safe_deepcopies(actor_network)  # ty: ignore[no-matching-overload]  # concrete networks can't satisfy EvolvableNetworkProtocol: its clone() is declared to return the protocol, not Self — fix in agilerl/protocols.py
         else:
             net_config = {} if net_config is None else net_config
             simba = net_config.get("simba", False)
@@ -191,7 +202,12 @@ class NeuralTS(RLAlgorithm):
 
     def init_params(self) -> None:
         """Initialize parameters for the agent network."""
-        self.exp_layer = self.actor.get_output_dense()
+        exp_layer = self.actor.get_output_dense()
+        assert exp_layer is not None, (
+            "Bandit actor network must expose an output dense layer."
+        )
+        # EvolvableMLP/MakeEvolvable networks build a final nn.Linear output layer
+        self.exp_layer = cast("nn.Linear", exp_layer)
 
         self.numel = sum(
             w.numel() for w in self.exp_layer.parameters() if w.requires_grad
@@ -233,7 +249,7 @@ class NeuralTS(RLAlgorithm):
                 [
                     w.grad.detach().flatten() / np.sqrt(self.exp_layer.weight.size(0))
                     for w in self.exp_layer.parameters()
-                    if w.requires_grad
+                    if w.requires_grad and w.grad is not None
                 ],
             )
             g[:] = grad_vec
@@ -246,7 +262,7 @@ class NeuralTS(RLAlgorithm):
                         w.grad.detach().flatten()
                         / np.sqrt(self.exp_layer.weight.size(0))
                         for w in self.exp_layer.parameters()
-                        if w.requires_grad
+                        if w.requires_grad and w.grad is not None
                     ],
                 )
 
@@ -273,7 +289,7 @@ class NeuralTS(RLAlgorithm):
             1 + v.T @ self.sigma_inv @ v
         )
 
-        return action
+        return int(action)
 
     def _greedy_test_action(self, obs: ObservationType) -> int:
         """Greedy arm for evaluation: preprocess obs, no TS/UCB or posterior update."""
@@ -290,8 +306,11 @@ class NeuralTS(RLAlgorithm):
         :param experiences: Batched states, rewards in that order.
         :type experiences: dict[str, torch.Tensor[float]]
         """
-        states = experiences["obs"]
-        rewards = experiences["reward"]
+        # Bandit replay buffers sample batches as TensorDicts keyed by field
+        # name (components/replay_buffer.py), which guarantees this layout.
+        batch = cast("_BanditBatch", experiences)
+        states = batch["obs"]
+        rewards = batch["reward"]
 
         pred_rewards = self.actor(states)
 
@@ -353,6 +372,6 @@ class NeuralTS(RLAlgorithm):
                     obs, reward = env.step(action)
                     score += reward
                 rewards.append(score)
-        mean_fit = np.mean(rewards)
+        mean_fit = float(np.mean(rewards))
         self.metrics.add_fitness(mean_fit)
         return mean_fit

@@ -3,7 +3,7 @@ from typing import Any
 import torch
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
-from agilerl.typing import ArrayOrTensor
+from agilerl.typing import ArrayOrTensor, DeviceType
 from agilerl.utils.evolvable_networks import create_mlp
 
 
@@ -51,7 +51,7 @@ class EvolvableMLP(EvolvableModule):
     :param new_gelu: Use new GELU activation function, defaults to False
     :type new_gelu: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
-    :type device: str, optional
+    :type device: DeviceType, optional
     :param name: Name of the network, defaults to 'mlp'
     :type name: str, optional
     :param random_seed: Random seed to use for the network. Defaults to None.
@@ -76,7 +76,7 @@ class EvolvableMLP(EvolvableModule):
         noisy: bool = False,
         noise_std: float = 0.5,
         new_gelu: bool = False,
-        device: str = "cpu",
+        device: DeviceType = "cpu",
         name: str = "mlp",
         random_seed: int | None = None,
     ) -> None:

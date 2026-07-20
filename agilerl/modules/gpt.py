@@ -45,7 +45,7 @@ class EvolvableGPT(EvolvableModule):
     :param bias: Use bias in Linears and LayerNorms, defaults to True
     :type bias: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
-    :type device: str, optional
+    :type device: DeviceType, optional
     :param random_seed: Random seed to use for the network. Defaults to None.
     :type random_seed: int | None
     """
@@ -64,7 +64,7 @@ class EvolvableGPT(EvolvableModule):
         min_layers: int = 8,
         max_layers: int = 16,
         bias: bool = True,
-        device: str = "cpu",
+        device: DeviceType = "cpu",
         random_seed: int | None = None,
     ) -> None:
         super().__init__(device, random_seed)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import gc
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 import numpy as np
 import torch
@@ -10,7 +10,12 @@ from agilerl import HAS_LIGER_KERNEL
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.protocols import PreTrainedModelProtocol
-from agilerl.typing import ExperiencesType, LLMObsType
+from agilerl.typing import (
+    ExperiencesType,
+    MultiAgentObservationType,
+    ObservationType,
+    SFTPrompts,
+)
 from agilerl.utils.llm_utils import aggregate_metrics_dict
 
 if TYPE_CHECKING:
@@ -209,10 +214,10 @@ class SFT(LLMAlgorithm):
 
     def get_action(
         self,
-        obs: LLMObsType,
+        obs: ObservationType | MultiAgentObservationType,
         *args: Any,
         **kwargs: Any,
-    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+    ) -> NoReturn:
         """Not implemented — SFT is an offline supervised algorithm.
 
         :raises NotImplementedError: Always.
@@ -222,7 +227,7 @@ class SFT(LLMAlgorithm):
 
     def learn(
         self,
-        experiences: ExperiencesType,
+        experiences: ExperiencesType | SFTPrompts,
         training: bool = True,
     ) -> dict[str, float]:
         """Update model parameters using cross-entropy loss on response tokens.
@@ -245,14 +250,17 @@ class SFT(LLMAlgorithm):
         if torch.backends.mps.is_available():
             torch.mps.empty_cache()
 
-        input_ids: torch.Tensor = experiences["input_ids"]
-        attention_mask: torch.Tensor = experiences["attention_mask"]
+        # Runtime contract: SFT batches come from ``SFTGym.reset``/``step``,
+        # which always yield an ``SFTPrompts`` mapping.
+        batch = cast("SFTPrompts", experiences)
+        input_ids = batch["input_ids"]
+        attention_mask = batch["attention_mask"]
         # Check first that all tensors have the same max length before calculating the masks
         assert input_ids.shape[1] == attention_mask.shape[1], (
             "All tensors must have the same max length"
         )
         max_length = input_ids.shape[1]
-        prompt_lengths: list[int] = experiences["prompt_lengths"]
+        prompt_lengths = batch["prompt_lengths"]
         # Build the response mask on CPU (same device as dataloader tensors).
         prompt_masks = LLMAlgorithm._create_prompt_masks(
             prompt_lengths, max_length=max_length
@@ -294,11 +302,13 @@ class SFT(LLMAlgorithm):
                 learn_metrics["perplexity"] += float(np.exp(min(loss_val, 100)))
                 num_updates += 1
 
-        learn_metrics = {
+        # ``aggregate_metrics_dict`` takes an invariant dict over the full raw
+        # metric-value union, so annotate the averaged dict to that exact type.
+        averaged_metrics: dict[str, torch.Tensor | np.ndarray | float] = {
             key: value / max(num_updates, 1) for key, value in learn_metrics.items()
         }
 
-        learn_metrics = aggregate_metrics_dict(self.accelerator, learn_metrics)
+        learn_metrics = aggregate_metrics_dict(self.accelerator, averaged_metrics)
 
         if training:
             self.metrics.log("loss", learn_metrics["loss"])

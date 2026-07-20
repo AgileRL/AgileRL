@@ -7,6 +7,7 @@ import torch
 from torch import nn
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
+from agilerl.typing import DeviceType
 
 
 class EvolvableBERT(EvolvableModule):
@@ -51,7 +52,7 @@ class EvolvableBERT(EvolvableModule):
     :param max_decoder_layers: Maximum number of decoder layers, defaults to 12
     :type max_decoder_layers: int, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
-    :type device: str, optional
+    :type device: DeviceType, optional
     :param random_seed: Random seed to use for the network. Defaults to None.
     :type random_seed: int | None
     """
@@ -74,7 +75,7 @@ class EvolvableBERT(EvolvableModule):
         norm_first: bool = False,
         max_encoder_layers: int = 12,
         max_decoder_layers: int = 12,
-        device: str = "cpu",
+        device: DeviceType = "cpu",
         name: str = "bert",
         random_seed: int | None = None,
     ) -> None:

@@ -216,7 +216,6 @@ unresolved-import = "ignore"
 # strictly.
 [[tool.ty.overrides]]
 include = [
-    "agilerl/algorithms/*.py",
     "agilerl/hpo",
     "agilerl/llm_envs",
     "agilerl/population.py",

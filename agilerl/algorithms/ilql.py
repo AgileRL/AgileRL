@@ -5,7 +5,7 @@ import operator
 from collections import defaultdict
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -16,6 +16,7 @@ from tqdm import tqdm
 from typing_extensions import Self
 
 from agilerl.data.rl_data import DataPoint, RL_Dataset
+from agilerl.data.tokenizer import Tokenizer
 from agilerl.modules.gpt import EvolvableGPT
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.typing import DeviceType, NetConfigType
@@ -26,6 +27,15 @@ from agilerl.utils.sampling_utils import (
     process_logits,
     update_kvs,
 )
+
+
+def _decode_str(tokenizer: Tokenizer, token_ids: list[int]) -> str:
+    """Decode one flat id sequence to a string.
+
+    ``Tokenizer.decode`` is annotated ``str | list[str]`` to cover batched
+    input, but a single flat id list always decodes to ``str``.
+    """
+    return cast("str", tokenizer.decode(token_ids, clean_up_tokenization_spaces=False))
 
 
 class ILQL(nn.Module):
@@ -130,7 +140,10 @@ class ILQL(nn.Module):
 
         self.algo = "ILQL"
         self.dataset = dataset
-        self.net_config = net_config
+        # ILQL's net_config is a flat mapping of GPT hyperparameters
+        # (``NetConfigType`` nests sub-configs for other architectures).
+        self.net_config: dict[str, Any] = net_config
+        cfg = self.net_config
         self.alpha = alpha
         self.gamma = gamma
         self.beta = beta
@@ -160,96 +173,96 @@ class ILQL(nn.Module):
 
         # model
         self.model = EvolvableGPT(
-            n_layer=net_config["n_layer"],
-            vocab_size=net_config["vocab_size"],
-            n_embd=net_config["n_embd"],
-            n_head=net_config["n_head"],
-            dim_feedfwd=net_config["dim_feedfwd"],
-            block_size=net_config["block_size"],
-            dropout=net_config["dropout"],
-            activation=net_config["activation"],
-            layer_norm_eps=net_config["layer_norm_eps"],
-            min_layers=net_config["min_layers"],
-            max_layers=net_config["max_layers"],
-            bias=net_config["bias"],
-            device=self.device,
+            n_layer=cfg["n_layer"],
+            vocab_size=cfg["vocab_size"],
+            n_embd=cfg["n_embd"],
+            n_head=cfg["n_head"],
+            dim_feedfwd=cfg["dim_feedfwd"],
+            block_size=cfg["block_size"],
+            dropout=cfg["dropout"],
+            activation=cfg["activation"],
+            layer_norm_eps=cfg["layer_norm_eps"],
+            min_layers=cfg["min_layers"],
+            max_layers=cfg["max_layers"],
+            bias=cfg["bias"],
+            device=str(self.device),
         )
         # lm policy
         self.actor = EvolvableGPT(
-            n_layer=net_config["n_layer"],
-            vocab_size=net_config["vocab_size"],
-            n_embd=net_config["n_embd"],
-            n_head=net_config["n_head"],
-            dim_feedfwd=net_config["dim_feedfwd"],
-            block_size=net_config["block_size"],
-            dropout=net_config["dropout"],
-            activation=net_config["activation"],
-            layer_norm_eps=net_config["layer_norm_eps"],
-            min_layers=net_config["min_layers"],
-            max_layers=net_config["max_layers"],
-            bias=net_config["bias"],
-            device=self.device,
+            n_layer=cfg["n_layer"],
+            vocab_size=cfg["vocab_size"],
+            n_embd=cfg["n_embd"],
+            n_head=cfg["n_head"],
+            dim_feedfwd=cfg["dim_feedfwd"],
+            block_size=cfg["block_size"],
+            dropout=cfg["dropout"],
+            activation=cfg["activation"],
+            layer_norm_eps=cfg["layer_norm_eps"],
+            min_layers=cfg["min_layers"],
+            max_layers=cfg["max_layers"],
+            bias=cfg["bias"],
+            device=str(self.device),
         )
         # lm target
         self.actor_target = EvolvableGPT(
-            n_layer=net_config["n_layer"],
-            vocab_size=net_config["vocab_size"],
-            n_embd=net_config["n_embd"],
-            n_head=net_config["n_head"],
-            dim_feedfwd=net_config["dim_feedfwd"],
-            block_size=net_config["block_size"],
-            dropout=net_config["dropout"],
-            activation=net_config["activation"],
-            layer_norm_eps=net_config["layer_norm_eps"],
-            min_layers=net_config["min_layers"],
-            max_layers=net_config["max_layers"],
-            bias=net_config["bias"],
-            device=self.device,
+            n_layer=cfg["n_layer"],
+            vocab_size=cfg["vocab_size"],
+            n_embd=cfg["n_embd"],
+            n_head=cfg["n_head"],
+            dim_feedfwd=cfg["dim_feedfwd"],
+            block_size=cfg["block_size"],
+            dropout=cfg["dropout"],
+            activation=cfg["activation"],
+            layer_norm_eps=cfg["layer_norm_eps"],
+            min_layers=cfg["min_layers"],
+            max_layers=cfg["max_layers"],
+            bias=cfg["bias"],
+            device=str(self.device),
         )
 
         self.copy_model_to_actor_target()
 
         # v and q networks
         self.v = EvolvableMLP(
-            num_inputs=net_config["n_embd"],
+            num_inputs=cfg["n_embd"],
             num_outputs=1,
-            hidden_size=[net_config["n_embd"] * 2, net_config["n_embd"] * 2],
-            device=self.device,
+            hidden_size=[cfg["n_embd"] * 2, cfg["n_embd"] * 2],
+            device=str(self.device),
         )
         self.q = EvolvableMLP(
-            num_inputs=net_config["n_embd"],
+            num_inputs=cfg["n_embd"],
             num_outputs=self.dataset.tokenizer.num_tokens(),
-            hidden_size=[net_config["n_embd"] * 2, net_config["n_embd"] * 2],
-            device=self.device,
+            hidden_size=[cfg["n_embd"] * 2, cfg["n_embd"] * 2],
+            device=str(self.device),
         )
         self.target_q = EvolvableMLP(
-            num_inputs=net_config["n_embd"],
+            num_inputs=cfg["n_embd"],
             num_outputs=self.dataset.tokenizer.num_tokens(),
-            hidden_size=[net_config["n_embd"] * 2, net_config["n_embd"] * 2],
-            device=self.device,
+            hidden_size=[cfg["n_embd"] * 2, cfg["n_embd"] * 2],
+            device=str(self.device),
         )
         self.target_q.load_state_dict(self.q.state_dict())
 
         if self.double_q:
             self.q2 = EvolvableMLP(
-                num_inputs=net_config["n_embd"],
+                num_inputs=cfg["n_embd"],
                 num_outputs=self.dataset.tokenizer.num_tokens(),
-                hidden_size=[net_config["n_embd"] * 2, net_config["n_embd"] * 2],
-                device=self.device,
+                hidden_size=[cfg["n_embd"] * 2, cfg["n_embd"] * 2],
+                device=str(self.device),
             )
             self.target_q2 = EvolvableMLP(
-                num_inputs=net_config["n_embd"],
+                num_inputs=cfg["n_embd"],
                 num_outputs=self.dataset.tokenizer.num_tokens(),
-                hidden_size=[net_config["n_embd"] * 2, net_config["n_embd"] * 2],
-                device=self.device,
+                hidden_size=[cfg["n_embd"] * 2, cfg["n_embd"] * 2],
+                device=str(self.device),
             )
             self.target_q2.load_state_dict(self.q2.state_dict())
 
         self.pi = EvolvableMLP(
-            num_inputs=net_config["n_embd"],
+            num_inputs=cfg["n_embd"],
             num_outputs=self.dataset.tokenizer.num_tokens(),
-            hidden_size=[net_config["n_embd"] * 2, net_config["n_embd"] * 2],
-            device=self.device,
+            hidden_size=[cfg["n_embd"] * 2, cfg["n_embd"] * 2],
+            device=str(self.device),
         )
 
         self.optimizer = optim.AdamW(
@@ -308,30 +321,33 @@ class ILQL(nn.Module):
             prefix_t = prefix_embs.shape[1]
         else:
             prefix_t = 0
-        set_pos_ids = prefix_attn_mask is not None
         if prefix_attn_mask is not None and attn_mask is not None:
             input_attn_mask = torch.cat((prefix_attn_mask, attn_mask), dim=1)
+            position_ids = torch.cumsum(input_attn_mask, dim=1) - 1
         else:
             input_attn_mask = None
-        position_ids = torch.cumsum(input_attn_mask, dim=1) - 1 if set_pos_ids else None
+            position_ids = None
 
         target_prefix_embs = prefix_embs.clone()
         policy_prefix_embs = prefix_embs.clone()
 
         if remove_prefix_position_embs:
-            prefix_embs -= self.model.transformer.wpe(
+            assert position_ids is not None, (
+                "remove_prefix_position_embs requires both prefix_attn_mask and attn_mask"
+            )
+            prefix_embs -= self.model.transformer["wpe"](
                 position_ids[:, : prefix_embs.shape[1]],
             )
-            target_prefix_embs -= self.actor_target.transformer.wpe(
+            target_prefix_embs -= self.actor_target.transformer["wpe"](
                 position_ids[:, : prefix_embs.shape[1]],
             )
 
         input_embeddings = torch.cat(
-            (prefix_embs, self.model.transformer.wte(tokens)),
+            (prefix_embs, self.model.transformer["wte"](tokens)),
             dim=1,
         )
         target_input_embeddings = torch.cat(
-            (target_prefix_embs, self.actor_target.transformer.wte(tokens)),
+            (target_prefix_embs, self.actor_target.transformer["wte"](tokens)),
             dim=1,
         )
 
@@ -369,11 +385,14 @@ class ILQL(nn.Module):
             policy_past_key_values = model_past_key_values
         else:
             if remove_prefix_position_embs:
-                policy_prefix_embs -= self.actor.transformer.wpe(
+                assert position_ids is not None, (
+                    "remove_prefix_position_embs requires both prefix_attn_mask and attn_mask"
+                )
+                policy_prefix_embs -= self.actor.transformer["wpe"](
                     position_ids[:, : prefix_embs.shape[1]],
                 )
             policy_input_embeddings = torch.cat(
-                (policy_prefix_embs, self.actor.transformer.wte(tokens)),
+                (policy_prefix_embs, self.actor.transformer["wte"](tokens)),
                 dim=1,
             )
             if detach_full_policy:
@@ -446,9 +465,9 @@ class ILQL(nn.Module):
             )
         with torch.no_grad():
             target_qs = self.target_q(action_target_hidden_states)
-            target_qs2 = None
-            if self.double_q:
-                target_qs2 = self.target_q2(action_target_hidden_states)
+            target_qs2 = (
+                self.target_q2(action_target_hidden_states) if self.double_q else None
+            )
         if skip_policy_on_train and self.training and self.actor is not None:
             logits = torch.zeros(
                 (
@@ -489,7 +508,9 @@ class ILQL(nn.Module):
                 else qs
             ),
             "target_qs": self.clip_values(
-                torch.minimum(target_qs, target_qs2) if self.double_q else target_qs,
+                torch.minimum(target_qs, target_qs2)
+                if target_qs2 is not None
+                else target_qs,
             ),
             "logits": logits,
         }
@@ -512,7 +533,7 @@ class ILQL(nn.Module):
         self,
         tokens: torch.Tensor,
         vs: torch.Tensor,
-        qs: torch.Tensor | None,
+        qs: torch.Tensor,
         state_idxs: torch.Tensor,
         action_idxs: torch.Tensor,
         terminals: torch.Tensor,
@@ -580,6 +601,8 @@ class ILQL(nn.Module):
     ) -> torch.Tensor:
         vns = vns.detach()
         if self.double_q:
+            # double_q contract: ``qs`` is the (q1, q2) pair.
+            assert not isinstance(qs, torch.Tensor)
             q1, q2 = qs
             l1 = (
                 (((1 - terminals[:, 1:]) * vns * gamma + rs - q1) ** 2)
@@ -590,6 +613,7 @@ class ILQL(nn.Module):
                 * (1 - terminals[:, :-1])
             ).sum() / max((1 - terminals[:, :-1]).sum().item(), 1.0)
             return l1 + l2
+        assert isinstance(qs, torch.Tensor)
         return (
             (((1 - terminals[:, 1:]) * vns * gamma + rs - qs) ** 2)
             * (1 - terminals[:, :-1])
@@ -603,6 +627,8 @@ class ILQL(nn.Module):
     ) -> torch.Tensor:
         n = (1 - terminals[:, :-1]).sum()
         if self.double_q:
+            # double_q contract: ``qs`` is the (q1, q2) pair.
+            assert not isinstance(qs, torch.Tensor)
             q1, q2 = qs
             b, t, d = q1.shape
             t1 = F.cross_entropy(
@@ -617,6 +643,7 @@ class ILQL(nn.Module):
                 reduction="none",
             ).reshape(b, t) * (1 - terminals[:, :-1])
             return ((t1) + (t2)).sum() / max(n.item(), 1.0)
+        assert isinstance(qs, torch.Tensor)
         b, t, d = qs.shape
         return (
             F.cross_entropy(
@@ -636,6 +663,9 @@ class ILQL(nn.Module):
     ) -> torch.Tensor:
         n = (1 - terminals[:, :-1]).sum()
         if self.double_q:
+            # double_q contract: ``qs``/``data_qs`` are (q1, q2) pairs.
+            assert not isinstance(qs, torch.Tensor)
+            assert not isinstance(data_qs, torch.Tensor)
             q1, q2 = qs
             data_q1, data_q2 = data_qs
             return (
@@ -660,6 +690,8 @@ class ILQL(nn.Module):
                     * (1 - terminals[:, :-1])
                 )
             ).sum() / max(n.item(), 1.0)
+        assert isinstance(qs, torch.Tensor)
+        assert isinstance(data_qs, torch.Tensor)
         return (
             (
                 torch.max(
@@ -905,7 +937,7 @@ class ILQL(nn.Module):
         include_logits: bool = False,
         include_advantage: bool = True,
         action_mask: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
         trivial_value_query = False
         if state_idxs is None or action_idxs is None:
             state_idxs = torch.full(
@@ -978,7 +1010,7 @@ class ILQL(nn.Module):
 
     def get_scores(
         self,
-        items: list[DataPoint] | RL_Dataset,
+        items: list[DataPoint] | dict[str, torch.Tensor],
         beta: float = 1.0,
         exp_weights: bool = False,
         clip_weight: float | None = None,
@@ -1009,7 +1041,7 @@ class ILQL(nn.Module):
 
     def initial_score(
         self,
-        items: list[DataPoint] | RL_Dataset,
+        items: list[DataPoint] | dict[str, torch.Tensor],
         beta: float = 1.0,
         exp_weights: bool = False,
         clip_weight: float | None = None,
@@ -1118,7 +1150,6 @@ class ILQL(nn.Module):
                 target_param.data.copy_(local_param.data)
         if self.actor_target is not None:
             del self.actor_target
-            self.actor_target = None
             self.actor_target = copy.deepcopy(self.model)
 
     def clone(self, index: int | None = None) -> Self:
@@ -1167,8 +1198,10 @@ class ILQL(nn.Module):
         clone.model = self.model.clone().to(self.device)
         clone.actor = self.actor.clone().to(self.device)
         clone.actor_target = self.actor_target.clone().to(self.device)
-        clone.optimizer = optim.Adam(
-            clone.actor.parameters(),
+        # Rebuild the optimizer the same way __init__ does (AdamW over all
+        # networks) now that the clone's networks have been replaced.
+        clone.optimizer = optim.AdamW(
+            clone.parameters(),
             lr=clone.lr,
             weight_decay=clone.weight_decay,
         )
@@ -1323,7 +1356,7 @@ class ILQL_Policy:
         attn_mask: torch.Tensor,
         state_idxs: torch.Tensor,
         action_idxs: torch.Tensor,
-        termination_condition: Callable[[np.ndarray], bool],
+        termination_condition: Callable[[str], bool],
         num_generations: int = 1,
         max_generation_len: int | None = None,
         temp: float = 1.0,
@@ -1353,9 +1386,9 @@ class ILQL_Policy:
         if max_generation_len is None:
             max_generation_len = max_length + 1
         input_strs = [
-            tokenizer.decode(
+            _decode_str(
+                tokenizer,
                 tokens[i, :][: attn_mask[i, :].sum().long()].tolist(),
-                clean_up_tokenization_spaces=False,
             )
             for i in range(len(tokens))
         ]
@@ -1445,7 +1478,7 @@ class ILQL_Policy:
                 device,
             ),
         )
-        t = torch.min(dialogue_lens).int()
+        t = int(dialogue_lens.min().item())
         base_logits = torch.full((dialogue_lens.shape[0],), 0.0).to(device)
         while termination_mask.sum() > 0 and (t + prefix_t) < max_length:
             curr_token = tokens[:, t - 1].unsqueeze(1)
@@ -1574,10 +1607,7 @@ class ILQL_Policy:
                 if tokens[idx, t] == tokenizer.eoa_token_id and t >= dialogue_lens[idx]:
                     termination_mask[idx] *= 1 - int(
                         termination_condition(
-                            tokenizer.decode(
-                                tokens[idx, :].tolist(),
-                                clean_up_tokenization_spaces=False,
-                            ),
+                            _decode_str(tokenizer, tokens[idx, :].tolist()),
                         ),
                     )
             t += 1
@@ -1589,8 +1619,7 @@ class ILQL_Policy:
         ).reshape(-1, num_generations)
         order = torch.argsort(-scores, dim=1)
         output_strs = [
-            tokenizer.decode(tokens[i, :].tolist(), clean_up_tokenization_spaces=False)
-            for i in range(len(tokens))
+            _decode_str(tokenizer, tokens[i, :].tolist()) for i in range(len(tokens))
         ]
         processed_outputs = []
         for i in range(len(input_strs)):
@@ -1631,7 +1660,7 @@ class ILQL_Policy:
         attn_mask: torch.Tensor,
         state_idxs: torch.Tensor,
         action_idxs: torch.Tensor,
-        termination_condition: Callable[[np.ndarray], bool],
+        termination_condition: Callable[[str], bool],
         max_generation_len: int | None = None,
         beam_width: int = 1,
         temp: float = 1.0,
@@ -1657,9 +1686,9 @@ class ILQL_Policy:
         if max_generation_len is None:
             max_generation_len = max_length + 1
         input_strs = [
-            tokenizer.decode(
+            _decode_str(
+                tokenizer,
                 tokens[i, :][: attn_mask[i, :].sum().long()].tolist(),
-                clean_up_tokenization_spaces=False,
             )
             for i in range(len(tokens))
         ]
@@ -1754,7 +1783,7 @@ class ILQL_Policy:
                 device,
             ),
         )
-        t = torch.min(dialogue_lens).int()
+        t = int(dialogue_lens.min().item())
         base_logits = torch.full((dialogue_lens.shape[0],), 0.0).to(device)
         while termination_mask.sum() > 0 and (t + prefix_t) < max_length:
             curr_token = tokens[:, t - 1].unsqueeze(1)
@@ -1852,7 +1881,7 @@ class ILQL_Policy:
                 .reshape(1, bsize, -1)
             )  # (time, batch, k*vocab)
             scores[0, :, vocab_size:] = scores[0, :, vocab_size:].masked_fill_(
-                (t == original_dialogue_lens)
+                (original_dialogue_lens == t)
                 .unsqueeze(1)
                 .repeat(1, scores.shape[2] - vocab_size),
                 float("-inf"),
@@ -1981,19 +2010,13 @@ class ILQL_Policy:
                 if tokens[idx, t] == tokenizer.eoa_token_id and t >= dialogue_lens[idx]:
                     termination_mask[idx] *= 1 - int(
                         termination_condition(
-                            tokenizer.decode(
-                                tokens[idx, :].tolist(),
-                                clean_up_tokenization_spaces=False,
-                            ),
+                            _decode_str(tokenizer, tokens[idx, :].tolist()),
                         ),
                     )
             t += 1
             termination_mask *= ((t - dialogue_lens) < max_generation_len).int()
 
-        output_strs = [
-            tokenizer.decode(tokens[i, :].tolist(), clean_up_tokenization_spaces=False)
-            for i in range(n)
-        ]
+        output_strs = [_decode_str(tokenizer, tokens[i, :].tolist()) for i in range(n)]
         processed_outputs = []
         for i in range(len(input_strs)):
             temp_outputs = []
@@ -2023,8 +2046,8 @@ class ILQL_Policy:
 
     def generate(
         self,
-        items: list[DataPoint] | RL_Dataset,
-        termination_condition: Callable[[np.ndarray], bool],
+        items: list[DataPoint] | dict[str, torch.Tensor],
+        termination_condition: Callable[[str], bool],
         **kwargs: Any,
     ) -> tuple[list[tuple[str, list[str]]], Any, torch.Tensor]:
         prepared_inputs = self.iql_model.prepare_inputs(items)
@@ -2057,7 +2080,10 @@ class ILQL_Policy:
         )
         generations, logprobs, kls = self.generate(
             [item],
-            always_terminate,
+            # Upstream fix: agilerl/utils/sampling_utils.py annotates
+            # ``always_terminate`` as taking an ndarray, but termination
+            # conditions receive the decoded completion string.
+            always_terminate,  # ty: ignore[invalid-argument-type]
             **self.generation_kwargs,
         )
         self.kls_all.append(kls[0, 0].item())
@@ -2090,7 +2116,7 @@ class ILQL_Evaluator:
     def evaluate(
         self,
         model: ILQL,
-        items: list[DataPoint] | RL_Dataset,
+        items: list[DataPoint] | dict[str, torch.Tensor],
     ) -> dict[str, tuple[float, int]]:
         policy = ILQL_Policy(model, self.kind, **self.generation_kwargs)
         tokens = model.prepare_inputs(items)["tokens"]

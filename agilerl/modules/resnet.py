@@ -5,7 +5,7 @@ from torch import nn
 
 from agilerl.modules import EvolvableCNN
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
-from agilerl.typing import ObservationType
+from agilerl.typing import DeviceType, ObservationType
 from agilerl.utils.evolvable_networks import create_resnet, get_activation
 
 
@@ -41,7 +41,7 @@ class EvolvableResNet(EvolvableModule):
     :param max_channel_size: Maximum number of channels in each convolutional layer, defaults to 256
     :type max_channel_size: int
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
-    :type device: str, optional
+    :type device: DeviceType, optional
     :param name: Name of the network, defaults to 'resnet'
     :type name: str, optional
     :param random_seed: Random seed to use for the network. Defaults to None.
@@ -62,7 +62,7 @@ class EvolvableResNet(EvolvableModule):
         max_blocks: int = 4,
         min_channel_size: int = 32,
         max_channel_size: int = 256,
-        device: str = "cpu",
+        device: DeviceType = "cpu",
         name: str = "resnet",
         random_seed: int | None = None,
     ) -> None:

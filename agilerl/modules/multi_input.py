@@ -10,7 +10,7 @@ from torch import nn
 from agilerl.modules import EvolvableCNN, EvolvableMLP
 from agilerl.modules.base import EvolvableModule, ModuleDict, MutationType, mutation
 from agilerl.modules.configs import CnnNetConfig, MlpNetConfig, NetConfig
-from agilerl.typing import ArrayOrTensor, ModuleType
+from agilerl.typing import ArrayOrTensor, DeviceType, ModuleType
 from agilerl.utils.evolvable_networks import (
     get_activation,
     is_image_space,
@@ -98,7 +98,7 @@ class EvolvableMultiInput(EvolvableModule):
     :param max_latent_dim: Maximum dimension of the latent space. Default is 128.
     :type max_latent_dim: int, optional
     :param device: Device to use for the network. Default is "cpu".
-    :type device: str, optional
+    :type device: DeviceType, optional
     :param name: Name of the network. Default is "multi_input".
     :type name: str, optional
     :param random_seed: Random seed to use for the network. Defaults to None.
@@ -120,7 +120,7 @@ class EvolvableMultiInput(EvolvableModule):
         output_layernorm: bool = False,
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
-        device: str = "cpu",
+        device: DeviceType = "cpu",
         name: str = "multi_input",
         random_seed: int | None = None,
     ) -> None:

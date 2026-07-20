@@ -5,7 +5,7 @@ import torch
 from gymnasium import spaces
 
 from agilerl.modules.base import EvolvableModule, EvolvableWrapper
-from agilerl.typing import ArrayOrTensor, NetConfigType
+from agilerl.typing import ArrayOrTensor, DeviceType, NetConfigType
 from agilerl.utils.torch_utils import (
     entropy_from_space,
     log_prob_from_space,
@@ -121,7 +121,7 @@ class EvolvableDistribution(EvolvableWrapper):
     :param squash_output: Whether to squash the output to the action space.
     :type squash_output: bool
     :param device: Device to use for the network.
-    :type device: str
+    :type device: DeviceType
     """
 
     wrapped: EvolvableModule
@@ -135,7 +135,7 @@ class EvolvableDistribution(EvolvableWrapper):
         network: EvolvableModule,
         action_std_init: float = 0.0,
         squash_output: bool = False,
-        device: str = "cpu",
+        device: DeviceType = "cpu",
     ) -> None:
         super().__init__(network)
 

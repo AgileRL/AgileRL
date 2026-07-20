@@ -107,7 +107,9 @@ StandardTensorDict = dict[str, torch.Tensor]
 TensorTuple = tuple[torch.Tensor, ...]
 ArrayDict = dict[str, np.ndarray]
 ArrayTuple = tuple[np.ndarray, ...]
-NetConfigType = dict[str, dict[str, Any] | Any]
+# dict[str, dict[str, Any] | Any] collapses to this; the longer form only
+# obscured the value type at **config splat sites.
+NetConfigType = dict[str, Any]
 KernelSizeType = int | tuple[int, ...]
 GymSpaceType = SupportedObservationSpace | list[SupportedObservationSpace]
 GymEnvType = str | gym.Env | gym.vector.VectorEnv | gym.vector.AsyncVectorEnv

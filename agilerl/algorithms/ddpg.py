@@ -1,7 +1,8 @@
 import copy
 import warnings
-from typing import Any
+from typing import Any, TypedDict, cast
 
+import gymnasium as gym
 import numpy as np
 import torch
 from accelerate import Accelerator
@@ -21,10 +22,10 @@ from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.typing import (
     ExperiencesType,
-    GymEnvType,
     NetConfigType,
     ObservationType,
     SupportedObservationSpace,
+    TorchObsType,
 )
 from agilerl.utils.algo_utils import (
     make_safe_deepcopies,
@@ -35,6 +36,16 @@ from agilerl.utils.evolvable_networks import (
     get_default_encoder_config,
     is_mlp_net_config,
 )
+
+
+class _ReplayBatch(TypedDict):
+    """Field layout of an off-policy replay sample (components/replay_buffer.py)."""
+
+    obs: TorchObsType
+    action: torch.Tensor
+    reward: torch.Tensor
+    next_obs: TorchObsType
+    done: torch.Tensor
 
 
 class DDPG(RLAlgorithm):
@@ -53,7 +64,7 @@ class DDPG(RLAlgorithm):
     :param vect_noise_dim: Vectorization dimension of environment for action noise, defaults to 1
     :type vect_noise_dim: int, optional
     :param mean_noise: Mean of exploration noise, defaults to 0.0
-    :type mean_noise: float, optional
+    :type mean_noise: float | np.ndarray, optional
     :param theta: Rate of mean reversion in Ornstein Uhlenbeck action noise, defaults to 0.15
     :type theta: float, optional
     :param dt: Timestep for Ornstein Uhlenbeck action noise update, defaults to 1e-2
@@ -97,6 +108,8 @@ class DDPG(RLAlgorithm):
     """
 
     action_space: spaces.Box
+    # Box action space, so the network output size is a plain int
+    action_dim: int
 
     def __init__(
         self,
@@ -105,7 +118,7 @@ class DDPG(RLAlgorithm):
         O_U_noise: bool = True,
         expl_noise: float | np.ndarray = 0.1,
         vect_noise_dim: int = 1,
-        mean_noise: float = 0.0,
+        mean_noise: float | np.ndarray = 0.0,
         theta: float = 0.15,
         dt: float = 1e-2,
         index: int = 0,
@@ -192,12 +205,12 @@ class DDPG(RLAlgorithm):
         self.O_U_noise = O_U_noise
         self.vect_noise_dim = vect_noise_dim
         self.share_encoders = share_encoders
-        self.expl_noise = (
+        self.expl_noise: np.ndarray = (
             expl_noise
             if isinstance(expl_noise, np.ndarray)
             else expl_noise * np.ones((vect_noise_dim, self.action_dim))
         )
-        self.mean_noise = (
+        self.mean_noise: np.ndarray = (
             mean_noise
             if isinstance(mean_noise, np.ndarray)
             else mean_noise * np.ones((vect_noise_dim, self.action_dim))
@@ -230,12 +243,12 @@ class DDPG(RLAlgorithm):
                 )
 
             self.actor, self.critic = make_safe_deepcopies(
-                actor_network,
-                critic_network,
+                actor_network,  # ty: ignore[invalid-argument-type]
+                critic_network,  # ty: ignore[invalid-argument-type]
             )
             self.actor_target, self.critic_target = make_safe_deepcopies(
-                actor_network,
-                critic_network,
+                actor_network,  # ty: ignore[invalid-argument-type]
+                critic_network,  # ty: ignore[invalid-argument-type]
             )
         else:
             net_config = {} if net_config is None else net_config
@@ -278,6 +291,9 @@ class DDPG(RLAlgorithm):
             critic_net_config: dict[str, Any] = copy.deepcopy(net_config)
             critic_net_config["head_config"] = critic_head_config
 
+            # NOTE: NetworkMeta.__call__ (agilerl/networks/base.py) types
+            # constructor calls as EvolvableNetwork; fix upstream to return the
+            # subclass.
             def create_actor() -> DeterministicActor:
                 return DeterministicActor(
                     observation_space=self.observation_space,
@@ -355,7 +371,9 @@ class DDPG(RLAlgorithm):
         """
         if all(isinstance(net, EvolvableNetwork) for net in [self.actor, self.critic]):
             try:
-                share_encoder_parameters(self.actor, self.critic, self.critic_target)
+                # NOTE: EvolvableNetwork fails EvolvableNetworkProtocol only via
+                # the protocol's mutable `device` member (see agilerl/protocols.py).
+                share_encoder_parameters(self.actor, self.critic, self.critic_target)  # ty: ignore[invalid-argument-type]  # concrete networks can't satisfy EvolvableNetworkProtocol: its clone() is declared to return the protocol, not Self — fix in agilerl/protocols.py
             except KeyError as e:
                 msg = f"Found incompatible encoder architectures: {e} not found in shared network."
                 raise KeyError(
@@ -441,7 +459,7 @@ class DDPG(RLAlgorithm):
         experiences: ExperiencesType,
         noise_clip: float = 0.5,
         policy_noise: float = 0.2,
-    ) -> tuple[float, float]:
+    ) -> tuple[float | None, float]:
         """Update agent network parameters to learn from experiences.
 
         :param experiences: TensorDict of batched observations, actions, rewards, next_observations, dones.
@@ -450,15 +468,18 @@ class DDPG(RLAlgorithm):
         :type noise_clip: float, optional
         :param policy_noise: Standard deviation of noise applied to policy, defaults to 0.2
         :type policy_noise: float, optional
+        :return: Actor loss (None on steps without a policy update) and critic loss
+        :rtype: tuple[float | None, float]
         """
-        obs = experiences["obs"]
-        actions = experiences["action"]
-        rewards = experiences["reward"]
-        next_obs = experiences["next_obs"]
-        dones = experiences["done"]
+        # Off-policy replay buffers sample batches as TensorDicts keyed by field
+        # name (components/replay_buffer.py), which guarantees this layout.
+        batch = cast("_ReplayBatch", experiences)
+        actions = batch["action"]
+        rewards = batch["reward"]
+        dones = batch["done"]
 
-        obs = self.preprocess_observation(obs)
-        next_obs = self.preprocess_observation(next_obs)
+        obs = self.preprocess_observation(batch["obs"])
+        next_obs = self.preprocess_observation(batch["next_obs"])
 
         q_value = self.critic(obs, actions)
         with torch.no_grad():
@@ -486,8 +507,8 @@ class DDPG(RLAlgorithm):
 
         self.critic_optimizer.step()
 
-        critic_loss = critic_loss.item()
-        self.metrics.log("critic_loss", critic_loss)
+        critic_loss_value = critic_loss.item()
+        self.metrics.log("critic_loss", critic_loss_value)
 
         # update actor and targets every policy_freq learn steps
         self.learn_counter += 1
@@ -508,12 +529,12 @@ class DDPG(RLAlgorithm):
             self.soft_update(self.actor, self.actor_target)
             self.soft_update(self.critic, self.critic_target)
 
-            actor_loss = actor_loss.item()
-            self.metrics.log("actor_loss", actor_loss)
+            actor_loss_value = actor_loss.item()
+            self.metrics.log("actor_loss", actor_loss_value)
         else:
-            actor_loss = None
+            actor_loss_value = None
 
-        return actor_loss, critic_loss
+        return actor_loss_value, critic_loss_value
 
     def soft_update(self, net: nn.Module, target: nn.Module) -> None:
         """Soft updates target network parameters.
@@ -532,14 +553,14 @@ class DDPG(RLAlgorithm):
 
     def test(
         self,
-        env: GymEnvType,
+        env: gym.vector.VectorEnv,
         max_steps: int | None = None,
         loop: int = 3,
     ) -> float:
         """Return mean test score of agent in environment with epsilon-greedy policy.
 
-        :param env: The environment to be tested in
-        :type env: Gym-style environment
+        :param env: The vectorized environment to be tested in
+        :type env: gym.vector.VectorEnv
         :param max_steps: Maximum number of testing steps, defaults to None
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
@@ -570,6 +591,6 @@ class DDPG(RLAlgorithm):
                             completed_episode_scores[idx] = scores[idx]
                             finished[idx] = 1
                 rewards.append(np.mean(completed_episode_scores))
-        mean_fit = np.mean(rewards)
+        mean_fit = float(np.mean(rewards))
         self.metrics.add_fitness(mean_fit)
         return mean_fit

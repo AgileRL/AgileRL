@@ -456,7 +456,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         obs: ObservationType | MultiAgentObservationType,
         *args: Any,
         **kwargs: Any,
-    ) -> ActionType:
+    ) -> ActionType | ActionResult:
         """Abstract method for getting an action from the algorithm.
 
         :param obs: The observation to get an action for.
@@ -466,13 +466,17 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :param kwargs: Additional keyword arguments to pass to the action function.
         :type kwargs: Any
         :return: The action to take.
-        :rtype: ActionType
+        :rtype: ActionType | ActionResult
         """
         raise NotImplementedError
 
     @abstractmethod
-    def test(self, *args: Any, **kwargs: Any) -> np.ndarray:
-        """Abstract method for testing the algorithm."""
+    def test(self, *args: Any, **kwargs: Any) -> float | np.ndarray:
+        """Abstract method for testing the algorithm.
+
+        Single-agent and bandit algorithms return a scalar mean score;
+        multi-agent algorithms may return per-agent scores.
+        """
         raise NotImplementedError
 
     @staticmethod
@@ -5200,7 +5204,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         # (for the vLLM mismatch correction) is excluded there.
         stitch_active = any(int(sp.shape[1]) > 0 for sp in stitch_prefixes)
         capture_sampling_logps = capture_sampling_logps and not stitch_active
-        generation_kwargs = {
+        generation_kwargs: dict[str, Any] = {
             "n": 1,  # vLLM on each GPU generates only 1 in colocate mode
             "repetition_penalty": self.repetition_penalty,
             "temperature": temperature,
