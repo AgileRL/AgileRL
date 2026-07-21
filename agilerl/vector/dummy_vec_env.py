@@ -12,6 +12,7 @@ from agilerl.typing import NumpyObsType, PzStepReturn
 from agilerl.vector.pz_vec_env import PettingZooVecEnv
 
 if TYPE_CHECKING:
+    from gymnasium.core import RenderFrame
     from pettingzoo import ParallelEnv
 
 
@@ -102,11 +103,11 @@ class DummyVecEnv:
             info,
         )
 
-    def render(self) -> Any:  # noqa: ANN401 -- render output is env-defined (RGB arrays, ansi strings, or None)
+    def render(self) -> RenderFrame | list[RenderFrame] | None:
         """Render the environment.
 
         :returns: Render output from the wrapped environment.
-        :rtype: Any
+        :rtype: gymnasium.core.RenderFrame | list[RenderFrame] | None
         """
         return self._env.render()
 
@@ -123,7 +124,7 @@ def _pz_placeholder(
     agent: str,
     name: str,
     obs_spaces: dict[str, spaces.Space],
-) -> Any:  # noqa: ANN401 -- placeholder is heterogeneous (float, info dict, or zero obs array)
+) -> Any:  # noqa: ANN401 -- heterogeneous: float (reward/dones), info dict, or zero obs array; the ndarray branch feeds np.expand_dims, which rejects the dict member
     """Return a NaN/zero placeholder for an inactive PettingZoo agent.
 
     Mirrors the convention used by :class:`AsyncPettingZooVecEnv`.
@@ -313,11 +314,11 @@ class PzDummyVecEnv(PettingZooVecEnv):
         msg = "step_async() must be called before step_wait()"
         raise RuntimeError(msg)
 
-    def render(self) -> Any:  # noqa: ANN401 -- render output is env-defined (RGB arrays, ansi strings, or None)
+    def render(self) -> None | np.ndarray | str | list:
         """Render the underlying environment.
 
         :returns: Render output from the wrapped environment.
-        :rtype: Any
+        :rtype: None | np.ndarray | str | list
         """
         return self._env.render()
 

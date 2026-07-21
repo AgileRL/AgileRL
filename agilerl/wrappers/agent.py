@@ -204,7 +204,7 @@ class AgentWrapper(ABC, Generic[AgentType]):
         obs: ObservationType | MARLObservationType,
         *args: Any,
         **kwargs: Any,
-    ) -> Any:  # noqa: ANN401 -- action type varies across wrapped algorithms
+    ) -> ActionReturnType:
         """Return the action from the agent.
 
         :param obs: Observation from the environment
@@ -457,7 +457,7 @@ class RSNorm(AgentWrapper[AgentType]):
         obs: ObservationType | MARLObservationType,
         *args: Any,
         **kwargs: Any,
-    ) -> Any:  # noqa: ANN401 -- action type varies across wrapped algorithms
+    ) -> ActionReturnType:
         """Return the action from the agent after normalizing the observation.
 
         :param obs: Observation from the environment

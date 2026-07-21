@@ -521,7 +521,7 @@ class FinetuningNetworkSpec(BaseModel):
     @field_serializer("lora_config")
     def _serialize_lora_config(
         self, value: LoraConfigDict | LoraConfig | None, info: SerializationInfo
-    ) -> Any:  # noqa: ANN401 -- field serializer returns a JSON-safe blob
+    ) -> LoraConfigDict | LoraConfig | dict[str, Any] | None:
         if info.mode != "json":
             return value
         if value is None:

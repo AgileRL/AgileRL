@@ -8,11 +8,14 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, GenerationConfig, PreTrainedModel
+
+if TYPE_CHECKING:
+    from transformers.generation.utils import GenerateOutput
 
 try:
     from peft import PeftModel, get_peft_model
@@ -179,7 +182,7 @@ class AutoModelForCausalLMWithValueHead(nn.Module):
 
         return (lm_logits, loss, value)
 
-    def generate(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401 -- HF generate returns a Tensor or GenerateOutput depending on kwargs
+    def generate(self, *args: Any, **kwargs: Any) -> torch.Tensor | GenerateOutput:
         # ``generate`` comes from GenerationMixin and resolves dynamically
         # through ``nn.Module.__getattr__`` on the wrapped model.
         generate_fn = cast("Callable[..., Any]", self.pretrained_model.generate)

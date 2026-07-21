@@ -42,7 +42,9 @@ def mutation(
         func: Callable[[Any], dict[str, Any] | None],
     ) -> MutationMethodProtocol:
         @wraps(func)
-        def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401 -- generic passthrough over any evolvable module method
+        def wrapper(
+            self: "EvolvableModule", *args: Any, **kwargs: Any
+        ) -> dict[str, Any] | None:
             return func(self, *args, **kwargs)
 
         # A plain function object has no ``_mutation_type`` / ``_recreate_kwargs``
@@ -183,7 +185,7 @@ def _mutation_wrapper(
     """
 
     @wraps(method)
-    def wrapped(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401 -- generic passthrough returning the wrapped method's result
+    def wrapped(*args: Any, **kwargs: Any) -> dict[str, Any] | None:
         with MutationContext(module, method, attribute):
             # This handles the case of an `EvolvableWrapper`
             if attribute not in module.mutation_methods:

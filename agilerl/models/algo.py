@@ -537,7 +537,7 @@ class LLMAlgorithmSpec(AlgorithmSpec):
         resume_from_checkpoint: str | None = None,
         accelerator: Accelerator | None = None,
         device: str | torch.device = "cpu",
-        actor_network: Any | None = None,  # noqa: ANN401 -- actor network type varies (PEFT/HF models, evolvable modules, user-provided)
+        actor_network: Any | None = None,  # noqa: ANN401 -- concrete HF/PEFT models (PreTrainedModelType) forwarded here do not structurally satisfy PreTrainedModelProtocol under ty (device attr variance)
     ) -> LLMAlgorithm:
         """Build an LLM algorithm instance from spec fields.
 

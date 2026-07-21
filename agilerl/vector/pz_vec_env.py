@@ -157,7 +157,7 @@ class PettingZooVecEnv:
         self.step_async(passed_actions_list)
         return self.step_wait()
 
-    def render(self) -> Any:  # noqa: ANN401  # rendered frames are env-defined (RGB arrays, ansi strings, etc.)
+    def render(self) -> Any:  # noqa: ANN401 -- abstract render; return varies by subclass (PzDummyVecEnv -> pettingzoo frames, AsyncPettingZooVecEnv -> tuple of per-env frames)
         """Return the rendered frames from the parallel environments."""
         msg = f"{self.__str__()} render function is not implemented."
         raise NotImplementedError(

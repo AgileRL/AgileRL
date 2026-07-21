@@ -425,7 +425,7 @@ class EvolvableAlgorithmProtocol(Protocol):
         path: str,
         device: str | torch.device = "cpu",
         accelerator: Accelerator | None = None,
-    ) -> Any:  # noqa: ANN401 -- returns whichever concrete algorithm subclass is loaded
+    ) -> Self:
         pass
 
     def load_checkpoint(self, path: str) -> None:
