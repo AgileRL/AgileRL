@@ -320,20 +320,6 @@ class TestFinetuningNetworkSpec:
         assert d["target_modules"] == ["a", "b"]
 
 
-class _TinyTextEnv:
-    """Minimal text env (reset/step + max_turns) served through an entrypoint."""
-
-    max_turns = 2
-
-    def reset(self, seed=None):
-        del seed
-        return "hi", {}
-
-    def step(self, action):
-        del action
-        return "", 0.0, True, False, {}
-
-
 class TestLLMEnvSpec:
     """Covers LLMEnvSpec validators and properties."""
 
@@ -503,22 +489,6 @@ class TestLLMEnvSpec:
             request_timeout_s=7.5,
         )
         assert spec._http_timeout_s() == 7.5
-
-    @pytest.mark.skipif(not HAS_LLM_DEPENDENCIES, reason="LLM deps not installed")
-    def test_served_spec_builds_a_shared_server_factory(self):
-        """served=True yields a ServedEnvFactory: one shared server, lazy start."""
-        from agilerl.llm_envs.openenv import ServedEnvFactory
-
-        spec = LLMEnvSpec(
-            env_type=LLMEnvType.ROLLOUT,
-            entrypoint=f"{__file__}:_TinyTextEnv",
-            served=True,
-        )
-        factory = spec.make_rollout_env_factory(MagicMock())
-        assert isinstance(factory, ServedEnvFactory)
-        assert spec.max_turns == 2  # probed from the entrypoint env
-        with pytest.raises(RuntimeError, match="not running"):
-            _ = factory.base_url  # no server until the first env is built
 
 
 class TestBanditEnvSpec:

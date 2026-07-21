@@ -37,12 +37,12 @@ def _reasoning_env() -> TinyDatasetEnv:
 
 
 def _wrap(inner: object) -> RolloutEnv:
-    """Drive ``inner`` at the token level over its own hosted OpenEnv server.
+    """Drive ``inner`` at the token level in-process (no HTTP).
 
-    The returned env owns the server, so callers must ``close()`` it.
+    The returned env owns the local client, so callers must ``close()`` it.
     """
-    return RolloutEnv.serving(
-        lambda: inner,
+    return RolloutEnv.local(
+        inner,
         MiniTokenizer(),
         max_turns=1,
         apply_chat_template=False,
@@ -156,8 +156,8 @@ def test_fold_applies_prefix_and_suffix_from_info() -> None:
     assert _fold("body", {"prefix": "PRE:", "suffix": "SUF"}) == "PRE:body\nSUF"
 
 
-def test_dataset_size_reflects_served_env() -> None:
-    """``dataset_size`` reports the served env's training-row count (via /info)."""
+def test_dataset_size_reflects_wrapped_env() -> None:
+    """``dataset_size`` reports the wrapped env's training-row count."""
     w = _wrap(_reasoning_env())
     try:
         assert w.dataset_size == 1
@@ -165,7 +165,7 @@ def test_dataset_size_reflects_served_env() -> None:
         w.close()
 
 
-def test_eval_mode_serves_wrapped_env_eval_split() -> None:
+def test_eval_mode_routes_to_the_eval_split() -> None:
     """``eval_mode()`` routes resets to the held-out split, restoring after."""
     w = _wrap(_reasoning_env())
     try:

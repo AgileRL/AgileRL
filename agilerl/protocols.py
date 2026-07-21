@@ -663,13 +663,12 @@ class TextEnvProtocol(Protocol):
 
 
 class EnvClientProtocol(Protocol):
-    """Backend surface shared by :class:`~agilerl.llm_envs.openenv.OpenEnvSessionClient`,
-    :class:`~agilerl.llm_envs.openenv.LocalEnvClient` and
-    :class:`~agilerl.llm_envs.openenv.ServedEnvClient`.
+    """Backend surface shared by :class:`~agilerl.llm_envs.openenv.OpenEnvSessionClient`
+    and :class:`~agilerl.llm_envs.openenv.LocalEnvClient`.
 
     A :class:`~agilerl.llm_envs.rollout_env.RolloutEnv` drives ``reset`` / ``step`` /
-    ``close`` through this interface — over HTTP or in-process. A backend owns
-    whatever it builds (a served backend owns its server), released by ``close``.
+    ``close`` through this interface — over a WebSocket session or in-process. A
+    backend releases whatever it owns via ``close``.
     """
 
     def reset(

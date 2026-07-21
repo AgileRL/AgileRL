@@ -37,7 +37,7 @@ Dependencies
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
     from agilerl.training.llm import train_llm_rollout
-    from agilerl.llm_envs import ServedEnvFactory
+    from agilerl.llm_envs import RolloutEnv
     from agilerl.utils.utils import create_population
 
 Defining Hyperparameters
@@ -223,10 +223,10 @@ Now we have defined our reward functions, we must also design our prompt. This f
 to the agent and provides the context necessary to complete the task. This is a task-specific feature,
 and different reasoning problems will require different conversation templates, although they can follow a similar
 format. We define the conversation template as follows (using ``question`` and ``answer`` as placeholders for the question and answer data)
-and then host a single-turn rollout env over the question and answer
-columns of our dataset with a :class:`ServedEnvFactory <agilerl.llm_envs.ServedEnvFactory>`
-as our ``env_factory`` (a prompt dataset is just an environment we host: one shared
-server, serving a fresh env instance to each rollout over its own WebSocket session).
+and then drive a single-turn rollout env over the question and answer
+columns of our dataset with an in-process ``env_factory`` (a prompt dataset is just an
+environment: each rollout runs its own env instance in-process via
+:meth:`RolloutEnv.local <agilerl.llm_envs.RolloutEnv.local>`).
 
 .. collapse:: Build the Single-Turn Rollout Environment
 
@@ -255,9 +255,9 @@ server, serving a fresh env instance to each rollout over its own WebSocket sess
             return "\n".join(p for p in parts if p)
 
         # A single-turn rollout environment from the dataset — a prompt dataset is
-        # just an env, hosted on one shared server by ServedEnvFactory.
+        # just an env, driven in-process by RolloutEnv.local.
         class PromptDataset:
-            """Single-turn dataset env: serve a question on reset, score it on step."""
+            """Single-turn dataset env: a question on reset, a score on step."""
 
             def __init__(self, questions, answers, reward_fn, prompt_builder,
                          test_questions=None, test_answers=None):
@@ -285,8 +285,8 @@ server, serving a fresh env instance to each rollout over its own WebSocket sess
             def step(self, action):
                 return "", float(self.reward_fn(action, self._a, self._q)), True, False, {}
 
-        env_factory = ServedEnvFactory(
-            lambda: PromptDataset(
+        env_factory = lambda: RolloutEnv.local(
+            PromptDataset(
                 questions=list(train_dataset["question"]),
                 answers=list(train_dataset["answer"]),
                 reward_fn=combined_rewards,

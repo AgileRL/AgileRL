@@ -26,8 +26,6 @@ from agilerl.llm_envs import (
     OpenEnvSessionClient,
     OpenEnvWrapper,
     RolloutEnv,
-    ServedEnvClient,
-    ServedEnvFactory,
     resolve_env,
 )
 from agilerl.llm_envs import openenv as openenv_module
@@ -206,7 +204,7 @@ def test_observation_text_supports_openenv_and_mcp_shapes(
     assert _observation_text(obs) == expected
 
 
-# --- env identity: the served env's real name in OpenEnv metadata ----------
+# --- env identity: the hosted env's real name in OpenEnv metadata ----------
 def test_openenv_wrapper_metadata_reports_real_env_name() -> None:
     """The wrapped env is identified by its own name, not ``OpenEnvWrapper``."""
     assert OpenEnvWrapper(_CountingEnv()).get_metadata().name == "_CountingEnv"
@@ -222,42 +220,6 @@ def test_name_from_spec_takes_trailing_identifier() -> None:
     assert _name_from_spec("/pkg/file.py:Env") == "Env"
     assert _name_from_spec(r"C:\pkg\file.py:Env") == "Env"
     assert _name_from_spec("plainname") == "plainname"
-
-
-# --- serving: one OpenEnv server instance per rollout ----------------------
-def test_serving_hosts_owns_and_stops_its_server() -> None:
-    """``serving`` binds a ``ServedEnvClient`` whose server ``close`` stops."""
-    env = RolloutEnv.serving(_CountingEnv, MiniTokenizer(), apply_chat_template=False)
-    assert isinstance(env._env_client, ServedEnvClient)
-    env.reset()  # reachable over real HTTP
-    assert env._prompt_text == "Start.\nReply 'go'."
-    env.close()
-    with pytest.raises(RuntimeError):
-        _ = env._env_client.base_url  # server stopped + released
-
-
-def test_batch_serving_factory_gives_one_server_per_env() -> None:
-    """A serving ``env_factory`` gives BatchRolloutEnv one isolated server per env.
-
-    The state race (one stateful server can't serve concurrent rollouts) is avoided:
-    each of the ``batch_size * group_size`` envs binds a distinct server URL, and
-    ``close`` tears them all down.
-    """
-    batch = BatchRolloutEnv(
-        lambda **_: RolloutEnv.serving(
-            _CountingEnv, MiniTokenizer(), apply_chat_template=False
-        ),
-        batch_size=2,
-        group_size=1,
-    )
-    batch.reset(seed=0)
-    urls = [env._env_client.base_url for env in batch.envs]
-    assert len(batch.envs) == 2
-    assert len(set(urls)) == 2  # distinct server instances
-    batch.close()
-    for env in batch.envs:
-        with pytest.raises(RuntimeError):
-            _ = env._env_client.base_url
 
 
 # --- RolloutEnv(url) over a real server ------------------------------------
@@ -396,22 +358,6 @@ class TestRolloutEnvFromSpec:
             apply_chat_template=False,
         )
         assert isinstance(env._env_client, LocalEnvClient)
-        obs, _ = env.reset(row_index=0)
-        assert "input_ids" in obs
-        env.close()
-
-    def test_entrypoint_with_serve_hosts_on_a_server(self) -> None:
-        """``serve=True`` hosts the entrypoint env on its own server (HTTP loopback)."""
-        spec = f"{__file__}:_RowDatasetEnv"
-        env = RolloutEnv.from_spec(
-            spec,
-            {"prefix": "Q"},
-            MiniTokenizer(),
-            max_turns=1,
-            serve=True,
-            apply_chat_template=False,
-        )
-        assert isinstance(env._env_client, ServedEnvClient)
         obs, _ = env.reset(row_index=0)
         assert "input_ids" in obs
         env.close()
@@ -619,35 +565,6 @@ def test_truncated_round_trips_over_http() -> None:
     assert reward == 0.5
     assert truncated is True
     assert terminated is False
-
-
-# --- ServedEnvClient: one owner for the server + session pair ----------------
-def test_served_env_client_owns_server_and_session() -> None:
-    """``close`` ends the session, stops the server, and closes the hosted env."""
-    inner = _CountingEnv()
-    client = ServedEnvClient(inner)
-    prompt, _ = client.reset()
-    assert prompt == "Start.\nReply 'go'."
-    client.close()
-    assert inner.closed  # server teardown closed the hosted env
-    with pytest.raises(RuntimeError):
-        _ = client.base_url
-    client.close()  # idempotent
-
-
-def test_served_env_client_eval_mode_serves_the_held_out_split() -> None:
-    """``eval_mode`` on a served client reaches the hosted env's reset."""
-    client = ServedEnvClient(_RowDatasetEnv())
-    try:
-        train_prompt, _ = client.reset(row_index=1)
-        with client.eval_mode():
-            eval_prompt, _ = client.reset(row_index=1)
-        after_prompt, _ = client.reset(row_index=1)
-    finally:
-        client.close()
-    assert train_prompt.startswith("row1")
-    assert eval_prompt.startswith("eval1")
-    assert after_prompt.startswith("row1")  # the block restores the train split
 
 
 class _KwargsOnlyResetEnv:
@@ -927,88 +844,11 @@ def test_step_encodes_mcp_call_tool_action() -> None:
     }
 
 
-# --- LocalEnvClient / ServedEnvClient: tool schemas + delegation -------------
+# --- LocalEnvClient: tool schemas --------------------------------------------
 def test_local_env_client_exposes_tools() -> None:
     """``LocalEnvClient`` surfaces the wrapped env's advertised tool schemas."""
     env = _CountingEnv(tools=[{"name": "t"}])
     assert LocalEnvClient(env).tools == [{"name": "t"}]
-
-
-def test_served_env_client_steps_and_reports_tools() -> None:
-    """The served backend forwards ``step`` and ``tools`` to its owned client."""
-    client = ServedEnvClient(_CountingEnv(tools=[{"name": "t"}]))
-    try:
-        client.reset()
-        _obs, reward, _term, _trunc, _info = client.step("go")
-        assert reward == 1.0
-        assert client.tools == [{"name": "t"}]
-    finally:
-        client.close()
-
-
-def test_served_env_client_stops_server_if_client_build_fails(
-    monkeypatch: Any,
-) -> None:
-    """If the client fails to build, the owned server is stopped (no leak)."""
-    inner = _CountingEnv()
-
-    def _boom(*_a: Any, **_k: Any) -> Any:
-        msg = "client build failed"
-        raise RuntimeError(msg)
-
-    monkeypatch.setattr(openenv_module, "OpenEnvSessionClient", _boom)
-    with pytest.raises(RuntimeError, match="client build failed"):
-        ServedEnvClient(inner)
-    assert inner.closed  # the started server was torn down, closing the env
-
-
-# --- ServedEnvFactory: one shared server, one session per env ----------------
-def _served_factory() -> ServedEnvFactory:
-    return ServedEnvFactory(
-        _CountingEnv, MiniTokenizer(), max_turns=3, apply_chat_template=False
-    )
-
-
-def test_served_env_factory_shares_one_server_with_isolated_sessions() -> None:
-    """Every factory env hits the same URL, but each session drives a fresh env."""
-    factory = _served_factory()
-    envs = [factory() for _ in range(3)]
-    try:
-        url = factory.base_url  # constant across calls: one shared server
-        first, second = envs[0]._env_client, envs[1]._env_client
-        assert first.reset()[0] == "Start.\nReply 'go'."
-        assert first.step("go")[0] == "turn 1"
-        # The second session starts its own env: its counter is untouched by
-        # the first session's steps.
-        assert second.reset()[0] == "Start.\nReply 'go'."
-        assert second.step("go")[0] == "turn 1"
-        assert first.step("go")[0] == "turn 2"
-        assert factory.base_url == url
-    finally:
-        for env in envs:
-            env.close()
-
-
-def test_served_env_factory_stops_server_with_the_last_lease() -> None:
-    """The shared server outlives all but the last env; a later call restarts it."""
-    factory = _served_factory()
-    envs = [factory() for _ in range(3)]
-    url = factory.base_url
-    envs[0].close()
-    envs[0].close()  # a double close releases its lease only once
-    envs[1].close()
-    assert factory.base_url == url  # one env still live -> server still up
-    probe = OpenEnvSessionClient(factory.base_url)
-    assert probe.reset()[0] == "Start.\nReply 'go'."  # still serving sessions
-    probe.close()
-    envs[2].close()
-    with pytest.raises(RuntimeError, match="not running"):
-        _ = factory.base_url
-    fresh = factory()  # the next call starts a fresh server
-    assert factory.base_url.startswith("http://127.0.0.1:")
-    fresh.close()
-    with pytest.raises(RuntimeError, match="not running"):
-        _ = factory.base_url
 
 
 # --- _observation_text: rendering our own + third-party observations ---------

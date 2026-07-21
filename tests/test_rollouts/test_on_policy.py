@@ -62,8 +62,8 @@ class TestCollectRolloutsLlm:
         tokenizer = TinyTokenizer()
 
         def env_fn():
-            return RolloutEnv.serving(
-                _SingleTurnTextEnv,
+            return RolloutEnv.local(
+                _SingleTurnTextEnv(),
                 tokenizer=tokenizer,
                 max_turns=1,
                 pad_id=tokenizer.pad_token_id,
@@ -232,8 +232,8 @@ class TestCollectRolloutsLlmGrpo:
         tokenizer = TinyTokenizer()
 
         def env_fn():
-            return RolloutEnv.serving(
-                _SingleTurnTextEnv,
+            return RolloutEnv.local(
+                _SingleTurnTextEnv(),
                 tokenizer=tokenizer,
                 max_turns=1,
                 pad_id=tokenizer.pad_token_id,

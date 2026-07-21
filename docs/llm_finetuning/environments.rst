@@ -6,10 +6,8 @@ Environments (OpenEnv)
 Every LLM-training environment in AgileRL is reached the same way — **text in, text
 out** — through the `OpenEnv <https://github.com/meta-pytorch/OpenEnv>`_ contract
 (installed with the ``[llm]`` extra). A ``RolloutEnv`` drives your env through a
-**backend**, and the env can be deployed in three shapes: **in-process** (a local
-Python env — no server, no sockets), **served locally** (one shared in-process OpenEnv
-server, the local rehearsal of a production deployment), or **remote** (an
-already-hosted OpenEnv server reached by URL). The trainer drives all three
+**backend** over one of two transports: **in-process** (a local Python env — no server,
+no sockets) or **remote** (an OpenEnv server reached by URL). The trainer drives both
 identically, so a local env and a remote one look the same to it.
 
 The text contract
@@ -84,28 +82,13 @@ tutorials):
 returning ``terminated=True`` (here, on a correct guess). Single-turn *reasoning* is
 just ``max_turns=1``: the model answers once and ``step`` scores it.
 
-Serving locally
----------------
-
-To **host** a single standalone env over HTTP instead, use
-:meth:`RolloutEnv.serving <agilerl.llm_envs.RolloutEnv.serving>`
-(``RolloutEnv.serving(lambda: GuessEnv(), tokenizer, …)``), which starts an in-process
-uvicorn server on an ephemeral port and drives it over a WebSocket session.
-
 For a **batch** — the ``env_factory`` handed to ``train_llm_rollout`` or
-``BatchRolloutEnv`` — use a
-:class:`ServedEnvFactory <agilerl.llm_envs.ServedEnvFactory>` instead. It hosts **one
-shared server** (one URL) that builds a fresh env per WebSocket session, and every
-factory call returns a ``RolloutEnv`` driving its own session — each rollout gets its
-own isolated env instance behind a single frontend, exactly how a remote deployment
-serves a rollout group. The server starts on the first factory call and stops when the
-last env it built closes:
+``BatchRolloutEnv`` — wrap the same call in a zero-argument factory so each rollout slot
+gets its own in-process env instance:
 
 .. code-block:: python
 
-   from agilerl.llm_envs import ServedEnvFactory
-
-   env_factory = ServedEnvFactory(GuessEnv, tokenizer, max_turns=3)
+   env_factory = lambda: RolloutEnv.local(GuessEnv(), tokenizer, max_turns=3)
 
 Connecting to a remote environment
 ----------------------------------
@@ -127,7 +110,7 @@ directly, pass ``timeout_s``.
 Either way the trainer drives ``env`` identically.
 :meth:`RolloutEnv.from_spec <agilerl.llm_envs.RolloutEnv.from_spec>` picks for you from a
 spec string: a URL → a WebSocket session client; a ``"package.module:EnvClass"``
-entrypoint → loaded and run **in-process** (or ``serve=True`` to host it over HTTP).
+entrypoint → loaded and run **in-process**.
 
 Tools
 -----
@@ -170,9 +153,8 @@ Lifecycle
   — not per step — so resources (subprocesses, connections, sandboxes) live for the whole
   episode and are released cleanly at the end. (Over HTTP, the hosting server closes a
   session's env when that session ends, never per request.)
-* Closing a ``RolloutEnv`` releases its backend — ending its session, closing the
-  in-process env, or stopping a server it owns. The last env built by a
-  ``ServedEnvFactory`` also stops the shared server when it closes.
+* Closing a ``RolloutEnv`` releases its backend — ending its WebSocket session or closing
+  the in-process env.
 
 Lower-level pieces
 ------------------
@@ -186,13 +168,10 @@ Lower-level pieces
   backend: a synchronous client holding one ``/ws`` session against a server, which backs
   each session with its own env instance. (An async caller, e.g. a Ray actor, gets its
   concurrency from the actor boundary, not the client.)
-* :class:`OpenEnvServer <agilerl.llm_envs.OpenEnvServer>` — host a local env in-process
-  (``start`` / ``stop``, or as a context manager) and read its ``base_url``. Pass ``env``
-  for one shared env, or ``make_env`` with ``max_concurrent_envs`` for a fresh env per
-  session — the shape :class:`ServedEnvFactory <agilerl.llm_envs.ServedEnvFactory>` hosts
-  with.
-* :class:`ServedEnvClient <agilerl.llm_envs.ServedEnvClient>` — owns one server + one
-  session as a single backend. This is what :meth:`RolloutEnv.serving` uses.
+* :class:`OpenEnvServer <agilerl.llm_envs.OpenEnvServer>` — the building block for hosting
+  a local env *as a URL* (``start`` / ``stop``, or as a context manager) and reading its
+  ``base_url``; a container, a Ray actor, or a script stands one up. Pass ``env`` for one
+  shared env, or ``make_env`` with ``max_concurrent_envs`` for a fresh env per session.
 
 .. code-block:: python
 

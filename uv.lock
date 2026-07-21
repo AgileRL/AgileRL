@@ -188,8 +188,8 @@ requires-dist = [
     { name = "minari", extras = ["all"], specifier = ">=0.5.2" },
     { name = "numpy", specifier = ">=2.0.0,<3.0" },
     { name = "omegaconf", specifier = ">=2.3.0" },
-    { name = "openenv", marker = "extra == 'all'", specifier = ">=0.3.1,<0.4" },
-    { name = "openenv", marker = "extra == 'llm'", specifier = ">=0.3.1,<0.4" },
+    { name = "openenv", marker = "extra == 'all'", specifier = ">=0.4.1,<0.5" },
+    { name = "openenv", marker = "extra == 'llm'", specifier = ">=0.4.1,<0.5" },
     { name = "packaging", specifier = ">=20.0" },
     { name = "pandas", specifier = ">=2.2.3" },
     { name = "peft", marker = "extra == 'all'", specifier = "==0.19.1" },
@@ -4690,7 +4690,7 @@ wheels = [
 
 [[package]]
 name = "openenv"
-version = "0.3.1"
+version = "0.4.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "fastapi" },
@@ -4706,12 +4706,13 @@ dependencies = [
     { name = "tomli" },
     { name = "tomli-w" },
     { name = "typer" },
+    { name = "typing-extensions" },
     { name = "uvicorn" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/7a/16/12825046f4180173d8f845ad95ff7b7aac32486391d822df38d4e52b82df/openenv-0.3.1.tar.gz", hash = "sha256:9e99a08872c781c7c16d5ba214e532caf5cf29f2278eb9cc478544dc538f3918", size = 165346, upload-time = "2026-06-02T08:47:23.918Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/0e/38/5552b1b208c8b8971a1895a74f3b9e52f824059d3aa5d08992088931d969/openenv-0.4.1.tar.gz", hash = "sha256:08c7c13455854beee5c8f311f57d95180772e3e9ac9c85278d681864488016a3", size = 201919, upload-time = "2026-07-03T11:37:24.139Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/cc/28/20af86f825054561c10eb31236e19835f79036fd4a9f600f529adef42b7b/openenv-0.3.1-py3-none-any.whl", hash = "sha256:9cad4b66c08a04fd9d9fe48d7b13cd31f8322b348ff24891646e4440e0b7468c", size = 194867, upload-time = "2026-06-02T08:47:22.469Z" },
+    { url = "https://files.pythonhosted.org/packages/14/18/787ddb930e29705479fdd0a58b2ca7fa243c9441f8f1ece33629f8d82b8b/openenv-0.4.1-py3-none-any.whl", hash = "sha256:24c46788c80fa322b34b8e1f8b3adfe42fb8ceec7df99a8b96b44eea0a295921", size = 236036, upload-time = "2026-07-03T11:37:22.607Z" },
 ]
 
 [[package]]

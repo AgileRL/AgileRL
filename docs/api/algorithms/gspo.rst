@@ -46,7 +46,7 @@ entry points such as ``train_llm_rollout``. Single-turn reasoning is the
 
 .. code-block:: python
 
-  from agilerl.llm_envs import ServedEnvFactory
+  from agilerl.llm_envs import RolloutEnv
   from agilerl.training.llm import train_llm_rollout
 
   def reward_fn(completion: str, answer: str, question: str) -> float:
@@ -83,8 +83,8 @@ entry points such as ``train_llm_rollout``. Single-turn reasoning is the
       def step(self, action):
           return "", float(self.reward_fn(action, self._a, self._q)), True, False, {}
 
-  env_factory = ServedEnvFactory(
-      lambda: PromptDataset(
+  env_factory = lambda: RolloutEnv.local(
+      PromptDataset(
           questions=["2+2?", "Capital of France?"],
           answers=["4", "Paris"],
           reward_fn=reward_fn,
@@ -107,8 +107,7 @@ entry points such as ``train_llm_rollout``. Single-turn reasoning is the
       evaluation_interval=50,
   )
 
-  # 2) Multi-turn text environments (one shared OpenEnv server; each rollout
-  #    drives a fresh env instance over its own WebSocket session)
+  # 2) Multi-turn text environments (each rollout drives its own in-process env)
   class ToyRolloutEnv:
       def reset(self, seed=None):
           del seed
@@ -118,8 +117,8 @@ entry points such as ``train_llm_rollout``. Single-turn reasoning is the
           reward = 1.0 if "4" in action else 0.0
           return "Done.", reward, True, False, {"correct": bool(reward)}
 
-  env_factory = ServedEnvFactory(
-      ToyRolloutEnv,
+  env_factory = lambda: RolloutEnv.local(
+      ToyRolloutEnv(),
       tokenizer,
       max_turns=4,
       pad_id=tokenizer.eos_token_id,

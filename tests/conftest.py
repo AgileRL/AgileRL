@@ -564,7 +564,7 @@ def serve_env():
     """Host local envs over OpenEnv HTTP for a test, stopping them all at teardown.
 
     ``url = serve_env(MyEnv())`` returns a base URL to hand to
-    ``OpenEnvSessionClient`` / ``RolloutEnv``; the server (and any others served in
+    ``OpenEnvSessionClient`` / ``RolloutEnv``; the server (and any others hosted in
     the same test) is shut down
     when the test finishes, so individual tests stay free of start/stop boilerplate.
     """

@@ -2,9 +2,11 @@
 
 Every LLM-training env is driven through the same two calls — ``reset()`` returns a
 prompt, ``step(text)`` returns the next prompt, a reward, and done flags — and a
-``RolloutEnv`` reaches it through a **backend**: an :class:`OpenEnvSessionClient` when
-the env is hosted at a URL (a remote Space, or a local :class:`OpenEnvServer`), or a
-:class:`LocalEnvClient` when the env runs in the same process (no HTTP).
+``RolloutEnv`` reaches it through one of two **backends**: an
+:class:`OpenEnvSessionClient` when the env is hosted at a URL (a remote Space, a
+container, or a server a Ray actor stands up), or a :class:`LocalEnvClient` when the
+env runs in the same process (no HTTP). Transport is thus a deployment concern:
+in-process for the colocated path, a URL when the env lives elsewhere.
 
 The pieces here fill the gaps OpenEnv's own classes leave:
 
@@ -13,23 +15,17 @@ The pieces here fill the gaps OpenEnv's own classes leave:
 * :class:`OpenEnvServer` — runs OpenEnv's app on uvicorn *in-process* (a daemon thread
   on an ephemeral port, ``start`` / ``stop``); OpenEnv's own hosting is a standalone
   blocking process. Hosts a single shared env, or — with ``make_env`` +
-  ``max_concurrent_envs`` — a fresh env per WebSocket session.
+  ``max_concurrent_envs`` — a fresh env per WebSocket session. This is the building
+  block for standing an env up as a URL (in a container, a Ray actor, or a script).
 * :class:`OpenEnvSessionClient` — drives an env at a URL over an OpenEnv ``/ws``
   session (wrapping OpenEnv's own ``SyncEnvClient``); one session per instance, so a
   single URL serves as many concurrent, isolated episodes as the server allows.
 * :class:`LocalEnvClient` — the in-process sibling: same surface, direct calls, no
   socket.
-* :class:`ServedEnvClient` — hosts a local env on an :class:`OpenEnvServer`, drives it
-  through an :class:`OpenEnvSessionClient`, and owns both, so one ``close`` tears
-  everything down.
-* :class:`ServedEnvFactory` — the batch counterpart: one shared server (one URL)
-  hosting a fresh env per session, handing out ``RolloutEnv`` instances that
-  each drive their own session — the in-process rehearsal of the ``env_url``
-  production topology.
 
 :func:`resolve_env` turns a URL or a ``module:Class`` entrypoint into a hosted ``(url,
-server)``; :func:`load_env` just builds an entrypoint env (no hosting) for the
-in-process path.
+server)`` (the caller owns the returned server); :func:`load_env` just builds an
+entrypoint env (no hosting) for the in-process path.
 
 Why WebSocket sessions: OpenEnv's REST ``/reset`` / ``/step`` / ``/state`` are
 registered only in **simulation mode** and carry no session state, so one shared env
@@ -70,7 +66,6 @@ from agilerl.utils.env_utils import resolve_entrypoint_target
 if TYPE_CHECKING:
     from typing import Self
 
-    from agilerl.llm_envs.rollout_env import RolloutEnv
 
 logger = logging.getLogger(__name__)
 
@@ -84,12 +79,13 @@ class TextAction(Action):
 class TextObservation(Observation):
     """OpenEnv observation carrying the next prompt text.
 
-    Inherits ``reward`` / ``done`` / ``metadata`` from ``Observation``. (The OpenEnv
-    server round-trips declared fields — ``prompt`` / ``truncated`` here, plus
-    ``reward`` / ``done`` — but not ``metadata``, so any prefix/suffix is folded into
-    ``prompt`` by :class:`OpenEnvWrapper`.) ``truncated`` distinguishes a time-limit
-    end from a natural termination inside ``done``, so the HTTP backend reports the
-    same Gym 5-tuple split as the in-process one.
+    Inherits ``reward`` / ``done`` from ``Observation``. ``truncated`` is a
+    declared field (the OpenEnv wire carries a single ``done`` bool, no
+    terminated/truncated split), so it distinguishes a time-limit end from a
+    natural termination and the WebSocket backend reports the same Gym 5-tuple
+    split as the in-process one. ``prompt`` carries the fully rendered
+    observation text: :class:`OpenEnvWrapper` folds any ``info`` prefix/suffix
+    into it server-side, so every client receives ready-to-use text.
     """
 
     prompt: str = ""
@@ -106,14 +102,14 @@ class OpenEnvWrapper(Environment):
     class translates between the two, letting OpenEnv's server host any local env
     unchanged. The env's ``dataset_size`` / ``tools`` are surfaced on the OpenEnv
     ``state`` so a client can read them. ``info``'s ``prefix`` / ``suffix`` are folded
-    into the prompt (OpenEnv does not round-trip observation metadata).
+    into the prompt here, so the client always receives ready-to-use text.
 
     :param inner: The local env to host.
     :param env_name: Name reported in the env's OpenEnv metadata; defaults to
         ``inner``'s class name (so a client sees the real env, not ``OpenEnvWrapper``).
     :param owns_inner: When ``True`` (the per-session hosting path), ``close``
-        closes ``inner``; when ``False`` (a single shared env driven over REST),
-        ``close`` is a no-op so the shared env outlives each per-request adapter.
+        closes ``inner``; when ``False`` (a single shared env), ``close`` is a
+        no-op so the shared env outlives each per-request adapter.
     """
 
     # OpenEnv gates ``max_concurrent_envs > 1`` on this flag. In the per-session
@@ -261,11 +257,12 @@ class OpenEnvServer:
     Any OpenEnv client can then reach it by URL.
     This class also enables env servers to be hosted by Ray actors in their own process.
 
-    Pass ``env`` to host a single shared env: one session's episode at a time
-    (this is what :class:`ServedEnvClient` uses for a per-rollout server). Pass
-    ``make_env`` with ``max_concurrent_envs`` to host a *fresh env per WebSocket
-    session*: OpenEnv calls the factory once per ``/ws`` connection, so one server
-    (one URL) serves that many concurrent, isolated episodes (drive each with its
+    Pass ``env`` to host a single shared env: one session's episode at a time.
+    Pass ``make_env`` with ``max_concurrent_envs`` to host a *fresh env per
+    WebSocket session*: OpenEnv calls the factory once per ``/ws`` connection, so
+    one server (one URL) serves that many concurrent, isolated episodes (the way
+    a container or Ray-actor-hosted deployment serves a whole rollout group;
+    drive each with its
     own :class:`OpenEnvSessionClient`). This is what lets a whole
     :class:`~agilerl.llm_envs.rollout_env.BatchRolloutEnv` group run against a
     single hosted env service.
@@ -534,6 +531,12 @@ class OpenEnvSessionClient:
             # OpenEnv annotates this as float but feeds it straight to
             # ``asyncio.wait_for``, where ``None`` means unbounded.
             message_timeout_s=timeout_s,
+            # Disable the client's WebSocket keepalive so the per-message
+            # ``timeout_s`` is the single liveness bound. Otherwise a legitimately
+            # long step (a slow tool job) against a server that blocks its event
+            # loop while stepping would miss the 20s pong deadline and be killed
+            # long before the message timeout it was given.
+            websocket_ping_interval_s=None,
         ).sync()
         self._mcp_tool = mcp_tool
         self._arg = arg
@@ -672,105 +675,6 @@ class OpenEnvSessionClient:
         return self._state
 
 
-class ServedEnvClient:
-    """Backend that hosts a local env on its own :class:`OpenEnvServer` and owns both halves.
-
-    It holds both the :class:`OpenEnvServer` and the :class:`OpenEnvSessionClient`
-    driving it, so ``RolloutEnv`` sees one backend with a single ``close`` that
-    tears both down together.
-
-    This is the in-process rehearsal of the ``env_url`` transport: the owned
-    server hosts the env exactly as a remote deployment would, and the client
-    reaches it over the same WebSocket session. Each served client owns one
-    server + one session; a :class:`~agilerl.llm_envs.rollout_env.BatchRolloutEnv`
-    uses one per concurrent rollout.
-
-    :param env: The local env to host (plain-text ``reset`` / ``step``).
-    :param host: Interface the server binds (default loopback).
-    :param port: Server TCP port; ``0`` lets the OS pick one.
-    :param env_name: Name advertised in the env's OpenEnv metadata; defaults to the
-        env's class name.
-    :param timeout_s: Per-message client timeout in seconds, defaults to 300 —
-        the server is our own loopback process, so a message that outlives this
-        means a hung env, and bounding it stops one stuck rollout stalling the
-        whole batch forever. Pass ``None`` for unbounded (e.g. an env step that
-        legitimately runs a very long tool job).
-    :param mcp_tool: Optional MCP transport adapter (see
-        :class:`OpenEnvSessionClient`).
-    :param arg: MCP argument name carrying the text (default ``"message"``).
-    :param instruction: Prompt returned from reset when the env's reset obs is empty.
-    """
-
-    def __init__(
-        self,
-        env: TextEnvProtocol,
-        *,
-        host: str = "127.0.0.1",
-        port: int = 0,
-        env_name: str | None = None,
-        timeout_s: float | None = 300.0,
-        mcp_tool: str | None = None,
-        arg: str = "message",
-        instruction: str = "",
-    ) -> None:
-        """Host ``env`` on a fresh server and open the session driving it."""
-        self._server = OpenEnvServer(
-            env, host=host, port=port, env_name=env_name
-        ).start()
-        try:
-            self._client = OpenEnvSessionClient(
-                self._server.base_url,
-                timeout_s=timeout_s,
-                mcp_tool=mcp_tool,
-                arg=arg,
-                instruction=instruction,
-            )
-        except Exception:
-            self._server.stop()
-            raise
-
-    @property
-    def base_url(self) -> str:
-        """The URL the owned server is bound to."""
-        return self._server.base_url
-
-    def reset(
-        self,
-        seed: int | None = None,
-        *,
-        row_index: int | None = None,
-    ) -> tuple[str, dict[str, Any]]:
-        """Reset the served env and return ``(prompt, info)``."""
-        return self._client.reset(seed=seed, row_index=row_index)
-
-    def step(self, action: Any) -> tuple[str, float, bool, bool, dict[str, Any]]:
-        """Step the served env with the action text and return the Gym 5-tuple."""
-        return self._client.step(action)
-
-    def close(self) -> None:
-        """End the session, then stop the owned server (which closes the env).
-
-        Closing the client ends the WebSocket session; stopping the server then
-        closes the hosted env directly.
-        """
-        self._client.close()
-        self._server.stop()
-
-    @property
-    def dataset_size(self) -> int:
-        """Dataset rows the served env exposes (``0`` if not dataset-backed)."""
-        return self._client.dataset_size
-
-    @property
-    def tools(self) -> list[Any]:
-        """Tool schemas the served env advertises (empty when none)."""
-        return self._client.tools
-
-    def eval_mode(self) -> Any:
-        """Flag resets for the env's held-out split within the block."""
-        return self._client.eval_mode()
-
-
 def _is_transport_error(exc: Exception) -> bool:
     """Whether ``exc`` means the WebSocket session is dead or desynced.
 
@@ -785,125 +689,6 @@ def _is_transport_error(exc: Exception) -> bool:
     if isinstance(exc, websockets.exceptions.WebSocketException):
         return True
     return "CAPACITY_REACHED" in str(exc)
-
-
-class ServedEnvFactory:
-    """Zero-arg :class:`RolloutEnv` factory hosting every env on one shared server.
-
-    The in-process rehearsal of the ``env_url`` production topology: one
-    :class:`OpenEnvServer` (one URL) builds a fresh env per WebSocket session,
-    and every factory call returns a ``RolloutEnv`` driving its own
-    :class:`OpenEnvSessionClient` session — a unique env instance behind a
-    single frontend, exactly how a remote deployment serves a rollout group.
-    Contrast :meth:`RolloutEnv.serving`, which owns a private server per env
-    and suits a standalone env, not a batch.
-
-    The server starts lazily on the first call and stops when the last env
-    built by this factory closes, so a
-    :class:`~agilerl.llm_envs.rollout_env.BatchRolloutEnv` group plus the
-    lazily built eval env share one server and tear it down deterministically
-    with their own ``close``.
-
-    :param make_env: Zero-arg factory building a fresh env per session.
-    :param tokenizer: Tokenizer for each ``RolloutEnv``'s token-level loop.
-    :param max_turns: Generation turns per episode.
-    :param env_name: Name advertised in the served env's OpenEnv metadata.
-    :param timeout_s: Per-message client timeout in seconds (``None`` =
-        unbounded), defaults to 300 — see :class:`ServedEnvClient`.
-    :param mcp_tool: Optional MCP transport adapter (see
-        :class:`OpenEnvSessionClient`).
-    :param host: Interface the shared server binds (default loopback).
-    :param port: Server TCP port; ``0`` lets the OS pick one.
-    :param rollout_kwargs: Forwarded to each :class:`RolloutEnv` (e.g.
-        ``pad_id``, ``apply_chat_template``, ``max_model_len``).
-    """
-
-    def __init__(
-        self,
-        make_env: Callable[[], TextEnvProtocol],
-        tokenizer: Any,
-        max_turns: int = 1,
-        *,
-        env_name: str | None = None,
-        timeout_s: float | None = 300.0,
-        mcp_tool: str | None = None,
-        host: str = "127.0.0.1",
-        port: int = 0,
-        **rollout_kwargs: Any,
-    ) -> None:
-        """Prepare (but do not start) the shared hosting for ``make_env`` envs."""
-        self._make_env = make_env
-        self._tokenizer = tokenizer
-        self._max_turns = max_turns
-        self._env_name = env_name
-        self._timeout_s = timeout_s
-        self._mcp_tool = mcp_tool
-        self._host = host
-        self._port = port
-        self._rollout_kwargs = rollout_kwargs
-        self._server: OpenEnvServer | None = None
-        self._live = 0
-
-    @property
-    def base_url(self) -> str:
-        """The shared server's URL (the server must be running)."""
-        if self._server is None:
-            msg = "ServedEnvFactory has no live envs; the shared server is not running"
-            raise RuntimeError(msg)
-        return self._server.base_url
-
-    def __call__(self) -> RolloutEnv:
-        """Build one ``RolloutEnv`` holding its own session against the shared server."""
-        from agilerl.llm_envs.rollout_env import RolloutEnv
-
-        if self._server is None:
-            # The server serves only this factory's own loopback sessions, so
-            # it does not police admission: OpenEnv's cap protects a shared
-            # deployment, and a tight cap here would only re-create the
-            # "batch admitted, eval env rejected" failure mode.
-            self._server = OpenEnvServer(
-                make_env=self._make_env,
-                host=self._host,
-                port=self._port,
-                env_name=self._env_name,
-                max_concurrent_envs=1_000_000,
-            ).start()
-        client = _LeasedSessionClient(
-            self,
-            self._server.base_url,
-            timeout_s=self._timeout_s,
-            mcp_tool=self._mcp_tool,
-        )
-        self._live += 1
-        return RolloutEnv(
-            client, self._tokenizer, max_turns=self._max_turns, **self._rollout_kwargs
-        )
-
-    def _release(self) -> None:
-        """Return one lease; the last one out stops the shared server."""
-        self._live -= 1
-        if self._live == 0 and self._server is not None:
-            self._server.stop()
-            self._server = None
-
-
-class _LeasedSessionClient(OpenEnvSessionClient):
-    """Session client counted against its owning :class:`ServedEnvFactory`.
-
-    ``close`` releases the lease exactly once; when the last live client
-    closes, the factory stops its shared server.
-    """
-
-    def __init__(self, factory: ServedEnvFactory, base_url: str, **kwargs: Any) -> None:
-        super().__init__(base_url, **kwargs)
-        self._factory = factory
-        self._released = False
-
-    def close(self) -> None:
-        super().close()
-        if not self._released:
-            self._released = True
-            self._factory._release()
 
 
 def _observation_text(obs: Any) -> str:

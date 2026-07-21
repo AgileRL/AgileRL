@@ -319,11 +319,11 @@ class LLMEnvSpec(BaseModel):
     * ``env_url`` -- a URL to an already-hosted OpenEnv service (driven over
       HTTP); ``max_turns`` must be set since it can't be probed remotely.
 
-    ``env_name`` / ``entrypoint`` run **in-process** by default; set
-    ``served: true`` to instead host them on an in-process OpenEnv HTTP server
-    -- the local rehearsal of the ``env_url`` production transport. Transport
-    is thus a deployment concern, not a code change: the same env declaration
-    trains in-process for dev and against a served endpoint in production.
+    ``env_name`` / ``entrypoint`` run **in-process**; to run an env elsewhere,
+    host it as an OpenEnv service (a container, a Space, or a server a Ray actor
+    stands up) and point ``env_url`` at it. Transport is thus a deployment
+    concern, not a code change: the same env trains in-process for dev and
+    against a hosted URL in production.
 
     A ``dataset`` env always comes from ``dataset`` and an ``objective``.
 
@@ -361,16 +361,13 @@ class LLMEnvSpec(BaseModel):
     :param env_url: URL of an already-hosted OpenEnv env service, driven over
         HTTP. Mutually exclusive with the other sources; requires ``max_turns``.
     :type env_url: str | None
-    :param served: Host an ``env_name`` / ``entrypoint`` env on an in-process
-        OpenEnv HTTP server instead of running it in-process. Defaults to False.
-    :type served: bool
-    :param mcp_tool: For an MCP-backed served env, the tool the model's text is
-        sent to. Only applies to a served env (``env_url`` or ``served``).
+    :param mcp_tool: For an MCP-backed ``env_url``, the tool the model's text is
+        sent to. Only applies to ``env_url``.
     :type mcp_tool: str | None
-    :param request_timeout_s: Per-message client timeout in seconds for a
-        served env. ``None`` (the default) applies a 300 s bound; ``0``
+    :param request_timeout_s: Per-message client timeout in seconds for an
+        ``env_url``. ``None`` (the default) applies a 300 s bound; ``0``
         disables the bound (e.g. an env step that legitimately runs a very
-        long tool job). Only applies to a served env.
+        long tool job). Only applies to ``env_url``.
     :type request_timeout_s: float | None
     """
 
@@ -395,12 +392,11 @@ class LLMEnvSpec(BaseModel):
     env_config: dict[str, Any] | None = Field(default=None)
     max_turns: int | None = Field(default=None, ge=1)
 
-    # Served rollout fields: drive an env over HTTP instead of in-process. Point
-    # at an already-hosted OpenEnv service (``env_url``), or host an
-    # ``env_name`` / ``entrypoint`` env on an in-process OpenEnv server
-    # (``served``). ``mcp_tool`` / ``request_timeout_s`` tune the HTTP client.
+    # Remote rollout fields: point at an already-hosted OpenEnv service
+    # (a container, a Space, or a server a Ray actor stands up) and drive it
+    # over a WebSocket session. ``mcp_tool`` / ``request_timeout_s`` tune the
+    # client.
     env_url: str | None = Field(default=None)
-    served: bool = Field(default=False)
     mcp_tool: str | None = Field(default=None)
     request_timeout_s: float | None = Field(default=None, ge=0.0)
 
@@ -426,7 +422,7 @@ class LLMEnvSpec(BaseModel):
         return self.env_type == LLMEnvType.ROLLOUT and self.dataset is not None
 
     def _http_timeout_s(self) -> float | None:
-        """Per-message client timeout for the HTTP transports.
+        """Per-message client timeout for an ``env_url``.
 
         The manifest value when set, otherwise a 300 s default (a message that
         outlives it means a hung env, and bounding it stops one stuck rollout
@@ -450,19 +446,12 @@ class LLMEnvSpec(BaseModel):
         if self.env_config is not None and self.entrypoint is None:
             msg = "env_config is only used with entrypoint, not env_name."
             raise ValueError(msg)
-        if self.served and self.env_name is None and self.entrypoint is None:
-            msg = (
-                "served=True hosts an env_name / entrypoint env over HTTP; it "
-                "does not apply to a dataset or an already-served env_url."
-            )
-            raise ValueError(msg)
-        transport_is_http = self.env_url is not None or self.served
         if (
             self.mcp_tool is not None or self.request_timeout_s is not None
-        ) and not transport_is_http:
+        ) and self.env_url is None:
             msg = (
-                "mcp_tool / request_timeout_s only apply to a served rollout "
-                "env (set env_url, or served=True on an env_name / entrypoint)."
+                "mcp_tool / request_timeout_s only apply to a remote rollout "
+                "env; set env_url to the hosted OpenEnv service."
             )
             raise ValueError(msg)
         if self.env_url is not None and self.max_turns is None:
@@ -725,27 +714,6 @@ class LLMEnvSpec(BaseModel):
             if hasattr(probe, "close"):
                 probe.close()
             self.max_turns = max_turns
-
-        if self.served:
-            # One shared in-process OpenEnv server for the whole run: every
-            # factory call opens its own WebSocket session, and the server
-            # builds a fresh env per session — the in-process rehearsal of the
-            # ``env_url`` production topology (one frontend, N sessions), not
-            # one server per rollout.
-            from agilerl.llm_envs.openenv import ServedEnvFactory
-
-            return ServedEnvFactory(
-                _make_raw_env,
-                tokenizer,
-                max_turns=max_turns,
-                env_name=self.name,
-                mcp_tool=self.mcp_tool,
-                timeout_s=self._http_timeout_s(),
-                pad_id=pad_id,
-                apply_chat_template=True,
-                max_model_len=max_model_len,
-                max_output_tokens=max_output_tokens,
-            )
 
         def _env_factory() -> RolloutEnv:
             return RolloutEnv.local(

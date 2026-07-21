@@ -48,7 +48,7 @@ endpoint. From there the behaviour is automatic:
 So the connection *is* the episode's identity. That is the difference from plain HTTP/REST, where each
 request is independent and one shared environment can only track a single episode at a time. (OpenEnv's
 REST ``/reset`` · ``/step`` · ``/state`` routes also exist only in *simulation* mode, whereas ``/ws`` is
-served in production too — so the session client is also the only one that can reach a real production
+available in production too — so the session client is also the only one that can reach a real production
 deployment.)
 
 The upshot for training:

@@ -118,7 +118,7 @@ Dependencies
     from agilerl.utils.algo_utils import VLLMConfig
     from agilerl.utils.llm_utils import create_llm_accelerator
     from agilerl.utils.utils import create_population
-    from agilerl.llm_envs import ServedEnvFactory
+    from agilerl.llm_envs import RolloutEnv
 
 Shared setup
 ------------
@@ -151,10 +151,9 @@ All runs use:
         max_model_len = 1024
         max_output_tokens = 64
 
-        # One shared OpenEnv server; each rollout drives a fresh gem env
-        # instance over its own WebSocket session.
-        env_factory = ServedEnvFactory(
-            lambda: gem.make(ENV_NAME),
+        # Each rollout drives its own in-process gem env instance.
+        env_factory = lambda: RolloutEnv.local(
+            gem.make(ENV_NAME),
             tokenizer,
             max_turns=max_turns,
             pad_id=tokenizer.pad_token_id,

@@ -925,17 +925,11 @@ class TestLLMEnvSpecRollout:
                 max_turns=1,
             )
 
-    def test_served_requires_an_env_source(self):
-        with pytest.raises(ValueError, match="served=True hosts"):
-            LLMEnvSpec(
-                env_type=LLMEnvType.ROLLOUT,
-                env_url="http://h:8000",
-                max_turns=1,
-                served=True,
-            )
-
-    def test_mcp_tool_requires_served_transport(self):
-        with pytest.raises(ValueError, match="mcp_tool / request_timeout_s"):
+    def test_mcp_tool_requires_env_url(self):
+        with pytest.raises(
+            ValueError,
+            match="mcp_tool / request_timeout_s only apply to a remote rollout",
+        ):
             LLMEnvSpec(
                 env_type=LLMEnvType.ROLLOUT,
                 env_name="game:Test-v0",
@@ -976,30 +970,6 @@ class TestLLMEnvSpecRollout:
             max_output_tokens=128,
         )
         mock_rollout_cls.local.assert_not_called()
-
-    def test_served_factory_shares_one_openenv_server(self):
-        mock_tokenizer = MagicMock()
-        mock_tokenizer.pad_token_id = 0
-        spec = LLMEnvSpec(
-            env_type=LLMEnvType.ROLLOUT,
-            entrypoint="my_mod:MyEnv",
-            max_turns=3,
-            served=True,
-        )
-        with patch(
-            "agilerl.models.env.resolve_entrypoint_target",
-            return_value=MagicMock(),
-        ):
-            factory = spec.make_rollout_env_factory(mock_tokenizer)
-
-        from agilerl.llm_envs.openenv import ServedEnvFactory
-
-        assert isinstance(factory, ServedEnvFactory)
-        assert factory._max_turns == 3
-        assert factory._env_name == "my_mod:MyEnv"
-        assert factory._timeout_s == 300.0
-        # The shared server starts lazily with the first env, not at build time.
-        assert factory._server is None
 
     def test_rollout_max_turns_optional(self):
         spec = LLMEnvSpec(
