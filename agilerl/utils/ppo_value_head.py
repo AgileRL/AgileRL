@@ -20,9 +20,9 @@ if TYPE_CHECKING:
 try:
     from peft import PeftModel, get_peft_model
 except ImportError:  # pragma: no cover
-    # peft is optional; leave sentinels that downstream ``is None`` checks gate on.
-    PeftModel = cast("Any", None)
-    get_peft_model = cast("Any", None)
+    # peft is optional; None sentinels that downstream ``is None`` checks gate on.
+    PeftModel = None  # ty: ignore[invalid-assignment]
+    get_peft_model = None  # ty: ignore[invalid-assignment]
 
 
 VALUE_HEAD_KWARGS = (
@@ -32,9 +32,12 @@ VALUE_HEAD_KWARGS = (
 )
 
 
-def _resolve_hidden_size(config: Any) -> int:  # noqa: ANN401 -- HF config exposes model-specific fields via dynamic attributes
-    if getattr(config, "word_embed_proj_dim", None) is not None:
-        return int(config.word_embed_proj_dim)
+def _resolve_hidden_size(config: object) -> int:
+    # HF configs expose model-specific fields as dynamic attributes, so read
+    # them via ``getattr`` rather than static attribute access.
+    word_embed_proj_dim = getattr(config, "word_embed_proj_dim", None)
+    if word_embed_proj_dim is not None:
+        return int(word_embed_proj_dim)
     hidden = getattr(config, "hidden_size", None)
     if hidden is None:
         # Gemma-4 and other multimodal wrappers keep text dims nested.
@@ -183,9 +186,13 @@ class AutoModelForCausalLMWithValueHead(nn.Module):
         return (lm_logits, loss, value)
 
     def generate(self, *args: Any, **kwargs: Any) -> torch.Tensor | GenerateOutput:
-        # ``generate`` comes from GenerationMixin and resolves dynamically
-        # through ``nn.Module.__getattr__`` on the wrapped model.
-        generate_fn = cast("Callable[..., Any]", self.pretrained_model.generate)
+        # ``generate`` is provided by GenerationMixin but resolves through
+        # ``nn.Module.__getattr__`` (typed ``Tensor | Module``), so cast the
+        # attribute back to its callable signature before invoking it.
+        generate_fn = cast(
+            "Callable[..., torch.Tensor | GenerateOutput]",
+            self.pretrained_model.generate,
+        )
         return generate_fn(*args, **kwargs)
 
     def state_dict(self, *args: Any, **kwargs: Any) -> dict[str, torch.Tensor]:

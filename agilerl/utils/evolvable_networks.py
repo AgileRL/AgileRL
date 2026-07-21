@@ -1,7 +1,7 @@
 from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import asdict
-from typing import Literal, TypeVar, cast, overload
+from typing import Literal, TypeGuard, TypeVar, cast, overload
 
 import numpy as np
 import torch
@@ -29,6 +29,16 @@ from agilerl.typing import DeviceType, NetConfigType
 
 TupleorInt = tuple[int, ...] | int
 ConvBlockType = Literal["Conv1d", "Conv2d", "Conv3d"]
+
+
+def _is_module_dict(model: nn.Module) -> TypeGuard[ModuleDict[nn.Module]]:
+    """Narrow a module to a ``ModuleDict`` whose values are plain ``nn.Module``.
+
+    ``isinstance(model, ModuleDict)`` erases the value-type parameter; this
+    guard restores it, which is sound because a ``ModuleDict``'s nested modules
+    are always ``nn.Module`` by construction.
+    """
+    return isinstance(model, ModuleDict)
 
 
 @overload
@@ -59,14 +69,11 @@ def compile_model(
         model is already compiled)
     :rtype: nn.Module
     """
-    if isinstance(model, ModuleDict):
-        # The isinstance check cannot recover the erased value-type parameter,
-        # but a ModuleDict's values are always nn.Modules by construction.
-        module_dict = cast("ModuleDict[nn.Module]", model)
+    if _is_module_dict(model):
         compiled_model = ModuleDict()
-        for agent_id, module in module_dict.items():
+        for agent_id, module in model.items():
             compiled_model.add_module(agent_id, compile_model(module, mode))
-        compiled_model.last_mutation_attr = module_dict.last_mutation_attr
+        compiled_model.last_mutation_attr = model.last_mutation_attr
         return compiled_model
 
     if not isinstance(model, OptimizedModule) and mode is not None:

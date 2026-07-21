@@ -4,7 +4,7 @@ import warnings
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from functools import wraps
-from typing import Any, TypeVar, cast
+from typing import Any, TypeGuard, TypeVar, cast
 
 import fastrand  # ty: ignore[unresolved-import] — C extension without type stubs
 import numpy as np
@@ -93,23 +93,35 @@ def get_offspring_eval_modules(
     return offspring_policy, offspring_modules
 
 
-def _as_module_dict(
-    name: str, module: EvolvableModule
-) -> "ModuleDict[EvolvableModule]":
-    """Narrow a multi-agent evaluation module to its per-agent mapping.
+def _is_module_dict(
+    module: EvolvableModule,
+) -> TypeGuard["ModuleDict[EvolvableModule]"]:
+    """Narrow an evaluation module to its per-agent ``ModuleDict`` mapping.
 
-    Multi-agent evaluation modules are per-agent containers; access is
-    duck-typed so custom containers work without subclassing ModuleDict.
+    ``isinstance(module, ModuleDict)`` erases the value-type parameter, so this
+    guard restores it: a ``ModuleDict``'s nested modules are always
+    :class:`~agilerl.modules.base.EvolvableModule` by construction.
 
-    :param name: The attribute name the module was read from
-    :type name: str
-    :param module: The evaluation module to narrow
+    :param module: The evaluation module to check
     :type module: EvolvableModule
+    :return: Whether the module is a per-agent ``ModuleDict``
+    :rtype: TypeGuard[ModuleDict[EvolvableModule]]
+    """
+    return isinstance(module, ModuleDict)
 
+
+def _as_module_dict(module: EvolvableModule) -> "ModuleDict[EvolvableModule]":
+    """Reinterpret a multi-agent evaluation module as its per-agent mapping.
+
+    Used at call sites where the module is a per-agent container by
+    construction but is not ``isinstance``-guarded, keeping access duck-typed so
+    custom containers work without subclassing ``ModuleDict``.
+
+    :param module: The evaluation module to reinterpret
+    :type module: EvolvableModule
     :return: The module as a mapping of per-agent modules
     :rtype: ModuleDict[EvolvableModule]
     """
-    del name
     return cast("ModuleDict[EvolvableModule]", module)
 
 
@@ -589,10 +601,9 @@ class Mutations:
 
         policy_name = policy_group.eval_network_name()
         offspring_policy: EvolvableModule = getattr(individual, policy_name)
-        if isinstance(offspring_policy, ModuleDict):
-            policy_modules = _as_module_dict(policy_name, offspring_policy)
-            for agent_id, module in policy_modules.items():
-                policy_modules[agent_id] = self._gaussian_parameter_mutation(module)
+        if _is_module_dict(offspring_policy):
+            for agent_id, module in offspring_policy.items():
+                offspring_policy[agent_id] = self._gaussian_parameter_mutation(module)
         else:
             offspring_policy = self._gaussian_parameter_mutation(offspring_policy)
 
@@ -714,18 +725,16 @@ class Mutations:
         :rtype: EvolvableModule
         """
         ind_shared: EvolvableModule
-        if isinstance(offspring, ModuleDict):
-            nested_modules = _as_module_dict("offspring", offspring)
+        if _is_module_dict(offspring):
             reinit_modules: dict[str, EvolvableModule] = OrderedDict()
-            for agent_id, nested_offspring in nested_modules.items():
+            for agent_id, nested_offspring in offspring.items():
                 reinit_modules[agent_id] = self._reinit_module(
                     nested_offspring,
                     nested_offspring.init_dict,
                 )
 
             state_dicts = {
-                agent_id: nested.state_dict()
-                for agent_id, nested in nested_modules.items()
+                agent_id: nested.state_dict() for agent_id, nested in offspring.items()
             }
             self._load_state_dicts(reinit_modules, state_dicts, remove_prefix)
 
@@ -1001,7 +1010,7 @@ class Mutations:
             sampled_mutation = None
 
         # Applying to the remaining sub-agents needs the per-agent mapping.
-        policy_offspring = _as_module_dict(policy_name, policy_module)
+        policy_offspring = _as_module_dict(policy_module)
         for agent_id, policy in policy_offspring.items():
             if agent_id == sampled_agent_id:
                 continue
@@ -1022,7 +1031,7 @@ class Mutations:
 
         # Try to apply an analogous mutation to the rest of the evaluation modules
         for name, eval_module in offspring_evals.items():
-            offspring_eval = _as_module_dict(name, eval_module)
+            offspring_eval = _as_module_dict(eval_module)
 
             # Iterate over the agents in the offspring evaluation module
             for agent_id, agent_eval in offspring_eval.items():

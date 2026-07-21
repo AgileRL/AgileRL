@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import cast
 
 import numpy as np
+from typing_extensions import TypeIs
 
 
 def get_nested_mean(metrics: list[dict[str, float]]) -> dict[str, float]:
@@ -148,6 +148,22 @@ class NestedMetricRow(MetricRow):
     children: list[ScalarMetricRow]
 
 
+def _is_nested_values(
+    values: list[float] | list[dict[str, float]],
+) -> TypeIs[list[dict[str, float]]]:
+    """Whether a metric's per-agent values use the nested (multi-agent) layout.
+
+    Inspecting the first element narrows the element type but not the list's, so
+    a ``TypeIs`` restates the layout for both branches at the call site.
+
+    :param values: Per-agent metric values.
+    :type values: list[float] | list[dict[str, float]]
+    :returns: True if the values are per-agent dicts, False if plain scalars.
+    :rtype: TypeIs[list[dict[str, float]]]
+    """
+    return bool(values) and isinstance(values[0], dict)
+
+
 def build_metric_row(
     name: str,
     values: list[float] | list[dict[str, float]],
@@ -164,30 +180,24 @@ def build_metric_row(
     :returns: A row from per-agent values, auto-detecting scalar vs nested layout.
     :rtype: ScalarMetricRow | NestedMetricRow
     """
-    if values and isinstance(values[0], dict):
-        # Checking the first element narrows the list's layout at runtime but
-        # not its static type, so record the nested layout with a cast.
-        nested_values = cast("list[dict[str, float]]", values)
+    if _is_nested_values(values):
         children = [
             ScalarMetricRow(
                 name=child_name,
-                agent_values=[series[child_name] for series in nested_values],
+                agent_values=[series[child_name] for series in values],
                 pop_mean=(
                     mean_value.get(child_name, float("nan"))
                     if isinstance(mean_value, dict)
                     else float("nan")
                 ),
             )
-            for child_name in nested_values[0]
+            for child_name in values[0]
         ]
         return NestedMetricRow(name=name, children=children)
 
-    # Reaching here rules out the nested layout, but that narrows the element
-    # type, not the list's, so restate the scalar layout with a cast.
-    scalar_values = cast("list[float]", values)
     return ScalarMetricRow(
         name=name,
-        agent_values=[float(value) for value in scalar_values],
+        agent_values=[float(value) for value in values],
         pop_mean=float(mean_value)
         if not isinstance(mean_value, dict)
         else float("nan"),

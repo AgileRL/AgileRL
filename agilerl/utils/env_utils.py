@@ -213,8 +213,8 @@ def _resolve_wrapper(
     """
     wrapper_kwargs: dict[str, Any]
     if isinstance(wrapper, tuple):
-        # The tuple arm of ``WrapperSpec``; the isinstance check cannot rule
-        # out a (hypothetical) tuple-like callable, hence the cast.
+        # ``isinstance(tuple)`` cannot exclude the ``Callable`` arm of
+        # ``WrapperSpec``, so it erases the tuple's element types; restate them.
         wrapper_spec, wrapper_kwargs = cast("tuple[Any, dict[str, Any]]", wrapper)
     else:
         wrapper_spec, wrapper_kwargs = wrapper, {}

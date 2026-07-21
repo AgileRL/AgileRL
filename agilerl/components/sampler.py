@@ -44,7 +44,9 @@ class Sampler:
         """
         return TensorDict(
             {
-                # Indexing a TensorDict with a leaf key returns a tensor
+                # Indexing a TensorDict with a leaf key returns a Tensor at
+                # runtime, but its static type is the wider ``Tensor |
+                # TensorCollection`` union, so restate the leaf as a Tensor.
                 key: torch.stack([cast("torch.Tensor", b[key]) for b in batch])
                 for key in batch[0].keys()
             },

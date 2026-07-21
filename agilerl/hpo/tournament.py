@@ -6,7 +6,7 @@ from typing import cast
 import numpy as np
 from accelerate.utils import broadcast_object_list
 
-from agilerl.algorithms.core.base import EvolvableAlgorithm, LLMAlgorithm
+from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.protocols import EvolvableAlgorithmProtocol
 
 PopulationT = list[EvolvableAlgorithmProtocol]
@@ -144,10 +144,12 @@ class TournamentSelection:
         :return: Elite agent and new population
         :rtype: tuple[EvolvableAlgorithmProtocol, PopulationT]
         """
-        # Entries are set to None below to drop this function's *and the caller's*
-        # last references to agents that don't survive selection: LLM agents hold
-        # multi-GB models, so the memory must be released as we go.
-        agent_slots = cast("list[EvolvableAlgorithm | None]", population)
+        # Alias the population as a slot list so entries can be nulled in place:
+        # this drops both this function's *and the caller's* last references to
+        # agents that don't survive selection (LLM agents hold multi-GB models,
+        # so the memory must be released as we go). Aliasing rather than copying
+        # is deliberate and needs the cast to admit the ``None`` writes.
+        agent_slots = cast("list[EvolvableAlgorithmProtocol | None]", population)
 
         accelerator = population[0].accelerator
         new_population_idxs: list[tuple[int, int, bool]] = []

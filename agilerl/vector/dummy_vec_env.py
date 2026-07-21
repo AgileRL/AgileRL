@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, overload
 
 import numpy as np
 from gymnasium import Env, spaces
@@ -120,14 +120,32 @@ class DummyVecEnv:
         return getattr(self._env, name)
 
 
+@overload
+def _pz_placeholder(
+    agent: str,
+    name: Literal["observation"],
+    obs_spaces: dict[str, spaces.Space],
+) -> np.ndarray: ...
+
+
+@overload
 def _pz_placeholder(
     agent: str,
     name: str,
     obs_spaces: dict[str, spaces.Space],
-) -> Any:  # noqa: ANN401 -- heterogeneous: float (reward/dones), info dict, or zero obs array; the ndarray branch feeds np.expand_dims, which rejects the dict member
+) -> float | dict[str, Any] | np.ndarray: ...
+
+
+def _pz_placeholder(
+    agent: str,
+    name: str,
+    obs_spaces: dict[str, spaces.Space],
+) -> float | dict[str, Any] | np.ndarray:
     """Return a NaN/zero placeholder for an inactive PettingZoo agent.
 
-    Mirrors the convention used by :class:`AsyncPettingZooVecEnv`.
+    Mirrors the convention used by :class:`AsyncPettingZooVecEnv`. The
+    ``"observation"`` overload returns the zero obs array so callers can feed it
+    straight to ``np.expand_dims``.
     """
     if name in ("reward", "terminated", "truncated"):
         return np.nan

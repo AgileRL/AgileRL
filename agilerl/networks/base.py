@@ -277,8 +277,9 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
             else:
                 encoder_config["num_outputs"] = self.latent_dim
 
-            # Concrete encoder constructors take arbitrary config kwargs, unlike the
-            # (device, random_seed) signature of the EvolvableModule base class.
+            # Concrete encoder constructors take arbitrary config kwargs, unlike
+            # the (device, random_seed) signature of the EvolvableModule base
+            # class, so cast to a factory accepting them.
             encoder_factory = cast("Callable[..., EvolvableModule]", encoder_cls)
             self.encoder = encoder_factory(
                 **{
