@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import logging
 from pathlib import Path
-from typing import Annotated, Any, Literal, get_args
+from typing import Annotated, Any, Literal
 
 import agilerl.arena.models.algorithms as _arena_algorithms  # noqa: F401
 import yaml
@@ -15,10 +15,7 @@ from agilerl.arena.models.algo import (
     LLMAlgorithmSpec,
 )
 from agilerl.arena.models.hpo import MutationSpec, TournamentSelectionSpec
-from agilerl.arena.models.networks import (
-    FinetuningNetworkSpec,
-    NetworkSpec,
-)
+from agilerl.arena.models.networks import FinetuningNetworkSpec
 from agilerl.arena.models.training import ReplayBufferSpec, TrainingSpec
 from pydantic import (
     AliasChoices,
@@ -32,29 +29,6 @@ from typing_extensions import Self
 
 logger = logging.getLogger(__name__)
 
-_MANIFEST_ENCODER_ARCHS = ("mlp", "cnn", "lstm", "simba", "multiinput")
-
-_ARCH_TO_NAME: dict[str, str] = {
-    "mlp": "EvolvableMLP",
-    "cnn": "EvolvableCNN",
-    "simba": "EvolvableSimBa",
-    "multiinput": "EvolvableMultiInput",
-    "lstm": "EvolvableLSTM",
-}
-
-
-def _normalize_network_for_platform(network: dict[str, Any]) -> None:
-    """Move ``arch`` from encoder_config to network top level and add ``name``."""
-    encoder = network.get("encoder_config")
-    if isinstance(encoder, dict):
-        arch = encoder.pop("arch", None)
-        if arch:
-            network.setdefault("arch", arch)
-
-    arch = network.get("arch")
-    if arch and "name" not in network:
-        network["name"] = _ARCH_TO_NAME.get(arch, "EvolvableMLP")
-
 
 def _ensure_platform_run_spec_keys(data: dict[str, Any]) -> None:
     """Mutate *data* for Arena run-spec JSON.
@@ -64,54 +38,6 @@ def _ensure_platform_run_spec_keys(data: dict[str, Any]) -> None:
     """
     for key in ("mutation", "tournament_selection", "network"):
         data.setdefault(key, {})
-
-    if data["network"]:
-        _normalize_network_for_platform(data["network"])
-
-
-def _normalize_network_arch(
-    data: dict[str, Any] | BaseModel,
-) -> dict[str, Any] | BaseModel:
-    """Move a top-level ``arch`` key into ``encoder_config.arch`` for proper
-    Pydantic validation client-side. If missing, resolution is deferred to the server.
-    """
-    # If passing a network spec we already have the correct structure
-    if not isinstance(data, dict):
-        return data
-
-    data = dict(data)
-    top_level_arch: str | None = data.pop("arch", None)
-    encoder_config = data.get("encoder_config")
-    nested_arch: str | None = (
-        encoder_config.get("arch") if isinstance(encoder_config, dict) else None
-    )
-    arch = top_level_arch or nested_arch
-
-    if encoder_config is None:
-        data["encoder_config"] = {"arch": arch}
-    else:
-        data["encoder_config"] = dict(encoder_config)
-        data["encoder_config"].setdefault("arch", arch)
-
-    return data
-
-
-def _network_has_arch(network: dict[str, Any]) -> bool:
-    """Whether a raw network dict declares a resolvable ``arch``.
-
-    Checks both the network root and ``encoder_config`` (the two places a
-    manifest may place it). Used to decide whether the network section can be
-    validated client-side, or must be deferred to the server.
-
-    :param network: Raw network section dict.
-    :type network: dict[str, Any]
-    :returns: ``True`` if ``arch`` is present at either location.
-    :rtype: bool
-    """
-    if network.get("arch"):
-        return True
-    encoder_config = network.get("encoder_config")
-    return isinstance(encoder_config, dict) and bool(encoder_config.get("arch"))
 
 
 def _resolve_algorithm(data: Any) -> AlgoSpecT:
@@ -166,12 +92,11 @@ def _coerce_environment(data: Any) -> dict[str, Any]:
 
 
 def _resolve_network(data: dict[str, Any] | BaseModel) -> dict[str, Any]:
-    """Normalise the network section to a validated dict with all defaults filled in.
+    """Normalise the network section to a plain dict for manifest storage.
 
-    Raw dicts are validated through :class:`NetworkSpec` so that default values are included in the serialized output.
-
-    If the raw dict has no resolvable ``arch`` (at the network root or nested
-    in ``encoder_config``), the network section is returned unchanged.
+    The encoder architecture is resolved server-side, so the network section is
+    passed through untouched. Only the LLM finetuning spec is materialised
+    client-side, since its fields feed the algorithm section.
 
     :param data: Network config dict or spec instance.
     :type data: Any
@@ -180,23 +105,11 @@ def _resolve_network(data: dict[str, Any] | BaseModel) -> dict[str, Any]:
     """
     if isinstance(data, FinetuningNetworkSpec):
         return data.model_dump(mode="json")
-    if isinstance(data, BaseModel):
-        data_dict = data.model_dump()
-        if isinstance(data, NetworkSpec):
-            data_dict["encoder_config"]["arch"] = data.encoder_config.arch
-        return data_dict
-
     if isinstance(data, dict) and "pretrained_model_name_or_path" in data:
         return FinetuningNetworkSpec.model_validate(data).model_dump(mode="json")
-
-    if isinstance(data, dict) and not _network_has_arch(data):
-        return data
-
-    normalized = _normalize_network_arch(data)
-    spec = NetworkSpec.model_validate(normalized)
-    data_dict = spec.model_dump()
-    data_dict["encoder_config"]["arch"] = spec.encoder_config.arch
-    return data_dict
+    if isinstance(data, BaseModel):
+        return data.model_dump()
+    return data
 
 
 def _serialize_algorithm(spec: AlgoSpecT) -> dict[str, Any]:
@@ -302,32 +215,18 @@ class TrainingManifest(BaseModel):
     @model_validator(mode="after")
     def _process_manifest(self) -> Self:
         """Process the manifest for submission to Arena."""
-        # 'network' component of manifest corresponds to algorithm's underlying networks
+        # 'network' component of manifest corresponds to algorithm's underlying
+        # networks. `arch` is resolved server-side, so `net_config` is never
+        # populated on the algorithm spec here (the platform rejects a set
+        # `net_config`).
         algo_spec_cls = type(self.algorithm)
-        if self.network is not None:
-            # Resolve the raw dict into the algorithm's concrete NetworkSpec
-            # if `net_config` field is present in the algorithm spec.
-            net_config_field = algo_spec_cls.model_fields.get("net_config")
-            if net_config_field is not None:
-                # get the NetworkSpec class from the type annotation and validate
-                spec_cls: NetworkSpec = next(
-                    (
-                        t
-                        for t in get_args(net_config_field.annotation)
-                        if t is not type(None)
-                    ),
-                    None,
-                )
-                # Skip when the network has no resolvable `arch`
-                if spec_cls is not None and _network_has_arch(self.network):
-                    self.algorithm.net_config = spec_cls.model_validate(self.network)
-            # LLM algorithms expect a pretrained model
-            elif issubclass(algo_spec_cls, LLMAlgorithmSpec):
-                llm_network = FinetuningNetworkSpec.model_validate(self.network)
-                self.algorithm.pretrained_model_name_or_path = (
-                    llm_network.pretrained_model_name_or_path
-                )
-                self.algorithm.max_model_len = llm_network.max_context_length
+        # LLM algorithms expect a pretrained model
+        if self.network is not None and issubclass(algo_spec_cls, LLMAlgorithmSpec):
+            llm_network = FinetuningNetworkSpec.model_validate(self.network)
+            self.algorithm.pretrained_model_name_or_path = (
+                llm_network.pretrained_model_name_or_path
+            )
+            self.algorithm.max_model_len = llm_network.max_context_length
 
         if (
             issubclass(algo_spec_cls, LLMAlgorithmSpec)
@@ -341,13 +240,7 @@ class TrainingManifest(BaseModel):
             raise ValueError(msg)
 
         recurrent = bool(getattr(self.algorithm, "recurrent", False))
-        net_config = getattr(self.algorithm, "net_config", None)
-        if net_config is not None:
-            simba = bool(getattr(net_config, "simba", False))
-        elif isinstance(self.network, dict):
-            simba = bool(self.network.get("simba", False))
-        else:
-            simba = False
+        simba = isinstance(self.network, dict) and bool(self.network.get("simba"))
         if recurrent and simba:
             msg = (
                 "`simba` and `recurrent` cannot both be set: a network cannot use "

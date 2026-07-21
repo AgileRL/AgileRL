@@ -16,7 +16,6 @@ from agilerl.arena.models.algorithms.dqn import DQNSpec
 from agilerl.arena.models.env import EnvSpec, LLMEnvType
 from agilerl.arena.models.manifest import (
     _coerce_environment,
-    _normalize_network_arch,
     _resolve_algorithm,
     _resolve_network,
 )
@@ -163,22 +162,6 @@ def test_get_validated_accepts_env_spec_objects() -> None:
     }
 
 
-def test_get_validated_normalizes_network_for_platform() -> None:
-    payload = TrainingManifest.get_validated(
-        _manifest(
-            network={
-                "arch": "mlp",
-                "encoder_config": {"hidden_size": [64], "activation": "ReLU"},
-                "head_config": {"hidden_size": [64], "activation": "ReLU"},
-            }
-        )
-    )
-    network = payload["network"]
-    assert network["arch"] == "mlp"
-    assert network["name"] == "EvolvableMLP"
-    assert "arch" not in network["encoder_config"]
-
-
 def test_get_validated_passes_network_raw_when_arch_missing() -> None:
     """When `arch` is absent, the client defers to the server."""
     network = {
@@ -187,6 +170,26 @@ def test_get_validated_passes_network_raw_when_arch_missing() -> None:
     }
     payload = TrainingManifest.get_validated(_manifest(network=network))
     assert payload["network"] == network
+
+
+def test_net_config_never_set_when_arch_present() -> None:
+    """`arch` is resolved server-side, so `net_config` must never be populated on
+    the algorithm spec (a set `net_config` is rejected server-side).
+    """
+    network = {
+        "arch": "mlp",
+        "encoder_config": {"hidden_size": [64], "activation": "ReLU"},
+        "head_config": {"hidden_size": [64], "activation": "ReLU"},
+    }
+    manifest = TrainingManifest.get_validated(
+        _manifest(algorithm={"name": "DQN"}, network=network), mode="python"
+    )
+    assert manifest.algorithm.net_config is None
+
+    payload = TrainingManifest.get_validated(
+        _manifest(algorithm={"name": "DQN"}, network=network)
+    )
+    assert "net_config" not in payload["algorithm"]
 
 
 def test_get_validated_raises_for_unknown_algorithm() -> None:
@@ -323,18 +326,6 @@ def test_coerce_environment_rejects_invalid_type() -> None:
         _coerce_environment("not-an-env")
 
 
-def test_normalize_network_arch_passthrough_for_spec() -> None:
-    spec = MlpSpec(hidden_size=[64])
-    assert _normalize_network_arch(spec) is spec
-
-
-def test_normalize_network_arch_creates_encoder_from_top_level_arch() -> None:
-    normalized = _normalize_network_arch(
-        {"arch": "mlp", "head_config": {"hidden_size": [64]}}
-    )
-    assert normalized["encoder_config"]["arch"] == "mlp"
-
-
 def test_resolve_network_accepts_finetuning_spec() -> None:
     spec = FinetuningNetworkSpec(
         pretrained_model_name_or_path="gpt2",
@@ -356,4 +347,5 @@ def test_python_manifest_accepts_network_spec_object() -> None:
         }
     )
     assert manifest.network is not None
-    assert manifest.network["encoder_config"]["arch"] == "mlp"
+    assert manifest.network["encoder_config"]["hidden_size"] == [64]
+    assert "arch" not in manifest.network["encoder_config"]
