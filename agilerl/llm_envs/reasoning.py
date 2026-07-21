@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 
-class ReasoningGym(HuggingFaceGym):
+class ReasoningGym(HuggingFaceGym[list[ReasoningPrompts], list[torch.Tensor]]):
     """Class to convert HuggingFace datasets into Gymnasium style environment.
 
     :param train_dataset: The training dataset.

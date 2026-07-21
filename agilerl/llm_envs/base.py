@@ -5,9 +5,9 @@ from __future__ import annotations
 import copy
 import warnings
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 import gymnasium as gym
 import torch
@@ -21,6 +21,15 @@ if TYPE_CHECKING:
         BatchEncoding,
         PreTrainedTokenizerBase,
     )
+
+# The batch a HuggingFaceGym yields per reset/step. Each paradigm binds it to
+# its own prompt structure (ReasoningGym -> list[ReasoningPrompts],
+# PreferenceGym -> PreferencePrompts, SFTGym -> SFTPrompts), so the base can
+# type reset/step precisely instead of falling back to Any.
+PromptT = TypeVar("PromptT")
+# The completions a step consumes. ReasoningGym scores a whole group at once
+# (list[Tensor]); the dataloader-only gyms ignore completions (Tensor | None).
+CompletionT = TypeVar("CompletionT")
 
 
 def apply_chat_template(
@@ -63,7 +72,7 @@ def apply_chat_template(
     )
 
 
-class HuggingFaceGym(gym.Env, ABC):
+class HuggingFaceGym(gym.Env, ABC, Generic[PromptT, CompletionT]):
     """Abstract base class for HuggingFace Gymnasium environments."""
 
     _batch_state_attrs: tuple[str, ...] = ()
@@ -136,19 +145,19 @@ class HuggingFaceGym(gym.Env, ABC):
     # and a reset advances a dataloader rather than accepting seed/options.
     # The batch shape is the subclass's contract - a rollout environment yields
     # tokenized prompts and rewards, a dataset environment yields a whole
-    # training batch - so the base declares only that a batch comes back.
+    # training batch - so ``PromptT``/``CompletionT`` carry those per-subclass.
     @abstractmethod
     def reset(  # ty: ignore[invalid-method-override]
         self,
         reset_dataloaders: bool = False,
-    ) -> Any:  # noqa: ANN401 -- batch shape is the subclass's contract
+    ) -> PromptT:
         """Reset the environment and get the next batch of tokenized prompts."""
 
     @abstractmethod
     def step(  # ty: ignore[invalid-method-override]
         self,
-        completions: Any,  # noqa: ANN401 -- completion type varies per subclass
-    ) -> Any:  # noqa: ANN401 -- batch shape is the subclass's contract
+        completions: CompletionT,
+    ) -> PromptT | tuple[PromptT, torch.Tensor]:
         """Take a step in a HuggingFaceGym environment."""
 
     @contextmanager
@@ -175,8 +184,12 @@ class HuggingFaceGym(gym.Env, ABC):
         tokenizer: PreTrainedTokenizerBase,
         *args: Any,
         **kwargs: Any,
-    ) -> Callable[[list[dict[str, Any]]], dict[str, Any]]:
-        """Create a collate function for this environment."""
+    ) -> Callable[[list[dict[str, Any]]], Mapping[str, Any]]:
+        """Create a collate function for this environment.
+
+        Subclasses may return a callable producing a more specific mapping
+        (e.g. an ``SFTPrompts`` TypedDict); those are all ``Mapping[str, Any]``.
+        """
 
     def __len__(self) -> int:
         """Return the length of the dataset."""
@@ -228,13 +241,13 @@ class HuggingFaceGym(gym.Env, ABC):
         return filtered_dataset
 
 
-class IterablePromptBatchGym(HuggingFaceGym):
+class IterablePromptBatchGym(HuggingFaceGym[PromptT, torch.Tensor | None]):
     """HuggingFaceGym whose ``step`` only advances the dataloader."""
 
     def reset(
         self,
         reset_dataloaders: bool = False,
-    ) -> Any:  # noqa: ANN401 -- batch shape is the subclass's contract
+    ) -> PromptT:
         """Reset the environment and get the next batch from the dataloader."""
         if reset_dataloaders:
             self._reset_dataloaders()
@@ -255,12 +268,12 @@ class IterablePromptBatchGym(HuggingFaceGym):
     def step(
         self,
         completions: torch.Tensor | None = None,
-    ) -> Any:  # noqa: ANN401 -- batch shape is the subclass's contract
+    ) -> PromptT:
         """Advance the iterator and return the next batch."""
         self.reset_called = False
         return self._get_next_batch()
 
-    def _get_next_batch(self) -> Any:  # noqa: ANN401 -- collate output varies per subclass
+    def _get_next_batch(self) -> PromptT:
         try:
             batch = next(self.dataloader)
         except StopIteration:

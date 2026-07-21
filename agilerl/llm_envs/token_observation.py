@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import inspect
 import warnings
-from typing import Any
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
 from agilerl.protocols import MultiTurnEnv
 from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
+
+if TYPE_CHECKING:
+    from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 
 class TokenObservationWrapper:
@@ -22,7 +26,7 @@ class TokenObservationWrapper:
     def __init__(
         self,
         env: MultiTurnEnv,
-        tokenizer: Any,  # noqa: ANN401 -- HF tokenizer; apply_chat_template's v5 dict return isn't modeled by the stub
+        tokenizer: PreTrainedTokenizerBase,
         max_turns: int,
         pad_id: int | None = None,
         apply_chat_template: bool = True,
@@ -80,12 +84,17 @@ class TokenObservationWrapper:
     def _tokenize_initial_prompt(self, obs_text: str) -> dict[str, torch.Tensor]:
         """Tokenize the initial observation, optionally with chat template."""
         if self.apply_chat_template:
-            result = self.tokenizer.apply_chat_template(
-                [{"role": "user", "content": obs_text}],
-                tokenize=True,
-                add_generation_prompt=True,
+            # v5 ``apply_chat_template(tokenize=True)`` returns a BatchEncoding
+            # mapping (``return_dict`` defaults to ``True``); the packaged stub
+            # widens the return to ``str | list``, so narrow it to the mapping.
+            result = cast(
+                "Mapping[str, Any]",
+                self.tokenizer.apply_chat_template(
+                    [{"role": "user", "content": obs_text}],
+                    tokenize=True,
+                    add_generation_prompt=True,
+                ),
             )
-            # Transformers v5 apply_chat_template returns a dict
             token_ids = result["input_ids"]
             if (
                 isinstance(token_ids, list)
@@ -332,9 +341,11 @@ class TokenObservationWrapper:
             raise RuntimeError(msg)
         pl = self._last_full_prompt_token_len
         gen_tokens = full_completion_ids[0, pl:]
-        gen_text = self.tokenizer.decode(
-            gen_tokens.tolist(),
-            skip_special_tokens=True,
+        # Decoding a single sequence returns ``str``; the stub widens
+        # ``decode`` to ``str | list[str]``.
+        gen_text = cast(
+            "str",
+            self.tokenizer.decode(gen_tokens.tolist(), skip_special_tokens=True),
         )
         return self._step(full_completion_ids, gen_text)
 

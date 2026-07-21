@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 
-class PreferenceGym(IterablePromptBatchGym):
+class PreferenceGym(IterablePromptBatchGym[PreferencePrompts]):
     """Class to convert HuggingFace preference datasets into Gymnasium style environment.
 
     :param train_dataset: The training dataset.

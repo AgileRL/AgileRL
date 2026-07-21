@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from agilerl.llm_envs.base import IterablePromptBatchGym
@@ -14,7 +15,7 @@ if TYPE_CHECKING:
     from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 
-class SFTGym(IterablePromptBatchGym):
+class SFTGym(IterablePromptBatchGym[SFTPrompts]):
     """Gymnasium-style environment for supervised fine-tuning (SFT) datasets.
 
     :param train_dataset: The training dataset.
@@ -93,7 +94,7 @@ class SFTGym(IterablePromptBatchGym):
         self,
         tokenizer: PreTrainedTokenizerBase,
         max_context_length: int | None = None,
-    ) -> Any:  # noqa: ANN401 -- collate returns SFTPrompts TypedDict, not the base's dict[str, Any] callable
+    ) -> Callable[[list[dict[str, Any]]], SFTPrompts]:
         """Build a collate function that tokenises ``(prompt, response)`` pairs.
 
         :param tokenizer: The tokenizer.
@@ -101,7 +102,7 @@ class SFTGym(IterablePromptBatchGym):
         :param max_context_length: The maximum context length for the LLM model.
         :type max_context_length: int | None
         :return: The collate function.
-        :rtype: Any
+        :rtype: Callable[[list[dict[str, Any]]], SFTPrompts]
         """
         response_column = self.response_column
 
