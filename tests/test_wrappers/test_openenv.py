@@ -291,7 +291,7 @@ class TestLocalEnvClient:
         client = LocalEnvClient(_RowDatasetEnv())
         assert client.dataset_size == 3
         prompt, info = client.reset(row_index=1)
-        assert prompt == "row1\nanswer:"  # suffix folded in-process (no OpenEnvWrapper)
+        assert prompt == "row1\nanswer:"  # the env returns the full text
         assert info == {}
         assert client.step("x marks it") == ("", 1.0, True, False, {})
 
@@ -1020,3 +1020,48 @@ class TestBatchRolloutEnvConcurrentStep:
         assert batch._io_pool is not None
         batch.close()
         assert batch._io_pool is None
+
+
+def test_wrapper_owns_inner_closes_it_on_close() -> None:
+    """``owns_inner=True`` closes the wrapped env on ``close``; ``False`` leaves it."""
+    owned = _CountingEnv()
+    OpenEnvWrapper(owned, owns_inner=True).close()
+    assert owned.closed is True
+
+    shared = _CountingEnv()
+    OpenEnvWrapper(shared, owns_inner=False).close()
+    assert shared.closed is False
+
+
+def test_server_base_url_before_start_raises() -> None:
+    """``base_url`` is only available once the server has started."""
+    server = OpenEnvServer(_CountingEnv())
+    with pytest.raises(RuntimeError, match="not running"):
+        _ = server.base_url
+
+
+def test_server_make_env_serves_a_fresh_env_per_session() -> None:
+    """``make_env`` + ``max_concurrent_envs`` hosts one server (one URL) with a fresh
+    env per WebSocket session — the container / Ray-actor deployment shape.
+    """
+    built: list[_CountingEnv] = []
+
+    def make_env() -> _CountingEnv:
+        env = _CountingEnv()
+        built.append(env)
+        return env
+
+    server = OpenEnvServer(make_env=make_env, max_concurrent_envs=4).start()
+    try:
+        c1 = OpenEnvSessionClient(server.base_url)
+        c2 = OpenEnvSessionClient(server.base_url)
+        c1.reset()
+        c2.reset()
+        # Each session drives its own fresh env instance (plus one the server
+        # builds up front to read the env's schema).
+        assert len(built) >= 2
+        assert len({id(env) for env in built}) == len(built)
+        c1.close()
+        c2.close()
+    finally:
+        server.stop()
