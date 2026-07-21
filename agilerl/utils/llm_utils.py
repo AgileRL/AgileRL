@@ -11,7 +11,7 @@ import warnings
 from collections.abc import Callable, Generator, Iterable
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 import numpy as np
 import torch
@@ -1718,9 +1718,18 @@ def stitch_completion_after_windowed_vllm_generate(
     return stitched
 
 
+class HFGeneratePrompt(TypedDict):
+    """Prompt tensors prepared for HuggingFace ``generate``."""
+
+    input_ids: torch.Tensor
+    attention_mask: torch.Tensor
+    stitch_prefix_ids: torch.Tensor | None
+    initial_prompt_len: int | None
+
+
 def prepare_prompt_hf_generate(
     prompt_dict: ReasoningPrompts, device: torch.device
-) -> dict[str, torch.Tensor | int | list[int] | None]:
+) -> HFGeneratePrompt:
     """Prepare a prompt dictionary for HuggingFace generate.
 
     :param prompt_dict: The prompt dictionary to prepare.
@@ -1728,7 +1737,7 @@ def prepare_prompt_hf_generate(
     :param device: The device to move the prompt dictionary to.
     :type device: torch.device
     :return: The prepared prompt dictionary.
-    :rtype: dict[str, torch.Tensor | int | list[int] | None]
+    :rtype: HFGeneratePrompt
     """
     # Trajectory keys may be absent or explicitly None (first turn); both fall
     # back to the initial prompt tensors.
@@ -1740,8 +1749,12 @@ def prepare_prompt_hf_generate(
         attention_mask = prompt_dict["attention_mask"]
     stitched = prompt_dict.get("stitch_prefix_ids")
     initial_prompt_len = prompt_dict.get("initial_prompt_len")
-    if isinstance(initial_prompt_len, torch.Tensor) and initial_prompt_len.numel() == 1:
-        initial_prompt_len = int(initial_prompt_len.item())
+    if isinstance(initial_prompt_len, torch.Tensor):
+        initial_prompt_len = (
+            int(initial_prompt_len.item()) if initial_prompt_len.numel() == 1 else None
+        )
+    elif isinstance(initial_prompt_len, list):
+        initial_prompt_len = initial_prompt_len[0] if initial_prompt_len else None
 
     return {
         "input_ids": input_ids.to(device),

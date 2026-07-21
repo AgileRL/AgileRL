@@ -488,20 +488,10 @@ class GRPO(LLMAlgorithm):
                             prompt = prepare_prompt_hf_generate(
                                 prompt_dict, actor_device
                             )
-                            # ``prepare_prompt_hf_generate`` maps these keys to
-                            # device tensors, an optional stitch tensor, and a
-                            # scalar prompt length (0-dim tensors already
-                            # converted to int) for this single-prompt path.
-                            input_ids = cast("torch.Tensor", prompt["input_ids"])
-                            attention_mask = cast(
-                                "torch.Tensor", prompt["attention_mask"]
-                            )
-                            stitch_ids = cast(
-                                "torch.Tensor | None", prompt["stitch_prefix_ids"]
-                            )
-                            initial_prompt_len = cast(
-                                "int | None", prompt["initial_prompt_len"]
-                            )
+                            input_ids = prompt["input_ids"]
+                            attention_mask = prompt["attention_mask"]
+                            stitch_ids = prompt["stitch_prefix_ids"]
+                            initial_prompt_len = prompt["initial_prompt_len"]
                             if training and group_size > 1:
                                 input_ids = input_ids.repeat(group_size, 1)
                                 attention_mask = attention_mask.repeat(group_size, 1)
