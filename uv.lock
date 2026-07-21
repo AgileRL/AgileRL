@@ -6439,7 +6439,7 @@ wheels = [
 
 [[package]]
 name = "supersuit"
-version = "3.10.0"
+version = "3.11.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "gymnasium" },
@@ -6448,9 +6448,9 @@ dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.13' and sys_platform != 'darwin') or (python_full_version >= '3.11' and sys_platform == 'darwin')" },
     { name = "tinyscaler" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/7c/68/16b774842f9be011d2accc6ab86bc3808854a36ce5456e4e19b9ad7c484b/supersuit-3.10.0.tar.gz", hash = "sha256:85cc4723e2ee4fc7284e0e5586d9e20360ee073bc0d8b997fe48686c83cd348a", size = 34350, upload-time = "2025-04-22T16:01:24.921Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/16/a1/7b807a152e4d4ad2fb5ac1b34300adbfc64f3cd30e23a79a46412e0804d6/supersuit-3.11.0.tar.gz", hash = "sha256:fbf1aff42bd084945aa86205af750b6cf5e7bbd864ddcd61d90142267a96afae", size = 34798, upload-time = "2026-05-31T22:27:37.221Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b5/6e/fce0b8179ba9e99c40cd3fb013657110e4d5ca894de3f9aa4962b6a9d86c/supersuit-3.10.0-py3-none-any.whl", hash = "sha256:fd0b9e351808d3efaedafcbe48a6beb1f6a87828ccfeaf410af4b87e32882a7f", size = 50180, upload-time = "2025-04-22T16:01:23.654Z" },
+    { url = "https://files.pythonhosted.org/packages/6d/46/c8bfcd9b193fd7a452a10c5086b2c633dacfadd15524473615152e818267/supersuit-3.11.0-py3-none-any.whl", hash = "sha256:d8cbbe27d79c427eaa90102b866673cbb03812f652c36fc7985029bffdb0c587", size = 50574, upload-time = "2026-05-31T22:27:35.435Z" },
 ]
 
 [[package]]
