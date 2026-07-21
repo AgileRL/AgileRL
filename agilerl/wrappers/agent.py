@@ -1,6 +1,6 @@
 from abc import ABC
 from collections import OrderedDict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from functools import partial
 from typing import Any, Generic, TypeVar, cast
 
@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from gymnasium import spaces
 from tensordict import TensorDictBase
-from typing_extensions import Self
+from typing_extensions import Self, TypeIs
 
 from agilerl.algorithms import PPO
 from agilerl.algorithms.core import (
@@ -20,15 +20,24 @@ from agilerl.algorithms.core import (
 from agilerl.algorithms.core.base import get_checkpoint_dict
 from agilerl.typing import (
     ActionReturnType,
+    ArrayDict,
+    ArrayTuple,
     DeviceType,
     ExperiencesType,
+    NumpyObsType,
     ObservationType,
+    TorchObsType,
 )
 from agilerl.utils.algo_utils import obs_to_tensor, stack_experiences
 from agilerl.wrappers.utils import RunningMeanStd
 
 AgentType = TypeVar("AgentType", bound=RLAlgorithm | MultiAgentRLAlgorithm)
 MARLObservationType = dict[str, ObservationType]
+
+# The tensorised observations handled inside :class:`RSNorm`: a single agent's obs is a
+# ``TorchObsType`` (tensor / tuple / dict of tensors), and the multi-agent case maps each
+# agent id to one such structure.
+MARLTensorObsType = dict[str, TorchObsType]
 
 
 class AgentWrapper(ABC, Generic[AgentType]):
@@ -257,6 +266,26 @@ def _space_shape(space: spaces.Space) -> tuple[int, ...]:
     return space.shape if space.shape is not None else ()
 
 
+def _is_tensor_tuple(obs: TorchObsType) -> TypeIs[tuple[torch.Tensor, ...]]:
+    """Narrow a tensorised observation to a tuple of tensors.
+
+    A plain ``isinstance(obs, tuple)`` check erases the element type; a
+    :data:`typing.TypeIs` keeps the tensors typed.
+    """
+    return isinstance(obs, tuple)
+
+
+def _is_tensor_mapping(obs: TorchObsType) -> TypeIs[dict[str, torch.Tensor]]:
+    """Narrow a tensorised observation to a per-key tensor mapping.
+
+    The runtime check is ``isinstance(obs, Mapping)`` so it also matches a
+    :class:`~tensordict.TensorDict` (a ``Mapping`` but not a ``dict``); both are then
+    treated as ``dict[str, torch.Tensor]``, which is exact for the only operation the
+    callers perform on them — string-keyed lookup of tensor leaves.
+    """
+    return isinstance(obs, Mapping)
+
+
 class RSNorm(AgentWrapper[AgentType]):
     """Wrapper to normalize observations such that each coordinate is centered with unit variance.
     Handles both single and multi-agent settings, as well as Dict and Tuple observation spaces.
@@ -346,111 +375,128 @@ class RSNorm(AgentWrapper[AgentType]):
             epsilon, shape=_space_shape(observation_space), device=device
         )
 
+    @property
+    def _leaf_obs_rms(self) -> RunningStatsType:
+        """Single-agent running statistics.
+
+        The single- and multi-agent statistics containers are both ``dict[str, ...]``
+        and so are structurally indistinguishable to the type checker; the wrapper knows
+        which it holds from :attr:`multi_agent`, so this accessor narrows the attribute
+        for the single-agent code paths.
+        """
+        return cast("RunningStatsType", self.obs_rms)
+
+    @property
+    def _agent_obs_rms(self) -> dict[str, RunningStatsType]:
+        """Per-agent running statistics used in multi-agent mode (see
+        :attr:`_leaf_obs_rms` for why this is a cast).
+        """
+        return cast("dict[str, RunningStatsType]", self.obs_rms)
+
     def _normalize_observation(
         self,
-        observation: ObservationType,
+        observation: TorchObsType,
         *,
         obs_rms: RunningStatsType | None = None,
-    ) -> ObservationType:
+    ) -> TorchObsType:
         """Normalize the observation using the RunningMeanStd object(s).
 
-        :param observation: Observation from the environment
-        :type observation: ObservationType
+        :param observation: Tensorised observation from the environment
+        :type observation: TorchObsType
         :param obs_rms: Optional running-statistics object(s) to use instead of
             ``self.obs_rms`` (required for per-agent stats in multi-agent mode).
 
         :return: Normalized observation
-        :rtype: ObservationType
+        :rtype: TorchObsType
         """
-        # When `obs_rms` is omitted the wrapper is single-agent, so `self.obs_rms` holds
-        # the leaf statistics rather than the per-agent mapping.
-        obs_rms = cast("RunningStatsType", self.obs_rms) if obs_rms is None else obs_rms
+        obs_rms = self._leaf_obs_rms if obs_rms is None else obs_rms
 
-        # The statistics mirror the structure of the (tensorised) observation. The leaf
-        # case is checked first so that the container branches keep their value types.
+        # The statistics mirror the (tensorised) observation's structure, so narrowing
+        # the stats tells us the observation's structure too.
         if isinstance(obs_rms, RunningMeanStd):
-            leaf_obs = cast("torch.Tensor", observation)
-            return (leaf_obs - obs_rms.mean) / (obs_rms.var + obs_rms.epsilon).sqrt()
+            assert isinstance(observation, torch.Tensor)
+            return (observation - obs_rms.mean) / (obs_rms.var + obs_rms.epsilon).sqrt()
 
         if isinstance(obs_rms, tuple):
-            tuple_obs = cast("Sequence[torch.Tensor]", observation)
+            assert _is_tensor_tuple(observation)
             return tuple(
-                (tuple_obs[i] - rms.mean) / (rms.var + rms.epsilon).sqrt()
+                (observation[i] - rms.mean) / (rms.var + rms.epsilon).sqrt()
                 for i, rms in enumerate(obs_rms)
             )
 
-        dict_obs = cast("Mapping[str, torch.Tensor]", observation)
+        assert _is_tensor_mapping(observation)
         return {
-            key: (dict_obs[key] - rms.mean) / (rms.var + rms.epsilon).sqrt()
+            key: (observation[key] - rms.mean) / (rms.var + rms.epsilon).sqrt()
             for key, rms in obs_rms.items()
         }
 
     def normalize_observation(
-        self, observation: ObservationType | MARLObservationType
-    ) -> ObservationType | MARLObservationType:
+        self, observation: TorchObsType | MARLTensorObsType
+    ) -> TorchObsType | MARLTensorObsType:
         """Normalize the observation using the RunningMeanStd object(s).
 
-        :param observation: Observation from the environment
-        :type observation: ObservationType | MARLObservationType
+        :param observation: Tensorised observation from the environment
+        :type observation: TorchObsType | MARLTensorObsType
 
         :return: Normalized observation
-        :rtype: ObservationType | MARLObservationType
+        :rtype: TorchObsType | MARLTensorObsType
         """
+        # A single-agent Dict observation is itself a ``dict[str, Tensor]``, so it is
+        # indistinguishable by type from the multi-agent mapping; ``multi_agent`` is the
+        # runtime discriminator, so these narrowings are casts rather than isinstance.
         if self.multi_agent:
-            marl_observation = cast("MARLObservationType", observation)
-            agent_rms = cast("dict[str, RunningStatsType]", self.obs_rms)
-            for agent_id, obs in marl_observation.items():
-                marl_observation[agent_id] = self._normalize_observation(
-                    obs, obs_rms=agent_rms[agent_id]
-                )
-            return marl_observation
+            marl_observation = cast("MARLTensorObsType", observation)
+            agent_rms = self._agent_obs_rms
+            return {
+                agent_id: self._normalize_observation(obs, obs_rms=agent_rms[agent_id])
+                for agent_id, obs in marl_observation.items()
+            }
 
-        return self._normalize_observation(cast("ObservationType", observation))
+        return self._normalize_observation(cast("TorchObsType", observation))
 
     def _update_statistics(
         self,
-        observation: ObservationType,
+        observation: TorchObsType,
         *,
         obs_rms: RunningStatsType | None = None,
     ) -> None:
         """Update the running statistics using the observation.
 
-        :param observation: Observation from the environment
-        :type observation: ObservationType
+        :param observation: Tensorised observation from the environment
+        :type observation: TorchObsType
         :param obs_rms: Optional running-statistics object(s) to use instead of
             ``self.obs_rms`` (required for per-agent stats in multi-agent mode).
         """
-        # See `_normalize_observation`: an omitted `obs_rms` implies single-agent stats.
-        obs_rms = cast("RunningStatsType", self.obs_rms) if obs_rms is None else obs_rms
+        obs_rms = self._leaf_obs_rms if obs_rms is None else obs_rms
 
-        # The statistics mirror the structure of the (tensorised) observation. The leaf
-        # case is checked first so that the container branches keep their value types.
+        # The statistics mirror the (tensorised) observation's structure, so narrowing
+        # the stats tells us the observation's structure too.
         if isinstance(obs_rms, RunningMeanStd):
-            obs_rms.update(cast("torch.Tensor", observation))
+            assert isinstance(observation, torch.Tensor)
+            obs_rms.update(observation)
         elif isinstance(obs_rms, tuple):
-            tuple_obs = cast("Sequence[torch.Tensor]", observation)
+            assert _is_tensor_tuple(observation)
             for i, rms in enumerate(obs_rms):
-                rms.update(tuple_obs[i])
+                rms.update(observation[i])
         else:
-            dict_obs = cast("Mapping[str, torch.Tensor]", observation)
+            assert _is_tensor_mapping(observation)
             for key, rms in obs_rms.items():
-                rms.update(dict_obs[key])
+                rms.update(observation[key])
 
-    def update_statistics(
-        self, observation: ObservationType | MARLObservationType
-    ) -> None:
+    def update_statistics(self, observation: TorchObsType | MARLTensorObsType) -> None:
         """Update the running statistics using the observation.
 
-        :param observation: Observation from the environment
-        :type observation: ObservationType | MARLObservationType
+        :param observation: Tensorised observation from the environment
+        :type observation: TorchObsType | MARLTensorObsType
         """
+        # See `normalize_observation` for why the single/multi split uses casts.
         if self.multi_agent:
-            marl_observation = cast("MARLObservationType", observation)
-            agent_rms = cast("dict[str, RunningStatsType]", self.obs_rms)
+            marl_observation = cast("MARLTensorObsType", observation)
+            agent_rms = self._agent_obs_rms
             for agent_id, obs in marl_observation.items():
                 self._update_statistics(obs, obs_rms=agent_rms[agent_id])
         else:
-            self._update_statistics(cast("ObservationType", observation))
+            self._update_statistics(cast("TorchObsType", observation))
 
     def get_action(
         self,
@@ -513,10 +559,10 @@ class RSNorm(AgentWrapper[AgentType]):
                 "TensorDictBase", self.agent.rollout_buffer.buffer[:buffer_size]
             )
             valid_data["observations"] = self.normalize_observation(
-                cast("ObservationType", valid_data["observations"]),
+                cast("TorchObsType", valid_data["observations"]),
             )
             valid_data["next_observations"] = self.normalize_observation(
-                cast("ObservationType", valid_data["next_observations"]),
+                cast("TorchObsType", valid_data["next_observations"]),
             )
             self.agent.rollout_buffer.buffer[:buffer_size] = valid_data
 
@@ -528,12 +574,36 @@ class RSNorm(AgentWrapper[AgentType]):
             raise ValueError(msg)
 
         experiences["obs"] = self.normalize_observation(
-            cast("ObservationType", experiences["obs"]),
+            cast("TorchObsType", experiences["obs"]),
         )
         experiences["next_obs"] = self.normalize_observation(
-            cast("ObservationType", experiences["next_obs"]),
+            cast("TorchObsType", experiences["next_obs"]),
         )
         return self.wrapped_learn(experiences, *args, **kwargs)
+
+
+def _is_array_dict(obs: NumpyObsType) -> TypeIs[ArrayDict]:
+    """Narrow a numpy observation leaf to a per-key array mapping.
+
+    ``isinstance(obs, dict)`` erases the value type; a :data:`typing.TypeIs` keeps the
+    arrays typed and narrows them out of the negative branch.
+    """
+    return isinstance(obs, dict)
+
+
+def _is_array_tuple(obs: NumpyObsType) -> TypeIs[ArrayTuple]:
+    """Narrow a numpy observation leaf to a tuple of arrays (see :func:`_is_array_dict`)."""
+    return isinstance(obs, tuple)
+
+
+def _mask_rows(array: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Select the rows of ``array`` where ``mask`` is true.
+
+    Also re-types the array: leaves pulled out of a ``dict``/``tuple`` observation are
+    seen by the type checker as ``object``-dtype arrays, which reject a boolean-array
+    key; passing them through this ``np.ndarray`` parameter restores a usable dtype.
+    """
+    return array[mask]
 
 
 class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
@@ -556,41 +626,43 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
 
     def extract_inactive_agents(
         self,
-        obs: MARLObservationType,
-    ) -> tuple[dict[str, np.ndarray], MARLObservationType]:
+        obs: dict[str, NumpyObsType],
+    ) -> tuple[dict[str, np.ndarray], dict[str, NumpyObsType]]:
         """Extract the inactive agents from an observation. Inspects each key in the
         observation dictionary and, if all the values are `np.nan` (as set by
         ``AsyncPettingZooVecEnv``), the agent is considered inactive and removed from
         the observation dictionary.
 
+        Async vectorised environments produce numpy array leaves, so each per-agent
+        observation is a ``np.ndarray`` or a container thereof (:data:`NumpyObsType`).
+
         :param obs: Observation dictionary
-        :type obs: MARLObservationType
+        :type obs: dict[str, NumpyObsType]
 
         :return: Tuple of inactive agents and filtered observations
-        :rtype: tuple[dict[str, np.ndarray], MARLObservationType]
+        :rtype: tuple[dict[str, np.ndarray], dict[str, NumpyObsType]]
         """
         inactive_agents: dict[str, np.ndarray] = {}
         agents_to_remove: list[str] = []
 
         # Process each agent's observations
         for agent_id, agent_obs in obs.items():
-            # Get the sample observation based on type. Async vectorised environments
-            # produce array leaves, so the leaves of each container are arrays.
-            sample: np.ndarray
-            if isinstance(agent_obs, dict):
-                sample = cast("np.ndarray", next(iter(agent_obs.values())))
-            elif isinstance(agent_obs, tuple):
-                sample = cast("np.ndarray", agent_obs[0])
+            # Get a representative array leaf based on the container's structure.
+            if _is_array_dict(agent_obs):
+                sample = next(iter(agent_obs.values()))
+            elif _is_array_tuple(agent_obs):
+                sample = agent_obs[0]
             else:
-                sample = cast("np.ndarray", agent_obs)
+                sample = agent_obs
 
             # Skip non-vectorized environments, assuming env doesn't return
             # observations for inactive agents
             if len(sample.shape) == 1:
                 continue
 
-            # Create boolean mask for active agents (reducing over an axis of a
-            # multi-dimensional sample always yields an array)
+            # Create boolean mask for active agents. Reducing over a single axis of a
+            # multi-dimensional sample always yields an array, but numpy's ``.all``
+            # overloads widen the result to a scalar-or-array union.
             active_mask = cast("np.ndarray", ~np.isnan(sample).all(axis=1))
 
             # If all agents are active, skip
@@ -606,14 +678,14 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
                 continue
 
             # Apply mask to filter observations
-            if isinstance(agent_obs, dict):
-                dict_obs = cast("dict[str, np.ndarray]", agent_obs)
-                obs[agent_id] = {k: v[active_mask] for k, v in dict_obs.items()}
-            elif isinstance(agent_obs, tuple):
-                tuple_obs = cast("tuple[np.ndarray, ...]", agent_obs)
-                obs[agent_id] = tuple(v[active_mask] for v in tuple_obs)
+            if _is_array_dict(agent_obs):
+                obs[agent_id] = {
+                    k: _mask_rows(v, active_mask) for k, v in agent_obs.items()
+                }
+            elif _is_array_tuple(agent_obs):
+                obs[agent_id] = tuple(_mask_rows(v, active_mask) for v in agent_obs)
             else:
-                obs[agent_id] = cast("np.ndarray", agent_obs)[active_mask]
+                obs[agent_id] = _mask_rows(agent_obs, active_mask)
 
             inactive_agents[agent_id] = inactive_agent_indices
 
@@ -792,8 +864,11 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
         :return: Action from the agent
         :rtype: Any
         """
-        inactive_agents, obs = self.extract_inactive_agents(obs)
-        action_return = self.wrapped_get_action(obs, *args, **kwargs)
+        # Async vectorised MARL environments always emit numpy-array observations, which
+        # `extract_inactive_agents` requires to NaN-mask inactive agents.
+        numpy_obs = cast("dict[str, NumpyObsType]", obs)
+        inactive_agents, numpy_obs = self.extract_inactive_agents(numpy_obs)
+        action_return = self.wrapped_get_action(numpy_obs, *args, **kwargs)
 
         # Off-policy MARL: MADDPG / MATD3 return (env_actions, raw_actions)
         if self.agent.algo in {"MADDPG", "MATD3"}:

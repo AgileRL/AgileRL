@@ -1,6 +1,6 @@
 import warnings
 from collections import OrderedDict
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 
 import numpy as np
 import torch
@@ -24,6 +24,25 @@ from agilerl.utils.evolvable_networks import (
 # "conv_layer_type" maps to a string, "activation_layers"/"norm_layers" to
 # ``dict[int, str]``, and "pooling_layers" to ``dict[int, dict[str, Any]]``.
 LayerInfo = dict[str, Any]
+
+_T = TypeVar("_T")
+
+
+def _require(value: _T | None, description: str) -> _T:
+    """Narrow an optional stream/tensor that an architecture invariant guarantees is set.
+
+    The value/advantage networks and the Rainbow support tensor are only built for the
+    architectures that use them, so within those code paths they are never ``None``.
+    This mirrors the explicit ``RuntimeError`` guards already used in :meth:`forward`.
+
+    :param value: The optional value to narrow.
+    :param description: Human-readable name used in the error message.
+    :return: ``value``, guaranteed non-``None``.
+    """
+    if value is None:
+        msg = f"{description} is not initialized."
+        raise RuntimeError(msg)
+    return value
 
 
 class MakeEvolvable(EvolvableModule):
@@ -179,7 +198,10 @@ class MakeEvolvable(EvolvableModule):
         )
         # Placeholders until `detect_architecture` (or the `kwargs` clone path) fills
         # these in. They stay `None` for MLP-only networks, whose code paths never read
-        # them: the CNN mutation methods are removed from such instances below.
+        # them: the CNN mutation methods are removed from such instances below. Typed
+        # `Any` because these dynamic CNN hyperparameters are read (and mutated in place)
+        # across every CNN mutation method; annotating them `... | None` would require
+        # narrowing at each of those sites, which is out of scope for this module.
         (
             self.in_channels,
             self.channel_size,
@@ -242,7 +264,7 @@ class MakeEvolvable(EvolvableModule):
         layers = list(self.feature_net.children())
         if self.arch == "cnn":
             # Convolutional architectures always build a value net.
-            layers += list(cast("nn.Module", self.value_net).children())
+            layers += list(_require(self.value_net, "Value network").children())
 
         # Initialize network layers
         l_no = 0
@@ -297,14 +319,16 @@ class MakeEvolvable(EvolvableModule):
                 x = torch.cat([x, xc], dim=1)
 
             # Convolutional architectures always build a value net.
-            value = cast("nn.Module", self.value_net)(x)
+            value = _require(self.value_net, "Value network")(x)
 
         # add in cnn functionality
         if self.rainbow:
             # Rainbow architectures always build value and advantage nets.
-            advantage: torch.Tensor = cast("nn.Module", self.advantage_net)(x)
+            advantage: torch.Tensor = _require(self.advantage_net, "Advantage network")(
+                x
+            )
             if not self.cnn_layer_info:
-                value = cast("nn.Module", self.value_net)(x)
+                value = _require(self.value_net, "Value network")(x)
                 value = value.view(-1, 1, self.num_atoms)
                 advantage = advantage.view(-1, self.num_outputs, self.num_atoms)
                 x = value + advantage - advantage.mean(1, keepdim=True)
@@ -326,7 +350,9 @@ class MakeEvolvable(EvolvableModule):
 
             if q:
                 # Rainbow networks are always constructed with an atoms support tensor.
-                x = torch.sum(x * cast("torch.Tensor", self.support), dim=2)
+                x = torch.sum(
+                    x * _require(self.support, "Rainbow support tensor"), dim=2
+                )
         elif self.cnn_layer_info:
             if value is None:
                 msg = "Value stream is not initialized."
@@ -778,9 +804,11 @@ class MakeEvolvable(EvolvableModule):
             self.cnn_output_size = cnn_output.shape
             input_size = (cnn_output).to(self.device).view(1, -1).size(1)
 
-            if self.secondary_input_tensor is not None:
-                # Set alongside `secondary_input_tensor` in the constructor.
-                input_size += cast("int", self.extra_critic_dims)
+            # `extra_critic_dims` is set to a concrete size exactly when
+            # `secondary_input_tensor` is provided (see the constructor), so a non-None
+            # check here also narrows away its `None` type.
+            if self.extra_critic_dims is not None:
+                input_size += self.extra_critic_dims
 
             if self.rainbow:
                 value_net = self.create_mlp(
@@ -1340,16 +1368,17 @@ class MakeEvolvable(EvolvableModule):
         )
 
         # The rebuilt nets exist whenever their current counterparts do: both come from
-        # `build_networks`, which keys them off the (unchanged) architecture.
-        if self.value_net is not None:
+        # `build_networks`, which keys them off the (unchanged) architecture, so the
+        # paired non-None checks narrow both the old and the new net together.
+        if self.value_net is not None and new_value_net is not None:
             new_value_net = preserve_params_fn(
                 old_net=self.value_net,
-                new_net=cast("nn.Module", new_value_net),
+                new_net=new_value_net,
             )
-        if self.advantage_net is not None:
+        if self.advantage_net is not None and new_advantage_net is not None:
             new_advantage_net = preserve_params_fn(
                 old_net=self.advantage_net,
-                new_net=cast("nn.Module", new_advantage_net),
+                new_net=new_advantage_net,
             )
         new_feature_net = preserve_params_fn(
             old_net=self.feature_net,
