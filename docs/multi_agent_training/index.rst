@@ -468,7 +468,7 @@ Alternatively, use a custom training loop. Combining all of the above:
         from agilerl.utils.utils import (
             default_progress_bar,
             init_loggers,
-            tournament_selection_and_mutation,
+            run_selection_and_mutation,
         )
         from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
@@ -635,9 +635,9 @@ Alternatively, use a custom training loop. Combining all of the above:
             population.report_metrics(clear=True)
 
             population.update(
-                tournament_selection_and_mutation(
+                run_selection_and_mutation(
+                    tournament,
                     population=population.agents,
-                    tournament=tournament,
                     mutation=mutations,
                     env_name="simple_speaker_listener_v4",
                     algo="MADDPG",
