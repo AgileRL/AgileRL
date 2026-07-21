@@ -802,13 +802,13 @@ class _NonTerminalEnv:
 
     def reset(self, seed: int | None = None, *, row_index: int | None = None):
         del seed, row_index
-        return "hello", {"prefix": "P:", "suffix": "S"}
+        return "P:hello\nS", {}
 
     def step(self, gen_text: str):
         self.calls += 1
         self.last_gen = gen_text
         if self.calls == 1:
-            return "feedback", 0.5, False, False, {"prefix": "F:", "suffix": "T"}
+            return "F:feedback\nT", 0.5, False, False, {}
         return "done", 1.0, True, False, {}
 
 

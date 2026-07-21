@@ -83,9 +83,7 @@ class TextObservation(Observation):
     declared field (the OpenEnv wire carries a single ``done`` bool, no
     terminated/truncated split), so it distinguishes a time-limit end from a
     natural termination and the WebSocket backend reports the same Gym 5-tuple
-    split as the in-process one. ``prompt`` carries the fully rendered
-    observation text: :class:`OpenEnvWrapper` folds any ``info`` prefix/suffix
-    into it server-side, so every client receives ready-to-use text.
+    split as the in-process one.
     """
 
     prompt: str = ""
@@ -101,8 +99,9 @@ class OpenEnvWrapper(Environment):
     OpenEnv works with typed ``Action`` / ``Observation`` / ``State`` objects. This
     class translates between the two, letting OpenEnv's server host any local env
     unchanged. The env's ``dataset_size`` / ``tools`` are surfaced on the OpenEnv
-    ``state`` so a client can read them. ``info``'s ``prefix`` / ``suffix`` are folded
-    into the prompt here, so the client always receives ready-to-use text.
+    ``state`` so a client can read them; the env's ``reset`` / ``step`` ``info``
+    is not carried on the wire, so an env returns everything the policy sees in
+    its ``prompt`` / observation text.
 
     :param inner: The local env to host.
     :param env_name: Name reported in the env's OpenEnv metadata; defaults to
@@ -159,9 +158,9 @@ class OpenEnvWrapper(Environment):
         for name in ("row_index", "evaluation"):
             if name in self._reset_params and kwargs.get(name) is not None:
                 call[name] = kwargs[name]
-        prompt, info = _normalize_reset(self._inner.reset(**call))
+        prompt, _info = _normalize_reset(self._inner.reset(**call))
         self._state = State(episode_id=episode_id, step_count=0)
-        return TextObservation(prompt=_fold(prompt, info), reward=None, done=False)
+        return TextObservation(prompt=prompt, reward=None, done=False)
 
     def step(
         self,
@@ -171,12 +170,12 @@ class OpenEnvWrapper(Environment):
     ) -> TextObservation:
         """Step the inner env with the action's text, returning a ``TextObservation``."""
         del timeout_s, kwargs
-        prompt, reward, terminated, truncated, info = _normalize_step(
+        prompt, reward, terminated, truncated, _info = _normalize_step(
             self._inner.step(action.message)
         )
         self._state.step_count += 1
         return TextObservation(
-            prompt=_fold(prompt, info),
+            prompt=prompt,
             reward=reward,
             done=bool(terminated or truncated),
             truncated=bool(truncated),
@@ -231,19 +230,6 @@ def _normalize_step(result: Any) -> tuple[str, Any, bool, bool, dict[str, Any]]:
         msg = f"env.step returned a {len(result)}-tuple; expected 4 or 5"
         raise ValueError(msg)
     return str(obs), reward, bool(terminated), bool(truncated), (info or {})
-
-
-def _fold(text: str, info: dict[str, Any] | None) -> str:
-    """Fold ``info``'s ``prefix`` / ``suffix`` into the prompt text."""
-    if not info:
-        return text
-    prefix = info.get("prefix", "")
-    suffix = info.get("suffix", "")
-    if prefix:
-        text = f"{prefix}{text}"
-    if suffix:
-        text = f"{text}\n{suffix}"
-    return text
 
 
 class OpenEnvServer:

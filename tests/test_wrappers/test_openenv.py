@@ -50,7 +50,7 @@ class _CountingEnv:
     def reset(self, seed: int | None = None) -> tuple[str, dict[str, Any]]:
         del seed
         self.n = 0
-        return "Start.", {"suffix": "Reply 'go'."}
+        return "Start.\nReply 'go'.", {}
 
     def step(self, action: str) -> tuple[str, float, bool, bool, dict[str, Any]]:
         self.n += 1
@@ -88,7 +88,7 @@ class _RowDatasetEnv:
         del seed
         idx = (row_index or 0) % self._n
         self._q = f"{'eval' if evaluation else self._prefix}{idx}"
-        return self._q, {"suffix": "answer:"}
+        return f"{self._q}\nanswer:", {}
 
     def step(self, action: str) -> tuple[str, float, bool, bool, dict[str, Any]]:
         return "", (1.0 if "x" in str(action) else 0.0), True, False, {}
@@ -105,7 +105,6 @@ def test_server_and_client_round_trip_over_http() -> None:
         assert server.base_url.startswith("http://127.0.0.1:")
         client = OpenEnvSessionClient(base_url=server.base_url)
         prompt, info = client.reset()
-        # The env's info['suffix'] is folded into the prompt (OpenEnv drops obs metadata).
         assert prompt == "Start.\nReply 'go'."
         assert info == {}
         obs1, r1, term1, trunc1, _ = client.step("go now")
@@ -230,7 +229,7 @@ def test_rollout_env_drives_url_and_applies_suffix() -> None:
             server.base_url, MiniTokenizer(), max_turns=2, apply_chat_template=False
         )
         env.reset()
-        # reset prompt + info["suffix"] are folded server-side by OpenEnvWrapper.
+        # The env returns the full observation text; no info folding.
         assert env._prompt_text == "Start.\nReply 'go'."
     finally:
         server.stop()

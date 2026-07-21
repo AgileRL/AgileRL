@@ -14,7 +14,6 @@ import pytest
 import torch
 
 from agilerl.llm_envs import RolloutEnv
-from agilerl.llm_envs.openenv import _fold
 from tests.helpers.rollout_doubles import (
     MiniTokenizer,
     TinyDatasetEnv,
@@ -145,17 +144,6 @@ def test_tool_schema_injected_into_feedback_boundary() -> None:
     assert w.tokenizer.last_tools == _TOOLS
 
 
-def test_fold_applies_prefix_and_suffix_from_info() -> None:
-    """``_fold`` wraps the observation with the info prefix/suffix; an empty
-    or absent info leaves the text untouched. Folding is the env clients' job
-    (server-side in ``OpenEnvWrapper``, in-process in ``LocalEnvClient``), so
-    ``RolloutEnv`` consumes the prompt text as-is.
-    """
-    assert _fold("body", None) == "body"
-    assert _fold("body", {}) == "body"
-    assert _fold("body", {"prefix": "PRE:", "suffix": "SUF"}) == "PRE:body\nSUF"
-
-
 def test_dataset_size_reflects_wrapped_env() -> None:
     """``dataset_size`` reports the wrapped env's training-row count."""
     w = _wrap(_reasoning_env())
@@ -180,8 +168,8 @@ def test_eval_mode_routes_to_the_eval_split() -> None:
         w.close()
 
 
-def test_reset_forwards_row_index_to_served_env() -> None:
-    """``reset`` passes ``row_index`` through to the served env, selecting that row."""
+def test_reset_forwards_row_index_to_wrapped_env() -> None:
+    """``reset`` passes ``row_index`` through to the wrapped env, selecting that row."""
     inner = TinyDatasetEnv(
         questions=["q0", "q1"],
         answers=["a0", "a1"],
