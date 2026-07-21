@@ -17,7 +17,7 @@ from agilerl.algorithms.core.base import (
 )
 from agilerl.models import (
     ALGO_REGISTRY,
-    AlgoSpecT,
+    AlgoSpec,
     LLMAlgorithmSpec,
     MutationSpec,
     ReplayBufferSpec,
@@ -83,7 +83,7 @@ class Trainer(ABC):
     """Abstract base trainer for AgileRL evolutionary training.
 
     :param algorithm: An algorithm spec or a string algorithm name.
-    :type algorithm: AlgoSpecT | str
+    :type algorithm: AlgoSpec | str
     :param environment: A ``gymnasium.Env`` instance, a PettingZoo ``ParallelEnv`` instance, or an env-name string.
     :type environment: EnvSpecT | str
     :param training: Training loop parameters (max steps, population size, etc.).
@@ -105,7 +105,7 @@ class Trainer(ABC):
 
     def __init__(
         self,
-        algorithm: AlgoSpecT | str,
+        algorithm: AlgoSpec | str,
         environment: EnvSpecT | str,
         training: TrainingSpec | None = None,
         mutation: MutationSpec | None = None,
@@ -119,7 +119,7 @@ class Trainer(ABC):
 
         # Convert string algorithm name to spec if provided.
         if isinstance(algorithm, str):
-            algorithm: AlgoSpecT = ALGO_REGISTRY.get(algorithm).spec_cls()
+            algorithm: AlgoSpec = ALGO_REGISTRY.get(algorithm).spec_cls()
 
         # Convert a plain environment name string to the appropriate spec.
         if isinstance(environment, str):
@@ -137,7 +137,7 @@ class Trainer(ABC):
 
     @staticmethod
     def _env_spec_from_string(
-        algorithm: AlgoSpecT,
+        algorithm: AlgoSpec,
         name: str,
     ) -> EnvSpecT:
         """Build an environment spec from a plain environment name string.
@@ -147,7 +147,7 @@ class Trainer(ABC):
         need richer configuration and must be given a full spec object.
 
         :param algorithm: The resolved algorithm spec.
-        :type algorithm: AlgoSpecT
+        :type algorithm: AlgoSpec
         :param name: The environment name (e.g. ``"CartPole-v1"``).
         :type name: str
         :returns: The appropriate environment spec.
@@ -277,7 +277,7 @@ class LocalTrainer(Trainer):
 
     def __init__(
         self,
-        algorithm: AlgoSpecT | str,
+        algorithm: AlgoSpec | str,
         environment: EnvSpecT | str,
         training: TrainingSpec | None = None,
         mutation: MutationSpec | None = None,
@@ -290,7 +290,7 @@ class LocalTrainer(Trainer):
     ) -> None:
 
         # Arena specs mirror the core ones on the server side; they are a separate
-        # model hierarchy, so they are not members of `EnvSpecT`/`AlgoSpecT`.
+        # model hierarchy, so they are not members of `EnvSpecT`/`AlgoSpec`.
         super().__init__(
             algorithm,
             cast("EnvSpecT", environment),
@@ -755,7 +755,7 @@ class ArenaTrainer(Trainer):
     """Submits AgileRL training jobs to the Arena RLOps platform.
 
     :param algorithm: An `:class:`AlgorithmSpec` instance or a string algorithm name.
-    :type algorithm: AlgoSpecT | str
+    :type algorithm: AlgoSpec | str
     :param environment: An `:class:`ArenaEnvSpec` instance or a string env name.
     :type environment: ArenaEnvSpec | str
     :param training: Training loop parameters.
@@ -775,7 +775,7 @@ class ArenaTrainer(Trainer):
 
     def __init__(
         self,
-        algorithm: AlgoSpecT | str,
+        algorithm: AlgoSpec | str,
         environment: ArenaEnvSpec | str,
         training: TrainingSpec | None = None,
         *,
@@ -797,7 +797,7 @@ class ArenaTrainer(Trainer):
             environment = ArenaEnvSpec(name=environment)
 
         # Arena specs mirror the core ones on the server side; they are a separate
-        # model hierarchy, so they are not members of `EnvSpecT`/`AlgoSpecT`.
+        # model hierarchy, so they are not members of `EnvSpecT`/`AlgoSpec`.
         super().__init__(
             algorithm,
             cast("EnvSpecT", environment),

@@ -474,18 +474,18 @@ class EvolvableAlgorithmProtocol(Protocol):
 
 
 # Define a TypeVar for EvolvableAlgorithm that can be used for generic typing
-T_EvolvableAlgorithm = TypeVar("T_EvolvableAlgorithm", bound=EvolvableAlgorithmProtocol)
+EvolvableAlgorithmT = TypeVar("EvolvableAlgorithmT", bound=EvolvableAlgorithmProtocol)
 
 
 @runtime_checkable
-class AgentWrapperProtocol(Protocol, Generic[T_EvolvableAlgorithm]):
+class AgentWrapperProtocol(Protocol, Generic[EvolvableAlgorithmT]):
     """Protocol for wrapper classes that encapsulate evolvable algorithms.
 
     Agent wrappers provide additional functionality around evolvable algorithms
     while maintaining the core interface for action selection and learning.
     """
 
-    agent: T_EvolvableAlgorithm
+    agent: EvolvableAlgorithmT
 
     def get_action(self, obs: ObservationType, **kwargs: Any) -> Any:  # noqa: ANN401 -- action return type varies per wrapped algorithm
         pass

@@ -13,7 +13,7 @@ if TYPE_CHECKING:
         PrioritizedReplayBuffer,
         ReplayBuffer,
     )
-    from agilerl.models.algo import AlgoSpecT
+    from agilerl.models.algo import AlgoSpec
 
     BufferT = ReplayBuffer | MultiStepReplayBuffer | PrioritizedReplayBuffer
 
@@ -59,12 +59,12 @@ class ReplayBufferSpec(BaseModel):
     per_buffer_args: PerBufferArgs = Field(default_factory=PerBufferArgs)
 
     def init_buffer(
-        self, algo_spec: AlgoSpecT, device: str | torch.device = "cpu"
+        self, algo_spec: AlgoSpec, device: str | torch.device = "cpu"
     ) -> BufferT:
         """Initialize the replay buffer.
 
         :param algo_spec: Algorithm specification
-        :type algo_spec: AlgoSpecT
+        :type algo_spec: AlgoSpec
         :param device: Device
         :type device: str | torch.device
         :return: Replay buffer
@@ -116,7 +116,7 @@ class ReplayBufferSpec(BaseModel):
         )
 
     def init_n_step_buffer(
-        self, algo_spec: AlgoSpecT, device: str | torch.device = "cpu"
+        self, algo_spec: AlgoSpec, device: str | torch.device = "cpu"
     ) -> BufferT | None:
         """Initialize the n-step replay buffer for combined PER + n-step setups.
 
@@ -124,7 +124,7 @@ class ReplayBufferSpec(BaseModel):
         ``True``.
 
         :param algo_spec: Algorithm specification.
-        :type algo_spec: AlgoSpecT
+        :type algo_spec: AlgoSpec
         :param device: Device.
         :type device: str | torch.device
         :returns: A :class:`MultiStepReplayBuffer` or ``None``.

@@ -47,10 +47,8 @@ else:
 
 logger = logging.getLogger(__name__)
 
-# TypeVar bound to the concrete algorithm-spec union ``AlgoSpecT`` (defined at
-# the bottom of this file): the registration decorators need a TypeVar, rather
-# than the union alias itself, to return the same spec subclass they wrap.
-AlgoSpecTV = TypeVar("AlgoSpecTV", bound="AlgoSpecT")
+# TypeVar over the AlgoSpec union so registration decorators return the concrete spec subclass.
+AlgoSpecT = TypeVar("AlgoSpecT", bound="AlgoSpec")
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,7 +58,7 @@ class RegistryEntry:
     :param spec_cls: The algorithm spec class.
     """
 
-    spec_cls: type[AlgoSpecT]
+    spec_cls: type[AlgoSpec]
 
 
 class AlgorithmRegistry:
@@ -73,13 +71,13 @@ class AlgorithmRegistry:
     def __init__(self) -> None:
         self._entries: dict[str, RegistryEntry] = {}
 
-    def add(self, name: str, spec_cls: type[AlgoSpecT]) -> None:
+    def add(self, name: str, spec_cls: type[AlgoSpec]) -> None:
         """Register a spec class under *name*.
 
         :param name: Algorithm name (e.g. ``"DQN"``).
         :type name: str
         :param spec_cls: The spec class to register.
-        :type spec_cls: type[AlgoSpecT]
+        :type spec_cls: type[AlgoSpec]
         """
         if name in self._entries:
             logger.warning("Overriding existing registration for algorithm %r", name)
@@ -106,14 +104,14 @@ class AlgorithmRegistry:
 ALGO_REGISTRY = AlgorithmRegistry()
 
 
-def register() -> Callable[[type[AlgoSpecTV]], type[AlgoSpecTV]]:
+def register() -> Callable[[type[AlgoSpecT]], type[AlgoSpecT]]:
     """Class decorator that registers an algorithm spec.
 
     The registry key is derived from the spec class name by stripping
     the ``"Spec"`` suffix (e.g. ``DQNSpec`` -> ``"DQN"``).
 
     :returns: The decorator function.
-    :rtype: Callable[[type[AlgoSpecTV]], type[AlgoSpecTV]]
+    :rtype: Callable[[type[AlgoSpecT]], type[AlgoSpecT]]
 
     Example::
 
@@ -122,7 +120,7 @@ def register() -> Callable[[type[AlgoSpecTV]], type[AlgoSpecTV]]:
             ...
     """
 
-    def decorator(spec_cls: type[AlgoSpecTV]) -> type[AlgoSpecTV]:
+    def decorator(spec_cls: type[AlgoSpecT]) -> type[AlgoSpecT]:
         name = spec_cls.__name__.removesuffix("Spec")
         ALGO_REGISTRY.add(name, spec_cls)
         return spec_cls
@@ -130,24 +128,24 @@ def register() -> Callable[[type[AlgoSpecTV]], type[AlgoSpecTV]]:
     return decorator
 
 
-def off_policy() -> Callable[[type[AlgoSpecTV]], type[AlgoSpecTV]]:
+def off_policy() -> Callable[[type[AlgoSpecT]], type[AlgoSpecT]]:
     """Decorate an algorithm to mark it as off-policy.
 
     By doing this we automatically signal the use
     of a replay buffer and, optionally, epsilon decay during training.
 
     :return: Decorated algorithm spec class
-    :rtype: Callable[[type[AlgoSpecTV]], type[AlgoSpecTV]]
+    :rtype: Callable[[type[AlgoSpecT]], type[AlgoSpecT]]
     """
 
-    def decorator(algo_spec_class: type[AlgoSpecTV]) -> type[AlgoSpecTV]:
+    def decorator(algo_spec_class: type[AlgoSpecT]) -> type[AlgoSpecT]:
         algo_spec_class.off_policy = True
         return algo_spec_class
 
     return decorator
 
 
-def offline() -> Callable[[type[AlgoSpecTV]], type[AlgoSpecTV]]:
+def offline() -> Callable[[type[AlgoSpecT]], type[AlgoSpecT]]:
     """Decorate an algorithm to mark it as offline.
 
     Offline algorithms learn from a fixed dataset rather than
@@ -156,10 +154,10 @@ def offline() -> Callable[[type[AlgoSpecTV]], type[AlgoSpecTV]]:
     data from the dataset source declared in :class:`OfflineEnvSpec`.
 
     :return: Decorated algorithm spec class
-    :rtype: Callable[[type[AlgoSpecTV]], type[AlgoSpecTV]]
+    :rtype: Callable[[type[AlgoSpecT]], type[AlgoSpecT]]
     """
 
-    def decorator(algo_spec_class: type[AlgoSpecTV]) -> type[AlgoSpecTV]:
+    def decorator(algo_spec_class: type[AlgoSpecT]) -> type[AlgoSpecT]:
         algo_spec_class.offline = True
         algo_spec_class.agent_type = AgentType.OfflineAgent
         return algo_spec_class
@@ -167,7 +165,7 @@ def offline() -> Callable[[type[AlgoSpecTV]], type[AlgoSpecTV]]:
     return decorator
 
 
-def bandit() -> Callable[[type[AlgoSpecTV]], type[AlgoSpecTV]]:
+def bandit() -> Callable[[type[AlgoSpecT]], type[AlgoSpecT]]:
     """Decorate an algorithm to mark it as a contextual bandit.
 
     Bandit algorithms learn from tabular datasets wrapped as
@@ -176,10 +174,10 @@ def bandit() -> Callable[[type[AlgoSpecTV]], type[AlgoSpecTV]]:
     training loop.
 
     :return: Decorated algorithm spec class
-    :rtype: Callable[[type[AlgoSpecTV]], type[AlgoSpecTV]]
+    :rtype: Callable[[type[AlgoSpecT]], type[AlgoSpecT]]
     """
 
-    def decorator(algo_spec_class: type[AlgoSpecTV]) -> type[AlgoSpecTV]:
+    def decorator(algo_spec_class: type[AlgoSpecT]) -> type[AlgoSpecT]:
         algo_spec_class.bandit = True
         algo_spec_class.agent_type = AgentType.BanditAgent
         return algo_spec_class
@@ -625,4 +623,4 @@ class LLMAlgorithmSpec(AlgorithmSpec):
         return algo
 
 
-AlgoSpecT = RLAlgorithmSpec | MultiAgentRLAlgorithmSpec | LLMAlgorithmSpec
+AlgoSpec = RLAlgorithmSpec | MultiAgentRLAlgorithmSpec | LLMAlgorithmSpec

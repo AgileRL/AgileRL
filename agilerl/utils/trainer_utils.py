@@ -30,7 +30,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.llm_envs import PreferenceGym, ReasoningGym, SFTGym
 from agilerl.models.algo import (
-    AlgoSpecT,
+    AlgoSpec,
     MultiAgentRLAlgorithmSpec,
     RLAlgorithmSpec,
 )
@@ -91,7 +91,7 @@ def hp_config_from_mutation_spec(spec: MutationSpec) -> HyperparameterConfig | N
 
 @singledispatch
 def get_spaces_from_env(
-    algo_spec: AlgoSpecT, env: GymEnvType | PzEnvType
+    algo_spec: AlgoSpec, env: GymEnvType | PzEnvType
 ) -> tuple[
     spaces.Space | dict[str, spaces.Space],
     spaces.Space | dict[str, spaces.Space],
@@ -102,7 +102,7 @@ def get_spaces_from_env(
     single-agent specs.
 
     :param algo_spec: Algorithm spec.
-    :type algo_spec: AlgoSpecT
+    :type algo_spec: AlgoSpec
     :param env: Environment.
     :type env: GymEnvType | PzEnvType
     """
@@ -148,7 +148,7 @@ def get_spaces_from_env_single_agent(
 
 def create_population_from_spec(
     population_size: int,
-    algo_spec: AlgoSpecT,
+    algo_spec: AlgoSpec,
     env: EnvironmentT,
     mutation_spec: MutationSpec | None,
     replay_buffer_spec: ReplayBufferSpec | None,
@@ -162,7 +162,7 @@ def create_population_from_spec(
     :param population_size: Number of agents to create.
     :type population_size: int
     :param algo_spec: Algorithm spec.
-    :type algo_spec: AlgoSpecT
+    :type algo_spec: AlgoSpec
     :param mutation_spec: Optional mutation spec for HP range fallback.
     :type mutation_spec: MutationSpec | None
     :param env: RL environment following Gymnasium or PettingZoo API.

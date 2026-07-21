@@ -7,7 +7,7 @@ import lazy_loader as lazy
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.models.algo import (  # noqa: F401
     ALGO_REGISTRY,
-    AlgoSpecT,
+    AlgoSpec,
     LLMAlgorithmSpec,
     MultiAgentRLAlgorithmSpec,
     RLAlgorithmSpec,

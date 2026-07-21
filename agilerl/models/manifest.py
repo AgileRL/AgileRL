@@ -21,7 +21,7 @@ from typing_extensions import Self
 from agilerl import HAS_ARENA_DEPENDENCIES, HAS_LLM_DEPENDENCIES
 from agilerl.models.algo import (
     ALGO_REGISTRY,
-    AlgoSpecT,
+    AlgoSpec,
     LLMAlgorithmSpec,
 )
 from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     EnvSpecT = GymEnvSpec | PzEnvSpec | OfflineEnvSpec | LLMEnvSpec
 
 
-def _resolve_algorithm(data: dict[str, Any] | AlgoSpecT) -> AlgoSpecT:
+def _resolve_algorithm(data: dict[str, Any] | AlgoSpec) -> AlgoSpec:
     """Dispatch to the concrete algorithm spec using ``ALGO_REGISTRY``.
 
     Reads the ``name`` key from the raw dict (e.g. ``"DQN"``), looks up
@@ -51,13 +51,13 @@ def _resolve_algorithm(data: dict[str, Any] | AlgoSpecT) -> AlgoSpecT:
     with the remaining fields.
 
     :param data: The raw dict or AlgorithmSpec to resolve.
-    :type data: dict[str, Any] | AlgoSpecT
+    :type data: dict[str, Any] | AlgoSpec
     :returns: The resolved AlgorithmSpec.
-    :rtype: AlgoSpecT
+    :rtype: AlgoSpec
     :raises TypeError: If the input is not a dict or AlgorithmSpec.
     :raises ValueError: If the 'name' field is not present.
     """
-    if isinstance(data, AlgoSpecT):
+    if isinstance(data, AlgoSpec):
         return data
     if isinstance(data, BaseModel):
         # Foreign spec (e.g. an arena algorithm spec) — re-resolve via the core
@@ -163,7 +163,7 @@ _ALGO_NON_SERIALIZABLE_FIELDS: set[str] = {
 }
 
 
-def _serialize_algorithm(spec: AlgoSpecT) -> dict[str, Any]:
+def _serialize_algorithm(spec: AlgoSpec) -> dict[str, Any]:
     """Serialize an algorithm spec to a JSON-safe dict for manifest storage.
 
     Runtime-only fields (PyTorch modules, HP configs, network specs) are
@@ -184,7 +184,7 @@ def _serialize_algorithm(spec: AlgoSpecT) -> dict[str, Any]:
 # are lost. Not really an issue because we serialize the algo spec directly (not through
 # TrainingManifest) when building the algorithm instance - but could lead to confusion?
 AlgorithmFromManifest = Annotated[
-    AlgoSpecT,
+    AlgoSpec,
     BeforeValidator(_resolve_algorithm),
     PlainSerializer(_serialize_algorithm, return_type=dict[str, Any]),
 ]
@@ -346,7 +346,7 @@ class TrainingManifest(BaseModel):
         return self
 
     @staticmethod
-    def _network_from_algorithm(algorithm: AlgoSpecT) -> Any | None:
+    def _network_from_algorithm(algorithm: AlgoSpec) -> Any | None:
         """Resolve the manifest ``network`` section from an algorithm spec."""
         if isinstance(algorithm, LLMAlgorithmSpec):
             return FinetuningNetworkSpec.model_validate(
@@ -364,7 +364,7 @@ class TrainingManifest(BaseModel):
     def from_trainer_specs(
         cls,
         *,
-        algorithm: AlgoSpecT,
+        algorithm: AlgoSpec,
         environment: BaseModel,
         training: TrainingSpec,
         mutation: MutationSpec | None = None,
@@ -374,7 +374,7 @@ class TrainingManifest(BaseModel):
         """Build a validated core manifest from trainer component specs.
 
         :param algorithm: Core algorithm spec or registered algorithm name dict.
-        :type algorithm: AlgoSpecT
+        :type algorithm: AlgoSpec
         :param environment: Environment spec instance held on the trainer.
         :type environment: BaseModel
         :param training: Training loop parameters.

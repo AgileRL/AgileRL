@@ -21,7 +21,7 @@ from typing_extensions import Self
 import agilerl.arena.models.algorithms as _arena_algorithms  # noqa: F401
 from agilerl.arena.models.algo import (
     ARENA_REGISTRY,
-    AlgoSpecT,
+    AlgoSpec,
     LLMAlgorithmSpec,
 )
 from agilerl.arena.models.hpo import MutationSpec, TournamentSelectionSpec
@@ -41,7 +41,7 @@ def _ensure_platform_run_spec_keys(data: dict[str, Any]) -> None:
         data.setdefault(key, {})
 
 
-def _resolve_algorithm(data: dict[str, Any] | AlgoSpecT) -> AlgoSpecT:
+def _resolve_algorithm(data: dict[str, Any] | AlgoSpec) -> AlgoSpec:
     """Dispatch to the concrete algorithm spec using ``ARENA_REGISTRY``.
 
     Reads the ``name`` key from the raw dict (e.g. ``"DQN"``), looks up
@@ -49,13 +49,13 @@ def _resolve_algorithm(data: dict[str, Any] | AlgoSpecT) -> AlgoSpecT:
     with the remaining fields.
 
     :param data: The raw dict or AlgorithmSpec to resolve.
-    :type data: dict[str, Any] | AlgoSpecT
+    :type data: dict[str, Any] | AlgoSpec
     :returns: The resolved AlgorithmSpec.
-    :rtype: AlgoSpecT
+    :rtype: AlgoSpec
     :raises TypeError: If the input is not a dict or AlgorithmSpec.
     :raises ValueError: If the 'name' field is not present.
     """
-    if isinstance(data, AlgoSpecT):
+    if isinstance(data, AlgoSpec):
         return data
     if not isinstance(data, dict):
         msg = f"Expected a dict or AlgorithmSpec, got {type(data).__name__}"
@@ -113,7 +113,7 @@ def _resolve_network(data: dict[str, Any] | BaseModel) -> dict[str, Any]:
     return data
 
 
-def _serialize_algorithm(spec: AlgoSpecT) -> dict[str, Any]:
+def _serialize_algorithm(spec: AlgoSpec) -> dict[str, Any]:
     """Serialize an algorithm spec to a JSON-safe dict for manifest storage."""
     dumped = spec.model_dump(mode="json", exclude_none=True)
     dumped["name"] = spec.name
@@ -124,7 +124,7 @@ def _serialize_algorithm(spec: AlgoSpecT) -> dict[str, Any]:
 # TrainingManifest's algorithm section in "python" mode, which is fine since we only serialize
 # when submitting jobs to Arena.
 AlgorithmFromManifest = Annotated[
-    AlgoSpecT,
+    AlgoSpec,
     BeforeValidator(_resolve_algorithm),
     PlainSerializer(_serialize_algorithm, return_type=dict[str, Any]),
 ]
