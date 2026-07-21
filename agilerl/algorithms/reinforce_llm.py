@@ -1,6 +1,6 @@
 import warnings
 from contextlib import nullcontext
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 import torch
@@ -11,7 +11,10 @@ from agilerl.algorithms.core import ActionResult, LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.llm_envs import ReasoningGym
 
-if HAS_LIGER_KERNEL:
+if TYPE_CHECKING:
+    from peft import LoraConfig
+
+if HAS_LIGER_KERNEL or TYPE_CHECKING:
     from agilerl.algorithms.core.llm_ops.fused_loss import (
         LigerFusedLinearPolicyLossFunction,
         apply_fused_policy_loss,
@@ -27,7 +30,7 @@ from agilerl.protocols import (
     PeftModelProtocol,
     PreTrainedModelProtocol,
 )
-from agilerl.typing import ExperiencesType, LLMObsType
+from agilerl.typing import ExperiencesType, LLMObsType, ReasoningPrompts
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
     VLLMConfig,
@@ -295,7 +298,9 @@ class REINFORCE(LLMAlgorithm):
             use_value_head=False,
             use_liger_loss=use_liger_loss,
             use_memory_efficient_params=use_memory_efficient_params,
-            lora_config=lora_config,
+            # LoraConfigProtocol mirrors peft.LoraConfig (which callers pass in
+            # practice); the base annotation requires the concrete class.
+            lora_config=cast("LoraConfig | None", lora_config),
             use_separate_reference_adapter=use_separate_reference_adapter,
             use_vllm=use_vllm,
             vllm_config=vllm_config,
@@ -399,10 +404,23 @@ class REINFORCE(LLMAlgorithm):
                             prompt = prepare_prompt_hf_generate(
                                 prompt_dict, actor_device
                             )
-                            stitch_ids = prompt.pop("stitch_prefix_ids", None)
-                            initial_prompt_len = prompt.pop("initial_prompt_len", None)
+                            # ``prepare_prompt_hf_generate`` maps these keys to
+                            # device tensors, an optional stitch tensor, and a
+                            # scalar prompt length (0-dim tensors already
+                            # converted to int) for this single-prompt path.
+                            input_ids = cast("torch.Tensor", prompt["input_ids"])
+                            attention_mask = cast(
+                                "torch.Tensor", prompt["attention_mask"]
+                            )
+                            stitch_ids = cast(
+                                "torch.Tensor | None", prompt["stitch_prefix_ids"]
+                            )
+                            initial_prompt_len = cast(
+                                "int | None", prompt["initial_prompt_len"]
+                            )
                             completion_id = self.actor.generate(
-                                **prompt,
+                                input_ids=input_ids,
+                                attention_mask=attention_mask,
                                 generation_config=self.generation_config,
                             )
                             completion_id, full_prompt_len = (
@@ -427,7 +445,9 @@ class REINFORCE(LLMAlgorithm):
                     completion_masks,
                     sampling_logps,
                 ) = self._generate_with_vllm_colocate(
-                    prompt_batch,
+                    # ReasoningPrompts is a TypedDict, i.e. a plain dict at
+                    # runtime; the base helper takes untyped prompt dicts.
+                    cast("list[dict[str, Any]]", prompt_batch),
                     1,
                     temperature=self.temperature
                     if training
@@ -466,9 +486,18 @@ class REINFORCE(LLMAlgorithm):
         self._prepare_vllm_for_training()
 
         with self.memory_efficient_params_context():
-            completion_ids, action_masks, rewards = stack_and_pad_experiences(
-                *experiences,
-                padding_values=[self.pad_token_id, False, None],
+            # Runtime contract: experiences are the positional tuple
+            # (completion_ids, action_masks, rewards); stacking tensor lists
+            # yields one tensor per position.
+            assert isinstance(experiences, tuple), (
+                "REINFORCE experiences must be a tuple"
+            )
+            completion_ids, action_masks, rewards = cast(
+                "tuple[torch.Tensor, torch.Tensor, torch.Tensor]",
+                stack_and_pad_experiences(
+                    *experiences,
+                    padding_values=[self.pad_token_id, False, None],
+                ),
             )
             completion_ids = completion_ids.to(self.device)
             action_masks = action_masks.to(self.device)
@@ -544,6 +573,9 @@ class REINFORCE(LLMAlgorithm):
                     minibatch_idxs = batch_idxs[
                         start : min((start + batch_size), num_samples)
                     ]
+                    # ``get_experiences_samples`` indexes each input
+                    # positionally: Tensor in -> Tensor out, so the tuple
+                    # mirrors the all-Tensor inputs.
                     (
                         batch_ids,
                         batch_action_mask,
@@ -551,14 +583,17 @@ class REINFORCE(LLMAlgorithm):
                         batch_reference_log_probs,
                         batch_advantages,
                         batch_turn_ids,
-                    ) = get_experiences_samples(
-                        minibatch_idxs,
-                        completion_ids,
-                        action_masks,
-                        old_log_probs,
-                        reference_log_probs,
-                        advantages,
-                        turn_ids,
+                    ) = cast(
+                        "tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]",
+                        get_experiences_samples(
+                            minibatch_idxs,
+                            completion_ids,
+                            action_masks,
+                            old_log_probs,
+                            reference_log_probs,
+                            advantages,
+                            turn_ids,
+                        ),
                     )
 
                     batch_mask_bool = batch_action_mask.bool()
@@ -676,7 +711,8 @@ class REINFORCE(LLMAlgorithm):
         result.update(is_metrics)
 
         # Wire averaged metrics into the metrics tracker (new API).
-        completion_length = float(np.mean([c.shape[-1] for c in experiences[0]]))
+        completion_list = cast("list[torch.Tensor]", experiences[0])
+        completion_length = float(np.mean([c.shape[-1] for c in completion_list]))
         agg = aggregate_metrics_dict(
             self.accelerator,
             {
@@ -698,8 +734,8 @@ class REINFORCE(LLMAlgorithm):
         loop: int = 1,
         *args: Any,
         **kwargs: Any,
-    ) -> torch.Tensor:
-        """Return fitness (test) score tensor of llm on test sub-set.
+    ) -> np.ndarray:
+        """Return fitness (test) score of llm on test sub-set.
 
         ``ReasoningGym`` (and compatible dataset envs): ``reset`` returns a batch
         of prompt dicts; each ``step`` accepts completion id tensors and returns
@@ -711,8 +747,8 @@ class REINFORCE(LLMAlgorithm):
         :type env: ReasoningGym | MultiTurnEnv
         :param loop: Number of outer test iterations (dataloader passes or episodes).
         :type loop: int
-        :return: Concatenated per-step rewards from the test loop.
-        :rtype: torch.Tensor
+        :return: Mean reward from the test loop (scalar numpy array).
+        :rtype: np.ndarray
         """
         eval_context = getattr(env, "eval_mode", nullcontext)
         with eval_context():
@@ -730,7 +766,10 @@ class REINFORCE(LLMAlgorithm):
             elif isinstance(env, MultiTurnEnv):
                 all_rewards: list[torch.Tensor] = []
                 for _ in range(loop):
-                    prompt_dict, _info = env.reset()
+                    obs, _info = env.reset()
+                    # REINFORCE requires a token-observation multi-turn env,
+                    # whose observations are ReasoningPrompts-shaped dicts.
+                    prompt_dict = cast("ReasoningPrompts", obs)
                     terminated, truncated = False, False
                     while not terminated and not truncated:
                         completion_ids = self.get_action(
@@ -738,9 +777,10 @@ class REINFORCE(LLMAlgorithm):
                             training=False,
                         ).completion_ids
                         full = completion_ids[0]
-                        prompt_dict, reward, terminated, truncated, _info = env.step(
+                        obs, reward, terminated, truncated, _info = env.step(
                             full,
                         )
+                        prompt_dict = cast("ReasoningPrompts", obs)
                         all_rewards.append(
                             torch.tensor(
                                 [float(reward)],
@@ -866,9 +906,12 @@ class REINFORCE(LLMAlgorithm):
             max_output_tokens if max_output_tokens is not None else max_model_len
         )
         self.min_output_tokens = min_output_tokens
-        self.max_model_len = (
+        resolved_max_model_len = (
             max_model_len if max_model_len is not None else max_output_tokens
         )
+        # One of the two is non-None (guarded above).
+        assert resolved_max_model_len is not None
+        self.max_model_len = resolved_max_model_len
         validate_llm_context_lengths(self.max_model_len, max_output_tokens)
         self.hf_generate_chunk_size = int(
             1 if hf_generate_chunk_size is None else max(1, hf_generate_chunk_size)
@@ -1088,7 +1131,7 @@ class REINFORCE(LLMAlgorithm):
         :rtype: torch.Tensor
         """
         batch_size = rewards.shape[0]
-        num_turns = turn_ids.max().item() + 1
+        num_turns = int(turn_ids.max().item()) + 1
 
         turn_rewards = pool_by_turns(rewards, turn_ids, num_turns)
 

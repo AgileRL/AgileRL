@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from pydantic import Field
+
 from agilerl.arena.models.algo import RLAlgorithmSpec, register
 from agilerl.arena.models.networks import QNetworkSpec
-from pydantic import Field
 
 
 @register()

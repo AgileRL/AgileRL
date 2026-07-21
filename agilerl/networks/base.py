@@ -1,12 +1,14 @@
 import inspect
 import warnings
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import asdict
-from typing import Any, ClassVar, TypeVar
+from typing import Any, ClassVar, TypeVar, cast, overload
 
 import numpy as np
 import torch
 from gymnasium import spaces
+from torch import nn
 
 from agilerl.modules import (
     EvolvableCNN,
@@ -19,16 +21,34 @@ from agilerl.modules import (
 from agilerl.modules.base import EvolvableModule, ModuleMeta, mutation
 from agilerl.protocols import MutationType
 from agilerl.typing import (
-    BatchDimension,
     DeviceType,
     NetConfigType,
+    TorchObsType,
 )
 from agilerl.utils.evolvable_networks import get_default_encoder_config, is_image_space
 
 SelfEvolvableNetwork = TypeVar("SelfEvolvableNetwork", bound="EvolvableNetwork")
+ModuleT = TypeVar("ModuleT", bound=nn.Module)
 DefaultEncoderType = (
     EvolvableCNN | EvolvableMLP | EvolvableMultiInput | EvolvableSimBa | EvolvableLSTM
 )
+
+
+def preserve_parameters(old_net: nn.Module, new_net: ModuleT) -> ModuleT:
+    """Copy compatible parameters from ``old_net`` into ``new_net`` and return it.
+
+    Typed wrapper around :meth:`EvolvableModule.preserve_parameters`, which copies
+    parameters in place and returns the (unchanged) new network.
+
+    :param old_net: Old neural network to copy parameters from.
+    :type old_net: nn.Module
+    :param new_net: New neural network to copy parameters into.
+    :type new_net: ModuleT
+    :return: The new network with copied parameters.
+    :rtype: ModuleT
+    """
+    EvolvableModule.preserve_parameters(old_net, new_net)
+    return new_net
 
 
 def assert_correct_mlp_net_config(net_config: dict[str, Any]) -> None:
@@ -111,7 +131,11 @@ class NetworkMeta(ModuleMeta):
     an encoder and a head_net (named as such).
     """
 
-    def __call__(self, *args: Any, **kwargs: Any) -> SelfEvolvableNetwork:
+    def __call__(
+        cls: type[SelfEvolvableNetwork],
+        *args: Any,
+        **kwargs: Any,
+    ) -> SelfEvolvableNetwork:
         instance: SelfEvolvableNetwork = super().__call__(*args, **kwargs)
 
         # Check that the mutation methods of the network are correctly defined
@@ -173,6 +197,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
 
     encoder: EvolvableModule
     head_net: EvolvableModule
+    encoder_cls: type[EvolvableModule] | None
 
     # Custom encoder aliases
     _encoder_aliases: ClassVar[dict[str, type[EvolvableModule]]] = {
@@ -210,6 +235,14 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                 recurrent=recurrent,
             )
 
+        # Resolve encoder class aliases (e.g. "ResNet") to the actual class
+        if isinstance(encoder_cls, str):
+            encoder_cls = self._encoder_aliases[encoder_cls]
+
+        if encoder_cls is not None and not issubclass(encoder_cls, EvolvableModule):
+            msg = "Encoder class must be a subclass of EvolvableModule."
+            raise TypeError(msg)
+
         self.observation_space = observation_space
         self.action_space = action_space
         self.latent_dim = latent_dim
@@ -230,21 +263,12 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
             encoder_config["output_activation"] = activation
 
         if encoder_cls is not None:
-            if isinstance(encoder_cls, str):
-                encoder_cls = self._encoder_aliases[encoder_cls]
-
-            if not issubclass(encoder_cls, EvolvableModule):
-                msg = "Encoder class must be a subclass of EvolvableModule."
-                raise TypeError(msg)
-
-            self.encoder_cls = encoder_cls
-
             # Check if encoder config contains `num_outputs` as input argument, in which
             # case we can enable latent space mutations. Otherwise, we disable them.
-            input_args = inspect.getfullargspec(self.encoder_cls.__init__).args
+            input_args = inspect.getfullargspec(encoder_cls.__init__).args
             if "num_outputs" not in input_args:
                 warnings.warn(
-                    f"{self.encoder_cls.__name__} does not contain `num_outputs` as an "
+                    f"{encoder_cls.__name__} does not contain `num_outputs` as an "
                     "input argument. Disabling latent space mutations. Make sure to set the number of "
                     "outputs to the latent dimension in the encoder configuration.",
                     stacklevel=2,
@@ -253,7 +277,10 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
             else:
                 encoder_config["num_outputs"] = self.latent_dim
 
-            self.encoder = self.encoder_cls(
+            # Concrete encoder constructors take arbitrary config kwargs, unlike the
+            # (device, random_seed) signature of the EvolvableModule base class.
+            encoder_factory = cast("Callable[..., EvolvableModule]", encoder_cls)
+            self.encoder = encoder_factory(
                 **{
                     "observation_space": self.observation_space,
                     "num_outputs": self.latent_dim,
@@ -296,11 +323,11 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         return self.head_net.net_config
 
     @property
-    def activation(self) -> str:
+    def activation(self) -> str | None:
         """Activation function of the network.
 
         :return: Activation function.
-        :rtype: str
+        :rtype: str | None
         """
         return self.encoder.activation
 
@@ -308,19 +335,34 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         """Forward pass of the network."""
         return self.forward(*args, **kwargs)
 
+    @overload
     def extract_features(
         self,
-        x: torch.Tensor,
+        x: TorchObsType,
+        hidden_state: None = None,
+    ) -> torch.Tensor: ...
+
+    @overload
+    def extract_features(
+        self,
+        x: TorchObsType,
+        hidden_state: dict[str, torch.Tensor],
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]: ...
+
+    def extract_features(
+        self,
+        x: TorchObsType,
         hidden_state: dict[str, torch.Tensor] | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Extract features from the encoder part of the network.
 
-        :param x: Input tensor to extract features from
-        :type x: torch.Tensor
-        :param hidden_states: Hidden states for recurrent networks (unused in non-recurrent networks)
-        :type hidden_states: dict[str, torch.Tensor], optional
-        :return: The encoded features
-        :rtype: torch.Tensor
+        :param x: Input observation to extract features from
+        :type x: TorchObsType
+        :param hidden_state: Hidden states for recurrent networks (unused in non-recurrent networks)
+        :type hidden_state: dict[str, torch.Tensor], optional
+        :return: The encoded features, and (for recurrent networks) the next
+            hidden-state dict if a hidden state was passed
+        :rtype: torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]
         """
         # For compatibility with both recurrent and non-recurrent networks
         if hidden_state is None:
@@ -347,16 +389,26 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
 
         return self.head_net(latent, *args, **kwargs)
 
-    def build_network_head(
-        self, net_config: NetConfigType | None = None, **kwargs: Any
-    ) -> None:
-        """Build the head of the network."""
+    def build_network_head(self, net_config: NetConfigType) -> None:
+        """Build the head of the network.
+
+        :param net_config: Configuration of the network head.
+        :type net_config: NetConfigType
+        """
         msg = (
             "Method build_network_head must be implemented in EvolvableNetwork objects."
         )
         raise NotImplementedError(
             msg,
         )
+
+    # NOTE: The base ``EvolvableModule.recreate_network(**kwargs)`` accepts arbitrary
+    # kwargs because the mutation wrapper in agilerl/modules/base.py inspects each
+    # override's signature and only forwards the kwargs it declares. Networks declare
+    # exactly the arguments they accept (none), hence the narrower signature.
+    def recreate_network(self) -> None:
+        """Recreate the network after a mutation. Implemented by subclasses."""
+        super().recreate_network()
 
     def create_mlp(
         self,
@@ -431,9 +483,9 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                 for name, shape in get_hidden_states_shape_from_model(
                     self.encoder,
                 ).items():
-                    # shape might have a batch dimension 'BatchPlaceholder', so we need to replace it
+                    # Replace the BatchDimension sentinel with the runtime batch size
                     shape = tuple(
-                        batch_size if x == BatchDimension else x for x in shape
+                        x if isinstance(x, int) else batch_size for x in shape
                     )
                     self.cached_hidden_state[name] = torch.zeros(shape).to(self.device)
             return deepcopy(self.cached_hidden_state)
@@ -500,7 +552,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         else:
             encoder = self._build_encoder(self.encoder.net_config)
 
-        self.encoder = EvolvableModule.preserve_parameters(self.encoder, encoder)
+        self.encoder = preserve_parameters(self.encoder, encoder)
 
     def _build_encoder(self, net_config: dict[str, Any]) -> DefaultEncoderType:
         """Build the encoder for the network based on the environments observation space.
@@ -521,8 +573,11 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         elif is_image_space(self.observation_space):
             assert_correct_cnn_net_config(net_config)
 
+            obs_shape = self.observation_space.shape
+            assert obs_shape is not None, "Image observation spaces must have a shape."
+
             encoder = EvolvableCNN(
-                input_shape=self.observation_space.shape,
+                input_shape=list(obs_shape),
                 num_outputs=self.latent_dim,
                 device=self.device,
                 name=self.encoder_name,
@@ -562,6 +617,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
             )
 
             # Need to flatten > 2D observations by default for MLPs
-            self.flatten_obs = len(self.observation_space.shape) > 1
+            obs_shape = self.observation_space.shape
+            self.flatten_obs = obs_shape is not None and len(obs_shape) > 1
 
         return encoder

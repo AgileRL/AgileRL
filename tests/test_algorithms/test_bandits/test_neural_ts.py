@@ -215,7 +215,7 @@ class TestNeuralTSGetAction:
 
         action = bandit.get_action(state, action_mask)
 
-        assert action.is_integer()
+        assert float(action).is_integer()
         assert action >= 0
         assert action < discrete_space.n
         bandit.clean_up()
@@ -230,7 +230,7 @@ class TestNeuralTSGetAction:
 
         action = bandit.get_action(state, action_mask)
 
-        assert action.is_integer()
+        assert float(action).is_integer()
         assert action == 1
         bandit.clean_up()
 

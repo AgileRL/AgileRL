@@ -3,7 +3,7 @@ from typing import Any
 import torch
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
-from agilerl.typing import ArrayOrTensor
+from agilerl.typing import ArrayOrTensor, DeviceType
 from agilerl.utils.evolvable_networks import create_mlp
 
 
@@ -51,7 +51,7 @@ class EvolvableMLP(EvolvableModule):
     :param new_gelu: Use new GELU activation function, defaults to False
     :type new_gelu: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
-    :type device: str, optional
+    :type device: DeviceType, optional
     :param name: Name of the network, defaults to 'mlp'
     :type name: str, optional
     :param random_seed: Random seed to use for the network. Defaults to None.
@@ -76,7 +76,7 @@ class EvolvableMLP(EvolvableModule):
         noisy: bool = False,
         noise_std: float = 0.5,
         new_gelu: bool = False,
-        device: str = "cpu",
+        device: DeviceType = "cpu",
         name: str = "mlp",
         random_seed: int | None = None,
     ) -> None:
@@ -179,11 +179,11 @@ class EvolvableMLP(EvolvableModule):
         :param output_coeff: Output layer standard deviation coefficient, defaults to 4
         :type output_coeff: float, optional
         """
-        EvolvableModule.init_weights_gaussian(self.model, std_coeff=std_coeff)
+        EvolvableModule.apply_gaussian_init(self.model, std_coeff=std_coeff)
 
         # Output layer is initialised with std_coeff=2
         output_layer = self.get_output_dense()
-        EvolvableModule.init_weights_gaussian(output_layer, std_coeff=output_coeff)
+        EvolvableModule.apply_gaussian_init(output_layer, std_coeff=output_coeff)
 
     def forward(self, x: ArrayOrTensor) -> torch.Tensor:
         """Return output of neural network.
@@ -268,7 +268,7 @@ class EvolvableMLP(EvolvableModule):
         :rtype: dict[str, int]
         """
         if hidden_layer is None:
-            hidden_layer = self.rng.integers(0, len(self.hidden_size))
+            hidden_layer = int(self.rng.integers(0, len(self.hidden_size)))
         else:
             hidden_layer = min(hidden_layer, len(self.hidden_size) - 1)
 
@@ -298,7 +298,7 @@ class EvolvableMLP(EvolvableModule):
         :rtype: dict[str, int]
         """
         if hidden_layer is None:
-            hidden_layer = self.rng.integers(0, len(self.hidden_size))
+            hidden_layer = int(self.rng.integers(0, len(self.hidden_size)))
         else:
             hidden_layer = min(hidden_layer, len(self.hidden_size) - 1)
 

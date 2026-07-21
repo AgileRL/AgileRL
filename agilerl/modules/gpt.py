@@ -1,7 +1,8 @@
 import inspect
 import math
 from collections import OrderedDict
-from typing import Any
+from collections.abc import Iterable
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -11,6 +12,9 @@ from torch.nn import functional as F
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.typing import DeviceType
+
+# Cached (key, value) projections for a single attention layer
+KVCacheType = tuple[torch.Tensor, torch.Tensor]
 
 
 class EvolvableGPT(EvolvableModule):
@@ -41,7 +45,7 @@ class EvolvableGPT(EvolvableModule):
     :param bias: Use bias in Linears and LayerNorms, defaults to True
     :type bias: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
-    :type device: str, optional
+    :type device: DeviceType, optional
     :param random_seed: Random seed to use for the network. Defaults to None.
     :type random_seed: int | None
     """
@@ -60,7 +64,7 @@ class EvolvableGPT(EvolvableModule):
         min_layers: int = 8,
         max_layers: int = 16,
         bias: bool = True,
-        device: str = "cpu",
+        device: DeviceType = "cpu",
         random_seed: int | None = None,
     ) -> None:
         super().__init__(device, random_seed)
@@ -130,7 +134,7 @@ class EvolvableGPT(EvolvableModule):
             device=self.device,
         )
 
-        self.transformer.wte.weight = self.lm_head.weight
+        self._wte.weight = self.lm_head.weight
 
         # init all weights
         self.apply(self._init_weights)
@@ -156,6 +160,28 @@ class EvolvableGPT(EvolvableModule):
         """Set activation function."""
         self._activation = activation
 
+    # Typed views over the transformer ModuleDict members, which torch only
+    # exposes as generic nn.Module objects.
+    @property
+    def _wte(self) -> nn.Embedding:
+        return cast("nn.Embedding", self.transformer["wte"])
+
+    @property
+    def _wpe(self) -> nn.Embedding:
+        return cast("nn.Embedding", self.transformer["wpe"])
+
+    @property
+    def _drop(self) -> nn.Dropout:
+        return cast("nn.Dropout", self.transformer["drop"])
+
+    @property
+    def _h(self) -> "Iterable[Block]":
+        return cast("Iterable[Block]", self.transformer["h"])
+
+    @property
+    def _ln_f(self) -> "LayerNorm":
+        return cast("LayerNorm", self.transformer["ln_f"])
+
     def get_num_params(self, non_embedding: bool = True) -> int:
         """Return the number of parameters in the model.
 
@@ -166,7 +192,7 @@ class EvolvableGPT(EvolvableModule):
         """
         n_params = sum(p.numel() for p in self.parameters())
         if non_embedding:
-            n_params -= self.transformer.wpe.weight.numel()
+            n_params -= self._wpe.weight.numel()
         return n_params
 
     def _init_weights(self, module: nn.Module) -> None:
@@ -217,13 +243,13 @@ class EvolvableGPT(EvolvableModule):
         tok_emb: torch.Tensor | None = None,
         targets: torch.Tensor | None = None,
         attn_mask: torch.Tensor | None = None,
-        past_key_values: tuple[torch.Tensor] | None = None,
+        past_key_values: tuple[KVCacheType | None, ...] | None = None,
         pos: torch.Tensor | None = None,
         is_causal: bool = True,
     ) -> tuple[
         torch.Tensor,
-        tuple[torch.Tensor],
-        tuple[torch.Tensor],
+        tuple[torch.Tensor, ...],
+        tuple[KVCacheType, ...],
         torch.Tensor | None,
     ]:
         """Forward pass through evolvable GPT model.
@@ -236,19 +262,20 @@ class EvolvableGPT(EvolvableModule):
         :type targets: torch.Tensor, optional
         :param attn_mask: Attention mask
         :type attn_mask: torch.Tensor, optional
-        :param past_key_values: Past key values for caching
-        :type past_key_values: tuple[torch.Tensor], optional
+        :param past_key_values: Per-layer cached (key, value) projections
+        :type past_key_values: tuple[KVCacheType | None, ...], optional
         :param pos: Position ids
         :type pos: torch.Tensor, optional
         :param is_causal: Whether to apply causal mask
         :type is_causal: bool, optional
         :return: Tuple containing logits, all hidden states, presents, and loss
-        :rtype: tuple[torch.Tensor, tuple[torch.Tensor], tuple[torch.Tensor], torch.Tensor | None]
+        :rtype: tuple[torch.Tensor, tuple[torch.Tensor, ...], tuple[KVCacheType, ...], torch.Tensor | None]
         """
         if idx is not None:
             device = idx.device
             t = idx.size(1)
         else:
+            assert tok_emb is not None, "Either idx or tok_emb must be provided."
             device = tok_emb.device
             t = tok_emb.size(-2)
 
@@ -256,13 +283,17 @@ class EvolvableGPT(EvolvableModule):
             f"Cannot forward sequence of length {t}, block size is only {self.block_size}"
         )
 
-        presents = ()
-        all_hidden_states = ()
+        presents: tuple[KVCacheType, ...] = ()
+        all_hidden_states: tuple[torch.Tensor, ...] = ()
         if past_key_values is None:
             past_length = 0
             past_key_values = tuple([None] * self.n_layer)
         else:
-            past_length = past_key_values[0][0].size(-2)
+            first_layer_past = past_key_values[0]
+            assert first_layer_past is not None, (
+                "past_key_values must contain the cached keys and values of the first layer."
+            )
+            past_length = first_layer_past[0].size(-2)
 
         if pos is not None:
             pos = pos.view(-1, t)
@@ -279,21 +310,21 @@ class EvolvableGPT(EvolvableModule):
         # forward the GPT model itself
         # token embeddings of shape (b, t, n_embd)
         if tok_emb is None:
-            tok_emb = self.transformer.wte(idx)
+            tok_emb = self._wte(idx)
 
         # position embeddings of shape (1, t, n_embd)
-        pos_emb = self.transformer.wpe(pos)
-        x = self.transformer.drop(tok_emb + pos_emb)
+        pos_emb = self._wpe(pos)
+        x = self._drop(tok_emb + pos_emb)
         all_hidden_states = (*all_hidden_states, x)
-        for block, layer_past in zip(self.transformer.h, past_key_values, strict=False):
+        for block, layer_past in zip(self._h, past_key_values, strict=False):
             # torch.cuda.set_device(x.device)
             # Ensure layer_past is on same device as hidden_states (might not be correct)
             if layer_past is not None:
-                layer_past = tuple(past_state.to(x.device) for past_state in layer_past)
+                layer_past = (layer_past[0].to(x.device), layer_past[1].to(x.device))
             x, pres = block(x, attn_mask, layer_past, is_causal)
             all_hidden_states = (*all_hidden_states, x)
             presents = (*presents, pres)
-        x = self.transformer.ln_f(x)
+        x = self._ln_f(x)
         all_hidden_states = (*all_hidden_states, x)
 
         logits = self.lm_head(x)
@@ -302,7 +333,7 @@ class EvolvableGPT(EvolvableModule):
             # logits = self.lm_head(x)
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)),
-                targets.view(-1).type(torch.LongTensor).to(self.device),
+                targets.view(-1).long().to(self.device),
                 ignore_index=-1,
             )
         else:
@@ -327,10 +358,10 @@ class EvolvableGPT(EvolvableModule):
         """
         assert block_size <= self.block_size
         self.block_size = block_size
-        self.transformer.wpe.weight = nn.Parameter(
-            self.transformer.wpe.weight[:block_size],
+        self._wpe.weight = nn.Parameter(
+            self._wpe.weight[:block_size],
         )
-        for block in self.transformer.h:
+        for block in self._h:
             if hasattr(block.attn, "attention_bias"):
                 block.attn.attention_bias = block.attn.attention_bias[
                     :,
@@ -361,7 +392,7 @@ class EvolvableGPT(EvolvableModule):
         override_args = override_args or {}  # default to empty dict
         from transformers import GPT2Config, GPT2LMHeadModel
 
-        config_args = {
+        config_args: dict[str, Any] = {
             "gpt2": {"n_layer": 12, "n_head": 12, "n_embd": 768},  # 124M params
             "gpt2-medium": {"n_layer": 24, "n_head": 16, "n_embd": 1024},  # 350M params
             "gpt2-large": {"n_layer": 36, "n_head": 20, "n_embd": 1280},  # 774M params
@@ -738,9 +769,9 @@ class CausalSelfAttention(nn.Module):
         self,
         x: torch.Tensor,
         attn_mask: torch.Tensor | None = None,
-        layer_past: tuple[torch.Tensor] | None = None,
+        layer_past: KVCacheType | None = None,
         is_causal: bool = True,
-    ) -> tuple[torch.Tensor, tuple[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, KVCacheType]:
         """Forward pass through the CausalSelfAttention module.
 
         :param x: Input tensor of shape (batch_size, sequence_length, embedding_dim).
@@ -748,11 +779,11 @@ class CausalSelfAttention(nn.Module):
         :param attn_mask: Optional attention mask tensor.
         :type attn_mask: torch.Tensor | None
         :param layer_past: Optional tuple of past key and value tensors for caching.
-        :type layer_past: tuple[torch.Tensor] | None
+        :type layer_past: KVCacheType | None
         :param is_causal: Whether to apply causal mask.
         :type is_causal: bool
         :return: Tuple containing the output tensor and the present key and value tensors.
-        :rtype: tuple[torch.Tensor, tuple[torch.Tensor]]
+        :rtype: tuple[torch.Tensor, KVCacheType]
         """
         B, T, C = (
             x.size()
@@ -872,9 +903,9 @@ class Block(nn.Module):
         self,
         x: torch.Tensor,
         attn_mask: torch.Tensor | None = None,
-        layer_past: tuple[torch.Tensor] | None = None,
+        layer_past: KVCacheType | None = None,
         is_causal: bool = True,
-    ) -> tuple[torch.Tensor, tuple[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, KVCacheType]:
         """Forward pass through the transformer block.
 
         :param x: Input tensor of shape (batch_size, sequence_length, embedding_dim).
@@ -882,11 +913,11 @@ class Block(nn.Module):
         :param attn_mask: Optional attention mask tensor.
         :type attn_mask: torch.Tensor | None
         :param layer_past: Optional tuple of past key and value tensors for caching.
-        :type layer_past: tuple[torch.Tensor] | None
+        :type layer_past: KVCacheType | None
         :param is_causal: Whether to apply causal mask.
         :type is_causal: bool
         :return: Tuple containing the output tensor and the present key and value tensors.
-        :rtype: tuple[torch.Tensor, tuple[torch.Tensor]]
+        :rtype: tuple[torch.Tensor, KVCacheType]
         """
         attn_output, present = self.attn(
             self.ln_1(x),

@@ -1,4 +1,4 @@
-from typing import Union
+from typing import Literal, overload
 
 import numpy as np
 import torch
@@ -54,7 +54,7 @@ class TorchDistribution:
         mu: torch.Tensor | None = None,
         log_std: torch.Tensor | None = None,
         squash_output: bool = False,
-    ):
+    ) -> None:
         self.action_space = action_space
         self.logits = logits
         self.mu = mu
@@ -136,7 +136,7 @@ class EvolvableDistribution(EvolvableWrapper):
         action_std_init: float = 0.0,
         squash_output: bool = False,
         device: DeviceType = "cpu",
-    ):
+    ) -> None:
         super().__init__(network)
 
         self.action_space = action_space
@@ -151,9 +151,11 @@ class EvolvableDistribution(EvolvableWrapper):
         # deviation (log_std) of the action distribution
         if isinstance(action_space, spaces.Box):
             self.log_std = torch.nn.Parameter(
-                torch.ones(1, np.prod(action_space.shape), device=device)
+                torch.ones(1, int(np.prod(action_space.shape)), device=device)
                 * action_std_init
             )
+        else:
+            self.log_std = None
 
     @property
     def net_config(self) -> NetConfigType:
@@ -174,6 +176,9 @@ class EvolvableDistribution(EvolvableWrapper):
         """
         # Normal distribution for Continuous action spaces
         if isinstance(self.action_space, spaces.Box):
+            assert self.log_std is not None, (
+                "log_std is initialized for Box action spaces."
+            )
             log_std = self.log_std.expand_as(logits)
             return TorchDistribution(
                 action_space=self.action_space,
@@ -283,24 +288,41 @@ class EvolvableDistribution(EvolvableWrapper):
 
         return masked_logits
 
+    @overload
     def forward(
         self,
         latent: torch.Tensor,
-        action_mask: ArrayOrTensor | None = None,
+        action_mask: ArrayOrTensor | list[np.ndarray] | None = None,
+        sample: Literal[True] = True,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
+
+    @overload
+    def forward(
+        self,
+        latent: torch.Tensor,
+        action_mask: ArrayOrTensor | list[np.ndarray] | None,
+        sample: Literal[False],
+    ) -> tuple[None, None, torch.Tensor]: ...
+
+    def forward(
+        self,
+        latent: torch.Tensor,
+        action_mask: ArrayOrTensor | list[np.ndarray] | None = None,
         sample: bool = True,
-    ) -> Union[
-        tuple[torch.Tensor, torch.Tensor, torch.Tensor], tuple[None, None, torch.Tensor]
-    ]:
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        | tuple[None, None, torch.Tensor]
+    ):
         """Forward pass of the network.
 
         :param latent: Latent space representation.
         :type latent: torch.Tensor
         :param action_mask: Mask to apply to the logits. Defaults to None.
-        :type action_mask: Optional[ArrayOrTensor]
+        :type action_mask: ArrayOrTensor | list[np.ndarray] | None
         :param sample: Whether to sample an action or return the mode/mean. Defaults to True.
         :type sample: bool
-        :return: Action and log probability of the action.
-        :rtype: Union[tuple[torch.Tensor, torch.Tensor, torch.Tensor], tuple[None, torch.Tensor, torch.Tensor]]
+        :return: Action, log probability of the action, and entropy of the distribution.
+        :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | tuple[None, None, torch.Tensor]
         """
         logits = self.wrapped(latent)
 
@@ -312,7 +334,7 @@ class EvolvableDistribution(EvolvableWrapper):
                     and action_mask.dtype == np.object_
                 ):
                     try:
-                        action_mask = np.stack(action_mask)
+                        action_mask = np.stack(list(action_mask))
                     except Exception:
                         # If stacking fails, it might be a non-uniform list or other structure not directly convertible.
                         # This path assumes action_mask should become a single tensor.
@@ -334,12 +356,9 @@ class EvolvableDistribution(EvolvableWrapper):
         if sample:
             action = self.dist.sample()
             log_prob = self.dist.log_prob(action)
-        else:
-            action = None
-            log_prob = None
+            return action, log_prob, self.dist.entropy()
 
-        entropy = self.dist.entropy()
-        return action, log_prob, entropy
+        return None, None, self.dist.entropy()
 
     def clone(self) -> "EvolvableDistribution":
         """Clones the distribution.

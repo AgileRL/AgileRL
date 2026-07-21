@@ -28,10 +28,15 @@ def test_trainer_utils_fallback_auto_tokenizer_when_no_llm_dependencies():
 
             assert trainer_utils_reloaded.AutoTokenizer is None
     finally:
-        sys.modules["agilerl.utils.trainer_utils"] = original_module
-        import agilerl.utils as _utils_pkg
+        # Drop the reloaded module; restore the original only if there was one.
+        # Storing None in sys.modules would poison every later import with
+        # "import of agilerl.utils.trainer_utils halted; None in sys.modules".
+        sys.modules.pop("agilerl.utils.trainer_utils", None)
+        if original_module is not None:
+            sys.modules["agilerl.utils.trainer_utils"] = original_module
+            import agilerl.utils as _utils_pkg
 
-        _utils_pkg.trainer_utils = original_module
+            _utils_pkg.trainer_utils = original_module
 
 
 class TestHpConfigFromMutationSpec:

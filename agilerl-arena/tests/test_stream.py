@@ -6,6 +6,7 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
+
 from agilerl.arena.stream import (
     CheckEvent,
     ErrorEvent,

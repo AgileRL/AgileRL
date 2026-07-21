@@ -1,7 +1,6 @@
 from collections.abc import Callable
 from typing import Any
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -118,5 +117,5 @@ def process_logits(
     return logits
 
 
-def always_terminate(s: np.ndarray) -> bool:
+def always_terminate(s: str) -> bool:
     return True

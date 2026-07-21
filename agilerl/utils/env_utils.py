@@ -6,7 +6,7 @@ from collections.abc import Callable
 from importlib import import_module
 from importlib import util as importlib_util
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar, cast
 
 from gymnasium.vector import AsyncVectorEnv, SyncVectorEnv
 from pettingzoo import ParallelEnv
@@ -16,6 +16,9 @@ from agilerl.vector import AsyncPettingZooVecEnv
 WrapperSpec = tuple[Any, dict[str, Any]] | str | Callable[..., Any]
 GymEnvType = AsyncVectorEnv | SyncVectorEnv
 PzEnvType = ParallelEnv | AsyncPettingZooVecEnv
+
+# Wrapped envs duck-type as the env they wrap, so wrapping preserves the type.
+EnvT = TypeVar("EnvT", bound=GymEnvType | PzEnvType)
 
 
 def make_conversation_template(prompt_template: dict[str, str]) -> list[dict[str, str]]:
@@ -35,7 +38,7 @@ def make_conversation_template(prompt_template: dict[str, str]) -> list[dict[str
     ]
 
 
-def get_reward_fn(reward_fn_name: str, file_path: str) -> Callable[[Any], float]:
+def get_reward_fn(reward_fn_name: str, file_path: str) -> Callable[..., float]:
     """Get the reward function for the environment.
 
     :param reward_fn_name: The name of the reward function to get
@@ -61,7 +64,7 @@ def get_reward_fn(reward_fn_name: str, file_path: str) -> Callable[[Any], float]
                 str(abs_file_path),
             )
 
-            if spec is None:
+            if spec is None or spec.loader is None:
                 msg = f"Could not create spec for {abs_file_path}"
                 raise ValueError(msg)
 
@@ -207,8 +210,11 @@ def _resolve_wrapper(
     :returns: Resolved wrapper and wrapper kwargs.
     :rtype: tuple[Any, dict[str, Any]]
     """
+    wrapper_kwargs: dict[str, Any]
     if isinstance(wrapper, tuple):
-        wrapper_spec, wrapper_kwargs = wrapper
+        # The tuple arm of ``WrapperSpec``; the isinstance check cannot rule
+        # out a (hypothetical) tuple-like callable, hence the cast.
+        wrapper_spec, wrapper_kwargs = cast("tuple[Any, dict[str, Any]]", wrapper)
     else:
         wrapper_spec, wrapper_kwargs = wrapper, {}
 
@@ -234,10 +240,10 @@ def _resolve_wrapper(
 
 
 def apply_wrappers(
-    env: GymEnvType | PzEnvType,
+    env: EnvT,
     wrappers: list[WrapperSpec] | None,
     path: str | None = None,
-) -> GymEnvType | PzEnvType:
+) -> EnvT:
     """Apply environment wrappers to an environment.
 
     :param env: Environment to apply wrappers to.

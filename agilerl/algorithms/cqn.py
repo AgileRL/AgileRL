@@ -1,6 +1,7 @@
 import random
-from typing import Any
+from typing import Any, cast
 
+import gymnasium as gym
 import numpy as np
 import torch
 from accelerate import Accelerator
@@ -16,7 +17,7 @@ from agilerl.algorithms.core.registry import (
 )
 from agilerl.modules.base import EvolvableModule
 from agilerl.networks.q_networks import QNetwork
-from agilerl.typing import ExperiencesType, GymEnvType, ObservationType
+from agilerl.typing import ExperiencesType, ObservationType, ReplayBatch
 from agilerl.utils.algo_utils import make_safe_deepcopies
 
 
@@ -60,6 +61,12 @@ class CQN(RLAlgorithm):
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """
+
+    # Narrowed from RLAlgorithm.action_space; enforced at construction.
+    action_space: spaces.Discrete | spaces.MultiDiscrete
+
+    # Discrete action space, so the network output size is a plain int
+    action_dim: int
 
     def __init__(
         self,
@@ -134,7 +141,7 @@ class CQN(RLAlgorithm):
                     msg,
                 )
 
-            # Need to make deepcopies for target and detached networks
+            # Need to make deepcopies for target and detached networks.
             self.actor, self.actor_target = make_safe_deepcopies(
                 actor_network,
                 actor_network,
@@ -239,11 +246,14 @@ class CQN(RLAlgorithm):
         :return: Loss from learning
         :rtype: float
         """
-        states = experiences["obs"]
-        actions = experiences["action"]
-        rewards = experiences["reward"]
-        next_states = experiences["next_obs"]
-        dones = experiences["done"]
+        # Off-policy replay buffers sample batches as TensorDicts keyed by field
+        # name (components/replay_buffer.py), which guarantees this layout.
+        batch = cast("ReplayBatch", experiences)
+        states = batch["obs"]
+        actions = batch["action"]
+        rewards = batch["reward"]
+        next_states = batch["next_obs"]
+        dones = batch["done"]
 
         if self.accelerator is not None:
             actions = actions.to(self.accelerator.device)
@@ -260,7 +270,7 @@ class CQN(RLAlgorithm):
             )
         else:
             q_target_next = (
-                self.actor_target(next_states).detach().max(axis=1)[0].unsqueeze(1)
+                self.actor_target(next_states).detach().max(dim=1)[0].unsqueeze(1)
             )
 
         # target, if terminal then y_j = rewards
@@ -301,14 +311,14 @@ class CQN(RLAlgorithm):
 
     def test(
         self,
-        env: GymEnvType,
+        env: gym.vector.VectorEnv,
         max_steps: int | None = None,
         loop: int = 3,
     ) -> float:
         """Return mean test score of agent in environment with epsilon-greedy policy.
 
-        :param env: The environment to be tested in
-        :type env: Gym-style environment
+        :param env: The vectorized environment to be tested in
+        :type env: gym.vector.VectorEnv
         :param max_steps: Maximum number of testing steps, defaults to None.
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
@@ -338,6 +348,6 @@ class CQN(RLAlgorithm):
                             completed_episode_scores[idx] = scores[idx]
                             finished[idx] = 1
                 rewards.append(np.mean(completed_episode_scores))
-        mean_fit = np.mean(rewards)
+        mean_fit = float(np.mean(rewards))
         self.metrics.add_fitness(mean_fit)
         return mean_fit

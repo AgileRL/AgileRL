@@ -254,14 +254,14 @@ class TestCQNGetAction:
         epsilon = 0
         action = cqn.get_action(state, epsilon, action_mask)[0]
 
-        assert action.is_integer()
+        assert float(action).is_integer()
         assert action >= 0
         assert action < action_space.n
 
         epsilon = 1
         action = cqn.get_action(state, epsilon, action_mask)[0]
 
-        assert action.is_integer()
+        assert float(action).is_integer()
         assert action >= 0
         assert action < action_space.n
         cqn.clean_up()
@@ -279,13 +279,13 @@ class TestCQNGetAction:
         epsilon = 0
         action = cqn.get_action(state, epsilon, action_mask)[0]
 
-        assert action.is_integer()
+        assert float(action).is_integer()
         assert action == 1
 
         epsilon = 1
         action = cqn.get_action(state, epsilon, action_mask)[0]
 
-        assert action.is_integer()
+        assert float(action).is_integer()
         assert action == 1
         cqn.clean_up()
 

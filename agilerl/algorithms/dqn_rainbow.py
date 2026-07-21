@@ -1,5 +1,6 @@
-from typing import Any
+from typing import Any, cast
 
+import gymnasium as gym
 import numpy as np
 import torch
 from accelerate import Accelerator
@@ -18,8 +19,8 @@ from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.q_networks import RainbowQNetwork
 from agilerl.typing import (
     ExperiencesType,
-    GymEnvType,
     ObservationType,
+    PrioritizedReplayBatch,
     SupportedObservationSpace,
     TorchObsType,
 )
@@ -81,6 +82,12 @@ class RainbowDQN(RLAlgorithm):
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """
+
+    # Narrowed from RLAlgorithm.action_space; enforced at construction.
+    action_space: spaces.Discrete
+
+    # Discrete action space, so the network output size is a plain int
+    action_dim: int
 
     def __init__(
         self,
@@ -205,14 +212,14 @@ class RainbowDQN(RLAlgorithm):
         else:
             net_config = {} if net_config is None else net_config
             net_config.pop("simba", None)
-            head_config: dict[str, Any] | None = net_config.get("head_config", {})
+            raw_head_config: dict[str, Any] = net_config.get("head_config", {})
 
             head_config = MlpNetConfig(
-                hidden_size=head_config.get("hidden_size", [64]),
+                hidden_size=raw_head_config.get("hidden_size", [64]),
                 noise_std=self.noise_std,
                 output_activation="ReLU",
-                min_mlp_nodes=head_config.get("min_mlp_nodes", 16),
-                max_mlp_nodes=head_config.get("max_mlp_nodes", 500),
+                min_mlp_nodes=raw_head_config.get("min_mlp_nodes", 16),
+                max_mlp_nodes=raw_head_config.get("max_mlp_nodes", 500),
             )
             net_config["head_config"] = head_config
 
@@ -259,7 +266,7 @@ class RainbowDQN(RLAlgorithm):
     def get_action(
         self,
         obs: ObservationType,
-        action_mask: np.ndarray | None = None,
+        action_mask: np.ndarray | list[np.ndarray] | None = None,
         training: bool = True,
         *args: Any,
         **kwargs: Any,
@@ -269,7 +276,7 @@ class RainbowDQN(RLAlgorithm):
         :param obs: State observation, or multiple observations in a batch
         :type obs: numpy.ndarray[float]
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
-        :type action_mask: numpy.ndarray, optional
+        :type action_mask: numpy.ndarray | list[numpy.ndarray], optional
         :param training: Flag indicating whether the model is in training mode, defaults to True
         :type training: bool, optional
         :return: The action to take
@@ -285,11 +292,9 @@ class RainbowDQN(RLAlgorithm):
             action = np.argmax(action_values.cpu().data.numpy(), axis=-1)
         else:
             # Need to stack if vectorized env
-            action_mask = (
-                np.stack(action_mask)
-                if action_mask.dtype == object or isinstance(action_mask, list)
-                else action_mask
-            )
+            if isinstance(action_mask, list) or action_mask.dtype == object:
+                action_mask = np.stack(list(action_mask))
+
             inv_mask = 1 - action_mask
             masked_action_values = np.ma.array(
                 action_values.cpu().data.numpy(),
@@ -309,7 +314,7 @@ class RainbowDQN(RLAlgorithm):
         obs: TorchObsType,
         actions: torch.Tensor,
         rewards: torch.Tensor,
-        next_obs: torch.Tensor,
+        next_obs: TorchObsType,
         dones: torch.Tensor,
         gamma: float,
     ) -> torch.Tensor:
@@ -322,7 +327,7 @@ class RainbowDQN(RLAlgorithm):
         :param rewards: Batch of rewards received
         :type rewards: torch.Tensor
         :param next_obs: Batch of next states
-        :type next_obs: torch.Tensor
+        :type next_obs: torch.Tensor, dict[str, torch.Tensor], tuple[torch.Tensor]
         :param dones: Batch of done flags indicating episode termination
         :type dones: torch.Tensor
         :param gamma: Discount factor
@@ -394,7 +399,7 @@ class RainbowDQN(RLAlgorithm):
         experiences: ExperiencesType,
         n_experiences: ExperiencesType | None = None,
         per: bool = False,
-    ) -> tuple[float, np.ndarray | None, np.ndarray | None]:
+    ) -> tuple[float, torch.Tensor | None, np.ndarray | None]:
         """Update agent network parameters to learn from experiences.
 
         :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
@@ -405,27 +410,31 @@ class RainbowDQN(RLAlgorithm):
         :type per: bool, optional
 
         :return: Tuple of loss, indices, and new priorities
-        :rtype: tuple[float, numpy.ndarray, numpy.ndarray]
+        :rtype: tuple[float, torch.Tensor | None, numpy.ndarray | None]
         """
-        n_step = n_experiences is not None
-        obs = experiences["obs"]
-        actions = experiences["action"]
-        rewards = experiences["reward"]
-        next_obs = experiences["next_obs"]
-        dones = experiences["done"]
+        # Off-policy replay buffers sample batches as TensorDicts keyed by field
+        # name (components/replay_buffer.py), which guarantees this layout.
+        batch = cast("PrioritizedReplayBatch", experiences)
+        n_batch = cast("PrioritizedReplayBatch | None", n_experiences)
+        n_step = n_batch is not None
+        obs = batch["obs"]
+        actions = batch["action"]
+        rewards = batch["reward"]
+        next_obs = batch["next_obs"]
+        dones = batch["done"]
 
         # Initialize n-step variables if n_step is True
         if n_step:
-            n_obs = n_experiences["obs"]
-            n_actions = n_experiences["action"]
-            n_rewards = n_experiences["reward"]
-            n_next_obs = n_experiences["next_obs"]
-            n_dones = n_experiences["done"]
+            n_obs = n_batch["obs"]
+            n_actions = n_batch["action"]
+            n_rewards = n_batch["reward"]
+            n_next_obs = n_batch["next_obs"]
+            n_dones = n_batch["done"]
 
         elementwise_loss: torch.Tensor | None = None
         if per:
-            weights = experiences["weights"]
-            idxs = experiences["idxs"]
+            weights = batch["weights"]
+            idxs = batch["idxs"]
 
             if self.combined_reward or not n_step:
                 elementwise_loss = self._dqn_loss(
@@ -446,8 +455,9 @@ class RainbowDQN(RLAlgorithm):
                     n_dones,
                     n_gamma,
                 )
-                if self.combined_reward:
-                    elementwise_loss += n_step_elementwise_loss
+                # elementwise_loss is non-None here iff combined_reward is set
+                if elementwise_loss is not None:
+                    elementwise_loss = elementwise_loss + n_step_elementwise_loss
                 else:
                     elementwise_loss = n_step_elementwise_loss
 
@@ -458,7 +468,7 @@ class RainbowDQN(RLAlgorithm):
 
         else:
             if n_step:
-                idxs = experiences["idxs"]
+                idxs = batch["idxs"]
             else:
                 idxs = None
 
@@ -483,8 +493,9 @@ class RainbowDQN(RLAlgorithm):
                     n_dones,
                     n_gamma,
                 )
-                if self.combined_reward:
-                    elementwise_loss += n_step_elementwise_loss
+                # elementwise_loss is non-None here iff combined_reward is set
+                if elementwise_loss is not None:
+                    elementwise_loss = elementwise_loss + n_step_elementwise_loss
                 else:
                     elementwise_loss = n_step_elementwise_loss
 
@@ -527,14 +538,14 @@ class RainbowDQN(RLAlgorithm):
 
     def test(
         self,
-        env: GymEnvType,
+        env: gym.vector.VectorEnv,
         max_steps: int | None = None,
         loop: int = 3,
     ) -> float:
         """Return mean test score of agent in environment with epsilon-greedy policy.
 
-        :param env: The environment to be tested in
-        :type env: Gym-style environment
+        :param env: The vectorized environment to be tested in
+        :type env: gym.vector.VectorEnv
         :param max_steps: Maximum number of testing steps, defaults to None
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean over these tests. Defaults to 3
@@ -569,6 +580,6 @@ class RainbowDQN(RLAlgorithm):
 
                 rewards.append(np.mean(completed_episode_scores))
 
-        mean_fit = np.mean(rewards)
+        mean_fit = float(np.mean(rewards))
         self.metrics.add_fitness(mean_fit)
         return mean_fit

@@ -41,7 +41,7 @@ class EvolvableResNet(EvolvableModule):
     :param max_channel_size: Maximum number of channels in each convolutional layer, defaults to 256
     :type max_channel_size: int
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
-    :type device: str, optional
+    :type device: DeviceType, optional
     :param name: Name of the network, defaults to 'resnet'
     :type name: str, optional
     :param random_seed: Random seed to use for the network. Defaults to None.
@@ -144,7 +144,7 @@ class EvolvableResNet(EvolvableModule):
         :return: The created convolutional neural network.
         :rtype: nn.Sequential
         """
-        # Build the main convolutional block
+        # Build the main convolutional block as named modules for nn.Sequential.
         net_dict = create_resnet(
             input_channels=input_shape[0],
             channel_size=channel_size,

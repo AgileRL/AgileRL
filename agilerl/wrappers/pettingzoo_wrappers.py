@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from gymnasium import spaces
 
 
-class PettingZooAutoResetParallelWrapper(ParallelEnv):
+class PettingZooAutoResetParallelWrapper(ParallelEnv[AgentID, ObsType, ActionType]):
     """Wrapper to automatically reset the environment when all agents terminate or truncate.
 
     :param env: The environment to wrap
@@ -22,7 +22,7 @@ class PettingZooAutoResetParallelWrapper(ParallelEnv):
     metadata: dict[str, Any]
     possible_agents: list[AgentID]
     state_space: spaces.Space | None
-    np_random: np.random.RandomState
+    np_random: np.random.Generator
     agents: list[AgentID]
 
     def __init__(self, env: ParallelEnv[AgentID, ObsType, ActionType]) -> None:
@@ -33,7 +33,7 @@ class PettingZooAutoResetParallelWrapper(ParallelEnv):
         # Not every environment has the .state_space attribute implemented
         with contextlib.suppress(AttributeError):
             self.state_space = (
-                self.env.state_space  # pyright: ignore[reportGeneralTypeIssues]
+                self.env.state_space  # ty: ignore[unresolved-attribute] # optional PettingZoo extension, guarded by suppress(AttributeError)
             )
 
     def reset(
@@ -99,11 +99,16 @@ class PettingZooAutoResetParallelWrapper(ParallelEnv):
         return self.env.unwrapped
 
     @property
-    def state(self) -> np.ndarray:
-        """Return the state of the environment.
+    def state(self) -> Any:
+        """Return the state of the wrapped environment.
+
+        PettingZoo declares ``state`` as a method on ``ParallelEnv``, but many
+        environments (including PettingZoo's own tutorial environments) instead
+        expose it as an attribute holding the latest observations, so whatever
+        the wrapped environment provides is passed through unchanged.
 
         :return: State of the environment
-        :rtype: np.ndarray
+        :rtype: Any
         """
         return self.env.state
 

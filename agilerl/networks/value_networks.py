@@ -5,8 +5,9 @@ from gymnasium import spaces
 
 from agilerl.modules import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
-from agilerl.networks.base import EvolvableNetwork
-from agilerl.typing import NetConfigType, TorchObsType
+from agilerl.modules.mlp import EvolvableMLP
+from agilerl.networks.base import EvolvableNetwork, preserve_parameters
+from agilerl.typing import DeviceType, NetConfigType, TorchObsType
 
 
 class ValueNetwork(EvolvableNetwork):
@@ -34,10 +35,12 @@ class ValueNetwork(EvolvableNetwork):
     :param recurrent: Whether to use a recurrent network.
     :type recurrent: bool
     :param device: Device to run the network on.
-    :type device: str
+    :type device: DeviceType
     :param random_seed: Random seed to use for the network. Defaults to None.
     :type random_seed: int | None
     """
+
+    head_net: EvolvableMLP
 
     def __init__(
         self,
@@ -50,7 +53,7 @@ class ValueNetwork(EvolvableNetwork):
         latent_dim: int = 64,
         simba: bool = False,
         recurrent: bool = False,
-        device: str = "cpu",
+        device: DeviceType = "cpu",
         random_seed: int | None = None,
         encoder_name: str = "encoder",
     ) -> None:
@@ -76,11 +79,11 @@ class ValueNetwork(EvolvableNetwork):
         # Build the network head
         self.build_network_head(head_config)
 
-    def get_output_dense(self) -> torch.nn.Linear:
+    def get_output_dense(self) -> torch.nn.Module:
         """Return the output dense layer of the network.
 
         :return: Output dense layer.
-        :rtype: torch.nn.Linear
+        :rtype: torch.nn.Module
         """
         return self.head_net.get_output_dense()
 
@@ -100,18 +103,20 @@ class ValueNetwork(EvolvableNetwork):
     def forward(
         self,
         x: TorchObsType,
-        hidden_state: TorchObsType | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        hidden_state: dict[str, torch.Tensor] | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Forward pass of the network.
 
         :param x: Input tensor.
         :type x: torch.Tensor, dict[str, torch.Tensor], or list[torch.Tensor]
-        :return: Output tensor.
-        :rtype: torch.Tensor
+        :param hidden_state: Hidden states for recurrent networks, defaults to None.
+        :type hidden_state: dict[str, torch.Tensor] | None
+        :return: Output tensor, and (for recurrent networks) the next hidden-state dict.
+        :rtype: torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]
         """
         if self.recurrent:
-            latent, hidden_state = self.extract_features(x, hidden_state=hidden_state)
-            return self.head_net(latent), hidden_state
+            latent, next_hidden = self.extract_features(x, hidden_state=hidden_state)
+            return self.head_net(latent), next_hidden
         latent = self.extract_features(x)
         return self.head_net(latent)
 
@@ -126,4 +131,4 @@ class ValueNetwork(EvolvableNetwork):
             net_config=self.head_net.net_config,
         )
 
-        self.head_net = EvolvableModule.preserve_parameters(self.head_net, head_net)
+        self.head_net = preserve_parameters(self.head_net, head_net)

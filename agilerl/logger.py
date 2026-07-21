@@ -19,7 +19,8 @@ from typing import TYPE_CHECKING
 try:
     from torch.utils.tensorboard import SummaryWriter
 except ImportError:
-    SummaryWriter = None
+    # Sentinel checked in TensorboardLogger.__init__; tensorboard is optional.
+    SummaryWriter = None  # ty: ignore[invalid-assignment]
 
 import wandb
 
@@ -71,7 +72,8 @@ class Logger(ABC):
 def _is_notebook() -> bool:
     """Detect whether we are running inside a Jupyter/IPython notebook."""
     try:
-        from IPython import get_ipython
+        # IPython is not a dependency; only present in notebook environments.
+        from IPython import get_ipython  # ty: ignore[unresolved-import]
 
         shell = get_ipython()
         return shell is not None and shell.__class__.__name__ == "ZMQInteractiveShell"
@@ -183,14 +185,16 @@ class CSVLogger(Logger):
         data = report.to_dict()
 
         # Write header if file is not opened
-        if self._writer is None:
-            self._file = self._path.open("w", newline="")
-            self._writer = csv.DictWriter(self._file, fieldnames=list(data.keys()))
+        file = self._file
+        if self._writer is None or file is None:
+            file = self._path.open("w", newline="")
+            self._file = file
+            self._writer = csv.DictWriter(file, fieldnames=list(data.keys()))
             self._writer.writeheader()
 
         # Write data to file
         self._writer.writerow(data)
-        self._file.flush()
+        file.flush()
 
     def close(self) -> None:
         """Close the CSV file."""

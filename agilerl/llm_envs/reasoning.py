@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
@@ -14,7 +14,7 @@ from agilerl.typing import ReasoningPrompts
 if TYPE_CHECKING:
     from accelerate import Accelerator
     from datasets import Dataset
-    from transformers import AutoTokenizer
+    from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 
 class ReasoningGym(HuggingFaceGym):
@@ -25,7 +25,7 @@ class ReasoningGym(HuggingFaceGym):
     :param test_dataset: The test dataset.
     :type test_dataset: Dataset
     :param tokenizer: The tokenizer.
-    :type tokenizer: AutoTokenizer
+    :type tokenizer: PreTrainedTokenizerBase
     :param data_batch_size_per_gpu: The batch size per GPU.
     :type data_batch_size_per_gpu: int
     :param accelerator: The accelerator.
@@ -44,7 +44,7 @@ class ReasoningGym(HuggingFaceGym):
         self,
         train_dataset: Dataset,
         test_dataset: Dataset,
-        tokenizer: AutoTokenizer,
+        tokenizer: PreTrainedTokenizerBase,
         reward_fn: Callable[[str, str, str], float],
         conversation_template: list[dict[str, str]],
         data_batch_size_per_gpu: int = 8,
@@ -76,7 +76,7 @@ class ReasoningGym(HuggingFaceGym):
 
     def step(
         self,
-        completions: torch.Tensor,
+        completions: list[torch.Tensor],
     ) -> tuple[list[ReasoningPrompts], torch.Tensor]:
         """Take a step in the ReasoningGym environment."""
         self.reset_called = False
@@ -88,7 +88,7 @@ class ReasoningGym(HuggingFaceGym):
     def reset(
         self,
         reset_dataloaders: bool = False,
-    ) -> tuple[list[ReasoningPrompts], dict[str, Any]]:
+    ) -> list[ReasoningPrompts]:
         """Reset the environment and get the next batch of tokenized prompts."""
         if reset_dataloaders:
             self._reset_dataloaders()
@@ -134,20 +134,26 @@ class ReasoningGym(HuggingFaceGym):
             self.questions = batch["question"]
             self.answers = batch["answer"]
 
+            # A rollout prompt carries only the tokenized prompt and its raw
+            # text; the remaining ReasoningPrompts keys are filled in by the
+            # multi-turn machinery downstream.
             returned_prompts = [
-                {
-                    "input_ids": returned_prompt["input_ids"],
-                    "attention_mask": returned_prompt["attention_mask"],
-                    "text": (
-                        self.tokenizer.batch_decode(
-                            returned_prompt["input_ids"],
-                            skip_special_tokens=False,
-                            clean_up_tokenization_spaces=False,
-                        )[0]
-                        if self.return_raw_completions
-                        else None
-                    ),
-                }
+                cast(
+                    "ReasoningPrompts",
+                    {
+                        "input_ids": returned_prompt["input_ids"],
+                        "attention_mask": returned_prompt["attention_mask"],
+                        "text": (
+                            self.tokenizer.batch_decode(
+                                returned_prompt["input_ids"],
+                                skip_special_tokens=False,
+                                clean_up_tokenization_spaces=False,
+                            )[0]
+                            if self.return_raw_completions
+                            else None
+                        ),
+                    },
+                )
                 for returned_prompt in batch["tokenized_prompts"]
             ]
         except StopIteration:
@@ -163,15 +169,20 @@ class ReasoningGym(HuggingFaceGym):
 
     def create_collate_fn(
         self,
-        tokenizer: AutoTokenizer,
+        tokenizer: PreTrainedTokenizerBase,
     ) -> Callable[[list[dict[str, Any]]], dict[str, Any]]:
         """Create a collate function that applies the chat template."""
 
         def collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
+            conversation_template = self.conversation_template
+            if conversation_template is None:
+                msg = "ReasoningGym requires a conversation template."
+                raise ValueError(msg)
+
             questions = [item["question"] for item in batch]
             answers = [item["answer"] for item in batch]
             tokenized_prompts = [
-                apply_chat_template(self.conversation_template, q, a, tokenizer)
+                apply_chat_template(conversation_template, q, a, tokenizer)
                 for q, a in zip(questions, answers, strict=False)
             ]
             return {

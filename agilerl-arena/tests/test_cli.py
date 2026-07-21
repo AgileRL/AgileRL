@@ -7,6 +7,8 @@ from unittest.mock import MagicMock, patch
 
 import click
 import pytest
+from click.testing import CliRunner
+
 from agilerl.arena.cli import (
     _redact_agent_rows_for_display,
     arena_client,
@@ -14,7 +16,6 @@ from agilerl.arena.cli import (
 )
 from agilerl.arena.config import CommandConfig, build_client
 from agilerl.arena.exceptions import ArenaAPIError
-from click.testing import CliRunner
 
 
 @pytest.fixture

@@ -1,3 +1,4 @@
+from collections.abc import ItemsView
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -24,19 +25,19 @@ class NetConfig:
 
         return cls.from_dict(net_config)
 
-    def __getitem__(self, key: str) -> Any:
+    def __getitem__(self, key: str) -> Any:  # noqa: ANN401 -- config fields are heterogeneous
         return getattr(self, key)
 
-    def __setitem__(self, key: str, value: Any) -> None:
+    def __setitem__(self, key: str, value: Any) -> None:  # noqa: ANN401 -- config fields are heterogeneous
         setattr(self, key, value)
 
     def __contains__(self, key: str) -> bool:
         return hasattr(self, key)
 
-    def get(self, key: str, default: Any = None) -> Any:
+    def get(self, key: str, default: Any = None) -> Any:  # noqa: ANN401 -- config fields are heterogeneous
         return getattr(self, key, default)
 
-    def pop(self, key: str, default: Any = None) -> Any:
+    def pop(self, key: str, default: Any = None) -> Any:  # noqa: ANN401 -- config fields are heterogeneous
         attr = getattr(self, key, default)
         if attr is not default:
             delattr(self, key)
@@ -48,7 +49,7 @@ class NetConfig:
     def values(self) -> list[Any]:
         return [getattr(self, key) for key in self.keys()]
 
-    def items(self) -> dict[str, Any]:
+    def items(self) -> ItemsView[str, Any]:
         return {key: getattr(self, key) for key in self.keys()}.items()
 
 
@@ -154,8 +155,8 @@ class MultiInputNetConfig(NetConfig):
     output_activation: str | None = field(default=None)
 
     # Network configurations
-    cnn_config: NetConfigType | None = field(default=None)
-    mlp_config: NetConfigType | None = field(default=None)
+    cnn_config: "NetConfigType | CnnNetConfig | None" = field(default=None)
+    mlp_config: "NetConfigType | MlpNetConfig | None" = field(default=None)
 
     # Additional settings
     init_dicts: dict[str, dict[str, Any]] = field(default_factory=dict)

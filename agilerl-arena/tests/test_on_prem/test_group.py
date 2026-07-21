@@ -6,6 +6,8 @@ from unittest.mock import MagicMock, patch
 
 import click
 import pytest
+from click.testing import CliRunner
+
 from agilerl.arena.client import ArenaClient
 from agilerl.arena.config import CommandConfig
 from agilerl.arena.on_prem import (
@@ -18,7 +20,6 @@ from agilerl.arena.on_prem.group import (
     _ON_PREM_ENSURED_META_KEY,
     OnPremDynamicGroup,
 )
-from click.testing import CliRunner
 
 
 class TestCapsAllowOnPremAtRoot:

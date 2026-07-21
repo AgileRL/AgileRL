@@ -4,7 +4,7 @@ import logging
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -47,7 +47,10 @@ else:
 
 logger = logging.getLogger(__name__)
 
-AlgoSpecTV = TypeVar("AlgoSpecTV", bound="AlgorithmSpec")
+# TypeVar bound to the concrete algorithm-spec union ``AlgoSpecT`` (defined at
+# the bottom of this file): the registration decorators need a TypeVar, rather
+# than the union alias itself, to return the same spec subclass they wrap.
+AlgoSpecTV = TypeVar("AlgoSpecTV", bound="AlgoSpecT")
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,7 +60,7 @@ class RegistryEntry:
     :param spec_cls: The algorithm spec class.
     """
 
-    spec_cls: type[AlgorithmSpec]
+    spec_cls: type[AlgoSpecT]
 
 
 class AlgorithmRegistry:
@@ -70,13 +73,13 @@ class AlgorithmRegistry:
     def __init__(self) -> None:
         self._entries: dict[str, RegistryEntry] = {}
 
-    def add(self, name: str, spec_cls: type[AlgorithmSpec]) -> None:
+    def add(self, name: str, spec_cls: type[AlgoSpecT]) -> None:
         """Register a spec class under *name*.
 
         :param name: Algorithm name (e.g. ``"DQN"``).
         :type name: str
         :param spec_cls: The spec class to register.
-        :type spec_cls: type[AlgorithmSpec]
+        :type spec_cls: type[AlgoSpecT]
         """
         if name in self._entries:
             logger.warning("Overriding existing registration for algorithm %r", name)
@@ -103,14 +106,14 @@ class AlgorithmRegistry:
 ALGO_REGISTRY = AlgorithmRegistry()
 
 
-def register() -> Callable[[type[AlgorithmSpec]], type[AlgorithmSpec]]:
+def register() -> Callable[[type[AlgoSpecTV]], type[AlgoSpecTV]]:
     """Class decorator that registers an algorithm spec.
 
     The registry key is derived from the spec class name by stripping
     the ``"Spec"`` suffix (e.g. ``DQNSpec`` -> ``"DQN"``).
 
     :returns: The decorator function.
-    :rtype: Callable[[type[AlgorithmSpec]], type[AlgorithmSpec]]
+    :rtype: Callable[[type[AlgoSpecTV]], type[AlgoSpecTV]]
 
     Example::
 
@@ -119,7 +122,7 @@ def register() -> Callable[[type[AlgorithmSpec]], type[AlgorithmSpec]]:
             ...
     """
 
-    def decorator(spec_cls: type[AlgorithmSpec]) -> type[AlgorithmSpec]:
+    def decorator(spec_cls: type[AlgoSpecTV]) -> type[AlgoSpecTV]:
         name = spec_cls.__name__.removesuffix("Spec")
         ALGO_REGISTRY.add(name, spec_cls)
         return spec_cls
@@ -234,7 +237,9 @@ class AlgorithmSpec(BaseModel):
     bandit: ClassVar[bool] = False
     default_evo_steps: ClassVar[int] = 10_000
 
-    _algo_class_cache: ClassVar[type | None] = None
+    _algo_class_cache: ClassVar[
+        type[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm] | None
+    ] = None
 
     agent_type: ClassVar[AgentType]
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -279,8 +284,8 @@ class AlgorithmSpec(BaseModel):
         *,
         training: TrainingSpec,
         env_spec: EnvSpecT,
-        memory: ReplayBufferT = None,
-        n_step_memory: ReplayBufferT = None,
+        memory: ReplayBufferT | None = None,
+        n_step_memory: ReplayBufferT | None = None,
     ) -> dict[str, Any]:
         """Return additional kwargs for the training loop.
 
@@ -297,7 +302,9 @@ class AlgorithmSpec(BaseModel):
         """
         kwargs = {}
         if isinstance(self, LLMAlgorithmSpec):
-            if env_spec.max_reward is not None:
+            from agilerl.models.env import LLMEnvSpec
+
+            if isinstance(env_spec, LLMEnvSpec) and env_spec.max_reward is not None:
                 kwargs["max_reward"] = env_spec.max_reward
 
             if training.checkpoint_steps is not None:
@@ -341,13 +348,16 @@ class AlgorithmSpec(BaseModel):
             if n_step_memory is not None:
                 kwargs["n_step_memory"] = n_step_memory
         elif self.offline:
-            if env_spec.minari_dataset_id is not None:
-                kwargs["minari_dataset_id"] = env_spec.minari_dataset_id
-                kwargs["remote"] = env_spec.remote
-            elif env_spec.dataset_path is not None:
-                import h5py
+            from agilerl.models.env import OfflineEnvSpec
 
-                kwargs["dataset"] = h5py.File(env_spec.dataset_path, "r")
+            if isinstance(env_spec, OfflineEnvSpec):
+                if env_spec.minari_dataset_id is not None:
+                    kwargs["minari_dataset_id"] = env_spec.minari_dataset_id
+                    kwargs["remote"] = env_spec.remote
+                elif env_spec.dataset_path is not None:
+                    import h5py
+
+                    kwargs["dataset"] = h5py.File(env_spec.dataset_path, "r")
         if self.bandit:
             kwargs["episode_steps"] = training.episode_steps
         if self.agent_type == AgentType.MultiAgent:
@@ -401,7 +411,8 @@ class RLAlgorithmSpec(AlgorithmSpec):
                 "action_space, and index."
             )
             raise ValueError(msg)
-        algo_cls = self.algo_class()
+        # The naming convention pairs each spec family with its algorithm base.
+        algo_cls = cast("type[RLAlgorithm]", self.algo_class())
         algo = algo_cls(
             observation_space=observation_space,
             action_space=action_space,
@@ -463,7 +474,8 @@ class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
                 "observation_spaces, action_spaces, and index."
             )
             raise ValueError(msg)
-        algo_cls = self.algo_class()
+        # The naming convention pairs each spec family with its algorithm base.
+        algo_cls = cast("type[MultiAgentRLAlgorithm]", self.algo_class())
         algo = algo_cls(
             observation_spaces=observation_spaces,
             action_spaces=action_spaces,
@@ -593,7 +605,8 @@ class LLMAlgorithmSpec(AlgorithmSpec):
             model_config.setdefault("attn_implementation", attn_implementation)
             kwargs["model_config"] = model_config
 
-        algo_cls = self.algo_class()
+        # The naming convention pairs each spec family with its algorithm base.
+        algo_cls = cast("type[LLMAlgorithm]", self.algo_class())
         algo = algo_cls(
             model_name=self.pretrained_model_name_or_path,
             pad_token_id=tokenizer.eos_token_id,

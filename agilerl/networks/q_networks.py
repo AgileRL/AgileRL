@@ -9,7 +9,7 @@ from agilerl.modules import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig, NetConfig
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.custom_modules import DuelingDistributionalMLP
-from agilerl.typing import ArrayOrTensor, NetConfigType, TorchObsType
+from agilerl.typing import ArrayOrTensor, DeviceType, NetConfigType, TorchObsType
 from agilerl.utils.evolvable_networks import (
     get_default_encoder_config,
     is_image_space,
@@ -48,7 +48,7 @@ class QNetwork(EvolvableNetwork):
     Otherwise, an `EvolvableLSTM` is used as an encoder.
     :type recurrent: bool
     :param device: Device to use for the network.
-    :type device: str
+    :type device: DeviceType
     :param random_seed: Random seed to use for the network. Defaults to None.
     :type random_seed: int | None
     """
@@ -67,7 +67,7 @@ class QNetwork(EvolvableNetwork):
         latent_dim: int = 64,
         simba: bool = False,
         recurrent: bool = False,
-        device: str = "cpu",
+        device: DeviceType = "cpu",
         random_seed: int | None = None,
     ) -> None:
         super().__init__(
@@ -165,7 +165,7 @@ class RainbowQNetwork(EvolvableNetwork):
     :param latent_dim: Dimension of the latent space representation.
     :type latent_dim: int
     :param device: Device to use for the network.
-    :type device: str
+    :type device: DeviceType
     :param random_seed: Random seed to use for the network. Defaults to None.
     :type random_seed: int | None
     """
@@ -182,7 +182,7 @@ class RainbowQNetwork(EvolvableNetwork):
         min_latent_dim: int = 8,
         max_latent_dim: int = 128,
         latent_dim: int = 64,
-        device: str = "cpu",
+        device: DeviceType = "cpu",
         random_seed: int | None = None,
     ) -> None:
 
@@ -328,7 +328,7 @@ class ContinuousQNetwork(EvolvableNetwork):
     :param recurrent: Whether to use a recurrent network. Defaults to False.
     :type recurrent: bool
     :param device: Device to use for the network.
-    :type device: str
+    :type device: DeviceType
     :param random_seed: Random seed to use for the network. Defaults to None.
     :type random_seed: int | None
     """
@@ -349,7 +349,7 @@ class ContinuousQNetwork(EvolvableNetwork):
         latent_dim: int = 64,
         simba: bool = False,
         recurrent: bool = False,
-        device: str = "cpu",
+        device: DeviceType = "cpu",
         random_seed: int | None = None,
     ) -> None:
         # NOTE: Need to disable layer normalization for the encoder since we're

@@ -619,13 +619,13 @@ class TestPPOGetAction:
 
         if isinstance(action_space, spaces.Discrete):
             for act in action:
-                assert act.is_integer()
+                assert float(act).is_integer()
                 assert act >= 0
                 assert act < action_space.n
         elif isinstance(action_space, spaces.MultiDiscrete):
             assert len(action[0]) == len(action_space.nvec)
             for i, act in enumerate(action[0]):
-                assert act.is_integer()
+                assert float(act).is_integer()
                 assert act >= 0
                 assert act < action_space.nvec[i]
         elif isinstance(action_space, spaces.MultiBinary):
@@ -696,13 +696,13 @@ class TestPPOGetAction:
 
         if isinstance(action_space, spaces.Discrete):
             for act in action:
-                assert act.is_integer()
+                assert float(act).is_integer()
                 assert act >= 0
                 assert act < action_space.n
         elif isinstance(action_space, spaces.MultiDiscrete):
             assert len(action[0]) == len(action_space.nvec)
             for i, act in enumerate(action[0]):
-                assert act.is_integer()
+                assert float(act).is_integer()
                 assert act >= 0
                 assert act < action_space.nvec[i]
         elif isinstance(action_space, spaces.MultiBinary):

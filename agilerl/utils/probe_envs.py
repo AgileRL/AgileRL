@@ -11,7 +11,22 @@ from agilerl.components.data import Transition
 from agilerl.rollouts import collect_rollouts
 
 
-class ConstantRewardEnv(gym.Env):
+class ProbeEnv(gym.Env[Any, Any]):
+    """Base class for probe environments.
+
+    Declares the ground-truth attributes the probe checkers read. Not every
+    probe environment defines all of them (e.g. discrete-action probes have no
+    ``sample_actions``); subclasses set the ones relevant to their check.
+    """
+
+    sample_obs: list[Any]
+    sample_actions: list[Any]
+    q_values: list[Any] | np.ndarray
+    v_values: list[Any]
+    policy_values: list[Any]
+
+
+class ConstantRewardEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Discrete(1)
         self.action_space = spaces.Discrete(1)
@@ -41,7 +56,7 @@ class ConstantRewardEnv(gym.Env):
         return observation, info
 
 
-class ConstantRewardImageEnv(gym.Env):
+class ConstantRewardImageEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Box(0.0, 0.0, (1, 3, 3))
         self.action_space = spaces.Discrete(1)
@@ -71,7 +86,7 @@ class ConstantRewardImageEnv(gym.Env):
         return observation, info
 
 
-class ConstantRewardDictEnv(gym.Env):
+class ConstantRewardDictEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Dict(
             {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 0.0, (1, 3, 3))},
@@ -103,7 +118,7 @@ class ConstantRewardDictEnv(gym.Env):
         return observation, info
 
 
-class ConstantRewardContActionsEnv(gym.Env):
+class ConstantRewardContActionsEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Discrete(1)
         self.action_space = spaces.Box(0.0, 1.0, (1,))
@@ -134,7 +149,7 @@ class ConstantRewardContActionsEnv(gym.Env):
         return observation, info
 
 
-class ConstantRewardContActionsImageEnv(gym.Env):
+class ConstantRewardContActionsImageEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Box(0.0, 0.0, (1, 3, 3))
         self.action_space = spaces.Box(0.0, 1.0, (1,))
@@ -165,7 +180,7 @@ class ConstantRewardContActionsImageEnv(gym.Env):
         return observation, info
 
 
-class ConstantRewardContActionsDictEnv(gym.Env):
+class ConstantRewardContActionsDictEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Dict(
             {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 0.0, (1, 3, 3))},
@@ -198,7 +213,7 @@ class ConstantRewardContActionsDictEnv(gym.Env):
         return observation, info
 
 
-class ObsDependentRewardEnv(gym.Env):
+class ObsDependentRewardEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Discrete(2)
         self.action_space = spaces.Discrete(1)
@@ -228,7 +243,7 @@ class ObsDependentRewardEnv(gym.Env):
         return self.last_obs, info
 
 
-class ObsDependentRewardImageEnv(gym.Env):
+class ObsDependentRewardImageEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Box(0.0, 1.0, (1, 3, 3))
         self.action_space = spaces.Discrete(1)
@@ -260,7 +275,7 @@ class ObsDependentRewardImageEnv(gym.Env):
         return self.last_obs, info
 
 
-class ObsDependentRewardDictEnv(gym.Env):
+class ObsDependentRewardDictEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Dict(
             {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 1.0, (1, 3, 3))},
@@ -305,7 +320,7 @@ class ObsDependentRewardDictEnv(gym.Env):
         return self.last_obs, info
 
 
-class ObsDependentRewardContActionsEnv(gym.Env):
+class ObsDependentRewardContActionsEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Discrete(2)
         self.action_space = spaces.Box(0.0, 1.0, (1,))
@@ -337,7 +352,7 @@ class ObsDependentRewardContActionsEnv(gym.Env):
         return self.last_obs, info
 
 
-class ObsDependentRewardContActionsImageEnv(gym.Env):
+class ObsDependentRewardContActionsImageEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Box(0.0, 1.0, (1, 3, 3))
         self.action_space = spaces.Box(0.0, 1.0, (1,))
@@ -371,7 +386,7 @@ class ObsDependentRewardContActionsImageEnv(gym.Env):
         return self.last_obs, info
 
 
-class ObsDependentRewardContActionsDictEnv(gym.Env):
+class ObsDependentRewardContActionsDictEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Dict(
             {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 1.0, (1, 3, 3))},
@@ -418,7 +433,7 @@ class ObsDependentRewardContActionsDictEnv(gym.Env):
         return self.last_obs, info
 
 
-class DiscountedRewardEnv(gym.Env):
+class DiscountedRewardEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Discrete(2)
         self.action_space = spaces.Discrete(1)
@@ -433,7 +448,7 @@ class DiscountedRewardEnv(gym.Env):
     ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
         observation = 1
         reward = self.last_obs  # Reward depends on observation
-        terminated = self.last_obs  # Terminate after second step
+        terminated = bool(self.last_obs)  # Terminate after second step
         truncated = False
         info = {}
         self.last_obs = 1
@@ -449,7 +464,7 @@ class DiscountedRewardEnv(gym.Env):
         return self.last_obs, info
 
 
-class DiscountedRewardImageEnv(gym.Env):
+class DiscountedRewardImageEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Box(0.0, 1.0, (1, 3, 3))
         self.action_space = spaces.Discrete(1)
@@ -463,8 +478,8 @@ class DiscountedRewardImageEnv(gym.Env):
         action: int | np.ndarray,
     ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
         observation = np.ones((1, 3, 3))
-        reward = np.mean(self.last_obs)  # Reward depends on observation
-        terminated = int(np.mean(self.last_obs))  # Terminate after second step
+        reward = float(np.mean(self.last_obs))  # Reward depends on observation
+        terminated = bool(int(np.mean(self.last_obs)))  # Terminate after second step
         truncated = False
         info = {}
         self.last_obs = np.ones((1, 3, 3))
@@ -480,7 +495,7 @@ class DiscountedRewardImageEnv(gym.Env):
         return self.last_obs, info
 
 
-class DiscountedRewardDictEnv(gym.Env):
+class DiscountedRewardDictEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Dict(
             {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 1.0, (1, 3, 3))},
@@ -501,10 +516,12 @@ class DiscountedRewardDictEnv(gym.Env):
         action: int | np.ndarray,
     ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
         observation = {"discrete": 1, "box": np.ones((1, 3, 3))}
-        reward = (
+        reward = float(
             np.mean(self.last_obs["box"]) + self.last_obs["discrete"]
         )  # Reward depends on observation
-        terminated = int(np.mean(self.last_obs["box"]))  # Terminate after second step
+        terminated = bool(
+            int(np.mean(self.last_obs["box"]))
+        )  # Terminate after second step
         truncated = False
         info = {}
         self.last_obs = {"discrete": 1, "box": np.ones((1, 3, 3))}
@@ -520,7 +537,7 @@ class DiscountedRewardDictEnv(gym.Env):
         return self.last_obs, info
 
 
-class DiscountedRewardContActionsEnv(gym.Env):
+class DiscountedRewardContActionsEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Discrete(2)
         self.action_space = spaces.Box(0.0, 1.0, (1,))
@@ -537,7 +554,7 @@ class DiscountedRewardContActionsEnv(gym.Env):
     ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
         observation = 1
         reward = self.last_obs  # Reward depends on observation
-        terminated = self.last_obs  # Terminate after second step
+        terminated = bool(self.last_obs)  # Terminate after second step
         truncated = False
         info = {}
         self.last_obs = 1
@@ -553,7 +570,7 @@ class DiscountedRewardContActionsEnv(gym.Env):
         return self.last_obs, info
 
 
-class DiscountedRewardContActionsImageEnv(gym.Env):
+class DiscountedRewardContActionsImageEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Box(0.0, 1.0, (1, 3, 3))
         self.action_space = spaces.Box(0.0, 1.0, (1,))
@@ -569,8 +586,8 @@ class DiscountedRewardContActionsImageEnv(gym.Env):
         action: int | np.ndarray,
     ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
         observation = np.ones((1, 3, 3))
-        reward = np.mean(self.last_obs)  # Reward depends on observation
-        terminated = int(np.mean(self.last_obs))  # Terminate after second step
+        reward = float(np.mean(self.last_obs))  # Reward depends on observation
+        terminated = bool(int(np.mean(self.last_obs)))  # Terminate after second step
         truncated = False
         info = {}
         self.last_obs = np.ones((1, 3, 3))
@@ -586,7 +603,7 @@ class DiscountedRewardContActionsImageEnv(gym.Env):
         return self.last_obs, info
 
 
-class DiscountedRewardContActionsDictEnv(gym.Env):
+class DiscountedRewardContActionsDictEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Dict(
             {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 1.0, (1, 3, 3))},
@@ -607,10 +624,12 @@ class DiscountedRewardContActionsDictEnv(gym.Env):
         action: int | np.ndarray,
     ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
         observation = {"discrete": 1, "box": np.ones((1, 3, 3))}
-        reward = (
+        reward = float(
             np.mean(self.last_obs["box"]) + self.last_obs["discrete"]
         )  # Reward depends on observation
-        terminated = int(np.mean(self.last_obs["box"]))  # Terminate after second step
+        terminated = bool(
+            int(np.mean(self.last_obs["box"]))
+        )  # Terminate after second step
         truncated = False
         info = {}
         self.last_obs = {"discrete": 1, "box": np.ones((1, 3, 3))}
@@ -626,7 +645,7 @@ class DiscountedRewardContActionsDictEnv(gym.Env):
         return self.last_obs, info
 
 
-class FixedObsPolicyEnv(gym.Env):
+class FixedObsPolicyEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Discrete(1)
         self.action_space = spaces.Discrete(2)
@@ -640,7 +659,7 @@ class FixedObsPolicyEnv(gym.Env):
         action: int | np.ndarray,
     ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
         if isinstance(action, (np.ndarray, list)):
-            action = action[0]
+            action = int(np.asarray(action)[0])
         observation = 0
         reward = [-1, 1][action]  # Reward depends on action
         terminated = True
@@ -658,7 +677,7 @@ class FixedObsPolicyEnv(gym.Env):
         return observation, info
 
 
-class FixedObsPolicyImageEnv(gym.Env):
+class FixedObsPolicyImageEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Box(0.0, 0.0, (1, 3, 3))
         self.action_space = spaces.Discrete(2)
@@ -673,7 +692,7 @@ class FixedObsPolicyImageEnv(gym.Env):
     ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
         observation = np.zeros((1, 3, 3))
         if isinstance(action, (np.ndarray, list)):
-            action = action[0]
+            action = int(np.asarray(action)[0])
         reward = [-1, 1][action]  # Reward depends on action
         terminated = True
         truncated = False
@@ -690,7 +709,7 @@ class FixedObsPolicyImageEnv(gym.Env):
         return observation, info
 
 
-class FixedObsPolicyDictEnv(gym.Env):
+class FixedObsPolicyDictEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Dict(
             {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 0.0, (1, 3, 3))},
@@ -707,7 +726,7 @@ class FixedObsPolicyDictEnv(gym.Env):
     ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
         observation = {"discrete": 0, "box": np.zeros((1, 3, 3))}
         if isinstance(action, (np.ndarray, list)):
-            action = action[0]
+            action = int(np.asarray(action)[0])
         reward = [-1, 1][action]  # Reward depends on action
         terminated = True
         truncated = False
@@ -724,7 +743,7 @@ class FixedObsPolicyDictEnv(gym.Env):
         return observation, info
 
 
-class FixedObsPolicyContActionsEnv(gym.Env):
+class FixedObsPolicyContActionsEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Discrete(1)
         self.action_space = spaces.Box(0.0, 1.0, (1,))
@@ -736,7 +755,7 @@ class FixedObsPolicyContActionsEnv(gym.Env):
 
     def step(
         self,
-        action: int | np.ndarray,
+        action: np.ndarray,
     ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
         observation = 0
         reward = -((1 - action[0]) ** 2)  # Reward depends on action
@@ -755,7 +774,7 @@ class FixedObsPolicyContActionsEnv(gym.Env):
         return observation, info
 
 
-class FixedObsPolicyContActionsImageEnv(gym.Env):
+class FixedObsPolicyContActionsImageEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Box(0.0, 1.0, (1, 3, 3))
         self.action_space = spaces.Box(0.0, 1.0, (1,))
@@ -767,7 +786,7 @@ class FixedObsPolicyContActionsImageEnv(gym.Env):
 
     def step(
         self,
-        action: int | np.ndarray,
+        action: np.ndarray,
     ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
         observation = np.zeros((1, 3, 3))
         reward = -((1 - action[0]) ** 2)  # Reward depends on action
@@ -786,7 +805,7 @@ class FixedObsPolicyContActionsImageEnv(gym.Env):
         return observation, info
 
 
-class FixedObsPolicyContActionsDictEnv(gym.Env):
+class FixedObsPolicyContActionsDictEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Dict(
             {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 1.0, (1, 3, 3))},
@@ -800,7 +819,7 @@ class FixedObsPolicyContActionsDictEnv(gym.Env):
 
     def step(
         self,
-        action: int | np.ndarray,
+        action: np.ndarray,
     ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
         observation = {"discrete": 0, "box": np.zeros((1, 3, 3))}
         reward = -((1 - action[0]) ** 2)  # Reward depends on action
@@ -819,7 +838,7 @@ class FixedObsPolicyContActionsDictEnv(gym.Env):
         return observation, info
 
 
-class PolicyEnv(gym.Env):
+class PolicyEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Discrete(2)
         self.action_space = spaces.Discrete(2)
@@ -854,7 +873,7 @@ class PolicyEnv(gym.Env):
         return self.last_obs, info
 
 
-class PolicyImageEnv(gym.Env):
+class PolicyImageEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Box(0.0, 1.0, (1, 3, 3))
         self.action_space = spaces.Discrete(2)
@@ -889,7 +908,7 @@ class PolicyImageEnv(gym.Env):
         return self.last_obs, info
 
 
-class PolicyDictEnv(gym.Env):
+class PolicyDictEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Dict(
             {"discrete": spaces.Discrete(2), "box": spaces.Box(0.0, 1.0, (1, 3, 3))},
@@ -915,7 +934,7 @@ class PolicyDictEnv(gym.Env):
         action: int | np.ndarray,
     ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
         if isinstance(action, (np.ndarray, list)):
-            action = action[0]
+            action = int(np.asarray(action)[0])
         observation = {
             "discrete": self.last_obs["discrete"],
             "box": self.last_obs["box"],
@@ -944,7 +963,7 @@ class PolicyDictEnv(gym.Env):
         return self.last_obs, info
 
 
-class PolicyContActionsEnv(gym.Env):
+class PolicyContActionsEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Discrete(2)
         self.action_space = spaces.Box(0.0, 1.0, (2,))
@@ -957,7 +976,7 @@ class PolicyContActionsEnv(gym.Env):
 
     def step(
         self,
-        action: int | np.ndarray,
+        action: np.ndarray,
     ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
         observation = self.last_obs
         if self.last_obs:  # last obs = 1, policy should be [0, 1]
@@ -979,7 +998,7 @@ class PolicyContActionsEnv(gym.Env):
         return self.last_obs, info
 
 
-class PolicyContActionsImageEnvSimple(gym.Env):
+class PolicyContActionsImageEnvSimple(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Box(0.0, 1.0, (1, 3, 3))
         self.action_space = spaces.Box(0.0, 1.0, (1,))
@@ -1002,7 +1021,7 @@ class PolicyContActionsImageEnvSimple(gym.Env):
 
     def step(
         self,
-        action: int | np.ndarray,
+        action: np.ndarray,
     ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
         observation = self.last_obs
         if int(np.mean(self.last_obs)):  # last obs = 1, policy should be [1]
@@ -1029,7 +1048,7 @@ class PolicyContActionsImageEnvSimple(gym.Env):
         return self.last_obs, info
 
 
-class PolicyContActionsImageEnv(gym.Env):
+class PolicyContActionsImageEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Box(0.0, 1.0, (1, 3, 3))
         self.action_space = spaces.Box(0.0, 1.0, (2,))
@@ -1042,7 +1061,7 @@ class PolicyContActionsImageEnv(gym.Env):
 
     def step(
         self,
-        action: int | np.ndarray,
+        action: np.ndarray,
     ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
         observation = self.last_obs
         if int(np.mean(self.last_obs)):  # last obs = 1, policy should be [0, 1]
@@ -1064,7 +1083,7 @@ class PolicyContActionsImageEnv(gym.Env):
         return self.last_obs, info
 
 
-class PolicyContActionsDictEnv(gym.Env):
+class PolicyContActionsDictEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Dict(
             {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 1.0, (1, 3, 3))},
@@ -1082,7 +1101,7 @@ class PolicyContActionsDictEnv(gym.Env):
 
     def step(
         self,
-        action: int | np.ndarray,
+        action: np.ndarray,
     ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
         observation = {
             "discrete": self.last_obs["discrete"],
@@ -1113,7 +1132,7 @@ class PolicyContActionsDictEnv(gym.Env):
 
 
 def check_q_learning_with_probe_env(
-    env: gym.Env[Any, Any],
+    env: ProbeEnv,
     algo_class: type[Any],
     algo_args: dict[str, Any],
     memory: Any,
@@ -1161,7 +1180,7 @@ def check_q_learning_with_probe_env(
 
 
 def check_policy_q_learning_with_probe_env(
-    env: gym.Env[Any, Any],
+    env: ProbeEnv,
     algo_class: type[Any],
     algo_args: dict[str, Any],
     memory: Any,
@@ -1232,7 +1251,7 @@ def check_policy_q_learning_with_probe_env(
 
 
 def check_policy_on_policy_with_probe_env(
-    env: gym.Env[Any, Any],
+    env: ProbeEnv,
     algo_class: type[Any],
     algo_args: dict[str, Any],
     learn_steps: int = 5000,

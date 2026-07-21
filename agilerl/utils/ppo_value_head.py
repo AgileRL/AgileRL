@@ -7,17 +7,19 @@ the dtype of hidden states and ``nn.Linear`` weights.
 from __future__ import annotations
 
 import os
-from typing import Any
+from collections.abc import Callable
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
-from transformers import AutoModelForCausalLM, PreTrainedModel
+from transformers import AutoModelForCausalLM, GenerationConfig, PreTrainedModel
 
 try:
     from peft import PeftModel, get_peft_model
 except ImportError:  # pragma: no cover
-    PeftModel = None  # type: ignore[misc, assignment]
-    get_peft_model = None  # type: ignore[misc, assignment]
+    # peft is optional; leave sentinels that downstream ``is None`` checks gate on.
+    PeftModel = cast("Any", None)
+    get_peft_model = cast("Any", None)
 
 
 VALUE_HEAD_KWARGS = (
@@ -131,11 +133,11 @@ class AutoModelForCausalLMWithValueHead(nn.Module):
         self.pretrained_model.name_or_path = value
 
     @property
-    def generation_config(self):
+    def generation_config(self) -> GenerationConfig:
         return self.pretrained_model.generation_config
 
     @generation_config.setter
-    def generation_config(self, value) -> None:
+    def generation_config(self, value: GenerationConfig) -> None:
         self.pretrained_model.generation_config = value
 
     @property
@@ -148,7 +150,7 @@ class AutoModelForCausalLMWithValueHead(nn.Module):
         past_key_values: Any = None,
         attention_mask: torch.Tensor | None = None,
         **kwargs: Any,
-    ):
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
         if past_key_values is not None:
             kwargs["past_key_values"] = past_key_values
 
@@ -177,8 +179,11 @@ class AutoModelForCausalLMWithValueHead(nn.Module):
 
         return (lm_logits, loss, value)
 
-    def generate(self, *args: Any, **kwargs: Any):
-        return self.pretrained_model.generate(*args, **kwargs)
+    def generate(self, *args: Any, **kwargs: Any) -> Any:
+        # ``generate`` comes from GenerationMixin and resolves dynamically
+        # through ``nn.Module.__getattr__`` on the wrapped model.
+        generate_fn = cast("Callable[..., Any]", self.pretrained_model.generate)
+        return generate_fn(*args, **kwargs)
 
     def state_dict(self, *args: Any, **kwargs: Any) -> dict[str, torch.Tensor]:
         if not self.is_peft_model:

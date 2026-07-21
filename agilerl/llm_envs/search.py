@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import requests
+
+if TYPE_CHECKING:
+    from agilerl.protocols import MultiTurnEnv
 
 # Timeout for search request in seconds
 TIMEOUT = 5
@@ -15,7 +18,13 @@ TIMEOUT = 5
 class SearchTool:
     tool_type = "search"
 
-    def __init__(self, num_workers=1, search_url=None, topk=3, timeout=TIMEOUT):
+    def __init__(
+        self,
+        num_workers: int = 1,
+        search_url: str | None = None,
+        topk: int = 3,
+        timeout: float = TIMEOUT,
+    ) -> None:
         self.num_workers = num_workers
         self.search_url = search_url
         self.topk = topk
@@ -32,7 +41,7 @@ class SearchTool:
             return parsed_query, parsed_action, True
         return "", "", False
 
-    def _search(self, query: str):
+    def _search(self, query: str) -> str:
         """Perform a search using the configured search_url."""
         if not self._search_url_resolved:
             self.search_url = self.search_url or os.environ.get("SEARCH_URL")
@@ -58,7 +67,7 @@ class SearchTool:
         except Exception as e:
             return f"[SearchTool Error: {e}]"
 
-    def _passages2string(self, result):
+    def _passages2string(self, result: list[dict[str, Any]]) -> str:
         format_reference = ""
         for idx, doc_item in enumerate(result):
             content = doc_item["document"]["contents"]
@@ -81,7 +90,7 @@ class SearchTool:
             "  <answer> your answer here </answer>"
         )
 
-    def execute_action(self, action: str):
+    def execute_action(self, action: str) -> tuple[bool, bool, str, str]:
         """Execute parsed action for SearchTool."""
         parsed_query, parsed_action, is_valid = self._parse_action(action)
         if not is_valid:
@@ -99,22 +108,24 @@ class SearchTool:
 class FormatRewardWrapper:
     """Wraps a multi-turn environment to give a small bonus for <answer> tags."""
 
-    def __init__(self, env, format_bonus: float = 0.1):
+    def __init__(self, env: MultiTurnEnv, format_bonus: float = 0.1) -> None:
         self._env = env
         self._format_bonus = format_bonus
 
     @property
-    def format_bonus(self):
+    def format_bonus(self) -> float:
         return self._format_bonus
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._env, name)
 
-    def step(self, action: str, **kwargs):
+    def step(
+        self, action: str, **kwargs: Any
+    ) -> tuple[str | dict[str, Any], float, bool, bool, dict[str, Any]]:
         obs, reward, terminated, truncated, info = self._env.step(action, **kwargs)
         if terminated and "<answer>" in action and not info.get("correct", False):
             reward += self._format_bonus
         return obs, reward, terminated, truncated, info
 
-    def reset(self, **kwargs):
+    def reset(self, **kwargs: Any) -> tuple[str | dict[str, Any], dict[str, Any]]:
         return self._env.reset(**kwargs)

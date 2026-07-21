@@ -4,13 +4,28 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
 if TYPE_CHECKING:
     from agilerl.protocols import MultiTurnEnv
     from agilerl.typing import ReasoningPrompts
+
+
+def _as_prompt(obs: str | dict[str, Any]) -> ReasoningPrompts:
+    """Read a multi-turn observation as a tokenized prompt.
+
+    ``MultiTurnEnv`` covers both the text-observation envs and the tokenized
+    ones; this vector env only drives the latter, whose observation is the
+    prompt dict.
+
+    :param obs: The observation returned by the wrapped environment.
+    :type obs: str | dict[str, Any]
+    :returns: The observation as a tokenized prompt.
+    :rtype: ReasoningPrompts
+    """
+    return cast("ReasoningPrompts", obs)
 
 
 @dataclass
@@ -45,7 +60,7 @@ class Trajectory:
 class TrajectoryBuffer:
     """Container for synchronized rollout trajectories."""
 
-    def __init__(self, batch_size: int, group_size: int):
+    def __init__(self, batch_size: int, group_size: int) -> None:
         """Initialize an empty trajectory buffer.
 
         :param batch_size: Number of logical batch items.
@@ -128,7 +143,7 @@ class TrajectoryBuffer:
             )
             raise IndexError(msg)
         prompt_dict, _ = self.trajectories[env_idx].env.reset(seed=seed)
-        self.trajectories[env_idx].prompt = prompt_dict
+        self.trajectories[env_idx].prompt = _as_prompt(prompt_dict)
         self.trajectories[env_idx].done = False
         self.trajectories[env_idx].sampling_logps.clear()
 
@@ -152,7 +167,7 @@ class SyncMultiTurnVecEnv:
         batch_size: int,
         group_size: int,
         env_config: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         """Create ``batch_size * group_size`` independent environments.
 
         :param env_factory: Factory that builds one multi-turn environment.
@@ -206,7 +221,7 @@ class SyncMultiTurnVecEnv:
                             env=env_i,
                             batch_idx=batch_idx,
                             group_idx=group_idx,
-                            prompt=prompt_dict,
+                            prompt=_as_prompt(prompt_dict),
                             done=False,
                         )
                     )
@@ -256,7 +271,7 @@ class SyncMultiTurnVecEnv:
             )
             traj.done = bool(terminated or truncated)
             if not traj.done:
-                traj.prompt = next_prompt
+                traj.prompt = _as_prompt(next_prompt)
         return self.trajectories.get_prompts()
 
     def close(self) -> None:
@@ -300,7 +315,10 @@ class SyncMultiTurnVecEnv:
         batch_steps = 0
         self.trajectories.sort(key=lambda t: (t.batch_idx, t.group_idx))
         for traj in self.trajectories:
-            ep_ids, action_mask, turn_ids, turn_rewards_t = traj.env.get_episode_data()
+            # Episode accumulation is specific to the tokenized multi-turn envs
+            # this vector env drives; `MultiTurnEnv` only declares the reset /
+            # step / close surface shared with the text-observation envs.
+            ep_ids, action_mask, turn_ids, turn_rewards_t = traj.env.get_episode_data()  # ty: ignore[unresolved-attribute]
             completion_ids_list.append(ep_ids)
             action_masks_list.append(action_mask)
             all_turn_ids.append(turn_ids)

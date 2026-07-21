@@ -665,7 +665,7 @@ class TestRolloutBufferDataRetrieval:
         assert data == {}
 
     def test_get_tensor_batch_empty_buffer(self):
-        """Test get_tensor_batch() returns empty dict when buffer is empty."""
+        """Test get_tensor_batch() returns an empty TensorDict when the buffer is empty."""
         obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
         action_space = spaces.Discrete(2)
         buffer = RolloutBuffer(
@@ -676,7 +676,9 @@ class TestRolloutBufferDataRetrieval:
             device="cpu",
         )
         batch = buffer.get_tensor_batch()
-        assert batch == {}
+        # An empty TensorDict (not a plain dict) so callers can uniformly rely
+        # on TensorDict semantics such as ``is_empty()``.
+        assert batch.is_empty()
 
     def test_get_batch_size_larger_than_total(self):
         """Test get() with batch_size > total_samples triggers warning and returns all data."""

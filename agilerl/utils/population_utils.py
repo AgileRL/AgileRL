@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+from typing import cast
 
 import numpy as np
 
@@ -164,23 +165,27 @@ def build_metric_row(
     :rtype: ScalarMetricRow | NestedMetricRow
     """
     if values and isinstance(values[0], dict):
+        # Checking the first element narrows the list's layout at runtime but
+        # not its static type, so record the nested layout with a cast.
+        nested_values = cast("list[dict[str, float]]", values)
         children = [
             ScalarMetricRow(
                 name=child_name,
-                agent_values=[series[child_name] for series in values],
+                agent_values=[series[child_name] for series in nested_values],
                 pop_mean=(
                     mean_value.get(child_name, float("nan"))
                     if isinstance(mean_value, dict)
                     else float("nan")
                 ),
             )
-            for child_name in values[0]
+            for child_name in nested_values[0]
         ]
         return NestedMetricRow(name=name, children=children)
 
+    scalar_values = cast("list[float]", values)
     return ScalarMetricRow(
         name=name,
-        agent_values=[float(value) for value in values],
+        agent_values=[float(value) for value in scalar_values],
         pop_mean=float(mean_value)
         if not isinstance(mean_value, dict)
         else float("nan"),

@@ -1,6 +1,6 @@
 import time
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
@@ -32,6 +32,8 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.utils.algo_utils import stack_and_pad_experiences
 
 if TYPE_CHECKING:
+    from agilerl.typing import ExperiencesType
+
     SupportedMultiturn = LLMPPO | LLMREINFORCE | GRPO
 
 
@@ -59,7 +61,7 @@ def finetune_llm_multiturn(
     max_reward: float | None = None,
     verbose: bool = True,
     accelerator: Accelerator | None = None,
-) -> "list[SupportedMultiturn]":
+) -> "tuple[list[SupportedMultiturn], list[float]]":
     """Finetune a population of agents on a multi-turn environment.
 
     Collects token-level episodes via ``SyncMultiTurnVecEnv`` and
@@ -225,13 +227,20 @@ def finetune_llm_multiturn(
                 reward.unsqueeze(0) if reward.dim() == 1 else reward
                 for reward in all_rewards
             ]
-            (turn_ids_padded,) = stack_and_pad_experiences(
-                all_turn_ids, padding_values=[-1]
+            # `stack_and_pad_experiences` takes invariant `list[ObservationType]`
+            # arguments and returns `ArrayOrTensor`; tensor inputs always come back
+            # as tensors. Accepting sequences and preserving the input type upstream
+            # (agilerl/utils/algo_utils.py) drops these suppressions.
+            (turn_ids_stacked,) = stack_and_pad_experiences(
+                all_turn_ids,  # ty: ignore[invalid-argument-type]
+                padding_values=[-1],
             )
-            (rewards_2d,) = stack_and_pad_experiences(
-                normalized_rewards, padding_values=[0.0]
+            (rewards_stacked,) = stack_and_pad_experiences(
+                normalized_rewards,  # ty: ignore[invalid-argument-type]
+                padding_values=[0.0],
             )
-            rewards_2d = rewards_2d.float()
+            turn_ids_padded = cast("torch.Tensor", turn_ids_stacked)
+            rewards_2d = cast("torch.Tensor", rewards_stacked).float()
 
             episode_scores = (
                 rewards_2d.sum(dim=1) if rewards_2d.dim() > 1 else rewards_2d
@@ -283,7 +292,9 @@ def finetune_llm_multiturn(
                     learn_kwargs["turn_ids"] = torch.nn.functional.pad(
                         turn_ids_padded, (0, pad_t), value=-1
                     )
-            agent.learn(experiences, **learn_kwargs)
+            # The rollout is a (completions, masks, rewards) tuple of tensors, which
+            # `ExperiencesType` (agilerl/typing.py) does not yet cover.
+            agent.learn(cast("ExperiencesType", experiences), **learn_kwargs)
 
             agg_score = safe_aggregate_metrics(accelerator, mean_score)
 
@@ -321,19 +332,26 @@ def finetune_llm_multiturn(
 
         # Tournament selection and mutation
         if tournament and mutation is not None:
+            # `_validate_finetune_args` rejects an unset `evo_steps` here.
+            assert evo_steps is not None
             if (i + 1) % evo_steps == 0:
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
+                # `tournament_selection_and_mutation` takes and returns an
+                # invariant `list[EvolvableAlgorithmProtocol]`, so a concrete
+                # population is assignable in neither direction; making it generic
+                # in the agent type (agilerl/utils/utils.py) drops both
+                # suppressions.
                 population.update(
-                    tournament_selection_and_mutation(
-                        population=population.agents,
+                    tournament_selection_and_mutation(  # ty: ignore[invalid-argument-type]
+                        population=population.agents,  # ty: ignore[invalid-argument-type]
                         tournament=tournament,
                         mutation=mutation,
                         env_name=env_name,
                         accelerator=accelerator,
                         language_model=True,
                         elite_path=elite_path,
-                        save_elite=save_elite,
+                        save_elite=bool(save_elite),
                     ),
                 )
                 if accelerator is not None:
@@ -377,4 +395,6 @@ def finetune_llm_multiturn(
 
     population.finish()
     pbar.close()
-    return population.agents, population.last_fitnesses
+    # LLM fitnesses are scalar mean rewards; `Population` types them as the wider
+    # scalar-or-per-agent-dict row shared with multi-agent training.
+    return population.agents, cast("list[float]", population.last_fitnesses)

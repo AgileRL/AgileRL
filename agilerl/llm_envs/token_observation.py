@@ -64,7 +64,7 @@ class TokenObservationWrapper:
         self._last_full_prompt_token_len: int | None = None
 
     @staticmethod
-    def _format_obs(obs: str, info: dict[str, Any] | None) -> str:
+    def _format_obs(obs: str | dict[str, Any], info: dict[str, Any] | None) -> str:
         """Apply prefix/suffix from info dict to an observation string."""
         text = str(obs)
         if not info:
@@ -262,6 +262,10 @@ class TokenObservationWrapper:
         gen_text: str,
     ) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
         """Record a generation and step the underlying environment."""
+        if self.full_ids is None:
+            msg = "No prompt: reset() was never called"
+            raise RuntimeError(msg)
+
         prompt_len = self.full_ids.shape[1]
         self.full_ids = full_completion_ids.detach().to(self.full_ids.device)
         gen_end = self.full_ids.shape[1]
@@ -285,6 +289,7 @@ class TokenObservationWrapper:
             # longer fit under ``max_model_len`` with room for at least one
             # generation, terminate the trajectory cleanly. With sliding
             # window enabled, the older turns get dropped and we keep going.
+            max_model_len = self._sw_max_model_len
             if not self._sw_enabled and (max_pt := self._prompt_budget()) is not None:
                 prompt_len = int(self.full_ids.shape[1])
                 if prompt_len > max_pt:
@@ -294,7 +299,13 @@ class TokenObservationWrapper:
                         "agilerl_context_overflow": {
                             "full_prompt_len": prompt_len,
                             "max_prompt_tokens": int(max_pt),
-                            "max_model_len": int(self._sw_max_model_len),
+                            # A prompt budget exists only when a model length was
+                            # configured, so this is never None here.
+                            "max_model_len": (
+                                int(max_model_len)
+                                if max_model_len is not None
+                                else None
+                            ),
                             "max_output_tokens": (
                                 int(self._sw_max_output_tokens)
                                 if self._sw_max_output_tokens is not None

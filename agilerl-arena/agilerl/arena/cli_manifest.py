@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import click
+
 from agilerl.arena.client import ManifestInvoke, ManifestParamSpec
 from agilerl.arena.config import CommandConfig, arena_client
 from agilerl.arena.exceptions import ArenaValidationError
@@ -339,7 +340,7 @@ def attach_manifest_tree(group: click.Group, node: dict[str, Any]) -> None:
             attach_manifest_tree(sub, child)
             group.add_command(sub, name=child["name"])
         elif typ == "command":
-            invoke = child.get("invoke") or {}
+            invoke: ManifestInvoke = child.get("invoke") or {}
             cmd = build_manifest_click_command(
                 child["name"],
                 child.get("help"),

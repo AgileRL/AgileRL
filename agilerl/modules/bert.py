@@ -7,6 +7,7 @@ import torch
 from torch import nn
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
+from agilerl.typing import DeviceType
 
 
 class EvolvableBERT(EvolvableModule):
@@ -51,7 +52,7 @@ class EvolvableBERT(EvolvableModule):
     :param max_decoder_layers: Maximum number of decoder layers, defaults to 12
     :type max_decoder_layers: int, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
-    :type device: str, optional
+    :type device: DeviceType, optional
     :param random_seed: Random seed to use for the network. Defaults to None.
     :type random_seed: int | None
     """
@@ -74,7 +75,7 @@ class EvolvableBERT(EvolvableModule):
         norm_first: bool = False,
         max_encoder_layers: int = 12,
         max_decoder_layers: int = 12,
-        device: str = "cpu",
+        device: DeviceType = "cpu",
         name: str = "bert",
         random_seed: int | None = None,
     ) -> None:
@@ -426,10 +427,10 @@ class EvolvableBERT(EvolvableModule):
         output: torch.Tensor,
         first_layer: nn.Module,
         str_first_layer: str,
-        mask: torch.Tensor,
-        src_key_padding_mask: torch.Tensor,
-        src_key_padding_mask_for_layers: torch.Tensor,
-    ) -> tuple[torch.Tensor, bool, torch.Tensor]:
+        mask: torch.Tensor | None,
+        src_key_padding_mask: torch.Tensor | None,
+        src_key_padding_mask_for_layers: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, bool, torch.Tensor | None]:
         """Return encoder output, conversion to nested and padding mask depending on if sparsity fast path possible.
         :param src: Encoder input sequence
         :type src: torch.Tensor
@@ -440,11 +441,11 @@ class EvolvableBERT(EvolvableModule):
         :param str_first_layer: Name of first layer of encoder
         :type str_first_layer: str
         :param mask: Mask for the src sequence
-        :type mask: torch.Tensor
+        :type mask: torch.Tensor | None
         :param src_key_padding_mask: Tensor mask for src keys per batch
-        :type src_key_padding_mask: torch.Tensor
+        :type src_key_padding_mask: torch.Tensor | None
         :param src_key_padding_mask_for_layers: Tensor mask for src keys per batch for layers
-        :type src_key_padding_mask_for_layers: torch.Tensor.
+        :type src_key_padding_mask_for_layers: torch.Tensor | None.
         """
         convert_to_nested = False
         if (
@@ -559,14 +560,14 @@ class EvolvableBERT(EvolvableModule):
 
         if network == "encoder":
             if hidden_layer is None:
-                hidden_layer = self.rng.integers(0, len(self.encoder_layers))
+                hidden_layer = int(self.rng.integers(0, len(self.encoder_layers)))
             else:
                 hidden_layer = min(hidden_layer, len(self.encoder_layers) - 1)
 
             self.encoder_layers[hidden_layer] += numb_new_nodes
         else:
             if hidden_layer is None:
-                hidden_layer = self.rng.integers(0, len(self.decoder_layers))
+                hidden_layer = int(self.rng.integers(0, len(self.decoder_layers)))
             else:
                 hidden_layer = min(hidden_layer, len(self.decoder_layers) - 1)
 
@@ -605,7 +606,7 @@ class EvolvableBERT(EvolvableModule):
 
         if network == "encoder":
             if hidden_layer is None:
-                hidden_layer = self.rng.integers(0, len(self.encoder_layers))
+                hidden_layer = int(self.rng.integers(0, len(self.encoder_layers)))
 
             else:
                 hidden_layer = min(hidden_layer, len(self.encoder_layers) - 1)
@@ -613,7 +614,7 @@ class EvolvableBERT(EvolvableModule):
                 self.encoder_layers[hidden_layer] -= numb_new_nodes
         else:
             if hidden_layer is None:
-                hidden_layer = self.rng.integers(0, len(self.decoder_layers))
+                hidden_layer = int(self.rng.integers(0, len(self.decoder_layers)))
             else:
                 hidden_layer = min(hidden_layer, len(self.decoder_layers) - 1)
 
@@ -767,10 +768,10 @@ class TokenEmbedding(nn.Module):
         return self.embedding(tokens)
 
 
-def _none_or_dtype(input: Any) -> torch.dtype | None:
+def _none_or_dtype(input: torch.Tensor | None) -> torch.dtype | None:
     """Return None or dtype of input. Adapted from torch.nn.functional.
     :param input: Input to return dtype of
-    :type input: Any.
+    :type input: torch.Tensor | None.
     """
     if input is None:
         return None

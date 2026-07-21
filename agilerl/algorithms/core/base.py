@@ -11,7 +11,7 @@ import tempfile
 import warnings
 from abc import ABC, ABCMeta, abstractmethod
 from collections import OrderedDict, defaultdict, deque
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Generator, Iterable, Mapping
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 from importlib.metadata import version
@@ -19,8 +19,11 @@ from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Any,
+    Literal,
+    NoReturn,
     TypeVar,
     cast,
+    overload,
 )
 
 import dill
@@ -46,17 +49,17 @@ from agilerl.algorithms.core.llm_ops.fused_logprobs import (
 from agilerl.algorithms.core.optimizer_wrapper import OptimizerWrapper
 from agilerl.algorithms.core.registry import (
     HyperparameterConfig,
+    MutationHook,
     MutationRegistry,
     NetworkGroup,
     OptimizerConfig,
+    OptimizerFactory,
 )
 from agilerl.metrics import AgentMetrics, MultiAgentMetrics
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.protocols import (
     AgentWrapperProtocol,
-    EvolvableAttributeDict,
-    EvolvableAttributeType,
     EvolvableModuleProtocol,
     ModuleDictProtocol,
     PeftModelProtocol,
@@ -70,8 +73,10 @@ from agilerl.typing import (
     CheckpointInfo,
     DeviceType,
     ExperiencesType,
+    FitnessValue,
     GymSpaceType,
     InfosDict,
+    LrNameType,
     ModuleType,
     MultiAgentObservationType,
     MultiAgentSetup,
@@ -118,7 +123,6 @@ from agilerl.utils.llm_packing import (
 )
 
 if TYPE_CHECKING:
-    from accelerate.utils.deepspeed import DeepSpeedOptimizerWrapper
     from torch.optim.lr_scheduler import SequentialLR
     from transformers import BitsAndBytesConfig
 
@@ -176,6 +180,10 @@ logger = logging.getLogger(__name__)
 
 SelfAgentWrapper = TypeVar("SelfAgentWrapper", bound=AgentWrapperProtocol)
 
+# Generic so instantiating a concrete algorithm class types as that class,
+# not as the EvolvableAlgorithm base.
+AlgoT = TypeVar("AlgoT", bound="EvolvableAlgorithm")
+
 
 class _RegistryMeta(type):
     """Metaclass to wrap registry information after algorithm is done
@@ -183,12 +191,12 @@ class _RegistryMeta(type):
     """
 
     def __call__(
-        cls: type[EvolvableAlgorithm],  # type: ignore[misc]
+        cls: type[AlgoT],  # type: ignore[misc]
         *args: Any,
         **kwargs: Any,
-    ) -> EvolvableAlgorithm:
+    ) -> AlgoT:
         # Create the instance
-        instance: EvolvableAlgorithm = super().__call__(*args, **kwargs)  # type: ignore[misc]
+        instance: AlgoT = super().__call__(*args, **kwargs)  # type: ignore[misc]
 
         # Initialize the MutationRegistry -> ensures that all of the networks and
         # optimizers are registered with the algorithm, and that the specified hyperparameters
@@ -235,8 +243,9 @@ def get_checkpoint_dict(
         attribute_dict.pop("actor", None)
     if omit_optimizer_info and "optimizer" in attribute_dict:
         attribute_dict.pop("optimizer", None)
-    if attribute_dict.pop("lr_scheduler", None) is not None:
-        attribute_dict["lr_scheduler"] = agent.lr_scheduler.state_dict()
+    lr_scheduler = attribute_dict.pop("lr_scheduler", None)
+    if lr_scheduler is not None:
+        attribute_dict["lr_scheduler"] = lr_scheduler.state_dict()
 
     # Get checkpoint dictionaries for evolvable modules and optimizers
     # Use type CheckpointInfo so load code can rely on the key existing.
@@ -264,23 +273,20 @@ def get_checkpoint_dict(
 
 def get_optimizer_cls(
     optimizer_cls: str | dict[str, str],
-) -> type[torch.optim.Optimizer] | dict[str, type[torch.optim.Optimizer]]:
+) -> OptimizerFactory | dict[str, OptimizerFactory]:
     """Return the optimizer class from the string or dictionary of optimizer classes.
 
     :param optimizer_cls: The optimizer class or dictionary of optimizer classes.
     :type optimizer_cls: str | dict[str, str]
     :return: The optimizer class or dictionary of optimizer classes.
-    :rtype: type[torch.optim.Optimizer] | dict[str, type[torch.optim.Optimizer]]
+    :rtype: OptimizerFactory | dict[str, OptimizerFactory]
     """
     if isinstance(optimizer_cls, dict):
-        optimizer_cls = {
-            agent_id: getattr(torch.optim, optimizer_cls[agent_id])
-            for agent_id in optimizer_cls
+        return {
+            agent_id: getattr(torch.optim, cls_name)
+            for agent_id, cls_name in optimizer_cls.items()
         }
-    else:
-        optimizer_cls = getattr(torch.optim, optimizer_cls)
-
-    return optimizer_cls
+    return getattr(torch.optim, optimizer_cls)
 
 
 class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
@@ -295,12 +301,14 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
     :param accelerator: Accelerator object for distributed computing, defaults to None.
     :type accelerator: Accelerator | None, optional
     :param torch_compiler: The torch compiler mode to use, defaults to None.
-    :type torch_compiler: Any | None, optional
+    :type torch_compiler: str | None, optional
     :param name: Name of the algorithm, defaults to the class name.
     :type name: str | None, optional
     """
 
     metrics: AgentMetrics | MultiAgentMetrics
+    # Optional LR scheduler, set by subclasses that use one (e.g. LLMAlgorithm).
+    lr_scheduler: SequentialLR | None
 
     def __init__(
         self,
@@ -308,7 +316,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         hp_config: HyperparameterConfig | None = None,
         device: str | torch.device = "cpu",
         accelerator: Accelerator | None = None,
-        torch_compiler: Any | None = None,
+        torch_compiler: str | None = None,
         name: str | None = None,
     ) -> None:
 
@@ -348,7 +356,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         self._index = value
 
     @property
-    def mut(self) -> Any:
+    def mut(self) -> str | None:
         """Return the mutation object of the algorithm."""
         return self._mut
 
@@ -360,7 +368,9 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
     @property
     def hp_config(self) -> HyperparameterConfig:
         """Return the hyperparameter configuration for Evo-HPO mutations."""
-        return self.registry.hp_config
+        hp_config = self.registry.hp_config
+        assert hp_config is not None  # MutationRegistry.__post_init__ guarantees this
+        return hp_config
 
     @hp_config.setter
     def hp_config(self, value: HyperparameterConfig) -> None:
@@ -377,29 +387,29 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         self.metrics.steps = value
 
     @property
-    def scores(self) -> list[float]:
-        """Per-episode scores."""
+    def scores(self) -> list[float | list[float]]:
+        """Per-episode scores (per-group score rows for multi-agent metrics)."""
         return self.metrics.scores
 
     @scores.setter
-    def scores(self, value: list[float]) -> None:
+    def scores(self, value: list[float | list[float]]) -> None:
         self.metrics.scores = value
 
     @property
-    def fitness(self) -> list[float]:
-        """Fitness history."""
+    def fitness(self) -> list[FitnessValue]:
+        """Fitness history (scalars, or per-sub-agent rows for multi-agent)."""
         return list(self.metrics.fitness)
 
     @fitness.setter
-    def fitness(self, value: Iterable[float]) -> None:
+    def fitness(self, value: Iterable[FitnessValue]) -> None:
         maxlen = self.metrics.fitness.maxlen
         self.metrics.fitness = deque(value, maxlen=maxlen)
 
-    def add_scores(self, scores: list[float]) -> None:
+    def add_scores(self, scores: list[float] | list[list[float]]) -> None:
         """Add scores to the metrics.
 
-        :param scores: List of scores to add.
-        :type scores: list[float]
+        :param scores: List of scores (or per-agent score rows) to add.
+        :type scores: list[float] | list[list[float]]
         """
         self.metrics.add_scores(scores)
 
@@ -416,8 +426,14 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         self.metrics.finalize_training_step(num_steps)
 
     @abstractmethod
-    def preprocess_observation(self, observation: ObservationType) -> TorchObsType:
+    def preprocess_observation(
+        self,
+        observation: ObservationType,
+    ) -> TorchObsType | dict[str, TorchObsType]:
         """Preprocesses observations for forward pass through neural network.
+
+        Multi-agent algorithms return a dictionary of preprocessed observations
+        keyed by agent (or group) ID.
 
         :param observations: Observations of environment
         :type observations: numpy.ndarray[float] or dict[str, numpy.ndarray[float]]
@@ -428,7 +444,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         raise NotImplementedError
 
     @abstractmethod
-    def learn(self, experiences: ExperiencesType) -> Any:
+    def learn(self, experiences: ExperiencesType) -> Any:  # noqa: ANN401 -- return type varies per algorithm (loss dict, tuple, etc.)
         """Abstract method for learning the algorithm."""
         raise NotImplementedError
 
@@ -438,8 +454,14 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         obs: ObservationType | MultiAgentObservationType,
         *args: Any,
         **kwargs: Any,
-    ) -> ActionType:
+    ) -> ActionType | ActionResult | tuple[Any, ...]:
         """Abstract method for getting an action from the algorithm.
+
+        Concrete algorithms return heterogeneous action payloads: a bare action
+        (off-policy), an ``(action, log_prob, entropy, values, ...)`` tuple
+        (on-policy), a per-agent ``(actions, raw_actions)`` pair (multi-agent),
+        or an :class:`ActionResult` (LLM). The ``tuple[Any, ...]`` arm admits
+        all of the tuple shapes.
 
         :param obs: The observation to get an action for.
         :type obs: ObservationType | MultiAgentObservationType
@@ -448,17 +470,27 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :param kwargs: Additional keyword arguments to pass to the action function.
         :type kwargs: Any
         :return: The action to take.
-        :rtype: ActionType
+        :rtype: ActionType | ActionResult | tuple[Any, ...]
         """
         raise NotImplementedError
 
     @abstractmethod
-    def test(self, *args: Any, **kwargs: Any) -> np.ndarray:
-        """Abstract method for testing the algorithm."""
+    def test(self, *args: Any, **kwargs: Any) -> float | np.ndarray:
+        """Abstract method for testing the algorithm.
+
+        Single-agent and bandit algorithms return a scalar mean score;
+        multi-agent algorithms may return per-agent scores.
+        """
         raise NotImplementedError
 
     @staticmethod
-    def get_state_dim(observation_space: GymSpaceType) -> tuple[int, ...]:
+    def get_state_dim(
+        observation_space: spaces.Space | list[spaces.Space] | dict[str, spaces.Space],
+    ) -> (
+        tuple[int, ...]
+        | dict[str, tuple[int, ...]]
+        | tuple[tuple[int, ...] | dict[str, tuple[int, ...]], ...]
+    ):
         """Return the dimension of the state space as it pertains to the underlying
         networks (i.e. the input size of the networks).
 
@@ -466,7 +498,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :type observation_space: spaces.Space or list[spaces.Space].
 
         :return: The dimension of the state space.
-        :rtype: tuple[int, ...].
+        :rtype: tuple[int, ...] | dict[str, tuple[int, ...]]
         """
         warnings.warn(
             "This method is deprecated. Use get_input_size_from_space instead.",
@@ -476,7 +508,9 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         return get_input_size_from_space(observation_space)
 
     @staticmethod
-    def get_action_dim(action_space: GymSpaceType) -> tuple[int, ...]:
+    def get_action_dim(
+        action_space: spaces.Space | list[spaces.Space] | dict[str, spaces.Space],
+    ) -> int | dict[str, int] | tuple[int | dict[str, int], ...]:
         """Return the dimension of the action space as it pertains to the underlying
         networks (i.e. the output size of the networks).
 
@@ -484,7 +518,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :type action_space: spaces.Space or list[spaces.Space].
 
         :return: The dimension of the action space.
-        :rtype: int.
+        :rtype: int | dict[str, int] | tuple[int | dict[str, int], ...]
         """
         warnings.warn(
             "This method is deprecated. Use get_output_size_from_space instead.",
@@ -537,9 +571,9 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
     @staticmethod
     def copy_attributes(
-        agent: EvolvableAlgorithm,
-        clone: EvolvableAlgorithm,
-    ) -> EvolvableAlgorithm:
+        agent: AlgoT,
+        clone: AlgoT,
+    ) -> AlgoT:
         """Copy the non-evolvable attributes of the algorithm to a clone.
 
         :param clone: The clone of the algorithm.
@@ -604,10 +638,10 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         observation_space: GymSpaceType,
         action_space: GymSpaceType,
         device: str = "cpu",
-        wrapper_cls: type[SelfAgentWrapper] | None = None,
+        wrapper_cls: Callable[..., SelfAgentWrapper] | None = None,
         wrapper_kwargs: dict[str, Any] | None = None,
         resume_from_checkpoint: str | None = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> list[Self | SelfAgentWrapper]:
         """Create a population of algorithms.
 
@@ -647,7 +681,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
         return population
 
-    def __setattr__(self, name: str, value: Any) -> None:
+    def __setattr__(self, name: str, value: Any) -> None:  # noqa: ANN401 -- __setattr__ accepts any attribute value
         """Set the attribute of the algorithm. If the attribute is an OptimizerWrapper,
         we register the optimizer with the algorithms registry.
 
@@ -739,29 +773,31 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
                 hp_spec.dtype = dtype
 
-    def _wrap_attr(self, attr: EvolvableAttributeType) -> EvolvableAttributeType:
-        """Wrap the model with the accelerator.
+    def _wrap_attr(self, attr: Any) -> Any:  # noqa: ANN401 -- accelerator-wrapped network/optimizer has no static type
+        """Wrap an evolvable attribute (network or optimizer) with the accelerator.
 
         :param attr: The attribute to wrap.
-        :type attr: EvolvableAttributeType
+        :type attr: Any
 
         :return: The wrapped attribute.
-        :rtype: EvolvableAttributeType
+        :rtype: Any
         """
+        accelerator = self.accelerator
+        assert accelerator is not None  # Guarded by wrap_models
         if isinstance(attr, OptimizerWrapper):
             if isinstance(attr.optimizer, dict):
                 wrapped_opt = {
-                    agent_id: self.accelerator.prepare(opt)
-                    for agent_id, opt in attr.optimizer.items()
+                    agent_id: accelerator.prepare(opt)
+                    for agent_id, opt in attr._optimizers_by_agent().items()
                 }
             else:
-                wrapped_opt = self.accelerator.prepare(attr.optimizer)
+                wrapped_opt = accelerator.prepare(attr.optimizer)
 
             attr.optimizer = wrapped_opt
             return attr
 
         # Only wrap the model if its part of the computation graph
-        return self.accelerator.prepare(attr) if attr.state_dict() else attr
+        return accelerator.prepare(attr) if attr.state_dict() else attr
 
     def _reinit_opt_from_config(
         self,
@@ -772,10 +808,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :param config: The optimizer configuration.
         :type config: OptimizerConfig
         """
-        opt: OptimizerWrapper | DeepSpeedOptimizerWrapper | None = getattr(
-            self,
-            config.name,
-        )
+        opt = getattr(self, config.name)
         optimizer = getattr(opt, "optimizer", None)
 
         if isinstance(self, LLMAlgorithm):
@@ -831,8 +864,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             if "actor" in name:
                 network.train(mode=training)
 
-    def get_lr_names(self) -> list[str]:
-        """Return the learning rates of the algorithm."""
+    def get_lr_names(self) -> list[LrNameType]:
+        """Return the learning-rate attribute name(s) of each optimizer."""
         return [opt.lr for opt in self.registry.optimizers]
 
     def register_network_group(self, group: NetworkGroup) -> None:
@@ -843,12 +876,12 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         """
         self.registry.register_group(group)
 
-    def register_mutation_hook(self, hook: Callable) -> None:
+    def register_mutation_hook(self, hook: MutationHook) -> None:
         """Register a hook to be executed after a mutation is performed on
         the algorithm.
 
         :param hook: The hook to be executed after mutation.
-        :type hook: Callable
+        :type hook: MutationHook
         """
         self.registry.register_hook(hook)
 
@@ -861,7 +894,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         """Return the policy network of the algorithm."""
         for group in self.registry.groups:
             if group.policy:
-                return getattr(self, group.eval_network)
+                return getattr(self, group.eval_network_name())
 
         msg = "No policy network has been registered with the algorithm."
         raise AttributeError(
@@ -900,24 +933,26 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :rtype: tuple[torch.Tensor[float], ...]
         """
         device = self.device if self.accelerator is None else self.accelerator.device
-        on_device = []
+        on_device: list[TorchObsType] = []
         for exp in experiences:
-            if isinstance(exp, dict):
+            moved: TorchObsType
+            # Check the Tensor leaf before the container arms so narrowing is exact.
+            if isinstance(exp, torch.Tensor):
+                moved = exp.to(device)
+            elif isinstance(exp, dict):
                 moved = {key: val.to(device) for key, val in exp.items()}
             elif isinstance(exp, (list, tuple)) and isinstance(exp[0], torch.Tensor):
                 moved = tuple(val.to(device) for val in exp)
-            elif isinstance(exp, torch.Tensor):
-                moved = exp.to(device)
             else:
                 moved = exp
             on_device.append(moved)
 
-        return on_device
+        return tuple(on_device)
 
     def evolvable_attributes(
         self,
         networks_only: bool = False,
-    ) -> EvolvableAttributeDict:
+    ) -> dict[str, Any]:
         """Return the attributes related to the evolvable networks in the algorithm. Includes
         attributes that are either EvolvableModule or ModuleDict objects, as well as the optimizers
         associated with the networks.
@@ -929,7 +964,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         :rtype: dict[str, Any]
         """
 
-        def is_evolvable(attr: str, obj: Any) -> bool:
+        def is_evolvable(attr: str, obj: Any) -> bool:  # noqa: ANN401 -- arbitrary attribute value under inspection
             return (
                 recursive_check_module_attrs(obj, networks_only)
                 and not attr.startswith("_")
@@ -937,7 +972,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             )
 
         # Inspect evolvable given specs
-        evolvable_attrs = {}
+        evolvable_attrs: dict[str, Any] = {}
         for attr in dir(self):
             obj = getattr(self, attr)
             if is_evolvable(attr, obj):
@@ -1004,7 +1039,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             self.unwrap_models()
 
         # Clone evolvable modules
-        cloned_modules = {}
+        cloned_modules: dict[str, Any] = {}
         for attr, obj in self.evolvable_attributes(networks_only=True).items():
             cloned_modules[attr] = obj.clone()
             setattr(clone, attr, cloned_modules[attr])
@@ -1094,6 +1129,10 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                     init_dict[agent_id]["device"] = self.device
                     loaded_modules[agent_id] = mod(**init_dict[agent_id])
 
+                assert module_dict_cls is not None, (
+                    f"Missing '{name}_module_dict_cls' entry for multi-agent "
+                    "network in checkpoint."
+                )
                 setattr(self, name, module_dict_cls(loaded_modules))
             else:
                 init_dict["device"] = self.device
@@ -1163,7 +1202,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             )
 
         if "lr_scheduler" in checkpoint:
-            self.lr_scheduler.load_state_dict(state_dict=checkpoint["lr_scheduler"])
+            if self.lr_scheduler is not None:
+                self.lr_scheduler.load_state_dict(state_dict=checkpoint["lr_scheduler"])
             checkpoint.pop("lr_scheduler")
 
         # Load other attributes
@@ -1229,7 +1269,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             )
 
         network_names = network_info["network_names"]
-        loaded_modules: dict[str, EvolvableAttributeType] = {}
+        loaded_modules: dict[str, Any] = {}
         for name in network_names:
             net_dict = {
                 k: v for k, v in network_info["modules"].items() if k.startswith(name)
@@ -1284,7 +1324,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             net_dict = {
                 k: v for k, v in network_info["modules"].items() if k.startswith(name)
             }
-            loaded_module: EvolvableModule | ModuleDict = getattr(self, name)
+            loaded_module = getattr(self, name)
             state_dict = net_dict[f"{name}_state_dict"]
             if isinstance(loaded_module, ModuleDict):
                 for agent_id, agent_module in loaded_module.items():
@@ -1364,8 +1404,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         # Check for agent wrapper
         wrapper_cls = checkpoint.get("wrapper_cls")
         if wrapper_cls is not None:
-            init_dict = checkpoint.get("wrapper_init_dict")
-            wrapper_attributes = checkpoint.get("wrapper_attrs")
+            init_dict = checkpoint.get("wrapper_init_dict") or {}
+            wrapper_attributes = checkpoint.get("wrapper_attrs") or {}
             self = wrapper_cls(self, **init_dict)
             for attr in wrapper_attributes:
                 setattr(self, attr, wrapper_attributes[attr])
@@ -1398,7 +1438,7 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
     :param accelerator: Accelerator object for distributed computing, defaults to None.
     :type accelerator: Accelerator | None, optional
     :param torch_compiler: The torch compiler mode to use, defaults to None.
-    :type torch_compiler: Any | None, optional
+    :type torch_compiler: str | None, optional
     :param normalize_images: If True, normalize images, defaults to True.
     :type normalize_images: bool, optional
     :param name: Name of the algorithm, defaults to the class name.
@@ -1413,7 +1453,7 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
         hp_config: HyperparameterConfig | None = None,
         device: str | torch.device = "cpu",
         accelerator: Accelerator | None = None,
-        torch_compiler: Any | None = None,
+        torch_compiler: str | None = None,
         normalize_images: bool = True,
         name: str | None = None,
     ) -> None:
@@ -1460,9 +1500,9 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
     """Base object for all multi-agent algorithms in the AgileRL framework.
 
     :param observation_spaces: The observation spaces of the agent environments.
-    :type observation_spaces: list[spaces.Space] | spaces.Dict
+    :type observation_spaces: list[spaces.Space] | Mapping[str, spaces.Space] | spaces.Dict
     :param action_spaces: The action spaces of the agent environments.
-    :type action_spaces: list[spaces.Space] | spaces.Dict
+    :type action_spaces: list[spaces.Space] | Mapping[str, spaces.Space] | spaces.Dict
     :param index: The index of the individual in the population.
     :type index: int.
     :param agent_ids: The agent IDs of the agents in the environment.
@@ -1474,7 +1514,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
     :param accelerator: Accelerator object for distributed computing, defaults to None
     :type accelerator: Accelerator | None, optional
     :param torch_compiler: The torch compiler mode to use, defaults to None
-    :type torch_compiler: Any | None, optional
+    :type torch_compiler: str | None, optional
     :param normalize_images: If True, normalize images, defaults to True
     :type normalize_images: bool, optional
     :param placeholder_value: The value to use as placeholder for missing observations, defaults to -1.
@@ -1485,8 +1525,8 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
     metrics: MultiAgentMetrics
 
-    possible_observation_spaces: dict[str, spaces.Space]
-    possible_action_spaces: dict[str, spaces.Space]
+    possible_observation_spaces: spaces.Dict
+    possible_action_spaces: spaces.Dict
 
     shared_agent_ids: list[str]
     grouped_agents: dict[str, list[str]]
@@ -1495,14 +1535,18 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
     def __init__(
         self,
-        observation_spaces: Iterable[spaces.Space] | spaces.Dict,
-        action_spaces: Iterable[spaces.Space] | spaces.Dict,
+        observation_spaces: Iterable[spaces.Space]
+        | Mapping[str, spaces.Space]
+        | spaces.Dict,
+        action_spaces: Iterable[spaces.Space]
+        | Mapping[str, spaces.Space]
+        | spaces.Dict,
         index: int,
-        agent_ids: Iterable[int] | None = None,
+        agent_ids: Iterable[str] | None = None,
         hp_config: HyperparameterConfig | None = None,
         device: str | torch.device = "cpu",
         accelerator: Accelerator | None = None,
-        torch_compiler: Any | None = None,
+        torch_compiler: str | None = None,
         normalize_images: bool = True,
         placeholder_value: Any | None = -1,
         name: str | None = None,
@@ -1516,27 +1560,48 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         )
 
         if isinstance(observation_spaces, (list, tuple)):
+            assert isinstance(action_spaces, (list, tuple)), (
+                "Action spaces must also be passed as a list."
+            )
             assert isinstance(
                 agent_ids,
                 (tuple, list),
             ), "Agent IDs must be specified if observation spaces are passed as a list."
-            assert len(agent_ids) == len(
+            # Narrowing the Iterable parameters against list/tuple keeps
+            # unhelpful intersections; pin the element types once.
+            agent_id_list = cast("list[str] | tuple[str, ...]", agent_ids)
+            obs_space_list = cast(
+                "list[spaces.Space] | tuple[spaces.Space, ...]",
                 observation_spaces,
+            )
+            action_space_list = cast(
+                "list[spaces.Space] | tuple[spaces.Space, ...]",
+                action_spaces,
+            )
+            assert len(agent_id_list) == len(
+                obs_space_list,
             ), "Number of agent IDs must match number of observation spaces."
 
             self.possible_observation_spaces = spaces.Dict(
-                dict(zip(agent_ids, observation_spaces, strict=False)),
+                dict(zip(agent_id_list, obs_space_list, strict=False)),
             )
             self.possible_action_spaces = spaces.Dict(
-                dict(zip(agent_ids, action_spaces, strict=False)),
+                dict(zip(agent_id_list, action_space_list, strict=False)),
             )
-        elif isinstance(observation_spaces, (spaces.Dict, dict)):
-            if isinstance(observation_spaces, dict):
-                observation_spaces = spaces.Dict(observation_spaces)
-                action_spaces = spaces.Dict(action_spaces)
-
+        elif isinstance(observation_spaces, spaces.Dict):
+            assert isinstance(action_spaces, spaces.Dict), (
+                "Action spaces must also be passed as a spaces.Dict."
+            )
             self.possible_observation_spaces = observation_spaces
             self.possible_action_spaces = action_spaces
+        elif isinstance(observation_spaces, Mapping):
+            assert isinstance(action_spaces, Mapping), (
+                "Action spaces must also be passed as a mapping."
+            )
+            self.possible_observation_spaces = spaces.Dict(
+                dict(observation_spaces),
+            )
+            self.possible_action_spaces = spaces.Dict(dict(action_spaces))
         else:
             msg = f"Observation spaces must be a list or dictionary of spaces.Space objects. Got {type(observation_spaces)}."
             raise TypeError(msg)
@@ -1563,8 +1628,11 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
                 "AgileRL automatically transposes images to be channels-first to support PyTorch convolutions.",
                 stacklevel=2,
             )
-            self.possible_observation_spaces = transpose_image_space(
-                self.possible_observation_spaces
+            # transpose_image_space preserves the space structure, so a Dict
+            # space transposes to a Dict space.
+            self.possible_observation_spaces = cast(
+                "spaces.Dict",
+                transpose_image_space(self.possible_observation_spaces),
             )
 
         # Determine groups of agents from their IDs
@@ -1671,13 +1739,15 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             and self.metrics.agent_ids == self.shared_agent_ids
         )
         if is_grouped:
+            # ``is_nested`` established that rows are per-agent sequences.
+            score_rows = cast("list[list[float]]", scores)
             # The only row shape these loops produce is one entry per raw env
             # agent; anything else would mislabel group columns if passed
             # through, so fail loudly rather than silently misrecord.
-            assert len(scores[0]) == len(self.agent_ids), (
+            assert len(score_rows[0]) == len(self.agent_ids), (
                 "Grouped multi-agent scores expected one entry per agent "
                 f"({len(self.agent_ids)} agents: {self.agent_ids}), got rows of "
-                f"length {len(scores[0])}."
+                f"length {len(score_rows[0])}."
             )
             column = {aid: idx for idx, aid in enumerate(self.agent_ids)}
             group_columns = [
@@ -1686,7 +1756,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             ]
             scores = [
                 [float(np.mean([row[idx] for idx in cols])) for cols in group_columns]
-                for row in scores
+                for row in score_rows
             ]
         super().add_scores(scores)
 
@@ -1714,7 +1784,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
     def preprocess_observation(
         self,
-        observation: ObservationType,
+        observation: ObservationType | Mapping[str, ObservationType],
         group_ids: list[str] | None = None,
     ) -> dict[str, TorchObsType]:
         """Preprocesses observations for forward pass through neural network.
@@ -1730,9 +1800,11 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         :return: Preprocessed observations
         :rtype: dict[str, TorchObsType]
         """
+        # Multi-agent observations are per-agent dictionaries.
+        obs_dict = cast("MultiAgentObservationType", observation)
         if group_ids is None:
-            preprocessed = {}
-            for agent_id, agent_obs in observation.items():
+            preprocessed: dict[str, TorchObsType] = {}
+            for agent_id, agent_obs in obs_dict.items():
                 preprocessed[agent_id] = preprocess_observation(
                     self.possible_observation_spaces.get(agent_id),
                     observation=agent_obs,
@@ -1742,15 +1814,15 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
                 )
             return preprocessed
 
-        preprocessed: dict[str, list[TorchObsType] | TorchObsType] = {
+        buckets: dict[str, list[TorchObsType]] = {
             group_id: [] for group_id in group_ids
         }
-        for agent_id, agent_obs in observation.items():
+        for agent_id, agent_obs in obs_dict.items():
             output_id = self.get_network_id(agent_id)
-            if output_id not in preprocessed:
-                preprocessed[output_id] = []
+            if output_id not in buckets:
+                buckets[output_id] = []
 
-            preprocessed[output_id].append(
+            buckets[output_id].append(
                 preprocess_observation(
                     self.observation_space.get(output_id),
                     observation=agent_obs,
@@ -1760,21 +1832,26 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
                     placeholder_value=self.placeholder_value,
                 )
             )
-        for output_id in list(preprocessed.keys()):
-            if not preprocessed[output_id]:
-                continue
-            preprocessed[output_id] = concatenate_tensors(preprocessed[output_id])
+        grouped = {
+            output_id: concatenate_tensors(obs_list) if obs_list else obs_list
+            for output_id, obs_list in buckets.items()
+        }
 
-        return cast("dict[str, TorchObsType]", preprocessed)
+        return cast("dict[str, TorchObsType]", grouped)
 
-    def extract_action_masks(self, infos: InfosDict) -> ArrayDict:
+    def extract_action_masks(
+        self, infos: InfosDict
+    ) -> Mapping[str, np.ndarray | torch.Tensor | None]:
         """Extract action masks from info dictionary.
 
         :param infos: Info dict
         :type infos: dict[str, dict[...]]
 
-        :return: Action masks
-        :rtype: dict[str, np.ndarray]
+        :return: Action masks (``None`` for agents without one). The return is
+            a read-only mapping so subclasses may specialise the value type:
+            the base yields raw numpy masks; on-policy multi-agent subclasses
+            (e.g. IPPO) stack them into per-group tensors.
+        :rtype: Mapping[str, np.ndarray | torch.Tensor | None]
         """
         # Get dict of form {"agent_id" : [1, 0, 0, 0]...} etc
         return {
@@ -1786,14 +1863,15 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
     def extract_agent_masks(
         self,
         infos: InfosDict | None = None,
-    ) -> tuple[ArrayDict, ArrayDict]:
+    ) -> tuple[dict[str, Any] | None, ArrayDict | None]:
         """Extract env_defined_actions from info dictionary and determine agent masks.
 
         :param infos: Info dict
         :type infos: dict[str, dict[...]]
 
-        :return: Env defined actions and agent masks
-        :rtype: tuple[ArrayDict, ArrayDict]
+        :return: Env defined actions and agent masks (both ``None`` when the
+            info dict defines no actions)
+        :rtype: tuple[dict[str, Any] | None, dict[str, np.ndarray] | None]
         """
         # Deal with case of no env_defined_actions defined in the info dict
         # Deal with empty info dicts for each sub agent
@@ -1804,7 +1882,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         ):
             return None, None
 
-        env_defined_actions = {
+        env_defined_actions: dict[str, Any] = {
             agent: (
                 info.get("env_defined_actions", None)
                 if isinstance(info, dict)
@@ -1813,37 +1891,52 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             for agent, info in infos.items()
             if agent in self.agent_ids
         }
-        agent_masks = None
-        if env_defined_actions is not None:
-            agent_masks = {}
-            for agent_id, action_val in list(env_defined_actions.items()):
-                val = action_val
-                # Handle None if environment isn't vectorized
-                if val is None:
-                    if not isinstance(
-                        self.possible_action_spaces[agent_id],
-                        spaces.Discrete,
-                    ):
-                        nan_arr = np.empty(self.action_dims[agent_id])
-                        nan_arr[:] = np.nan
-                    else:
-                        nan_arr = np.array([np.nan])
+        agent_masks: ArrayDict = {}
+        for agent_id, action_val in list(env_defined_actions.items()):
+            val = action_val
+            # Handle None if environment isn't vectorized
+            if val is None:
+                if not isinstance(
+                    self.possible_action_spaces[agent_id],
+                    spaces.Discrete,
+                ):
+                    nan_arr = np.empty(self.action_dims[agent_id])
+                    nan_arr[:] = np.nan
+                else:
+                    nan_arr = np.array([np.nan])
 
-                    env_defined_actions[agent_id] = nan_arr
-                    val = nan_arr
+                env_defined_actions[agent_id] = nan_arr
+                val = nan_arr
 
-                # Handle discrete actions + env not vectorized
-                if isinstance(val, (int, float)):
-                    val = np.array([val])
-                    env_defined_actions[agent_id] = val
+            # Handle discrete actions + env not vectorized
+            if isinstance(val, (int, float)):
+                val = np.array([val])
+                env_defined_actions[agent_id] = val
 
-                agent_masks[agent_id] = np.where(
-                    np.isnan(env_defined_actions[agent_id]),
-                    0,
-                    1,
-                ).astype(bool)
+            agent_masks[agent_id] = np.where(
+                np.isnan(env_defined_actions[agent_id]),
+                0,
+                1,
+            ).astype(bool)
 
         return env_defined_actions, agent_masks
+
+    @overload
+    def build_net_config(
+        self,
+        net_config: NetConfigType | None = ...,
+        flatten: bool = ...,
+        return_encoders: Literal[False] = ...,
+    ) -> NetConfigType: ...
+
+    @overload
+    def build_net_config(
+        self,
+        net_config: NetConfigType | None = ...,
+        flatten: bool = ...,
+        *,
+        return_encoders: Literal[True],
+    ) -> tuple[NetConfigType, dict[str, NetConfigType]]: ...
 
     def build_net_config(
         self,
@@ -1884,17 +1977,19 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         # -> Access to unique configs is relevant for algorithms with networks that process
         # multiple agents' observations (e.g. shared critic in MADDPG)
         def _add_to_encoder_configs(config: dict[str, Any], agent_id: str = "") -> None:
-            config = config_from_dict(config)
-            config_key = "mlp_config" if isinstance(config, MlpNetConfig) else agent_id
+            net_config = config_from_dict(config)
+            config_key = (
+                "mlp_config" if isinstance(net_config, MlpNetConfig) else agent_id
+            )
 
             if config_key not in encoder_configs or (
-                isinstance(config, MlpNetConfig)
-                and len(config["hidden_size"])
+                isinstance(net_config, MlpNetConfig)
+                and len(net_config["hidden_size"])
                 > len(
                     encoder_configs["mlp_config"]["hidden_size"],
                 )
             ):
-                encoder_configs[config_key] = asdict(config)
+                encoder_configs[config_key] = asdict(net_config)
 
         # Helper function to check if any agent ID exists in the net_config
         def _has_agent_ids(config: NetConfigType) -> bool:
@@ -1906,7 +2001,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         # Helper function to get or create encoder config for an agent
         def _get_encoder_config(config: NetConfigType, agent_id: str) -> NetConfigType:
             encoder_config = config.get("encoder_config")
-            simba = config.get("simba", False)
+            simba = bool(config.get("simba", False))
             if encoder_config is None:
                 encoder_config = get_default_encoder_config(
                     observation_spaces[agent_id],
@@ -2027,16 +2122,21 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         """
         return self.get_group_id(agent_id) if self.has_grouped_agents() else agent_id
 
-    def assemble_shared_inputs(self, experience: ExperiencesType) -> ExperiencesType:
+    def assemble_shared_inputs(
+        self,
+        experience: Mapping[str, Any],
+    ) -> dict[str, dict[str, Any]]:
         """Preprocesses inputs by constructing dictionaries by shared agents.
 
-        :param experience: experience to reshape from environment
-        :type experience: ExperiencesType
+        :param experience: per-agent experience to reshape from environment
+        :type experience: Mapping[str, Any]
 
-        :return: Preprocessed inputs
-        :rtype: ExperiencesType
+        :return: Preprocessed inputs, grouped by shared agents
+        :rtype: dict[str, dict[str, Any]]
         """
-        stacked_experience = {group_id: {} for group_id in self.observation_space}
+        stacked_experience: dict[str, dict[str, Any]] = {
+            group_id: {} for group_id in self.observation_space
+        }
         for agent_id, inp in experience.items():
             group_id = (
                 self.get_group_id(agent_id) if self.has_grouped_agents() else agent_id
@@ -2089,11 +2189,14 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
 
         return output_dict
 
-    def sum_shared_rewards(self, rewards: ArrayDict) -> ArrayDict:
+    def sum_shared_rewards(
+        self, rewards: Mapping[str, np.ndarray | float | int]
+    ) -> ArrayDict:
         """Sum the rewards for grouped agents.
 
-        :param rewards: Reward dictionary from environment
-        :type rewards: dict[str, np.ndarray]
+        :param rewards: Reward dictionary from environment. Vectorised envs
+            provide arrays; a non-vectorised ``ParallelEnv`` provides scalars.
+        :type rewards: dict[str, np.ndarray | float]
         :return: Summed rewards dictionary
         :rtype: dict[str, np.ndarray]
         """
@@ -2297,6 +2400,25 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     # ``LoRARequest`` name the llm_utils helpers default to).
     _vllm_rollout_adapter = "actor"
 
+    # Runtime handles that cross HF/PEFT/DeepSpeed/vLLM wrapper boundaries;
+    # their concrete types depend on the launch configuration (Accelerate
+    # prepare(), DeepSpeed engines, DummyEvolvable, colocated vLLM), so they
+    # are deliberately duck-typed. ``clean_up`` resets them to None.
+    actor: Any
+    optimizer: Any
+    llm: Any
+    tp_group: Any
+    lr: float
+
+    temperature: float
+    repetition_penalty: float | None
+    top_p: float | None
+    top_k: int | None
+    min_p: float | None
+    max_model_len: int
+    max_output_tokens: int | None
+    min_output_tokens: int | None
+
     def __init__(
         self,
         index: int,
@@ -2428,14 +2550,14 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         if isinstance(model_config, dict):
             # ``lora_target_scope`` is AgileRL-only; don't let it reach
             # ``from_pretrained``.
-            model_config = {
-                k: v for k, v in model_config.items() if k != "lora_target_scope"
+            model_dict = {
+                k: v for k, v in dict(model_config).items() if k != "lora_target_scope"
             }
-        if quantization_config is not None:
-            if model_config is None:
-                model_config = {}
-            if isinstance(model_config, dict):
-                model_config.setdefault("quantization_config", quantization_config)
+            if quantization_config is not None:
+                model_dict.setdefault("quantization_config", quantization_config)
+            model_config = model_dict
+        elif model_config is None and quantization_config is not None:
+            model_config = {"quantization_config": quantization_config}
         self.model_config = model_config
         self._configure_batch_size_per_process(
             batch_size,
@@ -2450,7 +2572,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if ds_plugin is not None:
                 ds_config = ds_plugin.deepspeed_config
                 if max_grad_norm is not None:
-                    if accelerator.is_main_process:
+                    if self.accelerator.is_main_process:
                         warnings.warn(
                             "Argument 'max_grad_norm' will overwrite the equivalent value set for 'gradient_clipping' in the deepspeed config.",
                             stacklevel=2,
@@ -2458,7 +2580,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     ds_config["gradient_clipping"] = max_grad_norm
                 if (
                     cosine_lr_schedule_config is not None
-                    and accelerator.is_main_process
+                    and self.accelerator.is_main_process
                 ):
                     warnings.warn(
                         "Cannot specify the optimizer in the DeepSpeed config and use AgileRL's LR scheduler. "
@@ -2536,7 +2658,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             self.accelerator is not None
             and getattr(self.accelerator.state, "deepspeed_plugin", None) is not None
         )
-        self._vllm_awake = self.use_vllm and not self.vllm_config.sleep_mode
+        self._vllm_awake = self.use_vllm and not (
+            self.vllm_config is not None and self.vllm_config.sleep_mode
+        )
         self._vllm_moved = False
         self._vllm_lora_loaded = False
         self._vllm_lora_staging_dir: Path | None = None
@@ -2969,7 +3093,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         path: str,
         device: DeviceType = "cpu",
         accelerator: Accelerator | None = None,
-    ) -> None:
+    ) -> NoReturn:
         msg = (
             "The load class method is not supported for this algorithm class. "
             "To load a saved LLM, please load the model as follows, and then re-instantiate the GRPO/DPO/SFT "
@@ -2988,7 +3112,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         )
 
     @classmethod
-    def population(
+    # LLM algorithms deliberately diverge from the base signature: they take no
+    # observation/action spaces (the model IS the policy).
+    def population(  # ty: ignore[invalid-method-override]
         cls,
         size: int,
         accelerator: Accelerator | None = None,
@@ -3281,11 +3407,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         )
         return type(self)(**input_args)
 
-    def _clone_actor_network(self) -> PreTrainedModelProtocol:
+    def _clone_actor_network(self) -> Any:
         """Clone actor network while preserving value-head state when enabled.
 
-        :return: Cloned actor network suitable for clone instantiation.
-        :rtype: PreTrainedModelProtocol
+        :return: Cloned actor network (HF/PEFT/value-head wrapper) suitable
+            for clone instantiation.
+        :rtype: Any
         """
         actor = self._get_unwrapped_actor()
 
@@ -3394,6 +3521,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :type work_dir: str
         """
         if self.zero_stage is not None and self.zero_stage >= 2:
+            assert clone.accelerator is not None  # ZeRO >= 2 implies an accelerator
             clone.accelerator.wait_for_everyone()
             clone._load_distributed_actor(f"{work_dir}/agent_{self.index}")
             clone.accelerator.wait_for_everyone()
@@ -3543,7 +3671,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self._restore_adapter_trainability(["actor", "critic"])
 
     @contextmanager
-    def select_adapter(self, adapter_name: str) -> None:
+    def select_adapter(self, adapter_name: str) -> Generator[None, None, None]:
         """Temporarily switch adapter; restores the actor adapter on exit.
 
         :param adapter_name: Name of the adapter to activate ("actor", "critic", "reference").
@@ -3844,7 +3972,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
     def _setup_actors(
         self,
-        actor_network: PreTrainedModelProtocol | None,
+        actor_network: Any | None,
         *,
         clone: bool,
     ) -> None:
@@ -3867,7 +3995,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
     def _initialize_colocated_vllm_and_actors(
         self,
-        base_model: PreTrainedModelProtocol | None,
+        base_model: Any | None,
         add_adapters: bool = True,
         *,
         clone: bool = False,
@@ -3934,7 +4062,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
     def _trainer_should_load_before_vllm(
         self,
-        base_model: PreTrainedModelProtocol | None,
+        base_model: Any | None,
     ) -> bool:
         """Whether the HF trainer must be built before colocated vLLM starts.
 
@@ -3984,7 +4112,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
     def _initialize_actors(
         self,
-        base_model: PreTrainedModelProtocol | None,
+        base_model: Any | None,
         add_adapters: bool = True,
     ) -> None:
         """Initialize the actor network.
@@ -4049,7 +4177,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 )
                 raise ValueError(msg)
 
-            peft_target = (
+            # The PEFT target crosses HF/PEFT wrapper types; keep it untyped.
+            peft_target: Any = (
                 base_model.pretrained_model if self.use_value_head else base_model
             )
             # A bitsandbytes-quantized base must go through PEFT's kbit
@@ -4144,17 +4273,23 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                         type(inner_model).__name__,
                     )
 
+            # The actor crosses HF/PEFT/compile/DummyEvolvable representations
+            # below, so build it in an untyped local before storing it.
+            actor: Any
             if self.use_value_head:
-                base_model.pretrained_model = peft_target
-                base_model.is_peft_model = True
-                self.actor = base_model
+                # The value-head wrapper is duck-typed (trl-style).
+                vh_wrapper: Any = base_model
+                vh_wrapper.pretrained_model = peft_target
+                vh_wrapper.is_peft_model = True
+                actor = vh_wrapper
             else:
-                self.actor = peft_target
+                actor = peft_target
         else:
-            self.actor = base_model
+            actor = base_model
 
+        self.actor = actor
         self.use_adapter("actor")
-        patch_lora_for_fused_forward(self.actor)
+        patch_lora_for_fused_forward(actor)
 
         if self.torch_compiler:
             if self._uses_deepspeed:
@@ -4171,10 +4306,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                         stacklevel=2,
                     )
                     self.gradient_checkpointing = False
-                self.actor = compile_model(self.actor, self.torch_compiler)
+                actor = compile_model(actor, self.torch_compiler)
+                self.actor = actor
 
         if self.accelerator is None:
-            self.actor = DummyEvolvable(module=self.actor, device=self.device)
+            actor = DummyEvolvable(module=actor, device=str(self.device))
+            self.actor = actor
 
         # If an optimizer is defined in the deepspeed config, then the optimizer is part of the engine when
         # accelerator.prepare() is called. Since we are yet to wrap the model, we pass a dummy optimizer to the OptimizerWrapper.
@@ -4191,23 +4328,24 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             lr_name="lr" if self.lr_critic is None else ("lr_actor", "lr_critic"),
         )
 
-        self.lr_scheduler = (
-            create_warmup_cosine_scheduler(
-                (
-                    self.optimizer.optimizer
-                    if self.optimizer.optimizer_cls != DummyOptimizer
-                    else self.actor.optimizer
-                ),
+        if self.cosine_lr_schedule_config is not None:
+            if self.optimizer.optimizer_cls != DummyOptimizer:
+                sched_optimizer = self.optimizer._single_optimizer()
+            else:
+                # With a DummyOptimizer, DeepSpeed owns the real optimizer and
+                # attaches it to the actor engine at wrap time.
+                sched_optimizer = cast("torch.optim.Optimizer", actor.optimizer)
+            self.lr_scheduler = create_warmup_cosine_scheduler(
+                sched_optimizer,
                 self.cosine_lr_schedule_config,
                 1e-8,
                 self.lr,
             )
-            if self.cosine_lr_schedule_config is not None
-            else None
-        )
+        else:
+            self.lr_scheduler = None
 
     @contextmanager
-    def _amp_ctx(self):
+    def _amp_ctx(self) -> Generator[None, None, None]:
         """Yield a ``torch.amp.autocast`` context when running without an accelerator.
 
         When an ``Accelerator`` is present it already manages mixed-precision
@@ -4224,7 +4362,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 yield
 
     @contextmanager
-    def _activation_offload_ctx(self):
+    def _activation_offload_ctx(self) -> Generator[None, None, None]:
         """Offload tensors saved for backward to pinned host RAM.
 
         When ``activation_offload`` is set, the training forward pass is run
@@ -4360,6 +4498,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 values_out[start:end].copy_(chunk_v)
                 del chunk_v
 
+        assert logprobs_out is not None  # chunks is never empty
         return logprobs_out, values_out
 
     def _fused_forward(
@@ -4421,6 +4560,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             routing,
         )
         if self.use_value_head:
+            assert values is not None  # value-head models return values
             return log_probs[:B], values[B:]
         return log_probs, None
 
@@ -4563,7 +4703,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             unset_fused_adapter_routing(self._get_unwrapped_actor())
             ref_logprobs = log_probs[:B]
             actor_logprobs = log_probs[B : 2 * B]
-            critic_values = values[2 * B :] if self.use_value_head else None
+            if self.use_value_head:
+                assert values is not None  # value-head models return values
+                critic_values = values[2 * B :]
+            else:
+                critic_values = None
 
         return ref_logprobs, actor_logprobs, critic_values
 
@@ -4579,8 +4723,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             # in exotic setups (accelerate/DeepSpeed wrappers, slotted modules).
             # Non-fatal — fall back to model_config / None below.
             logger.debug("attn-implementation probe failed", exc_info=True)
-        if isinstance(getattr(self, "model_config", None), dict):
-            return self.model_config.get("attn_implementation")
+        model_config = getattr(self, "model_config", None)
+        if isinstance(model_config, dict):
+            return model_config.get("attn_implementation")
         return None
 
     def _packing_mode(self) -> str | None:
@@ -4744,10 +4889,11 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :type loss: torch.Tensor
         """
         if self._uses_deepspeed:
+            assert self.accelerator is not None  # _uses_deepspeed implies one
             self.accelerator.backward(loss)
             if self.lr_scheduler is not None:
                 self.lr_scheduler.step()
-                self.lr = self.lr_scheduler.get_last_lr()[0]
+                self.lr = float(self.lr_scheduler.get_last_lr()[0])
         else:
             loss.backward()
 
@@ -4758,7 +4904,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             self.optimizer.zero_grad()
             if self.lr_scheduler is not None:
                 self.lr_scheduler.step()
-                self.lr = self.lr_scheduler.get_last_lr()[0]
+                self.lr = float(self.lr_scheduler.get_last_lr()[0])
 
     @property
     def _peft_model(self) -> Any:
@@ -4861,11 +5007,15 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if self.lora_config is None:
                 msg = "lora_config is required for vLLM LoRA adapter export."
                 raise ValueError(msg)
+            target_modules = self.lora_config.target_modules
+            assert target_modules is not None, (
+                "lora_config.target_modules is required for vLLM LoRA adapter export."
+            )
             adapter_path = save_peft_adapter_for_vllm_rollout(
                 peft_ref,
                 staging_dir,
                 self._vllm_rollout_adapter,
-                target_modules=self.lora_config.target_modules,
+                target_modules=target_modules,
             )
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
@@ -4955,6 +5105,10 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         if SamplingParams is None:
             msg = "vLLM is required when use_vllm=True. Install AgileRL with vLLM support for this platform: `pip install agilerl[llm]`."
             raise ImportError(msg)
+        vllm_config = self.vllm_config
+        assert vllm_config is not None, (
+            "vllm_config must be configured for colocated vLLM generation."
+        )
 
         max_token_cap = (
             self.max_output_tokens
@@ -5006,15 +5160,21 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         max_output_tokens = [m for m in unique_max for _ in range(group_size)]
         stitch_prefixes = [sp for sp in unique_stitch for _ in range(group_size)]
 
-        if self.vllm_config.tensor_parallel_size > 1:
+        if vllm_config.tensor_parallel_size > 1:
             orig_size = len(token_prompts)
 
-            gathered_prompts_ids = [
-                None for _ in range(self.vllm_config.tensor_parallel_size)
+            gathered_prompts_ids: list[Any] = [
+                None for _ in range(vllm_config.tensor_parallel_size)
             ]
-            gathered_token_prompts = [None] * self.vllm_config.tensor_parallel_size
-            gathered_stitch_prefixes = [None] * self.vllm_config.tensor_parallel_size
-            gathered_max_output_tokens = [None] * self.vllm_config.tensor_parallel_size
+            gathered_token_prompts: list[Any] = [
+                None
+            ] * vllm_config.tensor_parallel_size
+            gathered_stitch_prefixes: list[Any] = [
+                None
+            ] * vllm_config.tensor_parallel_size
+            gathered_max_output_tokens: list[Any] = [
+                None
+            ] * vllm_config.tensor_parallel_size
 
             for gathered, obj in zip(
                 (
@@ -5050,7 +5210,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         # (for the vLLM mismatch correction) is excluded there.
         stitch_active = any(int(sp.shape[1]) > 0 for sp in stitch_prefixes)
         capture_sampling_logps = capture_sampling_logps and not stitch_active
-        generation_kwargs = {
+        generation_kwargs: dict[str, Any] = {
             "n": 1,  # vLLM on each GPU generates only 1 in colocate mode
             "repetition_penalty": self.repetition_penalty,
             "temperature": temperature,
@@ -5060,14 +5220,14 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             "min_tokens": (
                 0 if self.min_output_tokens is None else self.min_output_tokens
             ),
-            "presence_penalty": self.vllm_config.presence_penalty,
-            "frequency_penalty": self.vllm_config.frequency_penalty,
+            "presence_penalty": vllm_config.presence_penalty,
+            "frequency_penalty": vllm_config.frequency_penalty,
         }
         if capture_sampling_logps:
             # logprobs=0 → vLLM returns the sampled token's logprob only.
             generation_kwargs["logprobs"] = 0
-        if self.vllm_config.stop_sequences:
-            generation_kwargs["stop"] = self.vllm_config.stop_sequences
+        if vllm_config.stop_sequences:
+            generation_kwargs["stop"] = vllm_config.stop_sequences
         sampling_params = [
             SamplingParams(**generation_kwargs, max_tokens=max_output_token)
             for max_output_token in all_max_output_tokens
@@ -5097,7 +5257,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             if capture_sampling_logps
             else []
         )
-        if self.vllm_config.tensor_parallel_size > 1:
+        if vllm_config.tensor_parallel_size > 1:
             # Slice completions for this rank within its TP group.
             # Each rank generates all outputs — we keep only our share.
             local_rank_in_group = torch.distributed.get_rank(group=self.tp_group)
@@ -5130,11 +5290,17 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                         prompts_ids[group_size * i : group_size * (i + 1)],
                         dim=0,
                     ),
-                    stack_and_pad_experiences(
-                        completion_ids[group_size * i : group_size * (i + 1)],
-                        padding_values=[self.pad_token_id],
-                        device=self.device,
-                    )[0],
+                    # Tensor inputs stay tensors; stack_and_pad_experiences'
+                    # device annotation is str-only upstream but Tensor.to
+                    # accepts torch.device too.
+                    cast(
+                        "torch.Tensor",
+                        stack_and_pad_experiences(
+                            completion_ids[group_size * i : group_size * (i + 1)],
+                            padding_values=[self.pad_token_id],
+                            device=self.device,
+                        )[0],
+                    ),
                 ],
                 dim=1,
             )
@@ -5494,7 +5660,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         peft_model = unwrapped.pretrained_model if self.use_value_head else unwrapped
 
         adapter_path = f"{checkpoint_dir}/{adapter_name}/adapter_model.safetensors"
-        adapter_state = load_file(adapter_path, device=self.device)
+        adapter_state = load_file(adapter_path, device=str(self.device))
 
         with gather_if_zero3(
             self.zero_stage,
@@ -5514,7 +5680,6 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                     param.requires_grad = False
                 elif "actor" in name or "critic" in name:
                     param.requires_grad = True
-        self.accelerator.wait_for_everyone()
 
         if self.accelerator is not None:
             self.accelerator.wait_for_everyone()
@@ -5666,7 +5831,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         adapter_state = load_file(adapter_path, device=str(self.device))
 
         with gather_if_zero3(
-            self.zero_stage, list(unwrapped.parameters()), modifier_rank=0
+            self.zero_stage,
+            list(unwrapped.parameters()),
+            modifier_rank=0,
         ):
             with torch.no_grad():
                 set_peft_model_state_dict(
@@ -5830,6 +5997,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         state based on the configured sleep level; ``wake_up()`` restores the
         engine allocations.
         """
+        assert self.vllm_config is not None  # _configure_vllm guarantees a config
         self.llm.sleep(level=self.vllm_config.sleep_mode_level)
         self._vllm_awake = False
         if self.accelerator is None or self.accelerator.is_main_process:
@@ -5839,10 +6007,12 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """Synchronize max_grad_norm with DeepSpeed gradient_clipping config.
         Registered as a mutation hook to ensure consistency after mutations.
         """
-        if self.accelerator is None or self.accelerator.state.deepspeed_plugin is None:
+        if self.accelerator is None:
             return
 
         ds_plugin = getattr(self.accelerator.state, "deepspeed_plugin", None)
+        if ds_plugin is None:
+            return
 
         ds_config = ds_plugin.deepspeed_config
         if "gradient_clipping" not in ds_config:
@@ -5889,18 +6059,18 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         )
         raise AttributeError(err_msg)
 
-    def _get_lm_head(self):
+    def _get_lm_head(self) -> torch.nn.Linear:
         """Locate the lm_head module, handling value-head, PEFT and LoRA wrappers.
 
         :return: The lm_head (or embed_out) linear layer.
-        :rtype: torch.nn.Module
+        :rtype: torch.nn.Linear
         :raises AttributeError: If no lm_head can be found.
         """
         parent, attr = self._get_lm_head_parent()
         return getattr(parent, attr)
 
     @contextmanager
-    def _patch_lm_head_to_identity(self):
+    def _patch_lm_head_to_identity(self) -> Generator[torch.nn.Module, None, None]:
         """Temporarily replace ``lm_head`` with ``nn.Identity``.
 
         With the head identity-patched, the model's ``output.logits`` becomes
@@ -5929,7 +6099,9 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         return actor
 
     @contextmanager
-    def _memory_efficient_params(self) -> None:  # pragma: no cover
+    def _memory_efficient_params(
+        self,
+    ) -> Generator[None, None, None]:  # pragma: no cover
         """Hold the trainer base on GPU only for the wrapped (training) block.
 
         Used by the colocated path (``use_memory_efficient_params``): the
@@ -5947,7 +6119,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             yield
             return
         unwrapped_model = self._get_unwrapped_actor()
-        move_params_to_gpu(unwrapped_model, self.device)
+        move_params_to_gpu(unwrapped_model, torch.device(self.device))
         try:
             yield
         finally:
@@ -5958,6 +6130,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         """Prepare vLLM for learning."""
         if not self.use_vllm:
             return
+        assert self.vllm_config is not None  # _configure_vllm guarantees a config
         # Every rank holds its own colocated engine (external_launcher), so
         # every rank must sleep it — not just the main process.
         if self.vllm_config.sleep_mode and self._vllm_awake:
@@ -5968,6 +6141,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         self._vllm_moved = False
 
     def _prepare_vllm_for_generation(self) -> None:
+        assert self.vllm_config is not None  # _configure_vllm guarantees a config
         if self.use_memory_efficient_params:
             # Colocated: park the trainer's own base on CPU *before* waking vLLM
             # so the rollout engine owns the GPU and the two bases never coexist

@@ -1,9 +1,12 @@
+from __future__ import annotations
+
 from collections.abc import Callable
-from typing import Any, Literal, TypeVar, get_args
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, get_args
 
 from gymnasium import spaces
 from pydantic import (
     BaseModel,
+    ConfigDict,
     Field,
     SerializationInfo,
     field_serializer,
@@ -13,7 +16,12 @@ from typing_extensions import Self
 
 from agilerl import HAS_LLM_DEPENDENCIES
 
-LoraConfig = None
+if TYPE_CHECKING:
+    from peft import LoraConfig
+else:
+    # peft is optional and LoraConfig is not a pydantic type; at runtime it is
+    # Any so the field annotation stays resolvable without peft installed.
+    LoraConfig = Any
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -472,9 +480,15 @@ def _peft_lora_config_to_manifest_dict(cfg: LoraConfig) -> dict[str, Any]:
 class FinetuningNetworkSpec(BaseModel):
     """Model specification for LLM finetuning networks."""
 
+    # Allow arbitrary types so the resolved peft ``LoraConfig`` (Any at runtime,
+    # the real type under TYPE_CHECKING) can live in the ``lora_config`` field.
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     pretrained_model_name_or_path: str = Field(..., min_length=1)
     max_context_length: int = Field(..., ge=1)
-    lora_config: LoraConfigDict | None = Field(default=None)
+    # Validated from a manifest ``LoraConfigDict``; ``_resolve_lora_config``
+    # replaces it in place with the peft ``LoraConfig`` after validation.
+    lora_config: LoraConfigDict | LoraConfig | None = Field(default=None)
 
     @model_validator(mode="before")
     @classmethod

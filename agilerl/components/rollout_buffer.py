@@ -1,7 +1,7 @@
 import warnings
 from collections import OrderedDict
-from collections.abc import Generator
-from typing import Any
+from collections.abc import Generator, Sequence
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -12,7 +12,6 @@ from agilerl.typing import (
     ArrayOrTensor,
     BPTTSequenceType,
     ObservationType,
-    TorchObsType,
 )
 from agilerl.utils.algo_utils import (
     extract_sequences_from_episode,
@@ -53,9 +52,11 @@ class RolloutBuffer:
     :type max_seq_len: int, optional
     """
 
-    padded_data: TensorDict
-    unpadded_data: TensorDict
-    unpadded_slices: list[torch.Tensor]
+    padded_data: TensorDict | None
+    unpadded_data: TensorDict | None
+    unpadded_slices: list[torch.Tensor] | None
+    num_sequences: int | None
+    max_sequence_length: int | None
 
     def __init__(
         self,
@@ -116,22 +117,24 @@ class RolloutBuffer:
 
     def _maybe_reshape_obs(
         self,
-        obs: TorchObsType,
+        obs: torch.Tensor,
         space: spaces.Space,
-    ) -> TorchObsType:
+    ) -> torch.Tensor:
         """Reshape observation to the correct shape.
 
         :param obs: Observation to reshape.
-        :type obs: TorchObsType
+        :type obs: torch.Tensor
         :param space: Observation space.
         :type space: spaces.Space
         :return: Reshaped observation.
-        :rtype: TorchObsType
+        :rtype: torch.Tensor
         """
         if isinstance(space, spaces.Discrete) and obs.ndim < 2:
             obs = obs.unsqueeze(-1)
 
-        return maybe_add_batch_dim(obs, space)
+        # maybe_add_batch_dim preserves the input type; its annotation
+        # (agilerl/utils/algo_utils.py) is not generic over it.
+        return cast("torch.Tensor", maybe_add_batch_dim(obs, space))
 
     def _initialize_buffers(self) -> None:
         """Initialize buffer arrays with correct shapes for vectorized environments."""
@@ -142,10 +145,7 @@ class RolloutBuffer:
         # Create a source TensorDict with appropriately sized tensors
         # The tensors will be on the CPU by default, can be moved to device later if needed.
         source_dict = OrderedDict()
-        if isinstance(
-            self.observation_space,
-            spaces.Dict,
-        ):  # Nested structure for Dict spaces
+        if isinstance(obs_shape, dict):  # Nested structure for Dict spaces
             obs_dict = OrderedDict()
             for key, shape in obs_shape.items():
                 obs_dict[key] = torch.zeros(
@@ -158,13 +158,16 @@ class RolloutBuffer:
                 key: torch.zeros_like(tensor) for key, tensor in obs_dict.items()
             }
         else:
-            # For non-Dict spaces, use regular tensor allocation
+            # For non-Dict spaces, use regular tensor allocation. Tuple
+            # observation spaces are not supported by the rollout buffer, so
+            # the shape is a flat leaf shape here.
+            leaf_shape = cast("tuple[int, ...]", obs_shape)
             source_dict["observations"] = torch.zeros(
-                (self.capacity, self.num_envs, *obs_shape),
+                (self.capacity, self.num_envs, *leaf_shape),
                 dtype=torch.float32,
             )
             source_dict["next_observations"] = torch.zeros(
-                (self.capacity, self.num_envs, *obs_shape),
+                (self.capacity, self.num_envs, *leaf_shape),
                 dtype=torch.float32,
             )
 
@@ -240,9 +243,9 @@ class RolloutBuffer:
         value: float | np.ndarray,
         log_prob: float | np.ndarray,
         next_obs: ObservationType | None = None,
-        hidden_state: dict[str, ArrayOrTensor] | None = None,
+        hidden_state: dict[str, torch.Tensor] | None = None,
         next_hidden_state: (
-            dict[str, ArrayOrTensor] | None
+            dict[str, torch.Tensor] | None
         ) = None,  # Not used if only initial hidden states are stored
         episode_start: bool | np.ndarray | None = None,
         action_mask: ArrayOrTensor | None = None,
@@ -264,9 +267,9 @@ class RolloutBuffer:
         :param next_obs: Next observation batch (shape: (num_envs, *obs_shape)), defaults to None
         :type next_obs: ObservationType | None
         :param hidden_state: Current hidden state batch (shape: (num_envs, hidden_size)), defaults to None
-        :type hidden_state: dict[str, ArrayOrTensor] | None
+        :type hidden_state: dict[str, torch.Tensor] | None
         :param next_hidden_state: Next hidden state batch (shape: (num_envs, hidden_size)), defaults to None
-        :type next_hidden_state: dict[str, ArrayOrTensor] | None
+        :type next_hidden_state: dict[str, torch.Tensor] | None
         :param episode_start: Episode start flag batch (shape: (num_envs,)), defaults to None
         :type episode_start: bool | np.ndarray | None
         :param action_mask: Action mask batch (shape: (num_envs, mask_size)), 1=legal 0=illegal, defaults to None
@@ -290,8 +293,12 @@ class RolloutBuffer:
         # Convert inputs to tensors and ensure correct device (CPU for buffer storage)
         # Also ensure they have the (num_envs, ...) shape
         if isinstance(self.observation_space, spaces.Dict):
+            assert isinstance(obs, dict), (
+                "Expected a dict observation for a Dict observation space."
+            )
+            obs_map = cast("dict[str, Any]", obs)
             obs_dict = OrderedDict()
-            for key, item in obs.items():
+            for key, item in obs_map.items():
                 sub_space = self.observation_space.spaces[key]
                 obs_tensor = torch.as_tensor(item, device="cpu")
                 obs_dict[key] = self._maybe_reshape_obs(obs_tensor, sub_space)
@@ -327,8 +334,12 @@ class RolloutBuffer:
         # Next Observations
         if next_obs is not None:
             if isinstance(self.observation_space, spaces.Dict):
+                assert isinstance(next_obs, dict), (
+                    "Expected a dict observation for a Dict observation space."
+                )
+                next_obs_map = cast("dict[str, Any]", next_obs)
                 next_obs_dict = OrderedDict()
-                for key, item in next_obs.items():
+                for key, item in next_obs_map.items():
                     sub_space = self.observation_space.spaces[key]
                     next_obs_tensor = torch.as_tensor(item, device="cpu")
                     next_obs_dict[key] = self._maybe_reshape_obs(
@@ -499,7 +510,7 @@ class RolloutBuffer:
 
         # Get a view of the buffer up to the current position and for all envs
         # This slice will have batch_size [buffer_size, num_envs]
-        valid_buffer_data: TensorDict = self.buffer[:buffer_size]
+        valid_buffer_data = cast("TensorDict", self.buffer[:buffer_size])
 
         # Reshape to flatten the num_envs dimension into the first batch dimension
         # New batch_size will be [buffer_size * num_envs]
@@ -516,7 +527,7 @@ class RolloutBuffer:
                 return self._convert_td_to_np_dict(flattened_td)
 
             indices = np.random.choice(total_samples, size=batch_size, replace=False)
-            sampled_td = flattened_td[indices]
+            sampled_td = cast("TensorDict", flattened_td[indices])
             # Convert the sampled TensorDict to the old dictionary format
             return self._convert_td_to_np_dict(sampled_td)
         return self._convert_td_to_np_dict(flattened_td)
@@ -525,7 +536,7 @@ class RolloutBuffer:
         self,
         batch_size: int | None = None,
         device: str | None = None,
-    ) -> dict[str, torch.Tensor | dict[str, torch.Tensor]]:
+    ) -> TensorDict:
         """Get data from the buffer as PyTorch tensors, flattened and optionally sampled.
         The output is a TensorDict.
 
@@ -534,22 +545,21 @@ class RolloutBuffer:
         :param device: Device to put tensors on, defaults to None (uses self.device).
         :type device: str | None
         :return: TensorDict containing the data.
-        :rtype: dict[str, torch.Tensor | dict[str, torch.Tensor]]
+        :rtype: TensorDict
         """
         target_device = device or self.device
         buffer_size = self.capacity if self.full else self.pos
         total_samples = buffer_size * self.num_envs
 
         if total_samples == 0:
-            # Return an empty TensorDict with the correct device and structure if possible,
-            # or simply an empty dict if structure is complex to define when empty.
-            # For now, returning an empty dict to match previous behavior.
-            return {}
+            # Empty buffer: return an empty TensorDict so callers can uniformly
+            # rely on TensorDict semantics (e.g. ``is_empty()``).
+            return TensorDict({}, batch_size=[], device=target_device)
 
         # Get a view of the buffer up to the current position and for all envs
         # This slice will have batch_size [buffer_size, num_envs]
         # All tensors inside self.buffer are already torch.Tensors on CPU
-        valid_buffer_data_view: TensorDict = self.buffer[:buffer_size]
+        valid_buffer_data_view = cast("TensorDict", self.buffer[:buffer_size])
 
         # Reshape to flatten the num_envs dimension into the first batch dimension
         # New batch_size will be [buffer_size * num_envs]
@@ -569,7 +579,7 @@ class RolloutBuffer:
             indices = torch.randperm(total_samples, device="cpu")[
                 :batch_size
             ]  # Sample on CPU then move
-            sampled_td: TensorDict = flattened_td[indices]
+            sampled_td = cast("TensorDict", flattened_td[indices])
 
             return sampled_td.to(target_device)
         # Return all flattened data, moved to the target device
@@ -587,7 +597,7 @@ class RolloutBuffer:
         :rtype: dict[str, np.ndarray | dict[str, np.ndarray]]
         """
         # Convert the TensorDict to the old dictionary of numpy arrays format
-        np_dict = {}
+        np_dict: dict[str, np.ndarray | dict[str, np.ndarray]] = {}
         for key, value in td.items():
             if key == "hidden_states" and isinstance(value, TensorDict):
                 # For hidden states, we want the *initial* hidden state for each sequence.
@@ -604,8 +614,9 @@ class RolloutBuffer:
                 dict,
             ):
                 # Handle Dict observation spaces
+                value_map = cast("dict[str, torch.Tensor]", value)
                 np_dict[key] = {
-                    k_obs: v_obs.cpu().numpy() for k_obs, v_obs in value.items()
+                    k_obs: v_obs.cpu().numpy() for k_obs, v_obs in value_map.items()
                 }
             elif isinstance(
                 value,
@@ -615,12 +626,15 @@ class RolloutBuffer:
                     k_sub: v_sub.cpu().numpy() for k_sub, v_sub in value.items()
                 }
             else:
+                assert isinstance(value, torch.Tensor), (
+                    f"Expected a tensor leaf for key '{key}', got {type(value)}."
+                )
                 np_dict[key] = value.cpu().numpy()
         return np_dict
 
     @staticmethod
     def _pad_sequences(
-        sequences: list[torch.Tensor | TensorDict],
+        sequences: Sequence[torch.Tensor | TensorDict],
         target_length: int | None = None,
     ) -> torch.Tensor | TensorDict:
         """Pad sequences using zeros. If target_length is provided, the sequences are padded to the target length.
@@ -629,17 +643,22 @@ class RolloutBuffer:
         to the maximum length of the sequences in the batch (i.e. using `torch.nn.utils.rnn.pad_sequence`).
 
         :param sequences: The sequences to be padded.
-        :type sequences: list[torch.Tensor | TensorDict]
+        :type sequences: Sequence[torch.Tensor | TensorDict]
         :param target_length: The target length to pad the sequences to. If None, the sequences are padded to the length of the longest sequence.
         :type target_length: int | None
         :return: The padded sequence.
         :rtype: torch.Tensor | TensorDict
         """
-        # Handle nested tensors
+        # Handle nested tensors (sequences are homogeneous: if the first element is a
+        # tensor collection, all of them are)
         if is_tensor_collection(sequences[0]):
-            sequences_T = {
-                key: [nested_seq[key] for nested_seq in sequences]
-                for key in sequences[0].keys()
+            nested = cast("Sequence[TensorDict]", sequences)
+            sequences_T: dict[Any, list[torch.Tensor | TensorDict]] = {
+                key: [
+                    cast("torch.Tensor | TensorDict", nested_seq[key])
+                    for nested_seq in nested
+                ]
+                for key in nested[0].keys()
             }
             return TensorDict(
                 {
@@ -648,10 +667,12 @@ class RolloutBuffer:
                 },
             )
 
+        tensors = cast("Sequence[torch.Tensor]", sequences)
+
         # If target_length is provided, pad the sequences to the target length
         if target_length is not None:
             padded_sequences = []
-            for seq in sequences:
+            for seq in tensors:
                 current_length = seq.size(0)
                 pad_amount = target_length - current_length
                 pad_spec = [0, 0] * (seq.dim() - 1) + [0, pad_amount]
@@ -663,7 +684,7 @@ class RolloutBuffer:
 
         # Otherwise, pad the sequences to the length of the longest sequence
         return torch.nn.utils.rnn.pad_sequence(
-            sequences,
+            list(tensors),
             batch_first=True,
             padding_value=0,
         )
@@ -714,15 +735,15 @@ class RolloutBuffer:
 
         return sequences, max_length
 
-    def prepare_sequence_tensors(self, device: str | None = None) -> TensorDict:
-        """Return a TensorDict with all of the possible sequences in the buffer for the
-        observations, actions, and hidden states. We pad the sequences to the same length to obtain
-        a TensorDict with batch_size [num_sequences, max_sequence_length] for efficient truncated BPTT.
+    def prepare_sequence_tensors(self, device: str | None = None) -> None:
+        """Prepare padded and unpadded TensorDicts with all of the possible sequences in the
+        buffer for the observations, actions, and hidden states. We pad the sequences to the
+        same length to obtain a TensorDict with batch_size [num_sequences, max_sequence_length]
+        for efficient truncated BPTT. The results are stored in ``self.padded_data`` and
+        ``self.unpadded_data``.
 
         :param device: Device to put tensors on, defaults to None (uses self.device).
         :type device: str | None
-        :return: Dictionary with tensor sequences.
-        :rtype: TensorDict
         """
         if not self.recurrent:
             msg = "prepare_sequence_tensors() is only supported when recurrent=True."
@@ -740,13 +761,14 @@ class RolloutBuffer:
         # Get a view of the buffer up to the current position and for all envs
         # This slice will have batch_size [buffer_size, num_envs]
         # All tensors inside self.buffer are already torch.Tensors on CPU
-        valid_buffer_data_view: TensorDict = self.buffer[:buffer_size]
+        valid_buffer_data_view = cast("TensorDict", self.buffer[:buffer_size])
 
         # Split data into sequences and apply zero-padding
         # Retrieve the indices of dones as these are the last step of a whole episode
+        dones = cast("torch.Tensor", valid_buffer_data_view["dones"])
         episode_done_indices: list[list[int]] = []
         for env_idx in range(self.num_envs):
-            env_dones: torch.Tensor = valid_buffer_data_view["dones"][:, env_idx]
+            env_dones: torch.Tensor = dones[:, env_idx]
             env_dones_list = env_dones.nonzero().squeeze(-1).tolist()
             episode_done_indices.append(env_dones_list)
 
@@ -785,8 +807,10 @@ class RolloutBuffer:
         padded_data_source = OrderedDict()
         for key, value in valid_data_to_pad.items():
             # Split data into episodes or sequences
+            # NOTE: nested TensorDict values (e.g. hidden states) duck-type the
+            # tensor slicing performed in _get_complete_sequences
             sequences, max_sequence_length = self._get_complete_sequences(
-                value,
+                cast("torch.Tensor", value),
                 episode_done_indices,
             )
 
@@ -848,7 +872,18 @@ class RolloutBuffer:
         :return: A TensorDict containing the minibatch of sequences.
         :rtype: Generator[tuple[TensorDict, TensorDict], None, None]
         """
-        if self.unpadded_slices is None:
+        unpadded_slices = self.unpadded_slices
+        padded_data = self.padded_data
+        unpadded_data = self.unpadded_data
+        total_sequences = self.num_sequences
+        max_sequence_length = self.max_sequence_length
+        if (
+            unpadded_slices is None
+            or padded_data is None
+            or unpadded_data is None
+            or total_sequences is None
+            or max_sequence_length is None
+        ):
             msg = (
                 "Attempting to fetch minibatches before preparing sequences. "
                 "Call prepare_sequence_tensors() first."
@@ -858,17 +893,17 @@ class RolloutBuffer:
             )
 
         # Determine the number of sequences per mini batch
-        if batch_size > self.num_sequences:
+        if batch_size > total_sequences:
             warnings.warn(
                 f"Batch size {batch_size} is larger than the number of sequences "
-                f"({self.num_sequences}), using batch_size = {self.num_sequences}.",
+                f"({total_sequences}), using batch_size = {total_sequences}.",
                 stacklevel=2,
             )
-            batch_size = self.num_sequences
+            batch_size = total_sequences
 
-        num_batches = self.num_sequences // batch_size
+        num_batches = total_sequences // batch_size
         num_sequences_per_batch = [batch_size] * num_batches
-        remainder = self.num_sequences % batch_size
+        remainder = total_sequences % batch_size
 
         if remainder > 0:
             num_sequences_per_batch.append(remainder)
@@ -877,10 +912,10 @@ class RolloutBuffer:
         # entire batch to ensure that sequences are maintained as a whole.
         indices = torch.arange(
             start=0,
-            end=self.num_sequences * self.max_sequence_length,
-        ).reshape(self.num_sequences, self.max_sequence_length)
+            end=total_sequences * max_sequence_length,
+        ).reshape(total_sequences, max_sequence_length)
 
-        sequence_indices = torch.randperm(self.num_sequences)
+        sequence_indices = torch.randperm(total_sequences)
 
         # Compose mini batches
         start = 0
@@ -891,17 +926,17 @@ class RolloutBuffer:
 
             # Unpadded and flat indices are used to sample unpadded training data
             minibatch_seq_indices: list[int] = sequences_samples.tolist()
-            unpadded_indices = [
-                self.unpadded_slices[idx].tolist() for idx in minibatch_seq_indices
+            unpadded_slice_lists = [
+                unpadded_slices[idx].tolist() for idx in minibatch_seq_indices
             ]
             unpadded_indices = [
-                int(item) for sublist in unpadded_indices for item in sublist
+                int(item) for sublist in unpadded_slice_lists for item in sublist
             ]
             unpadded_indices_tensor = torch.as_tensor(
                 unpadded_indices, device=indices.device
             )
 
-            padded: TensorDict = self.padded_data[padded_indices]
+            padded = cast("TensorDict", padded_data[padded_indices])
             if self.recurrent and padded.get("initial_hidden_states", None) is not None:
                 batch_hidden_states = {}
                 initial_hidden_states: dict[str, Any] = padded.get_non_tensor(
@@ -912,7 +947,7 @@ class RolloutBuffer:
 
                 padded.set_non_tensor("initial_hidden_states", batch_hidden_states)
 
-            unpadded = self.unpadded_data[unpadded_indices_tensor]
+            unpadded = cast("TensorDict", unpadded_data[unpadded_indices_tensor])
             start = end
             yield padded, unpadded
 

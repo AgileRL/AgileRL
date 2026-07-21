@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     import torch
     from accelerate import Accelerator
     from datasets import Dataset
-    from transformers import AutoTokenizer
+    from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 
 class SFTGym(IterablePromptBatchGym):
@@ -22,7 +22,7 @@ class SFTGym(IterablePromptBatchGym):
     :param test_dataset: The test dataset.
     :type test_dataset: Dataset
     :param tokenizer: The tokenizer.
-    :type tokenizer: AutoTokenizer
+    :type tokenizer: PreTrainedTokenizerBase
     :param data_batch_size_per_gpu: The batch size per GPU.
     :type data_batch_size_per_gpu: int
     :param response_column: The column name for the response in the dataset.
@@ -39,7 +39,7 @@ class SFTGym(IterablePromptBatchGym):
         self,
         train_dataset: Dataset,
         test_dataset: Dataset,
-        tokenizer: AutoTokenizer,
+        tokenizer: PreTrainedTokenizerBase,
         data_batch_size_per_gpu: int = 8,
         response_column: str = "target",
         accelerator: Accelerator | None = None,
@@ -91,13 +91,13 @@ class SFTGym(IterablePromptBatchGym):
 
     def create_collate_fn(
         self,
-        tokenizer: AutoTokenizer,
+        tokenizer: PreTrainedTokenizerBase,
         max_context_length: int | None = None,
     ) -> Any:
         """Build a collate function that tokenises ``(prompt, response)`` pairs.
 
         :param tokenizer: The tokenizer.
-        :type tokenizer: AutoTokenizer
+        :type tokenizer: PreTrainedTokenizerBase
         :param max_context_length: The maximum context length for the LLM model.
         :type max_context_length: int | None
         :return: The collate function.

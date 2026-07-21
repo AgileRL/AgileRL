@@ -4,7 +4,7 @@ import warnings
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import gymnasium as gym
 import numpy as np
@@ -34,8 +34,7 @@ from agilerl.algorithms.core.registry import HyperparameterConfig
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.logger import CSVLogger, StdOutLogger, TensorboardLogger, WandbLogger
-from agilerl.modules import EvolvableModule
-from agilerl.typing import BPTTSequenceType, GymSpaceType, PopulationType
+from agilerl.typing import BPTTSequenceType, PopulationType
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, DummyOptimizer, clone_llm
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
@@ -94,7 +93,8 @@ def _lora_config_from_init_hp(INIT_HP: dict[str, Any]) -> Any | None:
         lora_alpha=int(INIT_HP.get("LORA_ALPHA", 64)),
         target_modules=list(modules),
         lora_dropout=float(INIT_HP.get("LORA_DROPOUT", 0.0)),
-        bias=str(INIT_HP.get("LORA_BIAS", "none")),
+        # peft validates the bias literal at construction time.
+        bias=cast("Any", str(INIT_HP.get("LORA_BIAS", "none"))),
         task_type=str(INIT_HP.get("LORA_TASK_TYPE", "CAUSAL_LM")),
     )
 
@@ -211,7 +211,7 @@ def make_vect_envs(
     should_async_vector: bool = True,
     extra_wrappers: list[type] | None = None,
     **env_kwargs: Any,
-) -> Any:
+) -> gym.vector.AsyncVectorEnv | gym.vector.SyncVectorEnv:
     """Return async-vectorized gym environments.
 
     :param env_name: Gym environment name
@@ -225,11 +225,9 @@ def make_vect_envs(
     :param extra_wrappers: Optional list of wrapper classes to apply to each individual
         environment before vectorization.
     :type extra_wrappers: list[type] or None, optional
+    :return: Vectorized gym environments
+    :rtype: gym.vector.AsyncVectorEnv | gym.vector.SyncVectorEnv
     """
-    if env_name is None and make_env is None:
-        msg = "Either env_name or make_env must be provided"
-        raise ValueError(msg)
-
     if env_name is not None:
         _check_box2d_available(env_name)
 
@@ -237,10 +235,14 @@ def make_vect_envs(
         gym.vector.AsyncVectorEnv if should_async_vector else gym.vector.SyncVectorEnv
     )
 
-    def default_make_env() -> gym.Env:
-        return gym.make(env_name, **env_kwargs)
+    if make_env is None:
+        if env_name is None:
+            msg = "Either env_name or make_env must be provided"
+            raise ValueError(msg)
+        env_id: str = env_name
 
-    make_env = make_env or default_make_env
+        def make_env() -> gym.Env:
+            return gym.make(env_id, **env_kwargs)
 
     if extra_wrappers is not None:
         _inner_make_env = make_env
@@ -255,7 +257,7 @@ def make_vect_envs(
 
 
 def make_multi_agent_vect_envs(
-    env: Callable[[], ParallelEnv],
+    env: Callable[..., ParallelEnv],
     num_envs: int = 1,
     *,
     extra_wrappers: list[type] | None = None,
@@ -366,11 +368,14 @@ def create_population(
     algo: str,
     net_config: dict[str, Any] | None,
     INIT_HP: dict[str, Any],
-    observation_space: GymSpaceType | None = None,
-    action_space: GymSpaceType | None = None,
+    # The accepted space and network types depend on the ``algo`` string
+    # (single spaces/networks vs per-agent dicts/lists); each algorithm
+    # constructor validates them at runtime.
+    observation_space: Any = None,
+    action_space: Any = None,
     hp_config: HyperparameterConfig | None = None,
-    actor_network: EvolvableModule | None = None,
-    critic_network: EvolvableModule | None = None,
+    actor_network: Any = None,
+    critic_network: Any = None,
     agent_wrapper: Callable | None = None,
     wrapper_kwargs: dict[str, Any] | None = None,
     population_size: int = 1,
@@ -440,7 +445,7 @@ def create_population(
     )
     if algo_kwargs is None:
         algo_kwargs = {}
-    population = []
+    population: PopulationType = []
     if algo == "DQN":
         for idx in range(population_size):
             agent = DQN(
@@ -519,7 +524,7 @@ def create_population(
             )
 
             agent = (
-                agent_wrapper(agent, **wrapper_kwargs)
+                agent_wrapper(agent, **(wrapper_kwargs or {}))
                 if agent_wrapper is not None
                 else agent
             )
@@ -1238,10 +1243,11 @@ def tournament_selection_and_mutation(
             population = mutation.mutation(population)
         if accelerator is not None:
             accelerator.wait_for_everyone()
-            consolidate_mutations(population)
+            # This branch only runs for LLM populations.
+            consolidate_mutations(cast("list[LLMAlgorithm]", population))
             accelerator.wait_for_everyone()
         if save_elite:
-            save_llm_checkpoint(elite, elite_path)
+            save_llm_checkpoint(cast("LLMAlgorithm", elite), elite_path)
         return population
 
     elite = None
@@ -1334,7 +1340,7 @@ def init_wandb(
         config_dict.update(mutation_hyperparams)
 
     # track hyperparameters and run metadata
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "config": config_dict,
         "project": project,  # wandb project where this run will be logged
         "name": "{}-EvoHPO-{}-{}".format(
@@ -1437,6 +1443,9 @@ def init_loggers(
             )
         )
     if csv:
+        if csv_log_dir is None:
+            msg = "csv_log_dir must be provided when csv=True"
+            raise ValueError(msg)
         loggers.append(CSVLogger(csv_log_dir))
 
     return loggers
@@ -1513,11 +1522,11 @@ def print_hyperparams(pop: PopulationType) -> None:
     """
     for agent in pop:
         mean_fitness = (
-            np.mean(agent.fitness[-5:]).item()
+            np.mean([np.mean(f) for f in agent.fitness[-5:]]).item()
             if len(agent.fitness) > 0
             else float("nan")
         )
-        attrs = EvolvableAlgorithm.inspect_attributes(agent)
+        attrs = EvolvableAlgorithm.inspect_attributes(cast("EvolvableAlgorithm", agent))
         lines = [
             f"Agent ID: {agent.index}  |  Mean 5 Fitness: {mean_fitness:.2f}",
             "Attributes:",
@@ -1606,17 +1615,19 @@ def consolidate_mutations(population: list[LLMAlgorithm]) -> None:
         setattr(agent, mut, mut_value)
 
         if mut in ("lr", "critic_lr"):
+            assert agent.optimizer is not None, "Optimizer is not initialized"
             opt = (
                 agent.optimizer
                 if not isinstance(agent.optimizer.optimizer, DummyOptimizer)
-                else agent.actor.optimizer
+                # DeepSpeed engines expose the wrapped optimizer on the actor.
+                else cast("Any", agent.actor).optimizer
             )
             lr = (
                 (agent.lr, agent.lr_critic)
                 if getattr(agent, "lr_critic", None) is not None
                 else agent.lr
             )
-            update_lr_kw = {
+            update_lr_kw: dict[str, Any] = {
                 "optimizer": opt,
                 "lr": lr,
                 "accelerator": agent.accelerator,

@@ -1,10 +1,12 @@
 import warnings
-from typing import Any
+from typing import Any, cast
 
+import gymnasium as gym
 import numpy as np
 import torch
 from accelerate import Accelerator
 from gymnasium import spaces
+from tensordict import TensorDict
 from tensordict.nn import CudaGraphModule
 from torch import nn, optim
 
@@ -18,8 +20,8 @@ from agilerl.modules.base import EvolvableModule
 from agilerl.networks.q_networks import QNetwork
 from agilerl.typing import (
     ExperiencesType,
-    GymEnvType,
     ObservationType,
+    ReplayBatch,
     SupportedObservationSpace,
     TorchObsType,
 )
@@ -68,6 +70,12 @@ class DQN(RLAlgorithm):
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """
+
+    # Narrowed from RLAlgorithm.action_space; enforced at construction.
+    action_space: spaces.Discrete | spaces.MultiDiscrete
+
+    # Discrete action space, so the network output size is a plain int
+    action_dim: int
 
     def __init__(
         self,
@@ -144,7 +152,7 @@ class DQN(RLAlgorithm):
                     msg,
                 )
 
-            # Need to make deepcopies for target and detached networks
+            # Need to make deepcopies for target and detached networks.
             self.actor, self.actor_target = make_safe_deepcopies(
                 actor_network,
                 actor_network,
@@ -185,14 +193,20 @@ class DQN(RLAlgorithm):
                 "CUDA graphs for DQN are implemented experimentally and may not work as expected.",
                 stacklevel=2,
             )
-            self.update = torch.compile(self.update, mode=None)
-            self._get_action = torch.compile(
-                self._get_action,
-                mode=None,
-                fullgraph=True,
+            # torch.compile/CudaGraphModule shadow the bound methods with
+            # signature-preserving wrappers; typed as Any since instance
+            # attributes cannot redeclare method types.
+            self.update = cast("Any", torch.compile(self.update, mode=None))
+            self._get_action = cast(
+                "Any",
+                torch.compile(
+                    self._get_action,
+                    mode=None,
+                    fullgraph=True,
+                ),
             )
-            self.update = CudaGraphModule(self.update)
-            self._get_action = CudaGraphModule(self._get_action)
+            self.update = cast("Any", CudaGraphModule(self.update))
+            self._get_action = cast("Any", CudaGraphModule(self._get_action))
 
         # Register DQN network groups
         self.register_network_group(
@@ -211,7 +225,7 @@ class DQN(RLAlgorithm):
         self,
         obs: ObservationType,
         epsilon: float = 0.0,
-        action_mask: np.ndarray | None = None,
+        action_mask: np.ndarray | list[np.ndarray] | None = None,
         *args: Any,
         **kwargs: Any,
     ) -> np.ndarray:
@@ -222,33 +236,35 @@ class DQN(RLAlgorithm):
         :param epsilon: Probability of taking a random action for exploration, defaults to 0
         :type epsilon: float, optional
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
-        :type action_mask: numpy.ndarray, optional
+        :type action_mask: numpy.ndarray | list[numpy.ndarray], optional
         :return: Selected action(s) for the given observation(s)
         :rtype: numpy.ndarray
         """
         # Preprocess observations and convert inputs to torch tensors
         torch_obs = self.preprocess_observation(obs)
-        epsilon = torch.tensor(epsilon, device=self.device)
+        eps = torch.tensor(epsilon, device=self.device)
         if action_mask is not None:
             # Need to stack if vectorized env
-            action_mask = (
-                np.stack(action_mask)
-                if action_mask.dtype == object or isinstance(action_mask, list)
-                else action_mask
-            )
-            action_mask = torch.as_tensor(action_mask, device=self.device)
+            if isinstance(action_mask, list) or action_mask.dtype == object:
+                action_mask = np.stack(list(action_mask))
+
+            mask = torch.as_tensor(action_mask, device=self.device)
         else:
-            if isinstance(torch_obs, dict):
+            if isinstance(torch_obs, torch.Tensor):
+                batch_size = torch_obs.size(0)
+            elif isinstance(torch_obs, TensorDict):
+                batch_size = torch_obs.batch_size[0]
+            elif isinstance(torch_obs, dict):
                 sample = next(iter(torch_obs.values()))
                 batch_size = sample.size(0)
-            elif isinstance(torch_obs, tuple):
-                batch_size = torch_obs[0].size(0)
             else:
-                batch_size = torch_obs.size(0)
+                batch_size = torch_obs[0].size(0)
 
-            action_mask = torch.ones((batch_size, self.action_dim), device=self.device)
+            mask = torch.ones((batch_size, self.action_dim), device=self.device)
 
-        action = self._get_action(torch_obs, epsilon, action_mask).cpu().numpy()
+        # NOTE: with cudagraphs enabled, self._get_action is swapped for a
+        # signature-preserving CudaGraphModule wrapper in __init__.
+        action = self._get_action(torch_obs, eps, mask).cpu().numpy()  # ty: ignore[missing-argument, invalid-argument-type]
 
         if self.training:
             self.metrics.log_histogram("action_dist", action)
@@ -328,7 +344,7 @@ class DQN(RLAlgorithm):
                     self.actor_target(next_obs).gather(dim=1, index=q_idx).detach()
                 )
             else:
-                q_target = self.actor_target(next_obs).max(axis=1)[0].unsqueeze(1)
+                q_target = self.actor_target(next_obs).max(dim=1)[0].unsqueeze(1)
 
             # target, if terminal then y_j = rewards
             y_j = rewards + self.gamma * q_target * (1 - dones)
@@ -358,23 +374,26 @@ class DQN(RLAlgorithm):
         :return: Loss value from the learning step
         :rtype: float
         """
-        obs = experiences["obs"]
-        actions = experiences["action"]
-        rewards = experiences["reward"]
-        next_obs = experiences["next_obs"]
-        dones = experiences["done"]
+        # Off-policy replay buffers sample batches as TensorDicts keyed by field
+        # name (components/replay_buffer.py), which guarantees this layout.
+        batch = cast("ReplayBatch", experiences)
+        actions = batch["action"]
+        rewards = batch["reward"]
+        dones = batch["done"]
 
-        obs = self.preprocess_observation(obs)
-        next_obs = self.preprocess_observation(next_obs)
+        obs = self.preprocess_observation(batch["obs"])
+        next_obs = self.preprocess_observation(batch["next_obs"])
 
-        loss = self.update(obs, actions, rewards, next_obs, dones)
+        # NOTE: with cudagraphs enabled, self.update is swapped for a
+        # signature-preserving CudaGraphModule wrapper in __init__.
+        loss = self.update(obs, actions, rewards, next_obs, dones)  # ty: ignore[missing-argument, invalid-argument-type]
 
         # soft update target network
         self.soft_update()
 
-        loss = loss.item()
-        self.metrics.log("loss", loss)
-        return loss
+        loss_value = loss.item()
+        self.metrics.log("loss", loss_value)
+        return loss_value
 
     def soft_update(self) -> None:
         """Soft updates target network."""
@@ -389,14 +408,14 @@ class DQN(RLAlgorithm):
 
     def test(
         self,
-        env: GymEnvType,
+        env: gym.vector.VectorEnv,
         max_steps: int | None = None,
         loop: int = 1,
     ) -> float:
         """Return mean test score of agent in environment with epsilon-greedy policy.
 
-        :param env: The environment to be tested in
-        :type env: Gym-style environment
+        :param env: The vectorized environment to be tested in
+        :type env: gym.vector.VectorEnv
         :param max_steps: Maximum number of testing steps, defaults to None
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean over these tests. Defaults to 1
@@ -427,6 +446,6 @@ class DQN(RLAlgorithm):
                             completed_episode_scores[idx] = scores[idx]
                             finished[idx] = 1
                 rewards.append(np.mean(completed_episode_scores))
-        mean_fit = np.mean(rewards)
+        mean_fit = float(np.mean(rewards))
         self.metrics.add_fitness(mean_fit)
         return mean_fit

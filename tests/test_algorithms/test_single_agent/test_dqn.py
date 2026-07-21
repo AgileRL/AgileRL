@@ -287,14 +287,14 @@ class TestDQNGetAction:
         epsilon = 0
         action = dqn.get_action(state, epsilon, action_mask)[0]
 
-        assert action.is_integer()
+        assert float(action).is_integer()
         assert action >= 0
         assert action < action_space.n
 
         epsilon = 1
         action = dqn.get_action(state, epsilon, action_mask)[0]
 
-        assert action.is_integer()
+        assert float(action).is_integer()
         assert action >= 0
         assert action < action_space.n
         dqn.clean_up()
@@ -310,13 +310,13 @@ class TestDQNGetAction:
         epsilon = 0
         action = dqn.get_action(state, epsilon, action_mask)[0]
 
-        assert action.is_integer()
+        assert float(action).is_integer()
         assert action == 1
 
         epsilon = 1
         action = dqn.get_action(state, epsilon, action_mask)[0]
 
-        assert action.is_integer()
+        assert float(action).is_integer()
         assert action == 1
         dqn.clean_up()
 

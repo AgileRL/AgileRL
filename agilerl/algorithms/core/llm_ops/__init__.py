@@ -1,20 +1,29 @@
 """LLM-specific fused-kernel ops (Liger and LoRA).
 
-The ``fused_lora`` helpers are always available; ``fused_loss``
+The ``fused_lora`` helpers wrap PEFT LoRA layers, so they are gated on
+:data:`agilerl.HAS_LLM_DEPENDENCIES`; ``fused_loss``
 (``LigerFusedLinearPolicyLossFunction``, ``LigerDPOWithAlpha``,
 ``llm_policy_loss_fn``) requires ``liger-kernel`` at import
-time, so it is gated on :data:`agilerl.HAS_LIGER_KERNEL`. Without Liger
-the public symbols resolve to ``None`` so callers' ``is None`` guard
-fires.
+time, so it is gated on :data:`agilerl.HAS_LIGER_KERNEL`. When a dependency
+is missing the corresponding public symbols resolve to ``None`` so callers'
+``is None`` guard fires.
 """
 
-from agilerl import HAS_LIGER_KERNEL
-from agilerl.algorithms.core.llm_ops.fused_lora import (
-    patch_lora_for_fused_forward,
-    set_fused_adapter_routing,
-    unpatch_lora_for_fused_forward,
-    unset_fused_adapter_routing,
-)
+from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
+
+if HAS_LLM_DEPENDENCIES:
+    from agilerl.algorithms.core.llm_ops.fused_lora import (
+        patch_lora_for_fused_forward,
+        set_fused_adapter_routing,
+        unpatch_lora_for_fused_forward,
+        unset_fused_adapter_routing,
+    )
+else:
+    patch_lora_for_fused_forward = None
+    set_fused_adapter_routing = None
+    unpatch_lora_for_fused_forward = None
+    unset_fused_adapter_routing = None
+
 from agilerl.algorithms.core.llm_ops.vllm_colocate import (
     get_vllm_internal_model,
     patch_vllm_lora_keep_resident,

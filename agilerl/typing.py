@@ -107,7 +107,7 @@ StandardTensorDict = dict[str, torch.Tensor]
 TensorTuple = tuple[torch.Tensor, ...]
 ArrayDict = dict[str, np.ndarray]
 ArrayTuple = tuple[np.ndarray, ...]
-NetConfigType = dict[str, dict[str, Any] | Any]
+NetConfigType = dict[str, Any]
 KernelSizeType = int | tuple[int, ...]
 GymSpaceType = SupportedObservationSpace | list[SupportedObservationSpace]
 GymEnvType = str | gym.Env | gym.vector.VectorEnv | gym.vector.AsyncVectorEnv
@@ -119,9 +119,39 @@ TorchObsType = torch.Tensor | TensorDict | TensorTuple | StandardTensorDict
 ObservationType = NumpyObsType | TorchObsType | Number | LLMObsType
 MultiAgentObservationType = dict[str, ObservationType]
 ActionType = int | float | np.ndarray | torch.Tensor
+# A recorded fitness: a scalar, or a per-sub-agent row (multi-agent, sum_scores=False).
+FitnessValue = float | np.ndarray
 InfosDict = dict[str, dict[str, Any]]
 MaybeObsList = list[ObservationType] | ObservationType
 ExperiencesType = dict[str, ObservationType] | tuple[ObservationType, ...]
+
+
+class ReplayBatch(TypedDict):
+    """One off-policy sample from a :class:`~agilerl.components.replay_buffer.ReplayBuffer`."""
+
+    obs: TorchObsType
+    action: torch.Tensor
+    reward: torch.Tensor
+    next_obs: TorchObsType
+    done: torch.Tensor
+
+
+class PrioritizedReplayBatch(ReplayBatch, total=False):
+    """A :class:`ReplayBatch` plus the priority weights and indices returned by
+    prioritized (or ``return_idx=True``) sampling.
+    """
+
+    weights: torch.Tensor
+    idxs: torch.Tensor
+
+
+class BanditBatch(TypedDict):
+    """One sample from a bandit replay buffer (context and reward only)."""
+
+    obs: TorchObsType
+    reward: torch.Tensor
+
+
 ActionReturnType = tuple[ActionType | Any, ...] | ActionType | Any
 GymStepReturn = tuple[NumpyObsType, ActionType, float, MaybeObsList, InfosDict]
 PzStepReturn = tuple[

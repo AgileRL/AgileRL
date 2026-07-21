@@ -1,5 +1,5 @@
 import random
-from typing import Any
+from typing import Any, SupportsFloat
 
 import gymnasium as gym
 import numpy as np
@@ -22,13 +22,13 @@ class Skill(gym.Wrapper, gym.utils.RecordConstructorArgs):
     def step(
         self,
         action: Any,
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+    ) -> tuple[Any, SupportsFloat, bool, bool, dict[str, Any]]:
         """Step the environment and return the observation, reward, terminated, truncated, and info.
 
         :param action: Action
         :type action: Any
         :return: Tuple of (observation, reward, terminated, truncated, info)
-        :rtype: tuple[Any, float, bool, bool, dict[str, Any]]
+        :rtype: tuple[Any, SupportsFloat, bool, bool, dict[str, Any]]
         """
         observation, reward, terminated, truncated, info = self.env.step(action)
         return self.skill_reward(observation, reward, terminated, truncated, info)
@@ -36,17 +36,17 @@ class Skill(gym.Wrapper, gym.utils.RecordConstructorArgs):
     def skill_reward(
         self,
         observation: Any,
-        reward: float,
+        reward: SupportsFloat,
         terminated: bool,
         truncated: bool,
         info: dict[str, Any],
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+    ) -> tuple[Any, SupportsFloat, bool, bool, dict[str, Any]]:
         """Calculate the reward for the given observation, reward, terminated, truncated, and info.
 
         :param observation: Observation
         :type observation: Any
-        :param reward: Reward
-        :type reward: float
+        :param reward: Reward, as returned by the wrapped environment
+        :type reward: SupportsFloat
         :param terminated: Terminated
         :type terminated: bool
         :param truncated: Truncated
@@ -54,7 +54,7 @@ class Skill(gym.Wrapper, gym.utils.RecordConstructorArgs):
         :param info: Info
         :type info: dict[str, Any]
         :return: Tuple of (observation, reward, terminated, truncated, info)
-        :rtype: tuple[Any, float, bool, bool, dict[str, Any]]
+        :rtype: tuple[Any, SupportsFloat, bool, bool, dict[str, Any]]
         """
         return observation, reward, terminated, truncated, info
 

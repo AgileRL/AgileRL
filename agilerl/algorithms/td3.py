@@ -1,7 +1,8 @@
 import copy
 import warnings
-from typing import Any
+from typing import Any, cast
 
+import gymnasium as gym
 import numpy as np
 import torch
 from accelerate import Accelerator
@@ -21,9 +22,9 @@ from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.typing import (
     ExperiencesType,
-    GymEnvType,
     NetConfigType,
     ObservationType,
+    ReplayBatch,
     SupportedObservationSpace,
 )
 from agilerl.utils.algo_utils import (
@@ -51,9 +52,9 @@ class TD3(RLAlgorithm):
     :param vect_noise_dim: Vectorization dimension of environment for action noise, defaults to 1
     :type vect_noise_dim: int, optional
     :param expl_noise: Scale for Ornstein Uhlenbeck action noise, or standard deviation for Gaussian exploration noise
-    :type expl_noise: float, optional
+    :type expl_noise: float | np.ndarray, optional
     :param mean_noise: Mean of exploration noise, defaults to 0.0
-    :type mean_noise: float, optional
+    :type mean_noise: float | np.ndarray, optional
     :param theta: Rate of mean reversion in Ornstein Uhlenbeck action noise, defaults to 0.15
     :type theta: float, optional
     :param dt: Timestep for Ornstein Uhlenbeck action noise update, defaults to 1e-2
@@ -97,6 +98,8 @@ class TD3(RLAlgorithm):
     """
 
     action_space: spaces.Box
+    # Box action space, so the network output size is a plain int
+    action_dim: int
 
     def __init__(
         self,
@@ -104,8 +107,8 @@ class TD3(RLAlgorithm):
         action_space: spaces.Box,
         O_U_noise: bool = True,
         vect_noise_dim: int = 1,
-        expl_noise: float = 0.1,
-        mean_noise: float = 0.0,
+        expl_noise: float | np.ndarray = 0.1,
+        mean_noise: float | np.ndarray = 0.0,
         theta: float = 0.15,
         dt: float = 1e-2,
         index: int = 0,
@@ -201,12 +204,12 @@ class TD3(RLAlgorithm):
         self.action_high = torch.as_tensor(action_space.high, dtype=torch.float32)
 
         # Exploration noise
-        self.expl_noise = (
+        self.expl_noise: np.ndarray = (
             expl_noise
             if isinstance(expl_noise, np.ndarray)
             else expl_noise * np.ones((vect_noise_dim, self.action_dim))
         )
-        self.mean_noise = (
+        self.mean_noise: np.ndarray = (
             mean_noise
             if isinstance(mean_noise, np.ndarray)
             else mean_noise * np.ones((vect_noise_dim, self.action_dim))
@@ -388,9 +391,14 @@ class TD3(RLAlgorithm):
         """Shares the encoder parameters between the actor and critics.
         Registered as a mutation hook when share_encoders=True.
         """
-        if all(
-            isinstance(net, EvolvableNetwork)
-            for net in [self.actor, self.critic_1, self.critic_2]
+        # Explicit per-network checks (rather than all(...)) so the targets are
+        # covered too and each is known to be an encoder-bearing network.
+        if (
+            isinstance(self.actor, EvolvableNetwork)
+            and isinstance(self.critic_1, EvolvableNetwork)
+            and isinstance(self.critic_2, EvolvableNetwork)
+            and isinstance(self.critic_target_1, EvolvableNetwork)
+            and isinstance(self.critic_target_2, EvolvableNetwork)
         ):
             try:
                 share_encoder_parameters(
@@ -495,17 +503,18 @@ class TD3(RLAlgorithm):
         :type noise_clip: float, optional
         :param policy_noise: Standard deviation of noise applied to policy, defaults to 0.2
         :type policy_noise: float, optional
-        :return: Actor loss and critic loss
-        :rtype: tuple[float, float]
+        :return: Actor loss (None on steps without a policy update) and critic loss
+        :rtype: tuple[float | None, float]
         """
-        obs = experiences["obs"]
-        actions = experiences["action"]
-        rewards = experiences["reward"]
-        next_obs = experiences["next_obs"]
-        dones = experiences["done"]
+        # Off-policy replay buffers sample batches as TensorDicts keyed by field
+        # name (components/replay_buffer.py), which guarantees this layout.
+        batch = cast("ReplayBatch", experiences)
+        actions = batch["action"]
+        rewards = batch["reward"]
+        dones = batch["done"]
 
-        obs = self.preprocess_observation(obs)
-        next_obs = self.preprocess_observation(next_obs)
+        obs = self.preprocess_observation(batch["obs"])
+        next_obs = self.preprocess_observation(batch["next_obs"])
 
         # Compute the Q values
         q_value_1 = self.critic_1(obs, actions)
@@ -544,8 +553,8 @@ class TD3(RLAlgorithm):
         else:
             critic_loss.backward()
 
-        critic_loss = critic_loss.item()
-        self.metrics.log("critic_loss", critic_loss)
+        critic_loss_value = critic_loss.item()
+        self.metrics.log("critic_loss", critic_loss_value)
 
         self.critic_1_optimizer.step()
         self.critic_2_optimizer.step()
@@ -572,11 +581,11 @@ class TD3(RLAlgorithm):
             self.soft_update(self.critic_1, self.critic_target_1)
             self.soft_update(self.critic_2, self.critic_target_2)
 
-            actor_loss = actor_loss.item()
-            self.metrics.log("actor_loss", actor_loss)
-            return actor_loss, critic_loss
+            actor_loss_value = actor_loss.item()
+            self.metrics.log("actor_loss", actor_loss_value)
+            return actor_loss_value, critic_loss_value
 
-        return None, critic_loss
+        return None, critic_loss_value
 
     def soft_update(self, net: EvolvableModule, target: EvolvableModule) -> None:
         """Soft updates target network parameters.
@@ -595,14 +604,14 @@ class TD3(RLAlgorithm):
 
     def test(
         self,
-        env: GymEnvType,
+        env: gym.vector.VectorEnv,
         max_steps: int | None = None,
         loop: int = 3,
     ) -> float:
         """Return mean test score of agent in environment with epsilon-greedy policy.
 
-        :param env: The environment to be tested in
-        :type env: Gym-style environment
+        :param env: The vectorized environment to be tested in
+        :type env: gym.vector.VectorEnv
         :param max_steps: Maximum number of testing steps, defaults to None
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
@@ -633,6 +642,6 @@ class TD3(RLAlgorithm):
                             completed_episode_scores[idx] = scores[idx]
                             finished[idx] = 1
                 rewards.append(np.mean(completed_episode_scores))
-        mean_fit = np.mean(rewards)
+        mean_fit = float(np.mean(rewards))
         self.metrics.add_fitness(mean_fit)
         return mean_fit

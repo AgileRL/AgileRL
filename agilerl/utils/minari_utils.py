@@ -150,7 +150,7 @@ def minari_to_agile_dataset(dataset_id: str, remote: bool = False) -> h5py.File:
     terminals = []
 
     # Load the Minari dataset
-    dataset = load_minari_dataset(dataset_id, remote)
+    dataset = load_minari_dataset(dataset_id, remote=remote)
 
     # Iterate through the episodes in the dataset
     for episode in dataset.iterate_episodes():

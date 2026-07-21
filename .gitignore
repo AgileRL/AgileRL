@@ -162,6 +162,9 @@ wandb/
 CLAUDE.md
 AGENTS.md
 
+# Checkpoints written by test runs
+/models/
+
 # Symlink for type-checking (repo root only)
 /agilerl/arena/
 

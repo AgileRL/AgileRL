@@ -7,6 +7,7 @@ import tarfile
 from pathlib import Path
 
 import pytest
+
 from agilerl.arena.exceptions import ArenaFileNotFoundError
 from agilerl.arena.utils import (
     discover_env_sidecars,

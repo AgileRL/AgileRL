@@ -335,9 +335,9 @@ class TestTournamentSelectionSelect:
 
         for agent in population:
             # Create a mock clone that returns a new mock agent
-            def mock_clone(new_idx, wrap=False, _agent=agent):
+            def mock_clone(index=None, wrap=False, _agent=agent):
                 mock_agent = MagicMock()
-                mock_agent.index = new_idx
+                mock_agent.index = index
                 mock_agent.accelerator = accelerator
                 mock_agent.clean_up = MagicMock()
                 mock_agent.fitness = _agent.fitness

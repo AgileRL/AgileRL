@@ -1265,7 +1265,9 @@ class TestLLMGetTrainingKwargs:
         assert "num_epochs" not in kwargs
 
     def test_llm_kwargs_include_max_reward(self, grpo_spec):
-        env_spec = MagicMock(max_reward=5.0)
+        from agilerl.models.env import LLMEnvSpec
+
+        env_spec = LLMEnvSpec(env_type="preference", dataset="dummy", max_reward=5.0)
         training = TrainingSpec(max_steps=100, evo_steps=10, pop_size=2)
         kwargs = grpo_spec.get_training_kwargs(training=training, env_spec=env_spec)
         assert kwargs["max_reward"] == 5.0
@@ -2500,6 +2502,7 @@ class TestMakeEnvBranches:
 
     def test_llm_non_multiturn_calls_make_env(self):
         """LLMEnvSpec non-multiturn sets fields and calls make_env."""
+        from agilerl.models import LLMAlgorithmSpec
         from agilerl.models.env import LLMEnvSpec, LLMEnvType
 
         mock_env = MagicMock()
@@ -2519,7 +2522,8 @@ class TestMakeEnvBranches:
             "agilerl.training.trainer.isinstance",
             side_effect=lambda o, c: (
                 True
-                if c is LLMEnvSpec and o is trainer.env_spec
+                if (c is LLMEnvSpec and o is trainer.env_spec)
+                or (c is LLMAlgorithmSpec and o is trainer.algorithm_spec)
                 else type.__instancecheck__(c, o)
                 if isinstance(c, type)
                 else False
