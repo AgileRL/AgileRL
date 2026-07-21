@@ -529,10 +529,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                     completion_masks,
                     sampling_logps,
                 ) = self._generate_with_vllm_colocate(
-                    # ReasoningPrompts is a TypedDict (a plain dict at runtime);
-                    # the base helper's prompt-threading chain is typed as
-                    # list[dict[str, Any]].
-                    cast("list[dict[str, Any]]", prompt_batch),
+                    prompt_batch,
                     group_size,
                     temperature=self.temperature
                     if training

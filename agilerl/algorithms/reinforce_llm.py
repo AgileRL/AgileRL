@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import warnings
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -25,7 +27,6 @@ else:
     LigerFusedLinearPolicyLossFunction = None  # type: ignore[assignment]
     apply_fused_policy_loss = None  # type: ignore[assignment]
 from agilerl.protocols import (
-    LoraConfigProtocol,
     MultiTurnEnv,
     PeftModelProtocol,
     PreTrainedModelProtocol,
@@ -127,7 +128,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         DeepSpeed ZeRO-3.
     :type use_memory_efficient_params: bool
     :param lora_config: LoRA adapter configuration.
-    :type lora_config: LoraConfigProtocol | None
+    :type lora_config: LoraConfig | None
     :param cosine_lr_schedule_config: Cosine LR schedule configuration.
     :type cosine_lr_schedule_config: CosineLRScheduleConfig | None
     :param accelerator: HuggingFace Accelerator for distributed training.
@@ -255,7 +256,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         min_output_tokens: int | None = None,
         max_model_len: int | None = 1024,
         hf_generate_chunk_size: int | None = None,
-        lora_config: LoraConfigProtocol | None = None,
+        lora_config: LoraConfig | None = None,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
         accelerator: Accelerator | None = None,
         device: str = "cpu",
@@ -298,9 +299,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
             use_value_head=False,
             use_liger_loss=use_liger_loss,
             use_memory_efficient_params=use_memory_efficient_params,
-            # LoraConfigProtocol mirrors peft.LoraConfig (which callers pass in
-            # practice); the base annotation requires the concrete class.
-            lora_config=cast("LoraConfig | None", lora_config),
+            lora_config=lora_config,
             use_separate_reference_adapter=use_separate_reference_adapter,
             use_vllm=use_vllm,
             vllm_config=vllm_config,

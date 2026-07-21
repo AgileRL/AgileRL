@@ -1531,7 +1531,7 @@ def print_hyperparams(pop: PopulationType) -> None:
             if len(agent.fitness) > 0
             else float("nan")
         )
-        attrs = EvolvableAlgorithm.inspect_attributes(cast("EvolvableAlgorithm", agent))
+        attrs = EvolvableAlgorithm.inspect_attributes(agent)
         lines = [
             f"Agent ID: {agent.index}  |  Mean 5 Fitness: {mean_fitness:.2f}",
             "Attributes:",

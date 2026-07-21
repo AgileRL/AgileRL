@@ -8,7 +8,7 @@ import re
 import shutil
 import textwrap
 import warnings
-from collections.abc import Callable, Generator, Iterable
+from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict, cast
@@ -1653,9 +1653,9 @@ def build_completion_mask(
 def stitch_completion_after_windowed_vllm_generate(
     completion_ids: list[torch.Tensor],
     stitch_prefixes: list[torch.Tensor],
-    group_prompts: list[dict[str, Any]],
+    group_prompts: Sequence[Mapping[str, Any]],
     group_size: int,
-    prompts: list[dict[str, Any]],
+    prompts: Sequence[Mapping[str, Any]],
 ) -> list[torch.Tensor]:
     """Reinsert dropped middle segments into ``model_prompt | generation`` tensors.
 
@@ -1672,11 +1672,11 @@ def stitch_completion_after_windowed_vllm_generate(
     :type stitch_prefixes: list[torch.Tensor]
     :param group_prompts: ``prompts`` expanded so each original prompt repeats
         ``group_size`` times (same order as vLLM batch).
-    :type group_prompts: list[dict[str, Any]]
+    :type group_prompts: Sequence[Mapping[str, Any]]
     :param group_size: Number of repeated entries per logical prompt.
     :type group_size: int
-    :param prompts: Original batch of observation dicts (length ``N``).
-    :type prompts: list[dict[str, Any]]
+    :param prompts: Original batch of observation mappings (length ``N``).
+    :type prompts: Sequence[Mapping[str, Any]]
     :return: Same length as ``completion_ids``, with middle stitch applied
         where ``stitch_prefixes`` is non-empty.
     :rtype: list[torch.Tensor]

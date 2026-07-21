@@ -51,11 +51,6 @@ def _learn_from_buffer(
     per: bool,
 ) -> None:
     """Execute a single learning step for the agent."""
-    # `Sampler.sample` is typed as returning a bare `TensorDict`; the casts below
-    # assert the concrete replay-batch layout each algorithm's `learn` consumes.
-    # `agent` is the `SupportedOffPolicy` union, so a single positional batch must
-    # satisfy every member - `PrioritizedReplayBatch` (its optional weights/idxs
-    # keys make it the permissive superset of `ReplayBatch`) is the common type.
     sample = sampler.sample
 
     # Prioritized and n-step replay are the preserve of the RainbowDQN-style

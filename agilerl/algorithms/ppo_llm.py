@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import warnings
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -26,7 +28,6 @@ else:
     LigerFusedLinearPolicyLossFunction = None  # type: ignore[assignment]
     apply_fused_policy_loss = None  # type: ignore[assignment]
 from agilerl.protocols import (
-    LoraConfigProtocol,
     MultiTurnEnv,
     PeftModelProtocol,
     PreTrainedModelProtocol,
@@ -125,7 +126,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         Ignored when ``use_vllm=True``.
     :type hf_generate_chunk_size: int | None, optional
     :param lora_config: LoRA configuration.
-    :type lora_config: LoraConfigProtocol | None, optional
+    :type lora_config: LoraConfig | None, optional
     :param cosine_lr_schedule_config: Cosine LR scheduler configuration.
     :type cosine_lr_schedule_config: CosineLRScheduleConfig | None, optional
     :param accelerator: Optional HuggingFace ``Accelerator`` instance.
@@ -275,7 +276,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         min_output_tokens: int | None = None,
         max_model_len: int | None = 1024,
         hf_generate_chunk_size: int | None = None,
-        lora_config: LoraConfigProtocol | None = None,
+        lora_config: LoraConfig | None = None,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
         accelerator: Accelerator | None = None,
         device: str = "cpu",
@@ -326,9 +327,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
             use_vllm=use_vllm,
             vllm_config=vllm_config,
             use_liger_loss=use_liger_loss,
-            # LoraConfigProtocol mirrors peft.LoraConfig (which callers pass in
-            # practice); the base annotation requires the concrete class.
-            lora_config=cast("LoraConfig | None", lora_config),
+            lora_config=lora_config,
             use_separate_reference_adapter=use_separate_reference_adapter,
             model_name=model_name,
             actor_network=actor_network,

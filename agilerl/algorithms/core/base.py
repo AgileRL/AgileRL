@@ -61,6 +61,7 @@ from agilerl.modules.configs import MlpNetConfig
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.protocols import (
     AgentWrapperProtocol,
+    EvolvableAlgorithmProtocol,
     EvolvableModuleProtocol,
     ModuleDictProtocol,
     PeftModelProtocol,
@@ -535,7 +536,7 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
 
     @staticmethod
     def inspect_attributes(
-        agent: EvolvableAlgorithm,
+        agent: EvolvableAlgorithmProtocol,
         input_args_only: bool = False,
     ) -> dict[str, Any]:
         """Inspect and retrieve the attributes of the current object, excluding attributes related to the
@@ -2310,7 +2311,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         back to ``False``.
     :type use_liger_loss: bool
     :param lora_config: The LoRA config.
-    :type lora_config: LoraConfigProtocol | None
+    :type lora_config: LoraConfig | None
     :param use_separate_reference_adapter: Keep a dedicated ``reference`` LoRA
         adapter that reference-policy updates copy the actor adapter onto. When
         ``False`` (default) the reference is the base model with adapters
@@ -5086,7 +5087,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
     def _generate_with_vllm_colocate(
         self,
-        prompts: list[dict[str, Any]],
+        prompts: Sequence[Mapping[str, Any]],
         group_size: int,
         temperature: float | None,
         capture_sampling_logps: bool = False,
@@ -5105,8 +5106,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         non-empty). Action masks use the full logical prompt length from
         ``input_ids``, not only ``trajectory_input_ids``.
 
-        :param prompts: Length-``N`` list of observation dicts for this rank.
-        :type prompts: list[dict[str, Any]]
+        :param prompts: Length-``N`` sequence of observation mappings for this rank.
+        :type prompts: Sequence[Mapping[str, Any]]
         :param group_size: Repeat factor per prompt (1 for plain PPO).
         :type group_size: int
         :param temperature: Temperature for sampling.
@@ -5128,9 +5129,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             else self.max_model_len
         )
 
-        # Prompt dicts are `dict[str, Any]`, so token-id fields read back as `Any`;
-        # the casts here and below pin them to `torch.Tensor` for downstream ops.
-        def _trajectory_input_ids(prompt: dict[str, Any]) -> torch.Tensor:
+        # Prompt mappings type their values as `Any`, so token-id fields read
+        # back as `Any`; the casts here and below pin them to `torch.Tensor`.
+        def _trajectory_input_ids(prompt: Mapping[str, Any]) -> torch.Tensor:
             return cast(
                 "torch.Tensor",
                 prompt.get("trajectory_input_ids", prompt["input_ids"]),
@@ -5139,7 +5140,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         def _token_prompt_for_vllm(ids: torch.Tensor) -> dict[str, list[int]]:
             return {"prompt_token_ids": ids.squeeze(0).tolist()}
 
-        def _stitch_prefix(prompt: dict[str, Any], ref: torch.Tensor) -> torch.Tensor:
+        def _stitch_prefix(prompt: Mapping[str, Any], ref: torch.Tensor) -> torch.Tensor:
             st = prompt.get("stitch_prefix_ids")
             if st is None:
                 return ref.new_zeros((ref.shape[0], 0))
@@ -5333,8 +5334,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 prompts,
             )
 
-        # `prompts[i]` is `dict[str, Any]`, so `input_ids` reads back as `Any`;
-        # pin it to `torch.Tensor` to read the sequence-length dimension.
+        # Prompt mappings type their values as `Any`, so `input_ids` reads back
+        # as `Any`; pin it to `torch.Tensor` to read the sequence-length dimension.
         num_input_tokens = [
             int(cast("torch.Tensor", prompts[i]["input_ids"]).shape[1])
             for i in range(len(prompts))
