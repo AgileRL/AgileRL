@@ -608,9 +608,7 @@ class LocalTrainer(Trainer):
                 tokenizer=self.tokenizer, accelerator=self.accelerator
             )
 
-        # `EnvironmentT` (agilerl/utils/trainer_utils.py) predates the vectorized
-        # and protocol env types the specs actually build.
-        return cast("EnvironmentT", self.env_spec.make_env())
+        return self.env_spec.make_env()
 
     @staticmethod
     def _resolve_env_spec(manifest: TrainingManifest) -> EnvSpecT:

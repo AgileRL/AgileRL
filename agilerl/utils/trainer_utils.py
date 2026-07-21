@@ -27,10 +27,10 @@ from agilerl.models.algo import (
     MultiAgentRLAlgorithmSpec,
     RLAlgorithmSpec,
 )
+from agilerl.models.env import GymEnvType, PzEnvType
 from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
-from agilerl.typing import GymEnvType, PzEnvType
-from agilerl.wrappers.learning import BanditEnv
+from agilerl.protocols import BanditEnvProtocol
 
 if TYPE_CHECKING:
     import torch
@@ -40,7 +40,9 @@ if TYPE_CHECKING:
     from agilerl.typing import SupportedActionSpace, SupportedObservationSpace
 
 LLMEnvType = ReasoningGym | PreferenceGym | SFTGym
-EnvironmentT = GymEnvType | PzEnvType | BanditEnv | LLMEnvType
+# Union of every env type an ``EnvSpec.make_env`` builds: vectorized gym/pettingzoo
+# envs, a bandit env satisfying ``BanditEnvProtocol``, or an LLM gym.
+EnvironmentT = GymEnvType | PzEnvType | BanditEnvProtocol | LLMEnvType
 PopulationT = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
 BufferT = ReplayBuffer | MultiStepReplayBuffer | PrioritizedReplayBuffer
 
@@ -186,8 +188,8 @@ def create_population_from_spec(
     # NOTE: We should identify these lazily during training...
     for num_envs_arg in ["num_envs", "vect_noise_dim"]:
         if hasattr(algo_spec, num_envs_arg):
-            # Only vectorized envs reach this branch; the attribute lookup is
-            # intentionally dynamic across the env union.
+            # Not every member of the env union exposes ``num_envs``; the algos
+            # that set it always run on a vectorized env that does.
             setattr(algo_spec, num_envs_arg, cast("Any", env).num_envs)
 
     # Classic RL algorithms
