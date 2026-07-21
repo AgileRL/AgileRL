@@ -1,8 +1,7 @@
 import inspect
 import math
 from collections import OrderedDict
-from collections.abc import Iterable
-from typing import Any, cast
+from typing import Any, TypeVar
 
 import numpy as np
 import torch
@@ -15,6 +14,8 @@ from agilerl.typing import DeviceType
 
 # Cached (key, value) projections for a single attention layer
 KVCacheType = tuple[torch.Tensor, torch.Tensor]
+
+ModuleT = TypeVar("ModuleT", bound=nn.Module)
 
 
 class EvolvableGPT(EvolvableModule):
@@ -162,25 +163,32 @@ class EvolvableGPT(EvolvableModule):
 
     # Typed views over the transformer ModuleDict members, which torch only
     # exposes as generic nn.Module objects.
+    def _transformer_module(self, key: str, module_type: type[ModuleT]) -> ModuleT:
+        """Return the named transformer submodule narrowed to its concrete type."""
+        module = self.transformer[key]
+        assert isinstance(module, module_type)
+        return module
+
     @property
     def _wte(self) -> nn.Embedding:
-        return cast("nn.Embedding", self.transformer["wte"])
+        return self._transformer_module("wte", nn.Embedding)
 
     @property
     def _wpe(self) -> nn.Embedding:
-        return cast("nn.Embedding", self.transformer["wpe"])
+        return self._transformer_module("wpe", nn.Embedding)
 
     @property
     def _drop(self) -> nn.Dropout:
-        return cast("nn.Dropout", self.transformer["drop"])
+        return self._transformer_module("drop", nn.Dropout)
 
     @property
-    def _h(self) -> "Iterable[Block]":
-        return cast("Iterable[Block]", self.transformer["h"])
+    def _h(self) -> "list[Block]":
+        module_list = self._transformer_module("h", nn.ModuleList)
+        return [block for block in module_list if isinstance(block, Block)]
 
     @property
     def _ln_f(self) -> "LayerNorm":
-        return cast("LayerNorm", self.transformer["ln_f"])
+        return self._transformer_module("ln_f", LayerNorm)
 
     def get_num_params(self, non_embedding: bool = True) -> int:
         """Return the number of parameters in the model.

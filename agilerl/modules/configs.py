@@ -25,19 +25,22 @@ class NetConfig:
 
         return cls.from_dict(net_config)
 
-    def __getitem__(self, key: str) -> Any:  # noqa: ANN401 -- config fields are heterogeneous
+    # Access by an arbitrary string key can hit any field of any subclass, and
+    # ``len()``-style consumers narrow via ``isinstance`` on the config, not the
+    # value; ``Any`` is the only type that keeps those call sites checkable.
+    def __getitem__(self, key: str) -> Any:  # noqa: ANN401 -- see comment above
         return getattr(self, key)
 
-    def __setitem__(self, key: str, value: Any) -> None:  # noqa: ANN401 -- config fields are heterogeneous
+    def __setitem__(self, key: str, value: object) -> None:
         setattr(self, key, value)
 
     def __contains__(self, key: str) -> bool:
         return hasattr(self, key)
 
-    def get(self, key: str, default: Any = None) -> Any:  # noqa: ANN401 -- config fields are heterogeneous
+    def get(self, key: str, default: "NetConfigValue" = None) -> "NetConfigValue":
         return getattr(self, key, default)
 
-    def pop(self, key: str, default: Any = None) -> Any:  # noqa: ANN401 -- config fields are heterogeneous
+    def pop(self, key: str, default: "NetConfigValue" = None) -> "NetConfigValue":
         attr = getattr(self, key, default)
         if attr is not default:
             delattr(self, key)
@@ -46,11 +49,27 @@ class NetConfig:
     def keys(self) -> list[str]:
         return list(self.__dataclass_fields__.keys())
 
-    def values(self) -> list[Any]:
+    def values(self) -> "list[NetConfigValue]":
         return [getattr(self, key) for key in self.keys()]
 
-    def items(self) -> ItemsView[str, Any]:
+    def items(self) -> "ItemsView[str, NetConfigValue]":
         return {key: getattr(self, key) for key in self.keys()}.items()
+
+
+# The value types stored across the concrete NetConfig subclasses. Nested
+# configs stay ``dict``-typed as they mirror arbitrary user-supplied YAML.
+NetConfigValue = (
+    str
+    | int
+    | float
+    | bool
+    | torch.Tensor
+    | list[int]
+    | list[int | tuple[int, ...]]
+    | NetConfig
+    | dict[str, Any]
+    | None
+)
 
 
 @dataclass

@@ -1,7 +1,7 @@
 import copy
 from collections import OrderedDict
 from dataclasses import asdict
-from typing import Any, cast
+from typing import Any
 
 import torch
 from gymnasium import spaces
@@ -339,15 +339,14 @@ class EvolvableMultiInput(EvolvableModule):
             raise ValueError(
                 msg,
             )
-        # Check if we are extracting a nested dict
-        nested_dict = default_config.get(key)
-        config = (
-            copy.deepcopy(nested_dict)
-            if nested_dict is not None
-            else copy.deepcopy(default_config)
-        )
-
-        init_dict = asdict(config) if isinstance(config, NetConfig) else config
+        # Dataclass configs are flat; only dict configs may hold a nested config
+        # keyed by the observation key.
+        if isinstance(default_config, NetConfig):
+            init_dict = asdict(default_config)
+        else:
+            nested_config = default_config.get(key)
+            source = default_config if nested_config is None else nested_config
+            init_dict = copy.deepcopy(source)
 
         init_dict["num_outputs"] = self.latent_dim
         init_dict["device"] = self.device
@@ -419,12 +418,15 @@ class EvolvableMultiInput(EvolvableModule):
         if isinstance(x, tuple):
             x = dict(zip(self.observation_space.spaces.keys(), x, strict=False))
 
-        for key, obs in x.items():
-            if not isinstance(obs, torch.Tensor):
-                x[key] = torch.tensor(obs, device=self.device, dtype=torch.float32)
-
-        # All observations are tensors after the conversion above
-        obs_dict = cast("dict[str, torch.Tensor]", x)
+        # Ensure every observation is a tensor
+        obs_dict: dict[str, torch.Tensor] = {
+            key: (
+                obs
+                if isinstance(obs, torch.Tensor)
+                else torch.tensor(obs, device=self.device, dtype=torch.float32)
+            )
+            for key, obs in x.items()
+        }
 
         # Extract features from non-vector subspaces
         extracted_features: dict[str, torch.Tensor] = OrderedDict()

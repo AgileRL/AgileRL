@@ -86,6 +86,9 @@ class MutableKernelSizes:
 
         self.tuple_sizes = tuple_sizes
 
+    # Mutable views over ``sizes`` (same list object, so callers mutate in
+    # place). ``list`` erases its element type through ``isinstance``, so the
+    # homogeneity invariant tracked by ``tuple_sizes`` is expressed with a cast.
     @property
     def _tuple_sizes(self) -> list[tuple[int, ...]]:
         """View of ``sizes`` under the invariant that all kernel sizes are tuples."""

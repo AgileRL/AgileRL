@@ -411,7 +411,7 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
             msg,
         )
 
-    def __setattr__(self, name: str, value: Any) -> None:  # noqa: ANN401 -- attribute values may be any type
+    def __setattr__(self, name: str, value: Any) -> None:  # noqa: ANN401 -- accepts any attribute value and forwards to nn.Module.__setattr__
         """Set attribute of the network. If the attribute is a module, add its mutation methods
         to the parent module. Otherwise, set the attribute as usual.
 
@@ -912,10 +912,11 @@ class ModuleDict(EvolvableModule, nn.ModuleDict, Generic[ModuleType]):
         """
         evo_modules: dict[str, EvolvableModule] = OrderedDict()
         for name, module in self.items():
-            orig_mod = (
-                module._orig_mod if isinstance(module, OptimizedModule) else module
-            )
-            if isinstance(orig_mod, EvolvableModule):
+            if isinstance(module, EvolvableModule):
+                evo_modules[name] = module
+            elif isinstance(module, OptimizedModule) and isinstance(
+                module._orig_mod, EvolvableModule
+            ):
                 # OptimizedModule wrappers forward attribute access to the
                 # wrapped EvolvableModule, so they can be treated as one here
                 evo_modules[name] = cast("EvolvableModule", module)
