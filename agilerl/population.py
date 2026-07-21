@@ -665,7 +665,7 @@ class Population(Generic[AgentT]):
         :rtype: ScalarOrNestedRow
         """
         nested = any(
-            isinstance(agent.fitness[-1], np.ndarray)
+            isinstance(agent.fitness[-1], (dict, list, tuple, np.ndarray))
             for agent in self.agents
             if agent.fitness
         )
@@ -675,20 +675,31 @@ class Population(Generic[AgentT]):
                 for agent in self.agents
             ]
 
-        agent_ids = self.agent_ids
-        if not agent_ids:
-            msg = "Received nested fitness values without configured agent_ids."
-            raise ValueError(msg)
-
         fitnesses: NestedRow = []
         for agent in self.agents:
             if not agent.fitness:
-                fitnesses.append(dict.fromkeys(agent_ids, float("nan")))
+                fitnesses.append(dict.fromkeys(self.agent_ids or [], float("nan")))
                 continue
-            row = np.asarray(agent.fitness[-1]).ravel()
-            fitnesses.append(
-                {agent_id: float(row[idx]) for idx, agent_id in enumerate(agent_ids)}
-            )
+            # The fitness property understates the type: multi-agent rows are a
+            # dict (already keyed) or a list/array to map onto ``agent_ids``.
+            latest: object = agent.fitness[-1]
+            if isinstance(latest, dict):
+                fitnesses.append(
+                    {
+                        str(k): float(v)
+                        for k, v in latest.items()
+                        if isinstance(v, (int, float, np.floating))
+                    }
+                )
+                continue
+            if not self.agent_ids:
+                msg = "Received nested fitness values without configured agent_ids."
+                raise ValueError(msg)
+            if isinstance(latest, (list, tuple, np.ndarray)):
+                row = np.asarray(latest).ravel()
+                fitnesses.append(
+                    {aid: float(row[i]) for i, aid in enumerate(self.agent_ids)}
+                )
         return fitnesses
 
     def _collect_hyperparameters(self) -> list[dict[str, float]]:
