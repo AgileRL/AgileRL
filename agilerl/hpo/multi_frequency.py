@@ -17,11 +17,6 @@ exploitation (clone a winner over a loser, then perturb), preservation (survivor
 and open agents are untouched by :meth:`~MultiFrequencySelection.select`) and the
 asymmetric cross-frequency *migration* of Algorithm 2 of the paper.
 
-The orchestration that schedules subpopulations by frequency and saves the global
-elite lives in :func:`agilerl.utils.utils.run_selection_and_mutation`;
-this module holds only the operator. Under an :class:`~accelerate.Accelerator` that
-orchestrator runs the evolve step on the main process and broadcasts the result to the
-other ranks via a checkpoint round-trip, so this operator itself stays process-agnostic.
 """
 
 from __future__ import annotations
@@ -30,6 +25,9 @@ import copy
 from typing import Any
 
 import numpy as np
+from accelerate.utils import broadcast_object_list
+
+from agilerl.algorithms.core.base import LLMAlgorithm
 
 PopulationType = list[Any]
 
@@ -353,14 +351,28 @@ class MultiFrequencySelection:
 
         :param population: The whole population.
         :type population: list
-        :return: (elite, population, indices_to_mutate). A detached clone of the
-            pre-evolution global elite, the evolved population with migrants and
-            clones, and the indices of the winner clones to be perturbed.
+        :return: (elite, population, indices_to_mutate). The pre-evolution global
+            elite, the evolved population with migrants and clones, and the indices
+            of the winner clones to be perturbed.
         :rtype: tuple[Any, list, list[int]]
         """
         self._assign_initial_subpopulations(population)
         self._sync_index(population)
 
+        if isinstance(population[0], LLMAlgorithm):
+            return self._select_llm_agents(population)
+        return self._select_standard_agents(population)
+
+    def _select_standard_agents(
+        self, population: PopulationType
+    ) -> tuple[Any, PopulationType, list[int]]:
+        """Evolve a classic-RL population with in-memory cloning.
+
+        :param population: The whole population.
+        :type population: list
+        :return: (elite, population, indices_to_mutate).
+        :rtype: tuple[Any, list, list[int]]
+        """
         elite = max(
             population, key=lambda a: self._scalar_fitness(a.fitness[-1])
         ).clone(wrap=False)
@@ -389,6 +401,194 @@ class MultiFrequencySelection:
             )
 
         return elite, updated, indices_to_mutate
+
+    def _select_llm_agents(
+        self, population: PopulationType
+    ) -> tuple[Any, PopulationType, list[int]]:
+        """Evolve a population of LLM agents.
+
+        :param population: The whole population.
+        :type population: list
+        :return: (elite, population, indices_to_mutate).
+        :rtype: tuple[Any, list, list[int]]
+        """
+        accelerator = getattr(population[0], "accelerator", None)
+
+        plan: dict[str, Any] | None = None
+        if accelerator is None or accelerator.is_main_process:
+            plan = self._plan_llm_evolution(population)
+
+        # Broadcast the main process's decisions so all ranks clone identically
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+            if accelerator.num_processes > 1:
+                plan = broadcast_object_list([plan], from_process=0)[0]
+
+        new_population = self._execute_llm_plan(population, plan)
+
+        # Scrub the mutation tag on every agent: the LLM branch of
+        # run_selection_and_mutation mutates only the winner clones. Clones inherit their
+        # parent's stale mut, so without this reset a survivor/migrant would re-broadcast
+        # a mutation it never received
+        for agent in new_population:
+            agent.mut = "None"
+
+        elite = next(a for a in new_population if a.index == plan["elite_index"])
+        return elite, new_population, plan["indices_to_mutate"]
+
+    def _plan_llm_evolution(self, population: PopulationType) -> dict[str, Any]:
+        """Decide a whole MF-PBT generation as a serializable, index-based plan.
+
+        :param population: The whole population.
+        :type population: list
+        :return: A plan {"ops", "elite_index", "indices_to_mutate"}. ops is one
+            tuple per population slot (aligned to population order): ("keep",),
+            ("clone", src_index, new_index, subpop),
+            ("migrate_full", src_index, new_index, subpop) or
+            ("migrate_weights", src_index, new_index, subpop, hp_values) where
+            hp_values are the destination elite's mutable HPs, resolved here so all
+            ranks reset to identical values.
+        :rtype: dict
+        """
+        self._sync_index(population)
+        elite_index = max(
+            population, key=lambda a: self._scalar_fitness(a.fitness[-1])
+        ).index
+
+        ops: dict[int, tuple] = {a.index: ("keep",) for a in population}
+        indices_to_mutate: list[int] = []
+
+        for subpop in range(self.n_subpopulations):
+            self.counters[subpop] += 1
+            if self.counters[subpop] < self.deltas[subpop]:
+                continue
+            self.counters[subpop] = 0
+
+            winners, _survivors, open_for_migration, losers = self._brackets(
+                population, subpop
+            )
+            for loser in losers:
+                winner = winners[int(self.rng.integers(len(winners)))]
+                new_index = self._next_index()
+                ops[loser.index] = ("clone", winner.index, new_index, subpop)
+                indices_to_mutate.append(new_index)
+
+            for open_agent, ext, kind, elite in self._migration_decisions(
+                subpop, winners, open_for_migration, external_pool=population
+            ):
+                new_index = self._next_index()
+                if kind == "weights":
+                    hp_values = {
+                        name: copy.deepcopy(getattr(elite, name))
+                        for name in elite.registry.hp_config
+                    }
+                    ops[open_agent.index] = (
+                        "migrate_weights",
+                        ext.index,
+                        new_index,
+                        subpop,
+                        hp_values,
+                    )
+                else:
+                    ops[open_agent.index] = (
+                        "migrate_full",
+                        ext.index,
+                        new_index,
+                        subpop,
+                    )
+
+        return {
+            "ops": [ops[a.index] for a in population],
+            "elite_index": elite_index,
+            "indices_to_mutate": indices_to_mutate,
+        }
+
+    def _execute_llm_plan(
+        self, population: PopulationType, plan: dict[str, Any]
+    ) -> PopulationType:
+        """Materialise the broadcast plan, cloning collectively and freeing dropped agents.
+
+        To bound GPU memory (LLM agents are multi-GB) it frees an overwritten agent
+        as soon as it is no longer needed.
+
+        :param population: The pre-evolution population.
+        :type population: list
+        :param plan: The plan produced by :meth:`_plan_llm_evolution`.
+        :type plan: dict
+        :return: The evolved population, aligned to population's slot order.
+        :rtype: list
+        """
+        ops = plan["ops"]
+        by_index = {a.index: a for a in population}
+
+        replaced_indices: set[int] = set()
+        source_indices: set[int] = set()
+        kept_indices: set[int] = set()
+        last_use: dict[int, int] = {}
+        for i, (agent, op) in enumerate(zip(population, ops, strict=True)):
+            if op[0] == "keep":
+                kept_indices.add(agent.index)
+            else:
+                replaced_indices.add(agent.index)
+                source_indices.add(op[1])
+                last_use[op[1]] = i
+
+        # Free agents whose slot is overwritten and that no operation needs as a source
+        for agent in population:
+            if agent.index in replaced_indices and agent.index not in source_indices:
+                self._clean_up(agent)
+                by_index[agent.index] = None
+
+        new_population: PopulationType = []
+        for i, (agent, op) in enumerate(zip(population, ops, strict=True)):
+            if op[0] == "keep":
+                new_population.append(agent)
+                continue
+            src, new_index, subpop = op[1], op[2], op[3]
+            clone = self._collective_clone(by_index[src], new_index)
+            clone.subpopulation = subpop
+            if op[0] == "migrate_weights":
+                self._apply_hp_reset(clone, op[4])
+            new_population.append(clone)
+            # A non-kept source is freed after its last use
+            if src not in kept_indices and last_use[src] == i:
+                self._clean_up(by_index[src])
+                by_index[src] = None
+
+        return new_population
+
+    @staticmethod
+    def _clean_up(agent: Any) -> None:
+        """Free an agent, bracketed by its accelerator barriers.
+
+        :param agent: The agent to free.
+        :type agent: ~agilerl.algorithms.core.base.LLMAlgorithm
+        """
+        accelerator = getattr(agent, "accelerator", None)
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+        agent.clean_up()
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+
+    @staticmethod
+    def _collective_clone(source: Any, new_index: int) -> Any:
+        """Clone an agent, bracketed by its accelerator barriers.
+
+        :param source: The agent to clone.
+        :type source: ~agilerl.algorithms.core.base.LLMAlgorithm
+        :param new_index: The clone's globally-unique index.
+        :type new_index: int
+        :return: The unwrapped clone.
+        :rtype: ~agilerl.algorithms.core.base.LLMAlgorithm
+        """
+        accelerator = getattr(source, "accelerator", None)
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+        clone = source.clone(index=new_index, wrap=False)
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+        return clone
 
     def _clone_winners_over_losers(
         self,
@@ -459,11 +659,44 @@ class MultiFrequencySelection:
         :rtype: list
         """
         self._sync_index(population)
+        replacements: dict[int, Any] = {}
+        for open_agent, ext, kind, elite in self._migration_decisions(
+            subpop, winners, open_for_migration, external_pool
+        ):
+            migrant = (
+                self._migrate_weights(ext, elite, subpop)
+                if kind == "weights"
+                else self._migrate_full_clone(ext, subpop)
+            )
+            replacements[id(open_agent)] = migrant
+
+        return [replacements.get(id(a), a) for a in population]
+
+    def _migration_decisions(
+        self,
+        subpop: int,
+        winners: PopulationType,
+        open_for_migration: PopulationType,
+        external_pool: PopulationType,
+    ) -> list[tuple[Any, Any, str, Any]]:
+        """Decide the asymmetric migrations without cloning.
+
+        :param subpop: The subpopulation id to migrate into.
+        :type subpop: int
+        :param winners: The destination subpopulation's winners.
+        :type winners: list
+        :param open_for_migration: The destination's open-for-migration bracket.
+        :type open_for_migration: list
+        :param external_pool: The pre-evolution snapshot migrant sources are drawn from.
+        :type external_pool: list
+        :return: A list of (open_agent, external, kind, elite) tuples, one per migration.
+        :rtype: list[tuple]
+        """
         elite = winners[0]
         # Ranked agents from other subpopulations
         external = self._rank([a for a in external_pool if a.subpopulation != subpop])
 
-        replacements: dict[int, Any] = {}
+        decisions: list[tuple[Any, Any, str, Any]] = []
         external_counter = 0
         for open_agent in open_for_migration:
             if external_counter >= len(external):
@@ -473,14 +706,15 @@ class MultiFrequencySelection:
                 ext.fitness[-1]
             ):
                 continue
-            if self.deltas[ext.subpopulation] < self.deltas[subpop]:
-                migrant = self._migrate_weights(ext, elite, subpop)
-            else:
-                migrant = self._migrate_full_clone(ext, subpop)
-            replacements[id(open_agent)] = migrant
+            kind = (
+                "weights"
+                if self.deltas[ext.subpopulation] < self.deltas[subpop]
+                else "full"
+            )
+            decisions.append((open_agent, ext, kind, elite))
             external_counter += 1
 
-        return [replacements.get(id(a), a) for a in population]
+        return decisions
 
     def _migrate_full_clone(self, external: Any, subpop: int) -> Any:
         """Full clone of an external agent.
@@ -509,26 +743,37 @@ class MultiFrequencySelection:
         :rtype: ~agilerl.algorithms.core.base.EvolvableAlgorithm
         """
         migrant = external.clone(index=self._next_index(), wrap=False)
+        hp_values = {
+            name: copy.deepcopy(getattr(elite, name))
+            for name in elite.registry.hp_config
+        }
+        self._apply_hp_reset(migrant, hp_values)
+        migrant.subpopulation = subpop
+        return migrant
+
+    def _apply_hp_reset(self, migrant: Any, hp_values: dict[str, Any]) -> None:
+        """Reset a migrant's mutable hyperparameters, rebuilding any LR optimizer.
+
+        :param migrant: The freshly-cloned migrant to reset in place.
+        :type migrant: ~agilerl.algorithms.core.base.EvolvableAlgorithm
+        :param hp_values: The destination elite's mutable HP values, keyed by name.
+        :type hp_values: dict[str, Any]
+        """
         hp_config = migrant.registry.hp_config
-        changed = []
-        for name in elite.registry.hp_config:
-            new_value = copy.deepcopy(getattr(elite, name))
-            setattr(migrant, name, new_value)
+        changed = set(hp_values)
+        for name, value in hp_values.items():
+            setattr(migrant, name, value)
             # Keep the RLParameter value in sync with the plain attribute, so a later
             # mutation of this migrant perturbs the elite's values instead of those
             # of the external agent
             if hp_config and name in hp_config.names():
-                hp_config[name].value = new_value
-            changed.append(name)
+                hp_config[name].value = value
         # Re-run the registered mutation hooks so HP-derived state is rebuilt for the
         # new values (e.g. PPO sizes its rollout buffer from learn_step via a hook)
         migrant.mutation_hook()
         # Rebuild every optimizer whose learning rate was reset to the elite's
-        changed_set = set(changed)
         for opt_config in migrant.registry.optimizers:
             lr_attr = opt_config.lr
             lr_attr_names = lr_attr if isinstance(lr_attr, tuple) else (lr_attr,)
-            if any(name in changed_set for name in lr_attr_names):
+            if any(name in changed for name in lr_attr_names):
                 migrant.reinit_optimizers(optimizer=opt_config)
-        migrant.subpopulation = subpop
-        return migrant

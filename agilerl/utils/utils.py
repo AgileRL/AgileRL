@@ -1260,15 +1260,9 @@ def run_selection_and_mutation(
     :type language_model: bool, optional
     :return: Population of agents after evolution.
     :rtype: list[PopulationType]
-    :raises NotImplementedError: When language_model=True with a non-tournament
-        strategy; MF-PBT does not support LLM finetuning.
     """
     if selection_strategy is None:
         return population
-
-    if language_model and not isinstance(selection_strategy, TournamentSelection):
-        msg = "MF-PBT selection does not support language_model=True."
-        raise NotImplementedError(msg)
 
     algo = algo or population[0].__class__.__name__
 

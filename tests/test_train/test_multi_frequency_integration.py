@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -336,3 +337,118 @@ def test_multi_frequency_evolves_real_population_of_every_family(family):
         assert Counter(a.subpopulation for a in population) == Counter({0: 4, 1: 4})
         assert len({a.index for a in population}) == 8
         assert all(isinstance(a, EvolvableAlgorithm) for a in population)
+
+
+class _LLMHPParam:
+    def __init__(self, value):
+        self.value = value
+
+
+class _LLMHPConfig:
+    """Minimal HyperparameterConfig stand-in for the LLM migration path."""
+
+    def __init__(self, values):
+        self._params = {name: _LLMHPParam(v) for name, v in values.items()}
+
+    def __iter__(self):
+        return iter(self._params)
+
+    def __bool__(self):
+        return bool(self._params)
+
+    def names(self):
+        return list(self._params)
+
+    def __getitem__(self, key):
+        return self._params[key]
+
+
+class _LLMFinetuneAgent:
+    """Fake :class:`LLMAlgorithm`."""
+
+    def __init__(self, index, subpopulation, fitness, lr=1e-3):
+        self.index = index
+        self.subpopulation = subpopulation
+        self.fitness = [fitness]
+        self.lr = lr
+        self.accelerator = None
+        self.mut = "stale-mut"
+        self.registry = SimpleNamespace(
+            hp_config=_LLMHPConfig({"lr": lr}), optimizers=[]
+        )
+        self.clean_up_calls = 0
+
+    def clone(self, index=None, wrap=False):
+        twin = _LLMFinetuneAgent(
+            self.index if index is None else index,
+            self.subpopulation,
+            self.fitness[-1],
+            lr=self.lr,
+        )
+        twin.mut = self.mut
+        for name in self.registry.hp_config.names():
+            twin.registry.hp_config[name].value = self.registry.hp_config[name].value
+        return twin
+
+    def clean_up(self):
+        self.clean_up_calls += 1
+
+    def mutation_hook(self):
+        pass
+
+    def reinit_optimizers(self, optimizer=None):
+        pass
+
+
+def test_run_selection_and_mutation_drives_real_operator_for_llm(monkeypatch, tmp_path):
+    monkeypatch.setattr("agilerl.hpo.multi_frequency.LLMAlgorithm", _LLMFinetuneAgent)
+    saved: list = []
+    monkeypatch.setattr(
+        "agilerl.utils.utils.save_llm_checkpoint",
+        lambda agent, path: saved.append(agent),
+    )
+    population = [_LLMFinetuneAgent(i, i // 4, 0.0) for i in range(8)]
+    strategy = MultiFrequencySelection(
+        n_subpopulations=2,
+        n_individuals_per_subpopulation=4,
+        evolution_frequency_ratios=[1, 2],
+        n_winners=1,
+        n_survivors=1,
+        n_open_for_migration=1,
+        n_losers=1,
+        seed=0,
+    )
+    mutation = Mutations(
+        no_mutation=1.0,
+        architecture=0.0,
+        new_layer_prob=0.0,
+        parameters=0.0,
+        activation=0.0,
+        rl_hp=0.0,
+        mutation_sd=0.1,
+        rand_seed=0,
+        device="cpu",
+    )
+
+    for _cycle in range(3):
+        for agent in population:
+            base = 100.0 if agent.subpopulation == 0 else 0.0
+            agent.fitness = [base + (agent.index % 4)]
+        population = run_selection_and_mutation(
+            strategy,
+            population=population,
+            mutation=mutation,
+            env_name="Env",
+            algo="GRPO",
+            language_model=True,
+            save_elite=True,
+            elite_path=str(tmp_path / "elite"),
+        )
+
+        assert len(population) == 8
+        assert Counter(a.subpopulation for a in population) == Counter({0: 4, 1: 4})
+        assert len({a.index for a in population}) == 8  # indices stay unique
+        assert all(a.mut == "None" for a in population)
+
+    assert len(saved) == 3  # the live elite is checkpointed every cycle
+    assert all(isinstance(a, _LLMFinetuneAgent) for a in population)

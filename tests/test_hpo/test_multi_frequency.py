@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+import agilerl.hpo.multi_frequency as mf_module
 from agilerl.hpo.multi_frequency import MultiFrequencySelection
 
 
@@ -692,3 +693,310 @@ class TestMigration:
         assert len(migrants) == 1
         assert migrants[0].weights == "E0"
         assert open0 in migrated
+
+
+class FakeLLMAgent:
+    """Stand-in for an :class:`LLMAlgorithm`."""
+
+    def __init__(
+        self,
+        index,
+        subpopulation,
+        fitness,
+        weights="w",
+        lr=1e-3,
+        batch_size=64,
+        accelerator=None,
+        mut="stale-mut",
+    ):
+        self.index = index
+        self.subpopulation = subpopulation
+        self.fitness = [fitness]
+        self.weights = weights
+        self.lr = lr
+        self.batch_size = batch_size
+        self.registry = FakeRegistry(["lr", "batch_size"])
+        self.registry.hp_config["lr"].value = lr
+        self.registry.hp_config["batch_size"].value = batch_size
+        self.optimizer = FakeOptimizerWrapper(lr)
+        self.accelerator = accelerator
+        self.mut = mut
+        self.reinit_called = False
+        self.mutation_hook_called = False
+        self.clean_up_calls = 0
+
+    def clone(self, index=None, wrap=False):
+        new = FakeLLMAgent(
+            self.index if index is None else index,
+            self.subpopulation,
+            self.fitness[-1],
+            weights=self.weights,
+            lr=self.lr,
+            batch_size=self.batch_size,
+            accelerator=self.accelerator,
+            mut=self.mut,  # the real clone copies attributes, incl. the parent's mut
+        )
+        for name in self.registry.hp_config.names():
+            new.registry.hp_config[name].value = self.registry.hp_config[name].value
+        return new
+
+    def mutation_hook(self):
+        self.mutation_hook_called = True
+
+    def reinit_optimizers(self, optimizer=None):
+        self.reinit_called = True
+        self.optimizer = FakeOptimizerWrapper(self.lr)
+
+    def clean_up(self):
+        self.clean_up_calls += 1
+
+
+def make_llm_population(subpop_fitnesses, accelerator=None):
+    """Build a population of :class:`FakeLLMAgent` with unique indices."""
+    population = []
+    idx = 0
+    for subpop, fitnesses in subpop_fitnesses.items():
+        for fit in fitnesses:
+            population.append(
+                FakeLLMAgent(
+                    idx, subpop, fit, weights=f"w{idx}", accelerator=accelerator
+                )
+            )
+            idx += 1
+    return population
+
+
+@pytest.fixture
+def llm_dispatch(monkeypatch):
+    """Route ``select`` through the LLM path by making FakeLLMAgent the LLM type."""
+    monkeypatch.setattr(mf_module, "LLMAlgorithm", FakeLLMAgent)
+
+
+class TestApplyHpReset:
+    def test_apply_hp_reset_sets_hps_syncs_config_and_rebuilds_lr_optimizer(self):
+        strategy = make_strategy(n_subpop=2, n_ind=4)
+        agent = FakeLLMAgent(0, 0, 1.0, lr=0.5)
+
+        strategy._apply_hp_reset(agent, {"lr": 0.001, "batch_size": 32})
+
+        assert agent.lr == 0.001
+        assert agent.batch_size == 32
+        assert agent.registry.hp_config["lr"].value == 0.001
+        assert agent.registry.hp_config["batch_size"].value == 32
+        assert agent.mutation_hook_called is True
+        assert agent.reinit_called is True
+        assert agent.optimizer.lr == 0.001
+
+    def test_apply_hp_reset_skips_optimizer_rebuild_when_lr_unchanged(self):
+        strategy = make_strategy(n_subpop=2, n_ind=4)
+        agent = FakeLLMAgent(0, 0, 1.0, lr=0.5)
+
+        strategy._apply_hp_reset(agent, {"batch_size": 32})
+
+        assert agent.batch_size == 32
+        assert agent.reinit_called is False
+
+
+@pytest.mark.usefixtures("llm_dispatch")
+class TestSelectLLM:
+    def test_select_dispatches_to_llm_path_for_llm_populations(self):
+        # The LLM path returns the live elite (not a fresh clone) and scrubs mut on
+        # every returned agent. Neither is true of the standard path
+        strategy = make_strategy(n_subpop=2, n_ind=4, ratios=[1, 2])
+        pop = make_llm_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
+
+        elite, new_pop, _indices = strategy.select(pop)
+
+        assert elite in pop
+        assert all(a.mut == "None" for a in new_pop)
+
+    def test_select_returns_live_global_elite(self):
+        strategy = make_strategy(n_subpop=2, n_ind=4, ratios=[1, 2])
+        pop = make_llm_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
+        best = next(a for a in pop if a.fitness[-1] == 8.0)
+
+        elite, new_pop, _indices = strategy.select(pop)
+
+        assert elite is best
+        assert elite in new_pop
+
+    def test_select_marks_only_winner_clones_for_mutation(self):
+        strategy = make_strategy(n_subpop=2, n_ind=4, ratios=[1, 2])
+        pop = make_llm_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
+
+        _elite, new_pop, indices = strategy.select(pop)
+
+        assert len(indices) == 1  # one loser slot in the due subpop 0
+        clone = next(a for a in new_pop if a.index in indices)
+        assert clone.fitness[-1] == 4.0  # cloned from subpop 0's winner
+
+    def test_select_frees_replaced_non_source_agents(self):
+        # Subpop 0 is due: its loser (1.0) is cloned over and its open slot
+        # (2.0) is migrated over. Both are freed; neither is a clone/migration source
+        strategy = make_strategy(n_subpop=2, n_ind=4, ratios=[1, 2])
+        pop = make_llm_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
+        loser = next(a for a in pop if a.subpopulation == 0 and a.fitness[-1] == 1.0)
+        open_agent = next(
+            a for a in pop if a.subpopulation == 0 and a.fitness[-1] == 2.0
+        )
+
+        strategy.select(pop)
+
+        assert loser.clean_up_calls == 1
+        assert open_agent.clean_up_calls == 1
+
+    def test_select_does_not_free_surviving_agents(self):
+        strategy = make_strategy(n_subpop=2, n_ind=4, ratios=[1, 2])
+        pop = make_llm_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
+        winner = next(a for a in pop if a.subpopulation == 0 and a.fitness[-1] == 4.0)
+        survivor = next(a for a in pop if a.subpopulation == 0 and a.fitness[-1] == 3.0)
+
+        strategy.select(pop)
+
+        assert winner.clean_up_calls == 0
+        assert survivor.clean_up_calls == 0
+        # The whole not-due subpopulation is untouched
+        for a in pop:
+            if a.subpopulation == 1:
+                assert a.clean_up_calls == 0
+
+    def test_select_schedules_subpopulations_at_their_frequency(self):
+        strategy = make_strategy(n_subpop=3, n_ind=4, ratios=[1, 2, 3])
+        counters_seen = []
+
+        for _ in range(6):
+            pop = make_llm_population(
+                {0: [4, 3, 2, 1], 1: [8, 7, 6, 5], 2: [12, 11, 10, 9]}
+            )
+            strategy.select(pop)
+            counters_seen.append(list(strategy.counters))
+
+        # Subpop 0 (delta 1) resets every cycle; subpop 1 (delta 2) every 2; subpop 2
+        # (delta 3) every 3.
+        assert counters_seen == [
+            [0, 1, 1],
+            [0, 0, 2],
+            [0, 1, 0],
+            [0, 0, 1],
+            [0, 1, 2],
+            [0, 0, 0],
+        ]
+
+    def test_select_migrate_full_imports_external_agent_wholesale(self):
+        # Subpop 0 due; its open slot is offered subpop 1's best (full clone)
+        strategy = make_strategy(n_subpop=2, n_ind=4, ratios=[1, 2])
+        pop = make_llm_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
+        ext = next(a for a in pop if a.fitness[-1] == 8.0)
+        ext.weights = "EXT8"
+        ext.lr = 0.5
+
+        _elite, new_pop, _indices = strategy.select(pop)
+
+        migrant = next(
+            a for a in new_pop if a.subpopulation == 0 and a.weights == "EXT8"
+        )
+        assert migrant.lr == 0.5  # full clone keeps the external agent's lr
+        assert migrant is not ext
+
+    def test_select_migrate_weights_keeps_external_weights_but_elite_hps(self):
+        # Both subpops due. Subpop 1 draws from subpop 0 (weights-only)
+        strategy = make_strategy(n_subpop=2, n_ind=4, ratios=[1, 2])
+        strategy.counters = [0, 1]
+        pop = make_llm_population({0: [9.0, 8.0, 7.0, 6.0], 1: [5.0, 4.0, 3.0, 2.0]})
+        for a in pop:
+            if a.subpopulation == 0:
+                a.weights = "FAST"
+                a.lr = 0.5
+                a.registry.hp_config["lr"].value = 0.5
+            else:
+                a.lr = 0.001
+                a.registry.hp_config["lr"].value = 0.001
+
+        _elite, new_pop, _indices = strategy.select(pop)
+
+        migrant = next(
+            a for a in new_pop if a.subpopulation == 1 and a.weights == "FAST"
+        )
+        assert migrant.lr == 0.001
+        assert migrant.reinit_called is True
+        assert migrant.registry.hp_config["lr"].value == 0.001
+
+
+class _MultiProcAccelerator:
+    """Minimal multi-process accelerator stand-in for the LLM selection path."""
+
+    def __init__(self, is_main_process, num_processes):
+        self.is_main_process = is_main_process
+        self.num_processes = num_processes
+        self.wait_calls = 0
+
+    def wait_for_everyone(self):
+        self.wait_calls += 1
+
+
+class TestSelectLLMAccelerator:
+    def test_main_process_broadcasts_the_plan_to_workers(self, monkeypatch):
+        monkeypatch.setattr(mf_module, "LLMAlgorithm", FakeLLMAgent)
+        broadcasts = []
+
+        def fake_broadcast(obj, from_process=0):
+            broadcasts.append((obj, from_process))
+            return obj
+
+        monkeypatch.setattr(mf_module, "broadcast_object_list", fake_broadcast)
+        accelerator = _MultiProcAccelerator(is_main_process=True, num_processes=2)
+        strategy = make_strategy(n_subpop=2, n_ind=4, ratios=[1, 2])
+        pop = make_llm_population(
+            {0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]},
+            accelerator=accelerator,
+        )
+
+        elite, _new_pop, indices = strategy.select(pop)
+
+        assert len(broadcasts) == 1
+        payload, from_process = broadcasts[0]
+        assert from_process == 0  # decisions originate on the main process
+        (plan,) = payload
+        assert set(plan) == {"ops", "elite_index", "indices_to_mutate"}
+        assert len(plan["ops"]) == len(pop)
+        assert plan["elite_index"] == 4  # global best sits at index 4
+        assert elite.index == plan["elite_index"]
+        assert plan["indices_to_mutate"] == indices
+
+    def test_worker_process_builds_population_from_broadcast_plan(self, monkeypatch):
+        # A worker must not advance its own counters/RNG; it consumes the plan the main
+        # process broadcast and materialises exactly that generation
+        monkeypatch.setattr(mf_module, "LLMAlgorithm", FakeLLMAgent)
+        strategy = make_strategy(n_subpop=2, n_ind=4, ratios=[1, 2])
+        accelerator = _MultiProcAccelerator(is_main_process=False, num_processes=2)
+        pop = make_llm_population(
+            {0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]},
+            accelerator=accelerator,
+        )
+
+        keep = ("keep",)
+        plan = {
+            "ops": [
+                keep,
+                keep,
+                keep,
+                ("clone", 0, 8, 0),
+                keep,
+                keep,
+                keep,
+                keep,
+            ],
+            "elite_index": 4,
+            "indices_to_mutate": [8],
+        }
+        monkeypatch.setattr(
+            mf_module, "broadcast_object_list", lambda obj, from_process=0: [plan]
+        )
+
+        elite, new_pop, indices = strategy.select(pop)
+
+        assert strategy.counters == [0, 0]  # worker never advanced its counters
+        assert indices == [8]
+        assert elite.index == 4
+        clone = next(a for a in new_pop if a.index == 8)
+        assert clone.fitness[-1] == 4.0  # cloned from the winner

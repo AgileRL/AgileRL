@@ -32,8 +32,7 @@ global elite, the evolved population, and the winner-clone indices to mutate. Th
 scheduling and elite saving are driven from the trainers via
 :func:`run_selection_and_mutation <agilerl.utils.utils.run_selection_and_mutation>`, the single
 entry point shared with tournament selection.
-MF-PBT supports an ``accelerator`` but, at the moment,
-does not support the LLM RL algorithms.
+MF-PBT supports an ``accelerator`` and both the classic-RL and the LLM finetuning algorithms.
 
 .. code-block:: python
 
@@ -54,8 +53,8 @@ does not support the LLM RL algorithms.
 by the paper), where there is room for several subpopulations at different frequencies;
 its slower subpopulations make it more robust to premature convergence than tournament
 selection. The trade-offs are that it needs a larger population to be worthwhile and
-exposes more configuration parameters. For small populations or the LLM finetuning
-algorithms, prefer :ref:`tournament_selection`.
+exposes more configuration parameters. For small populations, prefer
+:ref:`tournament_selection`.
 
 Configuring from a manifest
 ---------------------------

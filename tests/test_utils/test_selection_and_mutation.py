@@ -161,15 +161,60 @@ class TestRunSelectionAndMutation:
 
         assert elite.saved == [elite_path]
 
-    def test_multi_frequency_rejects_language_model(self):
-        with pytest.raises(NotImplementedError, match="language_model"):
-            run_selection_and_mutation(
-                make_strategy(),
-                population=[1],
-                mutation=RecordingMutations(),
-                env_name="env",
-                language_model=True,
-            )
+    def test_multi_frequency_language_model_dispatches_through_llm_branch(
+        self, monkeypatch, tmp_path
+    ):
+        strategy = make_strategy()
+        elite = object()
+        monkeypatch.setattr(strategy, "select", lambda pop: (elite, ["evolved"], [3]))
+        saved: list = []
+        monkeypatch.setattr(
+            "agilerl.utils.utils.save_llm_checkpoint",
+            lambda agent, path: saved.append((agent, path)),
+        )
+        mutation = RecordingMutations(result=["mutated"])
+        elite_path = str(tmp_path / "elite")
+
+        out = run_selection_and_mutation(
+            strategy,
+            population=[1],
+            mutation=mutation,
+            env_name="env",
+            language_model=True,
+            save_elite=True,
+            elite_path=elite_path,
+        )
+
+        assert out == ["mutated"]
+        assert mutation.indices_seen == [[3]]  # only the winner clones are perturbed
+        assert saved == [(elite, elite_path)]
+
+    def test_multi_frequency_language_model_consolidates_under_accelerator(
+        self, monkeypatch
+    ):
+        strategy = make_strategy()
+        monkeypatch.setattr(
+            strategy, "select", lambda pop: (object(), ["evolved"], [3])
+        )
+        consolidated: list = []
+        monkeypatch.setattr(
+            "agilerl.utils.utils.consolidate_mutations",
+            lambda pop: consolidated.append(pop),
+        )
+        accelerator = FakeAccelerator(is_main_process=True)
+        mutation = RecordingMutations(result=["mutated"])
+
+        run_selection_and_mutation(
+            strategy,
+            population=[1],
+            mutation=mutation,
+            env_name="env",
+            language_model=True,
+            accelerator=accelerator,
+        )
+
+        assert mutation.indices_seen == [[3]]
+        assert consolidated == [["mutated"]]  # mutation decisions broadcast to workers
 
 
 def _stub_operator_steps(strategy):

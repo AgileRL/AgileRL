@@ -29,8 +29,8 @@ paper), where there is room for several subpopulations at different frequencies:
 slower subpopulations make it more robust to premature convergence than tournament
 selection, while its faster subpopulations allow for more refined hyperparameter
 schedules. The trade-offs are that it needs a larger population to be worthwhile and
-exposes more configuration parameters. For small populations or the LLM finetuning
-algorithms, prefer :ref:`tournament_selection`.
+exposes more configuration parameters. For small populations, prefer
+:ref:`tournament_selection`.
 
 Multi-frequency and tournament selection share the single ``tournament_selection`` manifest block,
 discriminated by a ``selection_strategy`` field that defaults to ``tournament``. To use
@@ -67,5 +67,5 @@ Multi-frequency selection is implemented by :class:`MultiFrequencySelection <agi
 and dispatched from the trainers via
 :func:`run_selection_and_mutation <agilerl.utils.utils.run_selection_and_mutation>`,
 which routes to either tournament selection followed by mutations or multi-frequency
-selection by the type of selection strategy. At the moment, MF-PBT does not support the
-LLM RL algorithms.
+selection by the type of selection strategy. Both classic-RL and LLM finetuning
+populations are supported.
