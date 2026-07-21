@@ -32,7 +32,7 @@ from agilerl.vector import DummyVecEnv
 if TYPE_CHECKING:
     from tensordict import TensorDictBase
 
-    from agilerl.typing import ExperiencesType
+    from agilerl.typing import PrioritizedReplayBatch
 
 InitDictType = dict[str, Any] | None
 SupportedOffPolicy = DQN | RainbowDQN | DDPG | TD3
@@ -51,8 +51,11 @@ def _learn_from_buffer(
     per: bool,
 ) -> None:
     """Execute a single learning step for the agent."""
-    # The buffers hand back `TensorDict` batches, which `ExperiencesType`
-    # (agilerl/typing.py) does not yet cover - the casts to it below record that gap.
+    # `Sampler.sample` is typed as returning a bare `TensorDict`; the casts below
+    # assert the concrete replay-batch layout each algorithm's `learn` consumes.
+    # `agent` is the `SupportedOffPolicy` union, so a single positional batch must
+    # satisfy every member - `PrioritizedReplayBatch` (its optional weights/idxs
+    # keys make it the permissive superset of `ReplayBatch`) is the common type.
     sample = sampler.sample
 
     # Prioritized and n-step replay are the preserve of the RainbowDQN-style
@@ -72,8 +75,8 @@ def _learn_from_buffer(
             else None
         )
         _loss, idxs, priorities = agent.learn(  # ty: ignore[invalid-assignment, not-iterable]
-            cast("ExperiencesType", experiences),
-            n_experiences=cast("ExperiencesType | None", n_step_experiences),  # ty: ignore[unknown-argument]
+            cast("PrioritizedReplayBatch", experiences),
+            n_experiences=cast("PrioritizedReplayBatch | None", n_step_experiences),  # ty: ignore[unknown-argument]
             per=per,  # ty: ignore[unknown-argument]
         )
         memory.update_priorities(idxs, priorities)  # ty: ignore[unresolved-attribute]
@@ -85,11 +88,11 @@ def _learn_from_buffer(
         if n_step_sampler is not None:
             n_step_experiences = n_step_sampler.sample(experiences["idxs"])
             agent.learn(
-                cast("ExperiencesType", experiences),
-                n_experiences=cast("ExperiencesType", n_step_experiences),  # ty: ignore[unknown-argument]
+                cast("PrioritizedReplayBatch", experiences),
+                n_experiences=cast("PrioritizedReplayBatch", n_step_experiences),  # ty: ignore[unknown-argument]
             )
         else:
-            agent.learn(cast("ExperiencesType", experiences))
+            agent.learn(cast("PrioritizedReplayBatch", experiences))
 
 
 def train_off_policy(

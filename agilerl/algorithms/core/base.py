@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Any,
+    Generic,
     Literal,
     NoReturn,
     TypeVar,
@@ -72,7 +73,7 @@ from agilerl.typing import (
     ArrayDict,
     CheckpointInfo,
     DeviceType,
-    ExperiencesType,
+    ExperiencesT,
     FitnessValue,
     GymSpaceType,
     InfosDict,
@@ -289,7 +290,7 @@ def get_optimizer_cls(
     return getattr(torch.optim, optimizer_cls)
 
 
-class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
+class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
     """Base object for all algorithms in the AgileRL framework.
 
     :param index: The index of the individual.
@@ -444,8 +445,13 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         raise NotImplementedError
 
     @abstractmethod
-    def learn(self, experiences: ExperiencesType) -> Any:  # noqa: ANN401 -- return type varies per algorithm (loss dict, tuple, etc.)
-        """Abstract method for learning the algorithm."""
+    def learn(self, experiences: ExperiencesT) -> Any:  # noqa: ANN401 -- return type varies per algorithm (loss dict, tuple, etc.)
+        """Abstract method for learning the algorithm.
+
+        Concrete algorithms bind ``ExperiencesT`` (agilerl/typing.py) to the exact
+        batch their buffer or rollout produces, so each ``learn`` override reads
+        its experiences with precise typing rather than narrowing a broad union.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -1422,7 +1428,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             delattr(self, attr_name)
 
 
-class RLAlgorithm(EvolvableAlgorithm, ABC):
+class RLAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT]):
     """Base object for all single-agent algorithms in the AgileRL framework.
 
     :param observation_space: The observation space of the environment.
@@ -1496,7 +1502,9 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
         )
 
 
-class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
+class MultiAgentRLAlgorithm(
+    EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT]
+):
     """Base object for all multi-agent algorithms in the AgileRL framework.
 
     :param observation_spaces: The observation spaces of the agent environments.
@@ -2276,7 +2284,7 @@ def _vllm_sampled_token_logprobs(output: CompletionOutput) -> list[float]:
     return out
 
 
-class LLMAlgorithm(EvolvableAlgorithm, ABC):
+class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT]):
     """Base object for all LLM algorithms in the AgileRL framework.
 
     :param index: The index of the algorithm.

@@ -1,5 +1,5 @@
 import random
-from typing import Any, cast
+from typing import Any
 
 import gymnasium as gym
 import numpy as np
@@ -17,11 +17,11 @@ from agilerl.algorithms.core.registry import (
 )
 from agilerl.modules.base import EvolvableModule
 from agilerl.networks.q_networks import QNetwork
-from agilerl.typing import ExperiencesType, ObservationType, ReplayBatch
+from agilerl.typing import ObservationType, ReplayBatch
 from agilerl.utils.algo_utils import make_safe_deepcopies
 
 
-class CQN(RLAlgorithm):
+class CQN(RLAlgorithm[ReplayBatch]):
     """Conservative Q-Learning for Offline Reinforcement Learning.
 
     Paper: https://arxiv.org/abs/2006.04779
@@ -237,23 +237,21 @@ class CQN(RLAlgorithm):
 
         return action
 
-    def learn(self, experiences: ExperiencesType) -> float:
+    def learn(self, experiences: ReplayBatch) -> float:
         """Update agent network parameters to learn from experiences.
 
-        :param experiences: TensorDict of batched observations, actions, rewards, next_observations, dones.
-        :type experiences: tensordict.TensorDict
+        :param experiences: Batch of observations, actions, rewards, next
+            observations and dones sampled from an off-policy replay buffer.
+        :type experiences: ReplayBatch
 
         :return: Loss from learning
         :rtype: float
         """
-        # Off-policy replay buffers sample batches as TensorDicts keyed by field
-        # name (components/replay_buffer.py), which guarantees this layout.
-        batch = cast("ReplayBatch", experiences)
-        states = batch["obs"]
-        actions = batch["action"]
-        rewards = batch["reward"]
-        next_states = batch["next_obs"]
-        dones = batch["done"]
+        states = experiences["obs"]
+        actions = experiences["action"]
+        rewards = experiences["reward"]
+        next_states = experiences["next_obs"]
+        dones = experiences["done"]
 
         if self.accelerator is not None:
             actions = actions.to(self.accelerator.device)

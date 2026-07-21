@@ -17,7 +17,6 @@ from agilerl.networks.value_networks import ValueNetwork
 from agilerl.protocols import BanditEnvProtocol
 from agilerl.typing import (
     BanditBatch,
-    ExperiencesType,
     ObservationType,
     SupportedObservationSpace,
 )
@@ -25,7 +24,7 @@ from agilerl.utils.algo_utils import make_safe_deepcopies
 from agilerl.utils.evolvable_networks import get_default_encoder_config
 
 
-class NeuralTS(RLAlgorithm):
+class NeuralTS(RLAlgorithm[BanditBatch]):
     """Neural Thompson Sampling (NeuralTS).
 
     Paper: https://arxiv.org/abs/2010.00827
@@ -293,17 +292,15 @@ class NeuralTS(RLAlgorithm):
                 mu_raw = mu_raw.repeat(self.action_dim)
             return int(np.argmax(mu_raw.cpu().numpy()))
 
-    def learn(self, experiences: ExperiencesType) -> float:
+    def learn(self, experiences: BanditBatch) -> float:
         """Update agent network parameters to learn from experiences.
 
-        :param experiences: Batched states, rewards in that order.
-        :type experiences: dict[str, torch.Tensor[float]]
+        :param experiences: Batch of contexts (``obs``) and rewards sampled from
+            the bandit replay buffer.
+        :type experiences: BanditBatch
         """
-        # Bandit replay buffers sample batches as TensorDicts keyed by field
-        # name (components/replay_buffer.py), which guarantees this layout.
-        batch = cast("BanditBatch", experiences)
-        states = batch["obs"]
-        rewards = batch["reward"]
+        states = experiences["obs"]
+        rewards = experiences["reward"]
 
         pred_rewards = self.actor(states)
 

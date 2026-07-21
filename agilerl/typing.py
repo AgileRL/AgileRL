@@ -125,6 +125,12 @@ InfosDict = dict[str, dict[str, Any]]
 MaybeObsList = list[ObservationType] | ObservationType
 ExperiencesType = dict[str, ObservationType] | tuple[ObservationType, ...]
 
+# The batch type an algorithm's ``learn`` consumes. Each concrete algorithm binds
+# this to the exact shape its buffer/rollout produces (e.g. ``ReplayBatch`` for
+# off-policy value methods, ``PreferencePrompts`` for DPO), so ``learn`` reads its
+# batch with precise key/element typing instead of narrowing a broad union by hand.
+ExperiencesT = TypeVar("ExperiencesT")
+
 
 class ReplayBatch(TypedDict):
     """One off-policy sample from a :class:`~agilerl.components.replay_buffer.ReplayBuffer`."""

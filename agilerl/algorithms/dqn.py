@@ -19,7 +19,6 @@ from agilerl.algorithms.core.registry import (
 from agilerl.modules.base import EvolvableModule
 from agilerl.networks.q_networks import QNetwork
 from agilerl.typing import (
-    ExperiencesType,
     ObservationType,
     ReplayBatch,
     SupportedObservationSpace,
@@ -28,7 +27,7 @@ from agilerl.typing import (
 from agilerl.utils.algo_utils import make_safe_deepcopies
 
 
-class DQN(RLAlgorithm):
+class DQN(RLAlgorithm[ReplayBatch]):
     """Deep Q-Network (DQN).
 
     Paper: https://arxiv.org/abs/1312.5602
@@ -366,23 +365,21 @@ class DQN(RLAlgorithm):
         self.optimizer.step()
         return loss.detach()
 
-    def learn(self, experiences: ExperiencesType) -> float:
+    def learn(self, experiences: ReplayBatch) -> float:
         """Update agent network parameters to learn from experiences.
 
-        :param experiences: TensorDict of batched observations, actions, rewards, next_observations, dones in that order.
-        :type experiences: tensordict.TensorDict
+        :param experiences: Batch of observations, actions, rewards, next
+            observations and dones sampled from an off-policy replay buffer.
+        :type experiences: ReplayBatch
         :return: Loss value from the learning step
         :rtype: float
         """
-        # Off-policy replay buffers sample batches as TensorDicts keyed by field
-        # name (components/replay_buffer.py), which guarantees this layout.
-        batch = cast("ReplayBatch", experiences)
-        actions = batch["action"]
-        rewards = batch["reward"]
-        dones = batch["done"]
+        actions = experiences["action"]
+        rewards = experiences["reward"]
+        dones = experiences["done"]
 
-        obs = self.preprocess_observation(batch["obs"])
-        next_obs = self.preprocess_observation(batch["next_obs"])
+        obs = self.preprocess_observation(experiences["obs"])
+        next_obs = self.preprocess_observation(experiences["next_obs"])
 
         # NOTE: with cudagraphs enabled, self.update is swapped for a
         # signature-preserving CudaGraphModule wrapper in __init__.

@@ -23,7 +23,7 @@ from agilerl.utils.utils import (
 )
 
 if TYPE_CHECKING:
-    from agilerl.typing import ExperiencesType
+    from agilerl.typing import ReplayBatch
 
 InitDictType = dict[str, Any] | None
 PopulationType = list[CQN]
@@ -260,11 +260,11 @@ def train_offline(
             agent.set_training_mode(True)
             agent.init_training_step()
 
-            # The buffer hands back `TensorDict` batches, which `ExperiencesType`
-            # (agilerl/typing.py) does not yet cover - hence the cast to it.
+            # `Sampler.sample` is typed as returning a bare `TensorDict`; the cast
+            # asserts the concrete replay-batch layout `CQN.learn` consumes.
             for _idx_step in range(evo_steps):
                 experiences = sampler.sample(agent.batch_size)
-                agent.learn(cast("ExperiencesType", experiences))
+                agent.learn(cast("ReplayBatch", experiences))
 
             agent.finalize_training_step(evo_steps)
             pbar.update(evo_steps // population.size)

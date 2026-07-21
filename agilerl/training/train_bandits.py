@@ -23,7 +23,7 @@ from agilerl.utils.utils import (
 )
 
 if TYPE_CHECKING:
-    from agilerl.typing import ExperiencesType
+    from agilerl.typing import BanditBatch
 
 InitDictType = dict[str, Any] | None
 PopulationType = list[NeuralTS | NeuralUCB]
@@ -235,9 +235,10 @@ def train_bandits(
                 if len(memory) >= agent.batch_size:
                     for _ in range(agent.learn_step):
                         experiences = sample(agent.batch_size)
-                        # The buffer hands back a `TensorDict`, which
-                        # `ExperiencesType` (agilerl/typing.py) does not cover.
-                        agent.learn(cast("ExperiencesType", experiences))
+                        # `Sampler.sample` is typed as returning a bare
+                        # `TensorDict`; the cast asserts the concrete bandit-batch
+                        # layout the algorithm's `learn` consumes.
+                        agent.learn(cast("BanditBatch", experiences))
 
                 score += reward
                 # Regret accumulates the fractional reward gap, so its elements are

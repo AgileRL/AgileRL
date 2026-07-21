@@ -1,6 +1,6 @@
 import copy
 import warnings
-from typing import Any, cast
+from typing import Any
 
 import gymnasium as gym
 import numpy as np
@@ -21,7 +21,6 @@ from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.typing import (
-    ExperiencesType,
     NetConfigType,
     ObservationType,
     ReplayBatch,
@@ -38,7 +37,7 @@ from agilerl.utils.evolvable_networks import (
 )
 
 
-class TD3(RLAlgorithm):
+class TD3(RLAlgorithm[ReplayBatch]):
     """Twin Delayed Deep Deterministic Policy Gradient (TD3).
 
     Paper: https://arxiv.org/abs/1802.09477
@@ -491,14 +490,15 @@ class TD3(RLAlgorithm):
 
     def learn(
         self,
-        experiences: ExperiencesType,
+        experiences: ReplayBatch,
         noise_clip: float = 0.5,
         policy_noise: float = 0.2,
     ) -> tuple[float | None, float]:
         """Update agent network parameters to learn from experiences.
 
-        :param experiences: TensorDict of batched observations, actions, rewards, next_observations, dones.
-        :type experiences: dict[str, torch.Tensor[float]]
+        :param experiences: Batch of observations, actions, rewards, next
+            observations and dones sampled from an off-policy replay buffer.
+        :type experiences: ReplayBatch
         :param noise_clip: Maximum noise limit to apply to actions, defaults to 0.5
         :type noise_clip: float, optional
         :param policy_noise: Standard deviation of noise applied to policy, defaults to 0.2
@@ -506,15 +506,12 @@ class TD3(RLAlgorithm):
         :return: Actor loss (None on steps without a policy update) and critic loss
         :rtype: tuple[float | None, float]
         """
-        # Off-policy replay buffers sample batches as TensorDicts keyed by field
-        # name (components/replay_buffer.py), which guarantees this layout.
-        batch = cast("ReplayBatch", experiences)
-        actions = batch["action"]
-        rewards = batch["reward"]
-        dones = batch["done"]
+        actions = experiences["action"]
+        rewards = experiences["reward"]
+        dones = experiences["done"]
 
-        obs = self.preprocess_observation(batch["obs"])
-        next_obs = self.preprocess_observation(batch["next_obs"])
+        obs = self.preprocess_observation(experiences["obs"])
+        next_obs = self.preprocess_observation(experiences["next_obs"])
 
         # Compute the Q values
         q_value_1 = self.critic_1(obs, actions)
