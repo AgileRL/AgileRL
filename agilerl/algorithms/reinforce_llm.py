@@ -30,7 +30,7 @@ from agilerl.protocols import (
     PeftModelProtocol,
     PreTrainedModelProtocol,
 )
-from agilerl.typing import ExperiencesType, LLMObsType, ReasoningPrompts
+from agilerl.typing import LLMObsType, LLMRolloutExperiences, ReasoningPrompts
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
     VLLMConfig,
@@ -55,7 +55,7 @@ if HAS_LLM_DEPENDENCIES:
     from transformers import GenerationConfig
 
 
-class REINFORCE(LLMAlgorithm):
+class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
     """Turn-level REINFORCE with Return Batch Normalization (ReBN) for LLM
     finetuning.
 
@@ -449,7 +449,7 @@ class REINFORCE(LLMAlgorithm):
 
     def learn(
         self,
-        experiences: ExperiencesType,
+        experiences: LLMRolloutExperiences,
         turn_ids: torch.Tensor | None = None,
         sampling_logps: list[torch.Tensor | None] | None = None,
     ) -> dict[str, float]:
@@ -458,7 +458,7 @@ class REINFORCE(LLMAlgorithm):
         :param experiences: ``(completion_ids, action_masks, rewards)``. For
             single-turn, ``rewards`` is a flat tensor of scalars; for multi-turn,
             shape ``[batch, max_turns]`` per-turn rewards.
-        :type experiences: ExperiencesType
+        :type experiences: LLMRolloutExperiences
         :param turn_ids: Optional ``[batch, seq_len - 1]`` tensor of turn indices per
             token; ``-1`` for non-action tokens. If ``None``, all action tokens are
             treated as turn ``0``.
@@ -476,18 +476,9 @@ class REINFORCE(LLMAlgorithm):
         self._prepare_vllm_for_training()
 
         with self.memory_efficient_params_context():
-            # Runtime contract: experiences are the positional tuple
-            # (completion_ids, action_masks, rewards); stacking tensor lists
-            # yields one tensor per position.
-            assert isinstance(experiences, tuple), (
-                "REINFORCE experiences must be a tuple"
-            )
-            completion_ids, action_masks, rewards = cast(
-                "tuple[torch.Tensor, torch.Tensor, torch.Tensor]",
-                stack_and_pad_experiences(
-                    *experiences,
-                    padding_values=[self.pad_token_id, False, None],
-                ),
+            completion_ids, action_masks, rewards = stack_and_pad_experiences(
+                *experiences,
+                padding_values=[self.pad_token_id, False, None],
             )
             completion_ids = completion_ids.to(self.device)
             action_masks = action_masks.to(self.device)
@@ -700,10 +691,9 @@ class REINFORCE(LLMAlgorithm):
         # they bypass the per-update averaging above.
         result.update(is_metrics)
 
-        # Wire averaged metrics into the metrics tracker. ``ExperiencesType`` is
-        # a broad shared alias; for REINFORCE position 0 is the completion-id
-        # tensor list.
-        completion_list = cast("list[torch.Tensor]", experiences[0])
+        # Wire averaged metrics into the metrics tracker; position 0 is the
+        # per-trajectory completion-id batch.
+        completion_list = experiences[0]
         completion_length = float(np.mean([c.shape[-1] for c in completion_list]))
         agg = aggregate_metrics_dict(
             self.accelerator,

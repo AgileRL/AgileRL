@@ -1701,22 +1701,25 @@ def stack_experiences(
 
 
 def stack_and_pad_experiences(
-    *experiences: MaybeObsList,
+    *experiences: Sequence[ObservationType] | ObservationType,
     padding_values: list[int | float | bool | None],
     padding_side: str = "right",
     device: str | torch.device | None = None,
-) -> tuple[ArrayOrTensor, ...]:
+) -> tuple[torch.Tensor, ...]:
     """Stacks experiences into a single tensor, padding them to the maximum length.
 
-    :param experiences: Experiences to stack
-    :type experiences: list[numpy.ndarray[float]] or list[dict[str, numpy.ndarray[float]]]
-    :param to_torch: If True, convert the stacked experiences to a torch tensor, defaults to True
-    :type to_torch: bool, optional
+    Every branch stacks or passes through tensors, so the result is always a tuple
+    of tensors; the covariant ``Sequence`` parameter lets callers pass concrete
+    ``list[torch.Tensor]`` batches directly.
+
+    :param experiences: Experiences to stack: per-position tensor lists or
+        already-stacked tensors.
+    :type experiences: Sequence[ObservationType] | ObservationType
     :param padding_side: Side to pad on, defaults to "right"
     :type padding_side: str, optional
 
     :return: Stacked experiences
-    :rtype: tuple[ArrayOrTensor, ...]
+    :rtype: tuple[torch.Tensor, ...]
     """
     stacked_experiences: list[Any] = []
     for exp, padding in zip(experiences, padding_values, strict=False):

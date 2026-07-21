@@ -5304,17 +5304,11 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                         prompts_ids[group_size * i : group_size * (i + 1)],
                         dim=0,
                     ),
-                    # Tensor inputs stay tensors; stack_and_pad_experiences'
-                    # device annotation is str-only upstream but Tensor.to
-                    # accepts torch.device too.
-                    cast(
-                        "torch.Tensor",
-                        stack_and_pad_experiences(
-                            completion_ids[group_size * i : group_size * (i + 1)],
-                            padding_values=[self.pad_token_id],
-                            device=self.device,
-                        )[0],
-                    ),
+                    stack_and_pad_experiences(
+                        completion_ids[group_size * i : group_size * (i + 1)],
+                        padding_values=[self.pad_token_id],
+                        device=self.device,
+                    )[0],
                 ],
                 dim=1,
             )

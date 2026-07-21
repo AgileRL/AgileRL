@@ -20,7 +20,6 @@ from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.protocols import PreTrainedModelProtocol
 from agilerl.typing import (
-    ExperiencesType,
     MultiAgentObservationType,
     ObservationType,
     PreferencePrompts,
@@ -32,7 +31,7 @@ if HAS_LIGER_KERNEL:
     from agilerl.algorithms.core.llm_ops.fused_loss import LigerDPOWithAlpha
 
 
-class DPO(LLMAlgorithm):
+class DPO(LLMAlgorithm[PreferencePrompts]):
     """Direct Preference Optimization (DPO).
 
     Paper: https://arxiv.org/pdf/2305.18290
@@ -244,13 +243,14 @@ class DPO(LLMAlgorithm):
 
     def learn(
         self,
-        experiences: ExperiencesType | PreferencePrompts,
+        experiences: PreferencePrompts,
         training: bool = True,
     ) -> dict[str, float]:
         """Update agent network parameters to learn from preference data.
 
-        :param experiences: Batched chosen_input_ids, rejected_input_ids, chosen_attention_mask, rejected_attention_mask and rewards
-        :type experiences: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+        :param experiences: Batched chosen/rejected input ids and attention masks
+            with prompt lengths, as produced by :class:`~agilerl.llm_envs.PreferenceGym`.
+        :type experiences: PreferencePrompts
         :param training: Whether the agent is training or not
         :type training: bool
         :return: Dict with keys ``loss``, ``chosen_reward``, ``rejected_reward``.
@@ -260,14 +260,11 @@ class DPO(LLMAlgorithm):
         torch.cuda.empty_cache()
         if torch.backends.mps.is_available():
             torch.mps.empty_cache()
-        # Runtime contract: DPO batches come from ``PreferenceGym.reset``/``step``,
-        # which always yield a ``PreferencePrompts`` mapping.
-        batch = cast("PreferencePrompts", experiences)
         # The following tensors are size [batch_size, max_length]
-        chosen_input_ids = batch["chosen_input_ids"].to(self.device)
-        rejected_input_ids = batch["rejected_input_ids"].to(self.device)
-        chosen_attention_mask = batch["chosen_attention_mask"].to(self.device)
-        rejected_attention_mask = batch["rejected_attention_mask"].to(self.device)
+        chosen_input_ids = experiences["chosen_input_ids"].to(self.device)
+        rejected_input_ids = experiences["rejected_input_ids"].to(self.device)
+        chosen_attention_mask = experiences["chosen_attention_mask"].to(self.device)
+        rejected_attention_mask = experiences["rejected_attention_mask"].to(self.device)
         # Check first that all tensors have the same max length before calculating the masks
         assert (
             chosen_input_ids.shape[1]
@@ -277,7 +274,7 @@ class DPO(LLMAlgorithm):
         ), "All tensors must have the same max length"
 
         max_length = chosen_input_ids.shape[1]
-        prompt_lengths = batch["prompt_lengths"]
+        prompt_lengths = experiences["prompt_lengths"]
 
         # Build the response mask on CPU (same device as dataloader tensors).
         prompt_masks = LLMAlgorithm._create_prompt_masks(

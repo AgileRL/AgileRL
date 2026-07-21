@@ -163,6 +163,17 @@ class BanditBatch(TypedDict):
 # the shared replay buffer and consumed by MADDPG/MATD3's ``learn``.
 MultiAgentReplayBatch = dict[str, dict[str, torch.Tensor]]
 
+# One LLM RL rollout consumed by GRPO/LLMPPO/LLMREINFORCE's ``learn``:
+# ``(completion_ids, action_masks, rewards)``. ``completion_ids`` and
+# ``action_masks`` are per-trajectory tensor lists, or already-stacked tensors
+# after cross-rank sequence-padding alignment; ``rewards`` is a ``(batch,)`` (or
+# ``(batch, max_turns)`` for per-turn) tensor.
+LLMRolloutExperiences = tuple[
+    list[torch.Tensor] | torch.Tensor,
+    list[torch.Tensor] | torch.Tensor,
+    torch.Tensor,
+]
+
 
 ActionReturnType = tuple[ActionType | Any, ...] | ActionType | Any
 GymStepReturn = tuple[NumpyObsType, ActionType, float, MaybeObsList, InfosDict]

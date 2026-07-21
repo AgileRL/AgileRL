@@ -1,6 +1,6 @@
 import time
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -32,7 +32,6 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.utils.algo_utils import stack_and_pad_experiences
 
 if TYPE_CHECKING:
-    from agilerl.typing import ExperiencesType
 
     SupportedMultiturn = LLMPPO | LLMREINFORCE | GRPO
 
@@ -227,20 +226,15 @@ def finetune_llm_multiturn(
                 reward.unsqueeze(0) if reward.dim() == 1 else reward
                 for reward in all_rewards
             ]
-            # `stack_and_pad_experiences` takes invariant `list[ObservationType]`
-            # arguments and returns `ArrayOrTensor`; tensor inputs always come back
-            # as tensors. Accepting sequences and preserving the input type upstream
-            # (agilerl/utils/algo_utils.py) drops these suppressions.
-            (turn_ids_stacked,) = stack_and_pad_experiences(
-                all_turn_ids,  # ty: ignore[invalid-argument-type]
+            (turn_ids_padded,) = stack_and_pad_experiences(
+                all_turn_ids,
                 padding_values=[-1],
             )
             (rewards_stacked,) = stack_and_pad_experiences(
-                normalized_rewards,  # ty: ignore[invalid-argument-type]
+                normalized_rewards,
                 padding_values=[0.0],
             )
-            turn_ids_padded = cast("torch.Tensor", turn_ids_stacked)
-            rewards_2d = cast("torch.Tensor", rewards_stacked).float()
+            rewards_2d = rewards_stacked.float()
 
             episode_scores = (
                 rewards_2d.sum(dim=1) if rewards_2d.dim() > 1 else rewards_2d
@@ -292,9 +286,7 @@ def finetune_llm_multiturn(
                     learn_kwargs["turn_ids"] = torch.nn.functional.pad(
                         turn_ids_padded, (0, pad_t), value=-1
                     )
-            # The rollout is a (completions, masks, rewards) tuple of tensors, which
-            # `ExperiencesType` (agilerl/typing.py) does not yet cover.
-            agent.learn(cast("ExperiencesType", experiences), **learn_kwargs)
+            agent.learn(experiences, **learn_kwargs)
 
             agg_score = safe_aggregate_metrics(accelerator, mean_score)
 

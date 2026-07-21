@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from accelerate import Accelerator
 
@@ -31,7 +31,6 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.llm_envs import ReasoningGym
 
 if TYPE_CHECKING:
-    from agilerl.typing import ExperiencesType
 
     SupportedReasoning = GRPO | LLMPPO | LLMREINFORCE
 
@@ -223,9 +222,7 @@ def finetune_llm_reasoning(
                 and isinstance(agent, (GRPO, LLMPPO, LLMREINFORCE))
                 else {}
             )
-            # The rollout is a (completions, masks, rewards) tuple of tensors, which
-            # `ExperiencesType` (agilerl/typing.py) does not yet cover.
-            agent.learn(cast("ExperiencesType", experiences), **learn_kwargs)
+            agent.learn(experiences, **learn_kwargs)
 
             if max_reward is not None:
                 if "accuracy" not in agent.metrics.additional_metrics:

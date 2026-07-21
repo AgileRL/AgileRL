@@ -33,7 +33,7 @@ from agilerl.protocols import (
     PeftModelProtocol,
     PreTrainedModelProtocol,
 )
-from agilerl.typing import ExperiencesType, LLMObsType, ReasoningPrompts
+from agilerl.typing import LLMObsType, LLMRolloutExperiences, ReasoningPrompts
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
     VLLMConfig,
@@ -76,7 +76,7 @@ class _StandardLossFn(Protocol):
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 
-class GRPO(LLMAlgorithm):
+class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
     """Group Relative Policy Optimization (GRPO).
 
     Paper: https://arxiv.org/pdf/2402.03300
@@ -544,7 +544,7 @@ class GRPO(LLMAlgorithm):
 
     def learn(
         self,
-        experiences: ExperiencesType,
+        experiences: LLMRolloutExperiences,
         turn_ids: torch.Tensor | None = None,
         sampling_logps: list[torch.Tensor | None] | None = None,
     ) -> dict[str, float]:
@@ -555,7 +555,7 @@ class GRPO(LLMAlgorithm):
             rewards, ``rewards`` is ``(batch, max_turns)``; otherwise it is one
             scalar per trajectory (per-turn rewards are summed to the episode
             return).
-        :type experiences: ExperiencesType
+        :type experiences: LLMRolloutExperiences
         :param sampling_logps: Optional per-row flat vLLM sampling logprobs (one
             1-D tensor per trajectory, generated tokens only; concatenated
             across turns for multi-turn) for the sampling-mismatch correction.
@@ -659,10 +659,7 @@ class GRPO(LLMAlgorithm):
         result = {
             metric: value / max(updates, 1) for metric, value in learn_metrics.items()
         }
-        # Runtime contract: rollout experiences are the positional tuple
-        # (completion_ids, action_masks, rewards) with per-trajectory tensors.
-        assert isinstance(experiences, tuple), "GRPO experiences must be a tuple"
-        completion_list = cast("list[torch.Tensor]", experiences[0])
+        completion_list = experiences[0]
         result["completion_length"] = float(
             np.mean([x.shape[-1] for x in completion_list])
         )
@@ -958,20 +955,13 @@ class GRPO(LLMAlgorithm):
 
     def _prepare_experience_batch(
         self,
-        experiences: ExperiencesType,
+        experiences: LLMRolloutExperiences,
         turn_ids: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Stack and pad the experience batch and move it to the device."""
-        # Runtime contract: experiences are the positional tuple
-        # (completion_ids, action_masks, rewards); stacking tensor lists yields
-        # one tensor per position.
-        assert isinstance(experiences, tuple), "GRPO experiences must be a tuple"
-        completion_ids, action_masks, rewards = cast(
-            "tuple[torch.Tensor, torch.Tensor, torch.Tensor]",
-            stack_and_pad_experiences(
-                *experiences,
-                padding_values=[self.pad_token_id, False, None],
-            ),
+        completion_ids, action_masks, rewards = stack_and_pad_experiences(
+            *experiences,
+            padding_values=[self.pad_token_id, False, None],
         )
         action_masks = action_masks.to(self.device)
         rewards = rewards.to(self.device).float()

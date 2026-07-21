@@ -306,16 +306,11 @@ def align_completion_batch_shapes_across_ranks(
     # Lazy import avoids a circular dependency with algo_utils -> llm_utils.
     from agilerl.utils.algo_utils import stack_and_pad_experiences
 
-    # stack_and_pad_experiences is typed for mixed array/tensor inputs but
-    # returns tensors for the tensor experiences passed here.
-    completion_ids, action_masks, rewards = cast(
-        "tuple[torch.Tensor, torch.Tensor, torch.Tensor]",
-        stack_and_pad_experiences(
-            completion_ids,
-            action_masks,
-            rewards,
-            padding_values=[pad_token_id, False, 0.0],
-        ),
+    completion_ids, action_masks, rewards = stack_and_pad_experiences(
+        completion_ids,
+        action_masks,
+        rewards,
+        padding_values=[pad_token_id, False, 0.0],
     )
     local_b = int(completion_ids.shape[0])
     local_t = int(completion_ids.shape[1])

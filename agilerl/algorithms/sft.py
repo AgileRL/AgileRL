@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import gc
-from typing import TYPE_CHECKING, Any, NoReturn, cast
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import numpy as np
 import torch
@@ -11,7 +11,6 @@ from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.protocols import PreTrainedModelProtocol
 from agilerl.typing import (
-    ExperiencesType,
     MultiAgentObservationType,
     ObservationType,
     SFTPrompts,
@@ -31,7 +30,7 @@ if HAS_LIGER_KERNEL or TYPE_CHECKING:
     )
 
 
-class SFT(LLMAlgorithm):
+class SFT(LLMAlgorithm[SFTPrompts]):
     """Supervised Fine-Tuning (SFT) algorithm.
 
     Trains an LLM via token-level cross-entropy loss computed exclusively on the
@@ -227,7 +226,7 @@ class SFT(LLMAlgorithm):
 
     def learn(
         self,
-        experiences: ExperiencesType | SFTPrompts,
+        experiences: SFTPrompts,
         training: bool = True,
     ) -> dict[str, float]:
         """Update model parameters using cross-entropy loss on response tokens.
@@ -238,7 +237,7 @@ class SFT(LLMAlgorithm):
         :param experiences: Dict with keys ``input_ids`` (prompt + response token
             IDs), ``attention_mask``, and ``prompt_lengths`` (number of prompt
             tokens per sample) as produced by :class:`~agilerl.llm_envs.SFTGym`.
-        :type experiences: ExperiencesType
+        :type experiences: SFTPrompts
         :param training: When ``False`` the backward pass is skipped (eval mode).
         :type training: bool
         :return: ``(loss, perplexity)`` averaged over all samples in
@@ -250,17 +249,14 @@ class SFT(LLMAlgorithm):
         if torch.backends.mps.is_available():
             torch.mps.empty_cache()
 
-        # Runtime contract: SFT batches come from ``SFTGym.reset``/``step``,
-        # which always yield an ``SFTPrompts`` mapping.
-        batch = cast("SFTPrompts", experiences)
-        input_ids = batch["input_ids"]
-        attention_mask = batch["attention_mask"]
+        input_ids = experiences["input_ids"]
+        attention_mask = experiences["attention_mask"]
         # Check first that all tensors have the same max length before calculating the masks
         assert input_ids.shape[1] == attention_mask.shape[1], (
             "All tensors must have the same max length"
         )
         max_length = input_ids.shape[1]
-        prompt_lengths = batch["prompt_lengths"]
+        prompt_lengths = experiences["prompt_lengths"]
         # Build the response mask on CPU (same device as dataloader tensors).
         prompt_masks = LLMAlgorithm._create_prompt_masks(
             prompt_lengths, max_length=max_length
