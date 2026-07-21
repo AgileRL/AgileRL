@@ -25,8 +25,8 @@ from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.typing import (
     ArrayDict,
-    ExperiencesType,
     InfosDict,
+    MultiAgentReplayBatch,
     NetConfigType,
     NumpyObsType,
     ObservationType,
@@ -60,7 +60,7 @@ def _ddp_no_sync(module: nn.Module) -> AbstractContextManager[None]:
     return no_sync()
 
 
-class MATD3(MultiAgentRLAlgorithm):
+class MATD3(MultiAgentRLAlgorithm[MultiAgentReplayBatch]):
     """Multi-Agent Twin Delayed Deep Deterministic Policy Gradient (MATD3).
 
     Paper: https://arxiv.org/abs/1910.01465
@@ -776,27 +776,24 @@ class MATD3(MultiAgentRLAlgorithm):
                 self.current_noise[agent_id][idx, :] = 0
 
     def learn(
-        self, experiences: ExperiencesType
+        self, experiences: MultiAgentReplayBatch
     ) -> dict[str, tuple[float | None, float]]:
         """Update agent network parameters from the gathered experiences.
 
-        :param experiences: TensorDict of nested per-agent observations, actions,
-            rewards, next_observations, dones.
-        :type experiences: TensorDict
+        :param experiences: Nested per-agent batch of observations, actions,
+            rewards, next observations and dones (field -> agent id -> tensor).
+            Composite observation spaces nest further containers in the
+            ``obs``/``next_obs`` leaves, which ``preprocess_observation`` handles.
+        :type experiences: MultiAgentReplayBatch
 
         :return: Losses for each agent
         :rtype: dict[str, tuple[float | None, float]]
         """
-        # Sampled batches arrive keyed by field name with per-agent tensor
-        # sub-maps (a TensorDict from the replay buffer, plain dicts in
-        # tests); composite observation spaces nest further containers in the
-        # "obs"/"next_obs" leaves, which preprocess_observation handles.
-        experience_map = cast("dict[str, dict[str, torch.Tensor]]", experiences)
-        states = experience_map["obs"]
-        actions = experience_map["action"]
-        rewards = experience_map["reward"]
-        next_states = experience_map["next_obs"]
-        dones = experience_map["done"]
+        states = experiences["obs"]
+        actions = experiences["action"]
+        rewards = experiences["reward"]
+        next_states = experiences["next_obs"]
+        dones = experiences["done"]
 
         actions = {
             agent_id: agent_actions.to(self.device)

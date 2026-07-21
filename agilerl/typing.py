@@ -158,6 +158,12 @@ class BanditBatch(TypedDict):
     reward: torch.Tensor
 
 
+# One multi-agent off-policy sample: field name (``obs``, ``action``, ``reward``,
+# ``next_obs``, ``done``) -> agent id -> tensor. Sampled as a nested TensorDict by
+# the shared replay buffer and consumed by MADDPG/MATD3's ``learn``.
+MultiAgentReplayBatch = dict[str, dict[str, torch.Tensor]]
+
+
 ActionReturnType = tuple[ActionType | Any, ...] | ActionType | Any
 GymStepReturn = tuple[NumpyObsType, ActionType, float, MaybeObsList, InfosDict]
 PzStepReturn = tuple[

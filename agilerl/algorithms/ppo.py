@@ -26,7 +26,6 @@ from agilerl.networks.value_networks import ValueNetwork
 from agilerl.typing import (
     ArrayOrTensor,
     BPTTSequenceType,
-    ExperiencesType,
     ObservationType,
     SupportedObservationSpace,
     TorchObsType,
@@ -46,7 +45,7 @@ RecurrentActionReturnType = tuple[
 ]
 
 
-class PPO(RLAlgorithm):
+class PPO(RLAlgorithm[TensorDict]):
     """Proximal Policy Optimization (PPO).
 
     Paper: https://arxiv.org/abs/1707.06347v2
@@ -641,13 +640,13 @@ class PPO(RLAlgorithm):
             values_np,
         )
 
-    def learn(self, experiences: ExperiencesType | None = None) -> float:
+    def learn(self, experiences: TensorDict | None = None) -> float:
         """Update agent network parameters to learn from experiences.
 
         :param experiences: Optional pre-collected rollout batch. When ``None``
             (the default), samples are drawn from the agent's internal rollout
             buffer.
-        :type experiences: ExperiencesType | None
+        :type experiences: TensorDict | None
         :return: Mean loss value from training.
         :rtype: float
         """
@@ -658,13 +657,11 @@ class PPO(RLAlgorithm):
 
     def _learn_from_rollout_buffer_flat(
         self,
-        buffer_td_external: ExperiencesType | None = None,
+        buffer_td_external: TensorDict | None = None,
     ) -> float:
         """Learning procedure using flattened samples (no BPTT)."""
         if buffer_td_external is not None:
-            # Externally provided batches must follow the rollout-buffer
-            # TensorDict layout; ExperiencesType is the abstract signature.
-            buffer_td = cast("TensorDict", buffer_td_external)
+            buffer_td = buffer_td_external
         else:
             buffer_td = self.rollout_buffer.get_tensor_batch(device=str(self.device))
 

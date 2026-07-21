@@ -1,5 +1,6 @@
 import logging
 import warnings
+from collections.abc import Mapping
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast
 
@@ -23,7 +24,7 @@ from agilerl.vector import PettingZooVecEnv, PzDummyVecEnv
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
 if TYPE_CHECKING:
-    from agilerl.typing import ExperiencesType, SingleAgentModule
+    from agilerl.typing import SingleAgentModule
 
 InitDictType = dict[str, Any] | None
 MultiAgentOnPolicyAlgorithms = IPPO
@@ -354,10 +355,9 @@ def train_multi_agent_on_policy(
                     next_done,
                 )
 
-                # Learn according to agent's RL algorithm. The rollout is a tuple of
-                # per-sub-agent dictionaries, which `ExperiencesType`
-                # (agilerl/typing.py) does not yet cover.
-                agent.learn(cast("ExperiencesType", experiences))
+                # The rollout is an 8-tuple of per-sub-agent field maps; the cast
+                # asserts that concrete layout for IPPO.learn.
+                agent.learn(cast("tuple[Mapping[str, Any], ...]", experiences))
 
             agent.add_scores(
                 cast("list[float] | list[list[float]]", completed_episode_scores),

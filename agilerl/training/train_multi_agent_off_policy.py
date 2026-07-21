@@ -27,7 +27,7 @@ from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 if TYPE_CHECKING:
     from tensordict import TensorDictBase
 
-    from agilerl.typing import ExperiencesType
+    from agilerl.typing import MultiAgentReplayBatch
 
 InitDictType = dict[str, Any] | None
 PopulationType = list[MADDPG | MATD3]
@@ -232,8 +232,8 @@ def train_multi_agent_off_policy(
             agent.set_training_mode(True)
             agent.init_training_step()
 
-            # The buffer hands back `TensorDict` batches, which `ExperiencesType`
-            # (agilerl/typing.py) does not yet cover - hence the casts below.
+            # `Sampler.sample` is typed as returning a bare `TensorDict`; the casts
+            # below assert the nested per-agent batch layout MADDPG/MATD3 consume.
             sample = sampler.sample
 
             obs, info = vec_env.reset()
@@ -289,14 +289,14 @@ def train_multi_agent_off_policy(
                         and memory.counter > learning_delay
                     ):
                         experiences = sample(agent.batch_size)
-                        agent.learn(cast("ExperiencesType", experiences))
+                        agent.learn(cast("MultiAgentReplayBatch", experiences))
 
                 elif (
                     len(memory) >= agent.batch_size and memory.counter > learning_delay
                 ):
                     for _ in range(num_envs // agent.learn_step):
                         experiences = sample(agent.batch_size)
-                        agent.learn(cast("ExperiencesType", experiences))
+                        agent.learn(cast("MultiAgentReplayBatch", experiences))
 
                 obs = next_obs
 

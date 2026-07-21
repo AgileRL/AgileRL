@@ -25,7 +25,6 @@ from agilerl.networks.actors import StochasticActor
 from agilerl.networks.value_networks import ValueNetwork
 from agilerl.typing import (
     ArrayDict,
-    ExperiencesType,
     InfosDict,
     NumpyObsType,
     ObservationType,
@@ -48,7 +47,7 @@ from agilerl.utils.algo_utils import (
 from agilerl.vector.pz_vec_env import PettingZooVecEnv
 
 
-class IPPO(MultiAgentRLAlgorithm):
+class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
     """Independent Proximal Policy Optimization (IPPO).
 
     Paper: https://arxiv.org/pdf/2011.09533
@@ -649,21 +648,19 @@ class IPPO(MultiAgentRLAlgorithm):
             ),
         )
 
-    def learn(self, experiences: ExperiencesType) -> dict[str, float]:
+    def learn(self, experiences: tuple[Mapping[str, Any], ...]) -> dict[str, float]:
         """Update agent network parameters to learn from experiences.
 
-        :param experiences: Tuple of dictionaries containing batched states, actions,
-            rewards, next_states, dones in that order for each individual agent.
-        :type experiences: ExperiencesType
+        :param experiences: 8-tuple of per-agent field maps holding batched
+            states, actions, log_probs, rewards, dones, values, next_states and
+            next_dones in that order.
+        :type experiences: tuple[Mapping[str, Any], ...]
 
         :return: Loss dictionary
         :rtype: dict[str, float]
         """
-        # Process experiences: an 8-tuple of per-agent field maps in the
-        # order documented above.
-        experience_fields = cast("tuple[Mapping[str, Any], ...]", experiences)
         states, actions, log_probs, rewards, dones, values, next_states, next_dones = (
-            map(self.assemble_shared_inputs, experience_fields)
+            map(self.assemble_shared_inputs, experiences)
         )
 
         loss_dict: dict[str, float] = {}

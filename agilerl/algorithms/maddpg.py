@@ -24,8 +24,8 @@ from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks import ContinuousQNetwork, DeterministicActor
 from agilerl.typing import (
     ArrayDict,
-    ExperiencesType,
     InfosDict,
+    MultiAgentReplayBatch,
     NetConfigType,
     NumpyObsType,
     ObservationType,
@@ -59,7 +59,7 @@ def _ddp_no_sync(module: nn.Module) -> AbstractContextManager[None]:
     return no_sync()
 
 
-class MADDPG(MultiAgentRLAlgorithm):
+class MADDPG(MultiAgentRLAlgorithm[MultiAgentReplayBatch]):
     """Multi-Agent Deep Deterministic Policy Gradient (MADDPG).
 
     Paper: https://arxiv.org/abs/1706.02275
@@ -694,22 +694,23 @@ class MADDPG(MultiAgentRLAlgorithm):
             for idx in indices:
                 self.current_noise[agent_id][idx, :] = 0
 
-    def learn(self, experiences: ExperiencesType) -> dict[str, tuple[float, float]]:
+    def learn(
+        self, experiences: MultiAgentReplayBatch
+    ) -> dict[str, tuple[float, float]]:
         """Update agent network parameters from the gathered experiences.
 
-        :param experiences: TensorDict of nested per-agent observations, actions,
-            rewards, next_observations, dones.
-        :type experiences: TensorDict
+        :param experiences: Nested per-agent batch of observations, actions,
+            rewards, next observations and dones (field -> agent id -> tensor).
+        :type experiences: MultiAgentReplayBatch
 
         :return: Loss dictionary
         :rtype: dict[str, tuple[float, float]]
         """
-        experience_map = cast("dict[str, dict[str, torch.Tensor]]", experiences)
-        states = experience_map["obs"]
-        actions = experience_map["action"]
-        rewards = experience_map["reward"]
-        next_states = experience_map["next_obs"]
-        dones = experience_map["done"]
+        states = experiences["obs"]
+        actions = experiences["action"]
+        rewards = experiences["reward"]
+        next_states = experiences["next_obs"]
+        dones = experiences["done"]
 
         actions = {
             agent_id: agent_actions.to(self.device)
