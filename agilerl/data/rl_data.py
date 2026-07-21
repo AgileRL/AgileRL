@@ -3,7 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 import torch
 
@@ -117,8 +117,7 @@ class DataPoint:
                 action_rewards.append(r)
         if terminal:
             raw_str += tokenizer.id_to_token(tokenizer.eod_token_id)
-        # Encoding a single string yields a flat token list
-        tokens = cast("list[int]", tokenizer.encode(raw_str)[0])
+        tokens = tokenizer.encode(raw_str)[0]
         token_rewards = token_reward.get_token_reward(tokens)
         state_idxs = []
         action_idxs = []

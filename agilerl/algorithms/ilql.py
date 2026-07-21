@@ -5,7 +5,7 @@ import operator
 from collections import defaultdict
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import torch
@@ -31,12 +31,8 @@ from agilerl.utils.sampling_utils import (
 
 
 def _decode_str(tokenizer: Tokenizer, token_ids: list[int]) -> str:
-    """Decode one flat id sequence to a string.
-
-    ``Tokenizer.decode`` is annotated ``str | list[str]`` to cover batched
-    input, but a single flat id list always decodes to ``str``.
-    """
-    return cast("str", tokenizer.decode(token_ids, clean_up_tokenization_spaces=False))
+    """Decode one flat id sequence to a string."""
+    return tokenizer.decode(token_ids, clean_up_tokenization_spaces=False)
 
 
 class ILQL(nn.Module):
