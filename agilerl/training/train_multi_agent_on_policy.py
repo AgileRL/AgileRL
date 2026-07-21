@@ -9,11 +9,11 @@ from gymnasium import spaces
 from pettingzoo import ParallelEnv
 
 from agilerl.algorithms import IPPO
-from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks import StochasticActor
 from agilerl.population import Population
+from agilerl.protocols import SelectionStrategyProtocol
 from agilerl.utils.utils import (
     default_progress_bar,
     init_loggers,
@@ -47,7 +47,7 @@ def train_multi_agent_on_policy(
     eval_steps: int | None = None,
     eval_loop: int = 1,
     target: float | None = None,
-    selection_strategy: TournamentSelection | MultiFrequencySelection | None = None,
+    selection_strategy: SelectionStrategyProtocol | None = None,
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
     checkpoint: int | None = None,

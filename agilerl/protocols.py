@@ -410,6 +410,17 @@ class EvolvableAlgorithmProtocol(Protocol):
         pass
 
 
+@runtime_checkable
+class SelectionStrategyProtocol(Protocol):
+    """Protocol for population selection strategies that drive evolutionary HPO."""
+
+    def select(
+        self,
+        population: list[Any],
+    ) -> tuple[Any, list[Any], list[int] | None]:
+        pass
+
+
 # Define a TypeVar for EvolvableAlgorithm that can be used for generic typing
 T_EvolvableAlgorithm = TypeVar("T_EvolvableAlgorithm", bound=EvolvableAlgorithmProtocol)
 

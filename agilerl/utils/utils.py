@@ -31,11 +31,11 @@ from agilerl.algorithms import (
 )
 from agilerl.algorithms.core import EvolvableAlgorithm, LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig
-from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.logger import CSVLogger, StdOutLogger, TensorboardLogger, WandbLogger
 from agilerl.modules import EvolvableModule
+from agilerl.protocols import SelectionStrategyProtocol
 from agilerl.typing import BPTTSequenceType, GymSpaceType, PopulationType
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, DummyOptimizer, clone_llm
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
@@ -1226,7 +1226,7 @@ def _save_standard_elite(
 
 
 def run_selection_and_mutation(
-    selection_strategy: TournamentSelection | MultiFrequencySelection | None,
+    selection_strategy: SelectionStrategyProtocol | None,
     *,
     population: PopulationType,
     mutation: Mutations,
@@ -1241,7 +1241,7 @@ def run_selection_and_mutation(
 
     :param selection_strategy: The selection strategy driving evolution; None
         returns the population unchanged.
-    :type selection_strategy: TournamentSelection | MultiFrequencySelection | None
+    :type selection_strategy: SelectionStrategyProtocol | None
     :param population: Population of agents.
     :type population: list[PopulationType]
     :param mutation: Mutation object.
@@ -1374,17 +1374,17 @@ def tournament_selection_and_mutation(
 
 
 def resolve_selection_strategy(
-    selection_strategy: TournamentSelection | MultiFrequencySelection | None,
+    selection_strategy: SelectionStrategyProtocol | None,
     tournament: TournamentSelection | None,
-) -> TournamentSelection | MultiFrequencySelection | None:
+) -> SelectionStrategyProtocol | None:
     """Fold the deprecated tournament trainer argument into selection_strategy.
 
     :param selection_strategy: The selection strategy passed via the new argument.
-    :type selection_strategy: TournamentSelection | MultiFrequencySelection | None
+    :type selection_strategy: SelectionStrategyProtocol | None
     :param tournament: The strategy passed via the deprecated tournament argument.
     :type tournament: TournamentSelection | None
     :return: The resolved selection strategy.
-    :rtype: TournamentSelection | MultiFrequencySelection | None
+    :rtype: SelectionStrategyProtocol | None
     """
     if tournament is None:
         return selection_strategy

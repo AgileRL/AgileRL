@@ -5,10 +5,10 @@ from accelerate import Accelerator
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import GRPO
-from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
+from agilerl.protocols import SelectionStrategyProtocol
 from agilerl.training.llm.common import (
     _compute_training_steps,
     _num_epochs_reached,
@@ -49,7 +49,7 @@ def finetune_llm_reasoning(
     evo_steps: int | None = None,
     checkpoint_steps: int | None = None,
     checkpoint_path: str | None = None,
-    selection_strategy: TournamentSelection | MultiFrequencySelection | None = None,
+    selection_strategy: SelectionStrategyProtocol | None = None,
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
     wandb_api_key: str | None = None,
@@ -89,7 +89,7 @@ def finetune_llm_reasoning(
     :param checkpoint_path: Directory for periodic checkpoints; falls back to elite_path, defaults to None
     :type checkpoint_path: str | None, optional
     :param selection_strategy: Selection strategy driving evolution, defaults to None
-    :type selection_strategy: TournamentSelection | MultiFrequencySelection | None, optional
+    :type selection_strategy: SelectionStrategyProtocol | None, optional
     :param tournament: Deprecated alias for selection_strategy, defaults to None
     :type tournament: TournamentSelection, optional
     :param mutation: Mutation object, defaults to None

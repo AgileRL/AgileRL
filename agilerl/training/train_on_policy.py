@@ -7,10 +7,10 @@ from typing import Any
 from accelerate import Accelerator
 
 from agilerl.algorithms import PPO
-from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
+from agilerl.protocols import SelectionStrategyProtocol
 from agilerl.typing import GymEnvType
 from agilerl.utils.utils import (
     default_progress_bar,
@@ -40,7 +40,7 @@ def train_on_policy(
     eval_steps: int | None = None,
     eval_loop: int = 1,
     target: float | None = None,
-    selection_strategy: TournamentSelection | MultiFrequencySelection | None = None,
+    selection_strategy: SelectionStrategyProtocol | None = None,
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
     checkpoint: int | None = None,

@@ -18,6 +18,8 @@ from agilerl.algorithms import (
     RainbowDQN,
 )
 from agilerl.algorithms.core import MultiAgentRLAlgorithm
+from agilerl.hpo.multi_frequency import MultiFrequencySelection
+from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules import (
     EvolvableCNN,
     EvolvableLSTM,
@@ -51,6 +53,7 @@ from agilerl.protocols import (
     PeftModelProtocol,
     PretrainedConfigProtocol,
     PreTrainedModelProtocol,
+    SelectionStrategyProtocol,
 )
 from agilerl.wrappers.learning import BanditEnv
 from tests.helper_functions import (
@@ -622,3 +625,27 @@ class TestBanditEnvProtocol:
         next_state, reward = env.step(0)
         assert isinstance(next_state, np.ndarray)
         assert isinstance(reward, float)
+
+
+class TestSelectionStrategyProtocol:
+    """Test that the selection strategy classes satisfy SelectionStrategyProtocol."""
+
+    @staticmethod
+    def _strategies():
+        return [
+            TournamentSelection(tournament_size=2, elitism=True, population_size=4),
+            MultiFrequencySelection(
+                n_subpopulations=2,
+                n_individuals_per_subpopulation=4,
+                n_winners=1,
+                n_survivors=1,
+                n_open_for_migration=1,
+                n_losers=1,
+                seed=42,
+            ),
+        ]
+
+    def test_selection_strategy_instances_implement_protocol(self):
+        """Both concrete strategies satisfy the runtime-checkable protocol."""
+        for strategy in self._strategies():
+            assert isinstance(strategy, SelectionStrategyProtocol)

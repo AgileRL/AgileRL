@@ -11,11 +11,10 @@ from agilerl.algorithms import NeuralTS, NeuralUCB
 from agilerl.components.data import ReplayDataset
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.sampler import Sampler
-from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
-from agilerl.protocols import BanditEnvProtocol
+from agilerl.protocols import BanditEnvProtocol, SelectionStrategyProtocol
 from agilerl.utils.utils import (
     default_progress_bar,
     init_loggers,
@@ -44,7 +43,7 @@ def train_bandits(
     eval_steps: int = 500,
     eval_loop: int = 1,
     target: float | None = None,
-    selection_strategy: TournamentSelection | MultiFrequencySelection | None = None,
+    selection_strategy: SelectionStrategyProtocol | None = None,
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
     checkpoint: int | None = None,

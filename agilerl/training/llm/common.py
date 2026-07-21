@@ -3,9 +3,8 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
 
 from agilerl import HAS_LLM_DEPENDENCIES
-from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.hpo.mutation import Mutations
-from agilerl.hpo.tournament import TournamentSelection
+from agilerl.protocols import SelectionStrategyProtocol
 
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.llm_envs import PreferenceGym, ReasoningGym
@@ -13,7 +12,7 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
 
 def _validate_finetune_args(
     evo_steps: int | None,
-    selection_strategy: TournamentSelection | MultiFrequencySelection | None,
+    selection_strategy: SelectionStrategyProtocol | None,
     mutation: Mutations | None,
     num_epochs: int | None,
     max_steps: int | None,

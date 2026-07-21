@@ -16,11 +16,11 @@ from agilerl.components import (
 )
 from agilerl.components.data import ReplayDataset, Transition
 from agilerl.components.sampler import Sampler
-from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks.actors import DeterministicActor
 from agilerl.population import Population
+from agilerl.protocols import SelectionStrategyProtocol
 from agilerl.typing import GymEnvType
 from agilerl.utils.utils import (
     default_progress_bar,
@@ -94,7 +94,7 @@ def train_off_policy(
     eps_decay: float = 0.999,
     target: float | None = None,
     n_step_memory: MultiStepReplayBuffer | None = None,
-    selection_strategy: TournamentSelection | MultiFrequencySelection | None = None,
+    selection_strategy: SelectionStrategyProtocol | None = None,
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
     checkpoint: int | None = None,

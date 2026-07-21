@@ -12,10 +12,10 @@ from agilerl.algorithms import MADDPG, MATD3
 from agilerl.components.data import MultiAgentTransition, ReplayDataset
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.sampler import Sampler
-from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
+from agilerl.protocols import SelectionStrategyProtocol
 from agilerl.utils.utils import (
     default_progress_bar,
     init_loggers,
@@ -50,7 +50,7 @@ def train_multi_agent_off_policy(
     eval_loop: int = 1,
     learning_delay: int = 0,
     target: float | None = None,
-    selection_strategy: TournamentSelection | MultiFrequencySelection | None = None,
+    selection_strategy: SelectionStrategyProtocol | None = None,
     tournament: TournamentSelection | None = None,
     mutation: Mutations | None = None,
     checkpoint: int | None = None,
