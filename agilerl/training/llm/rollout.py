@@ -63,6 +63,7 @@ def train_llm_rollout(
     verbose: bool = True,
     accelerator: Accelerator | None = None,
     max_wall_seconds: float | None = None,
+    io_timeout_s: float | None = 600.0,
 ) -> "tuple[list[SupportedRollout], Any]":
     """Train a population of LLM agents over rollout (generate-and-score) environments.
 
@@ -126,6 +127,11 @@ def train_llm_rollout(
     :type accelerator: Accelerator, optional
     :param max_wall_seconds: Stop after this wall-clock duration (seconds); ``None`` disables.
     :type max_wall_seconds: float | None
+    :param io_timeout_s: Backstop deadline for one concurrent round of env
+        round-trips; a hung env or stalled transport raises ``TimeoutError``
+        rather than blocking the batch forever. Defaults to 600 s; ``None``
+        disables it. Forwarded to :class:`BatchRolloutEnv`.
+    :type io_timeout_s: float | None
     :return: The finetuned population and its last recorded fitnesses.
     :rtype: tuple[list[SupportedRollout], Any]
     """
@@ -194,7 +200,9 @@ def train_llm_rollout(
     # ``1 << 31`` offset is arbitrary but large enough that the rank's
     # contribution decorrelates the RNG streams even for a small base seed.
     group_seed = int(pop[0].seed) + _distributed_rank(accelerator) * (1 << 31)
-    rollout_env = BatchRolloutEnv(env_factory, batch_size, group_size)
+    rollout_env = BatchRolloutEnv(
+        env_factory, batch_size, group_size, io_timeout_s=io_timeout_s
+    )
     # ``agent.test`` expects a single ``RolloutEnv``; ``rollout_env`` is a
     # ``BatchRolloutEnv`` wrapping N inner envs whose state is mid-rollout during
     # training. A separate test env keeps evaluation isolated; it is built lazily

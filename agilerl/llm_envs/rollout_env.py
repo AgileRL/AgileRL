@@ -898,6 +898,8 @@ class BatchRolloutEnv:
         batch_size: int,
         group_size: int,
         env_config: dict[str, Any] | None = None,
+        *,
+        io_timeout_s: float | None = 600.0,
     ):
         """Create ``batch_size * group_size`` independent env wrappers.
 
@@ -909,6 +911,17 @@ class BatchRolloutEnv:
         :type group_size: int
         :param env_config: Optional kwargs passed to ``env_factory``.
         :type env_config: dict[str, Any] | None
+        :param io_timeout_s: Backstop deadline (seconds) for one concurrent
+            round of env round-trips (one batched reset or step). If any
+            round-trip does not finish within it, the round raises
+            ``TimeoutError`` instead of blocking forever — the last line of
+            defence against a hung env or a stalled transport, and the *only*
+            bound on an in-process env (which has no per-message timeout).
+            Defaults to 600 s; ``None`` disables it (unbounded, the old
+            behaviour). It bounds a whole round, so keep it above any per-env
+            ``timeout_s`` so the client's own (more precise) timeout fires
+            first.
+        :type io_timeout_s: float | None
         """
         if batch_size <= 0:
             msg = f"batch_size must be > 0, got {batch_size}."
@@ -923,6 +936,7 @@ class BatchRolloutEnv:
         self.num_envs = batch_size * group_size
         self.batch_size = batch_size
         self.group_size = group_size
+        self._io_timeout_s = io_timeout_s
         self.envs: list[RolloutEnv] = []
         # Shared dataset cursor for dataset shuffling and iteration.
         # Also used by async RolloutEnvs in distributed code.
@@ -1058,26 +1072,48 @@ class BatchRolloutEnv:
         """Run each zero-arg thunk concurrently, returning results in order.
 
         Overlaps the backend round-trips (I/O-bound, so the GIL is released
-        during each blocking call). Every thunk runs to completion before the
-        first exception (in submission order) propagates, so no round-trip is
-        still in flight when the caller regains control — a retried reset/step
-        cannot race a straggler on the same env client. Falls back to a direct
-        call for a single thunk.
+        during each blocking call). The whole round is bounded by
+        ``io_timeout_s``: if every round-trip completes, the first thunk
+        exception (in submission order) propagates with no round-trip left in
+        flight (a retried reset/step cannot race a straggler); if the deadline
+        passes first, ``TimeoutError`` is raised rather than blocking forever on
+        a hung env — a stuck straggler thread is abandoned (the batch is failing
+        anyway; the pool is torn down in :meth:`close`).
+
+        Falls back to a direct call for a single thunk only when unbounded; with
+        a deadline set, even one thunk runs on the pool so the timeout applies.
         """
-        if len(thunks) <= 1:
-            return [thunk() for thunk in thunks]
+        if not thunks:
+            return []
+        if self._io_timeout_s is None and len(thunks) == 1:
+            return [thunks[0]()]
         if self._io_pool is None:
             self._io_pool = ThreadPoolExecutor(
                 max_workers=self.num_envs, thread_name_prefix="rollout-env-io"
             )
         futures = [self._io_pool.submit(thunk) for thunk in thunks]
-        wait(futures)
+        _done, not_done = wait(futures, timeout=self._io_timeout_s)
+        if not_done:
+            for future in not_done:
+                future.cancel()
+            msg = (
+                f"{len(not_done)}/{len(futures)} env round-trips did not finish "
+                f"within io_timeout_s={self._io_timeout_s}s; a hung env or a "
+                "stalled transport blocked the batch."
+            )
+            raise TimeoutError(msg)
         return [future.result() for future in futures]
 
     def close(self) -> None:
-        """Close all env wrappers and the env-I/O thread pool."""
+        """Close all env wrappers and the env-I/O thread pool.
+
+        The pool is shut down without waiting: after a normal round every
+        worker is idle and exits immediately, and after an ``io_timeout_s``
+        failure a straggler is hung by definition, so joining it would make
+        teardown hang exactly where the deadline was meant to prevent it.
+        """
         if self._io_pool is not None:
-            self._io_pool.shutdown(wait=True)
+            self._io_pool.shutdown(wait=False)
             self._io_pool = None
         seen: set[int] = set()
         for env in self.envs:

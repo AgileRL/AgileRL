@@ -561,6 +561,50 @@ class TestBatchRolloutEnvReset:
         assert seen == [20, 20, 21, 21]
 
 
+class TestBatchRolloutEnvIoTimeout:
+    def test_map_env_io_raises_on_a_hung_round_trip(self) -> None:
+        """A round-trip that outlives ``io_timeout_s`` fails fast, not forever."""
+        import threading
+        import time
+
+        release = threading.Event()
+        vec = BatchRolloutEnv(
+            env_factory=_SyncStubEnv, batch_size=2, group_size=1, io_timeout_s=0.3
+        )
+        try:
+            started = time.monotonic()
+            with pytest.raises(
+                TimeoutError, match="did not finish within io_timeout_s"
+            ):
+                vec._map_env_io([lambda: release.wait(30), lambda: 1])
+            # Bounded by the deadline, not the 30s wait.
+            assert time.monotonic() - started < 5.0
+        finally:
+            release.set()  # let the abandoned worker unblock and exit cleanly
+            vec.close()
+
+    def test_map_env_io_returns_results_within_the_deadline(self) -> None:
+        """Quick round-trips complete and return in submission order."""
+        vec = BatchRolloutEnv(
+            env_factory=_SyncStubEnv, batch_size=2, group_size=1, io_timeout_s=5.0
+        )
+        try:
+            assert vec._map_env_io([lambda: 1, lambda: 2]) == [1, 2]
+        finally:
+            vec.close()
+
+    def test_map_env_io_none_timeout_keeps_the_direct_single_thunk_path(self) -> None:
+        """``io_timeout_s=None`` restores the unbounded direct call for one thunk."""
+        vec = BatchRolloutEnv(
+            env_factory=_SyncStubEnv, batch_size=1, group_size=1, io_timeout_s=None
+        )
+        try:
+            assert vec._map_env_io([lambda: 7]) == [7]
+            assert vec._io_pool is None  # single thunk ran directly, no pool
+        finally:
+            vec.close()
+
+
 class TestBatchRolloutEnvStep:
     def test_sync_gem_vec_env_step_raises_when_completion_count_mismatches_active(
         self,
