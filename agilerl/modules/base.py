@@ -45,6 +45,9 @@ def mutation(
         def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401 -- generic passthrough over any evolvable module method
             return func(self, *args, **kwargs)
 
+        # A plain function object has no ``_mutation_type`` / ``_recreate_kwargs``
+        # attributes in its static type; the protocol declares them so they can
+        # be assigned below and read back by the mutation machinery.
         mutation_method = cast("MutationMethodProtocol", wrapper)
 
         # Explicitly set the mutation type attribute on the wrapper function
@@ -865,6 +868,8 @@ class ModuleDict(EvolvableModule, nn.ModuleDict, Generic[ModuleType]):
             return nested_activations[0]
         return None
 
+    # ``nn.ModuleDict`` is not generic, so its stubs erase the element type to
+    # ``Module``; these overrides restore the ``ModuleType`` parameter.
     def __getitem__(self, key: str) -> ModuleType:
         return cast("ModuleType", super().__getitem__(key))
 

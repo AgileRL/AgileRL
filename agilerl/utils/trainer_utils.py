@@ -254,7 +254,7 @@ def create_population_from_spec(
             state_dict=(
                 agent_0.actor.state_dict()
                 if accelerator is None
-                else get_state_dict(cast("torch.nn.Module", agent_0.actor))
+                else get_state_dict(agent_0.actor)
             ),
         )
         population.append(

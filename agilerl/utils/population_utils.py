@@ -182,6 +182,8 @@ def build_metric_row(
         ]
         return NestedMetricRow(name=name, children=children)
 
+    # Reaching here rules out the nested layout, but that narrows the element
+    # type, not the list's, so restate the scalar layout with a cast.
     scalar_values = cast("list[float]", values)
     return ScalarMetricRow(
         name=name,

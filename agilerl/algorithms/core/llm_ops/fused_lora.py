@@ -37,6 +37,8 @@ _ROUTING_STATE: WeakKeyDictionary[LoraLayer, list[str] | None] = WeakKeyDictiona
 def _lora_delta(layer: LoraLayer, adapter: str, rows: torch.Tensor) -> torch.Tensor:
     """One adapter's low-rank delta for a slice of input rows."""
     lora_a = layer.lora_A[adapter]
+    # lora_A is an nn.ModuleDict, so its members' `.weight` resolves through
+    # nn.Module.__getattr__ as the loose Tensor | Module; narrow it to Tensor.
     lora_a_weight = cast("torch.Tensor", lora_a.weight)
     rows = layer.lora_dropout[adapter](rows.to(lora_a_weight.dtype))
     return layer.lora_B[adapter](lora_a(rows)) * layer.scaling[adapter]

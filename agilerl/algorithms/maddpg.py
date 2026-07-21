@@ -319,16 +319,10 @@ class MADDPG(MultiAgentRLAlgorithm):
                 actor_networks,
                 critic_networks,
             )
-            self.actors = cast("ModuleDict[DeterministicActor]", actors_copy)
-            self.critics = cast("ModuleDict[ContinuousQNetwork]", critics_copy)
-            self.actor_targets = cast(
-                "ModuleDict[DeterministicActor]",
-                actor_targets_copy,
-            )
-            self.critic_targets = cast(
-                "ModuleDict[ContinuousQNetwork]",
-                critic_targets_copy,
-            )
+            self.actors = actors_copy
+            self.critics = critics_copy
+            self.actor_targets = actor_targets_copy
+            self.critic_targets = critic_targets_copy
         else:
             agent_configs, encoder_configs = self.build_net_config(
                 net_config,
@@ -382,9 +376,8 @@ class MADDPG(MultiAgentRLAlgorithm):
             }
 
             def create_actor(agent_id: str) -> DeterministicActor:
-                # NetworkMeta.__call__ (agilerl/networks/base.py) erases the
-                # constructed subclass to EvolvableNetwork; cast back until
-                # that annotation becomes generic.
+                # MADDPG is continuous, so the polymorphic per-agent action space
+                # (base attribute typed as spaces.Space) is always a Box here.
                 actor = DeterministicActor(
                     self.observation_space[agent_id],
                     cast("spaces.Box", self.action_space[agent_id]),
@@ -398,7 +391,8 @@ class MADDPG(MultiAgentRLAlgorithm):
 
             # Critic uses observations + actions of all agents to predict Q-value
             def create_critic() -> ContinuousQNetwork:
-                # Same NetworkMeta.__call__ subclass erasure as create_actor.
+                # concatenate_spaces is typed to return the generic spaces.Space
+                # supertype; concatenating Box action spaces yields a Box.
                 return ContinuousQNetwork(
                     observation_space=self.possible_observation_spaces,
                     action_space=cast(

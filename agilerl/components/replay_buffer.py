@@ -94,6 +94,7 @@ class ReplayBuffer:
         :return: The initialized storage
         :rtype: TensorDict
         """
+        # TensorDict indexing is typed loosely; a single row is itself a TensorDict.
         _data = cast("TensorDict", data[0])
         # torch.zeros_like dispatches through TensorDict's __torch_function__
         self._storage = cast(
@@ -179,6 +180,7 @@ class ReplayBuffer:
         assert self._storage is not None, "Cannot sample from an empty buffer."
 
         indices = self._sample_indices(min(batch_size, self.size))
+        # TensorDict indexing is typed loosely; a gathered batch is a TensorDict.
         samples = cast("TensorDict", self._storage[indices])
 
         if return_idx:
@@ -258,6 +260,7 @@ class MultiStepReplayBuffer(ReplayBuffer):
         :rtype: TensorDict
         """
         assert self._storage is not None, "Cannot sample from an empty buffer."
+        # TensorDict indexing is typed loosely; a gathered batch is a TensorDict.
         return cast("TensorDict", self._storage[idxs])
 
     def _get_n_step_info(self) -> TensorDict:
@@ -293,7 +296,8 @@ class MultiStepReplayBuffer(ReplayBuffer):
         done_key = self.done_key
         assert done_key is not None, "Done key is resolved on the first transition."
 
-        # Start with reward from first transition
+        # Start with reward from first transition. TensorDict keys are typed loosely
+        # (Tensor | nested collection); every leaf accessed here is a plain tensor.
         n_step_reward = cast("torch.Tensor", first_transition[self.reward_key]).clone()
 
         # Get the last next_state and done flag
@@ -408,7 +412,8 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         # Sample indices based on priorities
         indices = self._sample_proportional(batch_size)
 
-        # Gather transitions
+        # Gather transitions. TensorDict indexing is typed loosely; a gathered
+        # batch is a TensorDict.
         samples = cast("TensorDict", self._storage[indices]).clone()
 
         # Calculate importance sampling weights

@@ -466,6 +466,8 @@ class RSNorm(AgentWrapper[AgentType]):
         :return: Action from the agent
         :rtype: Any
         """
+        # `obs_to_tensor` is overloaded on single-agent obs; the MARL branch is
+        # dispatched by the same runtime code but has no matching overload.
         tensor_obs = obs_to_tensor(cast("ObservationType", obs), self.device)
 
         # Update running statistics only when in training mode

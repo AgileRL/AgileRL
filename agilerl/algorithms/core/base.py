@@ -11,7 +11,7 @@ import tempfile
 import warnings
 from abc import ABC, ABCMeta, abstractmethod
 from collections import OrderedDict, defaultdict, deque
-from collections.abc import Callable, Generator, Iterable, Mapping
+from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 from importlib.metadata import version
@@ -405,11 +405,11 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         maxlen = self.metrics.fitness.maxlen
         self.metrics.fitness = deque(value, maxlen=maxlen)
 
-    def add_scores(self, scores: list[float] | list[list[float]]) -> None:
+    def add_scores(self, scores: Sequence[float | list[float]]) -> None:
         """Add scores to the metrics.
 
         :param scores: List of scores (or per-agent score rows) to add.
-        :type scores: list[float] | list[list[float]]
+        :type scores: Sequence[float | list[float]]
         """
         self.metrics.add_scores(scores)
 
@@ -1719,7 +1719,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         """
         return len(self.shared_agent_ids) < len(self.agent_ids)
 
-    def add_scores(self, scores: list[float] | list[list[float]]) -> None:
+    def add_scores(self, scores: Sequence[float | list[float]]) -> None:
         """Add scores to the metrics, aggregating sub-agents into their groups.
 
         Multi-agent training loops collect non-summed score rows with one
@@ -1728,7 +1728,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         to the mean score per group before being recorded.
 
         :param scores: List of scores (or per-agent score rows) to add.
-        :type scores: list[float] | list[list[float]]
+        :type scores: Sequence[float | list[float]]
         """
         is_nested = bool(scores) and isinstance(scores[0], (list, np.ndarray))
         # Grouped setups track metrics under group IDs, so per-env-agent rows
@@ -1837,6 +1837,8 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
             for output_id, obs_list in buckets.items()
         }
 
+        # Populated buckets concatenate to a single tensor; only the rare empty
+        # bucket keeps its (empty) list, which callers never index.
         return cast("dict[str, TorchObsType]", grouped)
 
     def extract_action_masks(
@@ -2697,6 +2699,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         :return: Preprocessed observations
         :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or tuple[torch.Tensor[float], ...]
         """
+        # Dummy pass-through: LLM observations are assumed to already be batched
+        # tensors, so the wider ObservationType input is returned unchanged.
         return cast("TorchObsType", observation)
 
     def save_checkpoint(
@@ -5116,6 +5120,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             else self.max_model_len
         )
 
+        # Prompt dicts are `dict[str, Any]`, so token-id fields read back as `Any`;
+        # the casts here and below pin them to `torch.Tensor` for downstream ops.
         def _trajectory_input_ids(prompt: dict[str, Any]) -> torch.Tensor:
             return cast(
                 "torch.Tensor",
@@ -5325,6 +5331,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 prompts,
             )
 
+        # `prompts[i]` is `dict[str, Any]`, so `input_ids` reads back as `Any`;
+        # pin it to `torch.Tensor` to read the sequence-length dimension.
         num_input_tokens = [
             int(cast("torch.Tensor", prompts[i]["input_ids"]).shape[1])
             for i in range(len(prompts))

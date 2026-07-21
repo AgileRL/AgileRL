@@ -23,8 +23,6 @@ from agilerl.utils.utils import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from agilerl.typing import ExperiencesType
 
 InitDictType = dict[str, Any] | None
@@ -215,11 +213,7 @@ def train_bandits(
             agent.set_training_mode(True)
             agent.init_training_step()
 
-            # `Sampler.sample` is bound to one of the sampling strategies at
-            # construction time, so only its return type is statically known. The
-            # buffer hands back `TensorDict` batches, which `ExperiencesType`
-            # (agilerl/typing.py) does not yet cover - hence the cast to it.
-            sample = cast("Callable[..., TensorDict]", sampler.sample)
+            sample = sampler.sample
 
             score = 0.0
             context = env.reset()
@@ -241,6 +235,8 @@ def train_bandits(
                 if len(memory) >= agent.batch_size:
                     for _ in range(agent.learn_step):
                         experiences = sample(agent.batch_size)
+                        # The buffer hands back a `TensorDict`, which
+                        # `ExperiencesType` (agilerl/typing.py) does not cover.
                         agent.learn(cast("ExperiencesType", experiences))
 
                 score += reward

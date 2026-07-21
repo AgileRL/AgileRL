@@ -94,7 +94,10 @@ def _collect_rollouts(
     for _ in range(n_steps):
         current_hidden_state_for_buffer = current_hidden_state_for_actor
 
-        # Get action, statistics and (maybe) recurrent hidden state from agent
+        # Get action, statistics and (maybe) recurrent hidden state from agent.
+        # ``get_action`` returns a union of the recurrent/non-recurrent tuple
+        # shapes; the ``recurrent`` flag selects which one, which the type
+        # checker cannot correlate, so narrow it here.
         if recurrent:
             action, log_prob, _, value, next_hidden_for_actor = cast(
                 "RecurrentActionReturnType",
@@ -142,6 +145,8 @@ def _collect_rollouts(
         else:
             is_terminal = term or trunc
 
+        # ``env.step`` types the reward as ``SupportsFloat``, which numpy's
+        # ``atleast_1d`` stub does not accept as ``ArrayLike``.
         reward_np = np.atleast_1d(cast("ArrayLike", reward))
         is_terminal_np = np.atleast_1d(is_terminal)
         value_np = np.atleast_1d(value)

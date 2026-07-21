@@ -149,7 +149,9 @@ def train_multi_agent_on_policy(
             stacklevel=2,
         )
 
-    # Ensure environment has vectorized interface
+    # Ensure environment has vectorized interface. `PzDummyVecEnv` duck-types the
+    # `PettingZooVecEnv` API rather than subclassing it, and `hasattr` does not
+    # narrow the `env` union, so the cast matches the annotations downstream.
     vec_env = cast(
         "PettingZooVecEnv",
         env if hasattr(env, "num_envs") else PzDummyVecEnv(env),

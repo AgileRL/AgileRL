@@ -155,6 +155,8 @@ def get_input_size_from_space(observation_space: SpaceLike) -> Any:
             get_input_size_from_space(space) for space in observation_space.spaces
         )
     if isinstance(observation_space, (list, tuple)):
+        # isinstance on a union whose non-final `spaces.Space` arm yields an
+        # ambiguous intersection with element type `object`; assert the element.
         space_seq = cast("Sequence[spaces.Space]", observation_space)
         return tuple(get_input_size_from_space(space) for space in space_seq)
     if isinstance(observation_space, spaces.Dict):
@@ -163,6 +165,8 @@ def get_input_size_from_space(observation_space: SpaceLike) -> Any:
             for key, subspace in observation_space.spaces.items()
         }
     if isinstance(observation_space, dict):
+        # isinstance on the non-final `spaces.Space` arm yields an ambiguous
+        # intersection with value type `object`; assert the concrete mapping.
         space_map = cast("dict[str, spaces.Space]", observation_space)
         return {
             key: get_input_size_from_space(subspace)
@@ -215,6 +219,8 @@ def get_output_size_from_space(action_space: SpaceLike) -> Any:
     :rtype: int | dict[str, int] | tuple[int | dict[str, int], ...]
     """
     if isinstance(action_space, (list, tuple)):
+        # isinstance on a union whose non-final `spaces.Space` arm yields an
+        # ambiguous intersection with element type `object`; assert the element.
         space_seq = cast("Sequence[spaces.Space]", action_space)
         return tuple(get_output_size_from_space(space) for space in space_seq)
     if isinstance(action_space, spaces.Dict):
@@ -223,6 +229,8 @@ def get_output_size_from_space(action_space: SpaceLike) -> Any:
             for key, subspace in action_space.spaces.items()
         }
     if isinstance(action_space, dict):
+        # isinstance on the non-final `spaces.Space` arm yields an ambiguous
+        # intersection with value type `object`; assert the concrete mapping.
         space_map = cast("dict[str, spaces.Space]", action_space)
         return {
             key: get_output_size_from_space(subspace)
@@ -535,6 +543,8 @@ def transpose_image_observation(
         assert isinstance(observation, dict), (
             f"Expected dict observation for Dict space, got {type(observation)}"
         )
+        # isinstance narrowing intersects the non-final `torch.Tensor` arm into an
+        # ambiguous dict type; assert the concrete mapping shape.
         obs_dict = cast("dict[str, Any]", observation)
         return {
             key: transpose_image_observation(obs_dict[key], original_space[key])
@@ -545,10 +555,9 @@ def transpose_image_observation(
         assert isinstance(observation, tuple), (
             f"Expected tuple observation for Tuple space, got {type(observation)}"
         )
-        obs_tuple = cast("tuple[Any, ...]", observation)
         return tuple(
             transpose_image_observation(o, s)
-            for o, s in zip(obs_tuple, original_space.spaces, strict=True)
+            for o, s in zip(observation, original_space.spaces, strict=True)
         )
 
     return observation
@@ -671,6 +680,8 @@ def make_safe_deepcopies(
     copies: list[EvolvableModuleProtocol | list[EvolvableModuleProtocol]] = []
     for arg in args:
         if isinstance(arg, list):
+            # `EvolvableModuleProtocol` is a Protocol, so isinstance-narrowing the
+            # union arm against `list` erases the element type; assert it back.
             modules = cast("list[EvolvableModuleProtocol]", arg)
             copies.append([inner_arg.clone() for inner_arg in modules])
         else:
@@ -1099,6 +1110,8 @@ def get_vect_dim(observation: NumpyObsType, observation_space: spaces.Space) -> 
         assert isinstance(observation, dict), (
             f"Expected dict observation for Dict space, got {type(observation)}"
         )
+        # isinstance narrowing intersects the non-final `np.ndarray` arm into an
+        # ambiguous dict type; assert the concrete mapping shape.
         obs_dict = cast("dict[str, Any]", observation)
         first_key, first_obs = next(iter(obs_dict.items()))
         return get_vect_dim(first_obs, observation_space[first_key])
@@ -1605,10 +1618,7 @@ def get_experiences_samples(
         if isinstance(exp, torch.Tensor):
             sampled_exp = exp[minibatch_indices]
         elif isinstance(exp, dict):
-            exp_dict = cast("dict[str, torch.Tensor]", exp)
-            sampled_exp = {
-                key: value[minibatch_indices] for key, value in exp_dict.items()
-            }
+            sampled_exp = {key: value[minibatch_indices] for key, value in exp.items()}
         elif isinstance(exp, tuple):
             sampled_exp = tuple(value[minibatch_indices] for value in exp)
         elif exp is None:
@@ -1648,6 +1658,8 @@ def stack_experiences(
             stacked_experiences.append(stacked_exp)
             continue
 
+        # The list is homogeneous, so `first`'s type applies to every element;
+        # narrowing `first` does not narrow `exp`, hence the per-branch casts.
         first = exp[0]
         if isinstance(first, dict):
             grouped: defaultdict[str, list[Any]] = defaultdict(list)
@@ -1709,6 +1721,8 @@ def stack_and_pad_experiences(
     stacked_experiences: list[Any] = []
     for exp, padding in zip(experiences, padding_values, strict=False):
         stacked_exp: Any
+        # Each list is homogeneous, so `exp[0]`'s type applies to every element;
+        # narrowing the element does not narrow `exp`, hence the per-branch casts.
         if not isinstance(exp, list):
             # Pass-through experiences (e.g. an already-stacked tensor)
             stacked_exp = cast("torch.Tensor", exp)
@@ -1782,6 +1796,8 @@ def flatten_experiences(*experiences: ObservationType) -> tuple[ArrayOrTensor, .
         if isinstance(exp, (torch.Tensor, np.ndarray)):
             flattened_exp = flatten(exp)
         elif isinstance(exp, dict):
+            # isinstance narrowing intersects the non-final array/tensor arms into
+            # ambiguous container types; assert the concrete element types.
             exp_dict = cast("dict[str, ArrayOrTensor]", exp)
             flattened_exp = {key: flatten(value) for key, value in exp_dict.items()}
         elif isinstance(exp, tuple):
@@ -1810,11 +1826,9 @@ def is_vectorized_experiences(*experiences: NumpyObsType | TorchObsType) -> bool
         if isinstance(exp, (torch.Tensor, np.ndarray)):
             is_vec = exp.ndim > 1
         elif isinstance(exp, dict):
-            exp_dict = cast("dict[str, ArrayOrTensor]", exp)
-            is_vec = all(value.ndim > 1 for value in exp_dict.values())
+            is_vec = all(value.ndim > 1 for value in exp.values())
         elif isinstance(exp, tuple):
-            exp_tuple = cast("tuple[ArrayOrTensor, ...]", exp)
-            is_vec = all(value.ndim > 1 for value in exp_tuple)
+            is_vec = all(value.ndim > 1 for value in exp)
         else:
             is_vec = exp.ndim > 1
 
@@ -2204,10 +2218,8 @@ def reshape_from_space(tensor: TorchObsType, space: spaces.Space) -> TorchObsTyp
         assert isinstance(space, spaces.Dict), (
             f"Expected Dict space for dict tensor, got {type(space)}"
         )
-        tensor_dict = cast("dict[str, Any]", tensor)
         reshaped_dict: dict[str, Any] = {
-            key: reshape_from_space(value, space[key])
-            for key, value in tensor_dict.items()
+            key: reshape_from_space(value, space[key]) for key, value in tensor.items()
         }
         return reshaped_dict
     if isinstance(tensor, tuple):
@@ -2302,6 +2314,8 @@ def clone_llm(
         case PeftModel() | PreTrainedModel():
             source_model = original_model
         case DummyEvolvable():
+            # DummyEvolvable wraps an arbitrary module; the RL-clone path is only
+            # reached with a pretrained model inside it.
             source_model = cast(
                 "PreTrainedModelType",
                 original_model.module,

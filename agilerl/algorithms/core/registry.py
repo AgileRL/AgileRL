@@ -78,6 +78,8 @@ class OptimizerConfig:
     def __post_init__(self) -> None:
         # Save optimizer_cls as string for serialization
         if isinstance(self.optimizer_cls, dict):
+            # ``isinstance`` leaves a union of two dict types; unify the value type
+            # so ``cls`` is ``OptimizerFactory | str`` rather than ``object``.
             cls_map = cast(
                 "dict[str, OptimizerFactory | str]",
                 self.optimizer_cls,

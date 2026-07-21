@@ -277,6 +277,8 @@ class PPO(RLAlgorithm):
                 actor_network,
                 critic_network,
             )
+            # The copies are validated EvolvableModules; PPO's runtime contract is
+            # that the supplied actor/critic are these concrete subclasses.
             self.actor = cast("StochasticActor", actor_copy)
             self.critic = cast("ValueNetwork", critic_copy)
         else:

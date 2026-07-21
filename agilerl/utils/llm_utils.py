@@ -42,9 +42,9 @@ else:
     # HAS_LLM_DEPENDENCIES, so these are never reached at runtime.
     PreTrainedModel = Any
     Dataset = Any
-    AutoModelForCausalLM = cast("Any", None)
-    AutoModelForCausalLMWithValueHead = cast("Any", None)
-    BitsAndBytesConfig = cast("Any", None)
+    AutoModelForCausalLM: Any = None
+    AutoModelForCausalLMWithValueHead: Any = None
+    BitsAndBytesConfig: Any = None
 
 _DEPRECATED_LLM_ENV_NAMES = frozenset(
     ("apply_chat_template", "ReasoningGym", "PreferenceGym", "SFTGym"),

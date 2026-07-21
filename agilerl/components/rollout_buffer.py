@@ -296,6 +296,8 @@ class RolloutBuffer:
             assert isinstance(obs, dict), (
                 "Expected a dict observation for a Dict observation space."
             )
+            # The dict arm of ObservationType narrows with object keys; pin it so
+            # keys index the observation space and values convert to tensors.
             obs_map = cast("dict[str, Any]", obs)
             obs_dict = OrderedDict()
             for key, item in obs_map.items():
@@ -337,6 +339,7 @@ class RolloutBuffer:
                 assert isinstance(next_obs, dict), (
                     "Expected a dict observation for a Dict observation space."
                 )
+                # As above: pin the narrowed dict so keys index the space.
                 next_obs_map = cast("dict[str, Any]", next_obs)
                 next_obs_dict = OrderedDict()
                 for key, item in next_obs_map.items():

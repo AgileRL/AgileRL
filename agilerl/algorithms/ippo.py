@@ -307,8 +307,8 @@ class IPPO(MultiAgentRLAlgorithm):
                 actor_networks,
                 critic_networks,
             )
-            self.actors = cast("ModuleDict[StochasticActor]", actors_copy)
-            self.critics = cast("ModuleDict[ValueNetwork]", critics_copy)
+            self.actors = actors_copy
+            self.critics = critics_copy
         else:
             built_net_config = self.build_net_config(net_config, flatten=False)
 

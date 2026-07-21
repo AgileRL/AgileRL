@@ -710,7 +710,9 @@ class REINFORCE(LLMAlgorithm):
         # they bypass the per-update averaging above.
         result.update(is_metrics)
 
-        # Wire averaged metrics into the metrics tracker.
+        # Wire averaged metrics into the metrics tracker. ``ExperiencesType`` is
+        # a broad shared alias; for REINFORCE position 0 is the completion-id
+        # tensor list.
         completion_list = cast("list[torch.Tensor]", experiences[0])
         completion_length = float(np.mean([c.shape[-1] for c in completion_list]))
         agg = aggregate_metrics_dict(

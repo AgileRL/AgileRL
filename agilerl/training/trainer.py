@@ -291,11 +291,9 @@ class LocalTrainer(Trainer):
         accelerator: Accelerator | None = None,
     ) -> None:
 
-        # Arena specs mirror the core ones on the server side; they are a separate
-        # model hierarchy, so they are not members of `EnvSpecT`/`AlgoSpec`.
         super().__init__(
             algorithm,
-            cast("EnvSpecT", environment),
+            environment,
             training=training,
             mutation=mutation,
             tournament=tournament,
@@ -415,6 +413,8 @@ class LocalTrainer(Trainer):
         recurrent = bool(getattr(self.algorithm_spec, "recurrent", False))
 
         if isinstance(observation_space, dict):
+            # ``isinstance`` narrowing leaves a ``Space & dict`` intersection, so
+            # restate the per-agent mapping type for the multi-agent resolver.
             self._resolve_deferred_net_config_multi_agent(
                 net_config,
                 cast("dict[str, Any]", observation_space),

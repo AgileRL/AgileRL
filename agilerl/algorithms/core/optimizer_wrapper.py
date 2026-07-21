@@ -203,6 +203,8 @@ class OptimizerWrapper:
                 "multi-agent optimizers."
             )
             optimizers: dict[str, Optimizer] = {}
+            # isinstance narrowing erases the ModuleDict value type to object, so
+            # pin it back to iterate members as modules.
             module_dict = cast("ModuleDict[EvolvableModule]", first_network)
             for agent_id, net in module_dict.items():
                 if isinstance(optimizer_cls, dict):

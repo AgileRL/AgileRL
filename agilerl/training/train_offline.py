@@ -23,10 +23,6 @@ from agilerl.utils.utils import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
-    from tensordict import TensorDict
-
     from agilerl.typing import ExperiencesType
 
 InitDictType = dict[str, Any] | None
@@ -264,13 +260,10 @@ def train_offline(
             agent.set_training_mode(True)
             agent.init_training_step()
 
-            # `Sampler.sample` is bound to one of the sampling strategies at
-            # construction time, so only its return type is statically known. The
-            # buffer hands back `TensorDict` batches, which `ExperiencesType`
+            # The buffer hands back `TensorDict` batches, which `ExperiencesType`
             # (agilerl/typing.py) does not yet cover - hence the cast to it.
-            sample = cast("Callable[..., TensorDict]", sampler.sample)
             for _idx_step in range(evo_steps):
-                experiences = sample(agent.batch_size)
+                experiences = sampler.sample(agent.batch_size)
                 agent.learn(cast("ExperiencesType", experiences))
 
             agent.finalize_training_step(evo_steps)

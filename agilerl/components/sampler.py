@@ -1,4 +1,5 @@
 import warnings
+from collections.abc import Callable
 from typing import Any, cast
 
 import torch
@@ -26,6 +27,9 @@ class Sampler:
     :type dataloader: DataLoader | None, optional
     :raises AssertionError: If neither memory nor (dataset and dataloader) are provided
     """
+
+    # Bound in __init__ to one of the sampling strategies; all return a TensorDict.
+    sample: Callable[..., TensorDict]
 
     @staticmethod
     def tensordict_collate_fn(

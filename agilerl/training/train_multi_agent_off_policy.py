@@ -25,9 +25,7 @@ from agilerl.vector import PettingZooVecEnv, PzDummyVecEnv
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
-    from tensordict import TensorDict, TensorDictBase
+    from tensordict import TensorDictBase
 
     from agilerl.typing import ExperiencesType
 
@@ -166,7 +164,9 @@ def train_multi_agent_off_policy(
             stacklevel=2,
         )
 
-    # Ensure environment has vectorized interface
+    # Ensure environment has vectorized interface. `PzDummyVecEnv` duck-types the
+    # `PettingZooVecEnv` API rather than subclassing it, and `hasattr` does not
+    # narrow, so the cast matches the annotations of the helpers it is handed to.
     vec_env = cast(
         "PettingZooVecEnv",
         env if hasattr(env, "num_envs") else PzDummyVecEnv(env),
@@ -232,11 +232,9 @@ def train_multi_agent_off_policy(
             agent.set_training_mode(True)
             agent.init_training_step()
 
-            # `Sampler.sample` is bound to one of the sampling strategies at
-            # construction time, so only its return type is statically known. The
-            # buffer hands back `TensorDict` batches, which `ExperiencesType`
-            # (agilerl/typing.py) does not yet cover - hence the casts to it.
-            sample = cast("Callable[..., TensorDict]", sampler.sample)
+            # The buffer hands back `TensorDict` batches, which `ExperiencesType`
+            # (agilerl/typing.py) does not yet cover - hence the casts below.
+            sample = sampler.sample
 
             obs, info = vec_env.reset()
             scores = (
@@ -335,9 +333,7 @@ def train_multi_agent_off_policy(
 
                 agent.reset_action_noise(reset_noise_indices)
 
-            agent.add_scores(
-                cast("list[float] | list[list[float]]", completed_episode_scores),
-            )
+            agent.add_scores(completed_episode_scores)
             agent.finalize_training_step(steps)
             pbar.update(evo_steps // population.size)
 

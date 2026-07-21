@@ -30,9 +30,7 @@ from agilerl.utils.utils import (
 from agilerl.vector import DummyVecEnv
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
-    from tensordict import TensorDict, TensorDictBase
+    from tensordict import TensorDictBase
 
     from agilerl.typing import ExperiencesType
 
@@ -53,11 +51,9 @@ def _learn_from_buffer(
     per: bool,
 ) -> None:
     """Execute a single learning step for the agent."""
-    # `Sampler.sample` is bound to one of the sampling strategies at construction
-    # time, so only its return type is statically known. The buffers hand back
-    # `TensorDict` batches, which `ExperiencesType` (agilerl/typing.py) does not yet
-    # cover - the casts to it below record that gap.
-    sample = cast("Callable[..., TensorDict]", sampler.sample)
+    # The buffers hand back `TensorDict` batches, which `ExperiencesType`
+    # (agilerl/typing.py) does not yet cover - the casts to it below record that gap.
+    sample = sampler.sample
 
     # Prioritized and n-step replay are the preserve of the RainbowDQN-style
     # algorithms: only they anneal `beta`, take `n_experiences`/`per`, and return
@@ -71,9 +67,7 @@ def _learn_from_buffer(
             agent.beta,  # ty: ignore[unresolved-attribute]
         )
         n_step_experiences = (
-            cast("Callable[..., TensorDict]", n_step_sampler.sample)(
-                experiences["idxs"],
-            )
+            n_step_sampler.sample(experiences["idxs"])
             if n_step_sampler is not None
             else None
         )
@@ -89,10 +83,7 @@ def _learn_from_buffer(
             return_idx=n_step_memory is not None,
         )
         if n_step_sampler is not None:
-            n_step_experiences = cast(
-                "Callable[..., TensorDict]",
-                n_step_sampler.sample,
-            )(experiences["idxs"])
+            n_step_experiences = n_step_sampler.sample(experiences["idxs"])
             agent.learn(
                 cast("ExperiencesType", experiences),
                 n_experiences=cast("ExperiencesType", n_step_experiences),  # ty: ignore[unknown-argument]
