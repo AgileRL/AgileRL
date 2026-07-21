@@ -599,6 +599,7 @@ class TestBatchRolloutEnvIoTimeout:
             env_factory=_SyncStubEnv, batch_size=1, group_size=1, io_timeout_s=None
         )
         try:
+            assert vec._map_env_io([]) == []  # no active envs -> nothing to run
             assert vec._map_env_io([lambda: 7]) == [7]
             assert vec._io_pool is None  # single thunk ran directly, no pool
         finally:
