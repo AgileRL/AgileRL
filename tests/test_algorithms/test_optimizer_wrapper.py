@@ -1388,6 +1388,23 @@ def test_optimizer_cls_names_single_vs_multiagent():
     assert all(v == "Adam" for v in names.values())
 
 
+def test_optimizer_cls_names_multiagent_per_agent_classes():
+    """optimizer_cls_names returns per-agent class names when optimizer_cls is a dict."""
+    networks = ModuleDict(
+        {f"net_{i}": MockEvolvableNetwork(name=f"net_{i}") for i in range(2)},
+    )
+    opt_cls = {"net_0": torch.optim.SGD, "net_1": torch.optim.Adam}
+    wrapper = OptimizerWrapper(
+        opt_cls,
+        networks,
+        0.001,
+        network_names=["networks"],
+        lr_name="lr",
+    )
+    names = wrapper.optimizer_cls_names()
+    assert names == {"net_0": "SGD", "net_1": "Adam"}
+
+
 def test_llm_param_groups_rejects_moduledict_networks():
     networks = ModuleDict(
         {"agent_0": MockEvolvableNetwork(name="agent_0")},

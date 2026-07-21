@@ -6925,3 +6925,79 @@ class TestLLMUpdateExistingAdapterTrainability:
 class TestLLMLoadCheckpointLoraConfig:
     def test_load_checkpoint_lora_config_missing(self, tmp_path):
         assert LLMAlgorithm._load_checkpoint_lora_config(str(tmp_path)) is None
+
+
+class TestMultiAgentRLAlgorithmInit:
+    def test_spaces_dict_inputs_are_stored_directly(self):
+        """Passing ``spaces.Dict`` obs/action spaces stores them as-is."""
+        obs_spaces = spaces.Dict(
+            {
+                "agent_0": spaces.Box(0.0, 1.0, (4,)),
+                "agent_1": spaces.Box(0.0, 1.0, (4,)),
+            }
+        )
+        action_spaces = spaces.Dict(
+            {
+                "agent_0": spaces.Discrete(2),
+                "agent_1": spaces.Discrete(2),
+            }
+        )
+        agent = DummyMARLAlgorithm(
+            obs_spaces,
+            action_spaces,
+            agent_ids=["agent_0", "agent_1"],
+            index=0,
+        )
+        assert agent.possible_observation_spaces is obs_spaces
+        assert agent.possible_action_spaces is action_spaces
+        assert agent.agent_ids == ["agent_0", "agent_1"]
+
+
+@_LLM_DEPS_SKIP
+class TestLLMAlgorithmInitQuantizationConfig:
+    def test_quantization_config_merged_into_dict_model_config(self):
+        """A dict ``model_config`` gets ``quantization_config`` merged in."""
+        quantization_config = SimpleNamespace(llm_int8_skip_modules=None)
+        with (
+            patch.object(LLMAlgorithm, "_initialize_actors"),
+            patch.object(LLMAlgorithm, "_configure_vllm"),
+            patch.object(LLMAlgorithm, "wrap_models"),
+            patch.object(EvolvableAlgorithm, "_registry_init"),
+            patch(
+                "agilerl.algorithms.core.base.broadcast_object_list",
+                side_effect=lambda obj_list, from_process=0: list(obj_list),
+            ),
+        ):
+            agent = _StubLLMAlgorithm(
+                index=0,
+                batch_size=4,
+                lr=1e-4,
+                max_grad_norm=0.0,
+                clone=True,
+                calc_position_embeddings=False,
+                seed=42,
+                pad_token_id=0,
+                pad_token="<pad>",
+                use_liger_loss=False,
+                lora_config=MagicMock(),
+                actor_network=_make_mock_peft_actor(),
+                device="cpu",
+                model_config={"trust_remote_code": True},
+                quantization_config=quantization_config,
+            )
+
+        assert agent.model_config["quantization_config"] is quantization_config
+        assert agent.model_config["trust_remote_code"] is True
+        # lm_head is force-skipped so the fused lm_head matmul stays exact.
+        assert quantization_config.llm_int8_skip_modules == ["lm_head"]
+
+
+@_LLM_DEPS_SKIP
+class TestLLMAlgorithmSyncDeepspeedGradientClipping:
+    def test_returns_early_when_no_deepspeed_plugin(self):
+        """No-op when an accelerator is present but has no DeepSpeed plugin."""
+        agent = _make_llm_agent()
+        agent.accelerator = SimpleNamespace(
+            state=SimpleNamespace(deepspeed_plugin=None)
+        )
+        assert agent._sync_deepspeed_gradient_clipping() is None

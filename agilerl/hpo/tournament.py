@@ -195,7 +195,9 @@ class TournamentSelection:
         for agent_idx in old_population_idxs:
             if agent_idx in unwanted_agents:
                 unwanted_ref = agent_slots[old_population_idxs.index(agent_idx)]
-                if unwanted_ref is None:
+                if (
+                    unwanted_ref is None
+                ):  # pragma: no cover -- defensive: agent_slots only receives None in the later cloning loop, never during this deletion pass
                     continue
                 if unwanted_ref.accelerator is not None:
                     unwanted_ref.accelerator.wait_for_everyone()

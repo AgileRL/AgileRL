@@ -671,6 +671,17 @@ class TestCollectFitnesses:
         assert result[0]["a0"] == pytest.approx(1.0)
         assert result[0]["a1"] == pytest.approx(2.0)
 
+    def test_nested_with_empty_agent_fills_nan_dict(self):
+        """nested pop where one agent has empty fitness -> nan dict keyed by agent_ids."""
+        a_nested = _make_mock_agent(fitness=[{"a0": 1.0, "a1": 2.0}])
+        a_empty = _make_mock_agent(fitness=[])
+        pop = _make_population([a_nested, a_empty], agent_ids=["a0", "a1"])
+        result = pop._collect_fitnesses()
+        assert result[0] == {"a0": 1.0, "a1": 2.0}
+        assert set(result[1].keys()) == {"a0", "a1"}
+        assert np.isnan(result[1]["a0"])
+        assert np.isnan(result[1]["a1"])
+
 
 class TestCollectScores:
     def test_scalar_scores(self):
@@ -705,6 +716,13 @@ class TestCollectScores:
         result = pop._collect_scores()
         assert np.isnan(result[1]["a0"])
         assert np.isnan(result[1]["a1"])
+
+    def test_nested_scores_without_agent_ids_raises(self):
+        """raises when nested scores but no agent_ids configured."""
+        a = _make_mock_agent(scores=[[1.0, 2.0]])
+        pop = _make_population([a], agent_ids=None)
+        with pytest.raises(ValueError, match="without configured agent_ids"):
+            pop._collect_scores()
 
 
 class TestCollectAdditionalMetrics:

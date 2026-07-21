@@ -18,7 +18,7 @@ if HAS_LLM_DEPENDENCIES:
         unpatch_lora_for_fused_forward,
         unset_fused_adapter_routing,
     )
-else:
+else:  # pragma: no cover - LLM deps always present in CI; missing-dep fallback
     patch_lora_for_fused_forward = None
     set_fused_adapter_routing = None
     unpatch_lora_for_fused_forward = None

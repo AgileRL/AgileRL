@@ -688,6 +688,16 @@ class TestDatasetsCreateCommand:
             hf_split=None,
         )
 
+    def test_create_without_mapping_raises_usage_error(self, runner, mock_client):
+        with _patched_arena_client(mock_client):
+            result = runner.invoke(
+                main,
+                ["datasets", "create", "new-ds", "--category", "reasoning"],
+            )
+        assert result.exit_code != 0
+        assert "Provide --column-mapping or --column-mapping-file." in result.output
+        mock_client.create_dataset.assert_not_called()
+
 
 class TestDatasetsDeleteCommand:
     def test_delete_with_yes(self, runner, mock_client):

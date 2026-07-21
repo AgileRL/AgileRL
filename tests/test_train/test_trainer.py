@@ -387,6 +387,38 @@ class TestArenaTrainerMissingDependencies:
                 training=training_spec,
             )
 
+    def test_string_environment_raises_import_error_without_env_spec(
+        self, training_spec
+    ):
+        with (
+            patch("agilerl.training.trainer.ArenaEnvSpec", None),
+            pytest.raises(ImportError, match="Arena dependencies are not installed"),
+        ):
+            ArenaTrainer(
+                algorithm="PPO",
+                environment="CartPole-v1",
+                training=training_spec,
+            )
+
+    def test_from_manifest_raises_import_error_without_arena_manifest(self):
+        manifest = {
+            "algorithm": {"name": "PPO"},
+            "environment": {"name": "CartPole-v1"},
+            "training": {"max_steps": 100, "evo_steps": 50, "pop_size": 2},
+        }
+        with (
+            patch("agilerl.training.trainer.ArenaManifest", None),
+            pytest.raises(ImportError, match="Arena dependencies are not installed"),
+        ):
+            ArenaTrainer.from_manifest(manifest)
+
+    def test_resolve_env_spec_raises_import_error_without_env_spec(self):
+        with (
+            patch("agilerl.training.trainer.ArenaEnvSpec", None),
+            pytest.raises(ImportError, match="Arena dependencies are not installed"),
+        ):
+            ArenaTrainer._resolve_env_spec(MagicMock())
+
 
 class TestLocalTrainerConstruction:
     @patch("agilerl.training.trainer.create_population_from_spec")

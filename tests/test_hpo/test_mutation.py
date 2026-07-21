@@ -496,6 +496,56 @@ class TestMutationsReinitBanditGrads:
         assert bandit.sigma_inv.shape[0] == 8
         assert bandit.exp_layer is not None
 
+    def test_raises_when_output_layer_is_none(self, device):
+        """_reinit_bandit_grads raises ValueError when the offspring actor has no
+        output layer to reinitialise (get_output_dense returns None).
+        """
+
+        class NoOutputActor(EvolvableModule):
+            def __init__(self):
+                super().__init__(device="cpu")
+
+            def forward(self, x):
+                return x
+
+            def recreate_network(self):
+                pass
+
+            def get_output_dense(self):
+                return None
+
+        class DummyBandit:
+            def __init__(self):
+                self.sigma_inv = torch.eye(2)
+                self.lamb = 2.0
+                self.device = "cpu"
+                self.accelerator = None
+
+        muts = Mutations(0, 1, 0.5, 0, 0, 0, 0.1, device=device)
+        with pytest.raises(ValueError, match="output layer to reinitialise"):
+            muts._reinit_bandit_grads(
+                DummyBandit(), NoOutputActor(), torch.nn.Linear(2, 2)
+            )
+
+
+class TestMutationsParameterMutation:
+    def test_raises_when_no_policy_group(self, device):
+        """parameter_mutation raises MutationError when the individual has no
+        network group registered with policy=True.
+        """
+
+        class NoPolicyRegistry:
+            def policy(self, return_group=False):
+                return None
+
+        class NoPolicyIndividual:
+            def __init__(self):
+                self.registry = NoPolicyRegistry()
+
+        muts = Mutations(0, 1, 0.5, 0, 0, 0, 0.1, device=device)
+        with pytest.raises(MutationError, match="No policy network group registered"):
+            muts.parameter_mutation(NoPolicyIndividual())
+
 
 class TestMutationsMutation:
     # Checks no mutations if all probabilities set to zero
@@ -2237,6 +2287,26 @@ class TestGetExpLayer:
             TypeError, match=r"Bandit algorithm architecture.*not supported"
         ):
             get_exp_layer(torch.nn.Linear(2, 2))
+
+    def test_raises_for_non_linear_output_layer(self):
+        """get_exp_layer raises TypeError when the output layer is not nn.Linear."""
+
+        class NonLinearOutputModule(EvolvableModule):
+            def __init__(self):
+                super().__init__(device="cpu")
+                self.out = torch.nn.ReLU()
+
+            def forward(self, x):
+                return x
+
+            def recreate_network(self):
+                pass
+
+            def get_output_dense(self):
+                return self.out
+
+        with pytest.raises(TypeError, match=r"expected a linear output layer"):
+            get_exp_layer(NonLinearOutputModule())
 
     def test_returns_output_layer_for_evolvable_module(
         self, vector_space, discrete_space, encoder_mlp_config

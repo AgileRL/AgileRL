@@ -427,6 +427,55 @@ class TestTournamentSelectionSelect:
         assert llm_called["value"] is True
         assert std_called["value"] is False
 
+    def test_llm_non_main_process_without_elitism_raises_no_elite(self, monkeypatch):
+        """On a non-main process with elitism disabled, the broadcast selection
+        carries no ``is_elite`` tuple, so ``elite`` is never resolved and
+        ``_select_llm_agents`` raises a ``RuntimeError``.
+        """
+        import agilerl.hpo.tournament as tournament_module
+
+        def make_agent(idx):
+            agent = MagicMock()
+            agent.index = idx
+            agent.fitness = [float(idx)]
+            agent.accelerator = accelerator
+            agent.clean_up = MagicMock()
+
+            def clone(index=None, wrap=False, _agent=agent):
+                cloned = MagicMock()
+                cloned.index = index
+                cloned.accelerator = _agent.accelerator
+                cloned.fitness = _agent.fitness
+                cloned.clean_up = MagicMock()
+                return cloned
+
+            agent.clone = MagicMock(side_effect=clone)
+            return agent
+
+        accelerator = MagicMock()
+        accelerator.is_main_process = False
+        accelerator.num_processes = 2
+        accelerator.wait_for_everyone = MagicMock()
+
+        population = [make_agent(i) for i in range(4)]
+
+        # Values process 0 would broadcast when elitism is disabled: every tuple
+        # is (clone_source_idx, new_idx, is_elite=False) -- no elite is marked.
+        broadcast_new = [(3, 3, False), (2, 4, False), (3, 5, False), (2, 6, False)]
+        broadcast_old = [0, 1, 2, 3]
+        broadcast_unwanted = {0, 1}
+
+        def fake_broadcast(obj_list, from_process=0):
+            return [broadcast_new, broadcast_old, broadcast_unwanted]
+
+        monkeypatch.setattr(tournament_module, "broadcast_object_list", fake_broadcast)
+
+        tournament_selection = TournamentSelection(3, False, 4)
+        tournament_selection.language_model = True
+
+        with pytest.raises(RuntimeError, match="produced no elite agent"):
+            tournament_selection._select_llm_agents(population)
+
 
 class TestTournamentSelectionTournament:
     @pytest.mark.parametrize(

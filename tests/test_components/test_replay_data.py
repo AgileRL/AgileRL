@@ -142,6 +142,17 @@ class TestToTensordict:
         with pytest.raises(AssertionError, match="Expected all values of the dict"):
             to_tensordict({"a": np.array([1.0]), "b": "invalid"})
 
+    def test_to_tensordict_tensordict_input_recasts_dtype(self):
+        """An existing TensorDict is returned recast to the requested dtype."""
+        td = to_tensordict({"a": np.array([1.0, 2.0])}, dtype=torch.float64)
+        recast = to_tensordict(td, dtype=torch.float32)
+        assert recast["a"].dtype == torch.float32
+
+    def test_to_tensordict_unconvertible_type_raises(self):
+        """A value that is not a TensorDict, tuple, or dict raises TypeError."""
+        with pytest.raises(TypeError, match="Cannot convert data of type"):
+            to_tensordict(42)
+
 
 class TestToTorchTensor:
     def test_to_torch_tensor_ndarray(self):

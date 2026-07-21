@@ -4347,7 +4347,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             else:
                 # With a DummyOptimizer, DeepSpeed owns the real optimizer and
                 # attaches it to the actor engine at wrap time.
-                sched_optimizer = cast("torch.optim.Optimizer", actor.optimizer)
+                sched_optimizer = cast(
+                    "torch.optim.Optimizer", actor.optimizer
+                )  # pragma: no cover - needs a live DeepSpeed engine to attach actor.optimizer
             self.lr_scheduler = create_warmup_cosine_scheduler(
                 sched_optimizer,
                 self.cosine_lr_schedule_config,
