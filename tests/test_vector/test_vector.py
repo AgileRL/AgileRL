@@ -370,6 +370,12 @@ class TestAsyncPettingZooVecEnvInit:
         env.reset()
         env.close()
 
+    def test_get_observations_no_copy(self):
+        env = AsyncPettingZooVecEnv.__new__(AsyncPettingZooVecEnv)
+        env.copy = False
+        env.observations = {"agent_0": np.zeros(2)}
+        assert env.get_observations() is env.observations
+
 
 class TestAsyncPettingZooVecEnvRender:
     @pytest.mark.parametrize(

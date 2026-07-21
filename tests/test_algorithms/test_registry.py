@@ -322,6 +322,14 @@ class TestHyperparameterConfig:
         assert config1 == config2  # Same parameters, different order
         assert config1 != config3  # Different parameters
 
+    def test_hyperparameter_config_equality_unrelated_object(self):
+        """Test inequality against a non-HyperparameterConfig object."""
+        config = HyperparameterConfig(
+            learning_rate=RLParameter(min=1e-5, max=1e-2, dtype=float)
+        )
+
+        assert config != object()
+
     def test_hyperparameter_config_sample(self):
         """Test sampling from HyperparameterConfig."""
         torch.manual_seed(42)
@@ -434,6 +442,18 @@ class TestOptimizerConfig:
 
         assert config1 == config2  # Same name and networks
         assert config1 != config3  # Different name
+
+    def test_optimizer_config_equality_unrelated_object(self):
+        """Test inequality against a non-OptimizerConfig object."""
+        config = OptimizerConfig(
+            name="opt1",
+            networks="net1",
+            lr="lr",
+            optimizer_cls=optim.Adam,
+            optimizer_kwargs={},
+        )
+
+        assert config != object()
 
     def test_optimizer_config_get_optimizer_cls(self):
         """Test getting optimizer class from stored configuration."""

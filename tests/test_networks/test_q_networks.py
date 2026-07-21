@@ -15,6 +15,7 @@ from agilerl.modules import (
 )
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.base import EvolvableNetwork
+from agilerl.networks.custom_modules import DuelingDistributionalMLP
 from agilerl.networks.q_networks import ContinuousQNetwork, QNetwork, RainbowQNetwork
 from tests.helper_functions import (
     assert_close_dict,
@@ -420,6 +421,24 @@ class TestRainbowQNetworkForward:
 
         assert isinstance(out, torch.Tensor)
         assert out.shape == torch.Size([1, discrete_space.n])
+
+    def test_dueling_distributional_mlp_forward_numpy(self):
+        num_atoms = 51
+        support = torch.linspace(-10, 10, num_atoms)
+        network = DuelingDistributionalMLP(
+            num_inputs=4,
+            num_outputs=2,
+            hidden_size=[64],
+            num_atoms=num_atoms,
+            support=support,
+        )
+
+        x_np = torch.randn(1, 4).numpy()
+        with torch.no_grad():
+            out = network(x_np)
+
+        assert isinstance(out, torch.Tensor)
+        assert out.shape == torch.Size([1, 2])
 
 
 class TestRainbowQNetworkClone:

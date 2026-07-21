@@ -1001,6 +1001,17 @@ class TestInitLoggers:
         assert isinstance(loggers[1], CSVLogger)
         mock_sw.assert_called_once()
 
+    def test_csv_without_log_dir_raises(self):
+        with pytest.raises(ValueError, match="csv_log_dir must be provided"):
+            init_loggers(
+                algo="PPO",
+                env_name="CartPole-v1",
+                pbar=MagicMock(),
+                verbose=False,
+                csv=True,
+                csv_log_dir=None,
+            )
+
     def test_stdout_logger_receives_accelerator(self):
         """StdOutLogger must get the accelerator so non-main ranks skip prints
         when report_metrics is called on every rank.

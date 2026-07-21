@@ -1611,6 +1611,17 @@ class TestPreparePromptHfGenerateTensorInitialLen:
         assert out["initial_prompt_len"] == 2
         assert isinstance(out["initial_prompt_len"], int)
 
+    def test_list_initial_prompt_len_takes_first(self) -> None:
+        from agilerl.utils.llm_utils import prepare_prompt_hf_generate
+
+        prompt = {
+            "input_ids": torch.tensor([[1, 2, 3, 4]], dtype=torch.long),
+            "attention_mask": torch.tensor([[1, 1, 1, 1]], dtype=torch.long),
+            "initial_prompt_len": [3, 7],
+        }
+        out = prepare_prompt_hf_generate(prompt, torch.device("cpu"))
+        assert out["initial_prompt_len"] == 3
+
 
 class TestGetModelNameOrPathBaseModelBranches:
     """``get_model_name_or_path`` falls through several optional attribute
@@ -1902,6 +1913,14 @@ class TestProjectionNameResolution:
         assert (
             llm_utils_module._projection_names_for_clippable_lora(
                 _PlainLinearModel(), r".*\.q_proj"
+            )
+            is None
+        )
+
+    def test_none_targets_returns_none(self):
+        assert (
+            llm_utils_module._projection_names_for_clippable_lora(
+                _PlainLinearModel(), None
             )
             is None
         )

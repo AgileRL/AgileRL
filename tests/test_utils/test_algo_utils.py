@@ -1582,6 +1582,18 @@ class TestStackExperiences:
         assert stacked[0][1].shape == (2, 2)
         assert isinstance(stacked[0][0], torch.Tensor)
 
+    def test_stack_experiences_tuple_branch_no_torch(self):
+        """stack tuple experiences with to_torch=False stays as ndarrays."""
+        tuple_exps = [
+            (np.ones(3), np.zeros(2)),
+            (np.ones(3) * 0.5, np.ones(2) * 0.5),
+        ]
+        stacked = stack_experiences(tuple_exps, to_torch=False)
+        assert isinstance(stacked[0], tuple)
+        assert isinstance(stacked[0][0], np.ndarray)
+        assert stacked[0][0].shape == (2, 3)
+        assert stacked[0][1].shape == (2, 2)
+
 
 class TestFlattenExperiences:
     def test_flatten_experiences(self):
@@ -2096,6 +2108,7 @@ def test_get_output_size_from_space():
     assert get_output_size_from_space(spaces.Dict({"a": spaces.Discrete(3)})) == {
         "a": 3
     }
+    assert get_output_size_from_space({"a": spaces.Discrete(3)}) == {"a": 3}
     assert get_output_size_from_space(spaces.Discrete(4)) == 4
     assert get_output_size_from_space(spaces.Box(0, 1, (2,))) == 2
     assert get_output_size_from_space(spaces.MultiBinary(4)) == 4
@@ -2302,6 +2315,11 @@ class TestConcatenateAndReshapeHelpers:
         result = reshape_from_space(tensor, space)
         assert result.dim() <= 2
         assert result.numel() == 4
+
+    def test_reshape_from_space_unsupported_type(self):
+        """TypeError for unsupported tensor type."""
+        with pytest.raises(TypeError, match="Unsupported tensor type"):
+            reshape_from_space([1, 2, 3], spaces.Box(0, 1, (4,)))
 
 
 class TestRenamePeftPrimaryAdapterKeysInStateDict:

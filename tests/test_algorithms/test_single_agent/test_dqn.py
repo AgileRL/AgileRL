@@ -7,6 +7,7 @@ import torch
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
+from tensordict import TensorDict
 from torch import nn, optim
 
 from agilerl.algorithms.dqn import DQN
@@ -344,6 +345,21 @@ class TestDQNGetAction:
 
         assert np.array_equal(action, [1, 0])
         dqn.clean_up()
+
+    def test_list_action_mask(self, vector_space, discrete_space):
+        dqn = DQN(vector_space, discrete_space)
+        state = get_sample_from_space(vector_space, batch_size=2)
+        action_mask = [np.array([0, 1]), np.array([1, 0])]
+        action = dqn.get_action(state, epsilon=0, action_mask=action_mask)
+        assert np.array_equal(action, [1, 0])
+
+    def test_tensordict_obs_without_mask(self, dict_space, discrete_space, monkeypatch):
+        dqn = DQN(dict_space, discrete_space)
+        state = get_sample_from_space(dict_space, batch_size=2)
+        torch_obs = TensorDict(dict(dqn.preprocess_observation(state)), batch_size=[2])
+        monkeypatch.setattr(dqn, "preprocess_observation", lambda obs: torch_obs)
+        action = dqn.get_action(state, epsilon=0.0, action_mask=None)
+        assert len(action) == 2
 
     def test_tuple_obs_without_mask(self, discrete_space):
         tuple_space = spaces.Tuple(
