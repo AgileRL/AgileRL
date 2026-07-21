@@ -534,6 +534,11 @@ class Population(Generic[AgentT]):
         """Local step counter for the population."""
         return max(agent.metrics.steps for agent in self.agents)
 
+    @property
+    def last_scalar_fitnesses(self) -> list[float]:
+        """Most recent fitnesses as scalars (single-agent / summed loops)."""
+        return [float(f) for f in _scalar_entries(self.last_fitnesses)]
+
     def is_nested_scores(self) -> bool:
         """Check if the scores are nested per-sub-agent i.e. a nested list.
 

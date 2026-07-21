@@ -288,7 +288,7 @@ def train_offline(
             pbar.close()
             # Single-agent fitnesses are scalars; `Population` types them as the
             # wider scalar-or-per-agent-dict row shared with multi-agent training.
-            return population.agents, cast("list[float]", population.last_fitnesses)
+            return population.agents, population.last_scalar_fitnesses
 
         # Tournament selection and population mutation
         if tournament and mutation is not None:
@@ -323,4 +323,4 @@ def train_offline(
 
     population.finish()
     pbar.close()
-    return population.agents, cast("list[float]", population.last_fitnesses)
+    return population.agents, population.last_scalar_fitnesses

@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from accelerate import Accelerator
 
@@ -275,4 +275,4 @@ def finetune_llm_preference(
     pbar.close()
     # LLM fitnesses are scalar mean rewards; `Population` types them as the wider
     # scalar-or-per-agent-dict row shared with multi-agent training.
-    return population.agents, cast("list[float]", population.last_fitnesses)
+    return population.agents, population.last_scalar_fitnesses
