@@ -32,7 +32,6 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.utils.algo_utils import stack_and_pad_experiences
 
 if TYPE_CHECKING:
-
     SupportedMultiturn = LLMPPO | LLMREINFORCE | GRPO
 
 

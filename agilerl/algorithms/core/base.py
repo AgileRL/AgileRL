@@ -5140,7 +5140,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         def _token_prompt_for_vllm(ids: torch.Tensor) -> dict[str, list[int]]:
             return {"prompt_token_ids": ids.squeeze(0).tolist()}
 
-        def _stitch_prefix(prompt: Mapping[str, Any], ref: torch.Tensor) -> torch.Tensor:
+        def _stitch_prefix(
+            prompt: Mapping[str, Any], ref: torch.Tensor
+        ) -> torch.Tensor:
             st = prompt.get("stitch_prefix_ids")
             if st is None:
                 return ref.new_zeros((ref.shape[0], 0))

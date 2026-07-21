@@ -31,7 +31,6 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.llm_envs import ReasoningGym
 
 if TYPE_CHECKING:
-
     SupportedReasoning = GRPO | LLMPPO | LLMREINFORCE
 
 
