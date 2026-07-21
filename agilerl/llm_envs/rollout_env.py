@@ -1,13 +1,7 @@
-"""Token-level rollout env for generative LLM tasks (multi-turn agentic or single-turn reasoning).
+"""Token-level rollout envs for generative LLM tasks over an env client.
 
-A :class:`RolloutEnv` owns the tokenisation + turn loop and talks to its env through an
-**env client** exposing the OpenEnv ``reset`` / ``step`` calls. The env client is
-either an :class:`~agilerl.llm_envs.openenv.OpenEnvSessionClient` (the env is hosted over
-a URL — a remote server or a local :class:`~agilerl.llm_envs.openenv.OpenEnvServer` —
-reached over a WebSocket session) or a :class:`~agilerl.llm_envs.openenv.LocalEnvClient`
-(the env runs in-process, no HTTP). :meth:`RolloutEnv.from_spec` picks the right one from
-a URL or a ``module:Class`` entrypoint. ``BatchRolloutEnv`` maintains independent groups
-of these rollouts over a batch, sharing a :class:`BatchPointer` dataset cursor.
+``RolloutEnv`` runs the tokenisation + turn loop for one episode; ``BatchRolloutEnv``
+steps a batch of them in lock-step, sharing a ``BatchPointer`` dataset cursor.
 """
 
 from __future__ import annotations
@@ -31,26 +25,8 @@ if TYPE_CHECKING:
 class RolloutEnv:
     """Token-level rollout env: tokenisation + turn loop over a text env client.
 
-    It lets a model that produces tokens interact with a text world reached through an
-    env client — an :class:`~agilerl.llm_envs.openenv.OpenEnvSessionClient` over a URL, or
-    an in-process :class:`~agilerl.llm_envs.openenv.LocalEnvClient`: ``reset`` pulls the
-    initial prompt and ``step`` sends the decoded action and reads back the next
-    observation + reward — the env may score it, run a tool, or hit a sandbox. On top of
-    that it exposes the token-level surface the trainer / rollout engine drive:
-
-    * ``reset()`` / ``step(completion_ids, sampling_logps=None)`` return a
-      tokenised **observation dict** (``input_ids`` / ``attention_mask``);
-    * it assembles the multi-turn **transcript** (``full_ids`` = prompt + gen0 +
-      feedback0 + ... with per-turn ``turn_boundaries``);
-    * it builds the **provenance mask** and the complete per-episode row via
-      :meth:`get_episode_data` -> ``(full_ids, action_mask, turn_ids,
-      turn_rewards, sampling_logps)``, where only policy-generated tokens train;
-    * it renders the **chat template** (optionally with ``tools=`` schemas) and
-      enforces the **context budget**: when ``max_model_len`` is set and the next
-      turn would overflow, the episode terminates rather than dropping turns.
-
-    :class:`BatchRolloutEnv` keeps a ``list`` of RolloutEnvs and reads :attr:`done` /
-    :attr:`current_prompt` to drive the training loop.
+    Assembles the multi-turn transcript and the provenance mask (only policy-generated
+    tokens train, via :meth:`get_episode_data`); terminates on ``max_model_len`` overflow.
     """
 
     def __init__(
@@ -68,61 +44,25 @@ class RolloutEnv:
     ) -> None:
         """Drive a text env at the token level over ``env_client`` (a URL or a client object).
 
-        :param env_client: A URL string (opens a WebSocket session via
-            :class:`~agilerl.llm_envs.openenv.OpenEnvSessionClient`) or an
-            :class:`~agilerl.protocols.EnvClientProtocol` implementation used
-            as-is. See :meth:`local` / :meth:`from_spec` for the common cases.
-        :type env_client: str | EnvClientProtocol
-        :param tokenizer: Tokenizer used to encode prompts/feedback and apply the
-            chat template.
-        :type tokenizer: Any
-        :param max_turns: Maximum number of generation turns per episode.
-        :type max_turns: int
-        :param timeout_s: Per-request timeout in seconds for the OpenEnv client.
-            ``None`` (the default) leaves requests unbounded; supply the value from
-            the run manifest.
-        :type timeout_s: float | None
-        :param mcp_tool: For an external MCP server, the tool the model's text is sent
-            to as a ``call_tool``; ``None`` (default) sends plain text actions.
-        :type mcp_tool: str | None
-        :param pad_id: Padding token id used when assembling token tensors,
-            defaults to ``None``.
-        :type pad_id: int | None
-        :param apply_chat_template: Render prompts through the tokenizer's chat
-            template (vs. raw encoding), defaults to ``True``.
-        :type apply_chat_template: bool
-        :param max_model_len: Engine context length (prompt + completion). When
-            set, enables the stop-on-overflow check above, defaults to ``None``.
-        :type max_model_len: int | None
-        :param max_output_tokens: Generation budget reserved under
-            ``max_model_len`` when checking for overflow, defaults to ``None``.
-        :type max_output_tokens: int | None
-        :ivar full_ids: The episode's running token sequence (prompt + each
-            generation + each feedback turn), or ``None`` before ``reset``.
-        :vartype full_ids: torch.Tensor | None
-        :ivar turn_boundaries: ``(start, end, turn_idx)`` spans of the
-            policy-generated tokens within ``full_ids`` — the masking provenance.
-        :vartype turn_boundaries: list[tuple[int, int, int]]
-        :ivar turn_rewards: Per-turn rewards returned by the wrapped env.
-        :vartype turn_rewards: list[float]
-        :ivar done: Whether this episode has terminated (set by ``step``).
-        :vartype done: bool
-        :ivar current_prompt: The latest policy-ready observation — what the
-            owning ``BatchRolloutEnv`` hands to the next ``get_action``; ``{}``
-            once the episode is done.
-        :vartype current_prompt: dict[str, Any]
-        :ivar sampling_logps: Per-turn vLLM sampling logprobs (one 1-D tensor per
-            turn), captured when the policy provides them; empty on the HF path.
-        :vartype sampling_logps: list[torch.Tensor]
+        :param env_client: URL string (opens a WebSocket session) or an ``EnvClientProtocol``.
+        :param tokenizer: Encodes prompts/feedback and applies the chat template.
+        :param max_turns: Max generation turns per episode.
+        :param timeout_s: Per-request OpenEnv timeout; ``None`` leaves requests unbounded.
+        :param mcp_tool: MCP tool the text is sent to as ``call_tool``; ``None`` sends plain text.
+        :param pad_id: Padding token id for assembled tensors.
+        :param apply_chat_template: Render prompts through the chat template vs raw encoding.
+        :param max_model_len: Engine context length; enables stop-on-overflow when set.
+        :param max_output_tokens: Generation budget reserved under ``max_model_len``.
+        :ivar full_ids: Running episode token sequence (prompt + generations + feedback).
+        :ivar turn_boundaries: ``(start, end, turn_idx)`` spans of policy-generated tokens.
+        :ivar turn_rewards: Per-turn rewards from the env.
+        :ivar done: Whether the episode has terminated.
+        :ivar current_prompt: Latest policy-ready observation; ``{}`` once done.
+        :ivar sampling_logps: Per-turn vLLM sampling logprobs (empty on the HF path).
         """
         self.max_turns = max_turns
-        # ``env_client`` is either a URL string (open a WebSocket session) or an
-        # already-built ``EnvClientProtocol`` implementation — the latter is how
-        # ``.local`` / ``.from_spec`` plug in an in-process or custom transport.
-        # ``timeout_s`` / ``mcp_tool`` apply only to the URL case.
         if isinstance(env_client, str):
-            # Lazy: the OpenEnv backend needs the optional ``openenv`` package
-            # (llm extra); an injected client keeps the core install import-free.
+            # Lazy: OpenEnv backend needs the optional ``openenv`` package.
             from agilerl.llm_envs.openenv import OpenEnvSessionClient
 
             self._env_client = OpenEnvSessionClient(
@@ -135,9 +75,7 @@ class RolloutEnv:
         self.tokenizer = tokenizer
         self.pad_id = pad_id
         self.apply_chat_template = apply_chat_template
-        # Tool schemas come from whatever the env advertises through the env client,
-        # fetched lazily on first use (see :attr:`tools`) so construction never
-        # requires a live server.
+        # Tool schemas fetched lazily on first use (see :attr:`tools`).
         self._tools: list[Any] | None = None
         self._tools_known = False
         self._max_model_len = max_model_len
@@ -150,11 +88,9 @@ class RolloutEnv:
         self._gen_texts: list[str] = []
         self._feedback_texts: list[str] = []
         self._last_full_prompt_token_len: int | None = None
-        # Cached chat-template frame around a feedback turn (rendered lazily once;
-        # the frame is constant for a given tokenizer/template).
+        # Cached chat-template frame around a feedback turn (rendered once).
         self._boundary_parts: tuple[str, str] | None = None
         self._boundary_parts_known = False
-        # Per-episode state owned by this wrapper (the in-flight row builder):
         self.done: bool = False
         self.current_prompt: dict[str, Any] = {}
         self.sampling_logps: list[torch.Tensor] = []
@@ -171,17 +107,11 @@ class RolloutEnv:
     ) -> RolloutEnv:
         """Drive a local env **in-process** (no HTTP) via a :class:`LocalEnvClient`.
 
-        The env runs in this process (e.g. inside a Ray actor), so there is no
-        uvicorn thread, port, or loopback request. When the env must live
-        elsewhere, host it as a URL (a container, a Space, or a server a Ray
-        actor stands up with :class:`~agilerl.llm_envs.openenv.OpenEnvServer`)
-        and pass that URL to the :class:`RolloutEnv` constructor instead.
-
         :param env: A local env (plain-text ``reset`` / ``step``).
         :param tokenizer: Tokenizer for the token-level loop.
         :param max_turns: Generation turns per episode.
         :param instruction: Prompt returned when the env's reset obs renders empty.
-        :param kwargs: Forwarded to :class:`RolloutEnv` (e.g. ``pad_id``, ``max_model_len``).
+        :param kwargs: Forwarded to :class:`RolloutEnv`.
         :rtype: RolloutEnv
         """
         from agilerl.llm_envs.openenv import LocalEnvClient
@@ -200,21 +130,11 @@ class RolloutEnv:
     ) -> RolloutEnv:
         """Build a ``RolloutEnv`` from an env ``spec`` — a URL or a ``module:Class`` entrypoint.
 
-        * a **URL** -> the env is already hosted elsewhere (a remote Space, a
-          container, or a server a Ray actor stands up); drive it over an
-          :class:`OpenEnvSessionClient` (WebSocket session).
-        * a **``module:Class`` / ``path.py:Class`` entrypoint** -> load + build the env
-          with ``env_config`` and drive it **in-process** via :class:`LocalEnvClient`
-          (no HTTP).
-
-        Owns whatever it builds (the local env client); :meth:`close` releases it.
-
-        ``from_spec`` is for tasks **already packaged as an env**. If what you have is
-        labelled ``(question, answer)`` rows and a reward function rather than an env,
-        see :meth:`from_dataset`.
+        A URL is driven remotely; an entrypoint is built with ``env_config`` and driven
+        in-process. For rows + a reward fn instead of an env, see :meth:`from_dataset`.
 
         :param spec: A URL or a ``module:Class`` / ``path.py:Class`` entrypoint.
-        :param env_config: Kwargs forwarded to the entrypoint constructor (ignored for a URL).
+        :param env_config: Kwargs for the entrypoint constructor (ignored for a URL).
         :param tokenizer: Tokenizer for the token-level loop.
         :param max_turns: Generation turns per episode.
         :param kwargs: Forwarded to :class:`RolloutEnv`.
@@ -242,36 +162,18 @@ class RolloutEnv:
     ) -> RolloutEnv:
         """Build a single-turn ``RolloutEnv`` from (question, answer) rows and a reward fn.
 
-        The counterpart to :meth:`from_spec` for callers who **don't have an env** —
-        just labelled prompt data and a scoring function. Use :meth:`from_spec` when
-        the task is already packaged as an env (an OpenEnv URL, or a ``module:Class`` /
-        ``module:func`` entrypoint such as a GEM registry factory); use
-        ``from_dataset`` when what you have is rows of ``(question, answer)`` and a
-        ``reward_fn``, and the env is simply "serve a row, score the completion" —
-        single-turn generative RL (reasoning / contextual bandit). The rows + reward
-        fn are bundled into an internal dataset env driven **in-process** (no HTTP),
-        so there is nothing to host or register.
+        Rows + reward fn are served in-process as a single-turn env (``max_turns`` fixed
+        to 1); ``test_dataset`` rows are served under :meth:`eval_mode`.
 
-        The env is single-turn by definition (``max_turns`` is fixed to 1). The
-        owning :class:`BatchRolloutEnv` pins each group to one dataset row via
-        ``row_index``; ``test_dataset`` rows are served under
-        :meth:`eval_mode` / ``evaluation_mode``.
-
-        :param dataset: Train rows, indexable to per-row mappings with
-            ``question_column`` / ``answer_column`` keys (e.g. a ``datasets.Dataset``).
-        :param reward_fn: ``(completion, answer, question) -> float`` scorer. The
-            row's answer/question values are passed through unmodified.
+        :param dataset: Train rows, indexable to mappings with the question/answer keys.
+        :param reward_fn: ``(completion, answer, question) -> float`` scorer.
         :param tokenizer: Tokenizer for the token-level loop.
-        :param test_dataset: Optional held-out rows served under evaluation mode
-            (falls back to ``dataset`` when ``None``).
-        :param prompt_builder: Maps a dataset row to the prompt text served on reset,
-            so a template may interpolate any column. ``None`` serves
-            ``str(row[question_column])`` as-is; pass ``apply_chat_template=False``
-            if the built prompt is already templated.
-        :param question_column: Row key for the question, defaults to ``"question"``.
-        :param answer_column: Row key for the answer, defaults to ``"answer"``.
-        :param kwargs: Forwarded to :class:`RolloutEnv` (e.g. ``pad_id``,
-            ``apply_chat_template``, ``max_model_len``, ``max_output_tokens``).
+        :param test_dataset: Held-out rows served under eval mode (falls back to ``dataset``).
+        :param prompt_builder: Maps a row to the served prompt text; ``None`` serves
+            ``str(row[question_column])``.
+        :param question_column: Row key for the question.
+        :param answer_column: Row key for the answer.
+        :param kwargs: Forwarded to :class:`RolloutEnv`.
         :rtype: RolloutEnv
         """
         if "max_turns" in kwargs:
@@ -319,14 +221,7 @@ class RolloutEnv:
         return encoded["input_ids"]
 
     def _tokenize_feedback(self, feedback_text: str) -> torch.Tensor:
-        """Tokenize the assistant→user→assistant boundary plus feedback text.
-
-        Uses the tokenizer's chat template (via the cached frame from
-        :meth:`_feedback_boundary_parts`) so this works for any chat-templated
-        model (Gemma, Llama, Qwen, Mistral, ...), with ChatML markers as the
-        fallback for tokenizers whose templates don't render the placeholders
-        verbatim (rare).
-        """
+        """Tokenize the feedback turn via the cached chat-template frame (ChatML fallback)."""
         if not self.apply_chat_template:
             return torch.tensor(
                 [self.tokenizer.encode(feedback_text, add_special_tokens=False)],
@@ -337,7 +232,7 @@ class RolloutEnv:
         if boundary_ids is not None:
             return boundary_ids
 
-        # Fallback: ChatML-style markers (works for Qwen and derivatives).
+        # Fallback: ChatML-style markers.
         turn_boundary = (
             "<|im_end|>\n<|im_start|>user\n"
             + feedback_text
@@ -351,19 +246,10 @@ class RolloutEnv:
     def _feedback_boundary_parts(self) -> tuple[str, str] | None:
         """The ``(prefix, suffix)`` strings the chat template wraps a feedback turn in.
 
-        Rendered once per env and cached — the frame around the feedback text is
-        constant for a given tokenizer/template, so per-turn work reduces to one
-        ``encode``. The render is ``[user("."), assistant(placeholder),
-        user(placeholder)]`` with ``add_generation_prompt=True``, using two
-        per-render unique tokens (``uuid4`` hexes) that render verbatim and cannot
-        collide with template text: slicing at them yields exactly the bytes that
-        close the assistant turn (``prefix`` up to the feedback slot) and close the
-        user turn / open the next assistant turn (``suffix``). The dummy leading
-        user message keeps strict-alternation templates (e.g. some Mistral
-        variants) happy.
-
-        Returns ``None`` when the placeholders cannot be located in the render
-        (caller falls back to ChatML markers).
+        Rendered once and cached. Two ``uuid4`` placeholders render verbatim and can't
+        collide with template text, so slicing at them yields the boundary bytes; the
+        dummy leading user message keeps strict-alternation templates happy. ``None``
+        when the placeholders can't be located (caller falls back to ChatML).
         """
         if self._boundary_parts_known:
             return self._boundary_parts
@@ -406,12 +292,7 @@ class RolloutEnv:
         self,
         feedback_text: str,
     ) -> torch.Tensor | None:
-        """Token ids for the templated turn boundary carrying ``feedback_text``.
-
-        Wraps the feedback in the cached chat-template frame from
-        :meth:`_feedback_boundary_parts` and encodes it. Returns ``None`` when the
-        frame is unavailable (caller falls back to ChatML markers).
-        """
+        """Token ids for the templated turn boundary carrying ``feedback_text`` (``None`` if no frame)."""
         parts = self._feedback_boundary_parts()
         if parts is None:
             return None
@@ -438,20 +319,12 @@ class RolloutEnv:
             msg = "No prompt: reset() was never called"
             raise RuntimeError(msg)
         self._last_full_prompt_token_len = int(self.full_ids.shape[1])
-        # The row is single and unpadded, so consumers that need an attention
-        # mask (the HF-generate path) derive all-ones from ``input_ids``.
+        # Single unpadded row; HF-generate derives an all-ones mask from ``input_ids``.
         return {"input_ids": self.full_ids}
 
     @property
     def tools(self) -> list[Any] | None:
-        """Tool schemas the env advertises (``None`` when none) — passed to the
-        chat template as ``tools=``.
-
-        Fetched from the env client on first access and cached: an
-        :class:`~agilerl.llm_envs.openenv.OpenEnvSessionClient` reads the env's
-        OpenEnv ``state`` over its session, an in-process
-        :class:`~agilerl.llm_envs.openenv.LocalEnvClient` from the wrapper directly.
-        """
+        """Tool schemas the env advertises (``None`` when none); fetched once and cached."""
         if not self._tools_known:
             self._tools = self._env_client.tools or None
             self._tools_known = True
@@ -482,19 +355,10 @@ class RolloutEnv:
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Create a fresh episode and return the policy-ready observation plus info.
 
-        ``seed`` and ``row_index`` are forwarded to ``env_client.reset``: a
-        dataset-backed env client uses ``row_index`` to select its row, while an env
-        that picks its own task (e.g. a remote OpenEnv server) ignores it.
+        A prompt over the context budget ends truncated at turn 0 (empty ``current_prompt``).
 
-        :param seed: Optional reset seed forwarded to the env client.
-        :type seed: int | None
-        :param row_index: Dataset row chosen by the owning ``BatchRolloutEnv``,
-            forwarded to ``env_client.reset``.
-        :type row_index: int | None
-
-        An initial prompt that exceeds the context budget can't be generated for,
-        so the episode ends in truncation at turn 0 (``done`` with an empty
-        ``current_prompt``) rather than being sent to the generation engine.
+        :param seed: Reset seed forwarded to the env client.
+        :param row_index: Dataset row forwarded to ``env_client.reset``.
         """
         obs_text, info = self._reset_fetch(seed, row_index=row_index)
         return self._reset_apply(obs_text, info)
@@ -504,10 +368,7 @@ class RolloutEnv:
     ) -> tuple[str, dict[str, Any]]:
         """Pull the initial prompt from the env backend — the parallelizable I/O.
 
-        Backend I/O only (no tokenizer), so a batched collector can overlap it
-        across envs. Touching :attr:`tools` here warms its cache, so the one-off
-        ``/state`` round-trip an HTTP client pays on first access overlaps too,
-        instead of serializing in the apply (tokenizer) phase.
+        Backend I/O only (no tokenizer); touching :attr:`tools` warms its cache to overlap too.
         """
         _ = self.tools
         return self._env_client.reset(seed=seed, row_index=row_index)
@@ -517,13 +378,7 @@ class RolloutEnv:
         obs_text: str,
         info: dict[str, Any],
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Tokenize the initial prompt and start the episode (tokenizer).
-
-        An initial prompt that already exceeds the context budget can't be
-        generated for, so the episode ends in truncation at turn 0 (``done`` with
-        an empty ``current_prompt``) — it is simply never made active — instead of
-        raising or skipping the row.
-        """
+        """Tokenize the initial prompt and start the episode (truncates at turn 0 if over budget)."""
         self.full_ids = self._tokenize_initial_prompt(obs_text)
         self.turn_boundaries = []
         self.turn_rewards = []
@@ -548,12 +403,7 @@ class RolloutEnv:
         full_completion_ids: torch.Tensor,
         sampling_logps: torch.Tensor | None = None,
     ) -> str:
-        """Decode and record this turn's generation; return its text.
-
-        The tokenizer runs here, so the env round-trip (:meth:`_step_env`)
-        carries no tokenization — letting a batched collector overlap the
-        round-trips across envs without sharing the tokenizer across threads.
-        """
+        """Decode and record this turn's generation; return its text (tokenizer phase)."""
         if self._last_full_prompt_token_len is None:
             msg = (
                 "step() requires a prior reset() or step() "
@@ -561,8 +411,7 @@ class RolloutEnv:
             )
             raise RuntimeError(msg)
         prompt_len = self._last_full_prompt_token_len
-        # Only the newly generated suffix crosses devices; the prompt prefix in
-        # ``full_completion_ids`` is byte-identical to the resident ``full_ids``.
+        # Only the new suffix crosses devices; the prefix is byte-identical to ``full_ids``.
         gen_ids = full_completion_ids[0, prompt_len:].detach().to(self.full_ids.device)
         gen_text = self.tokenizer.decode(
             gen_ids.tolist(),
@@ -577,11 +426,7 @@ class RolloutEnv:
         return gen_text
 
     def _step_env(self, gen_text: str) -> tuple[str, float, bool, bool, dict[str, Any]]:
-        """Round-trip the env backend for ``gen_text`` — the parallelizable I/O.
-
-        Pure backend I/O: no tokenizer, no wrapper-state mutation, so a batched
-        collector can run this concurrently across envs.
-        """
+        """Round-trip the env backend for ``gen_text`` — the parallelizable I/O (no tokenizer)."""
         return self._env_client.step(gen_text)
 
     def _step_apply(
@@ -593,7 +438,6 @@ class RolloutEnv:
         self.turn_rewards.append(float(reward))
         self._turn_idx += 1
 
-        # Turn cap exceeded
         if not (terminated or truncated) and self._turn_idx >= self.max_turns:
             truncated = True
 
@@ -606,7 +450,6 @@ class RolloutEnv:
             )
             self.full_ids = torch.cat([self.full_ids, feedback_ids], dim=1)
 
-            # Strict overflow check
             if (max_pt := self._prompt_budget()) is not None:
                 prompt_len = int(self.full_ids.shape[1])
                 if prompt_len > max_pt:
@@ -626,13 +469,8 @@ class RolloutEnv:
     ) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
         """Decode the generation, round-trip the env, and apply the result.
 
-        Single-env convenience composing :meth:`_step_prepare` / :meth:`_step_env`
-        / :meth:`_step_apply`; ``BatchRolloutEnv`` drives the three phases directly
-        so it can overlap the env round-trips across envs.
-
-        ``sampling_logps`` is this turn's per-token vLLM rollout logprobs (or
-        ``None`` on the HF path); when provided it is appended to
-        :attr:`sampling_logps` so the assembled episode owns the complete row.
+        Single-env convenience over the ``_step_*`` phases; ``sampling_logps`` is this
+        turn's vLLM logprobs (or ``None``).
         """
         gen_text = self._step_prepare(full_completion_ids, sampling_logps)
         return self._step_apply(self._step_env(gen_text))
@@ -642,12 +480,9 @@ class RolloutEnv:
     ) -> tuple[
         torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None
     ]:
-        """Build and return the complete episode row for learning.
+        """Build the episode row ``(full_ids, action_mask, turn_ids, turn_rewards, sampling_logps)``.
 
-        Returns ``(full_ids, action_mask, turn_ids, turn_rewards,
-        sampling_logps)``, where ``sampling_logps`` is this episode's per-turn
-        vLLM logprobs concatenated across turns, or ``None`` when none were
-        captured (the HF path).
+        ``sampling_logps`` is the per-turn vLLM logprobs concatenated, or ``None`` (HF path).
         """
         if self.full_ids is None:
             msg = "No episode data: reset() was never called"
@@ -682,13 +517,7 @@ class RolloutEnv:
         )
 
     def close(self) -> None:
-        """Close the env client, releasing whatever backend it owns.
-
-        Ownership lives in the client: an
-        :class:`~agilerl.llm_envs.openenv.OpenEnvSessionClient` ends its
-        WebSocket session, a :class:`~agilerl.llm_envs.openenv.LocalEnvClient`
-        closes the wrapped env.
-        """
+        """Close the env client, releasing whatever backend it owns."""
         self._env_client.close()
 
     def get_debug_info(self) -> dict[str, Any]:
@@ -744,12 +573,8 @@ class RolloutEnv:
 class _PromptDatasetEnv:
     """(question, answer) rows + a reward fn, served as a single-turn text env.
 
-    The backend :meth:`RolloutEnv.from_dataset` builds: ``reset`` serves the row's
-    (optionally templated) question and ``step`` scores the model's completion with
-    ``reward_fn`` — always terminal, single turn. The owning
-    :class:`BatchRolloutEnv` pins each group to one row via ``row_index``; a bare
-    ``reset`` walks a sequential cursor instead. The held-out split is served when
-    ``reset`` is called with ``evaluation=True``.
+    Backend for :meth:`RolloutEnv.from_dataset`: ``reset`` serves the row's prompt (by
+    ``row_index`` or a cursor), ``step`` scores the completion with ``reward_fn``.
     """
 
     def __init__(
@@ -811,12 +636,9 @@ class _PromptDatasetEnv:
 class BatchPointer:
     """Group-consistent dataset cursor for batched rollouts.
 
-    Owns a per-epoch reshuffled row stream (a fresh full permutation each epoch, from one
-    seeded generator) and hands out one dataset row per batch item, reused across that
-    item's group so a GRPO group shares its prompt. Both the in-process
-    :class:`BatchRolloutEnv` and the distributed ``RayBatchRolloutEnv`` (the Ray-actor
-    collector in the integration repo) build a ``BatchPointer``, so the dataset order +
-    group pinning match across the colocated and async rollout paths.
+    Reshuffles the row stream each epoch and hands out one row per batch item, reused
+    across the item's group so a GRPO group shares its prompt. Shared by the colocated
+    and distributed collectors so their dataset order + group pinning match.
 
     :param dataset_size: Number of rows the env serves (``0`` -> :meth:`next_row` unused).
     :param seed: Seed for the per-epoch shuffle (``None`` -> a fixed default).
@@ -825,8 +647,7 @@ class BatchPointer:
     def __init__(self, dataset_size: int, *, seed: int | None = None) -> None:
         """Build a cursor over ``dataset_size`` rows with a seeded per-epoch shuffle."""
         self.dataset_size = int(dataset_size)
-        #: Completed full passes over the dataset rows (drives e.g. the trainer's
-        #: per-epoch reference-policy refresh).
+        #: Completed full passes over the dataset rows.
         self.num_epochs = 0
         self._generator = torch.Generator().manual_seed(
             seed if seed is not None else 42
@@ -857,11 +678,9 @@ class BatchPointer:
     ) -> list[tuple[int | None, int | None]]:
         """One ``(seed, row_index)`` per slot, group-contiguous; a group shares both.
 
-        Returns ``batch_size * group_size`` pairs in slot order. ``seed`` is
-        ``base_seed + seed_offset + batch_item`` (``None`` when ``base_seed`` is ``None``);
-        ``row_index`` is the next reshuffled row per batch item (``None`` when
-        ``dataset_size == 0``), reused across the item's group. The distributed collector
-        calls this to drive its per-episode workers with matching seeds + rows.
+        ``batch_size * group_size`` pairs in slot order: ``seed`` is
+        ``base_seed + seed_offset + batch_item`` and ``row_index`` the next reshuffled
+        row per batch item (either ``None`` when its source is ``None`` / empty).
         """
         out: list[tuple[int | None, int | None]] = []
         for item in range(batch_size):
@@ -876,20 +695,11 @@ class BatchPointer:
 class BatchRolloutEnv:
     """Batched in-process collector of LLM rollout episodes — the colocated path.
 
-    Holds ``batch_size * group_size`` independent :class:`RolloutEnv`
-    instances in ``self.envs`` (laid out group-contiguous, position implicit in
-    list order) and steps all active ones in lock-step using policy completions.
-    Each wrapper owns its own in-flight episode state — transcript, ``done``,
-    ``current_prompt`` and ``sampling_logps``.
-
-    Per-turn latency is bounded by the slowest env, not the sum: the backend
-    round-trips (``_reset_fetch`` / ``_step_env``) run concurrently on an
-    internal thread pool, while all tokenizer work and episode-state mutation
-    stay sequential on the calling thread. In-process (``RolloutEnv.local``)
-    envs are stepped on pool threads too, so env code that shares state across
-    instances must be thread-safe. Distributed rollout concurrency remains the
-    Ray collector's job; this class is the colocated counterpart sharing the
-    same :class:`BatchPointer` semantics.
+    Holds ``batch_size * group_size`` independent :class:`RolloutEnv` instances (group-
+    contiguous) and steps active ones in lock-step. Backend round-trips run concurrently
+    on a thread pool while tokenizer work and state mutation stay sequential, so per-turn
+    latency is the slowest env; in-process envs are stepped on pool threads (must be
+    thread-safe).
     """
 
     def __init__(
@@ -904,24 +714,12 @@ class BatchRolloutEnv:
         """Create ``batch_size * group_size`` independent env wrappers.
 
         :param env_factory: Factory that builds one :class:`RolloutEnv`.
-        :type env_factory: Callable[..., RolloutEnv]
         :param batch_size: Number of logical batch items.
-        :type batch_size: int
-        :param group_size: Number of grouped rollouts per batch item.
-        :type group_size: int
+        :param group_size: Grouped rollouts per batch item.
         :param env_config: Optional kwargs passed to ``env_factory``.
-        :type env_config: dict[str, Any] | None
-        :param io_timeout_s: Backstop deadline (seconds) for one concurrent
-            round of env round-trips (one batched reset or step). If any
-            round-trip does not finish within it, the round raises
-            ``TimeoutError`` instead of blocking forever — the last line of
-            defence against a hung env or a stalled transport, and the *only*
-            bound on an in-process env (which has no per-message timeout).
-            Defaults to 600 s; ``None`` disables it (unbounded, the old
-            behaviour). It bounds a whole round, so keep it above any per-env
-            ``timeout_s`` so the client's own (more precise) timeout fires
-            first.
-        :type io_timeout_s: float | None
+        :param io_timeout_s: Deadline (seconds) for one concurrent round of env round-trips
+            (raises ``TimeoutError`` rather than blocking); the only bound on an in-process
+            env. ``None`` disables it; keep it above any per-env ``timeout_s``.
         """
         if batch_size <= 0:
             msg = f"batch_size must be > 0, got {batch_size}."
@@ -938,11 +736,9 @@ class BatchRolloutEnv:
         self.group_size = group_size
         self._io_timeout_s = io_timeout_s
         self.envs: list[RolloutEnv] = []
-        # Shared dataset cursor for dataset shuffling and iteration.
-        # Also used by async RolloutEnvs in distributed code.
+        # Shared dataset cursor for shuffling/iteration.
         self._pointer: BatchPointer | None = None
-        # Thread pool for overlapping env.step(). Built lazily on first
-        # use and reused across turns; shut down in ``close``.
+        # Thread pool for overlapping env round-trips; built lazily, closed in ``close``.
         self._io_pool: ThreadPoolExecutor | None = None
 
     @property
@@ -972,24 +768,12 @@ class BatchRolloutEnv:
     ) -> list[RolloutPrompts] | None:
         """Reset all env wrappers, building them on the first call.
 
-        Seed/row assignment is delegated to :meth:`BatchPointer.assign` — the one
-        policy shared with the distributed collector: one seed per batch row (same
-        across the row's group) and one dataset row per batch row (advancing once
-        per row, re-shuffling each epoch), so every group is row-consistent.
-        Prompts are returned in stable list (batch/group) order. Envs that are not
-        dataset-backed (``dataset_size == 0``) get seeds but no ``row_index``.
-
-        A dataset row whose initial prompt exceeds the context budget produces
-        an episode that is truncated at turn 0 (never made active).
-
-        If building the envs fails partway (e.g. a server fails to start), the
-        already-built envs are closed and the batch is left empty, so a retried
-        ``reset`` starts clean.
+        Seed/row assignment is delegated to :meth:`BatchPointer.assign`; prompts return
+        in stable list order. If building envs fails partway, the built ones are closed
+        and the batch left empty so a retried ``reset`` starts clean.
 
         :param seed: Optional base seed for deterministic rollouts.
-        :type seed: int | None
         :return: Active prompt dictionaries after reset.
-        :rtype: list[RolloutPrompts] | None
         """
         if not self._is_initialized:
             try:
@@ -1023,17 +807,10 @@ class BatchRolloutEnv:
     ) -> list[RolloutPrompts] | None:
         """Step each active env with its corresponding completion.
 
-        Each wrapper records the turn's ``sampling_logps`` and updates its own
-        ``done`` / ``current_prompt``, so the collector only routes completions.
-
         :param completion_ids: One completion tensor per active env.
-        :type completion_ids: list[torch.Tensor]
-        :param sampling_logps: Sampling logprobs from vLLM rollout for this
-            turn, parallel to ``completion_ids``; entries (or the whole list)
-            may be ``None`` when nothing was captured.
-        :type sampling_logps: list[torch.Tensor | None] | None
+        :param sampling_logps: vLLM logprobs parallel to ``completion_ids``; entries or
+            the whole list may be ``None``.
         :return: Next active prompt dictionaries after stepping.
-        :rtype: list[RolloutPrompts] | None
         """
         active = self._active_envs()
         if len(completion_ids) != len(active):
@@ -1048,7 +825,7 @@ class BatchRolloutEnv:
                 f"envs: {len(sampling_logps)} != {len(active)}"
             )
             raise RuntimeError(msg)
-        # Normalize each completion to 2D once (shared by both step paths).
+        # Normalize each completion to 2D.
         completions = [c if c.dim() > 1 else c.unsqueeze(0) for c in completion_ids]
         slps = sampling_logps if sampling_logps is not None else [None] * len(active)
         # Phase 1 (sequential — tokenizer): decode + record each generation.
@@ -1071,17 +848,9 @@ class BatchRolloutEnv:
     def _map_env_io(self, thunks: list[Callable[[], Any]]) -> list[Any]:
         """Run each zero-arg thunk concurrently, returning results in order.
 
-        Overlaps the backend round-trips (I/O-bound, so the GIL is released
-        during each blocking call). The whole round is bounded by
-        ``io_timeout_s``: if every round-trip completes, the first thunk
-        exception (in submission order) propagates with no round-trip left in
-        flight (a retried reset/step cannot race a straggler); if the deadline
-        passes first, ``TimeoutError`` is raised rather than blocking forever on
-        a hung env — a stuck straggler thread is abandoned (the batch is failing
-        anyway; the pool is torn down in :meth:`close`).
-
-        Falls back to a direct call for a single thunk only when unbounded; with
-        a deadline set, even one thunk runs on the pool so the timeout applies.
+        Bounded by ``io_timeout_s``: on completion the first thunk exception (in order)
+        propagates; past the deadline ``TimeoutError`` is raised and the straggler
+        abandoned. A single thunk runs inline only when unbounded.
         """
         if not thunks:
             return []
@@ -1107,10 +876,7 @@ class BatchRolloutEnv:
     def close(self) -> None:
         """Close all env wrappers and the env-I/O thread pool.
 
-        The pool is shut down without waiting: after a normal round every
-        worker is idle and exits immediately, and after an ``io_timeout_s``
-        failure a straggler is hung by definition, so joining it would make
-        teardown hang exactly where the deadline was meant to prevent it.
+        The pool is shut down without waiting, since a timed-out straggler would hang teardown.
         """
         if self._io_pool is not None:
             self._io_pool.shutdown(wait=False)
@@ -1135,14 +901,10 @@ class BatchRolloutEnv:
     ]:
         """Collect complete episode tensors from all envs, in list order.
 
-        :return: ``(completion_ids_list, action_masks_list, all_turn_ids,
-            all_rewards, batch_steps, all_sampling_logps)`` where ``batch_steps``
-            is the summed number of recorded turn boundaries across envs.
-            ``all_sampling_logps`` is ``None`` when no vLLM logprobs were captured
-            this rollout; otherwise it holds one 1-D tensor of generated-token
-            logprobs per env (concatenated across turns), with ``None`` for any
-            env that captured none.
-        :rtype: tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], int, list[torch.Tensor | None] | None]
+        :return: ``(completion_ids_list, action_masks_list, all_turn_ids, all_rewards,
+            batch_steps, all_sampling_logps)`` where ``batch_steps`` is the summed turn
+            count. ``all_sampling_logps`` is ``None`` when no vLLM logprobs were captured,
+            else one 1-D tensor per env (``None`` for envs that captured none).
         """
         completion_ids_list: list[torch.Tensor] = []
         action_masks_list: list[torch.Tensor] = []
@@ -1171,8 +933,7 @@ class BatchRolloutEnv:
             all_turn_ids,
             all_rewards,
             batch_steps,
-            # Collapse to a single ``None`` when nothing was captured, so the
-            # caller needs only an ``is not None`` check (no per-row re-scan).
+            # Collapse to a single ``None`` when nothing was captured.
             (
                 all_sampling_logps
                 if any(logps is not None for logps in all_sampling_logps)

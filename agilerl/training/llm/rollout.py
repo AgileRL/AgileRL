@@ -194,20 +194,12 @@ def train_llm_rollout(
     next_checkpoint_step = checkpoint_steps
     max_steps_checkpoint_saved = False
     group_size = getattr(pop[0], "group_size", 1)
-    # Derive rollout seeding from the agent's configured seed so dataset-row
-    # order and env tasks are reproducible from the manifest, folding the rank
-    # in so data-parallel ranks draw decorrelated rows and tasks. The
-    # ``1 << 31`` offset is arbitrary but large enough that the rank's
-    # contribution decorrelates the RNG streams even for a small base seed.
+    # Seed from the agent's seed, offset by rank, so data-parallel ranks draw
+    # decorrelated dataset rows and env tasks.
     group_seed = int(pop[0].seed) + _distributed_rank(accelerator) * (1 << 31)
     rollout_env = BatchRolloutEnv(
         env_factory, batch_size, group_size, io_timeout_s=io_timeout_s
     )
-    # ``agent.test`` expects a single ``RolloutEnv``; ``rollout_env`` is a
-    # ``BatchRolloutEnv`` wrapping N inner envs whose state is mid-rollout during
-    # training. A separate test env keeps evaluation isolated; it is built lazily
-    # on the first evaluation, so runs that never reach ``evaluation_interval``
-    # don't pay for an extra env (or its server).
     test_env: RolloutEnv | None = None
     try:
         wall_deadline = (

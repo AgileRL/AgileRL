@@ -84,7 +84,7 @@ extra, then serve the env with :class:`~agilerl.llm_envs.openenv.OpenEnvServer`:
 
     import gem
 
-    from agilerl.llm_envs import OpenEnvServer
+    from agilerl.llm_envs.openenv import OpenEnvServer
 
 
     def make_env():

@@ -226,16 +226,12 @@ def _apply_checkpoint(
 ) -> None:
     """Seed a freshly-built agent from a checkpoint, if asked to.
 
-    The two options are different operations and must not be combined:
+    The two options are mutually exclusive:
 
-    * ``resume_from_checkpoint`` continues an interrupted run. The checkpoint is
-      authoritative -- optimizer moments, the learning-rate schedule position and
-      the hyperparameters they were computed under all come back, so the run picks
-      up exactly where it stopped. A hyperparameter that disagrees with the spec is
-      warned about, because the spec no longer describes what will be trained.
-    * ``load_weights_from`` starts a *new* run from a previous one's parameters (a
-      warm start). Only the weights are taken; the optimizer, schedule and progress
-      start fresh, and the spec keeps every hyperparameter.
+    * ``resume_from_checkpoint`` continues a run from the checkpoint's optimizer
+      state and hyperparameters, warning when they drift from the spec.
+    * ``load_weights_from`` warm-starts a new run from prior weights only, keeping
+      the spec's hyperparameters.
 
     :param algo: A freshly-built algorithm, configured from its spec.
     :type algo: AlgoT
@@ -261,9 +257,8 @@ def _apply_checkpoint(
 def _resume_and_warn_on_drift(algo: AlgoT, path: str) -> None:
     """Restore a checkpoint, warning about hyperparameters it overrode.
 
-    Resuming keeps the checkpoint's hyperparameters, because they are the ones the
-    restored optimizer state and lr schedule belong to. That silently diverges from
-    the spec if the two disagree, so say so.
+    The checkpoint's hyperparameters win (the restored optimizer state belongs to
+    them), so any drift from the spec is warned about.
 
     :param algo: A freshly-built algorithm, configured from its spec.
     :type algo: AlgoT
@@ -588,11 +583,9 @@ class LLMAlgorithmSpec(AlgorithmSpec):
     Extends :class:`AlgorithmSpec` with LLM-specific fields including LoRA
     configuration, model parameters, and training hyperparameters.
 
-    Subclasses must set the :attr:`env_type` class variable to indicate which
-    LLM env the algorithm requires: ``"rollout"`` for a
-    :class:`~agilerl.llm_envs.RolloutEnv`, or ``"dataset"`` for a
-    :class:`~agilerl.llm_envs.DatasetEnv` (which additionally sets
-    :attr:`objective` to ``"preference"`` or ``"sft"``).
+    Subclasses set :attr:`env_type` to ``"rollout"``
+    (:class:`~agilerl.llm_envs.RolloutEnv`) or ``"dataset"``
+    (:class:`~agilerl.llm_envs.DatasetEnv`, which also sets :attr:`objective`).
     """
 
     beta: float = Field(default=0.001, ge=0.0, le=1.0)

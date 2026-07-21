@@ -1063,12 +1063,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
     def load_weights(self, path: str) -> None:
         """Load only the network weights from a checkpoint.
 
-        The counterpart to :meth:`load_checkpoint`, for starting a *new* run from
-        a previous run's parameters (a warm start) rather than continuing an
-        interrupted one. Optimizer state, learning-rate schedule and training
-        progress are left at their freshly-constructed values, and the agent's
-        hyperparameters are untouched -- so whatever configured this agent stays
-        the authority on how it trains.
+        Warm-starts a new run from prior weights; optimizer, LR schedule,
+        training progress and hyperparameters are left untouched.
 
         :param path: Location to load checkpoint from
         :type path: string
@@ -1144,10 +1140,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
     def load_checkpoint(self, path: str) -> None:
         """Load saved agent properties and network weights from checkpoint.
 
-        Restores the full training state -- weights, optimizer, learning-rate
-        schedule and every saved hyperparameter -- so an interrupted run resumes
-        exactly where it stopped. Use :meth:`load_weights` to take only the
-        parameters into a new run.
+        Restores full training state (weights, optimizer, LR schedule,
+        hyperparameters) to resume a run; :meth:`load_weights` takes weights only.
 
         :param path: Location to load checkpoint from
         :type path: string
@@ -2629,10 +2623,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     ) -> np.ndarray:
         """Return fitness (test) score of the llm on the test sub-set.
 
-        Episodes run until the env reports itself done: ``RolloutEnv`` already
-        terminates or truncates every episode (at ``max_turns`` at the latest),
-        and a reset that is immediately done (an over-budget initial prompt)
-        contributes no turns.
+        Each episode runs until the env reports done (``max_turns`` at the latest).
 
         :param env: Tokenized rollout episode environment (single- or multi-turn).
         :type env: RolloutEnv
@@ -2828,10 +2819,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     ) -> None:
         """Load only the LoRA adapters (and value head) from a checkpoint directory.
 
-        The warm-start counterpart to :meth:`load_checkpoint`: nothing else about
-        the agent moves. Optimizer moments, the learning-rate schedule position
-        and training progress stay at their freshly-constructed values, and the
-        agent keeps every hyperparameter it was built with.
+        Warm-starts a new run from prior adapters; optimizer, LR schedule,
+        training progress and hyperparameters are left untouched.
 
         :param path: Directory containing a checkpoint written by
             :meth:`save_checkpoint`.
@@ -2864,9 +2853,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     def _load_full_model_actor(self, path: str, checkpoint: dict[str, Any]) -> None:
         """Load only the actor weights of a DeepSpeed full-model checkpoint.
 
-        ``save_checkpoint(lora_only=False, save_optimizer=False)`` gathers the
-        state dict into ``attributes.pt``; with ``save_optimizer=True`` the
-        module weights live in the ``save_checkpoint`` tag directory instead.
+        Weights come from ``attributes.pt`` when saved without optimizer state,
+        else from the ``save_checkpoint`` tag directory.
 
         :param path: Checkpoint directory written by :meth:`save_checkpoint`.
         :type path: str
@@ -2899,10 +2887,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     ) -> None:
         """Load adapter weights and algorithm state from a checkpoint directory.
 
-        Restores the full training state, so an interrupted run resumes where it
-        stopped: adapters, optimizer moments, the learning-rate schedule position
-        and every saved hyperparameter. Use :meth:`load_weights` to carry only the
-        adapters into a new run.
+        Restores full training state (adapters, optimizer, LR schedule,
+        hyperparameters) to resume a run; :meth:`load_weights` takes adapters only.
 
         Adapter roles restored on load:
 
@@ -3029,10 +3015,8 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
     ) -> None:
         """Restore LoRA adapter weights from a checkpoint directory.
 
-        Each adapter in :attr:`selected_adapters` is loaded from its own
-        subdirectory when the checkpoint has one. The checkpoint's LoRA config
-        must match the live algorithm's; a mismatch (e.g. a different rank)
-        raises ``ValueError``.
+        Each selected adapter is loaded from its own subdirectory; a LoRA-config
+        mismatch raises ``ValueError``.
 
         :param path: Checkpoint directory path.
         :type path: str

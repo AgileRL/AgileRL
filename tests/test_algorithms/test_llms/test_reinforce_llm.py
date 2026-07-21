@@ -1155,7 +1155,8 @@ class TestREINFORCETest:
     def test_test_method_token_observation_wrapper_branch(self):
         from transformers import AutoTokenizer
 
-        from agilerl.llm_envs import OpenEnvServer, RolloutEnv
+        from agilerl.llm_envs import RolloutEnv
+        from agilerl.llm_envs.openenv import OpenEnvServer
         from agilerl.utils.probe_envs_llm import ConstantTargetEnv
 
         tok = AutoTokenizer.from_pretrained(TINY_LLM_FIXTURE_PATH)

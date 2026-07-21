@@ -161,21 +161,21 @@ Lower-level pieces
 
 ``RolloutEnv`` builds on a few small pieces you can use directly if you need to:
 
-* :class:`LocalEnvClient <agilerl.llm_envs.LocalEnvClient>` — the in-process backend:
+* :class:`LocalEnvClient <agilerl.llm_envs.openenv.LocalEnvClient>` — the in-process backend:
   drives a local env's ``reset`` / ``step`` directly (no server, no socket). This is what
   :meth:`RolloutEnv.local` uses.
-* :class:`OpenEnvSessionClient <agilerl.llm_envs.OpenEnvSessionClient>` — the WebSocket
+* :class:`OpenEnvSessionClient <agilerl.llm_envs.openenv.OpenEnvSessionClient>` — the WebSocket
   backend: a synchronous client holding one ``/ws`` session against a server, which backs
   each session with its own env instance. (An async caller, e.g. a Ray actor, gets its
   concurrency from the actor boundary, not the client.)
-* :class:`OpenEnvServer <agilerl.llm_envs.OpenEnvServer>` — the building block for hosting
+* :class:`OpenEnvServer <agilerl.llm_envs.openenv.OpenEnvServer>` — the building block for hosting
   a local env *as a URL* (``start`` / ``stop``, or as a context manager) and reading its
   ``base_url``; a container, a Ray actor, or a script stands one up. Pass ``env`` for one
   shared env, or ``make_env`` with ``max_concurrent_envs`` for a fresh env per session.
 
 .. code-block:: python
 
-   from agilerl.llm_envs import OpenEnvSessionClient, OpenEnvServer
+   from agilerl.llm_envs.openenv import OpenEnvSessionClient, OpenEnvServer
 
    with OpenEnvServer(GuessEnv()) as server:
        client = OpenEnvSessionClient(server.base_url)

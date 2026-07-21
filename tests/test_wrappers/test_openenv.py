@@ -21,19 +21,19 @@ import websockets.exceptions
 from agilerl.llm_envs import (
     BatchPointer,
     BatchRolloutEnv,
+    RolloutEnv,
+)
+from agilerl.llm_envs import openenv as openenv_module
+from agilerl.llm_envs.openenv import (
     LocalEnvClient,
     OpenEnvServer,
     OpenEnvSessionClient,
     OpenEnvWrapper,
-    RolloutEnv,
-    resolve_env,
-)
-from agilerl.llm_envs import openenv as openenv_module
-from agilerl.llm_envs.openenv import (
     _name_from_spec,
     _normalize_reset,
     _normalize_step,
     _observation_text,
+    resolve_env,
 )
 from tests.helpers.rollout_doubles import MiniTokenizer
 

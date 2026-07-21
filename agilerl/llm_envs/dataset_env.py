@@ -1,10 +1,7 @@
 """Dataset-backed LLM env for SFT and DPO — one class, selected by ``objective``.
 
-A ``DatasetEnv`` serves batches of prompts and completions: the model is scored
-on its similarity to the dataset completions in a single forward pass (cross-entropy for SFT,
-chosen-vs-rejected preference for DPO), so no next-token generation is required. SFT and DPO differ
-only by the *required columns* and the *collate function*, so they share one class and
-are picked with the ``objective`` argument rather than separate subclasses.
+Scores the model on the dataset's own completions in a single forward pass (no
+generation): cross-entropy for SFT, chosen-vs-rejected preference for DPO.
 """
 
 from __future__ import annotations
@@ -33,23 +30,14 @@ if TYPE_CHECKING:
 class DatasetEnv:
     """Dataset-backed LLM env for SFT and DPO (no generation).
 
-    Serves batches straight from a labelled dataset: the model is scored on the
-    dataset's own completions in a single forward pass (cross-entropy for SFT,
-    chosen-vs-rejected preference for DPO) — no next-token generation. The two
-    objectives differ only by the *required columns* and the *collate function*,
-    selected with ``objective``:
+    Objectives differ only by required columns and collate function, via ``objective``;
+    ``reset`` advances the seeded ``DataLoader`` and there is no ``step``.
 
-    * ``objective="preference"`` (DPO) — requires ``prompt`` / ``chosen`` / ``rejected``.
-    * ``objective="sft"`` — requires ``prompt`` and ``response_column`` (default
-      ``"target"``).
-
-    ``reset`` advances the seeded ``DataLoader``; there is no ``step``, because
-    a teacher-forced batch is scored in one forward pass with no action to take.
+    * ``"preference"`` (DPO) — requires ``prompt`` / ``chosen`` / ``rejected``.
+    * ``"sft"`` — requires ``prompt`` and ``response_column`` (default ``"target"``).
 
     :ivar dataset_size: ``{"train": N, "test": M}`` row counts after filtering.
-    :vartype dataset_size: dict[str, int]
-    :ivar num_epochs: Number of full passes completed over the train split.
-    :vartype num_epochs: int
+    :ivar num_epochs: Full passes completed over the train split.
     """
 
     def __init__(
@@ -68,26 +56,16 @@ class DatasetEnv:
     ) -> None:
         """Build a dataset env for the selected ``objective``.
 
-        :param train_dataset: Training split containing prompt/label rows.
-        :type train_dataset: Dataset
+        :param train_dataset: Training split of prompt/label rows.
         :param test_dataset: Held-out split used under :meth:`eval_mode`.
-        :type test_dataset: Dataset
         :param tokenizer: Tokenizer used by the collate function.
-        :type tokenizer: AutoTokenizer
-        :param objective: Dataset objective: ``"preference"`` (DPO) or ``"sft"``.
-        :type objective: Literal["preference", "sft"]
+        :param objective: ``"preference"`` (DPO) or ``"sft"``.
         :param response_column: Target column for SFT rows.
-        :type response_column: str
-        :param data_batch_size_per_gpu: Batch size used by train/test dataloaders.
-        :type data_batch_size_per_gpu: int
+        :param data_batch_size_per_gpu: Batch size for the train/test dataloaders.
         :param accelerator: Optional accelerator used to prepare dataloaders.
-        :type accelerator: Accelerator | None
         :param max_context_length: Optional max prompt+completion token budget.
-        :type max_context_length: int | None
         :param min_completion_length: Minimum reserved completion token budget.
-        :type min_completion_length: int | None
-        :param seed: Random seed used for dataloader shuffling.
-        :type seed: int
+        :param seed: Seed for dataloader shuffling.
         """
         if objective == "preference":
             required_columns = {"prompt", "chosen", "rejected"}
@@ -163,27 +141,16 @@ class DatasetEnv:
     ) -> Callable[[list[dict[str, Any]]], dict[str, Any]]:
         """Build the row-collation callable for the current objective.
 
-        Collation reads the context budget from ``self.max_context_length``.
-
         :param tokenizer: Tokenizer used to encode prompts and labels.
-        :type tokenizer: AutoTokenizer
-        :return: Callable that maps raw dataset rows to a tensor batch dict.
-        :rtype: Callable[[list[dict[str, Any]]], dict[str, Any]]
+        :return: Callable mapping rows to a tensor batch dict.
         """
         return self._collate_builder(self, tokenizer)
 
     def reset(self, reset_dataloaders: bool = False) -> Any:
-        """Return the next batch, optionally rewinding dataloaders first.
-
-        ``reset`` is the sole data-advancing call, returning the next collated
-        batch from the active split. Calling it repeatedly walks the dataset --
-        this is the expected training pattern, mirroring how ``reset`` begins
-        each iteration for a ``RolloutEnv``.
+        """Return the next batch (walks the dataset), optionally rewinding dataloaders first.
 
         :param reset_dataloaders: Whether to rewind train/test iterators first.
-        :type reset_dataloaders: bool
         :return: Objective-specific collated batch from the active split.
-        :rtype: Any
         """
         if reset_dataloaders:
             self._reset_dataloaders()
@@ -207,9 +174,7 @@ class DatasetEnv:
     def eval_mode(self) -> Generator[None, None, None]:
         """Temporarily switch reads to the held-out split, restoring the prior mode.
 
-        Restores whatever mode was active on entry (save/set/restore), so nested
-        evaluation probes don't flip an outer eval context back to the train
-        split.
+        Saves/restores the entry mode so nested probes don't flip an outer eval context.
         """
         previous_mode = self.evaluation_mode
         self.dataloader = self.test_dataloader_iter
@@ -218,8 +183,7 @@ class DatasetEnv:
             yield
         finally:
             self.evaluation_mode = previous_mode
-            # Repoint at the live iterator for the restored mode (an inner reset
-            # may have rebuilt either iterator, so don't restore a stale object).
+            # Repoint at the live iterator; an inner reset may have rebuilt it.
             self.dataloader = (
                 self.test_dataloader_iter
                 if previous_mode
@@ -251,11 +215,7 @@ class DatasetEnv:
         dataset: Dataset,
         dataset_type: str | None = None,
     ) -> Dataset:
-        """Drop rows whose tokenized prompt would exceed the context budget.
-
-        The filter keeps rows where ``prompt_len <= max_context_length -
-        min_completion_length`` and warns when any rows are removed.
-        """
+        """Drop rows where ``prompt_len > max_context_length - min_completion_length``; warns if any."""
         dataset_type = "dataset" if dataset_type is None else dataset_type
         if self.max_context_length is None or not isinstance(
             dataset[0]["prompt"],

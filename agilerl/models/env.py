@@ -588,8 +588,7 @@ class LLMEnvSpec(BaseModel):
         dataset rows plus a reward function, a GEM environment (``env_name``), or
         a custom callable resolved from ``entrypoint``.
 
-        For an env-backed rollout, if :attr:`max_turns` is ``None`` it is probed
-        from a temporary environment instance and stored back on the spec.
+        For an env-backed rollout, an unset :attr:`max_turns` is probed and cached.
 
         :param tokenizer: The tokenizer (shared across all instances).
         :type tokenizer: Any

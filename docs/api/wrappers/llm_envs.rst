@@ -6,15 +6,15 @@ Every LLM-training environment is reached through the `OpenEnv
 backs an env — a prompt dataset, plain Python functions, an imported gem / AxonRL env, or
 a sandboxed VM — a :class:`~agilerl.llm_envs.RolloutEnv` drives it through a **backend**,
 in one of two transports: **in-process** (a
-:class:`~agilerl.llm_envs.LocalEnvClient` — no server, no sockets) or **remote** (an
+:class:`~agilerl.llm_envs.openenv.LocalEnvClient` — no server, no sockets) or **remote** (an
 OpenEnv server reached over a URL by an
-:class:`~agilerl.llm_envs.OpenEnvSessionClient`). :class:`~agilerl.llm_envs.OpenEnvServer`
+:class:`~agilerl.llm_envs.openenv.OpenEnvSessionClient`). :class:`~agilerl.llm_envs.openenv.OpenEnvServer`
 is the building block for hosting a local env *as a URL* — a container, a Ray actor, or a
 script stands one up and then points a :class:`~agilerl.llm_envs.RolloutEnv` at its
 address. A server wraps each env in an
-:class:`~agilerl.llm_envs.OpenEnvWrapper`, and a standard text contract —
-:class:`~agilerl.llm_envs.TextAction` (``message``) and
-:class:`~agilerl.llm_envs.TextObservation` (``prompt``) — carries the model's text both
+:class:`~agilerl.llm_envs.openenv.OpenEnvWrapper`, and a standard text contract —
+:class:`~agilerl.llm_envs.openenv.TextAction` (``message``) and
+:class:`~agilerl.llm_envs.openenv.TextObservation` (``prompt``) — carries the model's text both
 ways, so there are no per-env codecs. See :ref:`llm_environments` for a guide.
 
 * :class:`~agilerl.llm_envs.RolloutEnv` — the token-level rollout env: it owns
@@ -29,13 +29,13 @@ ways, so there are no per-env codecs. See :ref:`llm_environments` for a guide.
   (per-epoch shuffle + GRPO group pinning).
 * :class:`~agilerl.llm_envs.DatasetEnv` — the teacher-forced supervised fine-tuning and
   preference-optimization regimes.
-* :class:`~agilerl.llm_envs.LocalEnvClient` (in-process) and
-  :class:`~agilerl.llm_envs.OpenEnvSessionClient` (one WebSocket session against a hosted
+* :class:`~agilerl.llm_envs.openenv.LocalEnvClient` (in-process) and
+  :class:`~agilerl.llm_envs.openenv.OpenEnvSessionClient` (one WebSocket session against a hosted
   server) are the backends a ``RolloutEnv`` drives;
-  :class:`~agilerl.llm_envs.OpenEnvServer` hosts a local env over HTTP — one shared env,
+  :class:`~agilerl.llm_envs.openenv.OpenEnvServer` hosts a local env over HTTP — one shared env,
   or a fresh env per session via ``make_env`` / ``max_concurrent_envs``;
-  :func:`~agilerl.llm_envs.resolve_env` resolves a spec to a ``(url, server)`` (hosting an
-  entrypoint), and :func:`~agilerl.llm_envs.load_env` just builds an entrypoint env (no
+  :func:`~agilerl.llm_envs.openenv.resolve_env` resolves a spec to a ``(url, server)`` (hosting an
+  entrypoint), and :func:`~agilerl.llm_envs.openenv.load_env` just builds an entrypoint env (no
   hosting) for the in-process path.
 
 :func:`~agilerl.utils.llm_utils.apply_chat_template` lives in
@@ -43,11 +43,11 @@ ways, so there are no per-env codecs. See :ref:`llm_environments` for a guide.
 
 To drive a *real external* OpenEnv server (e.g. an env on the HuggingFace Hub), point
 :class:`~agilerl.llm_envs.RolloutEnv` at its URL; each rollout opens its own ``/ws``
-session via :class:`~agilerl.llm_envs.OpenEnvSessionClient` and the server backs it with
+session via :class:`~agilerl.llm_envs.openenv.OpenEnvSessionClient` and the server backs it with
 a fresh env instance, so the server's ``max_concurrent_envs`` must cover ``batch_size *
 group_size`` sessions plus one for the lazily built eval env. If that server exposes an
 MCP tool, pass ``mcp_tool=`` to :class:`~agilerl.llm_envs.RolloutEnv` /
-:class:`~agilerl.llm_envs.OpenEnvSessionClient` to make the tool available during
+:class:`~agilerl.llm_envs.openenv.OpenEnvSessionClient` to make the tool available during
 rollouts. In a run manifest, ``request_timeout_s`` bounds each message at 300 seconds by
 default; ``0`` disables the bound.
 
@@ -57,7 +57,7 @@ created once and reused for the whole run. For batched training,
 group_size`` times — once per slot — so the count is determined by the batch, at the
 training layer. A local env factory (``lambda: RolloutEnv.local(make_env(), tok)``) runs
 each in-process. To run against a hosted service instead, stand up an
-:class:`~agilerl.llm_envs.OpenEnvServer` (with ``make_env`` / ``max_concurrent_envs`` so
+:class:`~agilerl.llm_envs.openenv.OpenEnvServer` (with ``make_env`` / ``max_concurrent_envs`` so
 it backs each session with a fresh env instance) and point a factory at its URL
 (``lambda: RolloutEnv(server.base_url, tok, max_turns=...)``); the server's
 ``max_concurrent_envs`` must cover ``batch_size * group_size`` sessions plus one for the
@@ -67,11 +67,11 @@ lazily built eval env.
 .. autoclass:: agilerl.llm_envs.BatchRolloutEnv
 .. autoclass:: agilerl.llm_envs.BatchPointer
 .. autoclass:: agilerl.llm_envs.DatasetEnv
-.. autoclass:: agilerl.llm_envs.OpenEnvWrapper
-.. autoclass:: agilerl.llm_envs.TextAction
-.. autoclass:: agilerl.llm_envs.TextObservation
-.. autoclass:: agilerl.llm_envs.OpenEnvServer
-.. autoclass:: agilerl.llm_envs.OpenEnvSessionClient
-.. autoclass:: agilerl.llm_envs.LocalEnvClient
-.. autofunction:: agilerl.llm_envs.resolve_env
-.. autofunction:: agilerl.llm_envs.load_env
+.. autoclass:: agilerl.llm_envs.openenv.OpenEnvWrapper
+.. autoclass:: agilerl.llm_envs.openenv.TextAction
+.. autoclass:: agilerl.llm_envs.openenv.TextObservation
+.. autoclass:: agilerl.llm_envs.openenv.OpenEnvServer
+.. autoclass:: agilerl.llm_envs.openenv.OpenEnvSessionClient
+.. autoclass:: agilerl.llm_envs.openenv.LocalEnvClient
+.. autofunction:: agilerl.llm_envs.openenv.resolve_env
+.. autofunction:: agilerl.llm_envs.openenv.load_env
