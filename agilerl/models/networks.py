@@ -73,7 +73,7 @@ def network_arch_is_resolvable(network: dict) -> bool:
     return isinstance(encoder_config, dict) and bool(encoder_config.get("arch"))
 
 
-def normalize_manifest_network(data: Any) -> Any:
+def normalize_manifest_network(data: Any) -> Any:  # noqa: ANN401 -- raw manifest network section normalized before pydantic validation
     """Move a top-level ``arch`` key into ``encoder_config.arch`` when present.
 
     Raw YAML/JSON manifests place ``arch`` at the network section root, but
@@ -492,7 +492,7 @@ class FinetuningNetworkSpec(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _coerce_peft_lora(cls, data: Any) -> Any:
+    def _coerce_peft_lora(cls, data: Any) -> Any:  # noqa: ANN401 -- pydantic before-validator receives raw input
         """Accept a peft ``LoraConfig`` instance and convert it to a dict
         that Pydantic can validate as :class:`LoraConfigDict`.
         """
@@ -519,7 +519,9 @@ class FinetuningNetworkSpec(BaseModel):
         return self
 
     @field_serializer("lora_config")
-    def _serialize_lora_config(self, value: Any, info: SerializationInfo) -> Any:
+    def _serialize_lora_config(
+        self, value: LoraConfigDict | LoraConfig | None, info: SerializationInfo
+    ) -> Any:  # noqa: ANN401 -- field serializer returns a JSON-safe blob
         if info.mode != "json":
             return value
         if value is None:

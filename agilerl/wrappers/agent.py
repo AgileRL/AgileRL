@@ -97,7 +97,7 @@ class AgentWrapper(ABC, Generic[AgentType]):
         self.agent.get_action = partial(self.get_action)
         self.agent.learn = partial(self.learn)
 
-    def __getattr__(self, name: str) -> Any:
+    def __getattr__(self, name: str) -> Any:  # noqa: ANN401 -- proxies arbitrary attributes from the wrapped agent
         """Get attribute of the wrapper.
 
         :param name: The name of the attribute.
@@ -110,7 +110,7 @@ class AgentWrapper(ABC, Generic[AgentType]):
         except AttributeError:
             return getattr(self.agent, name)
 
-    def __setattr__(self, name: str, value: Any | AgentType) -> None:
+    def __setattr__(self, name: str, value: object) -> None:
         if name == "agent" or not hasattr(self, "agent"):
             super().__setattr__(name, value)
         if hasattr(self.agent, name):
@@ -204,7 +204,7 @@ class AgentWrapper(ABC, Generic[AgentType]):
         obs: ObservationType | MARLObservationType,
         *args: Any,
         **kwargs: Any,
-    ) -> Any:
+    ) -> Any:  # noqa: ANN401 -- action type varies across wrapped algorithms
         """Return the action from the agent.
 
         :param obs: Observation from the environment
@@ -221,7 +221,7 @@ class AgentWrapper(ABC, Generic[AgentType]):
 
     def learn(
         self, experiences: ExperiencesType | None = None, *args: Any, **kwargs: Any
-    ) -> Any:
+    ) -> Any:  # noqa: ANN401 -- learn return varies across wrapped algorithms (loss dict, etc.)
         """Learns from the experiences.
 
         :param experiences: Experiences from the environment
@@ -457,7 +457,7 @@ class RSNorm(AgentWrapper[AgentType]):
         obs: ObservationType | MARLObservationType,
         *args: Any,
         **kwargs: Any,
-    ) -> Any:
+    ) -> Any:  # noqa: ANN401 -- action type varies across wrapped algorithms
         """Return the action from the agent after normalizing the observation.
 
         :param obs: Observation from the environment
@@ -480,7 +480,7 @@ class RSNorm(AgentWrapper[AgentType]):
         experiences: TensorDictBase | None = None,
         *args: Any,
         **kwargs: Any,
-    ) -> Any:
+    ) -> Any:  # noqa: ANN401 -- learn return varies across wrapped algorithms (loss dict, etc.)
         """Learns from the experiences after normalizing the observations.
 
         :param experiences: Experiences from the environment
@@ -621,7 +621,7 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
 
         return inactive_agents, obs
 
-    def stack_experiences(self, experiences: Any) -> Any:
+    def stack_experiences(self, experiences: Any) -> Any:  # noqa: ANN401 -- arbitrarily nested runtime container (per-agent dicts/lists/arrays), preserved as-is
         """Stacks the experiences, preserving the structure of the container.
 
         Async experiences arrive as arbitrarily nested containers (per-agent dicts of
@@ -827,7 +827,7 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
 
         return action_return
 
-    def learn(self, experiences: ExperiencesType, *args: Any, **kwargs: Any) -> Any:
+    def learn(self, experiences: ExperiencesType, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401 -- learn return varies across wrapped algorithms (loss dict, etc.)
         """Learns from the collected experiences.
 
         :param experiences: Experiences from the environment

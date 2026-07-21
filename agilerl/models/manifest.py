@@ -109,7 +109,7 @@ def _coerce_environment(data: dict[str, Any] | BaseModel) -> dict[str, Any]:
     raise TypeError(msg)
 
 
-def _resolve_network(data: Any) -> dict[str, Any]:
+def _resolve_network(data: dict[str, Any] | BaseModel) -> dict[str, Any]:
     """Normalise the network section to a validated dict with all defaults filled in.
 
     Raw dicts are validated through :class:`NetworkSpec` so that default values
@@ -117,7 +117,7 @@ def _resolve_network(data: Any) -> dict[str, Any]:
     are included in the serialized output.
 
     :param data: Network config dict or spec instance.
-    :type data: Any
+    :type data: dict[str, Any] | BaseModel
     :returns: A plain dictionary suitable for manifest storage.
     :rtype: dict[str, Any]
     """
@@ -346,7 +346,7 @@ class TrainingManifest(BaseModel):
         return self
 
     @staticmethod
-    def _network_from_algorithm(algorithm: AlgoSpec) -> Any | None:
+    def _network_from_algorithm(algorithm: AlgoSpec) -> Any | None:  # noqa: ANN401 -- value coerced to a dict by the network field's BeforeValidator
         """Resolve the manifest ``network`` section from an algorithm spec."""
         if isinstance(algorithm, LLMAlgorithmSpec):
             return FinetuningNetworkSpec.model_validate(
@@ -389,7 +389,7 @@ class TrainingManifest(BaseModel):
         :rtype: TrainingManifest
         """
 
-        def _coerce(value: Any, core_cls: type) -> Any:
+        def _coerce(value: BaseModel | None, core_cls: type) -> Any:  # noqa: ANN401 -- returns a dict or spec for a field whose BeforeValidator accepts foreign specs
             """Dump foreign BaseModel inputs (e.g. arena specs) to plain dicts."""
             if value is None or isinstance(value, core_cls):
                 return value

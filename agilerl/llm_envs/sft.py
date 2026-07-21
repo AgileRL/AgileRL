@@ -93,7 +93,7 @@ class SFTGym(IterablePromptBatchGym):
         self,
         tokenizer: PreTrainedTokenizerBase,
         max_context_length: int | None = None,
-    ) -> Any:
+    ) -> Any:  # noqa: ANN401 -- collate returns SFTPrompts TypedDict, not the base's dict[str, Any] callable
         """Build a collate function that tokenises ``(prompt, response)`` pairs.
 
         :param tokenizer: The tokenizer.

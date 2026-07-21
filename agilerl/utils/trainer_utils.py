@@ -8,13 +8,6 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from accelerate import Accelerator
 
-from agilerl import HAS_LLM_DEPENDENCIES
-
-if HAS_LLM_DEPENDENCIES:
-    from transformers import AutoTokenizer
-else:
-    AutoTokenizer = None
-
 from agilerl.algorithms.core.base import (
     LLMAlgorithm,
     MultiAgentRLAlgorithm,
@@ -42,6 +35,7 @@ from agilerl.wrappers.learning import BanditEnv
 if TYPE_CHECKING:
     import torch
     from gymnasium import spaces
+    from transformers import PreTrainedTokenizerBase
 
     from agilerl.typing import SupportedActionSpace, SupportedObservationSpace
 
@@ -155,7 +149,7 @@ def create_population_from_spec(
     device: str | torch.device = "cpu",
     resume_from_checkpoint: str | None = None,
     accelerator: Accelerator | None = None,
-    tokenizer: AutoTokenizer | None = None,
+    tokenizer: PreTrainedTokenizerBase | None = None,
 ) -> PopulationT:
     """Instantiate a population of agents from an algorithm spec.
 
@@ -176,7 +170,7 @@ def create_population_from_spec(
     :param accelerator: Accelerator instance.
     :type accelerator: Accelerator | None
     :param tokenizer: Pre-loaded HuggingFace tokenizer for LLM algorithms.
-    :type tokenizer: AutoTokenizer | None
+    :type tokenizer: PreTrainedTokenizerBase | None
     :returns: A list of algorithm instances.
     :rtype: PopulationT
     """

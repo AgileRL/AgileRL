@@ -99,7 +99,7 @@ class PettingZooAutoResetParallelWrapper(ParallelEnv[AgentID, ObsType, ActionTyp
         return self.env.unwrapped
 
     @property
-    def state(self) -> Any:
+    def state(self) -> Any:  # noqa: ANN401 -- wrapped env exposes state as either a method or an observations attribute
         """Return the state of the wrapped environment.
 
         PettingZoo declares ``state`` as a method on ``ParallelEnv``, but many

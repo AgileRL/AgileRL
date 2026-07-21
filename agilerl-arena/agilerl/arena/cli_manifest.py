@@ -218,7 +218,7 @@ def _manifest_spec_to_click_option(spec: ManifestParamSpec) -> Callable[[Any], A
     return _typed_option(spec)
 
 
-def _parse_json_cli_value(raw: str) -> Any:
+def _parse_json_cli_value(raw: str) -> Any:  # noqa: ANN401 -- decoded JSON is a heterogeneous value
     """Parse a JSON CLI value, or load JSON from a file when prefixed with ``@``.
 
     :param raw: The raw option string; a leading ``@`` reads JSON from that path.

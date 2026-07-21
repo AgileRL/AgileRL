@@ -13,6 +13,7 @@ from agilerl import HAS_LLM_DEPENDENCIES, AgentType
 if TYPE_CHECKING:
     import torch
     from accelerate import Accelerator
+    from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
     from agilerl.algorithms.core import (
         LLMAlgorithm,
@@ -531,17 +532,17 @@ class LLMAlgorithmSpec(AlgorithmSpec):
 
     def build_algorithm(
         self,
-        tokenizer: Any | None = None,
+        tokenizer: PreTrainedTokenizerBase | None = None,
         index: int = 0,
         resume_from_checkpoint: str | None = None,
         accelerator: Accelerator | None = None,
         device: str | torch.device = "cpu",
-        actor_network: Any | None = None,
+        actor_network: Any | None = None,  # noqa: ANN401 -- actor network type varies (PEFT/HF models, evolvable modules, user-provided)
     ) -> LLMAlgorithm:
         """Build an LLM algorithm instance from spec fields.
 
         :param tokenizer: A HuggingFace ``AutoTokenizer`` instance.
-        :type tokenizer: Any | None
+        :type tokenizer: PreTrainedTokenizerBase | None
         :param index: Index of the algorithm in the population.
         :type index: int
         :param resume_from_checkpoint: Path to resume from checkpoint.

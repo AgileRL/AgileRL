@@ -102,7 +102,7 @@ class DummyVecEnv:
             info,
         )
 
-    def render(self) -> Any:
+    def render(self) -> Any:  # noqa: ANN401 -- render output is env-defined (RGB arrays, ansi strings, or None)
         """Render the environment.
 
         :returns: Render output from the wrapped environment.
@@ -114,7 +114,7 @@ class DummyVecEnv:
         """Close the wrapped environment."""
         self._env.close()
 
-    def __getattr__(self, name: str) -> Any:
+    def __getattr__(self, name: str) -> Any:  # noqa: ANN401 -- forwards arbitrary attributes from the wrapped env
         """Forward attribute access to the wrapped environment."""
         return getattr(self._env, name)
 
@@ -123,7 +123,7 @@ def _pz_placeholder(
     agent: str,
     name: str,
     obs_spaces: dict[str, spaces.Space],
-) -> Any:
+) -> Any:  # noqa: ANN401 -- placeholder is heterogeneous (float, info dict, or zero obs array)
     """Return a NaN/zero placeholder for an inactive PettingZoo agent.
 
     Mirrors the convention used by :class:`AsyncPettingZooVecEnv`.
@@ -313,7 +313,7 @@ class PzDummyVecEnv(PettingZooVecEnv):
         msg = "step_async() must be called before step_wait()"
         raise RuntimeError(msg)
 
-    def render(self) -> Any:
+    def render(self) -> Any:  # noqa: ANN401 -- render output is env-defined (RGB arrays, ansi strings, or None)
         """Render the underlying environment.
 
         :returns: Render output from the wrapped environment.

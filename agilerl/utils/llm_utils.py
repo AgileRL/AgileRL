@@ -8,10 +8,10 @@ import re
 import shutil
 import textwrap
 import warnings
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Iterable
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
@@ -19,7 +19,15 @@ from accelerate import Accelerator
 from torch import nn
 
 from agilerl import HAS_DEEPSPEED, HAS_LLM_DEPENDENCIES
-from agilerl.typing import ReasoningPrompts
+from agilerl.typing import PopulationType, ReasoningPrompts
+
+if TYPE_CHECKING:
+    from accelerate.utils import DeepSpeedPlugin
+    from peft import LoraConfig, PeftModel
+    from torch.nn.attention.flex_attention import BlockMask
+
+    from agilerl.algorithms.core.base import LLMAlgorithm
+    from agilerl.utils.algo_utils import VLLMConfig
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +58,7 @@ _BNB_QUANT_PRESETS = frozenset({"none", "int8", "nf4"})
 _CLIPPABLE_LINEAR_WRAPPER_SUFFIX = "ClippableLinear"
 
 
-def __getattr__(name: str) -> Any:
+def __getattr__(name: str) -> Any:  # noqa: ANN401 -- lazy module re-export resolves attributes dynamically
     """Lazy re-exports from ``llm_envs`` with a deprecation warning."""
     if name in _DEPRECATED_LLM_ENV_NAMES:
         warnings.warn(
@@ -191,7 +199,7 @@ def gather_tensor(
     return accelerator.gather(tensor)
 
 
-def needs_cross_rank_seq_padding(algo: Any, *, world_size: int) -> bool:
+def needs_cross_rank_seq_padding(algo: object, *, world_size: int) -> bool:
     """Return whether ranks must sync completion seq lengths before ``learn()``.
 
     Multi-rank Liger token-level losses chunk over ``B * (T - 1)`` and issue one
@@ -280,9 +288,9 @@ def pad_completion_batch_to_seq_len(
 
 
 def align_completion_batch_shapes_across_ranks(
-    completion_ids: Any,
-    action_masks: Any,
-    rewards: Any,
+    completion_ids: Any,  # noqa: ANN401 -- cross-rank batch of variable-length sequences; element type varies by paradigm
+    action_masks: Any,  # noqa: ANN401 -- see completion_ids
+    rewards: Any,  # noqa: ANN401 -- see completion_ids
     *,
     pad_token_id: int,
     accelerator: Accelerator,
@@ -648,9 +656,11 @@ def _normalize_projection_leaf_name(name: str) -> str:
 
 
 def _projection_names_for_clippable_lora(
-    model: nn.Module, raw_targets: str | list[str]
+    model: nn.Module, raw_targets: str | Iterable[str] | None
 ) -> list[str] | None:
     """Resolve projection leaf names, or ``None`` if ``raw_targets`` is already regex."""
+    if raw_targets is None:
+        return None
     raw_list = [raw_targets] if isinstance(raw_targets, str) else list(raw_targets)
     if any(_looks_like_peft_target_regex(t) for t in raw_list):
         return None
@@ -686,8 +696,8 @@ def _infer_clippable_lora_scope(model: nn.Module) -> str | None:
 
 
 def _clone_lora_config_with_targets(
-    lora_config: Any, target_modules: str | list[str]
-) -> Any:
+    lora_config: LoraConfig, target_modules: str | list[str]
+) -> LoraConfig:
     """Return a new ``LoraConfig`` with updated ``target_modules``."""
     if hasattr(lora_config, "to_dict"):
         cfg_dict = lora_config.to_dict()
@@ -716,10 +726,10 @@ def _example_module_keys_for_lora_scope(
 
 def adapt_lora_config_for_model(
     model: nn.Module,
-    lora_config: Any,
+    lora_config: LoraConfig,
     *,
     lora_target_scope: str | None = None,
-) -> Any:
+) -> LoraConfig:
     r"""Rewrite ``LoraConfig.target_modules`` for PEFT (regex or suffix list).
 
     For *ClippableLinear* models (Gemma 4 vision/audio), short names like ``q_proj``
@@ -985,7 +995,7 @@ def patch_flex_attention_kernel_options(options: dict[str, Any] | None = None) -
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        attention_mask: Any,
+        attention_mask: torch.Tensor | BlockMask,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         kwargs.setdefault("kernel_options", opts)
@@ -1401,7 +1411,7 @@ def clipped_is_surrogate(
 
 def create_llm_accelerator(
     *,
-    deepspeed_plugin: Any | None = None,
+    deepspeed_plugin: DeepSpeedPlugin | None = None,
 ) -> Accelerator | None:
     """Create an :class:`Accelerator` for LLM training with DeepSpeed.
 
@@ -1421,7 +1431,7 @@ def create_llm_accelerator(
     :param deepspeed_plugin: Explicit DeepSpeed plugin instance. If
         omitted, this function expects a launch-configured plugin to be
         present in ``Accelerator.state``.
-    :type deepspeed_plugin: Any | None
+    :type deepspeed_plugin: DeepSpeedPlugin | None
     :return: A configured ``Accelerator``, or ``None`` when no GPU is
         available.
     """
@@ -1485,7 +1495,7 @@ def cuda_tensor_bytes_in_module(module: torch.nn.Module) -> int:
     return total
 
 
-def collect_trainable_param_stats(pop: Any) -> dict[str, Any]:
+def collect_trainable_param_stats(pop: PopulationType) -> dict[str, Any]:
     """Best-effort LoRA / trainable-param accounting for a population's first agent.
 
     Recorded once at init so runs can be correlated against LoRA size.
@@ -1797,7 +1807,9 @@ def align_deepspeed_lr(lr: float, accelerator: Accelerator | None) -> float:
 
 
 def sample_eval_prompts(
-    env: Any, n: int = 5, seed: int = 0
+    env: Any,  # noqa: ANN401 -- gym env duck-typed across SFT/Preference/other gyms
+    n: int = 5,
+    seed: int = 0,
 ) -> list[tuple[str, str | None, str | None]]:
     """Randomly sample *n* ``(prompt, chosen, rejected)`` triples from
     *env*'s held-out test dataset.
@@ -1842,8 +1854,8 @@ def sample_eval_prompts(
 
 
 def compare_responses(
-    agent: Any,
-    tokenizer: Any,
+    agent: LLMAlgorithm,
+    tokenizer: Any,  # noqa: ANN401 -- HuggingFace tokenizer (untyped third-party)
     samples: list[tuple[str, str | None, str | None]],
     max_new_tokens: int = 200,
     temperature: float = 1.0,
@@ -2014,7 +2026,7 @@ def resolve_vllm_max_num_batched_tokens(
 
 
 def build_vllm_llm_init_kwargs(
-    vllm_config: Any,
+    vllm_config: VLLMConfig,
     *,
     trainer_model_name_or_path: str,
     max_model_len: int,
@@ -2073,7 +2085,7 @@ def build_vllm_rollout_lora_request(
     load_inplace: bool = False,
     lora_name: str = "actor",
     lora_int_id: int = 1,
-) -> Any:
+) -> Any:  # noqa: ANN401 -- returns vllm.LoRARequest (optional Linux-only dependency)
     """Build a vLLM :class:`~vllm.lora.request.LoRARequest` for rollout."""
     from vllm.lora.request import LoRARequest
 
@@ -2120,7 +2132,7 @@ def filter_peft_state_dict_for_vllm_lora(
     return filtered
 
 
-def _json_safe_value(obj: Any) -> Any:
+def _json_safe_value(obj: object) -> Any:  # noqa: ANN401 -- recursively coerces heterogeneous config values into a JSON-safe structure
     """Recursively convert PEFT config values to JSON-serializable types."""
     if obj is None or isinstance(obj, (str, int, float, bool)):
         return obj
@@ -2134,7 +2146,7 @@ def _json_safe_value(obj: Any) -> Any:
 
 
 def save_peft_adapter_for_vllm_rollout(
-    peft_model: Any,
+    peft_model: PeftModel,
     staging_dir: Path | str,
     adapter_name: str,
     *,

@@ -249,7 +249,7 @@ class PPO(LLMAlgorithm):
         pad_token_id: int,
         pad_token: str,
         model_name: str | None = None,
-        actor_network: Any | None = None,
+        actor_network: PreTrainedModelProtocol | None = None,
         model_config: dict[str, Any] | None = None,
         hp_config: HyperparameterConfig | None = None,
         index: int = 0,
@@ -817,7 +817,7 @@ class PPO(LLMAlgorithm):
         # they bypass the per-update averaging above.
         result.update(is_metrics)
 
-        # Wire averaged metrics into the metrics tracker (new API).
+        # Wire averaged metrics into the metrics tracker.
         completion_list = cast("list[torch.Tensor]", experiences[0])
         completion_length = np.mean([c.shape[-1] for c in completion_list])
         agg = aggregate_metrics_dict(
@@ -917,7 +917,7 @@ class PPO(LLMAlgorithm):
         lr: float,
         clip_coef: float,
         update_epochs: int,
-        actor_network: Any | None,
+        actor_network: PreTrainedModelProtocol | None,
         clone: bool,
     ) -> None:
         """Validate the core training arguments."""

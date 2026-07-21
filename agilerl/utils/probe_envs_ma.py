@@ -8,6 +8,7 @@ from torch import nn
 from tqdm import trange
 
 from agilerl.components.data import MultiAgentTransition
+from agilerl.components.replay_buffer import ReplayBuffer
 
 if TYPE_CHECKING:
     from tensordict import TensorDictBase
@@ -1870,10 +1871,10 @@ def prepare_ma_actions(
 
 
 def check_policy_q_learning_with_probe_env(
-    env: Any,
+    env: Any,  # noqa: ANN401 -- multi-agent probe envs share no base class
     algo_class: type[Any],
     algo_args: dict[str, Any],
-    memory: Any,
+    memory: ReplayBuffer,
     learn_steps: int = 1000,
     device: str = "cpu",
 ) -> None:
@@ -1961,7 +1962,7 @@ def check_policy_q_learning_with_probe_env(
 
 
 def check_on_policy_learning_with_probe_env(
-    env: Any,
+    env: Any,  # noqa: ANN401 -- multi-agent probe envs share no base class
     algo_class: type[Any],
     algo_args: dict[str, Any],
     learn_steps: int = 1000,

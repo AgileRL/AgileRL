@@ -3,11 +3,12 @@ import sys
 import time
 import traceback
 from collections import OrderedDict, defaultdict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import suppress
 from copy import deepcopy
 from enum import Enum
 from multiprocessing.connection import Connection
+from multiprocessing.context import BaseContext
 from multiprocessing.sharedctypes import SynchronizedArray
 from typing import Any, Literal, TypeAlias, TypeVar
 
@@ -41,7 +42,7 @@ def reshape_observation(
     raw_data: NumpyObsType,
     space: spaces.Space,
     num_envs: int,
-) -> Any:
+) -> Any:  # noqa: ANN401 -- reshaped obs mirrors arbitrarily nested Dict/Tuple spaces (deeper than NumpyObsType expresses)
     """Reshape the raw data to the correct shape for the observation space.
 
     :param raw_data: The raw data to reshape
@@ -372,11 +373,11 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
             infos,
         )
 
-    def render(self) -> Any:
+    def render(self) -> tuple[Any, ...]:
         """Return the rendered frames from the parallel environments."""
         return self.call("render")
 
-    def call(self, name: str, *args: Any, **kwargs: Any) -> Any:
+    def call(self, name: str, *args: Any, **kwargs: Any) -> tuple[Any, ...]:
         """Call a method from each parallel environment with args and kwargs.
 
         :param name: Name of the method or property to call
@@ -412,7 +413,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
 
         self._state = AsyncState.WAITING_CALL
 
-    def call_wait(self, timeout: float | None = None) -> Any:
+    def call_wait(self, timeout: float | None = None) -> tuple[Any, ...]:
         """Call all parent pipes and waits for the results.
 
         :param timeout: Number of seconds before the call to :meth:`call_wait` times out. If ``None`` (default),
@@ -441,7 +442,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         self._state = AsyncState.DEFAULT
         return results
 
-    def get_attr(self, name: str) -> Any:
+    def get_attr(self, name: str) -> tuple[Any, ...]:
         """Get a property from each parallel environment.
 
         :param name: Name of property to get from each individual environment
@@ -449,7 +450,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         """
         return self.call(name)
 
-    def set_attr(self, name: str, values: Any) -> None:
+    def set_attr(self, name: str, values: object) -> None:
         """Set an attribute of the sub-environments.
 
         :param name: Name of the property to be set in each individual environment.
@@ -723,22 +724,22 @@ class Observations:
     def __len__(self) -> int:
         return len(self.agents)
 
-    def __iterate_kv(self) -> Any:
+    def __iterate_kv(self) -> Iterator[tuple[str, NumpyObsType]]:
         for key in self.obs_view:
             yield (key, self.__getitem__(key))
 
-    def __iter__(self) -> Any:
+    def __iter__(self) -> Iterator[tuple[str, NumpyObsType]]:
         return self.__iterate_kv()
 
-    def keys(self) -> Any:
+    def keys(self) -> Iterator[str]:
         for k, _ in self.__iterate_kv():
             yield k
 
-    def values(self) -> Any:
+    def values(self) -> Iterator[NumpyObsType]:
         for _, v in self.__iterate_kv():
             yield v
 
-    def items(self) -> Any:
+    def items(self) -> Iterator[tuple[str, NumpyObsType]]:
         return self.__iterate_kv()
 
     def get(self, key: str) -> NumpyObsType | None:
@@ -751,7 +752,7 @@ class Observations:
 def _create_memory_array(
     num_envs: int,
     obs_space: spaces.Space,
-    context: Any,
+    context: BaseContext,
 ) -> SharedMemoryArray:
     """Create a shared memory array for a given observation space.
 
@@ -772,7 +773,7 @@ def _create_memory_array(
 def create_shared_memory(
     num_envs: int,
     obs_spaces: dict[str, spaces.Space],
-    context: Any,
+    context: BaseContext,
 ) -> dict[str, SharedMemoryType]:
     """Create shared memory for multi-agent observations.
 
@@ -806,7 +807,7 @@ def get_placeholder_value(
     agent: str,
     transition_name: str,
     obs_spaces: dict[str, spaces.Space] | None = None,
-) -> Any:
+) -> NumpyObsType | float | None:
     """Obtain a placeholder value to return for associated experience when an
     agent is killed or is inactive for the current step.
 
@@ -834,12 +835,9 @@ def get_placeholder_value(
 
         agent_space = obs_spaces[agent]
         if isinstance(agent_space, spaces.Dict):
-            # For Dict spaces, create a dictionary of -1 arrays
             return {k: np.full(v.shape or (), np.nan) for k, v in agent_space.items()}
         if isinstance(agent_space, spaces.Tuple):
-            # For Tuple spaces, create a tuple of -1 arrays
             return tuple(np.full(s.shape, np.nan) for s in agent_space)
-        # For normal spaces
         return np.full(agent_space.shape or (), np.nan)
     return None
 

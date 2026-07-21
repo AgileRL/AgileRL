@@ -27,7 +27,7 @@ from agilerl.arena.stream import (
 logger = logging.getLogger(__name__)
 
 
-def _print_rich(renderable: Any, *, is_error: bool = False) -> None:
+def _print_rich(renderable: object, *, is_error: bool = False) -> None:
     if is_error:
         error_console.print(renderable)
         return
@@ -36,7 +36,7 @@ def _print_rich(renderable: Any, *, is_error: bool = False) -> None:
 
 @singledispatch
 def emit_result(
-    result: Any,
+    result: object,
     *,
     is_error: bool = False,
     columns: list[str] | None = None,
@@ -168,7 +168,7 @@ def _emit_environment_catalog(
     _print_rich(table, is_error=is_error)
 
 
-def _format_cell(value: Any) -> str:
+def _format_cell(value: object) -> str:
     if isinstance(value, (dict, list)):
         return json.dumps(value, default=str)
     return str(value)

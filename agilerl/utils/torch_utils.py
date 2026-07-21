@@ -12,8 +12,8 @@ from gymnasium import spaces
 
 def map_pytree(
     f: Callable[[np.ndarray | torch.Tensor], Any],
-    item: Any,
-) -> Any:
+    item: object,
+) -> object:
     """Apply a function to all tensors/arrays in a nested data structure.
 
     Recursively traverses nested dictionaries, lists, tuples, and sets,
@@ -39,7 +39,7 @@ def map_pytree(
     return item
 
 
-def to(item: Any, device: torch.device | str) -> Any:
+def to(item: object, device: torch.device | str) -> object:
     """Move all tensors/arrays in a nested data structure to specified device.
 
     :param item: Nested data structure containing tensors/arrays
@@ -66,7 +66,7 @@ def to_decorator(
     :rtype: Callable
     """
 
-    def new_f(*args: Any, **kwargs: Any) -> Any:
+    def new_f(*args: Any, **kwargs: Any) -> object:
         return to(f(*args, **kwargs), device)
 
     return new_f

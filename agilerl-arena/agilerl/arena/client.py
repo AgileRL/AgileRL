@@ -328,7 +328,7 @@ class ArenaClient:
         """
         return self._request("GET", "/api/users/current")
 
-    def get_user_credits(self) -> Any:
+    def get_user_credits(self) -> Any:  # noqa: ANN401 -- credit payload is a raw JSON value (int or object)
         """Get the authenticated user's credit information."""
         return self._request("GET", "/api/users/credits")
 
@@ -520,7 +520,7 @@ class ArenaClient:
 
     def delete_environment(
         self, *, name: str, version: str | None = None, confirm: bool = False
-    ) -> Any:
+    ) -> dict[str, Any] | None:
         """Delete an environment version (or all versions if version is None).
 
         :param name: Environment name, as specified in Arena.
@@ -1098,7 +1098,7 @@ class ArenaClient:
         logger.info("Metrics saved to %s", path)
         return path
 
-    def stop_experiment(self, experiment_name: str) -> Any:
+    def stop_experiment(self, experiment_name: str) -> Any:  # noqa: ANN401 -- server returns a raw JSON stop-ack (str or object)
         """Stop a running experiment in Arena.
 
         :param experiment_name: Experiment name to halt.
@@ -1546,7 +1546,6 @@ class ArenaClient:
         # httpx; fall back to the client default (``request_timeout``).
         request_timeout = timeout if timeout is not None else httpx.USE_CLIENT_DEFAULT
 
-        # Send the request.
         try:
             if stream:
                 request = self._http.build_request(
@@ -1675,7 +1674,7 @@ class ArenaClient:
         *,
         timeout: int | None = None,
         **kwargs: Any,
-    ) -> Any:
+    ) -> Any:  # noqa: ANN401 -- parsed JSON body is heterogeneous, or plain text
         """Send a request and return the parsed JSON body (or text)."""
         resp = self._send(method, path, timeout=timeout, **kwargs)
         content_type: str = resp.headers.get("content-type", "")
@@ -1879,7 +1878,7 @@ class ArenaClient:
         self,
         invoke: ManifestInvoke,
         parsed_args: Mapping[str, Any],
-    ) -> Any:
+    ) -> Any:  # noqa: ANN401 -- JSON body (heterogeneous) or a binary (bytes, str|None, str|None) tuple
         """Dispatch an on-prem command using already-parsed CLI kwargs.
 
         Returns decoded JSON for ``responseKind == "json"`` invokes, or a
@@ -1922,7 +1921,6 @@ class ArenaClient:
             renderer = StreamRichRenderer(error_cls=error_cls)
             handler = renderer.handle_event
 
-        # Send the request and return an NDJsonStream
         resp = self._send(method, path, stream=True, timeout=timeout, **kwargs)
         return NDJsonStream(
             resp, handler=handler, renderer=renderer, error_cls=error_cls

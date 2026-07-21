@@ -695,7 +695,7 @@ def isroutine(obj: object) -> bool:
     return inspect.isroutine(obj)
 
 
-def recursive_check_module_attrs(obj: Any, networks_only: bool = False) -> bool:
+def recursive_check_module_attrs(obj: object, networks_only: bool = False) -> bool:
     """Recursively check if the object has any attributes that are EvolvableModuleProtocol objects or Optimizer's,
     excluding metaclasses.
 
@@ -1210,7 +1210,7 @@ def preprocess_observation(
     observation: ObservationType,
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
-    placeholder_value: Any | None = None,
+    placeholder_value: float | None = None,
     swap_channels: bool = False,
 ) -> TorchObsType:
     """Preprocesses observations for forward pass through neural network.
@@ -1242,7 +1242,7 @@ def preprocess_dict_observation(
     observation: dict[str, np.ndarray | torch.Tensor],
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
-    placeholder_value: Any | None = None,
+    placeholder_value: float | None = None,
     swap_channels: bool = False,
 ) -> StandardTensorDict:
     """Preprocess dictionary observations.
@@ -1290,7 +1290,7 @@ def preprocess_tuple_observation(
     observation: tuple[np.ndarray | torch.Tensor, ...],
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
-    placeholder_value: Any | None = None,
+    placeholder_value: float | None = None,
     swap_channels: bool = False,
 ) -> TensorTuple:
     """Preprocess tuple observations.
@@ -1346,7 +1346,7 @@ def preprocess_box_observation(
     observation: np.ndarray | torch.Tensor,
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
-    placeholder_value: Any | None = None,
+    placeholder_value: float | None = None,
     swap_channels: bool = False,
 ) -> torch.Tensor:
     """Preprocess box observations (continuous spaces).
@@ -1390,7 +1390,7 @@ def preprocess_discrete_observation(
     observation: np.ndarray | torch.Tensor,
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
-    placeholder_value: Any | None = None,
+    placeholder_value: float | None = None,
     swap_channels: bool = False,
 ) -> torch.Tensor:
     """Preprocess discrete observations.
@@ -1436,7 +1436,7 @@ def preprocess_multidiscrete_observation(
     observation: np.ndarray | torch.Tensor,
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
-    placeholder_value: Any | None = None,
+    placeholder_value: float | None = None,
     swap_channels: bool = False,
 ) -> torch.Tensor:
     """Preprocess multi-discrete observations.
@@ -1484,7 +1484,7 @@ def preprocess_multibinary_observation(
     observation: np.ndarray | torch.Tensor,
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
-    placeholder_value: Any | None = None,
+    placeholder_value: float | None = None,
     swap_channels: bool = False,
 ) -> torch.Tensor:
     """Preprocess multi-binary observations.
@@ -2114,7 +2114,7 @@ def vectorize_experiences_by_agent(
 
 
 def experience_to_tensors(
-    experience: Any,
+    experience: Any,  # noqa: ANN401 -- nested heterogeneous experience (dict/tuple/array-like) forwarded to np.array
     space: spaces.Space,
     actions: bool = False,
 ) -> TorchObsType:
@@ -2315,8 +2315,8 @@ def clone_llm(
         model = type(base_model)(model_config)
         adapter_names: list[str] = []
 
-        # Duck-typed: any model carrying peft_config has adapters to copy,
-        # including wrappers that are not PeftModel subclasses.
+        # Any model carrying peft_config has adapters to copy, including
+        # wrappers that are not PeftModel subclasses.
         if hasattr(source_model, "peft_config"):
             adapter_names = list(cast("Any", source_model).peft_config.keys())
 
@@ -2327,7 +2327,7 @@ def clone_llm(
                 )
             # AgileRL standardizes on adapter name "actor" for the primary adapter.
             first_adapter = adapter_names[0]
-            # Duck-typed access above; peft_config values are LoraConfigs.
+            # peft_config values are LoraConfigs.
             first_config = cast("Any", source_model).peft_config[first_adapter]
             model = get_peft_model(model, first_config, adapter_name="actor")
 

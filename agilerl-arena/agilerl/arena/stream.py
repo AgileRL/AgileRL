@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Generator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from typing_extensions import Self
 
@@ -183,6 +183,10 @@ def parse_ndjson_line(line: str) -> StreamEvent:
     return LogEvent(text=json.dumps(payload, default=str))
 
 
+class _SupportsClose(Protocol):
+    def close(self) -> None: ...
+
+
 class NDJsonStream:
     """Iterator + context-manager over an NDJSON HTTP response.
 
@@ -213,7 +217,7 @@ class NDJsonStream:
         response: httpx.Response,
         *,
         handler: Callable[[StreamEvent], None] | None = None,
-        renderer: Any | None = None,
+        renderer: _SupportsClose | None = None,
         error_cls: type[ArenaAPIError] | None = None,
     ) -> None:
         self._response: httpx.Response = response

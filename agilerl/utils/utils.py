@@ -42,6 +42,9 @@ if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
     from agilerl.algorithms import CISPO, DPO, GRPO, GSPO, LLMPPO, LLMREINFORCE, SFT
     from agilerl.utils.llm_utils import get_llm_accelerator, get_state_dict
 
+if TYPE_CHECKING:
+    from peft import LoraConfig
+
 
 SupportedObservationSpace = spaces.Box | spaces.Discrete | spaces.Dict | spaces.Tuple
 
@@ -77,7 +80,7 @@ def _normalize_algo_name(algo: str) -> str | None:
     return algo.upper().replace(" ", "").replace("-", "_")
 
 
-def _lora_config_from_init_hp(INIT_HP: dict[str, Any]) -> Any | None:
+def _lora_config_from_init_hp(INIT_HP: dict[str, Any]) -> "LoraConfig | None":
     """Build a ``peft.LoraConfig`` from INIT_HP keys, or return None."""
     modules = INIT_HP.get("LORA_TARGET_MODULES") or INIT_HP.get("TARGET_MODULES")
     if not modules:
@@ -102,10 +105,10 @@ def _lora_config_from_init_hp(INIT_HP: dict[str, Any]) -> Any | None:
 def _prepare_llm_algo_kwargs(
     algo_kwargs: dict[str, Any],
     *,
-    tokenizer: Any | None,
+    tokenizer: Any | None,  # noqa: ANN401 -- HF tokenizer (untyped 3rd-party); pad_token attrs read
     model_name: str | None,
-    lora_config: Any | None,
-    vllm_config: Any | None,
+    lora_config: object | None,
+    vllm_config: object | None,
     INIT_HP: dict[str, Any],
     with_generation_defaults: bool = True,
 ) -> dict[str, Any]:
@@ -188,7 +191,9 @@ def _prepare_llm_algo_kwargs(
     return merged
 
 
-def _validate_llm_kwargs(merged: dict[str, Any], *, actor_network: Any | None) -> None:
+def _validate_llm_kwargs(
+    merged: dict[str, Any], *, actor_network: object | None
+) -> None:
     if merged.get("pad_token_id") is None or merged.get("pad_token") is None:
         msg = (
             "LLM agents require pad_token_id and pad_token; pass tokenizer= to "
@@ -291,7 +296,7 @@ def make_multi_agent_vect_envs(
 
 def make_skill_vect_envs(
     env_name: str,
-    skill: Any,
+    skill: Callable[..., gym.Env],
     num_envs: int = 1,
 ) -> gym.vector.AsyncVectorEnv:
     """Return async-vectorized gym environments.
@@ -371,22 +376,22 @@ def create_population(
     # The accepted space and network types depend on the ``algo`` string
     # (single spaces/networks vs per-agent dicts/lists); each algorithm
     # constructor validates them at runtime.
-    observation_space: Any = None,
-    action_space: Any = None,
+    observation_space: Any = None,  # noqa: ANN401 -- space type varies per algo (single space vs per-agent dict/list)
+    action_space: Any = None,  # noqa: ANN401 -- space type varies per algo (single space vs per-agent dict/list)
     hp_config: HyperparameterConfig | None = None,
-    actor_network: Any = None,
-    critic_network: Any = None,
+    actor_network: Any = None,  # noqa: ANN401 -- network type varies per algo constructor; state_dict() read on LLM path
+    critic_network: Any = None,  # noqa: ANN401 -- network type varies per algo constructor
     agent_wrapper: Callable | None = None,
     wrapper_kwargs: dict[str, Any] | None = None,
     population_size: int = 1,
     num_envs: int = 1,
     device: str = "cpu",
-    accelerator: Any | None = None,
-    torch_compiler: Any | None = None,
-    tokenizer: Any | None = None,
+    accelerator: Accelerator | None = None,
+    torch_compiler: str | None = None,
+    tokenizer: object | None = None,
     model_name: str | None = None,
-    lora_config: Any | None = None,
-    vllm_config: Any | None = None,
+    lora_config: object | None = None,
+    vllm_config: object | None = None,
     algo_kwargs: dict[str, Any] | None = None,
 ) -> PopulationType:
     """Return population of identical agents.

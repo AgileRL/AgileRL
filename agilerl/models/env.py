@@ -32,7 +32,9 @@ from agilerl.vector import AsyncPettingZooVecEnv
 if TYPE_CHECKING:
     from accelerate import Accelerator
     from datasets import Dataset
+    from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
+    from agilerl.protocols import MultiTurnEnv
     from agilerl.wrappers.llm_envs import PreferenceGym, ReasoningGym, SFTGym
 
 
@@ -115,7 +117,7 @@ class GymEnvSpec(EnvSpec):
         :rtype: Callable[[], Any]
         """
 
-        def default_make_env() -> Any:
+        def default_make_env() -> Any:  # noqa: ANN401 -- resolves a user entrypoint to an env of caller-defined type
             constructor = resolve_entrypoint_target(entrypoint, path=path)
             if not callable(constructor):
                 msg = f"Entrypoint '{entrypoint}' resolved to non-callable object."
@@ -476,7 +478,7 @@ class LLMEnvSpec(BaseModel):
         return self._load_dataset_hf()
 
     def make_env(
-        self, tokenizer: Any, accelerator: Accelerator | None = None
+        self, tokenizer: PreTrainedTokenizerBase, accelerator: Accelerator | None = None
     ) -> ReasoningGym | PreferenceGym | SFTGym:
         """Make the environment for the LLM agent.
 
@@ -484,7 +486,7 @@ class LLMEnvSpec(BaseModel):
         instead — the training loop needs a factory, not a single env.
 
         :param tokenizer: The tokenizer.
-        :type tokenizer: Any
+        :type tokenizer: PreTrainedTokenizerBase
         :param accelerator: The accelerator.
         :type accelerator: Accelerator | None
         :return: The reasoning or preference gym environment.
@@ -510,7 +512,7 @@ class LLMEnvSpec(BaseModel):
 
     def make_multiturn_env_factory(
         self,
-        tokenizer: Any,
+        tokenizer: PreTrainedTokenizerBase,
         *,
         max_model_len: int | None = None,
         max_output_tokens: int | None = None,
@@ -526,7 +528,7 @@ class LLMEnvSpec(BaseModel):
         environment instance and stored back on the spec.
 
         :param tokenizer: The tokenizer (shared across all instances).
-        :type tokenizer: Any
+        :type tokenizer: PreTrainedTokenizerBase
         :param max_model_len: Maximum model context length for sliding-window
             prompt truncation inside the wrapper.
         :type max_model_len: int | None
@@ -550,7 +552,7 @@ class LLMEnvSpec(BaseModel):
 
             env_name = self.env_name
 
-            def _make_raw_env() -> Any:
+            def _make_raw_env() -> MultiTurnEnv:
                 return gem.make(env_name)
         else:
             if self.entrypoint is None:
@@ -565,7 +567,7 @@ class LLMEnvSpec(BaseModel):
                 raise TypeError(msg)
             cfg = self.env_config or {}
 
-            def _make_raw_env() -> Any:
+            def _make_raw_env() -> MultiTurnEnv:
                 return constructor(**cfg)
 
         max_turns = self.max_turns
@@ -596,7 +598,7 @@ class LLMEnvSpec(BaseModel):
         self,
         train_dataset: Dataset,
         test_dataset: Dataset,
-        tokenizer: Any,
+        tokenizer: PreTrainedTokenizerBase,
         accelerator: Accelerator | None = None,
     ) -> ReasoningGym:
         """Make the reasoning gym environment.
@@ -606,7 +608,7 @@ class LLMEnvSpec(BaseModel):
         :param test_dataset: The test dataset.
         :type test_dataset: Dataset
         :param tokenizer: The tokenizer.
-        :type tokenizer: Any
+        :type tokenizer: PreTrainedTokenizerBase
         :param accelerator: The accelerator.
         :type accelerator: Accelerator | None
         :return: The reasoning gym environment.
@@ -648,7 +650,7 @@ class LLMEnvSpec(BaseModel):
         self,
         train_dataset: Dataset,
         test_dataset: Dataset,
-        tokenizer: Any,
+        tokenizer: PreTrainedTokenizerBase,
         accelerator: Accelerator | None = None,
     ) -> PreferenceGym:
         """Make the environment for the LLM agent.
@@ -658,7 +660,7 @@ class LLMEnvSpec(BaseModel):
         :param test_dataset: The test dataset.
         :type test_dataset: Dataset
         :param tokenizer: The tokenizer.
-        :type tokenizer: Any
+        :type tokenizer: PreTrainedTokenizerBase
         :param accelerator: The accelerator.
         :type accelerator: Accelerator | None
         :return: The preference gym environment.
@@ -680,7 +682,7 @@ class LLMEnvSpec(BaseModel):
         self,
         train_dataset: Dataset,
         test_dataset: Dataset,
-        tokenizer: Any,
+        tokenizer: PreTrainedTokenizerBase,
         accelerator: Accelerator | None = None,
     ) -> SFTGym:
         """Make the SFT gym environment.
@@ -690,7 +692,7 @@ class LLMEnvSpec(BaseModel):
         :param test_dataset: The test dataset.
         :type test_dataset: Dataset
         :param tokenizer: The tokenizer.
-        :type tokenizer: Any
+        :type tokenizer: PreTrainedTokenizerBase
         :param accelerator: The accelerator.
         :type accelerator: Accelerator | None
         :return: The SFT gym environment.

@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from agilerl.data.language_environment import (
+    Language_Environment,
     Language_Observation,
     Policy,
     interact_environment,
@@ -216,7 +217,7 @@ class BC_LM(nn.Module):
     def next_score(
         self,
         tokens: torch.Tensor,
-        obs: Any,  # past_key_values
+        obs: object,  # past_key_values, forwarded opaquely to the model
         temp: float = 1.0,
         top_k: int | None = None,
         top_p: float | None = None,
@@ -617,7 +618,7 @@ class BC_Policy(Policy):
 class BC_Evaluator:
     def __init__(
         self,
-        env: Any,  # ParallelEnv or similar
+        env: Language_Environment,
         verbose: bool,
         kind: str,
         **generation_kwargs: Any,
@@ -658,11 +659,11 @@ class BC_Evaluator:
         }
 
 
-def to(item: Any, device: torch.device | str) -> Any:
+def to(item: Any, device: torch.device | str) -> Any:  # noqa: ANN401 -- recursive pytree map over arbitrary nested containers
     return map_pytree(lambda x: torch.tensor(x, device=device), item)
 
 
-def map_pytree(f: Callable[[np.ndarray | torch.Tensor], Any], item: Any) -> Any:
+def map_pytree(f: Callable[[np.ndarray | torch.Tensor], Any], item: Any) -> Any:  # noqa: ANN401 -- recursive pytree map over arbitrary nested containers
     if isinstance(item, dict):
         return {k: map_pytree(f, v) for k, v in item.items()}
     if isinstance(item, (list, set, tuple)):

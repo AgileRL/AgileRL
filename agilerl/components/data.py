@@ -51,14 +51,14 @@ def to_tensordict(
 
 
 def to_torch_tensor(
-    data: Any,
+    data: object,
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Convert a numpy array, torch tensor, Python number, or other array-like
     to a torch tensor.
 
     :param data: Numpy array, torch tensor, Python number, or other array-like.
-    :type data: Any
+    :type data: object
     :param dtype: Data type of the torch tensor, defaults to torch.float32
     :type dtype: torch.dtype, optional
     :return: Torch tensor.

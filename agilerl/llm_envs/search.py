@@ -116,7 +116,7 @@ class FormatRewardWrapper:
     def format_bonus(self) -> float:
         return self._format_bonus
 
-    def __getattr__(self, name: str) -> Any:
+    def __getattr__(self, name: str) -> Any:  # noqa: ANN401 -- delegates arbitrary attributes to the wrapped env
         return getattr(self._env, name)
 
     def step(

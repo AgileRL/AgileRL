@@ -366,7 +366,7 @@ class MakeEvolvable(EvolvableModule):
             def forward_hook(
                 module: nn.Module,
                 inputs: tuple[Any, ...],
-                output: Any,
+                output: Any,  # noqa: ANN401 -- torch forward-hook output type is module-specific
             ) -> None:
                 # Convolutional layer detection
                 if isinstance(module, nn.modules.conv._ConvNd):

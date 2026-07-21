@@ -22,7 +22,7 @@ class TokenObservationWrapper:
     def __init__(
         self,
         env: MultiTurnEnv,
-        tokenizer: Any,
+        tokenizer: Any,  # noqa: ANN401 -- HF tokenizer; apply_chat_template's v5 dict return isn't modeled by the stub
         max_turns: int,
         pad_id: int | None = None,
         apply_chat_template: bool = True,

@@ -141,14 +141,14 @@ class HuggingFaceGym(gym.Env, ABC):
     def reset(  # ty: ignore[invalid-method-override]
         self,
         reset_dataloaders: bool = False,
-    ) -> Any:
+    ) -> Any:  # noqa: ANN401 -- batch shape is the subclass's contract
         """Reset the environment and get the next batch of tokenized prompts."""
 
     @abstractmethod
     def step(  # ty: ignore[invalid-method-override]
         self,
-        completions: Any,
-    ) -> Any:
+        completions: Any,  # noqa: ANN401 -- completion type varies per subclass
+    ) -> Any:  # noqa: ANN401 -- batch shape is the subclass's contract
         """Take a step in a HuggingFaceGym environment."""
 
     @contextmanager
@@ -234,7 +234,7 @@ class IterablePromptBatchGym(HuggingFaceGym):
     def reset(
         self,
         reset_dataloaders: bool = False,
-    ) -> Any:
+    ) -> Any:  # noqa: ANN401 -- batch shape is the subclass's contract
         """Reset the environment and get the next batch from the dataloader."""
         if reset_dataloaders:
             self._reset_dataloaders()
@@ -255,12 +255,12 @@ class IterablePromptBatchGym(HuggingFaceGym):
     def step(
         self,
         completions: torch.Tensor | None = None,
-    ) -> Any:
+    ) -> Any:  # noqa: ANN401 -- batch shape is the subclass's contract
         """Advance the iterator and return the next batch."""
         self.reset_called = False
         return self._get_next_batch()
 
-    def _get_next_batch(self) -> Any:
+    def _get_next_batch(self) -> Any:  # noqa: ANN401 -- collate output varies per subclass
         try:
             batch = next(self.dataloader)
         except StopIteration:

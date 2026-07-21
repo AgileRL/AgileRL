@@ -15,6 +15,7 @@ from torch.nn import functional as F
 from tqdm import tqdm
 from typing_extensions import Self
 
+from agilerl.data.language_environment import Language_Environment, Language_Observation
 from agilerl.data.rl_data import DataPoint, RL_Dataset
 from agilerl.data.tokenizer import Tokenizer
 from agilerl.modules.gpt import EvolvableGPT
@@ -2072,7 +2073,7 @@ class ILQL_Policy:
         )
         return generations, info, kls
 
-    def act(self, obs: Any) -> str:
+    def act(self, obs: Language_Observation) -> str:
         item = DataPoint.from_obs(
             obs,
             self.iql_model.dataset.tokenizer,
@@ -2097,7 +2098,7 @@ class ILQL_Policy:
 class ILQL_Evaluator:
     def __init__(
         self,
-        env: Any,
+        env: Language_Environment,
         verbose: bool,
         kind: str,
         **generation_kwargs: Any,
@@ -2159,7 +2160,7 @@ class ILQL_Evaluator:
 class TopAdvantageNGrams:
     def __init__(
         self,
-        data: Any,
+        data: Any,  # noqa: ANN401 -- List_RL_Dataset, but precise typing surfaces a latent tokenizer.decode str|list union used as a dict key
         print_every: int,
         print_k: int,
         n_gram: int,
@@ -2169,7 +2170,9 @@ class TopAdvantageNGrams:
         self.print_k = print_k
         self.n_gram = n_gram
 
-    def evaluate(self, model: ILQL, items: Any) -> None:
+    def evaluate(
+        self, model: ILQL, items: list[DataPoint] | dict[str, torch.Tensor]
+    ) -> None:
         top_actions: defaultdict[str, float] = defaultdict(float)
         total_actions: defaultdict[str, int] = defaultdict(int)
         for i in tqdm(range(self.data.size())):
@@ -2219,9 +2222,9 @@ class TopAdvantageNGrams:
 
 
 def interact_environment(
-    env: Any,
-    policy: Any,
-    obs: Any,
+    env: Language_Environment,
+    policy: ILQL_Policy,
+    obs: Language_Observation | None,
 ) -> tuple[Any, list[tuple[Any, Any, float, bool]]]:
     obs_sequence: list[tuple[Any, Any, float, bool]] = []
     if obs is None:
@@ -2237,8 +2240,8 @@ def interact_environment(
 
 def map_pytree(
     f: Callable[[np.ndarray | torch.Tensor], Any],
-    item: Any,
-) -> Any:
+    item: Any,  # noqa: ANN401 -- recursive pytree map over arbitrary nested containers
+) -> Any:  # noqa: ANN401 -- recursive pytree map over arbitrary nested containers
     if isinstance(item, dict):
         return {k: map_pytree(f, v) for k, v in item.items()}
     if isinstance(item, (list, set, tuple)):
@@ -2248,7 +2251,7 @@ def map_pytree(
     return item
 
 
-def to(item: Any, device: torch.device | str) -> Any:
+def to(item: Any, device: torch.device | str) -> Any:  # noqa: ANN401 -- recursive pytree map over arbitrary nested containers
     return map_pytree(lambda x: torch.tensor(x).to(device), item)
 
 
@@ -2256,7 +2259,7 @@ def to_decorator(
     f: Callable[..., Any],
     device: torch.device | str,
 ) -> Callable[..., Any]:
-    def new_f(*args: Any, **kwargs: Any) -> Any:
+    def new_f(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401 -- returns to()'s dynamic pytree result
         return to(f(*args, **kwargs), device)
 
     return new_f

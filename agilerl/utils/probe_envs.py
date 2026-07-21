@@ -8,6 +8,7 @@ from gymnasium import spaces
 from tqdm import trange
 
 from agilerl.components.data import Transition
+from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.rollouts import collect_rollouts
 
 
@@ -1135,7 +1136,7 @@ def check_q_learning_with_probe_env(
     env: ProbeEnv,
     algo_class: type[Any],
     algo_args: dict[str, Any],
-    memory: Any,
+    memory: ReplayBuffer,
     learn_steps: int = 10000,
     device: str = "cpu",
 ) -> None:
@@ -1183,7 +1184,7 @@ def check_policy_q_learning_with_probe_env(
     env: ProbeEnv,
     algo_class: type[Any],
     algo_args: dict[str, Any],
-    memory: Any,
+    memory: ReplayBuffer,
     learn_steps: int = 10000,
     device: str = "cpu",
 ) -> None:

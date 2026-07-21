@@ -74,6 +74,8 @@ else:
 if TYPE_CHECKING:
     import torch
     from accelerate import Accelerator
+    from gymnasium import spaces
+    from transformers import PreTrainedTokenizerBase
 
 
 SelfTrainerT = TypeVar("SelfTrainerT", bound="Trainer")
@@ -208,7 +210,7 @@ class Trainer(ABC):
         )
 
     @staticmethod
-    def _resolve_env_spec(manifest: Any) -> Any:
+    def _resolve_env_spec(manifest: TrainingManifest) -> Any:  # noqa: ANN401 -- env spec type is subclass-specific (EnvSpecT locally vs ArenaEnvSpec)
         """Build an environment spec from the parsed manifest.
 
         Subclasses override this to produce the appropriate spec type, and read
@@ -378,6 +380,7 @@ class LocalTrainer(Trainer):
             assert isinstance(self.algorithm_spec, LLMAlgorithmSpec)
             max_model_len = getattr(self.algorithm_spec, "max_model_len", None)
             max_output_tokens = getattr(self.algorithm_spec, "max_output_tokens", None)
+            assert self.tokenizer is not None
             self.env_factory = self.env_spec.make_multiturn_env_factory(
                 self.tokenizer,
                 max_model_len=max_model_len,
@@ -435,7 +438,7 @@ class LocalTrainer(Trainer):
 
     def _resolve_encoder_config(
         self,
-        observation_space: Any,
+        observation_space: spaces.Space,
         user_encoder_config: dict[str, Any] | None,
         *,
         simba: bool,
@@ -547,11 +550,11 @@ class LocalTrainer(Trainer):
         # not on the `AlgorithmSpec` bases this attribute is typed against.
         self.algorithm_spec.net_config = resolved  # ty: ignore[invalid-assignment]
 
-    def _make_tokenizer(self) -> AutoTokenizer:
+    def _make_tokenizer(self) -> PreTrainedTokenizerBase:
         """Create the tokenizer for the LLM algorithm.
 
         :returns: The tokenizer.
-        :rtype: AutoTokenizer
+        :rtype: PreTrainedTokenizerBase
         :raises ImportError: If the LLM dependencies are not installed.
         """
         if AutoTokenizer is None:
@@ -600,6 +603,7 @@ class LocalTrainer(Trainer):
             self.env_spec.seed = self.algorithm_spec.seed
             self.env_spec.data_batch_size_per_gpu = self.algorithm_spec.batch_size
 
+            assert self.tokenizer is not None
             return self.env_spec.make_env(
                 tokenizer=self.tokenizer, accelerator=self.accelerator
             )
@@ -881,7 +885,7 @@ class ArenaTrainer(Trainer):
         )
 
     @staticmethod
-    def _resolve_env_spec(manifest: Any) -> ArenaEnvSpec:
+    def _resolve_env_spec(manifest: Any) -> ArenaEnvSpec:  # noqa: ANN401 -- Arena manifest is a distinct schema; a concrete type would break the base-method override
         """Build an :class:`ArenaEnvSpec` from the manifest.
 
         :param manifest: The validated training manifest.

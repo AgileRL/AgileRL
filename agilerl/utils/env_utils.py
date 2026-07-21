@@ -6,6 +6,7 @@ from collections.abc import Callable
 from importlib import import_module
 from importlib import util as importlib_util
 from pathlib import Path
+from types import ModuleType
 from typing import Any, TypeVar, cast
 
 from gymnasium.vector import AsyncVectorEnv, SyncVectorEnv
@@ -127,7 +128,7 @@ def _parse_entrypoint(entrypoint: str) -> tuple[str, str]:
     return module_ref, target_name
 
 
-def _load_module_from_path(module_ref: str, script_path: Path) -> Any:
+def _load_module_from_path(module_ref: str, script_path: Path) -> ModuleType:
     """Load a module from a file path.
 
     :param module_ref: Module reference.
@@ -149,7 +150,7 @@ def _load_module_from_path(module_ref: str, script_path: Path) -> Any:
     return module
 
 
-def _resolve_module(module_ref: str, path: str | None = None) -> Any:
+def _resolve_module(module_ref: str, path: str | None = None) -> ModuleType:
     """Resolve a module from a module reference and environment path.
 
     :param module_ref: Module reference.
@@ -180,7 +181,7 @@ def _resolve_module(module_ref: str, path: str | None = None) -> Any:
         raise ModuleNotFoundError(msg) from err
 
 
-def resolve_entrypoint_target(entrypoint: str, path: str | None = None) -> Any:
+def resolve_entrypoint_target(entrypoint: str, path: str | None = None) -> Any:  # noqa: ANN401 -- resolves an arbitrary user-defined class/callable via getattr
     """Resolve an entrypoint target from an entrypoint string and environment path.
 
     :param entrypoint: Entrypoint string to resolve.

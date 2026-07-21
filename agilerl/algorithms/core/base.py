@@ -1518,7 +1518,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
     :param normalize_images: If True, normalize images, defaults to True
     :type normalize_images: bool, optional
     :param placeholder_value: The value to use as placeholder for missing observations, defaults to -1.
-    :type placeholder_value: Any | None, optional
+    :type placeholder_value: float | None, optional
     :param name: Name of the algorithm, defaults to the class name
     :type name: str | None, optional
     """
@@ -1548,7 +1548,7 @@ class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
         accelerator: Accelerator | None = None,
         torch_compiler: str | None = None,
         normalize_images: bool = True,
-        placeholder_value: Any | None = -1,
+        placeholder_value: float | None = -1,
         name: str | None = None,
     ) -> None:
 
@@ -3407,7 +3407,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         )
         return type(self)(**input_args)
 
-    def _clone_actor_network(self) -> Any:
+    def _clone_actor_network(self) -> Any:  # noqa: ANN401 -- returns a heterogeneous HF/PEFT/value-head actor wrapper
         """Clone actor network while preserving value-head state when enabled.
 
         :return: Cloned actor network (HF/PEFT/value-head wrapper) suitable
@@ -3972,7 +3972,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
     def _setup_actors(
         self,
-        actor_network: Any | None,
+        actor_network: object | None,
         *,
         clone: bool,
     ) -> None:
@@ -3995,7 +3995,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
     def _initialize_colocated_vllm_and_actors(
         self,
-        base_model: Any | None,
+        base_model: object | None,
         add_adapters: bool = True,
         *,
         clone: bool = False,
@@ -4062,7 +4062,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
     def _trainer_should_load_before_vllm(
         self,
-        base_model: Any | None,
+        base_model: object | None,
     ) -> bool:
         """Whether the HF trainer must be built before colocated vLLM starts.
 
@@ -4112,7 +4112,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
 
     def _initialize_actors(
         self,
-        base_model: Any | None,
+        base_model: Any | None,  # noqa: ANN401 -- base HF model or trl-style value-head wrapper, dereferenced dynamically
         add_adapters: bool = True,
     ) -> None:
         """Initialize the actor network.
@@ -4907,7 +4907,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
                 self.lr = float(self.lr_scheduler.get_last_lr()[0])
 
     @property
-    def _peft_model(self) -> Any:
+    def _peft_model(self) -> Any:  # noqa: ANN401 -- PeftModel lives at a wrapper-specific attribute; concrete type varies
         """The PeftModel managing LoRA adapters.
 
         When ``use_value_head=True`` the PeftModel lives inside the
@@ -4949,7 +4949,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
             param.requires_grad_(True)
         self._trainable_params_cache = (key, params)
 
-    def _get_peft_model_for_vllm_sync(self) -> Any:
+    def _get_peft_model_for_vllm_sync(self) -> Any:  # noqa: ANN401 -- unwrapped PEFT model type varies (value-head wrapper vs bare PeftModel)
         """Unwrapped PEFT model used for vLLM weight / adapter sync."""
         model_ref = self._get_unwrapped_actor()
         return model_ref.pretrained_model if self.use_value_head else model_ref
@@ -6087,7 +6087,7 @@ class LLMAlgorithm(EvolvableAlgorithm, ABC):
         finally:
             setattr(model, attr, original)
 
-    def _get_unwrapped_actor(self) -> Any:
+    def _get_unwrapped_actor(self) -> Any:  # noqa: ANN401 -- actor spans PEFT/DeepSpeed/value-head/DummyEvolvable wrappers
         """Return actor unwrapped from Accelerate and DummyEvolvable layers."""
         actor = (
             self.accelerator.unwrap_model(self.actor)

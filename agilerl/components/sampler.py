@@ -192,11 +192,11 @@ class Sampler:
         )
         return self.memory.sample(batch_size, beta)
 
-    def sample_n_step(self, idxs: Any) -> TensorDict:
+    def sample_n_step(self, idxs: torch.Tensor) -> TensorDict:
         """Sample a batch of experiences from the n-step replay buffer.
 
         :param idxs: Indices to sample from
-        :type idxs: Any
+        :type idxs: torch.Tensor
         :return: Sampled batch of experiences
         :rtype: TensorDict
         """

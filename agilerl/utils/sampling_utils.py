@@ -50,11 +50,11 @@ def pad_sequence(
 
 
 def update_kvs(
-    kvs: Any,
-    updated_kvs: Any,
+    kvs: tuple[tuple[torch.Tensor, ...], ...],
+    updated_kvs: tuple[tuple[torch.Tensor, ...], ...],
     lens_chosen: torch.Tensor,
     idx: int,
-) -> Any:
+) -> tuple[tuple[torch.Tensor, ...], ...]:
     for i, layer in enumerate(kvs):
         for x, item in enumerate(layer):
             item[lens_chosen, :, idx, :] = updated_kvs[i][x][:, :, idx, :]
@@ -62,11 +62,11 @@ def update_kvs(
 
 
 def update_decoder_kvs(
-    kvs: Any,
-    updated_kvs: Any,
+    kvs: tuple[tuple[torch.Tensor, ...], ...],
+    updated_kvs: tuple[tuple[torch.Tensor, ...], ...],
     lens_chosen: torch.Tensor,
     idx: int,
-) -> Any:
+) -> tuple[tuple[torch.Tensor, ...], ...]:
     for i, layer in enumerate(kvs):
         for x, item in enumerate(layer[:2]):
             item[lens_chosen, :, idx, :] = updated_kvs[i][x][:, :, idx, :]
@@ -74,7 +74,7 @@ def update_decoder_kvs(
 
 
 def get_relevant_kvs(
-    kvs: Any,
+    kvs: tuple[tuple[torch.Tensor, ...], ...],
     lens_chosen: torch.Tensor,
     idx: int,
 ) -> tuple[tuple[Any, ...], ...]:

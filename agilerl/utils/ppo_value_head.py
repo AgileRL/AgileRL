@@ -29,7 +29,7 @@ VALUE_HEAD_KWARGS = (
 )
 
 
-def _resolve_hidden_size(config: Any) -> int:
+def _resolve_hidden_size(config: Any) -> int:  # noqa: ANN401 -- HF config exposes model-specific fields via dynamic attributes
     if getattr(config, "word_embed_proj_dim", None) is not None:
         return int(config.word_embed_proj_dim)
     hidden = getattr(config, "hidden_size", None)
@@ -59,7 +59,7 @@ class PPOValueHead(nn.Module):
 
     def __init__(
         self,
-        config: Any,
+        config: object,
         **kwargs: Any,
     ) -> None:
         super().__init__()
@@ -147,7 +147,7 @@ class AutoModelForCausalLMWithValueHead(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor | None = None,
-        past_key_values: Any = None,
+        past_key_values: object = None,
         attention_mask: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
@@ -179,7 +179,7 @@ class AutoModelForCausalLMWithValueHead(nn.Module):
 
         return (lm_logits, loss, value)
 
-    def generate(self, *args: Any, **kwargs: Any) -> Any:
+    def generate(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401 -- HF generate returns a Tensor or GenerateOutput depending on kwargs
         # ``generate`` comes from GenerationMixin and resolves dynamically
         # through ``nn.Module.__getattr__`` on the wrapped model.
         generate_fn = cast("Callable[..., Any]", self.pretrained_model.generate)
