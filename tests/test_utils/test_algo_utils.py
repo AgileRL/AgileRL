@@ -2044,6 +2044,22 @@ def test_get_vect_dim():
     obs_dict = {"a": np.ones((4, 3))}
     space_dict = spaces.Dict({"a": spaces.Box(0, 1, (3,))})
     assert get_vect_dim(obs_dict, space_dict) == 4
+    # Nested Dict (e.g. multi-agent mapping of per-agent Dict observations)
+    nested_obs = {
+        "agent_0": {"vec": np.ones((4, 3)), "img": np.ones((4, 2))},
+        "agent_1": {"vec": np.ones((4, 3)), "img": np.ones((4, 2))},
+    }
+    nested_space = spaces.Dict(
+        {
+            "agent_0": spaces.Dict(
+                {"vec": spaces.Box(0, 1, (3,)), "img": spaces.Box(0, 1, (2,))}
+            ),
+            "agent_1": spaces.Dict(
+                {"vec": spaces.Box(0, 1, (3,)), "img": spaces.Box(0, 1, (2,))}
+            ),
+        }
+    )
+    assert get_vect_dim(nested_obs, nested_space) == 4
     # Tuple
     obs_tup = (np.ones((4, 2)), np.ones((4, 3)))
     space_tup = spaces.Tuple((spaces.Box(0, 1, (2,)), spaces.Box(0, 1, (3,))))

@@ -338,17 +338,42 @@ class TestMutationsArchitectureMutateMulti:
 
     @pytest.mark.gpu
     def test_none_applied_mutation_branch(self, monkeypatch, device):
-        class DummySubmodule:
-            mutation_methods: ClassVar[list[str]] = ["add_node"]
+        class DummySubmodule(EvolvableModule):
+            def __init__(self):
+                super().__init__(device="cpu")
 
-        class DummyPolicyDict(dict):
-            mutation_methods: ClassVar[list[str]] = [
-                "agent_0.add_node",
-                "agent_1.add_node",
-            ]
+            def forward(self, x):
+                return x
+
+            def recreate_network(self):
+                pass
+
+        class DummyPolicyDict(ModuleDict):
+            """ModuleDict container with fixed mutation method names for the test."""
+
+            def __init__(
+                self,
+                modules: dict[str, EvolvableModule],
+                device: str = "cpu",
+            ) -> None:
+                # Empty during ModuleDict construction so add_module hasattr
+                # checks do not resolve dotted mutation names prematurely.
+                object.__setattr__(self, "_fixed_mutation_methods", [])
+                super().__init__(modules, device=device)
+                self._fixed_mutation_methods = [
+                    "agent_0.add_node",
+                    "agent_1.add_node",
+                ]
 
             def sample_mutation_method(self, *_args, **_kwargs):
                 return "agent_0.add_node"
+
+            @property
+            def mutation_methods(self) -> list[str]:
+                return list(self._fixed_mutation_methods)
+
+            def get_mutation_methods(self):
+                return {}
 
         class DummyIndividual:
             def mutation_hook(self):
@@ -358,7 +383,8 @@ class TestMutationsArchitectureMutateMulti:
                 return None
 
         policy = DummyPolicyDict(
-            {"agent_0": DummySubmodule(), "agent_1": DummySubmodule()}
+            {"agent_0": DummySubmodule(), "agent_1": DummySubmodule()},
+            device="cpu",
         )
         muts = Mutations(0, 1, 0.5, 0, 0, 0, 0.1, device=device)
         monkeypatch.setattr(
@@ -379,15 +405,38 @@ class TestMutationsArchitectureMutateMulti:
 
     @pytest.mark.gpu
     def test_raises_when_no_analogous(self, monkeypatch, device):
-        class DummyEval:
-            mutation_methods: ClassVar[list[str]] = ["agent_9.other_mut"]
-            last_mutation_attr = None
+        class DummyEval(EvolvableModule):
+            def __init__(self):
+                super().__init__(device="cpu")
+                self.last_mutation_attr = None
 
-        class DummyPolicy(dict):
-            mutation_methods: ClassVar[list[str]] = ["agent_0.add_node"]
+            def forward(self, x):
+                return x
+
+            def recreate_network(self):
+                pass
+
+        class DummyPolicy(ModuleDict):
+            """ModuleDict policy double with a fixed sampled mutation method."""
+
+            def __init__(
+                self,
+                modules: dict[str, EvolvableModule],
+                device: str = "cpu",
+            ) -> None:
+                object.__setattr__(self, "_fixed_mutation_methods", [])
+                super().__init__(modules, device=device)
+                self._fixed_mutation_methods = ["agent_0.add_node"]
 
             def sample_mutation_method(self, *_args, **_kwargs):
                 return "agent_0.add_node"
+
+            @property
+            def mutation_methods(self) -> list[str]:
+                return list(self._fixed_mutation_methods)
+
+            def get_mutation_methods(self):
+                return {}
 
         class DummyIndividual:
             def mutation_hook(self):
@@ -396,8 +445,8 @@ class TestMutationsArchitectureMutateMulti:
             def reinit_optimizers(self):
                 return None
 
-        policy = DummyPolicy({"agent_0": DummyEval()})
-        evals = {"critics": {"agent_0": DummyEval()}}
+        policy = DummyPolicy({"agent_0": DummyEval()}, device="cpu")
+        evals = {"critics": ModuleDict({"agent_0": DummyEval()}, device="cpu")}
         muts = Mutations(0, 1, 0.5, 0, 0, 0, 0.1, device=device)
         monkeypatch.setattr(
             "agilerl.hpo.mutation.get_offspring_eval_modules",
@@ -466,19 +515,17 @@ class TestMutationsReinitBanditGrads:
             def get_output_dense(self):
                 return self.out_mod
 
-        class OldLayer(torch.nn.Module):
+        # get_exp_layer requires nn.Linear output layers; subclass Linear and
+        # add asymmetric parameters to exercise shrink/grow/add/remove paths.
+        class OldLayer(torch.nn.Linear):
             def __init__(self):
-                super().__init__()
-                self.w1 = torch.nn.Parameter(torch.ones(2, 2))  # 4
-                self.w2 = torch.nn.Parameter(torch.ones(2))  # 2
-                self.only_old = torch.nn.Parameter(torch.ones(1))  # 1
+                super().__init__(2, 2)  # weight 4 + bias 2
+                self.only_old = torch.nn.Parameter(torch.ones(1))  # +1 → 7
 
-        class NewLayer(torch.nn.Module):
+        class NewLayer(torch.nn.Linear):
             def __init__(self):
-                super().__init__()
-                self.w1 = torch.nn.Parameter(torch.ones(1, 2))  # smaller than old w1
-                self.w2 = torch.nn.Parameter(torch.ones(4))  # bigger than old w2
-                self.only_new = torch.nn.Parameter(torch.ones(2))  # key absent in old
+                super().__init__(2, 1)  # weight 2 + bias 1
+                self.only_new = torch.nn.Parameter(torch.ones(5))  # +5 → 8
 
         class DummyBandit:
             def __init__(self):

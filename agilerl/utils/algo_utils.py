@@ -1144,6 +1144,7 @@ def get_vect_dim(
 
     ``observation`` may be a single observation or a per-agent mapping (with a
     matching ``spaces.Dict``), which is treated as a composite Dict observation.
+    Nested Dict/Tuple spaces are unwrapped until a leaf space is reached.
 
     :param observation: Observation
     :type observation: ObservationType
@@ -1151,32 +1152,29 @@ def get_vect_dim(
     :type observation_space: spaces.Space
     :return: Number of vectorized environments
     """
-    if isinstance(observation_space, spaces.Dict):
-        assert isinstance(observation, dict), (
-            f"Expected dict observation for Dict space, got {type(observation)}"
-        )
-        first_key, first_obs = next(iter(observation.items()))
-        assert isinstance(first_key, str)
-        assert isinstance(first_obs, np.ndarray)
-        return get_vect_dim(first_obs, observation_space[first_key])
-    if isinstance(observation_space, spaces.Tuple):
-        assert isinstance(observation, tuple), (
-            f"Expected tuple observation for Tuple space, got {type(observation)}"
-        )
-        first_element = observation[0]
-        assert isinstance(first_element, (np.ndarray, torch.Tensor)), (
-            f"Expected an array/tensor tuple element, got {type(first_element)}"
-        )
-        return get_vect_dim(first_element, observation_space[0])
+    obs: object = observation
+    space: spaces.Space = observation_space
 
-    space_shape = observation_space.shape
+    while isinstance(space, (spaces.Dict, spaces.Tuple)):
+        if isinstance(space, spaces.Dict):
+            assert isinstance(obs, dict), (
+                f"Expected dict observation for Dict space, got {type(obs)}"
+            )
+            first_key, obs = next(iter(obs.items()))
+            assert isinstance(first_key, str)
+            space = space[first_key]
+        else:
+            assert isinstance(obs, tuple), (
+                f"Expected tuple observation for Tuple space, got {type(obs)}"
+            )
+            obs = obs[0]
+            space = space[0]
+
+    space_shape = space.shape
     assert space_shape is not None, (
-        f"{type(observation_space)} spaces have no shape to infer the "
-        "vectorization dimension from."
+        f"{type(space)} spaces have no shape to infer the vectorization dimension from."
     )
-    array = (
-        observation if isinstance(observation, np.ndarray) else np.array(observation)
-    )
+    array = obs if isinstance(obs, np.ndarray) else np.array(obs)
     return array.shape[0] if len(array.shape) > len(space_shape) else 1
 
 
