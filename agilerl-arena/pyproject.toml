@@ -1,6 +1,6 @@
 [project]
 name = "agilerl-arena"
-version = "0.1.0"
+version = "0.1.1"
 description = "Arena Platform Client Library and CLI."
 authors = [{ name = "Nick Ustaran-Anderegg", email = "dev@agilerl.com" }]
 license = "Apache-2.0"
@@ -15,7 +15,7 @@ dependencies = [
     "pydantic>=2.0,<3",
     "python-keycloak>=4.0,<6",
     "pyyaml>=6.0",
-    "rich>=13.0,<14",
+    "rich>=13.0,<16",
 ]
 
 [project.scripts]

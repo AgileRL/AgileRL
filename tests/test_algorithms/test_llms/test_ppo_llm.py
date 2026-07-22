@@ -1591,9 +1591,9 @@ class TestPPOLearnWithLiger:
         # the use_liger_loss=True branch in learn() from the
         # actor/critic Liger forwards.
         ppo._ppo_loss_liger = MagicMock(return_value=(fake_loss, fake_metrics))
-        # ``clear_fused_adapter_routing`` walks the actor — stub it.
+        # ``unset_fused_adapter_routing`` walks the actor — stub it.
         monkeypatch.setattr(
-            "agilerl.algorithms.ppo_llm.clear_fused_adapter_routing",
+            "agilerl.algorithms.ppo_llm.unset_fused_adapter_routing",
             lambda actor: None,
         )
 

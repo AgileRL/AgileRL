@@ -111,7 +111,7 @@ The simplest way to train an RL agent with AgileRL is through the
 [`LocalTrainer`](https://docs.agilerl.com/en/latest/trainers/index.html). Here is an example of training a DQN agent on the `LunarLander-v3` environment:
 
 ```python
-from agilerl.training.trainer import LocalTrainer
+from agilerl import LocalTrainer
 
 trainer = LocalTrainer(algorithm="DQN", environment="LunarLander-v3")
 population, fitnesses = trainer.train()
