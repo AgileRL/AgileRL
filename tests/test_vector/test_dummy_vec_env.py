@@ -260,7 +260,8 @@ class TestDummyVecEnvStep:
 class TestDummyVecEnvMisc:
     def test_render_delegates(self):
         env = DummyVecEnv(FakeGymEnv())
-        assert env.render() == "frame"
+        # VectorEnv.render returns one tuple element per sub-env.
+        assert env.render() == ("frame",)
 
     def test_close_delegates(self):
         inner = MagicMock()

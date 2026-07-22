@@ -116,6 +116,8 @@ class DummyVecEnv(VectorEnv):
         frame = self._env.render()
         if frame is None:
             return None
+        # A single frame becomes a length-1 tuple; a frame list (rgb_array_list)
+        # is spread so each element is a RenderFrame, per the VectorEnv contract.
         return tuple(frame) if isinstance(frame, list) else (frame,)
 
     def close(self, **kwargs: Any) -> None:
