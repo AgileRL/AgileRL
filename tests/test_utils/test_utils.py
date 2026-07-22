@@ -939,7 +939,9 @@ class TestInitWandb:
             mock_wandb.init.assert_called_once()
             assert mock_wandb.init.call_args[1].get("tags") == ["test"]
 
-    def test_no_api_warns(self):
+    def test_no_api_warns(self, monkeypatch):
+        monkeypatch.delenv("WANDB_API_KEY", raising=False)
+
         class FakeWandb:
             def init(self, **kwargs):
                 pass
