@@ -56,6 +56,7 @@ class ValueNetwork(EvolvableNetwork):
         device: DeviceType = "cpu",
         random_seed: int | None = None,
         encoder_name: str = "encoder",
+        encoder: EvolvableModule | None = None,
     ) -> None:
 
         super().__init__(
@@ -71,6 +72,7 @@ class ValueNetwork(EvolvableNetwork):
             device=device,
             random_seed=random_seed,
             encoder_name=encoder_name,
+            encoder=encoder,
         )
 
         if head_config is None:

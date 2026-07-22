@@ -2,7 +2,7 @@ import inspect
 import warnings
 from copy import deepcopy
 from dataclasses import asdict
-from typing import Any, ClassVar, TypeVar, overload
+from typing import Any, ClassVar, Protocol, TypeVar, overload, runtime_checkable
 
 import numpy as np
 import torch
@@ -28,6 +28,21 @@ from agilerl.utils.evolvable_networks import get_default_encoder_config, is_imag
 
 SelfEvolvableNetwork = TypeVar("SelfEvolvableNetwork", bound="EvolvableNetwork")
 ModuleT = TypeVar("ModuleT", bound=nn.Module)
+
+
+@runtime_checkable
+class SupportsNumOutputs(Protocol):
+    """An encoder that reports its output width via ``num_outputs``.
+
+    All AgileRL evolvable modules (``EvolvableMLP``/``EvolvableLSTM``/...) and
+    :class:`~agilerl.wrappers.make_evolvable.MakeEvolvable` satisfy this, so a
+    pre-built one can be adopted as a network's encoder (its output width
+    becoming the latent dimension) without a forward pass.
+    """
+
+    num_outputs: int
+
+
 DefaultEncoderType = (
     EvolvableCNN | EvolvableMLP | EvolvableMultiInput | EvolvableSimBa | EvolvableLSTM
 )
@@ -217,15 +232,19 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         recurrent: bool = False,
         device: DeviceType = "cpu",
         random_seed: int | None = None,
+        encoder: EvolvableModule | None = None,
     ) -> None:
         super().__init__(device, random_seed)
 
-        assert latent_dim <= max_latent_dim, (
-            "Latent dimension must be less than or equal to max latent dimension."
-        )
-        assert latent_dim >= min_latent_dim, (
-            "Latent dimension must be greater than or equal to min latent dimension."
-        )
+        # A pre-built encoder fixes the latent width (and disables latent-space
+        # mutations below), so these bounds only constrain a built encoder.
+        if encoder is None:
+            assert latent_dim <= max_latent_dim, (
+                "Latent dimension must be less than or equal to max latent dimension."
+            )
+            assert latent_dim >= min_latent_dim, (
+                "Latent dimension must be greater than or equal to min latent dimension."
+            )
 
         if encoder_config is None:
             encoder_config = get_default_encoder_config(
@@ -242,12 +261,24 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
             msg = "Encoder class must be a subclass of EvolvableModule."
             raise TypeError(msg)
 
+        # A pre-built encoder takes precedence over `encoder_cls` (which clone
+        # round-trips as ``type(encoder)``) and fixes the latent width.
+        if encoder is not None:
+            if not isinstance(encoder, SupportsNumOutputs):
+                msg = (
+                    "A pre-built `encoder` must expose an integer `num_outputs` "
+                    "(e.g. a MakeEvolvable network or an AgileRL evolvable module)."
+                )
+                raise TypeError(msg)
+            latent_dim = encoder.num_outputs
+
         self.observation_space = observation_space
         self.action_space = action_space
         self.latent_dim = latent_dim
         self.min_latent_dim = min_latent_dim
         self.max_latent_dim = max_latent_dim
-        self.encoder_cls = encoder_cls
+        self.encoder_cls = type(encoder) if encoder is not None else encoder_cls
+        self._encoder_injected = encoder is not None
         self.device = device
         self.simba = simba
         self.recurrent = recurrent
@@ -261,7 +292,13 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
             activation = encoder_config.get("activation", "ReLU")
             encoder_config["output_activation"] = activation
 
-        if encoder_cls is not None:
+        if encoder is not None:
+            # A user-supplied encoder owns its architecture: adopt it directly
+            # and disable latent-space mutations, which would otherwise resize an
+            # output width we do not control.
+            self.encoder = encoder
+            self.filter_mutation_methods("latent")
+        elif encoder_cls is not None:
             # Check if encoder config contains `num_outputs` as input argument, in which
             # case we can enable latent space mutations. Otherwise, we disable them.
             input_args = inspect.getfullargspec(encoder_cls.__init__).args
@@ -297,6 +334,23 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         # NOTE: We disable layer mutations for the encoder since this usually adds a lot
         # of variance to the optimization process
         self.encoder.disable_mutations(MutationType.LAYER)
+
+    def get_init_dict(self) -> dict[str, Any]:
+        """Constructor arguments for the network.
+
+        The ``encoder`` parameter reflects to :attr:`encoder`, the *built*
+        encoder, so a network cloned from this dict would re-adopt it as a
+        pre-built encoder. That is only correct when an encoder was actually
+        injected; otherwise report ``None`` so the clone rebuilds its encoder
+        from ``encoder_cls``/``encoder_config`` as usual.
+
+        :return: The dictionary of constructor arguments.
+        :rtype: dict[str, Any]
+        """
+        init_dict = super().get_init_dict()
+        if "encoder" in init_dict and not self._encoder_injected:
+            init_dict["encoder"] = None
+        return init_dict
 
     @property
     def encoder_config(self) -> dict[str, Any]:

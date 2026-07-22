@@ -265,24 +265,24 @@ class PPO(RLAlgorithm[TensorDict]):
         )
 
         if actor_network is not None and critic_network is not None:
-            # PPO drives its actor through StochasticActor-specific methods
-            # (extract_features/forward_head/action_log_prob/...), so a custom
-            # actor must be a StochasticActor rather than an arbitrary module.
-            if not isinstance(actor_network, StochasticActor):
-                msg = f"Passed actor network is of type {type(actor_network)}, but must be of type StochasticActor."
-                raise TypeError(
-                    msg,
-                )
-            if not isinstance(critic_network, ValueNetwork):
-                msg = f"Passed critic network is of type {type(critic_network)}, but must be of type ValueNetwork."
-                raise TypeError(
-                    msg,
-                )
+            # PPO drives its actor/critic through StochasticActor/ValueNetwork
+            # methods (extract_features/forward_head/action_log_prob/...). A
+            # network that already is one is used as-is; a flat EvolvableModule
+            # (e.g. a MakeEvolvable network) is adopted as the encoder of one,
+            # so the user's network becomes the feature extractor and PPO
+            # supplies the distribution / value head.
+            actor = self._as_stochastic_actor(actor_network)
+            critic = self._as_value_network(critic_network)
 
-            self.actor, self.critic = make_safe_deepcopies(
-                actor_network,
-                critic_network,
-            )
+            # Two independent user-supplied networks are distinct feature
+            # extractors, so they cannot share an encoder.
+            if not (
+                isinstance(actor_network, StochasticActor)
+                and isinstance(critic_network, ValueNetwork)
+            ):
+                share_encoders = False
+
+            self.actor, self.critic = make_safe_deepcopies(actor, critic)
         else:
             net_config_dict = {} if self.net_config is None else self.net_config
 
@@ -351,6 +351,51 @@ class PPO(RLAlgorithm[TensorDict]):
         # Register metrics to keep track of during training
         for metric in ("loss", "policy_loss", "value_loss", "entropy_loss"):
             self.metrics.register(metric)
+
+    def _as_stochastic_actor(self, network: EvolvableModule) -> StochasticActor:
+        """Return *network* as a :class:`StochasticActor`.
+
+        A :class:`StochasticActor` is used unchanged. Any other evolvable module
+        (e.g. a :class:`~agilerl.wrappers.make_evolvable.MakeEvolvable` network)
+        is adopted as the actor's encoder, with PPO's distribution head built on
+        top of its outputs.
+
+        :param network: Custom actor network.
+        :type network: EvolvableModule
+        :return: A stochastic actor driving *network*.
+        :rtype: StochasticActor
+        """
+        if isinstance(network, StochasticActor):
+            return network
+        return StochasticActor(
+            self.observation_space,
+            self.action_space,
+            encoder=network,
+            action_std_init=self.action_std_init,
+            device=self.device,
+            recurrent=self.recurrent,
+        )
+
+    def _as_value_network(self, network: EvolvableModule) -> ValueNetwork:
+        """Return *network* as a :class:`ValueNetwork`.
+
+        A :class:`ValueNetwork` is used unchanged. Any other evolvable module is
+        adopted as the critic's encoder, with PPO's value head built on top of
+        its outputs.
+
+        :param network: Custom critic network.
+        :type network: EvolvableModule
+        :return: A value network driving *network*.
+        :rtype: ValueNetwork
+        """
+        if isinstance(network, ValueNetwork):
+            return network
+        return ValueNetwork(
+            self.observation_space,
+            encoder=network,
+            device=self.device,
+            recurrent=self.recurrent,
+        )
 
     def share_encoder_parameters(self) -> None:
         """Shares the encoder parameters between the actor and critic."""

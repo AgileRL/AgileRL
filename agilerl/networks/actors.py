@@ -320,6 +320,7 @@ class StochasticActor(EvolvableNetwork):
         device: DeviceType = "cpu",
         random_seed: int | None = None,
         encoder_name: str = "encoder",
+        encoder: EvolvableModule | None = None,
     ) -> None:
         super().__init__(
             observation_space,
@@ -334,6 +335,7 @@ class StochasticActor(EvolvableNetwork):
             device=device,
             random_seed=random_seed,
             encoder_name=encoder_name,
+            encoder=encoder,
         )
 
         # Require the head to output logits to parameterize a distribution

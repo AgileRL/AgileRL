@@ -11,6 +11,8 @@ from torch import nn, optim
 from agilerl.algorithms.ppo import PPO
 from agilerl.components.rollout_buffer import RolloutBuffer
 from agilerl.modules import EvolvableCNN, EvolvableMLP, EvolvableMultiInput
+from agilerl.networks import StochasticActor
+from agilerl.networks.value_networks import ValueNetwork
 from agilerl.rollouts import collect_rollouts, collect_rollouts_recurrent
 from agilerl.typing import BPTTSequenceType
 from agilerl.wrappers.make_evolvable import MakeEvolvable
@@ -275,54 +277,76 @@ class TestPPOInit:
     # Can initialize ppo with an actor network
     # TODO: Will be deprecated in the future
     @pytest.mark.parametrize(
-        (
-            "obs_space",
-            "action_space",
-            "actor_network",
-            "critic_network",
-            "input_tensor",
-            "input_tensor_critic",
-        ),
-        [
-            (
-                "vector_space",
-                "discrete_space",
-                "simple_mlp",
-                "simple_mlp_critic",
-                torch.randn(1, 4),
-                torch.randn(1, 6),
-            ),
-        ],
+        ("obs_space", "action_space", "actor_network", "input_tensor"),
+        [("vector_space", "discrete_space", "simple_mlp", torch.randn(1, 4))],
     )
-    def test_initialize_ppo_with_make_evo_rejected(
+    def test_initialize_ppo_with_make_evo(
         self,
         obs_space,
         action_space,
         actor_network,
-        critic_network,
         input_tensor,
-        input_tensor_critic,
         request,
     ):
-        # PPO drives its actor through StochasticActor-specific methods
-        # (extract_features/forward_head/action_log_prob), which a flat
-        # MakeEvolvable network does not implement. PPO therefore rejects it at
-        # construction with a clear error rather than crashing later in
-        # get_action/learn.
+        # A flat MakeEvolvable network does not implement PPO's
+        # StochasticActor/ValueNetwork interface (extract_features/forward_head/
+        # action_log_prob/...). PPO adopts it as the encoder of a
+        # StochasticActor/ValueNetwork so it becomes the feature extractor while
+        # PPO supplies the distribution / value head, and it works end to end.
         obs_space = request.getfixturevalue(obs_space)
         action_space = request.getfixturevalue(action_space)
-        actor_network = request.getfixturevalue(actor_network)
-        actor_network = MakeEvolvable(actor_network, input_tensor)
-        critic_network = request.getfixturevalue(critic_network)
-        critic_network = MakeEvolvable(critic_network, input_tensor_critic)
+        actor_network = MakeEvolvable(
+            request.getfixturevalue(actor_network), input_tensor
+        )
+        # Critic maps the same observation to a scalar value.
+        critic_network = MakeEvolvable(
+            nn.Sequential(nn.Linear(4, 20), nn.ReLU(), nn.Linear(20, 1)),
+            input_tensor,
+        )
 
-        with pytest.raises(TypeError, match="StochasticActor"):
-            PPO(
-                obs_space,
-                action_space,
-                actor_network=actor_network,
-                critic_network=critic_network,
+        ppo = PPO(
+            obs_space,
+            action_space,
+            learn_step=8,
+            batch_size=4,
+            update_epochs=1,
+            actor_network=actor_network,
+            critic_network=critic_network,
+        )
+
+        # The custom networks are adopted as the encoders of PPO's actor/critic.
+        assert isinstance(ppo.actor, StochasticActor)
+        assert isinstance(ppo.critic, ValueNetwork)
+        assert isinstance(ppo.actor.encoder, MakeEvolvable)
+        assert isinstance(ppo.critic.encoder, MakeEvolvable)
+        assert ppo.actor.encoder is not actor_network  # deep-copied, not aliased
+        # Independent user-supplied networks cannot share an encoder.
+        assert ppo.share_encoders is False
+
+        # get_action works (previously crashed with AttributeError).
+        obs, _ = get_batch_states(obs_space, 1)
+        action, _, _, _ = ppo.get_action(obs)
+        assert action.shape[0] == ppo.num_envs
+
+        # A full learn cycle works.
+        for i in range(ppo.learn_step):
+            step_obs, step_next = get_batch_states(obs_space, 1)
+            step_action = np.array([action_space.sample()], dtype=action_space.dtype)
+            ppo.rollout_buffer.add(
+                step_obs,
+                step_action,
+                1.0,
+                i == (ppo.learn_step - 1),
+                0.5,
+                -0.5,
+                step_next,
             )
+        last_value = torch.zeros((ppo.num_envs, 1), device=ppo.device)
+        last_done = torch.zeros((ppo.num_envs, 1), device=ppo.device)
+        ppo.rollout_buffer.compute_returns_and_advantages(last_value, last_done)
+        loss = ppo.learn()
+        assert isinstance(loss, float)
+        ppo.clean_up()
 
     def test_initialize_ppo_with_incorrect_actor_net(
         self, vector_space, discrete_space
