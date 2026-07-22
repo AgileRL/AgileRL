@@ -19,7 +19,7 @@ from accelerate import Accelerator
 from torch import nn
 
 from agilerl import HAS_DEEPSPEED, HAS_LLM_DEPENDENCIES
-from agilerl.typing import PopulationType, ReasoningPrompts
+from agilerl.typing import JSONValue, PopulationType, ReasoningPrompts
 
 if TYPE_CHECKING:
     from accelerate.utils import DeepSpeedPlugin
@@ -1863,7 +1863,7 @@ def sample_eval_prompts(
 
 def compare_responses(
     agent: LLMAlgorithm,
-    tokenizer: Any,  # noqa: ANN401 -- HuggingFace tokenizer (untyped third-party)
+    tokenizer: Any,  # noqa: ANN401 -- HF tokenizer; typed decode() returns str|list[str], which this single-sequence path would have to narrow
     samples: list[tuple[str, str | None, str | None]],
     max_new_tokens: int = 200,
     temperature: float = 1.0,
@@ -2140,7 +2140,7 @@ def filter_peft_state_dict_for_vllm_lora(
     return filtered
 
 
-def _json_safe_value(obj: object) -> Any:  # noqa: ANN401 -- recursively coerces heterogeneous config values into a JSON-safe structure
+def _json_safe_value(obj: object) -> JSONValue:
     """Recursively convert PEFT config values to JSON-serializable types."""
     if obj is None or isinstance(obj, (str, int, float, bool)):
         return obj
@@ -2199,7 +2199,9 @@ def save_peft_adapter_for_vllm_rollout(
     save_file(state, adapter_path / "adapter_model.safetensors")
 
     peft_cfg = peft_model.peft_config[adapter_name]
-    cfg_dict = _json_safe_value(peft_cfg.to_dict())
+    cfg_dict: dict[str, JSONValue] = {
+        str(key): _json_safe_value(value) for key, value in peft_cfg.to_dict().items()
+    }
     cfg_dict["target_modules"] = _json_safe_value(target_modules)
 
     import json

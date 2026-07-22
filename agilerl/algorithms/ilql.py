@@ -2236,8 +2236,8 @@ def interact_environment(
 
 def map_pytree(
     f: Callable[[np.ndarray | torch.Tensor], Any],
-    item: Any,  # noqa: ANN401 -- recursive pytree map over arbitrary nested containers
-) -> Any:  # noqa: ANN401 -- recursive pytree map over arbitrary nested containers
+    item: object,
+) -> Any:  # noqa: ANN401 -- leaves are transformed by the arbitrary callable f
     if isinstance(item, dict):
         return {k: map_pytree(f, v) for k, v in item.items()}
     if isinstance(item, (list, set, tuple)):
@@ -2247,7 +2247,7 @@ def map_pytree(
     return item
 
 
-def to(item: Any, device: torch.device | str) -> Any:  # noqa: ANN401 -- recursive pytree map over arbitrary nested containers
+def to(item: object, device: torch.device | str) -> Any:  # noqa: ANN401 -- return mirrors item's nested structure, but prepare_inputs needs a concrete dict[str, Tensor] that a PyTree return can't satisfy
     return map_pytree(lambda x: torch.tensor(x).to(device), item)
 
 
@@ -2255,7 +2255,7 @@ def to_decorator(
     f: Callable[..., Any],
     device: torch.device | str,
 ) -> Callable[..., Any]:
-    def new_f(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401 -- returns to()'s dynamic pytree result
+    def new_f(*args: object, **kwargs: object) -> Any:  # noqa: ANN401 -- returns to()'s structure-mirroring result, whose concrete type depends on the wrapped f
         return to(f(*args, **kwargs), device)
 
     return new_f

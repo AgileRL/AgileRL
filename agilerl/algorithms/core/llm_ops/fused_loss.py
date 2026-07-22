@@ -21,7 +21,7 @@ import time — gate on :data:`agilerl.HAS_LIGER_KERNEL` before importing.
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Protocol
 
 import torch
 from torch.autograd.function import FunctionCtx
@@ -531,7 +531,7 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
 
     @staticmethod
     def backward(
-        ctx: Any,  # noqa: ANN401 -- torch autograd context carries arbitrary attrs
+        ctx: FunctionCtx,
         grad_output: torch.Tensor,
         *grad_metrics: torch.Tensor,
     ) -> tuple[torch.Tensor | None, ...]:
@@ -797,7 +797,7 @@ class LigerDPOWithAlpha(LigerFusedLinearPreferenceBase):
 
     @staticmethod
     def backward(
-        ctx: Any,  # noqa: ANN401 -- torch autograd context carries arbitrary attrs
+        ctx: FunctionCtx,
         *grad_output: torch.Tensor,
     ) -> tuple[torch.Tensor | None, ...]:
         grads = LigerFusedLinearPreferenceBase.backward(ctx, grad_output)[:4]

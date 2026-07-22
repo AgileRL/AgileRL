@@ -44,6 +44,7 @@ if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
 
 if TYPE_CHECKING:
     from peft import LoraConfig
+    from transformers import PreTrainedTokenizerBase
 
 
 SupportedObservationSpace = spaces.Box | spaces.Discrete | spaces.Dict | spaces.Tuple
@@ -105,7 +106,7 @@ def _lora_config_from_init_hp(INIT_HP: dict[str, Any]) -> "LoraConfig | None":
 def _prepare_llm_algo_kwargs(
     algo_kwargs: dict[str, Any],
     *,
-    tokenizer: Any | None,  # noqa: ANN401 -- HF tokenizer (untyped 3rd-party); pad_token attrs read
+    tokenizer: "PreTrainedTokenizerBase | None",
     model_name: str | None,
     lora_config: object | None,
     vllm_config: object | None,
@@ -388,7 +389,7 @@ def create_population(
     device: str = "cpu",
     accelerator: Accelerator | None = None,
     torch_compiler: str | None = None,
-    tokenizer: object | None = None,
+    tokenizer: "PreTrainedTokenizerBase | None" = None,
     model_name: str | None = None,
     lora_config: object | None = None,
     vllm_config: object | None = None,
@@ -427,7 +428,7 @@ def create_population(
     :type torch_compiler: Any, optional
     :param tokenizer: Hugging Face tokenizer; used to default ``pad_token_id`` /
         ``pad_token`` for GRPO / DPO / LLMPPO / LLMREINFORCE when not set in ``algo_kwargs``.
-    :type tokenizer: Any, optional
+    :type tokenizer: PreTrainedTokenizerBase, optional
     :param model_name: HF model id or path; defaults ``algo_kwargs['model_name']``
         or ``INIT_HP['MODEL_NAME']`` for LLM agents.
     :type model_name: str, optional

@@ -170,7 +170,7 @@ class EvolvableModuleProtocol(Protocol):
     def parameters(self) -> Iterator[torch.nn.Parameter]:
         pass
 
-    def to(self, device: DeviceType) -> Any:  # noqa: ANN401 -- return type varies across implementations (Self or torch.nn.Module)
+    def to(self, device: DeviceType) -> Self:
         pass
 
     def state_dict(self) -> dict[str, Any]:
@@ -252,7 +252,7 @@ class EvolvableNetworkProtocol(EvolvableModuleProtocol, Protocol):
     ) -> None:
         pass
 
-    def _build_encoder(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401 -- encoder type varies by network implementation
+    def _build_encoder(self, *args: Any, **kwargs: Any) -> Module:
         pass
 
 

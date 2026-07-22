@@ -18,7 +18,7 @@ from typing import Any
 
 import click
 
-from agilerl.arena.client import ManifestInvoke, ManifestParamSpec
+from agilerl.arena.client import JSONValue, ManifestInvoke, ManifestParamSpec
 from agilerl.arena.config import CommandConfig, arena_client
 from agilerl.arena.exceptions import ArenaValidationError
 from agilerl.arena.output import emit_result
@@ -218,13 +218,13 @@ def _manifest_spec_to_click_option(spec: ManifestParamSpec) -> Callable[[Any], A
     return _typed_option(spec)
 
 
-def _parse_json_cli_value(raw: str) -> Any:  # noqa: ANN401 -- decoded JSON is a heterogeneous value
+def _parse_json_cli_value(raw: str) -> JSONValue:
     """Parse a JSON CLI value, or load JSON from a file when prefixed with ``@``.
 
     :param raw: The raw option string; a leading ``@`` reads JSON from that path.
     :type raw: str
     :returns: The decoded JSON value.
-    :rtype: Any
+    :rtype: JSONValue
     """
     path_raw = raw.strip()
     if path_raw.startswith("@"):

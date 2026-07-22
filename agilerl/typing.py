@@ -203,6 +203,19 @@ PopulationType = list[EvolvableAlgorithmProtocol]
 MutationMethod = Callable[[EvolvableAlgorithmProtocol], EvolvableAlgorithmProtocol]
 ConfigType = IsDataclass | NetConfigType
 StateDict = dict[str, Any] | dict[str, dict[str, Any]] | list[dict[str, Any]]
+
+# A decoded JSON value: any JSON primitive, array, or object (recursive).
+JSONValue = None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
+
+# A nested container of tensors/arrays for the LLM pytree map helpers (recursive).
+# Leaves are tensors or arrays; interior nodes are dicts, lists, or tuples.
+PyTree = (
+    torch.Tensor
+    | np.ndarray
+    | dict[str, "PyTree"]
+    | list["PyTree"]
+    | tuple["PyTree", ...]
+)
 LrNameType = str | tuple[str, str]
 
 

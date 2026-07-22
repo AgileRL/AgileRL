@@ -971,7 +971,7 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         :rtype: dict[str, Any]
         """
 
-        def is_evolvable(attr: str, obj: Any) -> bool:  # noqa: ANN401 -- arbitrary attribute value under inspection
+        def is_evolvable(attr: str, obj: object) -> bool:
             return (
                 recursive_check_module_attrs(obj, networks_only)
                 and not attr.startswith("_")

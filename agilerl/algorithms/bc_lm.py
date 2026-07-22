@@ -655,11 +655,11 @@ class BC_Evaluator:
         }
 
 
-def to(item: Any, device: torch.device | str) -> Any:  # noqa: ANN401 -- recursive pytree map over arbitrary nested containers
+def to(item: object, device: torch.device | str) -> Any:  # noqa: ANN401 -- return mirrors item's nested structure, but prepare_inputs needs a concrete dict[str, Tensor] that a PyTree return can't satisfy
     return map_pytree(lambda x: torch.tensor(x, device=device), item)
 
 
-def map_pytree(f: Callable[[np.ndarray | torch.Tensor], Any], item: Any) -> Any:  # noqa: ANN401 -- recursive pytree map over arbitrary nested containers
+def map_pytree(f: Callable[[np.ndarray | torch.Tensor], Any], item: object) -> Any:  # noqa: ANN401 -- leaves are transformed by the arbitrary callable f
     if isinstance(item, dict):
         return {k: map_pytree(f, v) for k, v in item.items()}
     if isinstance(item, (list, set, tuple)):

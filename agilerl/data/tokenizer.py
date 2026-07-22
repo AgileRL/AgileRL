@@ -56,5 +56,5 @@ class Tokenizer(ABC):
         pass
 
     @abstractmethod
-    def get_vocab(self) -> Any:  # noqa: ANN401 -- vocab representation is tokenizer-backend defined (dict or list)
+    def get_vocab(self) -> dict[str, int] | list[str]:
         pass

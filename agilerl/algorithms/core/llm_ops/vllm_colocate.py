@@ -17,7 +17,7 @@ See ``docs/llm_finetuning/quantization.rst`` for the full colocated picture.
 from __future__ import annotations
 
 import gc
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import torch
 
@@ -55,7 +55,7 @@ class _StrippedTower:
     def __call__(self, *args: Any, **kwargs: Any) -> None:
         raise RuntimeError(self._error("called as a forward path"))
 
-    def __getattr__(self, name: str) -> Any:  # noqa: ANN401 -- dynamic __getattr__ always raises
+    def __getattr__(self, name: str) -> NoReturn:
         raise AttributeError(self._error(f"attribute '{name}' accessed"))
 
 

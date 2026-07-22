@@ -351,7 +351,7 @@ class OptimizerWrapper:
         :return: List of attribute names for the networks
         """
 
-        def _match_condition(attr_value: Any) -> bool:  # noqa: ANN401 -- arbitrary container attribute value
+        def _match_condition(attr_value: object) -> bool:
             return any(id(attr_value) == id(net) for net in self.networks)
 
         return [
@@ -366,7 +366,7 @@ class OptimizerWrapper:
         :return: The learning rate attribute name
         """
 
-        def _match_condition(attr_value: Any) -> bool:  # noqa: ANN401 -- arbitrary container attribute value
+        def _match_condition(attr_value: object) -> bool:
             return self.lr is attr_value
 
         def _check_lr_names(attr_name: str) -> bool:

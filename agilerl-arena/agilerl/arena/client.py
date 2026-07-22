@@ -47,6 +47,11 @@ logger = logging.getLogger(__name__)
 
 DATASET_CATEGORIES = frozenset({"sft", "preference", "reasoning"})
 
+# A decoded JSON value: any JSON primitive, array, or object (recursive).
+# Defined locally because agilerl-arena is a standalone distribution and does
+# not depend on the agilerl core package (where the same alias also lives).
+JSONValue = None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
+
 
 # Functional syntax because ``in`` (a parameter's location) is a Python keyword
 # and can't be a class-statement field name.
@@ -328,7 +333,7 @@ class ArenaClient:
         """
         return self._request("GET", "/api/users/current")
 
-    def get_user_credits(self) -> Any:  # noqa: ANN401 -- credit payload is a raw JSON value (int or object)
+    def get_user_credits(self) -> JSONValue:
         """Get the authenticated user's credit information."""
         return self._request("GET", "/api/users/credits")
 
@@ -1098,7 +1103,7 @@ class ArenaClient:
         logger.info("Metrics saved to %s", path)
         return path
 
-    def stop_experiment(self, experiment_name: str) -> Any:  # noqa: ANN401 -- server returns a raw JSON stop-ack (str or object)
+    def stop_experiment(self, experiment_name: str) -> JSONValue:
         """Stop a running experiment in Arena.
 
         :param experiment_name: Experiment name to halt.
@@ -1674,7 +1679,7 @@ class ArenaClient:
         *,
         timeout: int | None = None,
         **kwargs: Any,
-    ) -> Any:  # noqa: ANN401 -- parsed JSON body is heterogeneous, or plain text
+    ) -> Any:  # noqa: ANN401 -- callers return this straight into narrower declared types (e.g. dict[str, Any]); JSONValue would force casts at every call site
         """Send a request and return the parsed JSON body (or text)."""
         resp = self._send(method, path, timeout=timeout, **kwargs)
         content_type: str = resp.headers.get("content-type", "")
@@ -1878,7 +1883,7 @@ class ArenaClient:
         self,
         invoke: ManifestInvoke,
         parsed_args: Mapping[str, Any],
-    ) -> Any:  # noqa: ANN401 -- JSON body (heterogeneous) or a binary (bytes, str|None, str|None) tuple
+    ) -> Any:  # noqa: ANN401 -- JSON body (heterogeneous) or a binary (bytes, str|None, str|None) tuple; callers destructure the tuple branch, so a union return would force casts
         """Dispatch an on-prem command using already-parsed CLI kwargs.
 
         Returns decoded JSON for ``responseKind == "json"`` invokes, or a

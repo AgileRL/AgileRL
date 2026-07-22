@@ -21,12 +21,12 @@ class Skill(gym.Wrapper, gym.utils.RecordConstructorArgs):
 
     def step(
         self,
-        action: Any,  # noqa: ANN401 -- gym ActType is env-specific; forwarded unchanged to the wrapped env.step
+        action: object,
     ) -> tuple[Any, SupportsFloat, bool, bool, dict[str, Any]]:
         """Step the environment and return the observation, reward, terminated, truncated, and info.
 
         :param action: Action
-        :type action: Any
+        :type action: object
         :return: Tuple of (observation, reward, terminated, truncated, info)
         :rtype: tuple[Any, SupportsFloat, bool, bool, dict[str, Any]]
         """
@@ -35,7 +35,7 @@ class Skill(gym.Wrapper, gym.utils.RecordConstructorArgs):
 
     def skill_reward(
         self,
-        observation: Any,  # noqa: ANN401 -- gym ObsType is env-specific; passed through unchanged
+        observation: object,
         reward: SupportsFloat,
         terminated: bool,
         truncated: bool,
@@ -44,7 +44,7 @@ class Skill(gym.Wrapper, gym.utils.RecordConstructorArgs):
         """Calculate the reward for the given observation, reward, terminated, truncated, and info.
 
         :param observation: Observation
-        :type observation: Any
+        :type observation: object
         :param reward: Reward, as returned by the wrapped environment
         :type reward: SupportsFloat
         :param terminated: Terminated

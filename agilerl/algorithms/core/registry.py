@@ -390,7 +390,7 @@ class NetworkGroup:
         :rtype: list[str]
         """
 
-        def _match_condition(attr_value: Any) -> bool:  # noqa: ANN401 -- arbitrary container attribute value
+        def _match_condition(attr_value: object) -> bool:
             if isinstance(objects, list):
                 return any(id(attr_value) == id(obj) for obj in objects)
             return id(attr_value) == id(objects)
