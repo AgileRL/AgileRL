@@ -1,12 +1,13 @@
 import logging
 import warnings
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import gymnasium as gym
 import numpy as np
 import torch
 from accelerate import Accelerator
+from tensordict import TensorDict
 from torch.utils.data import DataLoader
 
 from agilerl.algorithms import DDPG, DQN, TD3, RainbowDQN
@@ -42,6 +43,27 @@ BufferType = ReplayBuffer | PrioritizedReplayBuffer | MultiStepReplayBuffer
 logger = logging.getLogger(__name__)
 
 
+@runtime_checkable
+class _NStepAgent(Protocol):
+    """A RainbowDQN-style agent that consumes n-step / prioritized batches.
+
+    It is the only off-policy algorithm that anneals ``beta`` and whose
+    ``learn`` accepts ``n_experiences``/``per`` and returns the indices and
+    priorities to write back. Narrowing the population's union to this interface
+    resolves the prioritized/n-step path.
+    """
+
+    batch_size: int
+    beta: float
+
+    def learn(
+        self,
+        experiences: TensorDict,
+        n_experiences: TensorDict | None = None,
+        per: bool = False,
+    ) -> tuple[float, torch.Tensor | None, np.ndarray | None]: ...
+
+
 def _learn_from_buffer(
     agent: SupportedOffPolicy,
     sampler: Sampler,
@@ -58,7 +80,7 @@ def _learn_from_buffer(
     # and priorities to write back, and pairs with a PrioritizedReplayBuffer.
     # Narrowing to those concrete types resolves the whole block.
     if per:
-        assert isinstance(agent, RainbowDQN)
+        assert isinstance(agent, _NStepAgent)
         assert isinstance(memory, PrioritizedReplayBuffer)
         experiences = sample(agent.batch_size, agent.beta)
         n_step_experiences = (
@@ -80,7 +102,7 @@ def _learn_from_buffer(
             return_idx=n_step_memory is not None,
         )
         if n_step_sampler is not None:
-            assert isinstance(agent, RainbowDQN)
+            assert isinstance(agent, _NStepAgent)
             n_step_experiences = n_step_sampler.sample(experiences["idxs"])
             agent.learn(experiences, n_experiences=n_step_experiences)
         else:

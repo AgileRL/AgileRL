@@ -12,6 +12,8 @@ import pytest
 import torch
 from accelerate import Accelerator
 from gymnasium.spaces import Box, Dict, Discrete
+from gymnasium.vector import VectorEnv
+from gymnasium.vector.utils import batch_space
 from pettingzoo import ParallelEnv
 from tensordict import TensorDict
 
@@ -73,38 +75,35 @@ def _assert_wandb_summary_log(mock_wandb_log: MagicMock) -> None:
         assert key in logged
 
 
-class DummyEnv:
+class DummyEnv(VectorEnv):
+    """Minimal vectorized env double. ``vect`` selects ``num_envs`` (2 vs 1);
+    both modes return batched arrays, so it is a genuine ``VectorEnv`` that the
+    training loop consumes directly (no ``DummyVecEnv`` wrapping).
+    """
+
     def __init__(self, state_size, action_size, vect=True, num_envs=2):
         self._single_state_size = tuple(state_size)
-        self.state_size = state_size
         self.action_size = action_size
-        self.observation_space = Box(0.0, 1.0, self._single_state_size)
-        self.action_space = Box(-1.0, 1.0, (action_size,))
         self.vect = vect
-        if self.vect:
-            self.state_size = (num_envs, *self.state_size)
-            self.num_envs = num_envs
-            self.n_envs = num_envs
-        else:
-            self.n_envs = 1
+        self.num_envs = num_envs if vect else 1
+        self.n_envs = self.num_envs
+        self.state_size = (self.num_envs, *self._single_state_size)
+        self.single_observation_space = Box(0.0, 1.0, self._single_state_size)
+        self.single_action_space = Box(-1.0, 1.0, (action_size,))
+        self.observation_space = batch_space(
+            self.single_observation_space, self.num_envs
+        )
+        self.action_space = batch_space(self.single_action_space, self.num_envs)
 
     def reset(self, seed=None, options=None):
-        return np.random.rand(*self.state_size), {}
+        return np.random.rand(*self.state_size).astype(np.float32), {}
 
     def step(self, action):
-        if not self.vect:
-            return (
-                np.random.rand(*self.state_size),
-                float(np.random.randint(0, 5)),
-                bool(np.random.randint(0, 2)),
-                bool(np.random.randint(0, 2)),
-                {},
-            )
         return (
-            np.random.rand(*self.state_size),
-            np.random.randint(0, 5, self.n_envs),
-            np.random.randint(0, 2, self.n_envs),
-            np.random.randint(0, 2, self.n_envs),
+            np.random.rand(*self.state_size).astype(np.float32),
+            np.random.randint(0, 5, self.num_envs),
+            np.random.randint(0, 2, self.num_envs),
+            np.random.randint(0, 2, self.num_envs),
             {},
         )
 
