@@ -68,7 +68,6 @@ network:
 tournament_selection:
     selection_strategy: multi_frequency
     n_subpopulations: 2
-    n_individuals_per_subpopulation: 8
     n_winners: 2
     n_survivors: 0
     n_open_for_migration: 2
@@ -78,7 +77,7 @@ tournament_selection:
 training:
     max_steps: 2_000_000
     target_score:
-    # pop_size is derived from the MF-PBT layout (2 * 8 = 16) and must be omitted
+    pop_size: 16  # MF-PBT population size (2 subpopulations of 8 agents)
     evo_steps: 10_000
     eval_steps:
     eval_loop: 1

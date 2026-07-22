@@ -30,7 +30,7 @@ from agilerl.models.hpo import (
     SelectionStrategySpec,
     TournamentSelectionSpec,
     default_selection_strategy,
-    resolve_multi_frequency_selection_pop_size,
+    resolve_and_validate_multi_frequency_population,
 )
 from agilerl.models.networks import (
     FinetuningNetworkSpec,
@@ -282,15 +282,18 @@ class TrainingManifest(BaseModel):
     ] = Field(default=None)
 
     @model_validator(mode="after")
-    def _validate_hpo_regime(self) -> Self:
-        """Derive pop_size when MF-PBT is the configured selection strategy.
+    def _resolve_and_validate_compatibility_with_multi_frequency(self) -> Self:
+        """Check the training block is compatible with multi-frequency selection.
 
-        :raises ValueError: If an explicit pop_size conflicts with the derived value.
+        When MF-PBT is the configured selection strategy, this requires an explicit
+        training.pop_size.
+
+        :raises ValueError: If pop_size is unset or the MF-PBT layout is invalid.
         :return: The validated manifest.
         :rtype: Self
         """
         if isinstance(self.tournament_selection, MultiFrequencySelectionSpec):
-            resolve_multi_frequency_selection_pop_size(
+            resolve_and_validate_multi_frequency_population(
                 self.tournament_selection, self.training
             )
         return self

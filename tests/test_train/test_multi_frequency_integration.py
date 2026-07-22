@@ -58,7 +58,6 @@ def _make_ppo_trainer(
 ) -> LocalTrainer:
     multi_frequency_selection = MultiFrequencySelectionSpec(
         n_subpopulations=2,
-        n_individuals_per_subpopulation=4,
         evolution_frequency_ratios=[1, 2],
         n_winners=1,
         n_survivors=1,
@@ -105,7 +104,6 @@ def test_localtrainer_builds_multi_frequency_and_tags_subpopulations():
 def test_localtrainer_rejects_both_multi_frequency_and_tournament():
     multi_frequency_selection = MultiFrequencySelectionSpec(
         n_subpopulations=2,
-        n_individuals_per_subpopulation=4,
         evolution_frequency_ratios=[1, 2],
         n_winners=1,
         n_survivors=1,
@@ -132,16 +130,14 @@ def test_localtrainer_rejects_both_multi_frequency_and_tournament():
         )
 
 
-def test_localtrainer_derives_pop_size_without_manifest():
-    trainer = _make_ppo_trainer(training=TrainingSpec(max_steps=200, evo_steps=50))
-
-    assert trainer.training_spec.pop_size == 8
-    assert len(trainer.population) == 8
-    assert Counter(a.subpopulation for a in trainer.population) == Counter({0: 4, 1: 4})
+def test_localtrainer_requires_explicit_pop_size_without_manifest():
+    # pop_size is mandatory under MF-PBT
+    with pytest.raises(ValueError, match="pop_size is required"):
+        _make_ppo_trainer(training=TrainingSpec(max_steps=200, evo_steps=50))
 
 
-def test_localtrainer_rejects_conflicting_pop_size_without_manifest():
-    with pytest.raises(ValueError, match="derived value"):
+def test_localtrainer_rejects_pop_size_below_six_without_manifest():
+    with pytest.raises(ValueError, match="population_size must be >= 6"):
         _make_ppo_trainer(
             training=TrainingSpec(max_steps=200, evo_steps=50, pop_size=4)
         )
@@ -166,8 +162,7 @@ def test_multi_frequency_trainer_to_manifest_round_trips():
 
     manifest = trainer.to_manifest()
 
-    # The manifest validator must not reject its own derived pop_size on this round-trip
-    assert manifest["training"]["pop_size"] == 8  # 2 subpops x 4 individuals
+    assert manifest["training"]["pop_size"] == 8
     # Multi-frequency selection serializes under the single discriminated tournament_selection field
     assert manifest["tournament_selection"]["selection_strategy"] == "multi_frequency"
     assert "multi_frequency_selection" not in manifest
@@ -300,8 +295,8 @@ def test_multi_frequency_evolves_real_population_of_every_family(family):
     for agent in population:
         agent.subpopulation = agent.index // 4
     strategy = MultiFrequencySelection(
+        population_size=8,
         n_subpopulations=2,
-        n_individuals_per_subpopulation=4,
         evolution_frequency_ratios=[1, 2],
         n_winners=1,
         n_survivors=1,
@@ -409,8 +404,8 @@ def test_run_selection_and_mutation_drives_real_operator_for_llm(monkeypatch, tm
     )
     population = [_LLMFinetuneAgent(i, i // 4, 0.0) for i in range(8)]
     strategy = MultiFrequencySelection(
+        population_size=8,
         n_subpopulations=2,
-        n_individuals_per_subpopulation=4,
         evolution_frequency_ratios=[1, 2],
         n_winners=1,
         n_survivors=1,

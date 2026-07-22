@@ -635,8 +635,8 @@ class TestSelectionStrategyProtocol:
         return [
             TournamentSelection(tournament_size=2, elitism=True, population_size=4),
             MultiFrequencySelection(
+                population_size=8,
                 n_subpopulations=2,
-                n_individuals_per_subpopulation=4,
                 n_winners=1,
                 n_survivors=1,
                 n_open_for_migration=1,

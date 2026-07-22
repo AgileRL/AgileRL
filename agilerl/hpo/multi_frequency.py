@@ -4,12 +4,13 @@ Implements the MF-PBT evolution regime of Doulazmi et al.,
 *"Multiple-Frequencies Population-Based Training"*, as a drop-in alternative to
 AgileRL's tournament-selection + mutation evolution.
 
-A population of n_subpopulations * n_individuals_per_subpopulation agents is
-split into subpopulations, each evolving at its own frequency delta_i (every
-delta_i evolution cycles). All agents still train evo_steps per cycle, so
-the global evolution frequency, and therefore the granularity of the discovered
-hyperparameter schedules, is preserved, while the slower subpopulations resist
-the greediness that makes single-frequency PBT settle into local optima.
+A population of population_size agents is split into n_subpopulations
+subpopulations of population_size // n_subpopulations agents each, and each
+subpopulation evolves at its own frequency delta_i (every delta_i evolution
+cycles). All agents still train evo_steps per cycle, so the global evolution
+frequency, and therefore the granularity of the discovered hyperparameter
+schedules, is preserved, while the slower subpopulations resist the greediness
+that makes single-frequency PBT settle into local optima.
 
 Each subpopulation is partitioned by within-subpopulation fitness rank into four
 brackets (*winners*, *survivors*, *open-for-migration* and *losers*) that drive
@@ -35,60 +36,60 @@ PopulationType = list[Any]
 class MultiFrequencySelection:
     """The multi-frequency selection operator needed in MF-PBT.
 
-    :param n_subpopulations: Number of subpopulations (>= 2; None -> 2).
-    :type n_subpopulations: int | None
-    :param n_individuals_per_subpopulation: Agents in each subpopulation (>= 3;
-        None -> 8).
-    :type n_individuals_per_subpopulation: int | None
+    :param population_size: Total number of agents in the population (>= 6, and a
+        multiple of n_subpopulations).
+    :type population_size: int
+    :param n_subpopulations: Number of subpopulations (>= 2; migration has nothing
+        to draw from with a single subpopulation).
+    :type n_subpopulations: int
     :param evolution_frequency_ratios: Per-subpopulation evolution-frequency ratios
         delta_i (strictly increasing integers, delta_i >= 1; one per
         subpopulation). None or [] -> [1, 5, 10, ...].
     :type evolution_frequency_ratios: list[int] | None
     :param n_winners: Agents in the winners bracket (>= 1; None ->
-        round(0.25 * n_individuals_per_subpopulation)).
+        round(0.25 * subpopulation_size)).
     :type n_winners: int | None
-    :param n_survivors: Agents in the survivors bracket (>= 0; None -> 0).
-    :type n_survivors: int | None
+    :param n_survivors: Agents in the survivors bracket (>= 0).
+    :type n_survivors: int
     :param n_open_for_migration: Agents in the open-for-migration bracket (>= 1;
-        None -> round(0.25 * n_individuals_per_subpopulation)).
+        None -> round(0.25 * subpopulation_size)).
     :type n_open_for_migration: int | None
     :param n_losers: Agents in the losers bracket (>= 1; None -> the remainder
-        n_ind - n_winners - n_survivors - n_open_for_migration).
+        subpopulation_size - n_winners - n_survivors - n_open_for_migration).
     :type n_losers: int | None
     :param seed: Seed for the reproducible winner-clone selection in
         :meth:`_clone_winners_over_losers`, derived from the run's global seed. None
         leaves the RNG unseeded.
     :type seed: int | None
-    :raises ValueError: If n_subpopulations < 2 (migration has nothing to draw
-        from with a single subpopulation), n_individuals_per_subpopulation < 3,
-        n_winners < 1, n_survivors < 0, n_open_for_migration < 1,
-        n_losers < 1, the four brackets do not sum to
-        n_individuals_per_subpopulation, or the frequency ratios are not
+    :raises ValueError: If population_size < 6, population_size is not a multiple of
+        n_subpopulations, n_subpopulations < 2, n_winners < 1, n_survivors < 0,
+        n_open_for_migration < 1, n_losers < 1, the four brackets do not sum to
+        population_size // n_subpopulations, or the frequency ratios are not
         n_subpopulations strictly-increasing integers >= 1.
     """
 
     def __init__(
         self,
-        n_subpopulations: int | None = None,
-        n_individuals_per_subpopulation: int | None = None,
+        population_size: int,
+        n_subpopulations: int = 2,
         evolution_frequency_ratios: list[int] | None = None,
         n_winners: int | None = None,
-        n_survivors: int | None = None,
+        n_survivors: int = 0,
         n_open_for_migration: int | None = None,
         n_losers: int | None = None,
         seed: int | None = None,
     ) -> None:
         (
+            self.population_size,
             self.n_subpopulations,
-            self.n_individuals_per_subpopulation,
             self.deltas,
             self.n_winners,
             self.n_survivors,
             self.n_open_for_migration,
             self.n_losers,
         ) = self._resolve_and_validate(
+            population_size,
             n_subpopulations,
-            n_individuals_per_subpopulation,
             evolution_frequency_ratios,
             n_winners,
             n_survivors,
@@ -96,7 +97,7 @@ class MultiFrequencySelection:
             n_losers,
         )
 
-        self.pop_size = self.n_subpopulations * self.n_individuals_per_subpopulation
+        self.subpopulation_size = self.population_size // self.n_subpopulations
         self.bracket_sizes = (
             self.n_winners,
             self.n_survivors,
@@ -112,72 +113,67 @@ class MultiFrequencySelection:
 
     @staticmethod
     def _resolve_and_validate(
-        n_subpopulations: int | None,
-        n_individuals_per_subpopulation: int | None,
+        population_size: int,
+        n_subpopulations: int,
         evolution_frequency_ratios: list[int] | None,
         n_winners: int | None,
-        n_survivors: int | None,
+        n_survivors: int,
         n_open_for_migration: int | None,
         n_losers: int | None,
     ) -> tuple[int, int, list[int], int, int, int, int]:
-        """Resolve the None defaults, then hard-check the operator's invariants.
+        """Resolve the defaults, then hard-check the operator's invariants.
 
-        :param n_subpopulations: Number of subpopulations, or None for 2.
-        :type n_subpopulations: int | None
-        :param n_individuals_per_subpopulation: Agents per subpopulation, or None
-            for 8.
-        :type n_individuals_per_subpopulation: int | None
+        :param population_size: Total population size (>= 6, a multiple of
+            n_subpopulations).
+        :type population_size: int
+        :param n_subpopulations: Number of subpopulations (>= 2).
+        :type n_subpopulations: int
         :param evolution_frequency_ratios: Per-subpopulation frequency ratios, or
             None/[] for [1, 5, 10, ...].
         :type evolution_frequency_ratios: list[int] | None
         :param n_winners: Winners bracket size, or None for
-            round(0.25 * n_individuals_per_subpopulation).
+            round(0.25 * subpopulation_size).
         :type n_winners: int | None
-        :param n_survivors: Survivors bracket size, or None for 0.
-        :type n_survivors: int | None
+        :param n_survivors: Survivors bracket size (>= 0).
+        :type n_survivors: int
         :param n_open_for_migration: Open-for-migration bracket size, or None for
-            round(0.25 * n_individuals_per_subpopulation).
+            round(0.25 * subpopulation_size).
         :type n_open_for_migration: int | None
         :param n_losers: Losers bracket size, or None for the remainder
-            n_ind - n_winners - n_survivors - n_open_for_migration.
+            subpopulation_size - n_winners - n_survivors - n_open_for_migration.
         :type n_losers: int | None
-        :return: The resolved (n_subpopulations, n_individuals_per_subpopulation,
+        :return: The resolved (population_size, n_subpopulations,
             evolution_frequency_ratios, n_winners, n_survivors, n_open_for_migration,
             n_losers).
         :rtype: tuple[int, int, list[int], int, int, int, int]
         :raises ValueError: On any violated invariant.
         """
-        # Resolve defaults
-        if n_subpopulations is None:
-            n_subpopulations = 2
-        if n_individuals_per_subpopulation is None:
-            n_individuals_per_subpopulation = 8
-        if n_survivors is None:
-            n_survivors = 0
-        n_ind = n_individuals_per_subpopulation
-        if n_winners is None:
-            n_winners = round(0.25 * n_ind)
-        if n_open_for_migration is None:
-            n_open_for_migration = round(0.25 * n_ind)
-        if n_losers is None:
-            n_losers = n_ind - n_winners - n_survivors - n_open_for_migration
-        if not evolution_frequency_ratios:
-            evolution_frequency_ratios = [1] + [
-                5 * i for i in range(1, n_subpopulations)
-            ]
-        else:
-            evolution_frequency_ratios = list(evolution_frequency_ratios)
-
-        # Validate the MF-PBT parameters
+        if population_size < 6:
+            msg = (
+                "population_size must be >= 6 (the smallest MF-PBT layout is 2 "
+                f"subpopulations of 3 agents), got {population_size}."
+            )
+            raise ValueError(msg)
         if n_subpopulations < 2:
             msg = f"n_subpopulations must be >= 2, got {n_subpopulations}."
             raise ValueError(msg)
-        if n_ind < 3:
+        if population_size % n_subpopulations != 0:
             msg = (
-                "n_individuals_per_subpopulation must be >= 3 (one winner, one "
-                f"open-for-migration and one loser slot are each required), got {n_ind}."
+                f"population_size ({population_size}) must be divisible by "
+                f"n_subpopulations ({n_subpopulations})."
             )
             raise ValueError(msg)
+
+        subpop = population_size // n_subpopulations
+
+        # Resolve the None bracket defaults
+        if n_winners is None:
+            n_winners = round(0.25 * subpop)
+        if n_open_for_migration is None:
+            n_open_for_migration = round(0.25 * subpop)
+        if n_losers is None:
+            n_losers = subpop - n_winners - n_survivors - n_open_for_migration
+
         if n_winners < 1:
             msg = f"n_winners must be >= 1, got {n_winners}."
             raise ValueError(msg)
@@ -191,12 +187,20 @@ class MultiFrequencySelection:
             msg = f"n_losers must be >= 1, got {n_losers}."
             raise ValueError(msg)
         bracket_sum = n_winners + n_survivors + n_open_for_migration + n_losers
-        if bracket_sum != n_ind:
+        if bracket_sum != subpop:
             msg = (
                 f"n_winners + n_survivors + n_open_for_migration + n_losers "
-                f"({bracket_sum}) must equal n_individuals_per_subpopulation ({n_ind})."
+                f"({bracket_sum}) must equal population_size // n_subpopulations "
+                f"({subpop})."
             )
             raise ValueError(msg)
+
+        if not evolution_frequency_ratios:
+            evolution_frequency_ratios = [1] + [
+                5 * i for i in range(1, n_subpopulations)
+            ]
+        else:
+            evolution_frequency_ratios = list(evolution_frequency_ratios)
         if len(evolution_frequency_ratios) != n_subpopulations:
             msg = (
                 f"evolution_frequency_ratios must have length n_subpopulations "
@@ -214,8 +218,8 @@ class MultiFrequencySelection:
             raise ValueError(msg)
 
         return (
+            population_size,
             n_subpopulations,
-            n_individuals_per_subpopulation,
             evolution_frequency_ratios,
             n_winners,
             n_survivors,
@@ -273,9 +277,7 @@ class MultiFrequencySelection:
         return self._max_index
 
     @staticmethod
-    def _subpopulation_for_index(
-        index: int, n_individuals_per_subpopulation: int
-    ) -> int:
+    def _subpopulation_for_index(index: int, subpopulation_size: int) -> int:
         """Map an agent index to its subpopulation id.
 
         Both the build-time tagging in
@@ -285,12 +287,12 @@ class MultiFrequencySelection:
 
         :param index: The agent's population index.
         :type index: int
-        :param n_individuals_per_subpopulation: Agents per subpopulation.
-        :type n_individuals_per_subpopulation: int
+        :param subpopulation_size: Agents per subpopulation.
+        :type subpopulation_size: int
         :return: The subpopulation id the agent belongs to.
         :rtype: int
         """
-        return index // n_individuals_per_subpopulation
+        return index // subpopulation_size
 
     def _assign_initial_subpopulations(self, population: PopulationType) -> None:
         """Assign subpopulation to any agent that lacks it.
@@ -300,19 +302,19 @@ class MultiFrequencySelection:
 
         :param population: The whole population.
         :type population: list
-        :raises ValueError: If len(population) does not equal pop_size.
+        :raises ValueError: If len(population) does not equal population_size.
         """
-        if len(population) != self.pop_size:
+        if len(population) != self.population_size:
             msg = (
-                f"Population has {len(population)} agents, expected {self.pop_size} "
-                f"(n_subpopulations * n_individuals_per_subpopulation = "
-                f"{self.n_subpopulations} * {self.n_individuals_per_subpopulation})."
+                f"Population has {len(population)} agents, expected "
+                f"{self.population_size} (n_subpopulations * subpopulation_size = "
+                f"{self.n_subpopulations} * {self.subpopulation_size})."
             )
             raise ValueError(msg)
         for agent in population:
             if getattr(agent, "subpopulation", None) is None:
                 agent.subpopulation = self._subpopulation_for_index(
-                    agent.index, self.n_individuals_per_subpopulation
+                    agent.index, self.subpopulation_size
                 )
 
     def _brackets(
@@ -331,10 +333,10 @@ class MultiFrequencySelection:
         :rtype: tuple[list, list, list, list]
         """
         members = self._rank([a for a in population if a.subpopulation == subpop])
-        if len(members) != self.n_individuals_per_subpopulation:
+        if len(members) != self.subpopulation_size:
             msg = (
                 f"Subpopulation {subpop} has {len(members)} members, expected "
-                f"{self.n_individuals_per_subpopulation}."
+                f"{self.subpopulation_size}."
             )
             raise ValueError(msg)
         n_w, n_s, n_o, _n_l = self.bracket_sizes

@@ -36,30 +36,31 @@ Multi-frequency and tournament selection share the single ``tournament_selection
 discriminated by a ``selection_strategy`` field that defaults to ``tournament``. To use
 MF-PBT, set ``selection_strategy: multi_frequency`` and supply the subpopulation layout in
 the same block (the two regimes are mutually exclusive, so only one is ever configured).
-``pop_size`` is derived as ``n_subpopulations * n_individuals_per_subpopulation`` and
-should be omitted. The bracket sizes and frequency ratios have sensible defaults (leave
-them out to accept them):
+As with tournament selection, ``training.pop_size`` is the mandatory population size; MF-PBT
+reads it and derives the per-subpopulation size as ``pop_size // n_subpopulations``. The bracket
+sizes and frequency ratios have sensible defaults (leave them out to accept them):
 
 .. code-block:: yaml
 
     # `selection_strategy` defaults to `tournament`; set it to `multi_frequency` for MF-PBT.
-    # Omit `training.pop_size` (it is derived from the subpopulation layout).
     tournament_selection:
       selection_strategy: multi_frequency
       n_subpopulations: 2                 # >= 2
-      n_individuals_per_subpopulation: 8  # >= 3  (pop_size = 2 * 8 = 16)
       n_winners: 2                        # >= 1
       n_survivors: 0                      # >= 0
       n_open_for_migration: 2             # >= 1
       n_losers: 4                         # >= 1
       evolution_frequency_ratios: [1, 5]  # strictly increasing ints >= 1, one per subpop
 
-``n_subpopulations`` defaults to ``2`` and ``n_individuals_per_subpopulation`` to ``8``, so
-the default population is 16 agents. The bracket sizes must sum to
-``n_individuals_per_subpopulation``; their defaults are ``round(0.25 * n)`` winners and
-open-for-migration agents, ``0`` survivors and the remainder as losers, and the
-frequency-ratio default is ``[1, 5, 10, …]``. The recommended configuration is the one
-shown above: **2 subpopulations of 8 agents**, split into
+    training:
+      pop_size: 16                        # >= 6, a multiple of n_subpopulations
+
+``n_subpopulations`` defaults to ``2``, so with the recommended ``pop_size`` of 16 the
+population is 16 agents in two subpopulations of 8. The bracket sizes must sum to the
+subpopulation size ``pop_size // n_subpopulations``; their defaults are
+``round(0.25 * subpop)`` winners and open-for-migration agents, ``0`` survivors and the
+remainder as losers, and the frequency-ratio default is ``[1, 5, 10, …]``. The recommended
+configuration is the one shown above: **16 agents in 2 subpopulations of 8**, split into
 **2 winners / 0 survivors / 2 open-for-migration / 4 losers** with frequency ratios
 **[1, 5]**.
 

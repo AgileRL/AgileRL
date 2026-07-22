@@ -412,7 +412,13 @@ class EvolvableAlgorithmProtocol(Protocol):
 
 @runtime_checkable
 class SelectionStrategyProtocol(Protocol):
-    """Protocol for population selection strategies that drive evolutionary HPO."""
+    """Protocol for population selection strategies that drive evolutionary HPO.
+
+    :cvar population_size: Total number of agents in the population.
+    :vartype population_size: int
+    """
+
+    population_size: int
 
     def select(
         self,

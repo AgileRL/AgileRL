@@ -118,10 +118,12 @@ def make_population(subpop_fitnesses, weights=None):
     return population
 
 
-def make_strategy(n_subpop=2, n_ind=4, ratios=None, w=1, s=1, o=1, ln=1, seed=42):
+def make_strategy(
+    n_subpop=2, population_size=8, ratios=None, w=1, s=1, o=1, ln=1, seed=42
+):
     return MultiFrequencySelection(
+        population_size=population_size,
         n_subpopulations=n_subpop,
-        n_individuals_per_subpopulation=n_ind,
         evolution_frequency_ratios=ratios or list(range(1, n_subpop + 1)),
         n_winners=w,
         n_survivors=s,
@@ -149,58 +151,57 @@ def run_migration(strategy, population, subpop, external_pool):
 
 class TestMultiFrequencySelectionInit:
     def test_valid_construction_sets_derived_attributes(self):
-        strategy = make_strategy(n_subpop=2, n_ind=4, ratios=[1, 3])
-        assert strategy.pop_size == 8
+        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 3])
+        assert strategy.population_size == 8
+        assert strategy.subpopulation_size == 4
         assert strategy.deltas == [1, 3]
         assert strategy.bracket_sizes == (1, 1, 1, 1)
         assert strategy.counters == [0, 0]
 
     def test_defaults_resolve_to_recommended_configuration(self):
-        strategy = MultiFrequencySelection()
+        strategy = MultiFrequencySelection(population_size=16)
         assert strategy.n_subpopulations == 2
-        assert strategy.n_individuals_per_subpopulation == 8
-        assert strategy.pop_size == 16
+        assert strategy.subpopulation_size == 8
+        assert strategy.population_size == 16
         assert strategy.bracket_sizes == (2, 0, 2, 4)
         assert strategy.deltas == [1, 5]
 
     def test_ratios_default_scales_with_subpopulations(self):
-        strategy = MultiFrequencySelection(
-            n_subpopulations=4, n_individuals_per_subpopulation=8
-        )
+        strategy = MultiFrequencySelection(population_size=32, n_subpopulations=4)
         assert strategy.deltas == [1, 5, 10, 15]
 
     def test_empty_ratios_list_resolves_to_default(self):
         strategy = MultiFrequencySelection(
+            population_size=16,
             n_subpopulations=2,
-            n_individuals_per_subpopulation=8,
             evolution_frequency_ratios=[],
         )
         assert strategy.deltas == [1, 5]
 
     def test_losers_default_fills_the_remainder(self):
         strategy = MultiFrequencySelection(
+            population_size=16,
             n_subpopulations=2,
-            n_individuals_per_subpopulation=8,
             n_winners=3,
             n_survivors=1,
             n_open_for_migration=1,
         )
         assert strategy.n_losers == 3  # 8 - 3 - 1 - 1
 
-    @pytest.mark.parametrize("n_ind", [1, 2])
-    def test_init_rejects_fewer_than_three_individuals(self, n_ind):
-        with pytest.raises(
-            ValueError, match="n_individuals_per_subpopulation must be >= 3"
-        ):
-            MultiFrequencySelection(
-                n_subpopulations=2, n_individuals_per_subpopulation=n_ind
-            )
+    @pytest.mark.parametrize("population_size", [3, 5])
+    def test_init_rejects_population_size_below_six(self, population_size):
+        with pytest.raises(ValueError, match="population_size must be >= 6"):
+            MultiFrequencySelection(population_size=population_size, n_subpopulations=2)
+
+    def test_init_rejects_population_size_not_divisible_by_subpopulations(self):
+        with pytest.raises(ValueError, match="must be divisible by n_subpopulations"):
+            MultiFrequencySelection(population_size=9, n_subpopulations=2)
 
     def test_init_rejects_zero_open_for_migration(self):
         with pytest.raises(ValueError, match="n_open_for_migration must be >= 1"):
             MultiFrequencySelection(
+                population_size=8,
                 n_subpopulations=2,
-                n_individuals_per_subpopulation=4,
                 n_winners=1,
                 n_survivors=1,
                 n_open_for_migration=0,
@@ -210,8 +211,8 @@ class TestMultiFrequencySelectionInit:
     def test_init_rejects_negative_survivors(self):
         with pytest.raises(ValueError, match="n_survivors must be >= 0"):
             MultiFrequencySelection(
+                population_size=8,
                 n_subpopulations=2,
-                n_individuals_per_subpopulation=4,
                 n_winners=1,
                 n_survivors=-1,
                 n_open_for_migration=1,
@@ -220,7 +221,10 @@ class TestMultiFrequencySelectionInit:
 
     @pytest.mark.parametrize(
         ("n_survivors", "derived_losers"),
-        [(1, 0), (2, -1)],  # n_ind - n_winners - n_survivors - n_open = 4 - 2 - s - 1
+        [
+            (1, 0),
+            (2, -1),
+        ],  # subpop_size - n_winners - n_survivors - n_open = 4 - 2 - s - 1
     )
     def test_init_rejects_derived_losers_non_positive(
         self, n_survivors, derived_losers
@@ -229,8 +233,8 @@ class TestMultiFrequencySelectionInit:
             ValueError, match=f"n_losers must be >= 1, got {derived_losers}"
         ):
             MultiFrequencySelection(
+                population_size=8,
                 n_subpopulations=2,
-                n_individuals_per_subpopulation=4,
                 n_winners=2,
                 n_survivors=n_survivors,
                 n_open_for_migration=1,
@@ -245,20 +249,20 @@ class TestMultiFrequencySelectionInit:
             ),
             (
                 {"w": 1, "s": 1, "o": 1, "ln": 2},
-                "must equal n_individuals",
+                "must equal population_size // n_subpopulations",
             ),  # sum 5 != 4
         ],
     )
     def test_init_rejects_invalid_brackets(self, kwargs, match):
         with pytest.raises(ValueError, match=match):
-            make_strategy(n_subpop=2, n_ind=4, ratios=[1, 2], **kwargs)
+            make_strategy(n_subpop=2, population_size=8, ratios=[1, 2], **kwargs)
 
     def test_open_for_migration_may_exceed_winners_plus_survivors(self):
         # Migration sources migrants from the frozen pre-evolution snapshot rather than
         # the live population, so a subpopulation may open more slots for migration than
         # it preserves natively
         strategy = make_strategy(
-            n_subpop=2, n_ind=4, ratios=[1, 2], w=1, s=0, o=2, ln=1
+            n_subpop=2, population_size=8, ratios=[1, 2], w=1, s=0, o=2, ln=1
         )
         assert strategy.bracket_sizes == (1, 0, 2, 1)
 
@@ -272,13 +276,13 @@ class TestMultiFrequencySelectionInit:
     )
     def test_init_rejects_invalid_ratios(self, ratios, match):
         with pytest.raises(ValueError, match=match):
-            make_strategy(n_subpop=2, n_ind=4, ratios=ratios)
+            make_strategy(n_subpop=2, population_size=8, ratios=ratios)
 
     def test_init_rejects_negative_bracket(self):
         with pytest.raises(ValueError, match="n_losers must be >= 1, got -1"):
             MultiFrequencySelection(
+                population_size=8,
                 n_subpopulations=2,
-                n_individuals_per_subpopulation=4,
                 evolution_frequency_ratios=[1, 2],
                 n_winners=2,
                 n_survivors=2,
@@ -289,13 +293,15 @@ class TestMultiFrequencySelectionInit:
     def test_frozen_subpopulation_rejected(self):
         # A "frozen" subpopulation should raise an error
         with pytest.raises(ValueError, match="n_winners must be >= 1"):
-            make_strategy(n_subpop=2, n_ind=4, ratios=[1, 2], w=0, s=4, o=0, ln=0)
+            make_strategy(
+                n_subpop=2, population_size=8, ratios=[1, 2], w=0, s=4, o=0, ln=0
+            )
 
     def test_init_rejects_fewer_than_two_subpopulations(self):
         with pytest.raises(ValueError, match="n_subpopulations must be >= 2"):
             MultiFrequencySelection(
+                population_size=6,
                 n_subpopulations=1,
-                n_individuals_per_subpopulation=4,
                 evolution_frequency_ratios=[1],
                 n_winners=1,
                 n_survivors=1,
@@ -318,7 +324,7 @@ class TestSubpopulationAssignment:
         assert [fn(i, 4) for i in range(12)] == [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2]
 
     def test_assign_initial_subpopulations_tags_only_untagged_agents(self):
-        strategy = make_strategy(n_subpop=2, n_ind=4)
+        strategy = make_strategy(n_subpop=2, population_size=8)
         pop = [FakeAgent(i, None, fitness=0.0) for i in range(8)]
         pop[0] = FakeAgent(0, 1, fitness=0.0)
         pop[5] = FakeAgent(5, 0, fitness=0.0)
@@ -329,14 +335,14 @@ class TestSubpopulationAssignment:
 
     @pytest.mark.parametrize("size", [6, 10])
     def test_assign_initial_subpopulations_rejects_wrong_population_size(self, size):
-        strategy = make_strategy(n_subpop=2, n_ind=4)  # pop_size == 8
+        strategy = make_strategy(n_subpop=2, population_size=8)  # pop_size == 8
         pop = [FakeAgent(i, None, fitness=0.0) for i in range(size)]
 
         with pytest.raises(ValueError, match=f"{size} agents, expected 8"):
             strategy._assign_initial_subpopulations(pop)
 
     def test_assign_initial_subpopulations_accepts_correct_population_size(self):
-        strategy = make_strategy(n_subpop=2, n_ind=4)  # pop_size == 8
+        strategy = make_strategy(n_subpop=2, population_size=8)  # pop_size == 8
         pop = [FakeAgent(i, None, fitness=0.0) for i in range(8)]
 
         strategy._assign_initial_subpopulations(pop)
@@ -356,7 +362,7 @@ class TestBrackets:
     def test_brackets_partition_subpop_by_descending_fitness(
         self, w, s, o, ln, expected
     ):
-        strategy = make_strategy(n_subpop=2, n_ind=4, w=w, s=s, o=o, ln=ln)
+        strategy = make_strategy(n_subpop=2, population_size=8, w=w, s=s, o=o, ln=ln)
         pop = make_population({0: [2.0, 4.0, 1.0, 3.0], 1: [8.0, 7.0, 6.0, 5.0]})
 
         winners, survivors, open_, losers = strategy._brackets(pop, subpop=0)
@@ -370,7 +376,7 @@ class TestBrackets:
             assert all(a.subpopulation == 0 for a in bracket)
 
     def test_brackets_selects_the_requested_subpopulation(self):
-        strategy = make_strategy(n_subpop=2, n_ind=4)
+        strategy = make_strategy(n_subpop=2, population_size=8)
         pop = make_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
 
         winners, survivors, open_, losers = strategy._brackets(pop, subpop=1)
@@ -384,7 +390,7 @@ class TestBrackets:
 
     def test_brackets_rejects_wrong_member_count(self):
         # A mis-tagged subpop is rejected up front rather than silently mis-sliced
-        strategy = make_strategy(n_subpop=2, n_ind=4)
+        strategy = make_strategy(n_subpop=2, population_size=8)
         pop = [FakeAgent(i, 0, fitness=float(i)) for i in range(3)]
 
         with pytest.raises(
@@ -395,7 +401,7 @@ class TestBrackets:
 
 class TestCloneWinnersOverLosers:
     def test_clone_winners_over_losers_replaces_losers_with_fresh_winner_clones(self):
-        strategy = make_strategy(n_subpop=2, n_ind=4)
+        strategy = make_strategy(n_subpop=2, population_size=8)
         pop = make_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
         max_index_before = max(a.index for a in pop)
         winners, _s, _o, losers = strategy._brackets(pop, subpop=0)
@@ -429,7 +435,7 @@ class TestCloneWinnersOverLosers:
         assert pop == pop_copy
 
     def test_clone_winners_over_losers_clones_are_independent_of_parents(self):
-        strategy = make_strategy(n_subpop=2, n_ind=4, w=1, s=0, o=1, ln=2)
+        strategy = make_strategy(n_subpop=2, population_size=8, w=1, s=0, o=1, ln=2)
         pop = make_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
         winner = next(a for a in pop if a.subpopulation == 0 and a.fitness[-1] == 4.0)
         winners, _s, _o, losers = strategy._brackets(pop, subpop=0)
@@ -445,7 +451,7 @@ class TestCloneWinnersOverLosers:
 
     def test_clone_winners_over_losers_with_zero_survivors_replaces_every_loser(self):
         # Brackets 1/0/1/2: one winner, no survivors, one open, two losers.
-        strategy = make_strategy(n_subpop=2, n_ind=4, w=1, s=0, o=1, ln=2)
+        strategy = make_strategy(n_subpop=2, population_size=8, w=1, s=0, o=1, ln=2)
         pop = make_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
         winners, _s, _o, losers = strategy._brackets(pop, subpop=0)
 
@@ -467,7 +473,7 @@ class TestCloneWinnersOverLosers:
 
         def run():
             pop = make_population(**pop_kwargs)
-            strategy = make_strategy(n_ind=5, w=2, s=0, o=1, ln=2, seed=7)
+            strategy = make_strategy(population_size=10, w=2, s=0, o=1, ln=2, seed=7)
             winners, _s, _o, losers = strategy._brackets(pop, subpop=0)
             new_pop, _ = strategy._clone_winners_over_losers(
                 pop, winners, losers, subpop=0
@@ -488,7 +494,9 @@ class TestCloneWinnersOverLosers:
             # Several cloning rounds so the seeded stream can diverge
             for _ in range(6):
                 pop = make_population(**pop_kwargs)
-                strategy = make_strategy(n_ind=5, w=2, s=0, o=1, ln=2, seed=seed)
+                strategy = make_strategy(
+                    population_size=10, w=2, s=0, o=1, ln=2, seed=seed
+                )
                 winners, _s, _o, losers = strategy._brackets(pop, subpop=0)
                 new_pop, _ = strategy._clone_winners_over_losers(
                     pop, winners, losers, subpop=0
@@ -501,7 +509,7 @@ class TestCloneWinnersOverLosers:
 
 class TestSelect:
     def test_select_evolves_each_subpopulation_at_its_frequency(self):
-        strategy = make_strategy(n_subpop=3, n_ind=4, ratios=[1, 2, 3])
+        strategy = make_strategy(n_subpop=3, population_size=12, ratios=[1, 2, 3])
         fired = []  # (cycle, subpop)
         cycle = {"n": 0}
 
@@ -529,7 +537,7 @@ class TestSelect:
 
     def test_select_returns_new_population_and_only_clone_indices(self):
         # Subpop 0 (delta 1) is due on cycle 1; subpop 1 (delta 2) is not.
-        strategy = make_strategy(n_subpop=2, n_ind=4, ratios=[1, 2])
+        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
         pop = make_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
 
         elite, new_pop, indices = strategy.select(pop)
@@ -554,7 +562,7 @@ class TestSelect:
 class TestMigration:
     def test_migration_slow_to_fast_keeps_external_weights_but_elite_hps(self):
         # Studied subpop 1 (delta=2); external subpop 0 (delta=1) -> delta_ext < delta_studied.
-        strategy = make_strategy(n_subpop=2, n_ind=4, ratios=[1, 2])
+        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
         pop = make_population({0: [9.0, 8.0, 7.0, 6.0], 1: [5.0, 4.0, 3.0, 2.0]})
         for a in pop:
             if a.subpopulation == 0:
@@ -581,7 +589,7 @@ class TestMigration:
 
     def test_migration_full_clone_when_external_not_faster(self):
         # Studied subpop 0 (delta=1); external subpop 1 (delta=2) -> delta_ext > delta_studied.
-        strategy = make_strategy(n_subpop=2, n_ind=4, ratios=[1, 2])
+        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
         pop = make_population({0: [5.0, 4.0, 3.0, 2.0], 1: [9.0, 8.0, 7.0, 6.0]})
         for a in pop:
             if a.subpopulation == 1:
@@ -596,7 +604,7 @@ class TestMigration:
         assert movers[0].lr == 0.5
 
     def test_migration_migrant_is_independent_of_external_parent(self):
-        strategy = make_strategy(n_subpop=2, n_ind=4, ratios=[1, 2])
+        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
         pop = make_population({0: [5.0, 4.0, 3.0, 2.0], 1: [9.0, 8.0, 7.0, 6.0]})
         external = next(a for a in pop if a.subpopulation == 1 and a.fitness[-1] == 9.0)
 
@@ -608,7 +616,7 @@ class TestMigration:
 
     def test_migration_skips_when_open_agent_already_better(self):
         # The open agent of subpop 0 beats every external agent -> no migration
-        strategy = make_strategy(n_subpop=2, n_ind=4, ratios=[1, 2])
+        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
         pop = make_population({0: [100.0, 99.0, 98.0, 1.0], 1: [9.0, 8.0, 7.0, 6.0]})
         open_agent = next(
             a for a in pop if a.subpopulation == 0 and a.fitness[-1] == 98.0
@@ -621,7 +629,7 @@ class TestMigration:
 
     def test_migration_sources_migrants_from_external_pool_not_live_population(self):
         strategy = make_strategy(
-            n_subpop=2, n_ind=4, ratios=[1, 2], w=1, s=1, o=1, ln=1
+            n_subpop=2, population_size=8, ratios=[1, 2], w=1, s=1, o=1, ln=1
         )
         pop = make_population({0: [4.0, 3.0, 2.0, 1.0], 1: [5.0, 4.0, 3.0, 2.0]})
         for a in pop:  # subpop 0 already evolved this cycle -> its members are spent
@@ -653,7 +661,7 @@ class TestMigration:
         # So exactly one migrant results. Had the pointer not advanced past e0, open1
         # would be re-offered e0 (40) and migrate a second copy of it.
         strategy = make_strategy(
-            n_subpop=2, n_ind=4, ratios=[1, 2], w=1, s=0, o=2, ln=1
+            n_subpop=2, population_size=8, ratios=[1, 2], w=1, s=0, o=2, ln=1
         )
         pop = make_population({0: [50.0, 30.0, 20.0, 5.0], 1: [40.0, 15.0, 10.0, 8.0]})
         e0 = next(a for a in pop if a.subpopulation == 1 and a.fitness[-1] == 40.0)
@@ -680,7 +688,7 @@ class TestMigration:
         # So exactly one migrant results. Had the skip advanced the pointer, open1 would
         # face e1 (12), beat it, and skip -> zero migrants.
         strategy = make_strategy(
-            n_subpop=2, n_ind=4, ratios=[1, 2], w=1, s=0, o=2, ln=1
+            n_subpop=2, population_size=8, ratios=[1, 2], w=1, s=0, o=2, ln=1
         )
         pop = make_population({0: [50.0, 30.0, 20.0, 5.0], 1: [25.0, 12.0, 10.0, 8.0]})
         e0 = next(a for a in pop if a.subpopulation == 1 and a.fitness[-1] == 25.0)
@@ -774,7 +782,7 @@ def llm_dispatch(monkeypatch):
 
 class TestApplyHpReset:
     def test_apply_hp_reset_sets_hps_syncs_config_and_rebuilds_lr_optimizer(self):
-        strategy = make_strategy(n_subpop=2, n_ind=4)
+        strategy = make_strategy(n_subpop=2, population_size=8)
         agent = FakeLLMAgent(0, 0, 1.0, lr=0.5)
 
         strategy._apply_hp_reset(agent, {"lr": 0.001, "batch_size": 32})
@@ -788,7 +796,7 @@ class TestApplyHpReset:
         assert agent.optimizer.lr == 0.001
 
     def test_apply_hp_reset_skips_optimizer_rebuild_when_lr_unchanged(self):
-        strategy = make_strategy(n_subpop=2, n_ind=4)
+        strategy = make_strategy(n_subpop=2, population_size=8)
         agent = FakeLLMAgent(0, 0, 1.0, lr=0.5)
 
         strategy._apply_hp_reset(agent, {"batch_size": 32})
@@ -802,7 +810,7 @@ class TestSelectLLM:
     def test_select_dispatches_to_llm_path_for_llm_populations(self):
         # The LLM path returns the live elite (not a fresh clone) and scrubs mut on
         # every returned agent. Neither is true of the standard path
-        strategy = make_strategy(n_subpop=2, n_ind=4, ratios=[1, 2])
+        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
         pop = make_llm_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
 
         elite, new_pop, _indices = strategy.select(pop)
@@ -811,7 +819,7 @@ class TestSelectLLM:
         assert all(a.mut == "None" for a in new_pop)
 
     def test_select_returns_live_global_elite(self):
-        strategy = make_strategy(n_subpop=2, n_ind=4, ratios=[1, 2])
+        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
         pop = make_llm_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
         best = next(a for a in pop if a.fitness[-1] == 8.0)
 
@@ -821,7 +829,7 @@ class TestSelectLLM:
         assert elite in new_pop
 
     def test_select_marks_only_winner_clones_for_mutation(self):
-        strategy = make_strategy(n_subpop=2, n_ind=4, ratios=[1, 2])
+        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
         pop = make_llm_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
 
         _elite, new_pop, indices = strategy.select(pop)
@@ -833,7 +841,7 @@ class TestSelectLLM:
     def test_select_frees_replaced_non_source_agents(self):
         # Subpop 0 is due: its loser (1.0) is cloned over and its open slot
         # (2.0) is migrated over. Both are freed; neither is a clone/migration source
-        strategy = make_strategy(n_subpop=2, n_ind=4, ratios=[1, 2])
+        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
         pop = make_llm_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
         loser = next(a for a in pop if a.subpopulation == 0 and a.fitness[-1] == 1.0)
         open_agent = next(
@@ -846,7 +854,7 @@ class TestSelectLLM:
         assert open_agent.clean_up_calls == 1
 
     def test_select_does_not_free_surviving_agents(self):
-        strategy = make_strategy(n_subpop=2, n_ind=4, ratios=[1, 2])
+        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
         pop = make_llm_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
         winner = next(a for a in pop if a.subpopulation == 0 and a.fitness[-1] == 4.0)
         survivor = next(a for a in pop if a.subpopulation == 0 and a.fitness[-1] == 3.0)
@@ -861,7 +869,7 @@ class TestSelectLLM:
                 assert a.clean_up_calls == 0
 
     def test_select_schedules_subpopulations_at_their_frequency(self):
-        strategy = make_strategy(n_subpop=3, n_ind=4, ratios=[1, 2, 3])
+        strategy = make_strategy(n_subpop=3, population_size=12, ratios=[1, 2, 3])
         counters_seen = []
 
         for _ in range(6):
@@ -884,7 +892,7 @@ class TestSelectLLM:
 
     def test_select_migrate_full_imports_external_agent_wholesale(self):
         # Subpop 0 due; its open slot is offered subpop 1's best (full clone)
-        strategy = make_strategy(n_subpop=2, n_ind=4, ratios=[1, 2])
+        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
         pop = make_llm_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
         ext = next(a for a in pop if a.fitness[-1] == 8.0)
         ext.weights = "EXT8"
@@ -900,7 +908,7 @@ class TestSelectLLM:
 
     def test_select_migrate_weights_keeps_external_weights_but_elite_hps(self):
         # Both subpops due. Subpop 1 draws from subpop 0 (weights-only)
-        strategy = make_strategy(n_subpop=2, n_ind=4, ratios=[1, 2])
+        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
         strategy.counters = [0, 1]
         pop = make_llm_population({0: [9.0, 8.0, 7.0, 6.0], 1: [5.0, 4.0, 3.0, 2.0]})
         for a in pop:
@@ -945,7 +953,7 @@ class TestSelectLLMAccelerator:
 
         monkeypatch.setattr(mf_module, "broadcast_object_list", fake_broadcast)
         accelerator = _MultiProcAccelerator(is_main_process=True, num_processes=2)
-        strategy = make_strategy(n_subpop=2, n_ind=4, ratios=[1, 2])
+        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
         pop = make_llm_population(
             {0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]},
             accelerator=accelerator,
@@ -967,7 +975,7 @@ class TestSelectLLMAccelerator:
         # A worker must not advance its own counters/RNG; it consumes the plan the main
         # process broadcast and materialises exactly that generation
         monkeypatch.setattr(mf_module, "LLMAlgorithm", FakeLLMAgent)
-        strategy = make_strategy(n_subpop=2, n_ind=4, ratios=[1, 2])
+        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
         accelerator = _MultiProcAccelerator(is_main_process=False, num_processes=2)
         pop = make_llm_population(
             {0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]},

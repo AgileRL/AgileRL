@@ -156,7 +156,6 @@ class TestBuildMultiFrequencyFromSpec:
 
         spec = MultiFrequencySelectionSpec(
             n_subpopulations=2,
-            n_individuals_per_subpopulation=4,
             evolution_frequency_ratios=[1, 2],
             n_winners=1,
             n_survivors=1,
@@ -168,6 +167,7 @@ class TestBuildMultiFrequencyFromSpec:
         )
 
         assert isinstance(strategy, MultiFrequencySelection)
+        assert strategy.population_size == 8
         assert strategy.n_subpopulations == 2
         assert strategy.deltas == [1, 2]
         assert strategy.bracket_sizes == (1, 1, 1, 1)
@@ -184,9 +184,7 @@ class TestAssignSubpopulations:
         from agilerl.utils.trainer_utils import _assign_subpopulations
 
         agents = [MagicMock(index=i, subpopulation=None) for i in range(8)]
-        spec = MultiFrequencySelectionSpec(
-            n_subpopulations=2, n_individuals_per_subpopulation=4
-        )
+        spec = MultiFrequencySelectionSpec(n_subpopulations=2)
         _assign_subpopulations(agents, spec)
 
         assert [a.subpopulation for a in agents] == [0, 0, 0, 0, 1, 1, 1, 1]
@@ -212,9 +210,7 @@ class TestAssignSubpopulations:
 
         restored_indices = [12, 5, 40, 3, 27, 9, 33, 18]
         agents = [MagicMock(index=idx, subpopulation=99) for idx in restored_indices]
-        spec = MultiFrequencySelectionSpec(
-            n_subpopulations=2, n_individuals_per_subpopulation=4
-        )
+        spec = MultiFrequencySelectionSpec(n_subpopulations=2)
         _assign_subpopulations(agents, spec)
 
         assert [a.subpopulation for a in agents] == [0, 0, 0, 0, 1, 1, 1, 1]

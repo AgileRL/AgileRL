@@ -94,26 +94,27 @@ class TournamentSelectionSpec(BaseModel):
 class MultiFrequencySelectionSpec(BaseModel):
     """Pydantic model for the MultiFrequencySelection object.
 
+    The total population size is configured in the manifest's training block,
+    not on this spec. This spec only validates the population-size-independent
+    constraints.
+
     :param selection_strategy: Discriminator selecting this (MF-PBT) branch of the
         manifest's tournament_selection union. Fixed to "multi_frequency".
     :type selection_strategy: Literal["multi_frequency"]
     :param n_subpopulations: Number of subpopulations (>= 2, since MF-PBT migration
         draws from *other* subpopulations).
     :type n_subpopulations: int
-    :param n_individuals_per_subpopulation: Agents in each subpopulation (>= 3,
-        since a valid four-bracket partition needs at least one winner, one
-        open-for-migration and one loser slot).
-    :type n_individuals_per_subpopulation: int
-    :param n_winners: Agents in the winners bracket (default round(0.25 *
-        n_individuals_per_subpopulation)).
+    :param n_winners: Agents in the winners bracket (>= 1; default round(0.25 *
+        population_size // n_subpopulations)).
     :type n_winners: int | None
-    :param n_survivors: Agents in the survivors bracket.
+    :param n_survivors: Agents in the survivors bracket (>= 0).
     :type n_survivors: int
-    :param n_open_for_migration: Agents in the open-for-migration bracket (default
-        round(0.25 * n_individuals_per_subpopulation)).
+    :param n_open_for_migration: Agents in the open-for-migration bracket (>= 1;
+        default round(0.25 * population_size // n_subpopulations)).
     :type n_open_for_migration: int | None
-    :param n_losers: Agents in the losers bracket (default n_individuals -
-        n_winners - n_survivors - n_open_for_migration).
+    :param n_losers: Agents in the losers bracket (>= 1; default the remainder
+        population_size // n_subpopulations - n_winners - n_survivors -
+        n_open_for_migration).
     :type n_losers: int | None
     :param evolution_frequency_ratios: Per-subpopulation evolution-frequency ratios
         (strictly increasing integers, each >= 1; one per subpopulation; default
@@ -125,7 +126,6 @@ class MultiFrequencySelectionSpec(BaseModel):
 
     selection_strategy: Literal["multi_frequency"] = "multi_frequency"
     n_subpopulations: int = Field(default=2, ge=2)
-    n_individuals_per_subpopulation: int = Field(default=8, ge=3)
     n_winners: int | None = Field(default=None, ge=1)
     n_survivors: int = Field(default=0, ge=0)
     n_open_for_migration: int | None = Field(default=None, ge=1)
@@ -133,41 +133,12 @@ class MultiFrequencySelectionSpec(BaseModel):
     evolution_frequency_ratios: list[int] | None = Field(default=None)
 
     @model_validator(mode="after")
-    def _resolve_and_validate(self) -> Self:
-        """Resolve the None defaults, then hard-check the operator's invariants."""
-        n_ind = self.n_individuals_per_subpopulation
-
-        # Resolve the None defaults
-        if self.n_winners is None:
-            self.n_winners = round(0.25 * n_ind)
-        if self.n_open_for_migration is None:
-            self.n_open_for_migration = round(0.25 * n_ind)
-        if self.n_losers is None:
-            self.n_losers = (
-                n_ind - self.n_winners - self.n_survivors - self.n_open_for_migration
-            )
-        if self.evolution_frequency_ratios is None:
+    def _resolve_and_validate_ratios(self) -> Self:
+        """Default and validate the frequency ratios (population-size independent)."""
+        if not self.evolution_frequency_ratios:
             self.evolution_frequency_ratios = [1] + [
                 5 * i for i in range(1, self.n_subpopulations)
             ]
-
-        # The derived default value of n_losers can fall to <= 0, so a guard is kept
-        if self.n_losers < 1:
-            msg = f"n_losers must be >= 1, got {self.n_losers}."
-            raise ValueError(msg)
-        bracket_sum = (
-            self.n_winners
-            + self.n_survivors
-            + self.n_open_for_migration
-            + self.n_losers
-        )
-        if bracket_sum != n_ind:
-            msg = (
-                f"n_winners + n_survivors + n_open_for_migration + n_losers "
-                f"({bracket_sum}) must equal n_individuals_per_subpopulation "
-                f"({n_ind})."
-            )
-            raise ValueError(msg)
         ratios = self.evolution_frequency_ratios
         if len(ratios) != self.n_subpopulations:
             msg = (
@@ -237,42 +208,69 @@ def check_selection_strategy_exclusive(
         raise ValueError(msg)
 
 
-def resolve_multi_frequency_selection_pop_size(
+def resolve_and_validate_multi_frequency_population(
     multi_frequency_selection_spec: MultiFrequencySelectionSpec | None,
     training: TrainingSpec,
 ) -> None:
-    """Derive and enforce the MF-PBT population size on a training spec, in place.
-
-    Under MF-PBT the population size is not configured directly: it is fully determined
-    by the subpopulation layout as n_subpopulations *
-    n_individuals_per_subpopulation. This writes that derived value onto *training*
-    and rejects an explicit pop_size (or its population_size alias) that contradicts it.
+    """Enforce the MF-PBT population size and finalize the bracket layout.
 
     :param multi_frequency_selection_spec: MF-PBT spec, or None when unset.
     :type multi_frequency_selection_spec: MultiFrequencySelectionSpec | None
-    :param training: Training spec updated in place; its pop_size is set to the
-        derived value.
+    :param training: Training spec carrying the population size.
     :type training: ~agilerl.models.training.TrainingSpec
-    :raises ValueError: If an explicitly-set pop_size conflicts with the derived
-        value.
+    :raises ValueError: If pop_size is not set, population_size < 6,
+        population_size is not a multiple of n_subpopulations, or the resolved
+        bracket sizes do not sum to population_size // n_subpopulations.
     """
     if multi_frequency_selection_spec is None:
         return
 
-    derived = (
-        multi_frequency_selection_spec.n_subpopulations
-        * multi_frequency_selection_spec.n_individuals_per_subpopulation
-    )
-    pop_size_set = (
-        "pop_size" in training.model_fields_set
-        or "population_size" in training.model_fields_set
-    )
-    if pop_size_set and training.pop_size != derived:
+    spec = multi_frequency_selection_spec
+    # pop_size is mandatory under MF-PBT
+    if not {"pop_size", "population_size"} & training.model_fields_set:
         msg = (
-            f"'pop_size' ({training.pop_size}) conflicts with the MF-PBT "
-            "derived value n_subpopulations * n_individuals_per_subpopulation "
-            f"= {derived}. Omit 'pop_size' when 'multi_frequency_selection' is configured; it is "
-            "derived automatically."
+            "pop_size is required in the training block when "
+            "'multi_frequency_selection' is configured."
         )
         raise ValueError(msg)
-    training.pop_size = derived
+
+    population_size = training.pop_size
+    if population_size < 6:
+        msg = (
+            "population_size must be >= 6 (the smallest MF-PBT layout is 2 "
+            f"subpopulations of 3 agents), got {population_size}."
+        )
+        raise ValueError(msg)
+    if spec.n_subpopulations < 2:
+        msg = f"n_subpopulations must be >= 2, got {spec.n_subpopulations}."
+        raise ValueError(msg)
+    if population_size % spec.n_subpopulations != 0:
+        msg = (
+            f"population_size ({population_size}) must be divisible by "
+            f"n_subpopulations ({spec.n_subpopulations})."
+        )
+        raise ValueError(msg)
+
+    subpop = population_size // spec.n_subpopulations
+    # Resolve the None bracket defaults
+    if spec.n_winners is None:
+        spec.n_winners = round(0.25 * subpop)
+    if spec.n_open_for_migration is None:
+        spec.n_open_for_migration = round(0.25 * subpop)
+    if spec.n_losers is None:
+        spec.n_losers = (
+            subpop - spec.n_winners - spec.n_survivors - spec.n_open_for_migration
+        )
+    if spec.n_losers < 1:
+        msg = f"n_losers must be >= 1, got {spec.n_losers}."
+        raise ValueError(msg)
+    bracket_sum = (
+        spec.n_winners + spec.n_survivors + spec.n_open_for_migration + spec.n_losers
+    )
+    if bracket_sum != subpop:
+        msg = (
+            f"n_winners + n_survivors + n_open_for_migration + n_losers "
+            f"({bracket_sum}) must equal population_size // n_subpopulations "
+            f"({subpop})."
+        )
+        raise ValueError(msg)

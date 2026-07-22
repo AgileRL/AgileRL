@@ -83,8 +83,8 @@ def _make_multi_frequency_selection(seed: int = 0) -> MultiFrequencySelection:
     :rtype: MultiFrequencySelection
     """
     return MultiFrequencySelection(
+        population_size=6,
         n_subpopulations=2,
-        n_individuals_per_subpopulation=3,
         evolution_frequency_ratios=[1, 2],
         n_winners=1,
         n_survivors=0,

@@ -36,7 +36,7 @@ from agilerl.models.env import (
 )
 from agilerl.models.hpo import (
     check_selection_strategy_exclusive,
-    resolve_multi_frequency_selection_pop_size,
+    resolve_and_validate_multi_frequency_population,
     split_selection_spec,
 )
 from agilerl.models.networks import (
@@ -152,7 +152,7 @@ class Trainer(ABC):
         self.accelerator = accelerator
         self._resume_checkpoint = resume_from_checkpoint
 
-        resolve_multi_frequency_selection_pop_size(
+        resolve_and_validate_multi_frequency_population(
             multi_frequency_selection, self.training_spec
         )
 

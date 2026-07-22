@@ -9,6 +9,8 @@ are therefore mutually exclusive by construction, and a block that omits
 ``selection_strategy`` is treated as tournament selection so existing configs are
 unchanged.
 
+Both regimes take their population size from the mandatory ``training.pop_size`` field.
+
 .. autoclass:: agilerl.models.hpo.MutationProbabilities
    :members:
 

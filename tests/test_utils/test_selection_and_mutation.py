@@ -101,10 +101,10 @@ def make_population(subpop_fitnesses):
     return population
 
 
-def make_strategy(n_subpop=2, n_ind=4, ratios=None):
+def make_strategy(n_subpop=2, population_size=8, ratios=None):
     return MultiFrequencySelection(
+        population_size=population_size,
         n_subpopulations=n_subpop,
-        n_individuals_per_subpopulation=n_ind,
         evolution_frequency_ratios=ratios or list(range(1, n_subpop + 1)),
         n_winners=1,
         n_survivors=1,
@@ -236,7 +236,7 @@ def _stub_operator_steps(strategy):
 
 class TestMultiFrequencyOrchestration:
     def test_orchestration_schedules_subpops_at_their_frequencies(self):
-        strategy = make_strategy(n_subpop=3, n_ind=4, ratios=[1, 2, 3])
+        strategy = make_strategy(n_subpop=3, population_size=12, ratios=[1, 2, 3])
         pop = make_population({0: [4, 3, 2, 1], 1: [8, 7, 6, 5], 2: [12, 11, 10, 9]})
         fm = FakeMutations()
 
@@ -265,7 +265,7 @@ class TestMultiFrequencyOrchestration:
         assert [c for c, s in fired if s == 2] == [3, 6]  # delta=3
 
     def test_orchestration_saves_global_elite(self, tmp_path):
-        strategy = make_strategy(n_subpop=2, n_ind=4, ratios=[1, 2])
+        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
         pop = make_population({0: [4, 3, 2, 1], 1: [8, 7, 6, 5]})
         elite_path = str(tmp_path / "best.pt")
         # Elite is the pre-evolution global best; stub the operator steps so the fake
@@ -287,7 +287,7 @@ class TestMultiFrequencyOrchestration:
         self, tmp_path, monkeypatch
     ):
         monkeypatch.chdir(tmp_path)
-        strategy = make_strategy(n_subpop=2, n_ind=4, ratios=[1, 2])
+        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
         _stub_operator_steps(strategy)
         pop = make_population({0: [4, 3, 2, 1], 1: [8, 7, 6, 5]})
         accel = FakeAccelerator(is_main_process=True)
@@ -311,7 +311,7 @@ class TestMultiFrequencyOrchestration:
         assert accel.wait_count >= 3
 
     def test_orchestration_accelerator_worker_loads_without_evolving(self):
-        strategy = make_strategy(n_subpop=2, n_ind=4, ratios=[1, 2])
+        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
         _stub_operator_steps(strategy)
         pop = make_population({0: [4, 3, 2, 1], 1: [8, 7, 6, 5]})
         accel = FakeAccelerator(is_main_process=False)
@@ -335,7 +335,7 @@ class TestMultiFrequencyOrchestration:
         assert accel.wait_count >= 3
 
     def test_orchestration_assigns_missing_subpopulations(self):
-        strategy = make_strategy(n_subpop=2, n_ind=4, ratios=[1, 2])
+        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
         pop = make_population({None: [8, 7, 6, 5, 4, 3, 2, 1]})
         for agent in pop:
             agent.subpopulation = None
@@ -348,7 +348,7 @@ class TestMultiFrequencyOrchestration:
         assert sorted(a.subpopulation for a in pop) == [0, 0, 0, 0, 1, 1, 1, 1]
 
     def test_orchestration_migrates_against_pre_evolution_snapshot(self):
-        strategy = make_strategy(n_subpop=2, n_ind=4, ratios=[1, 2])
+        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
         pop = make_population({0: [4, 3, 2, 1], 1: [8, 7, 6, 5]})
         snapshot = list(pop)
 

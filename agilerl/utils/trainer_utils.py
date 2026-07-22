@@ -256,10 +256,12 @@ def _assign_subpopulations(
     """
     if multi_frequency_selection_spec is None:
         return
-    n_ind = multi_frequency_selection_spec.n_individuals_per_subpopulation
+    subpopulation_size = (
+        len(population) // multi_frequency_selection_spec.n_subpopulations
+    )
     for slot, agent in enumerate(population):
         agent.subpopulation = MultiFrequencySelection._subpopulation_for_index(
-            slot, n_ind
+            slot, subpopulation_size
         )
 
 
@@ -329,7 +331,7 @@ def build_multi_frequency_selection_from_spec(
 
     :param multi_frequency_selection_spec: MF-PBT specification.
     :type multi_frequency_selection_spec: MultiFrequencySelectionSpec | None
-    :param training_spec: Training specification (carries the derived pop_size).
+    :param training_spec: Training specification supplying the population size.
     :type training_spec: TrainingSpec
     :param seed: The run's global seed, forwarded to the operator's RNG so the
         winner-clone selection varies (reproducibly) with the run seed, defaults to
@@ -343,8 +345,8 @@ def build_multi_frequency_selection_from_spec(
         return None
 
     return MultiFrequencySelection(
+        population_size=training_spec.pop_size,
         n_subpopulations=multi_frequency_selection_spec.n_subpopulations,
-        n_individuals_per_subpopulation=multi_frequency_selection_spec.n_individuals_per_subpopulation,
         evolution_frequency_ratios=multi_frequency_selection_spec.evolution_frequency_ratios,
         n_winners=multi_frequency_selection_spec.n_winners,
         n_survivors=multi_frequency_selection_spec.n_survivors,
