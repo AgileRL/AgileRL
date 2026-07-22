@@ -377,6 +377,15 @@ class RLAlgorithmSpec(AlgorithmSpec):
 
     agent_type: ClassVar[AgentType] = AgentType.SingleAgent
 
+    @classmethod
+    def algo_class(cls) -> type[RLAlgorithm]:
+        """Resolve the concrete single-agent algorithm class for this spec."""
+        from agilerl.algorithms.core import RLAlgorithm
+
+        resolved = super().algo_class()
+        assert issubclass(resolved, RLAlgorithm)
+        return resolved
+
     def build_algorithm(
         self,
         observation_space: spaces.Space | None = None,
@@ -410,11 +419,7 @@ class RLAlgorithmSpec(AlgorithmSpec):
                 "action_space, and index."
             )
             raise ValueError(msg)
-        # The naming convention pairs each spec family with its algorithm base.
-        from agilerl.algorithms.core import RLAlgorithm
-
         algo_cls = self.algo_class()
-        assert issubclass(algo_cls, RLAlgorithm)
         algo = algo_cls(
             observation_space=observation_space,
             action_space=action_space,
@@ -442,6 +447,15 @@ class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
     torch_compiler: str | None = Field(default=None)
 
     agent_type: ClassVar[AgentType] = AgentType.MultiAgent
+
+    @classmethod
+    def algo_class(cls) -> type[MultiAgentRLAlgorithm]:
+        """Resolve the concrete multi-agent algorithm class for this spec."""
+        from agilerl.algorithms.core import MultiAgentRLAlgorithm
+
+        resolved = super().algo_class()
+        assert issubclass(resolved, MultiAgentRLAlgorithm)
+        return resolved
 
     def build_algorithm(
         self,
@@ -476,11 +490,7 @@ class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
                 "observation_spaces, action_spaces, and index."
             )
             raise ValueError(msg)
-        # The naming convention pairs each spec family with its algorithm base.
-        from agilerl.algorithms.core import MultiAgentRLAlgorithm
-
         algo_cls = self.algo_class()
-        assert issubclass(algo_cls, MultiAgentRLAlgorithm)
         algo = algo_cls(
             observation_spaces=observation_spaces,
             action_spaces=action_spaces,
@@ -535,6 +545,15 @@ class LLMAlgorithmSpec(AlgorithmSpec):
     agent_type: ClassVar[AgentType] = AgentType.LLMAgent
     default_evo_steps: ClassVar[int] = 5
     env_type: ClassVar[LLMEnvType]
+
+    @classmethod
+    def algo_class(cls) -> type[LLMAlgorithm]:
+        """Resolve the concrete LLM algorithm class for this spec."""
+        from agilerl.algorithms.core import LLMAlgorithm
+
+        resolved = super().algo_class()
+        assert issubclass(resolved, LLMAlgorithm)
+        return resolved
 
     def build_algorithm(
         self,
@@ -610,11 +629,7 @@ class LLMAlgorithmSpec(AlgorithmSpec):
             model_config.setdefault("attn_implementation", attn_implementation)
             kwargs["model_config"] = model_config
 
-        # The naming convention pairs each spec family with its algorithm base.
-        from agilerl.algorithms.core import LLMAlgorithm
-
         algo_cls = self.algo_class()
-        assert issubclass(algo_cls, LLMAlgorithm)
         algo = algo_cls(
             model_name=self.pretrained_model_name_or_path,
             pad_token_id=tokenizer.eos_token_id,
