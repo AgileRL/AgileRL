@@ -84,10 +84,9 @@ def equation_reward_func(completions, target, nums, **kwargs):
 
 
 def combined_rewards(completion, solution, prompt):
-    reward = (
-        equation_reward_func([completion], [solution], [prompt])[0]
-        + format_reward_func([completion], [solution])[0]
-    )
+    fmt = format_reward_func([completion], [solution])[0]
+    eq = equation_reward_func([completion], [solution], [prompt])[0]
+    reward = fmt + eq
 
     if reward == 2.0:
         with open("countdown_completions.txt", "a") as text_file:
@@ -95,7 +94,7 @@ def combined_rewards(completion, solution, prompt):
                 f"Prompt {prompt}" + "\n" + completion + "\n" + "=" * 50 + "\n",
             )
 
-    return reward
+    return reward, {"format": fmt, "equation": eq}
 
 
 def main():

@@ -6,7 +6,6 @@ steps a batch of them in lock-step, sharing a ``BatchPointer`` dataset cursor.
 
 from __future__ import annotations
 
-import math
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, wait
@@ -155,13 +154,7 @@ class RolloutEnv:
     def from_dataset(
         cls,
         dataset: Any,
-        reward_fn: (
-            Callable[[str, Any, Any], float]
-            | list[
-                tuple[str, Callable[[str, Any, Any], float]]
-                | tuple[str, Callable[[str, Any, Any], float], float]
-            ]
-        ),
+        reward_fn: Callable[[str, Any, Any], float | tuple[float, dict[str, float]]],
         tokenizer: Any,
         *,
         test_dataset: Any | None = None,
@@ -176,10 +169,17 @@ class RolloutEnv:
         to 1); ``test_dataset`` rows are served under :meth:`eval_mode`.
 
         :param dataset: Train rows, indexable to mappings with the question/answer keys.
-        :param reward_fn: ``(completion, answer, question) -> float`` scorer, or a
-            list of ``(name, fn)`` / ``(name, fn, weight)`` entries. A list composes
-            a weighted sum as the learning reward and exposes raw segments in
-            ``info["reward_components"]`` (weight defaults to ``1.0``).
+        :param reward_fn: ``(completion, answer, question) -> float`` scorer, or one
+            that returns ``(total, components)`` where ``components`` is a
+            ``dict[str, float]`` of raw segments. The ``total`` is the learning
+            reward; ``components`` are carried in ``info["reward_components"]`` for
+            per-component train/``mean_<name>`` reporting. A plain ``-> float``
+            return keeps working with no ``reward_components`` key::
+
+                def reward_fn(completion, answer, question):
+                    fmt     = 1.0 if is_well_formatted(completion) else 0.0
+                    correct = float(completion.strip() == answer)
+                    return 0.1 * fmt + 1.0 * correct, {"format": fmt, "correctness": correct}
         :param tokenizer: Tokenizer for the token-level loop.
         :param test_dataset: Held-out rows served under eval mode (falls back to ``dataset``).
         :param prompt_builder: Maps a row to the served prompt text; ``None`` serves
@@ -195,7 +195,7 @@ class RolloutEnv:
         env = _PromptDatasetEnv(
             dataset,
             test_dataset,
-            _normalize_reward_fn(reward_fn),
+            reward_fn,
             prompt_builder,
             question_column,
             answer_column,
@@ -590,64 +590,6 @@ class RolloutEnv:
         }
 
 
-def _normalize_reward_fn(
-    reward_fn: (
-        Callable[[str, Any, Any], float]
-        | list[
-            tuple[str, Callable[[str, Any, Any], float]]
-            | tuple[str, Callable[[str, Any, Any], float], float]
-        ]
-    ),
-) -> (
-    Callable[[str, Any, Any], float]
-    | list[tuple[str, Callable[[str, Any, Any], float], float]]
-):
-    """Normalize ``from_dataset`` reward_fn to a callable or weighted named list."""
-    if callable(reward_fn) and not isinstance(reward_fn, list):
-        return reward_fn
-    if isinstance(reward_fn, tuple):
-        msg = (
-            "reward_fn must be a callable or a list of (name, fn) / "
-            "(name, fn, weight) tuples; got a single tuple"
-        )
-        raise TypeError(msg)
-    if not isinstance(reward_fn, list):
-        msg = (
-            "reward_fn must be a callable or a list of (name, fn) / "
-            f"(name, fn, weight) tuples; got {type(reward_fn).__name__}"
-        )
-        raise TypeError(msg)
-    if not reward_fn:
-        msg = "reward_fn list must not be empty"
-        raise ValueError(msg)
-
-    normalized: list[tuple[str, Callable[[str, Any, Any], float], float]] = []
-    seen: set[str] = set()
-    for i, item in enumerate(reward_fn):
-        if not isinstance(item, tuple) or len(item) not in (2, 3):
-            msg = (
-                f"reward_fn[{i}] must be (name, fn) or (name, fn, weight); got {item!r}"
-            )
-            raise TypeError(msg)
-        name, fn, *rest = item
-        if not isinstance(name, str) or not name:
-            msg = f"reward_fn[{i}] name must be a non-empty str"
-            raise TypeError(msg)
-        if name in seen:
-            msg = f"duplicate reward component name: {name!r}"
-            raise ValueError(msg)
-        if not callable(fn):
-            msg = f"reward_fn[{i}] fn must be callable"
-            raise TypeError(msg)
-        weight = 1.0 if not rest else float(rest[0])
-        if not math.isfinite(weight):
-            msg = f"reward_fn[{i}] weight must be finite; got {weight!r}"
-            raise ValueError(msg)
-        seen.add(name)
-        normalized.append((name, fn, weight))
-    return normalized
-
-
 class _PromptDatasetEnv:
     """(question, answer) rows + a reward fn, served as a single-turn text env.
 
@@ -659,24 +601,14 @@ class _PromptDatasetEnv:
         self,
         dataset: Any,
         test_dataset: Any | None,
-        reward_fn: (
-            Callable[[str, Any, Any], float]
-            | list[tuple[str, Callable[[str, Any, Any], float], float]]
-        ),
+        reward_fn: Callable[[str, Any, Any], float | tuple[float, dict[str, float]]],
         prompt_builder: Callable[[Any], str] | None,
         question_column: str,
         answer_column: str,
     ) -> None:
         self._train = dataset
         self._test = test_dataset
-        if callable(reward_fn) and not isinstance(reward_fn, list):
-            self._reward_fn: Callable[[str, Any, Any], float] | None = reward_fn
-            self._reward_components: (
-                list[tuple[str, Callable[[str, Any, Any], float], float]] | None
-            ) = None
-        else:
-            self._reward_fn = None
-            self._reward_components = reward_fn
+        self._reward_fn = reward_fn
         self._prompt_builder = prompt_builder
         self._question_column = question_column
         self._answer_column = answer_column
@@ -717,17 +649,17 @@ class _PromptDatasetEnv:
 
     def step(self, action: str) -> tuple[str, float, bool, bool, dict[str, Any]]:
         """Score the completion against the current row; always single-turn."""
-        if self._reward_components is None:
-            reward = float(self._reward_fn(action, self._answer, self._question))
-            return "", reward, True, False, {}
-
-        raw: dict[str, float] = {}
-        total = 0.0
-        for name, fn, weight in self._reward_components:
-            value = float(fn(action, self._answer, self._question))
-            raw[name] = value
-            total += weight * value
-        return "", total, True, False, {"reward_components": raw}
+        result = self._reward_fn(action, self._answer, self._question)
+        if isinstance(result, tuple):
+            total, components = result
+            return (
+                "",
+                float(total),
+                True,
+                False,
+                {"reward_components": dict(components)},
+            )
+        return "", float(result), True, False, {}
 
 
 class BatchPointer:

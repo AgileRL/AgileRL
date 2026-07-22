@@ -94,10 +94,9 @@ def equation_reward_func(completions, target, nums, **kwargs):
 
 
 def combined_rewards(completion, solution, prompt):
-    return (
-        equation_reward_func([completion], [solution], [prompt])[0]
-        + format_reward_func([completion], [solution])[0]
-    )
+    fmt = format_reward_func([completion], [solution])[0]
+    eq = equation_reward_func([completion], [solution], [prompt])[0]
+    return fmt + eq, {"format": fmt, "equation": eq}
 
 
 def main(init_hp, mut_p):

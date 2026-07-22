@@ -485,8 +485,8 @@ class TestRolloutEnvFromDataset:
             )
 
 
-class TestRolloutEnvFromDatasetMultiReward:
-    """from_dataset accepts a named weighted reward list and composes a scalar."""
+class TestRolloutEnvFromDatasetTupleReward:
+    """from_dataset accepts a reward_fn returning (total, components) and carries the components."""
 
     _ROWS: ClassVar[list[dict]] = [
         {"question": "q0", "answer": "a0"},
@@ -507,11 +507,11 @@ class TestRolloutEnvFromDatasetMultiReward:
         return env, env.step(torch.cat([obs["input_ids"], gen], dim=1))
 
     def test_weighted_sum_returns_scalar_and_raw_components_in_info(self) -> None:
-        # Arrange
-        reward_fn = [
-            ("format", lambda c, a, q: 1.0, 0.1),
-            ("correctness", lambda c, a, q: 0.0, 1.0),
-        ]
+        # Arrange — the fn owns composition + weighting; the framework carries components.
+        def reward_fn(c, a, q):
+            fmt = 1.0
+            correct = 0.0
+            return 0.1 * fmt + 1.0 * correct, {"format": fmt, "correctness": correct}
 
         # Act
         _env, (_obs, reward, terminated, truncated, info) = self._step_once(reward_fn)
@@ -523,11 +523,11 @@ class TestRolloutEnvFromDatasetMultiReward:
         assert truncated is False
 
     def test_default_weight_is_one_when_omitted(self) -> None:
-        # Arrange
-        reward_fn = [
-            ("format", lambda c, a, q: 0.5),
-            ("correctness", lambda c, a, q: 1.5),
-        ]
+        # Arrange — weighting is the fn's concern; equal weights reproduce the old default.
+        def reward_fn(c, a, q):
+            fmt = 0.5
+            correct = 1.5
+            return fmt + correct, {"format": fmt, "correctness": correct}
 
         # Act
         _env, (_obs, reward, _t, _tr, info) = self._step_once(reward_fn)
@@ -537,7 +537,7 @@ class TestRolloutEnvFromDatasetMultiReward:
         assert info["reward_components"] == {"format": 0.5, "correctness": 1.5}
 
     def test_single_callable_has_no_reward_components_key(self) -> None:
-        # Arrange / Act
+        # Arrange / Act — a plain -> float return yields no reward_components key.
         _env, (_obs, reward, _t, _tr, info) = self._step_once(lambda c, a, q: 0.75)
 
         # Assert
@@ -545,11 +545,12 @@ class TestRolloutEnvFromDatasetMultiReward:
         assert "reward_components" not in info
 
     def test_zero_weight_excluded_from_total_but_present_in_info(self) -> None:
-        # Arrange
-        reward_fn = [
-            ("format", lambda c, a, q: 1.0, 0.0),
-            ("correctness", lambda c, a, q: 2.0, 1.0),
-        ]
+        # Arrange — a zero-weighted component is dropped from the total by the fn
+        # but still reported in info.
+        def reward_fn(c, a, q):
+            fmt = 1.0
+            correct = 2.0
+            return 0.0 * fmt + 1.0 * correct, {"format": fmt, "correctness": correct}
 
         # Act
         _env, (_obs, reward, _t, _tr, info) = self._step_once(reward_fn)
@@ -557,66 +558,6 @@ class TestRolloutEnvFromDatasetMultiReward:
         # Assert
         assert reward == pytest.approx(2.0)
         assert info["reward_components"] == {"format": 1.0, "correctness": 2.0}
-
-    def test_empty_list_raises(self) -> None:
-        with pytest.raises(ValueError, match="empty"):
-            RolloutEnv.from_dataset(
-                self._ROWS, [], _ChrTokenizer(), pad_id=None, apply_chat_template=False
-            )
-
-    def test_duplicate_names_raise(self) -> None:
-        with pytest.raises(ValueError, match="duplicate"):
-            RolloutEnv.from_dataset(
-                self._ROWS,
-                [
-                    ("format", lambda c, a, q: 1.0),
-                    ("format", lambda c, a, q: 0.0),
-                ],
-                _ChrTokenizer(),
-                pad_id=None,
-                apply_chat_template=False,
-            )
-
-    @pytest.mark.parametrize("weight", [float("nan"), float("inf")])
-    def test_non_finite_weight_raises(self, weight: float) -> None:
-        with pytest.raises(ValueError, match="finite"):
-            RolloutEnv.from_dataset(
-                self._ROWS,
-                [("format", lambda c, a, q: 1.0, weight)],
-                _ChrTokenizer(),
-                pad_id=None,
-                apply_chat_template=False,
-            )
-
-    def test_bad_tuple_arity_raises(self) -> None:
-        with pytest.raises(TypeError, match="name, fn"):
-            RolloutEnv.from_dataset(
-                self._ROWS,
-                [("format",)],
-                _ChrTokenizer(),
-                pad_id=None,
-                apply_chat_template=False,
-            )
-
-    def test_single_tuple_as_reward_fn_raises(self) -> None:
-        with pytest.raises(TypeError, match="single tuple"):
-            RolloutEnv.from_dataset(
-                self._ROWS,
-                ("format", lambda c, a, q: 1.0),
-                _ChrTokenizer(),
-                pad_id=None,
-                apply_chat_template=False,
-            )
-
-    def test_anonymous_callable_list_raises(self) -> None:
-        with pytest.raises(TypeError, match="name, fn"):
-            RolloutEnv.from_dataset(
-                self._ROWS,
-                [lambda c, a, q: 1.0, lambda c, a, q: 0.0],
-                _ChrTokenizer(),
-                pad_id=None,
-                apply_chat_template=False,
-            )
 
 
 class TestRolloutEnvStepApplyRewardComponents:
@@ -626,12 +567,14 @@ class TestRolloutEnvStepApplyRewardComponents:
 
     def test_components_in_info_accumulate_in_sums(self) -> None:
         # Arrange
+        def reward_fn(c, a, q):
+            fmt = 1.0
+            correct = 0.0
+            return 0.1 * fmt + 1.0 * correct, {"format": fmt, "correctness": correct}
+
         env = RolloutEnv.from_dataset(
             self._ROWS,
-            [
-                ("format", lambda c, a, q: 1.0, 0.1),
-                ("correctness", lambda c, a, q: 0.0, 1.0),
-            ],
+            reward_fn,
             _ChrTokenizer(),
             pad_id=None,
             apply_chat_template=False,
@@ -667,7 +610,7 @@ class TestRolloutEnvStepApplyRewardComponents:
         # Arrange
         env = RolloutEnv.from_dataset(
             self._ROWS,
-            [("format", lambda c, a, q: 1.0)],
+            lambda c, a, q: (1.0, {"format": 1.0}),
             _ChrTokenizer(),
             pad_id=None,
             apply_chat_template=False,
