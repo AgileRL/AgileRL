@@ -14,7 +14,6 @@ from accelerate import Accelerator
 from gymnasium.spaces import Box, Dict, Discrete
 from gymnasium.vector import VectorEnv
 from gymnasium.vector.utils import batch_space
-from pettingzoo import ParallelEnv
 from tensordict import TensorDict
 
 import agilerl
@@ -47,6 +46,7 @@ from agilerl.training.train_off_policy import train_off_policy
 from agilerl.training.train_offline import train_offline
 from agilerl.training.train_on_policy import train_on_policy
 from agilerl.utils.utils import make_multi_agent_vect_envs
+from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
 # Common parametrize constants
 _FLAT_VECT = [((6,), 2, True)]
@@ -315,8 +315,13 @@ class DummyCompiledPolicy:
         self._orig_mod = orig_mod if orig_mod is not None else DummyStochastic()
 
 
-class DummyMultiEnv(ParallelEnv):  # pylint: disable=overwritten-inherited-attribute
-    """Mimics a vectorized multi-agent parallel environment with num_envs=1."""
+class DummyMultiEnv(AsyncPettingZooVecEnv):  # pylint: disable=overwritten-inherited-attribute
+    """Mimics a vectorized multi-agent parallel environment with num_envs=1.
+
+    Subclasses AsyncPettingZooVecEnv (without its __init__) so both the
+    on-policy and off-policy training loops consume it directly rather than
+    wrapping it in PzDummyVecEnv.
+    """
 
     def __init__(self, state_dims, action_dims):
         self.state_dims = state_dims

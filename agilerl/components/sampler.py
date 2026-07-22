@@ -42,16 +42,12 @@ class Sampler:
         :return: Either a single TensorDict or a list of TensorDicts
         :rtype: TensorDict | list[TensorDict]
         """
-        collated = TensorDict({}, batch_size=len(batch))
-        for key in batch[0].keys():
-            # Collated buffers use flat string leaf keys.
-            assert isinstance(key, str)
-            leaves: list[torch.Tensor] = []
-            for b in batch:
-                leaf = b[key]
-                assert isinstance(leaf, torch.Tensor)
-                leaves.append(leaf)
-            collated[key] = torch.stack(leaves)
+        # The buffer yields plain TensorDicts; algorithms apply the typed
+        # TensorClass schema downstream in learn() via from_tensordict. Here we
+        # only need a dense stack along a new leading dimension, which
+        # TensorDict.stack collates recursively through nested per-agent
+        # TensorDict leaves (multi-agent) as well as flat tensor leaves.
+        collated: TensorDict = TensorDict.stack(batch)
         return collated
 
     def __init__(
