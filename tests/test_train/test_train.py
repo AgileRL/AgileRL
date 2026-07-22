@@ -184,7 +184,13 @@ class DummyAgentOffPolicy:
     def learn(self, experiences, n_experiences=None, per=False):
         loss = random.random()
         if n_experiences is not None or per:
-            return loss, None, None
+            # Prioritized / n-step path expects idxs + priorities for update_priorities
+            if "idxs" in experiences.keys():
+                idxs = experiences["idxs"]
+            else:
+                idxs = torch.tensor([0])
+            priorities = np.ones(len(idxs), dtype=np.float32)
+            return loss, idxs, priorities
         return loss
 
     def test(self, env, max_steps=None, loop=3, **kwargs):
@@ -1248,24 +1254,27 @@ def mocked_multi_memory():
 
 @pytest.fixture
 def mocked_env(state_size, action_size, vect=True, num_envs=2):
-    mock_env = MagicMock()
-    mock_env.state_size = state_size
+    # ``spec=VectorEnv`` makes ``isinstance(env, VectorEnv)`` True so
+    # train_off/on_policy skips DummyVecEnv wrapping (which requires real Spaces).
+    mock_env = MagicMock(spec=VectorEnv)
     mock_env.action_size = action_size
     mock_env.vect = vect
-    if mock_env.vect:
-        mock_env.state_size = (num_envs, *mock_env.state_size)
-        mock_env.num_envs = num_envs
-    else:
-        mock_env.num_envs = 1
+    n_envs = num_envs if vect else 1
+    mock_env.num_envs = n_envs
+    mock_env.state_size = (n_envs, *state_size)
+    mock_env.single_observation_space = Box(0.0, 1.0, tuple(state_size))
+    mock_env.single_action_space = Box(-1.0, 1.0, (action_size,))
+    mock_env.observation_space = batch_space(mock_env.single_observation_space, n_envs)
+    mock_env.action_space = batch_space(mock_env.single_action_space, n_envs)
 
-    def reset():
-        return np.random.rand(*mock_env.state_size), {}
+    def reset(seed=None, options=None):
+        return np.random.rand(*mock_env.state_size).astype(np.float32), {}
 
     mock_env.reset.side_effect = reset
 
     def step(action):
         return (
-            np.random.rand(*mock_env.state_size),
+            np.random.rand(*mock_env.state_size).astype(np.float32),
             np.random.randint(0, 5, mock_env.num_envs),
             np.random.randint(0, 2, mock_env.num_envs),
             np.random.randint(0, 2, mock_env.num_envs),
