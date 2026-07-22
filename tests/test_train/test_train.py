@@ -14,6 +14,7 @@ from accelerate import Accelerator
 from gymnasium.spaces import Box, Dict, Discrete
 from gymnasium.vector import VectorEnv
 from gymnasium.vector.utils import batch_space
+from pettingzoo import ParallelEnv
 from tensordict import TensorDict
 
 import agilerl
@@ -363,6 +364,53 @@ class DummyMultiEnv(AsyncPettingZooVecEnv):  # pylint: disable=overwritten-inher
                 agent: np.random.randint(0, 2, size=(self.num_envs,)).astype(bool)
                 for agent in self.agents
             },
+            self.info,
+        )
+
+    def action_space(self, agent):
+        return Discrete(5)
+
+    def observation_space(self, agent):
+        return Box(0, 255, self.state_dims)
+
+
+class DummyMultiParallelEnv(ParallelEnv):
+    """Single PettingZoo ParallelEnv double with non-batched dict returns.
+
+    Use as a factory for ``make_multi_agent_vect_envs`` or as an unrecognized
+    raw env that training loops wrap via ``PzDummyVecEnv``. Direct vectorized
+    fixtures continue to use ``DummyMultiEnv``.
+    """
+
+    def __init__(self, state_dims, action_dims):
+        self.state_dims = state_dims
+        self.state_size = self.state_dims
+        self.action_dims = action_dims
+        self.action_size = self.action_dims
+        self.agents = ["agent_0", "other_agent_0"]
+        self.possible_agents = ["agent_0", "other_agent_0"]
+        self.render_mode = None
+        self.metadata = {"name": "dummy_multi_parallel_v0"}
+        self.info = {
+            agent: {
+                "env_defined_actions": (
+                    None if agent == "other_agent_0" else np.array([0, 1])
+                ),
+            }
+            for agent in self.agents
+        }
+
+    def reset(self, seed=None, options=None):
+        return {
+            agent: np.random.rand(*self.state_dims) for agent in self.agents
+        }, self.info
+
+    def step(self, action):
+        return (
+            {agent: np.random.rand(*self.state_dims) for agent in self.agents},
+            {agent: float(np.random.rand()) for agent in self.agents},
+            {agent: bool(np.random.randint(0, 2)) for agent in self.agents},
+            {agent: bool(np.random.randint(0, 2)) for agent in self.agents},
             self.info,
         )
 
@@ -2987,8 +3035,7 @@ class TestTrainOnPolicy:
 class TestTrainMultiAgentOffPolicy:
     @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_wraps_env_without_num_envs(self, state_size, action_size, multi_memory):
-        env = DummyMultiEnv(state_size, action_size)
-        del env.num_envs
+        env = DummyMultiParallelEnv(state_size, action_size)
         agent = DummyMultiAgent(1, env, on_policy=False)
         wrapped = DummyMultiEnv(state_size, action_size)
 
@@ -3117,7 +3164,7 @@ class TestTrainMultiAgentOffPolicy:
         action_size,
     ):
         env = make_multi_agent_vect_envs(
-            DummyMultiEnv,
+            DummyMultiParallelEnv,
             num_envs=4,
             state_dims=state_size,
             action_dims=action_size,
@@ -3615,8 +3662,7 @@ class TestTrainMultiAgentOffPolicy:
 class TestTrainMultiAgentOnPolicy:
     @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
     def test_wraps_env_without_num_envs(self, state_size, action_size):
-        env = DummyMultiEnv(state_size, action_size)
-        del env.num_envs
+        env = DummyMultiParallelEnv(state_size, action_size)
         agent = DummyMultiAgent(1, env, on_policy=True)
         wrapped = DummyMultiEnv(state_size, action_size)
 
@@ -3683,7 +3729,7 @@ class TestTrainMultiAgentOnPolicy:
         action_size,
     ):
         env = make_multi_agent_vect_envs(
-            DummyMultiEnv,
+            DummyMultiParallelEnv,
             num_envs=4,
             state_dims=state_size,
             action_dims=action_size,
