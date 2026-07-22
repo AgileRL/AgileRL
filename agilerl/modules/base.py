@@ -9,7 +9,6 @@ from typing import (
     Any,
     Generic,
     TypeVar,
-    cast,
 )
 
 import numpy as np
@@ -47,10 +46,11 @@ def mutation(
         ) -> dict[str, Any] | None:
             return func(self, *args, **kwargs)
 
-        # A plain function object has no ``_mutation_type`` / ``_recreate_kwargs``
-        # attributes in its static type; the protocol declares them so they can
-        # be assigned below and read back by the mutation machinery.
-        mutation_method = cast("MutationMethodProtocol", wrapper)
+        # A function object has no ``_mutation_type`` / ``_recreate_kwargs`` in its
+        # static type; attach them dynamically (the ``MutationMethodProtocol`` the
+        # return is typed as declares them). Bridge through ``Any`` so attaching the
+        # attributes and returning the enriched function both type-check.
+        mutation_method: Any = wrapper
 
         # Explicitly set the mutation type attribute on the wrapper function
         mutation_method._mutation_type = mutation_type
@@ -839,7 +839,7 @@ class ModuleDict(EvolvableModule, nn.ModuleDict, Generic[ModuleType]):
 
     def __init__(
         self,
-        modules: dict[str, EvolvableModule] | None = None,
+        modules: dict[str, ModuleType] | None = None,
         device: DeviceType = "cpu",
     ) -> None:
         super().__init__(device)
@@ -871,15 +871,20 @@ class ModuleDict(EvolvableModule, nn.ModuleDict, Generic[ModuleType]):
         return None
 
     # ``nn.ModuleDict`` is not generic, so its stubs erase the element type to
-    # ``Module``; these overrides restore the ``ModuleType`` parameter.
+    # ``Module``; these overrides restore the ``ModuleType`` parameter. The stored
+    # modules are ``ModuleType`` by construction, so the erased ``super()`` result
+    # is bridged back through ``Any``.
     def __getitem__(self, key: str) -> ModuleType:
-        return cast("ModuleType", super().__getitem__(key))
+        module: Any = super().__getitem__(key)
+        return module
 
     def values(self) -> ValuesView[ModuleType]:
-        return cast("ValuesView[ModuleType]", super().values())
+        module_values: Any = super().values()
+        return module_values
 
     def items(self) -> ItemsView[str, ModuleType]:
-        return cast("ItemsView[str, ModuleType]", super().items())
+        module_items: Any = super().items()
+        return module_items
 
     def change_activation(self, activation: str, output: bool) -> None:
         """Change the activation function for the network.
@@ -917,9 +922,11 @@ class ModuleDict(EvolvableModule, nn.ModuleDict, Generic[ModuleType]):
             elif isinstance(module, OptimizedModule) and isinstance(
                 module._orig_mod, EvolvableModule
             ):
-                # OptimizedModule wrappers forward attribute access to the
-                # wrapped EvolvableModule, so they can be treated as one here
-                evo_modules[name] = cast("EvolvableModule", module)
+                # OptimizedModule wrappers forward attribute access to the wrapped
+                # EvolvableModule, so they can be treated as one here; bridge the
+                # duck-typed wrapper through Any.
+                optimized_module: Any = module
+                evo_modules[name] = optimized_module
 
         return evo_modules
 

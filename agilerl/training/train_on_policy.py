@@ -2,7 +2,7 @@ import logging
 import warnings
 from collections.abc import Callable
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import gymnasium as gym
 from accelerate import Accelerator
@@ -11,6 +11,7 @@ from agilerl.algorithms import PPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
+from agilerl.utils.algo_utils import get_num_envs
 from agilerl.utils.utils import (
     default_progress_bar,
     init_loggers,
@@ -158,12 +159,11 @@ def train_on_policy(
     # Ensure environment has vectorized interface. `DummyVecEnv` duck-types the
     # `VectorEnv` API rather than subclassing it, so the cast matches the annotations
     # of the rollout and evaluation helpers it is handed to.
-    vec_env = cast(
-        "gym.vector.VectorEnv",
-        env if hasattr(env, "num_envs") else DummyVecEnv(env),
+    vec_env: gym.vector.VectorEnv = (
+        env if isinstance(env, gym.vector.VectorEnv) else DummyVecEnv(env)
     )
 
-    num_envs = vec_env.num_envs
+    num_envs = get_num_envs(vec_env)
     save_path = (
         checkpoint_path.split(".pt")[0]
         if checkpoint_path is not None

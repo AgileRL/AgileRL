@@ -1,6 +1,6 @@
 import warnings
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any
 
 import torch
 from tensordict import TensorDict
@@ -42,16 +42,17 @@ class Sampler:
         :return: Either a single TensorDict or a list of TensorDicts
         :rtype: TensorDict | list[TensorDict]
         """
-        return TensorDict(
-            {
-                # Indexing a TensorDict with a leaf key returns a Tensor at
-                # runtime, but its static type is the wider ``Tensor |
-                # TensorCollection`` union, so restate the leaf as a Tensor.
-                key: torch.stack([cast("torch.Tensor", b[key]) for b in batch])
-                for key in batch[0].keys()
-            },
-            batch_size=len(batch),
-        )
+        collated = TensorDict({}, batch_size=len(batch))
+        for key in batch[0].keys():
+            # Collated buffers use flat string leaf keys.
+            assert isinstance(key, str)
+            leaves: list[torch.Tensor] = []
+            for b in batch:
+                leaf = b[key]
+                assert isinstance(leaf, torch.Tensor)
+                leaves.append(leaf)
+            collated[key] = torch.stack(leaves)
+        return collated
 
     def __init__(
         self,

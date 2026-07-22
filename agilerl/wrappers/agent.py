@@ -2,13 +2,13 @@ from abc import ABC
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from functools import partial
-from typing import Any, Generic, TypeVar, cast
+from typing import Any, Generic, TypeGuard, TypeVar
 
 import dill
 import numpy as np
 import torch
 from gymnasium import spaces
-from tensordict import TensorDictBase
+from tensordict import TensorDict, TensorDictBase
 from typing_extensions import Self, TypeIs
 
 from agilerl.algorithms import PPO
@@ -266,7 +266,9 @@ def _space_shape(space: spaces.Space) -> tuple[int, ...]:
     return space.shape if space.shape is not None else ()
 
 
-def _is_tensor_tuple(obs: TorchObsType) -> TypeIs[tuple[torch.Tensor, ...]]:
+def _is_tensor_tuple(
+    obs: TorchObsType | MARLTensorObsType,
+) -> TypeIs[tuple[torch.Tensor, ...]]:
     """Narrow a tensorised observation to a tuple of tensors.
 
     A plain ``isinstance(obs, tuple)`` check erases the element type; a
@@ -275,7 +277,33 @@ def _is_tensor_tuple(obs: TorchObsType) -> TypeIs[tuple[torch.Tensor, ...]]:
     return isinstance(obs, tuple)
 
 
-def _is_tensor_mapping(obs: TorchObsType) -> TypeIs[dict[str, torch.Tensor]]:
+def _narrow_obs_entry(value: object) -> TorchObsType:
+    """Narrow a raw ``TensorDict`` entry to a tensorised observation.
+
+    ``TensorDict`` reads are stubbed as the wide ``Tensor | TensorCollection`` union;
+    an observation leaf is a tensor or a nested ``TensorDict``. This verifies that
+    with a real check so a wrong assumption fails loudly at the boundary.
+    """
+    assert isinstance(value, (torch.Tensor, TensorDict)), (
+        f"Expected a tensor observation entry, got {type(value).__name__}."
+    )
+    return value
+
+
+def _is_marl_obs(
+    obs: TorchObsType | MARLTensorObsType,
+) -> TypeIs[MARLTensorObsType]:
+    """Narrow a tensorised observation to the multi-agent per-agent mapping.
+
+    A plain ``isinstance(obs, dict)`` widens the keys to ``object`` (a ``TensorDict``
+    is dict-ambiguous to the type checker); this ``TypeIs`` keeps the ``str`` keys.
+    """
+    return isinstance(obs, dict)
+
+
+def _is_tensor_mapping(
+    obs: TorchObsType | MARLTensorObsType,
+) -> TypeIs[dict[str, torch.Tensor]]:
     """Narrow a tensorised observation to a per-key tensor mapping.
 
     The runtime check is ``isinstance(obs, Mapping)`` so it also matches a
@@ -318,24 +346,37 @@ class RSNorm(AgentWrapper[AgentType]):
         super().__init__(agent)
 
         self.norm_obs_keys = norm_obs_keys
-        if self.multi_agent:
+        # The single- and multi-agent statistics containers are structurally
+        # indistinguishable to the type checker (both are dict-like); ``multi_agent``
+        # is the runtime discriminator, so keep a typed handle to whichever one is
+        # populated and expose the union through ``obs_rms``.
+        self._single_obs_rms: RunningStatsType | None = None
+        self._multi_obs_rms: dict[str, RunningStatsType] | None = None
+        # ``multi_agent`` is exactly ``isinstance(agent, MultiAgentRLAlgorithm)``
+        # (see the base constructor); narrowing the agent yields its precisely-typed
+        # observation space(s) rather than the delegated, widened attribute.
+        if isinstance(self.agent, MultiAgentRLAlgorithm):
             # Multi-agent algorithms expose `observation_space` as a per-agent mapping
             # (either a `spaces.Dict` or an `OrderedDict` of the unique agent spaces).
-            agent_spaces = cast("Mapping[str, spaces.Space]", self.observation_space)
-            self.obs_rms = OrderedDict(
+            multi_stats: dict[str, RunningStatsType] = OrderedDict(
                 (
                     agent_id,
                     RSNorm.build_rms(obs_space, epsilon, norm_obs_keys, self.device),
                 )
-                for agent_id, obs_space in agent_spaces.items()
+                for agent_id, obs_space in self.agent.observation_space.items()
             )
+            self._multi_obs_rms = multi_stats
+            self.obs_rms = multi_stats
         else:
-            self.obs_rms = RSNorm.build_rms(
-                cast("spaces.Space", self.observation_space),
+            assert isinstance(self.agent, RLAlgorithm)
+            single_stats = RSNorm.build_rms(
+                self.agent.observation_space,
                 epsilon,
                 norm_obs_keys,
                 self.device,
             )
+            self._single_obs_rms = single_stats
+            self.obs_rms = single_stats
 
     @staticmethod
     def build_rms(
@@ -375,27 +416,32 @@ class RSNorm(AgentWrapper[AgentType]):
             epsilon, shape=_space_shape(observation_space), device=device
         )
 
-    @property
     def _leaf_obs_rms(self) -> RunningStatsType:
         """Single-agent running statistics.
 
-        The single- and multi-agent statistics containers are both ``dict[str, ...]``
-        and so are structurally indistinguishable to the type checker; the wrapper knows
-        which it holds from :attr:`multi_agent`, so this accessor narrows the attribute
-        for the single-agent code paths.
+        The single- and multi-agent statistics containers are structurally
+        indistinguishable to the type checker; this accessor returns the handle the
+        constructor populated for single-agent mode. It is a method rather than a
+        property so reflective attribute walks (e.g. ``inspect.getmembers`` during
+        :meth:`clone`) do not trip the assertion.
         """
-        return cast("RunningStatsType", self.obs_rms)
+        assert self._single_obs_rms is not None, (
+            "single-agent statistics are only available on a single-agent wrapper"
+        )
+        return self._single_obs_rms
 
-    @property
     def _agent_obs_rms(self) -> dict[str, RunningStatsType]:
         """Per-agent running statistics used in multi-agent mode (see
-        :attr:`_leaf_obs_rms` for why this is a cast).
+        :meth:`_leaf_obs_rms`).
         """
-        return cast("dict[str, RunningStatsType]", self.obs_rms)
+        assert self._multi_obs_rms is not None, (
+            "per-agent statistics are only available on a multi-agent wrapper"
+        )
+        return self._multi_obs_rms
 
     def _normalize_observation(
         self,
-        observation: TorchObsType,
+        observation: TorchObsType | MARLTensorObsType,
         *,
         obs_rms: RunningStatsType | None = None,
     ) -> TorchObsType:
@@ -409,7 +455,7 @@ class RSNorm(AgentWrapper[AgentType]):
         :return: Normalized observation
         :rtype: TorchObsType
         """
-        obs_rms = self._leaf_obs_rms if obs_rms is None else obs_rms
+        obs_rms = self._leaf_obs_rms() if obs_rms is None else obs_rms
 
         # The statistics mirror the (tensorised) observation's structure, so narrowing
         # the stats tells us the observation's structure too.
@@ -443,20 +489,22 @@ class RSNorm(AgentWrapper[AgentType]):
         """
         # A single-agent Dict observation is itself a ``dict[str, Tensor]``, so it is
         # indistinguishable by type from the multi-agent mapping; ``multi_agent`` is the
-        # runtime discriminator, so these narrowings are casts rather than isinstance.
+        # runtime discriminator that narrows to the per-agent mapping below.
         if self.multi_agent:
-            marl_observation = cast("MARLTensorObsType", observation)
-            agent_rms = self._agent_obs_rms
+            assert _is_marl_obs(observation), (
+                "Multi-agent observations must be a per-agent mapping."
+            )
+            agent_rms = self._agent_obs_rms()
             return {
                 agent_id: self._normalize_observation(obs, obs_rms=agent_rms[agent_id])
-                for agent_id, obs in marl_observation.items()
+                for agent_id, obs in observation.items()
             }
 
-        return self._normalize_observation(cast("TorchObsType", observation))
+        return self._normalize_observation(observation)
 
     def _update_statistics(
         self,
-        observation: TorchObsType,
+        observation: TorchObsType | MARLTensorObsType,
         *,
         obs_rms: RunningStatsType | None = None,
     ) -> None:
@@ -467,7 +515,7 @@ class RSNorm(AgentWrapper[AgentType]):
         :param obs_rms: Optional running-statistics object(s) to use instead of
             ``self.obs_rms`` (required for per-agent stats in multi-agent mode).
         """
-        obs_rms = self._leaf_obs_rms if obs_rms is None else obs_rms
+        obs_rms = self._leaf_obs_rms() if obs_rms is None else obs_rms
 
         # The statistics mirror the (tensorised) observation's structure, so narrowing
         # the stats tells us the observation's structure too.
@@ -489,14 +537,16 @@ class RSNorm(AgentWrapper[AgentType]):
         :param observation: Tensorised observation from the environment
         :type observation: TorchObsType | MARLTensorObsType
         """
-        # See `normalize_observation` for why the single/multi split uses casts.
+        # ``multi_agent`` is the runtime discriminator (see `normalize_observation`).
         if self.multi_agent:
-            marl_observation = cast("MARLTensorObsType", observation)
-            agent_rms = self._agent_obs_rms
-            for agent_id, obs in marl_observation.items():
+            assert _is_marl_obs(observation), (
+                "Multi-agent observations must be a per-agent mapping."
+            )
+            agent_rms = self._agent_obs_rms()
+            for agent_id, obs in observation.items():
                 self._update_statistics(obs, obs_rms=agent_rms[agent_id])
         else:
-            self._update_statistics(cast("TorchObsType", observation))
+            self._update_statistics(observation)
 
     def get_action(
         self,
@@ -514,7 +564,7 @@ class RSNorm(AgentWrapper[AgentType]):
         """
         # `obs_to_tensor` is overloaded on single-agent obs; the MARL branch is
         # dispatched by the same runtime code but has no matching overload.
-        tensor_obs = obs_to_tensor(cast("ObservationType", obs), self.device)
+        tensor_obs = obs_to_tensor(obs, self.device)
 
         # Update running statistics only when in training mode
         if self.training:
@@ -555,14 +605,13 @@ class RSNorm(AgentWrapper[AgentType]):
             )
             # Slicing a TensorDict yields a TensorDict; its entries are tensors (or
             # nested tensor collections) that keep their structure once normalized.
-            valid_data = cast(
-                "TensorDictBase", self.agent.rollout_buffer.buffer[:buffer_size]
-            )
+            valid_data = self.agent.rollout_buffer.buffer[:buffer_size]
+            assert isinstance(valid_data, TensorDictBase)
             valid_data["observations"] = self.normalize_observation(
-                cast("TorchObsType", valid_data["observations"]),
+                _narrow_obs_entry(valid_data["observations"]),
             )
             valid_data["next_observations"] = self.normalize_observation(
-                cast("TorchObsType", valid_data["next_observations"]),
+                _narrow_obs_entry(valid_data["next_observations"]),
             )
             self.agent.rollout_buffer.buffer[:buffer_size] = valid_data
 
@@ -574,10 +623,10 @@ class RSNorm(AgentWrapper[AgentType]):
             raise ValueError(msg)
 
         experiences["obs"] = self.normalize_observation(
-            cast("TorchObsType", experiences["obs"]),
+            _narrow_obs_entry(experiences["obs"]),
         )
         experiences["next_obs"] = self.normalize_observation(
-            cast("TorchObsType", experiences["next_obs"]),
+            _narrow_obs_entry(experiences["next_obs"]),
         )
         return self.wrapped_learn(experiences, *args, **kwargs)
 
@@ -594,6 +643,18 @@ def _is_array_dict(obs: NumpyObsType) -> TypeIs[ArrayDict]:
 def _is_array_tuple(obs: NumpyObsType) -> TypeIs[ArrayTuple]:
     """Narrow a numpy observation leaf to a tuple of arrays (see :func:`_is_array_dict`)."""
     return isinstance(obs, tuple)
+
+
+def _is_numpy_obs_mapping(
+    obs: MARLObservationType,
+) -> TypeGuard[dict[str, NumpyObsType]]:
+    """Confirm every per-agent leaf is a numpy observation.
+
+    Async vectorised MARL environments (``AsyncPettingZooVecEnv``) always emit numpy
+    arrays; this verifies that so the NaN-masking in
+    :meth:`AsyncAgentsWrapper.extract_inactive_agents` operates on the array leaves.
+    """
+    return all(isinstance(leaf, (np.ndarray, dict, tuple)) for leaf in obs.values())
 
 
 def _mask_rows(array: np.ndarray, mask: np.ndarray) -> np.ndarray:
@@ -663,7 +724,7 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
             # Create boolean mask for active agents. Reducing over a single axis of a
             # multi-dimensional sample always yields an array, but numpy's ``.all``
             # overloads widen the result to a scalar-or-array union.
-            active_mask = cast("np.ndarray", ~np.isnan(sample).all(axis=1))
+            active_mask = ~np.isnan(sample).all(axis=1)
 
             # If all agents are active, skip
             if active_mask.all():
@@ -761,7 +822,7 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
     def _align_async_off_policy_experiences(
         self,
         experiences: Mapping[str, Mapping[str, np.ndarray]],
-    ) -> ExperiencesType:
+    ) -> TensorDict:
         """Align async off-policy experiences.
 
         :param experiences: Stacked experiences, keyed by field and then by agent ID
@@ -784,11 +845,11 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
             | set(dones.keys())
         )
 
-        aligned_obs = {}
-        aligned_actions = {}
-        aligned_rewards = {}
-        aligned_next_obs = {}
-        aligned_dones = {}
+        aligned_obs: dict[str, Any] = {}
+        aligned_actions: dict[str, Any] = {}
+        aligned_rewards: dict[str, Any] = {}
+        aligned_next_obs: dict[str, Any] = {}
+        aligned_dones: dict[str, Any] = {}
 
         for agent_id in all_agent_ids:
             agent_obs = obs.get(agent_id)
@@ -838,13 +899,21 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
                 aligned_next_obs[agent_id] = agent_next_obs[:min_len]
                 aligned_dones[agent_id] = agent_dones[:min_len]
 
-        return {
-            "obs": aligned_obs,
-            "action": aligned_actions,
-            "reward": aligned_rewards,
-            "next_obs": aligned_next_obs,
-            "done": aligned_dones,
-        }
+        # MADDPG/MATD3 ``learn`` consume a TensorDict of nested per-agent fields.
+        def _nested_td(fields: dict[str, Any]) -> TensorDict:
+            td = TensorDict({}, batch_size=[])
+            td.update(fields)
+            return td
+
+        return _nested_td(
+            {
+                "obs": _nested_td(aligned_obs),
+                "action": _nested_td(aligned_actions),
+                "reward": _nested_td(aligned_rewards),
+                "next_obs": _nested_td(aligned_next_obs),
+                "done": _nested_td(aligned_dones),
+            }
+        )
 
     def get_action(
         self,
@@ -866,8 +935,10 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
         """
         # Async vectorised MARL environments always emit numpy-array observations, which
         # `extract_inactive_agents` requires to NaN-mask inactive agents.
-        numpy_obs = cast("dict[str, NumpyObsType]", obs)
-        inactive_agents, numpy_obs = self.extract_inactive_agents(numpy_obs)
+        assert _is_numpy_obs_mapping(obs), (
+            "AsyncAgentsWrapper expects numpy-array observations from the environment."
+        )
+        inactive_agents, numpy_obs = self.extract_inactive_agents(obs)
         action_return = self.wrapped_get_action(numpy_obs, *args, **kwargs)
 
         # Off-policy MARL: MADDPG / MATD3 return (env_actions, raw_actions)
@@ -919,9 +990,9 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
         """
         # Off-policy branch for MADDPG / MATD3
         if self.agent.algo in {"MADDPG", "MATD3"}:
-            experiences = self.stack_experiences(experiences)
-            experiences = self._align_async_off_policy_experiences(experiences)
-            return self.wrapped_learn(experiences, *args, **kwargs)
+            stacked = self.stack_experiences(experiences)
+            aligned = self._align_async_off_policy_experiences(stacked)
+            return self.wrapped_learn(aligned, *args, **kwargs)
 
         # Existing IPPO branch
         states, actions, log_probs, rewards, dones, values, next_state, next_done = map(

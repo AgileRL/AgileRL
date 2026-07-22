@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import gc
-from typing import TYPE_CHECKING, Any, NoReturn, cast
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import numpy as np
 import torch
@@ -410,19 +410,16 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
             batch_rejected_mask,
             batch_ref_rejected_log_probs,
             batch_ref_chosen_log_probs,
-        ) = cast(
-            "tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]",
-            get_experiences_samples(
-                minibatch_idxs,
-                chosen_input_ids,
-                chosen_attention_mask,
-                rejected_input_ids,
-                rejected_attention_mask,
-                chosen_mask,
-                rejected_mask,
-                ref_rejected_log_probs,
-                ref_chosen_log_probs,
-            ),
+        ) = get_experiences_samples(
+            minibatch_idxs,
+            chosen_input_ids,
+            chosen_attention_mask,
+            rejected_input_ids,
+            rejected_attention_mask,
+            chosen_mask,
+            rejected_mask,
+            ref_rejected_log_probs,
+            ref_chosen_log_probs,
         )
         if self.use_liger_loss:
             return self._dpo_loss_liger(

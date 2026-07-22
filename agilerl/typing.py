@@ -16,7 +16,7 @@ import torch
 from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
 from pettingzoo import ParallelEnv
-from tensordict import TensorDict
+from tensordict import TensorClass, TensorDict
 from torch._dynamo import OptimizedModule
 from torch.nn import Module
 from torch.optim import Optimizer
@@ -132,8 +132,14 @@ ExperiencesType = dict[str, ObservationType] | tuple[ObservationType, ...]
 ExperiencesT = TypeVar("ExperiencesT")
 
 
-class ReplayBatch(TypedDict):
-    """One off-policy sample from a :class:`~agilerl.components.replay_buffer.ReplayBuffer`."""
+class ReplayBatch(TensorClass):
+    """One off-policy sample from a :class:`~agilerl.components.replay_buffer.ReplayBuffer`.
+
+    A :class:`~tensordict.TensorClass`: attribute access (``batch.reward``) resolves
+    statically to its declared type (:class:`torch.Tensor`), while the object wraps a
+    real ``TensorDict`` at runtime. Build one with ``ReplayBatch.from_tensordict`` and
+    bind the result to a ``: ReplayBatch`` annotation so the field types flow through.
+    """
 
     obs: TorchObsType
     action: torch.Tensor
@@ -142,7 +148,7 @@ class ReplayBatch(TypedDict):
     done: torch.Tensor
 
 
-class PrioritizedReplayBatch(ReplayBatch, total=False):
+class PrioritizedReplayBatch(ReplayBatch):
     """A :class:`ReplayBatch` plus the priority weights and indices returned by
     prioritized (or ``return_idx=True``) sampling.
     """
@@ -151,17 +157,73 @@ class PrioritizedReplayBatch(ReplayBatch, total=False):
     idxs: torch.Tensor
 
 
-class BanditBatch(TypedDict):
+class BanditBatch(TensorClass):
     """One sample from a bandit replay buffer (context and reward only)."""
 
     obs: TorchObsType
     reward: torch.Tensor
 
 
-# One multi-agent off-policy sample: field name (``obs``, ``action``, ``reward``,
-# ``next_obs``, ``done``) -> agent id -> tensor. Sampled as a nested TensorDict by
-# the shared replay buffer and consumed by MADDPG/MATD3's ``learn``.
-MultiAgentReplayBatch = dict[str, dict[str, torch.Tensor]]
+class RolloutMinibatch(TensorClass):
+    """One flattened (non-BPTT) PPO minibatch drawn from the rollout buffer.
+
+    ``action_masks`` is ``None`` when the policy does not use action masking. The
+    buffer stores value predictions under the key ``"values"``, which collides with
+    ``TensorDict.values()``; PPO renames it to ``value_preds`` when it wraps the
+    buffer so it reads back as a plain attribute here.
+    """
+
+    observations: TorchObsType
+    actions: torch.Tensor
+    log_probs: torch.Tensor
+    advantages: torch.Tensor
+    returns: torch.Tensor
+    value_preds: torch.Tensor
+    action_masks: torch.Tensor | None = None
+
+
+class RolloutSequenceMinibatch(TensorClass):
+    """The padded per-sequence half of a truncated-BPTT PPO minibatch.
+
+    Sequences are padded to a common length; ``pad_mask`` marks the real steps.
+    Initial recurrent hidden states ride along as a non-tensor entry and are read
+    with ``get_non_tensor`` at the call site.
+    """
+
+    observations: TorchObsType
+    actions: torch.Tensor
+    pad_mask: torch.Tensor
+    action_masks: torch.Tensor | None = None
+
+
+class RolloutSequenceTargets(TensorClass):
+    """The unpadded training-target half of a truncated-BPTT PPO minibatch.
+
+    As with :class:`RolloutMinibatch`, the buffer's ``"values"`` key is renamed to
+    ``value_preds`` at wrap time (it collides with ``TensorDict.values()``).
+    """
+
+    log_probs: torch.Tensor
+    advantages: torch.Tensor
+    returns: torch.Tensor
+    value_preds: torch.Tensor
+
+
+class MultiAgentReplayBatch(TensorClass):
+    """One multi-agent off-policy sample from the shared replay buffer.
+
+    Each field is a nested per-agent :class:`~tensordict.TensorDict` (agent id ->
+    tensor). Build one from a sampled batch with
+    ``MultiAgentReplayBatch.from_tensordict`` and bind the result to a
+    ``: MultiAgentReplayBatch`` annotation so the fields resolve.
+    """
+
+    obs: TensorDict
+    action: TensorDict
+    reward: TensorDict
+    next_obs: TensorDict
+    done: TensorDict
+
 
 # One LLM RL rollout consumed by GRPO/LLMPPO/LLMREINFORCE's ``learn``:
 # ``(completion_ids, action_masks, rewards)``. ``completion_ids`` and

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, Literal, overload
 
 import numpy as np
 from gymnasium import Env, spaces
+from gymnasium.vector import VectorEnv
 from gymnasium.vector.utils import batch_space
 
 from agilerl.typing import NumpyObsType, PzStepReturn
@@ -16,7 +17,7 @@ if TYPE_CHECKING:
     from pettingzoo import ParallelEnv
 
 
-class DummyVecEnv:
+class DummyVecEnv(VectorEnv):
     """Wraps a single :class:`gymnasium.Env` with a ``VectorEnv``-like API.
 
     Observations returned by :meth:`reset` and :meth:`step` always carry a
@@ -64,7 +65,7 @@ class DummyVecEnv:
         return np.expand_dims(obs, axis=0), info
 
     def step(
-        self, action: np.ndarray
+        self, actions: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
         """Take a step in the environment.
 
@@ -72,8 +73,8 @@ class DummyVecEnv:
         instead (next-step autoreset) and the reset observation is returned
         with zero reward and ``False`` done flags.
 
-        :param action: Batched action array (shape ``(1, ...)``).
-        :type action: np.ndarray
+        :param actions: Batched action array (shape ``(1, ...)``).
+        :type actions: np.ndarray
         :returns: A tuple of ``(obs, reward, terminated, truncated, info)``
             with leading batch dimensions.
         :rtype: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]
@@ -89,7 +90,7 @@ class DummyVecEnv:
                 info,
             )
 
-        scalar_action = action[0]
+        scalar_action = actions[0]
         if isinstance(self.single_action_space, spaces.Discrete):
             scalar_action = int(scalar_action)
 
@@ -103,15 +104,21 @@ class DummyVecEnv:
             info,
         )
 
-    def render(self) -> RenderFrame | list[RenderFrame] | None:
+    def render(self) -> tuple[RenderFrame, ...] | None:
         """Render the environment.
 
-        :returns: Render output from the wrapped environment.
-        :rtype: gymnasium.core.RenderFrame | list[RenderFrame] | None
-        """
-        return self._env.render()
+        Wraps the single environment's frame in a length-1 tuple to match the
+        :class:`~gymnasium.vector.VectorEnv` render contract.
 
-    def close(self) -> None:
+        :returns: Render output from the wrapped environment.
+        :rtype: tuple[gymnasium.core.RenderFrame, ...] | None
+        """
+        frame = self._env.render()
+        if frame is None:
+            return None
+        return tuple(frame) if isinstance(frame, list) else (frame,)
+
+    def close(self, **kwargs: Any) -> None:
         """Close the wrapped environment."""
         self._env.close()
 

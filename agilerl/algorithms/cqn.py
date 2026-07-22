@@ -6,6 +6,7 @@ import numpy as np
 import torch
 from accelerate import Accelerator
 from gymnasium import spaces
+from tensordict import TensorDict
 from torch import nn, optim
 from torch.nn.utils import clip_grad_norm_
 
@@ -21,7 +22,7 @@ from agilerl.typing import ObservationType, ReplayBatch
 from agilerl.utils.algo_utils import make_safe_deepcopies
 
 
-class CQN(RLAlgorithm[ReplayBatch]):
+class CQN(RLAlgorithm[TensorDict]):
     """Conservative Q-Learning for Offline Reinforcement Learning.
 
     Paper: https://arxiv.org/abs/2006.04779
@@ -237,21 +238,22 @@ class CQN(RLAlgorithm[ReplayBatch]):
 
         return action
 
-    def learn(self, experiences: ReplayBatch) -> float:
+    def learn(self, experiences: TensorDict) -> float:
         """Update agent network parameters to learn from experiences.
 
         :param experiences: Batch of observations, actions, rewards, next
             observations and dones sampled from an off-policy replay buffer.
-        :type experiences: ReplayBatch
+        :type experiences: TensorDict
 
         :return: Loss from learning
         :rtype: float
         """
-        states = experiences["obs"]
-        actions = experiences["action"]
-        rewards = experiences["reward"]
-        next_states = experiences["next_obs"]
-        dones = experiences["done"]
+        batch: ReplayBatch = ReplayBatch.from_tensordict(experiences)
+        states = batch.obs
+        actions = batch.action
+        rewards = batch.reward
+        next_states = batch.next_obs
+        dones = batch.done
 
         if self.accelerator is not None:
             actions = actions.to(self.accelerator.device)

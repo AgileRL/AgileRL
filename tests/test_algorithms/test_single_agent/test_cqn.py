@@ -6,6 +6,7 @@ import torch
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
+from tensordict import TensorDict
 from torch import nn, optim
 
 from agilerl.algorithms.cqn import CQN
@@ -305,13 +306,16 @@ class TestCQNLearn:
         td = get_experiences_batch(
             observation_space, action_space, batch_size, cqn.device
         )
-        experiences = {
-            "obs": td["obs"],
-            "action": td["action"],
-            "reward": td["reward"],
-            "next_obs": td["next_obs"],
-            "done": td["done"],
-        }
+        experiences = TensorDict(
+            {
+                "obs": td["obs"],
+                "action": td["action"],
+                "reward": td["reward"],
+                "next_obs": td["next_obs"],
+                "done": td["done"],
+            },
+            batch_size=[batch_size],
+        )
 
         # Copy state dict before learning - should be different to after updating weights
         actor = cqn.actor
@@ -354,13 +358,16 @@ class TestCQNLearn:
         next_states = torch.randint(0, discrete_space.n, (batch_size, 1))
         dones = torch.randint(0, 2, (batch_size, 1))
 
-        experiences = {
-            "obs": states,
-            "action": actions,
-            "reward": rewards,
-            "next_obs": next_states,
-            "done": dones,
-        }
+        experiences = TensorDict(
+            {
+                "obs": states,
+                "action": actions,
+                "reward": rewards,
+                "next_obs": next_states,
+                "done": dones,
+            },
+            batch_size=[batch_size],
+        )
 
         # Copy state dict before learning - should be different to after updating weights
         actor = cqn.actor
@@ -395,13 +402,16 @@ class TestCQNLearn:
         rewards = torch.randn((batch_size, 1))
         next_states = torch.randn(batch_size, vector_space.shape[0])
         dones = torch.randint(0, 2, (batch_size, 1))
-        experiences = {
-            "obs": states,
-            "action": actions,
-            "reward": rewards,
-            "next_obs": next_states,
-            "done": dones,
-        }
+        experiences = TensorDict(
+            {
+                "obs": states,
+                "action": actions,
+                "reward": rewards,
+                "next_obs": next_states,
+                "done": dones,
+            },
+            batch_size=[batch_size],
+        )
         loss = cqn.learn(experiences)
         assert isinstance(loss, float)
         cqn.clean_up()

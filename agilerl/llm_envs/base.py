@@ -7,12 +7,11 @@ import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 import gymnasium as gym
 import torch
 from torch.utils.data import DataLoader
-from torch.utils.data import Dataset as TorchDataset
 
 if TYPE_CHECKING:
     from accelerate import Accelerator
@@ -111,16 +110,19 @@ class HuggingFaceGym(gym.Env, ABC, Generic[PromptT, CompletionT]):
             "test dataset",
         )
         # A HuggingFace Dataset is map-style (__getitem__/__len__) but does not
-        # inherit torch's Dataset, which is what DataLoader declares.
+        # inherit torch's Dataset, which is what DataLoader declares; bridge the
+        # cross-library datasets through Any.
+        train_data: Any = train_dataset
+        test_data: Any = test_dataset
         self.train_dataloader = DataLoader(
-            cast("TorchDataset[Any]", train_dataset),
+            train_data,
             batch_size=data_batch_size_per_gpu,
             shuffle=True,
             **dataloader_kwargs,
             generator=generator,
         )
         self.test_dataloader = DataLoader(
-            cast("TorchDataset[Any]", test_dataset),
+            test_data,
             batch_size=data_batch_size_per_gpu,
             shuffle=False,
             **dataloader_kwargs,

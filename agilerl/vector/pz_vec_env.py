@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from typing import Any, SupportsInt, cast
+from typing import Any
 
 import numpy as np
 from gymnasium.spaces import Space
@@ -140,12 +140,11 @@ class PettingZooVecEnv:
                 if np.isnan(agent_action).all():
                     continue
 
+                # Scalar actions are numeric (discrete-action envs), so ``int`` is
+                # safe despite np.isscalar's wider TypeIs (which admits complex/str).
+                scalar_action: Any = agent_action
                 agent_action = (
-                    # Scalar actions are numeric (discrete-action envs), so
-                    # SupportsInt is safe despite np.isscalar's wider TypeIs.
-                    int(cast("SupportsInt", agent_action))
-                    if np.isscalar(agent_action)
-                    else agent_action
+                    int(scalar_action) if np.isscalar(agent_action) else agent_action
                 )
                 env_actions[agent_id] = agent_action
 

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import warnings
 from functools import singledispatch
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol
 
 from accelerate import Accelerator
+from gymnasium import spaces
 
 from agilerl.algorithms.core.base import (
     LLMAlgorithm,
@@ -34,10 +35,8 @@ from agilerl.protocols import BanditEnvProtocol
 
 if TYPE_CHECKING:
     import torch
-    from gymnasium import spaces
     from transformers import PreTrainedTokenizerBase
 
-    from agilerl.typing import SupportedActionSpace, SupportedObservationSpace
 
 LLMEnvType = ReasoningGym | PreferenceGym | SFTGym
 # Union of every env type an ``EnvSpec.make_env`` builds: vectorized gym/pettingzoo
@@ -177,6 +176,7 @@ def create_population_from_spec(
     :rtype: PopulationT
     """
     from agilerl.models.algorithms import RainbowDQNSpec
+    from agilerl.utils.algo_utils import get_num_envs
 
     # Override the hp_config with the one defined in MutationSpec if not already set
     hp_config = algo_spec.hp_config
@@ -190,7 +190,7 @@ def create_population_from_spec(
         if hasattr(algo_spec, num_envs_arg):
             # Not every member of the env union exposes ``num_envs``; the algos
             # that set it always run on a vectorized env that does.
-            setattr(algo_spec, num_envs_arg, cast("Any", env).num_envs)
+            setattr(algo_spec, num_envs_arg, get_num_envs(env))
 
     # Classic RL algorithms
     if isinstance(algo_spec, (RLAlgorithmSpec, MultiAgentRLAlgorithmSpec)):
@@ -203,13 +203,26 @@ def create_population_from_spec(
         ):
             algo_spec.n_step = replay_buffer_spec.n_step_buffer_args.n_step
 
-        # ``build_algorithm`` validates the concrete space classes at runtime;
-        # the env API only advertises ``spaces.Space``, hence the casts.
+        # ``get_spaces_from_env`` returns a per-agent mapping for multi-agent specs
+        # and a plain space for single-agent specs; narrow the shared return here.
         if isinstance(algo_spec, MultiAgentRLAlgorithmSpec):
+            ma_error = "Multi-agent specs require per-agent space mappings."
+            assert isinstance(observation_space, dict), ma_error
+            assert isinstance(action_space, dict), ma_error
+            # ``spaces.Dict`` is itself dict-like, so the ``dict`` narrow above leaves
+            # an ambiguous value type; rebuild explicit per-agent space mappings.
+            obs_by_agent: dict[str, spaces.Space] = {}
+            action_by_agent: dict[str, spaces.Space] = {}
+            for agent_id, obs_space in observation_space.items():
+                assert isinstance(obs_space, spaces.Space)
+                obs_by_agent[str(agent_id)] = obs_space
+            for agent_id, act_space in action_space.items():
+                assert isinstance(act_space, spaces.Space)
+                action_by_agent[str(agent_id)] = act_space
             multi_agent_population: PopulationT = [
                 algo_spec.build_algorithm(
-                    cast("dict[str, SupportedObservationSpace]", observation_space),
-                    cast("dict[str, SupportedActionSpace]", action_space),
+                    obs_by_agent,
+                    action_by_agent,
                     index=i,
                     resume_from_checkpoint=resume_from_checkpoint,
                     device=device,
@@ -219,10 +232,13 @@ def create_population_from_spec(
             ]
             return multi_agent_population
 
+        sa_error = "Single-agent specs require plain observation/action spaces."
+        assert not isinstance(observation_space, dict), sa_error
+        assert not isinstance(action_space, dict), sa_error
         single_agent_population: PopulationT = [
             algo_spec.build_algorithm(
-                cast("SupportedObservationSpace", observation_space),
-                cast("SupportedActionSpace", action_space),
+                observation_space,
+                action_space,
                 index=i,
                 resume_from_checkpoint=resume_from_checkpoint,
                 device=device,

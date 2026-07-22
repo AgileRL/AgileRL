@@ -1,9 +1,8 @@
 import inspect
 import warnings
-from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import asdict
-from typing import Any, ClassVar, TypeVar, cast, overload
+from typing import Any, ClassVar, TypeVar, overload
 
 import numpy as np
 import torch
@@ -279,8 +278,10 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
 
             # Concrete encoder constructors take arbitrary config kwargs, unlike
             # the (device, random_seed) signature of the EvolvableModule base
-            # class, so cast to a factory accepting them.
-            encoder_factory = cast("Callable[..., EvolvableModule]", encoder_cls)
+            # class; type the factory as Any to admit them. The single mapping
+            # (rather than explicit kwargs) lets ``encoder_config`` override the
+            # defaults without a duplicate-keyword error.
+            encoder_factory: Any = encoder_cls
             self.encoder = encoder_factory(
                 **{
                     "observation_space": self.observation_space,

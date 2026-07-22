@@ -23,7 +23,6 @@ from typing import (
     Literal,
     NoReturn,
     TypeVar,
-    cast,
     overload,
 )
 
@@ -430,15 +429,17 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
     @abstractmethod
     def preprocess_observation(
         self,
-        observation: ObservationType,
+        observation: Any,  # noqa: ANN401 -- observation shape varies per algorithm (single obs vs per-agent mapping)
     ) -> TorchObsType | dict[str, TorchObsType]:
         """Preprocesses observations for forward pass through neural network.
 
+        Each concrete algorithm narrows ``observation`` to the exact shape it
+        consumes (a single observation, or a per-agent mapping) in its override.
         Multi-agent algorithms return a dictionary of preprocessed observations
         keyed by agent (or group) ID.
 
-        :param observations: Observations of environment
-        :type observations: numpy.ndarray[float] or dict[str, numpy.ndarray[float]]
+        :param observation: Observations of environment
+        :type observation: numpy.ndarray[float] or dict[str, numpy.ndarray[float]]
 
         :return: Preprocessed observations
         :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]]
@@ -1563,41 +1564,20 @@ class MultiAgentRLAlgorithm(
 
         super().__init__(index, hp_config, device, accelerator, torch_compiler, name)
 
+        # Reject scalars/strings up front (a non-``isinstance(list)`` check so the
+        # per-agent ``Iterable[spaces.Space]`` element type survives narrowing).
+        if isinstance(observation_spaces, str) or not hasattr(
+            observation_spaces, "__iter__"
+        ):
+            msg = "Observation spaces must be a list or dictionary."
+            raise TypeError(msg)
+
         assert type(observation_spaces) is type(action_spaces), (
             "Observation spaces and action spaces must be the same type. "
             f"Got {type(observation_spaces)} and {type(action_spaces)}."
         )
 
-        if isinstance(observation_spaces, (list, tuple)):
-            assert isinstance(action_spaces, (list, tuple)), (
-                "Action spaces must also be passed as a list."
-            )
-            assert isinstance(
-                agent_ids,
-                (tuple, list),
-            ), "Agent IDs must be specified if observation spaces are passed as a list."
-            # Narrowing the Iterable parameters against list/tuple keeps
-            # unhelpful intersections; pin the element types once.
-            agent_id_list = cast("list[str] | tuple[str, ...]", agent_ids)
-            obs_space_list = cast(
-                "list[spaces.Space] | tuple[spaces.Space, ...]",
-                observation_spaces,
-            )
-            action_space_list = cast(
-                "list[spaces.Space] | tuple[spaces.Space, ...]",
-                action_spaces,
-            )
-            assert len(agent_id_list) == len(
-                obs_space_list,
-            ), "Number of agent IDs must match number of observation spaces."
-
-            self.possible_observation_spaces = spaces.Dict(
-                dict(zip(agent_id_list, obs_space_list, strict=False)),
-            )
-            self.possible_action_spaces = spaces.Dict(
-                dict(zip(agent_id_list, action_space_list, strict=False)),
-            )
-        elif isinstance(observation_spaces, spaces.Dict):
+        if isinstance(observation_spaces, spaces.Dict):
             assert isinstance(action_spaces, spaces.Dict), (
                 "Action spaces must also be passed as a spaces.Dict."
             )
@@ -1612,8 +1592,27 @@ class MultiAgentRLAlgorithm(
             )
             self.possible_action_spaces = spaces.Dict(dict(action_spaces))
         else:
-            msg = f"Observation spaces must be a list or dictionary of spaces.Space objects. Got {type(observation_spaces)}."
-            raise TypeError(msg)
+            # A sequence of per-agent spaces paired with agent_ids. Excluding the
+            # mapping cases above preserves the Iterable[spaces.Space] element
+            # type that an isinstance(list, tuple) check would erase.
+            assert agent_ids is not None, (
+                "Agent IDs must be specified if observation spaces are passed as a list."
+            )
+            assert not isinstance(action_spaces, Mapping), (
+                "Action spaces must also be passed as a list."
+            )
+            agent_id_list = list(agent_ids)
+            obs_space_list = list(observation_spaces)
+            action_space_list = list(action_spaces)
+            assert len(agent_id_list) == len(obs_space_list), (
+                "Number of agent IDs must match number of observation spaces."
+            )
+            self.possible_observation_spaces = spaces.Dict(
+                dict(zip(agent_id_list, obs_space_list, strict=False)),
+            )
+            self.possible_action_spaces = spaces.Dict(
+                dict(zip(agent_id_list, action_space_list, strict=False)),
+            )
 
         for obs_space in self.possible_observation_spaces.values():
             check_supported_space(obs_space)
@@ -1639,10 +1638,9 @@ class MultiAgentRLAlgorithm(
             )
             # transpose_image_space preserves the space structure, so a Dict
             # space transposes to a Dict space.
-            self.possible_observation_spaces = cast(
-                "spaces.Dict",
-                transpose_image_space(self.possible_observation_spaces),
-            )
+            transposed = transpose_image_space(self.possible_observation_spaces)
+            assert isinstance(transposed, spaces.Dict)
+            self.possible_observation_spaces = transposed
 
         # Determine groups of agents from their IDs
         self.shared_agent_ids = []
@@ -1748,16 +1746,19 @@ class MultiAgentRLAlgorithm(
             and self.metrics.agent_ids == self.shared_agent_ids
         )
         if is_grouped:
-            # ``is_nested`` established that rows are per-agent sequences.
-            score_rows = cast("list[list[float]]", scores)
-            # The only row shape these loops produce is one entry per raw env
-            # agent; anything else would mislabel group columns if passed
-            # through, so fail loudly rather than silently misrecord.
-            assert len(score_rows[0]) == len(self.agent_ids), (
-                "Grouped multi-agent scores expected one entry per agent "
-                f"({len(self.agent_ids)} agents: {self.agent_ids}), got rows of "
-                f"length {len(score_rows[0])}."
-            )
+            # ``is_nested`` established that rows are per-agent sequences; pin
+            # each one so the per-group reduction can index it. The only shape
+            # these loops produce is one entry per raw env agent; anything else
+            # would mislabel group columns, so fail loudly rather than misrecord.
+            score_rows: list[list[float] | np.ndarray] = []
+            for row in scores:
+                grouped_error = (
+                    "Grouped multi-agent scores expected one entry per agent "
+                    f"({len(self.agent_ids)} agents: {self.agent_ids})."
+                )
+                assert isinstance(row, (list, np.ndarray)), grouped_error
+                assert len(row) == len(self.agent_ids), grouped_error
+                score_rows.append(row)
             column = {aid: idx for idx, aid in enumerate(self.agent_ids)}
             group_columns = [
                 [column[aid] for aid in self.grouped_agents[gid]]
@@ -1793,13 +1794,13 @@ class MultiAgentRLAlgorithm(
 
     def preprocess_observation(
         self,
-        observation: ObservationType | Mapping[str, ObservationType],
+        observation: Mapping[str, ObservationType],
         group_ids: list[str] | None = None,
     ) -> dict[str, TorchObsType]:
         """Preprocesses observations for forward pass through neural network.
 
-        :param observation: Observations of environment
-        :type observation: numpy.ndarray[float] or dict[str, numpy.ndarray[float]]
+        :param observation: Per-agent observations of the environment.
+        :type observation: Mapping[str, ObservationType]
         :param group_ids: Optional list of output IDs. When group IDs are provided
             (e.g., ``["agent", "other_agent"]``), observations are grouped and
             concatenated per group. Otherwise, observations are returned per
@@ -1809,8 +1810,7 @@ class MultiAgentRLAlgorithm(
         :return: Preprocessed observations
         :rtype: dict[str, TorchObsType]
         """
-        # Multi-agent observations are per-agent dictionaries.
-        obs_dict = cast("MultiAgentObservationType", observation)
+        obs_dict = observation
         if group_ids is None:
             preprocessed: dict[str, TorchObsType] = {}
             for agent_id, agent_obs in obs_dict.items():
@@ -1841,14 +1841,17 @@ class MultiAgentRLAlgorithm(
                     placeholder_value=self.placeholder_value,
                 )
             )
-        grouped = {
-            output_id: concatenate_tensors(obs_list) if obs_list else obs_list
+        # Populated buckets concatenate to a single tensor; empty buckets (a
+        # group with no active agent) become an empty tensor so every supplied
+        # group id is present in the output without widening the value type.
+        return {
+            output_id: (
+                concatenate_tensors(obs_list)
+                if obs_list
+                else torch.empty(0, device=self.device)
+            )
             for output_id, obs_list in buckets.items()
         }
-
-        # Populated buckets concatenate to a single tensor; only the rare empty
-        # bucket keeps its (empty) list, which callers never index.
-        return cast("dict[str, TorchObsType]", grouped)
 
     def extract_action_masks(
         self, infos: InfosDict
@@ -2699,18 +2702,17 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         self.rng = np.random.RandomState(seed)
         self.metrics = AgentMetrics()
 
-    def preprocess_observation(self, observation: ObservationType) -> TorchObsType:
+    def preprocess_observation(self, observation: TorchObsType) -> TorchObsType:
         """Preprocess observations (dummy) for forward pass through neural network.
 
-        :param observations: Observations of environment
-        :type observations: numpy.ndarray[float] or dict[str, numpy.ndarray[float]]
+        :param observation: Observations of environment
+        :type observation: torch.Tensor[float] or dict[str, torch.Tensor[float]]
 
         :return: Preprocessed observations
         :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or tuple[torch.Tensor[float], ...]
         """
-        # Dummy pass-through: LLM observations are assumed to already be batched
-        # tensors, so the wider ObservationType input is returned unchanged.
-        return cast("TorchObsType", observation)
+        # Dummy pass-through: LLM observations are already batched tensors.
+        return observation
 
     def save_checkpoint(
         self,
@@ -4347,9 +4349,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             else:
                 # With a DummyOptimizer, DeepSpeed owns the real optimizer and
                 # attaches it to the actor engine at wrap time.
-                sched_optimizer = cast(
-                    "torch.optim.Optimizer", actor.optimizer
-                )  # pragma: no cover - needs a live DeepSpeed engine to attach actor.optimizer
+                sched_optimizer = actor.optimizer  # pragma: no cover - needs a live DeepSpeed engine to attach actor.optimizer
+            # ``actor.optimizer`` resolves through ``nn.Module.__getattr__`` to a
+            # dynamic member; both branches yield a real optimizer at runtime.
+            assert isinstance(sched_optimizer, torch.optim.Optimizer)
             self.lr_scheduler = create_warmup_cosine_scheduler(
                 sched_optimizer,
                 self.cosine_lr_schedule_config,
@@ -5134,10 +5137,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         # Prompt mappings type their values as `Any`, so token-id fields read
         # back as `Any`; the casts here and below pin them to `torch.Tensor`.
         def _trajectory_input_ids(prompt: Mapping[str, Any]) -> torch.Tensor:
-            return cast(
-                "torch.Tensor",
-                prompt.get("trajectory_input_ids", prompt["input_ids"]),
-            )
+            return prompt.get("trajectory_input_ids", prompt["input_ids"])
 
         def _token_prompt_for_vllm(ids: torch.Tensor) -> dict[str, list[int]]:
             return {"prompt_token_ids": ids.squeeze(0).tolist()}
@@ -5148,7 +5148,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             st = prompt.get("stitch_prefix_ids")
             if st is None:
                 return ref.new_zeros((ref.shape[0], 0))
-            return cast("torch.Tensor", st)
+            return st
 
         def _vllm_max_new_tokens(model_prompt_len: int) -> int:
             room = self.max_model_len - model_prompt_len
@@ -5341,8 +5341,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         # Prompt mappings type their values as `Any`, so `input_ids` reads back
         # as `Any`; pin it to `torch.Tensor` to read the sequence-length dimension.
         num_input_tokens = [
-            int(cast("torch.Tensor", prompts[i]["input_ids"]).shape[1])
-            for i in range(len(prompts))
+            int(prompts[i]["input_ids"].shape[1]) for i in range(len(prompts))
         ]
         completion_masks = [
             build_completion_mask(completion_id, num_input_tokens[i], self.pad_token_id)

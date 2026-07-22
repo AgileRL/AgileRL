@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import inspect
 import warnings
-from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -86,14 +85,12 @@ class TokenObservationWrapper:
         if self.apply_chat_template:
             # v5 ``apply_chat_template(tokenize=True)`` returns a BatchEncoding
             # mapping (``return_dict`` defaults to ``True``); the packaged stub
-            # widens the return to ``str | list``, so narrow it to the mapping.
-            result = cast(
-                "Mapping[str, Any]",
-                self.tokenizer.apply_chat_template(
-                    [{"role": "user", "content": obs_text}],
-                    tokenize=True,
-                    add_generation_prompt=True,
-                ),
+            # widens the return to ``str | list``, so treat it as the dynamic
+            # mapping transformers actually returns.
+            result: Any = self.tokenizer.apply_chat_template(
+                [{"role": "user", "content": obs_text}],
+                tokenize=True,
+                add_generation_prompt=True,
             )
             token_ids = result["input_ids"]
             if (
@@ -343,10 +340,8 @@ class TokenObservationWrapper:
         gen_tokens = full_completion_ids[0, pl:]
         # Decoding a single sequence returns ``str``; the stub widens
         # ``decode`` to ``str | list[str]``.
-        gen_text = cast(
-            "str",
-            self.tokenizer.decode(gen_tokens.tolist(), skip_special_tokens=True),
-        )
+        gen_text = self.tokenizer.decode(gen_tokens.tolist(), skip_special_tokens=True)
+        assert isinstance(gen_text, str)
         return self._step(full_completion_ids, gen_text)
 
     def build_model_prompt_fields(

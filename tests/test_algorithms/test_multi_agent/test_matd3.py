@@ -263,13 +263,16 @@ def experiences(
             for agent in agent_ids
         }
 
-    return {
-        "obs": states,
-        "action": actions,
-        "reward": rewards,
-        "next_obs": next_states,
-        "done": dones,
-    }
+    return TensorDict(
+        {
+            "obs": TensorDict(states, batch_size=[batch_size]),
+            "action": TensorDict(actions, batch_size=[batch_size]),
+            "reward": TensorDict(rewards, batch_size=[batch_size]),
+            "next_obs": TensorDict(next_states, batch_size=[batch_size]),
+            "done": TensorDict(dones, batch_size=[batch_size]),
+        },
+        batch_size=[batch_size],
+    )
 
 
 def no_sync(self):
@@ -1749,13 +1752,16 @@ class TestMATD3Learn:
         dones = {agent_id: torch.zeros(batch_size, 1) for agent_id in agent_ids}
 
         loss = matd3.learn(
-            {
-                "obs": states,
-                "action": actions,
-                "reward": rewards,
-                "next_obs": next_states,
-                "done": dones,
-            }
+            TensorDict(
+                {
+                    "obs": TensorDict(states, batch_size=[batch_size]),
+                    "action": TensorDict(actions, batch_size=[batch_size]),
+                    "reward": TensorDict(rewards, batch_size=[batch_size]),
+                    "next_obs": TensorDict(next_states, batch_size=[batch_size]),
+                    "done": TensorDict(dones, batch_size=[batch_size]),
+                },
+                batch_size=[batch_size],
+            )
         )
         assert set(loss.keys()) == set(matd3.shared_agent_ids)
         matd3.clean_up()
@@ -1793,13 +1799,16 @@ class TestMATD3Learn:
         # Run enough learn steps for the delayed actor update to fire
         for _ in range(matd3.policy_freq):
             matd3.learn(
-                {
-                    "obs": states,
-                    "action": actions,
-                    "reward": rewards,
-                    "next_obs": next_states,
-                    "done": dones,
-                }
+                TensorDict(
+                    {
+                        "obs": TensorDict(states, batch_size=[batch_size]),
+                        "action": TensorDict(actions, batch_size=[batch_size]),
+                        "reward": TensorDict(rewards, batch_size=[batch_size]),
+                        "next_obs": TensorDict(next_states, batch_size=[batch_size]),
+                        "done": TensorDict(dones, batch_size=[batch_size]),
+                    },
+                    batch_size=[batch_size],
+                )
             )
 
         # Losses are recorded per shared group, with no raw-agent keys leaking
@@ -2315,13 +2324,16 @@ class TestMATD3Clone:
         }
         dones = {agent_id: torch.zeros(batch_size, 1) for agent_id in agent_ids}
 
-        experiences = {
-            "obs": states,
-            "action": actions,
-            "reward": rewards,
-            "next_obs": next_states,
-            "done": dones,
-        }
+        experiences = TensorDict(
+            {
+                "obs": TensorDict(states, batch_size=[batch_size]),
+                "action": TensorDict(actions, batch_size=[batch_size]),
+                "reward": TensorDict(rewards, batch_size=[batch_size]),
+                "next_obs": TensorDict(next_states, batch_size=[batch_size]),
+                "done": TensorDict(dones, batch_size=[batch_size]),
+            },
+            batch_size=[batch_size],
+        )
         matd3.learn(experiences)
         clone_agent = matd3.clone()
         assert isinstance(clone_agent, MATD3)

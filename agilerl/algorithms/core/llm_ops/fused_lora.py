@@ -18,7 +18,7 @@ from __future__ import annotations
 import itertools
 from collections.abc import Sequence
 from functools import partial
-from typing import Any, cast
+from typing import Any
 from weakref import WeakKeyDictionary
 
 import torch
@@ -39,7 +39,8 @@ def _lora_delta(layer: LoraLayer, adapter: str, rows: torch.Tensor) -> torch.Ten
     lora_a = layer.lora_A[adapter]
     # lora_A is an nn.ModuleDict, so its members' `.weight` resolves through
     # nn.Module.__getattr__ as the loose Tensor | Module; narrow it to Tensor.
-    lora_a_weight = cast("torch.Tensor", lora_a.weight)
+    lora_a_weight = lora_a.weight
+    assert isinstance(lora_a_weight, torch.Tensor)
     rows = layer.lora_dropout[adapter](rows.to(lora_a_weight.dtype))
     return layer.lora_B[adapter](lora_a(rows)) * layer.scaling[adapter]
 

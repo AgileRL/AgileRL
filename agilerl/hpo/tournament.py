@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import cast
+from typing import Any
 
 import numpy as np
 from accelerate.utils import broadcast_object_list
@@ -148,8 +148,8 @@ class TournamentSelection:
         # this drops both this function's *and the caller's* last references to
         # agents that don't survive selection (LLM agents hold multi-GB models,
         # so the memory must be released as we go). Aliasing rather than copying
-        # is deliberate and needs the cast to admit the ``None`` writes.
-        agent_slots = cast("list[EvolvableAlgorithmProtocol | None]", population)
+        # is deliberate; typed ``Any`` to admit the in-place ``None`` writes below.
+        agent_slots: Any = population
 
         accelerator = population[0].accelerator
         new_population_idxs: list[tuple[int, int, bool]] = []

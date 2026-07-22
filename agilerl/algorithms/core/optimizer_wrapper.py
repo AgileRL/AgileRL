@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Sequence
-from typing import Any, cast
+from typing import Any, Literal, overload
 
 from torch import nn
 from torch.optim import Optimizer
 
 from agilerl.algorithms.core.registry import OptimizerFactory
 from agilerl.modules import EvolvableModule, ModuleDict
-from agilerl.protocols import EvolvableAlgorithmProtocol
+from agilerl.protocols import EvolvableAlgorithmProtocol, NamedCallable
 from agilerl.typing import LrNameType, StateDict
 
 ModuleList = list[EvolvableModule]
@@ -122,8 +122,6 @@ class OptimizerWrapper:
     :param lr_critic: Learning rate for the critic/value-head group when
         ``is_llm_optimizer`` is True.
     :type lr_critic: float | None
-    :param is_llm_optimizer: If True, the optimizer is an LLM optimizer.
-    :type is_llm_optimizer: bool
     """
 
     # ``optimizer`` holds the initialized optimizer instance/s; ``optimizer_cls``
@@ -133,6 +131,59 @@ class OptimizerWrapper:
     networks: list[nn.Module]
     network_names: list[str]
     lr_name: LrNameType
+
+    @overload
+    def __init__(
+        self,
+        optimizer_cls: OptimizerFactory | dict[str, OptimizerFactory],
+        networks: ModuleDict[Any],
+        lr: float,
+        optimizer_kwargs: dict[str, Any] | None = None,
+        network_names: list[str] | None = None,
+        lr_name: str | None = None,
+        lr_critic: float | None = None,
+        is_llm_optimizer: Literal[False] = False,
+    ) -> None: ...
+
+    @overload
+    def __init__(
+        self,
+        optimizer_cls: OptimizerFactory,
+        networks: nn.Module | list[nn.Module],
+        lr: float,
+        optimizer_kwargs: dict[str, Any] | None = None,
+        network_names: list[str] | None = None,
+        lr_name: LrNameType | None = None,
+        lr_critic: float | None = None,
+        *,
+        is_llm_optimizer: Literal[True],
+    ) -> None: ...
+
+    @overload
+    def __init__(
+        self,
+        optimizer_cls: OptimizerFactory,
+        networks: nn.Module | list[nn.Module],
+        lr: float,
+        optimizer_kwargs: dict[str, Any] | list[dict[str, Any]] | None = None,
+        network_names: list[str] | None = None,
+        lr_name: LrNameType | None = None,
+        lr_critic: float | None = None,
+        is_llm_optimizer: Literal[False] = False,
+    ) -> None: ...
+
+    @overload
+    def __init__(
+        self,
+        optimizer_cls: OptimizerFactory | dict[str, OptimizerFactory],
+        networks: nn.Module | list[nn.Module],
+        lr: float,
+        optimizer_kwargs: dict[str, Any] | list[dict[str, Any]] | None = None,
+        network_names: list[str] | None = None,
+        lr_name: LrNameType | None = None,
+        lr_critic: float | None = None,
+        is_llm_optimizer: bool = False,
+    ) -> None: ...
 
     def __init__(
         self,
@@ -145,25 +196,15 @@ class OptimizerWrapper:
         lr_critic: float | None = None,
         is_llm_optimizer: bool = False,
     ) -> None:
-
         self.optimizer_cls = optimizer_cls
         self.optimizer_kwargs = optimizer_kwargs if optimizer_kwargs is not None else {}
         self.lr = lr
         self.is_llm_optimizer = is_llm_optimizer
         self.lr_critic = lr_critic
 
-        if isinstance(networks, nn.Module):
-            self.networks = [networks]
-        elif isinstance(networks, list):
-            if not all(isinstance(net, nn.Module) for net in networks):
-                msg = "Expected a single / list of torch.nn.Module objects."
-                raise TypeError(msg)
-            self.networks = list(networks)
-        else:
-            msg = "Expected a single / list of torch.nn.Module objects."
-            raise TypeError(msg)
-
+        self.networks = _normalize_networks(networks)
         first_network = self.networks[0]
+
         if is_llm_optimizer:
             if isinstance(first_network, ModuleDict):
                 msg = "is_llm_optimizer=True does not support ModuleDict networks."
@@ -192,83 +233,36 @@ class OptimizerWrapper:
 
         assert self.network_names, "No networks found in the parent container."
 
-        # Initialize the optimizer/s
-        # NOTE: For multi-agent algorithms, we want to have a different optimizer
-        # for each of the networks in the passed ModuleDict since they correspond to
-        # different agents.
         multiple_attrs = len(self.network_names) > 1
         if isinstance(first_network, ModuleDict):
             assert isinstance(self.optimizer_kwargs, dict), (
                 "Expected a dictionary of optimizer keyword arguments for "
                 "multi-agent optimizers."
             )
-            optimizers: dict[str, Optimizer] = {}
-            # isinstance narrowing erases the ModuleDict value type to object, so
-            # pin it back to iterate members as modules.
-            module_dict = cast("ModuleDict[EvolvableModule]", first_network)
-            for agent_id, net in module_dict.items():
-                if isinstance(optimizer_cls, dict):
-                    # isinstance(dict) erases the value type, so pin it to index.
-                    single_cls = cast("dict[str, OptimizerFactory]", optimizer_cls)[
-                        agent_id
-                    ]
-                else:
-                    single_cls = optimizer_cls
-                kwargs = self.optimizer_kwargs.get(agent_id, {})
-                optimizers[agent_id] = init_from_single(
-                    net,
-                    single_cls,
-                    self.lr,
-                    kwargs,
-                )
-            self.optimizer = optimizers
-
-        elif is_llm_optimizer:
-            assert isinstance(
+            self.optimizer = _init_multi_agent_optimizers(
+                first_network,
                 optimizer_cls,
-                type,
-            ), "Expected a single optimizer class for LLM param groups."
-            assert isinstance(
+                self.lr,
                 self.optimizer_kwargs,
-                dict,
-            ), "Expected a single dictionary of optimizer keyword arguments."
-            self.optimizer = init_llm_optimizer(
+            )
+        elif is_llm_optimizer:
+            self.optimizer = _init_llm_wrapped_optimizer(
                 first_network,
                 optimizer_cls,
                 self.lr,
                 self.optimizer_kwargs,
                 lr_critic,
             )
-
-        # Single-agent algorithms with multiple networks for a single optimizer
         elif len(self.networks) > 1 and multiple_attrs:
-            assert len(self.networks) == len(
-                self.network_names,
-            ), "Number of networks and network attribute names do not match."
-            assert isinstance(
-                optimizer_cls,
-                type,
-            ), "Expected a single optimizer class for multiple networks."
-            # Initialize a single optimizer from the combination of network parameters
-            self.optimizer = init_from_multiple(
+            self.optimizer = _init_multi_network_optimizer(
                 self.networks,
+                self.network_names,
                 optimizer_cls,
                 self.lr,
                 self.optimizer_kwargs,
             )
-
-        # Single-agent algorithms with a single network for a single optimizer
         else:
-            assert isinstance(
-                optimizer_cls,
-                type,
-            ), "Expected a single optimizer class for a single network."
-            assert isinstance(
-                self.optimizer_kwargs,
-                dict,
-            ), "Expected a single dictionary of optimizer keyword arguments."
-
-            self.optimizer = init_from_single(
+            self.optimizer = _init_single_network_optimizer(
                 first_network,
                 optimizer_cls,
                 self.lr,
@@ -278,12 +272,14 @@ class OptimizerWrapper:
     def _optimizers_by_agent(self) -> dict[str, Optimizer]:
         """The per-agent optimizer mapping of a multi-agent wrapper.
 
-        Narrowing ``self.optimizer`` in place keeps an ``Optimizer & dict``
-        intersection alive, so the mapping type is pinned here once.
+        Excluding the single-``Optimizer`` case narrows to the mapping without
+        leaving an ``Optimizer & dict`` intersection behind.
         """
         optimizer = self.optimizer
-        assert isinstance(optimizer, dict), "Expected a dictionary of optimizers."
-        return cast("dict[str, Optimizer]", optimizer)
+        assert not isinstance(optimizer, Optimizer), (
+            "Expected a dictionary of optimizers."
+        )
+        return optimizer
 
     def _single_optimizer(self) -> Optimizer:
         """The lone optimizer of a single-agent wrapper."""
@@ -441,20 +437,22 @@ class OptimizerWrapper:
 
     def optimizer_cls_names(self) -> str | dict[str, str]:
         """Return the names of the optimizers."""
+        optimizer_cls = self.optimizer_cls
         if isinstance(self.networks[0], ModuleDict):
-            if isinstance(self.optimizer_cls, dict):
-                # Per-agent optimizer classes; isinstance(dict) erases the value
-                # type, so pin it to read each class name.
-                cls_map = cast("dict[str, OptimizerFactory]", self.optimizer_cls)
-                return {agent_id: cls.__name__ for agent_id, cls in cls_map.items()}
+            # A per-agent mapping is not itself callable, so it fails the
+            # NamedCallable check; a shared class passes it.
+            if not isinstance(optimizer_cls, NamedCallable):
+                return {
+                    agent_id: cls.__name__ for agent_id, cls in optimizer_cls.items()
+                }
             return dict.fromkeys(
                 self._optimizers_by_agent().keys(),
-                self.optimizer_cls.__name__,
+                optimizer_cls.__name__,
             )
-        assert not isinstance(self.optimizer_cls, dict), (
+        assert isinstance(optimizer_cls, NamedCallable), (
             "Expected a single optimizer class for single-agent optimizers."
         )
-        return self.optimizer_cls.__name__
+        return optimizer_cls.__name__
 
     def checkpoint_dict(self, name: str) -> dict[str, Any]:
         """Return a dictionary of the optimizer's state and parameters.
@@ -510,3 +508,110 @@ class OptimizerWrapper:
             f"{extra}\n"
             ")"
         )
+
+
+def _normalize_networks(networks: nn.Module | list[nn.Module]) -> list[nn.Module]:
+    """Normalize a module or list of modules into a list."""
+    if isinstance(networks, nn.Module):
+        return [networks]
+    if isinstance(networks, list):
+        if not all(isinstance(net, nn.Module) for net in networks):
+            msg = "Expected a single / list of torch.nn.Module objects."
+            raise TypeError(msg)
+        return list(networks)
+    msg = "Expected a single / list of torch.nn.Module objects."
+    raise TypeError(msg)
+
+
+def _init_multi_agent_optimizers(
+    networks: ModuleDict[Any],
+    optimizer_cls: OptimizerFactory | dict[str, OptimizerFactory],
+    lr: float,
+    optimizer_kwargs: dict[str, Any],
+) -> dict[str, Optimizer]:
+    """Build one optimizer per agent from a ``ModuleDict`` of networks."""
+    optimizers: dict[str, Optimizer] = {}
+    for agent_id, net in networks.items():
+        if isinstance(optimizer_cls, NamedCallable):
+            single_cls = optimizer_cls
+        else:
+            single_cls = optimizer_cls[agent_id]
+        kwargs = optimizer_kwargs.get(agent_id, {})
+        optimizers[agent_id] = init_from_single(
+            net,
+            single_cls,
+            lr,
+            kwargs,
+        )
+    return optimizers
+
+
+def _init_llm_wrapped_optimizer(
+    network: nn.Module,
+    optimizer_cls: OptimizerFactory | dict[str, OptimizerFactory],
+    lr: float,
+    optimizer_kwargs: dict[str, Any] | list[dict[str, Any]],
+    lr_critic: float | None,
+) -> Optimizer:
+    """Build an LLM param-group optimizer for a single network module."""
+    assert isinstance(
+        optimizer_cls,
+        type,
+    ), "Expected a single optimizer class for LLM param groups."
+    assert isinstance(
+        optimizer_kwargs,
+        dict,
+    ), "Expected a single dictionary of optimizer keyword arguments."
+    return init_llm_optimizer(
+        network,
+        optimizer_cls,
+        lr,
+        optimizer_kwargs,
+        lr_critic,
+    )
+
+
+def _init_multi_network_optimizer(
+    networks: list[nn.Module],
+    network_names: list[str],
+    optimizer_cls: OptimizerFactory | dict[str, OptimizerFactory],
+    lr: float,
+    optimizer_kwargs: dict[str, Any] | list[dict[str, Any]],
+) -> Optimizer:
+    """Build one optimizer over multiple single-agent networks."""
+    assert len(networks) == len(
+        network_names,
+    ), "Number of networks and network attribute names do not match."
+    assert isinstance(
+        optimizer_cls,
+        type,
+    ), "Expected a single optimizer class for multiple networks."
+    return init_from_multiple(
+        networks,
+        optimizer_cls,
+        lr,
+        optimizer_kwargs,
+    )
+
+
+def _init_single_network_optimizer(
+    network: nn.Module,
+    optimizer_cls: OptimizerFactory | dict[str, OptimizerFactory],
+    lr: float,
+    optimizer_kwargs: dict[str, Any] | list[dict[str, Any]],
+) -> Optimizer:
+    """Build one optimizer for a single network module."""
+    assert isinstance(
+        optimizer_cls,
+        type,
+    ), "Expected a single optimizer class for a single network."
+    assert isinstance(
+        optimizer_kwargs,
+        dict,
+    ), "Expected a single dictionary of optimizer keyword arguments."
+    return init_from_single(
+        network,
+        optimizer_cls,
+        lr,
+        optimizer_kwargs,
+    )

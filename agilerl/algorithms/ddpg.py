@@ -7,6 +7,7 @@ import numpy as np
 import torch
 from accelerate import Accelerator
 from gymnasium import spaces
+from tensordict import TensorDict
 from torch import nn, optim
 
 from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
@@ -37,7 +38,7 @@ from agilerl.utils.evolvable_networks import (
 )
 
 
-class DDPG(RLAlgorithm[ReplayBatch]):
+class DDPG(RLAlgorithm[TensorDict]):
     """Deep Deterministic Policy Gradient (DDPG).
 
     Paper: https://arxiv.org/abs/1509.02971
@@ -444,7 +445,7 @@ class DDPG(RLAlgorithm[ReplayBatch]):
 
     def learn(
         self,
-        experiences: ReplayBatch,
+        experiences: TensorDict,
         noise_clip: float = 0.5,
         policy_noise: float = 0.2,
     ) -> tuple[float | None, float]:
@@ -452,7 +453,7 @@ class DDPG(RLAlgorithm[ReplayBatch]):
 
         :param experiences: Batch of observations, actions, rewards, next
             observations and dones sampled from an off-policy replay buffer.
-        :type experiences: ReplayBatch
+        :type experiences: TensorDict
         :param noise_clip: Maximum noise limit to apply to actions, defaults to 0.5
         :type noise_clip: float, optional
         :param policy_noise: Standard deviation of noise applied to policy, defaults to 0.2
@@ -460,12 +461,13 @@ class DDPG(RLAlgorithm[ReplayBatch]):
         :return: Actor loss (None on steps without a policy update) and critic loss
         :rtype: tuple[float | None, float]
         """
-        actions = experiences["action"]
-        rewards = experiences["reward"]
-        dones = experiences["done"]
+        batch: ReplayBatch = ReplayBatch.from_tensordict(experiences)
+        actions = batch.action
+        rewards = batch.reward
+        dones = batch.done
 
-        obs = self.preprocess_observation(experiences["obs"])
-        next_obs = self.preprocess_observation(experiences["next_obs"])
+        obs = self.preprocess_observation(batch.obs)
+        next_obs = self.preprocess_observation(batch.next_obs)
 
         q_value = self.critic(obs, actions)
         with torch.no_grad():

@@ -1,5 +1,5 @@
 import warnings
-from typing import Any, cast
+from typing import Any
 
 import gymnasium as gym
 import numpy as np
@@ -27,7 +27,7 @@ from agilerl.typing import (
 from agilerl.utils.algo_utils import make_safe_deepcopies
 
 
-class DQN(RLAlgorithm[ReplayBatch]):
+class DQN(RLAlgorithm[TensorDict]):
     """Deep Q-Network (DQN).
 
     Paper: https://arxiv.org/abs/1312.5602
@@ -193,19 +193,18 @@ class DQN(RLAlgorithm[ReplayBatch]):
                 stacklevel=2,
             )
             # torch.compile/CudaGraphModule shadow the bound methods with
-            # signature-preserving wrappers; typed as Any since instance
-            # attributes cannot redeclare method types.
-            self.update = cast("Any", torch.compile(self.update, mode=None))
-            self._get_action = cast(
-                "Any",
-                torch.compile(
-                    self._get_action,
-                    mode=None,
-                    fullgraph=True,
-                ),
+            # signature-preserving wrappers whose types cannot be reconciled with
+            # the original methods; route the dynamic wrappers through Any.
+            compiled_update: Any = torch.compile(self.update, mode=None)
+            compiled_get_action: Any = torch.compile(
+                self._get_action,
+                mode=None,
+                fullgraph=True,
             )
-            self.update = cast("Any", CudaGraphModule(self.update))
-            self._get_action = cast("Any", CudaGraphModule(self._get_action))
+            graphed_update: Any = CudaGraphModule(compiled_update)
+            graphed_get_action: Any = CudaGraphModule(compiled_get_action)
+            self.update = graphed_update
+            self._get_action = graphed_get_action
 
         # Register DQN network groups
         self.register_network_group(
@@ -365,21 +364,22 @@ class DQN(RLAlgorithm[ReplayBatch]):
         self.optimizer.step()
         return loss.detach()
 
-    def learn(self, experiences: ReplayBatch) -> float:
+    def learn(self, experiences: TensorDict) -> float:
         """Update agent network parameters to learn from experiences.
 
         :param experiences: Batch of observations, actions, rewards, next
             observations and dones sampled from an off-policy replay buffer.
-        :type experiences: ReplayBatch
+        :type experiences: TensorDict
         :return: Loss value from the learning step
         :rtype: float
         """
-        actions = experiences["action"]
-        rewards = experiences["reward"]
-        dones = experiences["done"]
+        batch: ReplayBatch = ReplayBatch.from_tensordict(experiences)
+        actions = batch.action
+        rewards = batch.reward
+        dones = batch.done
 
-        obs = self.preprocess_observation(experiences["obs"])
-        next_obs = self.preprocess_observation(experiences["next_obs"])
+        obs = self.preprocess_observation(batch.obs)
+        next_obs = self.preprocess_observation(batch.next_obs)
 
         # NOTE: with cudagraphs enabled, self.update is swapped for a
         # signature-preserving CudaGraphModule wrapper in __init__.

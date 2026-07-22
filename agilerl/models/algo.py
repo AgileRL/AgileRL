@@ -4,7 +4,7 @@ import logging
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -13,6 +13,7 @@ from agilerl import HAS_LLM_DEPENDENCIES, AgentType
 if TYPE_CHECKING:
     import torch
     from accelerate import Accelerator
+    from gymnasium import spaces
     from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
     from agilerl.algorithms.core import (
@@ -31,7 +32,6 @@ if TYPE_CHECKING:
         PzEnvSpec,
     )
     from agilerl.models.training import TrainingSpec
-    from agilerl.typing import SupportedActionSpace, SupportedObservationSpace
 
     if HAS_LLM_DEPENDENCIES:
         from peft import LoraConfig
@@ -379,8 +379,8 @@ class RLAlgorithmSpec(AlgorithmSpec):
 
     def build_algorithm(
         self,
-        observation_space: SupportedObservationSpace | None = None,
-        action_space: SupportedActionSpace | None = None,
+        observation_space: spaces.Space | None = None,
+        action_space: spaces.Space | None = None,
         index: int | None = None,
         resume_from_checkpoint: str | None = None,
         device: str | torch.device = "cpu",
@@ -411,7 +411,10 @@ class RLAlgorithmSpec(AlgorithmSpec):
             )
             raise ValueError(msg)
         # The naming convention pairs each spec family with its algorithm base.
-        algo_cls = cast("type[RLAlgorithm]", self.algo_class())
+        from agilerl.algorithms.core import RLAlgorithm
+
+        algo_cls = self.algo_class()
+        assert issubclass(algo_cls, RLAlgorithm)
         algo = algo_cls(
             observation_space=observation_space,
             action_space=action_space,
@@ -442,8 +445,8 @@ class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
 
     def build_algorithm(
         self,
-        observation_spaces: dict[str, SupportedObservationSpace] | None = None,
-        action_spaces: dict[str, SupportedActionSpace] | None = None,
+        observation_spaces: dict[str, spaces.Space] | None = None,
+        action_spaces: dict[str, spaces.Space] | None = None,
         index: int | None = None,
         resume_from_checkpoint: str | None = None,
         device: str | torch.device = "cpu",
@@ -474,7 +477,10 @@ class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
             )
             raise ValueError(msg)
         # The naming convention pairs each spec family with its algorithm base.
-        algo_cls = cast("type[MultiAgentRLAlgorithm]", self.algo_class())
+        from agilerl.algorithms.core import MultiAgentRLAlgorithm
+
+        algo_cls = self.algo_class()
+        assert issubclass(algo_cls, MultiAgentRLAlgorithm)
         algo = algo_cls(
             observation_spaces=observation_spaces,
             action_spaces=action_spaces,
@@ -605,7 +611,10 @@ class LLMAlgorithmSpec(AlgorithmSpec):
             kwargs["model_config"] = model_config
 
         # The naming convention pairs each spec family with its algorithm base.
-        algo_cls = cast("type[LLMAlgorithm]", self.algo_class())
+        from agilerl.algorithms.core import LLMAlgorithm
+
+        algo_cls = self.algo_class()
+        assert issubclass(algo_cls, LLMAlgorithm)
         algo = algo_cls(
             model_name=self.pretrained_model_name_or_path,
             pad_token_id=tokenizer.eos_token_id,

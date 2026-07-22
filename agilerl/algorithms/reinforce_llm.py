@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import warnings
 from contextlib import nullcontext
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import torch
@@ -31,7 +31,7 @@ from agilerl.protocols import (
     PeftModelProtocol,
     PreTrainedModelProtocol,
 )
-from agilerl.typing import LLMObsType, LLMRolloutExperiences, ReasoningPrompts
+from agilerl.typing import LLMObsType, LLMRolloutExperiences
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
     VLLMConfig,
@@ -436,7 +436,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                 ) = self._generate_with_vllm_colocate(
                     # ReasoningPrompts is a TypedDict, i.e. a plain dict at
                     # runtime; the base helper takes untyped prompt dicts.
-                    cast("list[dict[str, Any]]", prompt_batch),
+                    prompt_batch,
                     1,
                     temperature=self.temperature
                     if training
@@ -563,17 +563,14 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                         batch_reference_log_probs,
                         batch_advantages,
                         batch_turn_ids,
-                    ) = cast(
-                        "tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]",
-                        get_experiences_samples(
-                            minibatch_idxs,
-                            completion_ids,
-                            action_masks,
-                            old_log_probs,
-                            reference_log_probs,
-                            advantages,
-                            turn_ids,
-                        ),
+                    ) = get_experiences_samples(
+                        minibatch_idxs,
+                        completion_ids,
+                        action_masks,
+                        old_log_probs,
+                        reference_log_probs,
+                        advantages,
+                        turn_ids,
                     )
 
                     batch_mask_bool = batch_action_mask.bool()
@@ -750,18 +747,20 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                     obs, _info = env.reset()
                     # REINFORCE requires a token-observation multi-turn env,
                     # whose observations are ReasoningPrompts-shaped dicts.
-                    prompt_dict = cast("ReasoningPrompts", obs)
+                    prompt_dict = obs
                     terminated, truncated = False, False
                     while not terminated and not truncated:
+                        # ty cannot match the env's dict against the TypedDict.
+                        prompt: Any = prompt_dict
                         completion_ids = self.get_action(
-                            [prompt_dict],
+                            [prompt],
                             training=False,
                         ).completion_ids
                         full = completion_ids[0]
                         obs, reward, terminated, truncated, _info = env.step(
                             full,
                         )
-                        prompt_dict = cast("ReasoningPrompts", obs)
+                        prompt_dict = obs
                         all_rewards.append(
                             torch.tensor(
                                 [float(reward)],

@@ -1,6 +1,6 @@
 import warnings
 from collections import OrderedDict
-from typing import Any, TypeVar, cast
+from typing import Any, TypeVar
 
 import numpy as np
 import torch
@@ -110,11 +110,15 @@ class MakeEvolvable(EvolvableModule):
     mlp_activation: str
     mlp_output_activation: str | None
     arch: str
-    in_channels: int
-    channel_size: list[int]
-    kernel_size: list[tuple[int, ...]]
-    stride_size: list[tuple[int, ...]]
-    padding: list[tuple[int, ...]]
+    # CNN hyperparameters: ``None`` for MLP-only networks, otherwise filled in by
+    # ``detect_architecture``. Typed ``Any`` because they are read and mutated in
+    # place across every CNN mutation method (see the placeholder init in __init__);
+    # ``... | None`` would require narrowing at each of those sites.
+    in_channels: Any
+    channel_size: Any
+    kernel_size: Any
+    stride_size: Any
+    padding: Any
     cnn_output_size: torch.Size
     feature_net: nn.Module
     value_net: nn.Module | None
@@ -208,7 +212,7 @@ class MakeEvolvable(EvolvableModule):
             self.kernel_size,
             self.stride_size,
             self.padding,
-        ) = cast("Any", (None, None, None, None, None))
+        ) = (None, None, None, None, None)
 
         # If first instance, network used to instantiate, upon cloning, init_dict used instead
         if not kwargs:

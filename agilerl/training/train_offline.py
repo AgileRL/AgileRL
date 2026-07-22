@@ -1,7 +1,7 @@
 import logging
 import warnings
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any
 
 import gymnasium as gym
 from accelerate import Accelerator
@@ -21,9 +21,6 @@ from agilerl.utils.utils import (
     save_population_checkpoint,
     tournament_selection_and_mutation,
 )
-
-if TYPE_CHECKING:
-    from agilerl.typing import ReplayBatch
 
 InitDictType = dict[str, Any] | None
 PopulationType = list[CQN]
@@ -264,7 +261,7 @@ def train_offline(
             # asserts the concrete replay-batch layout `CQN.learn` consumes.
             for _idx_step in range(evo_steps):
                 experiences = sampler.sample(agent.batch_size)
-                agent.learn(cast("ReplayBatch", experiences))
+                agent.learn(experiences)
 
             agent.finalize_training_step(evo_steps)
             pbar.update(evo_steps // population.size)

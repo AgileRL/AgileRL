@@ -4,7 +4,7 @@ import warnings
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import gymnasium as gym
 import numpy as np
@@ -92,13 +92,16 @@ def _lora_config_from_init_hp(INIT_HP: dict[str, Any]) -> "LoraConfig | None":
 
     if isinstance(modules, str):
         modules = [modules]
+    bias = str(INIT_HP.get("LORA_BIAS", "none"))
+    assert bias in ("none", "all", "lora_only"), (
+        f"LORA_BIAS must be one of 'none', 'all', 'lora_only'; got {bias!r}."
+    )
     return LoraConfig(
         r=int(INIT_HP.get("LORA_R", 16)),
         lora_alpha=int(INIT_HP.get("LORA_ALPHA", 64)),
         target_modules=list(modules),
         lora_dropout=float(INIT_HP.get("LORA_DROPOUT", 0.0)),
-        # peft validates the bias literal at construction time.
-        bias=cast("Any", str(INIT_HP.get("LORA_BIAS", "none"))),
+        bias=bias,
         task_type=str(INIT_HP.get("LORA_TASK_TYPE", "CAUSAL_LM")),
     )
 
@@ -1250,10 +1253,15 @@ def tournament_selection_and_mutation(
         if accelerator is not None:
             accelerator.wait_for_everyone()
             # This branch only runs for LLM populations.
-            consolidate_mutations(cast("list[LLMAlgorithm]", population))
+            consolidate_mutations(
+                [agent for agent in population if isinstance(agent, LLMAlgorithm)]
+            )
             accelerator.wait_for_everyone()
         if save_elite:
-            save_llm_checkpoint(cast("LLMAlgorithm", elite), elite_path)
+            assert isinstance(elite, LLMAlgorithm), (
+                "LLM checkpoints require an LLMAlgorithm elite."
+            )
+            save_llm_checkpoint(elite, elite_path)
         return population
 
     elite = None
@@ -1626,7 +1634,7 @@ def consolidate_mutations(population: list[LLMAlgorithm]) -> None:
                 agent.optimizer
                 if not isinstance(agent.optimizer.optimizer, DummyOptimizer)
                 # DeepSpeed engines expose the wrapped optimizer on the actor.
-                else cast("Any", agent.actor).optimizer
+                else agent.actor.optimizer
             )
             lr = (
                 (agent.lr, agent.lr_critic)

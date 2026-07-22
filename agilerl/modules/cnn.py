@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -88,16 +88,18 @@ class MutableKernelSizes:
 
     # Mutable views over ``sizes`` (same list object, so callers mutate in
     # place). ``list`` erases its element type through ``isinstance``, so the
-    # homogeneity invariant tracked by ``tuple_sizes`` is expressed with a cast.
+    # homogeneity invariant tracked by ``tuple_sizes`` is restored via ``Any``.
     @property
     def _tuple_sizes(self) -> list[tuple[int, ...]]:
         """View of ``sizes`` under the invariant that all kernel sizes are tuples."""
-        return cast("list[tuple[int, ...]]", self.sizes)
+        sizes: Any = self.sizes
+        return sizes
 
     @property
     def _int_sizes(self) -> list[int]:
         """View of ``sizes`` under the invariant that all kernel sizes are integers."""
-        return cast("list[int]", self.sizes)
+        sizes: Any = self.sizes
+        return sizes
 
     @property
     def int_sizes(self) -> list[int]:

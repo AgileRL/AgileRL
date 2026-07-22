@@ -7,8 +7,7 @@ the dtype of hidden states and ``nn.Linear`` weights.
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
@@ -187,12 +186,9 @@ class AutoModelForCausalLMWithValueHead(nn.Module):
 
     def generate(self, *args: Any, **kwargs: Any) -> torch.Tensor | GenerateOutput:
         # ``generate`` is provided by GenerationMixin but resolves through
-        # ``nn.Module.__getattr__`` (typed ``Tensor | Module``), so cast the
-        # attribute back to its callable signature before invoking it.
-        generate_fn = cast(
-            "Callable[..., torch.Tensor | GenerateOutput]",
-            self.pretrained_model.generate,
-        )
+        # ``nn.Module.__getattr__`` (typed ``Tensor | Module``), so recover its
+        # callable signature through ``Any`` before invoking it.
+        generate_fn: Any = self.pretrained_model.generate
         return generate_fn(*args, **kwargs)
 
     def state_dict(self, *args: Any, **kwargs: Any) -> dict[str, torch.Tensor]:

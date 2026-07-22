@@ -1,7 +1,7 @@
 import logging
 import warnings
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from accelerate import Accelerator
@@ -15,19 +15,20 @@ from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
+from agilerl.utils.algo_utils import get_num_envs
 from agilerl.utils.utils import (
     default_progress_bar,
     init_loggers,
     save_population_checkpoint,
     tournament_selection_and_mutation,
 )
-from agilerl.vector import PettingZooVecEnv, PzDummyVecEnv
+from agilerl.vector import PzDummyVecEnv
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
+from agilerl.vector.pz_vec_env import PettingZooVecEnv
 
 if TYPE_CHECKING:
     from tensordict import TensorDictBase
 
-    from agilerl.typing import MultiAgentReplayBatch
 
 InitDictType = dict[str, Any] | None
 PopulationType = list[MADDPG | MATD3]
@@ -164,15 +165,14 @@ def train_multi_agent_off_policy(
             stacklevel=2,
         )
 
-    # Ensure environment has vectorized interface. `PzDummyVecEnv` duck-types the
-    # `PettingZooVecEnv` API rather than subclassing it, and `hasattr` does not
-    # narrow, so the cast matches the annotations of the helpers it is handed to.
-    vec_env = cast(
-        "PettingZooVecEnv",
-        env if hasattr(env, "num_envs") else PzDummyVecEnv(env),
+    # Ensure environment has vectorized interface. `PzDummyVecEnv` subclasses
+    # `PettingZooVecEnv`; a raw `ParallelEnv` is wrapped so the loop always drives
+    # the vectorized API.
+    vec_env: PettingZooVecEnv = (
+        env if isinstance(env, PettingZooVecEnv) else PzDummyVecEnv(env)
     )
 
-    num_envs = vec_env.num_envs
+    num_envs = get_num_envs(vec_env)
 
     save_path = (
         checkpoint_path.split(".pt")[0]
@@ -289,14 +289,14 @@ def train_multi_agent_off_policy(
                         and memory.counter > learning_delay
                     ):
                         experiences = sample(agent.batch_size)
-                        agent.learn(cast("MultiAgentReplayBatch", experiences))
+                        agent.learn(experiences)
 
                 elif (
                     len(memory) >= agent.batch_size and memory.counter > learning_delay
                 ):
                     for _ in range(num_envs // agent.learn_step):
                         experiences = sample(agent.batch_size)
-                        agent.learn(cast("MultiAgentReplayBatch", experiences))
+                        agent.learn(experiences)
 
                 obs = next_obs
 

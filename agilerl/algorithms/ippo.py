@@ -2,7 +2,7 @@ import copy
 import warnings
 from collections import defaultdict
 from collections.abc import Mapping
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import torch
@@ -26,7 +26,6 @@ from agilerl.networks.value_networks import ValueNetwork
 from agilerl.typing import (
     ArrayDict,
     InfosDict,
-    NumpyObsType,
     ObservationType,
     SupportedObservationSpace,
     TorchObsType,
@@ -36,6 +35,7 @@ from agilerl.utils.algo_utils import (
     concatenate_experiences_into_batches,
     configure_tf32_precision,
     get_experiences_samples,
+    get_num_envs,
     get_vect_dim,
     key_in_nested_dict,
     make_safe_deepcopies,
@@ -257,7 +257,7 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
                     "actor_networks must be a list of the same length as the number of homogeneous agents"
                 )
                 # isinstance(list) leaves a list & ModuleDict intersection; pin it.
-                actor_list = cast("list[EvolvableModule]", actor_networks)
+                actor_list = actor_networks
                 actor_networks = ModuleDict(
                     {
                         agent_id: actor_list[idx]
@@ -272,7 +272,7 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
                 )
 
                 # isinstance(list) leaves a list & ModuleDict intersection; pin it.
-                critic_list = cast("list[EvolvableModule]", critic_networks)
+                critic_list = critic_networks
                 critic_networks = ModuleDict(
                     {
                         agent_id: critic_list[idx]
@@ -561,7 +561,7 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
         action_masks, env_defined_actions, agent_masks = self.process_infos(infos)
         # Environment observations are numpy containers at this boundary.
         vect_dim = get_vect_dim(
-            cast("NumpyObsType", obs),
+            obs,
             self.possible_observation_spaces,
         )
 
@@ -733,19 +733,23 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
         # Scalar per-agent fields vectorise to flat tensors; the dict/tuple
         # arms of vectorize_experiences_by_agent only arise for structured
         # observations.
-        log_probs = cast("torch.Tensor", vectorize_experiences_by_agent(log_probs))
-        rewards = cast("torch.Tensor", vectorize_experiences_by_agent(rewards))
-        dones = cast("torch.Tensor", vectorize_experiences_by_agent(dones))
-        values = cast("torch.Tensor", vectorize_experiences_by_agent(values))
+        # These experiences are per-agent scalars, so vectorizing always yields a
+        # flat tensor (``vectorize_experiences_by_agent`` widens to obs containers).
+        log_probs = vectorize_experiences_by_agent(log_probs)
+        rewards = vectorize_experiences_by_agent(rewards)
+        dones = vectorize_experiences_by_agent(dones)
+        values = vectorize_experiences_by_agent(values)
+        assert isinstance(log_probs, torch.Tensor)
+        assert isinstance(rewards, torch.Tensor)
+        assert isinstance(dones, torch.Tensor)
+        assert isinstance(values, torch.Tensor)
         log_probs = log_probs.squeeze()
         rewards = rewards.squeeze()
         dones = dones.squeeze()
         values = values.squeeze()
         vect_next_obs = vectorize_experiences_by_agent(next_obs, dim=0)
-        next_done = cast(
-            "torch.Tensor",
-            vectorize_experiences_by_agent(next_done, dim=0),
-        )
+        next_done = vectorize_experiences_by_agent(next_done, dim=0)
+        assert isinstance(next_done, torch.Tensor)
 
         with torch.no_grad():
             num_steps = rewards.size(0)
@@ -806,7 +810,9 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
         )
 
         # The returns entry is a flat tensor in this layout.
-        num_samples = cast("torch.Tensor", flat_experiences[4]).size(0)
+        returns_flat = flat_experiences[4]
+        assert isinstance(returns_flat, torch.Tensor)
+        num_samples = returns_flat.size(0)
         batch_idxs = np.arange(num_samples)
         learn_metrics = {
             "loss": 0.0,
@@ -829,20 +835,17 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
                 ) = get_experiences_samples(minibatch_idxs, *flat_experiences)
 
                 # Non-observation fields are flat tensors in this layout.
-                batch_actions = cast("torch.Tensor", batch_actions_raw).squeeze()
-                batch_returns = cast("torch.Tensor", batch_returns_raw).squeeze()
-                batch_log_probs = cast("torch.Tensor", batch_log_probs_raw).squeeze()
-                batch_advantages = cast(
-                    "torch.Tensor",
-                    batch_advantages_raw,
-                ).squeeze()
-                batch_values = cast("torch.Tensor", batch_values_raw).squeeze()
+                batch_actions = batch_actions_raw.squeeze()
+                batch_returns = batch_returns_raw.squeeze()
+                batch_log_probs = batch_log_probs_raw.squeeze()
+                batch_advantages = batch_advantages_raw.squeeze()
+                batch_values = batch_values_raw.squeeze()
 
                 if len(minibatch_idxs) > 1:
                     batch_obs = preprocess_observation_fn(
                         obs_space,
                         # Sampled from the non-None observation batch above.
-                        cast("TorchObsType", batch_obs_raw),
+                        batch_obs_raw,
                         self.device,
                         self.normalize_images,
                         swap_channels=self.swap_channels,
@@ -949,13 +952,8 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
         self.set_training_mode(False)
         with torch.no_grad():
             rewards = []
-            if hasattr(env, "num_envs"):
-                # Vectorised envs expose an integer environment count.
-                num_envs = cast("int", env.num_envs)
-                is_vectorised = True
-            else:
-                num_envs = 1
-                is_vectorised = False
+            num_envs = get_num_envs(env)
+            is_vectorised = hasattr(env, "num_envs")
 
             for _ in range(loop):
                 obs, info = env.reset()

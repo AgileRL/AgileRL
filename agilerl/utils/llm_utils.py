@@ -11,7 +11,7 @@ import warnings
 from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypedDict, cast
+from typing import TYPE_CHECKING, Any, TypedDict
 
 import numpy as np
 import torch
@@ -177,7 +177,10 @@ def normalize_reasoning_prompt_batch(
         else:
             for sample in result:
                 sample[key] = value
-    return cast("list[ReasoningPrompts]", result)
+    # Each dict carries exactly the keys of the input ReasoningPrompts; ty cannot
+    # match the dynamically-built dicts to the TypedDict, so bridge through Any.
+    prompts: Any = result
+    return prompts
 
 
 def gather_tensor(
@@ -1768,8 +1771,9 @@ def get_model_name_or_path(model: PreTrainedModel) -> str:
     :rtype: str
     """
     if hasattr(model, "name_or_path"):
-        # transformers models expose ``name_or_path`` as a string.
-        return cast("str", model.name_or_path)
+        # transformers types ``name_or_path`` as ``str | None``; it is always set
+        # on a loaded model, but coerce to keep the return a plain ``str``.
+        return str(model.name_or_path)
 
     if hasattr(model, "pretrained_model") and hasattr(
         model.pretrained_model, "name_or_path"

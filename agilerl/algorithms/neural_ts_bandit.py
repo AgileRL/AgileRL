@@ -1,9 +1,10 @@
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import torch
 from accelerate import Accelerator
 from gymnasium import spaces
+from tensordict import TensorDict
 from torch import nn, optim
 
 from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
@@ -24,7 +25,7 @@ from agilerl.utils.algo_utils import make_safe_deepcopies
 from agilerl.utils.evolvable_networks import get_default_encoder_config
 
 
-class NeuralTS(RLAlgorithm[BanditBatch]):
+class NeuralTS(RLAlgorithm[TensorDict]):
     """Neural Thompson Sampling (NeuralTS).
 
     Paper: https://arxiv.org/abs/2010.00827
@@ -195,11 +196,11 @@ class NeuralTS(RLAlgorithm[BanditBatch]):
     def init_params(self) -> None:
         """Initialize parameters for the agent network."""
         exp_layer = self.actor.get_output_dense()
-        assert exp_layer is not None, (
-            "Bandit actor network must expose an output dense layer."
-        )
         # EvolvableMLP/MakeEvolvable networks build a final nn.Linear output layer
-        self.exp_layer = cast("nn.Linear", exp_layer)
+        assert isinstance(exp_layer, nn.Linear), (
+            "Bandit actor network must expose an nn.Linear output dense layer."
+        )
+        self.exp_layer: nn.Linear = exp_layer
 
         self.numel = sum(
             w.numel() for w in self.exp_layer.parameters() if w.requires_grad
@@ -292,15 +293,16 @@ class NeuralTS(RLAlgorithm[BanditBatch]):
                 mu_raw = mu_raw.repeat(self.action_dim)
             return int(np.argmax(mu_raw.cpu().numpy()))
 
-    def learn(self, experiences: BanditBatch) -> float:
+    def learn(self, experiences: TensorDict) -> float:
         """Update agent network parameters to learn from experiences.
 
         :param experiences: Batch of contexts (``obs``) and rewards sampled from
             the bandit replay buffer.
-        :type experiences: BanditBatch
+        :type experiences: TensorDict
         """
-        states = experiences["obs"]
-        rewards = experiences["reward"]
+        batch: BanditBatch = BanditBatch.from_tensordict(experiences)
+        states = batch.obs
+        rewards = batch.reward
 
         pred_rewards = self.actor(states)
 

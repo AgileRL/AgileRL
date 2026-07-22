@@ -5,6 +5,7 @@ import numpy as np
 import torch
 from accelerate import Accelerator
 from gymnasium import spaces
+from tensordict import TensorDict
 from torch import optim
 from torch.nn.utils import clip_grad_norm_
 
@@ -20,6 +21,7 @@ from agilerl.networks.q_networks import RainbowQNetwork
 from agilerl.typing import (
     ObservationType,
     PrioritizedReplayBatch,
+    ReplayBatch,
     SupportedObservationSpace,
     TorchObsType,
 )
@@ -27,7 +29,7 @@ from agilerl.utils.algo_utils import make_safe_deepcopies
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
-class RainbowDQN(RLAlgorithm[PrioritizedReplayBatch]):
+class RainbowDQN(RLAlgorithm[TensorDict]):
     """Rainbow Deep Q-Network (DQN).
 
     Paper: https://arxiv.org/abs/1710.02298
@@ -395,8 +397,8 @@ class RainbowDQN(RLAlgorithm[PrioritizedReplayBatch]):
 
     def learn(
         self,
-        experiences: PrioritizedReplayBatch,
-        n_experiences: PrioritizedReplayBatch | None = None,
+        experiences: TensorDict,
+        n_experiences: TensorDict | None = None,
         per: bool = False,
     ) -> tuple[float, torch.Tensor | None, np.ndarray | None]:
         """Update agent network parameters to learn from experiences.
@@ -404,9 +406,9 @@ class RainbowDQN(RLAlgorithm[PrioritizedReplayBatch]):
         :param experiences: Batch of observations, actions, rewards, next
             observations and dones (plus prioritized ``weights``/``idxs``)
             sampled from the replay buffer.
-        :type experiences: PrioritizedReplayBatch
+        :type experiences: TensorDict
         :param n_experiences: Optional n-step batch in the same layout.
-        :type n_experiences: PrioritizedReplayBatch | None, optional
+        :type n_experiences: TensorDict | None, optional
         :param per: Use prioritized experience replay buffer, defaults to True
         :type per: bool, optional
 
@@ -414,24 +416,28 @@ class RainbowDQN(RLAlgorithm[PrioritizedReplayBatch]):
         :rtype: tuple[float, torch.Tensor | None, numpy.ndarray | None]
         """
         n_step = n_experiences is not None
-        obs = experiences["obs"]
-        actions = experiences["action"]
-        rewards = experiences["reward"]
-        next_obs = experiences["next_obs"]
-        dones = experiences["done"]
+        batch: PrioritizedReplayBatch = PrioritizedReplayBatch.from_tensordict(
+            experiences
+        )
+        obs = batch.obs
+        actions = batch.action
+        rewards = batch.reward
+        next_obs = batch.next_obs
+        dones = batch.done
 
         # Initialize n-step variables if n_step is True
-        if n_step:
-            n_obs = n_experiences["obs"]
-            n_actions = n_experiences["action"]
-            n_rewards = n_experiences["reward"]
-            n_next_obs = n_experiences["next_obs"]
-            n_dones = n_experiences["done"]
+        if n_experiences is not None:
+            n_batch: ReplayBatch = ReplayBatch.from_tensordict(n_experiences)
+            n_obs = n_batch.obs
+            n_actions = n_batch.action
+            n_rewards = n_batch.reward
+            n_next_obs = n_batch.next_obs
+            n_dones = n_batch.done
 
         elementwise_loss: torch.Tensor | None = None
         if per:
-            weights = experiences["weights"]
-            idxs = experiences["idxs"]
+            weights = batch.weights
+            idxs = batch.idxs
 
             if self.combined_reward or not n_step:
                 elementwise_loss = self._dqn_loss(
@@ -465,7 +471,7 @@ class RainbowDQN(RLAlgorithm[PrioritizedReplayBatch]):
 
         else:
             if n_step:
-                idxs = experiences["idxs"]
+                idxs = batch.idxs
             else:
                 idxs = None
 

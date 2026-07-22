@@ -7,7 +7,7 @@ from importlib import import_module
 from importlib import util as importlib_util
 from pathlib import Path
 from types import ModuleType
-from typing import Any, TypeVar, cast
+from typing import Any, TypeVar
 
 from gymnasium.vector import AsyncVectorEnv, SyncVectorEnv
 from pettingzoo import ParallelEnv
@@ -214,8 +214,10 @@ def _resolve_wrapper(
     wrapper_kwargs: dict[str, Any]
     if isinstance(wrapper, tuple):
         # ``isinstance(tuple)`` cannot exclude the ``Callable`` arm of
-        # ``WrapperSpec``, so it erases the tuple's element types; restate them.
-        wrapper_spec, wrapper_kwargs = cast("tuple[Any, dict[str, Any]]", wrapper)
+        # ``WrapperSpec``, so it erases the tuple's element types; restate them
+        # through an Any-typed unpack.
+        spec_and_kwargs: Any = wrapper
+        wrapper_spec, wrapper_kwargs = spec_and_kwargs
     else:
         wrapper_spec, wrapper_kwargs = wrapper, {}
 

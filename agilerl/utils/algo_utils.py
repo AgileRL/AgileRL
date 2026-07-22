@@ -7,7 +7,15 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import singledispatch
 from numbers import Number
-from typing import TYPE_CHECKING, Any, NoReturn, TypeVar, cast, overload
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    NoReturn,
+    Protocol,
+    TypeVar,
+    overload,
+    runtime_checkable,
+)
 
 import numpy as np
 import torch
@@ -19,6 +27,7 @@ from torch import nn
 from torch._dynamo import OptimizedModule
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+from typing_extensions import TypeVarTuple, Unpack
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.modules.dummy import DummyEvolvable
@@ -32,7 +41,6 @@ from agilerl.typing import (
     BatchDimension,
     BPTTSequenceType,
     MaybeObsList,
-    MultiAgentModule,
     NetConfigType,
     NumpyObsType,
     ObservationType,
@@ -43,9 +51,10 @@ from agilerl.typing import (
 
 if TYPE_CHECKING:
     from agilerl.algorithms.core.base import EvolvableAlgorithm
+    from agilerl.modules.base import ModuleDict
 
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
-    from peft import PeftModel, get_peft_model
+    from peft import PeftConfig, PeftModel, get_peft_model
     from transformers import PreTrainedModel
 
     from agilerl.utils.llm_utils import gather_if_zero3
@@ -155,23 +164,23 @@ def get_input_size_from_space(observation_space: SpaceLike) -> Any:
             get_input_size_from_space(space) for space in observation_space.spaces
         )
     if isinstance(observation_space, (list, tuple)):
-        # isinstance on a union whose non-final `spaces.Space` arm yields an
-        # ambiguous intersection with element type `object`; assert the element.
-        space_seq = cast("Sequence[spaces.Space]", observation_space)
-        return tuple(get_input_size_from_space(space) for space in space_seq)
+        sizes: list[Any] = []
+        for space in observation_space:
+            assert isinstance(space, spaces.Space)
+            sizes.append(get_input_size_from_space(space))
+        return tuple(sizes)
     if isinstance(observation_space, spaces.Dict):
         return {
             key: get_input_size_from_space(subspace)
             for key, subspace in observation_space.spaces.items()
         }
     if isinstance(observation_space, dict):
-        # isinstance on the non-final `spaces.Space` arm yields an ambiguous
-        # intersection with value type `object`; assert the concrete mapping.
-        space_map = cast("dict[str, spaces.Space]", observation_space)
-        return {
-            key: get_input_size_from_space(subspace)
-            for key, subspace in space_map.items()
-        }
+        sizes_by_key: dict[str, Any] = {}
+        for key, subspace in observation_space.items():
+            assert isinstance(key, str)
+            assert isinstance(subspace, spaces.Space)
+            sizes_by_key[key] = get_input_size_from_space(subspace)
+        return sizes_by_key
     if isinstance(observation_space, spaces.Discrete):
         return (observation_space.n,)
     if isinstance(observation_space, spaces.MultiDiscrete):
@@ -219,23 +228,23 @@ def get_output_size_from_space(action_space: SpaceLike) -> Any:
     :rtype: int | dict[str, int] | tuple[int | dict[str, int], ...]
     """
     if isinstance(action_space, (list, tuple)):
-        # isinstance on a union whose non-final `spaces.Space` arm yields an
-        # ambiguous intersection with element type `object`; assert the element.
-        space_seq = cast("Sequence[spaces.Space]", action_space)
-        return tuple(get_output_size_from_space(space) for space in space_seq)
+        sizes: list[Any] = []
+        for space in action_space:
+            assert isinstance(space, spaces.Space)
+            sizes.append(get_output_size_from_space(space))
+        return tuple(sizes)
     if isinstance(action_space, spaces.Dict):
         return {
             key: get_output_size_from_space(subspace)
             for key, subspace in action_space.spaces.items()
         }
     if isinstance(action_space, dict):
-        # isinstance on the non-final `spaces.Space` arm yields an ambiguous
-        # intersection with value type `object`; assert the concrete mapping.
-        space_map = cast("dict[str, spaces.Space]", action_space)
-        return {
-            key: get_output_size_from_space(subspace)
-            for key, subspace in space_map.items()
-        }
+        sizes_by_key: dict[str, Any] = {}
+        for key, subspace in action_space.items():
+            assert isinstance(key, str)
+            assert isinstance(subspace, spaces.Space)
+            sizes_by_key[key] = get_output_size_from_space(subspace)
+        return sizes_by_key
     if isinstance(action_space, spaces.Discrete):
         return int(action_space.n)
     if isinstance(action_space, spaces.MultiBinary):
@@ -543,13 +552,12 @@ def transpose_image_observation(
         assert isinstance(observation, dict), (
             f"Expected dict observation for Dict space, got {type(observation)}"
         )
-        # isinstance narrowing intersects the non-final `torch.Tensor` arm into an
-        # ambiguous dict type; assert the concrete mapping shape.
-        obs_dict = cast("dict[str, Any]", observation)
-        return {
-            key: transpose_image_observation(obs_dict[key], original_space[key])
-            for key in obs_dict
-        }
+        transposed: dict[str, Any] = {}
+        for key, value in observation.items():
+            assert isinstance(key, str)
+            assert isinstance(value, (np.ndarray, torch.Tensor))
+            transposed[key] = transpose_image_observation(value, original_space[key])
+        return transposed
 
     if isinstance(original_space, spaces.Tuple):
         assert isinstance(observation, tuple), (
@@ -647,8 +655,23 @@ def get_action_mask_size(space: spaces.Space) -> int:
     return 0
 
 
-# Copies preserve the caller's concrete module type.
+@runtime_checkable
+class _SupportsNumEnvs(Protocol):
+    num_envs: int
+
+
+def get_num_envs(env: object) -> int:
+    """Return a vectorized env's sub-environment count, or 1 if it exposes none."""
+    return env.num_envs if isinstance(env, _SupportsNumEnvs) else 1
+
+
+# Copies preserve the caller's concrete module type. Each positional argument
+# keeps its own type through an independent TypeVar, so a heterogeneous call
+# (actor, critic, ...) returns a precise tuple rather than a widened list.
 ModuleT = TypeVar("ModuleT", bound=EvolvableModuleProtocol)
+CopyT1 = TypeVar("CopyT1")
+CopyT2 = TypeVar("CopyT2")
+CopyT3 = TypeVar("CopyT3")
 
 
 @overload
@@ -660,7 +683,13 @@ def make_safe_deepcopies(args: ModuleT, /) -> ModuleT: ...
 
 
 @overload
-def make_safe_deepcopies(*args: ModuleT) -> list[ModuleT]: ...
+def make_safe_deepcopies(a: CopyT1, b: CopyT2, /) -> tuple[CopyT1, CopyT2]: ...
+
+
+@overload
+def make_safe_deepcopies(
+    a: CopyT1, b: CopyT2, c: CopyT3, /
+) -> tuple[CopyT1, CopyT2, CopyT3]: ...
 
 
 def make_safe_deepcopies(
@@ -669,7 +698,7 @@ def make_safe_deepcopies(
     """Make deep copies of EvolvableModule objects and their attributes.
 
     With a single argument the copy is returned directly; with multiple
-    arguments a list of copies (one per argument) is returned.
+    arguments a tuple of copies (one per argument) is returned.
 
     :param args: EvolvableModuleProtocol or lists of EvolvableModuleProtocol objects to copy.
     :type args: EvolvableModuleProtocol | list[EvolvableModuleProtocol].
@@ -680,14 +709,15 @@ def make_safe_deepcopies(
     copies: list[EvolvableModuleProtocol | list[EvolvableModuleProtocol]] = []
     for arg in args:
         if isinstance(arg, list):
-            # `EvolvableModuleProtocol` is a Protocol, so isinstance-narrowing the
-            # union arm against `list` erases the element type; assert it back.
-            modules = cast("list[EvolvableModuleProtocol]", arg)
-            copies.append([inner_arg.clone() for inner_arg in modules])
+            inner_copies: list[EvolvableModuleProtocol] = []
+            for inner_arg in arg:
+                assert isinstance(inner_arg, EvolvableModuleProtocol)
+                inner_copies.append(inner_arg.clone())
+            copies.append(inner_copies)
         else:
             copies.append(arg.clone())
 
-    return copies[0] if len(copies) == 1 else copies
+    return copies[0] if len(copies) == 1 else tuple(copies)
 
 
 def isroutine(obj: object) -> bool:
@@ -847,14 +877,15 @@ def module_checkpoint_dict(module: EvolvableAttributeType, name: str) -> dict[st
     :return: A dictionary containing the module's class, init dict, and state dict.
     :rtype: dict[str, Any]
     """
-    from agilerl.modules.base import ModuleDict
+    from agilerl.modules.base import EvolvableModule, ModuleDict
 
     # Checkpointing is only invoked on network attributes; the wider
     # EvolvableAttributeType arms (optimizers) are handled by OptimizerWrapper.
     if isinstance(module, ModuleDict):
-        return module_checkpoint_multiagent(cast("MultiAgentModule", module), name)
+        return module_checkpoint_multiagent(module, name)
 
-    return module_checkpoint_single(cast("EvolvableModuleProtocol", module), name)
+    assert isinstance(module, EvolvableModule)
+    return module_checkpoint_single(module, name)
 
 
 def module_checkpoint_single(
@@ -885,7 +916,9 @@ def module_checkpoint_single(
     }
 
 
-def module_checkpoint_multiagent(module: MultiAgentModule, name: str) -> dict[str, Any]:
+def module_checkpoint_multiagent(
+    module: "ModuleDict[Any]", name: str
+) -> dict[str, Any]:
     """Return a dictionary containing the module's class, init dict, and state dict.
 
     :param module: The module to checkpoint.
@@ -1066,6 +1099,12 @@ def obs_to_tensor(
 def obs_to_tensor(obs: ObservationType, device: str | torch.device) -> TorchObsType: ...
 
 
+@overload
+def obs_to_tensor(
+    obs: dict[str, ObservationType], device: str | torch.device
+) -> dict[str, TorchObsType]: ...
+
+
 def obs_to_tensor(obs: Any, device: str | torch.device) -> Any:
     """Move the observation to the given device as a PyTorch tensor.
 
@@ -1096,12 +1135,18 @@ def obs_to_tensor(obs: Any, device: str | torch.device) -> Any:
     raise TypeError(msg)
 
 
-def get_vect_dim(observation: NumpyObsType, observation_space: spaces.Space) -> int:
+def get_vect_dim(
+    observation: ObservationType | Mapping[str, ObservationType],
+    observation_space: spaces.Space,
+) -> int:
     """Return the number of vectorized environments given an observation and
     its corresponding space.
 
+    ``observation`` may be a single observation or a per-agent mapping (with a
+    matching ``spaces.Dict``), which is treated as a composite Dict observation.
+
     :param observation: Observation
-    :type observation: NumpyObsType
+    :type observation: ObservationType
     :param observation_space: Observation space
     :type observation_space: spaces.Space
     :return: Number of vectorized environments
@@ -1110,16 +1155,19 @@ def get_vect_dim(observation: NumpyObsType, observation_space: spaces.Space) -> 
         assert isinstance(observation, dict), (
             f"Expected dict observation for Dict space, got {type(observation)}"
         )
-        # isinstance narrowing intersects the non-final `np.ndarray` arm into an
-        # ambiguous dict type; assert the concrete mapping shape.
-        obs_dict = cast("dict[str, Any]", observation)
-        first_key, first_obs = next(iter(obs_dict.items()))
+        first_key, first_obs = next(iter(observation.items()))
+        assert isinstance(first_key, str)
+        assert isinstance(first_obs, np.ndarray)
         return get_vect_dim(first_obs, observation_space[first_key])
     if isinstance(observation_space, spaces.Tuple):
         assert isinstance(observation, tuple), (
             f"Expected tuple observation for Tuple space, got {type(observation)}"
         )
-        return get_vect_dim(observation[0], observation_space[0])
+        first_element = observation[0]
+        assert isinstance(first_element, (np.ndarray, torch.Tensor)), (
+            f"Expected an array/tensor tuple element, got {type(first_element)}"
+        )
+        return get_vect_dim(first_element, observation_space[0])
 
     space_shape = observation_space.shape
     assert space_shape is not None, (
@@ -1598,10 +1646,13 @@ def apply_image_normalization(
 
 # TODO: The following functions are currently used in PPO (on-policy) as a means of handling
 # experiences in the absence of a rollout buffer -> This will not be needed in the future.
+_ExperienceTs = TypeVarTuple("_ExperienceTs")
+
+
 def get_experiences_samples(
     minibatch_indices: np.ndarray,
-    *experiences: TorchObsType | None,
-) -> tuple[TorchObsType | None, ...]:
+    *experiences: Unpack[_ExperienceTs],
+) -> tuple[Unpack[_ExperienceTs]]:
     """Sample experiences given minibatch indices.
 
     :param minibatch_indices: Minibatch indices
@@ -1612,15 +1663,20 @@ def get_experiences_samples(
     :return: Sampled experiences
     :rtype: tuple[torch.Tensor[float], ...]
     """
+
+    def _take(value: object) -> torch.Tensor:
+        assert isinstance(value, torch.Tensor)
+        return value[minibatch_indices]
+
     sampled_experiences: list[Any] = []
     for exp in experiences:
         sampled_exp: Any
         if isinstance(exp, torch.Tensor):
             sampled_exp = exp[minibatch_indices]
         elif isinstance(exp, dict):
-            sampled_exp = {key: value[minibatch_indices] for key, value in exp.items()}
+            sampled_exp = {key: _take(value) for key, value in exp.items()}
         elif isinstance(exp, tuple):
-            sampled_exp = tuple(value[minibatch_indices] for value in exp)
+            sampled_exp = tuple(_take(value) for value in exp)
         elif exp is None:
             sampled_exp = None
         else:
@@ -1629,7 +1685,10 @@ def get_experiences_samples(
 
         sampled_experiences.append(sampled_exp)
 
-    return tuple(sampled_experiences)
+    # The loop indexes each element in place, preserving its type, but that is
+    # not statically expressible against the TypeVarTuple return.
+    result: Any = tuple(sampled_experiences)
+    return result
 
 
 def stack_experiences(
@@ -1659,12 +1718,15 @@ def stack_experiences(
             continue
 
         # The list is homogeneous, so `first`'s type applies to every element;
-        # narrowing `first` does not narrow `exp`, hence the per-branch casts.
+        # each branch re-asserts that element type since narrowing `first` does
+        # not narrow `exp`.
         first = exp[0]
         if isinstance(first, dict):
             grouped: defaultdict[str, list[Any]] = defaultdict(list)
-            for it in cast("list[dict[str, Any]]", exp):
+            for it in exp:
+                assert isinstance(it, dict)
                 for key, value in it.items():
+                    assert isinstance(key, str)
                     grouped[key].append(value)
 
             stacked_exp = {key: np.array(value) for key, value in grouped.items()}
@@ -1674,7 +1736,8 @@ def stack_experiences(
                 }
         elif isinstance(first, tuple):
             transposed: list[list[Any]] = [[] for _ in first]
-            for it in cast("list[tuple[Any, ...]]", exp):
+            for it in exp:
+                assert isinstance(it, tuple)
                 for i, value in enumerate(it):
                     transposed[i].append(value)
 
@@ -1685,11 +1748,15 @@ def stack_experiences(
                 stacked_exp = tuple(arrays)
 
         elif isinstance(first, (np.ndarray, Number)):
-            stacked_array = np.stack(cast("list[Any]", exp))
+            stacked_array = np.stack([np.asarray(e) for e in exp])
             stacked_exp = torch.from_numpy(stacked_array) if to_torch else stacked_array
 
         elif isinstance(first, torch.Tensor):
-            stacked_exp = torch.stack(cast("list[torch.Tensor]", exp))
+            tensor_list: list[torch.Tensor] = []
+            for e in exp:
+                assert isinstance(e, torch.Tensor)
+                tensor_list.append(e)
+            stacked_exp = torch.stack(tensor_list)
 
         else:
             msg = f"Unsupported experience type: {type(first)}"
@@ -1725,23 +1792,25 @@ def stack_and_pad_experiences(
     for exp, padding in zip(experiences, padding_values, strict=False):
         stacked_exp: Any
         # Each list is homogeneous, so `exp[0]`'s type applies to every element;
-        # narrowing the element does not narrow `exp`, hence the per-branch casts.
+        # each branch re-asserts that element type since narrowing the first
+        # element does not narrow `exp`.
         if not isinstance(exp, list):
             # Pass-through experiences (e.g. an already-stacked tensor)
-            stacked_exp = cast("torch.Tensor", exp)
+            stacked_exp = exp
         elif isinstance(exp[0], torch.Tensor):
-            stacked_exp = _stack_and_pad_tensor_list(
-                cast("list[torch.Tensor]", exp),
-                padding,
-                padding_side,
-            )
+            tensors: list[torch.Tensor] = []
+            for e in exp:
+                assert isinstance(e, torch.Tensor)
+                tensors.append(e)
+            stacked_exp = _stack_and_pad_tensor_list(tensors, padding, padding_side)
         elif isinstance(exp[0], (list, tuple)):
-            tensors = [torch.tensor(e).unsqueeze(0) for e in cast("list[Any]", exp)]
+            tensors = [torch.tensor(e).unsqueeze(0) for e in exp]
             stacked_exp = _stack_and_pad_tensor_list(tensors, padding, padding_side)
         else:
             msg = f"Unsupported experience type: {type(exp[0])}"
             raise TypeError(msg)
         if device is not None:
+            assert isinstance(stacked_exp, torch.Tensor)
             stacked_exp = stacked_exp.to(device)
         stacked_experiences.append(stacked_exp)
     return tuple(stacked_experiences)
@@ -1799,13 +1868,18 @@ def flatten_experiences(*experiences: ObservationType) -> tuple[ArrayOrTensor, .
         if isinstance(exp, (torch.Tensor, np.ndarray)):
             flattened_exp = flatten(exp)
         elif isinstance(exp, dict):
-            # isinstance narrowing intersects the non-final array/tensor arms into
-            # ambiguous container types; assert the concrete element types.
-            exp_dict = cast("dict[str, ArrayOrTensor]", exp)
-            flattened_exp = {key: flatten(value) for key, value in exp_dict.items()}
+            flattened_dict: dict[str, ArrayOrTensor] = {}
+            for key, value in exp.items():
+                assert isinstance(key, str)
+                assert isinstance(value, (np.ndarray, torch.Tensor))
+                flattened_dict[key] = flatten(value)
+            flattened_exp = flattened_dict
         elif isinstance(exp, tuple):
-            exp_tuple = cast("tuple[ArrayOrTensor, ...]", exp)
-            flattened_exp = tuple(flatten(value) for value in exp_tuple)
+            flattened_list: list[ArrayOrTensor] = []
+            for value in exp:
+                assert isinstance(value, (np.ndarray, torch.Tensor))
+                flattened_list.append(flatten(value))
+            flattened_exp = tuple(flattened_list)
         else:
             msg = f"Unsupported experience type: {type(exp)}"
             raise TypeError(msg)
@@ -2181,19 +2255,38 @@ def concatenate_tensors(tensors: list[TorchObsType]) -> TorchObsType:
     first = tensors[0]
     if isinstance(first, dict):
         # Homogeneous by construction: all entries share the first entry's structure
-        dict_tensors = cast("list[dict[str, Any]]", tensors)
-        concat_dict: dict[str, Any] = {
-            key: concatenate_tensors([t[key] for t in dict_tensors]) for key in first
-        }
+        concat_dict: dict[str, Any] = {}
+        for key in first:
+            column: list[TorchObsType] = []
+            for t in tensors:
+                assert isinstance(t, dict)
+                assert not isinstance(t, torch.Tensor)
+                value = t[key]
+                assert isinstance(value, torch.Tensor)
+                column.append(value)
+            concat_dict[key] = concatenate_tensors(column)
         return concat_dict
     if isinstance(first, tuple):
-        tuple_tensors = cast("list[tuple[Any, ...]]", tensors)
         concat_tuple: tuple[Any, ...] = tuple(
-            concatenate_tensors([t[i] for t in tuple_tensors])
-            for i in range(len(first))
+            _concatenate_tuple_column(tensors, i) for i in range(len(first))
         )
         return concat_tuple
-    return torch.cat(cast("list[torch.Tensor]", tensors), dim=0)
+    tensor_list: list[torch.Tensor] = []
+    for t in tensors:
+        assert isinstance(t, torch.Tensor)
+        tensor_list.append(t)
+    return torch.cat(tensor_list, dim=0)
+
+
+def _concatenate_tuple_column(tensors: list[TorchObsType], i: int) -> TorchObsType:
+    """Concatenate the i-th positional entry across a list of tuple observations."""
+    column: list[TorchObsType] = []
+    for t in tensors:
+        assert isinstance(t, tuple)
+        value = t[i]
+        assert isinstance(value, torch.Tensor)
+        column.append(value)
+    return concatenate_tensors(column)
 
 
 def reshape_from_space(tensor: TorchObsType, space: spaces.Space) -> TorchObsType:
@@ -2319,23 +2412,31 @@ def clone_llm(
         case DummyEvolvable():
             # DummyEvolvable wraps an arbitrary module; the RL-clone path is only
             # reached with a pretrained model inside it.
-            source_model = cast(
-                "PreTrainedModelType",
-                original_model.module,
-            )
+            inner_model = original_model.module
+            assert isinstance(inner_model, (PeftModel, PreTrainedModel))
+            source_model = inner_model
         case _:
             msg = f"Invalid 'original_model' type: {type(original_model)}"
             raise ValueError(msg)
     with gather_if_zero3(zero_stage, list(source_model.parameters())):
         model_config = source_model.config
         base_model = source_model.model
-        model = type(base_model)(model_config)
+        assert isinstance(base_model, nn.Module)
+        model: nn.Module = type(base_model)(model_config)
         adapter_names: list[str] = []
 
         # Any model carrying peft_config has adapters to copy, including
-        # wrappers that are not PeftModel subclasses.
+        # wrappers that are not PeftModel subclasses. The attribute is dynamic,
+        # so pin the adapter-name/config pairs to their concrete peft types.
         if hasattr(source_model, "peft_config"):
-            adapter_names = list(cast("Any", source_model).peft_config.keys())
+            raw_peft_config = source_model.peft_config
+            assert isinstance(raw_peft_config, dict)
+            peft_configs: dict[str, PeftConfig] = {}
+            for adapter_name, config in raw_peft_config.items():
+                assert isinstance(adapter_name, str)
+                assert isinstance(config, PeftConfig)
+                peft_configs[adapter_name] = config
+            adapter_names = list(peft_configs.keys())
 
             if len(adapter_names) > 1:
                 warnings.warn(
@@ -2344,14 +2445,15 @@ def clone_llm(
                 )
             # AgileRL standardizes on adapter name "actor" for the primary adapter.
             first_adapter = adapter_names[0]
-            # peft_config values are LoraConfigs.
-            first_config = cast("Any", source_model).peft_config[first_adapter]
-            model = get_peft_model(model, first_config, adapter_name="actor")
+            model = get_peft_model(
+                model, peft_configs[first_adapter], adapter_name="actor"
+            )
 
             # Add remaining adapters using add_adapter
             for adapter_name in adapter_names[1:]:
-                peft_config = cast("Any", source_model).peft_config[adapter_name]
-                model.add_adapter(peft_config=peft_config, adapter_name=adapter_name)
+                model.add_adapter(
+                    peft_config=peft_configs[adapter_name], adapter_name=adapter_name
+                )
             model.disable_adapter()
 
         if state_dict is not None:

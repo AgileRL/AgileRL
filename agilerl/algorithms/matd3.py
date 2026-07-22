@@ -1,16 +1,17 @@
 import copy
 import warnings
 from collections import OrderedDict, defaultdict
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from contextlib import AbstractContextManager
 from dataclasses import asdict
-from typing import Any, cast
+from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 import torch
 from accelerate import Accelerator
 from gymnasium import spaces
 from pettingzoo import ParallelEnv
+from tensordict import TensorDict
 from torch import nn, optim
 
 from agilerl.algorithms.core import MultiAgentRLAlgorithm, OptimizerWrapper
@@ -28,7 +29,6 @@ from agilerl.typing import (
     InfosDict,
     MultiAgentReplayBatch,
     NetConfigType,
-    NumpyObsType,
     ObservationType,
     StandardTensorDict,
     SupportedObservationSpace,
@@ -40,6 +40,7 @@ from agilerl.utils.algo_utils import (
     configure_tf32_precision,
     format_shared_critic_encoder,
     get_deepest_head_config,
+    get_num_envs,
     get_vect_dim,
     key_in_nested_dict,
     make_safe_deepcopies,
@@ -49,6 +50,11 @@ from agilerl.vector.pz_vec_env import PettingZooVecEnv
 SupportedActionSpace = spaces.Discrete | spaces.Box
 
 
+@runtime_checkable
+class _SupportsNoSync(Protocol):
+    def no_sync(self) -> AbstractContextManager[None]: ...
+
+
 def _ddp_no_sync(module: nn.Module) -> AbstractContextManager[None]:
     """Pause DDP gradient synchronisation on an accelerator-wrapped module.
 
@@ -56,11 +62,11 @@ def _ddp_no_sync(module: nn.Module) -> AbstractContextManager[None]:
     ``DistributedDataParallel``, which is what provides ``no_sync``
     (``nn.Module.__getattr__`` types the dynamic lookup as a parameter/module).
     """
-    no_sync = cast("Callable[[], AbstractContextManager[None]]", module.no_sync)
-    return no_sync()
+    assert isinstance(module, _SupportsNoSync)
+    return module.no_sync()
 
 
-class MATD3(MultiAgentRLAlgorithm[MultiAgentReplayBatch]):
+class MATD3(MultiAgentRLAlgorithm[TensorDict]):
     """Multi-Agent Twin Delayed Deep Deterministic Policy Gradient (MATD3).
 
     Paper: https://arxiv.org/abs/1910.01465
@@ -260,55 +266,33 @@ class MATD3(MultiAgentRLAlgorithm[MultiAgentReplayBatch]):
             )
             network_ids = list(self.observation_space.keys())
 
-            if isinstance(actor_networks, list):
-                assert len(actor_networks) == len(
-                    self.observation_space,
-                ), (
-                    "actor_networks must be a list of the same length as the number of homogeneous agents"
+            def to_module_dict(
+                networks: list[EvolvableModule] | ModuleDict,
+                label: str,
+            ) -> ModuleDict:
+                # Coerce a user-supplied network group (a per-agent list or an
+                # already-built ModuleDict) into a keyed ModuleDict. Typed as a
+                # bare ModuleDict: the concrete element type is the caller's
+                # responsibility (custom networks may be MakeEvolvable wrappers),
+                # which the ModuleDict[DeterministicActor]/[ContinuousQNetwork]
+                # attributes accept.
+                if isinstance(networks, ModuleDict):
+                    return networks
+                assert len(networks) == len(self.observation_space), (
+                    f"{label} must be a list of the same length as the number "
+                    "of homogeneous agents"
                 )
-                # A ModuleDict is never a list; the intersection arm ty keeps
-                # open here is unreachable.
-                actor_list = cast("list[EvolvableModule]", actor_networks)
-                actor_networks = ModuleDict(
+                return ModuleDict(
                     {
-                        network_ids[idx]: actor_list[idx]
-                        for idx in range(len(network_ids))
-                    },
-                )
-            if isinstance(critic_networks[0], list):
-                assert len(critic_networks[0]) == len(
-                    self.observation_space,
-                ), (
-                    "critic_networks at index 0 must be a list of the same length as the number of homogeneous agents"
-                )
-                assert len(critic_networks[1]) == len(
-                    self.observation_space,
-                ), (
-                    "critic_networks at index 1 must be a list of the same length as the number of homogeneous agents"
-                )
-
-                # Both critic sets follow the same list-of-modules layout.
-                critic_list_1 = cast("list[EvolvableModule]", critic_networks[0])
-                critic_list_2 = cast("list[EvolvableModule]", critic_networks[1])
-                critic_networks[0] = ModuleDict(
-                    {
-                        network_ids[idx]: critic_list_1[idx]
-                        for idx in range(len(network_ids))
-                    },
-                )
-                critic_networks[1] = ModuleDict(
-                    {
-                        network_ids[idx]: critic_list_2[idx]
+                        network_ids[idx]: networks[idx]
                         for idx in range(len(network_ids))
                     },
                 )
 
-            # Both critic sets are ModuleDicts from here on (lists were
-            # converted above); ty does not track narrowing through the
-            # subscript, so bind them once.
-            critic_dict_1 = cast("ModuleDict", critic_networks[0])
-            critic_dict_2 = cast("ModuleDict", critic_networks[1])
-            actors_list = list(actor_networks.values())
+            actor_dict = to_module_dict(actor_networks, "actor_networks")
+            critic_dict_1 = to_module_dict(critic_networks[0], "critic_networks[0]")
+            critic_dict_2 = to_module_dict(critic_networks[1], "critic_networks[1]")
+            actors_list = list(actor_dict.values())
             critics_list = list(critic_dict_1.values()) + list(
                 critic_dict_2.values(),
             )
@@ -319,9 +303,7 @@ class MATD3(MultiAgentRLAlgorithm[MultiAgentReplayBatch]):
                 isinstance(net, critics_list[0].__class__) for net in critics_list
             ), "'critic_networks' must all be the same type"
 
-            if not all(
-                isinstance(net, EvolvableModule) for net in actor_networks.values()
-            ):
+            if not all(isinstance(net, EvolvableModule) for net in actor_dict.values()):
                 msg = "All actor networks must be instances of EvolvableModule"
                 raise TypeError(
                     msg,
@@ -332,8 +314,8 @@ class MATD3(MultiAgentRLAlgorithm[MultiAgentReplayBatch]):
                     msg,
                 )
 
-            assert len(actor_networks) == self.n_unique_agents, (
-                f"Length of actor_networks ({len(actor_networks)}) does not match number of unique "
+            assert len(actor_dict) == self.n_unique_agents, (
+                f"Length of actor_networks ({len(actor_dict)}) does not match number of unique "
                 f"agents defined in environment ({self.n_unique_agents}: {list(self.observation_space.keys())})"
             )
             assert len(critic_dict_1) == self.n_unique_agents, (
@@ -344,7 +326,7 @@ class MATD3(MultiAgentRLAlgorithm[MultiAgentReplayBatch]):
                 f"Length of critic_networks at index 1 ({len(critic_dict_2)}) does not match number of unique "
                 f"agents defined in environment ({self.n_unique_agents}: {list(self.observation_space.keys())})"
             )
-            assert set(actor_networks.keys()) == set(network_ids), (
+            assert set(actor_dict.keys()) == set(network_ids), (
                 "actor_networks keys must match grouped agent IDs in observation_space."
             )
             assert set(critic_dict_1.keys()) == set(network_ids), (
@@ -355,32 +337,23 @@ class MATD3(MultiAgentRLAlgorithm[MultiAgentReplayBatch]):
             )
 
             actors_copy, critics_1_copy, critics_2_copy = make_safe_deepcopies(
-                actor_networks,
+                actor_dict,
                 critic_dict_1,
                 critic_dict_2,
             )
             actor_targets_copy, critic_targets_1_copy, critic_targets_2_copy = (
                 make_safe_deepcopies(
-                    actor_networks,
+                    actor_dict,
                     critic_dict_1,
                     critic_dict_2,
                 )
             )
-            self.actors = cast("ModuleDict[DeterministicActor]", actors_copy)
-            self.critics_1 = cast("ModuleDict[ContinuousQNetwork]", critics_1_copy)
-            self.critics_2 = cast("ModuleDict[ContinuousQNetwork]", critics_2_copy)
-            self.actor_targets = cast(
-                "ModuleDict[DeterministicActor]",
-                actor_targets_copy,
-            )
-            self.critic_targets_1 = cast(
-                "ModuleDict[ContinuousQNetwork]",
-                critic_targets_1_copy,
-            )
-            self.critic_targets_2 = cast(
-                "ModuleDict[ContinuousQNetwork]",
-                critic_targets_2_copy,
-            )
+            self.actors = actors_copy
+            self.critics_1 = critics_1_copy
+            self.critics_2 = critics_2_copy
+            self.actor_targets = actor_targets_copy
+            self.critic_targets_1 = critic_targets_1_copy
+            self.critic_targets_2 = critic_targets_2_copy
         else:
             agent_configs, encoder_configs = self.build_net_config(
                 net_config,
@@ -434,12 +407,15 @@ class MATD3(MultiAgentRLAlgorithm[MultiAgentReplayBatch]):
             }
 
             def create_actor(agent_id: str) -> DeterministicActor:
-                # NetworkMeta.__call__ (agilerl/networks/base.py) erases the
-                # constructed subclass to EvolvableNetwork; cast back until
-                # that annotation becomes generic.
+                # DeterministicActor handles both Box and Discrete per-agent
+                # action spaces; narrow the base attribute's generic spaces.Space.
+                action_space = self.action_space[agent_id]
+                assert isinstance(action_space, (spaces.Box, spaces.Discrete)), (
+                    "MATD3 actors require Box or Discrete action spaces."
+                )
                 actor = DeterministicActor(
                     self.observation_space[agent_id],
-                    cast("spaces.Box", self.action_space[agent_id]),
+                    action_space,
                     device=self.device,
                     **copy.deepcopy(agent_configs[agent_id]),
                 )
@@ -450,14 +426,10 @@ class MATD3(MultiAgentRLAlgorithm[MultiAgentReplayBatch]):
 
             # Critic uses observations + actions of all agents to predict Q-value
             def create_critic() -> ContinuousQNetwork:
-                # Same NetworkMeta.__call__ subclass erasure as create_actor.
                 return ContinuousQNetwork(
                     observation_space=self.possible_observation_spaces,
-                    action_space=cast(
-                        "spaces.Box",
-                        concatenate_spaces(
-                            list(self.possible_action_spaces.values()),
-                        ),
+                    action_space=concatenate_spaces(
+                        list(self.possible_action_spaces.values()),
                     ),
                     device=self.device,
                     **copy.deepcopy(critic_net_config),
@@ -621,7 +593,7 @@ class MATD3(MultiAgentRLAlgorithm[MultiAgentReplayBatch]):
             grouped_agents[network_id].append(agent_id)
             # Environment observations are numpy containers at this boundary.
             agent_batch_sizes[agent_id] = get_vect_dim(
-                cast("NumpyObsType", obs[agent_id]),
+                obs[agent_id],
                 self.possible_observation_spaces[agent_id],
             )
 
@@ -711,11 +683,8 @@ class MATD3(MultiAgentRLAlgorithm[MultiAgentReplayBatch]):
             else:
                 # Rescale actions to action space bounds; Box action spaces
                 # always define bounds and an output activation.
-                processed_action_dict[agent_id] = DeterministicActor.rescale_action(
-                    action=tensor_actions[agent_id],
-                    low=cast("torch.Tensor", actor.action_low),
-                    high=cast("torch.Tensor", actor.action_high),
-                    output_activation=actor.output_activation,
+                processed_action_dict[agent_id] = actor.rescale_output_action(
+                    tensor_actions[agent_id],
                 ).numpy()
 
             action_dict[agent_id] = tensor_actions[agent_id].numpy()
@@ -775,25 +744,26 @@ class MATD3(MultiAgentRLAlgorithm[MultiAgentReplayBatch]):
             for idx in indices:
                 self.current_noise[agent_id][idx, :] = 0
 
-    def learn(
-        self, experiences: MultiAgentReplayBatch
-    ) -> dict[str, tuple[float | None, float]]:
+    def learn(self, experiences: TensorDict) -> dict[str, tuple[float | None, float]]:
         """Update agent network parameters from the gathered experiences.
 
         :param experiences: Nested per-agent batch of observations, actions,
             rewards, next observations and dones (field -> agent id -> tensor).
             Composite observation spaces nest further containers in the
             ``obs``/``next_obs`` leaves, which ``preprocess_observation`` handles.
-        :type experiences: MultiAgentReplayBatch
+        :type experiences: TensorDict
 
         :return: Losses for each agent
         :rtype: dict[str, tuple[float | None, float]]
         """
-        states = experiences["obs"]
-        actions = experiences["action"]
-        rewards = experiences["reward"]
-        next_states = experiences["next_obs"]
-        dones = experiences["done"]
+        batch: MultiAgentReplayBatch = MultiAgentReplayBatch.from_tensordict(
+            experiences
+        )
+        states = batch.obs
+        actions = batch.action
+        rewards = batch.reward
+        next_states = batch.next_obs
+        dones = batch.done
 
         actions = {
             agent_id: agent_actions.to(self.device)
@@ -1054,13 +1024,8 @@ class MATD3(MultiAgentRLAlgorithm[MultiAgentReplayBatch]):
         self.set_training_mode(False)
         with torch.no_grad():
             rewards = []
-            if hasattr(env, "num_envs"):
-                # Vectorised envs expose an integer environment count.
-                num_envs = cast("int", env.num_envs)
-                is_vectorised = True
-            else:
-                num_envs = 1
-                is_vectorised = False
+            num_envs = get_num_envs(env)
+            is_vectorised = hasattr(env, "num_envs")
 
             for _ in range(loop):
                 obs, info = env.reset()

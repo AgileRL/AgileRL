@@ -1,12 +1,12 @@
 import warnings
 from collections import OrderedDict
 from collections.abc import Generator, Sequence
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import torch
 from gymnasium import spaces
-from tensordict import TensorDict, TensorDictBase, is_tensor_collection
+from tensordict import TensorDict, TensorDictBase
 
 from agilerl.typing import (
     ArrayOrTensor,
@@ -19,6 +19,16 @@ from agilerl.utils.algo_utils import (
     get_obs_shape,
     maybe_add_batch_dim,
 )
+
+
+def _narrow_leaf(value: object) -> torch.Tensor | TensorDict:
+    """Narrow a TensorDict child to the tensor or sub-collection it holds."""
+    if isinstance(value, TensorDict):
+        return value
+    assert isinstance(value, torch.Tensor), (
+        f"Expected a tensor or TensorDict leaf, got {type(value).__name__}."
+    )
+    return value
 
 
 class RolloutBuffer:
@@ -68,7 +78,7 @@ class RolloutBuffer:
         gae_lambda: float = 0.95,
         gamma: float = 0.99,
         recurrent: bool = False,
-        hidden_state_architecture: dict[str, tuple[int, int, int]] | None = None,
+        hidden_state_architecture: dict[str, tuple[int, ...]] | None = None,
         use_gae: bool = True,
         wrap_at_capacity: bool = False,
         max_seq_len: int | None = None,
@@ -134,7 +144,7 @@ class RolloutBuffer:
 
         # maybe_add_batch_dim preserves the input type; its annotation
         # (agilerl/utils/algo_utils.py) is not generic over it.
-        return cast("torch.Tensor", maybe_add_batch_dim(obs, space))
+        return maybe_add_batch_dim(obs, space)
 
     def _initialize_buffers(self) -> None:
         """Initialize buffer arrays with correct shapes for vectorized environments."""
@@ -160,8 +170,13 @@ class RolloutBuffer:
         else:
             # For non-Dict spaces, use regular tensor allocation. Tuple
             # observation spaces are not supported by the rollout buffer, so
-            # the shape is a flat leaf shape here.
-            leaf_shape = cast("tuple[int, ...]", obs_shape)
+            # the shape is a flat tuple of ints here.
+            leaf_shape: list[int] = []
+            for dim in obs_shape:
+                assert isinstance(dim, int), (
+                    "Tuple observation spaces are not supported by the rollout buffer."
+                )
+                leaf_shape.append(dim)
             source_dict["observations"] = torch.zeros(
                 (self.capacity, self.num_envs, *leaf_shape),
                 dtype=torch.float32,
@@ -296,11 +311,10 @@ class RolloutBuffer:
             assert isinstance(obs, dict), (
                 "Expected a dict observation for a Dict observation space."
             )
-            # The dict arm of ObservationType narrows with object keys; pin it so
-            # keys index the observation space and values convert to tensors.
-            obs_map = cast("dict[str, Any]", obs)
             obs_dict = OrderedDict()
-            for key, item in obs_map.items():
+            for key, item in obs.items():
+                # Dict observation keys are strings that index the sub-spaces.
+                assert isinstance(key, str)
                 sub_space = self.observation_space.spaces[key]
                 obs_tensor = torch.as_tensor(item, device="cpu")
                 obs_dict[key] = self._maybe_reshape_obs(obs_tensor, sub_space)
@@ -339,10 +353,10 @@ class RolloutBuffer:
                 assert isinstance(next_obs, dict), (
                     "Expected a dict observation for a Dict observation space."
                 )
-                # As above: pin the narrowed dict so keys index the space.
-                next_obs_map = cast("dict[str, Any]", next_obs)
                 next_obs_dict = OrderedDict()
-                for key, item in next_obs_map.items():
+                for key, item in next_obs.items():
+                    # As above: dict keys are strings indexing the sub-spaces.
+                    assert isinstance(key, str)
                     sub_space = self.observation_space.spaces[key]
                     next_obs_tensor = torch.as_tensor(item, device="cpu")
                     next_obs_dict[key] = self._maybe_reshape_obs(
@@ -513,7 +527,8 @@ class RolloutBuffer:
 
         # Get a view of the buffer up to the current position and for all envs
         # This slice will have batch_size [buffer_size, num_envs]
-        valid_buffer_data = cast("TensorDict", self.buffer[:buffer_size])
+        valid_buffer_data = self.buffer[:buffer_size]
+        assert isinstance(valid_buffer_data, TensorDict)
 
         # Reshape to flatten the num_envs dimension into the first batch dimension
         # New batch_size will be [buffer_size * num_envs]
@@ -530,7 +545,7 @@ class RolloutBuffer:
                 return self._convert_td_to_np_dict(flattened_td)
 
             indices = np.random.choice(total_samples, size=batch_size, replace=False)
-            sampled_td = cast("TensorDict", flattened_td[indices])
+            sampled_td = flattened_td[indices]
             # Convert the sampled TensorDict to the old dictionary format
             return self._convert_td_to_np_dict(sampled_td)
         return self._convert_td_to_np_dict(flattened_td)
@@ -562,7 +577,8 @@ class RolloutBuffer:
         # Get a view of the buffer up to the current position and for all envs
         # This slice will have batch_size [buffer_size, num_envs]
         # All tensors inside self.buffer are already torch.Tensors on CPU
-        valid_buffer_data_view = cast("TensorDict", self.buffer[:buffer_size])
+        valid_buffer_data_view = self.buffer[:buffer_size]
+        assert isinstance(valid_buffer_data_view, TensorDict)
 
         # Reshape to flatten the num_envs dimension into the first batch dimension
         # New batch_size will be [buffer_size * num_envs]
@@ -582,7 +598,8 @@ class RolloutBuffer:
             indices = torch.randperm(total_samples, device="cpu")[
                 :batch_size
             ]  # Sample on CPU then move
-            sampled_td = cast("TensorDict", flattened_td[indices])
+            sampled_td = flattened_td[indices]
+            assert isinstance(sampled_td, TensorDict)
 
             return sampled_td.to(target_device)
         # Return all flattened data, moved to the target device
@@ -602,35 +619,22 @@ class RolloutBuffer:
         # Convert the TensorDict to the old dictionary of numpy arrays format
         np_dict: dict[str, np.ndarray | dict[str, np.ndarray]] = {}
         for key, value in td.items():
-            if key == "hidden_states" and isinstance(value, TensorDict):
-                # For hidden states, we want the *initial* hidden state for each sequence.
-                # The `value` here would be a TensorDict where each key (e.g., "h_actor")
-                # has a tensor of shape (actual_batch_size, seq_len, layers, hidden_size)
-                # We need to take the first time step [:, 0]
-                # This block will be superseded by the explicit addition of "initial_hidden_states" below
-                # but kept for structural reference or if full hidden sequences were needed in np_dict form.
-                np_dict[key] = {
-                    k_hid: v_hid.cpu().numpy() for k_hid, v_hid in value.items()
-                }
-            elif key in ["observations", "next_observations"] and isinstance(
-                value,
-                dict,
-            ):
-                # Handle Dict observation spaces
-                value_map = cast("dict[str, torch.Tensor]", value)
-                np_dict[key] = {
-                    k_obs: v_obs.cpu().numpy() for k_obs, v_obs in value_map.items()
-                }
-            elif isinstance(
-                value,
-                TensorDict,
-            ):  # For nested like observations if it's a Dict space
-                np_dict[key] = {
-                    k_sub: v_sub.cpu().numpy() for k_sub, v_sub in value.items()
-                }
+            if isinstance(value, (TensorDict, dict)):
+                # Nested collections (hidden states, dict observations) hold one
+                # tensor per sub-key; the sub-container may be a nested TensorDict
+                # or a plain dict of tensors.
+                sub_dict: dict[str, np.ndarray] = {}
+                for sub_key, sub_value in value.items():
+                    assert isinstance(sub_key, str)
+                    assert isinstance(sub_value, torch.Tensor), (
+                        f"Expected a tensor leaf at '{key}/{sub_key}', "
+                        f"got {type(sub_value).__name__}."
+                    )
+                    sub_dict[sub_key] = sub_value.cpu().numpy()
+                np_dict[key] = sub_dict
             else:
                 assert isinstance(value, torch.Tensor), (
-                    f"Expected a tensor leaf for key '{key}', got {type(value)}."
+                    f"Expected a tensor leaf for key '{key}', got {type(value).__name__}."
                 )
                 np_dict[key] = value.cpu().numpy()
         return np_dict
@@ -652,16 +656,19 @@ class RolloutBuffer:
         :return: The padded sequence.
         :rtype: torch.Tensor | TensorDict
         """
-        # Handle nested tensors (sequences are homogeneous: if the first element is a
-        # tensor collection, all of them are)
-        if is_tensor_collection(sequences[0]):
-            nested = cast("Sequence[TensorDict]", sequences)
+        # Handle nested tensors (sequences are homogeneous: if the first element
+        # is a tensor collection, all of them are), regrouping by key and recursing.
+        first = sequences[0]
+        if isinstance(first, TensorDict):
+            nested_tds: list[TensorDict] = []
+            for seq in sequences:
+                assert isinstance(seq, TensorDict), (
+                    "Sequences to pad must be homogeneous."
+                )
+                nested_tds.append(seq)
             sequences_T: dict[Any, list[torch.Tensor | TensorDict]] = {
-                key: [
-                    cast("torch.Tensor | TensorDict", nested_seq[key])
-                    for nested_seq in nested
-                ]
-                for key in nested[0].keys()
+                key: [_narrow_leaf(nested_td.get(key)) for nested_td in nested_tds]
+                for key in first.keys()
             }
             return TensorDict(
                 {
@@ -670,7 +677,10 @@ class RolloutBuffer:
                 },
             )
 
-        tensors = cast("Sequence[torch.Tensor]", sequences)
+        tensors: list[torch.Tensor] = []
+        for seq in sequences:
+            assert isinstance(seq, torch.Tensor), "Sequences to pad must be tensors."
+            tensors.append(seq)
 
         # If target_length is provided, pad the sequences to the target length
         if target_length is not None:
@@ -687,35 +697,79 @@ class RolloutBuffer:
 
         # Otherwise, pad the sequences to the length of the longest sequence
         return torch.nn.utils.rnn.pad_sequence(
-            list(tensors),
+            tensors,
             batch_first=True,
             padding_value=0,
         )
 
+    def _extract_td_sequences(
+        self,
+        episode: TensorDict,
+        max_seq_len: int,
+    ) -> list[TensorDict]:
+        """TensorDict counterpart of :func:`extract_sequences_from_episode` for
+        nested buffer values (hidden states, dict observations).
+
+        :param episode: The nested episode to split into sequences.
+        :type episode: TensorDict
+        :param max_seq_len: The maximum sequence length.
+        :type max_seq_len: int
+        :return: The sequences extracted from the episode.
+        :rtype: list[TensorDict]
+        """
+        length = len(episode)
+        sequence_type = self.bptt_sequence_type
+        if sequence_type == BPTTSequenceType.CHUNKED:
+            num_chunks = max(1, length // max_seq_len)
+            starts: range = range(0, num_chunks * max_seq_len, max_seq_len)
+        elif sequence_type == BPTTSequenceType.MAXIMUM:
+            starts = range(length - max_seq_len + 1)
+        elif sequence_type == BPTTSequenceType.FIFTY_PERCENT_OVERLAP:
+            starts = range(0, length - max_seq_len + 1, max_seq_len // 2)
+        else:
+            msg = f"Received unrecognized sequence type: {sequence_type}"
+            raise NotImplementedError(msg)
+        sequences: list[TensorDict] = []
+        for start in starts:
+            sequence = episode[start : start + max_seq_len]
+            assert isinstance(sequence, TensorDict)
+            sequences.append(sequence)
+        return sequences
+
     def _get_complete_sequences(
         self,
-        data: torch.Tensor,
+        data: torch.Tensor | TensorDict,
         episode_done_indices: list[list[int]],
-    ) -> tuple[list[torch.Tensor], int]:
+    ) -> tuple[list[torch.Tensor | TensorDict], int]:
         """Split the provided data into sequences. If `self.max_seq_len` is not set, the entire episode
         is used as a sequence. Otherwise, the episode is split into sequences of length `self.max_seq_len`.
         If the episode is shorter than `self.max_seq_len`, the entire episode is used as a sequence.
 
         :param data: The data to be split into sequences.
-        :type data: torch.Tensor
+        :type data: torch.Tensor | TensorDict
         :param episode_done_indices: The indices of done signals.
         :type episode_done_indices: list[list[int]]
         :return: A list of sequences and the length of the longest sequence.
-        :rtype: tuple[list[torch.Tensor], int]
+        :rtype: tuple[list[torch.Tensor | TensorDict], int]
         """
         max_seq_len = self.max_seq_len
-        sequences = []
+        sequences: list[torch.Tensor | TensorDict] = []
         max_length = 1
         for env_idx in range(self.num_envs):
             start_index = 0
             for done_index in episode_done_indices[env_idx]:
-                # Split trajectory into episodes (clone to make them independent for stack)
-                episode = data[start_index : done_index + 1, env_idx]
+                # Split trajectory into episodes. Nested buffer values (hidden
+                # states, dict observations) are TensorDicts; leaves are tensors.
+                if isinstance(data, torch.Tensor):
+                    episode: torch.Tensor | TensorDict = data[
+                        start_index : done_index + 1, env_idx
+                    ]
+                else:
+                    sliced = data[start_index : done_index + 1, env_idx]
+                    assert isinstance(sliced, TensorDict), (
+                        "Nested buffer values are TensorDicts."
+                    )
+                    episode = sliced
 
                 # Split episodes into sequences for truncated BPTT
                 # If max_seq_len is not set, use the entire episode as a sequence
@@ -724,12 +778,18 @@ class RolloutBuffer:
                 # as a sequence, and later pad the shorter episodes to the max_seq_len.
                 if (max_seq_len is not None) and (len(episode) >= max_seq_len):
                     # Extract sequences from the episode
-                    truncated_sequences = extract_sequences_from_episode(
-                        episode=episode,
-                        max_seq_len=max_seq_len,
-                        sequence_type=self.bptt_sequence_type,
-                    )
-                    sequences.extend(truncated_sequences)
+                    if isinstance(episode, torch.Tensor):
+                        sequences.extend(
+                            extract_sequences_from_episode(
+                                episode=episode,
+                                max_seq_len=max_seq_len,
+                                sequence_type=self.bptt_sequence_type,
+                            )
+                        )
+                    else:
+                        sequences.extend(
+                            self._extract_td_sequences(episode, max_seq_len)
+                        )
                 else:
                     sequences.append(episode)
 
@@ -764,11 +824,13 @@ class RolloutBuffer:
         # Get a view of the buffer up to the current position and for all envs
         # This slice will have batch_size [buffer_size, num_envs]
         # All tensors inside self.buffer are already torch.Tensors on CPU
-        valid_buffer_data_view = cast("TensorDict", self.buffer[:buffer_size])
+        valid_buffer_data_view = self.buffer[:buffer_size]
+        assert isinstance(valid_buffer_data_view, TensorDict)
 
         # Split data into sequences and apply zero-padding
         # Retrieve the indices of dones as these are the last step of a whole episode
-        dones = cast("torch.Tensor", valid_buffer_data_view["dones"])
+        dones = valid_buffer_data_view["dones"]
+        assert isinstance(dones, torch.Tensor)
         episode_done_indices: list[list[int]] = []
         for env_idx in range(self.num_envs):
             env_dones: torch.Tensor = dones[:, env_idx]
@@ -787,10 +849,15 @@ class RolloutBuffer:
             buffer_size,
             self.num_envs,
         )
-        unpadded_slices, _ = self._get_complete_sequences(
+        timestep_sequences, _ = self._get_complete_sequences(
             flat_timesteps,
             episode_done_indices,
         )
+        # flat_timesteps is a tensor, so every returned slice is a tensor.
+        unpadded_slices: list[torch.Tensor] = []
+        for timestep_slice in timestep_sequences:
+            assert isinstance(timestep_slice, torch.Tensor)
+            unpadded_slices.append(timestep_slice)
 
         self.unpadded_slices = unpadded_slices
 
@@ -810,10 +877,10 @@ class RolloutBuffer:
         padded_data_source = OrderedDict()
         for key, value in valid_data_to_pad.items():
             # Split data into episodes or sequences
-            # NOTE: nested TensorDict values (e.g. hidden states) duck-type the
-            # tensor slicing performed in _get_complete_sequences
+            # NOTE: nested TensorDict values (e.g. hidden states) are handled by
+            # the TensorDict path of _get_complete_sequences
             sequences, max_sequence_length = self._get_complete_sequences(
-                cast("torch.Tensor", value),
+                _narrow_leaf(value),
                 episode_done_indices,
             )
 
@@ -939,7 +1006,8 @@ class RolloutBuffer:
                 unpadded_indices, device=indices.device
             )
 
-            padded = cast("TensorDict", padded_data[padded_indices])
+            padded = padded_data[padded_indices]
+            assert isinstance(padded, TensorDict)
             if self.recurrent and padded.get("initial_hidden_states", None) is not None:
                 batch_hidden_states = {}
                 initial_hidden_states: dict[str, Any] = padded.get_non_tensor(
@@ -950,7 +1018,8 @@ class RolloutBuffer:
 
                 padded.set_non_tensor("initial_hidden_states", batch_hidden_states)
 
-            unpadded = cast("TensorDict", unpadded_data[unpadded_indices_tensor])
+            unpadded = unpadded_data[unpadded_indices_tensor]
+            assert isinstance(unpadded, TensorDict)
             start = end
             yield padded, unpadded
 

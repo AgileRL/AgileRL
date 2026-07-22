@@ -1,7 +1,7 @@
 from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import asdict
-from typing import Literal, TypeGuard, TypeVar, cast, overload
+from typing import Any, Literal, TypeGuard, TypeVar, overload
 
 import numpy as np
 import torch
@@ -79,10 +79,8 @@ def compile_model(
     if not isinstance(model, OptimizedModule) and mode is not None:
         # torch.compile's overloads type a Module input as a bare callable;
         # at runtime compiling an nn.Module always yields an OptimizedModule.
-        return cast(
-            "OptimizedModule",
-            torch.compile(model, mode=mode, dynamic=True),
-        )
+        compiled: Any = torch.compile(model, mode=mode, dynamic=True)
+        return compiled
 
     return model
 

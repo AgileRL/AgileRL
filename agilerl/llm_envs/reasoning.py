@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -138,22 +138,19 @@ class ReasoningGym(HuggingFaceGym[list[ReasoningPrompts], list[torch.Tensor]]):
             # text; the remaining ReasoningPrompts keys are filled in by the
             # multi-turn machinery downstream.
             returned_prompts = [
-                cast(
-                    "ReasoningPrompts",
-                    {
-                        "input_ids": returned_prompt["input_ids"],
-                        "attention_mask": returned_prompt["attention_mask"],
-                        "text": (
-                            self.tokenizer.batch_decode(
-                                returned_prompt["input_ids"],
-                                skip_special_tokens=False,
-                                clean_up_tokenization_spaces=False,
-                            )[0]
-                            if self.return_raw_completions
-                            else None
-                        ),
-                    },
-                )
+                {
+                    "input_ids": returned_prompt["input_ids"],
+                    "attention_mask": returned_prompt["attention_mask"],
+                    "text": (
+                        self.tokenizer.batch_decode(
+                            returned_prompt["input_ids"],
+                            skip_special_tokens=False,
+                            clean_up_tokenization_spaces=False,
+                        )[0]
+                        if self.return_raw_completions
+                        else None
+                    ),
+                }
                 for returned_prompt in batch["tokenized_prompts"]
             ]
         except StopIteration:
@@ -165,7 +162,10 @@ class ReasoningGym(HuggingFaceGym[list[ReasoningPrompts], list[torch.Tensor]]):
                 reset_test=self.evaluation_mode,
             )
             return self._get_next_batch()
-        return returned_prompts
+        # The comprehension builds ReasoningPrompts-shaped dicts (the remaining
+        # keys are filled in downstream); ty cannot match them to the TypedDict.
+        prompts: Any = returned_prompts
+        return prompts
 
     def create_collate_fn(
         self,

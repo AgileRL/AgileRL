@@ -4,7 +4,7 @@ import warnings
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from functools import wraps
-from typing import Any, TypeGuard, TypeVar, cast
+from typing import Any, TypeGuard, TypeVar
 
 import fastrand  # ty: ignore[unresolved-import] — C extension without type stubs
 import numpy as np
@@ -111,18 +111,20 @@ def _is_module_dict(
 
 
 def _as_module_dict(module: EvolvableModule) -> "ModuleDict[EvolvableModule]":
-    """Reinterpret a multi-agent evaluation module as its per-agent mapping.
+    """Narrow a multi-agent evaluation module to its per-agent mapping.
 
-    Used at call sites where the module is a per-agent container by
-    construction but is not ``isinstance``-guarded, keeping access duck-typed so
-    custom containers work without subclassing ``ModuleDict``.
+    Used at call sites where the module is a per-agent container by construction;
+    the narrowing keeps a single ``ModuleDict`` type for the mutation loop.
 
     :param module: The evaluation module to reinterpret
     :type module: EvolvableModule
     :return: The module as a mapping of per-agent modules
     :rtype: ModuleDict[EvolvableModule]
     """
-    return cast("ModuleDict[EvolvableModule]", module)
+    assert _is_module_dict(module), (
+        "Multi-agent mutation requires a per-agent ModuleDict container."
+    )
+    return module
 
 
 def get_exp_layer(offspring: EvolvableModule) -> nn.Linear:
@@ -1147,17 +1149,10 @@ class Mutations:
         # Raises ValueError here (get_exp_layer raises TypeError for its own
         # callers); the two sites have always reported different error types.
         if isinstance(offspring_actor, EvolvableModule):
-            exp_layer = offspring_actor.get_output_dense()
+            exp_layer = get_exp_layer(offspring_actor)
         else:
             msg = (
                 f"Bandit algorithm architecture {type(offspring_actor)} not supported."
-            )
-            raise ValueError(msg)
-
-        if exp_layer is None:
-            msg = (
-                f"Bandit algorithm architecture {type(offspring_actor)} has no "
-                "output layer to reinitialise."
             )
             raise ValueError(msg)
 
@@ -1228,7 +1223,7 @@ class Mutations:
 
         # Bandit actors always expose a linear output layer (asserted where
         # the algorithm first resolves it).
-        individual.exp_layer = cast("nn.Linear", exp_layer)
+        individual.exp_layer = exp_layer
         individual.sigma_inv = torch.from_numpy(new_sigma_inv).to(
             (
                 individual.device

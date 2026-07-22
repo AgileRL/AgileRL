@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -25,7 +25,10 @@ def _as_prompt(obs: str | dict[str, Any]) -> ReasoningPrompts:
     :returns: The observation as a tokenized prompt.
     :rtype: ReasoningPrompts
     """
-    return cast("ReasoningPrompts", obs)
+    # Tokenized envs emit ReasoningPrompts-shaped dicts; ty cannot verify a plain
+    # dict against the TypedDict, so bridge through Any.
+    prompt: Any = obs
+    return prompt
 
 
 @dataclass

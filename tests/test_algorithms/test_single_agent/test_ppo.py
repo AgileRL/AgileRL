@@ -294,7 +294,7 @@ class TestPPOInit:
             ),
         ],
     )
-    def test_initialize_ppo_with_make_evo(
+    def test_initialize_ppo_with_make_evo_rejected(
         self,
         obs_space,
         action_space,
@@ -304,6 +304,11 @@ class TestPPOInit:
         input_tensor_critic,
         request,
     ):
+        # PPO drives its actor through StochasticActor-specific methods
+        # (extract_features/forward_head/action_log_prob), which a flat
+        # MakeEvolvable network does not implement. PPO therefore rejects it at
+        # construction with a clear error rather than crashing later in
+        # get_action/learn.
         obs_space = request.getfixturevalue(obs_space)
         action_space = request.getfixturevalue(action_space)
         actor_network = request.getfixturevalue(actor_network)
@@ -311,36 +316,13 @@ class TestPPOInit:
         critic_network = request.getfixturevalue(critic_network)
         critic_network = MakeEvolvable(critic_network, input_tensor_critic)
 
-        ppo = PPO(
-            obs_space,
-            action_space,
-            actor_network=actor_network,
-            critic_network=critic_network,
-        )
-
-        assert ppo.observation_space == obs_space
-        assert ppo.action_space == action_space
-        assert ppo.batch_size == 64
-        assert ppo.lr == 1e-4
-        assert ppo.gamma == 0.99
-        assert ppo.gae_lambda == 0.95
-        assert ppo.mut is None
-        assert ppo.action_std_init == 0.0
-        assert ppo.clip_coef == 0.2
-        assert ppo.ent_coef == 0.01
-        assert ppo.vf_coef == 0.5
-        assert ppo.max_grad_norm == 0.5
-        assert ppo.target_kl is None
-        assert ppo.update_epochs == 4
-        assert ppo.device == "cpu"
-        assert ppo.accelerator is None
-        assert ppo.index == 0
-        assert ppo.scores == []
-        assert ppo.fitness == []
-        assert ppo.steps == 0
-        assert isinstance(ppo.optimizer.optimizer, optim.Adam)
-        assert ppo.num_envs == 1
-        ppo.clean_up()
+        with pytest.raises(TypeError, match="StochasticActor"):
+            PPO(
+                obs_space,
+                action_space,
+                actor_network=actor_network,
+                critic_network=critic_network,
+            )
 
     def test_initialize_ppo_with_incorrect_actor_net(
         self, vector_space, discrete_space

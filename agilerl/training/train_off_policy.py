@@ -1,7 +1,7 @@
 import logging
 import warnings
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import gymnasium as gym
 import numpy as np
@@ -21,6 +21,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks.actors import DeterministicActor
 from agilerl.population import Population
+from agilerl.utils.algo_utils import get_num_envs
 from agilerl.utils.utils import (
     default_progress_bar,
     init_loggers,
@@ -32,7 +33,6 @@ from agilerl.vector import DummyVecEnv
 if TYPE_CHECKING:
     from tensordict import TensorDictBase
 
-    from agilerl.typing import PrioritizedReplayBatch
 
 InitDictType = dict[str, Any] | None
 SupportedOffPolicy = DQN | RainbowDQN | DDPG | TD3
@@ -53,41 +53,38 @@ def _learn_from_buffer(
     """Execute a single learning step for the agent."""
     sample = sampler.sample
 
-    # Prioritized and n-step replay are the preserve of the RainbowDQN-style
-    # algorithms: only they anneal `beta`, take `n_experiences`/`per`, and return
-    # the indices and priorities to write back. The suppressions below cover the
-    # other members of the annotated population union, and the buffer protocol
-    # (`update_priorities` lives on `PrioritizedReplayBuffer`), for a path that is
-    # gated on the buffer the caller passed in.
+    # Prioritized and n-step replay are the preserve of RainbowDQN: only it
+    # anneals `beta`, accepts `n_experiences`/`per` in `learn`, returns indices
+    # and priorities to write back, and pairs with a PrioritizedReplayBuffer.
+    # Narrowing to those concrete types resolves the whole block.
     if per:
-        experiences = sample(
-            agent.batch_size,
-            agent.beta,  # ty: ignore[unresolved-attribute]
-        )
+        assert isinstance(agent, RainbowDQN)
+        assert isinstance(memory, PrioritizedReplayBuffer)
+        experiences = sample(agent.batch_size, agent.beta)
         n_step_experiences = (
             n_step_sampler.sample(experiences["idxs"])
             if n_step_sampler is not None
             else None
         )
-        _loss, idxs, priorities = agent.learn(  # ty: ignore[invalid-assignment, not-iterable]
-            cast("PrioritizedReplayBatch", experiences),
-            n_experiences=cast("PrioritizedReplayBatch | None", n_step_experiences),  # ty: ignore[unknown-argument]
-            per=per,  # ty: ignore[unknown-argument]
+        _loss, idxs, priorities = agent.learn(
+            experiences,
+            n_experiences=n_step_experiences,
+            per=per,
         )
-        memory.update_priorities(idxs, priorities)  # ty: ignore[unresolved-attribute]
+        assert idxs is not None
+        assert priorities is not None
+        memory.update_priorities(idxs, priorities)
     else:
         experiences = sample(
             agent.batch_size,
             return_idx=n_step_memory is not None,
         )
         if n_step_sampler is not None:
+            assert isinstance(agent, RainbowDQN)
             n_step_experiences = n_step_sampler.sample(experiences["idxs"])
-            agent.learn(
-                cast("PrioritizedReplayBatch", experiences),
-                n_experiences=cast("PrioritizedReplayBatch", n_step_experiences),  # ty: ignore[unknown-argument]
-            )
+            agent.learn(experiences, n_experiences=n_step_experiences)
         else:
-            agent.learn(cast("PrioritizedReplayBatch", experiences))
+            agent.learn(experiences)
 
 
 def train_off_policy(
@@ -235,12 +232,11 @@ def train_off_policy(
     # Ensure environment has vectorized interface. `DummyVecEnv` duck-types the
     # `VectorEnv` API rather than subclassing it, so the cast matches the annotations
     # of the algorithm methods it is handed to.
-    vec_env = cast(
-        "gym.vector.VectorEnv",
-        env if hasattr(env, "num_envs") else DummyVecEnv(env),
+    vec_env: gym.vector.VectorEnv = (
+        env if isinstance(env, gym.vector.VectorEnv) else DummyVecEnv(env)
     )
 
-    num_envs = vec_env.num_envs
+    num_envs = get_num_envs(vec_env)
 
     save_path = (
         checkpoint_path.split(".pt")[0]

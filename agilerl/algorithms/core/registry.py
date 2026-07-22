@@ -2,7 +2,7 @@ import inspect
 from collections.abc import ItemsView, Iterator
 from dataclasses import dataclass, field
 from types import FunctionType, MethodType
-from typing import Any, Literal, cast, overload
+from typing import Any, Literal, overload
 
 import numpy as np
 import torch
@@ -76,17 +76,13 @@ class OptimizerConfig:
     optimizer_kwargs: dict[str, Any] | list[dict[str, Any]]
 
     def __post_init__(self) -> None:
-        # Save optimizer_cls as string for serialization
-        if isinstance(self.optimizer_cls, dict):
-            # ``isinstance`` leaves a union of two dict types; unify the value type
-            # so ``cls`` is ``OptimizerFactory | str`` rather than ``object``.
-            cls_map = cast(
-                "dict[str, OptimizerFactory | str]",
-                self.optimizer_cls,
-            )
+        # Save optimizer_cls as string for serialization. Excluding the scalar
+        # members isolates the per-agent mapping with its ``str`` keys intact and
+        # each value narrowed to ``NamedCallable | str``.
+        if not isinstance(self.optimizer_cls, (str, NamedCallable)):
             self.optimizer_cls = {
                 agent_id: cls if isinstance(cls, str) else cls.__name__
-                for agent_id, cls in cls_map.items()
+                for agent_id, cls in self.optimizer_cls.items()
             }
         elif not isinstance(self.optimizer_cls, str):
             self.optimizer_cls = self.optimizer_cls.__name__
@@ -116,12 +112,14 @@ class OptimizerConfig:
             "DummyOptimizer": DummyOptimizer,
         }
         # ``__post_init__`` serializes optimizer_cls to name string/s.
-        if isinstance(self.optimizer_cls, dict):
-            cls_names = cast("dict[str, str]", self.optimizer_cls)
-            return {
-                agent_id: name_to_cls[cls_name]
-                for agent_id, cls_name in cls_names.items()
-            }
+        if not isinstance(self.optimizer_cls, (str, NamedCallable)):
+            result: dict[str, OptimizerFactory] = {}
+            for agent_id, cls_name in self.optimizer_cls.items():
+                assert isinstance(cls_name, str), (
+                    "Optimizer classes are serialized to name strings in __post_init__."
+                )
+                result[agent_id] = name_to_cls[cls_name]
+            return result
 
         cls_name = self.optimizer_cls
         assert isinstance(cls_name, str)

@@ -522,7 +522,7 @@ class TestMutationsReinitBanditGrads:
                 self.accelerator = None
 
         muts = Mutations(0, 1, 0.5, 0, 0, 0, 0.1, device=device)
-        with pytest.raises(ValueError, match="output layer to reinitialise"):
+        with pytest.raises(TypeError, match="expected a linear output layer"):
             muts._reinit_bandit_grads(
                 DummyBandit(), NoOutputActor(), torch.nn.Linear(2, 2)
             )

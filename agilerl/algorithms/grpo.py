@@ -3,7 +3,7 @@ from __future__ import annotations
 import gc
 import warnings
 from contextlib import nullcontext
-from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import numpy as np
 import torch
@@ -33,7 +33,7 @@ from agilerl.protocols import (
     PeftModelProtocol,
     PreTrainedModelProtocol,
 )
-from agilerl.typing import LLMObsType, LLMRolloutExperiences, ReasoningPrompts
+from agilerl.typing import LLMObsType, LLMRolloutExperiences
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
     VLLMConfig,
@@ -709,18 +709,20 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                     obs, _info = env.reset()
                     # GRPO requires a token-observation multi-turn env, whose
                     # observations are ReasoningPrompts-shaped dicts.
-                    prompt_dict = cast("ReasoningPrompts", obs)
+                    prompt_dict = obs
                     terminated, truncated = False, False
                     while not terminated and not truncated:
+                        # ty cannot match the env's dict against the TypedDict.
+                        prompt: Any = prompt_dict
                         completion_ids = self.get_action(
-                            [prompt_dict],
+                            [prompt],
                             training=False,
                         ).completion_ids
                         full = completion_ids[0]
                         obs, reward, terminated, truncated, _info = env.step(
                             full,
                         )
-                        prompt_dict = cast("ReasoningPrompts", obs)
+                        prompt_dict = obs
                         all_rewards.append(
                             torch.tensor(
                                 [float(reward)],
@@ -1318,10 +1320,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             batch_old_log_probs,
             batch_reference_log_probs,
             *rest,
-        ) = cast(
-            "tuple[torch.Tensor, ...]",
-            get_experiences_samples(minibatch_idxs, *tensors),
-        )
+        ) = get_experiences_samples(minibatch_idxs, *tensors)
         batch_turn_ids = rest[0] if rest else None
         batch_sampling_log_probs = (
             sampling_log_probs[minibatch_idxs]

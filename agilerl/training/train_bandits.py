@@ -1,7 +1,7 @@
 import logging
 import warnings
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any
 
 from accelerate import Accelerator
 from tensordict import TensorDict
@@ -21,9 +21,6 @@ from agilerl.utils.utils import (
     save_population_checkpoint,
     tournament_selection_and_mutation,
 )
-
-if TYPE_CHECKING:
-    from agilerl.typing import BanditBatch
 
 InitDictType = dict[str, Any] | None
 PopulationType = list[NeuralTS | NeuralUCB]
@@ -238,7 +235,7 @@ def train_bandits(
                         # `Sampler.sample` is typed as returning a bare
                         # `TensorDict`; the cast asserts the concrete bandit-batch
                         # layout the algorithm's `learn` consumes.
-                        agent.learn(cast("BanditBatch", experiences))
+                        agent.learn(experiences)
 
                 score += reward
                 # Regret accumulates the fractional reward gap, so its elements are

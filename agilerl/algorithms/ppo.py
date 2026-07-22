@@ -1,7 +1,7 @@
 import copy
 import warnings
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any, overload
 
 import gymnasium as gym
 import numpy as np
@@ -27,10 +27,14 @@ from agilerl.typing import (
     ArrayOrTensor,
     BPTTSequenceType,
     ObservationType,
+    RolloutMinibatch,
+    RolloutSequenceMinibatch,
+    RolloutSequenceTargets,
     SupportedObservationSpace,
     TorchObsType,
 )
 from agilerl.utils.algo_utils import (
+    get_num_envs,
     make_safe_deepcopies,
     share_encoder_parameters,
 )
@@ -261,25 +265,24 @@ class PPO(RLAlgorithm[TensorDict]):
         )
 
         if actor_network is not None and critic_network is not None:
-            if not isinstance(actor_network, EvolvableModule):
-                msg = f"Passed actor network is of type {type(actor_network)}, but must be of type EvolvableModule."
+            # PPO drives its actor through StochasticActor-specific methods
+            # (extract_features/forward_head/action_log_prob/...), so a custom
+            # actor must be a StochasticActor rather than an arbitrary module.
+            if not isinstance(actor_network, StochasticActor):
+                msg = f"Passed actor network is of type {type(actor_network)}, but must be of type StochasticActor."
                 raise TypeError(
                     msg,
                 )
-            if not isinstance(critic_network, EvolvableModule):
-                msg = f"Passed critic network is of type {type(critic_network)}, but must be of type EvolvableModule."
+            if not isinstance(critic_network, ValueNetwork):
+                msg = f"Passed critic network is of type {type(critic_network)}, but must be of type ValueNetwork."
                 raise TypeError(
                     msg,
                 )
 
-            actor_copy, critic_copy = make_safe_deepcopies(
+            self.actor, self.critic = make_safe_deepcopies(
                 actor_network,
                 critic_network,
             )
-            # The copies are validated EvolvableModules; PPO's runtime contract is
-            # that the supplied actor/critic are these concrete subclasses.
-            self.actor = cast("StochasticActor", actor_copy)
-            self.critic = cast("ValueNetwork", critic_copy)
         else:
             net_config_dict = {} if self.net_config is None else self.net_config
 
@@ -493,16 +496,16 @@ class PPO(RLAlgorithm[TensorDict]):
         )
         return action, log_prob, entropy, values, None
 
-    def get_hidden_state_architecture(self) -> dict[str, tuple[int, int, int]]:
+    def get_hidden_state_architecture(self) -> dict[str, tuple[int, ...]]:
         """Get the hidden state architecture for the environment.
 
         :return: Dictionary describing the hidden state architecture (name to
             ``(num_layers, num_envs, hidden_size)`` shape)
-        :rtype: dict[str, tuple[int, int, int]]
+        :rtype: dict[str, tuple[int, ...]]
         """
         # Recurrent hidden states are always (num_layers, batch, hidden_size).
         return {
-            k: cast("tuple[int, int, int]", tuple(v.shape))
+            k: tuple(v.shape)
             for k, v in self.get_initial_hidden_state(self.num_envs).items()
         }
 
@@ -568,6 +571,26 @@ class PPO(RLAlgorithm[TensorDict]):
             entropy = -log_prob.mean()
 
         return log_prob, entropy, values
+
+    @overload
+    def get_action(
+        self,
+        obs: ObservationType,
+        action_mask: ArrayOrTensor | None = None,
+        *,
+        hidden_state: dict[str, torch.Tensor],
+        **kwargs: Any,
+    ) -> RecurrentActionReturnType: ...
+
+    @overload
+    def get_action(
+        self,
+        obs: ObservationType,
+        action_mask: ArrayOrTensor | None = None,
+        hidden_state: None = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> ActionReturnType: ...
 
     def get_action(
         self,
@@ -676,13 +699,6 @@ class PPO(RLAlgorithm[TensorDict]):
                 self.metrics.log(metric_name, 0.0)
             return 0.0
 
-        # Normalize advantages globally
-        valid_advantages: torch.Tensor = buffer_td.get("advantages")
-        normalized_advantages = (valid_advantages - valid_advantages.mean()) / (
-            valid_advantages.std() + 1e-8
-        )
-        buffer_td["advantages"] = normalized_advantages
-
         batch_size = self.batch_size
         num_samples = (
             int(buffer_td.batch_size[0])
@@ -690,6 +706,33 @@ class PPO(RLAlgorithm[TensorDict]):
             else self.rollout_buffer.size()
         )
         indices = np.arange(num_samples)
+
+        # Wrap the rollout buffer as a typed batch once and drive minibatches by
+        # indexing it (indexing a TensorClass returns a TensorClass, so every read
+        # below is statically typed). ``strict=False`` tolerates the optional
+        # ``action_masks``; the buffer's ``"values"`` key collides with
+        # ``TensorDict.values()`` so it is renamed to ``value_preds`` here.
+        minibatch_fields = [
+            "observations",
+            "actions",
+            "log_probs",
+            "advantages",
+            "returns",
+            "values",
+            "action_masks",
+        ]
+        buffer_batch_td = buffer_td.select(*minibatch_fields, strict=False)
+        buffer_batch_td.rename_key_("values", "value_preds")
+        buffer_batch: RolloutMinibatch = RolloutMinibatch.from_tensordict(
+            buffer_batch_td
+        )
+
+        # Normalize advantages globally
+        valid_advantages = buffer_batch.advantages
+        buffer_batch.advantages = (valid_advantages - valid_advantages.mean()) / (
+            valid_advantages.std() + 1e-8
+        )
+
         # Accumulated as tensors during the epoch loop, logged as floats.
         learn_metrics: dict[str, float | torch.Tensor] = {
             "loss": 0.0,
@@ -704,26 +747,18 @@ class PPO(RLAlgorithm[TensorDict]):
                 end_idx = min(start_idx + batch_size, num_samples)
                 minibatch_indices = indices[start_idx:end_idx]
 
-                # Slice the TensorDict to get the minibatch (tensor indices
-                # are the layout tensordict types; numpy indices coerce the
-                # same way at runtime).
-                minibatch_td = cast(
-                    "TensorDict",
-                    buffer_td[torch.from_numpy(minibatch_indices)],
-                )
-
-                # The rollout-buffer layout stores flat tensors for every
-                # non-observation field.
-                mb_obs = cast("TorchObsType", minibatch_td["observations"])
-                mb_actions = cast("torch.Tensor", minibatch_td["actions"])
-                mb_log_probs = cast("torch.Tensor", minibatch_td["log_probs"])
-                mb_advantages = cast("torch.Tensor", minibatch_td["advantages"])
-                mb_returns = cast("torch.Tensor", minibatch_td["returns"])
-                mb_old_values = cast("torch.Tensor", minibatch_td["values"])
-                mb_action_masks = cast(
-                    "torch.Tensor | None",
-                    minibatch_td.get("action_masks", None),
-                )
+                # Row-indexing a TensorClass returns a TensorClass at runtime, but
+                # the untyped ``__getitem__`` stub widens to ``Tensor | collection``;
+                # narrow the single polymorphic slice back to the batch type.
+                minibatch = buffer_batch[torch.from_numpy(minibatch_indices)]
+                assert isinstance(minibatch, RolloutMinibatch)
+                mb_obs = minibatch.observations
+                mb_actions = minibatch.actions
+                mb_log_probs = minibatch.log_probs
+                mb_advantages = minibatch.advantages
+                mb_returns = minibatch.returns
+                mb_old_values = minibatch.value_preds
+                mb_action_masks = minibatch.action_masks
 
                 if isinstance(self.action_space, spaces.Discrete):
                     mb_actions = mb_actions.squeeze(-1)
@@ -842,6 +877,7 @@ class PPO(RLAlgorithm[TensorDict]):
         total_minibatch_updates_total = 0
         for epoch in range(self.update_epochs):
             approx_kl_divs_epoch = []  # KL divergences for this epoch's minibatches
+            approx_kl_divs_minibatch_timesteps = []
             num_minibatches_this_epoch = 0
 
             # Itreate over minibatches of sequences
@@ -854,20 +890,37 @@ class PPO(RLAlgorithm[TensorDict]):
                 # Other tensors shape: (batch_seq * seq_len, )
                 # The sequence-buffer layout stores flat tensors for every
                 # non-observation field.
-                mb_obs_seq = cast("TorchObsType", minibatch_padded["observations"])
-                mb_actions_seq = cast("torch.Tensor", minibatch_padded["actions"])
-                mb_pad_mask = cast("torch.Tensor", minibatch_padded["pad_mask"])
-                mb_action_masks_seq = cast(
-                    "torch.Tensor | None",
-                    minibatch_padded.get("action_masks", None),
+                # ``strict=False`` drops the padded td's non-tensor
+                # ``initial_hidden_states`` (read below) and tolerates the optional
+                # ``action_masks``; the unpadded td's ``"values"`` collides with
+                # ``TensorDict.values()`` so it is renamed to ``value_preds``.
+                targets_td = minibatch_unpadded.select(
+                    "log_probs", "advantages", "returns", "values", strict=False
                 )
-                mb_old_log_probs = cast(
-                    "torch.Tensor",
-                    minibatch_unpadded["log_probs"],
+                targets_td.rename_key_("values", "value_preds")
+                padded: RolloutSequenceMinibatch = (
+                    RolloutSequenceMinibatch.from_tensordict(
+                        minibatch_padded.select(
+                            "observations",
+                            "actions",
+                            "pad_mask",
+                            "action_masks",
+                            strict=False,
+                        )
+                    )
                 )
-                mb_advantages = cast("torch.Tensor", minibatch_unpadded["advantages"])
-                mb_values = cast("torch.Tensor", minibatch_unpadded["values"])
-                mb_returns = cast("torch.Tensor", minibatch_unpadded["returns"])
+                targets: RolloutSequenceTargets = (
+                    RolloutSequenceTargets.from_tensordict(targets_td)
+                )
+                mb_obs_seq = padded.observations
+                mb_actions_seq = padded.actions
+                mb_pad_mask = padded.pad_mask
+                mb_action_masks_seq = padded.action_masks
+                mb_old_log_probs = targets.log_probs
+                mb_advantages = targets.advantages
+                mb_returns = targets.returns
+                mb_values = targets.value_preds
+                # Initial recurrent hidden states ride along as a non-tensor entry.
                 mb_initial_hidden_states_dict: dict[str, torch.Tensor] | None = (
                     minibatch_padded.get_non_tensor(
                         "initial_hidden_states",
@@ -1055,12 +1108,7 @@ class PPO(RLAlgorithm[TensorDict]):
 
         with torch.no_grad():
             rewards = []
-            # Vectorised envs expose an integer environment count.
-            num_envs = (
-                cast("int", env.num_envs)
-                if hasattr(env, "num_envs") and vectorized
-                else 1
-            )
+            num_envs = get_num_envs(env) if vectorized else 1
 
             for _ in range(loop):
                 obs, info = env.reset()
@@ -1086,9 +1134,11 @@ class PPO(RLAlgorithm[TensorDict]):
                         ):
                             # The guard established one info dict per
                             # sub-environment.
-                            info_dicts = cast("list[dict[str, Any]]", info)
+                            info_dicts = info
                             masks = [
-                                env_info.get("action_mask") for env_info in info_dicts
+                                env_info.get("action_mask")
+                                for env_info in info_dicts
+                                if isinstance(env_info, dict)
                             ]
                             present_masks = [m for m in masks if m is not None]
                             # If all environments returned a mask and they are not None
@@ -1117,20 +1167,14 @@ class PPO(RLAlgorithm[TensorDict]):
 
                     # Get action; the recurrent flag selects which arm of the
                     # get_action return union is produced.
-                    if self.recurrent:
-                        action, _, _, _, test_hidden_state = cast(
-                            "RecurrentActionReturnType",
-                            self.get_action(
-                                obs,
-                                action_mask=action_mask,
-                                hidden_state=test_hidden_state,
-                            ),
+                    if test_hidden_state is not None:
+                        action, _, _, _, test_hidden_state = self.get_action(
+                            obs,
+                            action_mask=action_mask,
+                            hidden_state=test_hidden_state,
                         )
                     else:
-                        action, _, _, _ = cast(
-                            "ActionReturnType",
-                            self.get_action(obs, action_mask=action_mask),
-                        )
+                        action, _, _, _ = self.get_action(obs, action_mask=action_mask)
 
                     # Environment step
                     if vectorized:

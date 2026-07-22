@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import gymnasium as gym
 import numpy as np
@@ -12,11 +12,6 @@ from gymnasium import spaces
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import PPO
 from agilerl.networks import StochasticActor
-
-if TYPE_CHECKING:
-    from numpy.typing import ArrayLike
-
-    from agilerl.algorithms.ppo import ActionReturnType, RecurrentActionReturnType
 
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE
@@ -95,27 +90,24 @@ def _collect_rollouts(
         current_hidden_state_for_buffer = current_hidden_state_for_actor
 
         # Get action, statistics and (maybe) recurrent hidden state from agent.
-        # ``get_action`` returns a union of the recurrent/non-recurrent tuple
-        # shapes; the ``recurrent`` flag selects which one, which the type
-        # checker cannot correlate, so narrow it here.
+        # ``get_action`` returns a 4-tuple, or a 5-tuple with the next hidden
+        # state for recurrent policies; the length check narrows the union.
         if recurrent:
-            action, log_prob, _, value, next_hidden_for_actor = cast(
-                "RecurrentActionReturnType",
-                agent.get_action(
-                    obs,
-                    action_mask=info.get("action_mask", None),
-                    hidden_state=current_hidden_state_for_actor,
-                ),
+            action_result = agent.get_action(
+                obs,
+                action_mask=info.get("action_mask", None),
+                hidden_state=current_hidden_state_for_actor,
             )
+            assert len(action_result) == 5
+            action, log_prob, _, value, next_hidden_for_actor = action_result
             agent.hidden_state = next_hidden_for_actor
         else:
-            action, log_prob, _, value = cast(
-                "ActionReturnType",
-                agent.get_action(
-                    obs,
-                    action_mask=info.get("action_mask", None),
-                ),
+            action_result = agent.get_action(
+                obs,
+                action_mask=info.get("action_mask", None),
             )
+            assert len(action_result) == 4
+            action, log_prob, _, value = action_result
 
         # Clip action to action space
         policy_attr = agent.registry.policy()
@@ -145,9 +137,9 @@ def _collect_rollouts(
         else:
             is_terminal = term or trunc
 
-        # ``env.step`` types the reward as ``SupportsFloat``, which numpy's
-        # ``atleast_1d`` stub does not accept as ``ArrayLike``.
-        reward_np = np.atleast_1d(cast("ArrayLike", reward))
+        # ``env.step`` types the reward as ``SupportsFloat | np.ndarray``, which
+        # numpy's ``atleast_1d`` stub rejects; ``asarray`` accepts both arms.
+        reward_np = np.atleast_1d(np.asarray(reward))
         is_terminal_np = np.atleast_1d(is_terminal)
         value_np = np.atleast_1d(value)
         log_prob_np = np.atleast_1d(log_prob)

@@ -308,8 +308,11 @@ class ContinuousQNetwork(EvolvableNetwork):
 
     :param observation_space: Observation space of the environment.
     :type observation_space: spaces.Space
-    :param action_space: Action space of the environment
-    :type action_space: spaces.Box
+    :param action_space: Action space of the environment. Any space with a
+        defined ``spaces.flatdim`` is supported: continuous ``Box`` actions
+        (DDPG/TD3) as well as the ``Discrete``/``MultiDiscrete`` joint action
+        spaces used by the multi-agent critics.
+    :type action_space: spaces.Space
     :param encoder_cls: Encoder class to use for the network. Defaults to None, whereby it is
         automatically built using an AgileRL module according the observation space.
     :type encoder_cls: str | type[EvolvableModule] | None
@@ -340,7 +343,7 @@ class ContinuousQNetwork(EvolvableNetwork):
     def __init__(
         self,
         observation_space: spaces.Space,
-        action_space: spaces.Box,
+        action_space: spaces.Space,
         encoder_cls: type[EvolvableModule] | None = None,
         encoder_config: NetConfigType | None = None,
         head_config: NetConfigType | None = None,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar, cast, get_args
+from typing import TYPE_CHECKING, Any, TypeVar, get_args
 
 from typing_extensions import Self
 
@@ -414,10 +414,13 @@ class LocalTrainer(Trainer):
 
         if isinstance(observation_space, dict):
             # ``isinstance`` narrowing leaves a ``Space & dict`` intersection, so
-            # restate the per-agent mapping type for the multi-agent resolver.
+            # rebuild the per-agent mapping for the multi-agent resolver.
+            obs_by_agent: dict[str, Any] = {
+                str(agent_id): space for agent_id, space in observation_space.items()
+            }
             self._resolve_deferred_net_config_multi_agent(
                 net_config,
-                cast("dict[str, Any]", observation_space),
+                obs_by_agent,
                 simba,
                 recurrent,
             )
@@ -799,10 +802,12 @@ class ArenaTrainer(Trainer):
             environment = ArenaEnvSpec(name=environment)
 
         # Arena specs mirror the core ones on the server side; they are a separate
-        # model hierarchy, so they are not members of `EnvSpecT`/`AlgoSpec`.
+        # model hierarchy, so they are not members of `EnvSpecT`/`AlgoSpec` and are
+        # bridged through Any for the base constructor.
+        arena_environment: Any = environment
         super().__init__(
             algorithm,
-            cast("EnvSpecT", environment),
+            arena_environment,
             training=training,
             mutation=mutation,
             tournament=tournament,
