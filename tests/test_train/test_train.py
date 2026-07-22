@@ -901,8 +901,36 @@ def _make_base_mock_agent(spec_cls, state_size, action_size, *, metrics=None):
     return mock
 
 
+def _instrument_callable_methods(agent, *method_names):
+    """Wrap real methods in MagicMock so tests can use assert_called()."""
+    for name in method_names:
+        setattr(agent, name, MagicMock(side_effect=getattr(agent, name)))
+    return agent
+
+
 @pytest.fixture
 def mocked_agent_off_policy(env, algo):
+    # Concrete DummyAgentOffPolicy satisfies runtime_checkable `_NStepAgent`
+    # (batch_size, beta, learn) under isinstance on all supported CPythons.
+    if algo == RainbowDQN:
+        agent = DummyAgentOffPolicy(5, env, 0.4, algo="Rainbow DQN")
+        agent.action_dim = 2
+        return _instrument_callable_methods(
+            agent,
+            "get_action",
+            "learn",
+            "test",
+            "wrap_models",
+            "unwrap_models",
+            "set_training_mode",
+            "init_training_step",
+            "add_scores",
+            "finalize_training_step",
+            "save_checkpoint",
+            "load_checkpoint",
+            "reset_action_noise",
+        )
+
     mock_agent = _make_base_mock_agent(algo, env.state_size, 2)
     mock_agent.action_dim = 2
 
@@ -926,18 +954,10 @@ def mocked_agent_off_policy(env, algo):
             np.random.randint(env.action_size, size=(env.n_envs,))
         )
 
-    if algo == RainbowDQN:
-        mock_agent.learn.side_effect = lambda experiences, **kwargs: (
-            random.random(),
-            random.random(),
-            random.random(),
-        )
-    else:
-        mock_agent.learn.side_effect = lambda experiences, **kwargs: random.random()
+    mock_agent.learn.side_effect = lambda experiences, **kwargs: random.random()
 
     mock_agent.algo = {
         DQN: "DQN",
-        RainbowDQN: "Rainbow DQN",
         DDPG: "DDPG",
         TD3: "TD3",
         CQN: "CQN",
