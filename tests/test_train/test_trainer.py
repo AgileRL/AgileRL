@@ -1086,6 +1086,8 @@ class TestLocalTrainerCustomNetworks:
 
     def test_ppo_custom_actor_critic(self):
         from agilerl.modules.mlp import EvolvableMLP
+        from agilerl.networks import StochasticActor
+        from agilerl.networks.value_networks import ValueNetwork
 
         actor = self._make_mlp(self.OBS_DIM, self.DISCRETE_ACTIONS)
         critic = self._make_mlp(self.OBS_DIM, 1)
@@ -1095,10 +1097,14 @@ class TestLocalTrainerCustomNetworks:
 
         assert len(trainer.population) == self.POP_SIZE
         for agent in trainer.population:
-            assert isinstance(agent.actor, EvolvableMLP)
-            assert isinstance(agent.critic, EvolvableMLP)
-            assert agent.actor.hidden_size == self.HIDDEN
-            assert agent.critic.hidden_size == self.HIDDEN
+            # PPO adopts the custom MLP as the encoder of its stochastic
+            # actor / value network and adds the distribution / value head.
+            assert isinstance(agent.actor, StochasticActor)
+            assert isinstance(agent.critic, ValueNetwork)
+            assert isinstance(agent.actor.encoder, EvolvableMLP)
+            assert isinstance(agent.critic.encoder, EvolvableMLP)
+            assert agent.actor.encoder.hidden_size == self.HIDDEN
+            assert agent.critic.encoder.hidden_size == self.HIDDEN
 
     # -- DDPG (continuous, actor + critic) ----------------------------------
 
@@ -1332,7 +1338,7 @@ class TestLLMBuildAlgorithm:
         mock_tokenizer.eos_token_id = 50256
         mock_tokenizer.eos_token = "<|endoftext|>"
 
-        with patch.object(type(dpo_spec), "_algo_class_cache", mock_algo):
+        with patch.object(type(dpo_spec), "algo_class", return_value=mock_algo):
             dpo_spec.build_algorithm(tokenizer=mock_tokenizer, index=0)
 
         mock_algo.assert_called_once()
@@ -1348,7 +1354,7 @@ class TestLLMBuildAlgorithm:
         mock_tokenizer.eos_token_id = 50256
         mock_tokenizer.eos_token = "<|endoftext|>"
 
-        with patch.object(type(grpo_spec), "_algo_class_cache", mock_algo):
+        with patch.object(type(grpo_spec), "algo_class", return_value=mock_algo):
             grpo_spec.build_algorithm(tokenizer=mock_tokenizer, index=1)
 
         mock_algo.assert_called_once()
@@ -1364,7 +1370,7 @@ class TestLLMBuildAlgorithm:
         mock_accel = MagicMock()
         mock_accel.num_processes = 2
 
-        with patch.object(type(dpo_spec), "_algo_class_cache", mock_algo):
+        with patch.object(type(dpo_spec), "algo_class", return_value=mock_algo):
             dpo_spec.build_algorithm(
                 tokenizer=mock_tokenizer, index=0, accelerator=mock_accel
             )

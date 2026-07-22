@@ -2203,7 +2203,9 @@ class TestModuleCheckpointDict:
         monkeypatch.setattr(
             algo_utils, "module_checkpoint_single", lambda module, name: sentinel
         )
-        out = algo_utils.module_checkpoint_dict(object(), "actor")
+        out = algo_utils.module_checkpoint_dict(
+            MagicMock(spec=EvolvableModule), "actor"
+        )
         assert out == sentinel
 
 
@@ -2350,8 +2352,14 @@ class TestCloneLlm:
     def test_clone_llm_peft_path_handles_multiple_adapters_and_state_rename(
         self, monkeypatch
     ):
-        class FakeBaseModel:
+        from peft import LoraConfig
+
+        default_config = LoraConfig(r=1)
+        extra_config = LoraConfig(r=2)
+
+        class FakeBaseModel(torch.nn.Module):
             def __init__(self, config):
+                super().__init__()
                 self.config = config
                 self.added = []
                 self.disabled = False
@@ -2370,7 +2378,7 @@ class TestCloneLlm:
             def __init__(self):
                 self.config = SimpleNamespace()
                 self.model = FakeBaseModel(SimpleNamespace())
-                self.peft_config = {"default": {"r": 1}, "extra": {"r": 2}}
+                self.peft_config = {"default": default_config, "extra": extra_config}
 
             def parameters(self):
                 return [torch.nn.Parameter(torch.tensor([1.0]))]
@@ -2397,13 +2405,14 @@ class TestCloneLlm:
             },
         )
         assert isinstance(cloned, FakeBaseModel)
-        assert ("extra", {"r": 2}) in cloned.added
+        assert ("extra", extra_config) in cloned.added
         assert cloned.disabled is True
         assert "base.actor.weight" in cloned.loaded
 
     def test_clone_llm_pretrained_model_path(self, monkeypatch):
-        class FakeBaseModel:
+        class FakeBaseModel(torch.nn.Module):
             def __init__(self, config):
+                super().__init__()
                 self.config = config
 
             def load_state_dict(self, state_dict, strict=False):
