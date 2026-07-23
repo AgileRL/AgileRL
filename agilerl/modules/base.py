@@ -18,7 +18,7 @@ from typing_extensions import Self
 
 from agilerl.modules.custom_components import NoisyLinear
 from agilerl.protocols import MutationMethodProtocol, MutationType
-from agilerl.typing import DeviceType
+from agilerl.typing import DeviceType, MutationApplyDict
 
 SelfEvolvableModule = TypeVar("SelfEvolvableModule", bound="EvolvableModule")
 TorchModuleType = TypeVar("TorchModuleType", bound=nn.Module)
@@ -38,12 +38,12 @@ def mutation(
     """
 
     def decorator(
-        func: Callable[[Any], dict[str, Any] | None],
+        func: Callable[[Any], MutationApplyDict | None],
     ) -> MutationMethodProtocol:
         @wraps(func)
         def wrapper(
             self: "EvolvableModule", *args: Any, **kwargs: Any
-        ) -> dict[str, Any] | None:
+        ) -> MutationApplyDict | None:
             return func(self, *args, **kwargs)
 
         # A function object has no ``_mutation_type`` / ``_recreate_kwargs`` in its
@@ -185,7 +185,7 @@ def _mutation_wrapper(
     """
 
     @wraps(method)
-    def wrapped(*args: Any, **kwargs: Any) -> dict[str, Any] | None:
+    def wrapped(*args: Any, **kwargs: Any) -> MutationApplyDict | None:
         with MutationContext(module, method, attribute):
             # This handles the case of an `EvolvableWrapper`
             if attribute not in module.mutation_methods:

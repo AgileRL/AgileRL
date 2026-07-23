@@ -25,6 +25,8 @@ from agilerl.typing import (
     ArrayTuple,
     DeviceType,
     ExperiencesType,
+    MARLObservationType,
+    MARLTensorObsType,
     NumpyObsType,
     ObservationType,
     TorchObsType,
@@ -33,12 +35,6 @@ from agilerl.utils.algo_utils import obs_to_tensor, stack_experiences
 from agilerl.wrappers.utils import RunningMeanStd
 
 AgentType = TypeVar("AgentType", bound=RLAlgorithm | MultiAgentRLAlgorithm)
-MARLObservationType = dict[str, ObservationType]
-
-# The tensorised observations handled inside :class:`RSNorm`: a single agent's obs is a
-# ``TorchObsType`` (tensor / tuple / dict of tensors), and the multi-agent case maps each
-# agent id to one such structure.
-MARLTensorObsType = dict[str, TorchObsType]
 
 
 class AgentWrapper(ABC, Generic[AgentType]):

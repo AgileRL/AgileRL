@@ -127,12 +127,13 @@ class SFTGym(IterablePromptBatchGym[SFTPrompts]):
                 return_tensors="pt",
             )
 
-            return {
+            result: SFTPrompts = {
                 "prompt": prompts,
                 "prompt_lengths": prompt_lengths,
                 "response": responses,
                 "input_ids": pair_enc["input_ids"],
                 "attention_mask": pair_enc["attention_mask"].long(),
             }
+            return result
 
         return collate_fn

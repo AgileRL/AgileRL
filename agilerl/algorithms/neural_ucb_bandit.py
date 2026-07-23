@@ -17,9 +17,11 @@ from agilerl.modules import EvolvableModule
 from agilerl.networks.value_networks import ValueNetwork
 from agilerl.protocols import BanditEnvProtocol
 from agilerl.typing import (
+    ActionMaskInput,
     BanditBatch,
     ObservationType,
     SupportedObservationSpace,
+    numpy_action_mask,
 )
 from agilerl.utils.algo_utils import make_safe_deepcopies
 from agilerl.utils.evolvable_networks import get_default_encoder_config
@@ -214,7 +216,7 @@ class NeuralUCB(RLAlgorithm[TensorDict]):
     def get_action(
         self,
         obs: ObservationType,
-        action_mask: np.ndarray | None = None,
+        action_mask: ActionMaskInput = None,
         *args: Any,
         **kwargs: Any,
     ) -> int:
@@ -223,7 +225,7 @@ class NeuralUCB(RLAlgorithm[TensorDict]):
         :param obs: State observation, or multiple observations in a batch
         :type obs: numpy.ndarray[float]
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
-        :type action_mask: numpy.ndarray, optional
+        :type action_mask: ActionMaskInput
 
         :return: Action to take in the environment
         :rtype: int
@@ -273,7 +275,7 @@ class NeuralUCB(RLAlgorithm[TensorDict]):
         if action_mask is None:
             action = np.argmax(action_values)
         else:
-            inv_mask = 1 - action_mask
+            inv_mask = 1 - numpy_action_mask(action_mask)
             masked_action_values = np.ma.array(action_values, mask=inv_mask)
             action = np.argmax(masked_action_values)
 

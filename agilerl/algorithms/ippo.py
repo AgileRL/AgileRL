@@ -26,9 +26,13 @@ from agilerl.networks.value_networks import ValueNetwork
 from agilerl.typing import (
     ArrayDict,
     InfosDict,
+    IPPOActionMasks,
+    IPPOProcessInfosReturn,
+    MaybeActionMask,
     ObservationType,
     SupportedObservationSpace,
     TorchObsType,
+    coerce_action_mask,
 )
 from agilerl.utils.algo_utils import (
     apply_env_defined_actions,
@@ -402,20 +406,18 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
     def process_infos(
         self,
         infos: InfosDict | None,
-    ) -> tuple[
-        Mapping[str, torch.Tensor | None], dict[str, Any] | None, ArrayDict | None
-    ]:
+    ) -> IPPOProcessInfosReturn:
         """Process the information, extract env_defined_actions, action_masks and agent_masks.
 
         :param infos: Info dict
-        :type infos: dict[str, dict[...]]
+        :type infos: InfosDict | None
         :return: Tuple of action_masks, env_defined_actions, agent_masks (the
             latter two are ``None`` when the info dict defines no actions)
-        :rtype: tuple[Mapping[str, torch.Tensor | None], dict[str, Any] | None, ArrayDict | None]
+        :rtype: IPPOProcessInfosReturn
         """
         if infos is None:
             infos = {agent: {} for agent in self.agent_ids}
-            action_masks: Mapping[str, torch.Tensor | None] = dict.fromkeys(
+            action_masks: IPPOActionMasks = dict.fromkeys(
                 self.observation_space,
             )
         else:
@@ -428,17 +430,17 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
     def extract_action_masks(
         self,
         infos: InfosDict,
-    ) -> Mapping[str, torch.Tensor | None]:
+    ) -> IPPOActionMasks:
         """Extract action masks from info dictionary.
 
         :param infos: Info dict
-        :type infos: dict[str, dict[...]]
+        :type infos: InfosDict
 
         :return: Action masks per group (``None`` when no masks are provided)
-        :rtype: Mapping[str, torch.Tensor | None]
+        :rtype: IPPOActionMasks
         """
         # Get dict of form {"agent_id" : [1, 0, 0, 0]...} etc
-        collected_masks: dict[str, list[np.ndarray | None]] = {
+        collected_masks: dict[str, list[MaybeActionMask]] = {
             group_id: [] for group_id in self.observation_space
         }
         for agent_id, info in infos.items():
@@ -448,7 +450,9 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
                     if self.has_grouped_agents()
                     else agent_id
                 )
-                collected_masks[group_id].append(info.get("action_mask", None))
+                collected_masks[group_id].append(
+                    coerce_action_mask(info.get("action_mask", None))
+                )
 
         # Check and stack masks
         action_masks: dict[str, torch.Tensor | None] = {}
@@ -549,9 +553,9 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
         :param obs: Environment observations: {'agent_0': state_dim_0, ..., 'agent_n': state_dim_n}
         :type obs: Mapping[str, numpy.Array | dict[str, numpy.Array] | tuple[numpy.Array, ...]]
         :param infos: Information dictionary returned by env.step(actions)
-        :type infos: dict[str, dict[str, ...]]
+        :type infos: InfosDict | None
         :return: Tuple of actions, log probabilities, entropies, values
-        :rtype: tuple[dict[str, np.ndarray], dict[str, np.ndarray], dict[str, np.ndarray], dict[str, np.ndarray]]
+        :rtype: tuple[ArrayDict, ArrayDict, ArrayDict, ArrayDict]
         """
         assert not key_in_nested_dict(
             obs,

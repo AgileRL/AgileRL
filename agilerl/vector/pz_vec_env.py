@@ -5,7 +5,13 @@ import numpy as np
 from gymnasium.spaces import Space
 from gymnasium.vector.utils import batch_space
 
-from agilerl.typing import ActionType, ArrayOrTensor, NumpyObsType, PzStepReturn
+from agilerl.typing import (
+    ActionType,
+    ArrayOrTensor,
+    InfosDict,
+    NumpyObsType,
+    PzStepReturn,
+)
 
 
 class PettingZooVecEnv:
@@ -55,22 +61,22 @@ class PettingZooVecEnv:
         }
 
     @property
-    def action_space(self) -> Callable[[str], Any]:
+    def action_space(self) -> Callable[[str], Space]:
         """Return callable to get an agent's action space."""
         return self._get_action_space
 
     @property
-    def observation_space(self) -> Callable[[str], Any]:
+    def observation_space(self) -> Callable[[str], Space]:
         """Return callable to get an agent's observation space."""
         return self._get_observation_space
 
     @property
-    def single_action_space(self) -> Callable[[str], Any]:
+    def single_action_space(self) -> Callable[[str], Space]:
         """Return callable to get an agent's single action space."""
         return self._get_single_action_space
 
     @property
-    def single_observation_space(self) -> Callable[[str], Any]:
+    def single_observation_space(self) -> Callable[[str], Space]:
         """Return callable to get an agent's single observation space."""
         return self._get_single_observation_space
 
@@ -79,7 +85,7 @@ class PettingZooVecEnv:
         *,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[dict[str, NumpyObsType], dict[str, Any]]:
+    ) -> tuple[dict[str, NumpyObsType], InfosDict]:
         """Reset all the environments and return two dictionaries of batched observations and infos.
 
         :param seed: Random seed, defaults to None
@@ -87,7 +93,7 @@ class PettingZooVecEnv:
         :param options: Options dictionary
         :type options: dict[str, Any]
         :return: Tuple of (observations, infos)
-        :rtype: tuple[dict[str, NumpyObsType], dict[str, Any]]
+        :rtype: tuple[dict[str, NumpyObsType], InfosDict]
         """
         msg = "Subclasses must implement reset()"
         raise NotImplementedError(msg)
@@ -128,7 +134,7 @@ class PettingZooVecEnv:
         :type actions: Mapping[str, ArrayOrTensor]
 
         :return: Tuple of observations, rewards, terminated, truncated, infos
-        :rtype: tuple[dict[str, np.ndarray], dict[str, float], dict[str, bool], dict[str, bool], dict[str, Any]]
+        :rtype: PzStepReturn
         """
         passed_actions_list = []
         num_actions = len(next(iter(actions.values())))

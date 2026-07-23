@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from agilerl.protocols import MultiTurnEnv
+from agilerl.typing import ReasoningPrompts, TokenObservation, TokenObsStepReturn
 from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
 
 if TYPE_CHECKING:
@@ -208,28 +209,30 @@ class TokenObservationWrapper:
             self._sw_max_output_tokens,
         )
 
-    def _policy_observation_from_state(self) -> dict[str, Any]:
+    def _policy_observation_from_state(self) -> ReasoningPrompts:
         """Build observation dict for ``get_action`` from current ``full_ids``."""
         if self.full_ids is None:
             msg = "No prompt: reset() was never called"
             raise RuntimeError(msg)
         self._last_full_prompt_token_len = int(self.full_ids.shape[1])
         prompt_ids_1d = self.full_ids[0]
-        obs: dict[str, Any] = {
+        text = self.tokenizer.decode(
+            prompt_ids_1d.tolist(),
+            skip_special_tokens=True,
+        )
+        assert isinstance(text, str)
+        obs: ReasoningPrompts = {
             "input_ids": self.full_ids,
             "attention_mask": torch.ones_like(self.full_ids),
-            "text": self.tokenizer.decode(
-                prompt_ids_1d.tolist(),
-                skip_special_tokens=True,
-            ),
+            "text": text,
         }
         if self._sw_enabled:
             max_pt = self._prompt_budget()
             if max_pt is not None:
-                obs.update(self.build_model_prompt_fields(max_pt))
+                obs = obs | self.build_model_prompt_fields(max_pt)
         return obs
 
-    def reset(self, seed: int | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+    def reset(self, seed: int | None = None) -> tuple[ReasoningPrompts, dict[str, Any]]:
         """Create a fresh episode and return the policy-ready observation plus info."""
         if seed is not None:
             reset_sig = inspect.signature(self._env.reset)
@@ -266,7 +269,7 @@ class TokenObservationWrapper:
         self,
         full_completion_ids: torch.Tensor,
         gen_text: str,
-    ) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
+    ) -> TokenObsStepReturn:
         """Record a generation and step the underlying environment."""
         if self.full_ids is None:
             msg = "No prompt: reset() was never called"
@@ -282,7 +285,9 @@ class TokenObservationWrapper:
         self.turn_rewards.append(float(reward))
         self._turn_idx += 1
 
-        prompt_dict: dict[str, Any] = {}
+        # Empty mapping when the episode has ended; callers only read obs on
+        # continuing turns (see SyncMultiTurnVecEnv.step).
+        prompt_dict: TokenObservation = {}
         if not (terminated or truncated):
             feedback_text = self._format_obs(next_obs, info)
             self._feedback_texts.append(feedback_text)
@@ -328,7 +333,7 @@ class TokenObservationWrapper:
     def step(
         self,
         full_completion_ids: torch.Tensor,
-    ) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
+    ) -> TokenObsStepReturn:
         """Decode the generation from completion IDs and step the environment."""
         if self._last_full_prompt_token_len is None:
             msg = (
@@ -347,8 +352,12 @@ class TokenObservationWrapper:
     def build_model_prompt_fields(
         self,
         max_prompt_tokens: int,
-    ) -> dict[str, Any]:
-        """Build truncated prompt tensors for model-window operation."""
+    ) -> ReasoningPrompts:
+        """Build truncated prompt tensors for model-window operation.
+
+        Returns a partial ``ReasoningPrompts`` with trajectory / stitch fields
+        only; callers merge into a full observation.
+        """
         if self.full_ids is None:
             msg = "No prompt: reset() was never called"
             raise RuntimeError(msg)
@@ -405,13 +414,19 @@ class TokenObservationWrapper:
             prompt_ids_1d.tolist(),
             skip_special_tokens=True,
         )
-        return {
+        assert isinstance(trajectory_text, str)
+        # Required TypedDict keys are filled with the truncated trajectory;
+        # callers that merge these fields overwrite their own input_ids.
+        result: ReasoningPrompts = {
+            "input_ids": trunc,
+            "attention_mask": torch.ones_like(trunc),
             "trajectory_input_ids": trunc,
             "trajectory_attention_mask": torch.ones_like(trunc),
             "trajectory_text": trajectory_text,
             "stitch_prefix_ids": stitch,
             "initial_prompt_len": initial_len,
         }
+        return result
 
     def get_episode_data(
         self,

@@ -14,6 +14,7 @@ from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
+from agilerl.typing import InitHyperparams
 from agilerl.utils.minari_utils import minari_to_agile_buffer
 from agilerl.utils.utils import (
     default_progress_bar,
@@ -22,7 +23,6 @@ from agilerl.utils.utils import (
     tournament_selection_and_mutation,
 )
 
-InitDictType = dict[str, Any] | None
 PopulationType = list[CQN]
 
 logger = logging.getLogger(__name__)
@@ -34,8 +34,8 @@ def train_offline(
     algo: str,
     pop: PopulationType,
     memory: ReplayBuffer,
-    init_hp: InitDictType = None,
-    mut_p: InitDictType = None,
+    init_hp: InitHyperparams = None,
+    mut_p: InitHyperparams = None,
     max_steps: int = 1000000,
     evo_steps: int = 10000,
     eval_steps: int | None = None,

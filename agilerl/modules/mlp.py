@@ -3,7 +3,7 @@ from typing import Any
 import torch
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
-from agilerl.typing import ArrayOrTensor, DeviceType
+from agilerl.typing import ArrayOrTensor, DeviceType, MutationApplyDict
 from agilerl.utils.evolvable_networks import create_mlp
 
 
@@ -225,7 +225,7 @@ class EvolvableMLP(EvolvableModule):
         self.recreate_network()
 
     @mutation(MutationType.LAYER)
-    def add_layer(self) -> dict[str, int] | None:
+    def add_layer(self) -> MutationApplyDict | None:
         """Add a hidden layer to neural network. Falls back on ``add_node()`` if ``max_hidden_layers`` reached.
 
         :return: Dictionary containing the hidden layer and number of new nodes.
@@ -239,7 +239,7 @@ class EvolvableMLP(EvolvableModule):
         return None
 
     @mutation(MutationType.LAYER)
-    def remove_layer(self) -> dict[str, int] | None:
+    def remove_layer(self) -> MutationApplyDict | None:
         """Remove a hidden layer from neural network. Falls back on ``add_node()`` if ``min_hidden_layers`` reached.
 
         :return: Dictionary containing the hidden layer and number of new nodes.
@@ -256,7 +256,7 @@ class EvolvableMLP(EvolvableModule):
         self,
         hidden_layer: int | None = None,
         numb_new_nodes: int | None = None,
-    ) -> dict[str, int]:
+    ) -> MutationApplyDict:
         """Add nodes to hidden layer of neural network.
 
         :param hidden_layer: Depth of hidden layer to add nodes to, defaults to None
@@ -286,7 +286,7 @@ class EvolvableMLP(EvolvableModule):
         self,
         hidden_layer: int | None = None,
         numb_new_nodes: int | None = None,
-    ) -> dict[str, int]:
+    ) -> MutationApplyDict:
         """Remove nodes from hidden layer of neural network.
 
         :param hidden_layer: Depth of hidden layer to remove nodes from, defaults to None

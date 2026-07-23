@@ -16,6 +16,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
 from agilerl.protocols import BanditEnvProtocol
+from agilerl.typing import InitHyperparams
 from agilerl.utils.utils import (
     default_progress_bar,
     init_loggers,
@@ -23,7 +24,6 @@ from agilerl.utils.utils import (
     tournament_selection_and_mutation,
 )
 
-InitDictType = dict[str, Any] | None
 PopulationType = list[NeuralTS | NeuralUCB]
 
 logger = logging.getLogger(__name__)
@@ -35,8 +35,8 @@ def train_bandits(
     algo: str,
     pop: PopulationType,
     memory: ReplayBuffer,
-    init_hp: InitDictType = None,
-    mut_p: InitDictType = None,
+    init_hp: InitHyperparams = None,
+    mut_p: InitHyperparams = None,
     max_steps: int = 20000,
     episode_steps: int = 500,
     evo_steps: int = 2500,

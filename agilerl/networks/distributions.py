@@ -5,7 +5,13 @@ import torch
 from gymnasium import spaces
 
 from agilerl.modules.base import EvolvableModule, EvolvableWrapper
-from agilerl.typing import ArrayOrTensor, DeviceType, NetConfigType
+from agilerl.typing import (
+    ActionMaskInput,
+    ArrayOrTensor,
+    DeviceType,
+    NetConfigType,
+    numpy_action_mask,
+)
 from agilerl.utils.torch_utils import (
     entropy_from_space,
     log_prob_from_space,
@@ -292,7 +298,7 @@ class EvolvableDistribution(EvolvableWrapper):
     def forward(
         self,
         latent: torch.Tensor,
-        action_mask: ArrayOrTensor | list[np.ndarray] | None = None,
+        action_mask: ActionMaskInput = None,
         sample: Literal[True] = True,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
@@ -300,14 +306,14 @@ class EvolvableDistribution(EvolvableWrapper):
     def forward(
         self,
         latent: torch.Tensor,
-        action_mask: ArrayOrTensor | list[np.ndarray] | None,
+        action_mask: ActionMaskInput,
         sample: Literal[False],
     ) -> tuple[None, None, torch.Tensor]: ...
 
     def forward(
         self,
         latent: torch.Tensor,
-        action_mask: ArrayOrTensor | list[np.ndarray] | None = None,
+        action_mask: ActionMaskInput = None,
         sample: bool = True,
     ) -> (
         tuple[torch.Tensor, torch.Tensor, torch.Tensor]
@@ -318,7 +324,7 @@ class EvolvableDistribution(EvolvableWrapper):
         :param latent: Latent space representation.
         :type latent: torch.Tensor
         :param action_mask: Mask to apply to the logits. Defaults to None.
-        :type action_mask: ArrayOrTensor | list[np.ndarray] | None
+        :type action_mask: ActionMaskInput
         :param sample: Whether to sample an action or return the mode/mean. Defaults to True.
         :type sample: bool
         :return: Action, log probability of the action, and entropy of the distribution.
@@ -327,26 +333,11 @@ class EvolvableDistribution(EvolvableWrapper):
         logits = self.wrapped(latent)
 
         if action_mask is not None:
-            if isinstance(action_mask, (np.ndarray, list)):
-                # Attempt to stack if it's a list of arrays or object array, typical for vectorized envs
-                if isinstance(action_mask, list) or (
-                    isinstance(action_mask, np.ndarray)
-                    and action_mask.dtype == np.object_
-                ):
-                    try:
-                        action_mask = np.stack(list(action_mask))
-                    except Exception:
-                        # If stacking fails, it might be a non-uniform list or other structure not directly convertible.
-                        # This path assumes action_mask should become a single tensor.
-                        # If it's already a correct tensor, as_tensor below handles it.
-                        pass  # Allow as_tensor to handle or raise error if still problematic
-
-            # Ensure action_mask is a tensor before applying.
-            # The view in apply_mask expects a compatible shape or will error.
             action_mask = torch.as_tensor(
-                action_mask, device=self.device, dtype=torch.bool
+                numpy_action_mask(action_mask),
+                device=self.device,
+                dtype=torch.bool,
             )
-
             logits = self.apply_mask(logits, action_mask)
 
         # Distribution from logits

@@ -80,10 +80,10 @@ class PreferenceGym(IterablePromptBatchGym[PreferencePrompts]):
         self,
         tokenizer: PreTrainedTokenizerBase,
         max_context_length: int | None = None,
-    ) -> Callable[[list[dict[str, Any]]], dict[str, Any]]:
+    ) -> Callable[[list[dict[str, Any]]], PreferencePrompts]:
         """Create a collate function for preference prompts."""
 
-        def collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
+        def collate_fn(batch: list[dict[str, Any]]) -> PreferencePrompts:
             prompts = [item["prompt"] for item in batch]
             chosen = [item["chosen"] for item in batch]
             rejected = [item["rejected"] for item in batch]
@@ -139,7 +139,7 @@ class PreferenceGym(IterablePromptBatchGym[PreferencePrompts]):
                     return_tensors="pt",
                 )
 
-            return {
+            result: PreferencePrompts = {
                 "prompt": prompts,
                 "prompt_lengths": prompt_lengths,
                 "chosen": chosen,
@@ -149,5 +149,6 @@ class PreferenceGym(IterablePromptBatchGym[PreferencePrompts]):
                 "rejected_input_ids": rejected_enc["input_ids"],
                 "rejected_attention_mask": rejected_enc["attention_mask"].long(),
             }
+            return result
 
         return collate_fn

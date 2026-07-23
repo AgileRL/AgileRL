@@ -9,7 +9,13 @@ from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.base import EvolvableNetwork, preserve_parameters
 from agilerl.networks.distributions import EvolvableDistribution
-from agilerl.typing import ArrayOrTensor, DeviceType, NetConfigType, TorchObsType
+from agilerl.typing import (
+    ActionMaskInput,
+    ArrayOrTensor,
+    DeviceType,
+    NetConfigType,
+    TorchObsType,
+)
 from agilerl.utils.algo_utils import get_output_size_from_space
 
 
@@ -411,14 +417,14 @@ class StochasticActor(EvolvableNetwork):
     def forward(
         self,
         obs: TorchObsType,
-        action_mask: ArrayOrTensor | None = None,
+        action_mask: ActionMaskInput = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Forward pass of the network.
 
         :param obs: Observation input.
         :type obs: TorchObsType
         :param action_mask: Action mask.
-        :type action_mask: ArrayOrTensor | None
+        :type action_mask: ActionMaskInput
         :return: Action, log probability of the action, and entropy of the action distribution.
         :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         """

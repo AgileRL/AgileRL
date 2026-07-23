@@ -18,7 +18,12 @@ from agilerl.algorithms.core.registry import (
 )
 from agilerl.modules.base import EvolvableModule
 from agilerl.networks.q_networks import QNetwork
-from agilerl.typing import ObservationType, ReplayBatch
+from agilerl.typing import (
+    ActionMaskInput,
+    ObservationType,
+    ReplayBatch,
+    numpy_action_mask,
+)
 from agilerl.utils.algo_utils import make_safe_deepcopies
 
 
@@ -191,7 +196,7 @@ class CQN(RLAlgorithm[TensorDict]):
         self,
         obs: ObservationType,
         epsilon: float = 0,
-        action_mask: np.ndarray | None = None,
+        action_mask: ActionMaskInput = None,
         *args: Any,
         **kwargs: Any,
     ) -> np.ndarray:
@@ -204,7 +209,7 @@ class CQN(RLAlgorithm[TensorDict]):
         :param epsilon: Probability of taking a random action for exploration, defaults to 0
         :type epsilon: float, optional
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
-        :type action_mask: numpy.ndarray, optional
+        :type action_mask: ActionMaskInput
 
         :return: Action to take in the environment
         :rtype: numpy.ndarray[int]
@@ -216,11 +221,9 @@ class CQN(RLAlgorithm[TensorDict]):
             if action_mask is None:
                 action = np.random.randint(0, self.action_dim, size=len(obs))
             else:
+                mask = numpy_action_mask(action_mask)
                 action = np.argmax(
-                    (
-                        np.random.uniform(0, 1, (len(obs), self.action_dim))
-                        * action_mask
-                    ),
+                    (np.random.uniform(0, 1, (len(obs), self.action_dim)) * mask),
                     axis=1,
                 )
         else:
@@ -232,7 +235,7 @@ class CQN(RLAlgorithm[TensorDict]):
             if action_mask is None:
                 action = np.argmax(action_values, axis=-1)
             else:
-                inv_mask = 1 - action_mask
+                inv_mask = 1 - numpy_action_mask(action_mask)
                 masked_action_values = np.ma.array(action_values, mask=inv_mask)
                 action = np.argmax(masked_action_values, axis=-1)
 

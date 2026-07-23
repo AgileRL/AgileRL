@@ -29,6 +29,7 @@ from typing import (
 import numpy as np
 import torch
 from accelerate import Accelerator
+from gymnasium import spaces
 from torch._dynamo import OptimizedModule
 from torch.nn import Module
 from torch.optim.optimizer import Optimizer
@@ -36,6 +37,7 @@ from typing_extensions import Self
 
 if TYPE_CHECKING:
     from agilerl.algorithms.core.registry import MutationRegistry
+    from agilerl.typing import MutationApplyDict
 
 NumpyObsType = np.ndarray | dict[str, np.ndarray] | tuple[np.ndarray, ...]
 TorchObsType = torch.Tensor | dict[str, torch.Tensor] | tuple[torch.Tensor, ...]
@@ -227,13 +229,13 @@ class EvolvableNetworkProtocol(EvolvableModuleProtocol, Protocol):
     def build_network_head(self, *args: Any, **kwargs: Any) -> None:
         pass
 
-    def add_latent_node(self, numb_new_nodes: int | None = None) -> dict[str, Any]:
+    def add_latent_node(self, numb_new_nodes: int | None = None) -> "MutationApplyDict":
         pass
 
     def remove_latent_node(
         self,
         numb_new_nodes: int | None = None,
-    ) -> dict[str, Any]:
+    ) -> "MutationApplyDict":
         pass
 
     def recreate_encoder(self) -> None:
@@ -703,8 +705,12 @@ class BanditEnvProtocol(Protocol):
 
     arms: int
     num_envs: int
-    single_observation_space: Any
-    single_action_space: Any
+
+    @property
+    def single_observation_space(self) -> spaces.Space: ...
+
+    @property
+    def single_action_space(self) -> spaces.Discrete: ...
 
     def reset(self) -> np.ndarray:
         pass

@@ -9,17 +9,19 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, TypeVar
 
+import gymnasium as gym
 from gymnasium.vector import AsyncVectorEnv, SyncVectorEnv
 from pettingzoo import ParallelEnv
 
+from agilerl.typing import WrapperSpec
 from agilerl.vector import AsyncPettingZooVecEnv
 
-WrapperSpec = tuple[Any, dict[str, Any]] | str | Callable[..., Any]
 GymEnvType = AsyncVectorEnv | SyncVectorEnv
 PzEnvType = ParallelEnv | AsyncPettingZooVecEnv
 
-# Wrapped envs duck-type as the env they wrap, so wrapping preserves the type.
-EnvT = TypeVar("EnvT", bound=GymEnvType | PzEnvType)
+# Single envs, vectorized gym envs, and PettingZoo parallel / vec envs.
+# Wrappers duck-type as the env they wrap, so wrapping preserves EnvT.
+EnvT = TypeVar("EnvT", bound=gym.Env | GymEnvType | PzEnvType)
 
 
 def make_conversation_template(prompt_template: dict[str, str]) -> list[dict[str, str]]:
@@ -201,15 +203,15 @@ def resolve_entrypoint_target(entrypoint: str, path: str | None = None) -> Any: 
 
 def _resolve_wrapper(
     wrapper: WrapperSpec, path: str | None = None
-) -> tuple[Any, dict[str, Any]]:
+) -> tuple[Callable[..., Any], dict[str, Any]]:
     """Resolve a wrapper from a wrapper specification and environment path.
 
     :param wrapper: Wrapper specification.
     :type wrapper: WrapperSpec
     :param path: Environment path.
     :type path: str or None
-    :returns: Resolved wrapper and wrapper kwargs.
-    :rtype: tuple[Any, dict[str, Any]]
+    :returns: Resolved wrapper callable and wrapper kwargs.
+    :rtype: tuple[Callable[..., Any], dict[str, Any]]
     """
     wrapper_kwargs: dict[str, Any]
     if isinstance(wrapper, tuple):

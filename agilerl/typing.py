@@ -1,4 +1,4 @@
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from enum import Enum
 from numbers import Number
 from typing import (
@@ -20,6 +20,7 @@ from tensordict import TensorClass, TensorDict
 from torch._dynamo import OptimizedModule
 from torch.nn import Module
 from torch.optim import Optimizer
+from typing_extensions import Never, NotRequired
 
 from agilerl.protocols import (
     EvolvableAlgorithmProtocol,
@@ -37,14 +38,23 @@ class IsDataclass(Protocol):
 
 
 class ReasoningPrompts(TypedDict):
+    """Tokenized reasoning / multi-turn observation prompts.
+
+    ``input_ids`` and ``attention_mask`` are always present. Remaining keys are
+    filled by collate, multi-turn wrappers, or sliding-window truncation as
+    needed.
+    """
+
     input_ids: torch.Tensor
     attention_mask: torch.Tensor
-    question: str | list[str] | None
-    answer: str | list[str] | None
-    trajectory_input_ids: torch.Tensor | None
-    trajectory_attention_mask: torch.Tensor | None
-    initial_prompt_len: int | list[int] | torch.Tensor | None
-    stitch_prefix_ids: torch.Tensor | None
+    question: NotRequired[str | list[str] | None]
+    answer: NotRequired[str | list[str] | None]
+    trajectory_input_ids: NotRequired[torch.Tensor | None]
+    trajectory_attention_mask: NotRequired[torch.Tensor | None]
+    initial_prompt_len: NotRequired[int | list[int] | torch.Tensor | None]
+    stitch_prefix_ids: NotRequired[torch.Tensor | None]
+    text: NotRequired[str | None]
+    trajectory_text: NotRequired[str | None]
 
 
 class PreferencePrompts(TypedDict):
@@ -67,10 +77,22 @@ class SFTPrompts(TypedDict):
 
 
 class CheckpointInfo(TypedDict):
-    modules: dict[str, Module]
-    optimizers: dict[str, Optimizer]
+    # Serialized bags keyed by ``{attr}_{cls|init_dict|state_dict|...}`` (modules)
+    # and ``{attr}_{cls|state_dict|networks|lr|kwargs|...}`` (optimizers).
+    # Values are heterogeneous pickled classes, init dicts, and state dicts.
+    modules: dict[str, Any]
+    optimizers: dict[str, Any]
     network_names: list[str]
     optimizer_names: list[str]
+
+
+class MutationApplyDict(TypedDict, total=False):
+    """Closed key set returned by single-module architecture mutations."""
+
+    numb_new_nodes: int
+    hidden_layer: int
+    numb_new_channels: int
+    kernel_size: int | tuple[int, ...] | list[int]
 
 
 class MultiAgentSetup(Enum):
@@ -110,7 +132,10 @@ StandardTensorDict = dict[str, torch.Tensor]
 TensorTuple = tuple[torch.Tensor, ...]
 ArrayDict = dict[str, np.ndarray]
 ArrayTuple = tuple[np.ndarray, ...]
-NetConfigType = dict[str, Any]
+# Imported mid-file so ``modules.configs`` can load without a typing↔configs cycle
+# (``modules.__init__`` is lazy). Canonical definition lives in ``modules.configs``.
+from agilerl.modules.configs import NetConfigType as NetConfigType  # noqa: E402
+
 KernelSizeType = int | tuple[int, ...]
 GymSpaceType = SupportedObservationSpace | list[SupportedObservationSpace]
 GymEnvType = str | gym.Env | gym.vector.VectorEnv | gym.vector.AsyncVectorEnv
@@ -121,12 +146,130 @@ NumpyObsType = np.ndarray | ArrayDict | ArrayTuple
 TorchObsType = torch.Tensor | TensorDict | TensorTuple | StandardTensorDict
 ObservationType = NumpyObsType | TorchObsType | Number | LLMObsType
 MultiAgentObservationType = dict[str, ObservationType]
+# Multi-agent obs aliases used by agent wrappers (same shape as MultiAgentObservationType).
+MARLObservationType = MultiAgentObservationType
+MARLTensorObsType = dict[str, TorchObsType]
 ActionType = int | float | np.ndarray | torch.Tensor
 # A recorded fitness: a scalar, or a per-sub-agent row (multi-agent, sum_scores=False).
 FitnessValue = float | np.ndarray
-InfosDict = dict[str, dict[str, Any]]
+
+# Raw Gym/PettingZoo ``info["action_mask"]`` before stacking into a tensor
+# (1 = legal, 0 = illegal). ``None`` means the agent provided no mask.
+ActionMask = np.ndarray | Sequence[int | float | bool]
+MaybeActionMask = ActionMask | None
+
+
+def coerce_action_mask(value: object) -> MaybeActionMask:
+    """Narrow an env ``info["action_mask"]`` value to :data:`MaybeActionMask`."""
+    if value is None or isinstance(value, np.ndarray):
+        return value
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        coerced: list[int | float | bool] = []
+        for item in value:
+            if not isinstance(item, (int, float, bool)):
+                return None
+            coerced.append(item)
+        return coerced
+    return None
+
+
+def numpy_action_mask(
+    value: np.ndarray | Sequence[np.ndarray] | torch.Tensor,
+) -> np.ndarray:
+    """Stack or convert a non-None :data:`ActionMaskInput` to ``np.ndarray``."""
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().numpy()
+    if isinstance(value, np.ndarray):
+        if value.dtype == object:
+            return np.stack(list(value))
+        return value
+    return np.stack(list(value))
+
+
+# Per-agent masks from ``process_infos`` / ``extract_action_masks`` (raw or stacked).
+MultiAgentActionMasks = Mapping[str, MaybeActionMask | torch.Tensor]
+
+# Masks accepted by single-agent ``get_action`` / distribution heads: stacked
+# ndarray, vectorized per-env masks, or already tensorised. Raw
+# ``Sequence[int | float | bool]`` from env info belongs in ``MaybeActionMask``.
+ActionMaskInput = np.ndarray | Sequence[np.ndarray] | torch.Tensor | None
+
+# MADDPG / MATD3 / base-like ``process_infos`` return.
+ProcessInfosReturn = tuple[
+    MultiAgentActionMasks,
+    ArrayDict | None,
+    ArrayDict | None,
+]
+
+# IPPO stacks per-group masks into tensors (``None`` when absent).
+IPPOActionMasks = Mapping[str, torch.Tensor | None]
+IPPOProcessInfosReturn = tuple[
+    IPPOActionMasks,
+    ArrayDict | None,
+    ArrayDict | None,
+]
+
+
+class AgentInfo(TypedDict, total=False):
+    """Per-agent (or single-env) step ``info`` keys used by AgileRL."""
+
+    action_mask: MaybeActionMask
+    env_defined_actions: ActionType | None
+
+
+# Flat single-agent Gymnasium info when only AgileRL keys are present.
+GymInfo = AgentInfo
+# Multi-agent env infos keyed by agent id. PettingZoo types the inner mapping
+# as a bare ``dict``; ``AgentInfo`` documents keys we read.
+InfosDict = Mapping[str, Mapping[str, object]]
 MaybeObsList = list[ObservationType] | ObservationType
 ExperiencesType = dict[str, ObservationType] | tuple[ObservationType, ...]
+
+# Observation as a dict or tuple of arrays/tensors (Dict / Tuple spaces).
+TupleOrDictObservation = dict[str, ArrayOrTensor] | tuple[ArrayOrTensor, ...]
+
+# One transition bag for replay-buffer storage (plain dict or TensorDict).
+DataType = dict[str, ArrayOrTensor] | TensorDict
+
+# Layer metadata detected from an arbitrary user network (heterogeneous values).
+LayerInfo = dict[str, Any]
+
+# Gymnasium / PettingZoo wrapper factory: ``(cls, kwargs)``, import path, or callable.
+WrapperSpec = tuple[Any, dict[str, Any]] | str | Callable[..., Any]
+
+# Zero-arg factory that builds a single (non-vectorized) Gymnasium env.
+EnvFactory = Callable[[], gym.Env]
+
+# Network input size inferred from an observation space (leaf / Dict / Tuple).
+InputSizeFromSpace = (
+    tuple[int, ...]
+    | dict[str, tuple[int, ...]]
+    | tuple[tuple[int, ...] | dict[str, tuple[int, ...]], ...]
+)
+# Network output size inferred from an action space (leaf / Dict / Tuple).
+OutputSizeFromSpace = int | dict[str, int] | tuple[int | dict[str, int], ...]
+# Observation shape for a Gymnasium space (leaf / Dict / Tuple).
+ObsShape = tuple[int, ...] | dict[str, tuple[int, ...]] | tuple[tuple[int, ...], ...]
+
+# Scores, episode lengths, and terminal info from an on-policy rollout collection.
+# Info stays ``dict[str, Any]`` to match Gymnasium's open info bags.
+RolloutReturn = tuple[
+    list[float],
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    dict[str, Any],
+]
+
+
+class HFGeneratePrompt(TypedDict):
+    """Prompt tensors prepared for HuggingFace ``generate``."""
+
+    input_ids: torch.Tensor
+    attention_mask: torch.Tensor
+    stitch_prefix_ids: torch.Tensor | None
+    initial_prompt_len: int | None
+
 
 # The batch type an algorithm's ``learn`` consumes. Each concrete algorithm binds
 # this to the exact shape its buffer/rollout produces (e.g. ``ReplayBatch`` for
@@ -241,14 +384,17 @@ LLMRolloutExperiences = tuple[
 
 
 ActionReturnType = tuple[ActionType | Any, ...] | ActionType | Any
-GymStepReturn = tuple[NumpyObsType, ActionType, float, MaybeObsList, InfosDict]
+GymStepReturn = tuple[NumpyObsType, ActionType, float, MaybeObsList, GymInfo]
 PzStepReturn = tuple[
     dict[str, NumpyObsType],
     ArrayDict,
     ArrayDict,
     ArrayDict,
-    dict[str, Any],
+    InfosDict,
 ]
+# TokenObservationWrapper obs: ReasoningPrompts mid-episode, empty mapping at done.
+TokenObservation = ReasoningPrompts | dict[str, Never]
+TokenObsStepReturn = tuple[TokenObservation, float, bool, bool, dict[str, Any]]
 
 SingleAgentModule = (
     T | EvolvableModuleProtocol | OptimizedModule | EvolvableNetworkProtocol
@@ -261,13 +407,21 @@ EvolvableNetworkType = (
 DeviceType = str | torch.device
 OptimizerType = Optimizer | AcceleratedOptimizer
 
-SingleAgentMutReturnType = dict[str, Any]
-MultiAgentMutReturnType = dict[str, dict[str, Any]]
+SingleAgentMutReturnType = MutationApplyDict
+MultiAgentMutReturnType = dict[str, MutationApplyDict]
 MutationReturnType = SingleAgentMutReturnType | MultiAgentMutReturnType
 PopulationType = list[EvolvableAlgorithmProtocol]
 MutationMethod = Callable[[EvolvableAlgorithmProtocol], EvolvableAlgorithmProtocol]
 ConfigType = IsDataclass | NetConfigType
 StateDict = dict[str, Any] | dict[str, dict[str, Any]] | list[dict[str, Any]]
+
+# Training / mutation hyperparameter bags passed to train_* and logging helpers.
+InitHyperparams = dict[str, Any] | None
+
+# Per-layer transformer KV cache: exact (key, value) tensor pair.
+KVCacheType = tuple[torch.Tensor, torch.Tensor]
+# Full stack of per-layer KV caches (inner tuple length may vary by backend).
+PastKeyValues = tuple[tuple[torch.Tensor, ...], ...]
 
 # A decoded JSON value: any JSON primitive, array, or object (recursive).
 JSONValue = None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]

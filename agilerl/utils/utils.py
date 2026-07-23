@@ -35,7 +35,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.logger import CSVLogger, StdOutLogger, TensorboardLogger, WandbLogger
 from agilerl.protocols import EvolvableAlgorithmProtocol
-from agilerl.typing import BPTTSequenceType, PopulationType
+from agilerl.typing import BPTTSequenceType, InfosDict, PopulationType
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, DummyOptimizer, clone_llm
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
@@ -1553,13 +1553,13 @@ def print_hyperparams(pop: PopulationType) -> None:
 
 
 def get_env_defined_actions(
-    info: dict[str, Any],
+    info: InfosDict,
     agents: list[str],
 ) -> dict[str, Any] | None:
     """Get the environment-defined actions for a list of agents.
 
     :param info: Info dictionary
-    :type info: dict[str, Any]
+    :type info: InfosDict
     :param agents: List of agents
     :type agents: list[str]
     :return: Environment-defined actions

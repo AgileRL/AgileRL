@@ -25,9 +25,8 @@ from agilerl.modules.custom_components import (
     ResidualBlock,
     SimbaResidualBlock,
 )
-from agilerl.typing import DeviceType, NetConfigType
+from agilerl.typing import DeviceType, KernelSizeType, NetConfigType
 
-TupleorInt = tuple[int, ...] | int
 ConvBlockType = Literal["Conv1d", "Conv2d", "Conv3d"]
 
 
@@ -37,16 +36,16 @@ _SizeT = TypeVar("_SizeT")
 
 
 @overload
-def _size_normalizer(dims: Literal[1]) -> Callable[[TupleorInt], tuple[int]]: ...
+def _size_normalizer(dims: Literal[1]) -> Callable[[KernelSizeType], tuple[int]]: ...
 @overload
 def _size_normalizer(
     dims: Literal[2],
-) -> Callable[[TupleorInt], tuple[int, int]]: ...
+) -> Callable[[KernelSizeType], tuple[int, int]]: ...
 @overload
 def _size_normalizer(
     dims: Literal[3],
-) -> Callable[[TupleorInt], tuple[int, int, int]]: ...
-def _size_normalizer(dims: int) -> Callable[[TupleorInt], tuple[int, ...]]:
+) -> Callable[[KernelSizeType], tuple[int, int, int]]: ...
+def _size_normalizer(dims: int) -> Callable[[KernelSizeType], tuple[int, ...]]:
     """Build a normalizer that coerces an int-or-tuple size to ``dims`` arity.
 
     torch's stubs demand an exact-arity size tuple per dimensionality; the
@@ -55,7 +54,7 @@ def _size_normalizer(dims: int) -> Callable[[TupleorInt], tuple[int, ...]]:
     upstream by ``_assert_correct_kernel_sizes`` in ``agilerl/modules/cnn.py``).
     """
 
-    def normalize(size: TupleorInt) -> tuple[int, ...]:
+    def normalize(size: KernelSizeType) -> tuple[int, ...]:
         if isinstance(size, int):
             return (size,) * dims
         return tuple(size[:dims])
@@ -91,12 +90,12 @@ class _PoolCtor(Protocol[_SizeT]):
 
 def _build_conv(
     conv_cls: _ConvCtor[_SizeT],
-    to_size: Callable[[TupleorInt], _SizeT],
+    to_size: Callable[[KernelSizeType], _SizeT],
     in_channels: int,
     out_channels: int,
-    kernel_size: TupleorInt,
-    stride: TupleorInt,
-    padding: TupleorInt,
+    kernel_size: KernelSizeType,
+    stride: KernelSizeType,
+    padding: KernelSizeType,
     device: DeviceType,
 ) -> nn.Module:
     """Construct ``conv_cls`` with each size normalized to its expected arity.
@@ -116,10 +115,10 @@ def _build_conv(
 
 def _build_pool(
     pool_cls: _PoolCtor[_SizeT],
-    to_size: Callable[[TupleorInt], _SizeT],
-    kernel_size: TupleorInt,
-    stride: TupleorInt,
-    padding: TupleorInt,
+    to_size: Callable[[KernelSizeType], _SizeT],
+    kernel_size: KernelSizeType,
+    stride: KernelSizeType,
+    padding: KernelSizeType,
 ) -> nn.Module:
     """Construct ``pool_cls``, preserving scalar sizes when all args are ints.
 
@@ -403,9 +402,9 @@ def get_conv_layer(
     conv_layer_name: ConvBlockType,
     in_channels: int,
     out_channels: int,
-    kernel_size: TupleorInt,
-    stride: TupleorInt = 1,
-    padding: TupleorInt = 0,
+    kernel_size: KernelSizeType,
+    stride: KernelSizeType = 1,
+    padding: KernelSizeType = 0,
     device: DeviceType = "cpu",
 ) -> nn.Module:
     """Return convolutional layer for corresponding convolutional layer name.
@@ -587,8 +586,8 @@ def create_cnn(
     block_type: ConvBlockType,
     in_channels: int,
     channel_size: Sequence[int],
-    kernel_size: Sequence[TupleorInt],
-    stride_size: Sequence[TupleorInt],
+    kernel_size: Sequence[KernelSizeType],
+    stride_size: Sequence[KernelSizeType],
     name: str = "cnn",
     init_layers: bool = True,
     layer_norm: bool = False,

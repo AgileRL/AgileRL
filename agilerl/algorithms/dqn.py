@@ -1,4 +1,5 @@
 import warnings
+from collections.abc import Callable
 from typing import Any
 
 import gymnasium as gym
@@ -19,10 +20,12 @@ from agilerl.algorithms.core.registry import (
 from agilerl.modules.base import EvolvableModule
 from agilerl.networks.q_networks import QNetwork
 from agilerl.typing import (
+    ActionMaskInput,
     ObservationType,
     ReplayBatch,
     SupportedObservationSpace,
     TorchObsType,
+    numpy_action_mask,
 )
 from agilerl.utils.algo_utils import make_safe_deepcopies
 
@@ -75,6 +78,16 @@ class DQN(RLAlgorithm[TensorDict]):
 
     # Discrete action space, so the network output size is a plain int
     action_dim: int
+
+    # Hot-path callables: bound methods by default, CudaGraph wrappers when enabled.
+    _get_action_impl: Callable[
+        [TorchObsType, torch.Tensor, torch.Tensor],
+        torch.Tensor,
+    ]
+    _update_impl: Callable[
+        [TorchObsType, torch.Tensor, torch.Tensor, TorchObsType, torch.Tensor],
+        torch.Tensor,
+    ]
 
     def __init__(
         self,
@@ -186,25 +199,22 @@ class DQN(RLAlgorithm[TensorDict]):
 
         self.criterion = nn.MSELoss()
 
-        # torch.compile and cuda graph optimizations
+        # Hot-path dispatch: methods by default; CudaGraph wrappers when enabled.
+        self._update_impl = self.update
+        self._get_action_impl = self._get_action
         if self.cudagraphs:
             warnings.warn(
                 "CUDA graphs for DQN are implemented experimentally and may not work as expected.",
                 stacklevel=2,
             )
-            # torch.compile/CudaGraphModule shadow the bound methods with
-            # signature-preserving wrappers whose types cannot be reconciled with
-            # the original methods; route the dynamic wrappers through Any.
             compiled_update: Any = torch.compile(self.update, mode=None)
             compiled_get_action: Any = torch.compile(
                 self._get_action,
                 mode=None,
                 fullgraph=True,
             )
-            graphed_update: Any = CudaGraphModule(compiled_update)
-            graphed_get_action: Any = CudaGraphModule(compiled_get_action)
-            self.update = graphed_update
-            self._get_action = graphed_get_action
+            self._update_impl = CudaGraphModule(compiled_update)
+            self._get_action_impl = CudaGraphModule(compiled_get_action)
 
         # Register DQN network groups
         self.register_network_group(
@@ -223,7 +233,7 @@ class DQN(RLAlgorithm[TensorDict]):
         self,
         obs: ObservationType,
         epsilon: float = 0.0,
-        action_mask: np.ndarray | list[np.ndarray] | None = None,
+        action_mask: ActionMaskInput = None,
         *args: Any,
         **kwargs: Any,
     ) -> np.ndarray:
@@ -234,7 +244,7 @@ class DQN(RLAlgorithm[TensorDict]):
         :param epsilon: Probability of taking a random action for exploration, defaults to 0
         :type epsilon: float, optional
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
-        :type action_mask: numpy.ndarray | list[numpy.ndarray], optional
+        :type action_mask: ActionMaskInput
         :return: Selected action(s) for the given observation(s)
         :rtype: numpy.ndarray
         """
@@ -242,11 +252,10 @@ class DQN(RLAlgorithm[TensorDict]):
         torch_obs = self.preprocess_observation(obs)
         eps = torch.tensor(epsilon, device=self.device)
         if action_mask is not None:
-            # Need to stack if vectorized env
-            if isinstance(action_mask, list) or action_mask.dtype == object:
-                action_mask = np.stack(list(action_mask))
-
-            mask = torch.as_tensor(action_mask, device=self.device)
+            mask = torch.as_tensor(
+                numpy_action_mask(action_mask),
+                device=self.device,
+            )
         else:
             if isinstance(torch_obs, torch.Tensor):
                 batch_size = torch_obs.size(0)
@@ -260,9 +269,7 @@ class DQN(RLAlgorithm[TensorDict]):
 
             mask = torch.ones((batch_size, self.action_dim), device=self.device)
 
-        # NOTE: with cudagraphs enabled, self._get_action is swapped for a
-        # signature-preserving CudaGraphModule wrapper in __init__.
-        action = self._get_action(torch_obs, eps, mask).cpu().numpy()  # ty: ignore[missing-argument, invalid-argument-type]
+        action = self._get_action_impl(torch_obs, eps, mask).cpu().numpy()
 
         if self.training:
             self.metrics.log_histogram("action_dist", action)
@@ -283,8 +290,8 @@ class DQN(RLAlgorithm[TensorDict]):
         :type obs: torch.Tensor, dict[str, torch.Tensor], tuple[torch.Tensor]
         :param epsilon: Probability of taking a random action for exploration, defaults to 0
         :type epsilon: float, optional
-        :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
-        :type action_mask: numpy.ndarray, optional
+        :param action_mask: Mask of legal actions 1=legal 0=illegal
+        :type action_mask: torch.Tensor
         :return: Selected action(s) as tensor
         :rtype: torch.Tensor
         """
@@ -381,9 +388,7 @@ class DQN(RLAlgorithm[TensorDict]):
         obs = self.preprocess_observation(batch.obs)
         next_obs = self.preprocess_observation(batch.next_obs)
 
-        # NOTE: with cudagraphs enabled, self.update is swapped for a
-        # signature-preserving CudaGraphModule wrapper in __init__.
-        loss = self.update(obs, actions, rewards, next_obs, dones)  # ty: ignore[missing-argument, invalid-argument-type]
+        loss = self._update_impl(obs, actions, rewards, next_obs, dones)
 
         # soft update target network
         self.soft_update()

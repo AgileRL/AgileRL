@@ -11,7 +11,7 @@ from torch import nn
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.custom_components import GumbelSoftmax, NoisyLinear
-from agilerl.typing import ArrayOrTensor
+from agilerl.typing import ArrayOrTensor, LayerInfo, MutationApplyDict
 from agilerl.utils.evolvable_networks import (
     get_activation,
     get_conv_layer,
@@ -19,11 +19,6 @@ from agilerl.utils.evolvable_networks import (
     get_pooling,
     layer_init,
 )
-
-# Layer information detected from an arbitrary user network. Values are heterogeneous:
-# "conv_layer_type" maps to a string, "activation_layers"/"norm_layers" to
-# ``dict[int, str]``, and "pooling_layers" to ``dict[int, dict[str, Any]]``.
-LayerInfo = dict[str, Any]
 
 _T = TypeVar("_T")
 
@@ -997,7 +992,7 @@ class MakeEvolvable(EvolvableModule):
         self,
         hidden_layer: int | None = None,
         numb_new_nodes: int | None = None,
-    ) -> dict[str, int]:
+    ) -> MutationApplyDict:
         """Add nodes to hidden layer of value network.
 
         :param hidden_layer: Depth of hidden layer to add nodes to, defaults to None
@@ -1024,7 +1019,7 @@ class MakeEvolvable(EvolvableModule):
         self,
         hidden_layer: int | None = None,
         numb_new_nodes: int | None = None,
-    ) -> dict[str, int]:
+    ) -> MutationApplyDict:
         """Remove nodes from hidden layer of neural network.
 
         :param hidden_layer: Depth of hidden layer to remove nodes from, defaults to None
@@ -1146,7 +1141,7 @@ class MakeEvolvable(EvolvableModule):
         self,
         hidden_layer: int | None = None,
         numb_new_channels: int | None = None,
-    ) -> dict[str, int]:
+    ) -> MutationApplyDict:
         """Add channel to hidden layer of Convolutional Neural Network.
 
         :param hidden_layer: Depth of hidden layer to add channel to, defaults to None
@@ -1173,7 +1168,7 @@ class MakeEvolvable(EvolvableModule):
         self,
         hidden_layer: int | None = None,
         numb_new_channels: int | None = None,
-    ) -> dict[str, int]:
+    ) -> MutationApplyDict:
         """Remove channel from hidden layer of convolutional neural network.
 
         :param hidden_layer: Depth of hidden layer to add channel to, defaults to None

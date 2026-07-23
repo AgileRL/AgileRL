@@ -6,7 +6,7 @@ import torch
 from torch import nn
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
-from agilerl.typing import ArrayOrTensor, DeviceType, KernelSizeType
+from agilerl.typing import ArrayOrTensor, DeviceType, KernelSizeType, MutationApplyDict
 from agilerl.utils.evolvable_networks import create_cnn, get_activation
 
 BlockType = Literal["Conv1d", "Conv2d", "Conv3d"]
@@ -688,7 +688,7 @@ class EvolvableCNN(EvolvableModule):
         return None
 
     @mutation(MutationType.LAYER, shrink_params=True)
-    def remove_layer(self) -> dict[str, int] | None:
+    def remove_layer(self) -> MutationApplyDict | None:
         """Remove a hidden layer from convolutional neural network.
 
         :return: If minimum number of hidden layers is reached, returns a dictionary containing
@@ -740,7 +740,7 @@ class EvolvableCNN(EvolvableModule):
         self,
         hidden_layer: int | None = None,
         numb_new_channels: int | None = None,
-    ) -> dict[str, int]:
+    ) -> MutationApplyDict:
         """Add channel to hidden layer of convolutional neural network.
 
         :param hidden_layer: Depth of hidden layer to add channel to, defaults to None
@@ -770,7 +770,7 @@ class EvolvableCNN(EvolvableModule):
         self,
         hidden_layer: int | None = None,
         numb_new_channels: int | None = None,
-    ) -> dict[str, int]:
+    ) -> MutationApplyDict:
         """Remove channel from hidden layer of convolutional neural network.
 
         :param hidden_layer: Depth of hidden layer to add channel to, defaults to None

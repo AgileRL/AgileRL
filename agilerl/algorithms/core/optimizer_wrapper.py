@@ -454,16 +454,16 @@ class OptimizerWrapper:
         )
         return optimizer_cls.__name__
 
-    def checkpoint_dict(self, name: str) -> dict[str, Any]:
+    def checkpoint_dict(self, name: str) -> dict[str, object]:
         """Return a dictionary of the optimizer's state and parameters.
 
         :param name: The name of the optimizer.
         :type name: str
 
         :return: A dictionary of the optimizer's state and parameters.
-        :rtype: dict[str, Any]
+        :rtype: dict[str, object]
         """
-        out = {
+        out: dict[str, object] = {
             f"{name}_cls": self.optimizer_cls_names(),
             f"{name}_state_dict": self.state_dict(),
             f"{name}_networks": self.network_names,

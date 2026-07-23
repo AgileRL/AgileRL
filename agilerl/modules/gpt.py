@@ -10,10 +10,7 @@ from torch.nn import functional as F
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
 from agilerl.modules.mlp import EvolvableMLP
-from agilerl.typing import DeviceType
-
-# Cached (key, value) projections for a single attention layer
-KVCacheType = tuple[torch.Tensor, torch.Tensor]
+from agilerl.typing import DeviceType, KVCacheType, MutationApplyDict
 
 ModuleT = TypeVar("ModuleT", bound=nn.Module)
 
@@ -640,7 +637,7 @@ class EvolvableGPT(EvolvableModule):
             self.n_layer -= 1
 
     @mutation(MutationType.NODE)
-    def add_node(self, numb_new_nodes: int | None = None) -> dict[str, int]:
+    def add_node(self, numb_new_nodes: int | None = None) -> MutationApplyDict:
         """Add nodes to hidden layers of transformer.
 
         :param numb_new_nodes: Number of nodes to add to hidden layers, defaults to None
@@ -653,7 +650,7 @@ class EvolvableGPT(EvolvableModule):
         return {"numb_new_nodes": numb_new_nodes}
 
     @mutation(MutationType.NODE)
-    def remove_node(self, numb_new_nodes: int | None = None) -> dict[str, int]:
+    def remove_node(self, numb_new_nodes: int | None = None) -> MutationApplyDict:
         """Remove nodes from hidden layers of transformer.
 
         :param numb_new_nodes: Number of nodes to remove from hidden layers, defaults to None

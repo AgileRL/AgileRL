@@ -20,7 +20,7 @@ from agilerl.data.rl_data import DataPoint, RL_Dataset
 from agilerl.data.tokenizer import Tokenizer
 from agilerl.modules.gpt import EvolvableGPT
 from agilerl.modules.mlp import EvolvableMLP
-from agilerl.typing import DeviceType, NetConfigType
+from agilerl.typing import DeviceType, NetConfigType, PastKeyValues
 from agilerl.utils.sampling_utils import (
     always_terminate,
     map_all_kvs,
@@ -139,7 +139,7 @@ class ILQL(nn.Module):
         self.dataset = dataset
         # ILQL's net_config is a flat mapping of GPT hyperparameters
         # (``NetConfigType`` nests sub-configs for other architectures).
-        self.net_config: dict[str, Any] = net_config
+        self.net_config: NetConfigType = net_config
         cfg = self.net_config
         self.alpha = alpha
         self.gamma = gamma
@@ -377,6 +377,7 @@ class ILQL(nn.Module):
         target_hidden_states = target_hidden_states[-1][:, prefix_t:, :]
 
         # Prepare policy inputs
+        policy_past_key_values: PastKeyValues
         if skip_policy_on_train and self.training:
             policy_hidden_states = hidden_states
             policy_past_key_values = model_past_key_values
@@ -1047,7 +1048,10 @@ class ILQL(nn.Module):
         logit_top_p: float | None = None,
         include_logits: bool = False,
         include_advantage: bool = True,
-    ) -> tuple[torch.Tensor, Any]:
+    ) -> tuple[
+        torch.Tensor,
+        tuple[PastKeyValues, PastKeyValues, PastKeyValues, torch.Tensor],
+    ]:
         prepared_inputs = self.prepare_inputs(items)
         tokens = prepared_inputs["tokens"]
         is_state = (
@@ -1092,10 +1096,19 @@ class ILQL(nn.Module):
             include_advantage=include_advantage,
             action_mask=action_mask,
         )
+        qv_past_key_values: PastKeyValues = model_outputs["qv_model_outputs"][
+            "past_key_values"
+        ]
+        policy_past_key_values: PastKeyValues = model_outputs["policy_model_outputs"][
+            "past_key_values"
+        ]
+        target_past_key_values: PastKeyValues = model_outputs["target_model_outputs"][
+            "past_key_values"
+        ]
         return scores[:, -1, :], (
-            model_outputs["qv_model_outputs"]["past_key_values"],
-            model_outputs["policy_model_outputs"]["past_key_values"],
-            model_outputs["target_model_outputs"]["past_key_values"],
+            qv_past_key_values,
+            policy_past_key_values,
+            target_past_key_values,
             action_mask,
         )
 

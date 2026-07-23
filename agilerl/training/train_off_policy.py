@@ -22,6 +22,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks.actors import DeterministicActor
 from agilerl.population import Population
+from agilerl.typing import InitHyperparams
 from agilerl.utils.algo_utils import get_num_envs
 from agilerl.utils.utils import (
     default_progress_bar,
@@ -35,7 +36,6 @@ if TYPE_CHECKING:
     from tensordict import TensorDictBase
 
 
-InitDictType = dict[str, Any] | None
 SupportedOffPolicy = DQN | RainbowDQN | DDPG | TD3
 PopulationType = list[SupportedOffPolicy]
 BufferType = ReplayBuffer | PrioritizedReplayBuffer | MultiStepReplayBuffer
@@ -115,8 +115,8 @@ def train_off_policy(
     algo: str,
     pop: PopulationType,
     memory: BufferType,
-    init_hp: InitDictType = None,
-    mut_p: InitDictType = None,
+    init_hp: InitHyperparams = None,
+    mut_p: InitHyperparams = None,
     max_steps: int = 1000000,
     evo_steps: int = 10000,
     eval_steps: int | None = None,

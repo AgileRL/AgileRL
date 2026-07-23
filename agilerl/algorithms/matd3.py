@@ -30,6 +30,7 @@ from agilerl.typing import (
     MultiAgentReplayBatch,
     NetConfigType,
     ObservationType,
+    ProcessInfosReturn,
     StandardTensorDict,
     SupportedObservationSpace,
     TorchObsType,
@@ -540,18 +541,14 @@ class MATD3(MultiAgentRLAlgorithm[TensorDict]):
     def process_infos(
         self,
         infos: InfosDict | None = None,
-    ) -> tuple[
-        Mapping[str, np.ndarray | torch.Tensor | None],
-        dict[str, Any] | None,
-        ArrayDict | None,
-    ]:
+    ) -> ProcessInfosReturn:
         """Process the information, extract env_defined_actions, action_masks and agent_masks.
 
         :param infos: Info dict
-        :type infos: dict[str, dict[...]]
+        :type infos: InfosDict | None
         :return: Action masks, env defined actions, agent masks (the latter
             two are ``None`` when the info dict defines no actions)
-        :rtype: tuple[Mapping[str, np.ndarray | torch.Tensor | None], dict[str, Any] | None, ArrayDict | None]
+        :rtype: ProcessInfosReturn
         """
         if infos is None:
             infos = {agent: {} for agent in self.agent_ids}
@@ -574,10 +571,10 @@ class MATD3(MultiAgentRLAlgorithm[TensorDict]):
         :param obs: Environment observations: {'agent_0': state_dim_0, ..., 'agent_n': state_dim_n}
         :type obs: Mapping[str, ObservationType]
         :param infos: Information dictionary from environment, defaults to None
-        :type infos: dict[str, dict[...]], optional
+        :type infos: InfosDict | None
 
         :return: Processed actions for each agent, raw actions for each agent
-        :rtype: tuple[dict[str, np.ndarray], dict[str, np.ndarray]]
+        :rtype: tuple[ArrayDict, ArrayDict]
         """
         assert not key_in_nested_dict(
             obs,

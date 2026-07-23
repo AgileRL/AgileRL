@@ -2,7 +2,7 @@ import logging
 import warnings
 from collections.abc import Callable
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import gymnasium as gym
 from accelerate import Accelerator
@@ -11,6 +11,7 @@ from agilerl.algorithms import PPO
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
+from agilerl.typing import InitHyperparams, RolloutReturn
 from agilerl.utils.algo_utils import get_num_envs
 from agilerl.utils.utils import (
     default_progress_bar,
@@ -20,16 +21,12 @@ from agilerl.utils.utils import (
 )
 from agilerl.vector import DummyVecEnv
 
-if TYPE_CHECKING:
-    from agilerl.rollouts.on_policy import RolloutReturn
-
-InitDictType = dict[str, Any] | None
 OnPolicyAlgorithms = PPO
 PopulationType = list[OnPolicyAlgorithms]
 
 # Rollout collectors take the agent and environment positionally and the rest of
 # the rollout state by keyword.
-CollectRolloutsFn = Callable[..., "RolloutReturn"]
+CollectRolloutsFn = Callable[..., RolloutReturn]
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +36,8 @@ def train_on_policy(
     env_name: str,
     algo: str,
     pop: PopulationType,
-    init_hp: InitDictType = None,
-    mut_p: InitDictType = None,
+    init_hp: InitHyperparams = None,
+    mut_p: InitHyperparams = None,
     max_steps: int = 1000000,
     evo_steps: int = 10000,
     eval_steps: int | None = None,

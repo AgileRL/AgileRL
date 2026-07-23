@@ -24,7 +24,7 @@ from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks import EvolvableNetwork, StochasticActor
 from agilerl.networks.value_networks import ValueNetwork
 from agilerl.typing import (
-    ArrayOrTensor,
+    ActionMaskInput,
     BPTTSequenceType,
     ObservationType,
     RolloutMinibatch,
@@ -453,7 +453,7 @@ class PPO(RLAlgorithm[TensorDict]):
     def _get_action_and_values(
         self,
         obs: TorchObsType,
-        action_mask: ArrayOrTensor | None = None,
+        action_mask: ActionMaskInput = None,
         hidden_state: (
             dict[str, torch.Tensor] | None
         ) = None,  # Hidden state is a dict for recurrent policies
@@ -471,7 +471,7 @@ class PPO(RLAlgorithm[TensorDict]):
         :param obs: Environment observation, or multiple observations in a batch
         :type obs: TorchObsType
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
-        :type action_mask: ArrayOrTensor | None
+        :type action_mask: ActionMaskInput
         :param hidden_state: Hidden state for recurrent policies, defaults to None
         :type hidden_state: dict[str, torch.Tensor] | None
         :param sample: Whether to sample an action, defaults to True
@@ -584,7 +584,7 @@ class PPO(RLAlgorithm[TensorDict]):
         obs: ObservationType,
         actions: torch.Tensor,
         hidden_state: dict[str, torch.Tensor] | None = None,
-        action_mask: ArrayOrTensor | None = None,
+        action_mask: ActionMaskInput = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Evaluate the actions.
 
@@ -595,7 +595,7 @@ class PPO(RLAlgorithm[TensorDict]):
         :param hidden_state: Hidden state for recurrent policies, defaults to None. Expected shape: dict with tensors of shape (batch_size, 1, hidden_size).
         :type hidden_state: dict[str, torch.Tensor] | None
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
-        :type action_mask: ArrayOrTensor | None
+        :type action_mask: ActionMaskInput
         :return: Log probability, entropy, state values
         :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         """
@@ -621,7 +621,7 @@ class PPO(RLAlgorithm[TensorDict]):
     def get_action(
         self,
         obs: ObservationType,
-        action_mask: ArrayOrTensor | None = None,
+        action_mask: ActionMaskInput = None,
         *,
         hidden_state: dict[str, torch.Tensor],
         **kwargs: Any,
@@ -631,7 +631,7 @@ class PPO(RLAlgorithm[TensorDict]):
     def get_action(
         self,
         obs: ObservationType,
-        action_mask: ArrayOrTensor | None = None,
+        action_mask: ActionMaskInput = None,
         hidden_state: None = None,
         *args: Any,
         **kwargs: Any,
@@ -640,7 +640,7 @@ class PPO(RLAlgorithm[TensorDict]):
     def get_action(
         self,
         obs: ObservationType,
-        action_mask: ArrayOrTensor | None = None,
+        action_mask: ActionMaskInput = None,
         hidden_state: dict[str, torch.Tensor] | None = None,
         *args: Any,
         **kwargs: Any,
@@ -650,7 +650,7 @@ class PPO(RLAlgorithm[TensorDict]):
         :param obs: Environment observation, or multiple observations in a batch
         :type obs: ObservationType
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
-        :type action_mask: ArrayOrTensor | None
+        :type action_mask: ActionMaskInput
         :param hidden_state: Hidden state for recurrent policies, defaults to None
         :type hidden_state: dict[str, torch.Tensor] | None
         :return: Action, log probability, entropy, state values, and (if recurrent) next hidden state

@@ -21,6 +21,7 @@ from agilerl.modules.base import EvolvableModule, ModuleMeta, mutation
 from agilerl.protocols import MutationType
 from agilerl.typing import (
     DeviceType,
+    MutationApplyDict,
     NetConfigType,
     TorchObsType,
 )
@@ -65,7 +66,7 @@ def preserve_parameters(old_net: nn.Module, new_net: ModuleT) -> ModuleT:
     return new_net
 
 
-def assert_correct_mlp_net_config(net_config: dict[str, Any]) -> None:
+def assert_correct_mlp_net_config(net_config: NetConfigType) -> None:
     """Assert that the MLP network configuration is correct.
 
     :param net_config: Configuration of the MLP network.
@@ -81,7 +82,7 @@ def assert_correct_mlp_net_config(net_config: dict[str, Any]) -> None:
     )
 
 
-def assert_correct_simba_net_config(net_config: dict[str, Any]) -> None:
+def assert_correct_simba_net_config(net_config: NetConfigType) -> None:
     """Assert that the MLP network configuration is correct.
 
     :param net_config: Configuration of the MLP network.
@@ -99,7 +100,7 @@ def assert_correct_simba_net_config(net_config: dict[str, Any]) -> None:
     ), "Net config num_blocks must be an integer."
 
 
-def assert_correct_cnn_net_config(net_config: dict[str, Any]) -> None:
+def assert_correct_cnn_net_config(net_config: NetConfigType) -> None:
     """Assert that the CNN network configuration is correct.
 
     :param net_config: Configuration of the CNN network.
@@ -123,7 +124,7 @@ def assert_correct_cnn_net_config(net_config: dict[str, Any]) -> None:
             ), "Kernel size must be of type int, list, or tuple."
 
 
-def assert_correct_lstm_net_config(net_config: dict[str, Any]) -> None:
+def assert_correct_lstm_net_config(net_config: NetConfigType) -> None:
     """Assert that the LSTM network configuration is correct.
 
     :param net_config: Configuration of the LSTM network.
@@ -471,7 +472,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         num_inputs: int,
         num_outputs: int,
         name: str,
-        net_config: dict[str, Any],
+        net_config: NetConfigType,
     ) -> EvolvableMLP:
         """Build the head of the network based on the passed configuration.
 
@@ -563,7 +564,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
             module.change_activation(activation, output=_output)
 
     @mutation(MutationType.NODE)
-    def add_latent_node(self, numb_new_nodes: int | None = None) -> dict[str, Any]:
+    def add_latent_node(self, numb_new_nodes: int | None = None) -> MutationApplyDict:
         """Add a latent node to the network.
 
         :param numb_new_nodes: Number of new nodes to add, defaults to None
@@ -581,7 +582,9 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         return {"numb_new_nodes": numb_new_nodes}
 
     @mutation(MutationType.NODE)
-    def remove_latent_node(self, numb_new_nodes: int | None = None) -> dict[str, Any]:
+    def remove_latent_node(
+        self, numb_new_nodes: int | None = None
+    ) -> MutationApplyDict:
         """Remove a latent node from the network.
 
         :param numb_new_nodes: Number of nodes to remove, defaults to None
@@ -610,7 +613,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
 
         self.encoder = preserve_parameters(self.encoder, encoder)
 
-    def _build_encoder(self, net_config: dict[str, Any]) -> DefaultEncoderType:
+    def _build_encoder(self, net_config: NetConfigType) -> DefaultEncoderType:
         """Build the encoder for the network based on the environments observation space.
 
         :return: Encoder module.

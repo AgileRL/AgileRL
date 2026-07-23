@@ -23,7 +23,7 @@ from gymnasium.vector.utils import CloudpickleWrapper, clear_mpi_env_vars
 from numpy.typing import ArrayLike
 from pettingzoo import ParallelEnv
 
-from agilerl.typing import ActionType, NumpyObsType, PzStepReturn
+from agilerl.typing import ActionType, InfosDict, NumpyObsType, PzStepReturn
 from agilerl.vector.pz_vec_env import PettingZooVecEnv
 
 AgentID = TypeVar("AgentID")
@@ -189,7 +189,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         *,
         seed: int | list[int] | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[dict[str, NumpyObsType], dict[str, Any]]:
+    ) -> tuple[dict[str, NumpyObsType], InfosDict]:
         """Reset all the environments and return two dictionaries of batched observations and infos.
 
         :param seed: Random seed (or one seed per environment), defaults to None
@@ -254,7 +254,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
     def reset_wait(
         self,
         timeout: float | None = None,
-    ) -> tuple[dict[str, NumpyObsType], dict[str, Any]]:
+    ) -> tuple[dict[str, NumpyObsType], InfosDict]:
         """Wait for the calls triggered by :meth:`reset_async` to finish and return the results.
 
         :param timeout: Number of seconds before the call to ``reset_wait`` times out. If `None`, the call to
@@ -262,7 +262,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         :type timeout: int | float | None, optional
 
         :return: Tuple of observations and infos
-        :rtype: tuple[dict[str, NumpyObsType], dict[str, Any]]
+        :rtype: tuple[dict[str, NumpyObsType], InfosDict]
         """
         self._assert_is_running()
         if self._state != AsyncState.WAITING_RESET:
@@ -324,7 +324,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         :type timeout: int | float | None, optional
 
         :return: Tuple of observations, rewards, dones, and infos
-        :rtype: tuple[dict[str, NumpyObsType], dict[str, np.ndarray], dict[str, np.ndarray], dict[str, Any]]
+        :rtype: PzStepReturn
         """
         self._assert_is_running()
         if self._state != AsyncState.WAITING_STEP:

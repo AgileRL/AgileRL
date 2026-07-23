@@ -1,11 +1,10 @@
-from collections.abc import ItemsView
+from collections.abc import ItemsView, Iterator, Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import torch
 import yaml
-
-from agilerl.typing import NetConfigType
 
 
 @dataclass
@@ -13,7 +12,7 @@ class NetConfig:
     """Dataclass for storing evolvable network configurations."""
 
     @classmethod
-    def from_dict(cls, config: dict[str, Any]) -> "NetConfig":
+    def from_dict(cls, config: Mapping[str, Any]) -> "NetConfig":
         return cls(**config)
 
     @classmethod
@@ -37,6 +36,12 @@ class NetConfig:
     def __contains__(self, key: str) -> bool:
         return hasattr(self, key)
 
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.keys())
+
+    def copy(self) -> "NetConfig":
+        return deepcopy(self)
+
     def get(self, key: str, default: "NetConfigValue" = None) -> "NetConfigValue":
         return getattr(self, key, default)
 
@@ -56,8 +61,8 @@ class NetConfig:
         return {key: getattr(self, key) for key in self.keys()}.items()
 
 
-# The value types stored across the concrete NetConfig subclasses. Nested
-# configs stay ``dict``-typed as they mirror arbitrary user-supplied YAML.
+# Value types stored across the concrete NetConfig subclasses. Nested configs
+# remain dict-typed so YAML/dict ingress and in-place updates stay valid.
 NetConfigValue = (
     str
     | int
@@ -67,9 +72,15 @@ NetConfigValue = (
     | list[int]
     | list[int | tuple[int, ...]]
     | NetConfig
-    | dict[str, Any]
+    | dict[str, "NetConfigValue"]
     | None
 )
+
+# Dataclass config or plain dict (YAML/dict ingress; callers mutate and ``.copy()``).
+# Dict values stay ``Any`` because configs are heterogeneous and deeply
+# subscripted (``cfg["encoder_config"]["hidden_size"]``); typing values as
+# ``NetConfigValue`` collapses after the first index and breaks those chains.
+NetConfigType = NetConfig | dict[str, Any]
 
 
 @dataclass

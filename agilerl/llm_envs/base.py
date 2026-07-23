@@ -189,8 +189,10 @@ class HuggingFaceGym(gym.Env, ABC, Generic[PromptT, CompletionT]):
     ) -> Callable[[list[dict[str, Any]]], Mapping[str, Any]]:
         """Create a collate function for this environment.
 
-        Subclasses may return a callable producing a more specific mapping
-        (e.g. an ``SFTPrompts`` TypedDict); those are all ``Mapping[str, Any]``.
+        Dataset rows stay ``dict[str, Any]`` (HF feature bags). Subclasses
+        return paradigm-specific TypedDicts (``SFTPrompts``,
+        ``PreferencePrompts``) or an intermediate collate mapping
+        (``ReasoningGym``).
         """
 
     def __len__(self) -> int:

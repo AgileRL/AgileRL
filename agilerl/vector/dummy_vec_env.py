@@ -10,7 +10,13 @@ from gymnasium import Env, spaces
 from gymnasium.vector import VectorEnv
 from gymnasium.vector.utils import batch_space
 
-from agilerl.typing import ArrayOrTensor, NumpyObsType, PzStepReturn
+from agilerl.typing import (
+    ActionType,
+    ArrayOrTensor,
+    InfosDict,
+    NumpyObsType,
+    PzStepReturn,
+)
 from agilerl.vector.pz_vec_env import PettingZooVecEnv
 
 if TYPE_CHECKING:
@@ -78,7 +84,7 @@ class DummyVecEnv(VectorEnv):
         :type actions: np.ndarray
         :returns: A tuple of ``(obs, reward, terminated, truncated, info)``
             with leading batch dimensions.
-        :rtype: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]
+        :rtype: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]
         """
         if self._autoreset:
             obs, info = self._env.reset()
@@ -207,7 +213,7 @@ class PzDummyVecEnv(PettingZooVecEnv):
         *,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[dict[str, NumpyObsType], dict[str, Any]]:
+    ) -> tuple[dict[str, NumpyObsType], InfosDict]:
         """Reset the environment and return batched observations.
 
         :param seed: Random seed for the reset.
@@ -216,7 +222,7 @@ class PzDummyVecEnv(PettingZooVecEnv):
         :type options: dict[str, Any] | None
         :returns: ``(obs, info)`` where *obs* is a dict of arrays with shape
             ``(1, ...)``.
-        :rtype: tuple[dict[str, NumpyObsType], dict[str, Any]]
+        :rtype: tuple[dict[str, NumpyObsType], InfosDict]
         """
         obs, info = self._env.reset(seed=seed, options=options)
 
@@ -251,7 +257,7 @@ class PzDummyVecEnv(PettingZooVecEnv):
         :rtype: PzStepReturn
         """
         # Strip batch dimension and filter NaN (inactive) agents
-        scalar_actions: dict[str, Any] = {}
+        scalar_actions: dict[str, ActionType] = {}
         for agent_id, action in actions.items():
             act = np.asarray(action[0])
             if np.isnan(act).all():
@@ -310,12 +316,12 @@ class PzDummyVecEnv(PettingZooVecEnv):
 
         return batched_obs, batched_reward, batched_terminated, batched_truncated, info
 
-    def step_async(self, actions: list[dict[str, Any]]) -> None:
+    def step_async(self, actions: list[dict[str, ActionType]]) -> None:
         """Store actions for :meth:`step_wait` (synchronous passthrough).
 
         :param actions: List of dictionaries of length num_envs, each sub dictionary contains
             actions for each agent in a given environment
-        :type actions: list[dict[str, Any]]
+        :type actions: list[dict[str, ActionType]]
 
         :raises RuntimeError: If :meth:`step_async` is called before :meth:`step_wait`.
         """

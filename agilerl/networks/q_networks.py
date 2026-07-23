@@ -1,6 +1,5 @@
 import warnings
 from dataclasses import asdict
-from typing import Any
 
 import torch
 from gymnasium import spaces
@@ -98,11 +97,11 @@ class QNetwork(EvolvableNetwork):
         # Build value network
         self.build_network_head(head_config)
 
-    def build_network_head(self, net_config: dict[str, Any]) -> None:
+    def build_network_head(self, net_config: NetConfigType) -> None:
         """Build the head of the network based on the passed configuration.
 
         :param net_config: Configuration of the network head.
-        :type net_config: dict[str, Any]
+        :type net_config: NetConfigType
         """
         self.head_net = self.create_mlp(
             num_inputs=self.latent_dim,
@@ -247,11 +246,11 @@ class RainbowQNetwork(EvolvableNetwork):
         # Build value and advantage networks
         self.build_network_head(head_config)
 
-    def build_network_head(self, net_config: dict[str, Any]) -> None:
+    def build_network_head(self, net_config: NetConfigType) -> None:
         """Build the value and advantage heads of the network based on the passed configuration.
 
         :param net_config: Configuration of the network head.
-        :type net_config: dict[str, Any]
+        :type net_config: NetConfigType
         """
         self.head_net = DuelingDistributionalMLP(
             num_inputs=self.latent_dim,

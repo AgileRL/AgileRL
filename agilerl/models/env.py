@@ -21,6 +21,7 @@ from typing_extensions import Self
 
 from agilerl.models.env_types import LLMEnvType
 from agilerl.protocols import BanditEnvProtocol
+from agilerl.typing import EnvFactory, WrapperSpec
 from agilerl.utils.env_utils import (
     apply_wrappers,
     get_reward_fn,
@@ -53,8 +54,6 @@ def _require_datasets() -> tuple[type[Dataset], Callable[..., Any]]:
 
 GymEnvType = AsyncVectorEnv | SyncVectorEnv
 PzEnvType = ParallelEnv | AsyncPettingZooVecEnv
-EnvFactory = Callable[[], Any]
-WrapperSpec = tuple[Any, dict[str, Any]] | str | Callable[..., Any]
 
 
 class EnvSpec(BaseModel):
@@ -114,10 +113,10 @@ class GymEnvSpec(EnvSpec):
         :param wrappers: Environment wrappers, if custom. Defaults to None.
         :type wrappers: list[tuple[Any, dict[str, Any]] | str] or None
         :returns: Custom environment factory function.
-        :rtype: Callable[[], Any]
+        :rtype: EnvFactory
         """
 
-        def default_make_env() -> Any:  # noqa: ANN401 -- resolves a user entrypoint to an env of caller-defined type
+        def default_make_env() -> gym.Env:
             constructor = resolve_entrypoint_target(entrypoint, path=path)
             if not callable(constructor):
                 msg = f"Entrypoint '{entrypoint}' resolved to non-callable object."

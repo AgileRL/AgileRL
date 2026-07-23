@@ -4,7 +4,7 @@ import torch
 from torch import nn
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
-from agilerl.typing import ArrayOrTensor, BatchDimension, DeviceType
+from agilerl.typing import ArrayOrTensor, BatchDimension, DeviceType, MutationApplyDict
 from agilerl.utils.evolvable_networks import get_activation
 
 
@@ -264,7 +264,7 @@ class EvolvableLSTM(EvolvableModule):
         return None
 
     @mutation(MutationType.NODE)
-    def add_node(self, numb_new_nodes: int | None = None) -> dict[str, int]:
+    def add_node(self, numb_new_nodes: int | None = None) -> MutationApplyDict:
         """Increases hidden size of the LSTM.
 
         :param numb_new_nodes: Number of nodes to add to hidden size, defaults to None
@@ -283,7 +283,7 @@ class EvolvableLSTM(EvolvableModule):
         return {"numb_new_nodes": numb_new_nodes}
 
     @mutation(MutationType.NODE)
-    def remove_node(self, numb_new_nodes: int | None = None) -> dict[str, int]:
+    def remove_node(self, numb_new_nodes: int | None = None) -> MutationApplyDict:
         """Decreases hidden size of the LSTM.
 
         :param numb_new_nodes: Number of nodes to remove from hidden size, defaults to None

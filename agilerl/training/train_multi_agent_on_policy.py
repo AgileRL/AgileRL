@@ -13,6 +13,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks import StochasticActor
 from agilerl.population import Population
+from agilerl.typing import InitHyperparams
 from agilerl.utils.algo_utils import get_num_envs
 from agilerl.utils.utils import (
     default_progress_bar,
@@ -27,7 +28,6 @@ from agilerl.vector.pz_vec_env import PettingZooVecEnv
 if TYPE_CHECKING:
     from agilerl.typing import SingleAgentModule
 
-InitDictType = dict[str, Any] | None
 MultiAgentOnPolicyAlgorithms = IPPO
 PopulationType = list[MultiAgentOnPolicyAlgorithms]
 
@@ -40,8 +40,8 @@ def train_multi_agent_on_policy(
     algo: str,
     pop: PopulationType,
     sum_scores: bool = True,
-    init_hp: InitDictType = None,
-    mut_p: InitDictType = None,
+    init_hp: InitHyperparams = None,
+    mut_p: InitHyperparams = None,
     max_steps: int = 50000,
     evo_steps: int = 25,
     eval_steps: int | None = None,

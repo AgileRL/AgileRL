@@ -9,8 +9,13 @@ from torch import nn
 
 from agilerl.modules import EvolvableCNN, EvolvableMLP
 from agilerl.modules.base import EvolvableModule, ModuleDict, MutationType, mutation
-from agilerl.modules.configs import CnnNetConfig, MlpNetConfig, NetConfig
-from agilerl.typing import ArrayOrTensor, DeviceType, ModuleType
+from agilerl.modules.configs import CnnNetConfig, MlpNetConfig, NetConfig, NetConfigType
+from agilerl.typing import (
+    DeviceType,
+    ModuleType,
+    MutationApplyDict,
+    TupleOrDictObservation,
+)
 from agilerl.utils.evolvable_networks import (
     get_activation,
     is_image_space,
@@ -20,9 +25,8 @@ from agilerl.utils.evolvable_networks import (
 
 # Feature-extractor configurations are either NetConfig dataclasses or plain
 # dictionaries (possibly nested per observation key)
-MultiInputConfigType = NetConfig | dict[str, Any]
+MultiInputConfigType = NetConfigType
 TupleOrDictSpace = spaces.Tuple | spaces.Dict
-TupleOrDictObservation = dict[str, ArrayOrTensor] | tuple[ArrayOrTensor, ...]
 
 # Default configurations for the feature extractors
 DefaultCnnConfig = CnnNetConfig(
@@ -493,7 +497,7 @@ class EvolvableMultiInput(EvolvableModule):
             self.output = get_activation(activation)
 
     @mutation(MutationType.NODE)
-    def add_latent_node(self, numb_new_nodes: int | None = None) -> dict[str, Any]:
+    def add_latent_node(self, numb_new_nodes: int | None = None) -> MutationApplyDict:
         """Add a latent node to the network.
 
         :param numb_new_nodes: Number of new nodes to add, defaults to None
@@ -511,7 +515,9 @@ class EvolvableMultiInput(EvolvableModule):
         return {"numb_new_nodes": numb_new_nodes}
 
     @mutation(MutationType.NODE)
-    def remove_latent_node(self, numb_new_nodes: int | None = None) -> dict[str, Any]:
+    def remove_latent_node(
+        self, numb_new_nodes: int | None = None
+    ) -> MutationApplyDict:
         """Remove a latent node from the network.
 
         :param numb_new_nodes: Number of nodes to remove, defaults to None

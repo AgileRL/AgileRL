@@ -1083,7 +1083,7 @@ class Mutations:
         self,
         network: EvolvableModule,
         mut_method: str | None,
-        applied_mut_dict: dict[str, Any] | None = None,
+        applied_mut_dict: MutationReturnType | None = None,
     ) -> tuple[str | None, MutationReturnType]:
         """Apply the mutation method to networks and returns mutation data if needed.
 
@@ -1092,7 +1092,7 @@ class Mutations:
         :param mut_method: The mutation method to apply
         :type mut_method: str | None
         :param applied_mut_dict: The mutation dictionary, defaults to None
-        :type applied_mut_dict: dict[str, Any] | None, optional
+        :type applied_mut_dict: MutationReturnType | None, optional
 
         :return: The mutation method name and the mutation dictionary
         :rtype: tuple[str | None, MutationReturnType]

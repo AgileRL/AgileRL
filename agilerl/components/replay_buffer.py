@@ -5,9 +5,6 @@ import torch
 from tensordict import TensorDict
 
 from agilerl.components.segment_tree import MinSegmentTree, SumSegmentTree
-from agilerl.typing import ArrayOrTensor
-
-DataType = dict[str, ArrayOrTensor] | TensorDict
 
 
 class ReplayBuffer:

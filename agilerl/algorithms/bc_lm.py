@@ -17,7 +17,7 @@ from agilerl.data.language_environment import (
 from agilerl.data.rl_data import DataPoint, RL_Dataset
 from agilerl.data.tokenizer import Tokenizer
 from agilerl.modules.gpt import EvolvableGPT
-from agilerl.typing import NetConfigType
+from agilerl.typing import NetConfigType, PastKeyValues
 from agilerl.utils.sampling_utils import (
     always_terminate,
     map_all_kvs,
@@ -74,7 +74,7 @@ class BC_LM(nn.Module):
         prefix_attn_mask: torch.Tensor | None = None,
         remove_prefix_position_embs: bool = False,
         **kwargs: Any,
-    ) -> tuple[torch.Tensor, Any]:
+    ) -> tuple[torch.Tensor, PastKeyValues]:
         # tokens - b,t
         # attn_mask - b,t
         # prefix_embs - b,t',d
@@ -202,7 +202,7 @@ class BC_LM(nn.Module):
         temp: float = 1.0,
         top_k: int | None = None,
         top_p: float | None = None,
-    ) -> tuple[torch.Tensor, Any]:
+    ) -> tuple[torch.Tensor, PastKeyValues]:
         prepared_inputs = self.prepare_inputs(items)
         tokens = prepared_inputs["tokens"]
         logits, past_key_values = self(tokens, None)
@@ -217,7 +217,7 @@ class BC_LM(nn.Module):
         temp: float = 1.0,
         top_k: int | None = None,
         top_p: float | None = None,
-    ) -> tuple[torch.Tensor, Any]:
+    ) -> tuple[torch.Tensor, PastKeyValues]:
         logits, past_key_values = self(
             tokens.unsqueeze(1),
             None,

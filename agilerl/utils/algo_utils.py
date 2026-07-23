@@ -40,10 +40,13 @@ from agilerl.typing import (
     ArrayOrTensor,
     BatchDimension,
     BPTTSequenceType,
+    InputSizeFromSpace,
     MaybeObsList,
     NetConfigType,
     NumpyObsType,
     ObservationType,
+    ObsShape,
+    OutputSizeFromSpace,
     StandardTensorDict,
     TensorTuple,
     TorchObsType,
@@ -115,6 +118,12 @@ def check_supported_space(observation_space: spaces.Space) -> None:
 
 
 LeafSpace = spaces.Box | spaces.Discrete | spaces.MultiDiscrete | spaces.MultiBinary
+_LEAF_SPACE_TYPES = (
+    spaces.Box,
+    spaces.Discrete,
+    spaces.MultiDiscrete,
+    spaces.MultiBinary,
+)
 SpaceLike = (
     spaces.Space
     | list[spaces.Space]
@@ -142,14 +151,10 @@ def get_input_size_from_space(
 @overload
 def get_input_size_from_space(
     observation_space: SpaceLike,
-) -> (
-    tuple[int, ...]
-    | dict[str, tuple[int, ...]]
-    | tuple[tuple[int, ...] | dict[str, tuple[int, ...]], ...]
-): ...
+) -> InputSizeFromSpace: ...
 
 
-def get_input_size_from_space(observation_space: SpaceLike) -> Any:
+def get_input_size_from_space(observation_space: SpaceLike) -> InputSizeFromSpace:
     """Return the dimension of the state space as it pertains to the underlying
     networks (i.e. the input size of the networks).
 
@@ -161,38 +166,64 @@ def get_input_size_from_space(observation_space: SpaceLike) -> Any:
     """
     if isinstance(observation_space, spaces.Tuple):
         return tuple(
-            get_input_size_from_space(space) for space in observation_space.spaces
+            _input_size_dict_or_leaf(space) for space in observation_space.spaces
         )
     if isinstance(observation_space, (list, tuple)):
-        sizes: list[Any] = []
-        for space in observation_space:
-            assert isinstance(space, spaces.Space)
-            sizes.append(get_input_size_from_space(space))
-        return tuple(sizes)
+        return tuple(
+            _input_size_dict_or_leaf(_require_space(space))
+            for space in observation_space
+        )
     if isinstance(observation_space, spaces.Dict):
         return {
-            key: get_input_size_from_space(subspace)
+            key: _input_size_leaf(subspace)
             for key, subspace in observation_space.spaces.items()
         }
     if isinstance(observation_space, dict):
-        sizes_by_key: dict[str, Any] = {}
+        sizes_by_key: dict[str, tuple[int, ...]] = {}
         for key, subspace in observation_space.items():
             assert isinstance(key, str)
             assert isinstance(subspace, spaces.Space)
-            sizes_by_key[key] = get_input_size_from_space(subspace)
+            sizes_by_key[key] = _input_size_leaf(subspace)
         return sizes_by_key
-    if isinstance(observation_space, spaces.Discrete):
-        return (observation_space.n,)
-    if isinstance(observation_space, spaces.MultiDiscrete):
-        return (sum(observation_space.nvec),)
-    if isinstance(observation_space, spaces.Box):
-        return observation_space.shape
-    if isinstance(observation_space, spaces.MultiBinary):
-        return (observation_space.n,)
+    if isinstance(observation_space, _LEAF_SPACE_TYPES):
+        return _input_size_leaf(observation_space)
     msg = f"Can't access state dimensions for {type(observation_space)} spaces."
     raise AttributeError(
         msg,
     )
+
+
+def _require_space(space: object) -> spaces.Space:
+    assert isinstance(space, spaces.Space)
+    return space
+
+
+def _input_size_leaf(space: spaces.Space) -> tuple[int, ...]:
+    """Input size for a leaf observation space."""
+    if isinstance(space, spaces.Discrete):
+        return (int(space.n),)
+    if isinstance(space, spaces.MultiDiscrete):
+        return (int(sum(space.nvec)),)
+    if isinstance(space, spaces.Box):
+        return tuple(int(dim) for dim in space.shape)
+    if isinstance(space, spaces.MultiBinary):
+        n = space.n
+        if isinstance(n, tuple):
+            return tuple(int(dim) for dim in n)
+        return (int(n),)
+    msg = f"Can't access state dimensions for {type(space)} spaces."
+    raise AttributeError(msg)
+
+
+def _input_size_dict_or_leaf(
+    space: spaces.Space,
+) -> tuple[int, ...] | dict[str, tuple[int, ...]]:
+    """Input size for a Dict space or leaf observation space."""
+    if isinstance(space, spaces.Dict):
+        return {
+            key: _input_size_leaf(subspace) for key, subspace in space.spaces.items()
+        }
+    return _input_size_leaf(space)
 
 
 @overload
@@ -214,10 +245,10 @@ def get_output_size_from_space(
 @overload
 def get_output_size_from_space(
     action_space: SpaceLike,
-) -> int | dict[str, int] | tuple[int | dict[str, int], ...]: ...
+) -> OutputSizeFromSpace: ...
 
 
-def get_output_size_from_space(action_space: SpaceLike) -> Any:
+def get_output_size_from_space(action_space: SpaceLike) -> OutputSizeFromSpace:
     """Return the dimension of the action space as it pertains to the underlying
     networks (i.e. the output size of the networks).
 
@@ -228,36 +259,53 @@ def get_output_size_from_space(action_space: SpaceLike) -> Any:
     :rtype: int | dict[str, int] | tuple[int | dict[str, int], ...]
     """
     if isinstance(action_space, (list, tuple)):
-        sizes: list[Any] = []
+        sizes: list[int | dict[str, int]] = []
         for space in action_space:
             assert isinstance(space, spaces.Space)
-            sizes.append(get_output_size_from_space(space))
+            sizes.append(_output_size_dict_or_leaf(space))
         return tuple(sizes)
     if isinstance(action_space, spaces.Dict):
         return {
-            key: get_output_size_from_space(subspace)
+            key: _output_size_leaf(subspace)
             for key, subspace in action_space.spaces.items()
         }
     if isinstance(action_space, dict):
-        sizes_by_key: dict[str, Any] = {}
+        sizes_by_key: dict[str, int] = {}
         for key, subspace in action_space.items():
             assert isinstance(key, str)
             assert isinstance(subspace, spaces.Space)
-            sizes_by_key[key] = get_output_size_from_space(subspace)
+            sizes_by_key[key] = _output_size_leaf(subspace)
         return sizes_by_key
-    if isinstance(action_space, spaces.Discrete):
-        return int(action_space.n)
-    if isinstance(action_space, spaces.MultiBinary):
-        return int(np.prod(action_space.shape))
-    if isinstance(action_space, spaces.MultiDiscrete):
-        return int(sum(action_space.nvec))
-    if isinstance(action_space, spaces.Box):
-        # NOTE: Assume continuous actions are always one-dimensional
-        return action_space.shape[0]
+    if isinstance(action_space, _LEAF_SPACE_TYPES):
+        return _output_size_leaf(action_space)
     msg = f"Can't access action dimensions for {type(action_space)} spaces."
     raise AttributeError(
         msg,
     )
+
+
+def _output_size_leaf(space: spaces.Space) -> int:
+    """Output size for a leaf action space."""
+    if isinstance(space, spaces.Discrete):
+        return int(space.n)
+    if isinstance(space, spaces.MultiBinary):
+        return int(np.prod(space.shape))
+    if isinstance(space, spaces.MultiDiscrete):
+        return int(sum(space.nvec))
+    if isinstance(space, spaces.Box):
+        # Continuous actions are one-dimensional
+        return int(space.shape[0])
+    msg = f"Can't access action dimensions for {type(space)} spaces."
+    raise AttributeError(msg)
+
+
+def _output_size_dict_or_leaf(space: spaces.Space) -> int | dict[str, int]:
+    """Output size for a Dict space or leaf action space."""
+    if isinstance(space, spaces.Dict):
+        return {
+            key: _output_size_leaf(subspace) for key, subspace in space.spaces.items()
+        }
+    return _output_size_leaf(space)
 
 
 def share_encoder_parameters(
@@ -505,7 +553,7 @@ def transpose_image_observation(
 
 def transpose_image_observation(
     observation: NumpyObsType | torch.Tensor, original_space: spaces.Space
-) -> Any:
+) -> NumpyObsType | torch.Tensor:
     """Transpose 3-D observations from HWC to CHW.
 
     Supports both NumPy arrays and PyTorch tensors. Observations that already
@@ -584,12 +632,10 @@ def get_obs_shape(space: spaces.Tuple) -> tuple[tuple[int, ...], ...]: ...
 
 
 @overload
-def get_obs_shape(
-    space: spaces.Space,
-) -> tuple[int, ...] | dict[str, tuple[int, ...]] | tuple[tuple[int, ...], ...]: ...
+def get_obs_shape(space: spaces.Space) -> ObsShape: ...
 
 
-def get_obs_shape(space: spaces.Space) -> Any:
+def get_obs_shape(space: spaces.Space) -> ObsShape:
     """Return the shape of the observation space.
 
     :param space: Observation space
@@ -597,20 +643,28 @@ def get_obs_shape(space: spaces.Space) -> Any:
     :return: Shape of the observation space
     :rtype: tuple[int, ...] | dict[str, tuple[int, ...]] | tuple[tuple[int, ...], ...]
     """
+    if isinstance(space, _LEAF_SPACE_TYPES):
+        return _obs_shape_leaf(space)
+    if isinstance(space, spaces.Dict):
+        return {
+            key: _obs_shape_leaf(subspace) for (key, subspace) in space.spaces.items()
+        }
+    if isinstance(space, spaces.Tuple):
+        return tuple(_obs_shape_leaf(subspace) for subspace in space.spaces)
+    msg = f"{space} observation space is not supported"
+    raise NotImplementedError(msg)
+
+
+def _obs_shape_leaf(space: spaces.Space) -> tuple[int, ...]:
+    """Observation shape for a leaf space."""
     if isinstance(space, spaces.Box):
-        return space.shape
+        return tuple(int(dim) for dim in space.shape)
     if isinstance(space, spaces.Discrete):
         return (1,)
     if isinstance(space, spaces.MultiDiscrete):
         return (len(space.nvec),)
     if isinstance(space, spaces.MultiBinary):
-        return space.shape
-    if isinstance(space, spaces.Dict):
-        return {
-            key: get_obs_shape(subspace) for (key, subspace) in space.spaces.items()
-        }
-    if isinstance(space, spaces.Tuple):
-        return tuple(get_obs_shape(subspace) for subspace in space)
+        return tuple(int(dim) for dim in space.shape)
     msg = f"{space} observation space is not supported"
     raise NotImplementedError(msg)
 
@@ -694,7 +748,11 @@ def make_safe_deepcopies(
 
 def make_safe_deepcopies(
     *args: EvolvableModuleProtocol | list[EvolvableModuleProtocol],
-) -> Any:
+) -> (
+    EvolvableModuleProtocol
+    | list[EvolvableModuleProtocol]
+    | tuple[EvolvableModuleProtocol | list[EvolvableModuleProtocol], ...]
+):
     """Make deep copies of EvolvableModule objects and their attributes.
 
     With a single argument the copy is returned directly; with multiple
@@ -793,7 +851,7 @@ def chkpt_attribute_to_device(
 def chkpt_attribute_to_device(
     chkpt_dict: dict[str, Any] | list[dict[str, Any]],
     device: str | torch.device,
-) -> Any:
+) -> dict[str, Any] | list[dict[str, Any]]:
     """Place checkpoint attributes on device. Used when loading saved agents.
 
     :param chkpt_dict: Checkpoint dictionary or list of checkpoint dictionaries
@@ -816,11 +874,11 @@ def chkpt_attribute_to_device(
     return chkpt_dict
 
 
-def filter_init_dict(init_dict: dict[str, Any], cls: type) -> dict[str, Any]:
+def filter_init_dict(init_dict: Mapping[str, object], cls: type) -> dict[str, Any]:
     """Filter the init dict to only include parameters that are valid for the given class.
 
     :param init_dict: Initialization dictionary
-    :type init_dict: dict[str, Any]
+    :type init_dict: Mapping[str, object]
     :param cls: Class to filter the init dict for
     :type cls: type
 
@@ -866,7 +924,9 @@ def remove_compile_prefix(state_dict: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-def module_checkpoint_dict(module: EvolvableAttributeType, name: str) -> dict[str, Any]:
+def module_checkpoint_dict(
+    module: EvolvableAttributeType, name: str
+) -> dict[str, object]:
     """Return a dictionary containing the module's class, init dict, and state dict.
 
     :param module: The module to checkpoint.
@@ -875,7 +935,7 @@ def module_checkpoint_dict(module: EvolvableAttributeType, name: str) -> dict[st
     :type name: str
 
     :return: A dictionary containing the module's class, init dict, and state dict.
-    :rtype: dict[str, Any]
+    :rtype: dict[str, object]
     """
     from agilerl.modules.base import EvolvableModule, ModuleDict
 
@@ -891,7 +951,7 @@ def module_checkpoint_dict(module: EvolvableAttributeType, name: str) -> dict[st
 def module_checkpoint_single(
     module: EvolvableModuleProtocol,
     name: str,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """Return a dictionary containing the module's class, init dict, and state dict.
 
     :param module: The module to checkpoint.
@@ -899,7 +959,7 @@ def module_checkpoint_single(
     :param name: The name of the attribute to checkpoint.
     :type name: str
     :return: A dictionary containing the module's class, init dict, and state dict.
-    :rtype: dict[str, Any]
+    :rtype: dict[str, object]
     """
     module_cls = (
         module._orig_mod.__class__
@@ -918,7 +978,7 @@ def module_checkpoint_single(
 
 def module_checkpoint_multiagent(
     module: "ModuleDict[Any]", name: str
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """Return a dictionary containing the module's class, init dict, and state dict.
 
     :param module: The module to checkpoint.
@@ -926,7 +986,7 @@ def module_checkpoint_multiagent(
     :param name: The name of the attribute to checkpoint.
     :type name: str
     :return: A dictionary containing the module's class, init dict, and state dict.
-    :rtype: dict[str, Any]
+    :rtype: dict[str, object]
     """
     agent_module_cls = OrderedDict()
     agent_init_dicts = OrderedDict()
@@ -949,7 +1009,9 @@ def module_checkpoint_multiagent(
     }
 
 
-def format_shared_critic_encoder(encoder_configs: NetConfigType) -> dict[str, Any]:
+def format_shared_critic_encoder(
+    encoder_configs: Mapping[str, NetConfigType],
+) -> NetConfigType:
     """Format the shared critic  (i.e. `EvolvableMultiInput`) config from the available
     encoder configs from all of the sub-agents. This dictionary is built when extracting the net
     config passed by the user in `MultiAgentAlgorithm.extract_net_config`.
@@ -959,19 +1021,32 @@ def format_shared_critic_encoder(encoder_configs: NetConfigType) -> dict[str, An
         groups, the deepest MLP config will be used for the shared critics `EvolvableMLP`.
 
     :param encoder_configs: Network configuration
-    :type encoder_configs: dict[str, Any]
+    :type encoder_configs: Mapping[str, NetConfigType]
     :return: Formatted shared critic encoder config
-    :rtype: dict[str, Any]
+    :rtype: NetConfigType
     """
-    encoder_config = defaultdict(dict)
+    encoder_config: NetConfigType = {}
+    init_dicts: dict[str, NetConfigType] = {}
     for encoder_key, config in encoder_configs.items():
         if encoder_key == "mlp_config":
-            encoder_config[encoder_key] = config
-            encoder_config["latent_dim"] = config.get("hidden_size", [32])[-1]
-            encoder_config["min_latent_dim"] = config.get("min_mlp_nodes", 8)
-            encoder_config["max_latent_dim"] = config.get("max_mlp_nodes", 1024)
+            encoder_config["mlp_config"] = config
+            hidden_size = config.get("hidden_size", [32])
+            encoder_config["latent_dim"] = (
+                hidden_size[-1] if isinstance(hidden_size, list) else 32
+            )
+            min_mlp_nodes = config.get("min_mlp_nodes", 8)
+            encoder_config["min_latent_dim"] = (
+                min_mlp_nodes if isinstance(min_mlp_nodes, int) else 8
+            )
+            max_mlp_nodes = config.get("max_mlp_nodes", 1024)
+            encoder_config["max_latent_dim"] = (
+                max_mlp_nodes if isinstance(max_mlp_nodes, int) else 1024
+            )
         else:
-            encoder_config["init_dicts"][encoder_key] = config
+            init_dicts[encoder_key] = config
+
+    if init_dicts:
+        encoder_config["init_dicts"] = init_dicts
 
     return encoder_config
 
@@ -1105,7 +1180,9 @@ def obs_to_tensor(
 ) -> dict[str, TorchObsType]: ...
 
 
-def obs_to_tensor(obs: Any, device: str | torch.device) -> Any:
+def obs_to_tensor(
+    obs: object, device: str | torch.device
+) -> TorchObsType | dict[str, TorchObsType]:
     """Move the observation to the given device as a PyTorch tensor.
 
     :param obs: Observation to convert
@@ -1122,10 +1199,11 @@ def obs_to_tensor(obs: Any, device: str | torch.device) -> Any:
     if isinstance(obs, np.ndarray):
         return torch.as_tensor(obs, device=device).float()
     if isinstance(obs, dict):
-        return {
-            key: torch.as_tensor(_obs, device=device).float()
-            for (key, _obs) in obs.items()
-        }
+        converted: dict[str, torch.Tensor] = {}
+        for key, _obs in obs.items():
+            assert isinstance(key, str)
+            converted[key] = torch.as_tensor(_obs, device=device).float()
+        return converted
     if isinstance(obs, tuple):
         return tuple(torch.as_tensor(_obs, device=device).float() for _obs in obs)
     if isinstance(obs, (list, Number)):
@@ -1593,7 +1671,7 @@ def apply_image_normalization(
 def apply_image_normalization(
     observation: ArrayOrTensor,
     observation_space: spaces.Box,
-) -> Any:
+) -> ArrayOrTensor:
     """Normalize images using minmax scaling.
 
     :param observation: Observation

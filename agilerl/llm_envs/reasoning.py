@@ -135,9 +135,8 @@ class ReasoningGym(HuggingFaceGym[list[ReasoningPrompts], list[torch.Tensor]]):
             self.answers = batch["answer"]
 
             # A rollout prompt carries only the tokenized prompt and its raw
-            # text; the remaining ReasoningPrompts keys are filled in by the
-            # multi-turn machinery downstream.
-            returned_prompts = [
+            # text; remaining ReasoningPrompts keys are filled multi-turn.
+            returned_prompts: list[ReasoningPrompts] = [
                 {
                     "input_ids": returned_prompt["input_ids"],
                     "attention_mask": returned_prompt["attention_mask"],
@@ -162,18 +161,22 @@ class ReasoningGym(HuggingFaceGym[list[ReasoningPrompts], list[torch.Tensor]]):
                 reset_test=self.evaluation_mode,
             )
             return self._get_next_batch()
-        # The comprehension builds ReasoningPrompts-shaped dicts (the remaining
-        # keys are filled in downstream); ty cannot match them to the TypedDict.
-        prompts: Any = returned_prompts
-        return prompts
+        return returned_prompts
 
     def create_collate_fn(
         self,
         tokenizer: PreTrainedTokenizerBase,
-    ) -> Callable[[list[dict[str, Any]]], dict[str, Any]]:
-        """Create a collate function that applies the chat template."""
+    ) -> Callable[[list[dict[str, Any]]], dict[str, list[str] | list[Any]]]:
+        """Create a collate function that applies the chat template.
 
-        def collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
+        Return keys are ``question``, ``answer``, and ``tokenized_prompts``
+        (list of partial ``ReasoningPrompts``); not a ``ReasoningPrompts``
+        TypedDict itself.
+        """
+
+        def collate_fn(
+            batch: list[dict[str, Any]],
+        ) -> dict[str, list[str] | list[Any]]:
             conversation_template = self.conversation_template
             if conversation_template is None:
                 msg = "ReasoningGym requires a conversation template."

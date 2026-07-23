@@ -12,6 +12,7 @@ from gymnasium import spaces
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import PPO
 from agilerl.networks import StochasticActor
+from agilerl.typing import RolloutReturn
 
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE
@@ -19,13 +20,6 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
 
 SupportedOnPolicy = PPO
 RolloutEnv = gym.Env | gym.vector.VectorEnv
-RolloutReturn = tuple[
-    list[float],
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    dict[str, Any],
-]
 
 
 def _collect_rollouts(

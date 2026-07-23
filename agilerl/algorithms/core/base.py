@@ -56,7 +56,7 @@ from agilerl.algorithms.core.registry import (
     OptimizerFactory,
 )
 from agilerl.metrics import AgentMetrics, MultiAgentMetrics
-from agilerl.modules.configs import MlpNetConfig
+from agilerl.modules.configs import MlpNetConfig, NetConfig
 from agilerl.modules.dummy import DummyEvolvable
 from agilerl.protocols import (
     AgentWrapperProtocol,
@@ -78,14 +78,18 @@ from agilerl.typing import (
     GymSpaceType,
     InfosDict,
     LrNameType,
+    MaybeActionMask,
     ModuleType,
+    MultiAgentActionMasks,
     MultiAgentObservationType,
     MultiAgentSetup,
     MultiAgentSpacesType,
     NetConfigType,
     ObservationType,
     OptimizerType,
+    ReasoningPrompts,
     TorchObsType,
+    coerce_action_mask,
 )
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
@@ -1124,12 +1128,12 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         )
 
         # Recreate evolvable modules
-        network_info: dict[str, dict[str, Any]] = checkpoint["network_info"]
+        network_info: CheckpointInfo = checkpoint["network_info"]
+        modules = network_info["modules"]
+        optimizers = network_info["optimizers"]
         network_names = network_info["network_names"]
         for name in network_names:
-            net_dict = {
-                k: v for k, v in network_info["modules"].items() if k.startswith(name)
-            }
+            net_dict = {k: v for k, v in modules.items() if k.startswith(name)}
 
             module_cls = net_dict.get(f"{name}_cls")
             if module_cls is None:
@@ -1163,9 +1167,7 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
 
         # Load state dicts after applying mutation hook
         for name in network_names:
-            net_dict = {
-                k: v for k, v in network_info["modules"].items() if k.startswith(name)
-            }
+            net_dict = {k: v for k, v in modules.items() if k.startswith(name)}
             loaded_module = getattr(self, name)
             state_dict = net_dict[f"{name}_state_dict"]
             if isinstance(loaded_module, ModuleDictProtocol):
@@ -1178,11 +1180,7 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
 
         optimizer_names = network_info["optimizer_names"]
         for name in optimizer_names:
-            opt_dict = {
-                k: v
-                for k, v in network_info["optimizers"].items()
-                if k.startswith(name)
-            }
+            opt_dict = {k: v for k, v in optimizers.items() if k.startswith(name)}
 
             # Initialize optimizer
             opt_kwargs = opt_dict[f"{name}_kwargs"]
@@ -1272,7 +1270,7 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         )
 
         # Reconstruct evolvable modules in algorithm
-        network_info: dict[str, dict[str, Any]] | None = checkpoint.get("network_info")
+        network_info: CheckpointInfo | None = checkpoint.get("network_info")
         if network_info is None:
             msg = (
                 "Network info not found in checkpoint. You may be loading a checkpoint from "
@@ -1284,12 +1282,12 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
                 msg,
             )
 
+        modules = network_info["modules"]
+        optimizers = network_info["optimizers"]
         network_names = network_info["network_names"]
         loaded_modules: dict[str, Any] = {}
         for name in network_names:
-            net_dict = {
-                k: v for k, v in network_info["modules"].items() if k.startswith(name)
-            }
+            net_dict = {k: v for k, v in modules.items() if k.startswith(name)}
 
             # Add device to init dict
             init_dict = net_dict.get(f"{name}_init_dict")
@@ -1337,9 +1335,7 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
 
         # Load state dictionaries
         for name in network_names:
-            net_dict = {
-                k: v for k, v in network_info["modules"].items() if k.startswith(name)
-            }
+            net_dict = {k: v for k, v in modules.items() if k.startswith(name)}
             loaded_module = getattr(self, name)
             state_dict = net_dict[f"{name}_state_dict"]
             if isinstance(loaded_module, ModuleDict):
@@ -1355,11 +1351,7 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         optimizer_names = network_info["optimizer_names"]
         loaded_optimizers = {}
         for name in optimizer_names:
-            opt_dict = {
-                k: v
-                for k, v in network_info["optimizers"].items()
-                if k.startswith(name)
-            }
+            opt_dict = {k: v for k, v in optimizers.items() if k.startswith(name)}
 
             # Add device to optimizer kwargs
             opt_kwargs = chkpt_attribute_to_device(opt_dict[f"{name}_kwargs"], device)
@@ -1857,39 +1849,38 @@ class MultiAgentRLAlgorithm(
             for output_id, obs_list in buckets.items()
         }
 
-    def extract_action_masks(
-        self, infos: InfosDict
-    ) -> Mapping[str, np.ndarray | torch.Tensor | None]:
+    def extract_action_masks(self, infos: InfosDict) -> MultiAgentActionMasks:
         """Extract action masks from info dictionary.
 
         :param infos: Info dict
-        :type infos: dict[str, dict[...]]
+        :type infos: InfosDict
 
         :return: Action masks (``None`` for agents without one). The return is
             a read-only mapping so subclasses may specialise the value type:
             the base yields raw numpy masks; on-policy multi-agent subclasses
             (e.g. IPPO) stack them into per-group tensors.
-        :rtype: Mapping[str, np.ndarray | torch.Tensor | None]
+        :rtype: MultiAgentActionMasks
         """
         # Get dict of form {"agent_id" : [1, 0, 0, 0]...} etc
-        return {
-            agent: info.get("action_mask", None) if isinstance(info, dict) else None
-            for agent, info in infos.items()
-            if agent in self.agent_ids
-        }
+        action_masks: dict[str, MaybeActionMask] = {}
+        for agent, info in infos.items():
+            if agent not in self.agent_ids:
+                continue
+            action_masks[agent] = coerce_action_mask(info.get("action_mask", None))
+        return action_masks
 
     def extract_agent_masks(
         self,
         infos: InfosDict | None = None,
-    ) -> tuple[dict[str, Any] | None, ArrayDict | None]:
+    ) -> tuple[ArrayDict | None, ArrayDict | None]:
         """Extract env_defined_actions from info dictionary and determine agent masks.
 
         :param infos: Info dict
-        :type infos: dict[str, dict[...]]
+        :type infos: InfosDict | None
 
         :return: Env defined actions and agent masks (both ``None`` when the
-            info dict defines no actions)
-        :rtype: tuple[dict[str, Any] | None, dict[str, np.ndarray] | None]
+            info dict defines no actions). Actions are normalized to arrays.
+        :rtype: tuple[ArrayDict | None, ArrayDict | None]
         """
         # Deal with case of no env_defined_actions defined in the info dict
         # Deal with empty info dicts for each sub agent
@@ -1900,17 +1891,18 @@ class MultiAgentRLAlgorithm(
         ):
             return None, None
 
-        env_defined_actions: dict[str, Any] = {
-            agent: (
-                info.get("env_defined_actions", None)
-                if isinstance(info, dict)
-                else None
-            )
-            for agent, info in infos.items()
-            if agent in self.agent_ids
-        }
+        raw_actions: dict[str, ActionType | None] = {}
+        for agent, info in infos.items():
+            if agent not in self.agent_ids:
+                continue
+            raw = info.get("env_defined_actions", None)
+            if raw is None or isinstance(raw, (int, float, np.ndarray, torch.Tensor)):
+                raw_actions[agent] = raw
+            else:
+                raw_actions[agent] = None
+        env_defined_actions: ArrayDict = {}
         agent_masks: ArrayDict = {}
-        for agent_id, action_val in list(env_defined_actions.items()):
+        for agent_id, action_val in raw_actions.items():
             val = action_val
             # Handle None if environment isn't vectorized
             if val is None:
@@ -1923,16 +1915,17 @@ class MultiAgentRLAlgorithm(
                 else:
                     nan_arr = np.array([np.nan])
 
-                env_defined_actions[agent_id] = nan_arr
                 val = nan_arr
 
             # Handle discrete actions + env not vectorized
             if isinstance(val, (int, float)):
                 val = np.array([val])
-                env_defined_actions[agent_id] = val
+            elif isinstance(val, torch.Tensor):
+                val = val.detach().cpu().numpy()
 
+            env_defined_actions[agent_id] = val
             agent_masks[agent_id] = np.where(
-                np.isnan(env_defined_actions[agent_id]),
+                np.isnan(val),
                 0,
                 1,
             ).astype(bool)
@@ -1994,7 +1987,7 @@ class MultiAgentRLAlgorithm(
         # Helper function to append unique configs to the unique_configs dictionary
         # -> Access to unique configs is relevant for algorithms with networks that process
         # multiple agents' observations (e.g. shared critic in MADDPG)
-        def _add_to_encoder_configs(config: dict[str, Any], agent_id: str = "") -> None:
+        def _add_to_encoder_configs(config: NetConfigType, agent_id: str = "") -> None:
             net_config = config_from_dict(config)
             config_key = (
                 "mlp_config" if isinstance(net_config, MlpNetConfig) else agent_id
@@ -2018,15 +2011,21 @@ class MultiAgentRLAlgorithm(
 
         # Helper function to get or create encoder config for an agent
         def _get_encoder_config(config: NetConfigType, agent_id: str) -> NetConfigType:
-            encoder_config = config.get("encoder_config")
             simba = bool(config.get("simba", False))
-            if encoder_config is None:
+            if "encoder_config" not in config or config.get("encoder_config") is None:
                 encoder_config = get_default_encoder_config(
                     observation_spaces[agent_id],
                     simba,
                 )
                 config["encoder_config"] = encoder_config
-
+                return encoder_config
+            encoder_config = config["encoder_config"]
+            if not isinstance(encoder_config, (dict, NetConfig)):
+                msg = (
+                    f"encoder_config for agent {agent_id!r} must be a dict or "
+                    f"NetConfig, got {type(encoder_config).__name__}"
+                )
+                raise TypeError(msg)
             return encoder_config
 
         # 1. net_config is None -> Automatically define an encoder for each sub-agent or group
@@ -5096,7 +5095,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
     def _generate_with_vllm_colocate(
         self,
-        prompts: Sequence[Mapping[str, Any]],
+        prompts: Sequence[ReasoningPrompts],
         group_size: int,
         temperature: float | None,
         capture_sampling_logps: bool = False,
@@ -5116,7 +5115,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         ``input_ids``, not only ``trajectory_input_ids``.
 
         :param prompts: Length-``N`` sequence of observation mappings for this rank.
-        :type prompts: Sequence[Mapping[str, Any]]
+        :type prompts: Sequence[ReasoningPrompts]
         :param group_size: Repeat factor per prompt (1 for plain PPO).
         :type group_size: int
         :param temperature: Temperature for sampling.
@@ -5138,17 +5137,16 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             else self.max_model_len
         )
 
-        # Prompt mappings type their values as `Any`, so token-id fields read
-        # back as `Any`; the casts here and below pin them to `torch.Tensor`.
-        def _trajectory_input_ids(prompt: Mapping[str, Any]) -> torch.Tensor:
-            return prompt.get("trajectory_input_ids", prompt["input_ids"])
+        def _trajectory_input_ids(prompt: ReasoningPrompts) -> torch.Tensor:
+            traj = prompt.get("trajectory_input_ids")
+            if traj is None:
+                return prompt["input_ids"]
+            return traj
 
         def _token_prompt_for_vllm(ids: torch.Tensor) -> dict[str, list[int]]:
             return {"prompt_token_ids": ids.squeeze(0).tolist()}
 
-        def _stitch_prefix(
-            prompt: Mapping[str, Any], ref: torch.Tensor
-        ) -> torch.Tensor:
+        def _stitch_prefix(prompt: ReasoningPrompts, ref: torch.Tensor) -> torch.Tensor:
             st = prompt.get("stitch_prefix_ids")
             if st is None:
                 return ref.new_zeros((ref.shape[0], 0))

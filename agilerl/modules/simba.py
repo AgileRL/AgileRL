@@ -3,7 +3,7 @@ from typing import Any
 import torch
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
-from agilerl.typing import DeviceType, ObservationType
+from agilerl.typing import DeviceType, MutationApplyDict, ObservationType
 from agilerl.utils.evolvable_networks import create_simba
 
 
@@ -167,7 +167,7 @@ class EvolvableSimBa(EvolvableModule):
         return None
 
     @mutation(MutationType.NODE)
-    def add_node(self, numb_new_nodes: int | None = None) -> dict[str, int]:
+    def add_node(self, numb_new_nodes: int | None = None) -> MutationApplyDict:
         """Add nodes to residual blocks of the neural network.
 
         :param numb_new_nodes: Number of nodes to add, defaults to None
@@ -182,7 +182,7 @@ class EvolvableSimBa(EvolvableModule):
         return {"numb_new_nodes": numb_new_nodes}
 
     @mutation(MutationType.NODE)
-    def remove_node(self, numb_new_nodes: int | None = None) -> dict[str, int]:
+    def remove_node(self, numb_new_nodes: int | None = None) -> MutationApplyDict:
         """Remove nodes from hidden layer of neural network.
 
         :param hidden_layer: Depth of hidden layer to remove nodes from, defaults to None

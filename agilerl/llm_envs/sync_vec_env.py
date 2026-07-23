@@ -2,33 +2,43 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeGuard
 
 import torch
 
+from agilerl.typing import ReasoningPrompts
+
 if TYPE_CHECKING:
     from agilerl.protocols import MultiTurnEnv
-    from agilerl.typing import ReasoningPrompts
 
 
-def _as_prompt(obs: str | dict[str, Any]) -> ReasoningPrompts:
+def _is_reasoning_prompts(obs: Mapping[str, object]) -> TypeGuard[ReasoningPrompts]:
+    return isinstance(obs.get("input_ids"), torch.Tensor) and isinstance(
+        obs.get("attention_mask"), torch.Tensor
+    )
+
+
+def _as_prompt(obs: str | Mapping[str, object]) -> ReasoningPrompts:
     """Read a multi-turn observation as a tokenized prompt.
 
     ``MultiTurnEnv`` covers both the text-observation envs and the tokenized
     ones; this vector env only drives the latter, whose observation is the
-    prompt dict.
+    prompt dict. Callers skip done envs (empty sentinel observations).
 
     :param obs: The observation returned by the wrapped environment.
-    :type obs: str | dict[str, Any]
+    :type obs: str | Mapping[str, object]
     :returns: The observation as a tokenized prompt.
     :rtype: ReasoningPrompts
     """
-    # Tokenized envs emit ReasoningPrompts-shaped dicts; ty cannot verify a plain
-    # dict against the TypedDict, so bridge through Any.
-    prompt: Any = obs
-    return prompt
+    if isinstance(obs, str):
+        msg = "SyncMultiTurnVecEnv expects tokenized prompt observations, got str"
+        raise TypeError(msg)
+    if not _is_reasoning_prompts(obs):
+        msg = "SyncMultiTurnVecEnv expects ReasoningPrompts observations"
+        raise TypeError(msg)
+    return obs
 
 
 @dataclass

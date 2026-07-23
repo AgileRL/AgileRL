@@ -5,7 +5,7 @@ from torch import nn
 
 from agilerl.modules import EvolvableCNN
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
-from agilerl.typing import DeviceType, ObservationType
+from agilerl.typing import DeviceType, MutationApplyDict, ObservationType
 from agilerl.utils.evolvable_networks import create_resnet, get_activation
 
 
@@ -220,7 +220,7 @@ class EvolvableResNet(EvolvableModule):
     def add_channel(
         self,
         numb_new_channels: int | None = None,
-    ) -> dict[str, int]:
+    ) -> MutationApplyDict:
         """Remove channel from hidden layer of convolutional neural network.
 
         :param numb_new_channels: Number of channels to add to hidden layer, defaults to None
@@ -241,7 +241,7 @@ class EvolvableResNet(EvolvableModule):
     def remove_channel(
         self,
         numb_new_channels: int | None = None,
-    ) -> dict[str, int]:
+    ) -> MutationApplyDict:
         """Remove channel from hidden layer of convolutional neural network.
 
         :param numb_new_channels: Number of channels to add to hidden layer, defaults to None

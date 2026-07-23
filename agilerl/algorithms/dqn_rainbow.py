@@ -19,11 +19,13 @@ from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.q_networks import RainbowQNetwork
 from agilerl.typing import (
+    ActionMaskInput,
     ObservationType,
     PrioritizedReplayBatch,
     ReplayBatch,
     SupportedObservationSpace,
     TorchObsType,
+    numpy_action_mask,
 )
 from agilerl.utils.algo_utils import make_safe_deepcopies
 from agilerl.wrappers.make_evolvable import MakeEvolvable
@@ -267,7 +269,7 @@ class RainbowDQN(RLAlgorithm[TensorDict]):
     def get_action(
         self,
         obs: ObservationType,
-        action_mask: np.ndarray | list[np.ndarray] | None = None,
+        action_mask: ActionMaskInput = None,
         training: bool = True,
         *args: Any,
         **kwargs: Any,
@@ -277,7 +279,7 @@ class RainbowDQN(RLAlgorithm[TensorDict]):
         :param obs: State observation, or multiple observations in a batch
         :type obs: numpy.ndarray[float]
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
-        :type action_mask: numpy.ndarray | list[numpy.ndarray], optional
+        :type action_mask: ActionMaskInput
         :param training: Flag indicating whether the model is in training mode, defaults to True
         :type training: bool, optional
         :return: The action to take
@@ -292,11 +294,7 @@ class RainbowDQN(RLAlgorithm[TensorDict]):
         if action_mask is None:
             action = np.argmax(action_values.cpu().data.numpy(), axis=-1)
         else:
-            # Need to stack if vectorized env
-            if isinstance(action_mask, list) or action_mask.dtype == object:
-                action_mask = np.stack(list(action_mask))
-
-            inv_mask = 1 - action_mask
+            inv_mask = 1 - numpy_action_mask(action_mask)
             masked_action_values = np.ma.array(
                 action_values.cpu().data.numpy(),
                 mask=inv_mask,

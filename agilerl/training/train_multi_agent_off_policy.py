@@ -15,6 +15,7 @@ from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
+from agilerl.typing import InitHyperparams
 from agilerl.utils.algo_utils import get_num_envs
 from agilerl.utils.utils import (
     default_progress_bar,
@@ -30,7 +31,6 @@ if TYPE_CHECKING:
     from tensordict import TensorDictBase
 
 
-InitDictType = dict[str, Any] | None
 PopulationType = list[MADDPG | MATD3]
 
 logger = logging.getLogger(__name__)
@@ -43,8 +43,8 @@ def train_multi_agent_off_policy(
     pop: PopulationType,
     memory: ReplayBuffer,
     sum_scores: bool = True,
-    init_hp: InitDictType = None,
-    mut_p: InitDictType = None,
+    init_hp: InitHyperparams = None,
+    mut_p: InitHyperparams = None,
     max_steps: int = 50000,
     evo_steps: int = 25,
     eval_steps: int | None = None,
