@@ -1,7 +1,7 @@
 import warnings
 from collections import OrderedDict
 from collections.abc import Generator, Sequence
-from typing import Any
+from typing import Any, TypeVar
 
 import numpy as np
 import torch
@@ -28,6 +28,20 @@ def _narrow_leaf(value: object) -> torch.Tensor | TensorDict:
     assert isinstance(value, torch.Tensor), (
         f"Expected a tensor or TensorDict leaf, got {type(value).__name__}."
     )
+    return value
+
+
+_T = TypeVar("_T")
+
+
+def _require_prepared(value: _T | None) -> _T:
+    """Return ``value`` unwrapped, or raise if sequences were never prepared."""
+    if value is None:
+        msg = (
+            "Attempting to fetch minibatches before preparing sequences. "
+            "Call prepare_sequence_tensors() first."
+        )
+        raise ValueError(msg)
     return value
 
 
@@ -942,25 +956,11 @@ class RolloutBuffer:
         :return: A TensorDict containing the minibatch of sequences.
         :rtype: Generator[tuple[TensorDict, TensorDict], None, None]
         """
-        unpadded_slices = self.unpadded_slices
-        padded_data = self.padded_data
-        unpadded_data = self.unpadded_data
-        total_sequences = self.num_sequences
-        max_sequence_length = self.max_sequence_length
-        if (
-            unpadded_slices is None
-            or padded_data is None
-            or unpadded_data is None
-            or total_sequences is None
-            or max_sequence_length is None
-        ):
-            msg = (
-                "Attempting to fetch minibatches before preparing sequences. "
-                "Call prepare_sequence_tensors() first."
-            )
-            raise ValueError(
-                msg,
-            )
+        unpadded_slices = _require_prepared(self.unpadded_slices)
+        padded_data = _require_prepared(self.padded_data)
+        unpadded_data = _require_prepared(self.unpadded_data)
+        total_sequences = _require_prepared(self.num_sequences)
+        max_sequence_length = _require_prepared(self.max_sequence_length)
 
         # Determine the number of sequences per mini batch
         if batch_size > total_sequences:

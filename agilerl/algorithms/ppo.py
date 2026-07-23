@@ -265,12 +265,7 @@ class PPO(RLAlgorithm[TensorDict]):
         )
 
         if actor_network is not None and critic_network is not None:
-            # PPO drives its actor/critic through StochasticActor/ValueNetwork
-            # methods (extract_features/forward_head/action_log_prob/...). A
-            # network that already is one is used as-is; a flat EvolvableModule
-            # (e.g. a MakeEvolvable network) is adopted as the encoder of one,
-            # so the user's network becomes the feature extractor and PPO
-            # supplies the distribution / value head.
+            # Custom networks must satisfy the StochasticActor/ValueNetwork interface
             actor = self._as_stochastic_actor(actor_network)
             critic = self._as_value_network(critic_network)
 
@@ -355,11 +350,6 @@ class PPO(RLAlgorithm[TensorDict]):
     def _as_stochastic_actor(self, network: EvolvableModule) -> StochasticActor:
         """Return *network* as a :class:`StochasticActor`.
 
-        A :class:`StochasticActor` is used unchanged. Any other evolvable module
-        (e.g. a :class:`~agilerl.wrappers.make_evolvable.MakeEvolvable` network)
-        is adopted as the actor's encoder, with PPO's distribution head built on
-        top of its outputs.
-
         :param network: Custom actor network.
         :type network: EvolvableModule
         :return: A stochastic actor driving *network*.
@@ -378,10 +368,6 @@ class PPO(RLAlgorithm[TensorDict]):
 
     def _as_value_network(self, network: EvolvableModule) -> ValueNetwork:
         """Return *network* as a :class:`ValueNetwork`.
-
-        A :class:`ValueNetwork` is used unchanged. Any other evolvable module is
-        adopted as the critic's encoder, with PPO's value head built on top of
-        its outputs.
 
         :param network: Custom critic network.
         :type network: EvolvableModule
@@ -933,12 +919,6 @@ class PPO(RLAlgorithm[TensorDict]):
                 # Obs shape: (batch_seq * seq_len, *obs_dims) or nested TD
                 # Actions shape: (batch_seq * seq_len, *act_dims)
                 # Other tensors shape: (batch_seq * seq_len, )
-                # The sequence-buffer layout stores flat tensors for every
-                # non-observation field.
-                # ``strict=False`` drops the padded td's non-tensor
-                # ``initial_hidden_states`` (read below) and tolerates the optional
-                # ``action_masks``; the unpadded td's ``"values"`` collides with
-                # ``TensorDict.values()`` so it is renamed to ``value_preds``.
                 targets_td = minibatch_unpadded.select(
                     "log_probs", "advantages", "returns", "values", strict=False
                 )
@@ -957,15 +937,7 @@ class PPO(RLAlgorithm[TensorDict]):
                 targets: RolloutSequenceTargets = (
                     RolloutSequenceTargets.from_tensordict(targets_td)
                 )
-                mb_obs_seq = padded.observations
                 mb_actions_seq = padded.actions
-                mb_pad_mask = padded.pad_mask
-                mb_action_masks_seq = padded.action_masks
-                mb_old_log_probs = targets.log_probs
-                mb_advantages = targets.advantages
-                mb_returns = targets.returns
-                mb_values = targets.value_preds
-                # Initial recurrent hidden states ride along as a non-tensor entry.
                 mb_initial_hidden_states_dict: dict[str, torch.Tensor] | None = (
                     minibatch_padded.get_non_tensor(
                         "initial_hidden_states",
@@ -995,24 +967,24 @@ class PPO(RLAlgorithm[TensorDict]):
                     entropy,
                     new_values,
                 ) = self.evaluate_actions(
-                    obs=mb_obs_seq,
+                    obs=padded.observations,
                     actions=mb_actions_seq,
                     hidden_state=mb_initial_hidden_states_dict,
-                    action_mask=mb_action_masks_seq,
+                    action_mask=padded.action_masks,
                 )
 
                 # Mask out padded values
-                new_values = new_values[mb_pad_mask]
-                new_log_probs = new_log_probs[mb_pad_mask]
-                entropy = entropy[mb_pad_mask]
+                new_values = new_values[padded.pad_mask]
+                new_log_probs = new_log_probs[padded.pad_mask]
+                entropy = entropy[padded.pad_mask]
 
                 if isinstance(entropy, torch.Tensor):
                     entropy = entropy.mean()
 
                 # Policy loss
-                ratio = torch.exp(new_log_probs - mb_old_log_probs)
-                policy_loss1 = -mb_advantages * ratio
-                policy_loss2 = -mb_advantages * torch.clamp(
+                ratio = torch.exp(new_log_probs - targets.log_probs)
+                policy_loss1 = -targets.advantages * ratio
+                policy_loss2 = -targets.advantages * torch.clamp(
                     ratio,
                     1 - self.clip_coef,
                     1 + self.clip_coef,
@@ -1020,14 +992,14 @@ class PPO(RLAlgorithm[TensorDict]):
                 policy_loss = torch.max(policy_loss1, policy_loss2).mean()
 
                 # Value loss
-                v_loss_unclipped = (new_values - mb_returns) ** 2
-                v_clipped = mb_values + torch.clamp(
-                    new_values - mb_values,
+                v_loss_unclipped = (new_values - targets.returns) ** 2
+                v_clipped = targets.value_preds + torch.clamp(
+                    new_values - targets.value_preds,
                     -self.clip_coef,
                     self.clip_coef,
                 )
 
-                v_loss_clipped = (v_clipped - mb_returns) ** 2
+                v_loss_clipped = (v_clipped - targets.returns) ** 2
                 v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
                 value_loss = v_loss_max.mean()
 
@@ -1036,7 +1008,7 @@ class PPO(RLAlgorithm[TensorDict]):
 
                 if self.target_kl is not None:
                     with torch.no_grad():
-                        log_ratio = new_log_probs - mb_old_log_probs
+                        log_ratio = new_log_probs - targets.log_probs
                         approx_kl_divs_minibatch_timesteps.append(
                             ((torch.exp(log_ratio) - 1) - log_ratio).mean().item(),
                         )
