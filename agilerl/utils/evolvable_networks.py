@@ -55,9 +55,12 @@ def _size_normalizer(dims: int) -> Callable[[KernelSizeType], tuple[int, ...]]:
     """
 
     def normalize(size: KernelSizeType) -> tuple[int, ...]:
-        if isinstance(size, int):
-            return (size,) * dims
-        return tuple(size[:dims])
+        # A tuple already carries per-dimension sizes; anything else (a Python
+        # ``int`` or a numpy integer scalar, which is not sliceable) is a scalar
+        # broadcast across every dimension.
+        if isinstance(size, tuple):
+            return tuple(int(s) for s in size[:dims])
+        return (int(size),) * dims
 
     return normalize
 
