@@ -18,7 +18,6 @@ from pydantic import (
 )
 from typing_extensions import Self
 
-import agilerl.arena.models.algorithms as _arena_algorithms  # noqa: F401
 from agilerl.arena.models.algo import (
     ARENA_REGISTRY,
     AlgoSpec,
