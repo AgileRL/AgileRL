@@ -100,7 +100,7 @@ else.
    <div class="tiles article">
       <a href="../mf_pbt/mf_pbt_tutorial.html" class="tile online">
          <img src="../../_images/agilerl_td3_lunar_lander.gif" alt="LunarLander gif" class="thumbnail-image">
-         <h2>MF-PBT - PPO - Lunar Lander</h2>
+         <h2>Lunar Lander with PPO & MF-PBT</h2>
       </a>
 
    </div>

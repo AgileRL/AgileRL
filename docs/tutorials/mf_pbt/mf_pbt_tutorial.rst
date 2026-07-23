@@ -1,7 +1,7 @@
 .. _mf_pbt_tutorial:
 
-Multi-Frequency PBT with PPO
-============================
+Lunar Lander with PPO & MF-PBT
+==============================
 
 In this tutorial we train a population of PPO agents on the Gymnasium ``LunarLander-v3``
 environment, but instead of the default :ref:`tournament selection <tournament_selection>` we drive
