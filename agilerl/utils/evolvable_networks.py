@@ -1,7 +1,7 @@
 from collections import OrderedDict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import asdict
-from typing import Any, Literal, TypeGuard, TypeVar, overload
+from typing import Any, Literal, Protocol, TypeGuard, TypeVar, overload
 
 import numpy as np
 import torch
@@ -29,6 +29,104 @@ from agilerl.typing import DeviceType, NetConfigType
 
 TupleorInt = tuple[int, ...] | int
 ConvBlockType = Literal["Conv1d", "Conv2d", "Conv3d"]
+
+
+# Arity of the size tuple a torch layer expects (e.g. ``tuple[int, int]`` for
+# 2d layers). Ties a layer constructor to a normalizer that produces it.
+_SizeT = TypeVar("_SizeT")
+
+
+@overload
+def _size_normalizer(dims: Literal[1]) -> Callable[[TupleorInt], tuple[int]]: ...
+@overload
+def _size_normalizer(
+    dims: Literal[2],
+) -> Callable[[TupleorInt], tuple[int, int]]: ...
+@overload
+def _size_normalizer(
+    dims: Literal[3],
+) -> Callable[[TupleorInt], tuple[int, int, int]]: ...
+def _size_normalizer(dims: int) -> Callable[[TupleorInt], tuple[int, ...]]:
+    """Build a normalizer that coerces an int-or-tuple size to ``dims`` arity.
+
+    torch's stubs demand an exact-arity size tuple per dimensionality; the
+    returned callable produces one. An ``int`` is broadcast across every
+    dimension; a tuple is assumed to already carry the correct arity (enforced
+    upstream by ``_assert_correct_kernel_sizes`` in ``agilerl/modules/cnn.py``).
+    """
+
+    def normalize(size: TupleorInt) -> tuple[int, ...]:
+        if isinstance(size, int):
+            return (size,) * dims
+        return tuple(size[:dims])
+
+    return normalize
+
+
+class _ConvCtor(Protocol[_SizeT]):
+    """A torch conv constructor whose size args all share arity ``_SizeT``."""
+
+    def __call__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: _SizeT,
+        stride: _SizeT,
+        padding: _SizeT,
+        *,
+        device: DeviceType,
+    ) -> nn.Module: ...
+
+
+class _PoolCtor(Protocol[_SizeT]):
+    """A torch pooling constructor whose size args all share arity ``_SizeT``."""
+
+    def __call__(
+        self,
+        kernel_size: _SizeT,
+        stride: _SizeT,
+        padding: _SizeT,
+    ) -> nn.Module: ...
+
+
+def _build_conv(
+    conv_cls: _ConvCtor[_SizeT],
+    to_size: Callable[[TupleorInt], _SizeT],
+    in_channels: int,
+    out_channels: int,
+    kernel_size: TupleorInt,
+    stride: TupleorInt,
+    padding: TupleorInt,
+    device: DeviceType,
+) -> nn.Module:
+    """Construct ``conv_cls`` with each size normalized to its expected arity.
+
+    Pairing ``conv_cls`` with ``to_size`` keeps the tuple arity the constructor
+    demands correlated with the normalizer that produces it.
+    """
+    return conv_cls(
+        in_channels,
+        out_channels,
+        to_size(kernel_size),
+        to_size(stride),
+        to_size(padding),
+        device=device,
+    )
+
+
+def _build_pool(
+    pool_cls: _PoolCtor[_SizeT],
+    to_size: Callable[[TupleorInt], _SizeT],
+    kernel_size: TupleorInt,
+    stride: TupleorInt,
+    padding: TupleorInt,
+) -> nn.Module:
+    """Construct ``pool_cls`` with each size normalized to its expected arity.
+
+    Pairing ``pool_cls`` with ``to_size`` keeps the tuple arity the constructor
+    demands correlated with the normalizer that produces it.
+    """
+    return pool_cls(to_size(kernel_size), to_size(stride), to_size(padding))
 
 
 def _is_module_dict(model: nn.Module) -> TypeGuard[ModuleDict[nn.Module]]:
@@ -320,30 +418,16 @@ def get_conv_layer(
     :return: Convolutional layer
     :rtype: nn.Module
     """
-    if conv_layer_name not in ["Conv1d", "Conv2d", "Conv3d"]:
-        msg = f"Invalid convolutional layer {conv_layer_name}. Must be one of 'Conv1d', 'Conv2d', 'Conv3d'."
-        raise ValueError(
-            msg,
-        )
+    args = (in_channels, out_channels, kernel_size, stride, padding)
+    if conv_layer_name == "Conv1d":
+        return _build_conv(nn.Conv1d, _size_normalizer(1), *args, device=device)
+    if conv_layer_name == "Conv2d":
+        return _build_conv(nn.Conv2d, _size_normalizer(2), *args, device=device)
+    if conv_layer_name == "Conv3d":
+        return _build_conv(nn.Conv3d, _size_normalizer(3), *args, device=device)
 
-    convolutional_layers: dict[str, type[nn.Conv1d | nn.Conv2d | nn.Conv3d]] = {
-        "1d": nn.Conv1d,
-        "2d": nn.Conv2d,
-        "3d": nn.Conv3d,
-    }
-
-    conv_cls = convolutional_layers[conv_layer_name.replace("Conv", "")]
-    # torch's conv stubs demand exact-arity size tuples (e.g. tuple[int, int]
-    # for Conv2d); tuple arity here is dynamic and validated at runtime against
-    # the block type (see _assert_correct_kernel_sizes in agilerl/modules/cnn.py).
-    return conv_cls(
-        in_channels,
-        out_channels,
-        kernel_size,  # ty: ignore[invalid-argument-type]
-        stride,  # ty: ignore[invalid-argument-type]
-        padding,  # ty: ignore[invalid-argument-type]
-        device=device,
-    )
+    msg = f"Invalid convolutional layer {conv_layer_name}. Must be one of 'Conv1d', 'Conv2d', 'Conv3d'."
+    raise ValueError(msg)
 
 
 def get_normalization(
@@ -419,17 +503,18 @@ def get_pooling(
     :return: Pooling layer
     :rtype: nn.Module
     """
-    pooling_functions = {
-        "MaxPool2d": nn.MaxPool2d,
-        "MaxPool3d": nn.MaxPool3d,
-        "AvgPool2d": nn.AvgPool2d,
-        "AvgPool3d": nn.AvgPool3d,
-    }
+    args = (kernel_size, stride, padding)
+    if pooling_name == "MaxPool2d":
+        return _build_pool(nn.MaxPool2d, _size_normalizer(2), *args)
+    if pooling_name == "MaxPool3d":
+        return _build_pool(nn.MaxPool3d, _size_normalizer(3), *args)
+    if pooling_name == "AvgPool2d":
+        return _build_pool(nn.AvgPool2d, _size_normalizer(2), *args)
+    if pooling_name == "AvgPool3d":
+        return _build_pool(nn.AvgPool3d, _size_normalizer(3), *args)
 
-    # torch's AvgPool stubs demand exact-arity size tuples (e.g. tuple[int, int]
-    # for AvgPool2d); tuple arity here is dynamic and matches the pooling name
-    # at runtime.
-    return pooling_functions[pooling_name](kernel_size, stride, padding)  # ty: ignore[invalid-argument-type]
+    msg = f"Invalid pooling layer {pooling_name}. Must be one of 'MaxPool2d', 'MaxPool3d', 'AvgPool2d', 'AvgPool3d'."
+    raise ValueError(msg)
 
 
 LayerType = nn.Module | GumbelSoftmax | NoisyLinear

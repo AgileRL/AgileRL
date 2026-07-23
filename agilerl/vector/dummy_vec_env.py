@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Literal, overload
 
 import numpy as np
@@ -9,7 +10,7 @@ from gymnasium import Env, spaces
 from gymnasium.vector import VectorEnv
 from gymnasium.vector.utils import batch_space
 
-from agilerl.typing import NumpyObsType, PzStepReturn
+from agilerl.typing import ArrayOrTensor, NumpyObsType, PzStepReturn
 from agilerl.vector.pz_vec_env import PettingZooVecEnv
 
 if TYPE_CHECKING:
@@ -235,15 +236,16 @@ class PzDummyVecEnv(PettingZooVecEnv):
 
     def step(
         self,
-        actions: dict[str, np.ndarray],
+        actions: Mapping[str, ArrayOrTensor],
         *args: Any,
         **kwargs: Any,
     ) -> PzStepReturn:
         """Take a step in the environment.
 
         :param actions: Dict of batched actions per agent, each with shape
-            ``(1, ...)``.  NaN actions are filtered (agent treated as inactive).
-        :type actions: dict[str, np.ndarray]
+            ``(1, ...)``.  Values may be arrays or tensors (converted via
+            ``np.asarray``).  NaN actions are filtered (agent treated as inactive).
+        :type actions: Mapping[str, ArrayOrTensor]
         :returns: ``(obs, rewards, terminated, truncated, info)`` with leading
             batch dimension of 1 on all per-agent arrays.
         :rtype: PzStepReturn

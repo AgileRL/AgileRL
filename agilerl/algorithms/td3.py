@@ -392,23 +392,20 @@ class TD3(RLAlgorithm[TensorDict]):
         """Shares the encoder parameters between the actor and critics.
         Registered as a mutation hook when share_encoders=True.
         """
-        # Explicit per-network checks (rather than all(...)) so the targets are
-        # covered too and each is known to be an encoder-bearing network.
-        if (
-            isinstance(self.actor, EvolvableNetwork)
-            and isinstance(self.critic_1, EvolvableNetwork)
-            and isinstance(self.critic_2, EvolvableNetwork)
-            and isinstance(self.critic_target_1, EvolvableNetwork)
-            and isinstance(self.critic_target_2, EvolvableNetwork)
-        ):
+        networks = [
+            net
+            for net in (
+                self.actor,
+                self.critic_1,
+                self.critic_2,
+                self.critic_target_1,
+                self.critic_target_2,
+            )
+            if isinstance(net, EvolvableNetwork)
+        ]
+        if len(networks) == 5:
             try:
-                share_encoder_parameters(
-                    self.actor,
-                    self.critic_1,
-                    self.critic_2,
-                    self.critic_target_1,
-                    self.critic_target_2,
-                )
+                share_encoder_parameters(*networks)
             except KeyError as e:
                 msg = f"Found incompatible encoder architectures: {e} not found in shared network."
                 raise KeyError(

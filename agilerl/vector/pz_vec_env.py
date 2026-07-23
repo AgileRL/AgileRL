@@ -1,11 +1,11 @@
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import numpy as np
 from gymnasium.spaces import Space
 from gymnasium.vector.utils import batch_space
 
-from agilerl.typing import ActionType, NumpyObsType, PzStepReturn
+from agilerl.typing import ActionType, ArrayOrTensor, NumpyObsType, PzStepReturn
 
 
 class PettingZooVecEnv:
@@ -117,14 +117,15 @@ class PettingZooVecEnv:
 
     def step(
         self,
-        actions: dict[str, np.ndarray],
+        actions: Mapping[str, ArrayOrTensor],
         *args: Any,
         **kwargs: Any,
     ) -> PzStepReturn:
         """Take an action for each parallel environment.
 
         :param actions: Dictionary of vectorized actions for each agent.
-        :type actions: dict[str, np.ndarray]
+            Values may be arrays or tensors.
+        :type actions: Mapping[str, ArrayOrTensor]
 
         :return: Tuple of observations, rewards, terminated, truncated, infos
         :rtype: tuple[dict[str, np.ndarray], dict[str, float], dict[str, bool], dict[str, bool], dict[str, Any]]

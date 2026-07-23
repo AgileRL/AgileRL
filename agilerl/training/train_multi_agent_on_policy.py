@@ -263,13 +263,11 @@ def train_multi_agent_on_policy(
                             spaces.Box,
                         ):
                             if agent_policy.squash_output:
-                                # NOTE: `StochasticActor.scale_action` takes and
-                                # returns a tensor on the policy's device, so the
-                                # scaled action reaches the environment as a tensor
-                                # rather than an array. `PPO.get_action` converts
-                                # with `.cpu().data.numpy()` after scaling.
+                                # ``scale_action`` returns a tensor on the policy
+                                # device; the vectorized env accepts arrays or
+                                # tensors and converts on the way in.
                                 clipped_agent_action = agent_policy.scale_action(
-                                    agent_action,  # ty: ignore[invalid-argument-type]
+                                    agent_action,
                                 )
                             else:
                                 clipped_agent_action = np.clip(
@@ -282,10 +280,10 @@ def train_multi_agent_on_policy(
 
                         clipped_action[agent_id] = clipped_agent_action
 
-                    # Act in environment. Squashed actions arrive as tensors (see the
-                    # NOTE above), which the vectorized env converts on the way in.
+                    # Squashed actions may be tensors; the vectorized env converts
+                    # array/tensor values on the way in.
                     next_obs, reward, termination, truncation, info = vec_env.step(
-                        clipped_action,  # ty: ignore[invalid-argument-type]
+                        clipped_action,
                     )
 
                     # Compute score increment (replace NaNs representing inactive agents with 0)

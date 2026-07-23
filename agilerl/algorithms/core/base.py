@@ -81,6 +81,7 @@ from agilerl.typing import (
     ModuleType,
     MultiAgentObservationType,
     MultiAgentSetup,
+    MultiAgentSpacesType,
     NetConfigType,
     ObservationType,
     OptimizerType,
@@ -1517,9 +1518,9 @@ class MultiAgentRLAlgorithm(
     """Base object for all multi-agent algorithms in the AgileRL framework.
 
     :param observation_spaces: The observation spaces of the agent environments.
-    :type observation_spaces: list[spaces.Space] | Mapping[str, spaces.Space] | spaces.Dict
+    :type observation_spaces: MultiAgentSpacesType
     :param action_spaces: The action spaces of the agent environments.
-    :type action_spaces: list[spaces.Space] | Mapping[str, spaces.Space] | spaces.Dict
+    :type action_spaces: MultiAgentSpacesType
     :param index: The index of the individual in the population.
     :type index: int.
     :param agent_ids: The agent IDs of the agents in the environment.
@@ -1552,12 +1553,8 @@ class MultiAgentRLAlgorithm(
 
     def __init__(
         self,
-        observation_spaces: Iterable[spaces.Space]
-        | Mapping[str, spaces.Space]
-        | spaces.Dict,
-        action_spaces: Iterable[spaces.Space]
-        | Mapping[str, spaces.Space]
-        | spaces.Dict,
+        observation_spaces: MultiAgentSpacesType,
+        action_spaces: MultiAgentSpacesType,
         index: int,
         agent_ids: Iterable[str] | None = None,
         hp_config: HyperparameterConfig | None = None,

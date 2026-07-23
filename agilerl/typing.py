@@ -1,4 +1,4 @@
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
 from enum import Enum
 from numbers import Number
 from typing import (
@@ -101,6 +101,9 @@ SupportedObservationSpace = (
 SupportedActionSpace = (
     spaces.Discrete | spaces.MultiDiscrete | spaces.MultiBinary | spaces.Box
 )
+# Per-agent spaces for multi-agent algorithms: an ordered iterable of spaces,
+# a mapping keyed by agent id, or a ``spaces.Dict``.
+MultiAgentSpacesType = Iterable[spaces.Space] | Mapping[str, spaces.Space] | spaces.Dict
 
 ArrayOrTensor = np.ndarray | torch.Tensor
 StandardTensorDict = dict[str, torch.Tensor]

@@ -389,11 +389,12 @@ class StochasticActor(EvolvableNetwork):
             device=self.device,
         )
 
-    def scale_action(self, action: torch.Tensor) -> torch.Tensor:
+    def scale_action(self, action: ArrayOrTensor) -> torch.Tensor:
         """Scale the action from [-1, 1] to the action space bounds [low, high].
 
-        :param action: Action.
-        :type action: torch.Tensor
+        :param action: Action as an array or tensor. Array inputs are handled by
+            the tensor arithmetic against ``action_low`` / ``action_high``.
+        :type action: ArrayOrTensor
         :return: Scaled action.
         :rtype: torch.Tensor
         """
