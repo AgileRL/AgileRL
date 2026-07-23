@@ -2,9 +2,8 @@ import copy
 import warnings
 from collections import OrderedDict, defaultdict
 from collections.abc import Mapping
-from contextlib import AbstractContextManager
 from dataclasses import asdict
-from typing import Any, Protocol, runtime_checkable
+from typing import Any
 
 import numpy as np
 import torch
@@ -49,22 +48,6 @@ from agilerl.utils.algo_utils import (
 from agilerl.vector.pz_vec_env import PettingZooVecEnv
 
 SupportedActionSpace = spaces.Discrete | spaces.Box
-
-
-@runtime_checkable
-class _SupportsNoSync(Protocol):
-    def no_sync(self) -> AbstractContextManager[None]: ...
-
-
-def _ddp_no_sync(module: nn.Module) -> AbstractContextManager[None]:
-    """Pause DDP gradient synchronisation on an accelerator-wrapped module.
-
-    Only reached when an ``Accelerator`` has wrapped the module in
-    ``DistributedDataParallel``, which is what provides ``no_sync``
-    (``nn.Module.__getattr__`` types the dynamic lookup as a parameter/module).
-    """
-    assert isinstance(module, _SupportsNoSync)
-    return module.no_sync()
 
 
 class MATD3(MultiAgentRLAlgorithm[TensorDict]):
@@ -606,7 +589,7 @@ class MATD3(MultiAgentRLAlgorithm[TensorDict]):
             actor.eval()
             grouped_obs = preprocessed_states[group_id]
             if self.accelerator is not None:
-                with _ddp_no_sync(actor), torch.no_grad():
+                with self.accelerator.no_sync(actor), torch.no_grad():
                     actions = actor(grouped_obs)
             else:
                 with torch.no_grad():
@@ -878,9 +861,9 @@ class MATD3(MultiAgentRLAlgorithm[TensorDict]):
         critic_2_optimizer = self.critic_2_optimizers[network_id]
 
         if self.accelerator is not None:
-            with _ddp_no_sync(critic_1):
+            with self.accelerator.no_sync(critic_1):
                 q_value_1 = critic_1(states, stacked_actions)
-            with _ddp_no_sync(critic_2):
+            with self.accelerator.no_sync(critic_2):
                 q_value_2 = critic_2(states, stacked_actions)
         else:
             q_value_1 = critic_1(states, stacked_actions)
@@ -888,12 +871,12 @@ class MATD3(MultiAgentRLAlgorithm[TensorDict]):
 
         with torch.no_grad():
             if self.accelerator is not None:
-                with _ddp_no_sync(critic_target_1):
+                with self.accelerator.no_sync(critic_target_1):
                     q_value_next_state_1 = critic_target_1(
                         next_states,
                         stacked_next_actions,
                     )
-                with _ddp_no_sync(critic_target_2):
+                with self.accelerator.no_sync(critic_target_2):
                     q_value_next_state_2 = critic_target_2(
                         next_states,
                         stacked_next_actions,
@@ -944,7 +927,7 @@ class MATD3(MultiAgentRLAlgorithm[TensorDict]):
 
         # Calculate actions and actor loss
         if self.accelerator is not None:
-            with _ddp_no_sync(actor):
+            with self.accelerator.no_sync(actor):
                 action = actor(states[agent_id])
         else:
             action = actor(states[agent_id])
@@ -960,7 +943,7 @@ class MATD3(MultiAgentRLAlgorithm[TensorDict]):
                 dim=1,
             )
             if self.accelerator is not None:
-                with _ddp_no_sync(critic_1):
+                with self.accelerator.no_sync(critic_1):
                     actor_loss = -critic_1(states, stacked_detached_actions).mean()
             else:
                 actor_loss = -critic_1(states, stacked_detached_actions).mean()

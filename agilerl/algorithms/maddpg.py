@@ -2,9 +2,8 @@ import copy
 import warnings
 from collections import OrderedDict, defaultdict
 from collections.abc import Mapping
-from contextlib import AbstractContextManager
 from dataclasses import asdict
-from typing import Any, Protocol, runtime_checkable
+from typing import Any
 
 import numpy as np
 import torch
@@ -48,22 +47,6 @@ from agilerl.utils.algo_utils import (
 from agilerl.vector.pz_vec_env import PettingZooVecEnv
 
 SupportedActionSpace = spaces.Discrete | spaces.Box
-
-
-@runtime_checkable
-class _SupportsNoSync(Protocol):
-    def no_sync(self) -> AbstractContextManager[None]: ...
-
-
-def _ddp_no_sync(module: nn.Module) -> AbstractContextManager[None]:
-    """Pause DDP gradient synchronisation on an accelerator-wrapped module.
-
-    Only reached when an ``Accelerator`` has wrapped the module in
-    ``DistributedDataParallel``, which is what provides ``no_sync``
-    (``nn.Module.__getattr__`` types the dynamic lookup as a parameter/module).
-    """
-    assert isinstance(module, _SupportsNoSync)
-    return module.no_sync()
 
 
 class MADDPG(MultiAgentRLAlgorithm[TensorDict]):
@@ -559,7 +542,7 @@ class MADDPG(MultiAgentRLAlgorithm[TensorDict]):
             actor.eval()
             grouped_obs = preprocessed_states[group_id]
             if self.accelerator is not None:
-                with _ddp_no_sync(actor), torch.no_grad():
+                with self.accelerator.no_sync(actor), torch.no_grad():
                     actions = actor(grouped_obs)
             else:
                 with torch.no_grad():
@@ -818,14 +801,14 @@ class MADDPG(MultiAgentRLAlgorithm[TensorDict]):
         critic_optimizer = self.critic_optimizers[network_id]
 
         if self.accelerator is not None:
-            with _ddp_no_sync(critic):
+            with self.accelerator.no_sync(critic):
                 q_value = critic(states, stacked_actions)
         else:
             q_value = critic(states, stacked_actions)
 
         with torch.no_grad():
             if self.accelerator is not None:
-                with _ddp_no_sync(critic_target):
+                with self.accelerator.no_sync(critic_target):
                     q_value_next_state = critic_target(
                         next_states,
                         stacked_next_actions,
@@ -863,7 +846,7 @@ class MADDPG(MultiAgentRLAlgorithm[TensorDict]):
 
         # Get actions from actor
         if self.accelerator is not None:
-            with _ddp_no_sync(actor):
+            with self.accelerator.no_sync(actor):
                 action = actor(states[agent_id])
         else:
             action = actor(states[agent_id])
@@ -877,7 +860,7 @@ class MADDPG(MultiAgentRLAlgorithm[TensorDict]):
             dim=1,
         )
         if self.accelerator is not None:
-            with _ddp_no_sync(critic):
+            with self.accelerator.no_sync(critic):
                 actor_loss = -critic(states, stacked_detached_actions).mean()
         else:
             actor_loss = -critic(states, stacked_detached_actions).mean()
