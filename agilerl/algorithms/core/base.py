@@ -185,6 +185,13 @@ SelfAgentWrapper = TypeVar("SelfAgentWrapper", bound=AgentWrapperProtocol)
 # not as the EvolvableAlgorithm base.
 AlgoT = TypeVar("AlgoT", bound="EvolvableAlgorithm")
 
+# Bound to the structural interface shared by evolvable algorithms and the agent
+# wrappers around them, so attribute-copying helpers accept either.
+IndividualT = TypeVar(
+    "IndividualT",
+    bound="EvolvableAlgorithmProtocol | AgentWrapperProtocol[Any]",
+)
+
 
 class _RegistryMeta(type):
     """Metaclass to wrap registry information after algorithm is done
@@ -537,7 +544,7 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
 
     @staticmethod
     def inspect_attributes(
-        agent: EvolvableAlgorithmProtocol,
+        agent: EvolvableAlgorithmProtocol | AgentWrapperProtocol[Any],
         input_args_only: bool = False,
     ) -> dict[str, Any]:
         """Inspect and retrieve the attributes of the current object, excluding attributes related to the
@@ -579,9 +586,9 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
 
     @staticmethod
     def copy_attributes(
-        agent: AlgoT,
-        clone: AlgoT,
-    ) -> AlgoT:
+        agent: IndividualT,
+        clone: IndividualT,
+    ) -> IndividualT:
         """Copy the non-evolvable attributes of the algorithm to a clone.
 
         :param clone: The clone of the algorithm.

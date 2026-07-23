@@ -497,6 +497,12 @@ class AgentWrapperProtocol(Protocol, Generic[EvolvableAlgorithmT]):
     ) -> None:
         pass
 
+    def evolvable_attributes(
+        self,
+        networks_only: bool = False,
+    ) -> EvolvableAttributeDict:
+        pass
+
 
 @runtime_checkable
 class LoraConfigProtocol(Protocol):

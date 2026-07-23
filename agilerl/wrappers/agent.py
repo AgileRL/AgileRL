@@ -18,6 +18,7 @@ from agilerl.algorithms.core import (
     RLAlgorithm,
 )
 from agilerl.algorithms.core.base import get_checkpoint_dict
+from agilerl.protocols import EvolvableAttributeDict
 from agilerl.typing import (
     ActionReturnType,
     ArrayDict,
@@ -83,6 +84,13 @@ class AgentWrapper(ABC, Generic[AgentType]):
         """
         return self.agent.device if not hasattr(self.agent, "rollout_buffer") else "cpu"
 
+    def evolvable_attributes(
+        self,
+        networks_only: bool = False,
+    ) -> EvolvableAttributeDict:
+        """Delegate attribute inspection to the wrapped agent."""
+        return self.agent.evolvable_attributes(networks_only)
+
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}({self.agent})"
 
@@ -140,12 +148,8 @@ class AgentWrapper(ABC, Generic[AgentType]):
         """
         agent_clone = self.agent.clone(index, wrap)
 
-        # NOTE: `inspect_attributes` / `copy_attributes` are duck-typed helpers that
-        # explicitly support wrapped individuals (see their handling of `AgentWrapper`
-        # attributes), but are annotated to take `EvolvableAlgorithm`. Fix belongs in
-        # agilerl/algorithms/core/base.py: widen them to accept the wrapper protocol.
         input_args = EvolvableAlgorithm.inspect_attributes(
-            self,  # ty: ignore[invalid-argument-type]
+            self,
             input_args_only=True,
         )
         input_args.pop("agent", None)
@@ -154,8 +158,8 @@ class AgentWrapper(ABC, Generic[AgentType]):
 
         # `copy_attributes` populates `clone` in place and returns it.
         EvolvableAlgorithm.copy_attributes(
-            self,  # ty: ignore[invalid-argument-type]
-            clone,  # ty: ignore[invalid-argument-type]
+            self,
+            clone,
         )
         return clone
 
@@ -171,16 +175,13 @@ class AgentWrapper(ABC, Generic[AgentType]):
         del checkpoint["get_action"]
 
         # Add wrapper attributes to checkpoint
-        # NOTE: see `clone` - `inspect_attributes` supports wrappers at runtime but is
-        # annotated for `EvolvableAlgorithm`; widening it belongs in
-        # agilerl/algorithms/core/base.py.
         checkpoint["wrapper_cls"] = self.__class__
         checkpoint["wrapper_init_dict"] = EvolvableAlgorithm.inspect_attributes(
-            self,  # ty: ignore[invalid-argument-type]
+            self,
             input_args_only=True,
         )
         checkpoint["wrapper_attrs"] = EvolvableAlgorithm.inspect_attributes(
-            self,  # ty: ignore[invalid-argument-type]
+            self,
         )
 
         checkpoint["wrapper_init_dict"].pop("agent")
