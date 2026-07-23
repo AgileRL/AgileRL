@@ -20,12 +20,17 @@ class DPOSpec(LLMAlgorithmSpec):
     env_type: ClassVar[LLMEnvType] = LLMEnvType.PREFERENCE
 
     @staticmethod
-    def get_training_fn() -> Callable[..., Any]:
+    def get_training_fn(*, multiturn: bool = False) -> Callable[..., Any]:
         """Get the training function for DPO.
 
+        :param multiturn: Multi-turn training is not supported for DPO.
         :return: Training function
         :rtype: Callable[..., Any]
+        :raises ValueError: If *multiturn* is ``True``.
         """
+        if multiturn:
+            msg = "DPO does not support multi-turn training."
+            raise ValueError(msg)
         from agilerl.training.llm import finetune_llm_preference
 
         return finetune_llm_preference

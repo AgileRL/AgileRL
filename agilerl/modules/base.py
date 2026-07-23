@@ -343,7 +343,7 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
     @rng.setter
     def rng(self, value: np.random.Generator) -> None:
         self._rng = value
-        for module in self.modules().values():
+        for module in self.evolvable_modules().values():
             module.rng = value
 
     @property
@@ -353,7 +353,7 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
     @device.setter
     def device(self, value: DeviceType) -> None:
         self._device = value
-        for module in self.modules().values():
+        for module in self.evolvable_modules().values():
             module.device = value
 
     def recreate_network(self) -> None:
@@ -630,14 +630,11 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
             raise ValueError(msg)
 
         # Recursively disable mutations in nested evolvable modules
-        for module in self.modules().values():
+        for module in self.evolvable_modules().values():
             module.disable_mutations(mut_type)
 
-    def modules(self) -> dict[str, "EvolvableModule"]:  # ty: ignore[invalid-method-override]  # intentional API redefinition of nn.Module.modules(); torch iterator available via torch_modules()
+    def evolvable_modules(self) -> dict[str, "EvolvableModule"]:
         """Return the nested evolvable modules in the network.
-
-        .. warning:: This overrides the behavior of `nn.Module.modules()` and only returns
-            the evolvable modules. If you need the torch modules, use :meth:`torch_modules()` instead.
 
         :return: A dictionary of network attributes.
         :rtype: dict[str, EvolvableModule]
@@ -851,7 +848,7 @@ class ModuleDict(EvolvableModule, nn.ModuleDict, Generic[ModuleT]):
     def layer_mutation_methods(self) -> list[str]:
         return [
             f"{name}.{method}"
-            for name, module in self.modules().items()
+            for name, module in self.evolvable_modules().items()
             for method in module.layer_mutation_methods
         ]
 
@@ -859,13 +856,15 @@ class ModuleDict(EvolvableModule, nn.ModuleDict, Generic[ModuleT]):
     def node_mutation_methods(self) -> list[str]:
         return [
             f"{name}.{method}"
-            for name, module in self.modules().items()
+            for name, module in self.evolvable_modules().items()
             for method in module.node_mutation_methods
         ]
 
     @property
     def activation(self) -> str | None:
-        nested_activations = [module.activation for module in self.modules().values()]
+        nested_activations = [
+            module.activation for module in self.evolvable_modules().values()
+        ]
         if len(set(nested_activations)) == 1:
             return nested_activations[0]
         return None
@@ -894,7 +893,7 @@ class ModuleDict(EvolvableModule, nn.ModuleDict, Generic[ModuleT]):
         :param output: Whether to set the activation function for the output layer.
         :type output: bool
         """
-        for module in self.modules().values():
+        for module in self.evolvable_modules().values():
             module.change_activation(activation, output)
 
     def filter_mutation_methods(self, remove: str) -> None:
@@ -903,17 +902,14 @@ class ModuleDict(EvolvableModule, nn.ModuleDict, Generic[ModuleT]):
         param remove: The string to remove.
         type remove: str
         """
-        for module in self.modules().values():
+        for module in self.evolvable_modules().values():
             module.filter_mutation_methods(remove)
 
-    def modules(self) -> dict[str, EvolvableModule]:
+    def evolvable_modules(self) -> dict[str, EvolvableModule]:
         """Return the nested evolvable modules in the network.
 
-        .. warning:: This overrides the behavior of `nn.Module.modules()` and only returns
-            the evolvable modules. If you need the torch modules, use :meth:`torch_modules()` instead.
-
         :return: A dictionary of network attributes.
-        :rtype: dict[str, Any]
+        :rtype: dict[str, EvolvableModule]
         """
         evo_modules: dict[str, EvolvableModule] = OrderedDict()
         for name, module in self.items():

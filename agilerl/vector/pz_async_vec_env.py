@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import multiprocessing as mp
 import sys
 import time
@@ -23,7 +25,13 @@ from gymnasium.vector.utils import CloudpickleWrapper, clear_mpi_env_vars
 from numpy.typing import ArrayLike
 from pettingzoo import ParallelEnv
 
-from agilerl.typing import ActionType, InfosDict, NumpyObsType, PzStepReturn
+from agilerl.typing import (
+    ActionType,
+    NumpyObsType,
+    PzObservationsType,
+    PzResetReturn,
+    PzStepReturn,
+)
 from agilerl.vector.pz_vec_env import PettingZooVecEnv
 
 AgentID = TypeVar("AgentID")
@@ -189,7 +197,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         *,
         seed: int | list[int] | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[dict[str, NumpyObsType], InfosDict]:
+    ) -> PzResetReturn:
         """Reset all the environments and return two dictionaries of batched observations and infos.
 
         :param seed: Random seed (or one seed per environment), defaults to None
@@ -237,24 +245,23 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
 
         self._state = AsyncState.WAITING_RESET
 
-    def get_observations(self) -> dict[str, NumpyObsType]:
+    def get_observations(self) -> PzObservationsType:
         """Get the observations from the environments.
 
         :return: Observations from the environments
-        :rtype: dict[str, NumpyObsType]
+        :rtype: PzObservationsType
         """
         if self.copy:
             return {
                 agent: deepcopy(self.observations[agent])
                 for agent in self.observations.keys()
             }
-        # Zero-copy path: the live Observations proxy duck-types the dict interface.
-        return self.observations  # ty: ignore[invalid-return-type]
+        return self.observations
 
     def reset_wait(
         self,
         timeout: float | None = None,
-    ) -> tuple[dict[str, NumpyObsType], InfosDict]:
+    ) -> PzResetReturn:
         """Wait for the calls triggered by :meth:`reset_async` to finish and return the results.
 
         :param timeout: Number of seconds before the call to ``reset_wait`` times out. If `None`, the call to
@@ -262,7 +269,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         :type timeout: int | float | None, optional
 
         :return: Tuple of observations and infos
-        :rtype: tuple[dict[str, NumpyObsType], InfosDict]
+        :rtype: PzResetReturn
         """
         self._assert_is_running()
         if self._state != AsyncState.WAITING_RESET:
@@ -648,7 +655,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         return vector_infos
 
 
-class Observations:
+class Observations(Mapping[str, NumpyObsType]):
     """Class for storing observations with a dictionary interface.
 
     :param shared_memory: A RawArray that all envs write observations to.
@@ -718,35 +725,11 @@ class Observations:
     def __repr__(self) -> str:
         return self.__str__()
 
-    def __contains__(self, key: str) -> bool:
-        return key in self.obs_view
-
     def __len__(self) -> int:
         return len(self.agents)
 
-    def __iterate_kv(self) -> Iterator[tuple[str, NumpyObsType]]:
-        for key in self.obs_view:
-            yield (key, self.__getitem__(key))
-
-    def __iter__(self) -> Iterator[tuple[str, NumpyObsType]]:
-        return self.__iterate_kv()
-
-    def keys(self) -> Iterator[str]:
-        for k, _ in self.__iterate_kv():
-            yield k
-
-    def values(self) -> Iterator[NumpyObsType]:
-        for _, v in self.__iterate_kv():
-            yield v
-
-    def items(self) -> Iterator[tuple[str, NumpyObsType]]:
-        return self.__iterate_kv()
-
-    def get(self, key: str) -> NumpyObsType | None:
-        try:
-            return self.__getitem__(key)
-        except KeyError:
-            return None
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.obs_view)
 
 
 def _create_memory_array(

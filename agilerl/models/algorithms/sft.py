@@ -20,12 +20,17 @@ class SFTSpec(LLMAlgorithmSpec):
     env_type: ClassVar[LLMEnvType] = LLMEnvType.SFT
 
     @staticmethod
-    def get_training_fn() -> Callable[..., Any]:
+    def get_training_fn(*, multiturn: bool = False) -> Callable[..., Any]:
         """Get the training function for SFT.
 
+        :param multiturn: Multi-turn training is not supported for SFT.
         :return: Training function
         :rtype: Callable[..., Any]
+        :raises ValueError: If *multiturn* is ``True``.
         """
+        if multiturn:
+            msg = "SFT does not support multi-turn training."
+            raise ValueError(msg)
         from agilerl.training.llm import finetune_llm_sft
 
         return finetune_llm_sft

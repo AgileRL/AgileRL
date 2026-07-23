@@ -8,8 +8,7 @@ from gymnasium.vector.utils import batch_space
 from agilerl.typing import (
     ActionType,
     ArrayOrTensor,
-    InfosDict,
-    NumpyObsType,
+    PzResetReturn,
     PzStepReturn,
 )
 
@@ -85,7 +84,7 @@ class PettingZooVecEnv:
         *,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[dict[str, NumpyObsType], InfosDict]:
+    ) -> PzResetReturn:
         """Reset all the environments and return two dictionaries of batched observations and infos.
 
         :param seed: Random seed, defaults to None
@@ -93,7 +92,7 @@ class PettingZooVecEnv:
         :param options: Options dictionary
         :type options: dict[str, Any]
         :return: Tuple of (observations, infos)
-        :rtype: tuple[dict[str, NumpyObsType], InfosDict]
+        :rtype: PzResetReturn
         """
         msg = "Subclasses must implement reset()"
         raise NotImplementedError(msg)

@@ -290,7 +290,7 @@ class ModuleDictProtocol(Protocol, Generic[T]):
     def items(self) -> Iterable[tuple[str, T]]:
         pass
 
-    def modules(self) -> dict[str, T]:
+    def evolvable_modules(self) -> dict[str, T]:
         pass
 
     def get_mutation_methods(self) -> dict[str, MutationMethodProtocol]:

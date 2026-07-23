@@ -405,7 +405,7 @@ class EvolvableCNN(EvolvableModule):
     def rng(self, value: np.random.Generator) -> None:
         self._rng = value
         self.mut_kernel_size.rng = value
-        for module in self.modules().values():
+        for module in self.evolvable_modules().values():
             module.rng = value
 
     @property

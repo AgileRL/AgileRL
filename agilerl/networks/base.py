@@ -513,7 +513,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
 
         # Initialize weights of network heads
         # NOTE: We assume the head is an instance of EvolvableMLP
-        for attr, module in self.modules().items():
+        for attr, module in self.evolvable_modules().items():
             if attr != "encoder":
                 module.init_weights_gaussian(
                     std_coeff=std_coeff,
@@ -559,7 +559,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         :param output: If True, change the output activation function, defaults to False
         :type output: bool, optional
         """
-        for attr, module in self.modules().items():
+        for attr, module in self.evolvable_modules().items():
             _output = True if attr == "encoder" else output
             module.change_activation(activation, output=_output)
 

@@ -196,9 +196,13 @@ def normalize_reasoning_prompt_batch(
         else:
             for sample in samples:
                 sample[key] = value
-    # Each sample is ReasoningPrompts-shaped but built dynamically (to preserve
-    # arbitrary metadata keys), which the closed TypedDict can't express.
-    return samples  # ty: ignore[invalid-return-type]
+    narrowed: list[ReasoningPrompts] = []
+    for sample in samples:
+        if not is_reasoning_prompts(sample):
+            msg = "normalized prompt sample missing required token tensors"
+            raise TypeError(msg)
+        narrowed.append(sample)
+    return narrowed
 
 
 def gather_tensor(

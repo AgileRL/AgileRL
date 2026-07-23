@@ -247,7 +247,7 @@ class EvolvableMultiInput(EvolvableModule):
             return self._init_dicts
 
         reformatted_dicts = {}
-        for key, net in self.feature_net.modules().items():
+        for key, net in self.feature_net.evolvable_modules().items():
             init_dict = net.init_dict
             init_dict.pop("observation_space", None)  # MultiInput
             init_dict.pop("input_size", None)  # LSTM
@@ -290,7 +290,7 @@ class EvolvableMultiInput(EvolvableModule):
         output_coeff: float = 4,
     ) -> None:
         """Initialise weights of linear layers using Gaussian distribution."""
-        for module in self.feature_net.modules().values():
+        for module in self.feature_net.evolvable_modules().values():
             assert isinstance(
                 module,
                 (EvolvableCNN, EvolvableMLP, EvolvableMultiInput),

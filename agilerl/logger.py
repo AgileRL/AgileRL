@@ -16,19 +16,19 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-try:
-    from torch.utils.tensorboard import SummaryWriter
-except ImportError:
-    # Sentinel checked in TensorboardLogger.__init__; tensorboard is optional.
-    SummaryWriter = None  # ty: ignore[invalid-assignment]
-
 import wandb
 
 if TYPE_CHECKING:
     from accelerate import Accelerator
+    from torch.utils.tensorboard import SummaryWriter
     from tqdm import tqdm
 
     from agilerl.population import MetricsReport
+else:
+    try:
+        from torch.utils.tensorboard import SummaryWriter
+    except ImportError:
+        SummaryWriter = None
 
 
 class Logger(ABC):

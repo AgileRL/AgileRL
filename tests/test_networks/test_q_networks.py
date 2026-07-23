@@ -98,7 +98,7 @@ class TestQNetworkInit:
         elif encoder_type == "cnn":
             assert isinstance(network.encoder, EvolvableCNN)
 
-        evolvable_modules = network.modules()
+        evolvable_modules = network.evolvable_modules()
         assert "encoder" in evolvable_modules
         assert "head_net" in evolvable_modules
 
@@ -110,7 +110,7 @@ class TestQNetworkInit:
         assert network.observation_space == observation_space
         assert isinstance(network.encoder, EvolvableLSTM)
 
-        evolvable_modules = network.modules()
+        evolvable_modules = network.evolvable_modules()
         assert "encoder" in evolvable_modules
         assert "head_net" in evolvable_modules
 
@@ -128,7 +128,7 @@ class TestQNetworkInit:
         elif encoder_type == "simba":
             assert isinstance(network.encoder, EvolvableSimBa)
 
-        evolvable_modules = network.modules()
+        evolvable_modules = network.evolvable_modules()
         assert "encoder" in evolvable_modules
         assert "head_net" in evolvable_modules
 
@@ -284,7 +284,7 @@ class TestRainbowQNetworkInit:
         elif encoder_type == "cnn":
             assert isinstance(network.encoder, EvolvableCNN)
 
-        evolvable_modules = network.modules()
+        evolvable_modules = network.evolvable_modules()
         assert "encoder" in evolvable_modules
         assert "head_net" in evolvable_modules
 
@@ -496,7 +496,7 @@ class TestContinuousQNetworkInit:
         elif encoder_type == "cnn":
             assert isinstance(network.encoder, EvolvableCNN)
 
-        evolvable_modules = network.modules()
+        evolvable_modules = network.evolvable_modules()
         assert "encoder" in evolvable_modules
         assert "head_net" in evolvable_modules
 
@@ -510,7 +510,7 @@ class TestContinuousQNetworkInit:
         assert network.observation_space == observation_space
         assert isinstance(network.encoder, EvolvableLSTM)
 
-        evolvable_modules = network.modules()
+        evolvable_modules = network.evolvable_modules()
         assert "encoder" in evolvable_modules
         assert "head_net" in evolvable_modules
 
@@ -531,7 +531,7 @@ class TestContinuousQNetworkInit:
         elif encoder_type == "simba":
             assert isinstance(network.encoder, EvolvableSimBa)
 
-        evolvable_modules = network.modules()
+        evolvable_modules = network.evolvable_modules()
         assert "encoder" in evolvable_modules
         assert "head_net" in evolvable_modules
 

@@ -139,7 +139,7 @@ def get_spaces_from_env_single_agent(
 def create_population_from_spec(
     population_size: int,
     algo_spec: AlgoSpec,
-    env: EnvironmentType,
+    env: EnvironmentType | None,
     mutation_spec: MutationSpec | None,
     replay_buffer_spec: ReplayBufferSpec | None,
     device: str | torch.device = "cpu",
@@ -155,8 +155,10 @@ def create_population_from_spec(
     :type algo_spec: AlgoSpec
     :param mutation_spec: Optional mutation spec for HP range fallback.
     :type mutation_spec: MutationSpec | None
-    :param env: RL environment following Gymnasium or PettingZoo API.
-    :type env: EnvironmentType
+    :param env: RL environment following Gymnasium or PettingZoo API, or
+        ``None`` for multi-turn LLM training where no environment is
+        instantiated up front.
+    :type env: EnvironmentType | None
     :param replay_buffer_spec: Replay buffer specification.
     :type replay_buffer_spec: ReplayBufferSpec | None
     :param device: Torch device string.
@@ -183,12 +185,21 @@ def create_population_from_spec(
     # NOTE: We should identify these lazily during training...
     for num_envs_arg in ["num_envs", "vect_noise_dim"]:
         if hasattr(algo_spec, num_envs_arg):
+            if env is None:
+                msg = (
+                    f"Algorithm spec {type(algo_spec).__name__} requires an "
+                    "environment to resolve num_envs."
+                )
+                raise ValueError(msg)
             # Not every member of the env union exposes ``num_envs``; the algos
             # that set it always run on a vectorized env that does.
             setattr(algo_spec, num_envs_arg, get_num_envs(env))
 
     # Classic RL algorithms
     if isinstance(algo_spec, (RLAlgorithmSpec, MultiAgentRLAlgorithmSpec)):
+        if env is None:
+            msg = "Classic RL algorithms require an instantiated environment."
+            raise ValueError(msg)
         observation_space, action_space = get_spaces_from_env(algo_spec, env)
 
         if (
@@ -341,7 +352,7 @@ def build_tournament_from_spec(
 
 
 def build_replay_buffer_from_spec(
-    algo_spec: RLAlgorithmSpec | MultiAgentRLAlgorithmSpec,
+    algo_spec: AlgoSpec,
     buffer_spec: ReplayBufferSpec | None,
     device: str | torch.device = "cpu",
 ) -> BufferType | None:
@@ -353,7 +364,7 @@ def build_replay_buffer_from_spec(
     On-policy algorithms return ``None``.
 
     :param algo_spec: Algorithm spec.
-    :type algo_spec: RLAlgorithmSpec | MultiAgentRLAlgorithmSpec
+    :type algo_spec: AlgoSpec
     :param buffer_spec: Replay buffer specification.
     :type buffer_spec: ReplayBufferSpec | None
     :param device: Torch device string.

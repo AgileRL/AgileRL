@@ -42,10 +42,7 @@ class Sampler:
         :rtype: TensorDict | list[TensorDict]
         """
         # The buffer yields plain TensorDicts; algorithms apply the typed
-        # TensorClass schema downstream in learn() via from_tensordict. Here we
-        # only need a dense stack along a new leading dimension, which
-        # TensorDict.stack collates recursively through nested per-agent
-        # TensorDict leaves (multi-agent) as well as flat tensor leaves.
+        # TensorClass schema downstream in learn() via from_tensordict.
         collated: TensorDict = TensorDict.stack(batch)
         return collated
 
@@ -192,7 +189,7 @@ class Sampler:
         assert isinstance(self.memory, PrioritizedReplayBuffer), (
             "PER sampling requires a PrioritizedReplayBuffer."
         )
-        return self.memory.sample(batch_size, beta)
+        return self.memory.sample(batch_size, beta=beta)
 
     def sample_n_step(self, idxs: torch.Tensor) -> TensorDict:
         """Sample a batch of experiences from the n-step replay buffer.

@@ -655,9 +655,11 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
     def population(
         cls,
         size: int,
-        observation_space: GymSpaceType,
-        action_space: GymSpaceType,
-        device: str = "cpu",
+        observation_space: GymSpaceType | None = None,
+        action_space: GymSpaceType | None = None,
+        device: DeviceType = "cpu",
+        *,
+        accelerator: Accelerator | None = None,
         wrapper_cls: Callable[..., SelfAgentWrapper] | None = None,
         wrapper_kwargs: dict[str, Any] | None = None,
         resume_from_checkpoint: str | None = None,
@@ -668,11 +670,13 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         :param size: The size of the population.
         :type size: int
         :param observation_space: The observation space.
-        :type observation_space: GymSpaceType
+        :type observation_space: GymSpaceType | None
         :param action_space: The action space.
-        :type action_space: GymSpaceType
-        :param device: Torch device string. Defaults to ``"cpu"``.
-        :type device: str
+        :type action_space: GymSpaceType | None
+        :param device: Torch device. Defaults to ``"cpu"``.
+        :type device: DeviceType
+        :param accelerator: Unused for classical algorithms; reserved for LLM subclasses.
+        :type accelerator: Accelerator | None
         :param wrapper_cls: Optional wrapper class to apply to each agent.
         :type wrapper_cls: type | None
         :param wrapper_kwargs: Keyword arguments for the wrapper class.
@@ -684,6 +688,8 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         :return: A list of algorithms.
         :rtype: list[EvolvableAlgorithm]
         """
+        assert observation_space is not None, "observation_space is required"
+        assert action_space is not None, "action_space is required"
         if wrapper_kwargs is None:
             wrapper_kwargs = {}
 
@@ -3133,16 +3139,19 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         )
 
     @classmethod
-    # LLM algorithms deliberately diverge from the base signature: they take no
-    # observation/action spaces (the model IS the policy).
-    def population(  # ty: ignore[invalid-method-override]
+    def population(
         cls,
         size: int,
+        observation_space: GymSpaceType | None = None,
+        action_space: GymSpaceType | None = None,
+        device: DeviceType = "cpu",
+        *,
         accelerator: Accelerator | None = None,
-        device: str | torch.device = "cpu",
+        wrapper_cls: Callable[..., SelfAgentWrapper] | None = None,
+        wrapper_kwargs: dict[str, Any] | None = None,
         resume_from_checkpoint: str | None = None,
         **kwargs: Any,
-    ) -> list[Self]:
+    ) -> list[EvolvableAlgorithm[ExperiencesT] | SelfAgentWrapper]:
         """Create a population of LLM algorithms.
 
         Builds agent 0 fully (loading the model from disk), then clones the actor
@@ -3152,10 +3161,18 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         :param size: The size of the population.
         :type size: int
+        :param observation_space: Unused; LLM policies do not use gym spaces.
+        :type observation_space: GymSpaceType | None
+        :param action_space: Unused; LLM policies do not use gym spaces.
+        :type action_space: GymSpaceType | None
+        :param device: Torch device. Defaults to ``"cpu"``.
+        :type device: DeviceType
         :param accelerator: HuggingFace ``Accelerator`` instance for agent 0.
         :type accelerator: Accelerator | None
-        :param device: Torch device string. Defaults to ``"cpu"``.
-        :type device: str | torch.device
+        :param wrapper_cls: Unused for LLM algorithms.
+        :type wrapper_cls: type | None
+        :param wrapper_kwargs: Unused for LLM algorithms.
+        :type wrapper_kwargs: dict[str, Any] | None
         :param resume_from_checkpoint: Path to checkpoint to resume from.
         :type resume_from_checkpoint: str | None
         :return: A list of LLM algorithms.
@@ -3166,7 +3183,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             agent_0.load_checkpoint(resume_from_checkpoint)
             agent_0.index = 0
 
-        population: list[Self] = [agent_0]
+        population: list[EvolvableAlgorithm[ExperiencesT] | SelfAgentWrapper] = [
+            agent_0
+        ]
         for i in range(1, size):
             agent_accelerator = Accelerator() if accelerator is not None else None
             cloned_actor = clone_llm(

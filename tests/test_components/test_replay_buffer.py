@@ -882,7 +882,7 @@ class TestPrioritizedReplayBufferSample:
         # Sample experiences
         batch_size = 3
         beta = 0.4
-        samples = buffer.sample(batch_size, beta)
+        samples = buffer.sample(batch_size, beta=beta)
 
         # Verify sample structure for image observations
         assert isinstance(samples, TensorDict)
@@ -918,7 +918,7 @@ class TestPrioritizedReplayBufferSample:
         # Sample experiences
         batch_size = 3
         beta = 0.4
-        samples = buffer.sample(batch_size, beta)
+        samples = buffer.sample(batch_size, beta=beta)
 
         # Verify sample structure for dictionary observations
         assert isinstance(samples, TensorDict)
@@ -951,7 +951,7 @@ class TestPrioritizedReplayBufferSample:
         # Sample experiences
         batch_size = 5
         beta = 0.4
-        samples = buffer.sample(batch_size, beta)
+        samples = buffer.sample(batch_size, beta=beta)
 
         # Verify sample structure
         assert isinstance(samples, TensorDict)

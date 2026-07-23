@@ -26,9 +26,6 @@ from agilerl.utils.algo_utils import remove_compile_prefix
 from agilerl.utils.evolvable_networks import compile_model
 from agilerl.wrappers.agent import AgentWrapper
 
-# The public entry point takes whatever population it is handed (algorithms are
-# referred to by protocol across the framework) and returns the same element
-# type; the mutation implementations work against the concrete base class.
 AgentT = TypeVar("AgentT", bound=EvolvableAlgorithmProtocol)
 IndividualT = TypeVar("IndividualT", bound=EvolvableAlgorithm)
 SingleAgentT = TypeVar("SingleAgentT", bound=RLAlgorithm)
@@ -97,10 +94,6 @@ def _is_module_dict(
 ) -> TypeGuard["ModuleDict[EvolvableModule]"]:
     """Narrow an evaluation module to its per-agent ``ModuleDict`` mapping.
 
-    ``isinstance(module, ModuleDict)`` erases the value-type parameter, so this
-    guard restores it: a ``ModuleDict``'s nested modules are always
-    :class:`~agilerl.modules.base.EvolvableModule` by construction.
-
     :param module: The evaluation module to check
     :type module: EvolvableModule
     :return: Whether the module is a per-agent ``ModuleDict``
@@ -111,9 +104,6 @@ def _is_module_dict(
 
 def _as_module_dict(module: EvolvableModule) -> "ModuleDict[EvolvableModule]":
     """Narrow a multi-agent evaluation module to its per-agent mapping.
-
-    Used at call sites where the module is a per-agent container by construction;
-    the narrowing keeps a single ``ModuleDict`` type for the mutation loop.
 
     :param module: The evaluation module to reinterpret
     :type module: EvolvableModule
@@ -988,8 +978,7 @@ class Mutations:
             individual.mut = "None"
             return individual
 
-        # Sample mutation method from policy network. The sampled method is the
-        # attribute name of the mutation, drawn as a numpy string.
+        # Sample mutation method from policy network.
         mut_method = str(
             policy_module.sample_mutation_method(self.new_layer_prob, self.rng),
         )
@@ -1145,8 +1134,6 @@ class Mutations:
         :param old_exp_layer: Old linear layer
         :type old_exp_layer: nn.Module
         """
-        # Raises ValueError here (get_exp_layer raises TypeError for its own
-        # callers); the two sites have always reported different error types.
         if isinstance(offspring_actor, EvolvableModule):
             exp_layer = get_exp_layer(offspring_actor)
         else:

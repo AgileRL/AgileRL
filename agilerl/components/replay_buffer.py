@@ -161,13 +161,21 @@ class ReplayBuffer:
         # Otherwise sample without replacement (no intra-batch duplicates).
         return torch.randperm(self.size)[:k]
 
-    def sample(self, batch_size: int, return_idx: bool = False) -> TensorDict:
+    def sample(
+        self,
+        batch_size: int,
+        return_idx: bool = False,
+        *,
+        beta: float = 0.4,
+    ) -> TensorDict:
         """Sample a batch of transitions.
 
         :param batch_size: Number of samples to return
         :type batch_size: int
         :param return_idx: Boolean flag to return index of samples randomly selected, defaults to False
         :type return_idx: bool, optional
+        :param beta: Unused; accepted for API compatibility with prioritized replay buffers
+        :type beta: float, optional
         :return: TensorDict containing sampled experiences
         :rtype: TensorDict
         """
@@ -393,13 +401,19 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         # Update max priority
         self.max_priority = max(self.max_priority, priority)
 
-    # NOTE: Prioritized sampling replaces the base ``return_idx`` flag with the
-    # importance-sampling ``beta`` parameter; indices are always included in the batch.
-    def sample(self, batch_size: int, beta: float = 0.4) -> TensorDict:  # ty: ignore[invalid-method-override]
+    def sample(
+        self,
+        batch_size: int,
+        return_idx: bool = False,
+        *,
+        beta: float = 0.4,
+    ) -> TensorDict:
         """Sample a batch of transitions based on priorities.
 
         :param batch_size: Number of samples to return
         :type batch_size: int
+        :param return_idx: Unused; indices are always included in the batch
+        :type return_idx: bool, optional
         :param beta: Beta parameter for importance sampling, defaults to 0.4
         :type beta: float, optional
         :return: Batch of transitions

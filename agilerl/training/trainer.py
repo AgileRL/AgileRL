@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar, get_args
+from typing import TYPE_CHECKING, Any, TypeVar, get_args, get_origin
 
 from typing_extensions import Self
 
@@ -19,8 +19,10 @@ from agilerl.models import (
     ALGO_REGISTRY,
     AlgoSpec,
     LLMAlgorithmSpec,
+    MultiAgentRLAlgorithmSpec,
     MutationSpec,
     ReplayBufferSpec,
+    RLAlgorithmSpec,
     TournamentSelectionSpec,
     TrainingManifest,
     TrainingSpec,
@@ -337,10 +339,7 @@ class LocalTrainer(Trainer):
         self.population = create_population_from_spec(
             population_size=self.training_spec.pop_size,
             algo_spec=self.algorithm_spec,
-            # Multi-turn LLM training has no instantiated environment; the helper
-            # handles that but is annotated as requiring one
-            # (agilerl/utils/trainer_utils.py).
-            env=self.env,  # ty: ignore[invalid-argument-type]
+            env=self.env,
             mutation_spec=self.mutation_spec,
             replay_buffer_spec=self.replay_buffer_spec,
             device=self.device,
@@ -354,11 +353,8 @@ class LocalTrainer(Trainer):
         self.tournament_selection = build_tournament_from_spec(
             self.tournament_selection_spec, self.training_spec
         )
-        # `build_replay_buffer_from_spec` reads only the `off_policy`/`offline`/
-        # `bandit` class flags of `AlgorithmSpec` (returning `None` for LLM specs),
-        # but is annotated for the RL specs alone (agilerl/utils/trainer_utils.py).
         self.memory = build_replay_buffer_from_spec(
-            self.algorithm_spec,  # ty: ignore[invalid-argument-type]
+            self.algorithm_spec,
             self.replay_buffer_spec,
             self.device,
         )
@@ -384,11 +380,7 @@ class LocalTrainer(Trainer):
                 max_model_len=max_model_len,
                 max_output_tokens=max_output_tokens,
             )
-            # `multiturn` is accepted by the LLM specs that support it (e.g.
-            # `GRPOSpec`); the `AlgorithmSpec` base declares the no-arg form.
-            self.train_fn = self.algorithm_spec.get_training_fn(
-                multiturn=True,  # ty: ignore[unknown-argument]
-            )
+            self.train_fn = self.algorithm_spec.get_training_fn(multiturn=True)
         else:
             self.env_factory = None
             self.train_fn = self.algorithm_spec.get_training_fn()
@@ -433,11 +425,10 @@ class LocalTrainer(Trainer):
             recurrent=recurrent,
         )
         resolved = {**net_config, "encoder_config": encoder_config}
-        # `net_config` is declared on the concrete algorithm specs (e.g. `DQNSpec`),
-        # not on the `AlgorithmSpec` bases this attribute is typed against.
-        self.algorithm_spec.net_config = self._algo_net_spec_cls().model_validate(  # ty: ignore[invalid-assignment]
-            resolved
-        )
+        if isinstance(self.algorithm_spec, RLAlgorithmSpec):
+            self.algorithm_spec.net_config = self._algo_net_spec_cls().model_validate(
+                resolved
+            )
 
     def _resolve_encoder_config(
         self,
@@ -494,8 +485,14 @@ class LocalTrainer(Trainer):
         :rtype: type[NetworkSpec]
         """
         net_config_field = type(self.algorithm_spec).model_fields.get("net_config")
+        if net_config_field is None:
+            return NetworkSpec
         return next(
-            (t for t in get_args(net_config_field.annotation) if t is not type(None)),
+            (
+                t
+                for t in get_args(net_config_field.annotation)
+                if t is not type(None) and get_origin(t) is not dict
+            ),
             NetworkSpec,
         )
 
@@ -533,7 +530,7 @@ class LocalTrainer(Trainer):
         shared_fields = {k: v for k, v in net_config.items() if k != "encoder_config"}
         user_encoder_config = net_config.get("encoder_config")
 
-        resolved: dict[str, dict[str, Any]] = {}
+        resolved: dict[str, NetworkSpec] = {}
         for agent_id, observation_space in observation_spaces.items():
             group_id = (
                 agent_id.rsplit("_", 1)[0] if isinstance(agent_id, str) else agent_id
@@ -547,11 +544,10 @@ class LocalTrainer(Trainer):
                 recurrent=recurrent,
             )
             agent_net_config = {**shared_fields, "encoder_config": encoder_config}
-            resolved[group_id] = spec_cls.model_validate(agent_net_config).model_dump()
+            resolved[group_id] = spec_cls.model_validate(agent_net_config)
 
-        # `net_config` is declared on the concrete algorithm specs (e.g. `IPPOSpec`),
-        # not on the `AlgorithmSpec` bases this attribute is typed against.
-        self.algorithm_spec.net_config = resolved  # ty: ignore[invalid-assignment]
+        if isinstance(self.algorithm_spec, MultiAgentRLAlgorithmSpec):
+            self.algorithm_spec.net_config = resolved
 
     def _make_tokenizer(self) -> PreTrainedTokenizerBase:
         """Create the tokenizer for the LLM algorithm.

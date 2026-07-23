@@ -9,7 +9,6 @@ from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
-import gymnasium as gym
 import torch
 from torch.utils.data import DataLoader
 
@@ -71,8 +70,8 @@ def apply_chat_template(
     )
 
 
-class HuggingFaceGym(gym.Env, ABC, Generic[PromptT, CompletionT]):
-    """Abstract base class for HuggingFace Gymnasium environments."""
+class HuggingFaceGym(ABC, Generic[PromptT, CompletionT]):
+    """Abstract base class for HuggingFace prompt-batch environments."""
 
     _batch_state_attrs: tuple[str, ...] = ()
 
@@ -142,21 +141,20 @@ class HuggingFaceGym(gym.Env, ABC, Generic[PromptT, CompletionT]):
         self.evaluation_mode = False
         self.num_epochs = 0
 
-    # LLM environments deliberately depart from the gym.Env step/reset
-    # signatures: a step consumes generated completions rather than an action,
-    # and a reset advances a dataloader rather than accepting seed/options.
-    # The batch shape is the subclass's contract - a rollout environment yields
-    # tokenized prompts and rewards, a dataset environment yields a whole
-    # training batch - so ``PromptT``/``CompletionT`` carry those per-subclass.
+    # A step consumes generated completions rather than an action; a reset
+    # advances a dataloader rather than accepting seed/options. The batch shape
+    # is the subclass's contract - a rollout environment yields tokenized
+    # prompts and rewards, a dataset environment yields a whole training batch -
+    # so ``PromptT``/``CompletionT`` carry those per-subclass.
     @abstractmethod
-    def reset(  # ty: ignore[invalid-method-override]
+    def reset(
         self,
         reset_dataloaders: bool = False,
     ) -> PromptT:
         """Reset the environment and get the next batch of tokenized prompts."""
 
     @abstractmethod
-    def step(  # ty: ignore[invalid-method-override]
+    def step(
         self,
         completions: CompletionT,
     ) -> PromptT | tuple[PromptT, torch.Tensor]:

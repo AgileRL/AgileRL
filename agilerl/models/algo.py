@@ -31,6 +31,7 @@ if TYPE_CHECKING:
         OfflineEnvSpec,
         PzEnvSpec,
     )
+    from agilerl.models.networks import NetworkSpec
     from agilerl.models.training import TrainingSpec
 
     if HAS_LLM_DEPENDENCIES:
@@ -373,6 +374,7 @@ class RLAlgorithmSpec(AlgorithmSpec):
 
     learn_step: int = Field(default=5, ge=1)
     gamma: float = Field(default=0.99, ge=0.0, le=1.0)
+    net_config: NetworkSpec | None = Field(default=None)
 
     agent_type: ClassVar[AgentType] = AgentType.SingleAgent
 
@@ -444,6 +446,7 @@ class MultiAgentRLAlgorithmSpec(AlgorithmSpec):
     learn_step: int = Field(default=2048, ge=1)
     gamma: float = Field(default=0.99, ge=0.0, le=1.0)
     torch_compiler: str | None = Field(default=None)
+    net_config: NetworkSpec | dict[str, NetworkSpec] | None = Field(default=None)
 
     agent_type: ClassVar[AgentType] = AgentType.MultiAgent
 
@@ -645,6 +648,25 @@ class LLMAlgorithmSpec(AlgorithmSpec):
             algo.load_checkpoint(resume_from_checkpoint)
 
         return algo
+
+    @staticmethod
+    def get_training_fn(
+        *, multiturn: bool = False
+    ) -> Callable[..., tuple[PopulationType, list[float]]]:
+        """Return the training function for this LLM algorithm.
+
+        :param multiturn: When ``True``, return the multi-turn training loop.
+            Subclasses that do not support multi-turn training must raise
+            :class:`ValueError`.
+        :return: Training function
+        :raises NotImplementedError: If the training function is not implemented.
+        :raises ValueError: If *multiturn* is requested but unsupported.
+        """
+        if multiturn:
+            msg = "This LLM algorithm does not support multi-turn training."
+            raise ValueError(msg)
+        msg = "Algorithm specs must implement get_training_fn."
+        raise NotImplementedError(msg) from None
 
 
 AlgoSpec = RLAlgorithmSpec | MultiAgentRLAlgorithmSpec | LLMAlgorithmSpec

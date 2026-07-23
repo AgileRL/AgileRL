@@ -18,10 +18,12 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from enum import Enum
 from numbers import Number
 from typing import (
+    TYPE_CHECKING,
     Any,
     ClassVar,
     NamedTuple,
     Protocol,
+    TypeAlias,
     TypedDict,
     TypeVar,
 )
@@ -427,8 +429,15 @@ LLMRolloutExperiences = tuple[
 # algorithm's declared return — would not be assignable to that attribute.
 ActionReturn = tuple[ActionType | Any, ...] | ActionType | Any
 GymStepReturn = tuple[NumpyObsType, ActionType, float, MaybeObsList, GymInfo]
+if TYPE_CHECKING:
+    from agilerl.vector.pz_async_vec_env import Observations
+
+    PzObservationsType: TypeAlias = dict[str, NumpyObsType] | Observations
+else:
+    PzObservationsType: TypeAlias = dict[str, NumpyObsType]
+PzResetReturn: TypeAlias = tuple[PzObservationsType, InfosDict]
 PzStepReturn = tuple[
-    dict[str, NumpyObsType],
+    PzObservationsType,
     ArrayDict,
     ArrayDict,
     ArrayDict,
