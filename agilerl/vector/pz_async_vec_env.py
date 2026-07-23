@@ -27,8 +27,8 @@ from agilerl.typing import ActionType, InfosDict, NumpyObsType, PzStepReturn
 from agilerl.vector.pz_vec_env import PettingZooVecEnv
 
 AgentID = TypeVar("AgentID")
-ObsType = TypeVar("ObsType")
-PzEnvType = PettingZooVecEnv | ParallelEnv
+ObsT = TypeVar("ObsT")
+PzSubEnvType = PettingZooVecEnv | ParallelEnv
 # `mp.Array` (used to back the shared observation buffers) returns a
 # lock-wrapped SynchronizedArray; the aliases are quoted because the class is
 # only subscriptable in stubs, not at runtime.
@@ -105,7 +105,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
 
     def __init__(
         self,
-        env_fns: Sequence[Callable[[], PzEnvType]],
+        env_fns: Sequence[Callable[[], PzSubEnvType]],
         copy: bool = True,
         context: Literal["spawn", "fork", "forkserver"] | None = None,
     ) -> None:

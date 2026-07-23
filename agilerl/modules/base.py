@@ -21,7 +21,7 @@ from agilerl.protocols import MutationMethodProtocol, MutationType
 from agilerl.typing import DeviceType, MutationApplyDict
 
 SelfEvolvableModule = TypeVar("SelfEvolvableModule", bound="EvolvableModule")
-TorchModuleType = TypeVar("TorchModuleType", bound=nn.Module)
+TorchModuleT = TypeVar("TorchModuleT", bound=nn.Module)
 
 
 def mutation(
@@ -478,17 +478,17 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
     @staticmethod
     def preserve_parameters(
         old_net: nn.Module,
-        new_net: TorchModuleType,
-    ) -> TorchModuleType:
+        new_net: TorchModuleT,
+    ) -> TorchModuleT:
         """Return new neural network with copied parameters from old network. Specifically, it
         handles tensors with different sizes by copying the minimum number of elements.
 
         :param old_net: Old neural network
         :type old_net: nn.Module
         :param new_net: New neural network
-        :type new_net: TorchModuleType
+        :type new_net: TorchModuleT
         :return: New neural network with copied parameters
-        :rtype: TorchModuleType
+        :rtype: TorchModuleT
         """
         old_net_dict = dict(old_net.named_parameters())
 
@@ -824,10 +824,10 @@ class EvolvableWrapper(EvolvableModule):
                 raise AttributeError(msg)
 
 
-ModuleType = TypeVar("ModuleType", bound=EvolvableModule | nn.Module)
+ModuleT = TypeVar("ModuleT", bound=EvolvableModule | nn.Module)
 
 
-class ModuleDict(EvolvableModule, nn.ModuleDict, Generic[ModuleType]):
+class ModuleDict(EvolvableModule, nn.ModuleDict, Generic[ModuleT]):
     """Analogous to ``nn.ModuleDict``, but allows for the inheritance of the
     mutation methods of nested evolvable modules.
 
@@ -839,7 +839,7 @@ class ModuleDict(EvolvableModule, nn.ModuleDict, Generic[ModuleType]):
 
     def __init__(
         self,
-        modules: dict[str, ModuleType] | None = None,
+        modules: dict[str, ModuleT] | None = None,
         device: DeviceType = "cpu",
     ) -> None:
         super().__init__(device)
@@ -871,18 +871,18 @@ class ModuleDict(EvolvableModule, nn.ModuleDict, Generic[ModuleType]):
         return None
 
     # ``nn.ModuleDict`` is not generic, so its stubs erase the element type to
-    # ``Module``; these overrides restore the ``ModuleType`` parameter. The stored
-    # modules are ``ModuleType`` by construction, so the erased ``super()`` result
+    # ``Module``; these overrides restore the ``ModuleT`` parameter. The stored
+    # modules are ``ModuleT`` by construction, so the erased ``super()`` result
     # is bridged back through ``Any``.
-    def __getitem__(self, key: str) -> ModuleType:
+    def __getitem__(self, key: str) -> ModuleT:
         module: Any = super().__getitem__(key)
         return module
 
-    def values(self) -> ValuesView[ModuleType]:
+    def values(self) -> ValuesView[ModuleT]:
         module_values: Any = super().values()
         return module_values
 
-    def items(self) -> ItemsView[str, ModuleType]:
+    def items(self) -> ItemsView[str, ModuleT]:
         module_items: Any = super().items()
         return module_items
 

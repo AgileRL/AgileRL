@@ -4,27 +4,21 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, TypeGuard
+from typing import TYPE_CHECKING, Any
 
 import torch
 
 from agilerl.typing import ReasoningPrompts
+from agilerl.utils.llm_utils import is_reasoning_prompts
 
 if TYPE_CHECKING:
-    from agilerl.protocols import MultiTurnEnv
-
-
-def _is_reasoning_prompts(obs: Mapping[str, object]) -> TypeGuard[ReasoningPrompts]:
-    return isinstance(obs.get("input_ids"), torch.Tensor) and isinstance(
-        obs.get("attention_mask"), torch.Tensor
-    )
+    from agilerl.protocols import TokenizedMultiTurnEnv
 
 
 def _as_prompt(obs: str | Mapping[str, object]) -> ReasoningPrompts:
     """Read a multi-turn observation as a tokenized prompt.
 
-    ``MultiTurnEnv`` covers both the text-observation envs and the tokenized
-    ones; this vector env only drives the latter, whose observation is the
+    Runtime validation that a (possibly duck-typed) env really returned a
     prompt dict. Callers skip done envs (empty sentinel observations).
 
     :param obs: The observation returned by the wrapped environment.
@@ -35,7 +29,7 @@ def _as_prompt(obs: str | Mapping[str, object]) -> ReasoningPrompts:
     if isinstance(obs, str):
         msg = "SyncMultiTurnVecEnv expects tokenized prompt observations, got str"
         raise TypeError(msg)
-    if not _is_reasoning_prompts(obs):
+    if not is_reasoning_prompts(obs):
         msg = "SyncMultiTurnVecEnv expects ReasoningPrompts observations"
         raise TypeError(msg)
     return obs
@@ -45,8 +39,8 @@ def _as_prompt(obs: str | Mapping[str, object]) -> ReasoningPrompts:
 class Trajectory:
     """State for one environment rollout within a synchronized vector batch.
 
-    :param env: The multi-turn environment this trajectory steps.
-    :type env: MultiTurnEnv
+    :param env: The tokenized multi-turn environment this trajectory steps.
+    :type env: TokenizedMultiTurnEnv
     :param batch_idx: Index of the logical batch item this trajectory belongs to.
     :type batch_idx: int
     :param group_idx: Index of this trajectory within its group (the buffer holds
@@ -62,7 +56,7 @@ class Trajectory:
     :type sampling_logps: list[torch.Tensor]
     """
 
-    env: MultiTurnEnv
+    env: TokenizedMultiTurnEnv
     batch_idx: int
     group_idx: int
     prompt: ReasoningPrompts
@@ -176,15 +170,15 @@ class SyncMultiTurnVecEnv:
 
     def __init__(
         self,
-        env_factory: Callable[..., MultiTurnEnv],
+        env_factory: Callable[..., TokenizedMultiTurnEnv],
         batch_size: int,
         group_size: int,
         env_config: dict[str, Any] | None = None,
     ) -> None:
         """Create ``batch_size * group_size`` independent environments.
 
-        :param env_factory: Factory that builds one multi-turn environment.
-        :type env_factory: Callable[..., MultiTurnEnv]
+        :param env_factory: Factory that builds one tokenized multi-turn environment.
+        :type env_factory: Callable[..., TokenizedMultiTurnEnv]
         :param batch_size: Number of logical batch items.
         :type batch_size: int
         :param group_size: Number of grouped trajectories per batch item.
@@ -328,10 +322,7 @@ class SyncMultiTurnVecEnv:
         batch_steps = 0
         self.trajectories.sort(key=lambda t: (t.batch_idx, t.group_idx))
         for traj in self.trajectories:
-            # Episode accumulation is specific to the tokenized multi-turn envs
-            # this vector env drives; `MultiTurnEnv` only declares the reset /
-            # step / close surface shared with the text-observation envs.
-            ep_ids, action_mask, turn_ids, turn_rewards_t = traj.env.get_episode_data()  # ty: ignore[unresolved-attribute]
+            ep_ids, action_mask, turn_ids, turn_rewards_t = traj.env.get_episode_data()
             completion_ids_list.append(ep_ids)
             action_masks_list.append(action_mask)
             all_turn_ids.append(turn_ids)

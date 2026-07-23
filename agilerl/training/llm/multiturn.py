@@ -27,7 +27,7 @@ from agilerl.utils.utils import (
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.algorithms import LLMPPO, LLMREINFORCE
     from agilerl.llm_envs import SyncMultiTurnVecEnv
-    from agilerl.protocols import MultiTurnEnv
+    from agilerl.protocols import TokenizedMultiTurnEnv
     from agilerl.rollouts.on_policy import collect_rollouts_llm
     from agilerl.utils.algo_utils import stack_and_pad_experiences
 
@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 def finetune_llm_multiturn(
     pop: "list[SupportedMultiturn]",
     max_turns: int,
-    env_factory: "Callable[[], MultiTurnEnv]",
+    env_factory: "Callable[[], TokenizedMultiTurnEnv]",
     env_config: dict[str, Any] | None = None,
     init_hp: dict[str, Any] | None = None,
     max_steps: int = 32768,
@@ -70,8 +70,9 @@ def finetune_llm_multiturn(
     :type pop: PopulationType
     :param max_turns: Maximum interaction turns per episode.
     :type max_turns: int
-    :param env_factory: Factory returning a fresh multi-turn env for each rollout.
-    :type env_factory: Callable[[], MultiTurnEnv]
+    :param env_factory: Factory returning a fresh tokenized multi-turn env for
+        each rollout.
+    :type env_factory: Callable[[], TokenizedMultiTurnEnv]
     :param env_config: Configuration for the environment factory.
     :type env_config: dict[str, Any], optional
     :param init_hp: Initial hyperparameters.
@@ -178,13 +179,14 @@ def finetune_llm_multiturn(
     max_steps_checkpoint_saved = False
     group_size = getattr(pop[0], "group_size", 1)
     rollout_env = SyncMultiTurnVecEnv(env_factory, batch_size, group_size, env_config)
-    # ``agent.test`` expects a single ``MultiTurnEnv``; ``rollout_env`` is a
-    # ``SyncMultiTurnVecEnv`` wrapping N inner envs whose state is mid-rollout
-    # during training. Build a separate test env so evaluation is isolated.
+    # ``agent.test`` expects a single ``TokenizedMultiTurnEnv``; ``rollout_env``
+    # is a ``SyncMultiTurnVecEnv`` wrapping N inner envs whose state is
+    # mid-rollout during training. Build a separate test env so evaluation is
+    # isolated.
     # NOTE: this means one extra env is held for the run's lifetime. Future
     # refactor could share a subset of the rollout envs (e.g. lease one of the
-    # vec env's inner ``MultiTurnEnv`` instances when no trajectory is active)
-    # to avoid the duplication for heavy env setups.
+    # vec env's inner envs when no trajectory is active) to avoid the
+    # duplication for heavy env setups.
     test_env = env_factory(**(env_config or {}))
     group_seed = np.random.randint(0, 1_000_000)
     wall_deadline = (

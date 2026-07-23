@@ -31,8 +31,8 @@ from agilerl.typing import (
     NetConfigType,
     ObservationType,
     ProcessInfosReturn,
-    StandardTensorDict,
     SupportedObservationSpace,
+    TensorMapping,
     TorchObsType,
 )
 from agilerl.utils.algo_utils import (
@@ -840,9 +840,9 @@ class MATD3(MultiAgentRLAlgorithm[TensorDict]):
         stacked_next_actions: torch.Tensor,
         states: dict[str, TorchObsType],
         next_states: dict[str, TorchObsType],
-        actions: StandardTensorDict,
-        rewards: StandardTensorDict,
-        dones: StandardTensorDict,
+        actions: TensorMapping,
+        rewards: TensorMapping,
+        dones: TensorMapping,
     ) -> tuple[float | None, float]:
         """Inner call to each agent for the learning/algo training steps, up until the soft updates.
         Applies all forward/backward props.

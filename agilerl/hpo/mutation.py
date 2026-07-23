@@ -21,7 +21,7 @@ from agilerl.algorithms.core import (
 )
 from agilerl.modules import EvolvableModule, ModuleDict
 from agilerl.protocols import EvolvableAlgorithmProtocol
-from agilerl.typing import MutationReturnType
+from agilerl.typing import MutationReturn
 from agilerl.utils.algo_utils import remove_compile_prefix
 from agilerl.utils.evolvable_networks import compile_model
 from agilerl.wrappers.agent import AgentWrapper
@@ -29,15 +29,15 @@ from agilerl.wrappers.agent import AgentWrapper
 # The public entry point takes whatever population it is handed (algorithms are
 # referred to by protocol across the framework) and returns the same element
 # type; the mutation implementations work against the concrete base class.
-AgentType = TypeVar("AgentType", bound=EvolvableAlgorithmProtocol)
-IndividualType = TypeVar("IndividualType", bound=EvolvableAlgorithm)
-SingleAgentType = TypeVar("SingleAgentType", bound=RLAlgorithm)
-MultiAgentType = TypeVar("MultiAgentType", bound=MultiAgentRLAlgorithm)
+AgentT = TypeVar("AgentT", bound=EvolvableAlgorithmProtocol)
+IndividualT = TypeVar("IndividualT", bound=EvolvableAlgorithm)
+SingleAgentT = TypeVar("SingleAgentT", bound=RLAlgorithm)
+MultiAgentT = TypeVar("MultiAgentT", bound=MultiAgentRLAlgorithm)
 BanditAlgorithm = NeuralUCB | NeuralTS
 
 # A bound mutation method of `Mutations`: maps an individual to a mutated
 # individual of the same type.
-MutationFunc = Callable[[IndividualType], IndividualType]
+MutationFunc = Callable[[IndividualT], IndividualT]
 
 torch._dynamo.config.cache_size_limit = 64
 torch._logging.set_logs(dynamo=logging.FATAL)
@@ -151,18 +151,18 @@ def get_exp_layer(offspring: EvolvableModule) -> nn.Linear:
 
 
 def reinit_shared_networks(
-    mutation_func: Callable[["Mutations", IndividualType], IndividualType],
-) -> Callable[["Mutations", IndividualType], IndividualType]:
+    mutation_func: Callable[["Mutations", IndividualT], IndividualT],
+) -> Callable[["Mutations", IndividualT], IndividualT]:
     """Reinitialize shared networks after architecture and parameter mutations (decorator).
 
     :param mutation_func: The mutation function to decorate
-    :type mutation_func: Callable[[Mutations, IndividualType], IndividualType]
+    :type mutation_func: Callable[[Mutations, IndividualT], IndividualT]
     :return: The decorated mutation function
-    :rtype: Callable[[Mutations, IndividualType], IndividualType]
+    :rtype: Callable[[Mutations, IndividualT], IndividualT]
     """
 
     @wraps(mutation_func)
-    def wrapper(self: "Mutations", individual: IndividualType) -> IndividualType:
+    def wrapper(self: "Mutations", individual: IndividualT) -> IndividualT:
         # Call the original mutation function
         individual = mutation_func(self, individual)
 
@@ -357,9 +357,9 @@ class Mutations:
 
     def mutation(
         self,
-        population: list[AgentType],
+        population: list[AgentT],
         pre_training_mut: bool = False,
-    ) -> list[AgentType]:
+    ) -> list[AgentT]:
         """Return a mutated population of agents. See :ref:`evo_hyperparam_opt` for more details.
 
         :param population: Population of agents
@@ -394,7 +394,7 @@ class Mutations:
         if not self.mutate_elite:
             mutation_choice[0] = self.no_mutation
 
-        mutated_population: list[AgentType] = []
+        mutated_population: list[AgentT] = []
         for mutation, individual in zip(mutation_choice, population, strict=False):
             wrapped_ind = isinstance(individual, AgentWrapper)
             agent = individual.agent if wrapped_ind else individual
@@ -411,7 +411,7 @@ class Mutations:
 
         return mutated_population
 
-    def no_mutation(self, individual: IndividualType) -> IndividualType:
+    def no_mutation(self, individual: IndividualT) -> IndividualT:
         """Return individual from population without mutation.
 
         :param individual: Individual agent from population
@@ -421,7 +421,7 @@ class Mutations:
         return individual
 
     @reinit_shared_networks
-    def architecture_mutate(self, individual: IndividualType) -> IndividualType:
+    def architecture_mutate(self, individual: IndividualT) -> IndividualT:
         """Perform a random mutation to the architecture of the policy network of an agent. The way in
         which we apply an architecture mutation to single and multi-agent RL algorithms inherently differs
         given the nested nature of the networks in the latter.
@@ -460,7 +460,7 @@ class Mutations:
 
         return individual
 
-    def rl_hyperparam_mutation(self, individual: IndividualType) -> IndividualType:
+    def rl_hyperparam_mutation(self, individual: IndividualT) -> IndividualT:
         """Perform a random mutation of a learning hyperparameter of an agent. To do this, sample a hyperparameter from those
         specified through the :class:`HyperparameterConfig <agilerl.algorithms.core.registry.HyperparameterConfig>`
         passed during initialization of the agent. The hyperparameter is then mutated and the optimizer is reinitialized if the
@@ -504,7 +504,7 @@ class Mutations:
 
     # TODO: Activation mutations should really be integrated as architecture mutations
     @reinit_shared_networks
-    def activation_mutation(self, individual: IndividualType) -> IndividualType:
+    def activation_mutation(self, individual: IndividualT) -> IndividualT:
         """Perform a random mutation of the activation layer of the evaluation networks of an agent.
 
         .. note::
@@ -567,7 +567,7 @@ class Mutations:
         individual.mut = "act" if not no_activation else "None"
         return individual
 
-    def parameter_mutation(self, individual: IndividualType) -> IndividualType:
+    def parameter_mutation(self, individual: IndividualT) -> IndividualT:
         """Perform a random mutation to the weights of the policy network of an agent through
         the addition of Gaussian noise.
 
@@ -891,8 +891,8 @@ class Mutations:
 
     def _architecture_mutate_single(
         self,
-        individual: SingleAgentType,
-    ) -> SingleAgentType:
+        individual: SingleAgentT,
+    ) -> SingleAgentT:
         """Apply an architecture mutation to a single-agent RL algorithm. Since all of the
         networks in a single-agent algorithm share the same architecture (given there is
         only one observation space), we first sample a mutation method from the policy network
@@ -952,8 +952,8 @@ class Mutations:
 
     def _architecture_mutate_multi(
         self,
-        individual: MultiAgentType,
-    ) -> MultiAgentType:
+        individual: MultiAgentT,
+    ) -> MultiAgentT:
         """Apply an architecture mutation to a multi-agent RL algorithm. Since each agent has its own
         observation space, we can't generally apply the same architecture mutation to all sub-agents.
         Instead, we sample a sub-agent to perform the mutation on for the policy. We then iterate over
@@ -1083,8 +1083,8 @@ class Mutations:
         self,
         network: EvolvableModule,
         mut_method: str | None,
-        applied_mut_dict: MutationReturnType | None = None,
-    ) -> tuple[str | None, MutationReturnType]:
+        applied_mut_dict: MutationReturn | None = None,
+    ) -> tuple[str | None, MutationReturn]:
         """Apply the mutation method to networks and returns mutation data if needed.
 
         :param networks: The networks to apply the mutation to
@@ -1092,10 +1092,10 @@ class Mutations:
         :param mut_method: The mutation method to apply
         :type mut_method: str | None
         :param applied_mut_dict: The mutation dictionary, defaults to None
-        :type applied_mut_dict: MutationReturnType | None, optional
+        :type applied_mut_dict: MutationReturn | None, optional
 
         :return: The mutation method name and the mutation dictionary
-        :rtype: tuple[str | None, MutationReturnType]
+        :rtype: tuple[str | None, MutationReturn]
         """
         if not isinstance(network, EvolvableModule):
             msg = (

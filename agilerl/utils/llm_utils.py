@@ -8,10 +8,10 @@ import re
 import shutil
 import textwrap
 import warnings
-from collections.abc import Callable, Generator, Iterable, Sequence
+from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeGuard
 
 import numpy as np
 import torch
@@ -19,7 +19,12 @@ from accelerate import Accelerator
 from torch import nn
 
 from agilerl import HAS_DEEPSPEED, HAS_LLM_DEPENDENCIES
-from agilerl.typing import HFGeneratePrompt, JSONValue, PopulationType, ReasoningPrompts
+from agilerl.typing import (
+    HFGeneratePrompts,
+    JSONValue,
+    PopulationType,
+    ReasoningPrompts,
+)
 
 if TYPE_CHECKING:
     from accelerate.utils import DeepSpeedPlugin
@@ -131,6 +136,22 @@ def validate_llm_context_lengths(
             f"(max_prompt_tokens={max_prompt_tokens_for_sliding_window(max_model_len, max_output_tokens)})."
         )
         raise ValueError(msg)
+
+
+def is_reasoning_prompts(obs: Mapping[str, object]) -> TypeGuard[ReasoningPrompts]:
+    """Check whether a mapping is a tokenized ``ReasoningPrompts`` observation.
+
+    Distinguishes live prompt observations from the empty mapping that
+    tokenized multi-turn envs return once an episode has ended.
+
+    :param obs: An observation mapping returned by a tokenized multi-turn env.
+    :type obs: Mapping[str, object]
+    :return: ``True`` when the mapping carries prompt tensors.
+    :rtype: TypeGuard[ReasoningPrompts]
+    """
+    return isinstance(obs.get("input_ids"), torch.Tensor) and isinstance(
+        obs.get("attention_mask"), torch.Tensor
+    )
 
 
 def normalize_reasoning_prompt_batch(
@@ -1766,7 +1787,7 @@ def stitch_completion_after_windowed_vllm_generate(
 
 def prepare_prompt_hf_generate(
     prompt_dict: ReasoningPrompts, device: torch.device
-) -> HFGeneratePrompt:
+) -> HFGeneratePrompts:
     """Prepare a prompt dictionary for HuggingFace generate.
 
     :param prompt_dict: The prompt dictionary to prepare.
@@ -1774,7 +1795,7 @@ def prepare_prompt_hf_generate(
     :param device: The device to move the prompt dictionary to.
     :type device: torch.device
     :return: The prepared prompt dictionary.
-    :rtype: HFGeneratePrompt
+    :rtype: HFGeneratePrompts
     """
     # Trajectory keys may be absent or explicitly None (first turn); both fall
     # back to the initial prompt tensors.
@@ -1793,7 +1814,7 @@ def prepare_prompt_hf_generate(
     elif isinstance(initial_prompt_len, list):
         initial_prompt_len = initial_prompt_len[0] if initial_prompt_len else None
 
-    result: HFGeneratePrompt = {
+    result: HFGeneratePrompts = {
         "input_ids": input_ids.to(device),
         "attention_mask": attention_mask.to(device),
         "stitch_prefix_ids": stitched,

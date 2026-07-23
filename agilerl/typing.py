@@ -1,3 +1,19 @@
+"""Shared type aliases, TypedDicts, and batch dataclasses used across AgileRL.
+
+Naming conventions (keep new aliases consistent with these):
+
+* Suffix by kind: a ``*Type`` suffix marks a **type alias** (a name for a union
+  or concrete type set, e.g. ``DeviceType``, ``ObservationType``, ``BufferType``);
+  a bare ``*T`` suffix is reserved for ``TypeVar`` generic parameters (e.g.
+  ``T``, ``ExperiencesT``, ``AgentT``) and is never used for a plain alias.
+* Plain structural aliases may drop the suffix (``ArrayDict``, ``TensorTuple``,
+  ``TensorMapping``) where the shape already reads as a type.
+* Multi-agent aliases use the ``MultiAgent*`` prefix (not ``MARL*``).
+* Observation aliases use the ``*ObsType`` suffix; the two hubs
+  ``ObservationType`` / ``MultiAgentObservationType`` keep the fuller word.
+* Function / tuple return aliases use the ``*Return`` suffix (not ``*ReturnType``).
+"""
+
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from enum import Enum
 from numbers import Number
@@ -15,7 +31,6 @@ import numpy as np
 import torch
 from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
-from pettingzoo import ParallelEnv
 from tensordict import TensorClass, TensorDict
 from torch._dynamo import OptimizedModule
 from torch.nn import Module
@@ -37,6 +52,7 @@ class IsDataclass(Protocol):
     __dataclass_fields__: ClassVar[dict[str, Any]]
 
 
+# ── TypedDicts: LLM prompts, checkpoint & mutation payloads ──────────────────
 class ReasoningPrompts(TypedDict):
     """Tokenized reasoning / multi-turn observation prompts.
 
@@ -95,6 +111,7 @@ class MutationApplyDict(TypedDict, total=False):
     kernel_size: int | tuple[int, ...] | list[int]
 
 
+# ── Enums ────────────────────────────────────────────────────────────────────
 class MultiAgentSetup(Enum):
     """Enum to specify the type of multi-agent setup."""
 
@@ -112,6 +129,7 @@ class ModuleType(Enum):
     MULTI_INPUT = "multi_input"
 
 
+# ── Gymnasium / PettingZoo space & env aliases ───────────────────────────────
 SupportedObservationSpace = (
     spaces.Box
     | spaces.Discrete
@@ -127,8 +145,11 @@ SupportedActionSpace = (
 # a mapping keyed by agent id, or a ``spaces.Dict``.
 MultiAgentSpacesType = Iterable[spaces.Space] | Mapping[str, spaces.Space] | spaces.Dict
 
+# ── Array / tensor container aliases ─────────────────────────────────────────
 ArrayOrTensor = np.ndarray | torch.Tensor
-StandardTensorDict = dict[str, torch.Tensor]
+# Plain dict of tensors (the tensor twin of ``ArrayDict``); distinct from the
+# tensordict-library ``TensorDict`` class also used in ``TorchObsType``.
+TensorMapping = dict[str, torch.Tensor]
 TensorTuple = tuple[torch.Tensor, ...]
 ArrayDict = dict[str, np.ndarray]
 ArrayTuple = tuple[np.ndarray, ...]
@@ -138,17 +159,15 @@ from agilerl.modules.configs import NetConfigType as NetConfigType  # noqa: E402
 
 KernelSizeType = int | tuple[int, ...]
 GymSpaceType = SupportedObservationSpace | list[SupportedObservationSpace]
-GymEnvType = str | gym.Env | gym.vector.VectorEnv | gym.vector.AsyncVectorEnv
-PzEnvType = str | ParallelEnv
 LLMObsType = list[ReasoningPrompts] | ReasoningPrompts
 
+# ── Observation & action aliases ─────────────────────────────────────────────
 NumpyObsType = np.ndarray | ArrayDict | ArrayTuple
-TorchObsType = torch.Tensor | TensorDict | TensorTuple | StandardTensorDict
+TorchObsType = torch.Tensor | TensorDict | TensorTuple | TensorMapping
 ObservationType = NumpyObsType | TorchObsType | Number | LLMObsType
 MultiAgentObservationType = dict[str, ObservationType]
-# Multi-agent obs aliases used by agent wrappers (same shape as MultiAgentObservationType).
-MARLObservationType = MultiAgentObservationType
-MARLTensorObsType = dict[str, TorchObsType]
+# Per-agent tensor observations keyed by agent id (used by the multi-agent wrappers).
+MultiAgentTensorObsType = dict[str, TorchObsType]
 ActionType = int | float | np.ndarray | torch.Tensor
 # A recorded fitness: a scalar, or a per-sub-agent row (multi-agent, sum_scores=False).
 FitnessValue = float | np.ndarray
@@ -226,7 +245,7 @@ MaybeObsList = list[ObservationType] | ObservationType
 ExperiencesType = dict[str, ObservationType] | tuple[ObservationType, ...]
 
 # Observation as a dict or tuple of arrays/tensors (Dict / Tuple spaces).
-TupleOrDictObservation = dict[str, ArrayOrTensor] | tuple[ArrayOrTensor, ...]
+TupleOrDictObsType = dict[str, ArrayOrTensor] | tuple[ArrayOrTensor, ...]
 
 # One transition bag for replay-buffer storage (plain dict or TensorDict).
 DataType = dict[str, ArrayOrTensor] | TensorDict
@@ -262,7 +281,7 @@ RolloutReturn = tuple[
 ]
 
 
-class HFGeneratePrompt(TypedDict):
+class HFGeneratePrompts(TypedDict):
     """Prompt tensors prepared for HuggingFace ``generate``."""
 
     input_ids: torch.Tensor
@@ -278,6 +297,7 @@ class HFGeneratePrompt(TypedDict):
 ExperiencesT = TypeVar("ExperiencesT")
 
 
+# ── Replay / rollout batch dataclasses (TensorClass) ─────────────────────────
 class ReplayBatch(TensorClass):
     """One off-policy sample from a :class:`~agilerl.components.replay_buffer.ReplayBuffer`.
 
@@ -383,7 +403,13 @@ LLMRolloutExperiences = tuple[
 ]
 
 
-ActionReturnType = tuple[ActionType | Any, ...] | ActionType | Any
+# A wrapped agent's ``get_action`` return: a bare action, a per-agent action
+# dict, or a tuple of either (e.g. PPO's ``(action, log_prob, entropy, value)``
+# or MADDPG's ``(env_actions, raw_actions)``). Kept intentionally gradual: an
+# ``AgentWrapper`` re-binds ``self.agent.get_action`` to its own across
+# heterogeneous algorithms, so a concrete union — wider than any single
+# algorithm's declared return — would not be assignable to that attribute.
+ActionReturn = tuple[ActionType | Any, ...] | ActionType | Any
 GymStepReturn = tuple[NumpyObsType, ActionType, float, MaybeObsList, GymInfo]
 PzStepReturn = tuple[
     dict[str, NumpyObsType],
@@ -393,9 +419,10 @@ PzStepReturn = tuple[
     InfosDict,
 ]
 # TokenObservationWrapper obs: ReasoningPrompts mid-episode, empty mapping at done.
-TokenObservation = ReasoningPrompts | dict[str, Never]
-TokenObsStepReturn = tuple[TokenObservation, float, bool, bool, dict[str, Any]]
+TokenObsType = ReasoningPrompts | dict[str, Never]
+TokenObsStepReturn = tuple[TokenObsType, float, bool, bool, dict[str, Any]]
 
+# ── Network / module / optimizer aliases ─────────────────────────────────────
 SingleAgentModule = (
     T | EvolvableModuleProtocol | OptimizedModule | EvolvableNetworkProtocol
 )
@@ -407,9 +434,8 @@ EvolvableNetworkType = (
 DeviceType = str | torch.device
 OptimizerType = Optimizer | AcceleratedOptimizer
 
-SingleAgentMutReturnType = MutationApplyDict
-MultiAgentMutReturnType = dict[str, MutationApplyDict]
-MutationReturnType = SingleAgentMutReturnType | MultiAgentMutReturnType
+MultiAgentMutReturn = dict[str, MutationApplyDict]
+MutationReturn = MutationApplyDict | MultiAgentMutReturn
 PopulationType = list[EvolvableAlgorithmProtocol]
 MutationMethod = Callable[[EvolvableAlgorithmProtocol], EvolvableAlgorithmProtocol]
 ConfigType = IsDataclass | NetConfigType

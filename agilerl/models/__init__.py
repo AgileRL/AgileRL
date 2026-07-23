@@ -73,7 +73,7 @@ if TYPE_CHECKING:
         PzEnvSpec,
     )
 
-    EnvironmentSpecT = GymEnvSpec | PzEnvSpec | LLMEnvSpec | OfflineEnvSpec
-    ReplayBufferSpecT = ReplayBufferSpec | None
-    TrainingSpecT = TrainingSpec | None
-    MutationSpecT = MutationSpec | None
+    EnvironmentSpecType = GymEnvSpec | PzEnvSpec | LLMEnvSpec | OfflineEnvSpec
+    ReplayBufferSpecType = ReplayBufferSpec | None
+    TrainingSpecType = TrainingSpec | None
+    MutationSpecType = MutationSpec | None

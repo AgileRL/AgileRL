@@ -27,9 +27,9 @@ else:
     LigerFusedLinearPolicyLossFunction = None  # type: ignore[assignment]
     apply_fused_policy_loss = None  # type: ignore[assignment]
 from agilerl.protocols import (
-    MultiTurnEnv,
     PeftModelProtocol,
     PreTrainedModelProtocol,
+    TokenizedMultiTurnEnv,
 )
 from agilerl.typing import LLMObsType, LLMRolloutExperiences
 from agilerl.utils.algo_utils import (
@@ -43,6 +43,7 @@ from agilerl.utils.llm_utils import (
     aggregate_metrics_dict,
     build_completion_mask,
     clipped_is_surrogate,
+    is_reasoning_prompts,
     masked_mean,
     normalize_reasoning_prompt_batch,
     pool_by_turns,
@@ -708,7 +709,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
 
     def test(
         self,
-        env: ReasoningGym | MultiTurnEnv,
+        env: ReasoningGym | TokenizedMultiTurnEnv,
         loop: int = 1,
         *args: Any,
         **kwargs: Any,
@@ -722,7 +723,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
 
         :param env: A :class:`~agilerl.utils.llm_utils.ReasoningGym` or
             :class:`~agilerl.llm_envs.TokenObservationWrapper`.
-        :type env: ReasoningGym | MultiTurnEnv
+        :type env: ReasoningGym | TokenizedMultiTurnEnv
         :param loop: Number of outer test iterations (dataloader passes or episodes).
         :type loop: int
         :return: Mean reward from the test loop (scalar numpy array).
@@ -741,26 +742,22 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
                     prompts = next_prompts
                     rewards.append(reward)
                 reward_tensor = torch.cat(rewards)
-            elif isinstance(env, MultiTurnEnv):
+            elif isinstance(env, TokenizedMultiTurnEnv):
                 all_rewards: list[torch.Tensor] = []
                 for _ in range(loop):
-                    obs, _info = env.reset()
-                    # REINFORCE requires a token-observation multi-turn env,
-                    # whose observations are ReasoningPrompts-shaped dicts.
-                    prompt_dict = obs
+                    prompt_dict, _info = env.reset()
                     terminated, truncated = False, False
                     while not terminated and not truncated:
-                        # ty cannot match the env's dict against the TypedDict.
-                        prompt: Any = prompt_dict
                         completion_ids = self.get_action(
-                            [prompt],
+                            [prompt_dict],
                             training=False,
                         ).completion_ids
                         full = completion_ids[0]
-                        obs, reward, terminated, truncated, _info = env.step(
-                            full,
-                        )
-                        prompt_dict = obs
+                        obs, reward, terminated, truncated, _info = env.step(full)
+                        # ``obs`` is the empty sentinel once the episode ends;
+                        # only live prompts feed the next turn.
+                        if is_reasoning_prompts(obs):
+                            prompt_dict = obs
                         all_rewards.append(
                             torch.tensor(
                                 [float(reward)],
@@ -772,7 +769,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
             else:
                 msg = (
                     "env must be a ReasoningGym (or subclass) or "
-                    f"MultiTurnEnv; got {type(env).__name__}"
+                    f"TokenizedMultiTurnEnv; got {type(env).__name__}"
                 )
                 raise TypeError(msg)
         mean_fit = torch.mean(reward_tensor.float()).item()

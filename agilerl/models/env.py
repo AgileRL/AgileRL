@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Any
 
 import gymnasium as gym
 import pandas as pd
-from gymnasium.vector import AsyncVectorEnv, SyncVectorEnv
 from pettingzoo import ParallelEnv
 from pydantic import (
     AliasChoices,
@@ -23,6 +22,7 @@ from agilerl.models.env_types import LLMEnvType
 from agilerl.protocols import BanditEnvProtocol
 from agilerl.typing import EnvFactory, WrapperSpec
 from agilerl.utils.env_utils import (
+    GymEnvType,
     apply_wrappers,
     get_reward_fn,
     make_conversation_template,
@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from datasets import Dataset
     from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
+    from agilerl.llm_envs import TokenObservationWrapper
     from agilerl.protocols import MultiTurnEnv
     from agilerl.wrappers.llm_envs import PreferenceGym, ReasoningGym, SFTGym
 
@@ -50,10 +51,6 @@ def _require_datasets() -> tuple[type[Dataset], Callable[..., Any]]:
         )
         raise ImportError(msg) from exc
     return Dataset, load_dataset
-
-
-GymEnvType = AsyncVectorEnv | SyncVectorEnv
-PzEnvType = ParallelEnv | AsyncPettingZooVecEnv
 
 
 class EnvSpec(BaseModel):
@@ -515,7 +512,7 @@ class LLMEnvSpec(BaseModel):
         *,
         max_model_len: int | None = None,
         max_output_tokens: int | None = None,
-    ) -> Callable[[], Any]:
+    ) -> Callable[[], TokenObservationWrapper]:
         """Build a factory that creates wrapped multi-turn env instances.
 
         Each call to the returned factory creates a fresh

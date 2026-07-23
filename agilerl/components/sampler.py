@@ -12,8 +12,7 @@ from agilerl.components import (
     ReplayBuffer,
 )
 from agilerl.components.data import ReplayDataset
-
-BufferType = ReplayBuffer | PrioritizedReplayBuffer | MultiStepReplayBuffer
+from agilerl.components.replay_buffer import BufferType
 
 
 class Sampler:

@@ -204,12 +204,12 @@ class _RegistryMeta(type):
     """
 
     def __call__(
-        cls: type[AlgoT],  # type: ignore[misc]
+        cls: type[AlgoT],
         *args: Any,
         **kwargs: Any,
     ) -> AlgoT:
         # Create the instance
-        instance: AlgoT = super().__call__(*args, **kwargs)  # type: ignore[misc]
+        instance: AlgoT = super().__call__(*args, **kwargs)
 
         # Initialize the MutationRegistry -> ensures that all of the networks and
         # optimizers are registered with the algorithm, and that the specified hyperparameters
@@ -4238,7 +4238,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 if name not in peft_target.peft_config:
                     peft_target.add_adapter(
                         adapter_name=name,
-                        peft_config=self.lora_config,  # type: ignore[arg-type]
+                        peft_config=self.lora_config,
                     )
 
             # Drop any adapters we don't own (e.g. from a user-supplied PEFT model).

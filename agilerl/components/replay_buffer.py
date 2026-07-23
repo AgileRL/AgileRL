@@ -494,3 +494,7 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         self.sum_tree.update_batch(idx_np, priority_alpha)
         self.min_tree.update_batch(idx_np, priority_alpha)
         self.max_priority = max(self.max_priority, float(priorities.max()))
+
+
+# Any off-policy replay buffer, canonical here so consumers share one definition.
+BufferType = ReplayBuffer | PrioritizedReplayBuffer | MultiStepReplayBuffer

@@ -38,6 +38,11 @@ if HAS_LIGER_KERNEL:
         llm_policy_loss_fn,
     )
 else:
+    # liger-kernel is an optional, Linux-only dependency; keep the names
+    # resolvable as None sentinels (callers gate on ``HAS_LIGER_KERNEL``).
+    # Mypy-style ``type: ignore`` is used deliberately: the invalid-assignment
+    # only surfaces where liger resolves (Linux), so a ``ty: ignore`` would read
+    # as unused on macOS/Windows checkouts.
     LigerFusedLinearPolicyLossFunction = None  # type: ignore[assignment]
     LigerDPOWithAlpha = None  # type: ignore[assignment]
     apply_fused_policy_loss = None  # type: ignore[assignment]

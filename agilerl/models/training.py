@@ -8,14 +8,8 @@ from typing_extensions import Self
 if TYPE_CHECKING:
     import torch
 
-    from agilerl.components.replay_buffer import (
-        MultiStepReplayBuffer,
-        PrioritizedReplayBuffer,
-        ReplayBuffer,
-    )
+    from agilerl.components.replay_buffer import BufferType
     from agilerl.models.algo import AlgoSpec
-
-    BufferT = ReplayBuffer | MultiStepReplayBuffer | PrioritizedReplayBuffer
 
 
 class NStepBufferArgs(BaseModel):
@@ -60,7 +54,7 @@ class ReplayBufferSpec(BaseModel):
 
     def init_buffer(
         self, algo_spec: AlgoSpec, device: str | torch.device = "cpu"
-    ) -> BufferT:
+    ) -> BufferType:
         """Initialize the replay buffer.
 
         :param algo_spec: Algorithm specification
@@ -68,7 +62,7 @@ class ReplayBufferSpec(BaseModel):
         :param device: Device
         :type device: str | torch.device
         :return: Replay buffer
-        :rtype: BufferT
+        :rtype: BufferType
         """
         # Import lazily to avoid heavy dependencies for Arena manifest validation
         from agilerl import AgentType
@@ -117,7 +111,7 @@ class ReplayBufferSpec(BaseModel):
 
     def init_n_step_buffer(
         self, algo_spec: AlgoSpec, device: str | torch.device = "cpu"
-    ) -> BufferT | None:
+    ) -> BufferType | None:
         """Initialize the n-step replay buffer for combined PER + n-step setups.
 
         Returns ``None`` unless both ``per_buffer`` and ``n_step_buffer`` are
@@ -128,7 +122,7 @@ class ReplayBufferSpec(BaseModel):
         :param device: Device.
         :type device: str | torch.device
         :returns: A :class:`MultiStepReplayBuffer` or ``None``.
-        :rtype: BufferT | None
+        :rtype: BufferType | None
         """
         if not (self.per_buffer and self.n_step_buffer):
             return None

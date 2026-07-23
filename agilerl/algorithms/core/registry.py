@@ -368,9 +368,14 @@ class NetworkGroup:
         # NOTE: Here the assumption is that NetworkGroup is used inside the __init__
         # method of the implemented algorithm, such that we can access the defined locals
         # and extract the corresponding attribute names to the passed networks.
-        # Frame inspection is inherently untyped metaprogramming.
-        current_frame = inspect.currentframe()
-        return current_frame.f_back.f_back.f_back.f_locals["self"]  # ty: ignore[unresolved-attribute]
+        # Walk three frames up (this method -> caller -> ... -> algorithm __init__);
+        # each ``f_back`` is Optional, so narrow before dereferencing.
+        frame = inspect.currentframe()
+        for _ in range(3):
+            assert frame is not None, "expected an active caller frame"
+            frame = frame.f_back
+        assert frame is not None, "expected the algorithm __init__ frame"
+        return frame.f_locals["self"]
 
     def _infer_attribute_names(
         self,

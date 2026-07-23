@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from agilerl.protocols import MultiTurnEnv
-from agilerl.typing import ReasoningPrompts, TokenObservation, TokenObsStepReturn
+from agilerl.typing import ReasoningPrompts, TokenObsStepReturn, TokenObsType
 from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
 
 if TYPE_CHECKING:
@@ -287,7 +287,7 @@ class TokenObservationWrapper:
 
         # Empty mapping when the episode has ended; callers only read obs on
         # continuing turns (see SyncMultiTurnVecEnv.step).
-        prompt_dict: TokenObservation = {}
+        prompt_dict: TokenObsType = {}
         if not (terminated or truncated):
             feedback_text = self._format_obs(next_obs, info)
             self._feedback_texts.append(feedback_text)

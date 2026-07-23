@@ -14,7 +14,7 @@ from agilerl.typing import (
     DeviceType,
     ModuleType,
     MutationApplyDict,
-    TupleOrDictObservation,
+    TupleOrDictObsType,
 )
 from agilerl.utils.evolvable_networks import (
     get_activation,
@@ -409,7 +409,7 @@ class EvolvableMultiInput(EvolvableModule):
 
         return feature_net
 
-    def forward(self, x: TupleOrDictObservation) -> torch.Tensor:
+    def forward(self, x: TupleOrDictObsType) -> torch.Tensor:
         """Forward pass of the composed network. Extracts features from each observation key and concatenates
         them with the corresponding observation key if specified. The concatenated features are then passed
         through the final MLP to produce the output tensor.

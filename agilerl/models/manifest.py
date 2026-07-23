@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from agilerl.arena.models import TrainingManifest as ArenaTrainingManifest
     from agilerl.models.env import GymEnvSpec, LLMEnvSpec, OfflineEnvSpec, PzEnvSpec
 
-    EnvSpecT = GymEnvSpec | PzEnvSpec | OfflineEnvSpec | LLMEnvSpec
+    EnvSpecType = GymEnvSpec | PzEnvSpec | OfflineEnvSpec | LLMEnvSpec
 
 
 def _resolve_algorithm(data: dict[str, Any] | AlgoSpec) -> AlgoSpec:

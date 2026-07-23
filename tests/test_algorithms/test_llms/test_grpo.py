@@ -4927,6 +4927,14 @@ class TestGRPOTest:
                 del full_completion_ids
                 return {}, 1.0, True, False, {}
 
+            def get_episode_data(self):
+                return (
+                    torch.ones(1, 4, dtype=torch.long),
+                    torch.ones(1, 3, dtype=torch.bool),
+                    torch.zeros(1, 3, dtype=torch.long),
+                    torch.tensor([1.0], dtype=torch.float32),
+                )
+
             def close(self):
                 return None
 
@@ -4969,6 +4977,14 @@ class TestGRPOTest:
                     return self.prompt_b, 0.5, False, False, {}
                 return {}, 1.0, True, False, {}
 
+            def get_episode_data(self):
+                return (
+                    torch.ones(1, 6, dtype=torch.long),
+                    torch.ones(1, 5, dtype=torch.bool),
+                    torch.zeros(1, 5, dtype=torch.long),
+                    torch.tensor([0.5, 1.0], dtype=torch.float32),
+                )
+
             def close(self):
                 return None
 
@@ -4989,7 +5005,9 @@ class TestGRPOTest:
         grpo = _make_cpu_grpo_for_branch_tests()
         with pytest.raises(
             TypeError,
-            match=re.escape("env must be a ReasoningGym (or subclass) or MultiTurnEnv"),
+            match=re.escape(
+                "env must be a ReasoningGym (or subclass) or TokenizedMultiTurnEnv"
+            ),
         ):
             grpo.test(object(), loop=1)
         grpo.clean_up()

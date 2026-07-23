@@ -175,7 +175,7 @@ class FusedLinearLogProbsFunction(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(  # type: ignore[override]
+    def forward(
         ctx: Any,  # noqa: ANN401 -- torch autograd context carries arbitrary attrs
         hidden: torch.Tensor,
         lm_head_weight: torch.Tensor,

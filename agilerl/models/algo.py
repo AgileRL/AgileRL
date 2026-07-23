@@ -22,7 +22,7 @@ if TYPE_CHECKING:
         RLAlgorithm,
     )
     from agilerl.algorithms.core.registry import HyperparameterConfig
-    from agilerl.components.replay_buffer import ReplayBuffer
+    from agilerl.components.replay_buffer import BufferType
     from agilerl.models.env import (
         BanditEnvSpec,
         GymEnvSpec,
@@ -37,9 +37,8 @@ if TYPE_CHECKING:
         from peft import LoraConfig
 
     AlgoT = TypeVar("AlgoT", bound="RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm")
-    EnvSpecT = GymEnvSpec | PzEnvSpec | OfflineEnvSpec | LLMEnvSpec | BanditEnvSpec
-    ReplayBufferT = ReplayBuffer
-    PopulationT = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
+    EnvSpecType = GymEnvSpec | PzEnvSpec | OfflineEnvSpec | LLMEnvSpec | BanditEnvSpec
+    PopulationType = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
 else:
     HyperparameterConfig = Any
     LoraConfig = Any
@@ -265,14 +264,14 @@ class AlgorithmSpec(BaseModel):
         raise NotImplementedError(msg)
 
     @staticmethod
-    def get_training_fn() -> Callable[..., tuple[PopulationT, list[float]]]:
+    def get_training_fn() -> Callable[..., tuple[PopulationType, list[float]]]:
         """Return the training function for this algorithm.
 
         Concrete specs **must** override this to return their training
         function (e.g. ``train_off_policy``).
 
         :return: Training function
-        :rtype: Callable[..., tuple[PopulationT, list[float]]]
+        :rtype: Callable[..., tuple[PopulationType, list[float]]]
         :raises NotImplementedError: If the training function is not implemented.
         """
         msg = "Algorithm specs must implement get_training_fn."
@@ -282,20 +281,20 @@ class AlgorithmSpec(BaseModel):
         self,
         *,
         training: TrainingSpec,
-        env_spec: EnvSpecT,
-        memory: ReplayBufferT | None = None,
-        n_step_memory: ReplayBufferT | None = None,
+        env_spec: EnvSpecType,
+        memory: BufferType | None = None,
+        n_step_memory: BufferType | None = None,
     ) -> dict[str, Any]:
         """Return additional kwargs for the training loop.
 
         :param training: Training specification.
         :type training: TrainingSpec
         :param env_spec: Environment specification.
-        :type env_spec: EnvSpecT
+        :type env_spec: EnvSpecType
         :param memory: Replay buffer instance.
-        :type memory: ReplayBufferT | None
+        :type memory: BufferType | None
         :param n_step_memory: N-step replay buffer for combined PER + n-step setups.
-        :type n_step_memory: ReplayBufferT | None
+        :type n_step_memory: BufferType | None
         :returns: Extra keyword arguments for the training function.
         :rtype: dict[str, Any]
         """

@@ -15,11 +15,7 @@ from agilerl.algorithms.core.base import (
     RLAlgorithm,
 )
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
-from agilerl.components.replay_buffer import (
-    MultiStepReplayBuffer,
-    PrioritizedReplayBuffer,
-    ReplayBuffer,
-)
+from agilerl.components.replay_buffer import BufferType
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.llm_envs import PreferenceGym, ReasoningGym, SFTGym
@@ -28,10 +24,10 @@ from agilerl.models.algo import (
     MultiAgentRLAlgorithmSpec,
     RLAlgorithmSpec,
 )
-from agilerl.models.env import GymEnvType, PzEnvType
 from agilerl.models.hpo import MutationSpec, TournamentSelectionSpec
 from agilerl.models.training import ReplayBufferSpec, TrainingSpec
 from agilerl.protocols import BanditEnvProtocol
+from agilerl.utils.env_utils import GymEnvType, PzEnvType
 
 if TYPE_CHECKING:
     import torch
@@ -41,9 +37,8 @@ if TYPE_CHECKING:
 LLMEnvType = ReasoningGym | PreferenceGym | SFTGym
 # Union of every env type an ``EnvSpec.make_env`` builds: vectorized gym/pettingzoo
 # envs, a bandit env satisfying ``BanditEnvProtocol``, or an LLM gym.
-EnvironmentT = GymEnvType | PzEnvType | BanditEnvProtocol | LLMEnvType
-PopulationT = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
-BufferT = ReplayBuffer | MultiStepReplayBuffer | PrioritizedReplayBuffer
+EnvironmentType = GymEnvType | PzEnvType | BanditEnvProtocol | LLMEnvType
+PopulationType = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
 
 
 class _SingleAgentVectorEnv(Protocol):
@@ -144,14 +139,14 @@ def get_spaces_from_env_single_agent(
 def create_population_from_spec(
     population_size: int,
     algo_spec: AlgoSpec,
-    env: EnvironmentT,
+    env: EnvironmentType,
     mutation_spec: MutationSpec | None,
     replay_buffer_spec: ReplayBufferSpec | None,
     device: str | torch.device = "cpu",
     resume_from_checkpoint: str | None = None,
     accelerator: Accelerator | None = None,
     tokenizer: PreTrainedTokenizerBase | None = None,
-) -> PopulationT:
+) -> PopulationType:
     """Instantiate a population of agents from an algorithm spec.
 
     :param population_size: Number of agents to create.
@@ -161,7 +156,7 @@ def create_population_from_spec(
     :param mutation_spec: Optional mutation spec for HP range fallback.
     :type mutation_spec: MutationSpec | None
     :param env: RL environment following Gymnasium or PettingZoo API.
-    :type env: EnvironmentT
+    :type env: EnvironmentType
     :param replay_buffer_spec: Replay buffer specification.
     :type replay_buffer_spec: ReplayBufferSpec | None
     :param device: Torch device string.
@@ -173,7 +168,7 @@ def create_population_from_spec(
     :param tokenizer: Pre-loaded HuggingFace tokenizer for LLM algorithms.
     :type tokenizer: PreTrainedTokenizerBase | None
     :returns: A list of algorithm instances.
-    :rtype: PopulationT
+    :rtype: PopulationType
     """
     from agilerl.models.algorithms import RainbowDQNSpec
     from agilerl.utils.algo_utils import get_num_envs
@@ -219,7 +214,7 @@ def create_population_from_spec(
             for agent_id, act_space in action_space.items():
                 assert isinstance(act_space, spaces.Space)
                 action_by_agent[str(agent_id)] = act_space
-            multi_agent_population: PopulationT = [
+            multi_agent_population: PopulationType = [
                 algo_spec.build_algorithm(
                     obs_by_agent,
                     action_by_agent,
@@ -235,7 +230,7 @@ def create_population_from_spec(
         sa_error = "Single-agent specs require plain observation/action spaces."
         assert not isinstance(observation_space, dict), sa_error
         assert not isinstance(action_space, dict), sa_error
-        single_agent_population: PopulationT = [
+        single_agent_population: PopulationType = [
             algo_spec.build_algorithm(
                 observation_space,
                 action_space,
@@ -349,7 +344,7 @@ def build_replay_buffer_from_spec(
     algo_spec: RLAlgorithmSpec | MultiAgentRLAlgorithmSpec,
     buffer_spec: ReplayBufferSpec | None,
     device: str | torch.device = "cpu",
-) -> BufferT | None:
+) -> BufferType | None:
     """Convert a :class:`ReplayBufferSpec` into a :class:`ReplayBuffer`,
     :class:`MultiStepReplayBuffer`, or :class:`PrioritizedReplayBuffer`
     instance, given an algorithm spec.
@@ -364,7 +359,7 @@ def build_replay_buffer_from_spec(
     :param device: Torch device string.
     :type device: str | torch.device
     :returns: A replay buffer instance, or ``None`` for on-policy algorithms.
-    :rtype: BufferT | None
+    :rtype: BufferType | None
     """
     if not (algo_spec.off_policy or algo_spec.offline or algo_spec.bandit):
         return None

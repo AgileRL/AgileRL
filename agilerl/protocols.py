@@ -37,7 +37,7 @@ from typing_extensions import Self
 
 if TYPE_CHECKING:
     from agilerl.algorithms.core.registry import MutationRegistry
-    from agilerl.typing import MutationApplyDict
+    from agilerl.typing import MutationApplyDict, ReasoningPrompts, TokenObsStepReturn
 
 NumpyObsType = np.ndarray | dict[str, np.ndarray] | tuple[np.ndarray, ...]
 TorchObsType = torch.Tensor | dict[str, torch.Tensor] | tuple[torch.Tensor, ...]
@@ -721,11 +721,12 @@ class BanditEnvProtocol(Protocol):
 
 @runtime_checkable
 class MultiTurnEnv(Protocol):
-    """Protocol for multi-turn LLM environments and AgileRL wrappers.
+    """Protocol for text-level multi-turn LLM environments.
 
-    Covers both:
-    - raw multi-turn envs / ``FormatRewardWrapper``: text obs + text actions
-    - ``TokenObservationWrapper``: dict obs + token-id tensor actions
+    Covers raw multi-turn envs (e.g. GEM environments) and text wrappers such
+    as ``FormatRewardWrapper``: text observations and text actions. The
+    token-level surface that ``TokenObservationWrapper`` exposes is described
+    by :class:`TokenizedMultiTurnEnv`.
     """
 
     max_turns: int
@@ -736,9 +737,39 @@ class MultiTurnEnv(Protocol):
         pass
 
     def step(
-        self, action: str | torch.Tensor, **kwargs: Any
+        self, action: str, **kwargs: Any
     ) -> tuple[str | dict[str, Any], float, bool, bool, dict[str, Any]]:
         pass
 
     def close(self) -> None:
+        pass
+
+
+@runtime_checkable
+class TokenizedMultiTurnEnv(Protocol):
+    """Protocol for token-level multi-turn LLM environments.
+
+    The surface ``TokenObservationWrapper`` exposes to
+    ``SyncMultiTurnVecEnv`` and the LLM algorithms' ``test`` loops:
+    tokenized ``ReasoningPrompts`` observations, token-id tensor actions,
+    and full-episode tensors for learning. ``step`` returns an empty
+    observation mapping once the episode has ended.
+    """
+
+    max_turns: int
+
+    def reset(
+        self, seed: int | None = None
+    ) -> "tuple[ReasoningPrompts, dict[str, Any]]":
+        pass
+
+    def step(self, full_completion_ids: torch.Tensor, /) -> "TokenObsStepReturn":
+        pass
+
+    def close(self) -> None:
+        pass
+
+    def get_episode_data(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         pass

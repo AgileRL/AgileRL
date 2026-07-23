@@ -2594,10 +2594,14 @@ class TestMakeEnvBranches:
 class TestLocalTrainerResolveEnvSpecBranches:
     """Tests for LocalTrainer._resolve_env_spec covering all agent types."""
 
-    def _make_manifest(self, agent_type, env_data=None, **algo_attrs):
+    def _make_manifest(self, agent_type, env_data=None, algo_cls=None, **algo_attrs):
         manifest = MagicMock()
         manifest.environment = env_data or {"name": "TestEnv-v0", "num_envs": 4}
         manifest.algorithm = MagicMock()
+        if algo_cls is not None:
+            # `_resolve_env_spec` narrows on the concrete spec type, so the
+            # double must satisfy `isinstance(..., algo_cls)`.
+            manifest.algorithm.__class__ = algo_cls
         manifest.algorithm.agent_type = agent_type
         for k, v in algo_attrs.items():
             setattr(manifest.algorithm, k, v)
@@ -2654,6 +2658,7 @@ class TestLocalTrainerResolveEnvSpecBranches:
                 "reward_fn_name": "reward_fn",
                 "prompt_template": {"system": "You are helpful"},
             },
+            algo_cls=LLMAlgorithmSpec,
             env_type=LLMEnvType.REASONING,
         )
         result = LocalTrainer._resolve_env_spec(manifest)

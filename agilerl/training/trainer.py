@@ -40,7 +40,7 @@ from agilerl.models.networks import (
     network_arch_is_resolvable,
 )
 from agilerl.utils.trainer_utils import (
-    EnvironmentT,
+    EnvironmentType,
     build_mutations_from_spec,
     build_replay_buffer_from_spec,
     build_tournament_from_spec,
@@ -50,9 +50,9 @@ from agilerl.utils.trainer_utils import (
 
 logger = logging.getLogger(__name__)
 
-EnvSpecT = GymEnvSpec | PzEnvSpec | OfflineEnvSpec | LLMEnvSpec | BanditEnvSpec
-ReplayBufferT = ReplayBufferSpec | None
-PopulationT = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
+EnvSpecType = GymEnvSpec | PzEnvSpec | OfflineEnvSpec | LLMEnvSpec | BanditEnvSpec
+ReplayBufferType = ReplayBufferSpec | None
+PopulationType = list[RLAlgorithm | MultiAgentRLAlgorithm | LLMAlgorithm]
 
 if HAS_ARENA_DEPENDENCIES:
     from agilerl.arena import ArenaClient
@@ -87,7 +87,7 @@ class Trainer(ABC):
     :param algorithm: An algorithm spec or a string algorithm name.
     :type algorithm: AlgoSpec | str
     :param environment: A ``gymnasium.Env`` instance, a PettingZoo ``ParallelEnv`` instance, or an env-name string.
-    :type environment: EnvSpecT | str
+    :type environment: EnvSpecType | str
     :param training: Training loop parameters (max steps, population size, etc.).
     :type training: TrainingSpec
     :param mutation: Mutation probabilities and RL-HP ranges.
@@ -96,7 +96,7 @@ class Trainer(ABC):
     :type tournament: TournamentSelectionSpec | None
     :param replay_buffer: Replay buffer configuration.  Off-policy algorithms
         auto-create a default buffer when this is ``None``.
-    :type replay_buffer: ReplayBufferT | None
+    :type replay_buffer: ReplayBufferType | None
     :param resume_from_checkpoint: Path to resume from checkpoint.
     :type resume_from_checkpoint: str | None
     :param device: Torch device (e.g. ``"cpu"``, ``"cuda"``).
@@ -108,11 +108,11 @@ class Trainer(ABC):
     def __init__(
         self,
         algorithm: AlgoSpec | str,
-        environment: EnvSpecT | str,
+        environment: EnvSpecType | str,
         training: TrainingSpec | None = None,
         mutation: MutationSpec | None = None,
         tournament: TournamentSelectionSpec | None = None,
-        replay_buffer: ReplayBufferT | None = None,
+        replay_buffer: ReplayBufferType | None = None,
         *,
         resume_from_checkpoint: str | None = None,
         device: str | torch.device = "cpu",
@@ -141,7 +141,7 @@ class Trainer(ABC):
     def _env_spec_from_string(
         algorithm: AlgoSpec,
         name: str,
-    ) -> EnvSpecT:
+    ) -> EnvSpecType:
         """Build an environment spec from a plain environment name string.
 
         Only standard Gymnasium and PettingZoo environments can be
@@ -153,7 +153,7 @@ class Trainer(ABC):
         :param name: The environment name (e.g. ``"CartPole-v1"``).
         :type name: str
         :returns: The appropriate environment spec.
-        :rtype: EnvSpecT
+        :rtype: EnvSpecType
         :raises ValueError: When the algorithm's agent type is not
             single-agent or multi-agent.
         """
@@ -210,7 +210,7 @@ class Trainer(ABC):
         )
 
     @staticmethod
-    def _resolve_env_spec(manifest: TrainingManifest) -> Any:  # noqa: ANN401 -- env spec type is subclass-specific (EnvSpecT locally vs ArenaEnvSpec)
+    def _resolve_env_spec(manifest: TrainingManifest) -> Any:  # noqa: ANN401 -- env spec type is subclass-specific (EnvSpecType locally vs ArenaEnvSpec)
         """Build an environment spec from the parsed manifest.
 
         Subclasses override this to produce the appropriate spec type, and read
@@ -226,7 +226,7 @@ class Trainer(ABC):
         raise NotImplementedError(msg)
 
     @abstractmethod
-    def train(self) -> tuple[PopulationT, list[float]] | dict[str, Any]:
+    def train(self) -> tuple[PopulationType, list[float]] | dict[str, Any]:
         """Run the training loop.
 
         - :class:`LocalTrainer` runs training locally and returns a tuple of
@@ -237,7 +237,7 @@ class Trainer(ABC):
           response as a ``dict``.
 
         :returns: The training result, whose type depends on the trainer.
-        :rtype: tuple[PopulationT, list[float]] | dict[str, Any]
+        :rtype: tuple[PopulationType, list[float]] | dict[str, Any]
         """
         msg = "Trainer subclass must implement train method."
         raise NotImplementedError(msg)
@@ -280,11 +280,11 @@ class LocalTrainer(Trainer):
     def __init__(
         self,
         algorithm: AlgoSpec | str,
-        environment: EnvSpecT | str,
+        environment: EnvSpecType | str,
         training: TrainingSpec | None = None,
         mutation: MutationSpec | None = None,
         tournament: TournamentSelectionSpec | None = None,
-        replay_buffer: ReplayBufferT | None = None,
+        replay_buffer: ReplayBufferType | None = None,
         hpo: bool = False,
         resume_from_checkpoint: str | None = None,
         device: str | torch.device = "cpu",
@@ -585,7 +585,7 @@ class LocalTrainer(Trainer):
 
         return tokenizer
 
-    def _make_env(self) -> EnvironmentT | None:
+    def _make_env(self) -> EnvironmentType | None:
         """Create the environment to train on.
 
         :returns: The environment to train on, or ``None`` for multi-turn LLM
@@ -614,7 +614,7 @@ class LocalTrainer(Trainer):
         return self.env_spec.make_env()
 
     @staticmethod
-    def _resolve_env_spec(manifest: TrainingManifest) -> EnvSpecT:
+    def _resolve_env_spec(manifest: TrainingManifest) -> EnvSpecType:
         """Build the appropriate environment spec from the manifest.
 
         Uses the algorithm's ``agent_type`` to choose the spec class.
@@ -627,12 +627,10 @@ class LocalTrainer(Trainer):
         agent_type = manifest.algorithm.agent_type
 
         if agent_type == AgentType.LLMAgent:
-            # `env_type` is a class variable of the LLM specs, which is what
-            # `agent_type` selects for here.
-            env_data.setdefault(
-                "env_type",
-                manifest.algorithm.env_type,  # ty: ignore[unresolved-attribute]
-            )
+            # `agent_type == LLMAgent` selects an LLM spec, on which `env_type`
+            # is a class variable; narrow so it resolves without an ignore.
+            assert isinstance(manifest.algorithm, LLMAlgorithmSpec)
+            env_data.setdefault("env_type", manifest.algorithm.env_type)
             return LLMEnvSpec(**env_data)
 
         if agent_type == AgentType.MultiAgent:
@@ -675,7 +673,7 @@ class LocalTrainer(Trainer):
         overwrite_checkpoints: bool = False,
         wandb_api_key: str | None = None,
         wandb_kwargs: dict[str, Any] | None = None,
-    ) -> tuple[PopulationT, list[float]]:
+    ) -> tuple[PopulationType, list[float]]:
         """Run a local training job given the passed configuration.
 
         :param verbose: If ``True``, print verbose output. Defaults to ``True``.
@@ -706,7 +704,7 @@ class LocalTrainer(Trainer):
             *population* is the final evolved population and
             *fitnesses* contains each agent's fitness from the final
             evaluation round.
-        :rtype: tuple[PopulationT, list[float]]
+        :rtype: tuple[PopulationType, list[float]]
         """
         manifest = self.to_manifest()
         evo_steps = (
@@ -775,7 +773,7 @@ class ArenaTrainer(Trainer):
     :param tournament: Tournament selection configuration. Defaults to ``None``.
     :type tournament: TournamentSelectionSpec | None
     :param replay_buffer: Replay buffer configuration. Defaults to ``None``.
-    :type replay_buffer: ReplayBufferT | None
+    :type replay_buffer: ReplayBufferType | None
     """
 
     def __init__(
@@ -788,7 +786,7 @@ class ArenaTrainer(Trainer):
         api_key: str | None = None,
         mutation: MutationSpec | None = None,
         tournament: TournamentSelectionSpec | None = None,
-        replay_buffer: ReplayBufferT | None = None,
+        replay_buffer: ReplayBufferType | None = None,
     ) -> None:
 
         if isinstance(environment, str):
@@ -802,7 +800,7 @@ class ArenaTrainer(Trainer):
             environment = ArenaEnvSpec(name=environment)
 
         # Arena specs mirror the core ones on the server side; they are a separate
-        # model hierarchy, so they are not members of `EnvSpecT`/`AlgoSpec` and are
+        # model hierarchy, so they are not members of `EnvSpecType`/`AlgoSpec` and are
         # bridged through Any for the base constructor.
         arena_environment: Any = environment
         super().__init__(

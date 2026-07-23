@@ -29,9 +29,9 @@ from agilerl.algorithms.core import ActionResult, LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.llm_envs import ReasoningGym
 from agilerl.protocols import (
-    MultiTurnEnv,
     PeftModelProtocol,
     PreTrainedModelProtocol,
+    TokenizedMultiTurnEnv,
 )
 from agilerl.typing import LLMObsType, LLMRolloutExperiences
 from agilerl.utils.algo_utils import (
@@ -47,6 +47,7 @@ from agilerl.utils.llm_packing import (
 from agilerl.utils.llm_utils import (
     aggregate_metrics_dict,
     build_completion_mask,
+    is_reasoning_prompts,
     masked_mean,
     masked_whiten,
     normalize_reasoning_prompt_batch,
@@ -675,7 +676,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
 
     def test(
         self,
-        env: ReasoningGym | MultiTurnEnv,
+        env: ReasoningGym | TokenizedMultiTurnEnv,
         loop: int = 1,
         *args: Any,
         **kwargs: Any,
@@ -684,7 +685,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
 
         :param env: Dataset-style ``ReasoningGym`` environment or tokenized
             multi-turn episode environment.
-        :type env: ReasoningGym | MultiTurnEnv
+        :type env: ReasoningGym | TokenizedMultiTurnEnv
         :param loop: Number of outer test iterations over ``reset`` / ``step``.
         :type loop: int
         :return: Concatenated reward tensor from the test loop.
@@ -703,26 +704,22 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
                     prompts = next_prompts
                     rewards.append(reward)
                 reward_tensor = torch.cat(rewards)
-            elif isinstance(env, MultiTurnEnv):
+            elif isinstance(env, TokenizedMultiTurnEnv):
                 all_rewards: list[torch.Tensor] = []
                 for _ in range(loop):
-                    obs, _info = env.reset()
-                    # GRPO requires a token-observation multi-turn env, whose
-                    # observations are ReasoningPrompts-shaped dicts.
-                    prompt_dict = obs
+                    prompt_dict, _info = env.reset()
                     terminated, truncated = False, False
                     while not terminated and not truncated:
-                        # ty cannot match the env's dict against the TypedDict.
-                        prompt: Any = prompt_dict
                         completion_ids = self.get_action(
-                            [prompt],
+                            [prompt_dict],
                             training=False,
                         ).completion_ids
                         full = completion_ids[0]
-                        obs, reward, terminated, truncated, _info = env.step(
-                            full,
-                        )
-                        prompt_dict = obs
+                        obs, reward, terminated, truncated, _info = env.step(full)
+                        # ``obs`` is the empty sentinel once the episode ends;
+                        # only live prompts feed the next turn.
+                        if is_reasoning_prompts(obs):
+                            prompt_dict = obs
                         all_rewards.append(
                             torch.tensor(
                                 [float(reward)],
@@ -734,7 +731,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
             else:
                 msg = (
                     "env must be a ReasoningGym (or subclass) or "
-                    f"MultiTurnEnv; got {type(env).__name__}"
+                    f"TokenizedMultiTurnEnv; got {type(env).__name__}"
                 )
                 raise TypeError(msg)
         mean_fit = torch.mean(reward_tensor).item()

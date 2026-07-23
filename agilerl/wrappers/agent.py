@@ -20,13 +20,13 @@ from agilerl.algorithms.core import (
 from agilerl.algorithms.core.base import get_checkpoint_dict
 from agilerl.protocols import EvolvableAttributeDict
 from agilerl.typing import (
-    ActionReturnType,
+    ActionReturn,
     ArrayDict,
     ArrayTuple,
     DeviceType,
     ExperiencesType,
-    MARLObservationType,
-    MARLTensorObsType,
+    MultiAgentObservationType,
+    MultiAgentTensorObsType,
     NumpyObsType,
     ObservationType,
     TorchObsType,
@@ -34,22 +34,22 @@ from agilerl.typing import (
 from agilerl.utils.algo_utils import obs_to_tensor, stack_experiences
 from agilerl.wrappers.utils import RunningMeanStd
 
-AgentType = TypeVar("AgentType", bound=RLAlgorithm | MultiAgentRLAlgorithm)
+AgentT = TypeVar("AgentT", bound=RLAlgorithm | MultiAgentRLAlgorithm)
 
 
-class AgentWrapper(ABC, Generic[AgentType]):
+class AgentWrapper(ABC, Generic[AgentT]):
     """Base class for all agent wrappers. Agent wrappers are used to apply an
     additional functionality to the ``get_action()`` and ``learn()`` methods of
     an ``EvolvableAlgorithm`` instance.
 
     :param agent: Agent to be wrapped
-    :type agent: AgentType
+    :type agent: AgentT
     """
 
     wrapped_get_action: Callable
     wrapped_learn: Callable
 
-    def __init__(self, agent: AgentType) -> None:
+    def __init__(self, agent: AgentT) -> None:
         self.agent = agent
         self.observation_space = agent.observation_space
         self.action_space = agent.action_space
@@ -99,7 +99,7 @@ class AgentWrapper(ABC, Generic[AgentType]):
         }
 
     def __setstate__(self, state: dict[str, Any]) -> None:
-        self.agent: AgentType = state["agent"]
+        self.agent: AgentT = state["agent"]
         self.observation_space = state["observation_space"]
         self.action_space = state["action_space"]
         self.multi_agent = state["multi_agent"]
@@ -207,14 +207,14 @@ class AgentWrapper(ABC, Generic[AgentType]):
 
     def get_action(
         self,
-        obs: ObservationType | MARLObservationType,
+        obs: ObservationType | MultiAgentObservationType,
         *args: Any,
         **kwargs: Any,
-    ) -> ActionReturnType:
+    ) -> ActionReturn:
         """Return the action from the agent.
 
         :param obs: Observation from the environment
-        :type obs: ObservationType | MARLObservationType
+        :type obs: ObservationType | MultiAgentObservationType
         :param args: Additional positional arguments
         :type args: Any
         :param kwargs: Additional keyword arguments
@@ -264,7 +264,7 @@ def _space_shape(space: spaces.Space) -> tuple[int, ...]:
 
 
 def _is_tensor_tuple(
-    obs: TorchObsType | MARLTensorObsType,
+    obs: TorchObsType | MultiAgentTensorObsType,
 ) -> TypeIs[tuple[torch.Tensor, ...]]:
     """Narrow a tensorised observation to a tuple of tensors.
 
@@ -288,8 +288,8 @@ def _narrow_obs_entry(value: object) -> TorchObsType:
 
 
 def _is_marl_obs(
-    obs: TorchObsType | MARLTensorObsType,
-) -> TypeIs[MARLTensorObsType]:
+    obs: TorchObsType | MultiAgentTensorObsType,
+) -> TypeIs[MultiAgentTensorObsType]:
     """Narrow a tensorised observation to the multi-agent per-agent mapping.
 
     A plain ``isinstance(obs, dict)`` widens the keys to ``object`` (a ``TensorDict``
@@ -299,7 +299,7 @@ def _is_marl_obs(
 
 
 def _is_tensor_mapping(
-    obs: TorchObsType | MARLTensorObsType,
+    obs: TorchObsType | MultiAgentTensorObsType,
 ) -> TypeIs[dict[str, torch.Tensor]]:
     """Narrow a tensorised observation to a per-key tensor mapping.
 
@@ -311,7 +311,7 @@ def _is_tensor_mapping(
     return isinstance(obs, Mapping)
 
 
-class RSNorm(AgentWrapper[AgentType]):
+class RSNorm(AgentWrapper[AgentT]):
     """Wrapper to normalize observations such that each coordinate is centered with unit variance.
     Handles both single and multi-agent settings, as well as Dict and Tuple observation spaces.
 
@@ -336,7 +336,7 @@ class RSNorm(AgentWrapper[AgentType]):
 
     def __init__(
         self,
-        agent: AgentType,
+        agent: AgentT,
         epsilon: float = 1e-4,
         norm_obs_keys: list[str] | None = None,
     ) -> None:
@@ -438,7 +438,7 @@ class RSNorm(AgentWrapper[AgentType]):
 
     def _normalize_observation(
         self,
-        observation: TorchObsType | MARLTensorObsType,
+        observation: TorchObsType | MultiAgentTensorObsType,
         *,
         obs_rms: RunningStatsType | None = None,
     ) -> TorchObsType:
@@ -474,15 +474,15 @@ class RSNorm(AgentWrapper[AgentType]):
         }
 
     def normalize_observation(
-        self, observation: TorchObsType | MARLTensorObsType
-    ) -> TorchObsType | MARLTensorObsType:
+        self, observation: TorchObsType | MultiAgentTensorObsType
+    ) -> TorchObsType | MultiAgentTensorObsType:
         """Normalize the observation using the RunningMeanStd object(s).
 
         :param observation: Tensorised observation from the environment
-        :type observation: TorchObsType | MARLTensorObsType
+        :type observation: TorchObsType | MultiAgentTensorObsType
 
         :return: Normalized observation
-        :rtype: TorchObsType | MARLTensorObsType
+        :rtype: TorchObsType | MultiAgentTensorObsType
         """
         # A single-agent Dict observation is itself a ``dict[str, Tensor]``, so it is
         # indistinguishable by type from the multi-agent mapping; ``multi_agent`` is the
@@ -501,7 +501,7 @@ class RSNorm(AgentWrapper[AgentType]):
 
     def _update_statistics(
         self,
-        observation: TorchObsType | MARLTensorObsType,
+        observation: TorchObsType | MultiAgentTensorObsType,
         *,
         obs_rms: RunningStatsType | None = None,
     ) -> None:
@@ -528,11 +528,13 @@ class RSNorm(AgentWrapper[AgentType]):
             for key, rms in obs_rms.items():
                 rms.update(observation[key])
 
-    def update_statistics(self, observation: TorchObsType | MARLTensorObsType) -> None:
+    def update_statistics(
+        self, observation: TorchObsType | MultiAgentTensorObsType
+    ) -> None:
         """Update the running statistics using the observation.
 
         :param observation: Tensorised observation from the environment
-        :type observation: TorchObsType | MARLTensorObsType
+        :type observation: TorchObsType | MultiAgentTensorObsType
         """
         # ``multi_agent`` is the runtime discriminator (see `normalize_observation`).
         if self.multi_agent:
@@ -547,14 +549,14 @@ class RSNorm(AgentWrapper[AgentType]):
 
     def get_action(
         self,
-        obs: ObservationType | MARLObservationType,
+        obs: ObservationType | MultiAgentObservationType,
         *args: Any,
         **kwargs: Any,
-    ) -> ActionReturnType:
+    ) -> ActionReturn:
         """Return the action from the agent after normalizing the observation.
 
         :param obs: Observation from the environment
-        :type obs: ObservationType | MARLObservationType
+        :type obs: ObservationType | MultiAgentObservationType
 
         :return: Action from the agent
         :rtype: Any
@@ -643,7 +645,7 @@ def _is_array_tuple(obs: NumpyObsType) -> TypeIs[ArrayTuple]:
 
 
 def _is_numpy_obs_mapping(
-    obs: MARLObservationType,
+    obs: MultiAgentObservationType,
 ) -> TypeGuard[dict[str, NumpyObsType]]:
     """Confirm every per-agent leaf is a numpy observation.
 
@@ -914,10 +916,10 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
 
     def get_action(
         self,
-        obs: MARLObservationType,
+        obs: MultiAgentObservationType,
         *args: Any,
         **kwargs: Any,
-    ) -> ActionReturnType:
+    ) -> ActionReturn:
         """Return the action from the agent.
 
         Since the environments may not return observations for all agents at the
@@ -925,7 +927,7 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
         placeholder values for their actions.
 
         :param obs: Observation from the environment
-        :type obs: MARLObservationType
+        :type obs: MultiAgentObservationType
 
         :return: Action from the agent
         :rtype: Any

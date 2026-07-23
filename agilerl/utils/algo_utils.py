@@ -47,7 +47,7 @@ from agilerl.typing import (
     ObservationType,
     ObsShape,
     OutputSizeFromSpace,
-    StandardTensorDict,
+    TensorMapping,
     TensorTuple,
     TorchObsType,
 )
@@ -1381,7 +1381,7 @@ def preprocess_dict_observation(
     normalize_images: bool = True,
     placeholder_value: float | None = None,
     swap_channels: bool = False,
-) -> StandardTensorDict:
+) -> TensorMapping:
     """Preprocess dictionary observations.
 
     Sub-observations of a Dict space are leaves (AgileRL does not support

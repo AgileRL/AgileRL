@@ -14,9 +14,9 @@ from agilerl.algorithms import DDPG, DQN, TD3, RainbowDQN
 from agilerl.components import (
     MultiStepReplayBuffer,
     PrioritizedReplayBuffer,
-    ReplayBuffer,
 )
 from agilerl.components.data import ReplayDataset, Transition
+from agilerl.components.replay_buffer import BufferType
 from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -38,7 +38,6 @@ if TYPE_CHECKING:
 
 SupportedOffPolicy = DQN | RainbowDQN | DDPG | TD3
 PopulationType = list[SupportedOffPolicy]
-BufferType = ReplayBuffer | PrioritizedReplayBuffer | MultiStepReplayBuffer
 
 logger = logging.getLogger(__name__)
 
@@ -392,16 +391,14 @@ def train_off_policy(
                 else:
                     memory.add(transition)
 
-                if per:
+                # `beta` is annealed only by RainbowDQN, the one population member
+                # that uses prioritized replay (`per`); narrowing lets it resolve.
+                if per and isinstance(agent, RainbowDQN):
                     fraction = min(
                         ((agent.metrics.steps + idx_step + 1) * num_envs / max_steps),
                         1.0,
                     )
-                    # `beta` is annealed by the algorithms that support prioritized
-                    # replay (RainbowDQN), not by the population union as a whole.
-                    agent.beta += fraction * (  # ty: ignore[unresolved-attribute]
-                        1.0 - agent.beta  # ty: ignore[unresolved-attribute]
-                    )
+                    agent.beta += fraction * (1.0 - agent.beta)
 
                 # Learn according to learning frequency
                 # Handle learn_step > num_envs
