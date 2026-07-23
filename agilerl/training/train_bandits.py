@@ -3,6 +3,7 @@ import warnings
 from datetime import datetime
 from typing import Any
 
+import torch
 from accelerate import Accelerator
 from tensordict import TensorDict
 from torch.utils.data import DataLoader
@@ -219,10 +220,12 @@ def train_bandits(
                 action = agent.get_action(context)
                 next_context, reward = env.step(action)
 
-                # Save experience to replay buffer. `TensorDict` converts array-likes
-                # and scalars, but its stub only accepts tensor collections.
+                # Save experience to replay buffer.
                 transition = TensorDict(
-                    {"obs": context[action], "reward": reward},  # ty: ignore[invalid-argument-type]
+                    {
+                        "obs": torch.as_tensor(context[action]),
+                        "reward": torch.as_tensor(reward),
+                    },
                 )
                 transition = transition.unsqueeze(0)
                 transition.batch_size = [1]
@@ -238,12 +241,9 @@ def train_bandits(
                         agent.learn(experiences)
 
                 score += reward
-                # Regret accumulates the fractional reward gap, so its elements are
-                # floats; the bandit algorithms initialise it as `[0]` and so infer
-                # `list[int]` - annotating it `list[float]` upstream drops this.
-                agent.regret.append(
-                    agent.regret[-1] + 1 - reward,  # ty: ignore[invalid-argument-type]
-                )
+                # Regret accumulates the fractional reward gap between the best
+                # possible and the achieved reward.
+                agent.regret.append(agent.regret[-1] + 1 - reward)
 
                 context = next_context
 

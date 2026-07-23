@@ -131,7 +131,7 @@ class NeuralUCB(RLAlgorithm[TensorDict]):
         self.lr = lr
         self.net_config = net_config
         self.mut = mut
-        self.regret = [0]
+        self.regret: list[float] = [0.0]
         self.actor_network = None
 
         # Default RL hyperparameters to mutate when doing Evo-HPO

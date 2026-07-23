@@ -131,7 +131,7 @@ class NeuralTS(RLAlgorithm[TensorDict]):
         self.lr = lr
         self.mut = mut
         self.net_config = net_config
-        self.regret = [0]
+        self.regret: list[float] = [0.0]
 
         # Default RL hyperparameters to mutate when doing Evo-HPO
         self.hp_config = self.hp_config or make_default_hp_config(
