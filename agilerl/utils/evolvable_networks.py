@@ -79,13 +79,13 @@ class _ConvCtor(Protocol[_SizeT]):
 
 
 class _PoolCtor(Protocol[_SizeT]):
-    """A torch pooling constructor whose size args all share arity ``_SizeT``."""
+    """A torch pooling constructor whose size args accept int or arity ``_SizeT``."""
 
     def __call__(
         self,
-        kernel_size: _SizeT,
-        stride: _SizeT,
-        padding: _SizeT,
+        kernel_size: int | _SizeT,
+        stride: int | _SizeT,
+        padding: int | _SizeT,
     ) -> nn.Module: ...
 
 
@@ -121,11 +121,17 @@ def _build_pool(
     stride: TupleorInt,
     padding: TupleorInt,
 ) -> nn.Module:
-    """Construct ``pool_cls`` with each size normalized to its expected arity.
+    """Construct ``pool_cls``, preserving scalar sizes when all args are ints.
 
-    Pairing ``pool_cls`` with ``to_size`` keeps the tuple arity the constructor
-    demands correlated with the normalizer that produces it.
+    torch pooling layers keep an ``int`` ``kernel_size`` in their ``repr`` when
+    constructed with scalars. Tuple sizes are normalized to the constructor arity.
     """
+    if (
+        isinstance(kernel_size, int)
+        and isinstance(stride, int)
+        and isinstance(padding, int)
+    ):
+        return pool_cls(kernel_size, stride, padding)
     return pool_cls(to_size(kernel_size), to_size(stride), to_size(padding))
 
 
@@ -242,6 +248,8 @@ def config_from_dict(config_dict: NetConfigType) -> NetConfig:
     :return: The net config class.
     :rtype: NetConfig
     """
+    if isinstance(config_dict, NetConfig):
+        return config_dict
     config_keys = config_dict.keys()
     if "hidden_state_size" in config_keys:
         config_cls = LstmNetConfig
