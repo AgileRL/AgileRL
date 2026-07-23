@@ -826,15 +826,11 @@ class ArenaTrainer(Trainer):
 
             self._client = ArenaClient(api_key=api_key)
 
-    # Arena manifests are a distinct schema validated by `ArenaManifest`, so this
-    # override deliberately accepts only serialized manifests and Arena-specific
-    # construction arguments.
     @classmethod
-    def from_manifest(  # ty: ignore[invalid-method-override]
+    def from_manifest(
         cls,
-        manifest: str | Path | dict[str, Any],
-        client: ArenaClient | None = None,
-        api_key: str | None = None,
+        manifest: str | Path | dict[str, Any] | TrainingManifest,
+        **kwargs: Any,
     ) -> Self:
         """Instantiate a :class:`ArenaTrainer` from a YAML, JSON, or dict manifest.
 
@@ -842,12 +838,10 @@ class ArenaTrainer(Trainer):
         fields.
 
         :param manifest: Path to a YAML/JSON file, or a raw dict.
-        :type manifest: str | Path | dict[str, Any]
-        :param client: An authenticated :class:`ArenaClient`.  One is created
-            automatically if not provided.
-        :type client: ArenaClient | None
-        :param api_key: The Arena API key.
-        :type api_key: str | None
+        :type manifest: str | Path | dict[str, Any] | TrainingManifest
+        :param kwargs: Arena-specific construction arguments.  Recognises ``client``
+            (an authenticated :class:`ArenaClient`, created automatically when
+            omitted) and ``api_key`` (the Arena API key).
         :returns: A fully configured :class:`ArenaTrainer` instance.
         :rtype: ArenaTrainer
         """
@@ -858,33 +852,49 @@ class ArenaTrainer(Trainer):
             )
             raise ImportError(msg)
 
+        client: ArenaClient | None = kwargs.get("client")
+        api_key: str | None = kwargs.get("api_key")
+
+        # Arena training is driven by the Arena manifest schema, so a pre-validated
+        # core :class:`TrainingManifest` instance cannot be submitted directly.
+        if isinstance(manifest, TrainingManifest):
+            msg = (
+                "ArenaTrainer.from_manifest expects a serialized manifest "
+                "(a path, JSON string, or dict), not a core TrainingManifest instance."
+            )
+            raise TypeError(msg)
+
         validated_manifest = ArenaManifest.get_validated(manifest, mode="python")
         env_spec = cls._resolve_env_spec(validated_manifest)
 
-        algorithm = validated_manifest.algorithm
+        # Arena specs mirror the core ones on the server side but form a separate
+        # model hierarchy, so they are bridged through `Any` for the base
+        # constructor, as `__init__` does for the environment spec.
+        algorithm: Any = validated_manifest.algorithm
+        training: Any = validated_manifest.training
+        mutation: Any = validated_manifest.mutation
+        tournament: Any = validated_manifest.tournament_selection
+        replay_buffer: Any = validated_manifest.replay_buffer
+
         # Deferred network (``arch`` omitted): the arena manifest leaves
         # ``net_config`` unset and keeps the raw network section. Carry it on the
         # spec so it is submitted for the server to resolve, not dropped.
         if (
             "net_config" in type(algorithm).model_fields
-            and algorithm.net_config is None  # ty: ignore[unresolved-attribute]
+            and algorithm.net_config is None
             and validated_manifest.network
         ):
-            # `net_config` is declared on the concrete algorithm specs, not on the
-            # `AlgorithmSpec` bases this attribute is typed against.
-            algorithm.net_config = validated_manifest.network  # ty: ignore[invalid-assignment]
+            algorithm.net_config = validated_manifest.network
 
-        # The Arena manifest validates into the Arena-side spec models, which mirror
-        # the core ones the constructor is annotated against.
         return cls(
-            algorithm=algorithm,  # ty: ignore[invalid-argument-type]
+            algorithm=algorithm,
             environment=env_spec,
             client=client,
             api_key=api_key,
-            training=validated_manifest.training,  # ty: ignore[invalid-argument-type]
-            mutation=validated_manifest.mutation,  # ty: ignore[invalid-argument-type]
-            tournament=validated_manifest.tournament_selection,  # ty: ignore[invalid-argument-type]
-            replay_buffer=validated_manifest.replay_buffer,  # ty: ignore[invalid-argument-type]
+            training=training,
+            mutation=mutation,
+            tournament=tournament,
+            replay_buffer=replay_buffer,
         )
 
     @staticmethod
