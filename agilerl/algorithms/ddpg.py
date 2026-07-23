@@ -1,5 +1,6 @@
 import copy
 import warnings
+from collections.abc import Sequence
 from typing import Any
 
 import gymnasium as gym
@@ -435,11 +436,11 @@ class DDPG(RLAlgorithm[TensorDict]):
             )
         return noise.astype(np.float32)
 
-    def reset_action_noise(self, indices: np.ndarray) -> None:
+    def reset_action_noise(self, indices: Sequence[int] | np.ndarray) -> None:
         """Reset action noise.
 
         :param indices: List of indices to reset
-        :type indices: np.ndarray
+        :type indices: Sequence[int] or np.ndarray
         """
         self.current_noise[indices] = self.mean_noise[indices]
 

@@ -367,12 +367,7 @@ def train_off_policy(
                         reset_noise_indices.append(idx)
 
                 if isinstance(agent, (DDPG, TD3)):
-                    # `reset_action_noise` fancy-indexes with its argument, so any
-                    # sequence of indices works; widening its annotation to
-                    # `Sequence[int] | np.ndarray` upstream drops this suppression.
-                    agent.reset_action_noise(
-                        reset_noise_indices,  # ty: ignore[invalid-argument-type]
-                    )
+                    agent.reset_action_noise(reset_noise_indices)
 
                 steps += num_envs
 
