@@ -129,11 +129,13 @@ def _build_pool(
     constructed with scalars. Tuple sizes are normalized to the constructor arity.
     """
     if (
-        isinstance(kernel_size, int)
-        and isinstance(stride, int)
-        and isinstance(padding, int)
+        not isinstance(kernel_size, tuple)
+        and not isinstance(stride, tuple)
+        and not isinstance(padding, tuple)
     ):
-        return pool_cls(kernel_size, stride, padding)
+        # All scalar (Python int or numpy integer): keep scalar kwargs so the
+        # layer's repr matches a reference network built with ints.
+        return pool_cls(int(kernel_size), int(stride), int(padding))
     return pool_cls(to_size(kernel_size), to_size(stride), to_size(padding))
 
 
