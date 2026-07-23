@@ -33,7 +33,6 @@ AgentType = TypeVar("AgentType", bound=EvolvableAlgorithmProtocol)
 IndividualType = TypeVar("IndividualType", bound=EvolvableAlgorithm)
 SingleAgentType = TypeVar("SingleAgentType", bound=RLAlgorithm)
 MultiAgentType = TypeVar("MultiAgentType", bound=MultiAgentRLAlgorithm)
-PopulationType = list[IndividualType]
 BanditAlgorithm = NeuralUCB | NeuralTS
 
 # A bound mutation method of `Mutations`: maps an individual to a mutated

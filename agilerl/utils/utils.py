@@ -4,7 +4,7 @@ import warnings
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import gymnasium as gym
 import numpy as np
@@ -34,6 +34,7 @@ from agilerl.algorithms.core.registry import HyperparameterConfig
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.logger import CSVLogger, StdOutLogger, TensorboardLogger, WandbLogger
+from agilerl.protocols import EvolvableAlgorithmProtocol
 from agilerl.typing import BPTTSequenceType, PopulationType
 from agilerl.utils.algo_utils import CosineLRScheduleConfig, DummyOptimizer, clone_llm
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
@@ -46,6 +47,8 @@ if TYPE_CHECKING:
     from peft import LoraConfig
     from transformers import PreTrainedTokenizerBase
 
+
+AgentT = TypeVar("AgentT", bound=EvolvableAlgorithmProtocol)
 
 SupportedObservationSpace = spaces.Box | spaces.Discrete | spaces.Dict | spaces.Tuple
 
@@ -1162,7 +1165,7 @@ def create_population(
 
 
 def save_population_checkpoint(
-    population: PopulationType,
+    population: list[AgentT],
     save_path: str,
     overwrite_checkpoints: bool,
     accelerator: Accelerator | None = None,
@@ -1170,7 +1173,7 @@ def save_population_checkpoint(
     """Save checkpoint of population of agents.
 
     :param population: Population of agents
-    :type population: list[PopulationType]
+    :type population: list[AgentT]
     :param save_path: Path to save checkpoint
     :type save_path: str
     :param overwrite_checkpoints: Flag to overwrite checkpoints
@@ -1212,7 +1215,7 @@ def save_population_checkpoint(
 
 
 def tournament_selection_and_mutation(
-    population: PopulationType,
+    population: list[AgentT],
     tournament: TournamentSelection,
     mutation: Mutations,
     env_name: str,
@@ -1221,11 +1224,11 @@ def tournament_selection_and_mutation(
     save_elite: bool = False,
     accelerator: Accelerator | None = None,
     language_model: bool | None = False,
-) -> PopulationType:
+) -> list[AgentT]:
     """Perform tournament selection and mutation on a population of agents.
 
     :param population: Population of agents
-    :type population: list[PopulationType]
+    :type population: list[AgentT]
     :param tournament: Tournament selection object
     :type tournament: TournamentSelection
     :param mutation: Mutation object
@@ -1241,7 +1244,7 @@ def tournament_selection_and_mutation(
     :param language_model: Flag to indicate if the environment is a language model, defaults to False
     :type language_model: bool, optional
     :return: Population of agents after tournament selection and mutation
-    :rtype: list[PopulationType]
+    :rtype: list[AgentT]
     """
     if algo is None:
         algo = population[0].__class__.__name__

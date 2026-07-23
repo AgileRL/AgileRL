@@ -194,14 +194,9 @@ def finetune_llm_sft(
             if (i + 1) % evo_steps == 0:
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
-                # `tournament_selection_and_mutation` takes and returns an
-                # invariant `list[EvolvableAlgorithmProtocol]`, so a concrete
-                # population is assignable in neither direction; making it generic
-                # in the agent type (agilerl/utils/utils.py) drops both
-                # suppressions.
                 population.update(
-                    tournament_selection_and_mutation(  # ty: ignore[invalid-argument-type]
-                        population=population.agents,  # ty: ignore[invalid-argument-type]
+                    tournament_selection_and_mutation(
+                        population=population.agents,
                         tournament=tournament,
                         mutation=mutation,
                         env_name=env.name,

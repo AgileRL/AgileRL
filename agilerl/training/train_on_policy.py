@@ -274,13 +274,9 @@ def train_on_policy(
 
         # Tournament selection and population mutation
         if tournament and mutation is not None:
-            # `tournament_selection_and_mutation` takes and returns an invariant
-            # `list[EvolvableAlgorithmProtocol]`, so a concrete population is assignable
-            # in neither direction; making it generic in the agent type
-            # (agilerl/utils/utils.py) removes both suppressions.
             population.update(
-                tournament_selection_and_mutation(  # ty: ignore[invalid-argument-type]
-                    population=population.agents,  # ty: ignore[invalid-argument-type]
+                tournament_selection_and_mutation(
+                    population=population.agents,
                     tournament=tournament,
                     mutation=mutation,
                     env_name=env_name,
@@ -294,9 +290,8 @@ def train_on_policy(
         # Save model checkpoint
         if checkpoint is not None:
             if population.local_step // checkpoint > checkpoint_count:
-                # `save_population_checkpoint` takes the same invariant list.
                 save_population_checkpoint(
-                    population=population.agents,  # ty: ignore[invalid-argument-type]
+                    population=population.agents,
                     save_path=save_path,
                     overwrite_checkpoints=overwrite_checkpoints,
                     accelerator=accelerator,

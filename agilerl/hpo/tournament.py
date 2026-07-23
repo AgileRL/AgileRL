@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, TypeVar
 
 import numpy as np
 from accelerate.utils import broadcast_object_list
@@ -9,7 +9,7 @@ from accelerate.utils import broadcast_object_list
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.protocols import EvolvableAlgorithmProtocol
 
-PopulationT = list[EvolvableAlgorithmProtocol]
+AgentT = TypeVar("AgentT", bound=EvolvableAlgorithmProtocol)
 
 
 class TournamentSelection:
@@ -67,14 +67,14 @@ class TournamentSelection:
 
     def _elitism(
         self,
-        population: PopulationT,
-    ) -> tuple[EvolvableAlgorithmProtocol, np.ndarray, int]:
+        population: list[AgentT],
+    ) -> tuple[AgentT, np.ndarray, int]:
         """Perform elitism selection given a population of agents.
 
         :param population: Population of agents
-        :type population: PopulationT
+        :type population: list[AgentT]
         :return: Best performing member of the population, rank array, and max id
-        :rtype: tuple[EvolvableAlgorithmProtocol, np.ndarray, int]
+        :rtype: tuple[AgentT, np.ndarray, int]
         """
         last_fitness = [self._scalar_fitness(indi.fitness[-1]) for indi in population]
         rank = np.argsort(last_fitness).argsort()
@@ -83,14 +83,14 @@ class TournamentSelection:
 
     def select(
         self,
-        population: PopulationT,
-    ) -> tuple[EvolvableAlgorithmProtocol, PopulationT]:
+        population: list[AgentT],
+    ) -> tuple[AgentT, list[AgentT]]:
         """Select the best agent and new population of agents following tournament selection.
 
         :param population: Population of agents
-        :type population: PopulationT
+        :type population: list[AgentT]
         :return: Elite agent and new population
-        :rtype: tuple[EvolvableAlgorithmProtocol, PopulationT]
+        :rtype: tuple[AgentT, list[AgentT]]
         """
         if self.language_model is None:
             self.language_model = isinstance(population[0], LLMAlgorithm)
@@ -103,20 +103,20 @@ class TournamentSelection:
 
     def _select_standard_agents(
         self,
-        population: PopulationT,
-    ) -> tuple[EvolvableAlgorithmProtocol, PopulationT]:
+        population: list[AgentT],
+    ) -> tuple[AgentT, list[AgentT]]:
         """Return best agent and new population of agents following tournament selection. Used for
         a population of :class:`RLAlgorithm <agilerl.algorithms.core.RLAlgorithm>` or
         :class:`MultiAgentRLAlgorithm <agilerl.algorithms.core.MultiAgentRLAlgorithm>` agents.
 
         :param population: Population of agents
-        :type population: PopulationT
+        :type population: list[AgentT]
         :return: Elite agent and new population
-        :rtype: tuple[EvolvableAlgorithmProtocol, PopulationT]
+        :rtype: tuple[AgentT, list[AgentT]]
         """
         best_agent, rank, max_id = self._elitism(population)
         elite = best_agent.clone(index=None, wrap=True)
-        new_population: PopulationT = []
+        new_population: list[AgentT] = []
         if self.elitism:  # keep top agent in population
             new_population.append(elite.clone(index=None, wrap=False))
             selection_size = self.population_size - 1
@@ -134,15 +134,15 @@ class TournamentSelection:
 
     def _select_llm_agents(
         self,
-        population: PopulationT,
-    ) -> tuple[EvolvableAlgorithmProtocol, PopulationT]:
+        population: list[AgentT],
+    ) -> tuple[AgentT, list[AgentT]]:
         """Return best agent and new population of agents following tournament selection. Used for
         a population of :class:`LLMAlgorithm <agilerl.algorithms.core.LLMAlgorithm>` agents.
 
         :param population: Population of agents
-        :type population: PopulationT
+        :type population: list[AgentT]
         :return: Elite agent and new population
-        :rtype: tuple[EvolvableAlgorithmProtocol, PopulationT]
+        :rtype: tuple[AgentT, list[AgentT]]
         """
         # Alias the population as a slot list so entries can be nulled in place:
         # this drops both this function's *and the caller's* last references to
@@ -155,7 +155,7 @@ class TournamentSelection:
         new_population_idxs: list[tuple[int, int, bool]] = []
         old_population_idxs = [ind.index for ind in population]
         unwanted_agents: set[int] = set()
-        elite: EvolvableAlgorithmProtocol | None = None
+        elite: AgentT | None = None
 
         if accelerator is None or (
             accelerator is not None and accelerator.is_main_process
@@ -205,8 +205,8 @@ class TournamentSelection:
                 if unwanted_ref.accelerator is not None:
                     unwanted_ref.accelerator.wait_for_everyone()
 
-        new_population: PopulationT = []
-        index_tracker: dict[int, EvolvableAlgorithmProtocol] = {}
+        new_population: list[AgentT] = []
+        index_tracker: dict[int, AgentT] = {}
         for idx_to_clone, new_idx, is_elite in new_population_idxs:
             slot = old_population_idxs.index(idx_to_clone)
             if (agent_ref := agent_slots[slot]) is not None:
