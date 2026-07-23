@@ -164,29 +164,16 @@ def get_input_size_from_space(observation_space: SpaceLike) -> InputSizeFromSpac
     :return: The dimension of the state space.
     :rtype: tuple[int, ...] | dict[str, tuple[int, ...]] | tuple[tuple[int, ...] | dict[str, tuple[int, ...]], ...]
     """
-    if isinstance(observation_space, spaces.Tuple):
-        return tuple(
-            _input_size_dict_or_leaf(space) for space in observation_space.spaces
-        )
+    if isinstance(observation_space, spaces.Space):
+        return _input_size(observation_space)
     if isinstance(observation_space, (list, tuple)):
-        return tuple(
-            _input_size_dict_or_leaf(_require_space(space))
-            for space in observation_space
-        )
-    if isinstance(observation_space, spaces.Dict):
-        return {
-            key: _input_size_leaf(subspace)
-            for key, subspace in observation_space.spaces.items()
-        }
+        return tuple(_input_size(_require_space(space)) for space in observation_space)
     if isinstance(observation_space, dict):
-        sizes_by_key: dict[str, tuple[int, ...]] = {}
+        sizes_by_key: dict[str, InputSizeFromSpace] = {}
         for key, subspace in observation_space.items():
             assert isinstance(key, str)
-            assert isinstance(subspace, spaces.Space)
-            sizes_by_key[key] = _input_size_leaf(subspace)
+            sizes_by_key[key] = _input_size(_require_space(subspace))
         return sizes_by_key
-    if isinstance(observation_space, _LEAF_SPACE_TYPES):
-        return _input_size_leaf(observation_space)
     msg = f"Can't access state dimensions for {type(observation_space)} spaces."
     raise AttributeError(
         msg,
@@ -215,14 +202,12 @@ def _input_size_leaf(space: spaces.Space) -> tuple[int, ...]:
     raise AttributeError(msg)
 
 
-def _input_size_dict_or_leaf(
-    space: spaces.Space,
-) -> tuple[int, ...] | dict[str, tuple[int, ...]]:
-    """Input size for a Dict space or leaf observation space."""
+def _input_size(space: spaces.Space) -> InputSizeFromSpace:
+    """Input size for a leaf, or a (possibly nested) Dict / Tuple space."""
     if isinstance(space, spaces.Dict):
-        return {
-            key: _input_size_leaf(subspace) for key, subspace in space.spaces.items()
-        }
+        return {key: _input_size(sub) for key, sub in space.spaces.items()}
+    if isinstance(space, spaces.Tuple):
+        return tuple(_input_size(sub) for sub in space.spaces)
     return _input_size_leaf(space)
 
 
@@ -258,26 +243,16 @@ def get_output_size_from_space(action_space: SpaceLike) -> OutputSizeFromSpace:
     :return: The dimension of the action space.
     :rtype: int | dict[str, int] | tuple[int | dict[str, int], ...]
     """
+    if isinstance(action_space, spaces.Space):
+        return _output_size(action_space)
     if isinstance(action_space, (list, tuple)):
-        sizes: list[int | dict[str, int]] = []
-        for space in action_space:
-            assert isinstance(space, spaces.Space)
-            sizes.append(_output_size_dict_or_leaf(space))
-        return tuple(sizes)
-    if isinstance(action_space, spaces.Dict):
-        return {
-            key: _output_size_leaf(subspace)
-            for key, subspace in action_space.spaces.items()
-        }
+        return tuple(_output_size(_require_space(space)) for space in action_space)
     if isinstance(action_space, dict):
-        sizes_by_key: dict[str, int] = {}
+        sizes_by_key: dict[str, OutputSizeFromSpace] = {}
         for key, subspace in action_space.items():
             assert isinstance(key, str)
-            assert isinstance(subspace, spaces.Space)
-            sizes_by_key[key] = _output_size_leaf(subspace)
+            sizes_by_key[key] = _output_size(_require_space(subspace))
         return sizes_by_key
-    if isinstance(action_space, _LEAF_SPACE_TYPES):
-        return _output_size_leaf(action_space)
     msg = f"Can't access action dimensions for {type(action_space)} spaces."
     raise AttributeError(
         msg,
@@ -299,12 +274,12 @@ def _output_size_leaf(space: spaces.Space) -> int:
     raise AttributeError(msg)
 
 
-def _output_size_dict_or_leaf(space: spaces.Space) -> int | dict[str, int]:
-    """Output size for a Dict space or leaf action space."""
+def _output_size(space: spaces.Space) -> OutputSizeFromSpace:
+    """Output size for a leaf, or a (possibly nested) Dict / Tuple space."""
     if isinstance(space, spaces.Dict):
-        return {
-            key: _output_size_leaf(subspace) for key, subspace in space.spaces.items()
-        }
+        return {key: _output_size(sub) for key, sub in space.spaces.items()}
+    if isinstance(space, spaces.Tuple):
+        return tuple(_output_size(sub) for sub in space.spaces)
     return _output_size_leaf(space)
 
 

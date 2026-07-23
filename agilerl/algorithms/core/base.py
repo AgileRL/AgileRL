@@ -1866,7 +1866,10 @@ class MultiAgentRLAlgorithm(
         for agent, info in infos.items():
             if agent not in self.agent_ids:
                 continue
-            action_masks[agent] = coerce_action_mask(info.get("action_mask", None))
+            # Real envs occasionally hand back a non-mapping per-agent info
+            # (e.g. a bare string); treat it as carrying no mask.
+            mask = info.get("action_mask", None) if isinstance(info, Mapping) else None
+            action_masks[agent] = coerce_action_mask(mask)
         return action_masks
 
     def extract_agent_masks(

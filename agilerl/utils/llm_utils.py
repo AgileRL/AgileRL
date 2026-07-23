@@ -177,71 +177,28 @@ def normalize_reasoning_prompt_batch(
     if batch_size == 0:
         return []
 
-    def _slice_tensor(value: torch.Tensor, index: int) -> torch.Tensor:
-        if value.dim() > 0 and value.shape[0] == batch_size:
-            if value.dim() == 1:
-                return value.unbind(0)[index]
-            return value.split(1, dim=0)[index]
-        return value
-
-    result: list[ReasoningPrompts] = []
-    for index in range(batch_size):
-        sample: ReasoningPrompts = {
-            "input_ids": _slice_tensor(prompts["input_ids"], index),
-            "attention_mask": _slice_tensor(prompts["attention_mask"], index),
-        }
-        if "question" in prompts:
-            question = prompts["question"]
-            if isinstance(question, list) and len(question) == batch_size:
-                item = question[index]
-                if item is None or isinstance(item, str):
-                    sample["question"] = item
-            elif question is None or isinstance(question, str):
-                sample["question"] = question
-        if "answer" in prompts:
-            answer = prompts["answer"]
-            if isinstance(answer, list) and len(answer) == batch_size:
-                item = answer[index]
-                if item is None or isinstance(item, str):
-                    sample["answer"] = item
-            elif answer is None or isinstance(answer, str):
-                sample["answer"] = answer
-        if "trajectory_input_ids" in prompts:
-            traj_ids = prompts["trajectory_input_ids"]
-            if traj_ids is None:
-                sample["trajectory_input_ids"] = None
-            else:
-                sample["trajectory_input_ids"] = _slice_tensor(traj_ids, index)
-        if "trajectory_attention_mask" in prompts:
-            traj_mask = prompts["trajectory_attention_mask"]
-            if traj_mask is None:
-                sample["trajectory_attention_mask"] = None
-            else:
-                sample["trajectory_attention_mask"] = _slice_tensor(traj_mask, index)
-        if "initial_prompt_len" in prompts:
-            init_len = prompts["initial_prompt_len"]
-            if isinstance(init_len, list) and len(init_len) == batch_size:
-                item = init_len[index]
-                if item is None or isinstance(item, (int, torch.Tensor)):
-                    sample["initial_prompt_len"] = item
-            elif init_len is None or isinstance(init_len, (int, torch.Tensor)):
-                sample["initial_prompt_len"] = init_len
-        if "stitch_prefix_ids" in prompts:
-            stitch = prompts["stitch_prefix_ids"]
-            if stitch is None:
-                sample["stitch_prefix_ids"] = None
-            else:
-                sample["stitch_prefix_ids"] = _slice_tensor(stitch, index)
-        if "text" in prompts:
-            text = prompts["text"]
-            if text is None or isinstance(text, str):
-                sample["text"] = text
-        if "trajectory_text" in prompts:
-            traj_text = prompts["trajectory_text"]
-            if traj_text is None or isinstance(traj_text, str):
-                sample["trajectory_text"] = traj_text
-        result.append(sample)
-    return result
+    # Inspect each key once and write it into every output dict in one pass.
+    # Keys not declared on ``ReasoningPrompts`` (caller-supplied metadata) are
+    # copied through unchanged, which a key-by-key typed construction can't do.
+    samples: list[dict[str, object]] = [{} for _ in range(batch_size)]
+    for key, value in prompts.items():
+        if (
+            isinstance(value, torch.Tensor)
+            and value.dim() > 0
+            and value.shape[0] == batch_size
+        ):
+            chunks = value.unbind(0) if value.dim() == 1 else value.split(1, dim=0)
+            for sample, chunk in zip(samples, chunks, strict=True):
+                sample[key] = chunk
+        elif isinstance(value, list) and len(value) == batch_size:
+            for sample, item in zip(samples, value, strict=True):
+                sample[key] = item
+        else:
+            for sample in samples:
+                sample[key] = value
+    # Each sample is ReasoningPrompts-shaped but built dynamically (to preserve
+    # arbitrary metadata keys), which the closed TypedDict can't express.
+    return samples  # ty: ignore[invalid-return-type]
 
 
 def gather_tensor(

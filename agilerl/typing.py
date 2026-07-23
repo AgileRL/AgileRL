@@ -259,14 +259,14 @@ WrapperSpec = tuple[Any, dict[str, Any]] | str | Callable[..., Any]
 # Zero-arg factory that builds a single (non-vectorized) Gymnasium env.
 EnvFactory = Callable[[], gym.Env]
 
-# Network input size inferred from an observation space (leaf / Dict / Tuple).
+# Network input size inferred from an observation space (leaf / nested Dict / Tuple).
 InputSizeFromSpace = (
-    tuple[int, ...]
-    | dict[str, tuple[int, ...]]
-    | tuple[tuple[int, ...] | dict[str, tuple[int, ...]], ...]
+    tuple[int, ...] | dict[str, "InputSizeFromSpace"] | tuple["InputSizeFromSpace", ...]
 )
-# Network output size inferred from an action space (leaf / Dict / Tuple).
-OutputSizeFromSpace = int | dict[str, int] | tuple[int | dict[str, int], ...]
+# Network output size inferred from an action space (leaf / nested Dict / Tuple).
+OutputSizeFromSpace = (
+    int | dict[str, "OutputSizeFromSpace"] | tuple["OutputSizeFromSpace", ...]
+)
 # Observation shape for a Gymnasium space (leaf / Dict / Tuple).
 ObsShape = tuple[int, ...] | dict[str, tuple[int, ...]] | tuple[tuple[int, ...], ...]
 
