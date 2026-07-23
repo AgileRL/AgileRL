@@ -411,7 +411,7 @@ Alternatively, use a custom training loop. Combining all of the above:
             )
 
             # Tournament selection and population mutation
-            elite, pop = tournament.select(pop)
+            elite, pop, _ = tournament.select(pop)
             pop = mutations.mutation(pop)
 
         pbar.close()

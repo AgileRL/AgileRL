@@ -1084,7 +1084,7 @@ if __name__ == "__main__":
                 pbar.update(0)
 
                 # Tournament selection and population mutation
-                elite, pop = tournament.select(pop)
+                elite, pop, _ = tournament.select(pop)
                 pop = mutations.mutation(pop)
 
         # Save the trained agent

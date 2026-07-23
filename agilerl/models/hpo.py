@@ -219,19 +219,18 @@ def resolve_and_validate_multi_frequency_population(
     :param training: Training spec carrying the population size.
     :type training: ~agilerl.models.training.TrainingSpec
     :raises ValueError: If pop_size is not set, population_size < 6,
-        population_size is not a multiple of n_subpopulations, or the resolved
-        bracket sizes do not sum to population_size // n_subpopulations.
+        population_size is not a multiple of n_subpopulations,
+        population_size // n_subpopulations < 3, a resolved bracket size is below
+        its minimum, or the resolved bracket sizes do not sum to
+        population_size // n_subpopulations.
     """
     if multi_frequency_selection_spec is None:
         return
 
     spec = multi_frequency_selection_spec
     # pop_size is mandatory under MF-PBT
-    if not {"pop_size", "population_size"} & training.model_fields_set:
-        msg = (
-            "pop_size is required in the training block when "
-            "'multi_frequency_selection' is configured."
-        )
+    if "pop_size" not in training.model_fields_set:
+        msg = "pop_size is required in the training block."
         raise ValueError(msg)
 
     population_size = training.pop_size
@@ -251,15 +250,24 @@ def resolve_and_validate_multi_frequency_population(
         )
         raise ValueError(msg)
 
-    subpop = population_size // spec.n_subpopulations
+    subpop_size = population_size // spec.n_subpopulations
+    if subpop_size < 3:
+        msg = (
+            "population_size // n_subpopulations must be >= 3 so each subpopulation "
+            "can host at least one winner, one open-for-migration agent and one "
+            f"loser; got population_size={population_size}, "
+            f"n_subpopulations={spec.n_subpopulations} -> subpopulation_size={subpop_size}."
+        )
+        raise ValueError(msg)
+
     # Resolve the None bracket defaults
     if spec.n_winners is None:
-        spec.n_winners = round(0.25 * subpop)
+        spec.n_winners = round(0.25 * subpop_size)
     if spec.n_open_for_migration is None:
-        spec.n_open_for_migration = round(0.25 * subpop)
+        spec.n_open_for_migration = round(0.25 * subpop_size)
     if spec.n_losers is None:
         spec.n_losers = (
-            subpop - spec.n_winners - spec.n_survivors - spec.n_open_for_migration
+            subpop_size - spec.n_winners - spec.n_survivors - spec.n_open_for_migration
         )
     if spec.n_losers < 1:
         msg = f"n_losers must be >= 1, got {spec.n_losers}."
@@ -267,10 +275,10 @@ def resolve_and_validate_multi_frequency_population(
     bracket_sum = (
         spec.n_winners + spec.n_survivors + spec.n_open_for_migration + spec.n_losers
     )
-    if bracket_sum != subpop:
+    if bracket_sum != subpop_size:
         msg = (
             f"n_winners + n_survivors + n_open_for_migration + n_losers "
             f"({bracket_sum}) must equal population_size // n_subpopulations "
-            f"({subpop})."
+            f"({subpop_size})."
         )
         raise ValueError(msg)

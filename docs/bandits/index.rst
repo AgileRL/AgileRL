@@ -426,7 +426,7 @@ Alternatively, use a custom bandit training loop:
 
                 if pop[0].steps // evo_steps > evo_count:
                     # Tournament selection and population mutation
-                    elite, pop = tournament.select(pop)
+                    elite, pop, _ = tournament.select(pop)
                     pop = mutations.mutation(pop)
                     evo_count += 1
 

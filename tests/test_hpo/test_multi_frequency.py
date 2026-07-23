@@ -193,6 +193,29 @@ class TestMultiFrequencySelectionInit:
         with pytest.raises(ValueError, match="population_size must be >= 6"):
             MultiFrequencySelection(population_size=population_size, n_subpopulations=2)
 
+    @pytest.mark.parametrize(
+        ("population_size", "n_subpopulations"), [(6, 3), (8, 4), (10, 5), (12, 6)]
+    )
+    def test_init_rejects_subpopulation_size_below_three(
+        self, population_size, n_subpopulations
+    ):
+        with pytest.raises(ValueError, match="must be >= 3 so each subpopulation"):
+            MultiFrequencySelection(
+                population_size=population_size, n_subpopulations=n_subpopulations
+            )
+
+    @pytest.mark.parametrize(
+        ("population_size", "n_subpopulations"), [(6, 2), (9, 3), (12, 4)]
+    )
+    def test_init_accepts_smallest_valid_subpopulation(
+        self, population_size, n_subpopulations
+    ):
+        strategy = MultiFrequencySelection(
+            population_size=population_size, n_subpopulations=n_subpopulations
+        )
+        assert strategy.subpopulation_size == 3
+        assert strategy.bracket_sizes == (1, 0, 1, 1)
+
     def test_init_rejects_population_size_not_divisible_by_subpopulations(self):
         with pytest.raises(ValueError, match="must be divisible by n_subpopulations"):
             MultiFrequencySelection(population_size=9, n_subpopulations=2)
@@ -319,9 +342,18 @@ class TestScalarFitness:
 
 
 class TestSubpopulationAssignment:
-    def test_subpopulation_for_index_maps_contiguous_blocks(self):
-        fn = MultiFrequencySelection._subpopulation_for_index
+    def test_subpopulation_for_position_maps_contiguous_blocks(self):
+        fn = MultiFrequencySelection._subpopulation_for_position
         assert [fn(i, 4) for i in range(12)] == [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2]
+
+    def test_assign_initial_subpopulations_tags_by_position_not_index(self):
+        strategy = make_strategy(n_subpop=2, population_size=8)
+        indices = [10, 11, 12, 13, 20, 21, 22, 23]
+        pop = [FakeAgent(idx, None, fitness=0.0) for idx in indices]
+
+        strategy._assign_initial_subpopulations(pop)
+
+        assert [a.subpopulation for a in pop] == [0, 0, 0, 0, 1, 1, 1, 1]
 
     def test_assign_initial_subpopulations_tags_only_untagged_agents(self):
         strategy = make_strategy(n_subpop=2, population_size=8)
@@ -348,6 +380,18 @@ class TestSubpopulationAssignment:
         strategy._assign_initial_subpopulations(pop)
 
         assert [a.subpopulation for a in pop] == [0, 0, 0, 0, 1, 1, 1, 1]
+
+    @pytest.mark.parametrize(
+        "indices",
+        [[3] * 8, [0, 1, 2, 3, 4, 5, 6, 6]],
+        ids=["resumed-from-one-checkpoint", "single-duplicated-pair"],
+    )
+    def test_assign_initial_subpopulations_rejects_duplicate_indices(self, indices):
+        strategy = make_strategy(n_subpop=2, population_size=8)
+        pop = [FakeAgent(idx, i // 4, fitness=0.0) for i, idx in enumerate(indices)]
+
+        with pytest.raises(ValueError, match="globally-unique agent indices"):
+            strategy._assign_initial_subpopulations(pop)
 
 
 class TestBrackets:
@@ -557,6 +601,21 @@ class TestSelect:
         # The not-due subpopulation is left entirely untouched
         original_subpop1 = [a for a in pop if a.subpopulation == 1]
         assert all(a in new_pop for a in original_subpop1)
+
+    def test_select_rejects_duplicate_indices(self):
+        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
+        pop = [FakeAgent(3, i // 4, fitness=float(8 - i)) for i in range(8)]
+
+        with pytest.raises(ValueError, match="globally-unique agent indices"):
+            strategy.select(pop)
+
+    def test_select_keeps_indices_unique_across_cycles(self):
+        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
+        pop = make_population({0: [4.0, 3.0, 2.0, 1.0], 1: [8.0, 7.0, 6.0, 5.0]})
+
+        for _ in range(4):
+            _elite, pop, _indices = strategy.select(pop)
+            assert len({a.index for a in pop}) == len(pop)
 
 
 class TestMigration:

@@ -36,8 +36,9 @@ PopulationType = list[Any]
 class MultiFrequencySelection:
     """The multi-frequency selection operator needed in MF-PBT.
 
-    :param population_size: Total number of agents in the population (>= 6, and a
-        multiple of n_subpopulations).
+    :param population_size: Total number of agents in the population (>= 6, a
+        multiple of n_subpopulations, and large enough that
+        population_size // n_subpopulations >= 3).
     :type population_size: int
     :param n_subpopulations: Number of subpopulations (>= 2; migration has nothing
         to draw from with a single subpopulation).
@@ -62,7 +63,8 @@ class MultiFrequencySelection:
         leaves the RNG unseeded.
     :type seed: int | None
     :raises ValueError: If population_size < 6, population_size is not a multiple of
-        n_subpopulations, n_subpopulations < 2, n_winners < 1, n_survivors < 0,
+        n_subpopulations, population_size // n_subpopulations < 3,
+        n_subpopulations < 2, n_winners < 1, n_survivors < 0,
         n_open_for_migration < 1, n_losers < 1, the four brackets do not sum to
         population_size // n_subpopulations, or the frequency ratios are not
         n_subpopulations strictly-increasing integers >= 1.
@@ -124,7 +126,7 @@ class MultiFrequencySelection:
         """Resolve the defaults, then hard-check the operator's invariants.
 
         :param population_size: Total population size (>= 6, a multiple of
-            n_subpopulations).
+            n_subpopulations, with population_size // n_subpopulations >= 3).
         :type population_size: int
         :param n_subpopulations: Number of subpopulations (>= 2).
         :type n_subpopulations: int
@@ -164,15 +166,24 @@ class MultiFrequencySelection:
             )
             raise ValueError(msg)
 
-        subpop = population_size // n_subpopulations
+        subpop_size = population_size // n_subpopulations
+        if subpop_size < 3:
+            msg = (
+                "population_size // n_subpopulations must be >= 3 "
+                "so each subpopulation can host at least one "
+                "winner, one open-for-migration agent and one loser; got "
+                f"population_size={population_size}, "
+                f"n_subpopulations={n_subpopulations} -> subpopulation_size={subpop_size}."
+            )
+            raise ValueError(msg)
 
         # Resolve the None bracket defaults
         if n_winners is None:
-            n_winners = round(0.25 * subpop)
+            n_winners = round(0.25 * subpop_size)
         if n_open_for_migration is None:
-            n_open_for_migration = round(0.25 * subpop)
+            n_open_for_migration = round(0.25 * subpop_size)
         if n_losers is None:
-            n_losers = subpop - n_winners - n_survivors - n_open_for_migration
+            n_losers = subpop_size - n_winners - n_survivors - n_open_for_migration
 
         if n_winners < 1:
             msg = f"n_winners must be >= 1, got {n_winners}."
@@ -187,11 +198,11 @@ class MultiFrequencySelection:
             msg = f"n_losers must be >= 1, got {n_losers}."
             raise ValueError(msg)
         bracket_sum = n_winners + n_survivors + n_open_for_migration + n_losers
-        if bracket_sum != subpop:
+        if bracket_sum != subpop_size:
             msg = (
                 f"n_winners + n_survivors + n_open_for_migration + n_losers "
                 f"({bracket_sum}) must equal population_size // n_subpopulations "
-                f"({subpop})."
+                f"({subpop_size})."
             )
             raise ValueError(msg)
 
@@ -277,32 +288,32 @@ class MultiFrequencySelection:
         return self._max_index
 
     @staticmethod
-    def _subpopulation_for_index(index: int, subpopulation_size: int) -> int:
-        """Map an agent index to its subpopulation id.
+    def _subpopulation_for_position(position: int, subpopulation_size: int) -> int:
+        """Map an agent's population slot position to its subpopulation id.
 
         Both the build-time tagging in
         :func:`agilerl.utils.trainer_utils._assign_subpopulations` and the defensive
-        tagging in :meth:`_assign_initial_subpopulations` route through this method so
-        the layout can only ever change in one place.
+        tagging in :meth:`_assign_initial_subpopulations` route through this method.
 
-        :param index: The agent's population index.
-        :type index: int
+        :param position: The agent's position in the population list.
+        :type position: int
         :param subpopulation_size: Agents per subpopulation.
         :type subpopulation_size: int
         :return: The subpopulation id the agent belongs to.
         :rtype: int
         """
-        return index // subpopulation_size
+        return position // subpopulation_size
 
     def _assign_initial_subpopulations(self, population: PopulationType) -> None:
-        """Assign subpopulation to any agent that lacks it.
+        """Tag any agent lacking a subpopulation.
 
         Makes the operator robust when driven through the functional trainers with
         a population that was not tagged at build time.
 
         :param population: The whole population.
         :type population: list
-        :raises ValueError: If len(population) does not equal population_size.
+        :raises ValueError: If len(population) does not equal population_size, or the
+            agent indices are not globally unique.
         """
         if len(population) != self.population_size:
             msg = (
@@ -311,10 +322,18 @@ class MultiFrequencySelection:
                 f"{self.n_subpopulations} * {self.subpopulation_size})."
             )
             raise ValueError(msg)
-        for agent in population:
+
+        indices = [agent.index for agent in population]
+        if len(set(indices)) != len(indices):
+            msg = (
+                f"MF-PBT requires globally-unique agent indices; got {sorted(indices)}."
+            )
+            raise ValueError(msg)
+
+        for position, agent in enumerate(population):
             if getattr(agent, "subpopulation", None) is None:
-                agent.subpopulation = self._subpopulation_for_index(
-                    agent.index, self.subpopulation_size
+                agent.subpopulation = self._subpopulation_for_position(
+                    position, self.subpopulation_size
                 )
 
     def _brackets(
@@ -416,6 +435,10 @@ class MultiFrequencySelection:
         """
         accelerator = getattr(population[0], "accelerator", None)
 
+        # Only the main process plans the generation, so the operator's mutable
+        # state (self.counters, self.rng, self._max_index) advances on rank 0 alone
+        # and deliberately diverges on the workers. This is safe because the workers
+        # never read that state: they clone strictly from the broadcast plan
         plan: dict[str, Any] | None = None
         if accelerator is None or accelerator.is_main_process:
             plan = self._plan_llm_evolution(population)

@@ -276,7 +276,7 @@ function and is an example of how we might choose to make use of a population of
             )
 
             # Tournament selection and population mutation
-            elite, pop = tournament.select(pop)
+            elite, pop, _ = tournament.select(pop)
             pop = mutations.mutation(pop)
 
         # Save the trained algorithm

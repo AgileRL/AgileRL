@@ -373,11 +373,11 @@ function and is an example of how we might choose to make use of a population of
                 print(
                     f"\nAgent achieved required score {required_score}. Stopping training."
                 )
-                elite, _ = tournament.select(pop)
+                elite, _, _ = tournament.select(pop)
                 training_complete = True
                 break
 
-            elite, pop = tournament.select(pop)
+            elite, pop, _ = tournament.select(pop)
             pop = mutations.mutation(pop)
 
         pbar.close()

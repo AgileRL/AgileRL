@@ -260,7 +260,7 @@ def _assign_subpopulations(
         len(population) // multi_frequency_selection_spec.n_subpopulations
     )
     for slot, agent in enumerate(population):
-        agent.subpopulation = MultiFrequencySelection._subpopulation_for_index(
+        agent.subpopulation = MultiFrequencySelection._subpopulation_for_position(
             slot, subpopulation_size
         )
 

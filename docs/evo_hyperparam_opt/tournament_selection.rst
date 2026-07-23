@@ -8,7 +8,8 @@ is automatically preserved and becomes a member of the next generation. Then, fo
 fitness is preserved. This is repeated until the population for the next generation is full.
 
 The class :class:`TournamentSelection <agilerl.hpo.tournament.TournamentSelection>` defines the functions required for tournament selection.
-:func:`TournamentSelection.select() <agilerl.hpo.tournament.TournamentSelection.select>` returns the best agent, and the new generation of agents.
+:func:`TournamentSelection.select() <agilerl.hpo.tournament.TournamentSelection.select>` returns the best agent, the new generation of agents, and the
+indices of the agents to mutate.
 
 The new generation is then perturbed by the shared :ref:`mutation <mutations>` step to explore the hyperparameter space; under tournament selection every agent in the new generation is eligible for mutation.
 

@@ -143,6 +143,42 @@ def test_localtrainer_rejects_pop_size_below_six_without_manifest():
         )
 
 
+def test_resumed_population_keeps_slot_indices_and_evolves(tmp_path):
+    from agilerl.models import DQNSpec
+    from agilerl.utils.trainer_utils import create_population_from_spec
+
+    env = _DummyEnv()
+    checkpoint = tmp_path / "resume.pt"
+    DQN(
+        observation_space=env.observation_space,
+        action_space=env.action_space,
+        index=3,
+    ).save_checkpoint(str(checkpoint))
+
+    mf_spec = MultiFrequencySelectionSpec(n_subpopulations=2)
+    population = create_population_from_spec(
+        population_size=6,
+        algo_spec=DQNSpec(),
+        env=env,
+        mutation_spec=None,
+        replay_buffer_spec=None,
+        resume_from_checkpoint=str(checkpoint),
+        multi_frequency_selection_spec=mf_spec,
+    )
+
+    assert [agent.index for agent in population] == [0, 1, 2, 3, 4, 5]
+    assert [agent.subpopulation for agent in population] == [0, 0, 0, 1, 1, 1]
+
+    for i, agent in enumerate(population):
+        agent.fitness = [float(6 - i)]
+    strategy = MultiFrequencySelection(
+        population_size=6, n_subpopulations=2, evolution_frequency_ratios=[1, 2]
+    )
+    _elite, evolved, _indices = strategy.select(population)
+
+    assert len({agent.index for agent in evolved}) == len(evolved)
+
+
 def test_localtrainer_accepts_multi_frequency_with_accelerator():
     accelerator = MagicMock()
     fake_population = [MagicMock() for _ in range(8)]

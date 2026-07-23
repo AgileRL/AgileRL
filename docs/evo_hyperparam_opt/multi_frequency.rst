@@ -70,3 +70,8 @@ and dispatched from the trainers via
 which routes to either tournament selection followed by mutations or multi-frequency
 selection by the type of selection strategy. Both classic-RL and LLM finetuning
 populations are supported.
+
+.. tutorial::
+
+   :ref:`mf_pbt_tutorial`
+      Train a PPO population on LunarLander-v3 with MF-PBT, via a YAML manifest and the constructor.

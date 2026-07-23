@@ -401,7 +401,7 @@ Alternatively, use a custom on-policy training loop:
             )
 
             # Tournament selection and population mutation
-            elite, pop = tournament.select(pop)
+            elite, pop, _ = tournament.select(pop)
             pop = mutations.mutation(pop)
 
         pbar.close()
@@ -557,11 +557,11 @@ users must set ``recurrent=True`` when creating the algorithm.
                 print(
                     f"\nAgent achieved required score {required_score}. Stopping training."
                 )
-                elite, _ = tournament.select(pop)
+                elite, _, _ = tournament.select(pop)
                 break
 
             # Tournament selection and population mutation
-            elite, pop = tournament.select(pop)
+            elite, pop, _ = tournament.select(pop)
             pop = mutations.mutation(pop)
 
         pbar.close()

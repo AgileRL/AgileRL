@@ -153,6 +153,25 @@ class TestResolveAndValidateMultiFrequencyPopulation:
         with pytest.raises(ValueError, match="must be divisible by n_subpopulations"):
             resolve_and_validate_multi_frequency_population(spec, training)
 
+    @pytest.mark.parametrize(("pop_size", "n_subpopulations"), [(6, 3), (8, 4)])
+    def test_rejects_subpopulation_size_below_three(self, pop_size, n_subpopulations):
+        spec = MultiFrequencySelectionSpec(n_subpopulations=n_subpopulations)
+        training = TrainingSpec(pop_size=pop_size)
+
+        with pytest.raises(ValueError, match="must be >= 3 so each subpopulation"):
+            resolve_and_validate_multi_frequency_population(spec, training)
+
+    @pytest.mark.parametrize(
+        ("pop_size", "n_subpopulations"), [(6, 2), (9, 3), (12, 4)]
+    )
+    def test_accepts_smallest_valid_subpopulation(self, pop_size, n_subpopulations):
+        spec = MultiFrequencySelectionSpec(n_subpopulations=n_subpopulations)
+        training = TrainingSpec(pop_size=pop_size)
+
+        resolve_and_validate_multi_frequency_population(spec, training)
+
+        assert (spec.n_winners, spec.n_open_for_migration, spec.n_losers) == (1, 1, 1)
+
     def test_rejects_bracket_sizes_that_do_not_sum_to_subpopulation_size(self):
         spec = MultiFrequencySelectionSpec(
             n_subpopulations=2,
@@ -253,6 +272,20 @@ class TestManifestIntegration:
             },
         )
         with pytest.raises(ValidationError, match="must be divisible"):
+            TrainingManifest.model_validate(data)
+
+    @pytest.mark.parametrize(("pop_size", "n_subpopulations"), [(6, 3), (8, 4)])
+    def test_multi_frequency_rejects_subpopulation_size_below_three(
+        self, pop_size, n_subpopulations
+    ):
+        data = _manifest(
+            {"max_steps": 1000, "evo_steps": 100, "pop_size": pop_size},
+            tournament_selection={
+                "selection_strategy": "multi_frequency",
+                "n_subpopulations": n_subpopulations,
+            },
+        )
+        with pytest.raises(ValidationError, match="must be >= 3 so each subpopulation"):
             TrainingManifest.model_validate(data)
 
     def test_invalid_selection_strategy_rejected(self):
