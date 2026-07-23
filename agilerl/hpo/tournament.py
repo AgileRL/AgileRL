@@ -19,7 +19,7 @@ class TournamentSelection:
 
     :param tournament_size: Tournament selection size
     :type tournament_size: int
-    :param elitism: Elitism in tournament selection
+    :param elitism: Elitism in tournament selection. Must be ``True`` for LLM populations.
     :type elitism: bool
     :param population_size: Number of agents in population
     :type population_size: int
@@ -95,6 +95,13 @@ class TournamentSelection:
         if self.language_model is None:
             self.language_model = isinstance(population[0], LLMAlgorithm)
 
+        if self.language_model and not self.elitism:
+            msg = (
+                "TournamentSelection(elitism=False) is not supported for LLM "
+                "populations. Construct TournamentSelection with elitism=True."
+            )
+            raise ValueError(msg)
+
         return (
             self._select_llm_agents(population)
             if self.language_model
@@ -144,41 +151,34 @@ class TournamentSelection:
         :return: Elite agent and new population
         :rtype: tuple[AgentT, list[AgentT]]
         """
-        # Alias the population as a slot list so entries can be nulled in place:
-        # this drops both this function's *and the caller's* last references to
-        # agents that don't survive selection (LLM agents hold multi-GB models,
-        # so the memory must be released as we go). Aliasing rather than copying
-        # is deliberate; typed ``Any`` to admit the in-place ``None`` writes below.
         agent_slots: Any = population
 
         accelerator = population[0].accelerator
-        new_population_idxs: list[tuple[int, int, bool]] = []
+        new_population_idxs: list[tuple[int, int]] = []
         old_population_idxs = [ind.index for ind in population]
         unwanted_agents: set[int] = set()
-        elite: AgentT | None = None
 
         if accelerator is None or (
             accelerator is not None and accelerator.is_main_process
         ):
             best_agent, rank, max_id = self._elitism(population)
             elite_idx = best_agent.index
-            if self.elitism:  # keep top agent in population
-                new_population_idxs.append((elite_idx, elite_idx, True))
-                selection_size = self.population_size - 1
-            else:
-                elite = population[old_population_idxs.index(elite_idx)]
-                selection_size = self.population_size
+            # Elitism is required for LLM populations (enforced in select()), so
+            # the elite always heads the (broadcast) selection and is recovered
+            # as new_population[0] below.
+            new_population_idxs.append((elite_idx, elite_idx))
+            selection_size = self.population_size - 1
             # select parents of next gen using tournament selection
             for _ in range(selection_size):
                 max_id += 1
                 actor_parent_idx = old_population_idxs[self._tournament(rank)]
                 new_population_idxs.append(
-                    (actor_parent_idx, max_id, False),
-                )  # (old_idx_to_clone, new_labelled_idx, is_elite)
+                    (actor_parent_idx, max_id),
+                )  # (old_idx_to_clone, new_labelled_idx)
 
             # Isolate any agents that are not in the new population to be deleted
             unwanted_agents = set(old_population_idxs) - {
-                idx for idx, *_ in new_population_idxs
+                idx for idx, _ in new_population_idxs
             }
 
         if accelerator is not None:
@@ -207,7 +207,7 @@ class TournamentSelection:
 
         new_population: list[AgentT] = []
         index_tracker: dict[int, AgentT] = {}
-        for idx_to_clone, new_idx, is_elite in new_population_idxs:
+        for idx_to_clone, new_idx in new_population_idxs:
             slot = old_population_idxs.index(idx_to_clone)
             if (agent_ref := agent_slots[slot]) is not None:
                 if agent_ref.accelerator is not None:
@@ -225,16 +225,7 @@ class TournamentSelection:
                     index=new_idx,
                     wrap=False,
                 )
-            if is_elite:
-                elite = actor_parent
             new_population.append(actor_parent)
 
-        if elite is None:
-            msg = (
-                "Tournament selection produced no elite agent. This happens when "
-                "elitism is disabled on a non-main process, where the elite is "
-                "never resolved from the broadcast selection."
-            )
-            raise RuntimeError(msg)
-
+        elite = new_population[0]
         return elite, new_population
