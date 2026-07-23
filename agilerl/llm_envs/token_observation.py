@@ -9,7 +9,12 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from agilerl.protocols import MultiTurnEnv
-from agilerl.typing import ReasoningPrompts, TokenObsStepReturn, TokenObsType
+from agilerl.typing import (
+    ModelPromptFields,
+    ReasoningPrompts,
+    TokenObsStepReturn,
+    TokenObsType,
+)
 from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
 
 if TYPE_CHECKING:
@@ -352,11 +357,12 @@ class TokenObservationWrapper:
     def build_model_prompt_fields(
         self,
         max_prompt_tokens: int,
-    ) -> ReasoningPrompts:
+    ) -> ModelPromptFields:
         """Build truncated prompt tensors for model-window operation.
 
-        Returns a partial ``ReasoningPrompts`` with trajectory / stitch fields
-        only; callers merge into a full observation.
+        Returns the trajectory / stitch fields only (no ``input_ids``); callers
+        merge these into a full observation whose ``input_ids`` stays the full
+        trajectory.
         """
         if self.full_ids is None:
             msg = "No prompt: reset() was never called"
@@ -415,11 +421,7 @@ class TokenObservationWrapper:
             skip_special_tokens=True,
         )
         assert isinstance(trajectory_text, str)
-        # Required TypedDict keys are filled with the truncated trajectory;
-        # callers that merge these fields overwrite their own input_ids.
-        result: ReasoningPrompts = {
-            "input_ids": trunc,
-            "attention_mask": torch.ones_like(trunc),
+        result: ModelPromptFields = {
             "trajectory_input_ids": trunc,
             "trajectory_attention_mask": torch.ones_like(trunc),
             "trajectory_text": trajectory_text,

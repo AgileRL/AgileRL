@@ -73,6 +73,22 @@ class ReasoningPrompts(TypedDict):
     trajectory_text: NotRequired[str | None]
 
 
+class ModelPromptFields(TypedDict, total=False):
+    """Windowed trajectory / stitch fields merged into a policy observation.
+
+    A partial ``ReasoningPrompts`` fragment produced by sliding-window
+    truncation. It deliberately omits ``input_ids`` so the merge keeps the
+    observation's full-trajectory input; the truncated view lives in
+    ``trajectory_input_ids``.
+    """
+
+    trajectory_input_ids: torch.Tensor
+    trajectory_attention_mask: torch.Tensor
+    trajectory_text: str
+    stitch_prefix_ids: torch.Tensor
+    initial_prompt_len: int
+
+
 class PreferencePrompts(TypedDict):
     prompt: list[str]
     prompt_lengths: list[int]
