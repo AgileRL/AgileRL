@@ -1,4 +1,5 @@
 from collections import deque
+from typing import TYPE_CHECKING
 
 import numpy as np
 import numpy.typing as npt
@@ -6,6 +7,22 @@ import torch
 from tensordict import TensorDict
 
 from agilerl.components.segment_tree import MinSegmentTree, SumSegmentTree
+
+if TYPE_CHECKING:
+
+    def _read_tensor(transition: TensorDict, key: str) -> torch.Tensor:
+        """Read a tensor-valued transition field.
+
+        Typed to return ``torch.Tensor`` so callers don't have to narrow the
+        widened ``TensorDict.__getitem__`` return; these buffer keys always
+        hold tensors. Same ``TYPE_CHECKING`` pattern used to type row-indexing
+        on the TensorClass batches.
+        """
+
+else:
+
+    def _read_tensor(transition: TensorDict, key: str) -> torch.Tensor:
+        return transition[key]
 
 
 class ReplayBuffer:
@@ -299,22 +316,17 @@ class MultiStepReplayBuffer(ReplayBuffer):
         done_key = self.done_key
         assert done_key is not None, "Done key is resolved on the first transition."
 
-        first_reward = first_transition[self.reward_key]
-        assert isinstance(first_reward, torch.Tensor)
-        n_step_reward = first_reward.clone()
+        n_step_reward = _read_tensor(first_transition, self.reward_key).clone()
 
         # Get the last next_state and done flag
         for i, transition in enumerate(list(self.n_step_buffer)[1:]):
             # Add discounted reward
-            reward = transition[self.reward_key]
-            assert isinstance(reward, torch.Tensor)
+            reward = _read_tensor(transition, self.reward_key)
             n_step_reward += reward * (self.gamma ** (i + 1))
 
             # Update next_state and done flag
-            done = transition[done_key]
-            next_obs = transition[self.ns_key]
-            assert isinstance(done, torch.Tensor)
-            assert isinstance(next_obs, torch.Tensor)
+            done = _read_tensor(transition, done_key)
+            next_obs = _read_tensor(transition, self.ns_key)
             first_transition[self.ns_key] = next_obs.clone()
             first_transition[done_key] = done.clone()
 
