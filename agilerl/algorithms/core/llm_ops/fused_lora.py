@@ -75,9 +75,11 @@ def _routed_forward(
     """
     routing = _ROUTING_STATE.get(layer)
     if routing is None:
-        # ``forward`` comes from the concrete nn.Module subclass, not PEFT's
-        # LoraLayer mixin, so ty can't resolve it on ``type(layer)``.
-        return type(layer).forward(layer, x, *forward_args, **forward_kwargs)  # ty: ignore[unresolved-attribute]
+        # Routing unset: fall back to the layer's original (class-level)
+        # forward. Every concrete LoRA layer is an nn.Module, so forward is
+        # defined; the isinstance check lets ty resolve it on ``type(layer)``.
+        assert isinstance(layer, nn.Module)
+        return type(layer).forward(layer, x, *forward_args, **forward_kwargs)
 
     # Layers that flatten (batch, seq, hidden) -> (batch * seq, hidden) before
     # their linears (OPT's MLP, MoE experts) show seq rows per routed sample.
