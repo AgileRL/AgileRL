@@ -12,6 +12,7 @@ from typing import (
     Any,
     NoReturn,
     Protocol,
+    TypeGuard,
     TypeVar,
     overload,
     runtime_checkable,
@@ -133,6 +134,19 @@ SpaceLike = (
 )
 
 
+def is_str_keyed_dict(obj: object) -> TypeGuard[dict[str, object]]:
+    """Narrow a value to a ``str``-keyed dict.
+
+    The framework's dict observations and spaces are always keyed by string. A
+    bare ``isinstance(obj, dict)`` doesn't express that to the type checker: it
+    intersects each union member with ``dict``, and because ``numpy.ndarray``
+    and ``torch.Tensor`` aren't final it keeps ``ndarray & dict`` / ``Tensor &
+    dict`` parts whose keys widen to ``object``. This guard asserts the
+    invariant so iterating ``.items()`` yields ``str`` keys.
+    """
+    return isinstance(obj, dict)
+
+
 @overload
 def get_input_size_from_space(observation_space: LeafSpace) -> tuple[int, ...]: ...
 
@@ -172,7 +186,6 @@ def get_input_size_from_space(observation_space: SpaceLike) -> InputSizeFromSpac
     if isinstance(observation_space, dict):
         sizes_by_key: dict[str, InputSizeFromSpace] = {}
         for key, subspace in observation_space.items():
-            assert isinstance(key, str)
             sizes_by_key[key] = _input_size(_require_space(subspace))
         return sizes_by_key
     msg = f"Can't access state dimensions for {type(observation_space)} spaces."
@@ -251,7 +264,6 @@ def get_output_size_from_space(action_space: SpaceLike) -> OutputSizeFromSpace:
     if isinstance(action_space, dict):
         sizes_by_key: dict[str, OutputSizeFromSpace] = {}
         for key, subspace in action_space.items():
-            assert isinstance(key, str)
             sizes_by_key[key] = _output_size(_require_space(subspace))
         return sizes_by_key
     msg = f"Can't access action dimensions for {type(action_space)} spaces."
@@ -573,12 +585,11 @@ def transpose_image_observation(
             return arr.transpose(0, 3, 1, 2)
 
     if isinstance(original_space, spaces.Dict):
-        assert isinstance(observation, dict), (
+        assert is_str_keyed_dict(observation), (
             f"Expected dict observation for Dict space, got {type(observation)}"
         )
         transposed: dict[str, Any] = {}
         for key, value in observation.items():
-            assert isinstance(key, str)
             assert isinstance(value, (np.ndarray, torch.Tensor))
             transposed[key] = transpose_image_observation(value, original_space[key])
         return transposed
@@ -1175,10 +1186,9 @@ def obs_to_tensor(
         return obs.float().to(device)
     if isinstance(obs, np.ndarray):
         return torch.as_tensor(obs, device=device).float()
-    if isinstance(obs, dict):
+    if is_str_keyed_dict(obs):
         converted: dict[str, torch.Tensor] = {}
         for key, _obs in obs.items():
-            assert isinstance(key, str)
             converted[key] = torch.as_tensor(_obs, device=device).float()
         return converted
     if isinstance(obs, tuple):
@@ -1777,9 +1787,8 @@ def stack_experiences(
         if isinstance(first, dict):
             grouped: defaultdict[str, list[Any]] = defaultdict(list)
             for it in exp:
-                assert isinstance(it, dict)
+                assert is_str_keyed_dict(it)
                 for key, value in it.items():
-                    assert isinstance(key, str)
                     grouped[key].append(value)
 
             stacked_exp = {key: np.array(value) for key, value in grouped.items()}
@@ -1920,10 +1929,9 @@ def flatten_experiences(*experiences: ObservationType) -> tuple[ArrayOrTensor, .
         flattened_exp: Any
         if isinstance(exp, (torch.Tensor, np.ndarray)):
             flattened_exp = flatten(exp)
-        elif isinstance(exp, dict):
+        elif is_str_keyed_dict(exp):
             flattened_dict: dict[str, np.ndarray | torch.Tensor] = {}
             for key, value in exp.items():
-                assert isinstance(key, str)
                 assert isinstance(value, (np.ndarray, torch.Tensor))
                 flattened_dict[key] = flatten(value)
             flattened_exp = flattened_dict

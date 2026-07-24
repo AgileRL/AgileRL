@@ -18,6 +18,7 @@ from agilerl.utils.algo_utils import (
     extract_sequences_from_episode,
     get_num_actions,
     get_obs_shape,
+    is_str_keyed_dict,
     maybe_add_batch_dim,
 )
 
@@ -336,13 +337,11 @@ class RolloutBuffer:
         # Convert inputs to tensors and ensure correct device (CPU for buffer storage)
         # Also ensure they have the (num_envs, ...) shape
         if isinstance(self.observation_space, spaces.Dict):
-            assert isinstance(obs, dict), (
+            assert is_str_keyed_dict(obs), (
                 "Expected a dict observation for a Dict observation space."
             )
             obs_dict = OrderedDict()
             for key, item in obs.items():
-                # Dict observation keys are strings that index the sub-spaces.
-                assert isinstance(key, str)
                 sub_space = self.observation_space.spaces[key]
                 obs_tensor = torch.as_tensor(item, device="cpu")
                 obs_dict[key] = self._maybe_reshape_obs(obs_tensor, sub_space)
@@ -378,13 +377,11 @@ class RolloutBuffer:
         # Next Observations
         if next_obs is not None:
             if isinstance(self.observation_space, spaces.Dict):
-                assert isinstance(next_obs, dict), (
+                assert is_str_keyed_dict(next_obs), (
                     "Expected a dict observation for a Dict observation space."
                 )
                 next_obs_dict = OrderedDict()
                 for key, item in next_obs.items():
-                    # As above: dict keys are strings indexing the sub-spaces.
-                    assert isinstance(key, str)
                     sub_space = self.observation_space.spaces[key]
                     next_obs_tensor = torch.as_tensor(item, device="cpu")
                     next_obs_dict[key] = self._maybe_reshape_obs(
