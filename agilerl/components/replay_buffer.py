@@ -93,9 +93,8 @@ class ReplayBuffer:
         """
         _data = data[0]
         assert isinstance(_data, TensorDict)
-        storage = _data.expand((self.max_size, *_data.shape)).clone()
-        storage.zero_()
-        self._storage = storage
+        self._storage = _data.expand((self.max_size, *_data.shape)).clone()
+        self._storage.zero_()
         self.initialized = True
         return self._storage
 

@@ -119,7 +119,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
     :param min_output_tokens: Minimum new tokens per generation.
     :type min_output_tokens: int | None
     :param max_model_len: Maximum context window length.
-    :type max_model_len: int | None
+    :type max_model_len: int
     :param hf_generate_chunk_size: Number of prompts per HuggingFace generation
         chunk. Ignored when ``use_vllm=True``.
     :type hf_generate_chunk_size: int | None, optional
@@ -256,7 +256,7 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         micro_batch_size_per_gpu: int | None = None,
         max_output_tokens: int | None = None,
         min_output_tokens: int | None = None,
-        max_model_len: int | None = 1024,
+        max_model_len: int = 1024,
         hf_generate_chunk_size: int | None = None,
         lora_config: LoraConfig | None = None,
         cosine_lr_schedule_config: CosineLRScheduleConfig | None = None,
@@ -873,23 +873,15 @@ class REINFORCE(LLMAlgorithm[LLMRolloutExperiences]):
         self,
         max_output_tokens: int | None,
         min_output_tokens: int | None,
-        max_model_len: int | None,
+        max_model_len: int,
         hf_generate_chunk_size: int | None,
     ) -> None:
         """Validate context lengths and build the HF generation config."""
-        if max_output_tokens is None and max_model_len is None:
-            msg = "Either max_output_tokens or max_model_len must be specified"
-            raise ValueError(msg)
         self.max_output_tokens = (
             max_output_tokens if max_output_tokens is not None else max_model_len
         )
         self.min_output_tokens = min_output_tokens
-        resolved_max_model_len = (
-            max_model_len if max_model_len is not None else max_output_tokens
-        )
-        # One of the two is non-None (guarded above).
-        assert resolved_max_model_len is not None
-        self.max_model_len = resolved_max_model_len
+        self.max_model_len = max_model_len
         validate_llm_context_lengths(self.max_model_len, max_output_tokens)
         self.hf_generate_chunk_size = int(
             1 if hf_generate_chunk_size is None else max(1, hf_generate_chunk_size)

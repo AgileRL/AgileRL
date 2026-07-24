@@ -511,6 +511,20 @@ class TestAgentWrapperProtocol:
                 torch.zeros(4, dtype=torch.bool),
             ),
         )
+        _ = AgentWrapperProtocol.evolvable_attributes(wrapper)
+
+
+class TestTokenizedMultiTurnEnvProtocol:
+    def test_protocol_methods_executed(self):
+        from unittest.mock import MagicMock
+
+        from agilerl.protocols import TokenizedMultiTurnEnv
+
+        env = MagicMock()
+        _ = TokenizedMultiTurnEnv.reset(env)
+        _ = TokenizedMultiTurnEnv.step(env, torch.zeros(1, dtype=torch.long))
+        TokenizedMultiTurnEnv.close(env)
+        _ = TokenizedMultiTurnEnv.get_episode_data(env)
 
 
 class TestLoraConfigProtocol:

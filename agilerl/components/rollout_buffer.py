@@ -157,8 +157,8 @@ class RolloutBuffer:
         if isinstance(space, spaces.Discrete) and obs.ndim < 2:
             obs = obs.unsqueeze(-1)
 
-        # maybe_add_batch_dim preserves the input type; its annotation
-        # (agilerl/utils/algo_utils.py) is not generic over it.
+        # maybe_add_batch_dim preserves the input type at runtime, but its
+        # annotation isn't generic over it, so the return is widened.
         return maybe_add_batch_dim(obs, space)
 
     def _initialize_buffers(self) -> None:
