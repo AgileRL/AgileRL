@@ -20,6 +20,17 @@ from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
 if TYPE_CHECKING:
     from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
+    # decode is overloaded (ids -> str, batched-ids -> list[str]); this wrapper
+    # decodes a single sequence, so it's typed to return str.
+    def _decode_str(
+        tokenizer: PreTrainedTokenizerBase, ids: list[int], **kwargs: object
+    ) -> str: ...
+
+else:
+
+    def _decode_str(tokenizer: object, ids: list[int], **kwargs: object) -> str:
+        return tokenizer.decode(ids, **kwargs)
+
 
 class TokenObservationWrapper:
     """Token-level observation wrapper for multi-turn environments."""
@@ -221,13 +232,11 @@ class TokenObservationWrapper:
             raise RuntimeError(msg)
         self._last_full_prompt_token_len = int(self.full_ids.shape[1])
         prompt_ids_1d = self.full_ids[0]
-        text = self.tokenizer.decode(
+        text = _decode_str(
+            self.tokenizer,
             prompt_ids_1d.tolist(),
             skip_special_tokens=True,
         )
-        # decode is overloaded (ids -> str, batched-ids -> list[str]); the 1-D
-        # ids give a str, which ReasoningPrompts["text"] requires.
-        assert isinstance(text, str)
         obs: ReasoningPrompts = {
             "input_ids": self.full_ids,
             "attention_mask": torch.ones_like(self.full_ids),
@@ -346,8 +355,9 @@ class TokenObservationWrapper:
         gen_tokens = full_completion_ids[0, pl:]
         # Decoding a single sequence returns ``str``; the stub widens
         # ``decode`` to ``str | list[str]``.
-        gen_text = self.tokenizer.decode(gen_tokens.tolist(), skip_special_tokens=True)
-        assert isinstance(gen_text, str)
+        gen_text = _decode_str(
+            self.tokenizer, gen_tokens.tolist(), skip_special_tokens=True
+        )
         return self._step(full_completion_ids, gen_text)
 
     def build_model_prompt_fields(
@@ -412,13 +422,11 @@ class TokenObservationWrapper:
         stitch = full[:, initial_len:drop_from_final]
 
         prompt_ids_1d = trunc[0]
-        trajectory_text = self.tokenizer.decode(
+        trajectory_text = _decode_str(
+            self.tokenizer,
             prompt_ids_1d.tolist(),
             skip_special_tokens=True,
         )
-        # decode is overloaded (ids -> str, batched-ids -> list[str]); the 1-D
-        # ids give a str, which ModelPromptFields["trajectory_text"] requires.
-        assert isinstance(trajectory_text, str)
         result: ModelPromptFields = {
             "trajectory_input_ids": trunc,
             "trajectory_attention_mask": torch.ones_like(trunc),
