@@ -2255,6 +2255,35 @@ def vectorize_experiences_by_agent(
     return stacked_tensor
 
 
+def vectorize_agent_experiences_flat(
+    experiences: dict[str, Any],
+    dim: int = 1,
+) -> torch.Tensor:
+    """Vectorize flat per-agent experiences (log-probs, rewards, dones, values).
+
+    A typed wrapper over :func:`vectorize_experiences_by_agent` for callers that
+    pass per-agent scalars — never structured (dict/tuple) observations — so the
+    result is always a single tensor and callers need no ``isinstance`` narrowing.
+
+    :param experiences: Per-agent experiences indexed by agent id.
+    :type experiences: dict[str, Any]
+    :param dim: Dimension to stack along.
+    :type dim: int
+    :return: The stacked experiences as a single tensor.
+    :rtype: torch.Tensor
+    :raises TypeError: If the experiences vectorize to a structured container
+        rather than a flat tensor.
+    """
+    vectorized = vectorize_experiences_by_agent(experiences, dim=dim)
+    if not isinstance(vectorized, torch.Tensor):
+        msg = (
+            "vectorize_agent_experiences_flat expects flat per-agent scalars, "
+            "but the experiences vectorized to a structured observation container."
+        )
+        raise TypeError(msg)
+    return vectorized
+
+
 def experience_to_tensors(
     experience: Any,  # noqa: ANN401 -- nested heterogeneous experience (dict/tuple/array-like) forwarded to np.array
     space: spaces.Space,

@@ -18,10 +18,11 @@ from typing import Any
 
 import click
 
-from agilerl.arena.client import JSONValue, ManifestInvoke, ManifestParamSpec
+from agilerl.arena.client import ManifestInvoke, ManifestParamSpec
 from agilerl.arena.config import CommandConfig, arena_client
 from agilerl.arena.exceptions import ArenaValidationError
 from agilerl.arena.output import emit_result
+from agilerl.arena.typing import JSONValue
 
 logger = logging.getLogger(__name__)
 

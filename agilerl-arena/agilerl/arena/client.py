@@ -34,6 +34,7 @@ from agilerl.arena.inference.cache import (
 from agilerl.arena.models import TrainingManifest
 from agilerl.arena.output import StreamRichRenderer
 from agilerl.arena.stream import NDJsonStream, StreamEvent
+from agilerl.arena.typing import JSONValue
 from agilerl.arena.utils import (
     discover_env_sidecars,
     extract_filename,
@@ -46,11 +47,6 @@ from agilerl.arena.utils import (
 logger = logging.getLogger(__name__)
 
 DATASET_CATEGORIES = frozenset({"sft", "preference", "reasoning"})
-
-# A decoded JSON value: any JSON primitive, array, or object (recursive).
-# Defined locally because agilerl-arena is a standalone distribution and does
-# not depend on the agilerl core package (where the same alias also lives).
-JSONValue = None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
 
 
 # Functional syntax because ``in`` (a parameter's location) is a Python keyword

@@ -188,7 +188,7 @@ logger = logging.getLogger(__name__)
 SelfAgentWrapper = TypeVar("SelfAgentWrapper", bound=AgentWrapperProtocol)
 
 
-class _ClassicRLPopulationFactory(Protocol):
+class ClassicRLPopulationFactory(Protocol):
     index: int
 
     def __init__(
@@ -203,11 +203,11 @@ class _ClassicRLPopulationFactory(Protocol):
     def load_checkpoint(self, path: str) -> None: ...
 
 
-_ClassicRLAlgoT = TypeVar("_ClassicRLAlgoT", bound=_ClassicRLPopulationFactory)
+ClassicRLAlgoT = TypeVar("ClassicRLAlgoT", bound=ClassicRLPopulationFactory)
 
 
-def _build_classic_rl_population(
-    cls: type[_ClassicRLAlgoT],
+def build_classic_rl_population(
+    cls: type[ClassicRLAlgoT],
     size: int,
     observation_space: GymSpaceType,
     action_space: GymSpaceType,
@@ -216,12 +216,12 @@ def _build_classic_rl_population(
     wrapper_kwargs: dict[str, Any] | None = None,
     resume_from_checkpoint: str | None = None,
     **kwargs: Any,
-) -> list[_ClassicRLAlgoT | SelfAgentWrapper]:
+) -> list[ClassicRLAlgoT | SelfAgentWrapper]:
     """Build a population of classic RL algorithms (as opposed to LLM algorithms)."""
     if wrapper_kwargs is None:
         wrapper_kwargs = {}
 
-    population: list[_ClassicRLAlgoT | SelfAgentWrapper] = []
+    population: list[ClassicRLAlgoT | SelfAgentWrapper] = []
     for i in range(size):
         agent = cls(observation_space, action_space, index=i, device=device, **kwargs)
         if resume_from_checkpoint is not None:
@@ -1484,7 +1484,7 @@ class RLAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT]):
         :return: A list of algorithms.
         :rtype: list[RLAlgorithm]
         """
-        return _build_classic_rl_population(
+        return build_classic_rl_population(
             cls,
             size,
             observation_space,
@@ -1619,7 +1619,7 @@ class MultiAgentRLAlgorithm(
         :return: A list of algorithms.
         :rtype: list[MultiAgentRLAlgorithm]
         """
-        return _build_classic_rl_population(
+        return build_classic_rl_population(
             cls,
             size,
             observation_space,

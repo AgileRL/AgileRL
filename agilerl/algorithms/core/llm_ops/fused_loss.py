@@ -45,7 +45,7 @@ from liger_kernel.chunked_loss.fused_linear_preference import (
 from agilerl.utils.llm_utils import calculate_k3_kl
 
 
-class _SaveForBackwardCtx(Protocol):
+class SaveForBackwardCtx(Protocol):
     """The one autograd-``ctx`` capability these forwards use.
 
     ``torch`` types ``FunctionCtx.save_for_backward`` to reject ``None``, but
@@ -303,7 +303,7 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
     @classmethod
     def forward(  # ty: ignore[invalid-method-override]  # intentionally diverges from Liger's base
         cls,
-        ctx: _SaveForBackwardCtx,
+        ctx: SaveForBackwardCtx,
         _input: torch.Tensor,
         weight: torch.Tensor,
         selected_token_ids: torch.Tensor,

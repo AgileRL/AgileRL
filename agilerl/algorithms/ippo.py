@@ -43,6 +43,7 @@ from agilerl.utils.algo_utils import (
     get_vect_dim,
     key_in_nested_dict,
     make_safe_deepcopies,
+    vectorize_agent_experiences_flat,
     vectorize_experiences_by_agent,
 )
 from agilerl.utils.algo_utils import (
@@ -734,26 +735,19 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
             experiences
         )
 
-        # Scalar per-agent fields vectorise to flat tensors; the dict/tuple
-        # arms of vectorize_experiences_by_agent only arise for structured
-        # observations.
-        # These experiences are per-agent scalars, so vectorizing always yields a
-        # flat tensor (``vectorize_experiences_by_agent`` widens to obs containers).
-        log_probs = vectorize_experiences_by_agent(log_probs)
-        rewards = vectorize_experiences_by_agent(rewards)
-        dones = vectorize_experiences_by_agent(dones)
-        values = vectorize_experiences_by_agent(values)
-        assert isinstance(log_probs, torch.Tensor)
-        assert isinstance(rewards, torch.Tensor)
-        assert isinstance(dones, torch.Tensor)
-        assert isinstance(values, torch.Tensor)
+        # These fields are per-agent scalars, so they always vectorize to a flat
+        # tensor (the dict/tuple arms only arise for structured observations,
+        # which next_obs below may still be).
+        log_probs = vectorize_agent_experiences_flat(log_probs)
+        rewards = vectorize_agent_experiences_flat(rewards)
+        dones = vectorize_agent_experiences_flat(dones)
+        values = vectorize_agent_experiences_flat(values)
         log_probs = log_probs.squeeze()
         rewards = rewards.squeeze()
         dones = dones.squeeze()
         values = values.squeeze()
         vect_next_obs = vectorize_experiences_by_agent(next_obs, dim=0)
-        next_done = vectorize_experiences_by_agent(next_done, dim=0)
-        assert isinstance(next_done, torch.Tensor)
+        next_done = vectorize_agent_experiences_flat(next_done, dim=0)
 
         with torch.no_grad():
             num_steps = rewards.size(0)

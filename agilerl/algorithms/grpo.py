@@ -62,7 +62,7 @@ if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
     from transformers import GenerationConfig
 
 
-class _StandardLossFn(Protocol):
+class StandardLossFn(Protocol):
     """Shared signature of the standard (non-Liger) minibatch loss functions."""
 
     def __call__(
@@ -1240,7 +1240,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
 
     def _resolve_standard_loss_fn(
         self,
-    ) -> _StandardLossFn:
+    ) -> StandardLossFn:
         """Resolve the active standard (non-Liger) loss function.
 
         Dispatch is on ``loss_type`` (``grpo``/``gspo`` min-clip vs ``cispo``

@@ -4,9 +4,12 @@ The ``fused_lora`` helpers wrap PEFT LoRA layers, so they are gated on
 :data:`agilerl.HAS_LLM_DEPENDENCIES`; ``fused_loss``
 (``LigerFusedLinearPolicyLossFunction``, ``LigerDPOWithAlpha``,
 ``llm_policy_loss_fn``) requires ``liger-kernel`` at import
-time, so it is gated on :data:`agilerl.HAS_LIGER_KERNEL`. When a dependency
-is missing the corresponding public symbols resolve to ``None`` so callers'
-``is None`` guard fires.
+time, so it is gated on :data:`agilerl.HAS_LIGER_KERNEL`. When a dependency is
+missing the corresponding names are bound to ``None`` purely so this package
+still imports and ``__all__`` resolves; call sites gate on
+:data:`agilerl.HAS_LLM_DEPENDENCIES` / :data:`agilerl.HAS_LIGER_KERNEL` (or
+import the concrete symbol straight from its submodule) rather than checking
+these facade names for ``None``.
 """
 
 from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES

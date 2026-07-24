@@ -183,7 +183,7 @@ def parse_ndjson_line(line: str) -> StreamEvent:
     return LogEvent(text=json.dumps(payload, default=str))
 
 
-class _SupportsClose(Protocol):
+class SupportsClose(Protocol):
     def close(self) -> None: ...
 
 
@@ -217,7 +217,7 @@ class NDJsonStream:
         response: httpx.Response,
         *,
         handler: Callable[[StreamEvent], None] | None = None,
-        renderer: _SupportsClose | None = None,
+        renderer: SupportsClose | None = None,
         error_cls: type[ArenaAPIError] | None = None,
     ) -> None:
         self._response: httpx.Response = response
