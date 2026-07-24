@@ -75,9 +75,8 @@ def _routed_forward(
     """
     routing = _ROUTING_STATE.get(layer)
     if routing is None:
-        # PEFT's ``LoraLayer`` mixin doesn't declare ``forward`` — it comes from
-        # the concrete ``nn.Module``-based subclass at runtime — so ty can't
-        # resolve the attribute on ``type(layer)`` and the ignore is required.
+        # ``forward`` comes from the concrete nn.Module subclass, not PEFT's
+        # LoraLayer mixin, so ty can't resolve it on ``type(layer)``.
         return type(layer).forward(layer, x, *forward_args, **forward_kwargs)  # ty: ignore[unresolved-attribute]
 
     # Layers that flatten (batch, seq, hidden) -> (batch * seq, hidden) before
