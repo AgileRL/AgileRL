@@ -40,6 +40,7 @@ from torch.nn import Module
 from torch.optim import Optimizer
 from typing_extensions import Never, NotRequired, Self
 
+from agilerl.net_configs import NetConfigType as NetConfigType
 from agilerl.protocols import (
     EvolvableAlgorithmProtocol,
     EvolvableModuleProtocol,
@@ -172,10 +173,6 @@ TensorMapping = dict[str, torch.Tensor]
 TensorTuple = tuple[torch.Tensor, ...]
 ArrayDict = dict[str, npt.NDArray]
 ArrayTuple = tuple[npt.NDArray, ...]
-# Imported mid-file so ``modules.configs`` can load without a typing↔configs cycle
-# (``modules.__init__`` is lazy). Canonical definition lives in ``modules.configs``.
-from agilerl.modules.configs import NetConfigType as NetConfigType  # noqa: E402
-
 KernelSizeType = int | tuple[int, ...]
 GymSpaceType = SupportedObservationSpace | list[SupportedObservationSpace]
 LLMObsType = list[ReasoningPrompts] | ReasoningPrompts

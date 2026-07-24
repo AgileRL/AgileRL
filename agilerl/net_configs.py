@@ -1,0 +1,228 @@
+from collections.abc import ItemsView, Iterator, Mapping
+from copy import deepcopy
+from dataclasses import dataclass, field
+from typing import Any, Literal
+
+import torch
+import yaml
+
+
+@dataclass
+class NetConfig:
+    """Dataclass for storing evolvable network configurations."""
+
+    @classmethod
+    def from_dict(cls, config: Mapping[str, Any]) -> "NetConfig":
+        return cls(**config)
+
+    @classmethod
+    def from_yaml(cls, path: str) -> "NetConfig":
+        with open(path) as file:
+            config: dict[str, Any] = yaml.safe_load(file)
+            assert "NET_CONFIG" in config, "NET_CONFIG not found in yaml file."
+            net_config = config["NET_CONFIG"]
+
+        return cls.from_dict(net_config)
+
+    # Access by an arbitrary string key can hit any field of any subclass, and
+    # ``len()``-style consumers narrow via ``isinstance`` on the config, not the
+    # value; ``Any`` is the only type that keeps those call sites checkable.
+    def __getitem__(self, key: str) -> Any:  # noqa: ANN401 -- see comment above
+        return getattr(self, key)
+
+    def __setitem__(self, key: str, value: object) -> None:
+        setattr(self, key, value)
+
+    def __contains__(self, key: str) -> bool:
+        return hasattr(self, key)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.keys())
+
+    def copy(self) -> "NetConfig":
+        return deepcopy(self)
+
+    def get(self, key: str, default: "NetConfigValue" = None) -> "NetConfigValue":
+        return getattr(self, key, default)
+
+    def pop(self, key: str, default: "NetConfigValue" = None) -> "NetConfigValue":
+        attr = getattr(self, key, default)
+        if attr is not default:
+            delattr(self, key)
+        return attr
+
+    def keys(self) -> list[str]:
+        return list(self.__dataclass_fields__.keys())
+
+    def values(self) -> "list[NetConfigValue]":
+        return [getattr(self, key) for key in self.keys()]
+
+    def items(self) -> "ItemsView[str, NetConfigValue]":
+        return {key: getattr(self, key) for key in self.keys()}.items()
+
+
+# Value types stored across the concrete NetConfig subclasses. Nested configs
+# remain dict-typed so YAML/dict ingress and in-place updates stay valid.
+NetConfigValue = (
+    str
+    | int
+    | float
+    | bool
+    | torch.Tensor
+    | list[int]
+    | list[int | tuple[int, ...]]
+    | NetConfig
+    | dict[str, "NetConfigValue"]
+    | None
+)
+
+# Dataclass config or plain dict (YAML/dict ingress; callers mutate and ``.copy()``).
+# Dict values stay ``Any`` because configs are heterogeneous and deeply
+# subscripted (``cfg["encoder_config"]["hidden_size"]``); typing values as
+# ``NetConfigValue`` collapses after the first index and breaks those chains.
+NetConfigType = NetConfig | dict[str, Any]
+
+
+@dataclass
+class MlpNetConfig(NetConfig):
+    hidden_size: list[int]
+    activation: str = field(default="ReLU")
+    output_activation: str | None = field(default=None)
+    min_hidden_layers: int = field(default=1)
+    max_hidden_layers: int = field(default=3)
+    min_mlp_nodes: int = field(default=16)
+    max_mlp_nodes: int = field(default=500)
+    layer_norm: bool = field(default=True)
+    output_vanish: bool = field(default=True)
+    output_layernorm: bool = field(default=False)
+    init_layers: bool = field(default=True)
+    noisy: bool = field(default=False)
+    noise_std: float = field(default=0.5)
+
+    def __post_init__(self) -> None:
+        assert len(self.hidden_size) >= self.min_hidden_layers, (
+            "Hidden layers must be greater than min_hidden_layers."
+        )
+
+        assert len(self.hidden_size) <= self.max_hidden_layers, (
+            "Hidden layers must be less than max_hidden_layers."
+        )
+
+        assert all(
+            self.min_mlp_nodes <= nodes <= self.max_mlp_nodes
+            for nodes in self.hidden_size
+        ), "Nodes must be within min_nodes and max_nodes."
+
+
+@dataclass
+class SimBaNetConfig(NetConfig):
+    hidden_size: int
+    num_blocks: int
+    output_activation: str | None = field(default=None)
+    min_blocks: int = field(default=1)
+    max_blocks: int = field(default=4)
+    min_mlp_nodes: int = field(default=16)
+    max_mlp_nodes: int = field(default=500)
+
+    def __post_init__(self) -> None:
+        assert self.num_blocks >= self.min_blocks, (
+            "Number of residual blocks must be greater than min_blocks."
+        )
+
+        assert self.num_blocks <= self.max_blocks, (
+            "Number of residual blocks must be less than max_blocks."
+        )
+
+        assert self.min_mlp_nodes <= self.hidden_size, (
+            "Nodes must be within min_nodes and max_nodes."
+        )
+        assert self.hidden_size <= self.max_mlp_nodes, (
+            "Nodes must be within min_nodes and max_nodes."
+        )
+
+
+@dataclass
+class CnnNetConfig(NetConfig):
+    channel_size: list[int]
+    kernel_size: list[int | tuple[int, ...]]
+    stride_size: list[int]
+    sample_input: torch.Tensor | None = field(default=None)
+    activation: str = field(default="ReLU")
+    output_activation: str | None = field(default=None)
+    block_type: Literal["Conv2d", "Conv3d"] = field(default="Conv2d")
+    min_hidden_layers: int = field(default=1)
+    max_hidden_layers: int = field(default=6)
+    min_channel_size: int = field(default=16)
+    max_channel_size: int = field(default=256)
+    layer_norm: bool = field(default=False)
+    init_layers: bool = field(default=True)
+
+
+@dataclass
+class LstmNetConfig(NetConfig):
+    hidden_state_size: int
+    num_layers: int = field(default=1)
+    min_hidden_state_size: int = field(default=16)
+    max_hidden_state_size: int = field(default=500)
+    min_layers: int = field(default=1)
+    max_layers: int = field(default=4)
+    output_activation: str | None = field(default=None)
+    dropout: float = field(default=0.0)
+
+
+@dataclass
+class MultiInputNetConfig(NetConfig):
+    """Configuration for the EvolvableMultiInput network.
+
+    This configuration class combines settings for the multi-input network,
+    including latent dimension settings and network-specific configurations.
+    """
+
+    latent_dim: int = 16
+    min_latent_dim: int = 8
+    max_latent_dim: int = 128
+    vector_space_mlp: bool = False
+    output_activation: str | None = field(default=None)
+
+    # Network configurations
+    cnn_config: "NetConfigType | CnnNetConfig | None" = field(default=None)
+    mlp_config: "NetConfigType | MlpNetConfig | None" = field(default=None)
+
+    # Additional settings
+    init_dicts: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Validate configuration parameters after initialization."""
+        # Validate latent dimension
+        assert self.latent_dim >= self.min_latent_dim, (
+            f"Latent dimension {self.latent_dim} must be >= {self.min_latent_dim}"
+        )
+        assert self.latent_dim <= self.max_latent_dim, (
+            f"Latent dimension {self.latent_dim} must be <= {self.max_latent_dim}"
+        )
+
+        # Validate network configurations if provided
+        if self.cnn_config is not None:
+            assert isinstance(
+                self.cnn_config,
+                (dict, CnnNetConfig),
+            ), "CNN config must be an instance of CnnNetConfig"
+        else:
+            self.cnn_config = CnnNetConfig(
+                channel_size=[32, 32],
+                kernel_size=[3, 3],
+                stride_size=[1, 1],
+                output_activation="ReLU",
+                layer_norm=False,
+            )
+        if self.mlp_config is not None:
+            assert isinstance(
+                self.mlp_config,
+                (dict, MlpNetConfig),
+            ), "MLP config must be an instance of MlpNetConfig"
+        else:
+            self.mlp_config = MlpNetConfig(
+                hidden_size=[64, 64],
+                output_activation="ReLU",
+                layer_norm=False,
+            )
