@@ -65,7 +65,7 @@ def _size_normalizer(dims: int) -> Callable[[KernelSizeType], tuple[int, ...]]:
     return normalize
 
 
-class _ConvCtor(Protocol[_SizeT]):
+class _ConvConstructor(Protocol[_SizeT]):
     """A torch conv constructor whose size args all share arity ``_SizeT``."""
 
     def __call__(
@@ -80,7 +80,7 @@ class _ConvCtor(Protocol[_SizeT]):
     ) -> nn.Module: ...
 
 
-class _PoolCtor(Protocol[_SizeT]):
+class _PoolConstructor(Protocol[_SizeT]):
     """A torch pooling constructor whose size args accept int or arity ``_SizeT``."""
 
     def __call__(
@@ -92,7 +92,7 @@ class _PoolCtor(Protocol[_SizeT]):
 
 
 def _build_conv(
-    conv_cls: _ConvCtor[_SizeT],
+    conv_cls: _ConvConstructor[_SizeT],
     to_size: Callable[[KernelSizeType], _SizeT],
     in_channels: int,
     out_channels: int,
@@ -117,7 +117,7 @@ def _build_conv(
 
 
 def _build_pool(
-    pool_cls: _PoolCtor[_SizeT],
+    pool_cls: _PoolConstructor[_SizeT],
     to_size: Callable[[KernelSizeType], _SizeT],
     kernel_size: KernelSizeType,
     stride: KernelSizeType,
