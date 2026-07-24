@@ -6,10 +6,12 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import click
-
+from agilerl.arena.cli_manifest import _parse_json_cli_value
 from agilerl.arena.config import CommandConfig, arena_client
+from agilerl.arena.on_prem.cluster_register import run_cluster_register
 from agilerl.arena.on_prem.installer import (
     run_on_prem_down,
     run_on_prem_install,
@@ -354,6 +356,217 @@ def build_teardown_command() -> click.Command:
             )
 
     return teardown_cmd
+
+
+def build_cluster_register_command() -> click.Command:
+    """``arena on-prem cluster register`` — register a cluster and write Helm values.
+
+    :returns: The configured ``register`` Click command.
+    :rtype: click.Command
+    """
+
+    @click.command(
+        "register",
+        context_settings={"max_content_width": 100},
+    )
+    @click.option("--name", required=True, help="Cluster name.")
+    @click.option(
+        "--profile",
+        "--install-profile",
+        "profile",
+        default="enterprise",
+        show_default=True,
+        type=click.Choice(["lab", "enterprise"], case_sensitive=False),
+        help="Install profile: lab (bundled MinIO) or enterprise (customer S3).",
+    )
+    @click.option(
+        "--storage-endpoint",
+        default=None,
+        help="S3-compatible endpoint (required for enterprise).",
+    )
+    @click.option(
+        "--storage-bucket",
+        default=None,
+        help="Object bucket name (required for enterprise).",
+    )
+    @click.option(
+        "--storage-prefix",
+        default=None,
+        help="Optional object key prefix.",
+    )
+    @click.option(
+        "--storage-secret-name",
+        default=None,
+        help="Kubernetes secret with S3 credentials (required for enterprise).",
+    )
+    @click.option(
+        "--ingress-class-name",
+        default=None,
+        help="Ingress class for inference routes.",
+    )
+    @click.option(
+        "--hostname-template",
+        default=None,
+        help="Hostname template for inference routes.",
+    )
+    @click.option(
+        "--gateway-api-parent-refs",
+        default=None,
+        help="Gateway API parent refs JSON (or @path.json).",
+    )
+    @click.option(
+        "--tls-secret-name",
+        default=None,
+        help="TLS secret for inference routes.",
+    )
+    @click.option(
+        "--preprocessing-resource-class-id",
+        type=int,
+        default=None,
+        help="Preprocessing resource class id.",
+    )
+    @click.option(
+        "--ray-data-storage-class-name",
+        default=None,
+        help="RWX storage class for shared Ray data PVC.",
+    )
+    @click.option(
+        "--ray-data-pvc-size",
+        default=None,
+        help="Ray shared data PVC size.",
+    )
+    @click.option(
+        "--output-dir",
+        default=None,
+        help="Directory for Helm values and token (default: ./arena-cluster-NAME).",
+    )
+    @click.option(
+        "--skip-enable",
+        is_flag=True,
+        default=False,
+        help="Skip enabling the on-prem provider (use when it is already enabled).",
+    )
+    @click.option(
+        "--force",
+        is_flag=True,
+        default=False,
+        help="Overwrite existing output files.",
+    )
+    @click.option(
+        "--install",
+        is_flag=True,
+        default=False,
+        help="Run helm upgrade --install for storage (lab) and agent charts.",
+    )
+    @click.option(
+        "--charts-dir",
+        default=None,
+        help=(
+            "Path to agilerl-platform/resources/helm-setup "
+            "(or set ARENA_HELM_CHARTS_DIR)."
+        ),
+    )
+    @click.option(
+        "--no-helm-wait",
+        is_flag=True,
+        default=False,
+        help="Do not pass --wait to helm upgrade --install.",
+    )
+    @click.option(
+        "-v",
+        "--verbose",
+        is_flag=True,
+        default=False,
+        help="Show detailed command traces.",
+    )
+    @click.pass_obj
+    def register_cmd(
+        config: CommandConfig,
+        name: str,
+        profile: str,
+        storage_endpoint: str | None,
+        storage_bucket: str | None,
+        storage_prefix: str | None,
+        storage_secret_name: str | None,
+        ingress_class_name: str | None,
+        hostname_template: str | None,
+        gateway_api_parent_refs: str | None,
+        tls_secret_name: str | None,
+        preprocessing_resource_class_id: int | None,
+        ray_data_storage_class_name: str | None,
+        ray_data_pvc_size: str | None,
+        output_dir: str | None,
+        skip_enable: bool,
+        force: bool,
+        install: bool,
+        charts_dir: str | None,
+        no_helm_wait: bool,
+        verbose: bool,
+    ) -> None:
+        """Register a customer Kubernetes cluster and write Helm install bundles.
+
+        **lab** — Arena defaults storage; writes ``storage-helm-values.yaml`` and
+        ``agent-helm-values.yaml``. Use ``--install`` to install storage (MinIO +
+        bucket bootstrap Job) then the agent chart with operator storage env.
+
+        **enterprise** — requires ``--storage-endpoint``, ``--storage-bucket``, and
+        ``--storage-secret-name``; writes ``agent-helm-values.yaml`` only.
+        ``--install`` installs the agent chart.
+        """
+        _apply_verbosity(verbose=verbose)
+        cluster_name = name.strip()
+        out = Path(output_dir or f"./arena-cluster-{cluster_name}")
+        charts = Path(charts_dir).expanduser() if charts_dir else None
+        gateway_refs: object | None = None
+        if gateway_api_parent_refs is not None:
+            gateway_refs = _parse_json_cli_value(gateway_api_parent_refs)
+
+        with arena_client(config) as client:
+            run_cluster_register(
+                client,
+                name=cluster_name,
+                profile=profile.lower(),
+                output_dir=out,
+                skip_enable=skip_enable,
+                force=force,
+                install=install,
+                charts_dir=charts,
+                helm_wait=not no_helm_wait,
+                storage_endpoint=storage_endpoint,
+                storage_bucket=storage_bucket,
+                storage_prefix=storage_prefix,
+                storage_secret_name=storage_secret_name,
+                ingress_class_name=ingress_class_name,
+                hostname_template=hostname_template,
+                gateway_api_parent_refs=gateway_refs,
+                tls_secret_name=tls_secret_name,
+                preprocessing_resource_class_id=preprocessing_resource_class_id,
+                ray_data_storage_class_name=ray_data_storage_class_name,
+                ray_data_pvc_size=ray_data_pvc_size,
+            )
+
+    return register_cmd
+
+
+def register_on_prem_cluster(on_prem_group: click.Group) -> None:
+    """Replace manifest ``clusters`` subgroup; register ``cluster register``.
+
+    :param on_prem_group: The ``on-prem`` group to attach the command to.
+    :type on_prem_group: click.Group
+    :returns: None
+    :rtype: None
+    """
+    on_prem_group.commands.pop("clusters", None)
+
+    @click.group(
+        "cluster",
+        help="Enterprise on-prem cluster registration.",
+    )
+    def cluster_group() -> None:
+        """Register customer Kubernetes clusters."""
+
+    cluster_group.add_command(build_cluster_register_command())
+    on_prem_group.add_command(cluster_group)
 
 
 def register_on_prem_install(on_prem_group: click.Group) -> None:

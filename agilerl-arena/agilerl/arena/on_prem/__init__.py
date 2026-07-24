@@ -10,10 +10,13 @@ The capability-gated command groups live in :mod:`group`, the Click commands in
 
 from agilerl.arena.on_prem.api import OnPremApi
 from agilerl.arena.on_prem.commands import (
+    build_cluster_register_command,
     build_install_command,
     build_teardown_command,
+    register_on_prem_cluster,
     register_on_prem_install,
 )
+from agilerl.arena.on_prem.cluster_register import run_cluster_register
 from agilerl.arena.on_prem.endpoints import SetupKind
 from agilerl.arena.on_prem.group import (
     ArenaRootGroup,
@@ -40,14 +43,17 @@ __all__ = [
     "OnPremInstaller",
     "SetupKind",
     "SwarmInstaller",
+    "build_cluster_register_command",
     "build_install_command",
     "build_installer",
     "build_teardown_command",
     "capabilities_show_on_prem_root",
     "caps_allow_on_prem_at_root",
     "normalize_setup_type",
+    "register_on_prem_cluster",
     "register_on_prem_install",
     "register_on_prem_manifest_group",
+    "run_cluster_register",
     "run_on_prem_install",
     "run_on_prem_teardown",
 ]

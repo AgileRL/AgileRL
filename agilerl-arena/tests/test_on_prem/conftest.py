@@ -86,6 +86,14 @@ wireguard:
   allowedIps: []
 """
 
+_VALID_ENTERPRISE_HELM_VALUES = """
+clusterName: "arena-train-42"
+wireguard:
+  enabled: false
+nfs:
+  enabled: false
+"""
+
 
 @pytest.fixture
 def swarm_bundle(tmp_path: Path) -> Path:
@@ -115,5 +123,17 @@ def helm_bundle(tmp_path: Path) -> Path:
     root = tmp_path / "bundle"
     (root / "chart").mkdir(parents=True)
     (root / "chart" / "values.yaml").write_text(_VALID_HELM_VALUES, encoding="utf-8")
+    (root / "setup.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    return root
+
+
+@pytest.fixture
+def enterprise_helm_bundle(tmp_path: Path) -> Path:
+    """Enterprise Ray Helm bundle: WireGuard disabled on the head pod."""
+    root = tmp_path / "bundle"
+    (root / "chart").mkdir(parents=True)
+    (root / "chart" / "values.yaml").write_text(
+        _VALID_ENTERPRISE_HELM_VALUES, encoding="utf-8"
+    )
     (root / "setup.sh").write_text("#!/bin/sh\n", encoding="utf-8")
     return root

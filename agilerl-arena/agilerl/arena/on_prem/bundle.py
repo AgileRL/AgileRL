@@ -112,6 +112,28 @@ def _validate_tun0_conf(path: Path) -> None:
         raise click.ClickException(msg)
 
 
+def _helm_bundle_requires_wireguard(values_text: str) -> bool:
+    """Return whether Helm values expect per-class WireGuard on the Ray head.
+
+    Enterprise on-prem classes render ``wireguard.enabled: false`` and omit
+    gateway keys; legacy classes include ``gatewayHost`` and peer material.
+
+    :param values_text: Contents of ``chart/values.yaml``.
+    :type values_text: str
+    :returns: ``True`` when legacy WireGuard keys must be present.
+    :rtype: bool
+    """
+    if "gatewayHost:" in values_text:
+        return True
+    if "wireguard:" in values_text and re.search(
+        r"^\s*enabled:\s*false\s*$",
+        values_text,
+        re.MULTILINE,
+    ):
+        return False
+    return True
+
+
 def validate_wireguard_bundle(bundle_root: Path, kind: SetupKind) -> None:
     """Check the bundle has a rendered WireGuard config for *kind*.
 
@@ -129,6 +151,8 @@ def validate_wireguard_bundle(bundle_root: Path, kind: SetupKind) -> None:
             msg = "Helm bundle missing chart/values.yaml."
             raise click.ClickException(msg)
         text = values.read_text(encoding="utf-8")
+        if not _helm_bundle_requires_wireguard(text):
+            return
         for key in (
             "wireguard:",
             "gatewayHost:",

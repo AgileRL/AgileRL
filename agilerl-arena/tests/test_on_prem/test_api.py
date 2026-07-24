@@ -81,3 +81,25 @@ class TestOnPremApi:
         assert data == b"zip-bytes"
         _invoke, query = mock_client._invoke_manifest_command.call_args.args
         assert query == {"name": "pool", "setupType": "helm", "archivedType": "zip"}
+
+    def test_register_cluster_enterprise_body(
+        self, on_prem_api: OnPremApi, mock_client: MagicMock
+    ) -> None:
+        mock_client._invoke_manifest_command.return_value = {"clusterId": 1}
+        on_prem_api.register_cluster(
+            name="prod-cluster",
+            install_profile="enterprise",
+            storage_endpoint="http://s3.example.com",
+            storage_bucket="arena-prod",
+            storage_secret_name="corp-s3",
+            preprocessing_resource_class_id=9,
+        )
+        _invoke, body = mock_client._invoke_manifest_command.call_args.args
+        assert body == {
+            "name": "prod-cluster",
+            "installProfile": "enterprise",
+            "storageEndpoint": "http://s3.example.com",
+            "storageBucket": "arena-prod",
+            "storageSecretName": "corp-s3",
+            "preprocessingResourceClassId": 9,
+        }

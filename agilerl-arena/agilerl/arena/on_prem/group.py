@@ -22,7 +22,10 @@ from agilerl.arena.config import (
     _resolve_root_command_config,
     build_client,
 )
-from agilerl.arena.on_prem.commands import register_on_prem_install
+from agilerl.arena.on_prem.commands import (
+    register_on_prem_cluster,
+    register_on_prem_install,
+)
 
 logger = logging.getLogger("agilerl.arena.on_prem")
 
@@ -250,6 +253,7 @@ class OnPremDynamicGroup(click.Group):
 
         attach_manifest_tree(self, root)
         register_on_prem_install(self)
+        register_on_prem_cluster(self)
 
     def list_commands(self, ctx: click.Context) -> list[str]:
         """Ensure commands are loaded, then list them.

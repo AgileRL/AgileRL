@@ -81,6 +81,11 @@ class TestValidateWireguardBundle:
     def test_accepts_valid_helm_bundle(self, helm_bundle: Path) -> None:
         validate_wireguard_bundle(helm_bundle, "helm")
 
+    def test_accepts_enterprise_helm_bundle_without_gateway_keys(
+        self, enterprise_helm_bundle: Path
+    ) -> None:
+        validate_wireguard_bundle(enterprise_helm_bundle, "helm")
+
     def test_rejects_incomplete_tun0(self, swarm_bundle: Path) -> None:
         (swarm_bundle / "config.d" / "tun0.conf").write_text(
             "[Interface]\n", encoding="utf-8"

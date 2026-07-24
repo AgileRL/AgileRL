@@ -93,3 +93,25 @@ action, _ = agent.get_action(observation)
 - CLI command: `arena`
 
 `agilerl-arena` and `agilerl` intentionally share the `agilerl.*` namespace as separate packages.
+
+## On-prem cluster registration
+
+Register a customer Kubernetes cluster against Arena (enterprise on-prem v1) and
+write Helm values files locally:
+
+```bash
+arena on-prem cluster register --name my-cluster --profile enterprise \
+  --storage-endpoint http://s3.corp.example.com:9000 \
+  --storage-bucket arena-prod \
+  --storage-secret-name corp-s3
+```
+
+Lab / PoC profile (bundled MinIO values included):
+
+```bash
+arena on-prem cluster register --name lab-cluster --profile lab
+```
+
+Requires an Arena server with the enterprise on-prem cluster register API
+(agilerl-platform Phase 1 / MR-a9). Run `arena on-prem enable` first, or omit
+`--skip-enable` to enable the provider automatically.

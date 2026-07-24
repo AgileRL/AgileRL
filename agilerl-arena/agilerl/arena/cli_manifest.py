@@ -78,6 +78,22 @@ def pythonize_manifest_param_name(name: str) -> str:
     return s2.lower()
 
 
+def write_text_atomic(dest: Path, text: str, *, force: bool = False) -> None:
+    """Write *text* to *dest* via a temp file and ``os.replace``.
+
+    :param dest: The destination file path (``~`` is expanded, path resolved).
+    :type dest: Path
+    :param text: The text to write (UTF-8).
+    :type text: str
+    :param force: If ``True``, overwrite an existing file.
+    :type force: bool
+    :returns: None
+    :rtype: None
+    :raises click.ClickException: If *dest* exists and *force* is ``False``.
+    """
+    write_binary_atomic(dest, text.encode("utf-8"), force=force)
+
+
 def write_binary_atomic(dest: Path, data: bytes, *, force: bool = False) -> None:
     """Write *data* to *dest* via a temp file and ``os.replace``.
 

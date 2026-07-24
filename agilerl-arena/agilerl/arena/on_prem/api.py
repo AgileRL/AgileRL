@@ -107,6 +107,60 @@ class OnPremApi:
         logger.info("Deleting on-prem resource class %r from Arena…", name)
         self._client._invoke_manifest_command(endpoints.DELETE_CLASS, {"name": name})
 
+    def register_cluster(
+        self,
+        *,
+        name: str,
+        install_profile: str | None = None,
+        storage_endpoint: str | None = None,
+        storage_bucket: str | None = None,
+        storage_prefix: str | None = None,
+        storage_secret_name: str | None = None,
+        ingress_class_name: str | None = None,
+        hostname_template: str | None = None,
+        gateway_api_parent_refs: Any | None = None,
+        tls_secret_name: str | None = None,
+        preprocessing_resource_class_id: int | None = None,
+        ray_data_storage_class_name: str | None = None,
+        ray_data_pvc_size: str | None = None,
+    ) -> dict[str, Any]:
+        """Register an on-prem cluster and return the registration bundle.
+
+        :param name: Cluster name.
+        :type name: str
+        :param install_profile: ``lab`` or ``enterprise`` (default enterprise).
+        :type install_profile: str | None
+        :returns: Registration bundle (cluster id, token, Helm values, etc.).
+        :rtype: dict[str, Any]
+        """
+        body: dict[str, Any] = {"name": name}
+        optional_fields: list[tuple[str, Any]] = [
+            ("installProfile", install_profile),
+            ("storageEndpoint", storage_endpoint),
+            ("storageBucket", storage_bucket),
+            ("storagePrefix", storage_prefix),
+            ("storageSecretName", storage_secret_name),
+            ("ingressClassName", ingress_class_name),
+            ("hostnameTemplate", hostname_template),
+            ("gatewayApiParentRefs", gateway_api_parent_refs),
+            ("tlsSecretName", tls_secret_name),
+            ("preprocessingResourceClassId", preprocessing_resource_class_id),
+            ("rayDataStorageClassName", ray_data_storage_class_name),
+            ("rayDataPvcSize", ray_data_pvc_size),
+        ]
+        for key, value in optional_fields:
+            if value is not None:
+                body[key] = value
+        logger.info("Registering on-prem cluster %r…", name)
+        result = self._client._invoke_manifest_command(
+            endpoints.REGISTER_CLUSTER,
+            body,
+        )
+        if not isinstance(result, dict):
+            msg = "Unexpected cluster registration response from Arena."
+            raise ArenaAPIError(msg)
+        return result
+
     def fetch_bundle(self, name: str, setup_type: SetupKind) -> bytes:
         """Download the deployment bundle zip for class *name* and return its bytes.
 
