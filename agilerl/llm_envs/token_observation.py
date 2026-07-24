@@ -317,13 +317,7 @@ class TokenObservationWrapper:
                         "agilerl_context_overflow": {
                             "full_prompt_len": prompt_len,
                             "max_prompt_tokens": int(max_pt),
-                            # A prompt budget exists only when a model length was
-                            # configured, so this is never None here.
-                            "max_model_len": (
-                                int(max_model_len)
-                                if max_model_len is not None
-                                else None
-                            ),
+                            "max_model_len": max_model_len,
                             "max_output_tokens": (
                                 int(self._sw_max_output_tokens)
                                 if self._sw_max_output_tokens is not None
@@ -422,6 +416,8 @@ class TokenObservationWrapper:
             prompt_ids_1d.tolist(),
             skip_special_tokens=True,
         )
+        # decode is overloaded (ids -> str, batched-ids -> list[str]); the 1-D
+        # ids give a str, which ModelPromptFields["trajectory_text"] requires.
         assert isinstance(trajectory_text, str)
         result: ModelPromptFields = {
             "trajectory_input_ids": trunc,
