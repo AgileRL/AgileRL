@@ -2,6 +2,7 @@ from typing import Any
 
 import gymnasium as gym
 import numpy as np
+import numpy.typing as npt
 import torch
 from accelerate import Accelerator
 from gymnasium import spaces
@@ -273,7 +274,7 @@ class RainbowDQN(RLAlgorithm[TensorDict]):
         training: bool = True,
         *args: Any,
         **kwargs: Any,
-    ) -> np.ndarray:
+    ) -> npt.NDArray:
         """Return the next action to take in the environment.
 
         :param obs: State observation, or multiple observations in a batch
@@ -398,7 +399,7 @@ class RainbowDQN(RLAlgorithm[TensorDict]):
         experiences: TensorDict,
         n_experiences: TensorDict | None = None,
         per: bool = False,
-    ) -> tuple[float, torch.Tensor | None, np.ndarray | None]:
+    ) -> tuple[float, torch.Tensor | None, npt.NDArray | None]:
         """Update agent network parameters to learn from experiences.
 
         :param experiences: Batch of observations, actions, rewards, next

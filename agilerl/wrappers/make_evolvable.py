@@ -284,9 +284,9 @@ class MakeEvolvable(EvolvableModule):
         """Return output of neural network.
 
         :param x: Neural network input
-        :type x: torch.Tensor() or np.array
+        :type x: torch.Tensor() or npt.NDArray
         :param xc: Actions to be evaluated by critic, defaults to None
-        :type xc: torch.Tensor() or np.array, optional
+        :type xc: torch.Tensor() or npt.NDArray, optional
         :param q: Return Q value if using rainbow, defaults to True
         :type q: bool, optional
         """

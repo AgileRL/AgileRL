@@ -585,7 +585,7 @@ class EvolvableCNN(EvolvableModule):
         """Return output of neural network.
 
         :param x: Neural network input
-        :type x: torch.Tensor or np.ndarray
+        :type x: torch.Tensor or npt.NDArray
 
         :return: Output of the neural network
         :rtype: torch.Tensor

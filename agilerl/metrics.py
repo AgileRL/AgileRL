@@ -10,6 +10,7 @@ from types import TracebackType
 from typing import Generic, TypeVar
 
 import numpy as np
+import numpy.typing as npt
 
 from agilerl.typing import FitnessValue
 
@@ -66,14 +67,14 @@ class BaseMetrics(ABC, Generic[ScalarStore, HistogramStore]):
         raise NotImplementedError
 
     @abstractmethod
-    def log_histogram(self, name: str, values: np.ndarray) -> None:
+    def log_histogram(self, name: str, values: npt.NDArray) -> None:
         """Extend the accumulator with raw sample values for a histogram metric."""
         raise NotImplementedError
 
     @abstractmethod
     def get_histogram(
         self, name: str, agent_id: str | None = None
-    ) -> np.ndarray | None:
+    ) -> npt.NDArray | None:
         """Return accumulated raw values for a histogram metric."""
         raise NotImplementedError
 
@@ -230,7 +231,7 @@ class AgentMetrics(BaseMetrics[list[float], deque[float]]):
         """
         self._additional_metrics[name].append(float(value))
 
-    def log_histogram(self, name: str, values: np.ndarray) -> None:
+    def log_histogram(self, name: str, values: npt.NDArray) -> None:
         """Extend the accumulator with raw sample values for a histogram metric.
 
         Values are accumulated across calls so that :meth:`get_histogram`
@@ -239,7 +240,7 @@ class AgentMetrics(BaseMetrics[list[float], deque[float]]):
         :param name: Previously registered non-scalar metric name.
         :type name: str
         :param values: Array of raw sample values (e.g. action indices).
-        :type values: numpy.ndarray
+        :type values: npt.NDArray
         """
         self._nonscalar_metrics[name].extend(values.tolist())
 
@@ -259,7 +260,7 @@ class AgentMetrics(BaseMetrics[list[float], deque[float]]):
 
     def get_histogram(
         self, name: str, agent_id: str | None = None
-    ) -> np.ndarray | None:
+    ) -> npt.NDArray | None:
         """Return the accumulated raw values for a histogram metric.
 
         :param name: Previously registered non-scalar metric name.
@@ -268,7 +269,7 @@ class AgentMetrics(BaseMetrics[list[float], deque[float]]):
             :class:`MultiAgentMetrics`.
         :type agent_id: str | None
         :returns: Array of all accumulated values, or ``None`` if empty.
-        :rtype: numpy.ndarray | None
+        :rtype: npt.NDArray | None
         """
         values = self._nonscalar_metrics[name]
         if not values:
@@ -358,14 +359,14 @@ class MultiAgentMetrics(BaseMetrics[dict[str, list[float]], dict[str, deque[floa
         self._additional_metrics[name][agent_id].append(float(value))
 
     def log_histogram(
-        self, name: str, values: np.ndarray, agent_id: str | None = None
+        self, name: str, values: npt.NDArray, agent_id: str | None = None
     ) -> None:
         """Extend the accumulator with raw sample values for a histogram metric.
 
         :param name: Previously registered non-scalar metric name.
         :type name: str
         :param values: Array of raw sample values (e.g. action indices).
-        :type values: numpy.ndarray
+        :type values: npt.NDArray
         :param agent_id: Sub-agent identifier. If omitted, defaults to the first
             configured sub-agent.
         :type agent_id: str | None
@@ -391,7 +392,7 @@ class MultiAgentMetrics(BaseMetrics[dict[str, list[float]], dict[str, deque[floa
 
     def get_histogram(
         self, name: str, agent_id: str | None = None
-    ) -> np.ndarray | None:
+    ) -> npt.NDArray | None:
         """Return accumulated raw values for a histogram metric and sub-agent.
 
         :param name: Previously registered non-scalar metric name.
@@ -400,7 +401,7 @@ class MultiAgentMetrics(BaseMetrics[dict[str, list[float]], dict[str, deque[floa
             configured sub-agent.
         :type agent_id: str | None
         :returns: Array of all accumulated values, or ``None`` if empty.
-        :rtype: numpy.ndarray | None
+        :rtype: npt.NDArray | None
         """
         resolved_agent_id = agent_id if agent_id is not None else self.agent_ids[0]
         values = self._nonscalar_metrics[name][resolved_agent_id]

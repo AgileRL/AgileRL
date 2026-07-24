@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeGuard
 
 import numpy as np
+import numpy.typing as npt
 import torch
 from accelerate import Accelerator
 from torch import nn
@@ -202,13 +203,13 @@ def normalize_reasoning_prompt_batch(
 
 
 def gather_tensor(
-    tensor: torch.Tensor | np.ndarray | float,
+    tensor: torch.Tensor | npt.NDArray | float,
     accelerator: Accelerator,
 ) -> torch.Tensor:
     """Gather tensors from gpus.
 
     :param tensor: Tensor (or array/scalar convertible to one) to gather
-    :type tensor: torch.Tensor | np.ndarray | float
+    :type tensor: torch.Tensor | npt.NDArray | float
     :param accelerator: Accelerator object
     :type accelerator: accelerate.Accelerator
     :return: Stacked tensors
@@ -365,14 +366,14 @@ def align_completion_batch_shapes_across_ranks(
 
 def aggregate_metrics_across_gpus(
     accelerator: Accelerator | None,
-    metric_tensor: torch.Tensor | np.ndarray | float,
+    metric_tensor: torch.Tensor | npt.NDArray | float,
 ) -> float:
     """Aggregate gathered tensors.
 
     :param accelerator: Accelerator object
     :type accelerator: accelerate.Accelerator | None
     :param metric_tensor: Metrics
-    :type metric_tensor: torch.Tensor | np.ndarray | float
+    :type metric_tensor: torch.Tensor | npt.NDArray | float
     :return: Mean metric
     :rtype: float
     """
@@ -386,14 +387,14 @@ def aggregate_metrics_across_gpus(
 
 def safe_aggregate_metrics(
     accelerator: Accelerator | None,
-    metrics: torch.Tensor | np.ndarray | float,
+    metrics: torch.Tensor | npt.NDArray | float,
 ) -> float:
     """Aggregate metrics generically, handling both when an accelerator is being used and when it isn't.
 
     :param accelerator: Accelerator object
     :type accelerator: Accelerator | None
     :param metrics: Metrics
-    :type metrics: torch.Tensor | np.ndarray | float
+    :type metrics: torch.Tensor | npt.NDArray | float
     :return: Mean metric
     :rtype: float
     """
@@ -410,14 +411,14 @@ def safe_aggregate_metrics(
 
 def aggregate_metrics_dict(
     accelerator: Accelerator | None,
-    metrics: dict[str, torch.Tensor | np.ndarray | float],
+    metrics: dict[str, torch.Tensor | npt.NDArray | float],
 ) -> dict[str, float]:
     """Aggregate all values in a metrics dict across GPUs (or locally if no accelerator).
 
     :param accelerator: Accelerator object (or None for single-device).
     :type accelerator: Accelerator | None
     :param metrics: Dictionary mapping metric names to raw values.
-    :type metrics: dict[str, torch.Tensor | np.ndarray | float]
+    :type metrics: dict[str, torch.Tensor | npt.NDArray | float]
     :return: Dictionary with all values aggregated to floats.
     :rtype: dict[str, float]
     """

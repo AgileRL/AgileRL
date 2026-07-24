@@ -27,6 +27,7 @@ from typing import (
 )
 
 import numpy as np
+import numpy.typing as npt
 import torch
 from accelerate import Accelerator
 from gymnasium import spaces
@@ -39,7 +40,7 @@ if TYPE_CHECKING:
     from agilerl.algorithms.core.registry import MutationRegistry
     from agilerl.typing import MutationApplyDict, ReasoningPrompts, TokenObsStepReturn
 
-NumpyObsType = np.ndarray | dict[str, np.ndarray] | tuple[np.ndarray, ...]
+NumpyObsType = npt.NDArray | dict[str, npt.NDArray] | tuple[npt.NDArray, ...]
 TorchObsType = torch.Tensor | dict[str, torch.Tensor] | tuple[torch.Tensor, ...]
 ObservationType = NumpyObsType | TorchObsType
 DeviceType = str | torch.device
@@ -403,7 +404,7 @@ class EvolvableAlgorithmProtocol(Protocol):
     mut: str | None
     index: int
     # Scalars, or per-sub-agent rows for multi-agent metrics (sum_scores=False).
-    fitness: list[float | np.ndarray]
+    fitness: list[float | npt.NDArray]
     steps: int
     torch_compiler: str | None
 
@@ -712,10 +713,10 @@ class BanditEnvProtocol(Protocol):
     @property
     def single_action_space(self) -> spaces.Discrete: ...
 
-    def reset(self) -> np.ndarray:
+    def reset(self) -> npt.NDArray:
         pass
 
-    def step(self, k: int) -> tuple[np.ndarray, float]:
+    def step(self, k: int) -> tuple[npt.NDArray, float]:
         pass
 
 

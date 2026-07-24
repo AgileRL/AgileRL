@@ -2,6 +2,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 from gymnasium.spaces import Space
 from gymnasium.vector.utils import batch_space
 
@@ -106,7 +107,7 @@ class PettingZooVecEnv:
 
         :param actions: List of dictionaries of length num_envs, each sub dictionary contains
         actions for each agent in a given environment
-        :type actions: list[dict[str, int | float | np.ndarray]]
+        :type actions: list[dict[str, int | float | npt.NDArray]]
         """
         msg = "Subclasses must implement step_async()"
         raise NotImplementedError(msg)
@@ -162,7 +163,7 @@ class PettingZooVecEnv:
         self.step_async(passed_actions_list)
         return self.step_wait()
 
-    def render(self) -> None | np.ndarray | str | list | tuple[Any, ...]:
+    def render(self) -> None | npt.NDArray | str | list | tuple[Any, ...]:
         """Return the rendered frames from the parallel environments."""
         msg = f"{self.__str__()} render function is not implemented."
         raise NotImplementedError(

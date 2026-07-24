@@ -5,6 +5,7 @@ from typing import Any
 
 import gymnasium as gym
 import numpy as np
+import numpy.typing as npt
 import torch
 from accelerate import Accelerator
 from gymnasium import spaces
@@ -53,9 +54,9 @@ class TD3(RLAlgorithm[TensorDict]):
     :param vect_noise_dim: Vectorization dimension of environment for action noise, defaults to 1
     :type vect_noise_dim: int, optional
     :param expl_noise: Scale for Ornstein Uhlenbeck action noise, or standard deviation for Gaussian exploration noise
-    :type expl_noise: float | np.ndarray, optional
+    :type expl_noise: float | npt.NDArray, optional
     :param mean_noise: Mean of exploration noise, defaults to 0.0
-    :type mean_noise: float | np.ndarray, optional
+    :type mean_noise: float | npt.NDArray, optional
     :param theta: Rate of mean reversion in Ornstein Uhlenbeck action noise, defaults to 0.15
     :type theta: float, optional
     :param dt: Timestep for Ornstein Uhlenbeck action noise update, defaults to 1e-2
@@ -108,8 +109,8 @@ class TD3(RLAlgorithm[TensorDict]):
         action_space: spaces.Box,
         O_U_noise: bool = True,
         vect_noise_dim: int = 1,
-        expl_noise: float | np.ndarray = 0.1,
-        mean_noise: float | np.ndarray = 0.0,
+        expl_noise: float | npt.NDArray = 0.1,
+        mean_noise: float | npt.NDArray = 0.0,
         theta: float = 0.15,
         dt: float = 1e-2,
         index: int = 0,
@@ -423,7 +424,7 @@ class TD3(RLAlgorithm[TensorDict]):
         training: bool = True,
         *args: Any,
         **kwargs: Any,
-    ) -> np.ndarray:
+    ) -> npt.NDArray:
         """Return the next action to take in the environment. If training, random noise
         is added to the action to promote exploration.
 
@@ -455,7 +456,7 @@ class TD3(RLAlgorithm[TensorDict]):
         )
         return action.data.numpy()
 
-    def action_noise(self) -> np.ndarray:
+    def action_noise(self) -> npt.NDArray:
         """Create action noise for exploration, either Ornstein Uhlenbeck or
             from a normal distribution.
 
@@ -479,11 +480,11 @@ class TD3(RLAlgorithm[TensorDict]):
             )
         return noise.astype(np.float32)
 
-    def reset_action_noise(self, indices: Sequence[int] | np.ndarray) -> None:
+    def reset_action_noise(self, indices: Sequence[int] | npt.NDArray) -> None:
         """Reset action noise.
 
         :param indices: Indices to reset
-        :type indices: Sequence[int] or np.ndarray
+        :type indices: Sequence[int] or npt.NDArray
         """
         self.current_noise[indices] = self.mean_noise[indices]
 

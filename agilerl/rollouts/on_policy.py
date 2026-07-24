@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 import gymnasium as gym
 import numpy as np
+import numpy.typing as npt
 import torch
 from gymnasium import spaces
 
@@ -26,9 +27,9 @@ def _collect_rollouts(
     agent: SupportedOnPolicy,
     env: RolloutEnv,
     n_steps: int | None = None,
-    last_obs: np.ndarray | None = None,
-    last_done: np.ndarray | None = None,
-    last_scores: np.ndarray | None = None,
+    last_obs: npt.NDArray | None = None,
+    last_done: npt.NDArray | None = None,
+    last_scores: npt.NDArray | None = None,
     last_info: dict[str, Any] | None = None,
     *,
     recurrent: bool,
@@ -42,11 +43,11 @@ def _collect_rollouts(
     :param n_steps: The number of steps to collect rollouts for. Defaults to agent.learn_step if not provided.
     :type n_steps: int | None
     :param last_obs: The observation to use for the first step. Defaults to None, where the environment is reset.
-    :type last_obs: np.ndarray | None
+    :type last_obs: npt.NDArray | None
     :param last_done: The done flag to use for the first step. Defaults to None, where the environment is reset.
-    :type last_done: np.ndarray | None
+    :type last_done: npt.NDArray | None
     :param last_scores: The scores to use for the first step. Defaults to None, where the environment is reset.
-    :type last_scores: np.ndarray | None
+    :type last_scores: npt.NDArray | None
     :param last_info: The info for the current step. Defaults to None, where the environment is reset.
     :type last_info: dict[str, Any] | None
     :param recurrent: Whether the agent is recurrent.
@@ -54,7 +55,7 @@ def _collect_rollouts(
 
     :return: The scores for the episodes completed in the rollouts, followed by
         the observation, done flag, scores, and info for the current step.
-    :rtype: tuple[list[float], np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]
+    :rtype: tuple[list[float], npt.NDArray, npt.NDArray, npt.NDArray, dict[str, Any]]
     """
     if (
         last_obs is None
@@ -225,7 +226,7 @@ def collect_rollouts(
 
     :return: The scores for the episodes completed in the rollouts, followed by
         the observation, done flag, scores, and info for the current step.
-    :rtype: tuple[list[float], np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]
+    :rtype: tuple[list[float], npt.NDArray, npt.NDArray, npt.NDArray, dict[str, Any]]
     """
     return _collect_rollouts(agent, env, n_steps, recurrent=False, **kwargs)
 
@@ -247,7 +248,7 @@ def collect_rollouts_recurrent(
 
     :return: The scores for the episodes completed in the rollouts, followed by
         the observation, done flag, scores, and info for the current step.
-    :rtype: tuple[list[float], np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]
+    :rtype: tuple[list[float], npt.NDArray, npt.NDArray, npt.NDArray, dict[str, Any]]
     """
     return _collect_rollouts(agent, env, n_steps, recurrent=True, **kwargs)
 

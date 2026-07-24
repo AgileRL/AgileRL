@@ -5,6 +5,7 @@ from typing import Any
 
 import gymnasium as gym
 import numpy as np
+import numpy.typing as npt
 import torch
 from accelerate import Accelerator
 from gymnasium import spaces
@@ -51,11 +52,11 @@ class DDPG(RLAlgorithm[TensorDict]):
     :param O_U_noise: Use Ornstein Uhlenbeck action noise for exploration. If False, uses Gaussian noise. Defaults to True
     :type O_U_noise: bool, optional
     :param expl_noise: Scale for Ornstein Uhlenbeck action noise, or standard deviation for Gaussian exploration noise, defaults to 0.1
-    :type expl_noise: float | np.ndarray, optional
+    :type expl_noise: float | npt.NDArray, optional
     :param vect_noise_dim: Vectorization dimension of environment for action noise, defaults to 1
     :type vect_noise_dim: int, optional
     :param mean_noise: Mean of exploration noise, defaults to 0.0
-    :type mean_noise: float | np.ndarray, optional
+    :type mean_noise: float | npt.NDArray, optional
     :param theta: Rate of mean reversion in Ornstein Uhlenbeck action noise, defaults to 0.15
     :type theta: float, optional
     :param dt: Timestep for Ornstein Uhlenbeck action noise update, defaults to 1e-2
@@ -107,9 +108,9 @@ class DDPG(RLAlgorithm[TensorDict]):
         observation_space: SupportedObservationSpace,
         action_space: spaces.Box,
         O_U_noise: bool = True,
-        expl_noise: float | np.ndarray = 0.1,
+        expl_noise: float | npt.NDArray = 0.1,
         vect_noise_dim: int = 1,
-        mean_noise: float | np.ndarray = 0.0,
+        mean_noise: float | npt.NDArray = 0.0,
         theta: float = 0.15,
         dt: float = 1e-2,
         index: int = 0,
@@ -381,7 +382,7 @@ class DDPG(RLAlgorithm[TensorDict]):
         training: bool = True,
         *args: Any,
         **kwargs: Any,
-    ) -> np.ndarray:
+    ) -> npt.NDArray:
         """Return the next action to take in the environment. If training, random noise
         is added to the action to promote exploration.
 
@@ -413,14 +414,14 @@ class DDPG(RLAlgorithm[TensorDict]):
         )
         return action.data.numpy()
 
-    def action_noise(self) -> np.ndarray:
+    def action_noise(self) -> npt.NDArray:
         """Create action noise for exploration, either Ornstein Uhlenbeck or from a normal distribution.
 
         :return: Action noise
-        :rtype: np.ndarray
+        :rtype: npt.NDArray
         """
         if self.O_U_noise:
-            noise: np.ndarray = (
+            noise: npt.NDArray = (
                 self.current_noise
                 + self.theta * (self.mean_noise - self.current_noise) * self.dt
                 + self.expl_noise
@@ -429,18 +430,18 @@ class DDPG(RLAlgorithm[TensorDict]):
             )
             self.current_noise = noise
         else:
-            noise: np.ndarray = np.random.normal(
+            noise: npt.NDArray = np.random.normal(
                 self.mean_noise,
                 self.expl_noise,
                 size=(self.vect_noise_dim, self.action_dim),
             )
         return noise.astype(np.float32)
 
-    def reset_action_noise(self, indices: Sequence[int] | np.ndarray) -> None:
+    def reset_action_noise(self, indices: Sequence[int] | npt.NDArray) -> None:
         """Reset action noise.
 
         :param indices: List of indices to reset
-        :type indices: Sequence[int] or np.ndarray
+        :type indices: Sequence[int] or npt.NDArray
         """
         self.current_noise[indices] = self.mean_noise[indices]
 

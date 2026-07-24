@@ -4,6 +4,7 @@ from collections.abc import Generator, Sequence
 from typing import Any, TypeVar
 
 import numpy as np
+import numpy.typing as npt
 import torch
 from gymnasium import spaces
 from tensordict import TensorDict, TensorDictBase
@@ -267,16 +268,16 @@ class RolloutBuffer:
         self,
         obs: ObservationType,
         action: ArrayOrTensor,
-        reward: float | np.ndarray,
-        done: bool | np.ndarray,
-        value: float | np.ndarray,
-        log_prob: float | np.ndarray,
+        reward: float | npt.NDArray,
+        done: bool | npt.NDArray,
+        value: float | npt.NDArray,
+        log_prob: float | npt.NDArray,
         next_obs: ObservationType | None = None,
         hidden_state: dict[str, torch.Tensor] | None = None,
         next_hidden_state: (
             dict[str, torch.Tensor] | None
         ) = None,  # Not used if only initial hidden states are stored
-        episode_start: bool | np.ndarray | None = None,
+        episode_start: bool | npt.NDArray | None = None,
         action_mask: ArrayOrTensor | None = None,
     ) -> None:
         """Add a new batch of observations and associated data from vectorized environments to the buffer.
@@ -286,13 +287,13 @@ class RolloutBuffer:
         :param action: Action batch taken (shape: (num_envs, *action_shape))
         :type action: ArrayOrTensor
         :param reward: Reward batch received (shape: (num_envs,))
-        :type reward: float | np.ndarray
+        :type reward: float | npt.NDArray
         :param done: Done flag batch (shape: (num_envs,))
-        :type done: bool | np.ndarray
+        :type done: bool | npt.NDArray
         :param value: Value estimate batch (shape: (num_envs,))
-        :type value: float | np.ndarray
+        :type value: float | npt.NDArray
         :param log_prob: Log probability batch of the actions (shape: (num_envs,))
-        :type log_prob: float | np.ndarray
+        :type log_prob: float | npt.NDArray
         :param next_obs: Next observation batch (shape: (num_envs, *obs_shape)), defaults to None
         :type next_obs: ObservationType | None
         :param hidden_state: Current hidden state batch (shape: (num_envs, hidden_size)), defaults to None
@@ -300,7 +301,7 @@ class RolloutBuffer:
         :param next_hidden_state: Next hidden state batch (shape: (num_envs, hidden_size)), defaults to None
         :type next_hidden_state: dict[str, torch.Tensor] | None
         :param episode_start: Episode start flag batch (shape: (num_envs,)), defaults to None
-        :type episode_start: bool | np.ndarray | None
+        :type episode_start: bool | npt.NDArray | None
         :param action_mask: Action mask batch (shape: (num_envs, mask_size)), 1=legal 0=illegal, defaults to None
         :type action_mask: ArrayOrTensor | None
         """
@@ -524,13 +525,13 @@ class RolloutBuffer:
     def get(
         self,
         batch_size: int | None = None,
-    ) -> dict[str, np.ndarray | dict[str, np.ndarray]]:
+    ) -> dict[str, npt.NDArray | dict[str, npt.NDArray]]:
         """Get data from the buffer, flattened and optionally sampled into minibatches.
 
         :param batch_size: Size of the minibatch to sample. If None, returns all data. Defaults to None.
         :type batch_size: int | None
         :return: Dictionary containing flattened buffer data arrays.
-        :rtype: dict[str, np.ndarray | dict[str, np.ndarray]]
+        :rtype: dict[str, npt.NDArray | dict[str, npt.NDArray]]
         """
         buffer_size = self.capacity if self.full else self.pos
         total_samples = buffer_size * self.num_envs
@@ -622,22 +623,22 @@ class RolloutBuffer:
     def _convert_td_to_np_dict(
         self,
         td: TensorDict,
-    ) -> dict[str, np.ndarray | dict[str, np.ndarray]]:
+    ) -> dict[str, npt.NDArray | dict[str, npt.NDArray]]:
         """Convert a TensorDict to a dictionary of numpy arrays.
 
         :param td: TensorDict to convert.
         :type td: TensorDict
         :return: Dictionary of numpy arrays.
-        :rtype: dict[str, np.ndarray | dict[str, np.ndarray]]
+        :rtype: dict[str, npt.NDArray | dict[str, npt.NDArray]]
         """
         # Convert the TensorDict to the old dictionary of numpy arrays format
-        np_dict: dict[str, np.ndarray | dict[str, np.ndarray]] = {}
+        np_dict: dict[str, npt.NDArray | dict[str, npt.NDArray]] = {}
         for key, value in td.items():
             if isinstance(value, (TensorDict, dict)):
                 # Nested collections (hidden states, dict observations) hold one
                 # tensor per sub-key; the sub-container may be a nested TensorDict
                 # or a plain dict of tensors.
-                sub_dict: dict[str, np.ndarray] = {}
+                sub_dict: dict[str, npt.NDArray] = {}
                 for sub_key, sub_value in value.items():
                     assert isinstance(sub_key, str)
                     assert isinstance(sub_value, torch.Tensor), (

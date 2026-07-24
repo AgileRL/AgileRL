@@ -18,6 +18,7 @@ from typing import (
 )
 
 import numpy as np
+import numpy.typing as npt
 import torch
 import torch.nn.functional as F
 from gymnasium import spaces
@@ -537,11 +538,11 @@ def transpose_image_observation(
     returned unchanged.
 
     :param observation: Observation
-    :type observation: np.ndarray | torch.Tensor
+    :type observation: npt.NDArray | torch.Tensor
     :param original_space: Original observation space
     :type original_space: spaces.Space
     :return: Transposed observation
-    :rtype: np.ndarray | torch.Tensor
+    :rtype: npt.NDArray | torch.Tensor
     """
     if isinstance(original_space, spaces.Box) and len(original_space.shape) == 3:
         # The channels-first layout this leaf should end up in
@@ -586,10 +587,11 @@ def transpose_image_observation(
         assert isinstance(observation, tuple), (
             f"Expected tuple observation for Tuple space, got {type(observation)}"
         )
-        return tuple(
-            transpose_image_observation(o, s)
-            for o, s in zip(observation, original_space.spaces, strict=True)
-        )
+        transposed_tuple: list[Any] = []
+        for o, s in zip(observation, original_space.spaces, strict=True):
+            assert isinstance(o, (np.ndarray, torch.Tensor))
+            transposed_tuple.append(transpose_image_observation(o, s))
+        return tuple(transposed_tuple)
 
     return observation
 
@@ -1248,7 +1250,7 @@ def add_placeholder_value(obs: torch.Tensor, placeholder_value: float) -> torch.
     ).to(torch.float32)
 
 
-ArrT = TypeVar("ArrT", np.ndarray, torch.Tensor)
+ArrT = TypeVar("ArrT", npt.NDArray, torch.Tensor)
 
 
 @singledispatch
@@ -1260,13 +1262,13 @@ def maybe_add_batch_dim(
     """Add batch dimension if necessary.
 
     :param array_like: Array or tensor
-    :type array_like: np.ndarray | torch.Tensor
+    :type array_like: npt.NDArray | torch.Tensor
     :param space: Observation space
     :type space: spaces.Space
     :param actions: Whether the array is an action, defaults to False
     :type actions: bool, optional
     :return: Observation tensor with batch dimension
-    :rtype: np.ndarray | torch.Tensor
+    :rtype: npt.NDArray | torch.Tensor
     """
     msg = f"Cannot add batch dimension for {type(array_like)}."
     raise TypeError(msg)
@@ -1274,10 +1276,10 @@ def maybe_add_batch_dim(
 
 @maybe_add_batch_dim.register(np.ndarray)
 def maybe_add_batch_dim_np(
-    array_like: np.ndarray,
+    array_like: npt.NDArray,
     space: LeafSpace,
     actions: bool = False,
-) -> np.ndarray:
+) -> npt.NDArray:
     space_shape = (
         get_input_size_from_space(space) if not actions else (get_num_actions(space),)
     )
@@ -1351,7 +1353,7 @@ def preprocess_observation(
 @preprocess_observation.register(spaces.Dict)
 def preprocess_dict_observation(
     observation_space: spaces.Dict,
-    observation: dict[str, np.ndarray | torch.Tensor],
+    observation: dict[str, npt.NDArray | torch.Tensor],
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
     placeholder_value: float | None = None,
@@ -1363,7 +1365,7 @@ def preprocess_dict_observation(
     nested Dict/Tuple spaces), so the preprocessed values are tensors.
 
     :param observation: Dictionary observation
-    :type observation: dict[str, np.ndarray | torch.Tensor]
+    :type observation: dict[str, npt.NDArray | torch.Tensor]
     :param observation_space: Dictionary observation space
     :type observation_space: spaces.Dict
     :param device: Computing device
@@ -1399,7 +1401,7 @@ def preprocess_dict_observation(
 @preprocess_observation.register(spaces.Tuple)
 def preprocess_tuple_observation(
     observation_space: spaces.Tuple,
-    observation: tuple[np.ndarray | torch.Tensor, ...],
+    observation: tuple[npt.NDArray | torch.Tensor, ...],
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
     placeholder_value: float | None = None,
@@ -1411,7 +1413,7 @@ def preprocess_tuple_observation(
     nested Dict/Tuple spaces), so the preprocessed elements are tensors.
 
     :param observation: Tuple observation
-    :type observation: tuple[np.ndarray | torch.Tensor, ...]
+    :type observation: tuple[npt.NDArray | torch.Tensor, ...]
     :param observation_space: Tuple observation space
     :type observation_space: spaces.Tuple
     :param device: Computing device
@@ -1455,7 +1457,7 @@ def preprocess_tuple_observation(
 @preprocess_observation.register(spaces.Box)
 def preprocess_box_observation(
     observation_space: spaces.Box,
-    observation: np.ndarray | torch.Tensor,
+    observation: npt.NDArray | torch.Tensor,
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
     placeholder_value: float | None = None,
@@ -1464,7 +1466,7 @@ def preprocess_box_observation(
     """Preprocess box observations (continuous spaces).
 
     :param observation: Box observation
-    :type observation: np.ndarray | torch.Tensor
+    :type observation: npt.NDArray | torch.Tensor
     :param observation_space: Box observation space
     :type observation_space: spaces.Box
     :param device: Computing device
@@ -1499,7 +1501,7 @@ def preprocess_box_observation(
 @preprocess_observation.register(spaces.Discrete)
 def preprocess_discrete_observation(
     observation_space: spaces.Discrete,
-    observation: np.ndarray | torch.Tensor,
+    observation: npt.NDArray | torch.Tensor,
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
     placeholder_value: float | None = None,
@@ -1508,7 +1510,7 @@ def preprocess_discrete_observation(
     """Preprocess discrete observations.
 
     :param observation: Discrete observation
-    :type observation: np.ndarray | torch.Tensor
+    :type observation: npt.NDArray | torch.Tensor
     :param observation_space: Discrete observation space
     :type observation_space: spaces.Discrete
     :param device: Computing device
@@ -1545,7 +1547,7 @@ def preprocess_discrete_observation(
 @preprocess_observation.register(spaces.MultiDiscrete)
 def preprocess_multidiscrete_observation(
     observation_space: spaces.MultiDiscrete,
-    observation: np.ndarray | torch.Tensor,
+    observation: npt.NDArray | torch.Tensor,
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
     placeholder_value: float | None = None,
@@ -1554,7 +1556,7 @@ def preprocess_multidiscrete_observation(
     """Preprocess multi-discrete observations.
 
     :param observation: Multi-discrete observation
-    :type observation: np.ndarray | torch.Tensor
+    :type observation: npt.NDArray | torch.Tensor
     :param observation_space: Multi-discrete observation space
     :type observation_space: spaces.MultiDiscrete
     :param device: Computing device
@@ -1593,7 +1595,7 @@ def preprocess_multidiscrete_observation(
 @preprocess_observation.register(spaces.MultiBinary)
 def preprocess_multibinary_observation(
     observation_space: spaces.MultiBinary,
-    observation: np.ndarray | torch.Tensor,
+    observation: npt.NDArray | torch.Tensor,
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
     placeholder_value: float | None = None,
@@ -1602,7 +1604,7 @@ def preprocess_multibinary_observation(
     """Preprocess multi-binary observations.
 
     :param observation: Multi-binary observation
-    :type observation: np.ndarray | torch.Tensor
+    :type observation: npt.NDArray | torch.Tensor
     :param observation_space: Multi-binary observation space
     :type observation_space: spaces.MultiBinary
     :param device: Computing device
@@ -1638,7 +1640,7 @@ def apply_image_normalization(
 
 @overload
 def apply_image_normalization(
-    observation: np.ndarray,
+    observation: npt.NDArray,
     observation_space: spaces.Box,
 ) -> np.ndarray: ...
 
@@ -1650,11 +1652,11 @@ def apply_image_normalization(
     """Normalize images using minmax scaling.
 
     :param observation: Observation
-    :type observation: np.ndarray | torch.Tensor
+    :type observation: npt.NDArray | torch.Tensor
     :param observation_space: Observation space
     :type observation_space: spaces.Box
     :return: Observation
-    :rtype: np.ndarray | torch.Tensor
+    :rtype: npt.NDArray | torch.Tensor
     """
     if not isinstance(observation_space, spaces.Box):
         msg = f"Expected spaces.Box, got {type(observation_space)}"
@@ -1701,13 +1703,13 @@ _ExperienceTs = TypeVarTuple("_ExperienceTs")
 
 
 def get_experiences_samples(
-    minibatch_indices: np.ndarray,
+    minibatch_indices: npt.NDArray,
     *experiences: Unpack[_ExperienceTs],
 ) -> tuple[Unpack[_ExperienceTs]]:
     """Sample experiences given minibatch indices.
 
     :param minibatch_indices: Minibatch indices
-    :type minibatch_indices: numpy.ndarray[int]
+    :type minibatch_indices: npt.NDArray
     :param experiences: Experiences to sample from
     :type experiences: tuple[torch.Tensor[float], ...]
 
@@ -1749,7 +1751,7 @@ def stack_experiences(
     """Stacks experiences into a single array or tensor.
 
     :param experiences: Experiences to stack
-    :type experiences: list[numpy.ndarray[float]] or list[dict[str, numpy.ndarray[float]]]
+    :type experiences: list[npt.NDArray] or list[dict[str, npt.NDArray]]
     :param to_torch: If True, convert the stacked experiences to a torch tensor, defaults to True
     :type to_torch: bool, optional
 
@@ -1899,13 +1901,13 @@ def flatten_experiences(*experiences: ObservationType) -> tuple[ArrayOrTensor, .
     """Flattens experiences into a single array or tensor.
 
     :param experiences: Experiences to flatten
-    :type experiences: tuple[numpy.ndarray[float], ...] or tuple[torch.Tensor[float], ...]
+    :type experiences: tuple[npt.NDArray, ...] or tuple[torch.Tensor[float], ...]
 
     :return: Flattened experiences
-    :rtype: tuple[numpy.ndarray[float], ...] or tuple[torch.Tensor[float], ...]
+    :rtype: tuple[npt.NDArray, ...] or tuple[torch.Tensor[float], ...]
     """
 
-    def flatten(arr: ArrayOrTensor) -> ArrayOrTensor:
+    def flatten(arr: np.ndarray | torch.Tensor) -> np.ndarray | torch.Tensor:
         # Need to flatten batch and n_env dimensions
         shape = arr.shape
         if len(shape) < 3:
@@ -1919,14 +1921,14 @@ def flatten_experiences(*experiences: ObservationType) -> tuple[ArrayOrTensor, .
         if isinstance(exp, (torch.Tensor, np.ndarray)):
             flattened_exp = flatten(exp)
         elif isinstance(exp, dict):
-            flattened_dict: dict[str, ArrayOrTensor] = {}
+            flattened_dict: dict[str, np.ndarray | torch.Tensor] = {}
             for key, value in exp.items():
                 assert isinstance(key, str)
                 assert isinstance(value, (np.ndarray, torch.Tensor))
                 flattened_dict[key] = flatten(value)
             flattened_exp = flattened_dict
         elif isinstance(exp, tuple):
-            flattened_list: list[ArrayOrTensor] = []
+            flattened_list: list[np.ndarray | torch.Tensor] = []
             for value in exp:
                 assert isinstance(value, (np.ndarray, torch.Tensor))
                 flattened_list.append(flatten(value))
@@ -1944,7 +1946,7 @@ def is_vectorized_experiences(*experiences: NumpyObsType | TorchObsType) -> bool
     """Check if experiences are vectorised.
 
     :param experiences: Experiences to check
-    :type experiences: tuple[numpy.ndarray[float], ...] or tuple[torch.Tensor[float], ...]
+    :type experiences: tuple[npt.NDArray, ...] or tuple[torch.Tensor[float], ...]
 
     :return: True if experiences are vectorised, False otherwise
     :rtype: bool
@@ -2292,7 +2294,7 @@ def experience_to_tensors(
     """Convert experience to tensors matching the structure of the given space.
 
     :param experience: Experience to convert (dict, tuple, or array-like)
-    :type experience: dict[str, Any] | tuple[Any, ...] | numpy.ndarray | Any
+    :type experience: dict[str, Any] | tuple[Any, ...] | npt.NDArray | Any
     :param space: Space to convert experience to
     :type space: spaces.Space
     :param actions: Whether the experience is an action, defaults to False
@@ -2596,18 +2598,18 @@ class DummyOptimizer:
 
 
 def _reconcile_shapes(
-    reference: np.ndarray, other: np.ndarray, discrete_actions: bool
-) -> tuple[np.ndarray, np.ndarray]:
+    reference: npt.NDArray, other: npt.NDArray, discrete_actions: bool
+) -> tuple[npt.NDArray, npt.NDArray]:
     """Squeeze and broadcast `other` to match `reference` shape where possible.
 
     :param reference: Reference array to match shape to.
-    :type reference: np.ndarray
+    :type reference: npt.NDArray
     :param other: Array to reconcile shape of.
-    :type other: np.ndarray
+    :type other: npt.NDArray
     :param discrete_actions: Whether the actions are discrete, defaults to False
     :type discrete_actions: bool, optional
     :return: Tuple of reconciled arrays.
-    :rtype: tuple[np.ndarray, np.ndarray]
+    :rtype: tuple[npt.NDArray, npt.NDArray]
     """
     if reference.shape == other.shape:
         return reference, other
@@ -2629,25 +2631,25 @@ def _reconcile_shapes(
 
 def apply_env_defined_actions(
     agent_ids: list[str],
-    action_dict: dict[str, np.ndarray],
-    env_defined_actions: dict[str, np.ndarray],
-    agent_masks: dict[str, np.ndarray],
+    action_dict: dict[str, npt.NDArray],
+    env_defined_actions: dict[str, npt.NDArray],
+    agent_masks: dict[str, npt.NDArray],
     discrete_actions: bool,
-) -> dict[str, np.ndarray]:
+) -> dict[str, npt.NDArray]:
     """Apply env-defined actions to agent actions where the agent mask is True.
 
     :param agent_ids: Agent identifiers to process.
     :type agent_ids: list[str]
     :param action_dict: Mutable mapping of agent id → action array.
-    :type action_dict: dict[str, np.ndarray]
+    :type action_dict: dict[str, npt.NDArray]
     :param env_defined_actions: Mapping of agent id → override action array.
-    :type env_defined_actions: dict[str, np.ndarray]
+    :type env_defined_actions: dict[str, npt.NDArray]
     :param agent_masks: Mapping of agent id → boolean mask array.
-    :type agent_masks: dict[str, np.ndarray]
+    :type agent_masks: dict[str, npt.NDArray]
     :param discrete_actions: Whether the actions are discrete, defaults to False
     :type discrete_actions: bool, optional
     :return: `action_dict` with overrides applied in-place.
-    :rtype: dict[str, np.ndarray]
+    :rtype: dict[str, npt.NDArray]
     """
     for agent_id in agent_ids:
         action = action_dict[agent_id]

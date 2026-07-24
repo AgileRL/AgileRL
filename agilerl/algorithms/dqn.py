@@ -4,6 +4,7 @@ from typing import Any
 
 import gymnasium as gym
 import numpy as np
+import numpy.typing as npt
 import torch
 from accelerate import Accelerator
 from gymnasium import spaces
@@ -236,11 +237,11 @@ class DQN(RLAlgorithm[TensorDict]):
         action_mask: ActionMaskInput = None,
         *args: Any,
         **kwargs: Any,
-    ) -> np.ndarray:
+    ) -> npt.NDArray:
         """Return the next action to take in the environment.
 
         :param obs: The current observation from the environment
-        :type obs: np.ndarray, dict[str, np.ndarray], tuple[np.ndarray]
+        :type obs: npt.NDArray, dict[str, npt.NDArray], tuple[npt.NDArray]
         :param epsilon: Probability of taking a random action for exploration, defaults to 0
         :type epsilon: float, optional
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None

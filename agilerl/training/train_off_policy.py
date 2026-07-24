@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import gymnasium as gym
 import numpy as np
+import numpy.typing as npt
 import torch
 from accelerate import Accelerator
 from tensordict import TensorDict
@@ -60,7 +61,7 @@ class _NStepAgent(Protocol):
         experiences: TensorDict,
         n_experiences: TensorDict | None = None,
         per: bool = False,
-    ) -> tuple[float, torch.Tensor | None, np.ndarray | None]: ...
+    ) -> tuple[float, torch.Tensor | None, npt.NDArray | None]: ...
 
 
 def _learn_from_buffer(

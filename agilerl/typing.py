@@ -30,6 +30,7 @@ from typing import (
 
 import gymnasium as gym
 import numpy as np
+import numpy.typing as npt
 import torch
 from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
@@ -164,13 +165,13 @@ SupportedActionSpace = (
 MultiAgentSpacesType = Iterable[spaces.Space] | Mapping[str, spaces.Space] | spaces.Dict
 
 # ── Array / tensor container aliases ─────────────────────────────────────────
-ArrayOrTensor = np.ndarray | torch.Tensor
+ArrayOrTensor = npt.NDArray | torch.Tensor
 # Plain dict of tensors (the tensor twin of ``ArrayDict``); distinct from the
 # tensordict-library ``TensorDict`` class also used in ``TorchObsType``.
 TensorMapping = dict[str, torch.Tensor]
 TensorTuple = tuple[torch.Tensor, ...]
-ArrayDict = dict[str, np.ndarray]
-ArrayTuple = tuple[np.ndarray, ...]
+ArrayDict = dict[str, npt.NDArray]
+ArrayTuple = tuple[npt.NDArray, ...]
 # Imported mid-file so ``modules.configs`` can load without a typing↔configs cycle
 # (``modules.__init__`` is lazy). Canonical definition lives in ``modules.configs``.
 from agilerl.modules.configs import NetConfigType as NetConfigType  # noqa: E402
@@ -180,15 +181,15 @@ GymSpaceType = SupportedObservationSpace | list[SupportedObservationSpace]
 LLMObsType = list[ReasoningPrompts] | ReasoningPrompts
 
 # ── Observation & action aliases ─────────────────────────────────────────────
-NumpyObsType = np.ndarray | ArrayDict | ArrayTuple
+NumpyObsType = npt.NDArray | ArrayDict | ArrayTuple
 TorchObsType = torch.Tensor | TensorDict | TensorTuple | TensorMapping
 ObservationType = NumpyObsType | TorchObsType | Number | LLMObsType
 MultiAgentObservationType = dict[str, ObservationType]
 # Per-agent tensor observations keyed by agent id (used by the multi-agent wrappers).
 MultiAgentTensorObsType = dict[str, TorchObsType]
-ActionType = int | float | np.ndarray | torch.Tensor
+ActionType = int | float | npt.NDArray | torch.Tensor
 # A recorded fitness: a scalar, or a per-sub-agent row (multi-agent, sum_scores=False).
-FitnessValue = float | np.ndarray
+FitnessValue = float | npt.NDArray
 
 # Raw Gym/PettingZoo ``info["action_mask"]`` before stacking into a tensor
 # (1 = legal, 0 = illegal). ``None`` means the agent provided no mask.
@@ -211,15 +212,15 @@ def coerce_action_mask(value: object) -> MaybeActionMask:
 
 
 def numpy_action_mask(
-    value: np.ndarray | Sequence[np.ndarray] | torch.Tensor,
-) -> np.ndarray:
+    value: npt.NDArray | Sequence[npt.NDArray] | torch.Tensor,
+) -> npt.NDArray:
     """Stack or convert a non-None :data:`ActionMaskInput` to ``np.ndarray``."""
     if isinstance(value, torch.Tensor):
         return value.detach().cpu().numpy()
     if isinstance(value, np.ndarray):
         if value.dtype == object:
             return np.stack(list(value))
-        return value
+        return np.asarray(value)
     return np.stack(list(value))
 
 
@@ -229,7 +230,7 @@ MultiAgentActionMasks = Mapping[str, MaybeActionMask | torch.Tensor]
 # Masks accepted by single-agent ``get_action`` / distribution heads: stacked
 # ndarray, vectorized per-env masks, or already tensorised. Raw
 # ``Sequence[int | float | bool]`` from env info belongs in ``MaybeActionMask``.
-ActionMaskInput = np.ndarray | Sequence[np.ndarray] | torch.Tensor | None
+ActionMaskInput = npt.NDArray | Sequence[npt.NDArray] | torch.Tensor | None
 
 # MADDPG / MATD3 / base-like ``process_infos`` return.
 ProcessInfosReturn = tuple[
@@ -292,9 +293,9 @@ ObsShape = tuple[int, ...] | dict[str, tuple[int, ...]] | tuple[tuple[int, ...],
 # Info stays ``dict[str, Any]`` to match Gymnasium's open info bags.
 RolloutReturn = tuple[
     list[float],
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
+    npt.NDArray,
+    npt.NDArray,
+    npt.NDArray,
     dict[str, Any],
 ]
 
@@ -487,7 +488,7 @@ JSONValue = None | bool | int | float | str | list["JSONValue"] | dict[str, "JSO
 # Leaves are tensors or arrays; interior nodes are dicts, lists, or tuples.
 PyTree = (
     torch.Tensor
-    | np.ndarray
+    | npt.NDArray
     | dict[str, "PyTree"]
     | list["PyTree"]
     | tuple["PyTree", ...]

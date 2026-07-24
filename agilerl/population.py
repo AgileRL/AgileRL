@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 import numpy as np
+import numpy.typing as npt
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
@@ -83,7 +84,7 @@ class PopulationMetrics:
     indices: list[int]
     additional_metrics: list[dict[str, float]]
     hyperparameters: list[dict[str, float]]
-    nonscalar_additional_metrics: list[dict[str, np.ndarray | None]] = field(
+    nonscalar_additional_metrics: list[dict[str, npt.NDArray | None]] = field(
         default_factory=list
     )
 
@@ -235,13 +236,13 @@ class MetricsReport:
         """
         return self.metrics.to_dict()
 
-    def to_nonscalar_dict(self) -> dict[str, np.ndarray]:
+    def to_nonscalar_dict(self) -> dict[str, npt.NDArray]:
         """Return per-agent non-scalar metrics for TensorBoard-style backends.
 
         :returns: Dictionary mapping ``train/agent_{idx}/{name}`` to arrays.
-        :rtype: dict[str, numpy.ndarray]
+        :rtype: dict[str, npt.NDArray]
         """
-        d: dict[str, np.ndarray] = {}
+        d: dict[str, npt.NDArray] = {}
         nonscalar_metrics = self.metrics.nonscalar_additional_metrics
         for idx, agent_metrics in enumerate(nonscalar_metrics):
             for name, val in agent_metrics.items():
@@ -772,15 +773,15 @@ class Population(Generic[AgentT]):
             result.append(d)
         return result
 
-    def _collect_nonscalar_metrics(self) -> list[dict[str, np.ndarray | None]]:
+    def _collect_nonscalar_metrics(self) -> list[dict[str, npt.NDArray | None]]:
         """Collect per-agent non-scalar metric arrays (e.g. histograms).
 
         :returns: One dict per agent mapping metric names to their accumulated arrays.
-        :rtype: list[dict[str, numpy.ndarray | None]]
+        :rtype: list[dict[str, npt.NDArray | None]]
         """
-        result: list[dict[str, np.ndarray | None]] = []
+        result: list[dict[str, npt.NDArray | None]] = []
         for agent in self.agents:
-            d: dict[str, np.ndarray | None] = {}
+            d: dict[str, npt.NDArray | None] = {}
             metrics = agent.metrics
             for name in self.nonscalar_metric_names:
                 if isinstance(metrics, MultiAgentMetrics):

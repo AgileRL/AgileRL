@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from typing import Any, TypeVar
 
 import numpy as np
+import numpy.typing as npt
 from accelerate.utils import broadcast_object_list
 
 from agilerl.algorithms.core.base import LLMAlgorithm
@@ -40,7 +41,7 @@ class TournamentSelection:
         self.language_model = None
 
     @staticmethod
-    def _scalar_fitness(fitness: float | np.ndarray | dict[str, float]) -> float:
+    def _scalar_fitness(fitness: float | npt.NDArray | dict[str, float]) -> float:
         """Reduce a possibly vector-valued fitness to a single scalar for ranking.
 
         When ``sum_scores=False``, multi-agent algorithms store per-sub-agent
@@ -53,11 +54,11 @@ class TournamentSelection:
             return float(np.mean(fitness))
         return float(fitness)
 
-    def _tournament(self, fitness_values: Sequence[float] | np.ndarray) -> int:
+    def _tournament(self, fitness_values: Sequence[float] | npt.NDArray) -> int:
         """Perform tournament selection given a list of fitness values.
 
         :param fitness_values: List of fitness values
-        :type fitness_values: Sequence[float] | np.ndarray
+        :type fitness_values: Sequence[float] | npt.NDArray
         :return: Index of the selected winner
         :rtype: int
         """
@@ -68,13 +69,13 @@ class TournamentSelection:
     def _elitism(
         self,
         population: list[AgentT],
-    ) -> tuple[AgentT, np.ndarray, int]:
+    ) -> tuple[AgentT, npt.NDArray, int]:
         """Perform elitism selection given a population of agents.
 
         :param population: Population of agents
         :type population: list[AgentT]
         :return: Best performing member of the population, rank array, and max id
-        :rtype: tuple[AgentT, np.ndarray, int]
+        :rtype: tuple[AgentT, npt.NDArray, int]
         """
         last_fitness = [self._scalar_fitness(indi.fitness[-1]) for indi in population]
         rank = np.argsort(last_fitness).argsort()

@@ -4,6 +4,7 @@ import contextlib
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+import numpy.typing as npt
 from gymnasium.utils import seeding
 from pettingzoo.utils.env import ActionType, AgentID, ObsType, ParallelEnv
 
@@ -48,7 +49,7 @@ class PettingZooAutoResetParallelWrapper(ParallelEnv[AgentID, ObsType, ActionTyp
         :param options: Options dictionary, defaults to None
         :type options: dict | None, optional
         :return: Tuple of (observations, infos)
-        :rtype: tuple[dict[str, np.ndarray], dict[str, Any]]
+        :rtype: tuple[dict[str, npt.NDArray], dict[str, Any]]
         """
         self.np_random, _ = seeding.np_random(seed)
 
@@ -70,18 +71,18 @@ class PettingZooAutoResetParallelWrapper(ParallelEnv[AgentID, ObsType, ActionTyp
         :param actions: Actions dictionary
         :type actions: dict[str, ActionType]
         :return: Tuple of (observations, rewards, terminations, truncations, infos)
-        :rtype: tuple[dict[str, np.ndarray], dict[str, float], dict[str, bool], dict[str, bool], dict[str, Any]]
+        :rtype: tuple[dict[str, npt.NDArray], dict[str, float], dict[str, bool], dict[str, bool], dict[str, Any]]
         """
         obs, rewards, terminations, truncations, infos = self.env.step(actions)
         if np.all(list(terminations.values()) or list(truncations.values())):
             obs, infos = self.env.reset()
         return obs, rewards, terminations, truncations, infos
 
-    def render(self) -> None | np.ndarray | str | list:
+    def render(self) -> None | npt.NDArray | str | list:
         """Render the environment.
 
         :return: Rendered environment
-        :rtype: None | np.ndarray | str | list
+        :rtype: None | npt.NDArray | str | list
         """
         return self.env.render()
 

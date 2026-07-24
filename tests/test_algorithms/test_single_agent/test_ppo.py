@@ -1,5 +1,6 @@
 import gymnasium
 import numpy as np
+import numpy.typing as npt
 import pytest
 import torch
 from accelerate import Accelerator
@@ -91,7 +92,7 @@ def _obs_batch_at(
     observation_space: spaces.Space,
     states,
     index: int,
-) -> np.ndarray | dict[str, np.ndarray] | tuple[np.ndarray, ...]:
+) -> npt.NDArray | dict[str, npt.NDArray] | tuple[npt.NDArray, ...]:
     """Single env observation batch (shape (1, ...)) at time ``index`` from stacked tensors."""
     if isinstance(observation_space, spaces.Dict):
         return {
@@ -111,7 +112,7 @@ def _obs_batch_at(
 def _bootstrap_next_obs(
     observation_space: spaces.Space,
     next_states,
-) -> np.ndarray | dict[str, np.ndarray] | tuple[np.ndarray, ...]:
+) -> npt.NDArray | dict[str, npt.NDArray] | tuple[npt.NDArray, ...]:
     """Bootstrap next observation batch already shaped for ``num_envs == 1``."""
     if isinstance(observation_space, spaces.Dict):
         return {

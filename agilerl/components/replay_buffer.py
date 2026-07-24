@@ -1,6 +1,7 @@
 from collections import deque
 
 import numpy as np
+import numpy.typing as npt
 import torch
 from tensordict import TensorDict
 
@@ -482,15 +483,15 @@ class PrioritizedReplayBuffer(ReplayBuffer):
 
     def update_priorities(
         self,
-        indices: torch.Tensor | np.ndarray,
-        priorities: torch.Tensor | np.ndarray,
+        indices: torch.Tensor | npt.NDArray,
+        priorities: torch.Tensor | npt.NDArray,
     ) -> None:
         """Update priorities of the sampled transitions.
 
         :param indices: Indices of transitions to update
-        :type indices: torch.Tensor | numpy.ndarray
+        :type indices: torch.Tensor | npt.NDArray
         :param priorities: New priorities
-        :type priorities: torch.Tensor | numpy.ndarray
+        :type priorities: torch.Tensor | npt.NDArray
         """
         # float64 matches the original max(priority.item(), 1e-5) clamp precision.
         idx_np = torch.as_tensor(indices).flatten().cpu().numpy()

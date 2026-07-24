@@ -5,6 +5,7 @@ from types import FunctionType, MethodType
 from typing import Any, Literal, overload
 
 import numpy as np
+import numpy.typing as npt
 import torch
 
 from agilerl.protocols import EvolvableAlgorithmProtocol, NamedCallable
@@ -141,19 +142,19 @@ class RLParameter:
     :param grow_factor: The factor by which the hyperparameter will be grown during mutation. Default is 1.2.
     :type grow_factor: float
     :param dtype: The data type of the hyperparameter. Default is float.
-    :type dtype: type[float] | type[int] | type[np.ndarray]
+    :type dtype: type[float] | type[int] | type[npt.NDArray]
     :param value: The current value of the hyperparameter. Default is None.
-    :type value: int | float | np.ndarray | None
+    :type value: int | float | npt.NDArray | None
     """
 
     min: float
     max: float
     shrink_factor: float = 0.8
     grow_factor: float = 1.2
-    dtype: type[float] | type[int] | type[np.ndarray] = float
-    value: int | float | np.ndarray | None = field(default=None, init=False)
+    dtype: type[float] | type[int] | type[npt.NDArray] = float
+    value: int | float | npt.NDArray | None = field(default=None, init=False)
 
-    def mutate(self) -> int | float | np.ndarray:
+    def mutate(self) -> int | float | npt.NDArray:
         """Mutate the hyperparameter value by either growing or shrinking it.
 
         For scalar values (int/float), the mutation applies the grow/shrink factor uniformly.
@@ -161,7 +162,7 @@ class RLParameter:
         of min/max constraints and preservation of the original array's dtype.
 
         :return: The mutated hyperparameter value.
-        :rtype: int | float | np.ndarray
+        :rtype: int | float | npt.NDArray
         """
         value = self.value
         assert value is not None, "Hyperparameter value is not set"

@@ -29,6 +29,7 @@ from typing import (
 
 import dill
 import numpy as np
+import numpy.typing as npt
 import torch
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list, set_seed
@@ -543,7 +544,7 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         raise NotImplementedError
 
     @abstractmethod
-    def test(self, *args: Any, **kwargs: Any) -> float | np.ndarray:
+    def test(self, *args: Any, **kwargs: Any) -> float | npt.NDArray:
         """Abstract method for testing the algorithm.
 
         Single-agent and bandit algorithms return a scalar mean score;
@@ -1982,7 +1983,7 @@ class MultiAgentRLAlgorithm(
         ):
             return None, None
 
-        raw_actions: dict[str, ActionType | None] = {}
+        raw_actions: dict[str, int | float | np.ndarray | torch.Tensor | None] = {}
         for agent, info in infos.items():
             if agent not in self.agent_ids:
                 continue
@@ -2272,13 +2273,13 @@ class MultiAgentRLAlgorithm(
             i.e. any given agent will always terminate at the same timestep in different vectorized environments.
 
         :param group_outputs: Dictionary to be disassembled, has the form {'agent': [4, 7, 8]}
-        :type group_outputs: dict[str, np.ndarray]
+        :type group_outputs: dict[str, npt.NDArray]
         :param vect_dim: Vectorization dimension size, i.e. number of vect envs
         :type vect_dim: int
         :param grouped_agents: Dictionary of grouped agent IDs
         :type grouped_agents: dict[str, list[str]]
         :return: Assembled dictionary, e.g. {'agent_0': 4, 'agent_1': 7, 'agent_2': 8}
-        :rtype: dict[str, np.ndarray]
+        :rtype: dict[str, npt.NDArray]
         """
         output_dict = {}
         for group_id, agent_ids in grouped_agents.items():
@@ -2298,15 +2299,15 @@ class MultiAgentRLAlgorithm(
         return output_dict
 
     def sum_shared_rewards(
-        self, rewards: Mapping[str, np.ndarray | float | int]
+        self, rewards: Mapping[str, npt.NDArray | float | int]
     ) -> ArrayDict:
         """Sum the rewards for grouped agents.
 
         :param rewards: Reward dictionary from environment. Vectorised envs
             provide arrays; a non-vectorised ``ParallelEnv`` provides scalars.
-        :type rewards: dict[str, np.ndarray | float]
+        :type rewards: dict[str, npt.NDArray | float]
         :return: Summed rewards dictionary
-        :rtype: dict[str, np.ndarray]
+        :rtype: dict[str, npt.NDArray]
         """
         reward_shape = next(iter(rewards.values()))
         reward_shape = (
@@ -2329,11 +2330,11 @@ class MultiAgentRLAlgorithm(
         """Assembles individual agent outputs into batched outputs for shared policies.
 
         :param agent_outputs: Dictionary with individual agent outputs, e.g. {'agent_0': 4, 'agent_1': 7, 'agent_2': 8}
-        :type agent_outputs: dict[str, np.ndarray]
+        :type agent_outputs: dict[str, npt.NDArray]
         :param vect_dim: Vectorization dimension size, i.e. number of vect envs
         :type vect_dim: int
         :return: Assembled dictionary with the form {'agent': [4, 7, 8]}
-        :rtype: dict[str, np.ndarray]
+        :rtype: dict[str, npt.NDArray]
         """
         group_outputs = {}
         for group_id in self.shared_agent_ids:

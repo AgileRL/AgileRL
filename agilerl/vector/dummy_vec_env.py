@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Literal, overload
 
 import numpy as np
+import numpy.typing as npt
 from gymnasium import Env, spaces
 from gymnasium.vector import VectorEnv
 from gymnasium.vector.utils import batch_space
@@ -57,7 +58,7 @@ class DummyVecEnv(VectorEnv):
         *,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[np.ndarray, dict[str, Any]]:
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
         """Reset the environment and return batched observation.
 
         :param seed: Random seed for the reset.
@@ -65,15 +66,15 @@ class DummyVecEnv(VectorEnv):
         :param options: Additional options for the reset.
         :type options: dict[str, Any] | None
         :returns: A tuple of ``(obs, info)`` with a leading batch dim on *obs*.
-        :rtype: tuple[np.ndarray, dict[str, Any]]
+        :rtype: tuple[npt.NDArray, dict[str, Any]]
         """
         obs, info = self._env.reset(seed=seed, options=options)
         self._autoreset = False
         return np.expand_dims(obs, axis=0), info
 
     def step(
-        self, actions: np.ndarray
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+        self, actions: npt.NDArray
+    ) -> tuple[npt.NDArray, npt.NDArray, npt.NDArray, npt.NDArray, dict[str, Any]]:
         """Take a step in the environment.
 
         If the previous step ended the episode, the environment is reset
@@ -81,10 +82,10 @@ class DummyVecEnv(VectorEnv):
         with zero reward and ``False`` done flags.
 
         :param actions: Batched action array (shape ``(1, ...)``).
-        :type actions: np.ndarray
+        :type actions: npt.NDArray
         :returns: A tuple of ``(obs, reward, terminated, truncated, info)``
             with leading batch dimensions.
-        :rtype: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]
+        :rtype: tuple[npt.NDArray, npt.NDArray, npt.NDArray, npt.NDArray, dict[str, Any]]
         """
         if self._autoreset:
             obs, info = self._env.reset()
@@ -141,7 +142,7 @@ def _pz_placeholder(
     agent: str,
     name: Literal["observation"],
     obs_spaces: dict[str, spaces.Space],
-) -> np.ndarray: ...
+) -> npt.NDArray: ...
 
 
 @overload
@@ -149,14 +150,14 @@ def _pz_placeholder(
     agent: str,
     name: str,
     obs_spaces: dict[str, spaces.Space],
-) -> float | dict[str, Any] | np.ndarray: ...
+) -> float | dict[str, Any] | npt.NDArray: ...
 
 
 def _pz_placeholder(
     agent: str,
     name: str,
     obs_spaces: dict[str, spaces.Space],
-) -> float | dict[str, Any] | np.ndarray:
+) -> float | dict[str, Any] | npt.NDArray:
     """Return a NaN/zero placeholder for an inactive PettingZoo agent.
 
     Mirrors the convention used by :class:`AsyncPettingZooVecEnv`. The
@@ -271,9 +272,9 @@ class PzDummyVecEnv(PettingZooVecEnv):
 
         # Batch all outputs, filling placeholders for inactive agents
         batched_obs: dict[str, NumpyObsType] = {}
-        batched_reward: dict[str, np.ndarray] = {}
-        batched_terminated: dict[str, np.ndarray] = {}
-        batched_truncated: dict[str, np.ndarray] = {}
+        batched_reward: dict[str, npt.NDArray] = {}
+        batched_terminated: dict[str, npt.NDArray] = {}
+        batched_truncated: dict[str, npt.NDArray] = {}
 
         for agent in self.agents:
             if agent in obs:
@@ -337,7 +338,7 @@ class PzDummyVecEnv(PettingZooVecEnv):
         :rtype: PzStepReturn
         """
         if self._pending_actions is not None:
-            actions_dict: dict[str, np.ndarray] = {}
+            actions_dict: dict[str, npt.NDArray] = {}
             for agent in self.agents:
                 vals = [
                     env_actions.get(agent, np.nan)
@@ -349,11 +350,11 @@ class PzDummyVecEnv(PettingZooVecEnv):
         msg = "step_async() must be called before step_wait()"
         raise RuntimeError(msg)
 
-    def render(self) -> None | np.ndarray | str | list:
+    def render(self) -> None | npt.NDArray | str | list:
         """Render the underlying environment.
 
         :returns: Render output from the wrapped environment.
-        :rtype: None | np.ndarray | str | list
+        :rtype: None | npt.NDArray | str | list
         """
         return self._env.render()
 

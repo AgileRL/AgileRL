@@ -6,6 +6,7 @@ from typing import Any, Generic, TypeGuard, TypeVar
 
 import dill
 import numpy as np
+import numpy.typing as npt
 import torch
 from gymnasium import spaces
 from tensordict import TensorDict, TensorDictBase
@@ -687,7 +688,7 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
     def extract_inactive_agents(
         self,
         obs: dict[str, NumpyObsType],
-    ) -> tuple[dict[str, np.ndarray], dict[str, NumpyObsType]]:
+    ) -> tuple[dict[str, npt.NDArray], dict[str, NumpyObsType]]:
         """Extract the inactive agents from an observation. Inspects each key in the
         observation dictionary and, if all the values are `np.nan` (as set by
         ``AsyncPettingZooVecEnv``), the agent is considered inactive and removed from
@@ -700,9 +701,9 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
         :type obs: dict[str, NumpyObsType]
 
         :return: Tuple of inactive agents and filtered observations
-        :rtype: tuple[dict[str, np.ndarray], dict[str, NumpyObsType]]
+        :rtype: tuple[dict[str, npt.NDArray], dict[str, NumpyObsType]]
         """
-        inactive_agents: dict[str, np.ndarray] = {}
+        inactive_agents: dict[str, npt.NDArray] = {}
         agents_to_remove: list[str] = []
 
         # Process each agent's observations
@@ -723,7 +724,7 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
             # Create boolean mask for active agents. Reducing over a single axis of a
             # multi-dimensional sample always yields an array, but numpy's ``.all``
             # overloads widen the result to a scalar-or-array union.
-            active_mask = ~np.isnan(sample).all(axis=1)
+            active_mask = np.asarray(~np.isnan(sample).all(axis=1))
 
             # If all agents are active, skip
             if active_mask.all():
@@ -785,9 +786,9 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
 
     def _insert_placeholder_actions(
         self,
-        action_dict: dict[str, np.ndarray],
-        inactive_agents: dict[str, np.ndarray],
-    ) -> dict[str, np.ndarray]:
+        action_dict: dict[str, npt.NDArray],
+        inactive_agents: dict[str, npt.NDArray],
+    ) -> dict[str, npt.NDArray]:
         """Insert placeholder actions for inactive agents back into action dict."""
         for agent_id, inactive_array in inactive_agents.items():
             if agent_id not in action_dict:
@@ -820,12 +821,12 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
 
     def _align_async_off_policy_experiences(
         self,
-        experiences: Mapping[str, Mapping[str, np.ndarray]],
+        experiences: Mapping[str, Mapping[str, npt.NDArray]],
     ) -> TensorDict:
         """Align async off-policy experiences.
 
         :param experiences: Stacked experiences, keyed by field and then by agent ID
-        :type experiences: Mapping[str, Mapping[str, np.ndarray]]
+        :type experiences: Mapping[str, Mapping[str, npt.NDArray]]
 
         :return: Experiences with all fields aligned per agent
         :rtype: ExperiencesType
@@ -1001,7 +1002,7 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
 
         # Handle case where we haven't collected a next state for each sub-agent
         for agent_id in self.agent.agent_ids:
-            agent_next_state: np.ndarray | None = next_state.get(agent_id, None)
+            agent_next_state: npt.NDArray | None = next_state.get(agent_id, None)
 
             # If we haven't collected a next state for this agent yet, we need to use
             # last collected state as next_state

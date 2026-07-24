@@ -4,6 +4,7 @@ import gc
 from typing import TYPE_CHECKING, Any, NoReturn
 
 import numpy as np
+import numpy.typing as npt
 import torch
 
 from agilerl import HAS_LIGER_KERNEL
@@ -300,7 +301,7 @@ class SFT(LLMAlgorithm[SFTPrompts]):
 
         # ``aggregate_metrics_dict`` takes an invariant dict over the full raw
         # metric-value union, so annotate the averaged dict to that exact type.
-        averaged_metrics: dict[str, torch.Tensor | np.ndarray | float] = {
+        averaged_metrics: dict[str, torch.Tensor | npt.NDArray | float] = {
             key: value / max(num_updates, 1) for key, value in learn_metrics.items()
         }
 
@@ -381,7 +382,7 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         loop: int = 1,
         *args: Any,
         **kwargs: Any,
-    ) -> np.ndarray:
+    ) -> npt.NDArray:
         """Return the negative mean loss as a fitness score (higher is better).
 
         :param env: SFT environment providing evaluation batches
@@ -389,7 +390,7 @@ class SFT(LLMAlgorithm[SFTPrompts]):
         :param loop: Number of evaluation batches, defaults to 1
         :type loop: int, optional
         :return: Mean negative loss (scalar numpy array)
-        :rtype: np.ndarray
+        :rtype: npt.NDArray
         """
         with env.eval_mode(), torch.no_grad():
             prompts = env.reset()

@@ -5,6 +5,7 @@ from typing import Any, overload
 
 import gymnasium as gym
 import numpy as np
+import numpy.typing as npt
 import torch
 from accelerate import Accelerator
 from gymnasium import spaces
@@ -39,12 +40,12 @@ from agilerl.utils.algo_utils import (
     share_encoder_parameters,
 )
 
-ActionReturnType = tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+ActionReturnType = tuple[npt.NDArray, npt.NDArray, npt.NDArray, npt.NDArray]
 RecurrentActionReturnType = tuple[
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
+    npt.NDArray,
+    npt.NDArray,
+    npt.NDArray,
+    npt.NDArray,
     dict[str, torch.Tensor] | None,
 ]
 
@@ -640,7 +641,7 @@ class PPO(RLAlgorithm[TensorDict]):
         :param hidden_state: Hidden state for recurrent policies, defaults to None
         :type hidden_state: dict[str, torch.Tensor] | None
         :return: Action, log probability, entropy, state values, and (if recurrent) next hidden state
-        :rtype: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, torch.Tensor] | None] | tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+        :rtype: tuple[npt.NDArray, npt.NDArray, npt.NDArray, npt.NDArray, dict[str, torch.Tensor] | None] | tuple[npt.NDArray, npt.NDArray, npt.NDArray, npt.NDArray]
         """
         preprocessed_obs = self.preprocess_observation(obs)
         with torch.no_grad():

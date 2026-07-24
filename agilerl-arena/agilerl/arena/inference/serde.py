@@ -7,9 +7,10 @@ import io
 from typing import TypeAlias
 
 import numpy as np
+import numpy.typing as npt
 
 # The wire pytree: arrays (or None) at the leaves, nested through dicts/tuples.
-RLData: TypeAlias = np.ndarray | dict[str, "RLData"] | tuple["RLData", ...] | None
+RLData: TypeAlias = npt.NDArray | dict[str, "RLData"] | tuple["RLData", ...] | None
 SerializedRLData: TypeAlias = (
     str | dict[str, "SerializedRLData"] | tuple["SerializedRLData", ...] | None
 )
@@ -26,10 +27,10 @@ def _encode_array(data: np.ndarray, batched: bool) -> str:
     return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
-def _decode_array(data: str, batched: bool) -> np.ndarray:
+def _decode_array(data: str, batched: bool) -> npt.NDArray:
     """Decode a base64-encoded ``.npy`` payload back to an array."""
     decoded = base64.b64decode(data, validate=True)
-    arr: np.ndarray = np.load(io.BytesIO(decoded), allow_pickle=False)
+    arr: npt.NDArray = np.load(io.BytesIO(decoded), allow_pickle=False)
     return arr if batched else arr.squeeze(axis=0)
 
 

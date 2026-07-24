@@ -3,6 +3,7 @@ from typing import Any, SupportsFloat
 
 import gymnasium as gym
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
 from gymnasium import spaces
 
@@ -87,11 +88,11 @@ class BanditEnv:
         )
         self.single_action_space = spaces.Discrete(self.arms)
 
-    def _new_state_and_target_action(self) -> tuple[np.ndarray, int]:
+    def _new_state_and_target_action(self) -> tuple[npt.NDArray, int]:
         """Generate a new state and target action.
 
         :return: Tuple of (state, target)
-        :rtype: tuple[np.ndarray, int]
+        :rtype: tuple[npt.NDArray, int]
         """
         # Randomly select next context
         r = random.randint(0, len(self.features) - 1)
@@ -107,13 +108,13 @@ class BanditEnv:
 
         return next_state, target
 
-    def step(self, k: int) -> tuple[np.ndarray, float]:
+    def step(self, k: int) -> tuple[npt.NDArray, float]:
         """Step the environment and return the state and reward.
 
         :param k: Action
         :type k: int
         :return: Tuple of (state, reward)
-        :rtype: tuple[np.ndarray, float]
+        :rtype: tuple[npt.NDArray, float]
         """
         # Calculate reward from action in previous state
         reward = self.prev_reward[k]
@@ -128,11 +129,11 @@ class BanditEnv:
 
         return next_state, float(reward)
 
-    def reset(self) -> np.ndarray:
+    def reset(self) -> npt.NDArray:
         """Reset the environment and return the initial state.
 
         :return: Initial state
-        :rtype: np.ndarray
+        :rtype: npt.NDArray
         """
         next_state, target = self._new_state_and_target_action()
         next_reward = np.zeros(self.arms, dtype=np.float32)

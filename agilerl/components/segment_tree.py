@@ -2,6 +2,7 @@ import operator
 from collections.abc import Callable
 
 import numpy as np
+import numpy.typing as npt
 
 
 class SegmentTree:
@@ -112,23 +113,23 @@ class SegmentTree:
 
         return float(self.tree[self.capacity + idx])
 
-    def get_batch(self, indices: np.ndarray) -> np.ndarray:
+    def get_batch(self, indices: npt.NDArray) -> npt.NDArray:
         """Vectorised leaf read for many indices at once.
 
         :param indices: Leaf indices in ``[0, capacity)``.
-        :type indices: np.ndarray
+        :type indices: npt.NDArray
         :return: Leaf values, one per index.
-        :rtype: np.ndarray
+        :rtype: npt.NDArray
         """
         return self.tree[self.capacity + np.asarray(indices, dtype=np.intp)]
 
-    def update_batch(self, indices: np.ndarray, values: np.ndarray) -> None:
+    def update_batch(self, indices: npt.NDArray, values: npt.NDArray) -> None:
         """Set many leaf values at once and update their ancestors.
 
         :param indices: Leaf indices in ``[0, capacity)``.
-        :type indices: np.ndarray
+        :type indices: npt.NDArray
         :param values: New leaf values, one per index.
-        :type values: np.ndarray
+        :type values: npt.NDArray
         """
         indices = np.asarray(indices, dtype=np.intp)
         if indices.size == 0:
@@ -194,13 +195,13 @@ class SumSegmentTree(SegmentTree):
                 idx = right
         return idx - self.capacity
 
-    def retrieve_batch(self, upperbounds: np.ndarray) -> np.ndarray:
+    def retrieve_batch(self, upperbounds: npt.NDArray) -> npt.NDArray:
         """Vectorised :meth:`retrieve` for a whole batch of upper bounds.
 
         :param upperbounds: Upper bounds for cumulative sum, one per sample.
-        :type upperbounds: np.ndarray
+        :type upperbounds: npt.NDArray
         :return: Leaf indices in ``[0, capacity)``, one per upper bound.
-        :rtype: np.ndarray
+        :rtype: npt.NDArray
         """
         ub = np.asarray(upperbounds, dtype=np.float64).copy()
         idx = np.ones(ub.shape, dtype=np.intp)  # start every query at the root

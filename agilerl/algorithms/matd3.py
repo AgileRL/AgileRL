@@ -6,6 +6,7 @@ from dataclasses import asdict
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 import torch
 from accelerate import Accelerator
 from gymnasium import spaces
@@ -583,7 +584,7 @@ class MATD3(MultiAgentRLAlgorithm[TensorDict]):
             group_ids=list(grouped_agents.keys()),
         )
 
-        grouped_actions: dict[str, np.ndarray] = {}
+        grouped_actions: dict[str, npt.NDArray] = {}
         for group_id in grouped_agents:
             actor = self.actors[group_id]
             actor.eval()
@@ -987,7 +988,7 @@ class MATD3(MultiAgentRLAlgorithm[TensorDict]):
         max_steps: int | None = None,
         loop: int = 3,
         sum_scores: bool = True,
-    ) -> float | np.ndarray:
+    ) -> float | npt.NDArray:
         """Return mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
@@ -999,7 +1000,7 @@ class MATD3(MultiAgentRLAlgorithm[TensorDict]):
         :param sum_scores: Boolean flag to indicate whether to sum sub-agent scores, defaults to True
         :type sum_scores: bool, optional
         :return: Mean test score, or per-agent scores when ``sum_scores`` is False
-        :rtype: float | np.ndarray
+        :rtype: float | npt.NDArray
         """
         self.set_training_mode(False)
         with torch.no_grad():

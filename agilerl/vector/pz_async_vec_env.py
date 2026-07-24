@@ -54,7 +54,7 @@ def reshape_observation(
     """Reshape the raw data to the correct shape for the observation space.
 
     :param raw_data: The raw data to reshape
-    :type raw_data: np.ndarray, dict[str, np.ndarray], tuple[np.ndarray, ...]
+    :type raw_data: npt.NDArray, dict[str, npt.NDArray], tuple[npt.NDArray, ...]
     :param space: The observation space
     :type space: gymnasium.spaces.Space
     :param num_envs: The number of environments
@@ -310,7 +310,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
 
         :param actions: List of dictionaries of length num_envs, each sub dictionary contains
             actions for each agent in a given environment
-        :type actions: list[dict[str, int | float | np.ndarray]]
+        :type actions: list[dict[str, int | float | npt.NDArray]]
         """
         self._assert_is_running()
         if self._state != AsyncState.DEFAULT:

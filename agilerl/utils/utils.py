@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 import gymnasium as gym
 import numpy as np
+import numpy.typing as npt
 import tqdm
 import wandb
 from accelerate import Accelerator
@@ -1469,17 +1470,17 @@ def init_loggers(
 
 
 def calculate_vectorized_scores(
-    rewards: np.ndarray,
-    terminations: np.ndarray,
+    rewards: npt.NDArray,
+    terminations: npt.NDArray,
     include_unterminated: bool = False,
     only_first_episode: bool = True,
 ) -> list[float]:
     """Calculate the vectorized scores for episodes based on rewards and terminations.
 
     :param rewards: Array of rewards for each environment.
-    :type rewards: np.ndarray
+    :type rewards: npt.NDArray
     :param terminations: Array indicating termination points for each environment.
-    :type terminations: np.ndarray
+    :type terminations: npt.NDArray
     :param include_unterminated: Whether to include rewards from unterminated episodes, defaults to False.
     :type include_unterminated: bool, optional
     :param only_first_episode: Whether to consider only the first episode, defaults to True.

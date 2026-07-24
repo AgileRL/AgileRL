@@ -4,6 +4,7 @@ from collections import OrderedDict
 from typing import Any, TypeVar
 
 import numpy as np
+import numpy.typing as npt
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -955,11 +956,11 @@ class MLP(EvolvableMLP):
         )
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x: torch.Tensor | np.ndarray) -> torch.Tensor:
+    def forward(self, x: torch.Tensor | npt.NDArray) -> torch.Tensor:
         """Return output of neural network.
 
         :param x: Neural network input
-        :type x: torch.Tensor() or np.array
+        :type x: torch.Tensor() or npt.NDArray
         """
         # convert input to tensor if it is not already
         if not isinstance(x, torch.Tensor):

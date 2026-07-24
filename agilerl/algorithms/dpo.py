@@ -4,6 +4,7 @@ import gc
 from typing import TYPE_CHECKING, Any, NoReturn
 
 import numpy as np
+import numpy.typing as npt
 import torch
 import torch.nn.functional as F
 
@@ -361,7 +362,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
     def _dpo_loss(
         self,
         batch_size: int,
-        minibatch_idxs: np.ndarray,
+        minibatch_idxs: npt.NDArray,
         chosen_input_ids: torch.Tensor,
         chosen_attention_mask: torch.Tensor,
         rejected_input_ids: torch.Tensor,
@@ -665,7 +666,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         loop: int = 1,
         *args: Any,
         **kwargs: Any,
-    ) -> np.ndarray:
+    ) -> npt.NDArray:
         """Return the fitness (test) score of the agent.
 
         :param env: The environment to be tested in
@@ -673,7 +674,7 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 1
         :type loop: int, optional
         :return: Mean test score (numpy array)
-        :rtype: np.ndarray
+        :rtype: npt.NDArray
         """
         with env.eval_mode(), torch.no_grad():
             prompts = env.reset()

@@ -6,6 +6,7 @@ from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import numpy as np
+import numpy.typing as npt
 import torch
 
 from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
@@ -680,7 +681,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         loop: int = 1,
         *args: Any,
         **kwargs: Any,
-    ) -> np.ndarray:
+    ) -> npt.NDArray:
         """Return fitness (test) score of llm on test sub-set.
 
         :param env: Dataset-style ``ReasoningGym`` environment or tokenized
@@ -978,7 +979,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
         completion_ids: torch.Tensor,
         action_masks: torch.Tensor,
         turn_ids: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, np.ndarray]:
+    ) -> tuple[torch.Tensor, npt.NDArray]:
         """Group-relative advantages at the resolved granularity, post-processed.
 
         Post-processing (zero-filter / whiten / clip) is shape-agnostic across
@@ -1285,7 +1286,7 @@ class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
     def _loss(
         self,
         batch_size: int,
-        minibatch_idxs: np.ndarray,
+        minibatch_idxs: npt.NDArray,
         completion_ids: torch.Tensor,
         action_mask: torch.Tensor,
         advantages: torch.Tensor,

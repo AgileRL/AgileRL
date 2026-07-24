@@ -5,6 +5,7 @@ from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
+import numpy.typing as npt
 import torch
 from accelerate import Accelerator
 
@@ -824,7 +825,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         loop: int = 1,
         *args: Any,
         **kwargs: Any,
-    ) -> np.ndarray:
+    ) -> npt.NDArray:
         """Return fitness (test) score of llm on test sub-set.
 
         ``ReasoningGym`` (and compatible dataset envs): ``reset`` returns a batch
@@ -838,7 +839,7 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
         :param loop: Number of outer test iterations (dataloader passes or episodes).
         :type loop: int
         :return: Mean reward from the test loop (scalar numpy array).
-        :rtype: np.ndarray
+        :rtype: npt.NDArray
         """
         eval_context = getattr(env, "eval_mode", nullcontext)
         with eval_context():
