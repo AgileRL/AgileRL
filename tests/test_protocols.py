@@ -462,7 +462,7 @@ class TestModuleDictProtocol:
         _ = ModuleDictProtocol.keys(mdl)
         _ = ModuleDictProtocol.values(mdl)
         _ = ModuleDictProtocol.items(mdl)
-        _ = ModuleDictProtocol.modules(mdl)
+        _ = ModuleDictProtocol.evolvable_modules(mdl)
         _ = ModuleDictProtocol.get_mutation_methods(mdl)
         ModuleDictProtocol.filter_mutation_methods(mdl, "add")
         _ = ModuleDictProtocol.mutation_methods.fget(mdl)
