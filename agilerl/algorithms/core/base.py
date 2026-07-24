@@ -247,9 +247,12 @@ IndividualT = TypeVar(
 )
 
 
-class _RegistryMeta(type):
-    """Metaclass to wrap registry information after algorithm is done
-    initializing with specified network groups and optimizers.
+class RegistryMeta(ABCMeta):
+    """Metaclass that runs registry initialization on top of ABC support.
+
+    After an algorithm finishes initializing with its specified network groups
+    and optimizers, this triggers ``_registry_init`` so the networks, optimizers,
+    and mutatable hyperparameters are registered on the instance.
     """
 
     def __call__(
@@ -267,10 +270,6 @@ class _RegistryMeta(type):
             instance._registry_init()
 
         return instance
-
-
-class RegistryMeta(_RegistryMeta, ABCMeta):
-    """Metaclass combining registry initialization with ABC support."""
 
 
 def get_checkpoint_dict(
