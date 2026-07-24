@@ -254,7 +254,7 @@ class MultiFrequencySelection:
         return float(fitness)
 
     def _rank(self, agents: PopulationType) -> PopulationType:
-        """Return agent sorted by scalar fitness, highest first.
+        """Return agents sorted by scalar fitness, highest first.
 
         :param agents: The agents to rank.
         :type agents: list
@@ -723,6 +723,7 @@ class MultiFrequencySelection:
 
         decisions: list[tuple[Any, Any, str, Any]] = []
         external_counter = 0
+        # Algorithm 2 of the paper: candidates and open slots are matched greedily
         for open_agent in open_for_migration:
             if external_counter >= len(external):
                 break

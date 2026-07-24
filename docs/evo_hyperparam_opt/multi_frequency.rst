@@ -26,15 +26,18 @@ they are mutated. Winners, survivors and migrants pass through untouched.
 
 .. figure:: ../_static/mf_pbt_evolution_step.png
    :align: center
+   :width: 100%
+   :alt: A single MF-PBT evolution step across evaluation, selection and mutation.
 
-   A single MF-PBT evolution step over a population split into three subpopulations that
-   each evolve at their own frequency (here every 1, 3 and 10 cycles). Only the
-   subpopulations due this cycle are evolved (subpopulations 1 and 3 in this example).
-   Each is ranked into the four brackets — winner, survivor, open-for-migration and loser
-   — its losers are replaced by mutated clones of its winners, and its open-for-migration
-   slots are filled by migration: a full clone (weights and hyperparameters) from a
-   slower subpopulation, or a weights-only clone (which adopts the subpopulation elite's
-   hyperparameters) from a faster one.
+   A single MF-PBT evolution step, illustrated for a fast subpopulation (Agents 1–4,
+   *due* to evolve this cycle) alongside a slow subpopulation (Agents 5–8, left untouched
+   this cycle). **1. Evaluation** collects the fitness of all the agents, which is used to
+   rank the evolved subpopulation into four brackets: winner, survivor, open-for-migration
+   and loser. **2. Multi-frequency selection** replaces the loser (Agent 4) with a clone
+   of the winner (Agent 1), and fills the open-for-migration slot (Agent 3) by migration,
+   here a full clone (weights *and* hyperparameters) of Agent 7, the strongest agent from
+   the slower subpopulation. **3. Mutation** perturbs only the winner-clone that replaced
+   the loser; the migrant, winner and survivor pass through untouched.
 
 **When to use it.** MF-PBT shines with **16 or more agents** (as recommended by the
 paper), where there is room for several subpopulations at different frequencies: its

@@ -414,7 +414,7 @@ class EvolvableAlgorithmProtocol(Protocol):
 class SelectionStrategyProtocol(Protocol):
     """Protocol for population selection strategies that drive evolutionary HPO.
 
-    :cvar population_size: Total number of agents in the population.
+    :ivar population_size: Total number of agents in the population.
     :vartype population_size: int
     """
 
