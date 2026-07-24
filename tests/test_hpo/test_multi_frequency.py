@@ -81,7 +81,8 @@ class FakeAgent:
         self.reinit_called = False
 
     def clone(self, index=None, wrap=False):
-        new = FakeAgent(
+        # type(self) so subclasses adding their own bookkeeping survive cloning
+        new = type(self)(
             self.index if index is None else index,
             self.subpopulation,
             self.fitness[-1],
@@ -334,11 +335,19 @@ class TestMultiFrequencySelectionInit:
 
 
 class TestScalarFitness:
-    def test_scalar_fitness_reduces_dict_list_array_and_scalar(self):
-        assert MultiFrequencySelection._scalar_fitness({"a": 1.0, "b": 3.0}) == 2.0
-        assert MultiFrequencySelection._scalar_fitness([1.0, 3.0]) == 2.0
-        assert MultiFrequencySelection._scalar_fitness(np.array([2.0, 4.0])) == 3.0
-        assert MultiFrequencySelection._scalar_fitness(5.0) == 5.0
+    @pytest.mark.parametrize(
+        ("fitness", "expected"),
+        [
+            ({"a": 1.0, "b": 3.0}, 2.0),
+            ([1.0, 3.0], 2.0),
+            ((1.0, 3.0), 2.0),
+            (np.array([2.0, 4.0]), 3.0),
+            (5.0, 5.0),
+        ],
+        ids=["dict", "list", "tuple", "array", "scalar"],
+    )
+    def test_scalar_fitness_reduces_to_the_mean(self, fitness, expected):
+        assert MultiFrequencySelection._scalar_fitness(fitness) == expected
 
 
 class TestSubpopulationAssignment:
@@ -554,26 +563,18 @@ class TestCloneWinnersOverLosers:
 class TestSelect:
     def test_select_evolves_each_subpopulation_at_its_frequency(self):
         strategy = make_strategy(n_subpop=3, population_size=12, ratios=[1, 2, 3])
+        pop = make_population({0: [4, 3, 2, 1], 1: [8, 7, 6, 5], 2: [12, 11, 10, 9]})
         fired = []  # (cycle, subpop)
-        cycle = {"n": 0}
 
-        def fake_clone(population, winners, losers, subpop):
-            fired.append((cycle["n"], subpop))
-            return population, []
-
-        strategy._clone_winners_over_losers = fake_clone
-        strategy._migrate = (
-            lambda population, subpop, winners, open_for_migration, external_pool: (
-                population
+        for cycle in range(1, 7):
+            _elite, new_pop, _indices = strategy.select(pop)
+            fired.extend(
+                (cycle, subpop)
+                for subpop in sorted(
+                    {a.subpopulation for a in new_agents(pop, new_pop)}
+                )
             )
-        )
-
-        for c in range(1, 7):
-            cycle["n"] = c
-            pop = make_population(
-                {0: [4, 3, 2, 1], 1: [8, 7, 6, 5], 2: [12, 11, 10, 9]}
-            )
-            strategy.select(pop)
+            pop = new_pop
 
         assert [c for c, s in fired if s == 0] == [1, 2, 3, 4, 5, 6]  # delta=1
         assert [c for c, s in fired if s == 1] == [2, 4, 6]  # delta=2
@@ -793,6 +794,9 @@ class FakeLLMAgent:
         self.clean_up_calls = 0
 
     def clone(self, index=None, wrap=False):
+        if self.clean_up_calls:
+            msg = f"agent {self.index} was cloned after being freed"
+            raise AssertionError(msg)
         new = FakeLLMAgent(
             self.index if index is None else index,
             self.subpopulation,
@@ -911,6 +915,26 @@ class TestSelectLLM:
 
         assert loser.clean_up_calls == 1
         assert open_agent.clean_up_calls == 1
+
+    def test_select_frees_a_replaced_agent_only_after_its_last_use_as_a_source(self):
+        # Subpop 0's weaker open slot (30.0) is migrated over, yet it is also the agent
+        # subpop 1 imports. It therefore cannot be freed in the up-front sweep, only
+        # once the migration that reads it has run.
+        strategy = make_strategy(
+            n_subpop=2, population_size=8, ratios=[1, 2], w=1, s=0, o=2, ln=1
+        )
+        strategy.counters = [0, 1]  # a single cycle then fires both subpopulations
+        pop = make_llm_population(
+            {0: [50.0, 30.0, 20.0, 5.0], 1: [40.0, 15.0, 10.0, 8.0]}
+        )
+        source = next(a for a in pop if a.fitness[-1] == 30.0)
+        source.weights = "SRC30"
+
+        _elite, new_pop, _indices = strategy.select(pop)
+
+        assert any(a.subpopulation == 1 and a.weights == "SRC30" for a in new_pop)
+        assert source not in new_pop  # its own slot was taken by a migrant
+        assert source.clean_up_calls == 1  # and it was freed exactly once, afterwards
 
     def test_select_does_not_free_surviving_agents(self):
         strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])

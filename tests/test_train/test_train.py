@@ -1391,42 +1391,12 @@ class TestTrainOffPolicy:
             evo_steps=50,
             eval_loop=1,
             n_step_memory=None,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
 
         assert len(pop) == len(population_off_policy)
-        assert len(pop) == len(population_off_policy)
-
-    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
-    def test_train_off_policy_routes_multi_frequency_selection(
-        self, env, population_off_policy, mutations, memory
-    ):
-        multi_frequency_selection = _make_multi_frequency_selection()
-        with patch(
-            "agilerl.training.train_off_policy.run_selection_and_mutation",
-            side_effect=lambda strategy, **kwargs: kwargs["population"],
-        ) as spy:
-            pop, _ = train_off_policy(
-                env,
-                "env_name",
-                "algo",
-                population_off_policy,
-                memory,
-                init_hp=None,
-                mut_p=None,
-                max_steps=50,
-                evo_steps=50,
-                eval_loop=1,
-                n_step_memory=None,
-                selection_strategy=multi_frequency_selection,
-                mutation=mutations,
-                wb=False,
-            )
-
-        spy.assert_called_once()
-        assert spy.call_args.args[0] is multi_frequency_selection
         assert len(pop) == len(population_off_policy)
 
     @pytest.mark.parametrize(
@@ -1467,7 +1437,7 @@ class TestTrainOffPolicy:
                 evo_steps=50,
                 eval_loop=1,
                 n_step_memory=None,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=False,
                 accelerator=accelerator,
@@ -1528,7 +1498,7 @@ class TestTrainOffPolicy:
             evo_steps=50,
             eval_loop=1,
             n_step_memory=n_step_memory,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             accelerator=accelerator,
@@ -1568,7 +1538,7 @@ class TestTrainOffPolicy:
                 evo_steps=50,
                 eval_loop=1,
                 n_step_memory=None,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=False,
                 save_elite=False,
@@ -1601,7 +1571,7 @@ class TestTrainOffPolicy:
                 evo_steps=50,
                 eval_loop=1,
                 n_step_memory=None,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=False,
                 checkpoint=None,
@@ -1624,7 +1594,7 @@ class TestTrainOffPolicy:
             evo_steps=50,
             eval_loop=1,
             n_step_memory=None,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -1653,7 +1623,7 @@ class TestTrainOffPolicy:
             evo_steps=50,
             eval_loop=1,
             n_step_memory=None,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -1686,7 +1656,7 @@ class TestTrainOffPolicy:
             evo_steps=50,
             eval_loop=1,
             n_step_memory=mocked_n_step_memory,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -1719,7 +1689,7 @@ class TestTrainOffPolicy:
             evo_steps=50,
             eval_loop=1,
             n_step_memory=None,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -1747,7 +1717,7 @@ class TestTrainOffPolicy:
             evo_steps=50,
             eval_loop=1,
             n_step_memory=None,
-            tournament=mocked_tournament,
+            selection_strategy=mocked_tournament,
             mutation=mocked_mutations,
             wb=False,
         )
@@ -1775,7 +1745,7 @@ class TestTrainOffPolicy:
             evo_steps=50,
             eval_loop=1,
             n_step_memory=None,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -1808,7 +1778,7 @@ class TestTrainOffPolicy:
             evo_steps=50,
             eval_loop=1,
             n_step_memory=n_step_memory,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -1838,7 +1808,7 @@ class TestTrainOffPolicy:
             evo_steps=50,
             eval_loop=1,
             n_step_memory=n_step_memory,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -1868,7 +1838,7 @@ class TestTrainOffPolicy:
             evo_steps=50,
             eval_loop=1,
             n_step_memory=None,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             accelerator=accelerator,
@@ -1917,7 +1887,7 @@ class TestTrainOffPolicy:
                 evo_steps=50,
                 eval_loop=1,
                 n_step_memory=None,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=True,
                 wandb_api_key="testing",
@@ -1982,7 +1952,7 @@ class TestTrainOffPolicy:
                 evo_steps=50,
                 eval_loop=1,
                 n_step_memory=None,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=True,
                 accelerator=accelerator,
@@ -2041,7 +2011,7 @@ class TestTrainOffPolicy:
                 evo_steps=50,
                 eval_loop=1,
                 n_step_memory=None,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=True,
                 wandb_api_key="testing",
@@ -2072,7 +2042,7 @@ class TestTrainOffPolicy:
             evo_steps=50,
             eval_loop=1,
             n_step_memory=None,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             save_elite=True,
@@ -2106,7 +2076,7 @@ class TestTrainOffPolicy:
             evo_steps=50,
             eval_loop=1,
             n_step_memory=None,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             checkpoint=10,
@@ -2518,7 +2488,7 @@ class TestTrainOnPolicy:
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=False,
                 accelerator=accelerator,
@@ -2536,34 +2506,6 @@ class TestTrainOnPolicy:
             if accelerator is not None:
                 mocked_agent_on_policy.wrap_models.assert_called()
                 mocked_agent_on_policy.unwrap_models.assert_called()
-
-    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
-    def test_train_on_policy_routes_multi_frequency_selection(
-        self, env, population_on_policy, mutations
-    ):
-        multi_frequency_selection = _make_multi_frequency_selection()
-        with patch(
-            "agilerl.training.train_on_policy.run_selection_and_mutation",
-            side_effect=lambda strategy, **kwargs: kwargs["population"],
-        ) as spy:
-            pop, _ = train_on_policy(
-                env,
-                "env_name",
-                "algo",
-                population_on_policy,
-                init_hp=None,
-                mut_p=None,
-                max_steps=50,
-                evo_steps=50,
-                eval_loop=1,
-                selection_strategy=multi_frequency_selection,
-                mutation=mutations,
-                wb=False,
-            )
-
-        spy.assert_called_once()
-        assert spy.call_args.args[0] is multi_frequency_selection
-        assert len(pop) == len(population_on_policy)
 
     @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_NOVECT)
     def test_train_on_policy_save_elite_warning(
@@ -2588,7 +2530,7 @@ class TestTrainOnPolicy:
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=False,
                 save_elite=False,
@@ -2618,7 +2560,7 @@ class TestTrainOnPolicy:
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=False,
                 checkpoint=None,
@@ -2643,7 +2585,7 @@ class TestTrainOnPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -2668,7 +2610,7 @@ class TestTrainOnPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=mocked_tournament,
+            selection_strategy=mocked_tournament,
             mutation=mocked_mutations,
             wb=False,
         )
@@ -2693,7 +2635,7 @@ class TestTrainOnPolicy:
             max_steps=256,
             evo_steps=256,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -2715,7 +2657,7 @@ class TestTrainOnPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -2738,7 +2680,7 @@ class TestTrainOnPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             accelerator=accelerator,
@@ -2791,7 +2733,7 @@ class TestTrainOnPolicy:
                 max_steps=50,
                 evo_steps=10,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=True,
                 accelerator=accelerator,
@@ -2858,7 +2800,7 @@ class TestTrainOnPolicy:
                 max_steps=500,
                 evo_steps=10,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=True,
                 wandb_api_key="testing",
@@ -2889,7 +2831,7 @@ class TestTrainOnPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             save_elite=True,
@@ -2921,7 +2863,7 @@ class TestTrainOnPolicy:
             max_steps=500,
             evo_steps=500,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             checkpoint=10,
@@ -3108,40 +3050,11 @@ class TestTrainMultiAgentOffPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             sum_scores=sum_scores,
         )
 
-        assert len(pop) == len(population_multi_agent)
-
-    @pytest.mark.parametrize("on_policy", [False])
-    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
-    def test_train_multi_agent_off_policy_routes_multi_frequency_selection(
-        self, multi_env, population_multi_agent, on_policy, multi_memory, mutations
-    ):
-        multi_frequency_selection = _make_multi_frequency_selection()
-        with patch(
-            "agilerl.training.train_multi_agent_off_policy.run_selection_and_mutation",
-            side_effect=lambda strategy, **kwargs: kwargs["population"],
-        ) as spy:
-            pop, _ = train_multi_agent_off_policy(
-                multi_env,
-                "env_name",
-                "algo",
-                pop=population_multi_agent,
-                memory=multi_memory,
-                init_hp=None,
-                mut_p=None,
-                max_steps=50,
-                evo_steps=50,
-                eval_loop=1,
-                selection_strategy=multi_frequency_selection,
-                mutation=mutations,
-            )
-
-        spy.assert_called_once()
-        assert spy.call_args.args[0] is multi_frequency_selection
         assert len(pop) == len(population_multi_agent)
 
     @pytest.mark.parametrize("on_policy", [False])
@@ -3167,7 +3080,7 @@ class TestTrainMultiAgentOffPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             accelerator=accelerator,
         )
@@ -3200,7 +3113,7 @@ class TestTrainMultiAgentOffPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
         )
 
@@ -3241,7 +3154,7 @@ class TestTrainMultiAgentOffPolicy:
             max_steps=10,
             evo_steps=5,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
         )
         assert len(pop) == len(population_multi_agent)
@@ -3274,7 +3187,7 @@ class TestTrainMultiAgentOffPolicy:
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 save_elite=False,
                 elite_path="path",
@@ -3307,7 +3220,7 @@ class TestTrainMultiAgentOffPolicy:
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 checkpoint=None,
                 checkpoint_path="path",
@@ -3369,7 +3282,7 @@ class TestTrainMultiAgentOffPolicy:
                 max_steps=50,
                 evo_steps=10,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=True,
                 accelerator=accelerator,
@@ -3447,7 +3360,7 @@ class TestTrainMultiAgentOffPolicy:
                 max_steps=500,
                 evo_steps=10,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=True,
                 wandb_api_key="testing",
@@ -3485,7 +3398,7 @@ class TestTrainMultiAgentOffPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             accelerator=accelerator,
@@ -3528,7 +3441,7 @@ class TestTrainMultiAgentOffPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -3557,7 +3470,7 @@ class TestTrainMultiAgentOffPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=mocked_tournament,
+            selection_strategy=mocked_tournament,
             mutation=mocked_mutations,
             wb=False,
         )
@@ -3586,7 +3499,7 @@ class TestTrainMultiAgentOffPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -3620,7 +3533,7 @@ class TestTrainMultiAgentOffPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             save_elite=True,
@@ -3656,7 +3569,7 @@ class TestTrainMultiAgentOffPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             checkpoint=10,
@@ -3765,40 +3678,12 @@ class TestTrainMultiAgentOnPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             sum_scores=sum_scores,
             accelerator=accelerator,
         )
 
-        assert len(pop) == len(population_multi_agent)
-
-    @pytest.mark.parametrize("on_policy", [True])
-    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
-    def test_train_multi_agent_on_policy_routes_multi_frequency_selection(
-        self, multi_env, population_multi_agent, on_policy, mutations
-    ):
-        multi_frequency_selection = _make_multi_frequency_selection()
-        with patch(
-            "agilerl.training.train_multi_agent_on_policy.run_selection_and_mutation",
-            side_effect=lambda strategy, **kwargs: kwargs["population"],
-        ) as spy:
-            pop, _ = train_multi_agent_on_policy(
-                multi_env,
-                "env_name",
-                "algo",
-                pop=population_multi_agent,
-                init_hp=None,
-                mut_p=None,
-                max_steps=50,
-                evo_steps=50,
-                eval_loop=1,
-                selection_strategy=multi_frequency_selection,
-                mutation=mutations,
-            )
-
-        spy.assert_called_once()
-        assert spy.call_args.args[0] is multi_frequency_selection
         assert len(pop) == len(population_multi_agent)
 
     @pytest.mark.parametrize("on_policy", [True])
@@ -3834,7 +3719,7 @@ class TestTrainMultiAgentOnPolicy:
             max_steps=10,
             evo_steps=5,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
         )
         assert len(pop) == len(population_multi_agent)
@@ -3866,7 +3751,7 @@ class TestTrainMultiAgentOnPolicy:
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 save_elite=False,
                 elite_path="path",
@@ -3898,7 +3783,7 @@ class TestTrainMultiAgentOnPolicy:
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 checkpoint=None,
                 checkpoint_path="path",
@@ -3959,7 +3844,7 @@ class TestTrainMultiAgentOnPolicy:
                 max_steps=50,
                 evo_steps=10,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=True,
                 accelerator=accelerator,
@@ -4024,7 +3909,7 @@ class TestTrainMultiAgentOnPolicy:
                 max_steps=500,
                 evo_steps=10,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=True,
                 wandb_api_key="testing",
@@ -4060,7 +3945,7 @@ class TestTrainMultiAgentOnPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             accelerator=accelerator,
@@ -4095,7 +3980,7 @@ class TestTrainMultiAgentOnPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -4123,7 +4008,7 @@ class TestTrainMultiAgentOnPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=mocked_tournament,
+            selection_strategy=mocked_tournament,
             mutation=mocked_mutations,
             wb=False,
         )
@@ -4156,7 +4041,7 @@ class TestTrainMultiAgentOnPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             save_elite=True,
@@ -4191,7 +4076,7 @@ class TestTrainMultiAgentOnPolicy:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             checkpoint=10,
@@ -4365,7 +4250,7 @@ class TestTrainOffline:
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=False,
                 accelerator=accelerator,
@@ -4373,42 +4258,6 @@ class TestTrainOffline:
 
             assert len(pop) == len(population_off_policy)
             assert len(pop) == len(population_off_policy)
-
-    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
-    def test_train_offline_routes_multi_frequency_selection(
-        self,
-        env,
-        population_off_policy,
-        memory,
-        mutations,
-        offline_init_hp,
-        dummy_h5py_data,
-    ):
-        multi_frequency_selection = _make_multi_frequency_selection()
-        with patch(
-            "agilerl.training.train_offline.run_selection_and_mutation",
-            side_effect=lambda strategy, **kwargs: kwargs["population"],
-        ) as spy:
-            pop, _ = train_offline(
-                env,
-                "env_name",
-                "algo",
-                population_off_policy,
-                memory,
-                dataset=dummy_h5py_data,
-                init_hp=offline_init_hp,
-                mut_p=None,
-                max_steps=50,
-                evo_steps=50,
-                eval_loop=1,
-                selection_strategy=multi_frequency_selection,
-                mutation=mutations,
-                wb=False,
-            )
-
-        spy.assert_called_once()
-        assert spy.call_args.args[0] is multi_frequency_selection
-        assert len(pop) == len(population_off_policy)
 
     @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
     def test_train_offline_save_elite_warning(
@@ -4438,7 +4287,7 @@ class TestTrainOffline:
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=False,
                 save_elite=False,
@@ -4473,7 +4322,7 @@ class TestTrainOffline:
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=False,
                 checkpoint=None,
@@ -4521,7 +4370,7 @@ class TestTrainOffline:
                 max_steps=50,
                 evo_steps=10,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=True,
                 accelerator=accelerator,
@@ -4590,7 +4439,7 @@ class TestTrainOffline:
                     max_steps=50,
                     evo_steps=10,
                     eval_loop=1,
-                    tournament=tournament,
+                    selection_strategy=tournament,
                     mutation=mutations,
                     wb=True,
                     accelerator=accelerator,
@@ -4628,7 +4477,7 @@ class TestTrainOffline:
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=False,
                 accelerator=accelerator,
@@ -4670,7 +4519,7 @@ class TestTrainOffline:
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=False,
                 accelerator=accelerator,
@@ -4704,7 +4553,7 @@ class TestTrainOffline:
                 max_steps=50,
                 evo_steps=50,
                 eval_loop=1,
-                tournament=mocked_tournament,
+                selection_strategy=mocked_tournament,
                 mutation=mocked_mutations,
                 wb=False,
                 accelerator=accelerator,
@@ -4740,7 +4589,7 @@ class TestTrainOffline:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             accelerator=accelerator,
@@ -4777,7 +4626,7 @@ class TestTrainOffline:
             max_steps=50,
             evo_steps=50,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             accelerator=accelerator,
@@ -4854,43 +4703,12 @@ class TestTrainBandits:
             evo_steps=25,
             eval_steps=5,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
 
         assert len(pop) == len(population_bandit)
-        assert len(pop) == len(population_bandit)
-
-    @pytest.mark.parametrize(("state_size", "action_size"), _FLAT)
-    def test_train_bandit_routes_multi_frequency_selection(
-        self, bandit_env, population_bandit, mutations, bandit_memory
-    ):
-        multi_frequency_selection = _make_multi_frequency_selection()
-        with patch(
-            "agilerl.training.train_bandits.run_selection_and_mutation",
-            side_effect=lambda strategy, **kwargs: kwargs["population"],
-        ) as spy:
-            pop, _ = train_bandits(
-                bandit_env,
-                "bandit_env_name",
-                "algo",
-                population_bandit,
-                bandit_memory,
-                init_hp=None,
-                mut_p=None,
-                max_steps=50,
-                episode_steps=5,
-                evo_steps=50,
-                eval_steps=5,
-                eval_loop=1,
-                selection_strategy=multi_frequency_selection,
-                mutation=mutations,
-                wb=False,
-            )
-
-        spy.assert_called_once()
-        assert spy.call_args.args[0] is multi_frequency_selection
         assert len(pop) == len(population_bandit)
 
     @pytest.mark.parametrize("algo", [NeuralUCB])
@@ -4920,7 +4738,7 @@ class TestTrainBandits:
                 evo_steps=25,
                 eval_steps=5,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=False,
                 accelerator=accelerator,
@@ -4967,7 +4785,7 @@ class TestTrainBandits:
                 evo_steps=25,
                 eval_steps=5,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=False,
                 save_elite=False,
@@ -5001,7 +4819,7 @@ class TestTrainBandits:
                 evo_steps=25,
                 eval_steps=5,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=False,
                 checkpoint=None,
@@ -5030,7 +4848,7 @@ class TestTrainBandits:
             evo_steps=25,
             eval_steps=5,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -5060,7 +4878,7 @@ class TestTrainBandits:
             evo_steps=25,
             eval_steps=5,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -5089,7 +4907,7 @@ class TestTrainBandits:
             evo_steps=25,
             eval_steps=5,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -5118,7 +4936,7 @@ class TestTrainBandits:
             evo_steps=25,
             eval_steps=5,
             eval_loop=1,
-            tournament=mocked_tournament,
+            selection_strategy=mocked_tournament,
             mutation=mocked_mutations,
             wb=False,
         )
@@ -5147,7 +4965,7 @@ class TestTrainBandits:
             evo_steps=25,
             eval_steps=5,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -5177,7 +4995,7 @@ class TestTrainBandits:
             evo_steps=25,
             eval_steps=5,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -5207,7 +5025,7 @@ class TestTrainBandits:
             evo_steps=25,
             eval_steps=5,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
         )
@@ -5238,7 +5056,7 @@ class TestTrainBandits:
             evo_steps=25,
             eval_steps=5,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             accelerator=accelerator,
@@ -5294,7 +5112,7 @@ class TestTrainBandits:
                 evo_steps=25,
                 eval_steps=5,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=True,
                 wandb_api_key="testing",
@@ -5361,7 +5179,7 @@ class TestTrainBandits:
                 evo_steps=25,
                 eval_steps=5,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=True,
                 accelerator=accelerator,
@@ -5427,7 +5245,7 @@ class TestTrainBandits:
                 evo_steps=25,
                 eval_steps=5,
                 eval_loop=1,
-                tournament=tournament,
+                selection_strategy=tournament,
                 mutation=mutations,
                 wb=True,
                 wandb_api_key="testing",
@@ -5459,7 +5277,7 @@ class TestTrainBandits:
             evo_steps=25,
             eval_steps=5,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             save_elite=True,
@@ -5494,7 +5312,7 @@ class TestTrainBandits:
             evo_steps=25,
             eval_steps=5,
             eval_loop=1,
-            tournament=tournament,
+            selection_strategy=tournament,
             mutation=mutations,
             wb=False,
             checkpoint=10,
@@ -5504,6 +5322,195 @@ class TestTrainBandits:
         for i in range(6):  # iterate through the population indices
             for s in range(5):
                 assert os.path.isfile(f"{checkpoint_path}_{i}_{10 * (s + 1)}.pt")
+
+
+def _route_off_policy(get, **strategy_kwarg):
+    pop, _ = train_off_policy(
+        get("env"),
+        "env_name",
+        "algo",
+        get("population_off_policy"),
+        get("memory"),
+        init_hp=None,
+        mut_p=None,
+        max_steps=50,
+        evo_steps=50,
+        eval_loop=1,
+        n_step_memory=None,
+        **strategy_kwarg,
+        mutation=get("mutations"),
+        wb=False,
+    )
+    return pop
+
+
+def _route_on_policy(get, **strategy_kwarg):
+    pop, _ = train_on_policy(
+        get("env"),
+        "env_name",
+        "algo",
+        get("population_on_policy"),
+        init_hp=None,
+        mut_p=None,
+        max_steps=50,
+        evo_steps=50,
+        eval_loop=1,
+        **strategy_kwarg,
+        mutation=get("mutations"),
+        wb=False,
+    )
+    return pop
+
+
+def _route_multi_agent_off_policy(get, **strategy_kwarg):
+    multi_env = get("multi_env")
+    pop, _ = train_multi_agent_off_policy(
+        multi_env,
+        "env_name",
+        "algo",
+        pop=[DummyMultiAgent(5, multi_env, False) for _ in range(6)],
+        memory=get("multi_memory"),
+        init_hp=None,
+        mut_p=None,
+        max_steps=50,
+        evo_steps=50,
+        eval_loop=1,
+        **strategy_kwarg,
+        mutation=get("mutations"),
+    )
+    return pop
+
+
+def _route_multi_agent_on_policy(get, **strategy_kwarg):
+    multi_env = get("multi_env")
+    pop, _ = train_multi_agent_on_policy(
+        multi_env,
+        "env_name",
+        "algo",
+        pop=[DummyMultiAgent(5, multi_env, True) for _ in range(6)],
+        init_hp=None,
+        mut_p=None,
+        max_steps=50,
+        evo_steps=50,
+        eval_loop=1,
+        **strategy_kwarg,
+        mutation=get("mutations"),
+    )
+    return pop
+
+
+def _route_offline(get, **strategy_kwarg):
+    pop, _ = train_offline(
+        get("env"),
+        "env_name",
+        "algo",
+        get("population_off_policy"),
+        get("memory"),
+        dataset=get("dummy_h5py_data"),
+        init_hp=get("offline_init_hp"),
+        mut_p=None,
+        max_steps=50,
+        evo_steps=50,
+        eval_loop=1,
+        **strategy_kwarg,
+        mutation=get("mutations"),
+        wb=False,
+    )
+    return pop
+
+
+def _route_bandits(get, **strategy_kwarg):
+    pop, _ = train_bandits(
+        get("bandit_env"),
+        "bandit_env_name",
+        "algo",
+        get("population_bandit"),
+        get("bandit_memory"),
+        init_hp=None,
+        mut_p=None,
+        max_steps=50,
+        episode_steps=5,
+        evo_steps=50,
+        eval_steps=5,
+        eval_loop=1,
+        **strategy_kwarg,
+        mutation=get("mutations"),
+        wb=False,
+    )
+    return pop
+
+
+# (trainer module, runner) per non-LLM trainer
+_SELECTION_ROUTING_CASES = {
+    "off-policy": ("agilerl.training.train_off_policy", _route_off_policy),
+    "on-policy": ("agilerl.training.train_on_policy", _route_on_policy),
+    "multi-agent off-policy": (
+        "agilerl.training.train_multi_agent_off_policy",
+        _route_multi_agent_off_policy,
+    ),
+    "multi-agent on-policy": (
+        "agilerl.training.train_multi_agent_on_policy",
+        _route_multi_agent_on_policy,
+    ),
+    "offline": ("agilerl.training.train_offline", _route_offline),
+    "bandits": ("agilerl.training.train_bandits", _route_bandits),
+}
+
+
+class TestTrainerSelectionStrategyRouting:
+    """Every trainer hands its selection strategy to the one shared entry point."""
+
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
+    @pytest.mark.parametrize(
+        "case", list(_SELECTION_ROUTING_CASES), ids=list(_SELECTION_ROUTING_CASES)
+    )
+    def test_trainer_forwards_selection_strategy(
+        self, request, case, state_size, action_size, vect
+    ):
+        module, route = _SELECTION_ROUTING_CASES[case]
+        strategy = _make_multi_frequency_selection()
+
+        with patch(
+            f"{module}.run_selection_and_mutation",
+            side_effect=lambda _strategy, **kwargs: kwargs["population"],
+        ) as spy:
+            pop = route(request.getfixturevalue, selection_strategy=strategy)
+
+        spy.assert_called_once()
+        assert spy.call_args.args[0] is strategy
+        assert len(pop) == 6
+
+
+class TestTrainerDeprecatedTournamentArgument:
+    """The superseded ``tournament`` argument still drives evolution, with a warning.
+
+    Every trainer folds it into ``selection_strategy`` via
+    :func:`~agilerl.utils.utils.resolve_selection_strategy`, so callers written
+    against the old signature keep working unchanged.
+    """
+
+    @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_VECT)
+    @pytest.mark.parametrize(
+        "case", list(_SELECTION_ROUTING_CASES), ids=list(_SELECTION_ROUTING_CASES)
+    )
+    def test_deprecated_tournament_argument_reaches_the_entry_point(
+        self, request, case, state_size, action_size, vect
+    ):
+        module, route = _SELECTION_ROUTING_CASES[case]
+        strategy = DummyTournament()
+
+        with (
+            patch(
+                f"{module}.run_selection_and_mutation",
+                side_effect=lambda _strategy, **kwargs: kwargs["population"],
+            ) as spy,
+            pytest.warns(DeprecationWarning, match="'tournament' argument"),
+        ):
+            pop = route(request.getfixturevalue, tournament=strategy)
+
+        spy.assert_called_once()
+        assert spy.call_args.args[0] is strategy
+        assert len(pop) == 6
 
 
 def _try_remove_models_dir() -> bool:

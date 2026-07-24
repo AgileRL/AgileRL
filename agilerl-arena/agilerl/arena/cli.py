@@ -3,9 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import agilerl.arena  # noqa: F401 — configure package logging before submodules
 import click
-from agilerl.arena import console
 from agilerl.arena.cli_manifest import handle_help_option
 from agilerl.arena.config import CommandConfig, arena_client
 from agilerl.arena.exceptions import ArenaError
@@ -16,6 +14,9 @@ from agilerl.arena.output import (
     emit_result,
 )
 from agilerl.arena.utils import sort_dataset_search_by_downloads
+
+import agilerl.arena  # noqa: F401 — configure package logging before submodules
+from agilerl.arena import console
 
 ArenaError.enable_cli_mode()
 

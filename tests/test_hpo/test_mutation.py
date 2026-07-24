@@ -25,7 +25,7 @@ from agilerl.hpo.mutation import (
 )
 from agilerl.modules import EvolvableBERT, EvolvableModule, ModuleDict
 from agilerl.utils.utils import create_population
-from agilerl.wrappers.agent import AsyncAgentsWrapper, RSNorm
+from agilerl.wrappers.agent import AgentWrapper, AsyncAgentsWrapper, RSNorm
 from tests.helper_functions import (
     assert_state_dicts_equal,
     generate_discrete_space,
@@ -2285,9 +2285,21 @@ class _IndexedAgent:
         self.index = index
         self.mut = None
         self.hook_calls = 0
+        self.observation_space = None
+        self.action_space = None
+
+    def get_action(self, *args, **kwargs):
+        return None
+
+    def learn(self, *args, **kwargs):
+        return None
 
     def mutation_hook(self):
         self.hook_calls += 1
+
+
+class _StubWrapper(AgentWrapper):
+    """Concrete AgentWrapper over _IndexedAgent."""
 
 
 def _tagging_mutations(mutate_elite=True, seed=0):
@@ -2320,67 +2332,117 @@ def _labelled_mutations(seed=0):
     return muts
 
 
-def test_mutation_indices_only_mutates_selected_agents():
-    muts = _tagging_mutations()
-    pop = [_IndexedAgent(i) for i in range(5)]
+def _replacing_mutations(seed=0):
+    """This fake returns a fresh object so the branch actually rebinds the wrapped agent."""
+    muts = Mutations(1, 0, 0, 0, 0, 0, rand_seed=seed)
 
-    out = muts.mutation(pop, indices=[pop[1].index, pop[3].index])
+    def replace(agent):
+        replacement = _IndexedAgent(agent.index)
+        replacement.mut = "tagged"
+        return replacement
 
-    assert len(out) == 5
-
-    for i in (1, 3):
-        assert pop[i].mut == "tagged"
-        assert pop[i].hook_calls == 1
-
-    for i in (0, 2, 4):
-        assert out[i] is pop[i]
-        assert pop[i].mut is None
-        assert pop[i].hook_calls == 0
+    muts.mut_options = (replace,)
+    muts.mut_proba = np.array([1.0])
+    return muts
 
 
-def test_mutation_indices_none_mutates_whole_population():
-    muts = _tagging_mutations()
-    pop = [_IndexedAgent(i) for i in range(4)]
+class TestMutationsMutationIndices:
+    """The indices path of :meth:`Mutations.mutation`, used by MF-PBT."""
 
-    muts.mutation(pop, indices=None)
-
-    assert all(a.mut == "tagged" for a in pop)
-    assert all(a.hook_calls == 1 for a in pop)
-
-
-def test_mutation_empty_indices_is_a_noop():
-    muts = _tagging_mutations()
-    pop = [_IndexedAgent(i) for i in range(4)]
-
-    out = muts.mutation(pop, indices=[])
-
-    assert out == pop
-    assert all(a.mut is None for a in pop)
-    assert all(a.hook_calls == 0 for a in pop)
-
-
-def test_mutation_indices_path_ignores_elite_skip():
-    # On the whole-population path with mutate_elite=False, agent 0 is spared
-    # (no_mutation). On the indices path the caller has already chosen exactly
-    # which agents to mutate, so the elite-skip must not apply.
-    pop = [_IndexedAgent(i) for i in range(4)]
-    _tagging_mutations(mutate_elite=False).mutation(pop, indices=None)
-    assert pop[0].mut == "None"
-
-    pop = [_IndexedAgent(i) for i in range(4)]
-    _tagging_mutations(mutate_elite=False).mutation(pop, indices=[pop[0].index])
-    assert pop[0].mut == "tagged"
-
-
-def test_mutation_indices_selection_is_reproducible():
-    def run():
-        muts = _labelled_mutations(seed=123)
+    def test_indices_only_mutates_selected_agents(self):
+        muts = _tagging_mutations()
         pop = [_IndexedAgent(i) for i in range(5)]
-        muts.mutation(pop, indices=[pop[1].index, pop[4].index])
-        return pop
 
-    first, second = run(), run()
+        out = muts.mutation(pop, indices=[pop[1].index, pop[3].index])
 
-    assert [first[1].mut, first[4].mut] == [second[1].mut, second[4].mut]
-    assert all(a.mut in ("A", "B") for a in (first[1], first[4]))
-    assert [first[i].mut for i in (0, 2, 3)] == [None, None, None]
+        assert len(out) == 5
+
+        for i in (1, 3):
+            assert pop[i].mut == "tagged"
+            assert pop[i].hook_calls == 1
+
+        for i in (0, 2, 4):
+            assert out[i] is pop[i]
+            assert pop[i].mut is None
+            assert pop[i].hook_calls == 0
+
+    def test_indices_none_mutates_whole_population(self):
+        muts = _tagging_mutations()
+        pop = [_IndexedAgent(i) for i in range(4)]
+
+        muts.mutation(pop, indices=None)
+
+        assert all(a.mut == "tagged" for a in pop)
+        assert all(a.hook_calls == 1 for a in pop)
+
+    def test_empty_indices_is_a_noop(self):
+        muts = _tagging_mutations()
+        pop = [_IndexedAgent(i) for i in range(4)]
+
+        out = muts.mutation(pop, indices=[])
+
+        assert out == pop
+        assert all(a.mut is None for a in pop)
+        assert all(a.hook_calls == 0 for a in pop)
+
+    def test_indices_path_ignores_elite_skip(self):
+        # On the whole-population path with mutate_elite=False, agent 0 is spared
+        # (no_mutation). On the indices path the caller has already chosen exactly
+        # which agents to mutate, so the elite-skip must not apply.
+        pop = [_IndexedAgent(i) for i in range(4)]
+        _tagging_mutations(mutate_elite=False).mutation(pop, indices=None)
+        assert pop[0].mut == "None"
+
+        pop = [_IndexedAgent(i) for i in range(4)]
+        _tagging_mutations(mutate_elite=False).mutation(pop, indices=[pop[0].index])
+        assert pop[0].mut == "tagged"
+
+    def test_indices_selection_is_reproducible(self):
+        def run():
+            muts = _labelled_mutations(seed=123)
+            pop = [_IndexedAgent(i) for i in range(5)]
+            muts.mutation(pop, indices=[pop[1].index, pop[4].index])
+            return pop
+
+        first, second = run(), run()
+
+        assert [first[1].mut, first[4].mut] == [second[1].mut, second[4].mut]
+        assert all(a.mut in ("A", "B") for a in (first[1], first[4]))
+        assert [first[i].mut for i in (0, 2, 3)] == [None, None, None]
+
+    def test_indices_replaces_the_agent_inside_a_wrapper(self):
+        # A wrapped individual keeps its wrapper in the population; only the agent it
+        # holds is swapped for the mutated one.
+        muts = _replacing_mutations()
+        pop = [_StubWrapper(_IndexedAgent(i)) for i in range(3)]
+        originals = [wrapper.agent for wrapper in pop]
+
+        out = muts.mutation(pop, indices=[1])
+
+        assert out == pop  # the wrapper objects themselves are preserved
+        assert pop[1].agent is not originals[1]
+        assert pop[1].agent.mut == "tagged"
+        assert pop[1].agent.hook_calls == 1
+
+        for i in (0, 2):
+            assert pop[i].agent is originals[i]
+            assert pop[i].agent.mut is None
+
+    def test_unknown_indices_select_nothing(self):
+        muts = _tagging_mutations()
+        pop = [_IndexedAgent(i) for i in range(3)]
+
+        out = muts.mutation(pop, indices=[99])
+
+        assert out == pop
+        assert all(a.mut is None for a in pop)
+        assert all(a.hook_calls == 0 for a in pop)
+
+    def test_unknown_indices_do_not_shift_the_known_ones(self):
+        muts = _tagging_mutations()
+        pop = [_IndexedAgent(i) for i in range(3)]
+
+        muts.mutation(pop, indices=[99, pop[2].index])
+
+        assert pop[2].mut == "tagged"
+        assert [pop[0].mut, pop[1].mut] == [None, None]

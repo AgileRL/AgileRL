@@ -5,11 +5,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import ClassVar, TypeVar
 
-from agilerl.arena import AgentType
 from agilerl.arena.models.env import LLMEnvType
 from agilerl.arena.models.hpo import RLHyperparameter
 from agilerl.arena.models.networks import LoraConfigDict
 from pydantic import BaseModel, ConfigDict, Field
+
+from agilerl.arena import AgentType
 
 logger = logging.getLogger(__name__)
 

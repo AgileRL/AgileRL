@@ -10,6 +10,7 @@ from rich.logging import RichHandler
 
 if TYPE_CHECKING:
     from agilerl.arena.client import ArenaClient
+
     from agilerl.arena.inference import Agent
 
 console = Console()

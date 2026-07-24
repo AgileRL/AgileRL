@@ -6,36 +6,33 @@ import os
 
 import pytest
 
-from agilerl.hpo.multi_frequency import MultiFrequencySelection
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.utils import (
     resolve_selection_strategy,
     run_selection_and_mutation,
 )
+from tests.test_hpo.test_multi_frequency import (
+    FakeAgent as _OperatorFakeAgent,
+)
+from tests.test_hpo.test_multi_frequency import (
+    make_strategy,
+    new_agents,
+)
 
 
-class FakeAgent:
-    def __init__(self, index, subpopulation, fitness):
-        self.index = index
-        self.subpopulation = subpopulation
-        self.fitness = [fitness]
-        # Records for the accelerate path
+class FakeAgent(_OperatorFakeAgent):
+    """The operator's agent stand-in plus the accelerator round-trip bookkeeping."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         self.unwrap_calls = 0
         self.wrap_calls = 0
         self.saved: list[str] = []
         self.loaded: list[str] = []
 
-    def clone(self, index=None, wrap=False):
-        return FakeAgent(
-            self.index if index is None else index,
-            self.subpopulation,
-            self.fitness[-1],
-        )
-
     def save_checkpoint(self, path):
         self.saved.append(path)
-        with open(path, "w") as fh:
-            fh.write("checkpoint")
+        super().save_checkpoint(path)
 
     def load_checkpoint(self, path):
         self.loaded.append(path)
@@ -92,6 +89,7 @@ class RecordingMutations:
 
 
 def make_population(subpop_fitnesses):
+    """Build a population of the accelerator-aware FakeAgent with unique indices."""
     population = []
     idx = 0
     for subpop, fitnesses in subpop_fitnesses.items():
@@ -99,18 +97,6 @@ def make_population(subpop_fitnesses):
             population.append(FakeAgent(idx, subpop, fit))
             idx += 1
     return population
-
-
-def make_strategy(n_subpop=2, population_size=8, ratios=None):
-    return MultiFrequencySelection(
-        population_size=population_size,
-        n_subpopulations=n_subpop,
-        evolution_frequency_ratios=ratios or list(range(1, n_subpop + 1)),
-        n_winners=1,
-        n_survivors=1,
-        n_open_for_migration=1,
-        n_losers=1,
-    )
 
 
 class TestRunSelectionAndMutation:
@@ -217,48 +203,23 @@ class TestRunSelectionAndMutation:
         assert consolidated == [["mutated"]]  # mutation decisions broadcast to workers
 
 
-def _stub_operator_steps(strategy):
-    """Stub the per-subpopulation clone/migrate steps.
-
-    Lets the fake agents drive the scheduling/elite logic without needing clone or
-    a full registry; select still runs its real counter and bracketing logic.
-    """
-    strategy._clone_winners_over_losers = lambda population, winners, losers, subpop: (
-        population,
-        [],
-    )
-    strategy._migrate = (
-        lambda population, subpop, winners, open_for_migration, external_pool: (
-            population
-        )
-    )
-
-
 class TestMultiFrequencyOrchestration:
     def test_orchestration_schedules_subpops_at_their_frequencies(self):
         strategy = make_strategy(n_subpop=3, population_size=12, ratios=[1, 2, 3])
         pop = make_population({0: [4, 3, 2, 1], 1: [8, 7, 6, 5], 2: [12, 11, 10, 9]})
-        fm = FakeMutations()
-
         fired = []  # (cycle, subpop)
-        cycle = {"n": 0}
 
-        def fake_clone(population, winners, losers, subpop):
-            fired.append((cycle["n"], subpop))
-            return population, []
-
-        strategy._clone_winners_over_losers = fake_clone
-        strategy._migrate = (
-            lambda population, subpop, winners, open_for_migration, external_pool: (
-                population
+        for cycle in range(1, 7):
+            new_pop = run_selection_and_mutation(
+                strategy, population=pop, mutation=FakeMutations(), env_name="env"
             )
-        )
-
-        for c in range(1, 7):
-            cycle["n"] = c
-            run_selection_and_mutation(
-                strategy, population=pop, mutation=fm, env_name="env"
+            fired.extend(
+                (cycle, subpop)
+                for subpop in sorted(
+                    {a.subpopulation for a in new_agents(pop, new_pop)}
+                )
             )
+            pop = new_pop
 
         assert [c for c, s in fired if s == 0] == [1, 2, 3, 4, 5, 6]  # delta=1
         assert [c for c, s in fired if s == 1] == [2, 4, 6]  # delta=2
@@ -268,9 +229,6 @@ class TestMultiFrequencyOrchestration:
         strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
         pop = make_population({0: [4, 3, 2, 1], 1: [8, 7, 6, 5]})
         elite_path = str(tmp_path / "best.pt")
-        # Elite is the pre-evolution global best; stub the operator steps so the fake
-        # agents need only save_checkpoint
-        _stub_operator_steps(strategy)
 
         run_selection_and_mutation(
             strategy,
@@ -288,9 +246,9 @@ class TestMultiFrequencyOrchestration:
     ):
         monkeypatch.chdir(tmp_path)
         strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
-        _stub_operator_steps(strategy)
         pop = make_population({0: [4, 3, 2, 1], 1: [8, 7, 6, 5]})
         accel = FakeAccelerator(is_main_process=True)
+        elite_path = str(tmp_path / "best.pt")
 
         out = run_selection_and_mutation(
             strategy,
@@ -298,13 +256,17 @@ class TestMultiFrequencyOrchestration:
             mutation=FakeMutations(),
             env_name="env",
             accelerator=accel,
+            save_elite=True,
+            elite_path=elite_path,
         )
 
         # select() ran on the main process: subpop 0 (delta 1) fired and reset its counter,
         # subpop 1 (delta 2) has not fired yet
         assert strategy.counters == [0, 1]
-        for agent in out:
+        assert os.path.exists(elite_path)
+        for agent in pop:
             assert agent.unwrap_calls == 1
+        for agent in out:
             assert agent.wrap_calls == 1
             assert len(agent.saved) == 1
             assert agent.loaded == []
@@ -312,7 +274,6 @@ class TestMultiFrequencyOrchestration:
 
     def test_orchestration_accelerator_worker_loads_without_evolving(self):
         strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
-        _stub_operator_steps(strategy)
         pop = make_population({0: [4, 3, 2, 1], 1: [8, 7, 6, 5]})
         accel = FakeAccelerator(is_main_process=False)
 
@@ -339,7 +300,6 @@ class TestMultiFrequencyOrchestration:
         pop = make_population({None: [8, 7, 6, 5, 4, 3, 2, 1]})
         for agent in pop:
             agent.subpopulation = None
-        _stub_operator_steps(strategy)
 
         run_selection_and_mutation(
             strategy, population=pop, mutation=FakeMutations(), env_name="env"

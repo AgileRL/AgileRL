@@ -433,7 +433,7 @@ class TestFinetuneLlmReasoning:
                 max_reward=2.0,
                 evo_steps=1,
                 accelerator=None if use_accelerator else Accelerator(),
-                tournament=Mock(),
+                selection_strategy=Mock(),
                 mutation=mutation,
             )
             assert mock_env.reset.call_count == 1
@@ -443,6 +443,56 @@ class TestFinetuneLlmReasoning:
             assert mock_agent.learn.call_count == 6
             assert mock_agent.test.call_count == 3
             assert mock_run_selection_and_mutation.call_count == 6
+
+    def test_finetune_llm_reasoning_deprecated_tournament_argument(self):
+        # The superseded ``tournament`` argument warns but still drives evolution:
+        # the LLM finetuners fold it into ``selection_strategy`` the same way the
+        # non-LLM trainers do, so old-signature callers keep working.
+        mock_agent = _mock_grpo_agent()
+
+        mock_env = MagicMock()
+        mock_env.__len__.return_value = 6
+        mock_env.reset.return_value = "initial_prompts"
+        mock_env.step.return_value = ("next_prompts", torch.tensor([2.0, 3.0]))
+        mock_env.data_batch_size_per_gpu = 1
+
+        strategy = Mock()
+
+        mutation = MagicMock()
+        mutation.architecture_mut = 0
+        mutation.new_layer_prob = 0
+        mutation.parameters_mut = 0
+        mutation.activation_mut = 0
+
+        with (
+            patch(
+                "agilerl.training.llm.reasoning.default_progress_bar"
+            ) as mock_pbar_fn,
+            patch("agilerl.training.llm.reasoning.safe_aggregate_metrics") as mock_agg,
+            patch("agilerl.training.llm.reasoning.save_llm_checkpoint"),
+            patch("agilerl.training.llm.reasoning.init_loggers", return_value=[]),
+            patch(
+                "agilerl.training.llm.reasoning.run_selection_and_mutation"
+            ) as mock_run_selection_and_mutation,
+        ):
+            mock_pbar_fn.return_value = MagicMock()
+            mock_run_selection_and_mutation.return_value = [mock_agent]
+            mock_agg.return_value = 0.5
+
+            with pytest.warns(DeprecationWarning, match="'tournament' argument"):
+                finetune_llm_reasoning(
+                    pop=[mock_agent],
+                    env=mock_env,
+                    evaluation_interval=2,
+                    max_reward=2.0,
+                    evo_steps=1,
+                    accelerator=None,
+                    tournament=strategy,
+                    mutation=mutation,
+                )
+
+        assert mock_run_selection_and_mutation.call_count == 6
+        assert mock_run_selection_and_mutation.call_args.args[0] is strategy
 
     def test_finetune_llm_reasoning_warns_checkpoint_steps_during_evolution(self):
         mock_agent = _mock_grpo_agent()
@@ -481,7 +531,7 @@ class TestFinetuneLlmReasoning:
                     env=mock_env,
                     evaluation_interval=2,
                     evo_steps=1,
-                    tournament=Mock(),
+                    selection_strategy=Mock(),
                     mutation=mutation,
                     checkpoint_steps=3,
                 )
@@ -534,7 +584,7 @@ class TestFinetuneLlmReasoning:
                 env=MagicMock(),
                 evo_steps=None,
                 accelerator=None,
-                tournament=MagicMock(),
+                selection_strategy=MagicMock(),
                 mutation=MagicMock(),
             )
 
@@ -904,7 +954,7 @@ class TestFinetuneLlmPreference:
                 evaluation_interval=2,
                 evo_steps=1,
                 accelerator=None if use_accelerator else Accelerator(),
-                tournament=Mock(),
+                selection_strategy=Mock(),
                 mutation=mutation,
             )
             assert mock_env.reset.call_count == 1
@@ -1156,7 +1206,7 @@ class TestFinetuneLlmSft:
                 evaluation_interval=2,
                 evo_steps=1,
                 accelerator=None if use_accelerator else Accelerator(),
-                tournament=Mock(),
+                selection_strategy=Mock(),
                 mutation=mutation,
             )
             assert mock_env.reset.call_count == 1
@@ -1237,7 +1287,7 @@ class TestFinetuneLlmSft:
                 env=MagicMock(),
                 evo_steps=None,
                 accelerator=None,
-                tournament=MagicMock(),
+                selection_strategy=MagicMock(),
                 mutation=MagicMock(),
             )
 
@@ -1465,7 +1515,7 @@ class TestFinetuneLlmMultiturn:
                 evaluation_interval=100,
                 verbose=False,
                 evo_steps=1,
-                tournament=Mock(),
+                selection_strategy=Mock(),
                 mutation=mutation,
                 accelerator=None if use_accelerator else Accelerator(),
             )
@@ -1473,7 +1523,7 @@ class TestFinetuneLlmMultiturn:
         assert mock_tourn.call_count == 3
         assert mock_save.call_count == 0
 
-    def test_finetune_llm_multiturn_value_error_when_evo_steps_missing_with_tournament(
+    def test_finetune_llm_multiturn_value_error_when_evo_steps_missing_with_selection_strategy(
         self,
     ):
         mutation = MagicMock()
@@ -1490,12 +1540,14 @@ class TestFinetuneLlmMultiturn:
                 init_hp={"BATCH_SIZE": 1, "ALGO": "LLMPPO"},
                 max_steps=1,
                 evo_steps=None,
-                tournament=MagicMock(),
+                selection_strategy=MagicMock(),
                 mutation=mutation,
                 accelerator=None,
             )
 
-    def test_finetune_llm_multiturn_warns_when_evo_steps_without_tournament(self):
+    def test_finetune_llm_multiturn_warns_when_evo_steps_without_selection_strategy(
+        self,
+    ):
         mock_agent = _make_multiturn_mock_agent()
         with pytest.warns(UserWarning, match="evo_steps"):
             finetune_llm_multiturn(
@@ -1505,7 +1557,7 @@ class TestFinetuneLlmMultiturn:
                 init_hp={"BATCH_SIZE": 1, "ALGO": "LLMPPO"},
                 max_steps=0,
                 evo_steps=3,
-                tournament=None,
+                selection_strategy=None,
                 mutation=None,
                 accelerator=None,
                 verbose=False,

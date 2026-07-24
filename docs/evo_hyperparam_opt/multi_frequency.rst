@@ -24,6 +24,18 @@ The *perturbation* applied to those winner-clones is the shared :ref:`mutation <
 step: multi-frequency selection nominates exactly the clones that replace losers, and only
 they are mutated. Winners, survivors and migrants pass through untouched.
 
+.. figure:: ../_static/mf_pbt_evolution_step.png
+   :align: center
+
+   A single MF-PBT evolution step over a population split into three subpopulations that
+   each evolve at their own frequency (here every 1, 3 and 10 cycles). Only the
+   subpopulations due this cycle are evolved (subpopulations 1 and 3 in this example).
+   Each is ranked into the four brackets — winner, survivor, open-for-migration and loser
+   — its losers are replaced by mutated clones of its winners, and its open-for-migration
+   slots are filled by migration: a full clone (weights and hyperparameters) from a
+   slower subpopulation, or a weights-only clone (which adopts the subpopulation elite's
+   hyperparameters) from a faster one.
+
 **When to use it.** MF-PBT shines with **16 or more agents** (as recommended by the
 paper), where there is room for several subpopulations at different frequencies: its
 slower subpopulations make it more robust to premature convergence than tournament

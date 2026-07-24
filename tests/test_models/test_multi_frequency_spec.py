@@ -81,25 +81,39 @@ class TestMultiFrequencySelectionSpec:
             MultiFrequencySelectionSpec(**bad)
 
     def test_extra_fields_forbidden(self):
-        with pytest.raises(ValidationError):
+        with pytest.raises(
+            ValidationError, match=r"unexpected\s+Extra inputs are not permitted"
+        ):
             MultiFrequencySelectionSpec(**{**VALID_MULTI_FREQUENCY, "unexpected": 1})
 
     def test_removed_n_individuals_field_is_rejected(self):
-        with pytest.raises(ValidationError):
+        with pytest.raises(
+            ValidationError,
+            match=r"n_individuals_per_subpopulation\s+Extra inputs are not permitted",
+        ):
             MultiFrequencySelectionSpec(n_individuals_per_subpopulation=8)
 
     def test_zero_winners_rejected(self):
-        with pytest.raises(ValidationError):
+        with pytest.raises(
+            ValidationError,
+            match=r"n_winners\s+Input should be greater than or equal to 1",
+        ):
             MultiFrequencySelectionSpec(**{**VALID_MULTI_FREQUENCY, "n_winners": 0})
 
     def test_zero_open_for_migration_rejected(self):
-        with pytest.raises(ValidationError):
+        with pytest.raises(
+            ValidationError,
+            match=r"n_open_for_migration\s+Input should be greater than or equal to 1",
+        ):
             MultiFrequencySelectionSpec(
                 **{**VALID_MULTI_FREQUENCY, "n_open_for_migration": 0}
             )
 
     def test_negative_survivors_rejected(self):
-        with pytest.raises(ValidationError):
+        with pytest.raises(
+            ValidationError,
+            match=r"n_survivors\s+Input should be greater than or equal to 0",
+        ):
             MultiFrequencySelectionSpec(**{**VALID_MULTI_FREQUENCY, "n_survivors": -1})
 
     def test_fewer_than_two_subpopulations_rejected(self):
@@ -293,7 +307,10 @@ class TestManifestIntegration:
             {"max_steps": 1000, "evo_steps": 100},
             tournament_selection={"selection_strategy": "bogus"},
         )
-        with pytest.raises(ValidationError):
+        with pytest.raises(
+            ValidationError,
+            match=r"Input tag 'bogus' .* does not match any of the expected tags",
+        ):
             TrainingManifest.model_validate(data)
 
     def test_tournament_keys_rejected_under_multi_frequency(self):
@@ -304,7 +321,10 @@ class TestManifestIntegration:
                 "tournament_size": 2,
             },
         )
-        with pytest.raises(ValidationError):
+        with pytest.raises(
+            ValidationError,
+            match=r"tournament_size\s+Extra inputs are not permitted",
+        ):
             TrainingManifest.model_validate(data)
 
     def test_multi_frequency_manifest_dump_uses_unified_block(self):
