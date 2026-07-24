@@ -188,7 +188,7 @@ logger = logging.getLogger(__name__)
 SelfAgentWrapper = TypeVar("SelfAgentWrapper", bound=AgentWrapperProtocol)
 
 
-class _ClassicRLPopulationCtor(Protocol):
+class _ClassicRLPopulationFactory(Protocol):
     index: int
 
     def __init__(
@@ -203,7 +203,7 @@ class _ClassicRLPopulationCtor(Protocol):
     def load_checkpoint(self, path: str) -> None: ...
 
 
-_ClassicRLAlgoT = TypeVar("_ClassicRLAlgoT", bound=_ClassicRLPopulationCtor)
+_ClassicRLAlgoT = TypeVar("_ClassicRLAlgoT", bound=_ClassicRLPopulationFactory)
 
 
 def _build_classic_rl_population(
