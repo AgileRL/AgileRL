@@ -119,10 +119,59 @@ another is possible but should be surfaced as lower confidence.
   can never disagree with the bars.
 - Fitting (`profiling/sweep.py`) needs numpy; applying a fit does not.
 
+## First calibration finding — the colocated training floor
+
+Profiling `Qwen/Qwen2.5-0.5B-Instruct` on an L4 (vLLM 0.23, sleep level 1)
+surfaced the single most decision-relevant fact the widget can teach:
+**colocated training does not get the vLLM engine's memory back.** Every
+training point sat on a ~12 GiB device floor for a model whose weights are
+under 1 GiB, flat across all knobs — almost exactly the engine's
+`gpu_memory_utilization` (0.45 × 23 GiB ≈ 10.4 GiB) reservation. Sleep
+level 1 offloads the base to host RAM and frees the KV *contents*, but the
+reservation stays mapped on the device rather than returning to the
+co-resident trainer.
+
+Consequences baked into the estimator:
+
+- The training bar attributes this to a labelled **"Sleeping engine
+  reservation"** segment (usually the dominant colocated-training term), not
+  to overhead. An uncalibrated colocated estimate now includes it
+  analytically (`gpu_memory_utilization × total`) so it never tells a user a
+  run fits when it won't.
+- It means the practical colocated headroom for training is
+  `total − gpu_memory_utilization × total`, i.e. the *same* budget split the
+  generation phase lives under — the two bars are more symmetric than the
+  "training gets the whole GPU back" intuition suggests. Lowering
+  `gpu_memory_utilization` helps *both* phases.
+
+Holdout accuracy on this first profile: training 4.8%, generation 0.37% —
+inside the 10% target band. (One generation *fit* point sits at ~12%, a
+single noisy measurement; the held-out points are the accuracy signal.)
+
+## Profiling gotchas found while running the first sweep
+
+- **One process per point.** vLLM's CuMem allocator (which backs sleep mode)
+  is process-global and permits one engine per process, so `run_sweep`
+  spawns a fresh subprocess per point (`python -m
+  agilerl.memory.profiling.harness`). A single-process loop dies on the
+  second point with "CuMem allocator can only be used for one instance per
+  process".
+- **NVML polling undercounts the training spike.** The 10 ms poll missed the
+  brief backward-pass peak (torch's exact `max_memory_reserved` came in
+  ~0.7 GiB higher). The training calibration target is therefore
+  `max(nvml_poll, non-torch baseline + torch_max_reserved)`; generation
+  stays pure-NVML (vLLM's CuMem is invisible to torch and its allocation is
+  not spiky).
+- **flashinfer JIT needs `curand.h`.** On a box without the full CUDA
+  toolkit headers, set `VLLM_USE_FLASHINFER_SAMPLER=0`.
+
 ## Status
 
-Prototype: calculation core + advice + preflight CLI + profiling harness are
-implemented and unit-tested CPU-only. The sweep has not yet been run on a
-GPU box, so `fixtures/` is empty and all estimates are uncalibrated
-(explicitly flagged in output). First calibration run + accuracy-band
-validation is the next step, then the curated starter set.
+Prototype with one calibrated model. Calculation core + advice + preflight
+CLI + profiling harness implemented and unit-tested (33 CPU-only tests); the
+sweep runs end-to-end on an L4 and the first fixture
+(`fixtures/Qwen__Qwen2.5-0.5B-Instruct.json`) validates inside the target
+band. Next: broaden the curated set (+ nf4 / vision-stripped variants),
+add a re-fit that attributes the engine floor analytically (so the intercept
+drops to true overhead), a cut-down CI drift check, and the two-bar Arena
+widget on this same core.

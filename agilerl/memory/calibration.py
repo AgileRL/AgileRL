@@ -78,9 +78,16 @@ class MeasuredPoint(BaseModel):
 
     knobs: dict[str, float | int | str | bool]
     phase: Phase
-    #: Device-level peak from NVML polling — the only signal that sees vLLM's
-    #: CuMem allocations, which bypass the torch caching allocator.
-    nvml_peak_bytes: int
+    #: Best device-level peak estimate and the calibration target. For
+    #: generation this is the raw NVML poll (the only signal that sees vLLM's
+    #: CuMem allocations). For training it is ``max`` of the poll and
+    #: ``non-torch baseline + torch_max_reserved``, because NVML polling can
+    #: miss the brief backward-pass spike that torch's exact high-water mark
+    #: captures.
+    device_peak_bytes: int
+    #: Raw NVML poll, kept for audit even when ``device_peak_bytes`` is the
+    #: torch-corrected value.
+    nvml_polled_bytes: int | None = None
     torch_max_allocated_bytes: int | None = None
     torch_max_reserved_bytes: int | None = None
     analytic_bytes: int | None = None

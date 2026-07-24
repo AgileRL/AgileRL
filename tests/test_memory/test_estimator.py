@@ -181,6 +181,31 @@ def test_colocated_run_includes_trainer_residual(model, device):
     assert component(split_estimate.generation, "trainer_residual").bytes_ == 0
 
 
+def test_colocated_training_includes_sleeping_engine_floor(model, device):
+    # Uncalibrated colocated training must not silently omit the vLLM
+    # reservation the sleeping engine keeps on the device.
+    colocated = estimate_run(
+        RunConfig(
+            model=model,
+            train_device=device,
+            generation=GenerationKnobs(gpu_memory_utilization=0.45),
+        )
+    )
+    residual = component(colocated.training, "vllm_residual")
+    assert residual.bytes_ == pytest.approx(int(0.45 * device.total_bytes), rel=0.01)
+
+    # A dedicated training device carries no engine reservation.
+    split = estimate_run(
+        RunConfig(
+            model=model,
+            train_device=device,
+            gen_device=DeviceSpec(total_bytes=16 * GiB),
+            generation=GenerationKnobs(gpu_memory_utilization=0.45),
+        )
+    )
+    assert component(split.training, "vllm_residual").bytes_ == 0
+
+
 def test_over_budget_advice_is_ranked_and_actionable(model):
     tiny = DeviceSpec(total_bytes=2 * GiB)
     config = RunConfig(

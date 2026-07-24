@@ -19,9 +19,13 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import itertools
 import json
+import subprocess
 import sys
+import tempfile
+from pathlib import Path
 
 from agilerl.memory.calibration import (
     DeviceFingerprint,
@@ -130,7 +134,7 @@ def calibrate_phase(
             model, device, point, phase, gpu_memory_utilization
         )
         basis_rows.append(basis)
-        residuals.append(measured.nvml_peak_bytes - analytic)
+        residuals.append(measured.device_peak_bytes - analytic)
     fit = fit_residuals(basis_rows, residuals)
 
     max_rel_error = None
@@ -142,7 +146,7 @@ def calibrate_phase(
             )
             predicted = analytic + fit.correction_bytes(basis)
             errors.append(
-                abs(predicted - measured.nvml_peak_bytes) / measured.nvml_peak_bytes
+                abs(predicted - measured.device_peak_bytes) / measured.device_peak_bytes
             )
         max_rel_error = max(errors)
     return PhaseCalibration(
@@ -152,6 +156,118 @@ def calibrate_phase(
     )
 
 
+def _device_identity(device_index: int) -> tuple[int, tuple[int, int]]:
+    """Total bytes and compute capability of the device, read in a
+    subprocess so the sweep parent never initialises CUDA.
+    """
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as handle:
+        out_path = handle.name
+    script = (
+        "import json,sys,torch;"
+        "i=int(sys.argv[2]);"
+        "p=torch.cuda.get_device_properties(i);"
+        "c=torch.cuda.get_device_capability(i);"
+        "open(sys.argv[1],'w').write("
+        "json.dumps({'total':p.total_memory,'cc':list(c)}))"
+    )
+    subprocess.run(
+        [sys.executable, "-c", script, out_path, str(device_index)], check=True
+    )
+    data = json.loads(Path(out_path).read_text())
+    Path(out_path).unlink(missing_ok=True)
+    return int(data["total"]), (int(data["cc"][0]), int(data["cc"][1]))
+
+
+def _framework_versions() -> dict[str, str]:
+    def _version(package: str) -> str | None:
+        try:
+            return importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            return None
+
+    packages = ("agilerl", "torch", "vllm", "transformers", "peft")
+    return {p: v for p in packages if (v := _version(p)) is not None}
+
+
+def _measure_point_subprocess(
+    model_name: str,
+    point: SweepPoint,
+    device_index: int,
+    gpu_memory_utilization: float,
+) -> tuple[MeasuredPoint, MeasuredPoint]:
+    """Measure one point in a fresh subprocess.
+
+    vLLM's CuMem allocator is process-global and allows one engine per
+    process, so each sleep-mode point needs its own process.
+    """
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as handle:
+        out_path = handle.name
+    cmd = [
+        sys.executable,
+        "-m",
+        "agilerl.memory.profiling.harness",
+        "--model",
+        model_name,
+        "--out",
+        out_path,
+        "--seq-len",
+        str(point.seq_len),
+        "--micro-batch",
+        str(point.micro_batch),
+        "--group-size",
+        str(point.group_size),
+        "--lora-rank",
+        str(point.lora_rank),
+        "--quantization",
+        point.quantization,
+        "--device-index",
+        str(device_index),
+        "--gpu-memory-utilization",
+        str(gpu_memory_utilization),
+    ]
+    subprocess.run(cmd, check=True)
+    data = json.loads(Path(out_path).read_text())
+    Path(out_path).unlink(missing_ok=True)
+    return (
+        MeasuredPoint.model_validate(data["generation"]),
+        MeasuredPoint.model_validate(data["training"]),
+    )
+
+
+def _measure_weights_subprocess(
+    model_name: str, quantization: str, device_index: int
+) -> int:
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as handle:
+        out_path = handle.name
+    cmd = [
+        sys.executable,
+        "-m",
+        "agilerl.memory.profiling.harness",
+        "--model",
+        model_name,
+        "--out",
+        out_path,
+        "--weights-only",
+        "--quantization",
+        quantization,
+        "--device-index",
+        str(device_index),
+        # Unused by --weights-only but required by the parser.
+        "--seq-len",
+        "0",
+        "--micro-batch",
+        "0",
+        "--group-size",
+        "0",
+        "--lora-rank",
+        "0",
+    ]
+    subprocess.run(cmd, check=True)
+    data = json.loads(Path(out_path).read_text())
+    Path(out_path).unlink(missing_ok=True)
+    return int(data["realised_weight_bytes"])
+
+
 def run_sweep(
     model_name: str,
     device_name: str,
@@ -159,29 +275,22 @@ def run_sweep(
     gpu_memory_utilization: float = 0.45,
     quantizations: tuple[str, ...] = ("none",),
 ) -> ModelProfile:
-    """Measure every plan point on the local GPU and build the profile."""
-    import torch
+    """Measure every plan point on the local GPU and build the profile.
+
+    Each measurement runs in its own subprocess (CuMem is process-global), so
+    this parent process never touches CUDA.
+    """
     from transformers import AutoConfig
 
-    import agilerl
-    from agilerl.memory.profiling.harness import (
-        measure_point,
-        measure_realised_weight_bytes,
-    )
     from agilerl.memory.specs import ModelArch, WeightVariant
 
     arch = ModelArch.from_hf_config(AutoConfig.from_pretrained(model_name).to_dict())
-    total_bytes = torch.cuda.get_device_properties(device_index).total_memory
-    capability = torch.cuda.get_device_capability(device_index)
-    device = DeviceSpec.from_compute_capability(
-        total_bytes, *capability, name=device_name
-    )
 
     realised: dict[str, int] = {}
     variants = []
     for quantization in quantizations:
         name = "base" if quantization == "none" else quantization
-        realised[name] = measure_realised_weight_bytes(
+        realised[name] = _measure_weights_subprocess(
             model_name, quantization, device_index
         )
         variants.append(
@@ -210,7 +319,7 @@ def run_sweep(
             f"{' (holdout)' if held_out else ''}",
             flush=True,
         )
-        generation, training = measure_point(
+        generation, training = _measure_point_subprocess(
             model_name,
             point,
             device_index=device_index,
@@ -221,6 +330,11 @@ def run_sweep(
         target["generation"].append((point, generation))
         target["training"].append((point, training))
 
+    total_bytes, capability = _device_identity(device_index)
+    device = DeviceSpec.from_compute_capability(
+        total_bytes, *capability, name=device_name
+    )
+
     return ModelProfile(
         model_id=model_name,
         model_spec=model,
@@ -229,10 +343,7 @@ def run_sweep(
             total_bytes=total_bytes,
             compute_capability=f"{capability[0]}.{capability[1]}",
         ),
-        framework_versions={
-            "agilerl": getattr(agilerl, "__version__", "unknown"),
-            "torch": torch.__version__,
-        },
+        framework_versions=_framework_versions(),
         training=calibrate_phase(
             model,
             device,

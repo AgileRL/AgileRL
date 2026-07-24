@@ -10,11 +10,20 @@ one rollout and one learn, and records per-phase peaks:
 
 Requires a CUDA device with the ``llm`` extra installed; import stays lazy so
 the sweep planner and fitter remain importable everywhere.
+
+Runs as a module (``python -m agilerl.memory.profiling.harness``) so the sweep
+can spawn one fresh process per point: vLLM's CuMem allocator (which backs
+sleep mode) is process-global and permits only one engine per process, so a
+multi-point sweep must isolate each point in its own process.
 """
 
 from __future__ import annotations
 
+import argparse
+import json
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 from agilerl.memory.calibration import MeasuredPoint
 from agilerl.memory.specs import GenerationKnobs, TrainingKnobs
@@ -122,12 +131,13 @@ def measure_point(
     # Fixed-content prompts of controlled token length; content is irrelevant
     # to memory, shape is everything.
     prompt_ids = torch.randint(
-        low=10, high=tokenizer.vocab_size - 10, size=(prompt_len,)
+        low=10, high=tokenizer.vocab_size - 10, size=(1, prompt_len)
     )
     prompts = [
         {
             "input_ids": prompt_ids.clone(),
             "attention_mask": torch.ones_like(prompt_ids),
+            "text": tokenizer.decode(prompt_ids[0]),
         }
         for _ in range(n_prompts)
     ]
@@ -138,8 +148,12 @@ def measure_point(
                 prompts, training=True
             )
 
-        rewards = torch.randn(len(completion_ids))
+        # One reward per trajectory row; completions arrive as one
+        # (group_size, seq) tensor per prompt.
+        n_trajectories = sum(ids.shape[0] for ids in completion_ids)
+        rewards = torch.randn(n_trajectories)
         torch.cuda.reset_peak_memory_stats(device_index)
+        reserved_at_entry = int(torch.cuda.memory_reserved(device_index))
         with NvmlPeakSampler(device_index) as training_sampler:
             agent.learn(
                 (completion_ids, action_masks, rewards),
@@ -153,12 +167,20 @@ def measure_point(
     generation = MeasuredPoint(
         knobs=point.as_dict(),
         phase="generation",
-        nvml_peak_bytes=generation_sampler.peak_bytes,
+        device_peak_bytes=generation_sampler.peak_bytes,
+        nvml_polled_bytes=generation_sampler.peak_bytes,
     )
+    # NVML polling can miss the brief backward spike; torch's exact reserved
+    # high-water mark plus the non-torch resident memory (vLLM sleeping
+    # residual + CUDA context) is a tighter lower bound on the device peak.
+    nontorch_baseline = max(training_sampler.baseline_bytes - reserved_at_entry, 0)
     training = MeasuredPoint(
         knobs=point.as_dict(),
         phase="training",
-        nvml_peak_bytes=training_sampler.peak_bytes,
+        device_peak_bytes=max(
+            training_sampler.peak_bytes, nontorch_baseline + torch_reserved
+        ),
+        nvml_polled_bytes=training_sampler.peak_bytes,
         torch_max_allocated_bytes=torch_allocated,
         torch_max_reserved_bytes=torch_reserved,
     )
@@ -177,17 +199,19 @@ def measure_realised_weight_bytes(
 
     from agilerl.utils.llm_utils import create_model_from_name_or_path
 
-    kwargs: dict[str, object] = {}
+    model_config: dict[str, object] | None = None
     if quantization == "nf4":
         from transformers import BitsAndBytesConfig
 
-        kwargs["quantization_config"] = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_compute_dtype=torch.bfloat16,
-        )
-    model = create_model_from_name_or_path(model_name, **kwargs)
+        model_config = {
+            "quantization_config": BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_compute_dtype=torch.bfloat16,
+            )
+        }
+    model = create_model_from_name_or_path(model_name, model_config=model_config)
     total = 0
     seen: set[int] = set()
     for tensor in list(model.parameters()) + list(model.buffers()):
@@ -199,3 +223,57 @@ def measure_realised_weight_bytes(
     del model
     torch.cuda.empty_cache()
     return total
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Measure one point (and optionally its realised weight bytes) in this
+    process, writing the result JSON to ``--out``. Invoked one process per
+    point by :func:`agilerl.memory.profiling.sweep.run_sweep`.
+    """
+    parser = argparse.ArgumentParser(prog="agilerl.memory.profiling.harness")
+    parser.add_argument("--model", required=True)
+    parser.add_argument("--out", required=True)
+    parser.add_argument("--seq-len", type=int, required=True)
+    parser.add_argument("--micro-batch", type=int, required=True)
+    parser.add_argument("--group-size", type=int, required=True)
+    parser.add_argument("--lora-rank", type=int, required=True)
+    parser.add_argument("--quantization", default="none")
+    parser.add_argument("--device-index", type=int, default=0)
+    parser.add_argument("--gpu-memory-utilization", type=float, default=0.45)
+    parser.add_argument(
+        "--weights-only",
+        action="store_true",
+        help="Only measure realised weight bytes for --quantization",
+    )
+    args = parser.parse_args(argv)
+
+    if args.weights_only:
+        result = {
+            "realised_weight_bytes": measure_realised_weight_bytes(
+                args.model, args.quantization, args.device_index
+            )
+        }
+    else:
+        point = SweepPoint(
+            seq_len=args.seq_len,
+            micro_batch=args.micro_batch,
+            group_size=args.group_size,
+            lora_rank=args.lora_rank,
+            quantization=args.quantization,
+        )
+        generation, training = measure_point(
+            args.model,
+            point,
+            device_index=args.device_index,
+            gpu_memory_utilization=args.gpu_memory_utilization,
+        )
+        result = {
+            "generation": generation.model_dump(mode="json"),
+            "training": training.model_dump(mode="json"),
+        }
+    Path(args.out).write_text(json.dumps(result))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
