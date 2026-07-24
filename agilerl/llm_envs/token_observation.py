@@ -89,10 +89,10 @@ class TokenObservationWrapper:
     def _tokenize_initial_prompt(self, obs_text: str) -> dict[str, torch.Tensor]:
         """Tokenize the initial observation, optionally with chat template."""
         if self.apply_chat_template:
-            # v5 ``apply_chat_template(tokenize=True)`` returns a BatchEncoding
-            # mapping (``return_dict`` defaults to ``True``); the packaged stub
-            # widens the return to ``str | list``, so treat it as the dynamic
-            # mapping transformers actually returns.
+            # transformers v5 ``apply_chat_template(tokenize=True)`` returns a
+            # BatchEncoding mapping (``return_dict`` defaults to ``True``); the
+            # packaged stub widens the return to ``str | list``, so treat it as
+            # the dynamic mapping transformers actually returns.
             result: Any = self.tokenizer.apply_chat_template(
                 [{"role": "user", "content": obs_text}],
                 tokenize=True,
@@ -225,6 +225,8 @@ class TokenObservationWrapper:
             prompt_ids_1d.tolist(),
             skip_special_tokens=True,
         )
+        # decode is overloaded (ids -> str, batched-ids -> list[str]); the 1-D
+        # ids give a str, which ReasoningPrompts["text"] requires.
         assert isinstance(text, str)
         obs: ReasoningPrompts = {
             "input_ids": self.full_ids,
