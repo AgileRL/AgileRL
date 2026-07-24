@@ -52,10 +52,9 @@ test *args:
 # ---------------------------------------------------------------------------
 
 # Static type checking with ty (config in pyproject.toml [tool.ty]).
-# Creates the agilerl/arena dev symlink on first run: agilerl.arena is a
-# namespace portion shipped by agilerl-arena, and ty resolves it through the
-# symlink. Both paths are passed explicitly because ty does not traverse
-# symlinked directories during discovery.
+# Runs the pinned ty pre-commit hook so local type-checking stays identical to
+# CI. The hook creates the agilerl/arena dev symlink (agilerl.arena is a
+# namespace portion shipped by agilerl-arena, which ty resolves through the
+# symlink) and checks both trees.
 typecheck:
-    [ -e agilerl/arena ] || ln -s ../agilerl-arena/agilerl/arena agilerl/arena
-    uv run ty check agilerl agilerl/arena
+    uv run pre-commit run ty --all-files
