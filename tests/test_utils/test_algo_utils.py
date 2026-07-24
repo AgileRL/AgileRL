@@ -1888,6 +1888,19 @@ class TestVectorizeExperiencesByAgent:
         assert isinstance(out_tup, tuple)
         assert len(out_tup) == 2
 
+    def test_vectorize_agent_experiences_flat_returns_tensor(self):
+        exp = {"a0": [1.0, 2.0], "a1": [3.0, 4.0]}
+        result = algo_utils.vectorize_agent_experiences_flat(exp)
+        assert isinstance(result, torch.Tensor)
+
+    def test_vectorize_agent_experiences_flat_rejects_structured(self):
+        """Structured (dict/tuple) experiences vectorize to a container, which
+        the flat helper rejects rather than returning a non-tensor.
+        """
+        structured = {"a0": {"obs": [1.0, 2.0]}, "a1": {"obs": [3.0, 4.0]}}
+        with pytest.raises(TypeError, match="flat per-agent scalars"):
+            algo_utils.vectorize_agent_experiences_flat(structured)
+
 
 class TestExperienceToTensors:
     @pytest.mark.parametrize(

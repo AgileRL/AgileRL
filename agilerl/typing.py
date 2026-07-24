@@ -37,7 +37,7 @@ from tensordict import TensorClass, TensorDict
 from torch._dynamo import OptimizedModule
 from torch.nn import Module
 from torch.optim import Optimizer
-from typing_extensions import Never, NotRequired
+from typing_extensions import Never, NotRequired, Self
 
 from agilerl.protocols import (
     EvolvableAlgorithmProtocol,
@@ -364,6 +364,12 @@ class RolloutMinibatch(TensorClass):
     returns: torch.Tensor
     value_preds: torch.Tensor
     action_masks: torch.Tensor | None = None
+
+    if TYPE_CHECKING:
+        # tensordict's ``__getitem__`` stub widens the return to
+        # ``Tensor | collection``; row/tensor indexing actually yields the same
+        # TensorClass, so callers can index without narrowing back.
+        def __getitem__(self, index: Any) -> Self: ...  # noqa: ANN401 -- tensordict indexing accepts arbitrary index expressions; only the narrowed Self return matters here
 
 
 class RolloutSequenceMinibatch(TensorClass):

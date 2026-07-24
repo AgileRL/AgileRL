@@ -778,11 +778,7 @@ class PPO(RLAlgorithm[TensorDict]):
                 end_idx = min(start_idx + batch_size, num_samples)
                 minibatch_indices = indices[start_idx:end_idx]
 
-                # Row-indexing a TensorClass returns a TensorClass at runtime, but
-                # the untyped ``__getitem__`` stub widens to ``Tensor | collection``;
-                # narrow the single polymorphic slice back to the batch type.
                 minibatch = buffer_batch[torch.from_numpy(minibatch_indices)]
-                assert isinstance(minibatch, RolloutMinibatch)
                 mb_obs = minibatch.observations
                 mb_actions = minibatch.actions
                 mb_log_probs = minibatch.log_probs
