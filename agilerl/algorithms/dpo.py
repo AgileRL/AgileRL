@@ -400,8 +400,6 @@ class DPO(LLMAlgorithm[PreferencePrompts]):
         :return: Loss, chosen rewards, rejected rewards
         :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         """
-        # ``get_experiences_samples`` indexes each input positionally: Tensor in
-        # -> Tensor out, None passes through, so the tuple mirrors the inputs.
         (
             batch_chosen_input_ids,
             batch_chosen_attention_mask,

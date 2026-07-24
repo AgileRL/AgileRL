@@ -739,11 +739,9 @@ class PPO(RLAlgorithm[TensorDict]):
         )
         indices = np.arange(num_samples)
 
-        # Wrap the rollout buffer as a typed batch once and drive minibatches by
-        # indexing it (indexing a TensorClass returns a TensorClass, so every read
-        # below is statically typed). ``strict=False`` tolerates the optional
-        # ``action_masks``; the buffer's ``"values"`` key collides with
-        # ``TensorDict.values()`` so it is renamed to ``value_preds`` here.
+        # Wrap the buffer as a typed batch once, then index it for minibatches.
+        # ``values`` is renamed to ``value_preds`` to avoid clashing with
+        # ``TensorDict.values()``.
         minibatch_fields = [
             "observations",
             "actions",
@@ -755,9 +753,7 @@ class PPO(RLAlgorithm[TensorDict]):
         ]
         buffer_batch_td = buffer_td.select(*minibatch_fields, strict=False)
         buffer_batch_td.rename_key_("values", "value_preds")
-        buffer_batch: RolloutMinibatch = RolloutMinibatch.from_tensordict(
-            buffer_batch_td
-        )
+        buffer_batch = RolloutMinibatch.from_tensordict(buffer_batch_td)
 
         # Normalize advantages globally
         valid_advantages = buffer_batch.advantages
