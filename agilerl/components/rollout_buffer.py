@@ -1,7 +1,7 @@
 import warnings
 from collections import OrderedDict
 from collections.abc import Generator, Sequence
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import numpy as np
 import numpy.typing as npt
@@ -44,6 +44,19 @@ def _require_prepared(value: _T | None) -> _T:
         )
         raise ValueError(msg)
     return value
+
+
+# Typed to return ``TensorDict`` so callers don't narrow the widened
+# ``TensorDict.__getitem__`` return; indexing/slicing a TensorDict yields a
+# TensorDict at runtime.
+if TYPE_CHECKING:
+
+    def _index_tensordict(td: TensorDict, index: Any) -> TensorDict: ...  # noqa: ANN401 -- tensordict indexing accepts arbitrary index expressions; only the TensorDict return matters
+
+else:
+
+    def _index_tensordict(td: TensorDict, index: Any) -> TensorDict:  # noqa: ANN401 -- tensordict indexing accepts arbitrary index expressions
+        return td[index]
 
 
 class RolloutBuffer:
@@ -592,8 +605,9 @@ class RolloutBuffer:
         # Get a view of the buffer up to the current position and for all envs
         # This slice will have batch_size [buffer_size, num_envs]
         # All tensors inside self.buffer are already torch.Tensors on CPU
-        valid_buffer_data_view = self.buffer[:buffer_size]
-        assert isinstance(valid_buffer_data_view, TensorDict)
+        valid_buffer_data_view = _index_tensordict(
+            self.buffer, slice(None, buffer_size)
+        )
 
         # Reshape to flatten the num_envs dimension into the first batch dimension
         # New batch_size will be [buffer_size * num_envs]
@@ -839,8 +853,9 @@ class RolloutBuffer:
         # Get a view of the buffer up to the current position and for all envs
         # This slice will have batch_size [buffer_size, num_envs]
         # All tensors inside self.buffer are already torch.Tensors on CPU
-        valid_buffer_data_view = self.buffer[:buffer_size]
-        assert isinstance(valid_buffer_data_view, TensorDict)
+        valid_buffer_data_view = _index_tensordict(
+            self.buffer, slice(None, buffer_size)
+        )
 
         # Split data into sequences and apply zero-padding
         # Retrieve the indices of dones as these are the last step of a whole episode
@@ -1007,8 +1022,7 @@ class RolloutBuffer:
                 unpadded_indices, device=indices.device
             )
 
-            padded = padded_data[padded_indices]
-            assert isinstance(padded, TensorDict)
+            padded = _index_tensordict(padded_data, padded_indices)
             if self.recurrent and padded.get("initial_hidden_states", None) is not None:
                 batch_hidden_states = {}
                 initial_hidden_states: dict[str, Any] = padded.get_non_tensor(
@@ -1019,8 +1033,7 @@ class RolloutBuffer:
 
                 padded.set_non_tensor("initial_hidden_states", batch_hidden_states)
 
-            unpadded = unpadded_data[unpadded_indices_tensor]
-            assert isinstance(unpadded, TensorDict)
+            unpadded = _index_tensordict(unpadded_data, unpadded_indices_tensor)
             start = end
             yield padded, unpadded
 
