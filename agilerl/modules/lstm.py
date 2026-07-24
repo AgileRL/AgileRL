@@ -146,8 +146,8 @@ class EvolvableLSTM(EvolvableModule):
         return net_config
 
     @property
-    def activation(self) -> str | None:
-        """Return activation function."""
+    def activation(self) -> None:
+        """LSTM has no activation function."""
         return None
 
     @activation.setter
@@ -198,10 +198,8 @@ class EvolvableLSTM(EvolvableModule):
 
         # Use provided hidden state if available
         if hidden_state is not None:
-            h0 = hidden_state.get(f"{self.name}_h", None)
-            c0 = hidden_state.get(f"{self.name}_c", None)
-            assert h0 is not None, f"Expected key '{self.name}_h' in hidden state."
-            assert c0 is not None, f"Expected key '{self.name}_c' in hidden state."
+            h0 = hidden_state[f"{self.name}_h"]
+            c0 = hidden_state[f"{self.name}_c"]
 
             # Reshape to (batch_seq_size, seq_len, features)
             sequence_input = False

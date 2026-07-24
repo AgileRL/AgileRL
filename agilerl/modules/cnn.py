@@ -173,7 +173,7 @@ class MutableKernelSizes:
         channel_size: list[int],
         stride_size: list[int],
         input_shape: list[int],
-        kernel_size: float | tuple[int, ...] | None = None,
+        kernel_size: int | tuple[int, ...] | None = None,
     ) -> int | tuple[int, ...]:
         """Randomly alters convolution kernel of random CNN layer.
 
@@ -186,7 +186,7 @@ class MutableKernelSizes:
         :param input_shape: Input shape.
         :type input_shape: list[int]
         :param kernel_size: Kernel size to change to, defaults to None
-        :type kernel_size: int | float | tuple[int, ...], optional
+        :type kernel_size: int | tuple[int, ...], optional
 
         :return: New kernel size, in the same form it is stored (tuple per
             block when tuple-sized, scalar otherwise) so mutation replays can
@@ -200,8 +200,8 @@ class MutableKernelSizes:
             else:
                 assert isinstance(
                     kernel_size,
-                    (int, float, np.integer, np.floating),
-                ), "Kernel size must be a number."
+                    (int, np.integer),
+                ), "Kernel size must be an integer."
                 new_kernel_size = int(kernel_size)
         else:
             max_kernels = self.calc_max_kernel_sizes(
