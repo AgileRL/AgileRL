@@ -499,6 +499,16 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
 
         return ActionResult(completion_ids, completion_masks, sampling_logps)
 
+    if TYPE_CHECKING:
+        # PPO always trains with a value head, so the fused forward always
+        # returns critic values; narrow the base ``Tensor | None`` here.
+        def _fused_forward(
+            self,
+            ids: torch.Tensor,
+            batch_size: int,
+            attention_mask: torch.Tensor | None = None,
+        ) -> tuple[torch.Tensor, torch.Tensor]: ...
+
     def learn(
         self,
         experiences: LLMRolloutExperiences,
@@ -694,9 +704,6 @@ class PPO(LLMAlgorithm[LLMRolloutExperiences]):
                         batch_ids,
                         batch_size=batch_size,
                     )
-                    # PPO always trains with a value head, so critic values
-                    # are present.
-                    assert batch_values is not None
                     batch_log_probs = torch.masked_fill(
                         batch_log_probs, ~batch_mask_bool, 1.0
                     )
