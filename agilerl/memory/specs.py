@@ -1,0 +1,358 @@
+"""Input specifications for the GPU memory estimator.
+
+Everything in this module is plain data: pydantic models that describe the
+model architecture, the device, and the user-facing knobs. The specs are
+JSON-serializable so the same objects can back the Arena widget, the CLI
+preflight, and the checked-in calibration fixtures. Nothing here imports
+torch — the calculation core must stay portable to a browser runtime.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from typing_extensions import Self
+
+GiB = 1024**3
+MiB = 1024**2
+
+#: Bytes per element for the dtypes the estimator reasons about. Sub-byte
+#: quantization formats (nf4) are handled via bytes-per-param factors in
+#: :mod:`agilerl.memory.formulas`, not through this table.
+DTYPE_BYTES: dict[str, float] = {
+    "fp32": 4.0,
+    "fp16": 2.0,
+    "bf16": 2.0,
+    "fp8": 1.0,
+    "int8": 1.0,
+}
+
+WeightDtype = Literal["fp32", "bf16", "fp16"]
+KVCacheDtype = Literal["auto", "fp8", "int8"]
+QuantizationMethod = Literal["none", "nf4", "int8", "awq", "gptq"]
+Algorithm = Literal["grpo", "gspo", "cispo", "ppo", "reinforce", "dpo", "sft"]
+LoraTargetScope = Literal["all-linear", "attention-only"]
+DistributedBackend = Literal["none", "deepspeed"]
+
+
+class ModelArch(BaseModel):
+    """Dense (or MoE) decoder-only transformer geometry.
+
+    Field names follow HF ``config.json`` semantics; use
+    :meth:`from_hf_config` to build one from a raw config dict.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    n_layers: int
+    hidden_size: int
+    intermediate_size: int
+    n_heads: int
+    n_kv_heads: int
+    head_dim: int
+    vocab_size: int
+    tied_embeddings: bool = False
+    max_position_embeddings: int | None = None
+    #: Sliding-window size when the model uses windowed attention. Caps KV
+    #: growth per sequence on the windowed layers.
+    sliding_window: int | None = None
+    #: Fraction of layers using the sliding window (1.0 for fully windowed
+    #: models, e.g. 0.75 for hybrid layouts). Ignored when
+    #: ``sliding_window`` is None.
+    sliding_window_layer_fraction: float = 1.0
+    #: Whether attention projections carry biases (Qwen2-style qkv bias).
+    attn_bias: bool = False
+    #: Gated MLP (SwiGLU-style: gate + up + down). All mainstream decoder
+    #: models qualify; ungated MLPs use two matrices instead of three.
+    gated_mlp: bool = True
+
+    # MoE geometry — None for dense models. Weights/optimizer scale with the
+    # total expert count; activations scale with the active (routed) count.
+    n_experts: int | None = None
+    n_experts_per_tok: int | None = None
+    expert_intermediate_size: int | None = None
+    n_shared_experts: int = 0
+
+    #: Parameter count of multimodal towers (vision/audio encoders and
+    #: projectors) when the checkpoint carries them. Tower geometry varies too
+    #: much to model analytically; profiled realised sizes refine this.
+    multimodal_tower_params: int = 0
+
+    @property
+    def is_moe(self) -> bool:
+        return self.n_experts is not None and self.n_experts > 1
+
+    @classmethod
+    def from_hf_config(cls, config: dict[str, Any]) -> Self:
+        """Build a :class:`ModelArch` from a raw HF ``config.json`` dict.
+
+        Multimodal configs that nest the language model under ``text_config``
+        are unwrapped; the tower parameter count is left at 0 (profiling or an
+        explicit override fills it in).
+        """
+        text_cfg = config.get("text_config", config)
+        n_heads = int(text_cfg["num_attention_heads"])
+        hidden = int(text_cfg["hidden_size"])
+        n_kv = int(text_cfg.get("num_key_value_heads") or n_heads)
+        moe_experts = text_cfg.get("num_experts") or text_cfg.get("num_local_experts")
+        return cls(
+            n_layers=int(text_cfg["num_hidden_layers"]),
+            hidden_size=hidden,
+            intermediate_size=int(text_cfg["intermediate_size"]),
+            n_heads=n_heads,
+            n_kv_heads=n_kv,
+            head_dim=int(text_cfg.get("head_dim") or hidden // n_heads),
+            vocab_size=int(text_cfg["vocab_size"]),
+            tied_embeddings=bool(text_cfg.get("tie_word_embeddings", False)),
+            max_position_embeddings=text_cfg.get("max_position_embeddings"),
+            sliding_window=(
+                text_cfg.get("sliding_window")
+                if text_cfg.get("use_sliding_window", True)
+                else None
+            ),
+            attn_bias=bool(
+                text_cfg.get("attention_bias", False) or text_cfg.get("qkv_bias", False)
+            ),
+            n_experts=int(moe_experts) if moe_experts else None,
+            n_experts_per_tok=(
+                int(text_cfg["num_experts_per_tok"])
+                if text_cfg.get("num_experts_per_tok")
+                else None
+            ),
+            expert_intermediate_size=(
+                int(text_cfg["moe_intermediate_size"])
+                if text_cfg.get("moe_intermediate_size")
+                else None
+            ),
+        )
+
+
+class WeightVariant(BaseModel):
+    """One loadable form of a model's weights.
+
+    Quantization and multimodal-tower stripping produce discrete variants of
+    the same checkpoint with different realised in-memory sizes. The analytic
+    size is always computable; ``realised_bytes`` is the profiled ground truth
+    and takes precedence when present (scales, zero points, and
+    higher-precision held-out layers all cut into the nominal saving).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str = "base"
+    quantization: QuantizationMethod = "none"
+    stripped_multimodal: bool = False
+    realised_bytes: int | None = None
+
+
+class ModelSpec(BaseModel):
+    """A curated model: geometry plus its profiled weight variants."""
+
+    model_config = ConfigDict(frozen=True)
+
+    model_id: str
+    arch: ModelArch
+    checkpoint_dtype: WeightDtype = "bf16"
+    #: Exact parameter count when known (e.g. from safetensors metadata).
+    #: ``None`` falls back to the analytic count from the geometry.
+    n_params: int | None = None
+    variants: tuple[WeightVariant, ...] = (WeightVariant(),)
+
+    def variant(self, name: str) -> WeightVariant:
+        for v in self.variants:
+            if v.name == name:
+                return v
+        msg = (
+            f"Model {self.model_id!r} has no weight variant {name!r}; "
+            f"available: {[v.name for v in self.variants]}"
+        )
+        raise KeyError(msg)
+
+
+class DeviceSpec(BaseModel):
+    """A device abstracted as capacity plus the capability flags that change
+    which formula applies (not just which constant).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    total_bytes: int
+    #: Bytes actually usable by the run. CUDA context + driver reserve
+    #: consume memory before any tensor is allocated, so this is lower than
+    #: ``total_bytes``; the default carve-out matches a typical ~0.75 GiB
+    #: context.
+    available_bytes: int | None = None
+    name: str | None = None
+    #: fp8 KV cache / fp8 weights need compute capability >= 8.9 (Ada/Hopper).
+    supports_fp8: bool = True
+    supports_bf16: bool = True
+    #: Without FlashAttention/SDPA-flash the attention forward materialises a
+    #: B*H*S*S score matrix — a different activation formula entirely.
+    has_flash_attention: bool = True
+
+    @property
+    def usable_bytes(self) -> int:
+        if self.available_bytes is not None:
+            return self.available_bytes
+        return max(self.total_bytes - int(0.75 * GiB), 0)
+
+    @classmethod
+    def from_compute_capability(
+        cls, total_bytes: int, major: int, minor: int, name: str | None = None
+    ) -> Self:
+        cc = major + minor / 10
+        return cls(
+            total_bytes=total_bytes,
+            name=name,
+            supports_fp8=cc >= 8.9,
+            supports_bf16=cc >= 8.0,
+            has_flash_attention=cc >= 8.0,
+        )
+
+
+class TrainingKnobs(BaseModel):
+    """The training-side knobs that genuinely exist in the framework.
+
+    Notably absent, because the framework does not expose them:
+
+    - Full fine-tuning — AgileRL trains LoRA adapters only, so gradients and
+      optimizer state scale with adapter parameters, never with the base.
+    - Optimizer choice — ``torch.optim.AdamW`` (or a DeepSpeed-config-owned
+      optimizer) is the only path.
+    - ``beta`` — the KL coefficient is memory-neutral: the reference forward
+      runs (and the reference adapter exists) regardless of beta, so it is a
+      loss knob, not a memory knob.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    algorithm: Algorithm = "grpo"
+    #: Completion rows per gradient minibatch; with ``group_size`` it also
+    #: proxies the (megabyte-scale) held rollout-tensor row count.
+    batch_size: int = 16
+    #: Rows per gradient forward/backward. ``None`` falls back to
+    #: ``batch_size`` (matching ``LLMAlgorithm`` behaviour).
+    micro_batch_size_per_gpu: int | None = None
+    group_size: int = 8
+    #: Full context budget (prompt + completion), i.e. the worst-case
+    #: sequence length for activation and logprob tensors.
+    max_model_len: int = 1024
+    lora_rank: int = 16
+    lora_target_scope: LoraTargetScope = "all-linear"
+    #: A frozen copy of the actor adapter used for reference logprobs.
+    #: ``False`` routes reference rows through the (immutable) base instead —
+    #: this removes the second adapter's weights but not the reference
+    #: forward itself.
+    use_separate_reference_adapter: bool = True
+    weight_dtype: WeightDtype = "bf16"
+    #: Trainer-side base quantization (QLoRA). ``lm_head`` stays unquantized
+    #: and norms + lm_head are upcast to fp32 by k-bit preparation.
+    quantization: Literal["none", "nf4", "int8"] = "none"
+    gradient_checkpointing: bool = True
+    #: Save backward-saved activations to pinned host RAM instead of GPU.
+    activation_offload: bool = False
+    #: Fused-logprob tile rows. ``None`` auto-tunes to a ~256 MiB fp32 logit
+    #: workspace, clamped to [128, 4096].
+    chunk_rows: int | None = None
+    distributed: DistributedBackend = "none"
+
+    @property
+    def grad_rows(self) -> int:
+        return self.micro_batch_size_per_gpu or self.batch_size
+
+    @property
+    def n_adapter_rows(self) -> int:
+        """Row multiplier of the fused no-grad forward (actor + reference
+        [+ value head for PPO]).
+        """
+        rows = 2  # actor + reference logprobs are always computed
+        if self.algorithm == "ppo":
+            rows += 1
+        if self.algorithm == "sft":
+            rows = 1
+        return rows
+
+    @property
+    def n_trained_adapters(self) -> int:
+        """Adapters carrying gradients/optimizer state (the reference adapter
+        is frozen).
+        """
+        return 1
+
+    @property
+    def n_resident_adapters(self) -> int:
+        n = 1
+        if self.use_separate_reference_adapter and self.algorithm != "sft":
+            n += 1
+        return n
+
+
+class GenerationKnobs(BaseModel):
+    """The vLLM-side knobs, mirroring ``VLLMConfig`` plus the workload shape."""
+
+    model_config = ConfigDict(frozen=True)
+
+    gpu_memory_utilization: float = 0.3
+    max_num_seqs: int = 8
+    max_model_len: int = 1024
+    #: ``None`` uses the framework's resolution rule:
+    #: ``min(max_num_seqs * max_model_len, max(max_model_len, max_num_seqs * 8192))``.
+    max_num_batched_tokens: int | None = None
+    kv_cache_dtype: KVCacheDtype = "auto"
+    #: Pin the KV pool size instead of letting vLLM derive it from
+    #: ``gpu_memory_utilization``.
+    kv_cache_memory_bytes: int | None = None
+    #: ``True`` skips CUDA-graph capture (saves the ~2 GiB graph pool at some
+    #: decode-throughput cost). ``None``/``False`` keeps graphs on.
+    enforce_eager: bool | None = None
+    max_lora_rank: int = 16
+    max_loras: int = 1
+    weight_dtype: WeightDtype = "bf16"
+    #: Name of the :class:`WeightVariant` the engine loads (vLLM may load a
+    #: different variant than the trainer, e.g. an AWQ export).
+    weight_variant: str = "base"
+    #: Worst-case concurrent requests, ``prompts_in_flight * group_size``.
+    #: ``None`` assumes the schedule limit (``max_num_seqs``) is saturated.
+    concurrent_requests: int | None = None
+
+    @property
+    def concurrency(self) -> int:
+        if self.concurrent_requests is None:
+            return self.max_num_seqs
+        return min(self.concurrent_requests, self.max_num_seqs)
+
+    @model_validator(mode="after")
+    def _check_utilization(self) -> Self:
+        if not 0.0 < self.gpu_memory_utilization <= 1.0:
+            msg = (
+                "gpu_memory_utilization must be in (0, 1], got "
+                f"{self.gpu_memory_utilization}"
+            )
+            raise ValueError(msg)
+        return self
+
+
+class RunConfig(BaseModel):
+    """A complete sizing question: model + devices + knobs + placement."""
+
+    model_config = ConfigDict(frozen=True)
+
+    model: ModelSpec
+    train_device: DeviceSpec
+    #: ``None`` means colocated: generation shares ``train_device`` and the
+    #: cross-phase residuals (offloaded trainer state during rollout, sleeping
+    #: engine during training) are included in each phase's bar.
+    gen_device: DeviceSpec | None = None
+    training: TrainingKnobs = Field(default_factory=TrainingKnobs)
+    generation: GenerationKnobs = Field(default_factory=GenerationKnobs)
+    #: Trainer-side weight variant (usually "base"; "nf4" under QLoRA).
+    trainer_weight_variant: str = "base"
+
+    @property
+    def colocated(self) -> bool:
+        return self.gen_device is None
+
+    @property
+    def generation_device(self) -> DeviceSpec:
+        return self.gen_device or self.train_device
