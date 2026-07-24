@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 from pydantic import BaseModel, ConfigDict, Field
 
 from agilerl import HAS_LLM_DEPENDENCIES, AgentType
+from agilerl.models.networks import NetworkSpec
 
 if TYPE_CHECKING:
     import torch
@@ -31,7 +32,6 @@ if TYPE_CHECKING:
         OfflineEnvSpec,
         PzEnvSpec,
     )
-    from agilerl.models.networks import NetworkSpec
     from agilerl.models.training import TrainingSpec
 
     if HAS_LLM_DEPENDENCIES:

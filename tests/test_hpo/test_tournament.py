@@ -249,10 +249,11 @@ class TestTournamentSelectionSelect:
         reason="Need to install agilerl with deepspeed + vllm",
     )
     @pytest.mark.parametrize("use_accelerator", [True, False])
-    @pytest.mark.parametrize("elitism", [True, False])
     @pytest.mark.parametrize("num_processes", [1, 2])
-    def test_language_model_tournament(self, use_accelerator, elitism, num_processes):
-        tournament_selection = TournamentSelection(3, elitism, 4)
+    def test_language_model_tournament(self, use_accelerator, num_processes):
+        # LLM populations require elitism; the elitism=False path is rejected and
+        # covered separately by test_llm_without_elitism_rejected.
+        tournament_selection = TournamentSelection(3, True, 4)
         population_size = 4
 
         init_hp = {
