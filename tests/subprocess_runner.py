@@ -15,6 +15,7 @@ Usage:
 import argparse
 import functools
 import importlib.util
+import itertools
 import json
 import os
 import random
@@ -31,8 +32,37 @@ from torch._inductor.utils import fresh_cache
 
 from tests.utils import force_gpu_memory_release, wait_for_gpu_memory_to_clear
 
+_port_counter = itertools.count()
+
 
 def get_free_port():
+    """Pick a MASTER_PORT that won't collide across xdist workers.
+
+    The bind-to-port-0 / close / reuse dance is TOCTOU-racy: two concurrent
+    subprocess-isolated tests can be handed the same ephemeral port and the
+    loser dies with ``EADDRINUSE`` inside ``init_process_group``. This process
+    inherits ``PYTEST_XDIST_WORKER`` from the spawning worker (``env`` is
+    copied in ``tests.utils``), so carve a disjoint 300-port range per worker
+    and walk it with a per-process counter; the low range also keeps
+    ``MASTER_PORT`` clear of vLLM's ephemeral allocations. Fall back to an
+    OS-assigned port only if the whole range is somehow occupied. Mirrors
+    ``get_free_port`` in ``tests/conftest.py``.
+    """
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "gw0")
+    try:
+        worker_num = int(worker.lstrip("gw"))
+    except ValueError:
+        worker_num = 0
+    base = 20000 + (worker_num % 100) * 300
+    for _ in range(300):
+        port = base + next(_port_counter) % 300
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                s.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+            return port
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
