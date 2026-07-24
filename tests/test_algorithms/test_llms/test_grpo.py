@@ -366,7 +366,6 @@ def generate_grpo(
             kv_cache_memory_bytes=32 * 1024 * 1024,
             max_num_seqs=1,
             sleep_mode=sleep_mode,
-            swap_space=0,
             enforce_eager=False,
         )
 
