@@ -8,16 +8,11 @@ from tensordict import TensorDict
 
 from agilerl.components.segment_tree import MinSegmentTree, SumSegmentTree
 
+# Typed to return ``torch.Tensor`` so callers don't narrow the widened
+# ``TensorDict.__getitem__`` return; the n-step keys always hold tensors.
 if TYPE_CHECKING:
 
-    def _read_tensor(transition: TensorDict, key: str) -> torch.Tensor:
-        """Read a tensor-valued transition field.
-
-        Typed to return ``torch.Tensor`` so callers don't have to narrow the
-        widened ``TensorDict.__getitem__`` return; these buffer keys always
-        hold tensors. Same ``TYPE_CHECKING`` pattern used to type row-indexing
-        on the TensorClass batches.
-        """
+    def _read_tensor(transition: TensorDict, key: str) -> torch.Tensor: ...
 
 else:
 
