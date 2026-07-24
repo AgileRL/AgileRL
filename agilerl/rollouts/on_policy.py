@@ -93,7 +93,10 @@ def _collect_rollouts(
                 action_mask=info.get("action_mask", None),
                 hidden_state=current_hidden_state_for_actor,
             )
-            assert len(action_result) == 5
+            assert len(action_result) == 5, (
+                "Recurrent get_action must return a 5-tuple "
+                "(action, log_prob, entropy, value, next_hidden_state)."
+            )
             action, log_prob, _, value, next_hidden_for_actor = action_result
             agent.hidden_state = next_hidden_for_actor
         else:
@@ -101,7 +104,10 @@ def _collect_rollouts(
                 obs,
                 action_mask=info.get("action_mask", None),
             )
-            assert len(action_result) == 4
+            assert len(action_result) == 4, (
+                "Non-recurrent get_action must return a 4-tuple "
+                "(action, log_prob, entropy, value)."
+            )
             action, log_prob, _, value = action_result
 
         # Clip action to action space

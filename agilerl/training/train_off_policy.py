@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 
 @runtime_checkable
-class _NStepAgent(Protocol):
+class NStepAgent(Protocol):
     """A RainbowDQN-style agent that consumes n-step / prioritized batches.
 
     It is the only off-policy algorithm that anneals ``beta`` and whose
@@ -80,7 +80,7 @@ def _learn_from_buffer(
     # and priorities to write back, and pairs with a PrioritizedReplayBuffer.
     # Narrowing to those concrete types resolves the whole block.
     if per:
-        assert isinstance(agent, _NStepAgent)
+        assert isinstance(agent, NStepAgent)
         assert isinstance(memory, PrioritizedReplayBuffer)
         experiences = sample(agent.batch_size, agent.beta)
         n_step_experiences = (
@@ -102,7 +102,7 @@ def _learn_from_buffer(
             return_idx=n_step_memory is not None,
         )
         if n_step_sampler is not None:
-            assert isinstance(agent, _NStepAgent)
+            assert isinstance(agent, NStepAgent)
             n_step_experiences = n_step_sampler.sample(experiences["idxs"])
             agent.learn(experiences, n_experiences=n_step_experiences)
         else:

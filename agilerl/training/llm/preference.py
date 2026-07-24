@@ -209,7 +209,8 @@ def finetune_llm_preference(
 
         # Tournament selection and mutation
         if tournament and mutation is not None:
-            # `_validate_finetune_args` rejects an unset `evo_steps` here.
+            # evo_steps is guaranteed set here: it is validated as set on entry
+            # when tournament and mutation are enabled.
             assert evo_steps is not None
             if (i + 1) % evo_steps == 0:
                 if accelerator is not None:

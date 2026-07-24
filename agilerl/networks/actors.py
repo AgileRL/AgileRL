@@ -155,7 +155,8 @@ class DeterministicActor(EvolvableNetwork):
 
         output_size = get_output_size_from_space(self.action_space)
         assert not isinstance(output_size, (dict, tuple)), (
-            "Box and Discrete action spaces have an integer output size."
+            "Expected an integer output size for a Box/Discrete action space, "
+            "got a structured (dict/tuple) size."
         )
         self.output_size = output_size
 
@@ -355,7 +356,8 @@ class StochasticActor(EvolvableNetwork):
 
         output_size = get_output_size_from_space(self.action_space)
         assert not isinstance(output_size, (dict, tuple)), (
-            "Supported action spaces have an integer output size."
+            "Expected an integer output size for this action space, "
+            "got a structured (dict/tuple) size."
         )
         self.output_size = output_size
 
