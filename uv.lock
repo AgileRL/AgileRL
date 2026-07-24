@@ -174,8 +174,8 @@ requires-dist = [
     { name = "hydra-core", specifier = ">=1.3.2" },
     { name = "jax", extras = ["cpu"], specifier = ">=0.4.31" },
     { name = "lazy-loader", specifier = ">=0.4" },
-    { name = "liger-kernel", marker = "sys_platform == 'linux' and extra == 'all'", specifier = "==0.8.0" },
-    { name = "liger-kernel", marker = "sys_platform == 'linux' and extra == 'llm'", specifier = "==0.8.0" },
+    { name = "liger-kernel", marker = "sys_platform == 'linux' and extra == 'all'", specifier = "==0.8.1" },
+    { name = "liger-kernel", marker = "sys_platform == 'linux' and extra == 'llm'", specifier = "==0.8.1" },
     { name = "matplotlib", specifier = ">=3.9.4" },
     { name = "minari", extras = ["all"], specifier = ">=0.5.2" },
     { name = "numpy", specifier = ">=2.0.0,<3.0" },
@@ -2809,15 +2809,15 @@ wheels = [
 
 [[package]]
 name = "liger-kernel"
-version = "0.8.0"
+version = "0.8.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "torch", marker = "(python_full_version < '3.11' and sys_platform == 'win32') or (sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32')" },
     { name = "triton", marker = "(python_full_version < '3.11' and sys_platform == 'win32') or (sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32')" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/41/d6/85f032b40fc30c969e817f9f3527f987b508171b46d9958befd0868855fd/liger_kernel-0.8.0.tar.gz", hash = "sha256:f98b94faf018814a0757e7b72bb8ebaaf12a78782cd09b157732acca2791e72c", size = 3989670, upload-time = "2026-04-30T23:02:15.183Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/1a/6b/5d4b965e411d35fb1f533d4b2a2a9a1e99f4bf3fc751ab22b989159c2a18/liger_kernel-0.8.1.tar.gz", hash = "sha256:ae708a8079d2283070128e38497aa2976294d822e21a0f21ea86e63c67334a8b", size = 4157449, upload-time = "2026-07-23T00:01:37.77Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7c/6b/eb29b56f128a819e2cded552e293212c57daa949481206b82490b207deac/liger_kernel-0.8.0-py3-none-any.whl", hash = "sha256:e1f03eeb4ba6a6a413d585dacf92c4c15d164bab5844fa4ead2fede6bcac469c", size = 403120, upload-time = "2026-04-30T23:02:13.443Z" },
+    { url = "https://files.pythonhosted.org/packages/fc/dc/68b2d8400e97d64412536bf3bd72c8890238013ebf75b95598c56b3b10a8/liger_kernel-0.8.1-py3-none-any.whl", hash = "sha256:90836c1e9de22a1c57a640775fb79151ea704748cf9c3f6658dddaa06fff1989", size = 506445, upload-time = "2026-07-23T00:01:35.995Z" },
 ]
 
 [[package]]
