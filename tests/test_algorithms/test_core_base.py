@@ -80,7 +80,7 @@ from agilerl import HAS_DEEPSPEED, HAS_LLM_DEPENDENCIES, HAS_VLLM
 from agilerl.algorithms.core.base import (
     EvolvableAlgorithm,
     LLMAlgorithm,
-    _RegistryMeta,
+    RegistryMeta,
     get_checkpoint_dict,
     get_optimizer_cls,
 )
@@ -4944,7 +4944,7 @@ class TestLLMCloneWithoutAccelerator:
                 },
             ),
             patch.object(EvolvableAlgorithm, "copy_attributes", return_value=cloned),
-            patch.object(_RegistryMeta, "__call__", return_value=cloned),
+            patch.object(RegistryMeta, "__call__", return_value=cloned),
             patch.object(LLMAlgorithm, "wrap_models"),
         ):
             result = LLMAlgorithm.clone(agent, index=5, wrap=True)
@@ -4999,7 +4999,7 @@ class TestLLMCloneWithAccelerator:
                 },
             ),
             patch.object(EvolvableAlgorithm, "copy_attributes", return_value=cloned),
-            patch.object(_RegistryMeta, "__call__", return_value=cloned),
+            patch.object(RegistryMeta, "__call__", return_value=cloned),
             patch.object(LLMAlgorithm, "wrap_models"),
         ):
             result = LLMAlgorithm.clone(agent, index=3)
@@ -5049,7 +5049,7 @@ class TestLLMCloneWithDeepSpeed:
                 },
             ),
             patch.object(EvolvableAlgorithm, "copy_attributes", return_value=cloned),
-            patch.object(_RegistryMeta, "__call__", return_value=cloned),
+            patch.object(RegistryMeta, "__call__", return_value=cloned),
             patch.object(LLMAlgorithm, "wrap_models"),
             patch.object(LLMAlgorithm, "_save_distributed_actor"),
             patch.object(LLMAlgorithm, "_load_distributed_actor"),
@@ -5098,7 +5098,7 @@ class TestLLMQuantizedClone:
                 "_clone_actor_network",
                 side_effect=AssertionError("dense clone_llm must not run for quant"),
             ),
-            patch.object(_RegistryMeta, "__call__", side_effect=_fake_ctor),
+            patch.object(RegistryMeta, "__call__", side_effect=_fake_ctor),
         ):
             agent._create_clone_instance()
 
@@ -5303,7 +5303,7 @@ class TestLLMCloneWithVllm:
                 },
             ),
             patch.object(EvolvableAlgorithm, "copy_attributes", return_value=cloned),
-            patch.object(_RegistryMeta, "__call__", return_value=cloned),
+            patch.object(RegistryMeta, "__call__", return_value=cloned),
             patch.object(LLMAlgorithm, "wrap_models"),
         ):
             result = LLMAlgorithm.clone(agent, index=2)
@@ -5366,7 +5366,7 @@ class TestLLMCloneWithVllm:
                 },
             ),
             patch.object(EvolvableAlgorithm, "copy_attributes", return_value=cloned),
-            patch.object(_RegistryMeta, "__call__", return_value=cloned),
+            patch.object(RegistryMeta, "__call__", return_value=cloned),
             patch.object(LLMAlgorithm, "wrap_models"),
         ):
             result = LLMAlgorithm.clone(agent, index=2)
@@ -6325,7 +6325,7 @@ class TestLLMCloneBroadcastMultiProcess:
                 },
             ),
             patch.object(EvolvableAlgorithm, "copy_attributes", return_value=cloned),
-            patch.object(_RegistryMeta, "__call__", return_value=cloned),
+            patch.object(RegistryMeta, "__call__", return_value=cloned),
             patch.object(LLMAlgorithm, "wrap_models"),
         ):
             LLMAlgorithm.clone(agent, index=3)
