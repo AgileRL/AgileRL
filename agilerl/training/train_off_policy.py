@@ -392,9 +392,11 @@ def train_off_policy(
                 else:
                     memory.add(transition)
 
-                # `beta` is annealed only by RainbowDQN, the one population member
-                # that uses prioritized replay (`per`); narrowing lets it resolve.
-                if per and isinstance(agent, RainbowDQN):
+                # `beta` is annealed only by RainbowDQN-style agents, the ones
+                # using prioritized replay (`per`). The structural check also
+                # holds for a wrapped agent, whose class is not RainbowDQN but
+                # which proxies `beta` through to it.
+                if per and isinstance(agent, NStepAgent):
                     fraction = min(
                         ((agent.metrics.steps + idx_step + 1) * num_envs / max_steps),
                         1.0,

@@ -492,6 +492,34 @@ class TestOptimizerConfig:
         _ = MutationRegistryProtocol.networks(reg)
 
 
+class TestNStepAgentProtocol:
+    """The prioritized-replay path must keep working for wrapped agents."""
+
+    def test_matches_rainbow_and_its_wrapper_but_not_dqn(self):
+        from agilerl.training.train_off_policy import NStepAgent
+        from agilerl.wrappers.agent import RSNorm
+
+        obs = generate_random_box_space(shape=(4,))
+        act = generate_discrete_space(2)
+        rainbow = RainbowDQN(obs, act)
+
+        # A wrapper is not a RainbowDQN instance, but proxies `beta` to one, so
+        # the structural check must still select it for beta annealing.
+        assert isinstance(rainbow, NStepAgent)
+        assert isinstance(RSNorm(rainbow), NStepAgent)
+        assert not isinstance(DQN(obs, act), NStepAgent)
+
+    def test_wrapper_proxies_beta_writes_to_the_wrapped_agent(self):
+        from agilerl.wrappers.agent import RSNorm
+
+        rainbow = RainbowDQN(
+            generate_random_box_space(shape=(4,)), generate_discrete_space(2)
+        )
+        wrapper = RSNorm(rainbow)
+        wrapper.beta += 0.1
+        assert rainbow.beta == pytest.approx(0.5)
+
+
 class TestAgentWrapperProtocol:
     def test_agent_wrapper_protocol_methods_executed(self):
         from agilerl.wrappers.agent import RSNorm
