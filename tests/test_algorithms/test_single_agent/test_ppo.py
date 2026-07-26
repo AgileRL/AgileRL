@@ -349,6 +349,28 @@ class TestPPOInit:
         assert isinstance(loss, float)
         ppo.clean_up()
 
+    def test_initialize_ppo_with_prewrapped_networks(
+        self, vector_space, discrete_space
+    ):
+        # Networks that already are a StochasticActor/ValueNetwork are adopted
+        # as-is rather than wrapped a second time.
+        actor_network = StochasticActor(vector_space, discrete_space)
+        critic_network = ValueNetwork(vector_space)
+
+        ppo = PPO(
+            vector_space,
+            discrete_space,
+            actor_network=actor_network,
+            critic_network=critic_network,
+        )
+
+        assert isinstance(ppo.actor, StochasticActor)
+        assert isinstance(ppo.critic, ValueNetwork)
+        # Adopted directly: the encoder is not itself a StochasticActor.
+        assert not isinstance(ppo.actor.encoder, StochasticActor)
+        assert not isinstance(ppo.critic.encoder, ValueNetwork)
+        ppo.clean_up()
+
     def test_initialize_ppo_with_incorrect_actor_net(
         self, vector_space, discrete_space
     ):

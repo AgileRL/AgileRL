@@ -174,6 +174,41 @@ class TestStitchCompletionAfterWindowedVllmGenerate:
         )
         assert torch.equal(out[0], torch.tensor([[10, 99, 98, 11, 12, 13]]))
 
+    @pytest.mark.parametrize(
+        "initial_prompt_len",
+        [1, torch.tensor(1), [1]],
+        ids=["int", "tensor", "list"],
+    )
+    def test_accepts_scalar_tensor_or_list_initial_prompt_len(self, initial_prompt_len):
+        out = stitch_completion_after_windowed_vllm_generate(
+            completion_ids=[torch.tensor([[10, 11, 12, 13]], dtype=torch.long)],
+            stitch_prefixes=[torch.tensor([[99, 98]], dtype=torch.long)],
+            group_prompts=[{"initial_prompt_len": initial_prompt_len}],
+            group_size=1,
+            prompts=[{}],
+        )
+        assert torch.equal(out[0], torch.tensor([[10, 99, 98, 11, 12, 13]]))
+
+    def test_rejects_empty_initial_prompt_len_list(self):
+        with pytest.raises(ValueError, match="initial_prompt_len list is empty"):
+            stitch_completion_after_windowed_vllm_generate(
+                completion_ids=[torch.tensor([[10, 11]], dtype=torch.long)],
+                stitch_prefixes=[torch.tensor([[99]], dtype=torch.long)],
+                group_prompts=[{"initial_prompt_len": []}],
+                group_size=1,
+                prompts=[{}],
+            )
+
+    def test_requires_initial_prompt_len_when_stitching(self):
+        with pytest.raises(ValueError, match="initial_prompt_len required"):
+            stitch_completion_after_windowed_vllm_generate(
+                completion_ids=[torch.tensor([[10, 11]], dtype=torch.long)],
+                stitch_prefixes=[torch.tensor([[99]], dtype=torch.long)],
+                group_prompts=[{}],
+                group_size=1,
+                prompts=[{}],
+            )
+
     def test_broadcasts_single_stitch_row_across_group_rows(self):
         completion_ids = [torch.tensor([[1, 2, 7], [3, 4, 8]], dtype=torch.long)]
         stitch_prefixes = [torch.tensor([[9, 10]], dtype=torch.long)]

@@ -887,6 +887,18 @@ class TestArenaTrainerDelegation:
 class TestArenaTrainerFromManifest:
     """Tests for ArenaTrainer.from_manifest()."""
 
+    def test_rejects_prevalidated_core_manifest(self):
+        from agilerl.models.manifest import TrainingManifest
+
+        data = {
+            "algorithm": {"name": "PPO"},
+            "environment": {"name": "CartPole-v1"},
+            "training": {"max_steps": 10},
+        }
+        manifest = TrainingManifest.get_validated(data, mode="python")
+        with pytest.raises(TypeError, match="expects a serialized manifest"):
+            ArenaTrainer.from_manifest(manifest)
+
     def test_from_dict(self):
         from agilerl.arena.models import DQNSpec as ArenaDQNSpec
 

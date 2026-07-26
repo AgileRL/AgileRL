@@ -1,8 +1,17 @@
 import pytest
 
+from agilerl.algorithms.core import LLMAlgorithm
 from agilerl.models.algo import LLMAlgorithmSpec
 from agilerl.models.algorithms.dpo import DPOSpec
 from agilerl.models.algorithms.sft import SFTSpec
+
+
+class TestAlgoClass:
+    @pytest.mark.parametrize(("spec", "expected"), [(DPOSpec, "DPO"), (SFTSpec, "SFT")])
+    def test_resolves_llm_algorithm_subclass(self, spec, expected):
+        resolved = spec.algo_class()
+        assert resolved.__name__ == expected
+        assert issubclass(resolved, LLMAlgorithm)
 
 
 class TestGetTrainingFn:

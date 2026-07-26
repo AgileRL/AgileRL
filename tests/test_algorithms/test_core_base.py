@@ -1083,6 +1083,26 @@ class TestExtractAgentMasksEdgeCases:
         assert env_acts is not None
         assert np.isnan(env_acts["agent_0"]).all() or env_acts["agent_0"].size == 1
 
+    def test_extract_agent_masks_tensor_env_defined_action(self, ma_agent):
+        infos = {
+            "agent_0": {"env_defined_actions": torch.tensor([1.0])},
+            "agent_1": {"env_defined_actions": np.array([0.0])},
+        }
+        env_acts, _agent_masks = ma_agent.extract_agent_masks(infos)
+        assert env_acts is not None
+        assert isinstance(env_acts["agent_0"], np.ndarray)
+
+    def test_extract_agent_masks_unsupported_type_treated_as_none(self, ma_agent):
+        # A type that isn't a scalar/array/tensor is discarded rather than
+        # propagated, so it is masked out like an explicit None.
+        infos = {
+            "agent_0": {"env_defined_actions": "not-an-action"},
+            "agent_1": {"env_defined_actions": np.array([1.0])},
+        }
+        env_acts, _agent_masks = ma_agent.extract_agent_masks(infos)
+        assert env_acts is not None
+        assert np.isnan(env_acts["agent_0"]).all()
+
 
 class TestGetGroupIdNonString:
     def test_get_group_id_returns_agent_id_when_not_string(self, vector_space):
@@ -4401,6 +4421,14 @@ class TestMultiAgentExtractAgentMasksContinuousNan:
 
 
 class TestMultiAgentBuildNetConfigPaths:
+    def test_build_net_config_rejects_non_mapping_encoder_config(self, vector_space):
+        obs = [vector_space, vector_space]
+        act = [spaces.Discrete(2), spaces.Discrete(2)]
+        agent = DummyMARLAlgorithm(obs, act, agent_ids=["agent_0", "agent_1"], index=0)
+        net_config = {"encoder_config": "not-a-config"}
+        with pytest.raises(TypeError, match="must be a dict or NetConfig"):
+            agent.build_net_config(net_config, flatten=False)
+
     def test_build_net_config_none_creates_defaults(self, vector_space):
         obs = [vector_space, vector_space]
         act = [spaces.Discrete(2), spaces.Discrete(2)]

@@ -264,6 +264,11 @@ class TestDummyVecEnvMisc:
         # VectorEnv.render returns one tuple element per sub-env.
         assert env.render() == ("frame",)
 
+    def test_render_passes_through_none(self):
+        inner = FakeGymEnv()
+        inner.render = lambda: None
+        assert DummyVecEnv(inner).render() is None
+
     def test_close_delegates(self):
         inner = MagicMock()
         inner.observation_space = spaces.Box(low=0, high=1, shape=(2,))

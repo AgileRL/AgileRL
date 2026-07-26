@@ -17,3 +17,13 @@ class TestGetPooling:
     def test_invalid_pooling_name_raises(self):
         with pytest.raises(ValueError, match="Invalid pooling layer"):
             get_pooling("NotARealPool", 2, 1, 0)
+
+    def test_scalar_sizes_stay_scalar(self):
+        # Scalar args keep an int kernel_size so the repr matches a reference
+        # network built with ints.
+        assert get_pooling("MaxPool2d", 2, 1, 0).kernel_size == 2
+
+    def test_tuple_size_is_normalized_to_constructor_arity(self):
+        pool = get_pooling("MaxPool2d", (2, 2), 1, 0)
+        assert pool.kernel_size == (2, 2)
+        assert pool.stride == (1, 1)
