@@ -24,7 +24,14 @@ from agilerl.utils.algo_utils import (
 
 
 def _narrow_leaf(value: object) -> torch.Tensor | TensorDict:
-    """Narrow a TensorDict child to the tensor or sub-collection it holds."""
+    """Narrow a TensorDict child to the tensor or sub-collection it holds.
+
+    ``TensorDict.get()``/``.items()`` are typed to return ``Tensor |
+    TensorCollection | Unknown``, so consumers that need the concrete stored
+    type must narrow. This is the single seam for that (rather than repeating
+    the check at every call site); the invariant is that a leaf is either a
+    tensor or a nested ``TensorDict``.
+    """
     if isinstance(value, TensorDict):
         return value
     assert isinstance(value, torch.Tensor), (
@@ -48,15 +55,17 @@ def _require_prepared(value: _T | None) -> _T:
 
 
 # Typed to return ``TensorDict`` so callers don't narrow the widened
-# ``TensorDict.__getitem__`` return; indexing/slicing a TensorDict yields a
-# TensorDict at runtime.
+# ``TensorDict.__getitem__`` return; indexing/slicing a TensorDict with a mask
+# or slice yields a TensorDict at runtime.
 if TYPE_CHECKING:
 
-    def _index_tensordict(td: TensorDict, index: Any) -> TensorDict: ...  # noqa: ANN401 -- tensordict indexing accepts arbitrary index expressions; only the TensorDict return matters
+    def _index_tensordict(
+        td: TensorDict, index: torch.Tensor | slice
+    ) -> TensorDict: ...
 
 else:
 
-    def _index_tensordict(td: TensorDict, index: Any) -> TensorDict:  # noqa: ANN401 -- tensordict indexing accepts arbitrary index expressions
+    def _index_tensordict(td: TensorDict, index: torch.Tensor | slice) -> TensorDict:
         return td[index]
 
 
@@ -642,28 +651,9 @@ class RolloutBuffer:
         :return: Dictionary of numpy arrays.
         :rtype: dict[str, npt.NDArray | dict[str, npt.NDArray]]
         """
-        # Convert the TensorDict to the old dictionary of numpy arrays format
-        np_dict: dict[str, npt.NDArray | dict[str, npt.NDArray]] = {}
-        for key, value in td.items():
-            if isinstance(value, (TensorDict, dict)):
-                # Nested collections (hidden states, dict observations) hold one
-                # tensor per sub-key; the sub-container may be a nested TensorDict
-                # or a plain dict of tensors.
-                sub_dict: dict[str, npt.NDArray] = {}
-                for sub_key, sub_value in value.items():
-                    assert isinstance(sub_key, str)
-                    assert isinstance(sub_value, torch.Tensor), (
-                        f"Expected a tensor leaf at '{key}/{sub_key}', "
-                        f"got {type(sub_value).__name__}."
-                    )
-                    sub_dict[sub_key] = sub_value.cpu().numpy()
-                np_dict[key] = sub_dict
-            else:
-                assert isinstance(value, torch.Tensor), (
-                    f"Expected a tensor leaf for key '{key}', got {type(value).__name__}."
-                )
-                np_dict[key] = value.cpu().numpy()
-        return np_dict
+        # TensorDict.numpy() returns the nested {key: ndarray | {sub_key: ndarray}}
+        # form directly, moving tensors off-device as it goes.
+        return td.cpu().numpy()
 
     @staticmethod
     def _pad_sequences(
@@ -686,12 +676,9 @@ class RolloutBuffer:
         # is a tensor collection, all of them are), regrouping by key and recursing.
         first = sequences[0]
         if isinstance(first, TensorDict):
-            nested_tds: list[TensorDict] = []
-            for seq in sequences:
-                assert isinstance(seq, TensorDict), (
-                    "Sequences to pad must be homogeneous."
-                )
-                nested_tds.append(seq)
+            # Sequences are homogeneous, so the isinstance filter keeps them all
+            # while narrowing the element type to TensorDict.
+            nested_tds = [seq for seq in sequences if isinstance(seq, TensorDict)]
             sequences_T: dict[Any, list[torch.Tensor | TensorDict]] = {
                 key: [_narrow_leaf(nested_td.get(key)) for nested_td in nested_tds]
                 for key in first.keys()
@@ -703,10 +690,8 @@ class RolloutBuffer:
                 },
             )
 
-        tensors: list[torch.Tensor] = []
-        for seq in sequences:
-            assert isinstance(seq, torch.Tensor), "Sequences to pad must be tensors."
-            tensors.append(seq)
+        # Homogeneous with a tensor first element, so every entry is a tensor.
+        tensors = [seq for seq in sequences if isinstance(seq, torch.Tensor)]
 
         # If target_length is provided, pad the sequences to the target length
         if target_length is not None:
