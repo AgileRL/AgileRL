@@ -1126,6 +1126,17 @@ def test_make_safe_deepcopies():
 
 
 class TestIsVectorizedExperiences:
+    def test_tensordict_experiences_use_batch_ndim(self):
+        from tensordict import TensorDict
+
+        # A TensorDict's ndim counts batch dims, so (num_steps, num_envs) is
+        # vectorized while a single leading dim is not.
+        vectorized = TensorDict({"a": torch.ones((10, 4, 5))}, batch_size=[10, 4])
+        assert is_vectorized_experiences(vectorized)
+
+        unvectorized = TensorDict({"a": torch.ones((10, 5))}, batch_size=[10])
+        assert not is_vectorized_experiences(unvectorized)
+
     def test_is_vectorized_experiences(self):
         # Test with a single tensor with batch dimension
         single_tensor = torch.ones((10, 5))
@@ -2196,6 +2207,11 @@ class TestGetObsShape:
         """NotImplementedError for unsupported space."""
         with pytest.raises(NotImplementedError, match="not supported"):
             get_obs_shape(spaces.Text(5))
+
+    def test_get_obs_shape_unsupported_leaf_of_dict(self):
+        """Unsupported leaves are rejected from inside a Dict space too."""
+        with pytest.raises(NotImplementedError, match="not supported"):
+            get_obs_shape(spaces.Dict({"a": spaces.Text(5)}))
 
 
 class TestGetNumActions:

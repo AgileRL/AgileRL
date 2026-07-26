@@ -205,6 +205,23 @@ class TestBuildReplayBuffer:
         assert result.max_size == 10_000
 
 
+class TestAlgoNetSpecCls:
+    def test_falls_back_to_networkspec_without_net_config_field(self):
+        from agilerl.models.algorithms.dpo import DPOSpec
+        from agilerl.models.networks import NetworkSpec
+
+        # LLM specs carry no ``net_config`` field, so there is no concrete
+        # subclass to resolve and the base spec is used.
+        trainer = LocalTrainer.__new__(LocalTrainer)
+        trainer.algorithm_spec = DPOSpec()
+        assert trainer._algo_net_spec_cls() is NetworkSpec
+
+    def test_resolves_concrete_spec_from_net_config_annotation(self):
+        trainer = LocalTrainer.__new__(LocalTrainer)
+        trainer.algorithm_spec = DQNSpec()
+        assert issubclass(trainer._algo_net_spec_cls(), QNetworkSpec)
+
+
 class TestGetTrainingKwargs:
     @pytest.fixture
     def gym_env_spec(self):

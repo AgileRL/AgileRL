@@ -1516,6 +1516,20 @@ class TestRolloutBufferSequences:
 class TestRolloutBufferUtilities:
     """Test utility methods and edge cases."""
 
+    def test_extract_td_sequences_rejects_unknown_sequence_type(self):
+        obs_space = spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32)
+        buffer = RolloutBuffer(
+            capacity=8,
+            observation_space=obs_space,
+            action_space=spaces.Discrete(2),
+            num_envs=1,
+            max_seq_len=2,
+        )
+        buffer.bptt_sequence_type = "not-a-sequence-type"
+        episode = TensorDict({"x": torch.ones((6, 2))}, batch_size=[6])
+        with pytest.raises(NotImplementedError, match="unrecognized sequence type"):
+            buffer._extract_td_sequences(episode, 2)
+
     @pytest.mark.parametrize(
         "bptt_sequence_type",
         [
