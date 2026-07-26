@@ -1222,11 +1222,10 @@ def get_vect_dim(
 
     while isinstance(space, (spaces.Dict, spaces.Tuple)):
         if isinstance(space, spaces.Dict):
-            assert isinstance(obs, dict), (
+            assert is_str_keyed_dict(obs), (
                 f"Expected dict observation for Dict space, got {type(obs)}"
             )
             first_key, obs = next(iter(obs.items()))
-            assert isinstance(first_key, str)
             space = space[first_key]
         else:
             assert isinstance(obs, tuple), (
@@ -1814,11 +1813,7 @@ def stack_experiences(
             stacked_exp = torch.from_numpy(stacked_array) if to_torch else stacked_array
 
         elif isinstance(first, torch.Tensor):
-            tensor_list: list[torch.Tensor] = []
-            for e in exp:
-                assert isinstance(e, torch.Tensor)
-                tensor_list.append(e)
-            stacked_exp = torch.stack(tensor_list)
+            stacked_exp = torch.stack([e for e in exp if isinstance(e, torch.Tensor)])
 
         else:
             msg = f"Unsupported experience type: {type(first)}"
@@ -1860,10 +1855,7 @@ def stack_and_pad_experiences(
             # Pass-through experiences (e.g. an already-stacked tensor)
             stacked_exp = exp
         elif isinstance(exp[0], torch.Tensor):
-            tensors: list[torch.Tensor] = []
-            for e in exp:
-                assert isinstance(e, torch.Tensor)
-                tensors.append(e)
+            tensors = [e for e in exp if isinstance(e, torch.Tensor)]
             stacked_exp = _stack_and_pad_tensor_list(tensors, padding, padding_side)
         elif isinstance(exp[0], (list, tuple)):
             tensors = [torch.tensor(e).unsqueeze(0) for e in exp]
@@ -1930,17 +1922,17 @@ def flatten_experiences(*experiences: ObservationType) -> tuple[ArrayOrTensor, .
         if isinstance(exp, (torch.Tensor, np.ndarray)):
             flattened_exp = flatten(exp)
         elif is_str_keyed_dict(exp):
-            flattened_dict: dict[str, np.ndarray | torch.Tensor] = {}
-            for key, value in exp.items():
-                assert isinstance(value, (np.ndarray, torch.Tensor))
-                flattened_dict[key] = flatten(value)
-            flattened_exp = flattened_dict
+            flattened_exp = {
+                key: flatten(value)
+                for key, value in exp.items()
+                if isinstance(value, (np.ndarray, torch.Tensor))
+            }
         elif isinstance(exp, tuple):
-            flattened_list: list[np.ndarray | torch.Tensor] = []
-            for value in exp:
-                assert isinstance(value, (np.ndarray, torch.Tensor))
-                flattened_list.append(flatten(value))
-            flattened_exp = tuple(flattened_list)
+            flattened_exp = tuple(
+                flatten(value)
+                for value in exp
+                if isinstance(value, (np.ndarray, torch.Tensor))
+            )
         else:
             msg = f"Unsupported experience type: {type(exp)}"
             raise TypeError(msg)
@@ -2520,12 +2512,12 @@ def clone_llm(
         # so pin the adapter-name/config pairs to their concrete peft types.
         if hasattr(source_model, "peft_config"):
             raw_peft_config = source_model.peft_config
-            assert isinstance(raw_peft_config, dict)
-            peft_configs: dict[str, PeftConfig] = {}
-            for adapter_name, config in raw_peft_config.items():
-                assert isinstance(adapter_name, str)
-                assert isinstance(config, PeftConfig)
-                peft_configs[adapter_name] = config
+            assert is_str_keyed_dict(raw_peft_config)
+            peft_configs: dict[str, PeftConfig] = {
+                name: config
+                for name, config in raw_peft_config.items()
+                if isinstance(config, PeftConfig)
+            }
             adapter_names = list(peft_configs.keys())
 
             if len(adapter_names) > 1:
