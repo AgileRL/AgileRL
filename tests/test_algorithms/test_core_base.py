@@ -6194,6 +6194,60 @@ class TestLLMGenerateWithVllmColocateFullPaths:
         assert len(completion_ids) == 2
         assert len(action_masks) == 2
 
+    def test_generate_with_vllm_colocate_uses_trajectory_ids(self):
+        """Multi-turn prompts carry the running trajectory, which vLLM re-reads."""
+        agent = _make_llm_agent()
+        agent.pad_token = "<pad>"
+        agent.pad_token_id = 0
+        agent.max_output_tokens = 20
+        agent.max_model_len = 100
+        agent.repetition_penalty = 1.0
+        agent.temperature = 1.0
+        agent.top_p = 1.0
+        agent.top_k = None
+        agent.min_p = None
+        agent.min_output_tokens = None
+        agent.accelerator = None
+
+        vllm_config = MagicMock()
+        vllm_config.tensor_parallel_size = 1
+        agent.vllm_config = vllm_config
+        agent.device = "cpu"
+
+        # ``trajectory_input_ids`` supersedes ``input_ids`` when present.
+        prompts = [
+            {
+                "input_ids": torch.tensor([[1, 2, 3]]),
+                "trajectory_input_ids": torch.tensor([[1, 2, 3, 9, 9]]),
+                "text": "hello",
+            },
+        ]
+
+        mock_output = MagicMock()
+        mock_output.outputs = [MagicMock(token_ids=list(range(5)))]
+        agent.llm = MagicMock()
+        agent.llm.generate.return_value = [mock_output, mock_output]
+
+        with (
+            patch(
+                "agilerl.algorithms.core.base.SamplingParams",
+                return_value=MagicMock(),
+                create=True,
+            ),
+            patch(
+                "agilerl.algorithms.core.base.stack_and_pad_experiences",
+                return_value=(torch.zeros(2, 5), None),
+            ),
+        ):
+            completion_ids, _action_masks, _ = agent._generate_with_vllm_colocate(
+                prompts, group_size=2, temperature=0.9
+            )
+
+        # The trajectory, not the bare prompt, was handed to vLLM.
+        sent = agent.llm.generate.call_args[0][0]
+        assert sent[0]["prompt_token_ids"] == [1, 2, 3, 9, 9]
+        assert len(completion_ids) == 1
+
 
 class TestLLMGenerateWithVllmColocateAccelerator:
     """_generate_with_vllm_colocate does not world-barrier before generate."""
