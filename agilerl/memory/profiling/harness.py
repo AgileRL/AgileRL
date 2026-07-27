@@ -50,6 +50,16 @@ class SweepPoint:
     #: framework's own resolution in place (FlashAttention-2 if the package
     #: is importable, else SDPA), which is what a stock install gets.
     attn_implementation: str = "auto"
+    #: Algorithm under test. Only GRPO and PPO are measured: they bracket the
+    #: adapter structure (2 fused rows vs 3, one trained adapter vs two), and
+    #: the rest reduce to one or the other.
+    algorithm: str = "grpo"
+    #: Explicit LoRA targets, comma-separated. ``all-linear`` is PEFT's
+    #: shorthand but is not applied for every architecture — on OLMoE it was
+    #: iterated character-wise — and wrapping every expert projection on an
+    #: MoE is pathological regardless, so MoE sweeps name the attention
+    #: projections instead.
+    lora_target_modules: str = "all-linear"
     #: Engine budget fraction. A real sweep axis, not a fixed setting: the
     #: colocated training floor is driven by it, so holding out points at
     #: other utilizations is what validates that the floor is modelled
@@ -66,6 +76,8 @@ class SweepPoint:
             "n_prompts": self.n_prompts,
             "lora_target_scope": self.lora_target_scope or "",
             "attn_implementation": self.attn_implementation,
+            "algorithm": self.algorithm,
+            "lora_target_modules": self.lora_target_modules,
             "gpu_memory_utilization": self.gpu_memory_utilization,
         }
 
@@ -83,6 +95,8 @@ class SweepPoint:
             n_prompts=int(knobs.get("n_prompts", 1)),
             lora_target_scope=str(knobs.get("lora_target_scope") or "") or None,
             attn_implementation=str(knobs.get("attn_implementation") or "auto"),
+            algorithm=str(knobs.get("algorithm") or "grpo"),
+            lora_target_modules=str(knobs.get("lora_target_modules") or "all-linear"),
             gpu_memory_utilization=float(knobs.get("gpu_memory_utilization", 0.45)),
         )
 
@@ -101,6 +115,7 @@ class SweepPoint:
             lora_rank=self.lora_rank,
             quantization=self.quantization,  # type: ignore[arg-type]
             attn_implementation=self.attn_implementation,  # type: ignore[arg-type]
+            algorithm=self.algorithm,  # type: ignore[arg-type]
         )
 
     @property
@@ -145,9 +160,13 @@ def measure_point(
     from peft import LoraConfig
     from transformers import AutoTokenizer
 
-    from agilerl.algorithms.grpo import GRPO
     from agilerl.memory.profiling.nvml import NvmlPeakSampler
     from agilerl.utils.algo_utils import VLLMConfig
+
+    if point.algorithm == "ppo":
+        from agilerl.algorithms.ppo_llm import PPO as Algorithm
+    else:
+        from agilerl.algorithms.grpo import GRPO as Algorithm
 
     if snapshot_path:
         # Record from before the model exists: allocations predating the
@@ -173,7 +192,17 @@ def measure_point(
             bnb_4bit_compute_dtype=torch.bfloat16,
         )
 
-    agent = GRPO(
+    targets = (
+        "all-linear"
+        if point.lora_target_modules == "all-linear"
+        else [m.strip() for m in point.lora_target_modules.split(",") if m.strip()]
+    )
+    algorithm_kwargs: dict[str, object] = {}
+    if point.algorithm != "ppo":
+        # PPO has no notion of a completion group; its batch is trajectories.
+        algorithm_kwargs["group_size"] = point.group_size
+
+    agent = Algorithm(
         pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
         pad_token=tokenizer.pad_token or tokenizer.eos_token,
         model_name=model_name,
@@ -182,7 +211,6 @@ def measure_point(
             if point.attn_implementation != "auto"
             else None
         ),
-        group_size=point.group_size,
         micro_batch_size_per_gpu=point.micro_batch,
         batch_size=point.micro_batch,
         max_model_len=point.seq_len,
@@ -190,7 +218,7 @@ def measure_point(
         lora_config=LoraConfig(
             r=point.lora_rank,
             lora_alpha=2 * point.lora_rank,
-            target_modules="all-linear",
+            target_modules=targets,
             task_type="CAUSAL_LM",
         ),
         lora_target_scope=point.lora_target_scope,
@@ -202,6 +230,7 @@ def measure_point(
             max_lora_rank=point.lora_rank,
             sleep_mode=True,
         ),
+        **algorithm_kwargs,
     )
 
     # Fixed-content prompts of controlled token length; content is irrelevant
@@ -384,6 +413,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--group-size", type=int, required=True)
     parser.add_argument("--lora-rank", type=int, required=True)
     parser.add_argument("--quantization", default="none")
+    parser.add_argument("--algorithm", default="grpo", choices=["grpo", "ppo"])
+    parser.add_argument(
+        "--lora-target-modules",
+        default="all-linear",
+        help="Comma-separated module names, or the all-linear shorthand",
+    )
     parser.add_argument(
         "--attn-implementation",
         default="auto",
@@ -427,6 +462,8 @@ def main(argv: list[str] | None = None) -> int:
             quantization=args.quantization,
             lora_target_scope=args.lora_target_scope,
             attn_implementation=args.attn_implementation,
+            algorithm=args.algorithm,
+            lora_target_modules=args.lora_target_modules,
             gpu_memory_utilization=args.gpu_memory_utilization,
         )
         generation, training = measure_point(

@@ -261,6 +261,10 @@ def _measure_point_subprocess(
             if point.lora_target_scope
             else []
         ),
+        "--algorithm",
+        point.algorithm,
+        "--lora-target-modules",
+        point.lora_target_modules,
         "--device-index",
         str(device_index),
         "--gpu-memory-utilization",
@@ -320,6 +324,8 @@ def run_sweep(
     quantizations: tuple[str, ...] = ("none",),
     point_quantization: str = "none",
     lora_target_scope: str | None = None,
+    algorithm: str = "grpo",
+    lora_target_modules: str = "all-linear",
 ) -> ModelProfile:
     """Measure every plan point on the local GPU and build the profile.
 
@@ -384,6 +390,8 @@ def run_sweep(
             gpu_memory_utilization=gpu_memory_utilization,
             quantization=point_quantization,
             lora_target_scope=lora_target_scope,
+            algorithm=algorithm,
+            lora_target_modules=lora_target_modules,
         )
         for point in corner_plan()
     ]
@@ -392,6 +400,8 @@ def run_sweep(
             point,
             quantization=point_quantization,
             lora_target_scope=lora_target_scope,
+            algorithm=algorithm,
+            lora_target_modules=lora_target_modules,
         )
         for point in HOLDOUT_POINTS
     ]
@@ -491,6 +501,8 @@ def main(argv: list[str] | None = None) -> int:
             "and audio towers and vLLM rejects the adapter."
         ),
     )
+    parser.add_argument("--algorithm", default="grpo", choices=["grpo", "ppo"])
+    parser.add_argument("--lora-target-modules", default="all-linear")
     parser.add_argument("--output-dir", default=None)
     parser.add_argument(
         "--dry-run",
@@ -514,6 +526,8 @@ def main(argv: list[str] | None = None) -> int:
         quantizations=tuple(args.quantizations),
         point_quantization=args.point_quantization,
         lora_target_scope=args.lora_target_scope,
+        algorithm=args.algorithm,
+        lora_target_modules=args.lora_target_modules,
     )
     output_dir = Path(args.output_dir) if args.output_dir else None
     path = save_profile(profile, output_dir)
