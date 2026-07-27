@@ -224,6 +224,19 @@ def measure_point(
         rewards = torch.randn(n_trajectories)
         torch.cuda.reset_peak_memory_stats(device_index)
         reserved_at_entry = int(torch.cuda.memory_reserved(device_index))
+        if snapshot_path:
+            # Scope the trace to the training window. Otherwise the largest
+            # peak in the trace belongs to vLLM's start-up KV allocation and
+            # the training phase — the thing being attributed — never shows
+            # up as the maximum. The trainer's base weights are moved back
+            # onto the device inside ``learn``, so they are still captured.
+            torch.cuda.memory._record_memory_history(
+                enabled="all",
+                context="all",
+                stacks="python",
+                max_entries=100_000,
+                clear_history=True,
+            )
         with NvmlPeakSampler(device_index) as training_sampler:
             agent.learn(
                 (completion_ids, action_masks, rewards),

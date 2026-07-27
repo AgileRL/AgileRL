@@ -54,6 +54,10 @@ llm = [
     "deepspeed>=0.19.1; sys_platform == 'linux'",
     "liger-kernel==0.8.0; sys_platform == 'linux'",
     "peft==0.19.1",
+    # transformers does not depend on sentencepiece, so checkpoints with a
+    # sentencepiece tokenizer (Granite, Llama-2 lineage, older Gemma) fail to
+    # load with "Couldn't instantiate the backend tokenizer".
+    "sentencepiece>=0.2.0",
     "transformers==5.11.0",
     "vllm>=0.23; sys_platform == 'linux'",
 ]
@@ -68,6 +72,10 @@ all = [
     "deepspeed>=0.19.1; sys_platform == 'linux'",
     "liger-kernel==0.8.0; sys_platform == 'linux'",
     "peft==0.19.1",
+    # transformers does not depend on sentencepiece, so checkpoints with a
+    # sentencepiece tokenizer (Granite, Llama-2 lineage, older Gemma) fail to
+    # load with "Couldn't instantiate the backend tokenizer".
+    "sentencepiece>=0.2.0",
     "transformers==5.11.0",
     "vllm>=0.23; sys_platform == 'linux'",
     "agilerl-arena==0.1.1",

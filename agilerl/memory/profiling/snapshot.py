@@ -39,12 +39,22 @@ ATTRIBUTION_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     # vLLM first: its pool is registered with the torch allocator but is not
     # trainer memory, and after sleep it is not resident at all. Leaving it
     # in would swamp every other component.
-    ("vllm_engine", ("vllm", "cumem", "worker.py", "model_runner")),
+    ("vllm_engine", ("vllm/", "cumem", "gpu_worker", "model_runner")),
     ("logits_workspace", ("fused_logprobs", "fused_loss", "logsumexp", "lm_head")),
-    ("adapters", ("lora", "peft")),
-    ("grads_optimizer", ("optimizer", "adamw", "backward", "accumulate_grad")),
+    (
+        "grads_optimizer",
+        ("optimizer", "adamw", "accumulate_grad", "_engine.run_backward"),
+    ),
+    # Before the adapter rule: a forward through a LoRA-wrapped layer has
+    # peft frames in its stack but is allocating activations, not adapter
+    # weights. Ordering these first stops activations being booked as
+    # adapters — measured at 1.24 GiB mis-attributed on one corner.
     ("activations", ("checkpoint", "decoder_layer", "attention", "mlp", "forward")),
-    ("base_weights", ("from_pretrained", "load_state_dict", "modeling_", "_load")),
+    (
+        "base_weights",
+        ("from_pretrained", "load_state_dict", "modeling_", "_apply", "move_params"),
+    ),
+    ("adapters", ("lora", "peft")),
 )
 
 
@@ -58,8 +68,13 @@ def classify(frames: list[dict]) -> str:
     return "unattributed"
 
 
-def summarise(path: Path) -> dict[str, int]:
-    """Bytes of live allocation per component at the snapshot's peak."""
+def summarise_final(path: Path) -> dict[str, int]:
+    """Bytes per component still live when the snapshot was taken.
+
+    Rarely what you want: by the time ``learn`` returns, activations are
+    freed and the trainer's parameters are back on the host, so the
+    interesting components read as zero.
+    """
     with path.open("rb") as handle:
         snapshot = pickle.load(handle)
 
@@ -70,6 +85,55 @@ def summarise(path: Path) -> dict[str, int]:
                 continue
             frames = block.get("frames") or []
             totals[classify(frames)] += int(block.get("size", 0))
+    return dict(totals)
+
+
+def summarise(path: Path) -> dict[str, int]:
+    """Bytes per component at the moment of peak allocation.
+
+    Replays the allocation event trace rather than reading the final block
+    list, because the peak is what the estimator predicts and it has long
+    passed by the time the snapshot is written.
+    """
+    with path.open("rb") as handle:
+        snapshot = pickle.load(handle)
+
+    traces = snapshot.get("device_traces") or []
+    events = max(traces, key=len) if traces else []
+    if not events:
+        return summarise_final(path)
+
+    allocs = {"alloc", "segment_alloc"}
+    frees = {"free_completed", "segment_free"}
+
+    live: dict[int, int] = {}
+    total = 0
+    peak = 0
+    peak_index = 0
+    for index, event in enumerate(events):
+        action = event.get("action")
+        size = int(event.get("size", 0))
+        if action in allocs:
+            live[event.get("addr")] = size
+            total += size
+            if total > peak:
+                peak, peak_index = total, index
+        elif action in frees and event.get("addr") in live:
+            total -= live.pop(event.get("addr"))
+
+    totals: dict[str, int] = defaultdict(int)
+    live_frames: dict[int, tuple[int, list]] = {}
+    for event in events[: peak_index + 1]:
+        action = event.get("action")
+        if action in allocs:
+            live_frames[event.get("addr")] = (
+                int(event.get("size", 0)),
+                event.get("frames") or [],
+            )
+        elif action in frees:
+            live_frames.pop(event.get("addr"), None)
+    for size, frames in live_frames.values():
+        totals[classify(frames)] += size
     return dict(totals)
 
 
