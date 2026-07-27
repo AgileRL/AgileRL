@@ -48,9 +48,9 @@ jobs:
             - name: Create arena namespace symlink
               run: ln -s ../agilerl-arena/agilerl/arena agilerl/arena
 
-            # ty is not a project dependency; it is pinned by the
-            # astral-sh/ty-pre-commit rev in .pre-commit-config.yaml. Keep this
-            # version in step with that rev. --with overlays ty onto the synced
-            # project environment so it can still resolve third-party imports.
+            # Run the hook rather than ty directly so the version has a single
+            # home: the astral-sh/ty-pre-commit rev in .pre-commit-config.yaml.
+            # Running under uv run keeps the synced project environment visible
+            # so ty can resolve third-party imports.
             - name: Run ty
-              run: uv run --with ty==0.0.61 ty check agilerl agilerl/arena
+              run: uv run pre-commit run ty --all-files

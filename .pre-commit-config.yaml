@@ -69,8 +69,9 @@ repos:
             pass_filenames: false
             always_run: true
 
+    # The single home for the ty version: the type-checks CI workflow runs this
+    # same hook rather than invoking ty itself.
     - repo: https://github.com/astral-sh/ty-pre-commit
-      # Pins the ty version; keep in step with the CI type-checks workflow.
       rev: v0.0.61
       hooks:
           - id: ty
