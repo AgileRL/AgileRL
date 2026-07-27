@@ -277,7 +277,7 @@ def _measure_point_subprocess(
 
 def _measure_weights_subprocess(
     model_name: str, quantization: str, device_index: int
-) -> int:
+) -> dict[str, int]:
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as handle:
         out_path = handle.name
     cmd = [
@@ -306,7 +306,10 @@ def _measure_weights_subprocess(
     subprocess.run(cmd, check=True)
     data = json.loads(Path(out_path).read_text())
     Path(out_path).unlink(missing_ok=True)
-    return int(data["realised_weight_bytes"])
+    sizes = data["realised_weight_bytes"]
+    if isinstance(sizes, int):  # profiles written before variant measurement
+        return {"full": sizes}
+    return {k: int(v) for k, v in sizes.items()}
 
 
 def run_sweep(
@@ -331,20 +334,39 @@ def run_sweep(
 
     arch = ModelArch.from_hf_config(AutoConfig.from_pretrained(model_name).to_dict())
 
+    # Every variant the checkpoint actually offers, measured rather than
+    # derived: each quantization level requested, and — automatically, for
+    # multimodal bases — the text-only size with the towers removed.
     realised: dict[str, int] = {}
     variants = []
     for quantization in quantizations:
         name = "base" if quantization == "none" else quantization
-        realised[name] = _measure_weights_subprocess(
-            model_name, quantization, device_index
-        )
+        sizes = _measure_weights_subprocess(model_name, quantization, device_index)
+        realised[name] = sizes["full"]
         variants.append(
             WeightVariant(
                 name=name,
                 quantization=quantization,  # type: ignore[arg-type]
-                realised_bytes=realised[name],
+                realised_bytes=sizes["full"],
             )
         )
+        if "stripped" in sizes:
+            stripped_name = f"{name}-stripped"
+            realised[stripped_name] = sizes["stripped"]
+            realised[f"{name}-towers"] = sizes["towers"]
+            variants.append(
+                WeightVariant(
+                    name=stripped_name,
+                    quantization=quantization,  # type: ignore[arg-type]
+                    stripped_multimodal=True,
+                    realised_bytes=sizes["stripped"],
+                )
+            )
+            print(
+                f"    multimodal towers: {sizes['towers'] / 1024**3:.2f} GiB "
+                f"({sizes['towers'] / sizes['full']:.0%} of the checkpoint)",
+                flush=True,
+            )
     model = ModelSpec(model_id=model_name, arch=arch, variants=tuple(variants))
 
     measured: list[MeasuredPoint] = []

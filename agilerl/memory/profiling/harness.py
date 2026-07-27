@@ -293,13 +293,48 @@ def measure_point(
     return generation, training
 
 
-def measure_realised_weight_bytes(
-    model_name: str, quantization: str = "none", device_index: int = 0
-) -> int:
-    """Load the trainer-side model alone and measure realised weight bytes.
+#: Attribute names the framework strips for text-only RL on a multimodal
+#: base, matching ``VLLMConfig.strip_multimodal_towers``.
+MULTIMODAL_TOWER_ATTRS = (
+    "vision_tower",
+    "audio_tower",
+    "multi_modal_projector",
+    "embed_vision",
+    "embed_audio",
+)
 
-    Sums parameter and buffer storage directly (robust to allocator
-    rounding); quantized layers report their packed storage sizes.
+
+def _storage_bytes(module: object) -> int:
+    """Realised bytes of a module's parameters and buffers.
+
+    Sums distinct storages rather than trusting nominal dtypes: quantized
+    layers report their packed size, and tied weights are counted once.
+    """
+    total = 0
+    seen: set[int] = set()
+    for tensor in list(module.parameters()) + list(module.buffers()):  # type: ignore[attr-defined]
+        storage = tensor.untyped_storage()
+        if storage.data_ptr() in seen:
+            continue
+        seen.add(storage.data_ptr())
+        total += storage.nbytes()
+    return total
+
+
+def measure_realised_weight_bytes(
+    model_name: str,
+    quantization: str = "none",
+    device_index: int = 0,
+) -> dict[str, int]:
+    """Measure realised weight bytes for every variant this checkpoint offers.
+
+    Always returns the full model. When the checkpoint carries multimodal
+    towers it also returns the text-only size, because stripping them is a
+    real deployment option for text-only RL and the saving is not derivable
+    from the text config alone. Nominal bits-per-weight cannot be trusted
+    either: quantization scales, zero points, and layers held at higher
+    precision all eat into the notional saving, which is why this loads the
+    model rather than computing.
     """
     import torch
 
@@ -318,17 +353,22 @@ def measure_realised_weight_bytes(
             )
         }
     model = create_model_from_name_or_path(model_name, model_config=model_config)
-    total = 0
-    seen: set[int] = set()
-    for tensor in list(model.parameters()) + list(model.buffers()):
-        ptr = tensor.untyped_storage().data_ptr()
-        if ptr in seen:
-            continue
-        seen.add(ptr)
-        total += tensor.untyped_storage().nbytes()
+
+    sizes = {"full": _storage_bytes(model)}
+    towers = {
+        attr: getattr(model, attr, None) or getattr(model.base_model, attr, None)
+        for attr in MULTIMODAL_TOWER_ATTRS
+        if getattr(model, attr, None) is not None
+        or getattr(getattr(model, "base_model", None), attr, None) is not None
+    }
+    if towers:
+        tower_bytes = sum(_storage_bytes(module) for module in towers.values())
+        sizes["stripped"] = sizes["full"] - tower_bytes
+        sizes["towers"] = tower_bytes
+
     del model
     torch.cuda.empty_cache()
-    return total
+    return sizes
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -287,6 +287,10 @@ class TrainingKnobs(BaseModel):
     max_model_len: int = 1024
     lora_rank: int = 16
     lora_target_scope: LoraTargetScope = "all-linear"
+    #: KL coefficient. Memory-relevant only through the reference forward:
+    #: at ``beta=0`` the KL term drops out of the loss, so the reference row
+    #: of the fused no-grad pass has nothing to feed and can be skipped.
+    beta: float = 0.001
     #: A frozen copy of the actor adapter used for reference logprobs.
     #: ``False`` routes reference rows through the (immutable) base instead —
     #: this removes the second adapter's weights but not the reference
@@ -335,28 +339,58 @@ class TrainingKnobs(BaseModel):
         return max(-(-self.trajectories // self.grad_rows), 1)
 
     @property
-    def n_adapter_rows(self) -> int:
-        """Row multiplier of the fused no-grad forward (actor + reference
-        [+ value head for PPO]).
+    def uses_reference(self) -> bool:
+        """Whether a reference policy is consulted at all.
+
+        SFT has none. Elsewhere the reference exists to supply the KL term,
+        so at ``beta=0`` there is nothing for it to feed.
+
+        Note this models the beta=0 short-circuit as *implemented*: the fused
+        no-grad pass currently builds the reference row unconditionally, so a
+        run at beta=0 pays for it until that is optimised. The estimate says
+        so in its warnings rather than silently assuming the saving.
         """
-        rows = 2  # actor + reference logprobs are always computed
-        if self.algorithm == "ppo":
+        return self.algorithm != "sft" and self.beta != 0.0
+
+    @property
+    def uses_critic(self) -> bool:
+        """PPO trains a critic: its own LoRA adapter plus a value head."""
+        return self.algorithm == "ppo"
+
+    @property
+    def n_adapter_rows(self) -> int:
+        """Row multiplier of the fused no-grad forward.
+
+        The pass fuses one row per consulted adapter — reference, actor and
+        (PPO) critic — by repeating the batch, so this multiplies the no-grad
+        activation footprint directly.
+        """
+        rows = 1  # the actor's own logprobs
+        if self.uses_reference:
             rows += 1
-        if self.algorithm == "sft":
-            rows = 1
+        if self.uses_critic:
+            rows += 1
         return rows
 
     @property
     def n_trained_adapters(self) -> int:
-        """Adapters carrying gradients/optimizer state (the reference adapter
-        is frozen).
+        """Adapters carrying gradients and optimizer state.
+
+        The reference adapter is frozen; PPO additionally trains a critic.
         """
-        return 1
+        return 2 if self.uses_critic else 1
 
     @property
     def n_resident_adapters(self) -> int:
+        """Adapter copies held on the device.
+
+        The reference adapter stays resident whenever it exists, including at
+        beta=0 — it is created at init, so only its *forward* is skippable.
+        """
         n = 1
         if self.use_separate_reference_adapter and self.algorithm != "sft":
+            n += 1
+        if self.uses_critic:
             n += 1
         return n
 

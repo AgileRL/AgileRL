@@ -144,6 +144,12 @@ def estimate_training(
         device.has_flash_attention
         and not formulas.materializes_attention_scores(attn_impl, arch)
     )
+    if knobs.beta == 0.0 and knobs.algorithm != "sft":
+        warnings.append(
+            "Assumes the reference forward is skipped at beta=0. The fused "
+            "no-grad pass currently builds that row unconditionally, so an "
+            "unpatched run pays for one extra row of activations."
+        )
     if not flash_like:
         warnings.append(
             "attn_implementation='eager' materialises a rows x heads x S x S "
@@ -161,7 +167,9 @@ def estimate_training(
         arch, knobs.lora_rank, knobs.lora_target_scope
     )
     adapter_bytes_per_param = formulas.ADAPTER_BYTES_PER_PARAM
-    value_head_params = arch.hidden_size if knobs.algorithm == "ppo" else 0
+    # PPOValueHead is Linear(hidden -> 1), held in modules_to_save so it is
+    # trained alongside the adapters.
+    value_head_params = arch.hidden_size + 1 if knobs.uses_critic else 0
     adapters = (
         lora_params * knobs.n_resident_adapters + value_head_params
     ) * adapter_bytes_per_param

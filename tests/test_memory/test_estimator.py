@@ -108,10 +108,72 @@ def test_training_checkpointing_and_quantization_levers(model, device):
     )
 
 
-def test_beta_is_memory_neutral(model, device):
-    # beta is not a TrainingKnobs field at all: the reference forward and
-    # adapter exist regardless, so there is nothing for it to change.
-    assert "beta" not in TrainingKnobs.model_fields
+def test_beta_zero_skips_the_reference_forward_but_keeps_the_adapter(model, device):
+    # beta does not change what is *resident*: the reference adapter is
+    # created at init either way. What it changes is whether the fused
+    # no-grad pass carries a reference row, which is activation memory.
+    with_kl = TrainingKnobs(beta=0.001, max_model_len=4096)
+    without_kl = TrainingKnobs(beta=0.0, max_model_len=4096)
+
+    assert with_kl.n_adapter_rows == 2
+    assert without_kl.n_adapter_rows == 1
+    assert with_kl.n_resident_adapters == without_kl.n_resident_adapters
+
+    hot = estimate_training(model, device, with_kl)
+    cold = estimate_training(model, device, without_kl)
+
+    # The no-grad pass halves, since it drops one of its two fused rows.
+    assert (
+        component(cold, "activations").detail["nograd_logprob_pass"]
+        < (component(hot, "activations").detail["nograd_logprob_pass"])
+    )
+    assert component(cold, "adapters").bytes_ == component(hot, "adapters").bytes_
+    assert component(cold, "activations").bytes_ <= (
+        component(hot, "activations").bytes_
+    )
+
+    # But the bar only moves when the no-grad pass is the binding peak. Under
+    # gradient checkpointing the grad pass carries a saved hidden state per
+    # layer, so it usually dominates and the beta=0 saving is masked — worth
+    # knowing before promising users that beta=0 frees memory.
+    assert (
+        component(hot, "activations").bytes_
+        == (component(hot, "activations").detail["grad_pass"])
+    )
+
+    # And the saving is only real once the framework short-circuits that row.
+    assert any("beta=0" in w for w in cold.warnings)
+
+
+def test_ppo_carries_a_critic_adapter_and_value_head(model, device):
+    # PPO fuses three rows (reference, actor, critic), keeps three adapters
+    # resident, and trains two of them plus a Linear(hidden -> 1) value head.
+    grpo = TrainingKnobs(algorithm="grpo")
+    ppo = TrainingKnobs(algorithm="ppo")
+
+    assert ppo.n_adapter_rows == 3
+    assert ppo.n_resident_adapters == 3
+    assert ppo.n_trained_adapters == 2
+    assert grpo.n_trained_adapters == 1
+
+    ppo_bd = estimate_training(model, device, ppo)
+    grpo_bd = estimate_training(model, device, grpo)
+    assert component(ppo_bd, "adapters").bytes_ > component(grpo_bd, "adapters").bytes_
+    assert (
+        component(ppo_bd, "grads_optimizer").bytes_
+        > component(grpo_bd, "grads_optimizer").bytes_
+    )
+    assert (
+        component(ppo_bd, "activations").bytes_
+        > component(grpo_bd, "activations").bytes_
+    )
+
+
+def test_sft_has_no_reference_or_critic():
+    knobs = TrainingKnobs(algorithm="sft")
+    assert knobs.n_adapter_rows == 1
+    assert knobs.n_resident_adapters == 1
+    assert not knobs.uses_reference
 
 
 def test_generation_kv_pool_is_budget_remainder(model, device):
