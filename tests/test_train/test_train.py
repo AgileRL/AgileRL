@@ -1435,6 +1435,39 @@ def dummy_h5py_data(action_size, state_size):
 
 
 class TestTrainOffPolicy:
+    def test_real_rainbow_takes_the_rainbow_action_branch(self):
+        """The action-selection dispatch is by concrete class.
+
+        The mocked-agent tests stand in for Rainbow but are not ``RainbowDQN``
+        instances, so they fall through to the generic branch; only a real agent
+        exercises the Rainbow path (and its prioritized-replay learn step).
+        """
+        import gymnasium as gym
+
+        from agilerl.algorithms import RainbowDQN
+
+        vec_env = gym.vector.SyncVectorEnv([lambda: gym.make("CartPole-v1")])
+        agent = RainbowDQN(
+            vec_env.single_observation_space,
+            vec_env.single_action_space,
+            batch_size=4,
+            learn_step=1,
+        )
+        pop, fitnesses = train_off_policy(
+            vec_env,
+            "CartPole-v1",
+            "Rainbow DQN",
+            [agent],
+            PrioritizedReplayBuffer(max_size=100, device="cpu"),
+            max_steps=12,
+            evo_steps=12,
+            eval_steps=2,
+            eval_loop=1,
+            verbose=False,
+        )
+        assert len(pop) == 1
+        assert len(fitnesses) == 1
+
     @pytest.mark.parametrize(("state_size", "action_size", "vect"), _FLAT_BOTH)
     def test_train_off_policy(
         self, env, population_off_policy, tournament, mutations, memory
