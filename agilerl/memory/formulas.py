@@ -271,22 +271,26 @@ def resolve_attn_implementation(
 def materializes_attention_scores(attn_implementation: str, arch: ModelArch) -> bool:
     """Whether the backend builds a ``rows x heads x S x S`` score matrix.
 
-    The trap is SDPA: its flash kernel is only chosen when no explicit
-    attention mask is passed. Sliding-window models pass one, so SDPA falls
-    back to the math backend and materialises the full S x S scores and bias
-    — the difference between O(S) and O(S^2) activation memory, and the
-    reason long-context runs on windowed models OOM where dense ones do not.
+    Only ``eager`` does, on the stack this was measured against. SDPA was
+    expected to as well — its flash kernel is documented as requiring no
+    explicit attention mask, and sliding-window models pass one — but a
+    controlled A/B says otherwise. Gemma 4 E2B (28 of 35 layers windowed,
+    8 heads) at seq 4096, micro-batch 8, where the quadratic term would be
+    2.15 GiB:
 
-    FlashAttention-2 and PyTorch's FlexAttention both stay O(S): FlexAttention
-    expresses the window as block sparsity instead of a dense mask, which is
-    why it is the recommended backend for windowed models without the
-    ``flash_attn`` package.
+        sdpa            training peak 14.78 GiB
+        flex_attention  training peak 15.03 GiB
+
+    SDPA came out 0.25 GiB *lower*, not 2.15 GiB higher, so torch 2.11 /
+    transformers 5.11 is keeping it O(S) for a windowed mask. Charging the
+    quadratic term here would invent memory the run never allocates.
+
+    The caveat that remains unmeasured: SDPA can still fall back to the math
+    backend on older stacks or at much longer context than 4096, which is
+    what the framework's own warning is about. If that is ever observed,
+    this is the function to change — and the A/B above is how to check.
     """
-    if attn_implementation == "eager":
-        return True
-    if attn_implementation in ("flash_attention_2", "flex_attention"):
-        return False
-    return arch.sliding_window is not None
+    return attn_implementation == "eager"
 
 
 def activation_hidden_bytes(

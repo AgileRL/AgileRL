@@ -144,12 +144,11 @@ def estimate_training(
         device.has_flash_attention
         and not formulas.materializes_attention_scores(attn_impl, arch)
     )
-    if not flash_like and arch.sliding_window is not None and attn_impl == "sdpa":
+    if not flash_like:
         warnings.append(
-            "SDPA materialises the full S x S scores for sliding-window "
-            "models because they pass an explicit mask. Install flash_attn "
-            "or set attn_implementation='flex_attention' to keep attention "
-            "O(S) at long context."
+            "attn_implementation='eager' materialises a rows x heads x S x S "
+            "score matrix, which dominates activation memory at long "
+            "context. Use sdpa or flex_attention."
         )
 
     variant = model.variant(trainer_variant)

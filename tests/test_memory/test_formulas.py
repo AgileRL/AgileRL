@@ -174,22 +174,22 @@ def test_sliding_window_pattern_integer_form():
     assert arch.sliding_window_layer_fraction == pytest.approx(5 / 6)
 
 
-def test_sdpa_materializes_scores_only_for_windowed_models():
-    # The framework resolves "auto" to SDPA unless flash_attn is installed,
-    # and SDPA only falls back to the math backend (materialising S x S) when
-    # the model passes an explicit mask — which sliding-window models do.
+def test_only_eager_materializes_attention_scores():
+    # Measured, not assumed: an A/B on Gemma 4 E2B (windowed, 8 heads) at
+    # seq 4096 / micro-batch 8 put sdpa 0.25 GiB BELOW flex_attention, where
+    # a materialised score matrix would have put it 2.15 GiB above. So SDPA
+    # stays O(S) for a windowed mask on this stack.
     dense = QWEN_05B
     windowed = QWEN_05B.model_copy(update={"sliding_window": 1024})
 
     assert formulas.resolve_attn_implementation("auto", False) == "sdpa"
     assert formulas.resolve_attn_implementation("auto", True) == "flash_attention_2"
-    assert formulas.resolve_attn_implementation("flex_attention", True) == (
-        "flex_attention"
+    assert (
+        formulas.resolve_attn_implementation("flex_attention", True) == "flex_attention"
     )
 
-    assert not formulas.materializes_attention_scores("sdpa", dense)
-    assert formulas.materializes_attention_scores("sdpa", windowed)
     assert formulas.materializes_attention_scores("eager", dense)
-    # Both O(S) paths keep windowed models off the quadratic term.
-    assert not formulas.materializes_attention_scores("flash_attention_2", windowed)
-    assert not formulas.materializes_attention_scores("flex_attention", windowed)
+    assert formulas.materializes_attention_scores("eager", windowed)
+    for impl in ("sdpa", "flash_attention_2", "flex_attention"):
+        assert not formulas.materializes_attention_scores(impl, dense)
+        assert not formulas.materializes_attention_scores(impl, windowed)
