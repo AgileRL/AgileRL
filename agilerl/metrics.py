@@ -11,6 +11,7 @@ from typing import Generic, TypeVar
 
 import numpy as np
 import numpy.typing as npt
+from jaxtyping import Shaped
 
 from agilerl.typing import FitnessValue
 
@@ -18,6 +19,10 @@ from agilerl.typing import FitnessValue
 # metrics store one accumulator per sub-agent.
 ScalarStore = TypeVar("ScalarStore", list[float], dict[str, list[float]])
 HistogramStore = TypeVar("HistogramStore", deque[float], dict[str, deque[float]])
+
+# One flat run of raw histogram samples (e.g. action indices), at whatever dtype
+# the caller logged.
+HistogramSamples = Shaped[npt.NDArray, " num_samples"]
 
 # Default cap on accumulated raw histogram samples. Bundled training loops
 # clear accumulators every evo step, but custom loops may never clear, so
@@ -67,14 +72,14 @@ class BaseMetrics(ABC, Generic[ScalarStore, HistogramStore]):
         raise NotImplementedError
 
     @abstractmethod
-    def log_histogram(self, name: str, values: npt.NDArray) -> None:
+    def log_histogram(self, name: str, values: HistogramSamples) -> None:
         """Extend the accumulator with raw sample values for a histogram metric."""
         raise NotImplementedError
 
     @abstractmethod
     def get_histogram(
         self, name: str, agent_id: str | None = None
-    ) -> npt.NDArray | None:
+    ) -> HistogramSamples | None:
         """Return accumulated raw values for a histogram metric."""
         raise NotImplementedError
 
@@ -231,7 +236,7 @@ class AgentMetrics(BaseMetrics[list[float], deque[float]]):
         """
         self._additional_metrics[name].append(float(value))
 
-    def log_histogram(self, name: str, values: npt.NDArray) -> None:
+    def log_histogram(self, name: str, values: HistogramSamples) -> None:
         """Extend the accumulator with raw sample values for a histogram metric.
 
         Values are accumulated across calls so that :meth:`get_histogram`
@@ -240,7 +245,7 @@ class AgentMetrics(BaseMetrics[list[float], deque[float]]):
         :param name: Previously registered non-scalar metric name.
         :type name: str
         :param values: Array of raw sample values (e.g. action indices).
-        :type values: npt.NDArray
+        :type values: HistogramSamples
         """
         self._nonscalar_metrics[name].extend(values.tolist())
 
@@ -260,7 +265,7 @@ class AgentMetrics(BaseMetrics[list[float], deque[float]]):
 
     def get_histogram(
         self, name: str, agent_id: str | None = None
-    ) -> npt.NDArray | None:
+    ) -> HistogramSamples | None:
         """Return the accumulated raw values for a histogram metric.
 
         :param name: Previously registered non-scalar metric name.
@@ -269,7 +274,7 @@ class AgentMetrics(BaseMetrics[list[float], deque[float]]):
             :class:`MultiAgentMetrics`.
         :type agent_id: str | None
         :returns: Array of all accumulated values, or ``None`` if empty.
-        :rtype: npt.NDArray | None
+        :rtype: HistogramSamples | None
         """
         values = self._nonscalar_metrics[name]
         if not values:
@@ -359,14 +364,14 @@ class MultiAgentMetrics(BaseMetrics[dict[str, list[float]], dict[str, deque[floa
         self._additional_metrics[name][agent_id].append(float(value))
 
     def log_histogram(
-        self, name: str, values: npt.NDArray, agent_id: str | None = None
+        self, name: str, values: HistogramSamples, agent_id: str | None = None
     ) -> None:
         """Extend the accumulator with raw sample values for a histogram metric.
 
         :param name: Previously registered non-scalar metric name.
         :type name: str
         :param values: Array of raw sample values (e.g. action indices).
-        :type values: npt.NDArray
+        :type values: HistogramSamples
         :param agent_id: Sub-agent identifier. If omitted, defaults to the first
             configured sub-agent.
         :type agent_id: str | None
@@ -392,7 +397,7 @@ class MultiAgentMetrics(BaseMetrics[dict[str, list[float]], dict[str, deque[floa
 
     def get_histogram(
         self, name: str, agent_id: str | None = None
-    ) -> npt.NDArray | None:
+    ) -> HistogramSamples | None:
         """Return accumulated raw values for a histogram metric and sub-agent.
 
         :param name: Previously registered non-scalar metric name.
@@ -401,7 +406,7 @@ class MultiAgentMetrics(BaseMetrics[dict[str, list[float]], dict[str, deque[floa
             configured sub-agent.
         :type agent_id: str | None
         :returns: Array of all accumulated values, or ``None`` if empty.
-        :rtype: npt.NDArray | None
+        :rtype: HistogramSamples | None
         """
         resolved_agent_id = agent_id if agent_id is not None else self.agent_ids[0]
         values = self._nonscalar_metrics[name][resolved_agent_id]

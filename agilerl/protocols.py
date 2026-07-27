@@ -31,6 +31,7 @@ import numpy.typing as npt
 import torch
 from accelerate import Accelerator
 from gymnasium import spaces
+from jaxtyping import Bool, Float, Int, Shaped
 from torch._dynamo import OptimizedModule
 from torch.nn import Module
 from torch.optim.optimizer import Optimizer
@@ -212,14 +213,16 @@ class EvolvableNetworkProtocol(EvolvableModuleProtocol, Protocol):
 
     def forward_head(
         self,
-        latent: torch.Tensor,
+        latent: Float[torch.Tensor, "batch latent_dim"],
         /,
         *args: Any,
         **kwargs: Any,
     ) -> torch.Tensor:
         pass
 
-    def extract_features(self, x: TorchObsType, /) -> torch.Tensor:
+    def extract_features(
+        self, x: TorchObsType, /
+    ) -> Float[torch.Tensor, "batch latent_dim"]:
         pass
 
     def build_network_head(self, *args: Any, **kwargs: Any) -> None:
@@ -240,7 +243,7 @@ class EvolvableNetworkProtocol(EvolvableModuleProtocol, Protocol):
     def initialize_hidden_state(
         self,
         batch_size: int = 1,
-    ) -> dict[str, torch.Tensor]:
+    ) -> dict[str, Float[torch.Tensor, "num_layers batch hidden_size"]]:
         pass
 
     def init_weights_gaussian(
@@ -399,7 +402,7 @@ class EvolvableAlgorithmProtocol(Protocol):
     mut: str | None
     index: int
     # Scalars, or per-sub-agent rows for multi-agent metrics (sum_scores=False).
-    fitness: list[float | npt.NDArray]
+    fitness: list[float | Float[npt.NDArray[np.float64], " num_agents"]]
     steps: int
     torch_compiler: str | None
 
@@ -598,11 +601,11 @@ class PreTrainedModelProtocol(Protocol):
 
     def generate(
         self,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor | None = None,
+        input_ids: Int[torch.Tensor, "batch seq"],
+        attention_mask: Shaped[torch.Tensor, "batch seq"] | None = None,
         generation_config: GenerationConfigProtocol | None = None,
         **kwargs: Any,
-    ) -> torch.Tensor:
+    ) -> Int[torch.Tensor, "batch full_seq"]:
         pass
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401 -- model forward output type varies (logits, tuples, ModelOutput)
@@ -643,11 +646,11 @@ class PeftModelProtocol(Protocol):
 
     def generate(
         self,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor | None = None,
+        input_ids: Int[torch.Tensor, "batch seq"],
+        attention_mask: Shaped[torch.Tensor, "batch seq"] | None = None,
         generation_config: GenerationConfigProtocol | None = None,
         **kwargs: Any,
-    ) -> torch.Tensor:
+    ) -> Int[torch.Tensor, "batch full_seq"]:
         pass
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401 -- model forward output type varies (logits, tuples, ModelOutput)
@@ -708,10 +711,12 @@ class BanditEnvProtocol(Protocol):
     @property
     def single_action_space(self) -> spaces.Discrete: ...
 
-    def reset(self) -> npt.NDArray:
+    def reset(self) -> Float[npt.NDArray[np.float32], "arms context_dim"]:
         pass
 
-    def step(self, k: int) -> tuple[npt.NDArray, float]:
+    def step(
+        self, k: int
+    ) -> tuple[Float[npt.NDArray[np.float32], "arms context_dim"], float]:
         pass
 
 
@@ -746,7 +751,9 @@ class TokenizedMultiTurnEnv(Protocol):
     ) -> "tuple[ReasoningPrompts, dict[str, Any]]":
         pass
 
-    def step(self, full_completion_ids: torch.Tensor, /) -> "TokenObsStepReturn":
+    def step(
+        self, full_completion_ids: Int[torch.Tensor, "batch seq"], /
+    ) -> "TokenObsStepReturn":
         pass
 
     def close(self) -> None:
@@ -754,5 +761,10 @@ class TokenizedMultiTurnEnv(Protocol):
 
     def get_episode_data(
         self,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[
+        Int[torch.Tensor, "batch seq"],
+        Bool[torch.Tensor, "batch action_seq"],
+        Int[torch.Tensor, "batch action_seq"],
+        Float[torch.Tensor, " max_turns"],
+    ]:
         pass

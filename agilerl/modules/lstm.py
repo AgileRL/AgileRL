@@ -1,11 +1,23 @@
 from typing import Any
 
+import numpy.typing as npt
 import torch
+from jaxtyping import Float, Shaped
 from torch import nn
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
-from agilerl.typing import ArrayOrTensor, BatchDimension, DeviceType, MutationApplyDict
+from agilerl.typing import (
+    BatchDimension,
+    DeviceType,
+    HiddenStateDict,
+    MutationApplyDict,
+)
 from agilerl.utils.evolvable_networks import get_activation
+
+SequenceInput = (
+    Shaped[npt.NDArray, "batch *seq_len input_size"]
+    | Shaped[torch.Tensor, "batch *seq_len input_size"]
+)
 
 
 class EvolvableLSTM(EvolvableModule):
@@ -166,17 +178,17 @@ class EvolvableLSTM(EvolvableModule):
 
     def forward(
         self,
-        x: ArrayOrTensor,
-        hidden_state: dict[str, torch.Tensor] | None = None,
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        x: SequenceInput,
+        hidden_state: HiddenStateDict | None = None,
+    ) -> tuple[Float[torch.Tensor, "batch num_outputs"], HiddenStateDict]:
         """Forward pass of the network.
 
         :param x: Input tensor
-        :type x: ArrayOrTensor
+        :type x: SequenceInput
         :param hidden_state: Dict containing hidden and cell states, defaults to None
-        :type hidden_state: dict[str, torch.Tensor] | None
+        :type hidden_state: HiddenStateDict | None
         :return: Output tensor and next hidden state
-        :rtype: tuple[torch.Tensor, dict[str, torch.Tensor]]
+        :rtype: tuple[Float[torch.Tensor, "batch num_outputs"], HiddenStateDict]
         """
         if not isinstance(x, torch.Tensor):
             x = torch.tensor(x, dtype=torch.float32, device=self.device)

@@ -1,9 +1,11 @@
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 import torch
 from accelerate import Accelerator
 from gymnasium import spaces
+from jaxtyping import Shaped
 from tensordict import TensorDict
 from torch import nn, optim
 
@@ -19,7 +21,10 @@ from agilerl.protocols import BanditEnvProtocol
 from agilerl.typing import (
     ActionMaskInput,
     BanditBatch,
+    GradientMatrix,
     ObservationType,
+    ParamVector,
+    PosteriorTensor,
     SupportedObservationSpace,
     numpy_action_mask,
 )
@@ -207,8 +212,10 @@ class NeuralTS(RLAlgorithm[TensorDict]):
         self.numel = sum(
             w.numel() for w in self.exp_layer.parameters() if w.requires_grad
         )
-        self.sigma_inv = self.lamb * torch.eye(self.numel).to(self.device)
-        self.theta_0 = torch.cat(
+        self.sigma_inv: PosteriorTensor = self.lamb * torch.eye(self.numel).to(
+            self.device
+        )
+        self.theta_0: ParamVector = torch.cat(
             [w.flatten() for w in self.exp_layer.parameters() if w.requires_grad],
         )
 
@@ -222,7 +229,7 @@ class NeuralTS(RLAlgorithm[TensorDict]):
         """Return the next action to take in the environment.
 
         :param obs: State observation, or multiple observations in a batch
-        :type obs: numpy.ndarray[float]
+        :type obs: ObservationType
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: ActionMaskInput
         :return: Action to take in the environment
@@ -236,7 +243,9 @@ class NeuralTS(RLAlgorithm[TensorDict]):
             if (mu_raw.numel() == 1 and self.action_dim > 1)
             else mu_raw
         )
-        g = torch.zeros((self.action_dim, self.numel), device=self.device)
+        g: GradientMatrix = torch.zeros(
+            (self.action_dim, self.numel), device=self.device
+        )
         if mu_raw.numel() == 1 and self.action_dim > 1:
             self.optimizer.zero_grad()
             mu_raw[0].backward(retain_graph=True)
@@ -274,7 +283,9 @@ class NeuralTS(RLAlgorithm[TensorDict]):
         if action_mask is None:
             action = np.argmax(action_values)
         else:
-            inv_mask = 1 - numpy_action_mask(action_mask)
+            inv_mask: Shaped[npt.NDArray, " action_dim"] = 1 - numpy_action_mask(
+                action_mask
+            )
             masked_action_values = np.ma.array(action_values, mask=inv_mask)
             action = np.argmax(masked_action_values)
 

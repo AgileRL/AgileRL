@@ -27,6 +27,11 @@ from typing import NamedTuple
 
 import torch
 import torch.nn.functional as F
+from jaxtyping import Float, Int, Shaped
+
+# A packed float payload in the model's compute dtype, of unconstrained rank:
+# ``(N,)``, ``(1, N)`` and ``(N, 1)`` are all accepted and reshaped to ``(N,)``.
+PackedFloat = Float[torch.Tensor, "..."]
 
 
 class PackedBatch(NamedTuple):
@@ -44,18 +49,18 @@ class PackedBatch(NamedTuple):
         rebuild the ``(B, T - 1)`` frame).
     """
 
-    input_ids: torch.Tensor
-    position_ids: torch.Tensor
-    cu_seqlens: torch.Tensor
-    seq_lengths: torch.Tensor
+    input_ids: Int[torch.Tensor, "1 num_tokens"]
+    position_ids: Int[torch.Tensor, "1 num_tokens"]
+    cu_seqlens: Int[torch.Tensor, " batch_plus_one"]
+    seq_lengths: Int[torch.Tensor, " batch"]
     max_seqlen: int
     batch_size: int
     padded_seq_len: int
 
 
 def pack_padded_batch(
-    input_ids: torch.Tensor,
-    attention_mask: torch.Tensor,
+    input_ids: Int[torch.Tensor, "batch seq_len"],
+    attention_mask: Shaped[torch.Tensor, "batch seq_len"],
 ) -> PackedBatch:
     """Flatten a padded ``(B, T)`` batch into a single padding-free row.
 
@@ -66,9 +71,9 @@ def pack_padded_batch(
     uses for real tokens.
 
     :param input_ids: ``(B, T)`` token ids.
-    :type input_ids: torch.Tensor
-    :param attention_mask: ``(B, T)`` mask; non-zero marks real tokens.
-    :type attention_mask: torch.Tensor
+    :type input_ids: Int[torch.Tensor, "batch seq_len"]
+    :param attention_mask: ``(B, T)`` mask; non-zero marks real tokens (bool or integer).
+    :type attention_mask: Shaped[torch.Tensor, "batch seq_len"]
     :return: A :class:`PackedBatch`.
     :rtype: PackedBatch
     """
@@ -109,7 +114,7 @@ def pack_padded_batch(
 def packed_segment_ids(
     packed: PackedBatch,
     device: torch.device | str,
-) -> torch.Tensor:
+) -> Int[torch.Tensor, " num_tokens"]:
     """``(N,)`` segment id per flat token (which original sequence it belongs to)."""
     return torch.repeat_interleave(
         torch.arange(packed.batch_size, device=device),
@@ -118,12 +123,12 @@ def packed_segment_ids(
 
 
 def _scatter_packed(
-    flat: torch.Tensor,
+    flat: Float[torch.Tensor, "flat_rows ..."],
     packed: PackedBatch,
-    tokens_per_seg: torch.Tensor,
+    tokens_per_seg: Int[torch.Tensor, " batch"],
     row_stride: int,
     trailing_dim: int | None,
-) -> torch.Tensor:
+) -> Float[torch.Tensor, "out_rows ..."]:
     """Scatter the leading ``tokens_per_seg[b]`` rows of each packed segment.
 
     Shared core of both unpackers. For each original sequence *b*, the flat span
@@ -133,20 +138,20 @@ def _scatter_packed(
     Built with ``index_select`` / ``index_put`` so gradients flow back to ``flat``.
 
     :param flat: ``(N,)`` or ``(N, H)`` packed rows to scatter.
-    :type flat: torch.Tensor
+    :type flat: Float[torch.Tensor, "flat_rows ..."]
     :param packed: The :class:`PackedBatch` whose ``cu_seqlens`` give segment
         offsets.
     :type packed: PackedBatch
     :param tokens_per_seg: ``(B,)`` number of leading rows to take from each
         segment (e.g. ``L_b - 1`` for logprobs, ``L_b`` for hidden states).
-    :type tokens_per_seg: torch.Tensor
+    :type tokens_per_seg: Int[torch.Tensor, " batch"]
     :param row_stride: Output row stride per segment (``T - 1`` or ``T``).
     :type row_stride: int
     :param trailing_dim: ``H`` for a ``(N, H)`` payload, else ``None`` for ``(N,)``.
     :type trailing_dim: int | None
     :return: Flat ``(B * row_stride,)`` (or ``(B * row_stride, H)``) output, to be
         viewed into its final padded shape by the caller.
-    :rtype: torch.Tensor
+    :rtype: Float[torch.Tensor, "out_rows ..."]
     """
     device = flat.device
     cu = packed.cu_seqlens
@@ -157,8 +162,8 @@ def _scatter_packed(
         else flat.new_zeros(n_rows, trailing_dim)
     )
 
-    src_chunks: list[torch.Tensor] = []
-    dst_chunks: list[torch.Tensor] = []
+    src_chunks: list[Int[torch.Tensor, " seg_len"]] = []
+    dst_chunks: list[Int[torch.Tensor, " seg_len"]] = []
     for b in range(packed.batch_size):
         n = int(tokens_per_seg[b])
         if n <= 0:
@@ -176,9 +181,9 @@ def _scatter_packed(
 
 
 def unpack_logprobs(
-    packed_logprobs: torch.Tensor,
+    packed_logprobs: PackedFloat,
     packed: PackedBatch,
-) -> torch.Tensor:
+) -> Float[torch.Tensor, "batch seq_len_minus_one"]:
     """Scatter packed per-token logprobs back onto the padded ``(B, T-1)`` frame.
 
     ``packed_logprobs`` is the ``(N - 1,)`` fused next-token sequence over the
@@ -188,11 +193,11 @@ def unpack_logprobs(
     the module docstring for the shared scatter semantics.
 
     :param packed_logprobs: ``(N - 1,)`` packed per-token logprobs.
-    :type packed_logprobs: torch.Tensor
+    :type packed_logprobs: PackedFloat
     :param packed: The :class:`PackedBatch` the logprobs were computed from.
     :type packed: PackedBatch
     :return: ``(B, T-1)`` per-token logprobs aligned to the dense frame.
-    :rtype: torch.Tensor
+    :rtype: Float[torch.Tensor, "batch seq_len_minus_one"]
     """
     flat = packed_logprobs.reshape(-1)
     tm1 = packed.padded_seq_len - 1
@@ -207,9 +212,9 @@ def unpack_logprobs(
 
 
 def unpack_values(
-    packed_values: torch.Tensor,
+    packed_values: PackedFloat,
     packed: PackedBatch,
-) -> torch.Tensor:
+) -> Float[torch.Tensor, "batch seq_len_minus_one"]:
     """Scatter packed per-token critic values back onto the ``(B, T-1)`` frame.
 
     The value-head analogue of :func:`unpack_logprobs`. A critic value is a
@@ -226,11 +231,11 @@ def unpack_values(
 
     :param packed_values: ``(N,)`` (or ``(1, N)`` / ``(N, 1)``) packed per-token
         critic values.
-    :type packed_values: torch.Tensor
+    :type packed_values: PackedFloat
     :param packed: The :class:`PackedBatch` the values were computed from.
     :type packed: PackedBatch
     :return: ``(B, T-1)`` per-token values aligned to the dense frame.
-    :rtype: torch.Tensor
+    :rtype: Float[torch.Tensor, "batch seq_len_minus_one"]
     """
     flat = packed_values.reshape(-1)
     tm1 = packed.padded_seq_len - 1
@@ -245,9 +250,9 @@ def unpack_values(
 
 
 def unpack_hidden_states(
-    packed_hidden: torch.Tensor,
+    packed_hidden: Float[torch.Tensor, "... num_tokens hidden_dim"],
     packed: PackedBatch,
-) -> torch.Tensor:
+) -> Float[torch.Tensor, "batch seq_len hidden_dim"]:
     """Scatter packed ``(1, N, H)`` hidden states back onto the ``(B, T, H)`` frame.
 
     The hidden-state analogue of :func:`unpack_logprobs`: it maps all ``L_b``
@@ -257,11 +262,11 @@ def unpack_hidden_states(
     drop. See the module docstring for the shared scatter semantics.
 
     :param packed_hidden: ``(1, N, H)`` (or ``(N, H)``) packed last-hidden-states.
-    :type packed_hidden: torch.Tensor
+    :type packed_hidden: Float[torch.Tensor, "... num_tokens hidden_dim"]
     :param packed: The :class:`PackedBatch` the hidden states were computed from.
     :type packed: PackedBatch
     :return: ``(B, T, H)`` hidden states aligned to the dense frame.
-    :rtype: torch.Tensor
+    :rtype: Float[torch.Tensor, "batch seq_len hidden_dim"]
     """
     hidden_dim = packed_hidden.shape[-1]
     flat = packed_hidden.reshape(-1, hidden_dim)  # (N, H)

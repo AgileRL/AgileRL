@@ -6,6 +6,14 @@ import numpy as np
 import numpy.typing as npt
 import pandas as pd
 from gymnasium import spaces
+from jaxtyping import Float, Int
+
+# One contextual bandit state: the sampled feature row written into a per-arm block.
+BanditContext = Float[
+    np.ndarray[tuple[int, int], np.dtype[np.float32]], "num_arms context_dim"
+]
+# A per-arm vector (the one-hot reward for the current context).
+ArmVector = Float[npt.NDArray[np.float32], " num_arms"]
 
 
 class Skill(gym.Wrapper, gym.utils.RecordConstructorArgs):
@@ -75,8 +83,10 @@ class BanditEnv:
         self.context_dim = (len(np.array(features.loc[0])) * self.arms,)
 
         self.features = features
-        self.targets = pd.factorize(targets.values.ravel())[0]
-        self.prev_reward = np.zeros(self.arms, dtype=np.float32)
+        self.targets: Int[npt.NDArray[np.intp], " num_samples"] = pd.factorize(
+            targets.values.ravel()
+        )[0]
+        self.prev_reward: ArmVector = np.zeros(self.arms, dtype=np.float32)
         self.num_envs = 1  # follow vec-env interface
 
         # Define the observation and action spaces
@@ -88,19 +98,23 @@ class BanditEnv:
         )
         self.single_action_space = spaces.Discrete(self.arms)
 
-    def _new_state_and_target_action(self) -> tuple[npt.NDArray, int]:
+    def _new_state_and_target_action(self) -> tuple[BanditContext, np.intp]:
         """Generate a new state and target action.
 
         :return: Tuple of (state, target)
-        :rtype: tuple[npt.NDArray, int]
+        :rtype: tuple[BanditContext, np.intp]
         """
         # Randomly select next context
         r = random.randint(0, len(self.features) - 1)
 
         # Create contextual input to bandit and corresponding target
-        context = np.array(self.features.loc[r], dtype=np.float32)
+        context: Float[npt.NDArray[np.float32], " feature_dim"] = np.array(
+            self.features.loc[r], dtype=np.float32
+        )
         target = self.targets[r]
-        next_state = np.zeros((self.arms, *self.context_dim), dtype=np.float32)
+        next_state: BanditContext = np.zeros(
+            (self.arms, *self.context_dim), dtype=np.float32
+        )
         for i, j in zip(
             range(self.arms), range(0, self.context_dim[0], len(context)), strict=False
         ):
@@ -108,13 +122,13 @@ class BanditEnv:
 
         return next_state, target
 
-    def step(self, k: int) -> tuple[npt.NDArray, float]:
+    def step(self, k: int) -> tuple[BanditContext, float]:
         """Step the environment and return the state and reward.
 
         :param k: Action
         :type k: int
         :return: Tuple of (state, reward)
-        :rtype: tuple[npt.NDArray, float]
+        :rtype: tuple[BanditContext, float]
         """
         # Calculate reward from action in previous state
         reward = self.prev_reward[k]
@@ -123,20 +137,20 @@ class BanditEnv:
         next_state, target = self._new_state_and_target_action()
 
         # Save reward for next call to step()
-        next_reward = np.zeros(self.arms, dtype=np.float32)
+        next_reward: ArmVector = np.zeros(self.arms, dtype=np.float32)
         next_reward[target] = 1
         self.prev_reward = next_reward
 
         return next_state, float(reward)
 
-    def reset(self) -> npt.NDArray:
+    def reset(self) -> BanditContext:
         """Reset the environment and return the initial state.
 
         :return: Initial state
-        :rtype: npt.NDArray
+        :rtype: BanditContext
         """
         next_state, target = self._new_state_and_target_action()
-        next_reward = np.zeros(self.arms, dtype=np.float32)
+        next_reward: ArmVector = np.zeros(self.arms, dtype=np.float32)
         next_reward[target] = 1
         self.prev_reward = next_reward
         return next_state

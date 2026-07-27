@@ -9,7 +9,7 @@ from tensordict import TensorClass, TensorDict
 from torch.utils.data import IterableDataset
 
 from agilerl.components import ReplayBuffer
-from agilerl.typing import ArrayOrTensor, ObservationType
+from agilerl.typing import AnyTensor, ArrayOrTensor, ObservationType
 from agilerl.utils.algo_utils import is_str_keyed_dict
 
 
@@ -49,13 +49,14 @@ def to_tensordict(
 def to_torch_tensor(
     data: object,
     dtype: torch.dtype = torch.float32,
-) -> torch.Tensor:
+) -> AnyTensor:
     """Convert a numpy array, torch tensor, Python number, or other array-like
     :param data: Numpy array, torch tensor, Python number, or other array-like.
     :type data: object
     :param dtype: Data type of the torch tensor, defaults to torch.float32
     :type dtype: torch.dtype, optional
-    :return: Torch tensor.
+    :return: Torch tensor of ``dtype``, rank following the input (0-d for scalars).
+    :rtype: AnyTensor
     """
     if isinstance(data, (np.ndarray, Number, bool)):
         return torch.tensor(data, dtype=dtype)
@@ -167,6 +168,6 @@ class ReplayDataset(IterableDataset):
         self.buffer = buffer
         self.batch_size = batch_size
 
-    def __iter__(self) -> Iterator:
+    def __iter__(self) -> Iterator[TensorDict]:
         samples = self.buffer.sample(self.batch_size)
         yield samples

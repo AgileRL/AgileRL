@@ -2,9 +2,13 @@ import math
 
 import torch
 import torch.nn.functional as F
+from jaxtyping import Float
 from torch import nn
 
 from agilerl.typing import DeviceType
+
+ActionLogitsTensor = Float[torch.Tensor, "*batch num_actions"]
+BatchedImageTensor = Float[torch.Tensor, "batch channels height width"]
 
 
 class GumbelSoftmax(nn.Module):
@@ -12,14 +16,14 @@ class GumbelSoftmax(nn.Module):
 
     @staticmethod
     def gumbel_softmax(
-        logits: torch.Tensor,
+        logits: ActionLogitsTensor,
         tau: float = 1.0,
         eps: float = 1e-20,
-    ) -> torch.Tensor:
+    ) -> ActionLogitsTensor:
         """Implement the gumbel softmax activation function.
 
         :param logits: Tensor containing unnormalized log probabilities for each class.
-        :type logits: torch.Tensor
+        :type logits: ActionLogitsTensor
         :param tau: Tau, defaults to 1.0
         :type tau: float, optional
         :param eps: Epsilon, defaults to 1e-20
@@ -31,7 +35,7 @@ class GumbelSoftmax(nn.Module):
         y = logits + gumbel_noise
         return F.softmax(y / tau, dim=-1)
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def forward(self, input: ActionLogitsTensor) -> ActionLogitsTensor:
         return self.gumbel_softmax(input)
 
 
@@ -48,8 +52,8 @@ class NoisyLinear(nn.Module):
     :type device: DeviceType, optional
     """
 
-    weight_epsilon: torch.Tensor
-    bias_epsilon: torch.Tensor
+    weight_epsilon: Float[torch.Tensor, "out_features in_features"]
+    bias_epsilon: Float[torch.Tensor, " out_features"]
 
     def __init__(
         self,
@@ -86,13 +90,16 @@ class NoisyLinear(nn.Module):
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(in_features={self.in_features}, out_features={self.out_features})"
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: Float[torch.Tensor, "batch in_features"],
+    ) -> Float[torch.Tensor, "batch out_features"]:
         """Return output of neural network.
 
         :param x: Neural network input
-        :type x: torch.Tensor
+        :type x: Float[torch.Tensor, "batch in_features"]
         :return: Neural network output
-        :rtype: torch.Tensor
+        :rtype: Float[torch.Tensor, "batch out_features"]
         """
         if self.training:
             weight = self.weight_mu + self.weight_sigma.mul(self.weight_epsilon)
@@ -121,7 +128,7 @@ class NoisyLinear(nn.Module):
         self.weight_epsilon.copy_(epsilon_out.ger(epsilon_in))
         self.bias_epsilon.copy_(epsilon_out)
 
-    def _scale_noise(self, size: int) -> torch.Tensor:
+    def _scale_noise(self, size: int) -> Float[torch.Tensor, " size"]:
         """Return noisy tensor.
 
         :param size: Tensor of same size as noisy output
@@ -197,13 +204,17 @@ class ResidualBlock(nn.Module):
         nn.init.kaiming_uniform_(self.conv1.weight, nonlinearity="relu")
         nn.init.kaiming_uniform_(self.conv2.weight, nonlinearity="relu")
 
-    def asymmetric_padding(self, x: torch.Tensor, kernel_size: int) -> torch.Tensor:
+    def asymmetric_padding(
+        self,
+        x: BatchedImageTensor,
+        kernel_size: int,
+    ) -> Float[torch.Tensor, "batch channels padded_height padded_width"]:
         """Apply asymmetric padding for even kernel sizes."""
         pad_l = (kernel_size - 1) // 2  # Floor
         pad_r = kernel_size // 2  # Ceiling
         return F.pad(x, (pad_l, pad_r, pad_l, pad_r), mode="replicate")
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: BatchedImageTensor) -> BatchedImageTensor:
         res = x
 
         x = self.asymmetric_padding(
@@ -253,7 +264,10 @@ class SimbaResidualBlock(nn.Module):
         nn.init.kaiming_uniform_(self.linear1.weight)
         nn.init.kaiming_uniform_(self.linear2.weight)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: Float[torch.Tensor, "batch hidden_size"],
+    ) -> Float[torch.Tensor, "batch hidden_size"]:
         res = x
         x = self.layer_norm(x)
         x = F.relu(self.linear1(x))

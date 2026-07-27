@@ -8,6 +8,7 @@ import numpy.typing as npt
 import torch
 from accelerate import Accelerator
 from gymnasium import spaces
+from jaxtyping import Float, Int, Num, Real
 from tensordict import TensorDict
 from tensordict.nn import CudaGraphModule
 from torch import nn, optim
@@ -22,8 +23,11 @@ from agilerl.modules.base import EvolvableModule
 from agilerl.networks.q_networks import QNetwork
 from agilerl.typing import (
     ActionMaskInput,
+    DiscreteActionArray,
+    EnvScoreArray,
     ObservationType,
     ReplayBatch,
+    ScalarLoss,
     SupportedObservationSpace,
     TorchObsType,
     numpy_action_mask,
@@ -82,12 +86,22 @@ class DQN(RLAlgorithm[TensorDict]):
 
     # Hot-path callables: bound methods by default, CudaGraph wrappers when enabled.
     _get_action_impl: Callable[
-        [TorchObsType, torch.Tensor, torch.Tensor],
-        torch.Tensor,
+        [
+            TorchObsType,
+            Real[torch.Tensor, ""],
+            Num[torch.Tensor, "... action_dim"],
+        ],
+        Int[torch.Tensor, " batch"],
     ]
     _update_impl: Callable[
-        [TorchObsType, torch.Tensor, torch.Tensor, TorchObsType, torch.Tensor],
-        torch.Tensor,
+        [
+            TorchObsType,
+            Float[torch.Tensor, "batch ..."],
+            Float[torch.Tensor, "batch 1"],
+            TorchObsType,
+            Float[torch.Tensor, "batch 1"],
+        ],
+        ScalarLoss,
     ]
 
     def __init__(
@@ -237,7 +251,7 @@ class DQN(RLAlgorithm[TensorDict]):
         action_mask: ActionMaskInput = None,
         *args: Any,
         **kwargs: Any,
-    ) -> npt.NDArray:
+    ) -> DiscreteActionArray:
         """Return the next action to take in the environment.
 
         :param obs: The current observation from the environment
@@ -247,13 +261,13 @@ class DQN(RLAlgorithm[TensorDict]):
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: ActionMaskInput
         :return: Selected action(s) for the given observation(s)
-        :rtype: numpy.ndarray
+        :rtype: Int[npt.NDArray[np.int64], " num_envs"]
         """
         # Preprocess observations and convert inputs to torch tensors
         torch_obs = self.preprocess_observation(obs)
-        eps = torch.tensor(epsilon, device=self.device)
+        eps: Real[torch.Tensor, ""] = torch.tensor(epsilon, device=self.device)
         if action_mask is not None:
-            mask = torch.as_tensor(
+            mask: Num[torch.Tensor, "... action_dim"] = torch.as_tensor(
                 numpy_action_mask(action_mask),
                 device=self.device,
             )
@@ -270,7 +284,9 @@ class DQN(RLAlgorithm[TensorDict]):
 
             mask = torch.ones((batch_size, self.action_dim), device=self.device)
 
-        action = self._get_action_impl(torch_obs, eps, mask).cpu().numpy()
+        action: DiscreteActionArray = (
+            self._get_action_impl(torch_obs, eps, mask).cpu().numpy()
+        )
 
         if self.training:
             self.metrics.log_histogram("action_dist", action)
@@ -280,9 +296,9 @@ class DQN(RLAlgorithm[TensorDict]):
     def _get_action(
         self,
         obs: TorchObsType,
-        epsilon: torch.Tensor,
-        action_mask: torch.Tensor,
-    ) -> torch.Tensor:
+        epsilon: Real[torch.Tensor, ""],
+        action_mask: Num[torch.Tensor, "... action_dim"],
+    ) -> Int[torch.Tensor, " batch"]:
         """Return the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
         For greedy behaviour, set epsilon to 0.
@@ -290,11 +306,11 @@ class DQN(RLAlgorithm[TensorDict]):
         :param obs: The current observation from the environment
         :type obs: torch.Tensor, dict[str, torch.Tensor], tuple[torch.Tensor]
         :param epsilon: Probability of taking a random action for exploration, defaults to 0
-        :type epsilon: float, optional
+        :type epsilon: Real[torch.Tensor, ""]
         :param action_mask: Mask of legal actions 1=legal 0=illegal
-        :type action_mask: torch.Tensor
+        :type action_mask: Num[torch.Tensor, "... action_dim"]
         :return: Selected action(s) as tensor
-        :rtype: torch.Tensor
+        :rtype: Int[torch.Tensor, " batch"]
         """
         self.actor.eval()
         with torch.no_grad():
@@ -323,25 +339,25 @@ class DQN(RLAlgorithm[TensorDict]):
     def update(
         self,
         obs: TorchObsType,
-        actions: torch.Tensor,
-        rewards: torch.Tensor,
+        actions: Float[torch.Tensor, "batch ..."],
+        rewards: Float[torch.Tensor, "batch 1"],
         next_obs: TorchObsType,
-        dones: torch.Tensor,
-    ) -> torch.Tensor:
+        dones: Float[torch.Tensor, "batch 1"],
+    ) -> ScalarLoss:
         """Update agent network parameters to learn from experiences.
 
         :param obs: List of batched states
         :type obs: torch.Tensor[float], dict[str, torch.Tensor[float]], tuple[torch.Tensor[float]]
         :param actions: List of batched actions
-        :type actions: torch.Tensor[int]
+        :type actions: Float[torch.Tensor, "batch ..."]
         :param rewards: List of batched rewards
-        :type rewards: torch.Tensor[float]
+        :type rewards: Float[torch.Tensor, "batch 1"]
         :param next_obs: List of batched next states
         :type next_obs: torch.Tensor[float], dict[str, torch.Tensor[float]], tuple[torch.Tensor[float]]
         :param dones: List of batched dones
-        :type dones: torch.Tensor[int]
+        :type dones: Float[torch.Tensor, "batch 1"]
         :return: Loss value from the update step
-        :rtype: torch.Tensor
+        :rtype: ScalarLoss
         """
         with torch.no_grad():
             if self.double:  # Double Q-learning
@@ -360,7 +376,7 @@ class DQN(RLAlgorithm[TensorDict]):
 
         # Compute Q-values for actions taken and loss
         q_eval = self.actor(obs).gather(1, actions.long())
-        loss: torch.Tensor = self.criterion(q_eval, y_j)
+        loss: ScalarLoss = self.criterion(q_eval, y_j)
 
         # zero gradients, perform a backward pass, and update the weights
         self.optimizer.zero_grad()
@@ -432,9 +448,11 @@ class DQN(RLAlgorithm[TensorDict]):
             num_envs = env.num_envs if hasattr(env, "num_envs") else 1
             for _ in range(loop):
                 obs, info = env.reset()
-                scores = np.zeros(num_envs)
-                completed_episode_scores = np.zeros(num_envs)
-                finished = np.zeros(num_envs)
+                scores: EnvScoreArray = np.zeros(num_envs)
+                completed_episode_scores: EnvScoreArray = np.zeros(num_envs)
+                finished: Float[npt.NDArray[np.float64], " num_envs"] = np.zeros(
+                    num_envs
+                )
                 step = 0
                 while not np.all(finished):
                     action_mask = info.get("action_mask", None)

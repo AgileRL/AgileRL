@@ -4,10 +4,15 @@ from collections import OrderedDict
 from typing import Any
 
 import torch
+from jaxtyping import Bool, Float, Int, Shaped
 from torch import nn
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
-from agilerl.typing import DeviceType
+from agilerl.typing import AnyTensor, DeviceType
+
+SeqTokenIds = Int[torch.Tensor, "seq_len batch"]
+SeqEmbeddings = Float[torch.Tensor, "seq_len batch emb_size"]
+KeyPaddingMask = Bool[torch.Tensor, "batch seq_len"]
 
 
 class EvolvableBERT(EvolvableModule):
@@ -182,7 +187,9 @@ class EvolvableBERT(EvolvableModule):
 
         return nn.ModuleDict(encoder_dict), nn.ModuleDict(decoder_dict)
 
-    def generate_square_subsequent_mask(self, sz: int) -> torch.Tensor:
+    def generate_square_subsequent_mask(
+        self, sz: int
+    ) -> Float[torch.Tensor, "seq_len seq_len"]:
         """Return a square mask for the sequence that prevents the model from looking into the future words when
         making predictions.
         The masked positions are filled with float('-inf'). Unmasked positions are filled with float(0.0).
@@ -202,16 +209,21 @@ class EvolvableBERT(EvolvableModule):
 
     def create_mask(
         self,
-        src: torch.Tensor,
-        tgt: torch.Tensor,
+        src: SeqTokenIds,
+        tgt: SeqTokenIds,
         pad_idx: int,
-    ) -> tuple[torch.Tensor, ...]:
+    ) -> tuple[
+        Bool[torch.Tensor, "src_seq_len src_seq_len"],
+        Float[torch.Tensor, "tgt_seq_len tgt_seq_len"],
+        KeyPaddingMask,
+        KeyPaddingMask,
+    ]:
         """Return masks to hide source and target padding tokens.
 
         :param src: Source
-        :type src: torch.Tensor
+        :type src: SeqTokenIds
         :param tgt: Target
-        :type tgt: torch.Tensor
+        :type tgt: SeqTokenIds
         :param pad_idx: Index of padding symbol <pad> in special symbols list
         :type pad_idx: int
         """
@@ -240,34 +252,36 @@ class EvolvableBERT(EvolvableModule):
 
     def forward(
         self,
-        src: torch.Tensor,
-        tgt: torch.Tensor,
-        src_mask: torch.Tensor | None = None,
-        tgt_mask: torch.Tensor | None = None,
-        memory_mask: torch.Tensor | None = None,
-        src_key_padding_mask: torch.Tensor | None = None,
-        tgt_key_padding_mask: torch.Tensor | None = None,
-        memory_key_padding_mask: torch.Tensor | None = None,
+        src: SeqTokenIds | SeqEmbeddings,
+        tgt: SeqTokenIds | SeqEmbeddings,
+        src_mask: Shaped[torch.Tensor, "seq_len seq_len"] | None = None,
+        tgt_mask: Shaped[torch.Tensor, "seq_len seq_len"] | None = None,
+        memory_mask: Shaped[torch.Tensor, "seq_len seq_len"] | None = None,
+        src_key_padding_mask: Shaped[torch.Tensor, "batch seq_len"] | None = None,
+        tgt_key_padding_mask: Shaped[torch.Tensor, "batch seq_len"] | None = None,
+        memory_key_padding_mask: Shaped[torch.Tensor, "batch seq_len"] | None = None,
         is_causal: bool = False,
     ) -> torch.Tensor:
         """Return output of neural network.
 
-        :param src: Encoder input sequence
-        :type src: torch.Tensor
-        :param tgt: Decoder input sequence
-        :type tgt: torch.Tensor
+        :param src: Encoder input sequence: token ids when ``end2end``, otherwise
+            already-embedded inputs
+        :type src: SeqTokenIds | SeqEmbeddings
+        :param tgt: Decoder input sequence: token ids when ``end2end``, otherwise
+            already-embedded inputs
+        :type tgt: SeqTokenIds | SeqEmbeddings
         :param src_mask: Additive mask for the src sequence, defaults to None
-        :type src_mask: torch.Tensor | None, optional
+        :type src_mask: Shaped[torch.Tensor, "seq_len seq_len"] | None, optional
         :param tgt_mask: Additive mask for the tgt sequence, defaults to None
-        :type tgt_mask: torch.Tensor | None, optional
+        :type tgt_mask: Shaped[torch.Tensor, "seq_len seq_len"] | None, optional
         :param memory_mask: Additive mask for the encoder output, defaults to None
-        :type memory_mask: torch.Tensor | None, optional
-        :param src_key_padding_mask: Tensor mask for src keys per batch, defaults to None
-        :type src_key_padding_mask: torch.Tensor | None, optional
-        :param tgt_key_padding_mask: Tensor mask for tgt keys per batch, defaults to None
-        :type tgt_key_padding_mask: torch.Tensor | None, optional
-        :param memory_key_padding_mask: Tensor mask for memory keys per batch, defaults to None
-        :type memory_key_padding_mask: torch.Tensor | None, optional
+        :type memory_mask: Shaped[torch.Tensor, "seq_len seq_len"] | None, optional
+        :param src_key_padding_mask: Bool or additive-float mask for src keys per batch, defaults to None
+        :type src_key_padding_mask: Shaped[torch.Tensor, "batch seq_len"] | None, optional
+        :param tgt_key_padding_mask: Bool or additive-float mask for tgt keys per batch, defaults to None
+        :type tgt_key_padding_mask: Shaped[torch.Tensor, "batch seq_len"] | None, optional
+        :param memory_key_padding_mask: Bool or additive-float mask for memory keys per batch, defaults to None
+        :type memory_key_padding_mask: Shaped[torch.Tensor, "batch seq_len"] | None, optional
         :param is_causal: Applies a causal mask as mask and ignores attn_mask for computing scaled dot product attention, defaults to False
         :type is_causal: bool, optional
         """
@@ -645,17 +659,17 @@ class EvolvableBERT(EvolvableModule):
 
 
 def _canonical_mask(
-    mask: torch.Tensor | None,
+    mask: AnyTensor | None,
     mask_name: str,
     other_type: torch.dtype | None,
     other_name: str,
     target_type: torch.dtype,
     check_other: bool = True,
-) -> torch.Tensor | None:
+) -> AnyTensor | None:
     """Return canonical mask. Adapted from torch.nn.functional.
 
     :param mask: Input mask tensor
-    :type mask: torch.Tensor | None
+    :type mask: AnyTensor | None
     :param mask_name: Name of the mask
     :type mask_name: str
     :param other_type: Data type of the other tensor
@@ -667,7 +681,7 @@ def _canonical_mask(
     :param check_other: Flag to check other tensor type, defaults to True
     :type check_other: bool, optional
     :return: Canonical mask tensor
-    :rtype: torch.Tensor | None
+    :rtype: AnyTensor | None
     """
     if mask is not None:
         _mask_dtype = mask.dtype
@@ -703,7 +717,7 @@ class PositionalEncoder(nn.Module):
     :type maxlen: int, optional
     """
 
-    pos_embedding: torch.Tensor
+    pos_embedding: Float[torch.Tensor, "maxlen 1 emb_size"]
 
     def __init__(self, emb_size: int, dropout: float, maxlen: int = 5000) -> None:
         super().__init__()
@@ -718,10 +732,10 @@ class PositionalEncoder(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.register_buffer("pos_embedding", pos_embedding)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: SeqEmbeddings) -> SeqEmbeddings:
         """Forward pass through positional encoder.
         :param x: Input to positional encoder, shape [seq_len, batch_size, embedding_dim]
-        :type x: torch.Tensor.
+        :type x: SeqEmbeddings.
         """
         return self.dropout(x + self.pos_embedding[: x.size(0), :])
 
@@ -736,10 +750,10 @@ class PositionalEncoding(nn.Module):
         self.embedding = nn.Embedding(max_positions, emb_size)
         self.emb_size = emb_size
 
-    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+    def forward(self, tokens: SeqTokenIds) -> SeqEmbeddings:
         """Forward pass through position embedding module.
         :param tokens: Tokens to embed
-        :type tokens: torch.Tensor.
+        :type tokens: SeqTokenIds.
         """
         return self.embedding(tokens)
 
@@ -759,10 +773,10 @@ class TokenEmbedding(nn.Module):
         self.embedding = nn.Embedding(vocab_size, emb_size)
         self.emb_size = emb_size
 
-    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+    def forward(self, tokens: SeqTokenIds) -> SeqEmbeddings:
         """Forward pass through token embedding module.
         :param tokens: Tokens to embed
-        :type tokens: torch.Tensor.
+        :type tokens: SeqTokenIds.
         """
         # return self.embedding(tokens.long()) * math.sqrt(self.emb_size)
         return self.embedding(tokens)

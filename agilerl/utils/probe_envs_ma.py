@@ -1,15 +1,41 @@
 import random
+from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
 import numpy.typing as npt
 import torch
 from gymnasium import spaces
+from jaxtyping import Float, Int
 from torch import nn
 from tqdm import trange
 
 from agilerl.components.data import MultiAgentTransition, transition_to_tensordict
 from agilerl.components.replay_buffer import ReplayBuffer
+from agilerl.typing import NumArray
+
+ProbeImageArray = Float[
+    np.ndarray[tuple[int, int, int], np.dtype[np.float64]], "channels height width"
+]
+ProbeImageSampleArray = Float[
+    np.ndarray[tuple[int, int, int, int], np.dtype[np.float64]],
+    "batch channels height width",
+]
+MultiAgentProbeActionType = Mapping[str, NumArray]
+MultiAgentFlatObsType = dict[str, Int[npt.NDArray[np.int64], " obs_dim"]]
+MultiAgentImageObsType = dict[str, ProbeImageArray]
+MultiAgentFlatSampleObsType = list[
+    dict[str, Int[npt.NDArray[np.int64], "batch obs_dim"]]
+]
+MultiAgentImageSampleObsType = list[dict[str, ProbeImageSampleArray]]
+MultiAgentSampleActionType = list[
+    dict[str, Float[npt.NDArray[np.float64], "batch action_dim"]]
+]
+MultiAgentPolicyValueType = list[
+    dict[str, Float[npt.NDArray[np.float64], " action_dim"]]
+]
+MultiAgentStateTensorType = dict[str, Float[torch.Tensor, "batch ..."]]
+MultiAgentActionTensorType = dict[str, Float[torch.Tensor, "batch action_dim"]]
 
 
 class ConstantRewardEnv:
@@ -28,10 +54,10 @@ class ConstantRewardEnv:
             "other_agent_0": spaces.Discrete(2),
         }
 
-        self.sample_obs = [
+        self.sample_obs: MultiAgentFlatSampleObsType = [
             {"agent_0": np.array([[0]]), "other_agent_0": np.array([[0]])},
         ]
-        self.sample_actions = [
+        self.sample_actions: MultiAgentSampleActionType = [
             {
                 "agent_0": np.array([[0.2, 0.8]]),
                 "other_agent_0": np.array([[0.8, 0.2]]),
@@ -47,8 +73,8 @@ class ConstantRewardEnv:
 
     def step(
         self,
-        action: dict[str, npt.NDArray] | npt.NDArray,
-    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
+        action: MultiAgentProbeActionType,
+    ) -> tuple[MultiAgentFlatObsType, Any, Any, Any, dict[str, Any]]:
         observation = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
         reward = {"agent_0": 1, "other_agent_0": 0}  # Constant reward of 1
         terminated = {"agent_0": True, "other_agent_0": True}
@@ -60,7 +86,7 @@ class ConstantRewardEnv:
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[MultiAgentFlatObsType, dict[str, Any]]:
         observation = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
         info = {}
         return observation, info
@@ -82,13 +108,13 @@ class ConstantRewardImageEnv:
             "other_agent_0": spaces.Discrete(2),
         }
 
-        self.sample_obs = [
+        self.sample_obs: MultiAgentImageSampleObsType = [
             {
                 "agent_0": np.zeros((1, 1, 3, 3)),
                 "other_agent_0": np.zeros((1, 1, 3, 3)),
             },
         ]
-        self.sample_actions = [
+        self.sample_actions: MultiAgentSampleActionType = [
             {
                 "agent_0": np.array([[0.2, 0.8]]),
                 "other_agent_0": np.array([[0.8, 0.2]]),
@@ -104,8 +130,8 @@ class ConstantRewardImageEnv:
 
     def step(
         self,
-        action: dict[str, npt.NDArray] | npt.NDArray,
-    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
+        action: MultiAgentProbeActionType,
+    ) -> tuple[MultiAgentImageObsType, Any, Any, Any, dict[str, Any]]:
         observation = {
             "agent_0": np.zeros((1, 3, 3)),
             "other_agent_0": np.zeros((1, 3, 3)),
@@ -120,7 +146,7 @@ class ConstantRewardImageEnv:
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[MultiAgentImageObsType, dict[str, Any]]:
         observation = {
             "agent_0": np.zeros((1, 3, 3)),
             "other_agent_0": np.zeros((1, 3, 3)),
@@ -145,10 +171,10 @@ class ConstantRewardContActionsEnv:
             "other_agent_0": spaces.Box(0.0, 1.0, (1,)),
         }
 
-        self.sample_obs = [
+        self.sample_obs: MultiAgentFlatSampleObsType = [
             {"agent_0": np.array([[0]]), "other_agent_0": np.array([[0]])},
         ]
-        self.sample_actions = [
+        self.sample_actions: MultiAgentSampleActionType = [
             {"agent_0": np.array([[0.0]]), "other_agent_0": np.array([[1.0]])},
         ]
         self.q_values = [
@@ -161,8 +187,8 @@ class ConstantRewardContActionsEnv:
 
     def step(
         self,
-        action: dict[str, npt.NDArray] | npt.NDArray,
-    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
+        action: MultiAgentProbeActionType,
+    ) -> tuple[MultiAgentFlatObsType, Any, Any, Any, dict[str, Any]]:
         observation = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
         reward = {"agent_0": 1, "other_agent_0": 0}  # Constant reward
         terminated = {"agent_0": True, "other_agent_0": True}
@@ -174,7 +200,7 @@ class ConstantRewardContActionsEnv:
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[MultiAgentFlatObsType, dict[str, Any]]:
         observation = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
         info = {}
         return observation, info
@@ -196,13 +222,13 @@ class ConstantRewardContActionsImageEnv:
             "other_agent_0": spaces.Box(0.0, 1.0, (1,)),
         }
 
-        self.sample_obs = [
+        self.sample_obs: MultiAgentImageSampleObsType = [
             {
                 "agent_0": np.zeros((1, 1, 3, 3)),
                 "other_agent_0": np.zeros((1, 1, 3, 3)),
             },
         ]
-        self.sample_actions = [
+        self.sample_actions: MultiAgentSampleActionType = [
             {"agent_0": np.array([[0.0]]), "other_agent_0": np.array([[1.0]])},
         ]
         self.q_values = [
@@ -215,8 +241,8 @@ class ConstantRewardContActionsImageEnv:
 
     def step(
         self,
-        action: dict[str, npt.NDArray] | npt.NDArray,
-    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
+        action: MultiAgentProbeActionType,
+    ) -> tuple[MultiAgentImageObsType, Any, Any, Any, dict[str, Any]]:
         observation = {
             "agent_0": np.zeros((1, 3, 3)),
             "other_agent_0": np.zeros((1, 3, 3)),
@@ -231,7 +257,7 @@ class ConstantRewardContActionsImageEnv:
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[MultiAgentImageObsType, dict[str, Any]]:
         observation = {
             "agent_0": np.zeros((1, 3, 3)),
             "other_agent_0": np.zeros((1, 3, 3)),
@@ -247,7 +273,10 @@ class ObsDependentRewardEnv:
         self.max_num_agents = len(self.possible_agents)
         self.num_agents = len(self.agents)
 
-        self.last_obs = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
+        self.last_obs: MultiAgentFlatObsType = {
+            "agent_0": np.array([0]),
+            "other_agent_0": np.array([0]),
+        }
         self.observation_space = {
             "agent_0": spaces.Discrete(2),
             "other_agent_0": spaces.Discrete(2),
@@ -257,11 +286,11 @@ class ObsDependentRewardEnv:
             "other_agent_0": spaces.Discrete(2),
         }
 
-        self.sample_obs = [
+        self.sample_obs: MultiAgentFlatSampleObsType = [
             {"agent_0": np.array([[0]]), "other_agent_0": np.array([[0]])},
             {"agent_0": np.array([[1]]), "other_agent_0": np.array([[1]])},
         ]
-        self.sample_actions = [
+        self.sample_actions: MultiAgentSampleActionType = [
             {
                 "agent_0": np.array([[0.2, 0.8]]),
                 "other_agent_0": np.array([[0.8, 0.2]]),
@@ -283,8 +312,8 @@ class ObsDependentRewardEnv:
 
     def step(
         self,
-        action: dict[str, npt.NDArray] | npt.NDArray,
-    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
+        action: MultiAgentProbeActionType,
+    ) -> tuple[MultiAgentFlatObsType, Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = (
             {"agent_0": 1, "other_agent_0": 0}
@@ -300,7 +329,7 @@ class ObsDependentRewardEnv:
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[MultiAgentFlatObsType, dict[str, Any]]:
         self.last_obs = random.choice(
             [
                 {"agent_0": np.array([0]), "other_agent_0": np.array([0])},
@@ -318,7 +347,7 @@ class ObsDependentRewardImageEnv:
         self.max_num_agents = len(self.possible_agents)
         self.num_agents = len(self.agents)
 
-        self.last_obs = {
+        self.last_obs: MultiAgentImageObsType = {
             "agent_0": np.zeros((1, 3, 3)),
             "other_agent_0": np.zeros((1, 3, 3)),
         }
@@ -331,14 +360,14 @@ class ObsDependentRewardImageEnv:
             "other_agent_0": spaces.Discrete(2),
         }
 
-        self.sample_obs = [
+        self.sample_obs: MultiAgentImageSampleObsType = [
             {
                 "agent_0": np.zeros((1, 1, 3, 3)),
                 "other_agent_0": np.zeros((1, 1, 3, 3)),
             },
             {"agent_0": np.ones((1, 1, 3, 3)), "other_agent_0": np.ones((1, 1, 3, 3))},
         ]
-        self.sample_actions = [
+        self.sample_actions: MultiAgentSampleActionType = [
             {
                 "agent_0": np.array([[0.2, 0.8]]),
                 "other_agent_0": np.array([[0.8, 0.2]]),
@@ -360,8 +389,8 @@ class ObsDependentRewardImageEnv:
 
     def step(
         self,
-        action: dict[str, npt.NDArray] | npt.NDArray,
-    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
+        action: MultiAgentProbeActionType,
+    ) -> tuple[MultiAgentImageObsType, Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = (
             {"agent_0": 1, "other_agent_0": 0}
@@ -377,7 +406,7 @@ class ObsDependentRewardImageEnv:
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[MultiAgentImageObsType, dict[str, Any]]:
         self.last_obs = random.choice(
             [
                 {"agent_0": np.zeros((1, 3, 3)), "other_agent_0": np.zeros((1, 3, 3))},
@@ -395,7 +424,10 @@ class ObsDependentRewardContActionsEnv:
         self.max_num_agents = len(self.possible_agents)
         self.num_agents = len(self.agents)
 
-        self.last_obs = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
+        self.last_obs: MultiAgentFlatObsType = {
+            "agent_0": np.array([0]),
+            "other_agent_0": np.array([0]),
+        }
         self.observation_space = {
             "agent_0": spaces.Discrete(2),
             "other_agent_0": spaces.Discrete(2),
@@ -405,11 +437,11 @@ class ObsDependentRewardContActionsEnv:
             "other_agent_0": spaces.Box(0.0, 1.0, (1,)),
         }
 
-        self.sample_obs = [
+        self.sample_obs: MultiAgentFlatSampleObsType = [
             {"agent_0": np.array([[0]]), "other_agent_0": np.array([[0]])},
             {"agent_0": np.array([[1]]), "other_agent_0": np.array([[1]])},
         ]
-        self.sample_actions = [
+        self.sample_actions: MultiAgentSampleActionType = [
             {"agent_0": np.array([[0.2]]), "other_agent_0": np.array([[0.0]])},
             {"agent_0": np.array([[0.8]]), "other_agent_0": np.array([[0.6]])},
         ]
@@ -425,8 +457,8 @@ class ObsDependentRewardContActionsEnv:
 
     def step(
         self,
-        action: dict[str, npt.NDArray] | npt.NDArray,
-    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
+        action: MultiAgentProbeActionType,
+    ) -> tuple[MultiAgentFlatObsType, Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = (
             {"agent_0": 1, "other_agent_0": 0}
@@ -442,7 +474,7 @@ class ObsDependentRewardContActionsEnv:
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[MultiAgentFlatObsType, dict[str, Any]]:
         self.last_obs = random.choice(
             [
                 {"agent_0": np.array([0]), "other_agent_0": np.array([0])},
@@ -460,7 +492,10 @@ class ObsDependentRewardContActionsImageEnv:
         self.max_num_agents = len(self.possible_agents)
         self.num_agents = len(self.agents)
 
-        self.last_obs = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
+        self.last_obs: dict[str, NumArray] = {
+            "agent_0": np.array([0]),
+            "other_agent_0": np.array([0]),
+        }
         self.observation_space = {
             "agent_0": spaces.Box(0.0, 1.0, (1, 3, 3)),
             "other_agent_0": spaces.Box(0.0, 1.0, (1, 3, 3)),
@@ -470,14 +505,14 @@ class ObsDependentRewardContActionsImageEnv:
             "other_agent_0": spaces.Box(0.0, 1.0, (1,)),
         }
 
-        self.sample_obs = [
+        self.sample_obs: MultiAgentImageSampleObsType = [
             {
                 "agent_0": np.zeros((1, 1, 3, 3)),
                 "other_agent_0": np.zeros((1, 1, 3, 3)),
             },
             {"agent_0": np.ones((1, 1, 3, 3)), "other_agent_0": np.ones((1, 1, 3, 3))},
         ]
-        self.sample_actions = [
+        self.sample_actions: MultiAgentSampleActionType = [
             {"agent_0": np.array([[0.2]]), "other_agent_0": np.array([[0.0]])},
             {"agent_0": np.array([[0.8]]), "other_agent_0": np.array([[0.6]])},
         ]
@@ -493,8 +528,8 @@ class ObsDependentRewardContActionsImageEnv:
 
     def step(
         self,
-        action: dict[str, npt.NDArray] | npt.NDArray,
-    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
+        action: MultiAgentProbeActionType,
+    ) -> tuple[dict[str, NumArray], Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = (
             {"agent_0": 1, "other_agent_0": 0}
@@ -510,7 +545,7 @@ class ObsDependentRewardContActionsImageEnv:
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[dict[str, NumArray], dict[str, Any]]:
         self.last_obs = random.choice(
             [
                 {"agent_0": np.zeros((1, 3, 3)), "other_agent_0": np.zeros((1, 3, 3))},
@@ -528,7 +563,10 @@ class DiscountedRewardEnv:
         self.max_num_agents = len(self.possible_agents)
         self.num_agents = len(self.agents)
 
-        self.last_obs = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
+        self.last_obs: MultiAgentFlatObsType = {
+            "agent_0": np.array([0]),
+            "other_agent_0": np.array([0]),
+        }
         self.observation_space = {
             "agent_0": spaces.Discrete(2),
             "other_agent_0": spaces.Discrete(2),
@@ -538,11 +576,11 @@ class DiscountedRewardEnv:
             "other_agent_0": spaces.Discrete(2),
         }
 
-        self.sample_obs = [
+        self.sample_obs: MultiAgentFlatSampleObsType = [
             {"agent_0": np.array([[0]]), "other_agent_0": np.array([[0]])},
             {"agent_0": np.array([[1]]), "other_agent_0": np.array([[1]])},
         ]
-        self.sample_actions = [
+        self.sample_actions: MultiAgentSampleActionType = [
             {
                 "agent_0": np.array([[0.2, 0.8]]),
                 "other_agent_0": np.array([[0.8, 0.2]]),
@@ -564,8 +602,8 @@ class DiscountedRewardEnv:
 
     def step(
         self,
-        action: dict[str, npt.NDArray] | npt.NDArray,
-    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
+        action: MultiAgentProbeActionType,
+    ) -> tuple[MultiAgentFlatObsType, Any, Any, Any, dict[str, Any]]:
         observation = {"agent_0": np.array([1]), "other_agent_0": np.array([1])}
         reward = (
             {"agent_0": 1, "other_agent_0": 0.5}
@@ -584,7 +622,7 @@ class DiscountedRewardEnv:
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[MultiAgentFlatObsType, dict[str, Any]]:
         self.last_obs = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
         info = {}
         return self.last_obs, info
@@ -597,7 +635,7 @@ class DiscountedRewardImageEnv:
         self.max_num_agents = len(self.possible_agents)
         self.num_agents = len(self.agents)
 
-        self.last_obs = {
+        self.last_obs: MultiAgentImageObsType = {
             "agent_0": np.zeros((1, 3, 3)),
             "other_agent_0": np.zeros((1, 3, 3)),
         }
@@ -610,14 +648,14 @@ class DiscountedRewardImageEnv:
             "other_agent_0": spaces.Discrete(2),
         }
 
-        self.sample_obs = [
+        self.sample_obs: MultiAgentImageSampleObsType = [
             {
                 "agent_0": np.zeros((1, 1, 3, 3)),
                 "other_agent_0": np.zeros((1, 1, 3, 3)),
             },
             {"agent_0": np.ones((1, 1, 3, 3)), "other_agent_0": np.ones((1, 1, 3, 3))},
         ]
-        self.sample_actions = [
+        self.sample_actions: MultiAgentSampleActionType = [
             {
                 "agent_0": np.array([[0.2, 0.8]]),
                 "other_agent_0": np.array([[0.8, 0.2]]),
@@ -639,8 +677,8 @@ class DiscountedRewardImageEnv:
 
     def step(
         self,
-        action: dict[str, npt.NDArray] | npt.NDArray,
-    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
+        action: MultiAgentProbeActionType,
+    ) -> tuple[MultiAgentImageObsType, Any, Any, Any, dict[str, Any]]:
         observation = {
             "agent_0": np.ones((1, 3, 3)),
             "other_agent_0": np.ones((1, 3, 3)),
@@ -666,7 +704,7 @@ class DiscountedRewardImageEnv:
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[MultiAgentImageObsType, dict[str, Any]]:
         self.last_obs = {
             "agent_0": np.zeros((1, 3, 3)),
             "other_agent_0": np.zeros((1, 3, 3)),
@@ -682,7 +720,10 @@ class DiscountedRewardContActionsEnv:
         self.max_num_agents = len(self.possible_agents)
         self.num_agents = len(self.agents)
 
-        self.last_obs = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
+        self.last_obs: MultiAgentFlatObsType = {
+            "agent_0": np.array([0]),
+            "other_agent_0": np.array([0]),
+        }
         self.observation_space = {
             "agent_0": spaces.Discrete(2),
             "other_agent_0": spaces.Discrete(2),
@@ -692,11 +733,11 @@ class DiscountedRewardContActionsEnv:
             "other_agent_0": spaces.Box(0.0, 1.0, (1,)),
         }
 
-        self.sample_obs = [
+        self.sample_obs: MultiAgentFlatSampleObsType = [
             {"agent_0": np.array([[0]]), "other_agent_0": np.array([[0]])},
             {"agent_0": np.array([[1]]), "other_agent_0": np.array([[1]])},
         ]
-        self.sample_actions = [
+        self.sample_actions: MultiAgentSampleActionType = [
             {"agent_0": np.array([[0.2]]), "other_agent_0": np.array([[0.4]])},
             {"agent_0": np.array([[0.8]]), "other_agent_0": np.array([[0.1]])},
         ]
@@ -712,8 +753,8 @@ class DiscountedRewardContActionsEnv:
 
     def step(
         self,
-        action: dict[str, npt.NDArray] | npt.NDArray,
-    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
+        action: MultiAgentProbeActionType,
+    ) -> tuple[MultiAgentFlatObsType, Any, Any, Any, dict[str, Any]]:
         observation = {"agent_0": np.array([1]), "other_agent_0": np.array([1])}
         reward = (
             {"agent_0": 1, "other_agent_0": 0.5}
@@ -732,7 +773,7 @@ class DiscountedRewardContActionsEnv:
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[MultiAgentFlatObsType, dict[str, Any]]:
         self.last_obs = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
         info = {}
         return self.last_obs, info
@@ -745,7 +786,7 @@ class DiscountedRewardContActionsImageEnv:
         self.max_num_agents = len(self.possible_agents)
         self.num_agents = len(self.agents)
 
-        self.last_obs = {
+        self.last_obs: MultiAgentImageObsType = {
             "agent_0": np.zeros((1, 3, 3)),
             "other_agent_0": np.zeros((1, 3, 3)),
         }
@@ -758,14 +799,14 @@ class DiscountedRewardContActionsImageEnv:
             "other_agent_0": spaces.Box(0.0, 1.0, (1,)),
         }
 
-        self.sample_obs = [
+        self.sample_obs: MultiAgentImageSampleObsType = [
             {
                 "agent_0": np.zeros((1, 1, 3, 3)),
                 "other_agent_0": np.zeros((1, 1, 3, 3)),
             },
             {"agent_0": np.ones((1, 1, 3, 3)), "other_agent_0": np.ones((1, 1, 3, 3))},
         ]
-        self.sample_actions = [
+        self.sample_actions: MultiAgentSampleActionType = [
             {"agent_0": np.array([[0.2]]), "other_agent_0": np.array([[0.4]])},
             {"agent_0": np.array([[0.8]]), "other_agent_0": np.array([[0.1]])},
         ]
@@ -781,8 +822,8 @@ class DiscountedRewardContActionsImageEnv:
 
     def step(
         self,
-        action: dict[str, npt.NDArray] | npt.NDArray,
-    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
+        action: MultiAgentProbeActionType,
+    ) -> tuple[MultiAgentImageObsType, Any, Any, Any, dict[str, Any]]:
         observation = {
             "agent_0": np.ones((1, 3, 3)),
             "other_agent_0": np.ones((1, 3, 3)),
@@ -808,7 +849,7 @@ class DiscountedRewardContActionsImageEnv:
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[MultiAgentImageObsType, dict[str, Any]]:
         self.last_obs = {
             "agent_0": np.zeros((1, 3, 3)),
             "other_agent_0": np.zeros((1, 3, 3)),
@@ -824,7 +865,10 @@ class FixedObsPolicyEnv:
         self.max_num_agents = len(self.possible_agents)
         self.num_agents = len(self.agents)
 
-        self.last_obs = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
+        self.last_obs: MultiAgentFlatObsType = {
+            "agent_0": np.array([0]),
+            "other_agent_0": np.array([0]),
+        }
         self.observation_space = {
             "agent_0": spaces.Discrete(1),
             "other_agent_0": spaces.Discrete(1),
@@ -834,10 +878,10 @@ class FixedObsPolicyEnv:
             "other_agent_0": spaces.Discrete(2),
         }
 
-        self.sample_obs = [
+        self.sample_obs: MultiAgentFlatSampleObsType = [
             {"agent_0": np.array([[0]]), "other_agent_0": np.array([[0]])},
         ]
-        self.sample_actions = [
+        self.sample_actions: MultiAgentSampleActionType = [
             {
                 "agent_0": np.array([[1.0, 0.0]]),
                 "other_agent_0": np.array([[0.0, 1.0]]),
@@ -847,7 +891,7 @@ class FixedObsPolicyEnv:
             {"agent_0": 1.0, "other_agent_0": 1.0},
         ]  # Correct Q values to learn, s x a table
         self.v_values = [None]
-        self.policy_values = [
+        self.policy_values: MultiAgentSampleActionType = [
             {
                 "agent_0": np.array([[1.0, 0.0]]),
                 "other_agent_0": np.array([[0.0, 1.0]]),
@@ -856,8 +900,8 @@ class FixedObsPolicyEnv:
 
     def step(
         self,
-        action: dict[str, npt.NDArray] | npt.NDArray,
-    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
+        action: MultiAgentProbeActionType,
+    ) -> tuple[MultiAgentFlatObsType, Any, Any, Any, dict[str, Any]]:
         observation = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
         reward = {
             "agent_0": [1, -1][int(np.asarray(action["agent_0"]).flat[0])],
@@ -872,7 +916,7 @@ class FixedObsPolicyEnv:
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[MultiAgentFlatObsType, dict[str, Any]]:
         observation = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
         info = {}
         return observation, info
@@ -885,7 +929,7 @@ class FixedObsPolicyImageEnv:
         self.max_num_agents = len(self.possible_agents)
         self.num_agents = len(self.agents)
 
-        self.last_obs = {
+        self.last_obs: MultiAgentImageObsType = {
             "agent_0": np.zeros((1, 3, 3)),
             "other_agent_0": np.zeros((1, 3, 3)),
         }
@@ -898,13 +942,13 @@ class FixedObsPolicyImageEnv:
             "other_agent_0": spaces.Discrete(2),
         }
 
-        self.sample_obs = [
+        self.sample_obs: MultiAgentImageSampleObsType = [
             {
                 "agent_0": np.zeros((1, 1, 3, 3)),
                 "other_agent_0": np.zeros((1, 1, 3, 3)),
             },
         ]
-        self.sample_actions = [
+        self.sample_actions: MultiAgentSampleActionType = [
             {
                 "agent_0": np.array([[1.0, 0.0]]),
                 "other_agent_0": np.array([[0.0, 1.0]]),
@@ -914,7 +958,7 @@ class FixedObsPolicyImageEnv:
             {"agent_0": 1.0, "other_agent_0": 1.0},
         ]  # Correct Q values to learn, s x a table
         self.v_values = [None]
-        self.policy_values = [
+        self.policy_values: MultiAgentSampleActionType = [
             {
                 "agent_0": np.array([[1.0, 0.0]]),
                 "other_agent_0": np.array([[0.0, 1.0]]),
@@ -923,8 +967,8 @@ class FixedObsPolicyImageEnv:
 
     def step(
         self,
-        action: dict[str, npt.NDArray] | npt.NDArray,
-    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
+        action: MultiAgentProbeActionType,
+    ) -> tuple[MultiAgentImageObsType, Any, Any, Any, dict[str, Any]]:
         observation = {
             "agent_0": np.zeros((1, 3, 3)),
             "other_agent_0": np.zeros((1, 3, 3)),
@@ -942,7 +986,7 @@ class FixedObsPolicyImageEnv:
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[MultiAgentImageObsType, dict[str, Any]]:
         observation = {
             "agent_0": np.zeros((1, 3, 3)),
             "other_agent_0": np.zeros((1, 3, 3)),
@@ -958,7 +1002,10 @@ class FixedObsPolicyContActionsEnv:
         self.max_num_agents = len(self.possible_agents)
         self.num_agents = len(self.agents)
 
-        self.last_obs = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
+        self.last_obs: MultiAgentFlatObsType = {
+            "agent_0": np.array([0]),
+            "other_agent_0": np.array([0]),
+        }
         self.observation_space = {
             "agent_0": spaces.Discrete(1),
             "other_agent_0": spaces.Discrete(1),
@@ -968,24 +1015,24 @@ class FixedObsPolicyContActionsEnv:
             "other_agent_0": spaces.Box(0.0, 1.0, (1,)),
         }
 
-        self.sample_obs = [
+        self.sample_obs: MultiAgentFlatSampleObsType = [
             {"agent_0": np.array([[0]]), "other_agent_0": np.array([[0]])},
         ]
-        self.sample_actions = [
+        self.sample_actions: MultiAgentSampleActionType = [
             {"agent_0": np.array([[1.0]]), "other_agent_0": np.array([[0.0]])},
         ]
         self.q_values = [
             {"agent_0": 0.0, "other_agent_0": 0.0},
         ]  # Correct Q values to learn, s x a table
         self.v_values = [None]
-        self.policy_values = [
+        self.policy_values: MultiAgentPolicyValueType = [
             {"agent_0": np.array([1.0]), "other_agent_0": np.array([0.0])},
         ]
 
     def step(
         self,
-        action: dict[str, npt.NDArray] | npt.NDArray,
-    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
+        action: MultiAgentProbeActionType,
+    ) -> tuple[MultiAgentFlatObsType, Any, Any, Any, dict[str, Any]]:
         observation = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
         reward = {
             "agent_0": -((1 - action["agent_0"]) ** 2),
@@ -1000,7 +1047,7 @@ class FixedObsPolicyContActionsEnv:
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[MultiAgentFlatObsType, dict[str, Any]]:
         observation = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
         info = {}
         return observation, info
@@ -1013,7 +1060,7 @@ class FixedObsPolicyContActionsImageEnv:
         self.max_num_agents = len(self.possible_agents)
         self.num_agents = len(self.agents)
 
-        self.last_obs = {
+        self.last_obs: MultiAgentImageObsType = {
             "agent_0": np.zeros((1, 3, 3)),
             "other_agent_0": np.zeros((1, 3, 3)),
         }
@@ -1026,27 +1073,27 @@ class FixedObsPolicyContActionsImageEnv:
             "other_agent_0": spaces.Box(0.0, 1.0, (1,)),
         }
 
-        self.sample_obs = [
+        self.sample_obs: MultiAgentImageSampleObsType = [
             {
                 "agent_0": np.zeros((1, 1, 3, 3)),
                 "other_agent_0": np.zeros((1, 1, 3, 3)),
             },
         ]
-        self.sample_actions = [
+        self.sample_actions: MultiAgentSampleActionType = [
             {"agent_0": np.array([[1.0]]), "other_agent_0": np.array([[0.0]])},
         ]
         self.q_values = [
             {"agent_0": 0.0, "other_agent_0": 0.0},
         ]  # Correct Q values to learn, s x a table
         self.v_values = [None]
-        self.policy_values = [
+        self.policy_values: MultiAgentPolicyValueType = [
             {"agent_0": np.array([1.0]), "other_agent_0": np.array([0.0])},
         ]
 
     def step(
         self,
-        action: dict[str, npt.NDArray] | npt.NDArray,
-    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
+        action: MultiAgentProbeActionType,
+    ) -> tuple[MultiAgentImageObsType, Any, Any, Any, dict[str, Any]]:
         observation = {
             "agent_0": np.zeros((1, 3, 3)),
             "other_agent_0": np.zeros((1, 3, 3)),
@@ -1064,7 +1111,7 @@ class FixedObsPolicyContActionsImageEnv:
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[MultiAgentImageObsType, dict[str, Any]]:
         observation = {
             "agent_0": np.zeros((1, 3, 3)),
             "other_agent_0": np.zeros((1, 3, 3)),
@@ -1080,7 +1127,10 @@ class PolicyEnv:
         self.max_num_agents = len(self.possible_agents)
         self.num_agents = len(self.agents)
 
-        self.last_obs = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
+        self.last_obs: MultiAgentFlatObsType = {
+            "agent_0": np.array([0]),
+            "other_agent_0": np.array([0]),
+        }
         self.observation_space = {
             "agent_0": spaces.Discrete(2),
             "other_agent_0": spaces.Discrete(2),
@@ -1089,13 +1139,13 @@ class PolicyEnv:
             "agent_0": spaces.Discrete(2),
             "other_agent_0": spaces.Discrete(2),
         }
-        self.sample_obs = [
+        self.sample_obs: MultiAgentFlatSampleObsType = [
             {"agent_0": np.array([[0]]), "other_agent_0": np.array([[1]])},
             {"agent_0": np.array([[1]]), "other_agent_0": np.array([[0]])},
             {"agent_0": np.array([[0]]), "other_agent_0": np.array([[1]])},
             {"agent_0": np.array([[1]]), "other_agent_0": np.array([[0]])},
         ]
-        self.sample_actions = [
+        self.sample_actions: MultiAgentSampleActionType = [
             {
                 "agent_0": np.array([[1.0, 0.0]]),
                 "other_agent_0": np.array([[1.0, 0.0]]),
@@ -1120,7 +1170,7 @@ class PolicyEnv:
             {"agent_0": 0.0, "other_agent_0": 0.0},
         ]  # Correct Q values to learn, s x a table
         self.v_values = [None]
-        self.policy_values = [
+        self.policy_values: MultiAgentSampleActionType = [
             {
                 "agent_0": np.array([[1.0, 0.0]]),
                 "other_agent_0": np.array([[1.0, 0.0]]),
@@ -1141,8 +1191,8 @@ class PolicyEnv:
 
     def step(
         self,
-        action: dict[str, npt.NDArray] | npt.NDArray,
-    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
+        action: MultiAgentProbeActionType,
+    ) -> tuple[MultiAgentFlatObsType, Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = {
             "agent_0": action["agent_0"] == self.last_obs["agent_0"],
@@ -1157,7 +1207,7 @@ class PolicyEnv:
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[MultiAgentFlatObsType, dict[str, Any]]:
         self.last_obs = random.choice(
             [
                 {"agent_0": np.array([0]), "other_agent_0": np.array([0])},
@@ -1177,7 +1227,7 @@ class PolicyImageEnv:
         self.max_num_agents = len(self.possible_agents)
         self.num_agents = len(self.agents)
 
-        self.last_obs = {
+        self.last_obs: MultiAgentImageObsType = {
             "agent_0": np.zeros((1, 3, 3)),
             "other_agent_0": np.zeros((1, 3, 3)),
         }
@@ -1189,13 +1239,13 @@ class PolicyImageEnv:
             "agent_0": spaces.Discrete(2),
             "other_agent_0": spaces.Discrete(2),
         }
-        self.sample_obs = [
+        self.sample_obs: MultiAgentImageSampleObsType = [
             {"agent_0": np.zeros((1, 1, 3, 3)), "other_agent_0": np.ones((1, 1, 3, 3))},
             {"agent_0": np.ones((1, 1, 3, 3)), "other_agent_0": np.zeros((1, 1, 3, 3))},
             {"agent_0": np.zeros((1, 1, 3, 3)), "other_agent_0": np.ones((1, 1, 3, 3))},
             {"agent_0": np.ones((1, 1, 3, 3)), "other_agent_0": np.zeros((1, 1, 3, 3))},
         ]
-        self.sample_actions = [
+        self.sample_actions: MultiAgentSampleActionType = [
             {
                 "agent_0": np.array([[1.0, 0.0]]),
                 "other_agent_0": np.array([[1.0, 0.0]]),
@@ -1220,7 +1270,7 @@ class PolicyImageEnv:
             {"agent_0": 0.0, "other_agent_0": 0.0},
         ]  # Correct Q values to learn, s x a table
         self.v_values = [None]
-        self.policy_values = [
+        self.policy_values: MultiAgentSampleActionType = [
             {
                 "agent_0": np.array([[1.0, 0.0]]),
                 "other_agent_0": np.array([[1.0, 0.0]]),
@@ -1241,8 +1291,8 @@ class PolicyImageEnv:
 
     def step(
         self,
-        action: dict[str, npt.NDArray] | npt.NDArray,
-    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
+        action: MultiAgentProbeActionType,
+    ) -> tuple[MultiAgentImageObsType, Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = {
             "agent_0": action["agent_0"] == np.mean(self.last_obs["agent_0"]),
@@ -1258,7 +1308,7 @@ class PolicyImageEnv:
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[MultiAgentImageObsType, dict[str, Any]]:
         self.last_obs = random.choice(
             [
                 {"agent_0": np.zeros((1, 3, 3)), "other_agent_0": np.zeros((1, 3, 3))},
@@ -1278,7 +1328,10 @@ class PolicyContActionsEnv:
         self.max_num_agents = len(self.possible_agents)
         self.num_agents = len(self.agents)
 
-        self.last_obs = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
+        self.last_obs: MultiAgentFlatObsType = {
+            "agent_0": np.array([0]),
+            "other_agent_0": np.array([0]),
+        }
         self.observation_space = {
             "agent_0": spaces.Discrete(2),
             "other_agent_0": spaces.Discrete(2),
@@ -1287,7 +1340,7 @@ class PolicyContActionsEnv:
             "agent_0": spaces.Box(0.0, 1.0, (2,)),
             "other_agent_0": spaces.Box(0.0, 1.0, (2,)),
         }
-        self.sample_obs = [
+        self.sample_obs: MultiAgentFlatSampleObsType = [
             {"agent_0": np.array([[0]]), "other_agent_0": np.array([[0]])},
             {"agent_0": np.array([[1]]), "other_agent_0": np.array([[1]])},
             {"agent_0": np.array([[0]]), "other_agent_0": np.array([[1]])},
@@ -1295,7 +1348,7 @@ class PolicyContActionsEnv:
             {"agent_0": np.array([[0]]), "other_agent_0": np.array([[1]])},
             {"agent_0": np.array([[1]]), "other_agent_0": np.array([[0]])},
         ]
-        self.sample_actions = [
+        self.sample_actions: MultiAgentSampleActionType = [
             {
                 "agent_0": np.array([[1.0, 0.0]]),
                 "other_agent_0": np.array([[0.0, 1.0]]),
@@ -1330,7 +1383,7 @@ class PolicyContActionsEnv:
             {"agent_0": -1.0, "other_agent_0": -1.0},
         ]  # Correct Q values to learn, s x a table
         self.v_values = [None]
-        self.policy_values = [
+        self.policy_values: MultiAgentSampleActionType = [
             {
                 "agent_0": np.array([[1.0, 0.0]]),
                 "other_agent_0": np.array([[0.0, 1.0]]),
@@ -1359,8 +1412,8 @@ class PolicyContActionsEnv:
 
     def step(
         self,
-        action: dict[str, npt.NDArray] | npt.NDArray,
-    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
+        action: MultiAgentProbeActionType,
+    ) -> tuple[MultiAgentFlatObsType, Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = {}
         if self.last_obs["agent_0"]:  # last obs = 1, policy should be [0, 1]
@@ -1388,7 +1441,7 @@ class PolicyContActionsEnv:
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[MultiAgentFlatObsType, dict[str, Any]]:
         self.last_obs = random.choice(
             [
                 {"agent_0": np.array([0]), "other_agent_0": np.array([0])},
@@ -1408,7 +1461,7 @@ class PolicyContActionsImageEnv:
         self.max_num_agents = len(self.possible_agents)
         self.num_agents = len(self.agents)
 
-        self.last_obs = {
+        self.last_obs: MultiAgentImageObsType = {
             "agent_0": np.zeros((1, 3, 3)),
             "other_agent_0": np.zeros((1, 3, 3)),
         }
@@ -1420,7 +1473,7 @@ class PolicyContActionsImageEnv:
             "agent_0": spaces.Box(0.0, 1.0, (2,)),
             "other_agent_0": spaces.Box(0.0, 1.0, (2,)),
         }
-        self.sample_obs = [
+        self.sample_obs: MultiAgentImageSampleObsType = [
             {
                 "agent_0": np.zeros((1, 1, 3, 3)),
                 "other_agent_0": np.zeros((1, 1, 3, 3)),
@@ -1431,7 +1484,7 @@ class PolicyContActionsImageEnv:
             {"agent_0": np.zeros((1, 1, 3, 3)), "other_agent_0": np.ones((1, 1, 3, 3))},
             {"agent_0": np.ones((1, 1, 3, 3)), "other_agent_0": np.zeros((1, 1, 3, 3))},
         ]
-        self.sample_actions = [
+        self.sample_actions: MultiAgentSampleActionType = [
             {
                 "agent_0": np.array([[1.0, 0.0]]),
                 "other_agent_0": np.array([[0.0, 1.0]]),
@@ -1466,7 +1519,7 @@ class PolicyContActionsImageEnv:
             {"agent_0": -1.0, "other_agent_0": -1.0},
         ]  # Correct Q values to learn, s x a table
         self.v_values = [None]
-        self.policy_values = [
+        self.policy_values: MultiAgentSampleActionType = [
             {
                 "agent_0": np.array([[1.0, 0.0]]),
                 "other_agent_0": np.array([[0.0, 1.0]]),
@@ -1495,8 +1548,8 @@ class PolicyContActionsImageEnv:
 
     def step(
         self,
-        action: dict[str, npt.NDArray] | npt.NDArray,
-    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
+        action: MultiAgentProbeActionType,
+    ) -> tuple[MultiAgentImageObsType, Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = {}
         # First, deal with agent_0
@@ -1530,7 +1583,7 @@ class PolicyContActionsImageEnv:
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[MultiAgentImageObsType, dict[str, Any]]:
         self.last_obs = random.choice(
             [
                 {"agent_0": np.zeros((1, 3, 3)), "other_agent_0": np.zeros((1, 3, 3))},
@@ -1550,7 +1603,10 @@ class MultiPolicyEnv:
         self.max_num_agents = len(self.possible_agents)
         self.num_agents = len(self.agents)
 
-        self.last_obs = {"agent_0": np.array([0]), "other_agent_0": np.array([0])}
+        self.last_obs: MultiAgentFlatObsType = {
+            "agent_0": np.array([0]),
+            "other_agent_0": np.array([0]),
+        }
         self.observation_space = {
             "agent_0": spaces.Discrete(2),
             "other_agent_0": spaces.Discrete(2),
@@ -1560,7 +1616,7 @@ class MultiPolicyEnv:
             "other_agent_0": spaces.Discrete(2),
         }
 
-        self.sample_obs = [
+        self.sample_obs: MultiAgentFlatSampleObsType = [
             {"agent_0": np.array([[0]]), "other_agent_0": np.array([[1]])},
             {"agent_0": np.array([[1]]), "other_agent_0": np.array([[0]])},
             {"agent_0": np.array([[0]]), "other_agent_0": np.array([[1]])},
@@ -1570,7 +1626,7 @@ class MultiPolicyEnv:
             {"agent_0": np.array([[0]]), "other_agent_0": np.array([[1]])},
             {"agent_0": np.array([[1]]), "other_agent_0": np.array([[0]])},
         ]
-        self.sample_actions = [
+        self.sample_actions: MultiAgentSampleActionType = [
             {
                 "agent_0": np.array([[1.0, 0.0]]),
                 "other_agent_0": np.array([[1.0, 0.0]]),
@@ -1615,7 +1671,7 @@ class MultiPolicyEnv:
             {"agent_0": 3.0, "other_agent_0": 0.0},
         ]  # Correct Q values to learn, s x a table
         self.v_values = [None]
-        self.policy_values = [
+        self.policy_values: MultiAgentSampleActionType = [
             {
                 "agent_0": np.array([[1.0, 0.0]]),
                 "other_agent_0": np.array([[1.0, 0.0]]),
@@ -1652,8 +1708,8 @@ class MultiPolicyEnv:
 
     def step(
         self,
-        action: dict[str, npt.NDArray] | npt.NDArray,
-    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
+        action: MultiAgentProbeActionType,
+    ) -> tuple[MultiAgentFlatObsType, Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = {
             "agent_0": 2 * (action["agent_0"] == self.last_obs["agent_0"])
@@ -1671,7 +1727,7 @@ class MultiPolicyEnv:
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[MultiAgentFlatObsType, dict[str, Any]]:
         self.last_obs = random.choice(
             [
                 {"agent_0": np.array([0]), "other_agent_0": np.array([0])},
@@ -1691,7 +1747,7 @@ class MultiPolicyImageEnv:
         self.max_num_agents = len(self.possible_agents)
         self.num_agents = len(self.agents)
 
-        self.last_obs = {
+        self.last_obs: MultiAgentImageObsType = {
             "agent_0": np.zeros((1, 3, 3)),
             "other_agent_0": np.zeros((1, 3, 3)),
         }
@@ -1704,7 +1760,7 @@ class MultiPolicyImageEnv:
             "other_agent_0": spaces.Discrete(2),
         }
 
-        self.sample_obs = [
+        self.sample_obs: MultiAgentImageSampleObsType = [
             {"agent_0": np.zeros((1, 1, 3, 3)), "other_agent_0": np.ones((1, 1, 3, 3))},
             {"agent_0": np.ones((1, 1, 3, 3)), "other_agent_0": np.zeros((1, 1, 3, 3))},
             {"agent_0": np.zeros((1, 1, 3, 3)), "other_agent_0": np.ones((1, 1, 3, 3))},
@@ -1714,7 +1770,7 @@ class MultiPolicyImageEnv:
             {"agent_0": np.zeros((1, 1, 3, 3)), "other_agent_0": np.ones((1, 1, 3, 3))},
             {"agent_0": np.ones((1, 1, 3, 3)), "other_agent_0": np.zeros((1, 1, 3, 3))},
         ]
-        self.sample_actions = [
+        self.sample_actions: MultiAgentSampleActionType = [
             {
                 "agent_0": np.array([[1.0, 0.0]]),
                 "other_agent_0": np.array([[1.0, 0.0]]),
@@ -1759,7 +1815,7 @@ class MultiPolicyImageEnv:
             {"agent_0": 3.0, "other_agent_0": 0.0},
         ]  # Correct Q values to learn, s x a table
         self.v_values = [None]
-        self.policy_values = [
+        self.policy_values: MultiAgentSampleActionType = [
             {
                 "agent_0": np.array([[1.0, 0.0]]),
                 "other_agent_0": np.array([[1.0, 0.0]]),
@@ -1796,8 +1852,8 @@ class MultiPolicyImageEnv:
 
     def step(
         self,
-        action: dict[str, npt.NDArray] | npt.NDArray,
-    ) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
+        action: MultiAgentProbeActionType,
+    ) -> tuple[MultiAgentImageObsType, Any, Any, Any, dict[str, Any]]:
         observation = self.last_obs
         reward = {
             "agent_0": 2
@@ -1822,7 +1878,7 @@ class MultiPolicyImageEnv:
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[MultiAgentImageObsType, dict[str, Any]]:
         self.last_obs = random.choice(
             [
                 {"agent_0": np.zeros((1, 3, 3)), "other_agent_0": np.zeros((1, 3, 3))},
@@ -1836,11 +1892,11 @@ class MultiPolicyImageEnv:
 
 
 def prepare_ma_states(
-    states: dict[str, npt.NDArray],
-    observation_space: dict[str, spaces.Space[Any]],
+    states: Mapping[str, NumArray],
+    observation_space: Mapping[str, spaces.Space[Any]],
     device: str = "cpu",
-) -> dict[str, torch.Tensor]:
-    processed_states: dict[str, torch.Tensor] = {}
+) -> MultiAgentStateTensorType:
+    processed_states: MultiAgentStateTensorType = {}
     for agent_id, state in states.items():
         agent_space = observation_space[agent_id]
         if isinstance(agent_space, spaces.Discrete):
@@ -1859,9 +1915,9 @@ def prepare_ma_states(
 
 
 def prepare_ma_actions(
-    actions: dict[str, npt.NDArray],
+    actions: Mapping[str, Float[npt.NDArray[np.floating], "batch action_dim"]],
     device: str = "cpu",
-) -> dict[str, torch.Tensor]:
+) -> MultiAgentActionTensorType:
     return {
         agent_id: torch.Tensor(action).to(device)
         for (agent_id, action) in actions.items()

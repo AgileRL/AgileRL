@@ -9,6 +9,7 @@ import numpy.typing as npt
 import torch
 from accelerate import Accelerator
 from gymnasium import spaces
+from jaxtyping import Float, Int
 from tensordict import TensorDict
 from torch import nn, optim
 
@@ -24,9 +25,16 @@ from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.typing import (
+    ActionBoundTensor,
+    ContinuousActionArray,
+    EnvScoreArray,
+    ExplorationNoiseArray,
     NetConfigType,
+    NoiseParamArray,
+    NoiseStateArray,
     ObservationType,
     ReplayBatch,
+    ScalarLoss,
     SupportedObservationSpace,
 )
 from agilerl.utils.algo_utils import (
@@ -52,11 +60,11 @@ class DDPG(RLAlgorithm[TensorDict]):
     :param O_U_noise: Use Ornstein Uhlenbeck action noise for exploration. If False, uses Gaussian noise. Defaults to True
     :type O_U_noise: bool, optional
     :param expl_noise: Scale for Ornstein Uhlenbeck action noise, or standard deviation for Gaussian exploration noise, defaults to 0.1
-    :type expl_noise: float | npt.NDArray, optional
+    :type expl_noise: float | NoiseParamArray, optional
     :param vect_noise_dim: Vectorization dimension of environment for action noise, defaults to 1
     :type vect_noise_dim: int, optional
     :param mean_noise: Mean of exploration noise, defaults to 0.0
-    :type mean_noise: float | npt.NDArray, optional
+    :type mean_noise: float | NoiseParamArray, optional
     :param theta: Rate of mean reversion in Ornstein Uhlenbeck action noise, defaults to 0.15
     :type theta: float, optional
     :param dt: Timestep for Ornstein Uhlenbeck action noise update, defaults to 1e-2
@@ -108,9 +116,9 @@ class DDPG(RLAlgorithm[TensorDict]):
         observation_space: SupportedObservationSpace,
         action_space: spaces.Box,
         O_U_noise: bool = True,
-        expl_noise: float | npt.NDArray = 0.1,
+        expl_noise: float | NoiseParamArray = 0.1,
         vect_noise_dim: int = 1,
-        mean_noise: float | npt.NDArray = 0.0,
+        mean_noise: float | NoiseParamArray = 0.0,
         theta: float = 0.15,
         dt: float = 1e-2,
         index: int = 0,
@@ -197,22 +205,28 @@ class DDPG(RLAlgorithm[TensorDict]):
         self.O_U_noise = O_U_noise
         self.vect_noise_dim = vect_noise_dim
         self.share_encoders = share_encoders
-        self.expl_noise: np.ndarray = (
+        self.expl_noise: NoiseParamArray = (
             expl_noise
             if isinstance(expl_noise, np.ndarray)
             else expl_noise * np.ones((vect_noise_dim, self.action_dim))
         )
-        self.mean_noise: np.ndarray = (
+        self.mean_noise: NoiseParamArray = (
             mean_noise
             if isinstance(mean_noise, np.ndarray)
             else mean_noise * np.ones((vect_noise_dim, self.action_dim))
         )
-        self.current_noise = np.zeros((vect_noise_dim, self.action_dim))
+        self.current_noise: NoiseStateArray = np.zeros(
+            (vect_noise_dim, self.action_dim)
+        )
         self.theta = theta
         self.dt = dt
         self.learn_counter = 0
-        self.action_low = torch.as_tensor(action_space.low, dtype=torch.float32)
-        self.action_high = torch.as_tensor(action_space.high, dtype=torch.float32)
+        self.action_low: ActionBoundTensor = torch.as_tensor(
+            action_space.low, dtype=torch.float32
+        )
+        self.action_high: ActionBoundTensor = torch.as_tensor(
+            action_space.high, dtype=torch.float32
+        )
 
         # Default RL hyperparameters to mutate when doing Evo-HPO
         self.hp_config = self.hp_config or make_default_hp_config(
@@ -382,7 +396,7 @@ class DDPG(RLAlgorithm[TensorDict]):
         training: bool = True,
         *args: Any,
         **kwargs: Any,
-    ) -> npt.NDArray:
+    ) -> ContinuousActionArray:
         """Return the next action to take in the environment. If training, random noise
         is added to the action to promote exploration.
 
@@ -391,12 +405,12 @@ class DDPG(RLAlgorithm[TensorDict]):
         :param training: Agent is training, use exploration noise, defaults to True
         :type training: bool, optional
         :return: Action
-        :rtype: numpy.ndarray[float]
+        :rtype: Float[npt.NDArray[np.float32], "num_envs action_dim"]
         """
         obs = self.preprocess_observation(obs)
         self.actor.eval()
         with torch.no_grad():
-            action: torch.Tensor = self.actor(obs)
+            action: Float[torch.Tensor, "num_envs action_dim"] = self.actor(obs)
 
         self.actor.train()
 
@@ -414,14 +428,14 @@ class DDPG(RLAlgorithm[TensorDict]):
         )
         return action.data.numpy()
 
-    def action_noise(self) -> npt.NDArray:
+    def action_noise(self) -> ExplorationNoiseArray:
         """Create action noise for exploration, either Ornstein Uhlenbeck or from a normal distribution.
 
         :return: Action noise
-        :rtype: npt.NDArray
+        :rtype: Float[npt.NDArray[np.float32], "vect_noise_dim action_dim"]
         """
         if self.O_U_noise:
-            noise: npt.NDArray = (
+            noise: NoiseStateArray = (
                 self.current_noise
                 + self.theta * (self.mean_noise - self.current_noise) * self.dt
                 + self.expl_noise
@@ -430,18 +444,20 @@ class DDPG(RLAlgorithm[TensorDict]):
             )
             self.current_noise = noise
         else:
-            noise: npt.NDArray = np.random.normal(
+            noise: NoiseStateArray = np.random.normal(
                 self.mean_noise,
                 self.expl_noise,
                 size=(self.vect_noise_dim, self.action_dim),
             )
         return noise.astype(np.float32)
 
-    def reset_action_noise(self, indices: Sequence[int] | npt.NDArray) -> None:
+    def reset_action_noise(
+        self, indices: Sequence[int] | Int[npt.NDArray[np.integer], " num_reset"]
+    ) -> None:
         """Reset action noise.
 
         :param indices: List of indices to reset
-        :type indices: Sequence[int] or npt.NDArray
+        :type indices: Sequence[int] or Int[npt.NDArray[np.integer], " num_reset"]
         """
         self.current_noise[indices] = self.mean_noise[indices]
 
@@ -486,7 +502,7 @@ class DDPG(RLAlgorithm[TensorDict]):
 
         y_j = rewards + ((1 - dones) * self.gamma * q_value_next_state)
 
-        critic_loss: torch.Tensor = self.criterion(q_value, y_j)
+        critic_loss: ScalarLoss = self.criterion(q_value, y_j)
 
         # critic loss backprop
         self.critic_optimizer.zero_grad()
@@ -565,9 +581,11 @@ class DDPG(RLAlgorithm[TensorDict]):
             num_envs = env.num_envs if hasattr(env, "num_envs") else 1
             for _i in range(loop):
                 obs, _ = env.reset()
-                scores = np.zeros(num_envs)
-                completed_episode_scores = np.zeros(num_envs)
-                finished = np.zeros(num_envs)
+                scores: EnvScoreArray = np.zeros(num_envs)
+                completed_episode_scores: EnvScoreArray = np.zeros(num_envs)
+                finished: Float[npt.NDArray[np.float64], " num_envs"] = np.zeros(
+                    num_envs
+                )
                 step = 0
                 while not np.all(finished):
                     action = self.get_action(obs, training=False)

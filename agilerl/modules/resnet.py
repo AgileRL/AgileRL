@@ -1,12 +1,19 @@
 from typing import Any
 
+import numpy.typing as npt
 import torch
+from jaxtyping import Float, Shaped
 from torch import nn
 
 from agilerl.modules import EvolvableCNN
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
-from agilerl.typing import DeviceType, MutationApplyDict, ObservationType
+from agilerl.typing import DeviceType, MutationApplyDict
 from agilerl.utils.evolvable_networks import create_resnet, get_activation
+
+ImageInput = (
+    Shaped[npt.NDArray, "*batch channels height width"]
+    | Shaped[torch.Tensor, "*batch channels height width"]
+)
 
 
 class EvolvableResNet(EvolvableModule):
@@ -177,13 +184,13 @@ class EvolvableResNet(EvolvableModule):
 
         return nn.Sequential(net_dict)
 
-    def forward(self, x: ObservationType) -> torch.Tensor:
+    def forward(self, x: ImageInput) -> Float[torch.Tensor, "batch num_outputs"]:
         """Return output of neural network.
 
         :param x: Neural network input
-        :type x: torch.Tensor
+        :type x: ImageInput
         :return: Neural network output
-        :rtype: torch.Tensor
+        :rtype: Float[torch.Tensor, "batch num_outputs"]
         """
         if not isinstance(x, torch.Tensor):
             x = torch.tensor(x, dtype=torch.float32, device=self.device)

@@ -2,21 +2,28 @@ import warnings
 from dataclasses import asdict
 from typing import ClassVar
 
+import numpy.typing as npt
 import torch
 from gymnasium import spaces
+from jaxtyping import Float, Shaped
 
 from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.base import EvolvableNetwork, preserve_parameters
 from agilerl.networks.distributions import EvolvableDistribution
 from agilerl.typing import (
+    ActionEntropy,
     ActionMaskInput,
-    ArrayOrTensor,
     DeviceType,
+    LogProbs,
     NetConfigType,
+    SampledAction,
     TorchObsType,
 )
 from agilerl.utils.algo_utils import get_output_size_from_space
+
+ActionTensor = Float[torch.Tensor, "batch action_dim"]
+ActionBounds = Float[torch.Tensor, " action_dim"]
 
 
 def get_output_bounds(output_activation: str) -> tuple[float, float]:
@@ -71,6 +78,8 @@ class DeterministicActor(EvolvableNetwork):
     """
 
     action_space: spaces.Box | spaces.Discrete
+    action_low: ActionBounds | None
+    action_high: ActionBounds | None
     supported_spaces: ClassVar[tuple[type[spaces.Space], ...]] = (
         spaces.Box,
         spaces.Discrete,
@@ -164,23 +173,23 @@ class DeterministicActor(EvolvableNetwork):
 
     @staticmethod
     def rescale_action(
-        action: torch.Tensor,
-        low: torch.Tensor,
-        high: torch.Tensor,
+        action: ActionTensor,
+        low: ActionBounds,
+        high: ActionBounds,
         output_activation: str,
-    ) -> torch.Tensor:
+    ) -> ActionTensor:
         """Rescale an action from the network output bounds to the action space bounds [low, high].
 
         :param action: Action as outputted by the network.
-        :type action: torch.Tensor
+        :type action: ActionTensor
         :param low: Minimum action array.
-        :type low: torch.Tensor
+        :type low: ActionBounds
         :param high: Maximum action array.
-        :type high: torch.Tensor
+        :type high: ActionBounds
         :param output_activation: Output activation function of the network.
         :type output_activation: str
         :return: Action in space bounds [low, high].
-        :rtype: torch.Tensor
+        :rtype: ActionTensor
         """
         min_output, max_output = get_output_bounds(output_activation)
 
@@ -212,13 +221,13 @@ class DeterministicActor(EvolvableNetwork):
             net_config=net_config,
         )
 
-    def rescale_output_action(self, action: torch.Tensor) -> torch.Tensor:
+    def rescale_output_action(self, action: ActionTensor) -> ActionTensor:
         """Rescale a network-output action to this actor's action-space bounds.
 
         :param action: Action as outputted by the network.
-        :type action: torch.Tensor
+        :type action: ActionTensor
         :return: Action rescaled to the ``[low, high]`` action-space bounds.
-        :rtype: torch.Tensor
+        :rtype: ActionTensor
         """
         box_error = "Action rescaling requires a Box action space."
         assert self.action_low is not None, box_error
@@ -231,13 +240,13 @@ class DeterministicActor(EvolvableNetwork):
             output_activation=self.output_activation,
         )
 
-    def forward(self, obs: TorchObsType) -> torch.Tensor:
+    def forward(self, obs: TorchObsType) -> ActionTensor:
         """Forward pass of the network.
 
         :param obs: Observation input.
         :type obs: TorchObsType
         :return: Output of the network.
-        :rtype: torch.Tensor
+        :rtype: ActionTensor
         """
         latent = self.extract_features(obs)
         return self.head_net(latent)
@@ -299,6 +308,8 @@ class StochasticActor(EvolvableNetwork):
     action_space: (
         spaces.Box | spaces.Discrete | spaces.MultiDiscrete | spaces.MultiBinary
     )
+    action_low: ActionBounds | None
+    action_high: ActionBounds | None
     supported_spaces: ClassVar[tuple[type[spaces.Space], ...]] = (
         spaces.Box,
         spaces.Discrete,
@@ -393,14 +404,17 @@ class StochasticActor(EvolvableNetwork):
             device=self.device,
         )
 
-    def scale_action(self, action: ArrayOrTensor) -> torch.Tensor:
+    def scale_action(
+        self,
+        action: ActionTensor | Shaped[npt.NDArray, "batch action_dim"],
+    ) -> ActionTensor:
         """Scale the action from [-1, 1] to the action space bounds [low, high].
 
         :param action: Action as an array or tensor. Array inputs are handled by
             the tensor arithmetic against ``action_low`` / ``action_high``.
-        :type action: ArrayOrTensor
+        :type action: ActionTensor | Shaped[npt.NDArray, "batch action_dim"]
         :return: Scaled action.
-        :rtype: torch.Tensor
+        :rtype: ActionTensor
         """
         assert self.action_low is not None, (
             "Action scaling requires a Box action space."
@@ -416,7 +430,7 @@ class StochasticActor(EvolvableNetwork):
         self,
         obs: TorchObsType,
         action_mask: ActionMaskInput = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[SampledAction, LogProbs, ActionEntropy]:
         """Forward pass of the network.
 
         :param obs: Observation input.
@@ -424,7 +438,7 @@ class StochasticActor(EvolvableNetwork):
         :param action_mask: Action mask.
         :type action_mask: ActionMaskInput
         :return: Action, log probability of the action, and entropy of the action distribution.
-        :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        :rtype: tuple[SampledAction, LogProbs, ActionEntropy]
         """
         latent = self.extract_features(obs)
         action, log_prob, entropy = self.head_net.forward(latent, action_mask)
@@ -435,21 +449,21 @@ class StochasticActor(EvolvableNetwork):
 
         return action, log_prob, entropy
 
-    def action_log_prob(self, action: torch.Tensor) -> torch.Tensor:
+    def action_log_prob(self, action: SampledAction) -> LogProbs:
         """Get the log probability of the action.
 
         :param action: Action.
-        :type action: torch.Tensor
+        :type action: SampledAction
         :return: Log probability of the action.
-        :rtype: torch.Tensor
+        :rtype: LogProbs
         """
         return self.head_net.log_prob(action)
 
-    def action_entropy(self) -> torch.Tensor:
+    def action_entropy(self) -> ActionEntropy:
         """Get the entropy of the action distribution.
 
         :return: Entropy of the action distribution.
-        :rtype: torch.Tensor
+        :rtype: ActionEntropy
         """
         return self.head_net.entropy()
 

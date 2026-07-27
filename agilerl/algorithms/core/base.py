@@ -34,6 +34,7 @@ import torch
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list, set_seed
 from gymnasium import spaces
+from jaxtyping import Bool, Float, Int, Shaped
 from tensordict import TensorDict
 from torch._dynamo import OptimizedModule
 from torch.nn.utils import clip_grad_norm_
@@ -72,6 +73,8 @@ from agilerl.protocols import (
 from agilerl.typing import (
     ActionResult,
     ActionType,
+    AnyArray,
+    AnyTensor,
     ArrayDict,
     CheckpointInfo,
     DeviceType,
@@ -90,6 +93,9 @@ from agilerl.typing import (
     ObservationType,
     OptimizerType,
     ReasoningPrompts,
+    ScalarLoss,
+    TokenActionMask,
+    TokenIds,
     TorchObsType,
     coerce_action_mask,
 )
@@ -185,6 +191,21 @@ else:
 __all__ = ["ActionResult", "EvolvableAlgorithm", "MultiAgentRLAlgorithm", "RLAlgorithm"]
 
 logger = logging.getLogger(__name__)
+
+# A recorded fitness array: a per-sub-agent row (multi-agent, sum_scores=False)
+# or a 0-d array (LLM algorithms).
+FitnessArray = Float[npt.NDArray[np.float64], "..."]
+# Per-agent boolean masks marking the entries of a matching action array that
+# the environment did *not* define.
+AgentMaskDict = dict[str, Bool[npt.NDArray[np.bool_], "..."]]
+
+# LLM tensor frames: the prompt-length attention mask (bool when built here as
+# ``ids != pad_token_id``, the tokenizer's int mask under GRPO / SFT), the
+# ``(batch, seq - 1)`` action-frame log-probs, and the flat per-completion vLLM
+# sampling log-probs.
+AttentionMask = Shaped[torch.Tensor, "batch seq"]
+LogProbTensor = Float[torch.Tensor, "batch action_seq"]
+SamplingLogProbs = Float[torch.Tensor, " num_generated_tokens"]
 
 SelfAgentWrapper = TypeVar("SelfAgentWrapper", bound=AgentWrapperProtocol)
 
@@ -522,7 +543,7 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         raise NotImplementedError
 
     @abstractmethod
-    def test(self, *args: Any, **kwargs: Any) -> float | npt.NDArray:
+    def test(self, *args: Any, **kwargs: Any) -> float | FitnessArray:
         """Abstract method for testing the algorithm."""
         raise NotImplementedError
 
@@ -1809,7 +1830,7 @@ class MultiAgentRLAlgorithm(
             # each one so the per-group reduction can index it. The only shape
             # these loops produce is one entry per raw env agent; anything else
             # would mislabel group columns, so fail loudly rather than misrecord.
-            score_rows: list[list[float] | np.ndarray] = []
+            score_rows: list[list[float] | Shaped[npt.NDArray, " num_agents"]] = []
             for row in scores:
                 grouped_error = (
                     "Grouped multi-agent scores expected one entry per agent "
@@ -1938,7 +1959,7 @@ class MultiAgentRLAlgorithm(
     def extract_agent_masks(
         self,
         infos: InfosDict | None = None,
-    ) -> tuple[ArrayDict | None, ArrayDict | None]:
+    ) -> tuple[ArrayDict | None, AgentMaskDict | None]:
         """Extract env_defined_actions from info dictionary and determine agent masks.
 
         :param infos: Info dict
@@ -1946,7 +1967,7 @@ class MultiAgentRLAlgorithm(
 
         :return: Env defined actions and agent masks (both ``None`` when the
             info dict defines no actions). Actions are normalized to arrays.
-        :rtype: tuple[ArrayDict | None, ArrayDict | None]
+        :rtype: tuple[ArrayDict | None, AgentMaskDict | None]
         """
         # Deal with case of no env_defined_actions defined in the info dict
         # Deal with empty info dicts for each sub agent
@@ -1957,7 +1978,7 @@ class MultiAgentRLAlgorithm(
         ):
             return None, None
 
-        raw_actions: dict[str, int | float | np.ndarray | torch.Tensor | None] = {}
+        raw_actions: dict[str, int | float | AnyArray | AnyTensor | None] = {}
         for agent, info in infos.items():
             if agent not in self.agent_ids:
                 continue
@@ -1967,7 +1988,7 @@ class MultiAgentRLAlgorithm(
             else:
                 raw_actions[agent] = None
         env_defined_actions: ArrayDict = {}
-        agent_masks: ArrayDict = {}
+        agent_masks: AgentMaskDict = {}
         for agent_id, action_val in raw_actions.items():
             val = action_val
             # Handle None if environment isn't vectorized
@@ -2237,23 +2258,23 @@ class MultiAgentRLAlgorithm(
 
     def disassemble_grouped_outputs(
         self,
-        group_outputs: ArrayDict,
+        group_outputs: dict[str, Shaped[npt.NDArray, "group_batch ..."]],
         vect_dim: int,
         grouped_agents: dict[str, list[str]],
-    ) -> ArrayDict:
+    ) -> dict[str, Shaped[npt.NDArray, "num_envs ..."]]:
         """Disassembles batched output by shared policies into their grouped agents' outputs.
 
         .. note:: This assumes that for any given sub-agent the termination condition is deterministic,
             i.e. any given agent will always terminate at the same timestep in different vectorized environments.
 
         :param group_outputs: Dictionary to be disassembled, has the form {'agent': [4, 7, 8]}
-        :type group_outputs: dict[str, npt.NDArray]
+        :type group_outputs: dict[str, Shaped[npt.NDArray, "group_batch ..."]]
         :param vect_dim: Vectorization dimension size, i.e. number of vect envs
         :type vect_dim: int
         :param grouped_agents: Dictionary of grouped agent IDs
         :type grouped_agents: dict[str, list[str]]
         :return: Assembled dictionary, e.g. {'agent_0': 4, 'agent_1': 7, 'agent_2': 8}
-        :rtype: dict[str, npt.NDArray]
+        :rtype: dict[str, Shaped[npt.NDArray, "num_envs ..."]]
         """
         output_dict = {}
         for group_id, agent_ids in grouped_agents.items():
@@ -2273,15 +2294,15 @@ class MultiAgentRLAlgorithm(
         return output_dict
 
     def sum_shared_rewards(
-        self, rewards: Mapping[str, npt.NDArray | float | int]
-    ) -> ArrayDict:
+        self, rewards: Mapping[str, Shaped[npt.NDArray, " num_envs"] | float | int]
+    ) -> dict[str, Float[npt.NDArray[np.float64], " num_envs"]]:
         """Sum the rewards for grouped agents.
 
         :param rewards: Reward dictionary from environment. Vectorised envs
             provide arrays; a non-vectorised ``ParallelEnv`` provides scalars.
-        :type rewards: dict[str, npt.NDArray | float]
+        :type rewards: Mapping[str, Shaped[npt.NDArray, " num_envs"] | float | int]
         :return: Summed rewards dictionary
-        :rtype: dict[str, npt.NDArray]
+        :rtype: dict[str, Float[npt.NDArray[np.float64], " num_envs"]]
         """
         reward_shape = next(iter(rewards.values()))
         reward_shape = (
@@ -2298,17 +2319,17 @@ class MultiAgentRLAlgorithm(
 
     def assemble_grouped_outputs(
         self,
-        agent_outputs: ArrayDict,
+        agent_outputs: dict[str, Shaped[npt.NDArray, "num_envs ..."]],
         vect_dim: int,
-    ) -> ArrayDict:
+    ) -> dict[str, Shaped[npt.NDArray, "group_batch flat_dim"]]:
         """Assembles individual agent outputs into batched outputs for shared policies.
 
         :param agent_outputs: Dictionary with individual agent outputs, e.g. {'agent_0': 4, 'agent_1': 7, 'agent_2': 8}
-        :type agent_outputs: dict[str, npt.NDArray]
+        :type agent_outputs: dict[str, Shaped[npt.NDArray, "num_envs ..."]]
         :param vect_dim: Vectorization dimension size, i.e. number of vect envs
         :type vect_dim: int
         :return: Assembled dictionary with the form {'agent': [4, 7, 8]}
-        :rtype: dict[str, npt.NDArray]
+        :rtype: dict[str, Shaped[npt.NDArray, "group_batch flat_dim"]]
         """
         group_outputs = {}
         for group_id in self.shared_agent_ids:
@@ -3861,16 +3882,16 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             )
 
     @staticmethod
-    def _position_ids_from_mask(mask: torch.Tensor) -> torch.Tensor:
+    def _position_ids_from_mask(mask: AttentionMask) -> Int[torch.Tensor, "batch seq"]:
         """Left-padding-safe ``position_ids`` from an attention mask.
 
         Cumulative real-token count minus one, with padded positions pinned to
         ``1`` so the rotary embedding sees a valid (ignored) index.
 
         :param mask: ``(B, T)`` attention mask (1 = real token, 0 = pad).
-        :type mask: torch.Tensor
+        :type mask: AttentionMask
         :return: ``(B, T)`` position ids in ``long``.
-        :rtype: torch.Tensor
+        :rtype: Int[torch.Tensor, "batch seq"]
         """
         position_ids = mask.long().cumsum(dim=-1) - 1
         position_ids.masked_fill_(mask=(mask == 0), value=1)
@@ -3878,7 +3899,11 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
     def _fused_logprob_fn_and_head(
         self,
-    ) -> tuple[Callable, torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[
+        Callable,
+        Float[torch.Tensor, "vocab hidden"],
+        Float[torch.Tensor, " vocab"] | None,
+    ]:
         """Resolve the fused per-token-logprob fn and the lm_head weight/bias.
 
         Fused-linear-logprob path (the only path): the lm_head is identity-
@@ -3889,7 +3914,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         stays bounded too; under no_grad the lighter static method is used.
 
         :return: ``(fused_fn, lm_head_weight, lm_head_bias)``.
-        :rtype: tuple[Callable, torch.Tensor, torch.Tensor | None]
+        :rtype: tuple[Callable, Float[torch.Tensor, "vocab hidden"], Float[torch.Tensor, " vocab"] | None]
         """
         fused_fn = (
             LLMAlgorithm._logprobs_from_hidden_fused_grad
@@ -3937,10 +3962,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
     def _align_sampling_logprobs(
         self,
-        sampling_logps: list[torch.Tensor | None] | None,
-        action_masks: torch.Tensor,
-        old_log_probs: torch.Tensor,
-    ) -> tuple[torch.Tensor | None, int]:
+        sampling_logps: list[SamplingLogProbs | None] | None,
+        action_masks: TokenActionMask,
+        old_log_probs: LogProbTensor,
+    ) -> tuple[LogProbTensor | None, int]:
         """Scatter per-row flat vLLM logprobs onto the ``(B, T-1)`` action frame.
 
         ``sampling_logps`` is one 1-D tensor per row (the generated-token
@@ -3952,14 +3977,14 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         correction) instead of crashing.
 
         :param sampling_logps: Per-row flat logprobs, or ``None``.
-        :type sampling_logps: list[torch.Tensor | None] | None
+        :type sampling_logps: list[SamplingLogProbs | None] | None
         :param action_masks: ``(B, T-1)`` action-token mask.
-        :type action_masks: torch.Tensor
+        :type action_masks: TokenActionMask
         :param old_log_probs: ``(B, T-1)`` trainer old-policy logprobs (the
             fallback where data is missing → unit ratio).
-        :type old_log_probs: torch.Tensor
+        :type old_log_probs: LogProbTensor
         :return: ``(aligned (B, T-1) or None, n_rows_skipped)``.
-        :rtype: tuple[torch.Tensor | None, int]
+        :rtype: tuple[LogProbTensor | None, int]
         """
         if not sampling_logps:
             return None, 0
@@ -3981,9 +4006,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
     def _sampling_mismatch_metrics(
         self,
-        old_log_probs: torch.Tensor,
-        sampling_log_probs: torch.Tensor,
-        action_masks: torch.Tensor,
+        old_log_probs: LogProbTensor,
+        sampling_log_probs: LogProbTensor,
+        action_masks: TokenActionMask,
     ) -> dict[str, float]:
         """Summarise the vLLM-vs-trainer logprob divergence over action tokens.
 
@@ -4011,10 +4036,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
     def _aligned_sampling_logprobs_and_metrics(
         self,
-        sampling_logps: list[torch.Tensor | None] | None,
-        action_masks: torch.Tensor,
-        old_log_probs: torch.Tensor,
-    ) -> tuple[torch.Tensor | None, dict[str, float]]:
+        sampling_logps: list[SamplingLogProbs | None] | None,
+        action_masks: TokenActionMask,
+        old_log_probs: LogProbTensor,
+    ) -> tuple[LogProbTensor | None, dict[str, float]]:
         """Align captured vLLM sampling logprobs and summarise the mismatch.
 
         Aligns the per-row logprobs captured at rollout onto the ``(B, T-1)``
@@ -4026,13 +4051,13 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         :param sampling_logps: Per-row vLLM sampling logprobs from rollout, or
             ``None`` when none were captured.
-        :type sampling_logps: list[torch.Tensor | None] | None
+        :type sampling_logps: list[SamplingLogProbs | None] | None
         :param action_masks: ``(B, T-1)`` action-token mask.
-        :type action_masks: torch.Tensor
+        :type action_masks: TokenActionMask
         :param old_log_probs: ``(B, T-1)`` frozen-policy logprobs.
-        :type old_log_probs: torch.Tensor
+        :type old_log_probs: LogProbTensor
         :return: ``(aligned_logprobs_or_None, metrics)``.
-        :rtype: tuple[torch.Tensor | None, dict[str, float]]
+        :rtype: tuple[LogProbTensor | None, dict[str, float]]
         """
         is_metrics: dict[str, float] = {}
         sampling_log_probs, n_skipped = self._align_sampling_logprobs(
@@ -4471,11 +4496,11 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
     def _fused_model_pass(
         self,
-        fused_ids: torch.Tensor,
-        fused_mask: torch.Tensor,
+        fused_ids: TokenIds,
+        fused_mask: AttentionMask,
         routing: list[str],
         batch_size: int | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[LogProbTensor, LogProbTensor | None]:
         """Run the model on a fused batch with per-sample adapter routing.
 
         When *batch_size* is ``None`` the full batch is processed in a single
@@ -4486,7 +4511,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :return: ``(log_probs, values)`` where *log_probs* has shape
             ``(fused_ids.shape[0], seq_len - 1)`` and *values* matches that
             batch dimension when ``use_value_head`` is set, else ``None``.
-        :rtype: tuple[torch.Tensor, torch.Tensor | None]
+        :rtype: tuple[LogProbTensor, LogProbTensor | None]
         """
         unwrapped = self._get_unwrapped_actor()
         total = fused_ids.shape[0]
@@ -4506,7 +4531,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
         def _process_chunk(
             start: int, end: int
-        ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        ) -> tuple[
+            Float[torch.Tensor, "chunk action_seq"],
+            Float[torch.Tensor, "chunk action_seq"] | None,
+        ]:
             set_fused_adapter_routing(unwrapped, routing[start:end])
             model_kwargs: dict = {
                 "input_ids": fused_ids[start:end],
@@ -4558,8 +4586,8 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         # chunk in place via copy_(). Avoids holding the full list of chunk
         # tensors plus the concatenated buffer in memory at the same time
         # (which doubles peak memory in the torch.cat path).
-        logprobs_out: torch.Tensor | None = None
-        values_out: torch.Tensor | None = None
+        logprobs_out: LogProbTensor | None = None
+        values_out: LogProbTensor | None = None
 
         for start, end in chunks:
             chunk_lp, chunk_v = _process_chunk(start, end)
@@ -4590,10 +4618,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
     def _fused_forward(
         self,
-        ids: torch.Tensor,
+        ids: TokenIds,
         batch_size: int,
-        attention_mask: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        attention_mask: AttentionMask | None = None,
+    ) -> tuple[LogProbTensor, LogProbTensor | None]:
         """Actor log-probs, and optionally critic values, in one forward.
 
         When ``use_value_head`` is set, the input is doubled (actor slice then
@@ -4615,14 +4643,14 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
            minibatch loop (see ``learn()`` in ``ppo_llm.py``).
 
         :param ids: Token IDs ``(B, seq_len)``.
-        :type ids: torch.Tensor
+        :type ids: TokenIds
         :param batch_size: Unused (kept for API symmetry).
         :type batch_size: int
         :param attention_mask: Optional attention mask matching *ids*.
-        :type attention_mask: torch.Tensor | None, optional
+        :type attention_mask: AttentionMask | None, optional
         :return: ``(actor_log_probs, critic_values)`` with shapes ``(B, seq_len-1)``;
             *critic_values* is ``None`` when no value head is used.
-        :rtype: tuple[torch.Tensor, torch.Tensor | None]
+        :rtype: tuple[LogProbTensor, LogProbTensor | None]
         """
         B = ids.shape[0]
         if attention_mask is None:
@@ -4653,9 +4681,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
     def _fused_packed_forward(
         self,
-        ids: torch.Tensor,
-        attention_mask: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        ids: TokenIds,
+        attention_mask: AttentionMask,
+    ) -> tuple[LogProbTensor, LogProbTensor | None]:
         """Padding-free packed variant of the gradient :meth:`_fused_forward`.
 
         Actor and critic see identical token ids, so the ``(B, T)`` batch is
@@ -4672,12 +4700,12 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         note).
 
         :param ids: Token IDs ``(B, seq_len)``.
-        :type ids: torch.Tensor
+        :type ids: TokenIds
         :param attention_mask: Mask matching *ids* (non-zero marks real tokens).
-        :type attention_mask: torch.Tensor
+        :type attention_mask: AttentionMask
         :return: ``(actor_log_probs, critic_values)`` each ``(B, seq_len - 1)``;
             *critic_values* is ``None`` when no value head is used.
-        :rtype: tuple[torch.Tensor, torch.Tensor | None]
+        :rtype: tuple[LogProbTensor, LogProbTensor | None]
         """
         unwrapped = self._get_unwrapped_actor()
         packed = pack_padded_batch(ids, attention_mask)
@@ -4733,10 +4761,10 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
     def _fused_forward_no_grad(
         self,
-        ids: torch.Tensor,
+        ids: TokenIds,
         batch_size: int,
-        attention_mask: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        attention_mask: AttentionMask | None = None,
+    ) -> tuple[LogProbTensor, LogProbTensor, LogProbTensor | None]:
         """Compute reference log-probs, actor log-probs, and critic values in
         one forward pass (under ``torch.no_grad``).
 
@@ -4751,14 +4779,14 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         is involved.
 
         :param ids: Token IDs ``(B, seq_len)``.
-        :type ids: torch.Tensor
+        :type ids: TokenIds
         :param batch_size: Micro-batch size for memory-bounded iteration.
         :type batch_size: int
         :param attention_mask: Optional attention mask matching *ids*.
-        :type attention_mask: torch.Tensor | None, optional
+        :type attention_mask: AttentionMask | None, optional
         :return: ``(reference_log_probs, actor_log_probs, critic_values)``
             each of shape ``(B, seq_len - 1)``.
-        :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]
+        :rtype: tuple[LogProbTensor, LogProbTensor, LogProbTensor | None]
         """
         B = ids.shape[0]
         if attention_mask is None:
@@ -4862,16 +4890,16 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
     def _get_logprobs(
         self,
-        ids: torch.Tensor,
+        ids: TokenIds,
         batch_size: int,
         use_reference: bool = False,
         eval_mode: bool = False,
-        attention_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        attention_mask: AttentionMask | None = None,
+    ) -> LogProbTensor:
         """Find the log probabilities for a set of previously generated ids.
 
         :param ids: Completion IDs.
-        :type ids: torch.Tensor
+        :type ids: TokenIds
         :param batch_size: Batch size.
         :type batch_size: int
         :param use_reference: Flag to indicate to use reference policy, defaults to False
@@ -4879,9 +4907,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :param eval_mode: Flag to indicate setting policy network to evaluation mode, defaults to False
         :type eval_mode: bool, optional
         :param attention_mask: Attention mask.
-        :type attention_mask: torch.Tensor, optional
+        :type attention_mask: AttentionMask, optional
         :return: Log probabilities of the completion IDs.
-        :rtype: torch.Tensor
+        :rtype: LogProbTensor
         """
         grad_enabled = torch.is_grad_enabled()
         with self.select_adapter("reference" if use_reference else "actor"):
@@ -4969,11 +4997,11 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
                 log_probs.append(log_prob)
         return torch.cat(log_probs, dim=0)
 
-    def _backward_pass(self, loss: torch.Tensor) -> None:
+    def _backward_pass(self, loss: ScalarLoss) -> None:
         """Perform a backward pass and optimizer step.
 
         :param loss: Combined loss.
-        :type loss: torch.Tensor
+        :type loss: ScalarLoss
         """
         if self._uses_deepspeed:
             assert self.accelerator is not None  # _uses_deepspeed implies one
@@ -5166,7 +5194,9 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         temperature: float | None,
         capture_sampling_logps: bool = False,
     ) -> tuple[
-        list[torch.Tensor], list[torch.Tensor], list[torch.Tensor | None] | None
+        list[Int[torch.Tensor, "group_size seq"]],
+        list[Bool[torch.Tensor, "group_size action_seq"]],
+        list[SamplingLogProbs | None] | None,
     ]:
         """Generate completions with colocated vLLM for GRPO/LLMPPO-style batches.
 
@@ -5187,7 +5217,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :param temperature: Temperature for sampling.
         :type temperature: float | None
         :return: Per-prompt completion token tensors and matching action masks.
-        :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
+        :rtype: tuple[list[Int[torch.Tensor, "group_size seq"]], list[Bool[torch.Tensor, "group_size action_seq"]], list[SamplingLogProbs | None] | None]
         """
         if SamplingParams is None:
             msg = "vLLM is required when use_vllm=True. Install AgileRL with vLLM support for this platform: `pip install agilerl[llm]`."
@@ -5203,16 +5233,18 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             else self.max_model_len
         )
 
-        def _trajectory_input_ids(prompt: ReasoningPrompts) -> torch.Tensor:
+        def _trajectory_input_ids(prompt: ReasoningPrompts) -> TokenIds:
             traj = prompt.get("trajectory_input_ids")
             if traj is None:
                 return prompt["input_ids"]
             return traj
 
-        def _token_prompt_for_vllm(ids: torch.Tensor) -> dict[str, list[int]]:
+        def _token_prompt_for_vllm(ids: TokenIds) -> dict[str, list[int]]:
             return {"prompt_token_ids": ids.squeeze(0).tolist()}
 
-        def _stitch_prefix(prompt: ReasoningPrompts, ref: torch.Tensor) -> torch.Tensor:
+        def _stitch_prefix(
+            prompt: ReasoningPrompts, ref: TokenIds
+        ) -> Int[torch.Tensor, "batch prefix_len"]:
             st = prompt.get("stitch_prefix_ids")
             if st is None:
                 return ref.new_zeros((ref.shape[0], 0))
@@ -5388,7 +5420,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             for i in range(len(prompts))
         ]
 
-        sampling_logps: list[torch.Tensor | None] | None = (
+        sampling_logps: list[SamplingLogProbs | None] | None = (
             [
                 torch.tensor(lp, dtype=torch.float32, device=self.device)
                 for lp in sampling_logps_flat
@@ -5420,11 +5452,11 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
     @staticmethod
     def _logprobs_from_logits(
-        logits: torch.Tensor,
-        index: torch.Tensor,
+        logits: Float[torch.Tensor, "batch seq vocab"],
+        index: TokenIds,
         cast_to_fp32: bool = True,
         chunk_rows: int = 1,
-    ) -> torch.Tensor:
+    ) -> Float[torch.Tensor, "batch seq"]:
         """Calculate log probabilities for previously generated token ids.
 
         Processes ``chunk_rows`` rows at a time so peak memory stays bounded to
@@ -5445,18 +5477,21 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         ``F.log_softmax`` stability either way.
 
         :param logits: Logits of shape ``(B, seq_len, vocab_size)``.
-        :type logits: torch.Tensor
+        :type logits: Float[torch.Tensor, "batch seq vocab"]
         :param index: Token IDs of shape ``(B, seq_len)``.
-        :type index: torch.Tensor
+        :type index: TokenIds
         :param cast_to_fp32: Promote each chunk to fp32 before the reduction.
         :type cast_to_fp32: bool
         :return: Log probabilities of the completion IDs, shape ``(B, seq_len)``.
-        :rtype: torch.Tensor
+        :rtype: Float[torch.Tensor, "batch seq"]
         """
         orig_dtype = logits.dtype
         B = logits.shape[0]
 
-        def _logprobs_chunk(lg: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
+        def _logprobs_chunk(
+            lg: Float[torch.Tensor, "chunk seq vocab"],
+            idx: Int[torch.Tensor, "chunk seq"],
+        ) -> Float[torch.Tensor, "chunk seq"]:
             if cast_to_fp32:
                 lg = lg.float()
             max_lg = lg.amax(dim=-1, keepdim=True)
@@ -5501,14 +5536,14 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
     @staticmethod
     def _logprobs_from_hidden_fused(
-        hidden: torch.Tensor,
-        lm_head_weight: torch.Tensor,
-        lm_head_bias: torch.Tensor | None,
-        target_ids: torch.Tensor,
+        hidden: Float[torch.Tensor, "batch seq hidden"],
+        lm_head_weight: Float[torch.Tensor, "vocab hidden"],
+        lm_head_bias: Float[torch.Tensor, " vocab"] | None,
+        target_ids: TokenIds,
         temperature: float = 1.0,
         cast_to_fp32: bool = True,
         chunk_rows: int | None = None,
-    ) -> torch.Tensor:
+    ) -> Float[torch.Tensor, "batch seq"]:
         """Per-token target logprobs without materializing the full ``(B, T, V)``
         logits tensor.
 
@@ -5525,14 +5560,14 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         keeps the two paths bit-comparable.
 
         :param hidden: ``(B, T, H)`` last-hidden-state.
-        :type hidden: torch.Tensor
+        :type hidden: Float[torch.Tensor, "batch seq hidden"]
         :param lm_head_weight: ``(V, H)``.
-        :type lm_head_weight: torch.Tensor
+        :type lm_head_weight: Float[torch.Tensor, "vocab hidden"]
         :param lm_head_bias: ``(V,)`` or ``None``.
-        :type lm_head_bias: torch.Tensor | None
+        :type lm_head_bias: Float[torch.Tensor, " vocab"] | None
         :param target_ids: ``(B, T)`` (caller does the ``[:, :-1]``/``[:, 1:]``
             shift before calling).
-        :type target_ids: torch.Tensor
+        :type target_ids: TokenIds
         :param temperature: scalar; logits divided by this before log_softmax
             (skipped when ``1.0``).
         :type temperature: float, optional
@@ -5546,7 +5581,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             a ~256 MB fp32 workspace heuristic.
         :type chunk_rows: int | None, optional
         :return: ``(B, T)`` per-token logprobs in ``hidden.dtype``.
-        :rtype: torch.Tensor
+        :rtype: Float[torch.Tensor, "batch seq"]
         """
         chunk_rows = LLMAlgorithm._resolve_fused_chunk_rows(
             lm_head_weight.shape[0], chunk_rows
@@ -5563,14 +5598,14 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
 
     @staticmethod
     def _logprobs_from_hidden_fused_grad(
-        hidden: torch.Tensor,
-        lm_head_weight: torch.Tensor,
-        lm_head_bias: torch.Tensor | None,
-        target_ids: torch.Tensor,
+        hidden: Float[torch.Tensor, "batch seq hidden"],
+        lm_head_weight: Float[torch.Tensor, "vocab hidden"],
+        lm_head_bias: Float[torch.Tensor, " vocab"] | None,
+        target_ids: TokenIds,
         temperature: float = 1.0,
         cast_to_fp32: bool = True,
         chunk_rows: int | None = None,
-    ) -> torch.Tensor:
+    ) -> Float[torch.Tensor, "batch seq"]:
         """Gradient-aware version of :meth:`_logprobs_from_hidden_fused`.
 
         Routes through :class:`FusedLinearLogProbsFunction` so the per-token
@@ -5584,13 +5619,13 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         ``log_softmax`` gradient.
 
         :param hidden: ``(B, T, H)`` last-hidden-state (typically requires grad).
-        :type hidden: torch.Tensor
+        :type hidden: Float[torch.Tensor, "batch seq hidden"]
         :param lm_head_weight: ``(V, H)``.
-        :type lm_head_weight: torch.Tensor
+        :type lm_head_weight: Float[torch.Tensor, "vocab hidden"]
         :param lm_head_bias: ``(V,)`` or ``None``.
-        :type lm_head_bias: torch.Tensor | None
+        :type lm_head_bias: Float[torch.Tensor, " vocab"] | None
         :param target_ids: ``(B, T)`` (caller does the shift before calling).
-        :type target_ids: torch.Tensor
+        :type target_ids: TokenIds
         :param temperature: logits divided by this before log_softmax.
         :type temperature: float, optional
         :param cast_to_fp32: run the per-chunk reduction in fp32.
@@ -5600,7 +5635,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
             a ~256 MB fp32 workspace heuristic.
         :type chunk_rows: int | None, optional
         :return: ``(B, T)`` per-token logprobs in ``hidden.dtype``.
-        :rtype: torch.Tensor
+        :rtype: Float[torch.Tensor, "batch seq"]
         """
         chunk_rows = LLMAlgorithm._resolve_fused_chunk_rows(
             lm_head_weight.shape[0], chunk_rows
@@ -5933,7 +5968,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
     @staticmethod
     def _create_prompt_masks(
         prompt_lengths: list[int], max_length: int
-    ) -> torch.Tensor:
+    ) -> Bool[torch.Tensor, "batch max_length"]:
         """Create a mask for the prompts based on the prompt lengths (vectorized).
 
         :param prompt_lengths: List of prompt lengths
@@ -5941,7 +5976,7 @@ class LLMAlgorithm(EvolvableAlgorithm[ExperiencesT], ABC, Generic[ExperiencesT])
         :param max_length: Maximum length of the prompts
         :type max_length: int
         :return: Mask tensor [batch_size, max_length]
-        :rtype: torch.Tensor
+        :rtype: Bool[torch.Tensor, "batch max_length"]
         """
         prompt_lengths_tensor = torch.tensor(prompt_lengths, dtype=torch.long)
         positions = torch.arange(max_length, dtype=torch.long).unsqueeze(0)

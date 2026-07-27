@@ -1,12 +1,16 @@
 from typing import Any
 
+import numpy.typing as npt
 import torch
 import torch.nn.functional as F
+from jaxtyping import Float, Shaped
 
 from agilerl.modules.base import EvolvableModule
 from agilerl.modules.mlp import EvolvableMLP
-from agilerl.typing import ArrayOrTensor, DeviceType
+from agilerl.typing import DeviceType
 from agilerl.utils.evolvable_networks import create_mlp
+
+SupportTensor = Float[torch.Tensor, " num_atoms"]
 
 
 class DuelingDistributionalMLP(EvolvableMLP):
@@ -23,7 +27,7 @@ class DuelingDistributionalMLP(EvolvableMLP):
     :param num_atoms: Number of atoms in the distribution.
     :type num_atoms: int
     :param support: Support of the distribution.
-    :type support: torch.Tensor
+    :type support: SupportTensor
     :param layer_norm: Normalization between layers, defaults to True
     :type layer_norm: bool, optional
     :param output_layernorm: Normalization after the last layer, defaults to False
@@ -60,7 +64,7 @@ class DuelingDistributionalMLP(EvolvableMLP):
         num_outputs: int,
         hidden_size: list[int],
         num_atoms: int,
-        support: torch.Tensor,
+        support: SupportTensor,
         layer_norm: bool = True,
         output_layernorm: bool = False,
         output_vanish: bool = True,
@@ -127,21 +131,22 @@ class DuelingDistributionalMLP(EvolvableMLP):
 
     def forward(
         self,
-        x: ArrayOrTensor,
+        x: Shaped[npt.NDArray, "batch latent_dim"]
+        | Shaped[torch.Tensor, "batch latent_dim"],
         q: bool = True,
         log: bool = False,
-    ) -> torch.Tensor:
+    ) -> Float[torch.Tensor, "batch num_actions *num_atoms"]:
         """Forward pass of the network.
 
         :param x: Input to the network.
-        :type x: ArrayOrTensor
+        :type x: Shaped[npt.NDArray, "batch latent_dim"] | Shaped[torch.Tensor, "batch latent_dim"]
         :param q: Whether to return Q values. Defaults to True.
         :type q: bool
         :param log: Whether to return log probabilities. Defaults to False.
         :type log: bool
 
         :return: Output of the network.
-        :rtype: torch.Tensor
+        :rtype: Float[torch.Tensor, "batch num_actions *num_atoms"]
         """
         if not isinstance(x, torch.Tensor):
             x = torch.tensor(x, dtype=torch.float32, device=self.device)

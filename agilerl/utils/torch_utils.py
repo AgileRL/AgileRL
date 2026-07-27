@@ -9,6 +9,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from gymnasium import spaces
+from jaxtyping import Float, Int, Num, Shaped
+
+from agilerl.typing import ActionLogits, LogProbs
+
+# Per-sub-action category counts of a ``MultiDiscrete`` space (``spaces.MultiDiscrete.nvec``).
+NvecType = Sequence[int] | Int[npt.NDArray[np.integer], " num_sub_actions"]
 
 
 def map_pytree(
@@ -88,26 +94,28 @@ def parameter_norm(model: nn.Module) -> float:
 
 
 def get_transformer_logs(
-    attentions: list[torch.Tensor],
+    attentions: list[Float[torch.Tensor, "..."]],
     model: nn.Module,
-    attn_mask: torch.Tensor,
-) -> dict[str, tuple[float | torch.Tensor, int | torch.Tensor]]:
+    attn_mask: Shaped[torch.Tensor, "..."],
+) -> dict[str, tuple[float | Float[torch.Tensor, ""], int | Num[torch.Tensor, ""]]]:
     """Extract logging information from transformer attention weights.
 
     Computes attention entropy and parameter norm for transformer models,
     which can be useful for monitoring training dynamics.
 
     :param attentions: List of attention weight tensors from transformer layers
-    :type attentions: list[torch.Tensor]
+    :type attentions: list[Float[torch.Tensor, "..."]]
     :param model: Transformer model
     :type model: nn.Module
     :param attn_mask: Attention mask tensor
-    :type attn_mask: torch.Tensor
+    :type attn_mask: Shaped[torch.Tensor, "..."]
     :return: Dictionary containing attention entropy and parameter norm; the
         attention-entropy pair stays as 0-dim tensors derived from ``attn_mask``.
-    :rtype: dict[str, tuple[float | torch.Tensor, int | torch.Tensor]]
+    :rtype: dict[str, tuple[float | Float[torch.Tensor, ""], int | Num[torch.Tensor, ""]]]
     """
-    logs: dict[str, tuple[float | torch.Tensor, int | torch.Tensor]] = {}
+    logs: dict[
+        str, tuple[float | Float[torch.Tensor, ""], int | Num[torch.Tensor, ""]]
+    ] = {}
     n = attn_mask.sum()
     model_attention_entropy = -sum(
         (
@@ -129,33 +137,35 @@ def get_transformer_logs(
 # --------------------------------------------------------------------------- #
 
 
-def sample_discrete(logits: torch.Tensor) -> torch.Tensor:
+def sample_discrete(
+    logits: Float[torch.Tensor, "batch num_actions"],
+) -> Int[torch.Tensor, " batch"]:
     """Sample from a categorical distribution over a discrete action space.
 
     :param logits: Logits of the distribution.
-    :type logits: torch.Tensor
+    :type logits: Float[torch.Tensor, "batch num_actions"]
     :return: Sampled action.
-    :rtype: torch.Tensor
+    :rtype: Int[torch.Tensor, " batch"]
     """
     probs = torch.softmax(logits, dim=-1)
     return torch.multinomial(probs, 1).squeeze(-1)
 
 
 def log_prob_discrete(
-    logits: torch.Tensor,
-    action: torch.Tensor,
+    logits: Float[torch.Tensor, "batch num_actions"],
+    action: Num[torch.Tensor, "batch ..."],
     n_actions: int | None = None,
-) -> torch.Tensor:
+) -> LogProbs:
     """Log probability of actions under a categorical distribution.
 
     :param logits: Logits of the distribution.
-    :type logits: torch.Tensor
-    :param action: Action.
-    :type action: torch.Tensor
+    :type logits: Float[torch.Tensor, "batch num_actions"]
+    :param action: Action, as ``(batch,)``, ``(batch, 1)`` or one-hot ``(batch, num_actions)``.
+    :type action: Num[torch.Tensor, "batch ..."]
     :param n_actions: Number of actions.
     :type n_actions: int | None
     :return: Log probability of the action.
-    :rtype: torch.Tensor
+    :rtype: LogProbs
     :raises ValueError: If the action shape is not compatible with the logits shape.
     """
     log_p_all = torch.log_softmax(logits, dim=-1)
@@ -189,33 +199,35 @@ def log_prob_discrete(
     return log_p_all.gather(-1, action_indices_for_gather).squeeze(-1)
 
 
-def entropy_discrete(logits: torch.Tensor) -> torch.Tensor:
+def entropy_discrete(
+    logits: Float[torch.Tensor, "batch num_actions"],
+) -> Float[torch.Tensor, " batch"]:
     """Entropy of a categorical distribution.
 
     :param logits: Logits of the distribution.
-    :type logits: torch.Tensor
+    :type logits: Float[torch.Tensor, "batch num_actions"]
     :return: Entropy of the distribution.
-    :rtype: torch.Tensor
+    :rtype: Float[torch.Tensor, " batch"]
     """
     p = torch.softmax(logits, dim=-1)
     return -(p * torch.log(p + 1e-8)).sum(-1)
 
 
 def sample_continuous(
-    mu: torch.Tensor,
-    log_std: torch.Tensor,
+    mu: Float[torch.Tensor, "batch action_dim"],
+    log_std: Float[torch.Tensor, "batch action_dim"],
     squash_output: bool = False,
-) -> torch.Tensor:
+) -> Float[torch.Tensor, "batch action_dim"]:
     """Sample from a diagonal Gaussian; optionally squash with tanh.
 
     :param mu: Mean of the distribution.
-    :type mu: torch.Tensor
+    :type mu: Float[torch.Tensor, "batch action_dim"]
     :param log_std: Log standard deviation of the distribution.
-    :type log_std: torch.Tensor
+    :type log_std: Float[torch.Tensor, "batch action_dim"]
     :param squash_output: Whether to squash the output with tanh.
     :type squash_output: bool
     :return: Sampled action.
-    :rtype: torch.Tensor
+    :rtype: Float[torch.Tensor, "batch action_dim"]
     """
     eps = torch.randn_like(mu)
     out = mu + torch.exp(log_std) * eps
@@ -225,20 +237,20 @@ def sample_continuous(
 
 
 def log_prob_continuous(
-    mu: torch.Tensor,
-    log_std: torch.Tensor,
-    action: torch.Tensor,
-) -> torch.Tensor:
+    mu: Float[torch.Tensor, "batch action_dim"],
+    log_std: Float[torch.Tensor, "batch action_dim"],
+    action: Float[torch.Tensor, "batch action_dim"],
+) -> LogProbs:
     """Log probability of actions under a diagonal Gaussian.
 
     :param mu: Mean of the distribution.
-    :type mu: torch.Tensor
+    :type mu: Float[torch.Tensor, "batch action_dim"]
     :param log_std: Log standard deviation of the distribution.
-    :type log_std: torch.Tensor
+    :type log_std: Float[torch.Tensor, "batch action_dim"]
     :param action: Action.
-    :type action: torch.Tensor
+    :type action: Float[torch.Tensor, "batch action_dim"]
     :return: Log probability of the action.
-    :rtype: torch.Tensor
+    :rtype: LogProbs
     """
     var = torch.exp(2 * log_std)
     return (
@@ -246,33 +258,36 @@ def log_prob_continuous(
     ).sum(-1)
 
 
-def entropy_continuous(mu: torch.Tensor, log_std: torch.Tensor) -> torch.Tensor:
+def entropy_continuous(
+    mu: Float[torch.Tensor, "batch action_dim"],
+    log_std: Float[torch.Tensor, "batch action_dim"],
+) -> Float[torch.Tensor, " batch"]:
     """Entropy of a diagonal Gaussian.
 
     :param mu: Mean of the distribution.
-    :type mu: torch.Tensor
+    :type mu: Float[torch.Tensor, "batch action_dim"]
     :param log_std: Log standard deviation of the distribution.
-    :type log_std: torch.Tensor
+    :type log_std: Float[torch.Tensor, "batch action_dim"]
     :return: Entropy of the distribution.
-    :rtype: torch.Tensor
+    :rtype: Float[torch.Tensor, " batch"]
     """
     return 0.5 * (1 + math.log(2 * math.pi)) * mu.size(-1) + log_std.sum(-1)
 
 
 def sample_multi_discrete(
-    logits: torch.Tensor,
-    nvec: Sequence[int] | npt.NDArray,
-) -> torch.Tensor:
+    logits: Float[torch.Tensor, "batch sum_nvec"],
+    nvec: NvecType,
+) -> Int[torch.Tensor, "batch num_sub_actions"]:
     """Sample from independent categoricals for a MultiDiscrete action space.
 
     :param logits: Logits of the distribution.
-    :type logits: torch.Tensor
+    :type logits: Float[torch.Tensor, "batch sum_nvec"]
     :param nvec: Number of actions for each discrete action space.
-    :type nvec: Sequence[int] | npt.NDArray
+    :type nvec: NvecType
     :return: Sampled action.
-    :rtype: torch.Tensor
+    :rtype: Int[torch.Tensor, "batch num_sub_actions"]
     """
-    actions: list[torch.Tensor] = []
+    actions: list[Int[torch.Tensor, " batch"]] = []
     offset = 0
     for size in nvec:
         logits_i = logits[:, offset : offset + size]
@@ -284,22 +299,22 @@ def sample_multi_discrete(
 
 
 def log_prob_multi_discrete(
-    logits: torch.Tensor,
-    nvec: Sequence[int] | npt.NDArray,
-    action: torch.Tensor,
-) -> torch.Tensor:
+    logits: Float[torch.Tensor, "batch sum_nvec"],
+    nvec: NvecType,
+    action: Num[torch.Tensor, "batch num_sub_actions"],
+) -> LogProbs:
     """Log probability of actions under independent categoricals.
 
     :param logits: Logits of the distribution.
-    :type logits: torch.Tensor
+    :type logits: Float[torch.Tensor, "batch sum_nvec"]
     :param nvec: Number of actions for each discrete action space.
-    :type nvec: Sequence[int] | npt.NDArray
+    :type nvec: NvecType
     :param action: Action.
-    :type action: torch.Tensor
+    :type action: Num[torch.Tensor, "batch num_sub_actions"]
     :return: Log probability of the action.
-    :rtype: torch.Tensor
+    :rtype: LogProbs
     """
-    logps = []
+    logps: list[LogProbs] = []
     offset = 0
     for idx, size in enumerate(nvec):
         logits_i = logits[:, offset : offset + size]
@@ -312,19 +327,19 @@ def log_prob_multi_discrete(
 
 
 def entropy_multi_discrete(
-    logits: torch.Tensor,
-    nvec: Sequence[int] | npt.NDArray,
-) -> torch.Tensor:
+    logits: Float[torch.Tensor, "batch sum_nvec"],
+    nvec: NvecType,
+) -> Float[torch.Tensor, " batch"]:
     """Entropy of independent categoricals for MultiDiscrete.
 
     :param logits: Logits of the distribution.
-    :type logits: torch.Tensor
+    :type logits: Float[torch.Tensor, "batch sum_nvec"]
     :param nvec: Number of actions for each discrete action space.
-    :type nvec: Sequence[int] | npt.NDArray
+    :type nvec: NvecType
     :return: Entropy of the distribution.
-    :rtype: torch.Tensor
+    :rtype: Float[torch.Tensor, " batch"]
     """
-    entropies = []
+    entropies: list[Float[torch.Tensor, " batch"]] = []
     offset = 0
     for size in nvec:
         logits_i = logits[:, offset : offset + size]
@@ -335,30 +350,32 @@ def entropy_multi_discrete(
     return torch.stack(entropies, dim=-1).sum(-1)
 
 
-def sample_multi_binary(logits: torch.Tensor) -> torch.Tensor:
+def sample_multi_binary(
+    logits: Float[torch.Tensor, "batch num_binary"],
+) -> Float[torch.Tensor, "batch num_binary"]:
     """Sample from independent Bernoullis for a MultiBinary action space.
 
     :param logits: Logits of the distribution.
-    :type logits: torch.Tensor
-    :return: Sampled action.
-    :rtype: torch.Tensor
+    :type logits: Float[torch.Tensor, "batch num_binary"]
+    :return: Sampled action, 0.0/1.0 valued in the dtype of ``logits``.
+    :rtype: Float[torch.Tensor, "batch num_binary"]
     """
     probs = torch.sigmoid(logits)
     return torch.bernoulli(probs)
 
 
 def log_prob_multi_binary(
-    logits: torch.Tensor,
-    action: torch.Tensor,
-) -> torch.Tensor:
+    logits: Float[torch.Tensor, "batch num_binary"],
+    action: Num[torch.Tensor, "batch num_binary"],
+) -> LogProbs:
     """Log probability of actions under independent Bernoullis.
 
     :param logits: Logits of the distribution.
-    :type logits: torch.Tensor
+    :type logits: Float[torch.Tensor, "batch num_binary"]
     :param action: Action.
-    :type action: torch.Tensor
+    :type action: Num[torch.Tensor, "batch num_binary"]
     :return: Log probability of the action.
-    :rtype: torch.Tensor
+    :rtype: LogProbs
     """
     log_p1 = -F.softplus(-logits)
     log_p0 = -logits + log_p1
@@ -366,13 +383,15 @@ def log_prob_multi_binary(
     return (a * log_p1 + (1.0 - a) * log_p0).sum(-1)
 
 
-def entropy_multi_binary(logits: torch.Tensor) -> torch.Tensor:
+def entropy_multi_binary(
+    logits: Float[torch.Tensor, "batch num_binary"],
+) -> Float[torch.Tensor, " batch"]:
     """Entropy of independent Bernoullis for MultiBinary.
 
     :param logits: Logits of the distribution.
-    :type logits: torch.Tensor
+    :type logits: Float[torch.Tensor, "batch num_binary"]
     :return: Entropy of the distribution.
-    :rtype: torch.Tensor
+    :rtype: Float[torch.Tensor, " batch"]
     """
     p = torch.sigmoid(logits)
     return -(p * torch.log(p + 1e-8) + (1 - p) * torch.log(1 - p + 1e-8)).sum(-1)
@@ -387,25 +406,26 @@ def entropy_multi_binary(logits: torch.Tensor) -> torch.Tensor:
 def sample_from_space(
     action_space: spaces.Space,
     *,
-    logits: torch.Tensor | None = None,
-    mu: torch.Tensor | None = None,
-    log_std: torch.Tensor | None = None,
+    logits: ActionLogits | None = None,
+    mu: Float[torch.Tensor, "batch action_dim"] | None = None,
+    log_std: Float[torch.Tensor, "batch action_dim"] | None = None,
     squash_output: bool = False,
-) -> torch.Tensor:
+) -> Num[torch.Tensor, "batch ..."]:
     """Sample from the distribution for the given action space. Dispatches on action_space type.
 
     :param action_space: Action space.
     :type action_space: spaces.Space
     :param logits: Logits of the distribution.
-    :type logits: torch.Tensor | None
+    :type logits: ActionLogits | None
     :param mu: Mean of the distribution.
-    :type mu: torch.Tensor | None
+    :type mu: Float[torch.Tensor, "batch action_dim"] | None
     :param log_std: Log standard deviation of the distribution.
-    :type log_std: torch.Tensor | None
+    :type log_std: Float[torch.Tensor, "batch action_dim"] | None
     :param squash_output: Whether to squash the output.
     :type squash_output: bool
-    :return: Sampled action.
-    :rtype: torch.Tensor
+    :return: Sampled action; integer for Discrete/MultiDiscrete, floating for
+        Box/MultiBinary.
+    :rtype: Num[torch.Tensor, "batch ..."]
     :raises NotImplementedError: If the action space is not supported.
     """
     msg = f"Unsupported action space for sampling: {type(action_space).__name__}"
@@ -416,11 +436,11 @@ def sample_from_space(
 def _sample_discrete(
     action_space: spaces.Discrete,
     *,
-    logits: torch.Tensor | None = None,
-    mu: torch.Tensor | None = None,
-    log_std: torch.Tensor | None = None,
+    logits: ActionLogits | None = None,
+    mu: Float[torch.Tensor, "batch action_dim"] | None = None,
+    log_std: Float[torch.Tensor, "batch action_dim"] | None = None,
     squash_output: bool = False,
-) -> torch.Tensor:
+) -> Num[torch.Tensor, "batch ..."]:
     assert logits is not None
     return sample_discrete(logits)
 
@@ -429,11 +449,11 @@ def _sample_discrete(
 def _sample_box(
     action_space: spaces.Box,
     *,
-    logits: torch.Tensor | None = None,
-    mu: torch.Tensor | None = None,
-    log_std: torch.Tensor | None = None,
+    logits: ActionLogits | None = None,
+    mu: Float[torch.Tensor, "batch action_dim"] | None = None,
+    log_std: Float[torch.Tensor, "batch action_dim"] | None = None,
     squash_output: bool = False,
-) -> torch.Tensor:
+) -> Num[torch.Tensor, "batch ..."]:
     assert mu is not None
     assert log_std is not None
     return sample_continuous(mu, log_std, squash_output)
@@ -443,11 +463,11 @@ def _sample_box(
 def _sample_multi_discrete(
     action_space: spaces.MultiDiscrete,
     *,
-    logits: torch.Tensor | None = None,
-    mu: torch.Tensor | None = None,
-    log_std: torch.Tensor | None = None,
+    logits: ActionLogits | None = None,
+    mu: Float[torch.Tensor, "batch action_dim"] | None = None,
+    log_std: Float[torch.Tensor, "batch action_dim"] | None = None,
     squash_output: bool = False,
-) -> torch.Tensor:
+) -> Num[torch.Tensor, "batch ..."]:
     assert logits is not None
     return sample_multi_discrete(logits, action_space.nvec)
 
@@ -456,11 +476,11 @@ def _sample_multi_discrete(
 def _sample_multi_binary(
     action_space: spaces.MultiBinary,
     *,
-    logits: torch.Tensor | None = None,
-    mu: torch.Tensor | None = None,
-    log_std: torch.Tensor | None = None,
+    logits: ActionLogits | None = None,
+    mu: Float[torch.Tensor, "batch action_dim"] | None = None,
+    log_std: Float[torch.Tensor, "batch action_dim"] | None = None,
     squash_output: bool = False,
-) -> torch.Tensor:
+) -> Num[torch.Tensor, "batch ..."]:
     assert logits is not None
     return sample_multi_binary(logits)
 
@@ -468,26 +488,26 @@ def _sample_multi_binary(
 @singledispatch
 def log_prob_from_space(
     action_space: spaces.Space,
-    action: torch.Tensor,
+    action: Num[torch.Tensor, "batch ..."],
     *,
-    logits: torch.Tensor | None = None,
-    mu: torch.Tensor | None = None,
-    log_std: torch.Tensor | None = None,
-) -> torch.Tensor:
+    logits: ActionLogits | None = None,
+    mu: Float[torch.Tensor, "batch action_dim"] | None = None,
+    log_std: Float[torch.Tensor, "batch action_dim"] | None = None,
+) -> LogProbs:
     """Log probability of action under the distribution. Dispatches on action_space type.
 
     :param action_space: Action space.
     :type action_space: spaces.Space
     :param action: Action.
-    :type action: torch.Tensor
+    :type action: Num[torch.Tensor, "batch ..."]
     :param logits: Logits of the distribution.
-    :type logits: torch.Tensor | None
+    :type logits: ActionLogits | None
     :param mu: Mean of the distribution.
-    :type mu: torch.Tensor | None
+    :type mu: Float[torch.Tensor, "batch action_dim"] | None
     :param log_std: Log standard deviation of the distribution.
-    :type log_std: torch.Tensor | None
+    :type log_std: Float[torch.Tensor, "batch action_dim"] | None
     :return: Log probability of the action.
-    :rtype: torch.Tensor
+    :rtype: LogProbs
     :raises NotImplementedError: If the action space is not supported.
     """
     msg = f"Unsupported action space for log_prob: {type(action_space).__name__}"
@@ -497,12 +517,12 @@ def log_prob_from_space(
 @log_prob_from_space.register(spaces.Discrete)
 def _log_prob_discrete(
     action_space: spaces.Discrete,
-    action: torch.Tensor,
+    action: Num[torch.Tensor, "batch ..."],
     *,
-    logits: torch.Tensor | None = None,
-    mu: torch.Tensor | None = None,
-    log_std: torch.Tensor | None = None,
-) -> torch.Tensor:
+    logits: ActionLogits | None = None,
+    mu: Float[torch.Tensor, "batch action_dim"] | None = None,
+    log_std: Float[torch.Tensor, "batch action_dim"] | None = None,
+) -> LogProbs:
     assert logits is not None
     n_actions = getattr(action_space, "n", None)
     return log_prob_discrete(logits, action, n_actions)
@@ -511,12 +531,12 @@ def _log_prob_discrete(
 @log_prob_from_space.register(spaces.Box)
 def _log_prob_box(
     action_space: spaces.Box,
-    action: torch.Tensor,
+    action: Num[torch.Tensor, "batch ..."],
     *,
-    logits: torch.Tensor | None = None,
-    mu: torch.Tensor | None = None,
-    log_std: torch.Tensor | None = None,
-) -> torch.Tensor:
+    logits: ActionLogits | None = None,
+    mu: Float[torch.Tensor, "batch action_dim"] | None = None,
+    log_std: Float[torch.Tensor, "batch action_dim"] | None = None,
+) -> LogProbs:
     assert mu is not None
     assert log_std is not None
     return log_prob_continuous(mu, log_std, action)
@@ -525,12 +545,12 @@ def _log_prob_box(
 @log_prob_from_space.register(spaces.MultiDiscrete)
 def _log_prob_multi_discrete(
     action_space: spaces.MultiDiscrete,
-    action: torch.Tensor,
+    action: Num[torch.Tensor, "batch ..."],
     *,
-    logits: torch.Tensor | None = None,
-    mu: torch.Tensor | None = None,
-    log_std: torch.Tensor | None = None,
-) -> torch.Tensor:
+    logits: ActionLogits | None = None,
+    mu: Float[torch.Tensor, "batch action_dim"] | None = None,
+    log_std: Float[torch.Tensor, "batch action_dim"] | None = None,
+) -> LogProbs:
     assert logits is not None
     return log_prob_multi_discrete(logits, action_space.nvec, action)
 
@@ -538,12 +558,12 @@ def _log_prob_multi_discrete(
 @log_prob_from_space.register(spaces.MultiBinary)
 def _log_prob_multi_binary(
     action_space: spaces.MultiBinary,
-    action: torch.Tensor,
+    action: Num[torch.Tensor, "batch ..."],
     *,
-    logits: torch.Tensor | None = None,
-    mu: torch.Tensor | None = None,
-    log_std: torch.Tensor | None = None,
-) -> torch.Tensor:
+    logits: ActionLogits | None = None,
+    mu: Float[torch.Tensor, "batch action_dim"] | None = None,
+    log_std: Float[torch.Tensor, "batch action_dim"] | None = None,
+) -> LogProbs:
     assert logits is not None
     return log_prob_multi_binary(logits, action)
 
@@ -552,22 +572,22 @@ def _log_prob_multi_binary(
 def entropy_from_space(
     action_space: spaces.Space,
     *,
-    logits: torch.Tensor | None = None,
-    mu: torch.Tensor | None = None,
-    log_std: torch.Tensor | None = None,
-) -> torch.Tensor:
+    logits: ActionLogits | None = None,
+    mu: Float[torch.Tensor, "batch action_dim"] | None = None,
+    log_std: Float[torch.Tensor, "batch action_dim"] | None = None,
+) -> Float[torch.Tensor, " batch"]:
     """Entropy of the distribution. Dispatches on action_space type.
 
     :param action_space: Action space.
     :type action_space: spaces.Space
     :param logits: Logits of the distribution.
-    :type logits: torch.Tensor | None
+    :type logits: ActionLogits | None
     :param mu: Mean of the distribution.
-    :type mu: torch.Tensor | None
+    :type mu: Float[torch.Tensor, "batch action_dim"] | None
     :param log_std: Log standard deviation of the distribution.
-    :type log_std: torch.Tensor | None
+    :type log_std: Float[torch.Tensor, "batch action_dim"] | None
     :return: Entropy of the distribution.
-    :rtype: torch.Tensor
+    :rtype: Float[torch.Tensor, " batch"]
     :raises NotImplementedError: If the action space is not supported.
     """
     msg = f"Unsupported action space for entropy: {type(action_space).__name__}"
@@ -578,10 +598,10 @@ def entropy_from_space(
 def _entropy_discrete(
     action_space: spaces.Discrete,
     *,
-    logits: torch.Tensor | None = None,
-    mu: torch.Tensor | None = None,
-    log_std: torch.Tensor | None = None,
-) -> torch.Tensor:
+    logits: ActionLogits | None = None,
+    mu: Float[torch.Tensor, "batch action_dim"] | None = None,
+    log_std: Float[torch.Tensor, "batch action_dim"] | None = None,
+) -> Float[torch.Tensor, " batch"]:
     assert logits is not None
     return entropy_discrete(logits)
 
@@ -590,10 +610,10 @@ def _entropy_discrete(
 def _entropy_box(
     action_space: spaces.Box,
     *,
-    logits: torch.Tensor | None = None,
-    mu: torch.Tensor | None = None,
-    log_std: torch.Tensor | None = None,
-) -> torch.Tensor:
+    logits: ActionLogits | None = None,
+    mu: Float[torch.Tensor, "batch action_dim"] | None = None,
+    log_std: Float[torch.Tensor, "batch action_dim"] | None = None,
+) -> Float[torch.Tensor, " batch"]:
     assert mu is not None
     assert log_std is not None
     return entropy_continuous(mu, log_std)
@@ -603,10 +623,10 @@ def _entropy_box(
 def _entropy_multi_discrete(
     action_space: spaces.MultiDiscrete,
     *,
-    logits: torch.Tensor | None = None,
-    mu: torch.Tensor | None = None,
-    log_std: torch.Tensor | None = None,
-) -> torch.Tensor:
+    logits: ActionLogits | None = None,
+    mu: Float[torch.Tensor, "batch action_dim"] | None = None,
+    log_std: Float[torch.Tensor, "batch action_dim"] | None = None,
+) -> Float[torch.Tensor, " batch"]:
     assert logits is not None
     return entropy_multi_discrete(logits, action_space.nvec)
 
@@ -615,9 +635,9 @@ def _entropy_multi_discrete(
 def _entropy_multi_binary(
     action_space: spaces.MultiBinary,
     *,
-    logits: torch.Tensor | None = None,
-    mu: torch.Tensor | None = None,
-    log_std: torch.Tensor | None = None,
-) -> torch.Tensor:
+    logits: ActionLogits | None = None,
+    mu: Float[torch.Tensor, "batch action_dim"] | None = None,
+    log_std: Float[torch.Tensor, "batch action_dim"] | None = None,
+) -> Float[torch.Tensor, " batch"]:
     assert logits is not None
     return entropy_multi_binary(logits)

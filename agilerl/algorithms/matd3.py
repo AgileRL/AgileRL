@@ -10,6 +10,7 @@ import numpy.typing as npt
 import torch
 from accelerate import Accelerator
 from gymnasium import spaces
+from jaxtyping import Float
 from pettingzoo import ParallelEnv
 from tensordict import TensorDict
 from torch import nn, optim
@@ -26,13 +27,20 @@ from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.typing import (
     ArrayDict,
+    EpisodeFinishedArray,
+    EpisodeScoreMatrix,
+    FitnessRow,
     InfosDict,
     MultiAgentReplayBatch,
     NetConfigType,
+    NoiseTensor,
     ObservationType,
+    PerAgentActionTensor,
+    PerAgentDoneTensor,
+    PerAgentRewardTensor,
     ProcessInfosReturn,
+    StackedActionsTensor,
     SupportedObservationSpace,
-    TensorMapping,
     TorchObsType,
 )
 from agilerl.utils.algo_utils import (
@@ -215,11 +223,11 @@ class MATD3(MultiAgentRLAlgorithm[TensorDict]):
         )
 
         # Initialise noise for exploration
-        self.sample_gaussian = {
+        self.sample_gaussian: dict[str, NoiseTensor] = {
             agent_id: torch.zeros(*(vect_noise_dim, action_dim), device=self.device)
             for agent_id, action_dim in self.action_dims.items()
         }
-        self.expl_noise = (
+        self.expl_noise: dict[str, NoiseTensor] = (
             expl_noise
             if isinstance(expl_noise, dict)
             else {
@@ -228,7 +236,7 @@ class MATD3(MultiAgentRLAlgorithm[TensorDict]):
                 for agent_id, action_dim in self.action_dims.items()
             }
         )
-        self.mean_noise = (
+        self.mean_noise: dict[str, NoiseTensor] = (
             mean_noise
             if isinstance(mean_noise, dict)
             else {
@@ -237,7 +245,7 @@ class MATD3(MultiAgentRLAlgorithm[TensorDict]):
                 for agent_id, action_dim in self.action_dims.items()
             }
         )
-        self.current_noise = {
+        self.current_noise: dict[str, NoiseTensor] = {
             agent_id: torch.zeros(*(vect_noise_dim, action_dim), device=self.device)
             for agent_id, action_dim in self.action_dims.items()
         }
@@ -585,7 +593,9 @@ class MATD3(MultiAgentRLAlgorithm[TensorDict]):
             group_ids=list(grouped_agents.keys()),
         )
 
-        grouped_actions: dict[str, npt.NDArray] = {}
+        grouped_actions: dict[
+            str, Float[npt.NDArray[np.float32], "group_batch action_dim"]
+        ] = {}
         for group_id in grouped_agents:
             actor = self.actors[group_id]
             actor.eval()
@@ -598,7 +608,7 @@ class MATD3(MultiAgentRLAlgorithm[TensorDict]):
                     actions = actor(grouped_obs)
             grouped_actions[group_id] = actions.cpu().numpy()
 
-        tensor_actions: dict[str, torch.Tensor] = {}
+        tensor_actions: dict[str, Float[torch.Tensor, "num_envs action_dim"]] = {}
         for group_id, group_actions in grouped_actions.items():
             start = 0
             for agent_id in grouped_agents[group_id]:
@@ -687,14 +697,14 @@ class MATD3(MultiAgentRLAlgorithm[TensorDict]):
 
         return processed_action_dict, action_dict
 
-    def action_noise(self, agent_id: str) -> torch.Tensor:
+    def action_noise(self, agent_id: str) -> NoiseTensor:
         """Create action noise for exploration, either Ornstein Uhlenbeck or
             from a normal distribution.
 
         :param agent_id: Agent ID for action dims
         :type agent_id: str
         :return: Action noise
-        :rtype: torch.Tensor
+        :rtype: NoiseTensor
         """
         if self.O_U_noise:
             noise = (
@@ -806,13 +816,13 @@ class MATD3(MultiAgentRLAlgorithm[TensorDict]):
     def learn_individual(
         self,
         agent_id: str,
-        stacked_actions: torch.Tensor,
-        stacked_next_actions: torch.Tensor,
+        stacked_actions: StackedActionsTensor,
+        stacked_next_actions: StackedActionsTensor,
         states: dict[str, TorchObsType],
         next_states: dict[str, TorchObsType],
-        actions: TensorMapping,
-        rewards: TensorMapping,
-        dones: TensorMapping,
+        actions: dict[str, PerAgentActionTensor],
+        rewards: dict[str, PerAgentRewardTensor],
+        dones: dict[str, PerAgentDoneTensor],
     ) -> tuple[float | None, float]:
         """Inner call to each agent for the learning/algo training steps, up until the soft updates.
         Applies all forward/backward props.
@@ -821,17 +831,17 @@ class MATD3(MultiAgentRLAlgorithm[TensorDict]):
         :type agent_id: str
 
         :param stacked_actions: Stacked actions tensor for CNN architecture
-        :type stacked_actions: torch.Tensor | None
+        :type stacked_actions: StackedActionsTensor
         :param stacked_next_actions: Stacked next actions tensor for CNN architecture
-        :type stacked_next_actions: torch.Tensor | None
+        :type stacked_next_actions: StackedActionsTensor
         :param states: Dictionary of current states for each agent
-        :type states: dict[str, torch.Tensor]
+        :type states: dict[str, TorchObsType]
         :param actions: Dictionary of actions taken by each agent
-        :type actions: dict[str, torch.Tensor]
+        :type actions: dict[str, PerAgentActionTensor]
         :param rewards: Dictionary of rewards received by each agent
-        :type rewards: dict[str, torch.Tensor]
+        :type rewards: dict[str, PerAgentRewardTensor]
         :param dones: Dictionary of done flags for each agent
-        :type dones: dict[str, torch.Tensor]
+        :type dones: dict[str, PerAgentDoneTensor]
 
         :return: Tuple containing actor loss (if applicable) and critic loss
         :rtype: tuple[float | None, float]
@@ -974,7 +984,7 @@ class MATD3(MultiAgentRLAlgorithm[TensorDict]):
         max_steps: int | None = None,
         loop: int = 3,
         sum_scores: bool = True,
-    ) -> float | npt.NDArray:
+    ) -> float | FitnessRow:
         """Return mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
@@ -986,7 +996,7 @@ class MATD3(MultiAgentRLAlgorithm[TensorDict]):
         :param sum_scores: Boolean flag to indicate whether to sum sub-agent scores, defaults to True
         :type sum_scores: bool, optional
         :return: Mean test score, or per-agent scores when ``sum_scores`` is False
-        :rtype: float | npt.NDArray
+        :rtype: float | FitnessRow
         """
         self.set_training_mode(False)
         with torch.no_grad():
@@ -996,17 +1006,17 @@ class MATD3(MultiAgentRLAlgorithm[TensorDict]):
 
             for _ in range(loop):
                 obs, info = env.reset()
-                scores = (
+                scores: EpisodeScoreMatrix = (
                     np.zeros((num_envs, 1))
                     if sum_scores
                     else np.zeros((num_envs, len(self.agent_ids)))
                 )
-                completed_episode_scores = (
+                completed_episode_scores: EpisodeScoreMatrix = (
                     np.zeros((num_envs, 1))
                     if sum_scores
                     else np.zeros((num_envs, len(self.agent_ids)))
                 )
-                finished = np.zeros(num_envs)
+                finished: EpisodeFinishedArray = np.zeros(num_envs)
                 step = 0
                 while not np.all(finished):
                     step += 1
@@ -1071,7 +1081,7 @@ class MATD3(MultiAgentRLAlgorithm[TensorDict]):
 
                 rewards.append(np.mean(completed_episode_scores, axis=0))
 
-        mean_fit_row = np.mean(rewards, axis=0)
+        mean_fit_row: FitnessRow = np.mean(rewards, axis=0)
         if sum_scores:
             fitness = float(mean_fit_row[0])
             self.metrics.add_fitness(fitness)

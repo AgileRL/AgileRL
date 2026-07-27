@@ -14,6 +14,7 @@ import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from gymnasium import spaces
+from jaxtyping import Shaped
 from pettingzoo.utils.env import ParallelEnv
 
 from agilerl import HAS_LLM_DEPENDENCIES
@@ -1470,17 +1471,18 @@ def init_loggers(
 
 
 def calculate_vectorized_scores(
-    rewards: npt.NDArray,
-    terminations: npt.NDArray,
+    rewards: Shaped[npt.NDArray, "num_envs num_steps"],
+    terminations: Shaped[npt.NDArray, "num_envs num_steps"],
     include_unterminated: bool = False,
     only_first_episode: bool = True,
 ) -> list[float]:
     """Calculate the vectorized scores for episodes based on rewards and terminations.
 
     :param rewards: Array of rewards for each environment.
-    :type rewards: npt.NDArray
-    :param terminations: Array indicating termination points for each environment.
-    :type terminations: npt.NDArray
+    :type rewards: Shaped[npt.NDArray, "num_envs num_steps"]
+    :param terminations: Array indicating termination points for each environment;
+        compared against 1, so either boolean or integer.
+    :type terminations: Shaped[npt.NDArray, "num_envs num_steps"]
     :param include_unterminated: Whether to include rewards from unterminated episodes, defaults to False.
     :type include_unterminated: bool, optional
     :param only_first_episode: Whether to consider only the first episode, defaults to True.

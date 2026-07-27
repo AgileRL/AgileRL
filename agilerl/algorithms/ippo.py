@@ -9,6 +9,7 @@ import numpy.typing as npt
 import torch
 from accelerate import Accelerator
 from gymnasium import spaces
+from jaxtyping import Bool, Float, Int, Shaped
 from pettingzoo import ParallelEnv
 from torch import nn, optim
 from torch.nn.utils import clip_grad_norm_
@@ -25,12 +26,13 @@ from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import StochasticActor
 from agilerl.networks.value_networks import ValueNetwork
 from agilerl.typing import (
-    ArrayDict,
     InfosDict,
     IPPOActionMasks,
     IPPOProcessInfosReturn,
+    LogProbs,
     MaybeActionMask,
     ObservationType,
+    PolicyActionArray,
     SupportedObservationSpace,
     TorchObsType,
     coerce_action_mask,
@@ -51,6 +53,13 @@ from agilerl.utils.algo_utils import (
     preprocess_observation as preprocess_observation_fn,
 )
 from agilerl.vector.pz_vec_env import PettingZooVecEnv
+
+# Per-group legality masks. ``torch.Tensor(...)`` yields float32, not bool.
+GroupActionMask = Float[torch.Tensor, "num_group_agents ..."]
+# Per-agent vectors copied off a network: log-probabilities, entropies, values.
+AgentValueArray = Float[npt.NDArray[np.float32], " batch"]
+# Per-env, per-agent score rows accumulated during evaluation.
+AgentScoreArray = Float[npt.NDArray[np.float64], "num_envs num_agents"]
 
 
 class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
@@ -457,7 +466,7 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
                 )
 
         # Check and stack masks
-        action_masks: dict[str, torch.Tensor | None] = {}
+        action_masks: dict[str, GroupActionMask | None] = {}
         for group_id in self.observation_space:
             group_masks = collected_masks[group_id]
             if None in group_masks or not group_masks:
@@ -478,9 +487,14 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
         obs: TorchObsType,
         actor: StochasticActor,
         critic: ValueNetwork,
-        action_mask: torch.Tensor | None = None,
+        action_mask: GroupActionMask | None = None,
         batch_size: int | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[
+        Shaped[torch.Tensor, "batch ..."],
+        LogProbs,
+        Float[torch.Tensor, " batch"],
+        Float[torch.Tensor, " batch"],
+    ]:
         """Get actions and values for a batch of grouped observations.
 
         :param obs: Observations of environment
@@ -490,11 +504,11 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
         :param critic: Critic network
         :type critic: ValueNetwork
         :param action_mask: Action mask
-        :type action_mask: torch.Tensor, optional
+        :type action_mask: GroupActionMask, optional
         :param batch_size: Batch size
         :type batch_size: int, optional
         :return: Tuple of actions, log probabilities, entropies, values
-        :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+        :rtype: tuple[Shaped[torch.Tensor, "batch ..."], LogProbs, Float[torch.Tensor, " batch"], Float[torch.Tensor, " batch"]]
         """
         # Process in batches. Mapping/tuple observations carry no direct
         # shape; they always take the single-pass branch (checking the leaf
@@ -514,7 +528,10 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
                 start_idx = batch_idx * batch_size
                 end_idx = min((batch_idx + 1) * batch_size, obs.shape[0])
 
-                minibatch_indices = np.arange(start_idx, end_idx)
+                minibatch_indices: Int[npt.NDArray[np.int64], " batch"] = np.arange(
+                    start_idx,
+                    end_idx,
+                )
                 batch_obs = get_experiences_samples(minibatch_indices, obs)[0]
                 batch_mask = None
                 if action_mask is not None:
@@ -549,7 +566,12 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
         infos: InfosDict | None = None,
         *args: Any,
         **kwargs: Any,
-    ) -> tuple[ArrayDict, ArrayDict, ArrayDict, ArrayDict]:
+    ) -> tuple[
+        dict[str, PolicyActionArray],
+        dict[str, AgentValueArray],
+        dict[str, AgentValueArray],
+        dict[str, AgentValueArray],
+    ]:
         """Return the next action to take in the environment.
 
         :param obs: Environment observations: {'agent_0': state_dim_0, ..., 'agent_n': state_dim_n}
@@ -557,7 +579,7 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
         :param infos: Information dictionary returned by env.step(actions)
         :type infos: InfosDict | None
         :return: Tuple of actions, log probabilities, entropies, values
-        :rtype: tuple[ArrayDict, ArrayDict, ArrayDict, ArrayDict]
+        :rtype: tuple[dict[str, PolicyActionArray], dict[str, AgentValueArray], dict[str, AgentValueArray], dict[str, AgentValueArray]]
         """
         assert not key_in_nested_dict(
             obs,
@@ -586,10 +608,10 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
             list(grouped_agents.keys()),
         )
 
-        action_dict = {}
-        action_logprob_dict = {}
-        dist_entropy_dict = {}
-        state_values_dict = {}
+        action_dict: dict[str, PolicyActionArray] = {}
+        action_logprob_dict: dict[str, AgentValueArray] = {}
+        dist_entropy_dict: dict[str, AgentValueArray] = {}
+        state_values_dict: dict[str, AgentValueArray] = {}
         for agent_id, agent_obs in preprocessed.items():
             action_mask = action_masks[agent_id]
             actor = self.actors[agent_id]
@@ -765,7 +787,7 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
                 swap_channels=self.swap_channels,
             )
             next_value = critic(preprocessed_next_obs).reshape(1, -1).cpu()
-            advantages = torch.zeros_like(rewards).float()
+            advantages: Float[torch.Tensor, " ..."] = torch.zeros_like(rewards).float()
             last_gae_lambda = 0
             for t in reversed(range(num_steps)):
                 if t == num_steps - 1:
@@ -812,7 +834,7 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
         returns_flat = flat_experiences[4]
         assert isinstance(returns_flat, torch.Tensor)
         num_samples = returns_flat.size(0)
-        batch_idxs = np.arange(num_samples)
+        batch_idxs: Int[npt.NDArray[np.int64], " num_samples"] = np.arange(num_samples)
         learn_metrics = {
             "loss": 0.0,
             "policy_loss": 0.0,
@@ -823,7 +845,9 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
         for _ in range(self.update_epochs):
             np.random.shuffle(batch_idxs)
             for start in range(0, num_samples, self.batch_size):
-                minibatch_idxs = batch_idxs[start : start + self.batch_size]
+                minibatch_idxs: Int[npt.NDArray[np.int64], " batch"] = batch_idxs[
+                    start : start + self.batch_size
+                ]
                 (
                     batch_obs_raw,
                     batch_actions_raw,
@@ -934,7 +958,7 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
         max_steps: int | None = None,
         loop: int = 3,
         sum_scores: bool = True,
-    ) -> float | npt.NDArray:
+    ) -> float | Float[npt.NDArray[np.float64], " num_agents"]:
         """Return mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
@@ -946,7 +970,7 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
         :param sum_scores: Boolean flag to indicate whether to sum sub-agent scores, defaults to True
         :type sum_scores: bool, optional
         :return: Mean test score, or per-agent scores when ``sum_scores`` is False
-        :rtype: float | npt.NDArray
+        :rtype: float | Float[npt.NDArray[np.float64], " num_agents"]
         """
         self.set_training_mode(False)
         with torch.no_grad():
@@ -956,17 +980,19 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
 
             for _ in range(loop):
                 obs, info = env.reset()
-                scores = (
+                scores: AgentScoreArray = (
                     np.zeros((num_envs, 1))
                     if sum_scores
                     else np.zeros((num_envs, len(self.observation_space)))
                 )
-                completed_episode_scores = (
+                completed_episode_scores: AgentScoreArray = (
                     np.zeros((num_envs, 1))
                     if sum_scores
                     else np.zeros((num_envs, len(self.observation_space)))
                 )
-                finished = np.zeros(num_envs)
+                finished: Float[npt.NDArray[np.float64], " num_envs"] = np.zeros(
+                    num_envs,
+                )
                 step = 0
                 while not np.all(finished):
                     step += 1
@@ -980,7 +1006,9 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
                     reward = self.sum_shared_rewards(reward)
 
                     # Compute score increment (replace NaNs representing inactive agents with 0)
-                    agent_rewards = np.array(list(reward.values())).transpose()
+                    agent_rewards: AgentScoreArray = np.array(
+                        list(reward.values()),
+                    ).transpose()
                     agent_rewards = np.where(np.isnan(agent_rewards), 0, agent_rewards)
                     score_increment = (
                         (
@@ -993,7 +1021,7 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
                     )
                     scores += score_increment
 
-                    dones = {}
+                    dones: dict[str, Bool[npt.NDArray[np.bool_], " num_envs"]] = {}
                     for agent_id in self.agent_ids:
                         terminated = term.get(agent_id, True)
                         truncated = trunc.get(agent_id, False)
@@ -1030,7 +1058,10 @@ class IPPO(MultiAgentRLAlgorithm[tuple[Mapping[str, Any], ...]]):
 
                 rewards.append(np.mean(completed_episode_scores, axis=0))
 
-        mean_fit_row = np.mean(rewards, axis=0)
+        mean_fit_row: Float[npt.NDArray[np.float64], " num_agents"] = np.mean(
+            rewards,
+            axis=0,
+        )
         if sum_scores:
             fitness = float(mean_fit_row[0])
             self.metrics.add_fitness(fitness)

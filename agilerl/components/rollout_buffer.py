@@ -7,11 +7,16 @@ import numpy as np
 import numpy.typing as npt
 import torch
 from gymnasium import spaces
+from jaxtyping import Bool, Float, Int, Shaped
 from tensordict import TensorDict, TensorDictBase
 
 from agilerl.typing import (
-    ArrayOrTensor,
+    AnyArray,
+    AnyTensor,
     BPTTSequenceType,
+    EnvDoneArray,
+    HiddenStateDict,
+    IndexTensor,
     ObservationType,
 )
 from agilerl.utils.algo_utils import (
@@ -23,8 +28,25 @@ from agilerl.utils.algo_utils import (
     narrow_tensor,
 )
 
+# The nested ``{key: array | {sub_key: array}}`` form ``TensorDict.numpy()``
+# yields. Leaves are mixed-dtype (float32 observations, bool dones), so the
+# leaf dtype stays erased.
+NumpyBufferTree = dict[str, AnyArray | dict[str, AnyArray]]
+# One scalar per vectorized environment. Stays ``np.floating``: the vector envs
+# emit float64 and the network path emits float32.
+PerEnvFloatArray = Float[npt.NDArray[np.floating], " num_envs"]
+# The float32 / bool matrices read back out of the buffer leaves for GAE.
+BufferFloatArray = Float[npt.NDArray[np.float32], "buffer_size num_envs"]
+BufferBoolArray = Bool[npt.NDArray[np.bool_], "buffer_size num_envs"]
+# One BPTT sequence sliced out of the buffer (the env axis has been dropped).
+SequenceTensor = Shaped[torch.Tensor, "seq_len ..."]
+# Per-sequence starting hidden states handed to the recurrent policy.
+InitialHiddenStates = dict[
+    str, Float[torch.Tensor, "num_sequences num_layers hidden_size"]
+]
 
-def _narrow_leaf(value: object) -> torch.Tensor | TensorDict:
+
+def _narrow_leaf(value: object) -> AnyTensor | TensorDict:
     """Narrow a TensorDict child to the tensor or sub-collection it holds."""
     if isinstance(value, TensorDict):
         return value
@@ -48,7 +70,7 @@ def _require_prepared(value: _T | None) -> _T:
     return value
 
 
-def _index_tensordict(td: TensorDict, index: torch.Tensor | slice) -> TensorDict:
+def _index_tensordict(td: TensorDict, index: IndexTensor | slice) -> TensorDict:
     """Index or slice ``td``, narrowing the widened ``__getitem__`` return."""
     view = td[index]
     assert isinstance(view, TensorDict), (
@@ -57,9 +79,7 @@ def _index_tensordict(td: TensorDict, index: torch.Tensor | slice) -> TensorDict
     return view
 
 
-def _is_numpy_tree(
-    obj: object,
-) -> TypeGuard[dict[str, npt.NDArray | dict[str, npt.NDArray]]]:
+def _is_numpy_tree(obj: object) -> TypeGuard[NumpyBufferTree]:
     """Narrow ``TensorDict.numpy()``'s result to the nested numpy form."""
     return isinstance(obj, dict)
 
@@ -95,9 +115,10 @@ class RolloutBuffer:
     :type max_seq_len: int, optional
     """
 
+    buffer: TensorDict
     padded_data: TensorDict | None
     unpadded_data: TensorDict | None
-    unpadded_slices: list[torch.Tensor] | None
+    unpadded_slices: list[Int[torch.Tensor, " seq_len"]] | None
     num_sequences: int | None
     max_sequence_length: int | None
 
@@ -160,17 +181,17 @@ class RolloutBuffer:
 
     def _maybe_reshape_obs(
         self,
-        obs: torch.Tensor,
+        obs: AnyTensor,
         space: spaces.Space,
-    ) -> torch.Tensor:
+    ) -> Shaped[torch.Tensor, " num_envs *obs_shape"]:
         """Reshape observation to the correct shape.
 
         :param obs: Observation to reshape.
-        :type obs: torch.Tensor
+        :type obs: AnyTensor
         :param space: Observation space.
         :type space: spaces.Space
         :return: Reshaped observation.
-        :rtype: torch.Tensor
+        :rtype: Shaped[torch.Tensor, " num_envs *obs_shape"]
         """
         if isinstance(space, spaces.Discrete) and obs.ndim < 2:
             obs = obs.unsqueeze(-1)
@@ -285,43 +306,50 @@ class RolloutBuffer:
     def add(
         self,
         obs: ObservationType,
-        action: ArrayOrTensor,
-        reward: float | npt.NDArray,
-        done: bool | npt.NDArray,
-        value: float | npt.NDArray,
-        log_prob: float | npt.NDArray,
+        action: (
+            Shaped[npt.NDArray, " num_envs *action_shape"]
+            | Shaped[torch.Tensor, " num_envs *action_shape"]
+        ),
+        reward: float | PerEnvFloatArray,
+        done: bool | EnvDoneArray,
+        value: float | PerEnvFloatArray,
+        log_prob: float | PerEnvFloatArray,
         next_obs: ObservationType | None = None,
-        hidden_state: dict[str, torch.Tensor] | None = None,
+        hidden_state: HiddenStateDict | None = None,
         next_hidden_state: (
             dict[str, torch.Tensor] | None
         ) = None,  # Not used if only initial hidden states are stored
-        episode_start: bool | npt.NDArray | None = None,
-        action_mask: ArrayOrTensor | None = None,
+        episode_start: bool | EnvDoneArray | None = None,
+        action_mask: (
+            Shaped[npt.NDArray, "num_envs mask_size"]
+            | Shaped[torch.Tensor, "num_envs mask_size"]
+            | None
+        ) = None,
     ) -> None:
         """Add a new batch of observations and associated data from vectorized environments to the buffer.
 
         :param obs: Current observation batch (shape: (num_envs, *obs_shape))
         :type obs: ObservationType
         :param action: Action batch taken (shape: (num_envs, *action_shape))
-        :type action: ArrayOrTensor
+        :type action: Shaped[npt.NDArray, " num_envs *action_shape"] | Shaped[torch.Tensor, " num_envs *action_shape"]
         :param reward: Reward batch received (shape: (num_envs,))
-        :type reward: float | npt.NDArray
+        :type reward: float | PerEnvFloatArray
         :param done: Done flag batch (shape: (num_envs,))
-        :type done: bool | npt.NDArray
+        :type done: bool | EnvDoneArray
         :param value: Value estimate batch (shape: (num_envs,))
-        :type value: float | npt.NDArray
+        :type value: float | PerEnvFloatArray
         :param log_prob: Log probability batch of the actions (shape: (num_envs,))
-        :type log_prob: float | npt.NDArray
+        :type log_prob: float | PerEnvFloatArray
         :param next_obs: Next observation batch (shape: (num_envs, *obs_shape)), defaults to None
         :type next_obs: ObservationType | None
-        :param hidden_state: Current hidden state batch (shape: (num_envs, hidden_size)), defaults to None
-        :type hidden_state: dict[str, torch.Tensor] | None
+        :param hidden_state: Current hidden state batch (shape: (num_layers, num_envs, hidden_size)), defaults to None
+        :type hidden_state: HiddenStateDict | None
         :param next_hidden_state: Next hidden state batch (shape: (num_envs, hidden_size)), defaults to None
         :type next_hidden_state: dict[str, torch.Tensor] | None
         :param episode_start: Episode start flag batch (shape: (num_envs,)), defaults to None
-        :type episode_start: bool | npt.NDArray | None
+        :type episode_start: bool | EnvDoneArray | None
         :param action_mask: Action mask batch (shape: (num_envs, mask_size)), 1=legal 0=illegal, defaults to None
-        :type action_mask: ArrayOrTensor | None
+        :type action_mask: Shaped[npt.NDArray, "num_envs mask_size"] | Shaped[torch.Tensor, "num_envs mask_size"] | None
         """
         if self.pos == self.capacity:
             if self.wrap_at_capacity:
@@ -468,50 +496,70 @@ class RolloutBuffer:
 
     def compute_returns_and_advantages(
         self,
-        last_value: ArrayOrTensor,
-        last_done: ArrayOrTensor,
+        last_value: (
+            Float[npt.NDArray[np.floating], "..."] | Float[torch.Tensor, "..."]
+        ),
+        last_done: AnyArray | AnyTensor,
     ) -> None:
         """Compute returns and advantages for the stored experiences using GAE or Monte Carlo.
 
         :param last_value: Value estimate for the last observation in each environment (shape: (num_envs,))
-        :type last_value: ArrayOrTensor
+        :type last_value: Float[npt.NDArray[np.floating], "..."] | Float[torch.Tensor, "..."]
         :param last_done: Done flag for the last state in each environment (shape: (num_envs,))
-        :type last_done: ArrayOrTensor
+        :type last_done: AnyArray | AnyTensor
         """
         # Convert inputs to numpy arrays if they are tensors, and ensure correct shape
         if isinstance(last_value, torch.Tensor):
-            last_value_np = last_value.cpu().numpy().reshape(self.num_envs)
+            last_value_np: PerEnvFloatArray = (
+                last_value.cpu().numpy().reshape(self.num_envs)
+            )
         else:
             last_value_np = np.asarray(last_value).reshape(self.num_envs)
 
         if isinstance(last_done, torch.Tensor):
-            last_done_np = last_done.cpu().numpy().reshape(self.num_envs)
+            last_done_np: Shaped[npt.NDArray, " num_envs"] = (
+                last_done.cpu().numpy().reshape(self.num_envs)
+            )
         else:
             last_done_np = np.asarray(last_done).reshape(self.num_envs)
 
         buffer_size = self.capacity if self.full else self.pos
 
         # Temporary numpy arrays for computation, will be assigned back to TensorDict
-        advantages_np = np.zeros((buffer_size, self.num_envs), dtype=np.float32)
-        returns_np = np.zeros((buffer_size, self.num_envs), dtype=np.float32)
+        advantages_np: BufferFloatArray = np.zeros(
+            (buffer_size, self.num_envs), dtype=np.float32
+        )
+        returns_np: BufferFloatArray = np.zeros(
+            (buffer_size, self.num_envs), dtype=np.float32
+        )
 
         # Get necessary data from TensorDict as numpy arrays for computation
         # Slicing to buffer_size for all components.
-        rewards_np = narrow_tensor(self.buffer["rewards"])[:buffer_size].cpu().numpy()
-        dones_np = narrow_tensor(self.buffer["dones"])[:buffer_size].cpu().numpy()
-        values_np = narrow_tensor(self.buffer["values"])[:buffer_size].cpu().numpy()
+        rewards_np: BufferFloatArray = (
+            narrow_tensor(self.buffer["rewards"])[:buffer_size].cpu().numpy()
+        )
+        dones_np: BufferBoolArray = (
+            narrow_tensor(self.buffer["dones"])[:buffer_size].cpu().numpy()
+        )
+        values_np: BufferFloatArray = (
+            narrow_tensor(self.buffer["values"])[:buffer_size].cpu().numpy()
+        )
 
         if self.use_gae:
-            last_gae_lambda = np.zeros(self.num_envs, dtype=np.float32)
+            last_gae_lambda: PerEnvFloatArray = np.zeros(
+                self.num_envs, dtype=np.float32
+            )
             for t in reversed(range(buffer_size)):
                 if t == buffer_size - 1:
-                    next_non_terminal = 1.0 - last_done_np.astype(float)
-                    next_values = last_value_np.astype(float)
+                    next_non_terminal: Float[npt.NDArray[np.float64], " num_envs"] = (
+                        1.0 - last_done_np.astype(float)
+                    )
+                    next_values: PerEnvFloatArray = last_value_np.astype(float)
                 else:
                     next_non_terminal = 1.0 - dones_np[t + 1].astype(float)
                     next_values = values_np[t + 1]
 
-                delta = (
+                delta: Float[npt.NDArray[np.float64], " num_envs"] = (
                     rewards_np[t]
                     + self.gamma * next_values * next_non_terminal
                     - values_np[t]
@@ -523,8 +571,8 @@ class RolloutBuffer:
             returns_np = advantages_np + values_np
         else:
             # Monte Carlo returns
-            last_returns_np = last_value_np.astype(float) * (
-                1.0 - last_done_np.astype(float)
+            last_returns_np: Float[npt.NDArray[np.float64], " num_envs"] = (
+                last_value_np.astype(float) * (1.0 - last_done_np.astype(float))
             )
             for t in reversed(range(buffer_size)):
                 returns_np[t] = last_returns_np = rewards_np[
@@ -539,13 +587,13 @@ class RolloutBuffer:
     def get(
         self,
         batch_size: int | None = None,
-    ) -> dict[str, npt.NDArray | dict[str, npt.NDArray]]:
+    ) -> NumpyBufferTree:
         """Get data from the buffer, flattened and optionally sampled into minibatches.
 
         :param batch_size: Size of the minibatch to sample. If None, returns all data. Defaults to None.
         :type batch_size: int | None
         :return: Dictionary containing flattened buffer data arrays.
-        :rtype: dict[str, npt.NDArray | dict[str, npt.NDArray]]
+        :rtype: NumpyBufferTree
         """
         buffer_size = self.capacity if self.full else self.pos
         total_samples = buffer_size * self.num_envs
@@ -573,7 +621,9 @@ class RolloutBuffer:
                 # For hidden_states, we need to handle the nested TensorDict structure
                 return self._convert_td_to_np_dict(flattened_td)
 
-            indices = np.random.choice(total_samples, size=batch_size, replace=False)
+            indices: Int[npt.NDArray[np.int64], " batch_size"] = np.random.choice(
+                total_samples, size=batch_size, replace=False
+            )
             sampled_td = flattened_td[indices]
             # Convert the sampled TensorDict to the old dictionary format
             return self._convert_td_to_np_dict(sampled_td)
@@ -625,9 +675,9 @@ class RolloutBuffer:
                 # Move the whole flattened_td to the target device
                 return flattened_td.to(target_device)
 
-            indices = torch.randperm(total_samples, device="cpu")[
-                :batch_size
-            ]  # Sample on CPU then move
+            indices: Int[torch.Tensor, " batch_size"] = torch.randperm(
+                total_samples, device="cpu"
+            )[:batch_size]  # Sample on CPU then move
             sampled_td = flattened_td[indices]
             assert isinstance(sampled_td, TensorDict)
 
@@ -638,13 +688,13 @@ class RolloutBuffer:
     def _convert_td_to_np_dict(
         self,
         td: TensorDict,
-    ) -> dict[str, npt.NDArray | dict[str, npt.NDArray]]:
+    ) -> NumpyBufferTree:
         """Convert a TensorDict to a dictionary of numpy arrays.
 
         :param td: TensorDict to convert.
         :type td: TensorDict
         :return: Dictionary of numpy arrays.
-        :rtype: dict[str, npt.NDArray | dict[str, npt.NDArray]]
+        :rtype: NumpyBufferTree
         """
         # TensorDict.numpy() returns the nested {key: ndarray | {sub_key: ndarray}}
         # form directly, moving tensors off-device as it goes.
@@ -656,20 +706,20 @@ class RolloutBuffer:
 
     @staticmethod
     def _pad_sequences(
-        sequences: Sequence[torch.Tensor | TensorDict],
+        sequences: Sequence[SequenceTensor | TensorDict],
         target_length: int | None = None,
-    ) -> torch.Tensor | TensorDict:
+    ) -> Shaped[torch.Tensor, "num_sequences padded_seq_len ..."] | TensorDict:
         """Pad sequences using zeros. If target_length is provided, the sequences are padded to the target length.
         Otherwise, the sequences are padded to the length of the longest sequence. Results in a tensor of
         shape (B, T, *). We provide the option to pad to a specified target length but in general these should be padded
         to the maximum length of the sequences in the batch (i.e. using `torch.nn.utils.rnn.pad_sequence`).
 
         :param sequences: The sequences to be padded.
-        :type sequences: Sequence[torch.Tensor | TensorDict]
+        :type sequences: Sequence[SequenceTensor | TensorDict]
         :param target_length: The target length to pad the sequences to. If None, the sequences are padded to the length of the longest sequence.
         :type target_length: int | None
         :return: The padded sequence.
-        :rtype: torch.Tensor | TensorDict
+        :rtype: Shaped[torch.Tensor, "num_sequences padded_seq_len ..."] | TensorDict
         """
         # Handle nested tensors (sequences are homogeneous: if the first element
         # is a tensor collection, all of them are), regrouping by key and recursing.
@@ -678,7 +728,7 @@ class RolloutBuffer:
             # Sequences are homogeneous, so the isinstance filter keeps them all
             # while narrowing the element type to TensorDict.
             nested_tds = [seq for seq in sequences if isinstance(seq, TensorDict)]
-            sequences_T: dict[Any, list[torch.Tensor | TensorDict]] = {
+            sequences_T: dict[Any, list[SequenceTensor | TensorDict]] = {
                 key: [_narrow_leaf(nested_td.get(key)) for nested_td in nested_tds]
                 for key in first.keys()
             }
@@ -746,22 +796,22 @@ class RolloutBuffer:
 
     def _get_complete_sequences(
         self,
-        data: torch.Tensor | TensorDict,
+        data: Shaped[torch.Tensor, "buffer_size num_envs ..."] | TensorDict,
         episode_done_indices: list[list[int]],
-    ) -> tuple[list[torch.Tensor | TensorDict], int]:
+    ) -> tuple[list[SequenceTensor | TensorDict], int]:
         """Split the provided data into sequences. If `self.max_seq_len` is not set, the entire episode
         is used as a sequence. Otherwise, the episode is split into sequences of length `self.max_seq_len`.
         If the episode is shorter than `self.max_seq_len`, the entire episode is used as a sequence.
 
         :param data: The data to be split into sequences.
-        :type data: torch.Tensor | TensorDict
+        :type data: Shaped[torch.Tensor, "buffer_size num_envs ..."] | TensorDict
         :param episode_done_indices: The indices of done signals.
         :type episode_done_indices: list[list[int]]
         :return: A list of sequences and the length of the longest sequence.
-        :rtype: tuple[list[torch.Tensor | TensorDict], int]
+        :rtype: tuple[list[SequenceTensor | TensorDict], int]
         """
         max_seq_len = self.max_seq_len
-        sequences: list[torch.Tensor | TensorDict] = []
+        sequences: list[SequenceTensor | TensorDict] = []
         max_length = 1
         for env_idx in range(self.num_envs):
             start_index = 0
@@ -769,7 +819,7 @@ class RolloutBuffer:
                 # Split trajectory into episodes. Nested buffer values (hidden
                 # states, dict observations) are TensorDicts; leaves are tensors.
                 if isinstance(data, torch.Tensor):
-                    episode: torch.Tensor | TensorDict = data[
+                    episode: Shaped[torch.Tensor, "ep_len ..."] | TensorDict = data[
                         start_index : done_index + 1, env_idx
                     ]
                 else:
@@ -837,7 +887,7 @@ class RolloutBuffer:
         assert isinstance(dones, torch.Tensor)
         episode_done_indices: list[list[int]] = []
         for env_idx in range(self.num_envs):
-            env_dones: torch.Tensor = dones[:, env_idx]
+            env_dones: Bool[torch.Tensor, " buffer_size"] = dones[:, env_idx]
             env_dones_list = env_dones.nonzero().squeeze(-1).tolist()
             episode_done_indices.append(env_dones_list)
 
@@ -849,7 +899,9 @@ class RolloutBuffer:
                 episode_done_indices[env_idx].append(buffer_size - 1)
 
         # Get the indices of unpadded sequences
-        flat_timesteps = torch.arange(buffer_size * self.num_envs).reshape(
+        flat_timesteps: Int[torch.Tensor, "buffer_size num_envs"] = torch.arange(
+            buffer_size * self.num_envs,
+        ).reshape(
             buffer_size,
             self.num_envs,
         )
@@ -858,7 +910,7 @@ class RolloutBuffer:
             episode_done_indices,
         )
         # flat_timesteps is a tensor, so every returned slice is a tensor.
-        unpadded_slices: list[torch.Tensor] = []
+        unpadded_slices: list[Int[torch.Tensor, " seq_len"]] = []
         for timestep_slice in timestep_sequences:
             assert isinstance(timestep_slice, torch.Tensor)
             unpadded_slices.append(timestep_slice)
@@ -970,19 +1022,23 @@ class RolloutBuffer:
 
         # Prepare indices, but only shuffle the sequence indices and not the
         # entire batch to ensure that sequences are maintained as a whole.
-        indices = torch.arange(
+        indices: Int[torch.Tensor, "num_sequences max_seq_len"] = torch.arange(
             start=0,
             end=total_sequences * max_sequence_length,
         ).reshape(total_sequences, max_sequence_length)
 
-        sequence_indices = torch.randperm(total_sequences)
+        sequence_indices: Int[torch.Tensor, " num_sequences"] = torch.randperm(
+            total_sequences,
+        )
 
         # Compose mini batches
         start = 0
         for num_sequences in num_sequences_per_batch:
             end = start + num_sequences
             sequences_samples = sequence_indices[start:end]
-            padded_indices = indices[sequences_samples].view(-1)
+            padded_indices: Int[torch.Tensor, " padded_steps"] = indices[
+                sequences_samples
+            ].view(-1)
 
             # Unpadded and flat indices are used to sample unpadded training data
             minibatch_seq_indices: list[int] = sequences_samples.tolist()
@@ -992,14 +1048,14 @@ class RolloutBuffer:
             unpadded_indices = [
                 int(item) for sublist in unpadded_slice_lists for item in sublist
             ]
-            unpadded_indices_tensor = torch.as_tensor(
-                unpadded_indices, device=indices.device
+            unpadded_indices_tensor: Int[torch.Tensor, " unpadded_steps"] = (
+                torch.as_tensor(unpadded_indices, device=indices.device)
             )
 
             padded = _index_tensordict(padded_data, padded_indices)
             if self.recurrent and padded.get("initial_hidden_states", None) is not None:
                 batch_hidden_states = {}
-                initial_hidden_states: dict[str, Any] = padded.get_non_tensor(
+                initial_hidden_states: InitialHiddenStates = padded.get_non_tensor(
                     "initial_hidden_states",
                 )
                 for key, value in initial_hidden_states.items():

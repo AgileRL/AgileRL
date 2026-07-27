@@ -3,13 +3,22 @@ from typing import Any, Literal
 
 import numpy as np
 import torch
+from jaxtyping import Float
 from torch import nn
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
-from agilerl.typing import ArrayOrTensor, DeviceType, KernelSizeType, MutationApplyDict
+from agilerl.typing import (
+    AnyArray,
+    AnyTensor,
+    DeviceType,
+    KernelSizeType,
+    MutationApplyDict,
+)
 from agilerl.utils.evolvable_networks import create_cnn, get_activation
 
 BlockType = Literal["Conv1d", "Conv2d", "Conv3d"]
+
+SampleInput = Float[torch.Tensor, "batch channels *spatial"]
 
 
 def _assert_correct_kernel_sizes(
@@ -55,7 +64,7 @@ def _assert_correct_kernel_sizes(
 class MutableKernelSizes:
     sizes: list[KernelSizeType]
     cnn_block_type: BlockType
-    sample_input: torch.Tensor | None
+    sample_input: SampleInput | None
     rng: np.random.Generator
 
     def __post_init__(self) -> None:
@@ -261,7 +270,7 @@ class EvolvableCNN(EvolvableModule):
     :param stride_size: Convolution stride size
     :type stride_size: list[int]
     :param sample_input: Sample input tensor, defaults to None
-    :type sample_input: torch.Tensor | None, optional
+    :type sample_input: SampleInput | None, optional
     :param block_type: Type of convolutional block, either 'Conv1d', 'Conv2d' or 'Conv3d', defaults to 'Conv2d'.
     :type block_type: Literal["Conv1d", "Conv2d", "Conv3d"], optional
     :param activation: CNN activation layer, defaults to 'ReLU'
@@ -295,7 +304,7 @@ class EvolvableCNN(EvolvableModule):
         channel_size: list[int],
         kernel_size: list[KernelSizeType],
         stride_size: list[int],
-        sample_input: torch.Tensor | None = None,
+        sample_input: SampleInput | None = None,
         block_type: Literal["Conv1d", "Conv2d", "Conv3d"] = "Conv2d",
         activation: str = "ReLU",
         output_activation: str | None = None,
@@ -522,7 +531,7 @@ class EvolvableCNN(EvolvableModule):
         channel_size: list[int],
         kernel_size: list[KernelSizeType],
         stride_size: list[int],
-        sample_input: torch.Tensor,
+        sample_input: SampleInput,
     ) -> nn.Sequential:
         """Create and returns a convolutional neural network.
 
@@ -535,7 +544,7 @@ class EvolvableCNN(EvolvableModule):
         :param stride_size: A list of integers representing the stride size of each convolutional layer.
         :type stride_size: list[int]
         :param sample_input: A sample input tensor.
-        :type sample_input: torch.Tensor
+        :type sample_input: SampleInput
         :param name: The name of the CNN.
         :type name: str
 
@@ -581,14 +590,17 @@ class EvolvableCNN(EvolvableModule):
         """Reset noise of the model layers."""
         super().reset_noise()
 
-    def forward(self, x: ArrayOrTensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: AnyArray | AnyTensor,
+    ) -> Float[torch.Tensor, "batch num_outputs"]:
         """Return output of neural network.
 
         :param x: Neural network input
-        :type x: torch.Tensor or npt.NDArray
+        :type x: AnyArray | AnyTensor
 
         :return: Output of the neural network
-        :rtype: torch.Tensor
+        :rtype: Float[torch.Tensor, "batch num_outputs"]
         """
         if not isinstance(x, torch.Tensor):
             x = torch.tensor(x, dtype=torch.float32, device=self.device)

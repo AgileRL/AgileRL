@@ -1,15 +1,23 @@
 from typing import Literal, overload
 
 import numpy as np
+import numpy.typing as npt
 import torch
 from gymnasium import spaces
+from jaxtyping import Shaped
 
 from agilerl.modules.base import EvolvableModule, EvolvableWrapper
 from agilerl.typing import (
+    ActionEntropy,
+    ActionLogits,
     ActionMaskInput,
+    ActionMaskTensor,
     ArrayOrTensor,
     DeviceType,
+    LatentTensor,
+    LogProbs,
     NetConfigType,
+    SampledAction,
     numpy_action_mask,
 )
 from agilerl.utils.torch_utils import (
@@ -20,16 +28,16 @@ from agilerl.utils.torch_utils import (
 
 
 def apply_action_mask_discrete(
-    logits: torch.Tensor, mask: torch.Tensor
-) -> torch.Tensor:
+    logits: ActionLogits, mask: ActionMaskTensor
+) -> ActionLogits:
     """Apply a mask to the logits.
 
     :param logits: Logits.
-    :type logits: torch.Tensor
+    :type logits: ActionLogits
     :param mask: Mask.
-    :type mask: torch.Tensor
+    :type mask: ActionMaskTensor
     :return: Logits with mask applied.
-    :rtype: torch.Tensor
+    :rtype: ActionLogits
     """
     return torch.where(mask, logits, torch.full_like(logits, -1e8).to(logits.device))
 
@@ -43,11 +51,11 @@ class TorchDistribution:
     :param action_space: Action space of the environment.
     :type action_space: spaces.Space
     :param logits: Logits.
-    :type logits: torch.Tensor | None
+    :type logits: ActionLogits | None
     :param mu: Mean.
-    :type mu: torch.Tensor | None
+    :type mu: ActionLogits | None
     :param log_std: Log standard deviation.
-    :type log_std: torch.Tensor | None
+    :type log_std: ActionLogits | None
     :param squash_output: Whether to squash the output to the action space.
     :type squash_output: bool
     """
@@ -56,9 +64,9 @@ class TorchDistribution:
         self,
         *,
         action_space: spaces.Space,
-        logits: torch.Tensor | None = None,
-        mu: torch.Tensor | None = None,
-        log_std: torch.Tensor | None = None,
+        logits: ActionLogits | None = None,
+        mu: ActionLogits | None = None,
+        log_std: ActionLogits | None = None,
         squash_output: bool = False,
     ) -> None:
         self.action_space = action_space
@@ -66,13 +74,13 @@ class TorchDistribution:
         self.mu = mu
         self.log_std = log_std
         self.squash_output = squash_output and isinstance(action_space, spaces.Box)
-        self._sampled_action: torch.Tensor | None = None
+        self._sampled_action: SampledAction | None = None
 
-    def sample(self) -> torch.Tensor:
+    def sample(self) -> SampledAction:
         """Sample from the distribution for the given action space.
 
         :return: Sampled action.
-        :rtype: torch.Tensor
+        :rtype: SampledAction
         """
         self._sampled_action = sample_from_space(
             self.action_space,
@@ -83,13 +91,13 @@ class TorchDistribution:
         )
         return self._sampled_action
 
-    def log_prob(self, action: torch.Tensor) -> torch.Tensor:
+    def log_prob(self, action: SampledAction) -> LogProbs:
         """Log probability of the action.
 
         :param action: Action.
-        :type action: torch.Tensor
+        :type action: SampledAction
         :return: Log probability of the action.
-        :rtype: torch.Tensor
+        :rtype: LogProbs
         """
         return log_prob_from_space(
             self.action_space,
@@ -99,11 +107,11 @@ class TorchDistribution:
             log_std=self.log_std,
         )
 
-    def entropy(self) -> torch.Tensor:
+    def entropy(self) -> ActionEntropy:
         """Entropy of the distribution.
 
         :return: Entropy of the distribution.
-        :rtype: torch.Tensor
+        :rtype: ActionEntropy
         """
         return entropy_from_space(
             self.action_space,
@@ -172,11 +180,11 @@ class EvolvableDistribution(EvolvableWrapper):
         """
         return self.wrapped.net_config
 
-    def get_distribution(self, logits: torch.Tensor) -> TorchDistribution:
+    def get_distribution(self, logits: ActionLogits) -> TorchDistribution:
         """Get the distribution over the action space given an observation.
 
         :param logits: Output of the network, either logits or probabilities.
-        :type logits: torch.Tensor
+        :type logits: ActionLogits
         :return: Distribution over the action space.
         :rtype: Distribution # This should ideally be TorchDistribution, but keeping for consistency with old file if Distribution was a type alias
         """
@@ -219,13 +227,13 @@ class EvolvableDistribution(EvolvableWrapper):
         msg = f"Action space {self.action_space} not supported."
         raise NotImplementedError(msg)
 
-    def log_prob(self, action: torch.Tensor) -> torch.Tensor:
+    def log_prob(self, action: SampledAction) -> LogProbs:
         """Get the log probability of the action.
 
         :param action: Action.
-        :type action: torch.Tensor
+        :type action: SampledAction
         :return: Log probability of the action.
-        :rtype: torch.Tensor
+        :rtype: LogProbs
         """
         if self.dist is None:
             msg = "Distribution not initialized. Call forward first."
@@ -234,11 +242,11 @@ class EvolvableDistribution(EvolvableWrapper):
         # Handles squashing correction internally for Box space
         return self.dist.log_prob(action)
 
-    def entropy(self) -> torch.Tensor:
+    def entropy(self) -> ActionEntropy:
         """Get the entropy of the action distribution.
 
         :return: Entropy of the action distribution.
-        :rtype: torch.Tensor
+        :rtype: ActionEntropy
         """
         if self.dist is None:
             msg = "Distribution not initialized. Call forward first."
@@ -247,15 +255,21 @@ class EvolvableDistribution(EvolvableWrapper):
         # Returns analytical entropy for supported spaces
         return self.dist.entropy()
 
-    def apply_mask(self, logits: torch.Tensor, mask: ArrayOrTensor) -> torch.Tensor:
+    def apply_mask(
+        self,
+        logits: ActionLogits,
+        mask: Shaped[torch.Tensor, "batch action_dim"]
+        | Shaped[npt.NDArray, "batch action_dim"],
+    ) -> ActionLogits:
         """Apply a mask to the logits.
 
         :param logits: Logits.
-        :type logits: torch.Tensor
-        :param mask: Mask.
-        :type mask: ArrayOrTensor
+        :type logits: ActionLogits
+        :param mask: Mask. Any dtype ``torch.as_tensor`` can cast to bool; env
+            masks arrive as 1/0 integers.
+        :type mask: Shaped[torch.Tensor, "batch action_dim"] | Shaped[npt.NDArray, "batch action_dim"]
         :return: Logits with mask applied.
-        :rtype: torch.Tensor
+        :rtype: ActionLogits
         """
         # Convert mask to tensor and reshape to match logits shape
         mask = torch.as_tensor(mask, dtype=torch.bool, device=self.device).view(
@@ -297,38 +311,37 @@ class EvolvableDistribution(EvolvableWrapper):
     @overload
     def forward(
         self,
-        latent: torch.Tensor,
+        latent: LatentTensor,
         action_mask: ActionMaskInput = None,
         sample: Literal[True] = True,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
+    ) -> tuple[SampledAction, LogProbs, ActionEntropy]: ...
 
     @overload
     def forward(
         self,
-        latent: torch.Tensor,
+        latent: LatentTensor,
         action_mask: ActionMaskInput,
         sample: Literal[False],
-    ) -> tuple[None, None, torch.Tensor]: ...
+    ) -> tuple[None, None, ActionEntropy]: ...
 
     def forward(
         self,
-        latent: torch.Tensor,
+        latent: LatentTensor,
         action_mask: ActionMaskInput = None,
         sample: bool = True,
     ) -> (
-        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-        | tuple[None, None, torch.Tensor]
+        tuple[SampledAction, LogProbs, ActionEntropy] | tuple[None, None, ActionEntropy]
     ):
         """Forward pass of the network.
 
         :param latent: Latent space representation.
-        :type latent: torch.Tensor
+        :type latent: LatentTensor
         :param action_mask: Mask to apply to the logits. Defaults to None.
         :type action_mask: ActionMaskInput
         :param sample: Whether to sample an action or return the mode/mean. Defaults to True.
         :type sample: bool
         :return: Action, log probability of the action, and entropy of the distribution.
-        :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | tuple[None, None, torch.Tensor]
+        :rtype: tuple[SampledAction, LogProbs, ActionEntropy] | tuple[None, None, ActionEntropy]
         """
         logits = self.wrapped(latent)
 

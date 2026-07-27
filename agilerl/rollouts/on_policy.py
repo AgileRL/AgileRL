@@ -9,11 +9,13 @@ import numpy as np
 import numpy.typing as npt
 import torch
 from gymnasium import spaces
+from jaxtyping import Bool, Float, Int, Shaped
 
 from agilerl import HAS_LLM_DEPENDENCIES
 from agilerl.algorithms import PPO
+from agilerl.algorithms.ppo import EnvValueArray, PolicyActionArray
 from agilerl.networks import StochasticActor
-from agilerl.typing import RolloutReturn
+from agilerl.typing import EnvDoneArray, EnvScoreArray, RolloutReturn
 
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.algorithms import GRPO, LLMPPO, LLMREINFORCE
@@ -22,14 +24,18 @@ if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
 SupportedOnPolicy = PPO
 RolloutEnv = gym.Env | gym.vector.VectorEnv
 
+# Batched environment observation. Dict/Tuple observation spaces yield a dict or
+# tuple of these rather than a single array.
+BatchedObsArray = Shaped[npt.NDArray, "num_envs ..."]
+
 
 def _collect_rollouts(
     agent: SupportedOnPolicy,
     env: RolloutEnv,
     n_steps: int | None = None,
-    last_obs: npt.NDArray | None = None,
-    last_done: npt.NDArray | None = None,
-    last_scores: npt.NDArray | None = None,
+    last_obs: BatchedObsArray | None = None,
+    last_done: EnvDoneArray | None = None,
+    last_scores: EnvScoreArray | None = None,
     last_info: dict[str, Any] | None = None,
     *,
     recurrent: bool,
@@ -43,11 +49,11 @@ def _collect_rollouts(
     :param n_steps: The number of steps to collect rollouts for. Defaults to agent.learn_step if not provided.
     :type n_steps: int | None
     :param last_obs: The observation to use for the first step. Defaults to None, where the environment is reset.
-    :type last_obs: npt.NDArray | None
+    :type last_obs: BatchedObsArray | None
     :param last_done: The done flag to use for the first step. Defaults to None, where the environment is reset.
-    :type last_done: npt.NDArray | None
+    :type last_done: EnvDoneArray | None
     :param last_scores: The scores to use for the first step. Defaults to None, where the environment is reset.
-    :type last_scores: npt.NDArray | None
+    :type last_scores: EnvScoreArray | None
     :param last_info: The info for the current step. Defaults to None, where the environment is reset.
     :type last_info: dict[str, Any] | None
     :param recurrent: Whether the agent is recurrent.
@@ -64,8 +70,8 @@ def _collect_rollouts(
         or last_info is None
     ):
         obs, info = env.reset()
-        scores = np.zeros(agent.num_envs)
-        done = np.zeros(agent.num_envs)
+        scores: EnvScoreArray = np.zeros(agent.num_envs)
+        done: Shaped[npt.NDArray, " num_envs"] = np.zeros(agent.num_envs)
         agent.hidden_state = (
             agent.get_initial_hidden_state(agent.num_envs) if recurrent else None
         )
@@ -80,7 +86,7 @@ def _collect_rollouts(
 
     current_hidden_state_for_actor = agent.hidden_state
 
-    completed_episode_scores = []
+    completed_episode_scores: list[float] = []
     for _ in range(n_steps):
         current_hidden_state_for_buffer = current_hidden_state_for_actor
 
@@ -118,7 +124,7 @@ def _collect_rollouts(
             agent.action_space,
             spaces.Box,
         ):
-            clipped_action = np.clip(
+            clipped_action: PolicyActionArray = np.clip(
                 action,
                 agent.action_space.low,
                 agent.action_space.high,
@@ -140,10 +146,12 @@ def _collect_rollouts(
 
         # ``env.step`` types the reward as ``SupportsFloat | np.ndarray``, which
         # numpy's ``atleast_1d`` stub rejects; ``asarray`` accepts both arms.
-        reward_np = np.atleast_1d(np.asarray(reward))
-        is_terminal_np = np.atleast_1d(is_terminal)
-        value_np = np.atleast_1d(value)
-        log_prob_np = np.atleast_1d(log_prob)
+        reward_np: Float[npt.NDArray[np.float64], " num_envs"] = np.atleast_1d(
+            np.asarray(reward),
+        )
+        is_terminal_np: EnvDoneArray = np.atleast_1d(is_terminal)
+        value_np: EnvValueArray = np.atleast_1d(value)
+        log_prob_np: EnvValueArray = np.atleast_1d(log_prob)
 
         current_action_mask = info.get("action_mask", None)
         agent.rollout_buffer.add(
@@ -162,7 +170,9 @@ def _collect_rollouts(
         done = is_terminal_np
 
         if recurrent and np.any(is_terminal_np):
-            finished_mask = is_terminal_np.astype(bool)
+            finished_mask: Shaped[npt.NDArray, " num_envs"] = is_terminal_np.astype(
+                bool,
+            )
             initial_hidden_states_for_reset = agent.get_initial_hidden_state(
                 agent.num_envs,
             )
@@ -267,13 +277,13 @@ def collect_rollouts_llm(
     group_seed: int,
     **kwargs: Any,
 ) -> tuple[
-    list[torch.Tensor],
-    list[torch.Tensor],
-    list[torch.Tensor],
-    list[torch.Tensor],
+    list[Int[torch.Tensor, "1 seq_len"]],
+    list[Bool[torch.Tensor, "1 mask_len"]],
+    list[Int[torch.Tensor, "1 mask_len"]],
+    list[Float[torch.Tensor, " num_turns"]],
     int,
     int,
-    list[torch.Tensor | None] | None,
+    list[Float[torch.Tensor, " gen_len"] | None] | None,
 ]:
     """Collect multi-turn rollouts for LLM on-policy algorithms.
 
@@ -291,7 +301,7 @@ def collect_rollouts_llm(
         updated group seed, and per-trajectory vLLM sampling logprobs (one 1-D
         tensor of generated-token logprobs each, individual entries possibly
         ``None``; ``None`` overall when none were captured this rollout).
-    :rtype: tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], int, int, list[torch.Tensor | None] | None]
+    :rtype: tuple[list[Int[torch.Tensor, "1 seq_len"]], list[Bool[torch.Tensor, "1 mask_len"]], list[Int[torch.Tensor, "1 mask_len"]], list[Float[torch.Tensor, " num_turns"]], int, int, list[Float[torch.Tensor, " gen_len"] | None] | None]
     """
     prompts = env.reset(
         seed=group_seed,

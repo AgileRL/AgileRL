@@ -1,6 +1,11 @@
 import torch
+from jaxtyping import Float
 
 from agilerl.typing import DeviceType
+
+# Running statistics and the batch moments they are updated from all carry the
+# observation's shape (scalar, ``(n,)`` or ``(c, h, w)`` depending on the space).
+RunningStat = Float[torch.Tensor, "..."]
 
 
 class RunningMeanStd:
@@ -26,15 +31,17 @@ class RunningMeanStd:
 
         self.epsilon = epsilon
         self.device = device
-        self.mean = torch.zeros(shape, dtype=dtype, device=device)
-        self.var = torch.ones(shape, dtype=dtype, device=device)
-        self.count = torch.tensor(epsilon, dtype=dtype, device=device)
+        self.mean: RunningStat = torch.zeros(shape, dtype=dtype, device=device)
+        self.var: RunningStat = torch.ones(shape, dtype=dtype, device=device)
+        self.count: Float[torch.Tensor, ""] = torch.tensor(
+            epsilon, dtype=dtype, device=device
+        )
 
-    def update(self, x: torch.Tensor) -> None:
+    def update(self, x: Float[torch.Tensor, "batch ..."]) -> None:
         """Update mean, variance, and count using a batch of samples.
 
         :param x: Batch of samples.
-        :type x: torch.Tensor
+        :type x: Float[torch.Tensor, "batch ..."]
         """
         batch_mean = torch.mean(x, dim=0)
         batch_var = torch.var(x, dim=0, unbiased=False)  # Matches NumPy's default
@@ -43,16 +50,16 @@ class RunningMeanStd:
 
     def update_from_moments(
         self,
-        batch_mean: torch.Tensor,
-        batch_var: torch.Tensor,
+        batch_mean: RunningStat,
+        batch_var: RunningStat,
         batch_count: int,
     ) -> None:
         """Update mean and variance using batch moments.
 
         :param batch_mean: Mean of the batch
-        :type batch_mean: torch.Tensor
+        :type batch_mean: RunningStat
         :param batch_var: Variance of the batch
-        :type batch_var: torch.Tensor
+        :type batch_var: RunningStat
         :param batch_count: Number of samples in the batch
         :type batch_count: int
         """

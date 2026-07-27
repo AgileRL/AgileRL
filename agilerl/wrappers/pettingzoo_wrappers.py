@@ -49,7 +49,7 @@ class PettingZooAutoResetParallelWrapper(ParallelEnv[AgentID, ObsType, ActionTyp
         :param options: Options dictionary, defaults to None
         :type options: dict | None, optional
         :return: Tuple of (observations, infos)
-        :rtype: tuple[dict[str, npt.NDArray], dict[str, Any]]
+        :rtype: tuple[dict[AgentID, ObsType], dict[AgentID, dict]]
         """
         self.np_random, _ = seeding.np_random(seed)
 
@@ -69,20 +69,20 @@ class PettingZooAutoResetParallelWrapper(ParallelEnv[AgentID, ObsType, ActionTyp
         """Step the environment and return the observations, rewards, terminations, truncations, and info.
 
         :param actions: Actions dictionary
-        :type actions: dict[str, ActionType]
+        :type actions: dict[AgentID, ActionType]
         :return: Tuple of (observations, rewards, terminations, truncations, infos)
-        :rtype: tuple[dict[str, npt.NDArray], dict[str, float], dict[str, bool], dict[str, bool], dict[str, Any]]
+        :rtype: tuple[dict[AgentID, ObsType], dict[AgentID, float], dict[AgentID, bool], dict[AgentID, bool], dict[AgentID, dict]]
         """
         obs, rewards, terminations, truncations, infos = self.env.step(actions)
         if np.all(list(terminations.values()) or list(truncations.values())):
             obs, infos = self.env.reset()
         return obs, rewards, terminations, truncations, infos
 
-    def render(self) -> None | npt.NDArray | str | list:
+    def render(self) -> None | npt.NDArray[Any] | str | list:
         """Render the environment.
 
         :return: Rendered environment
-        :rtype: None | npt.NDArray | str | list
+        :rtype: None | npt.NDArray[Any] | str | list
         """
         return self.env.render()
 

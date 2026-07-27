@@ -5,12 +5,14 @@ from typing import Any
 
 import torch
 from gymnasium import spaces
+from jaxtyping import Float, Shaped
 from torch import nn
 
 from agilerl.modules import EvolvableCNN, EvolvableMLP
 from agilerl.modules.base import EvolvableModule, ModuleDict, MutationType, mutation
 from agilerl.modules.configs import CnnNetConfig, MlpNetConfig, NetConfig, NetConfigType
 from agilerl.typing import (
+    AnyTensor,
     DeviceType,
     ModuleType,
     MutationApplyDict,
@@ -409,21 +411,24 @@ class EvolvableMultiInput(EvolvableModule):
 
         return feature_net
 
-    def forward(self, x: TupleOrDictObsType) -> torch.Tensor:
+    def forward(
+        self,
+        x: TupleOrDictObsType,
+    ) -> Float[torch.Tensor, "batch num_outputs"]:
         """Forward pass of the composed network. Extracts features from each observation key and concatenates
         them with the corresponding observation key if specified. The concatenated features are then passed
         through the final MLP to produce the output tensor.
 
         :param x: Dictionary of observations.
-        :type x: dict[str, ArrayOrTensor], tuple[ArrayOrTensor]
+        :type x: TupleOrDictObsType
         :return: Output tensor.
-        :rtype: torch.Tensor
+        :rtype: Float[torch.Tensor, "batch num_outputs"]
         """
         if isinstance(x, tuple):
             x = dict(zip(self.observation_space.spaces.keys(), x, strict=False))
 
         # Ensure every observation is a tensor
-        obs_dict: dict[str, torch.Tensor] = {
+        obs_dict: dict[str, AnyTensor] = {
             key: (
                 obs
                 if isinstance(obs, torch.Tensor)
@@ -433,14 +438,16 @@ class EvolvableMultiInput(EvolvableModule):
         }
 
         # Extract features from non-vector subspaces
-        extracted_features: dict[str, torch.Tensor] = OrderedDict()
+        extracted_features: dict[str, Float[torch.Tensor, "batch feature_dim"]] = (
+            OrderedDict()
+        )
         if self.extracted_features_dim > 0:
             for key in obs_dict:
                 if key in self.feature_net:
                     extracted_features[key] = self.feature_net[key](obs_dict[key])
 
         # Extract raw features from vector spaces
-        vector_inputs: list[torch.Tensor] = []
+        vector_inputs: list[Shaped[torch.Tensor, "batch vector_dim"]] = []
         for key, space in self.vector_spaces.items():
             _obs = (
                 extracted_features.pop(key)

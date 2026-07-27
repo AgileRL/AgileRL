@@ -21,6 +21,8 @@ from agilerl.modules.base import EvolvableModule, ModuleMeta, mutation
 from agilerl.protocols import MutationType
 from agilerl.typing import (
     DeviceType,
+    HiddenStateDict,
+    LatentTensor,
     MutationApplyDict,
     NetConfigType,
     TorchObsType,
@@ -276,7 +278,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         self.recurrent = recurrent
         self.flatten_obs = False
         self.encoder_name = encoder_name
-        self.cached_hidden_state = None
+        self.cached_hidden_state: HiddenStateDict | None = None
 
         # By default we use same activation for encoder output as for the rest of the network
         output_activation = encoder_config.get("output_activation", None)
@@ -382,29 +384,29 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         self,
         x: TorchObsType,
         hidden_state: None = None,
-    ) -> torch.Tensor: ...
+    ) -> LatentTensor: ...
 
     @overload
     def extract_features(
         self,
         x: TorchObsType,
-        hidden_state: dict[str, torch.Tensor],
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]: ...
+        hidden_state: HiddenStateDict,
+    ) -> tuple[LatentTensor, HiddenStateDict]: ...
 
     def extract_features(
         self,
         x: TorchObsType,
-        hidden_state: dict[str, torch.Tensor] | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        hidden_state: HiddenStateDict | None = None,
+    ) -> LatentTensor | tuple[LatentTensor, HiddenStateDict]:
         """Extract features from the encoder part of the network.
 
         :param x: Input observation to extract features from
         :type x: TorchObsType
         :param hidden_state: Hidden states for recurrent networks (unused in non-recurrent networks)
-        :type hidden_state: dict[str, torch.Tensor], optional
+        :type hidden_state: HiddenStateDict, optional
         :return: The encoded features, and (for recurrent networks) the next
             hidden-state dict if a hidden state was passed
-        :rtype: torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]
+        :rtype: LatentTensor | tuple[LatentTensor, HiddenStateDict]
         """
         # For compatibility with both recurrent and non-recurrent networks
         if hidden_state is None:
@@ -413,14 +415,14 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
 
     def forward_head(
         self,
-        latent: torch.Tensor,
+        latent: LatentTensor,
         *args: Any,
         **kwargs: Any,
     ) -> torch.Tensor:
         """Forward pass of the network head using pre-computed latent encodings.
 
         :param latent: Latent encodings from the encoder.
-        :type latent: torch.Tensor
+        :type latent: LatentTensor
 
         :return: Output of the network head.
         :rtype: torch.Tensor
@@ -505,7 +507,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
                     output_coeff=output_coeff,
                 )
 
-    def initialize_hidden_state(self, batch_size: int = 1) -> dict[str, torch.Tensor]:
+    def initialize_hidden_state(self, batch_size: int = 1) -> HiddenStateDict:
         """Initialize the hidden state for the network.
 
         :param env: The environment to initialize the hidden state for

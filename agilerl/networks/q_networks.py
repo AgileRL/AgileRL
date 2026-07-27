@@ -1,19 +1,23 @@
 import warnings
 from dataclasses import asdict
 
+import numpy.typing as npt
 import torch
 from gymnasium import spaces
+from jaxtyping import Float, Shaped
 
 from agilerl.modules import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig, NetConfig
 from agilerl.networks.base import EvolvableNetwork
-from agilerl.networks.custom_modules import DuelingDistributionalMLP
-from agilerl.typing import ArrayOrTensor, DeviceType, NetConfigType, TorchObsType
+from agilerl.networks.custom_modules import DuelingDistributionalMLP, SupportTensor
+from agilerl.typing import DeviceType, NetConfigType, TorchObsType
 from agilerl.utils.evolvable_networks import (
     get_default_encoder_config,
     is_image_space,
     is_mlp_net_config,
 )
+
+QValues = Float[torch.Tensor, "batch num_actions"]
 
 
 class QNetwork(EvolvableNetwork):
@@ -110,14 +114,14 @@ class QNetwork(EvolvableNetwork):
             net_config=net_config,
         )
 
-    def forward(self, obs: TorchObsType) -> torch.Tensor:
+    def forward(self, obs: TorchObsType) -> QValues:
         """Forward pass of the Q network.
 
         :param obs: Input to the network.
         :type obs: TorchObsType
 
         :return: Output of the network.
-        :rtype: torch.Tensor
+        :rtype: QValues
         """
         latent = self.extract_features(obs)
         return self.head_net(latent)
@@ -152,7 +156,7 @@ class RainbowQNetwork(EvolvableNetwork):
     :param encoder_config: Configuration of the encoder network.
     :type encoder_config: ConfigType
     :param support: Support for the distributional value function.
-    :type support: torch.Tensor
+    :type support: SupportTensor
     :param num_atoms: Number of atoms in the distributional value function. Defaults to 51.
     :type num_atoms: int
     :param head_config: Configuration of the network MLP head.
@@ -173,7 +177,7 @@ class RainbowQNetwork(EvolvableNetwork):
         self,
         observation_space: spaces.Space,
         action_space: spaces.Discrete,
-        support: torch.Tensor,
+        support: SupportTensor,
         num_atoms: int = 51,
         noise_std: float = 0.5,
         encoder_config: NetConfigType | None = None,
@@ -266,7 +270,7 @@ class RainbowQNetwork(EvolvableNetwork):
         obs: TorchObsType,
         q: bool = True,
         log: bool = False,
-    ) -> torch.Tensor:
+    ) -> Float[torch.Tensor, "batch num_actions *num_atoms"]:
         """Forward pass of the Rainbow Q network.
 
         :param obs: Input to the network.
@@ -277,7 +281,7 @@ class RainbowQNetwork(EvolvableNetwork):
         :type log: bool
 
         :return: Output of the network.
-        :rtype: torch.Tensor
+        :rtype: Float[torch.Tensor, "batch num_actions *num_atoms"]
         """
         latent = self.extract_features(obs)
         return self.head_net(latent, q=q, log=log)
@@ -409,15 +413,20 @@ class ContinuousQNetwork(EvolvableNetwork):
             net_config=net_config,
         )
 
-    def forward(self, obs: TorchObsType, actions: ArrayOrTensor) -> torch.Tensor:
+    def forward(
+        self,
+        obs: TorchObsType,
+        actions: Shaped[npt.NDArray, "*batch num_actions"]
+        | Shaped[torch.Tensor, "*batch num_actions"],
+    ) -> Float[torch.Tensor, "batch 1"]:
         """Forward pass of the network.
 
         :param obs: Input tensor.
         :type obs: torch.Tensor, dict[str, torch.Tensor], or list[torch.Tensor]
         :param actions: Actions tensor.
-        :type actions: torch.Tensor
+        :type actions: Shaped[npt.NDArray, "*batch num_actions"] | Shaped[torch.Tensor, "*batch num_actions"]
         :return: Output tensor.
-        :rtype: torch.Tensor
+        :rtype: Float[torch.Tensor, "batch 1"]
         """
         if not isinstance(actions, torch.Tensor):
             actions = torch.as_tensor(actions, dtype=torch.float32).to(self.device)

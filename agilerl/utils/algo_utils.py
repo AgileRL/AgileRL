@@ -23,6 +23,7 @@ import numpy.typing as npt
 import torch
 import torch.nn.functional as F
 from gymnasium import spaces
+from jaxtyping import Bool, Float, Int, Shaped
 from tensordict import TensorDict, from_module
 from tensordict.nn import CudaGraphModule
 from torch import nn
@@ -39,10 +40,13 @@ from agilerl.protocols import (
     EvolvableNetworkProtocol,
 )
 from agilerl.typing import (
+    AnyArray,
+    AnyTensor,
     ArrayOrTensor,
     BatchDimension,
     BPTTSequenceType,
     DeviceType,
+    ImageTensor,
     InputSizeFromSpace,
     LeafSpace,
     MaybeObsList,
@@ -51,9 +55,9 @@ from agilerl.typing import (
     ObservationType,
     ObsShape,
     OutputSizeFromSpace,
+    ScalarLoss,
     SpaceLike,
     TensorMapping,
-    TensorTuple,
     TorchObsType,
 )
 
@@ -73,6 +77,23 @@ else:
     # definition time, so provide a runtime placeholder when the LLM
     # dependencies are not installed.
     PreTrainedModelType = Any
+
+# Float tensor of any rank, as produced by ``obs_to_tensor``'s ``.float()`` calls.
+AnyFloatTensor = Float[torch.Tensor, "..."]
+# Float tensor with the leading batch axis that every ``preprocess_*`` return carries.
+BatchedFloatTensor = Float[torch.Tensor, "batch ..."]
+# Per-agent experiences stacked along a new agent axis.
+StackedAgentTensor = Float[torch.Tensor, "num_steps num_agents ..."]
+# A channels-first image observation: the layout the HWC -> CHW transpose returns.
+ImageArray = Shaped[npt.NDArray[Any], "... channels height width"]
+# One agent's actions across the vectorized envs.
+AgentActionArray = Shaped[npt.NDArray[Any], "num_envs ..."]
+# Rollout experiences with the step and env axes already merged.
+BatchedArrayOrTensor = (
+    Shaped[npt.NDArray[Any], "batch ..."] | Shaped[torch.Tensor, "batch ..."]
+)
+# The LLM stacking path pads every trajectory to a common sequence length.
+PaddedTokenBatch = Shaped[torch.Tensor, "batch seq_len"]
 
 
 def configure_tf32_precision() -> None:
@@ -135,7 +156,7 @@ def is_str_keyed_dict(obj: object) -> TypeGuard[dict[str, object]]:
     return isinstance(obj, dict)
 
 
-def narrow_tensor(value: object) -> torch.Tensor:
+def narrow_tensor(value: object) -> AnyTensor:
     """Narrow a :class:`~tensordict.TensorDict` entry to the tensor it holds."""
     assert isinstance(value, torch.Tensor), (
         f"Expected a tensor entry, got {type(value).__name__}."
@@ -356,10 +377,10 @@ def get_hidden_states_shape_from_model(
 
 
 def extract_sequences_from_episode(
-    episode: torch.Tensor,
+    episode: Shaped[torch.Tensor, "episode_len ..."],
     max_seq_len: int,
     sequence_type: BPTTSequenceType = BPTTSequenceType.CHUNKED,
-) -> list[torch.Tensor]:
+) -> list[Shaped[torch.Tensor, "seq_len ..."]]:
     """Extract sequences from an episode.
 
     - `BPTTSequenceType.CHUNKED`: Extracts sequences by chunking the episode into unique
@@ -410,10 +431,10 @@ def extract_sequences_from_episode(
 
 
 def multi_dim_clamp(
-    min_val: float | torch.Tensor,
-    max_val: float | torch.Tensor,
-    input_tensor: torch.Tensor,
-) -> torch.Tensor:
+    min_val: float | AnyTensor,
+    max_val: float | AnyTensor,
+    input_tensor: AnyTensor,
+) -> AnyTensor:
     """Multi-dimensional clamp function.
 
     :param min_val: Minimum value or array of minimum values
@@ -431,7 +452,7 @@ def multi_dim_clamp(
     # torch.min/torch.max require tensor bounds on the input's device
     min_t = torch.as_tensor(min_val, device=input_tensor.device)
     max_t = torch.as_tensor(max_val, device=input_tensor.device)
-    clamped: torch.Tensor = torch.max(torch.min(input_tensor, max_t), min_t)
+    clamped: AnyTensor = torch.max(torch.min(input_tensor, max_t), min_t)
     return clamped.to(input_tensor.dtype)
 
 
@@ -518,26 +539,26 @@ def transpose_image_space(space: spaces.Space) -> spaces.Space:
 
 @overload
 def transpose_image_observation(
-    observation: torch.Tensor, original_space: spaces.Space
-) -> torch.Tensor: ...
+    observation: AnyTensor, original_space: spaces.Space
+) -> ImageTensor: ...
 
 
 @overload
 def transpose_image_observation(
-    observation: np.ndarray, original_space: spaces.Space
-) -> np.ndarray: ...
+    observation: AnyArray, original_space: spaces.Space
+) -> ImageArray: ...
 
 
 @overload
 def transpose_image_observation(
-    observation: dict[str, np.ndarray], original_space: spaces.Space
-) -> dict[str, np.ndarray]: ...
+    observation: dict[str, AnyArray], original_space: spaces.Space
+) -> dict[str, AnyArray]: ...
 
 
 @overload
 def transpose_image_observation(
-    observation: tuple[np.ndarray, ...], original_space: spaces.Space
-) -> tuple[np.ndarray, ...]: ...
+    observation: tuple[AnyArray, ...], original_space: spaces.Space
+) -> tuple[AnyArray, ...]: ...
 
 
 def transpose_image_observation(
@@ -1141,19 +1162,19 @@ def obs_to_tensor(obs: TensorDict, device: str | torch.device) -> TensorDict: ..
 @overload
 def obs_to_tensor(
     obs: ArrayOrTensor | Number | list[Any], device: str | torch.device
-) -> torch.Tensor: ...
+) -> AnyFloatTensor: ...
 
 
 @overload
 def obs_to_tensor(
     obs: Mapping[str, ArrayOrTensor], device: str | torch.device
-) -> dict[str, torch.Tensor]: ...
+) -> dict[str, AnyFloatTensor]: ...
 
 
 @overload
 def obs_to_tensor(
     obs: tuple[ArrayOrTensor, ...], device: str | torch.device
-) -> tuple[torch.Tensor, ...]: ...
+) -> tuple[AnyFloatTensor, ...]: ...
 
 
 @overload
@@ -1185,7 +1206,7 @@ def obs_to_tensor(
     if isinstance(obs, np.ndarray):
         return torch.as_tensor(obs, device=device).float()
     if is_str_keyed_dict(obs):
-        converted: dict[str, torch.Tensor] = {}
+        converted: dict[str, AnyFloatTensor] = {}
         for key, _obs in obs.items():
             converted[key] = torch.as_tensor(_obs, device=device).float()
         return converted
@@ -1236,7 +1257,9 @@ def get_vect_dim(
     return array.shape[0] if len(array.shape) > len(space_shape) else 1
 
 
-def add_placeholder_value(obs: torch.Tensor, placeholder_value: float) -> torch.Tensor:
+def add_placeholder_value(
+    obs: AnyFloatTensor, placeholder_value: float
+) -> AnyFloatTensor:
     """Add placeholder value to observation.
 
     :param obs: Observation
@@ -1279,10 +1302,10 @@ def maybe_add_batch_dim(
 
 @maybe_add_batch_dim.register(np.ndarray)
 def maybe_add_batch_dim_np(
-    array_like: npt.NDArray,
+    array_like: AnyArray,
     space: LeafSpace,
     actions: bool = False,
-) -> npt.NDArray:
+) -> Shaped[npt.NDArray[Any], "batch ..."]:
     space_shape = (
         get_input_size_from_space(space) if not actions else (get_num_actions(space),)
     )
@@ -1301,10 +1324,10 @@ def maybe_add_batch_dim_np(
 
 @maybe_add_batch_dim.register(torch.Tensor)
 def maybe_add_batch_dim_torch(
-    array_like: torch.Tensor,
+    array_like: AnyTensor,
     space: LeafSpace,
     actions: bool = False,
-) -> torch.Tensor:
+) -> Shaped[torch.Tensor, "batch ..."]:
     space_shape = (
         get_input_size_from_space(space) if not actions else (get_num_actions(space),)
     )
@@ -1356,12 +1379,12 @@ def preprocess_observation(
 @preprocess_observation.register(spaces.Dict)
 def preprocess_dict_observation(
     observation_space: spaces.Dict,
-    observation: dict[str, npt.NDArray | torch.Tensor],
+    observation: dict[str, AnyArray | AnyTensor],
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
     placeholder_value: float | None = None,
     swap_channels: bool = False,
-) -> TensorMapping:
+) -> dict[str, BatchedFloatTensor]:
     """Preprocess dictionary observations.
 
     :param observation: Dictionary observation
@@ -1401,12 +1424,12 @@ def preprocess_dict_observation(
 @preprocess_observation.register(spaces.Tuple)
 def preprocess_tuple_observation(
     observation_space: spaces.Tuple,
-    observation: tuple[npt.NDArray | torch.Tensor, ...],
+    observation: tuple[AnyArray | AnyTensor, ...],
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
     placeholder_value: float | None = None,
     swap_channels: bool = False,
-) -> TensorTuple:
+) -> tuple[BatchedFloatTensor, ...]:
     """Preprocess tuple observations.
 
     :param observation: Tuple observation
@@ -1454,12 +1477,12 @@ def preprocess_tuple_observation(
 @preprocess_observation.register(spaces.Box)
 def preprocess_box_observation(
     observation_space: spaces.Box,
-    observation: npt.NDArray | torch.Tensor,
+    observation: AnyArray | AnyTensor,
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
     placeholder_value: float | None = None,
     swap_channels: bool = False,
-) -> torch.Tensor:
+) -> BatchedFloatTensor:
     """Preprocess box observations (continuous spaces).
 
     :param observation: Box observation
@@ -1498,12 +1521,12 @@ def preprocess_box_observation(
 @preprocess_observation.register(spaces.Discrete)
 def preprocess_discrete_observation(
     observation_space: spaces.Discrete,
-    observation: npt.NDArray | torch.Tensor,
+    observation: AnyArray | AnyTensor,
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
     placeholder_value: float | None = None,
     swap_channels: bool = False,
-) -> torch.Tensor:
+) -> Float[torch.Tensor, "batch num_classes"]:
     """Preprocess discrete observations.
 
     :param observation: Discrete observation
@@ -1544,12 +1567,12 @@ def preprocess_discrete_observation(
 @preprocess_observation.register(spaces.MultiDiscrete)
 def preprocess_multidiscrete_observation(
     observation_space: spaces.MultiDiscrete,
-    observation: npt.NDArray | torch.Tensor,
+    observation: AnyArray | AnyTensor,
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
     placeholder_value: float | None = None,
     swap_channels: bool = False,
-) -> torch.Tensor:
+) -> Float[torch.Tensor, "batch sum_nvec"]:
     """Preprocess multi-discrete observations.
 
     :param observation: Multi-discrete observation
@@ -1592,12 +1615,12 @@ def preprocess_multidiscrete_observation(
 @preprocess_observation.register(spaces.MultiBinary)
 def preprocess_multibinary_observation(
     observation_space: spaces.MultiBinary,
-    observation: npt.NDArray | torch.Tensor,
+    observation: AnyArray | AnyTensor,
     device: str | torch.device = "cpu",
     normalize_images: bool = True,
     placeholder_value: float | None = None,
     swap_channels: bool = False,
-) -> torch.Tensor:
+) -> BatchedFloatTensor:
     """Preprocess multi-binary observations.
 
     :param observation: Multi-binary observation
@@ -1630,16 +1653,16 @@ def preprocess_multibinary_observation(
 
 @overload
 def apply_image_normalization(
-    observation: torch.Tensor,
+    observation: AnyFloatTensor,
     observation_space: spaces.Box,
-) -> torch.Tensor: ...
+) -> AnyFloatTensor: ...
 
 
 @overload
 def apply_image_normalization(
-    observation: npt.NDArray,
+    observation: AnyArray,
     observation_space: spaces.Box,
-) -> np.ndarray: ...
+) -> AnyArray: ...
 
 
 def apply_image_normalization(
@@ -1700,13 +1723,13 @@ _ExperienceTs = TypeVarTuple("_ExperienceTs")
 
 
 def get_experiences_samples(
-    minibatch_indices: npt.NDArray,
+    minibatch_indices: Int[npt.NDArray[np.integer], " minibatch"],
     *experiences: Unpack[_ExperienceTs],
 ) -> tuple[Unpack[_ExperienceTs]]:
     """Sample experiences given minibatch indices.
 
     :param minibatch_indices: Minibatch indices
-    :type minibatch_indices: npt.NDArray
+    :type minibatch_indices: npt.NDArray[np.integer]
     :param experiences: Experiences to sample from
     :type experiences: tuple[torch.Tensor[float], ...]
 
@@ -1714,7 +1737,7 @@ def get_experiences_samples(
     :rtype: tuple[torch.Tensor[float], ...]
     """
 
-    def _take(value: object) -> torch.Tensor:
+    def _take(value: object) -> Shaped[torch.Tensor, "minibatch ..."]:
         assert isinstance(value, torch.Tensor)
         return value[minibatch_indices]
 
@@ -1817,7 +1840,7 @@ def stack_and_pad_experiences(
     padding_values: list[int | float | bool | None],
     padding_side: str = "right",
     device: str | torch.device | None = None,
-) -> tuple[torch.Tensor, ...]:
+) -> tuple[PaddedTokenBatch, ...]:
     """Stacks experiences into a single tensor, padding them to the maximum length.
 
     :param experiences: Experiences to stack: per-position tensor lists or
@@ -1855,10 +1878,10 @@ def stack_and_pad_experiences(
 
 
 def _stack_and_pad_tensor_list(
-    exp: list[torch.Tensor],
+    exp: list[Shaped[torch.Tensor, "rows seq_len"]],
     padding: float | bool | None,
     padding_side: str = "right",
-) -> torch.Tensor:
+) -> PaddedTokenBatch:
     """Stack and pad a list of tensors.
 
     :param exp: List of tensors to stack and pad
@@ -1882,7 +1905,9 @@ def _stack_and_pad_tensor_list(
     return torch.cat(exp, dim=0)
 
 
-def flatten_experiences(*experiences: ObservationType) -> tuple[ArrayOrTensor, ...]:
+def flatten_experiences(
+    *experiences: ObservationType,
+) -> tuple[BatchedArrayOrTensor, ...]:
     """Flattens experiences into a single array or tensor.
 
     :param experiences: Experiences to flatten
@@ -1892,7 +1917,12 @@ def flatten_experiences(*experiences: ObservationType) -> tuple[ArrayOrTensor, .
     :rtype: tuple[npt.NDArray, ...] or tuple[torch.Tensor[float], ...]
     """
 
-    def flatten(arr: np.ndarray | torch.Tensor) -> np.ndarray | torch.Tensor:
+    def flatten(
+        arr: (
+            Shaped[npt.NDArray[Any], "num_steps num_envs ..."]
+            | Shaped[torch.Tensor, "num_steps num_envs ..."]
+        ),
+    ) -> BatchedArrayOrTensor:
         # Need to flatten batch and n_env dimensions
         shape = arr.shape
         if len(shape) < 3:
@@ -2181,7 +2211,9 @@ def remove_nested_files(files: list[str]) -> None:
 def vectorize_experiences_by_agent(
     experiences: dict[str, Any],
     dim: int = 1,
-) -> torch.Tensor | dict[str, torch.Tensor] | tuple[torch.Tensor, ...]:
+) -> (
+    StackedAgentTensor | dict[str, StackedAgentTensor] | tuple[StackedAgentTensor, ...]
+):
     """Reorganizes experiences into a tensor, vectorized by time step.
 
     Example input:
@@ -2225,7 +2257,7 @@ def vectorize_experiences_by_agent(
         )
         return vectorized_tuple
     # Original implementation for array/tensor observations
-    tensors: list[torch.Tensor] = []
+    tensors: list[Float[torch.Tensor, "num_steps ..."]] = []
     for experience in experiences.values():
         if experience is None:
             continue
@@ -2244,7 +2276,7 @@ def vectorize_experiences_by_agent(
 def vectorize_agent_experiences_flat(
     experiences: dict[str, Any],
     dim: int = 1,
-) -> torch.Tensor:
+) -> StackedAgentTensor:
     """Vectorize flat per-agent experiences (log-probs, rewards, dones, values).
 
     :param experiences: Per-agent experiences indexed by agent id.
@@ -2333,7 +2365,7 @@ def concatenate_tensors(tensors: list[TorchObsType]) -> TorchObsType:
             _concatenate_tuple_column(tensors, i) for i in range(len(first))
         )
         return concat_tuple
-    tensor_list: list[torch.Tensor] = []
+    tensor_list: list[Shaped[torch.Tensor, "batch ..."]] = []
     for t in tensors:
         assert isinstance(t, torch.Tensor)
         tensor_list.append(t)
@@ -2437,15 +2469,15 @@ def is_peft_model(model: nn.Module) -> bool:
 
 
 def _rename_peft_primary_adapter_keys_in_state_dict(
-    state_dict: dict[str, torch.Tensor],
+    state_dict: dict[str, AnyTensor],
     *,
     old_adapter: str,
     new_adapter: str,
-) -> dict[str, torch.Tensor]:
+) -> dict[str, AnyTensor]:
     """Rewrite state-dict keys when the primary PEFT adapter is renamed (e.g. to ``actor``)."""
     if old_adapter == new_adapter:
         return state_dict
-    out: dict[str, torch.Tensor] = {}
+    out: dict[str, AnyTensor] = {}
     for k, v in state_dict.items():
         nk = k.replace(f".{old_adapter}.", f".{new_adapter}.")
         nk = nk.replace(f"lora_{old_adapter}", f"lora_{new_adapter}")
@@ -2456,7 +2488,7 @@ def _rename_peft_primary_adapter_keys_in_state_dict(
 def clone_llm(
     original_model: PreTrainedModelType | DummyEvolvable,
     zero_stage: int | None,
-    state_dict: dict[str, torch.Tensor] | None = None,
+    state_dict: dict[str, AnyTensor] | None = None,
 ) -> PreTrainedModelType:
     """Clone the actor.
 
@@ -2533,14 +2565,14 @@ def clone_llm(
 class DummyOptimizer:
     """Placeholder optimizer class to pass to the OptimizerWrapper when the optimizer is defined in the deepspeed config."""
 
-    def __init__(self, params: list[torch.Tensor], **kwargs: Any) -> None:
+    def __init__(self, params: list[AnyTensor], **kwargs: Any) -> None:
         """Sentinel class to use for the optimizer when the optimizer is defined in the deepspeed config.
 
         :param params: Parameters to optimize.
         :type params: list[torch.Tensor]
         """
 
-    def step(self, closure: Callable[[], torch.Tensor] | None = None) -> NoReturn:
+    def step(self, closure: Callable[[], ScalarLoss] | None = None) -> NoReturn:
         msg = (
             "DummyOptimizer is a placeholder optimizer and should not be used."
             "Please ensure you are calling accelerator.prepare() on the optimizer."
@@ -2578,8 +2610,8 @@ class DummyOptimizer:
 
 
 def _reconcile_shapes(
-    reference: npt.NDArray, other: npt.NDArray, discrete_actions: bool
-) -> tuple[npt.NDArray, npt.NDArray]:
+    reference: AnyArray, other: AnyArray, discrete_actions: bool
+) -> tuple[AnyArray, AnyArray]:
     """Squeeze and broadcast `other` to match `reference` shape where possible.
 
     :param reference: Reference array to match shape to.
@@ -2611,11 +2643,11 @@ def _reconcile_shapes(
 
 def apply_env_defined_actions(
     agent_ids: list[str],
-    action_dict: dict[str, npt.NDArray],
-    env_defined_actions: dict[str, npt.NDArray],
-    agent_masks: dict[str, npt.NDArray],
+    action_dict: dict[str, AgentActionArray],
+    env_defined_actions: dict[str, AnyArray],
+    agent_masks: dict[str, Bool[npt.NDArray[np.bool_], "..."]],
     discrete_actions: bool,
-) -> dict[str, npt.NDArray]:
+) -> dict[str, AgentActionArray]:
     """Apply env-defined actions to agent actions where the agent mask is True.
 
     :param agent_ids: Agent identifiers to process.
@@ -2625,7 +2657,7 @@ def apply_env_defined_actions(
     :param env_defined_actions: Mapping of agent id → override action array.
     :type env_defined_actions: dict[str, npt.NDArray]
     :param agent_masks: Mapping of agent id → boolean mask array.
-    :type agent_masks: dict[str, npt.NDArray]
+    :type agent_masks: dict[str, npt.NDArray[np.bool_]]
     :param discrete_actions: Whether the actions are discrete, defaults to False
     :type discrete_actions: bool, optional
     :return: `action_dict` with overrides applied in-place.

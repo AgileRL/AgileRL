@@ -9,6 +9,7 @@ import numpy as np
 import numpy.typing as npt
 import torch
 from gymnasium import spaces
+from jaxtyping import Bool, Float, Int, Shaped
 from tensordict import TensorDict, TensorDictBase
 from typing_extensions import Self, TypeIs
 
@@ -264,9 +265,14 @@ def _space_shape(space: spaces.Space) -> tuple[int, ...]:
     return space.shape if space.shape is not None else ()
 
 
+# A tensorised observation leaf: ``obs_to_tensor`` and the rollout buffer both
+# produce float32 with the batch axis leading.
+TensorObsLeaf = Float[torch.Tensor, "batch ..."]
+
+
 def _is_tensor_tuple(
     obs: TorchObsType | MultiAgentTensorObsType,
-) -> TypeIs[tuple[torch.Tensor, ...]]:
+) -> TypeIs[tuple[TensorObsLeaf, ...]]:
     """Narrow a tensorised observation to a tuple of tensors."""
     return isinstance(obs, tuple)
 
@@ -288,7 +294,7 @@ def _is_marl_obs(
 
 def _is_tensor_mapping(
     obs: TorchObsType | MultiAgentTensorObsType,
-) -> TypeIs[dict[str, torch.Tensor]]:
+) -> TypeIs[dict[str, TensorObsLeaf]]:
     """Narrow a tensorised observation to a per-key tensor mapping."""
     return isinstance(obs, Mapping)
 
@@ -603,6 +609,15 @@ class RSNorm(AgentWrapper[AgentT]):
         return self.wrapped_learn(experiences, *args, **kwargs)
 
 
+# One vectorised per-agent observation or action leaf. The dtype is whatever the
+# environment's space produced, and the leading axis is the vectorized env axis.
+ObsLeaf = Shaped[npt.NDArray[Any], "num_envs ..."]
+# Env indices of the agents that returned an all-NaN (inactive) observation.
+InactiveIndices = Int[npt.NDArray[np.intp], " num_inactive"]
+# Per-env mask of the agents that returned a real observation this step.
+ActiveMask = Bool[npt.NDArray[np.bool_], " num_envs"]
+
+
 def _is_array_dict(obs: NumpyObsType) -> TypeIs[ArrayDict]:
     """Narrow a numpy observation leaf to a per-key array mapping."""
     return isinstance(obs, dict)
@@ -620,7 +635,9 @@ def _is_numpy_obs_mapping(
     return all(isinstance(leaf, (np.ndarray, dict, tuple)) for leaf in obs.values())
 
 
-def _mask_rows(array: np.ndarray, mask: np.ndarray) -> np.ndarray:
+def _mask_rows(
+    array: ObsLeaf, mask: ActiveMask
+) -> Shaped[npt.NDArray[Any], "num_active ..."]:
     """Select the rows of ``array`` where ``mask`` is true."""
     return array[mask]
 
@@ -646,7 +663,7 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
     def extract_inactive_agents(
         self,
         obs: dict[str, NumpyObsType],
-    ) -> tuple[dict[str, npt.NDArray], dict[str, NumpyObsType]]:
+    ) -> tuple[dict[str, InactiveIndices], dict[str, NumpyObsType]]:
         """Extract the inactive agents from an observation. Inspects each key in the
         observation dictionary and, if all the values are `np.nan` (as set by
         ``AsyncPettingZooVecEnv``), the agent is considered inactive and removed from
@@ -656,9 +673,9 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
         :type obs: dict[str, NumpyObsType]
 
         :return: Tuple of inactive agents and filtered observations
-        :rtype: tuple[dict[str, npt.NDArray], dict[str, NumpyObsType]]
+        :rtype: tuple[dict[str, InactiveIndices], dict[str, NumpyObsType]]
         """
-        inactive_agents: dict[str, npt.NDArray] = {}
+        inactive_agents: dict[str, InactiveIndices] = {}
         agents_to_remove: list[str] = []
 
         # Process each agent's observations
@@ -679,14 +696,14 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
             # Create boolean mask for active agents. Reducing over a single axis of a
             # multi-dimensional sample always yields an array, but numpy's ``.all``
             # overloads widen the result to a scalar-or-array union.
-            active_mask = np.asarray(~np.isnan(sample).all(axis=1))
+            active_mask: ActiveMask = np.asarray(~np.isnan(sample).all(axis=1))
 
             # If all agents are active, skip
             if active_mask.all():
                 continue
 
             # Get indices of inactive agents
-            inactive_agent_indices = np.where(~active_mask)[0]
+            inactive_agent_indices: InactiveIndices = np.where(~active_mask)[0]
 
             # If all agents are inactive, mark for removal
             if not active_mask.any():
@@ -735,9 +752,9 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
 
     def _insert_placeholder_actions(
         self,
-        action_dict: dict[str, npt.NDArray],
-        inactive_agents: dict[str, npt.NDArray],
-    ) -> dict[str, npt.NDArray]:
+        action_dict: dict[str, ObsLeaf | None],
+        inactive_agents: Mapping[str, InactiveIndices],
+    ) -> dict[str, ObsLeaf | None]:
         """Insert placeholder actions for inactive agents back into action dict."""
         for agent_id, inactive_array in inactive_agents.items():
             if agent_id not in action_dict:
@@ -770,15 +787,17 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
 
     def _align_async_off_policy_experiences(
         self,
-        experiences: Mapping[str, Mapping[str, npt.NDArray]],
+        experiences: Mapping[
+            str, Mapping[str, Shaped[npt.NDArray[Any], "num_steps ..."] | None]
+        ],
     ) -> TensorDict:
         """Align async off-policy experiences.
 
         :param experiences: Stacked experiences, keyed by field and then by agent ID
-        :type experiences: Mapping[str, Mapping[str, npt.NDArray]]
+        :type experiences: Mapping[str, Mapping[str, Shaped[npt.NDArray[Any], "num_steps ..."] | None]]
 
         :return: Experiences with all fields aligned per agent
-        :rtype: ExperiencesType
+        :rtype: TensorDict
         """
         obs = experiences["obs"]
         actions = experiences["action"]
@@ -951,7 +970,7 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
 
         # Handle case where we haven't collected a next state for each sub-agent
         for agent_id in self.agent.agent_ids:
-            agent_next_state: npt.NDArray | None = next_state.get(agent_id, None)
+            agent_next_state: ObsLeaf | None = next_state.get(agent_id, None)
 
             # If we haven't collected a next state for this agent yet, we need to use
             # last collected state as next_state

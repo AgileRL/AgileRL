@@ -6,14 +6,23 @@ from typing import Any, TypeVar
 import numpy as np
 import numpy.typing as npt
 import torch
+from jaxtyping import Float, Int, Shaped
 from torch import nn
 from torch.nn import functional as F
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
 from agilerl.modules.mlp import EvolvableMLP
-from agilerl.typing import DeviceType, KVCacheType, MutationApplyDict
+from agilerl.typing import (
+    DeviceType,
+    KVCacheType,
+    MutationApplyDict,
+    ScalarLoss,
+    TokenIds,
+)
 
 ModuleT = TypeVar("ModuleT", bound=nn.Module)
+
+HiddenStates = Float[torch.Tensor, "batch seq_len n_embd"]
 
 
 class EvolvableGPT(EvolvableModule):
@@ -245,37 +254,37 @@ class EvolvableGPT(EvolvableModule):
 
     def forward(
         self,
-        idx: torch.Tensor | None = None,
-        tok_emb: torch.Tensor | None = None,
-        targets: torch.Tensor | None = None,
+        idx: TokenIds | None = None,
+        tok_emb: HiddenStates | None = None,
+        targets: TokenIds | None = None,
         attn_mask: torch.Tensor | None = None,
         past_key_values: tuple[KVCacheType | None, ...] | None = None,
-        pos: torch.Tensor | None = None,
+        pos: Int[torch.Tensor, "1 seq_len"] | None = None,
         is_causal: bool = True,
     ) -> tuple[
-        torch.Tensor,
-        tuple[torch.Tensor, ...],
+        Float[torch.Tensor, "batch seq_len vocab_size"],
+        tuple[HiddenStates, ...],
         tuple[KVCacheType, ...],
-        torch.Tensor | None,
+        ScalarLoss | None,
     ]:
         """Forward pass through evolvable GPT model.
 
         :param idx: Input ids
-        :type idx: torch.Tensor, optional
+        :type idx: TokenIds, optional
         :param tok_emb: Token embeddings
-        :type tok_emb: torch.Tensor, optional
+        :type tok_emb: HiddenStates, optional
         :param targets: Target ids
-        :type targets: torch.Tensor, optional
+        :type targets: TokenIds, optional
         :param attn_mask: Attention mask
         :type attn_mask: torch.Tensor, optional
         :param past_key_values: Per-layer cached (key, value) projections
         :type past_key_values: tuple[KVCacheType | None, ...], optional
         :param pos: Position ids
-        :type pos: torch.Tensor, optional
+        :type pos: Int[torch.Tensor, "1 seq_len"], optional
         :param is_causal: Whether to apply causal mask
         :type is_causal: bool, optional
         :return: Tuple containing logits, all hidden states, presents, and loss
-        :rtype: tuple[torch.Tensor, tuple[torch.Tensor, ...], tuple[KVCacheType, ...], torch.Tensor | None]
+        :rtype: tuple[Float[torch.Tensor, "batch seq_len vocab_size"], tuple[HiddenStates, ...], tuple[KVCacheType, ...], ScalarLoss | None]
         """
         if idx is not None:
             device = idx.device
@@ -290,7 +299,7 @@ class EvolvableGPT(EvolvableModule):
         )
 
         presents: tuple[KVCacheType, ...] = ()
-        all_hidden_states: tuple[torch.Tensor, ...] = ()
+        all_hidden_states: tuple[HiddenStates, ...] = ()
         if past_key_values is None:
             past_length = 0
             past_key_values = tuple([None] * self.n_layer)
@@ -580,11 +589,11 @@ class EvolvableGPT(EvolvableModule):
     @torch.no_grad()
     def generate(
         self,
-        idx: torch.Tensor,
+        idx: TokenIds,
         max_new_tokens: int,
         temperature: float = 1.0,
         top_k: int | None = None,
-    ) -> torch.Tensor:
+    ) -> Int[torch.Tensor, "batch seq_len_plus_new"]:
         """Generate a sequence of tokens.
 
         This method takes a conditioning sequence of indices `idx` (LongTensor of shape (b, t))
@@ -593,7 +602,7 @@ class EvolvableGPT(EvolvableModule):
         for this.
 
         :param idx: Conditioning sequence of indices.
-        :type idx: torch.Tensor
+        :type idx: TokenIds
         :param max_new_tokens: Number of new tokens to generate.
         :type max_new_tokens: int
         :param temperature: Sampling temperature. Higher values mean more random samples, defaults to 1.0.
@@ -601,7 +610,7 @@ class EvolvableGPT(EvolvableModule):
         :param top_k: If specified, only consider the top k tokens for sampling, defaults to None.
         :type top_k: int | None, optional
         :return: Generated sequence of indices.
-        :rtype: torch.Tensor
+        :rtype: Int[torch.Tensor, "batch seq_len_plus_new"]
         """
         for _ in range(max_new_tokens):
             # if the sequence context is growing too long we must crop it at block_size
@@ -731,7 +740,7 @@ class CausalSelfAttention(nn.Module):
     :type block_size: int
     """
 
-    attention_bias: torch.Tensor
+    attention_bias: Float[torch.Tensor, "1 1 block_size block_size"]
 
     def __init__(
         self,
@@ -773,15 +782,15 @@ class CausalSelfAttention(nn.Module):
 
     def forward(
         self,
-        x: torch.Tensor,
+        x: HiddenStates,
         attn_mask: torch.Tensor | None = None,
         layer_past: KVCacheType | None = None,
         is_causal: bool = True,
-    ) -> tuple[torch.Tensor, KVCacheType]:
+    ) -> tuple[HiddenStates, KVCacheType]:
         """Forward pass through the CausalSelfAttention module.
 
         :param x: Input tensor of shape (batch_size, sequence_length, embedding_dim).
-        :type x: torch.Tensor
+        :type x: HiddenStates
         :param attn_mask: Optional attention mask tensor.
         :type attn_mask: torch.Tensor | None
         :param layer_past: Optional tuple of past key and value tensors for caching.
@@ -789,7 +798,7 @@ class CausalSelfAttention(nn.Module):
         :param is_causal: Whether to apply causal mask.
         :type is_causal: bool
         :return: Tuple containing the output tensor and the present key and value tensors.
-        :rtype: tuple[torch.Tensor, KVCacheType]
+        :rtype: tuple[HiddenStates, KVCacheType]
         """
         B, T, C = (
             x.size()
@@ -832,9 +841,9 @@ class CausalSelfAttention(nn.Module):
             )
         else:
             # manual implementation of attention
-            att: torch.Tensor = (q @ k.transpose(-2, -1)) * (
-                1.0 / math.sqrt(k.size(-1))
-            )
+            att: Float[torch.Tensor, "batch n_head seq_len seq_len"] = (
+                q @ k.transpose(-2, -1)
+            ) * (1.0 / math.sqrt(k.size(-1)))
             att = att.masked_fill(self.attention_bias[:, :, :T, :T] == 0, float("-inf"))
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
@@ -907,15 +916,15 @@ class Block(nn.Module):
 
     def forward(
         self,
-        x: torch.Tensor,
+        x: HiddenStates,
         attn_mask: torch.Tensor | None = None,
         layer_past: KVCacheType | None = None,
         is_causal: bool = True,
-    ) -> tuple[torch.Tensor, KVCacheType]:
+    ) -> tuple[HiddenStates, KVCacheType]:
         """Forward pass through the transformer block.
 
         :param x: Input tensor of shape (batch_size, sequence_length, embedding_dim).
-        :type x: torch.Tensor
+        :type x: HiddenStates
         :param attn_mask: Optional attention mask tensor.
         :type attn_mask: torch.Tensor | None
         :param layer_past: Optional tuple of past key and value tensors for caching.
@@ -923,7 +932,7 @@ class Block(nn.Module):
         :param is_causal: Whether to apply causal mask.
         :type is_causal: bool
         :return: Tuple containing the output tensor and the present key and value tensors.
-        :rtype: tuple[torch.Tensor, KVCacheType]
+        :rtype: tuple[HiddenStates, KVCacheType]
         """
         attn_output, present = self.attn(
             self.ln_1(x),
@@ -956,11 +965,14 @@ class MLP(EvolvableMLP):
         )
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x: torch.Tensor | npt.NDArray) -> torch.Tensor:
+    def forward(
+        self,
+        x: HiddenStates | Shaped[npt.NDArray, "batch seq_len n_embd"],
+    ) -> HiddenStates:
         """Return output of neural network.
 
         :param x: Neural network input
-        :type x: torch.Tensor() or npt.NDArray
+        :type x: HiddenStates | Shaped[npt.NDArray, "batch seq_len n_embd"]
         """
         # convert input to tensor if it is not already
         if not isinstance(x, torch.Tensor):
@@ -985,10 +997,13 @@ class PositionalEncoding(nn.Module):
         self.embedding = nn.Embedding(max_positions, emb_size, device=device)
         self.emb_size = emb_size
 
-    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        tokens: TokenIds,
+    ) -> Float[torch.Tensor, "batch seq_len emb_size"]:
         """Forward pass through position embedding module.
         :param tokens: Tokens to embed
-        :type tokens: torch.Tensor.
+        :type tokens: TokenIds.
         """
         return self.embedding(tokens)
 
@@ -1004,10 +1019,13 @@ class TokenEmbedding(nn.Module):
         self.embedding = nn.Embedding(vocab_size, emb_size, device=device)
         self.emb_size = emb_size
 
-    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        tokens: TokenIds,
+    ) -> Float[torch.Tensor, "batch seq_len emb_size"]:
         """Forward pass through token embedding module.
         :param tokens: Tokens to embed
-        :type tokens: torch.Tensor.
+        :type tokens: TokenIds.
         """
         # return self.embedding(tokens.long()) * math.sqrt(self.emb_size)
         return self.embedding(tokens)

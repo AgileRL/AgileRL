@@ -3,15 +3,23 @@ from typing import Any
 
 import numpy as np
 import numpy.typing as npt
+import torch
 from gymnasium.spaces import Space
 from gymnasium.vector.utils import batch_space
+from jaxtyping import Shaped
 
 from agilerl.typing import (
     ActionType,
-    ArrayOrTensor,
     PzResetReturn,
     PzStepReturn,
 )
+
+# Batched per-agent actions, leading axis ``num_envs``. Dtypes are mixed within
+# one call: int64 from discrete heads, float32 from Box heads, and float64 for
+# an inactive agent's NaN row.
+VecActionArray = Shaped[npt.NDArray, "num_envs *action_shape"]
+# The ``actions`` mapping ``step`` accepts, shared with the subclass overrides.
+VecActionMapping = Mapping[str, VecActionArray | torch.Tensor]
 
 
 class PettingZooVecEnv:
@@ -123,15 +131,15 @@ class PettingZooVecEnv:
 
     def step(
         self,
-        actions: Mapping[str, ArrayOrTensor],
+        actions: VecActionMapping,
         *args: Any,
         **kwargs: Any,
     ) -> PzStepReturn:
         """Take an action for each parallel environment.
 
-        :param actions: Dictionary of vectorized actions for each agent.
-            Values may be arrays or tensors.
-        :type actions: Mapping[str, ArrayOrTensor]
+        :param actions: Dictionary of vectorized actions for each agent, each of
+            shape ``(num_envs, *action_shape)``. Values may be arrays or tensors.
+        :type actions: VecActionMapping
 
         :return: Tuple of observations, rewards, terminated, truncated, infos
         :rtype: PzStepReturn

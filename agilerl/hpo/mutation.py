@@ -8,8 +8,10 @@ from typing import Any, TypeGuard, TypeVar
 
 import fastrand  # ty: ignore[unresolved-import] — C extension without type stubs
 import numpy as np
+import numpy.typing as npt
 import torch
 from accelerate import Accelerator
+from jaxtyping import Bool, Float, Int, Shaped
 from torch import nn
 
 from agilerl.algorithms import NeuralTS, NeuralUCB
@@ -21,7 +23,7 @@ from agilerl.algorithms.core import (
 )
 from agilerl.modules import EvolvableModule, ModuleDict
 from agilerl.protocols import EvolvableAlgorithmProtocol
-from agilerl.typing import MutationReturn
+from agilerl.typing import AnyTensor, MutationReturn
 from agilerl.utils.algo_utils import remove_compile_prefix
 from agilerl.utils.evolvable_networks import compile_model
 from agilerl.wrappers.agent import AgentWrapper
@@ -370,7 +372,7 @@ class Mutations:
 
         # Randomly choose mutation for each agent in population from options with
         # relative probabilities
-        sampled_indices = self.rng.choice(
+        sampled_indices: Int[npt.NDArray[np.int64], " pop_size"] = self.rng.choice(
             len(mutation_options),
             len(population),
             p=mutation_proba,
@@ -798,7 +800,7 @@ class Mutations:
         reset_prob = super_mut_prob + 0.05
         mag_limit = 1000000
 
-        model_params: dict[str, torch.Tensor] = network.state_dict()
+        model_params: dict[str, AnyTensor] = network.state_dict()
 
         # Collect keys corresponding to weight matrices (ignoring normalization / lstm params)
         exclude_keys = ["lstm", "norm"]
@@ -811,35 +813,55 @@ class Mutations:
 
         # Randomly choose a subset of keys to mutate
         how_many = int(self.rng.integers(1, len(potential_keys) + 1))
-        chosen_keys = self.rng.choice(potential_keys, how_many, replace=False)
+        chosen_keys: Shaped[npt.NDArray[np.str_], " num_chosen"] = self.rng.choice(
+            potential_keys, how_many, replace=False
+        )
 
         for key in chosen_keys:
-            W: torch.Tensor = model_params[key]
+            W: Float[torch.Tensor, "out_features in_features"] = model_params[key]
             num_weights = W.shape[0] * W.shape[1]
             num_mutations = int(np.ceil(num_mutation_frac * num_weights))
             if num_mutations < 1:
                 continue
 
             # Vectorized generation of random indices (for rows and columns)
-            rows = self.rng.integers(0, W.shape[0], size=num_mutations)
-            cols = self.rng.integers(0, W.shape[1], size=num_mutations)
-            rand_vals = self.rng.uniform(0, 1, size=num_mutations)
+            rows: Int[npt.NDArray[np.int64], " num_mutations"] = self.rng.integers(
+                0, W.shape[0], size=num_mutations
+            )
+            cols: Int[npt.NDArray[np.int64], " num_mutations"] = self.rng.integers(
+                0, W.shape[1], size=num_mutations
+            )
+            rand_vals: Float[npt.NDArray[np.float64], " num_mutations"] = (
+                self.rng.uniform(0, 1, size=num_mutations)
+            )
 
             # Convert indices and random values to torch tensors on the same device as W
-            rows_tensor = torch.tensor(rows, dtype=torch.long, device=W.device)
-            cols_tensor = torch.tensor(cols, dtype=torch.long, device=W.device)
-            rand_vals_tensor = torch.tensor(rand_vals, dtype=W.dtype, device=W.device)
+            rows_tensor: Int[torch.Tensor, " num_mutations"] = torch.tensor(
+                rows, dtype=torch.long, device=W.device
+            )
+            cols_tensor: Int[torch.Tensor, " num_mutations"] = torch.tensor(
+                cols, dtype=torch.long, device=W.device
+            )
+            rand_vals_tensor: Float[torch.Tensor, " num_mutations"] = torch.tensor(
+                rand_vals, dtype=W.dtype, device=W.device
+            )
 
             # Get current weight values at the selected indices
-            current_vals: torch.Tensor = W[rows_tensor, cols_tensor]
-            new_vals = current_vals.clone()
+            current_vals: Float[torch.Tensor, " num_mutations"] = W[
+                rows_tensor, cols_tensor
+            ]
+            new_vals: Float[torch.Tensor, " num_mutations"] = current_vals.clone()
 
             # Create masks for the different mutation types
-            mask_super = rand_vals_tensor < super_mut_prob
-            mask_reset = (rand_vals_tensor >= super_mut_prob) & (
-                rand_vals_tensor < reset_prob
+            mask_super: Bool[torch.Tensor, " num_mutations"] = (
+                rand_vals_tensor < super_mut_prob
             )
-            mask_normal = rand_vals_tensor >= reset_prob
+            mask_reset: Bool[torch.Tensor, " num_mutations"] = (
+                rand_vals_tensor >= super_mut_prob
+            ) & (rand_vals_tensor < reset_prob)
+            mask_normal: Bool[torch.Tensor, " num_mutations"] = (
+                rand_vals_tensor >= reset_prob
+            )
 
             # Super mutation: add noise with std proportional to the absolute current value times super_mut_strength
             if mask_super.sum() > 0:
@@ -1152,7 +1174,9 @@ class Mutations:
         # create matrix that is copy of sigma inv
         # first go through old params, figure out which to remove, then remove any difference
         # then go through new params, figure out where to add, then add zeros/lambda
-        new_sigma_inv = copy.deepcopy(individual.sigma_inv).cpu().numpy()
+        new_sigma_inv: Float[npt.NDArray[np.float32], "numel numel"] = (
+            copy.deepcopy(individual.sigma_inv).cpu().numpy()
+        )
         old_params = dict(old_exp_layer.named_parameters())
         new_params = dict(exp_layer.named_parameters())
 

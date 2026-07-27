@@ -8,13 +8,14 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 
 import numpy as np
 import numpy.typing as npt
+from jaxtyping import Float, Shaped
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
 from agilerl.algorithms.core.base import MultiAgentRLAlgorithm
 from agilerl.logger import Logger
-from agilerl.metrics import MultiAgentMetrics
+from agilerl.metrics import HistogramSamples, MultiAgentMetrics
 from agilerl.utils.population_utils import (
     NestedMetricRow,
     ScalarMetricRow,
@@ -81,7 +82,7 @@ class PopulationMetrics:
     indices: list[int]
     additional_metrics: list[dict[str, float]]
     hyperparameters: list[dict[str, float]]
-    nonscalar_additional_metrics: list[dict[str, npt.NDArray | None]] = field(
+    nonscalar_additional_metrics: list[dict[str, HistogramSamples | None]] = field(
         default_factory=list
     )
 
@@ -233,13 +234,13 @@ class MetricsReport:
         """
         return self.metrics.to_dict()
 
-    def to_nonscalar_dict(self) -> dict[str, npt.NDArray]:
+    def to_nonscalar_dict(self) -> dict[str, HistogramSamples]:
         """Return per-agent non-scalar metrics for TensorBoard-style backends.
 
         :returns: Dictionary mapping ``train/agent_{idx}/{name}`` to arrays.
-        :rtype: dict[str, npt.NDArray]
+        :rtype: dict[str, HistogramSamples]
         """
-        d: dict[str, npt.NDArray] = {}
+        d: dict[str, HistogramSamples] = {}
         nonscalar_metrics = self.metrics.nonscalar_additional_metrics
         for idx, agent_metrics in enumerate(nonscalar_metrics):
             for name, val in agent_metrics.items():
@@ -690,7 +691,7 @@ class Population(Generic[AgentT]):
                 msg = "Received nested fitness values without configured agent_ids."
                 raise ValueError(msg)
             if isinstance(latest, (list, tuple, np.ndarray)):
-                row = np.asarray(latest).ravel()
+                row: Shaped[npt.NDArray, " num_agents"] = np.asarray(latest).ravel()
                 fitnesses.append(
                     {aid: float(row[i]) for i, aid in enumerate(self.agent_ids)}
                 )
@@ -735,7 +736,9 @@ class Population(Generic[AgentT]):
         scores: NestedRow = []
         for agent in self.agents:
             if agent.metrics.scores:
-                mean_score_subagent = np.mean(np.array(agent.metrics.scores), axis=0)
+                mean_score_subagent: Float[npt.NDArray[np.float64], " num_agents"] = (
+                    np.mean(np.array(agent.metrics.scores), axis=0)
+                )
                 scores.append(
                     {
                         agent_id: float(mean_score_subagent[idx])
@@ -766,15 +769,15 @@ class Population(Generic[AgentT]):
             result.append(d)
         return result
 
-    def _collect_nonscalar_metrics(self) -> list[dict[str, npt.NDArray | None]]:
+    def _collect_nonscalar_metrics(self) -> list[dict[str, HistogramSamples | None]]:
         """Collect per-agent non-scalar metric arrays (e.g. histograms).
 
         :returns: One dict per agent mapping metric names to their accumulated arrays.
-        :rtype: list[dict[str, npt.NDArray | None]]
+        :rtype: list[dict[str, HistogramSamples | None]]
         """
-        result: list[dict[str, npt.NDArray | None]] = []
+        result: list[dict[str, HistogramSamples | None]] = []
         for agent in self.agents:
-            d: dict[str, npt.NDArray | None] = {}
+            d: dict[str, HistogramSamples | None] = {}
             metrics = agent.metrics
             for name in self.nonscalar_metric_names:
                 if isinstance(metrics, MultiAgentMetrics):

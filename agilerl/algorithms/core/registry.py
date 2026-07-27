@@ -9,7 +9,7 @@ import numpy.typing as npt
 import torch
 
 from agilerl.protocols import EvolvableAlgorithmProtocol, NamedCallable
-from agilerl.typing import LrNameType, NetworkType
+from agilerl.typing import AnyArray, LrNameType, NetworkType
 from agilerl.utils.algo_utils import DummyOptimizer
 
 # An optimizer "class": a torch ``Optimizer`` subclass or an optimizer-like
@@ -144,7 +144,7 @@ class RLParameter:
     :param dtype: The data type of the hyperparameter. Default is float.
     :type dtype: type[float] | type[int] | type[npt.NDArray]
     :param value: The current value of the hyperparameter. Default is None.
-    :type value: int | float | npt.NDArray | None
+    :type value: int | float | AnyArray | None
     """
 
     min: float
@@ -152,9 +152,9 @@ class RLParameter:
     shrink_factor: float = 0.8
     grow_factor: float = 1.2
     dtype: type[float] | type[int] | type[npt.NDArray] = float
-    value: int | float | npt.NDArray | None = field(default=None, init=False)
+    value: int | float | AnyArray | None = field(default=None, init=False)
 
-    def mutate(self) -> int | float | npt.NDArray:
+    def mutate(self) -> int | float | AnyArray:
         """Mutate the hyperparameter value by either growing or shrinking it.
 
         For scalar values (int/float), the mutation applies the grow/shrink factor uniformly.
@@ -162,7 +162,7 @@ class RLParameter:
         of min/max constraints and preservation of the original array's dtype.
 
         :return: The mutated hyperparameter value.
-        :rtype: int | float | npt.NDArray
+        :rtype: int | float | AnyArray
         """
         value = self.value
         assert value is not None, "Hyperparameter value is not set"

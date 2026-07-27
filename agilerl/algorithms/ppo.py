@@ -9,6 +9,7 @@ import numpy.typing as npt
 import torch
 from accelerate import Accelerator
 from gymnasium import spaces
+from jaxtyping import Float, Int, Shaped
 from tensordict import TensorDict
 from torch import optim
 from torch.nn.utils import clip_grad_norm_
@@ -27,7 +28,12 @@ from agilerl.networks.value_networks import ValueNetwork
 from agilerl.typing import (
     ActionMaskInput,
     BPTTSequenceType,
+    EnvDoneArray,
+    EnvScoreArray,
+    HiddenStateDict,
+    LogProbs,
     ObservationType,
+    PolicyActionArray,
     RolloutMinibatch,
     RolloutSequenceMinibatch,
     RolloutSequenceTargets,
@@ -40,13 +46,23 @@ from agilerl.utils.algo_utils import (
     share_encoder_parameters,
 )
 
-ActionReturnType = tuple[npt.NDArray, npt.NDArray, npt.NDArray, npt.NDArray]
+# Per-env vectors copied off a network: log-probabilities and value estimates.
+EnvValueArray = Float[npt.NDArray[np.float32], " num_envs"]
+# Entropy: one value per env, or 0-d for the ``-log_prob.mean()`` fallback.
+EntropyArray = Float[npt.NDArray[np.float32], "..."]
+
+ActionReturnType = tuple[
+    PolicyActionArray,
+    EnvValueArray,
+    EntropyArray,
+    EnvValueArray,
+]
 RecurrentActionReturnType = tuple[
-    npt.NDArray,
-    npt.NDArray,
-    npt.NDArray,
-    npt.NDArray,
-    dict[str, torch.Tensor] | None,
+    PolicyActionArray,
+    EnvValueArray,
+    EntropyArray,
+    EnvValueArray,
+    HiddenStateDict | None,
 ]
 
 
@@ -123,6 +139,7 @@ class PPO(RLAlgorithm[TensorDict]):
     # unconditionally.
     actor: StochasticActor
     critic: ValueNetwork
+    hidden_state: HiddenStateDict | None
 
     def __init__(
         self,
@@ -419,17 +436,17 @@ class PPO(RLAlgorithm[TensorDict]):
 
     def _extract_hidden_state(
         self,
-        full_hidden_state: dict[str, torch.Tensor],
+        full_hidden_state: HiddenStateDict,
         encoder_name: str,
-    ) -> dict[str, torch.Tensor]:
+    ) -> HiddenStateDict:
         """Extract hidden state components for a specific network encoder.
 
         :param full_hidden_state: Complete hidden state dictionary
-        :type full_hidden_state: dict[str, torch.Tensor]
+        :type full_hidden_state: HiddenStateDict
         :param encoder_name: Name of the encoder to extract hidden states for
         :type encoder_name: str
         :return: Hidden state dictionary for the specific encoder
-        :rtype: dict[str, torch.Tensor]
+        :rtype: HiddenStateDict
         """
         return {
             key: value
@@ -442,16 +459,16 @@ class PPO(RLAlgorithm[TensorDict]):
         obs: TorchObsType,
         action_mask: ActionMaskInput = None,
         hidden_state: (
-            dict[str, torch.Tensor] | None
+            HiddenStateDict | None
         ) = None,  # Hidden state is a dict for recurrent policies
         *,
         sample: bool = True,
     ) -> tuple[
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        dict[str, torch.Tensor] | None,
+        Shaped[torch.Tensor, "batch ..."],
+        LogProbs,
+        Float[torch.Tensor, "..."],
+        Float[torch.Tensor, " batch"],
+        HiddenStateDict | None,
     ]:
         """Return the next action to take in the environment and the values.
 
@@ -460,11 +477,11 @@ class PPO(RLAlgorithm[TensorDict]):
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: ActionMaskInput
         :param hidden_state: Hidden state for recurrent policies, defaults to None
-        :type hidden_state: dict[str, torch.Tensor] | None
+        :type hidden_state: HiddenStateDict | None
         :param sample: Whether to sample an action, defaults to True
         :type sample: bool
         :return: Action, log probability, entropy, state values, and (if recurrent) next hidden state
-        :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict[str, torch.Tensor] | None]
+        :rtype: tuple[Shaped[torch.Tensor, "batch ..."], LogProbs, Float[torch.Tensor, "..."], Float[torch.Tensor, " batch"], HiddenStateDict | None]
         """
         if hidden_state is not None:
             if self.share_encoders:
@@ -507,7 +524,7 @@ class PPO(RLAlgorithm[TensorDict]):
                 values = values.squeeze(-1)
 
                 # Combine the next hidden states from both networks
-                next_hidden_combined: dict[str, torch.Tensor] = {}
+                next_hidden_combined: HiddenStateDict = {}
                 if next_hidden_actor is not None:
                     next_hidden_combined.update(next_hidden_actor)
                 if next_hidden_critic is not None:
@@ -541,7 +558,7 @@ class PPO(RLAlgorithm[TensorDict]):
             for k, v in self.get_initial_hidden_state(self.num_envs).items()
         }
 
-    def get_initial_hidden_state(self, num_envs: int = 1) -> dict[str, torch.Tensor]:
+    def get_initial_hidden_state(self, num_envs: int = 1) -> HiddenStateDict:
         """Get the initial hidden state for the environment.
 
         The hidden states are generally cached on a per Module basis.
@@ -550,11 +567,11 @@ class PPO(RLAlgorithm[TensorDict]):
         :param num_envs: Number of environments, defaults to 1
         :type num_envs: int, optional
         :return: Initial hidden state dictionary
-        :rtype: dict[str, torch.Tensor]
+        :rtype: HiddenStateDict
         """
         # Return a batch of initial hidden states
         # Flat map them into "actor_*" and "critic_*" (if not sharing encoders)
-        flat_hidden: dict[str, torch.Tensor] = {}
+        flat_hidden: HiddenStateDict = {}
 
         actor_hidden = self.actor.initialize_hidden_state(batch_size=num_envs)
         flat_hidden.update(actor_hidden)
@@ -569,22 +586,22 @@ class PPO(RLAlgorithm[TensorDict]):
     def evaluate_actions(
         self,
         obs: ObservationType,
-        actions: torch.Tensor,
-        hidden_state: dict[str, torch.Tensor] | None = None,
+        actions: Float[torch.Tensor, "batch ..."],
+        hidden_state: HiddenStateDict | None = None,
         action_mask: ActionMaskInput = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[LogProbs, Float[torch.Tensor, "..."], Float[torch.Tensor, " batch"]]:
         """Evaluate the actions.
 
         :param obs: Environment observation, or multiple observations in a batch
         :type obs: ObservationType
         :param actions: Actions to evaluate
-        :type actions: torch.Tensor
+        :type actions: Float[torch.Tensor, "batch ..."]
         :param hidden_state: Hidden state for recurrent policies, defaults to None. Expected shape: dict with tensors of shape (batch_size, 1, hidden_size).
-        :type hidden_state: dict[str, torch.Tensor] | None
+        :type hidden_state: HiddenStateDict | None
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: ActionMaskInput
         :return: Log probability, entropy, state values
-        :rtype: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        :rtype: tuple[LogProbs, Float[torch.Tensor, "..."], Float[torch.Tensor, " batch"]]
         """
         preprocessed_obs = self.preprocess_observation(obs)
 
@@ -610,7 +627,7 @@ class PPO(RLAlgorithm[TensorDict]):
         obs: ObservationType,
         action_mask: ActionMaskInput = None,
         *,
-        hidden_state: dict[str, torch.Tensor],
+        hidden_state: HiddenStateDict,
         **kwargs: Any,
     ) -> RecurrentActionReturnType: ...
 
@@ -628,7 +645,7 @@ class PPO(RLAlgorithm[TensorDict]):
         self,
         obs: ObservationType,
         action_mask: ActionMaskInput = None,
-        hidden_state: dict[str, torch.Tensor] | None = None,
+        hidden_state: HiddenStateDict | None = None,
         *args: Any,
         **kwargs: Any,
     ) -> ActionReturnType | RecurrentActionReturnType:
@@ -639,9 +656,9 @@ class PPO(RLAlgorithm[TensorDict]):
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: ActionMaskInput
         :param hidden_state: Hidden state for recurrent policies, defaults to None
-        :type hidden_state: dict[str, torch.Tensor] | None
+        :type hidden_state: HiddenStateDict | None
         :return: Action, log probability, entropy, state values, and (if recurrent) next hidden state
-        :rtype: tuple[npt.NDArray, npt.NDArray, npt.NDArray, npt.NDArray, dict[str, torch.Tensor] | None] | tuple[npt.NDArray, npt.NDArray, npt.NDArray, npt.NDArray]
+        :rtype: RecurrentActionReturnType | ActionReturnType
         """
         preprocessed_obs = self.preprocess_observation(obs)
         with torch.no_grad():
@@ -662,7 +679,7 @@ class PPO(RLAlgorithm[TensorDict]):
         entropy = -log_prob.mean() if entropy is None else entropy
 
         # Clip to action space during inference
-        action_np = action.cpu().data.numpy()
+        action_np: PolicyActionArray = action.cpu().data.numpy()
         if not self.training and isinstance(self.action_space, spaces.Box):
             if self.actor.squash_output:
                 # Scale on-device before converting: scale_action operates on
@@ -676,9 +693,9 @@ class PPO(RLAlgorithm[TensorDict]):
                     self.action_space.high,
                 )
 
-        log_prob_np = log_prob.cpu().data.numpy()
-        entropy_np = entropy.cpu().data.numpy()
-        values_np = values.cpu().data.numpy()
+        log_prob_np: EnvValueArray = log_prob.cpu().data.numpy()
+        entropy_np: EntropyArray = entropy.cpu().data.numpy()
+        values_np: EnvValueArray = values.cpu().data.numpy()
 
         if self.recurrent:
             return (
@@ -737,7 +754,7 @@ class PPO(RLAlgorithm[TensorDict]):
             if buffer_td_external is not None
             else self.rollout_buffer.size()
         )
-        indices = np.arange(num_samples)
+        indices: Int[npt.NDArray[np.int64], " num_samples"] = np.arange(num_samples)
 
         # Wrap the buffer as a typed batch once, then index it for minibatches.
         # ``values`` is renamed to ``value_preds`` to avoid clashing with
@@ -773,7 +790,9 @@ class PPO(RLAlgorithm[TensorDict]):
             np.random.shuffle(indices)
             for start_idx in range(0, num_samples, batch_size):
                 end_idx = min(start_idx + batch_size, num_samples)
-                minibatch_indices = indices[start_idx:end_idx]
+                minibatch_indices: Int[npt.NDArray[np.int64], " batch"] = indices[
+                    start_idx:end_idx
+                ]
 
                 minibatch = buffer_batch[torch.from_numpy(minibatch_indices)]
                 mb_obs = minibatch.observations
@@ -877,9 +896,9 @@ class PPO(RLAlgorithm[TensorDict]):
         )
 
         # Normalize advantages globally
-        valid_advantages: torch.Tensor = self.rollout_buffer.buffer.get("advantages")[
-            :buffer_size
-        ]
+        valid_advantages: Float[torch.Tensor, "buffer_size num_envs"] = (
+            self.rollout_buffer.buffer.get("advantages")[:buffer_size]
+        )
         original_shape = valid_advantages.shape
         flat_adv = valid_advantages.reshape(-1)
         normalized_flat_adv = (flat_adv - flat_adv.mean()) / (flat_adv.std() + 1e-8)
@@ -1122,9 +1141,9 @@ class PPO(RLAlgorithm[TensorDict]):
 
             for _ in range(loop):
                 obs, info = env.reset()
-                scores = np.zeros(num_envs)
-                completed_episode_scores = np.zeros(num_envs)
-                finished = np.zeros(num_envs, dtype=bool)
+                scores: EnvScoreArray = np.zeros(num_envs)
+                completed_episode_scores: EnvScoreArray = np.zeros(num_envs)
+                finished: EnvDoneArray = np.zeros(num_envs, dtype=bool)
                 step = 0
                 test_hidden_state = (
                     self.get_initial_hidden_state(num_envs) if self.recurrent else None
@@ -1134,7 +1153,7 @@ class PPO(RLAlgorithm[TensorDict]):
                 last_infos = [{}] * num_envs if vectorized else {}
                 while not np.all(finished):
                     # Process action mask
-                    action_mask = None
+                    action_mask: ActionMaskInput = None
                     if vectorized:
                         # Check if info is a list/array of dicts
                         if (
@@ -1200,7 +1219,7 @@ class PPO(RLAlgorithm[TensorDict]):
                     scores += np.array(reward)
 
                     # Check for episode termination
-                    newly_finished = (
+                    newly_finished: Shaped[npt.NDArray, " num_envs"] = (
                         np.logical_or(
                             np.logical_or(done, trunc),
                             (max_steps is not None and step == max_steps),

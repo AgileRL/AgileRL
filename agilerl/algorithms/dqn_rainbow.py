@@ -6,6 +6,7 @@ import numpy.typing as npt
 import torch
 from accelerate import Accelerator
 from gymnasium import spaces
+from jaxtyping import Float, Int
 from tensordict import TensorDict
 from torch import optim
 from torch.nn.utils import clip_grad_norm_
@@ -21,6 +22,8 @@ from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.q_networks import RainbowQNetwork
 from agilerl.typing import (
     ActionMaskInput,
+    DiscreteActionArray,
+    EnvScoreArray,
     ObservationType,
     PrioritizedReplayBatch,
     ReplayBatch,
@@ -30,6 +33,8 @@ from agilerl.typing import (
 )
 from agilerl.utils.algo_utils import make_safe_deepcopies
 from agilerl.wrappers.make_evolvable import MakeEvolvable
+
+ElementwiseLoss = Float[torch.Tensor, " batch"]
 
 
 class RainbowDQN(RLAlgorithm[TensorDict]):
@@ -188,7 +193,7 @@ class RainbowDQN(RLAlgorithm[TensorDict]):
             learn_step=self.learn_step,
         )
 
-        self.support = torch.linspace(
+        self.support: Float[torch.Tensor, " num_atoms"] = torch.linspace(
             self.v_min,
             self.v_max,
             self.num_atoms,
@@ -274,7 +279,7 @@ class RainbowDQN(RLAlgorithm[TensorDict]):
         training: bool = True,
         *args: Any,
         **kwargs: Any,
-    ) -> npt.NDArray:
+    ) -> DiscreteActionArray:
         """Return the next action to take in the environment.
 
         :param obs: State observation, or multiple observations in a batch
@@ -284,13 +289,13 @@ class RainbowDQN(RLAlgorithm[TensorDict]):
         :param training: Flag indicating whether the model is in training mode, defaults to True
         :type training: bool, optional
         :return: The action to take
-        :rtype: numpy.ndarray
+        :rtype: Int[npt.NDArray[np.int64], " num_envs"]
         """
         obs = self.preprocess_observation(obs)
 
         self.actor.train(mode=training)
         with torch.no_grad():
-            action_values = self.actor(obs)
+            action_values: Float[torch.Tensor, "num_envs action_dim"] = self.actor(obs)
 
         if action_mask is None:
             action = np.argmax(action_values.cpu().data.numpy(), axis=-1)
@@ -312,28 +317,28 @@ class RainbowDQN(RLAlgorithm[TensorDict]):
     def _dqn_loss(
         self,
         obs: TorchObsType,
-        actions: torch.Tensor,
-        rewards: torch.Tensor,
+        actions: Float[torch.Tensor, "batch 1"],
+        rewards: Float[torch.Tensor, "batch 1"],
         next_obs: TorchObsType,
-        dones: torch.Tensor,
+        dones: Float[torch.Tensor, "batch 1"],
         gamma: float,
-    ) -> torch.Tensor:
+    ) -> ElementwiseLoss:
         """Calculate the DQN loss.
 
         :param obs: Batch of current states
         :type obs: torch.Tensor
         :param actions: Batch of actions taken
-        :type actions: torch.Tensor
+        :type actions: Float[torch.Tensor, "batch 1"]
         :param rewards: Batch of rewards received
-        :type rewards: torch.Tensor
+        :type rewards: Float[torch.Tensor, "batch 1"]
         :param next_obs: Batch of next states
         :type next_obs: torch.Tensor, dict[str, torch.Tensor], tuple[torch.Tensor]
         :param dones: Batch of done flags indicating episode termination
-        :type dones: torch.Tensor
+        :type dones: Float[torch.Tensor, "batch 1"]
         :param gamma: Discount factor
         :type gamma: float
         :return: Element-wise loss
-        :rtype: torch.Tensor
+        :rtype: ElementwiseLoss
         """
         obs = self.preprocess_observation(obs)
         next_obs = self.preprocess_observation(next_obs)
@@ -399,7 +404,11 @@ class RainbowDQN(RLAlgorithm[TensorDict]):
         experiences: TensorDict,
         n_experiences: TensorDict | None = None,
         per: bool = False,
-    ) -> tuple[float, torch.Tensor | None, npt.NDArray | None]:
+    ) -> tuple[
+        float,
+        Int[torch.Tensor, "batch 1"] | None,
+        Float[npt.NDArray[np.float32], " batch"] | None,
+    ]:
         """Update agent network parameters to learn from experiences.
 
         :param experiences: Batch of observations, actions, rewards, next
@@ -412,7 +421,7 @@ class RainbowDQN(RLAlgorithm[TensorDict]):
         :type per: bool, optional
 
         :return: Tuple of loss, indices, and new priorities
-        :rtype: tuple[float, torch.Tensor | None, numpy.ndarray | None]
+        :rtype: tuple[float, Int[torch.Tensor, "batch 1"] | None, Float[npt.NDArray[np.float32], " batch"] | None]
         """
         n_step = n_experiences is not None
         batch: PrioritizedReplayBatch = PrioritizedReplayBatch.from_tensordict(
@@ -433,9 +442,9 @@ class RainbowDQN(RLAlgorithm[TensorDict]):
             n_next_obs = n_batch.next_obs
             n_dones = n_batch.done
 
-        elementwise_loss: torch.Tensor | None = None
+        elementwise_loss: ElementwiseLoss | None = None
         if per:
-            weights = batch.weights
+            weights: Float[torch.Tensor, "batch 1"] = batch.weights
             idxs = batch.idxs
 
             if self.combined_reward or not n_step:
@@ -520,7 +529,9 @@ class RainbowDQN(RLAlgorithm[TensorDict]):
         self.actor.reset_noise()
         self.actor_target.reset_noise()
         if per:
-            loss_for_prior = elementwise_loss.detach().cpu().numpy()
+            loss_for_prior: Float[npt.NDArray[np.float32], " batch"] = (
+                elementwise_loss.detach().cpu().numpy()
+            )
             new_priorities = loss_for_prior + self.prior_eps
 
         loss_value = loss.item()
@@ -559,9 +570,11 @@ class RainbowDQN(RLAlgorithm[TensorDict]):
             num_envs = env.num_envs if hasattr(env, "num_envs") else 1
             for _ in range(loop):
                 obs, info = env.reset()
-                scores = np.zeros(num_envs)
-                completed_episode_scores = np.zeros(num_envs)
-                finished = np.zeros(num_envs)
+                scores: EnvScoreArray = np.zeros(num_envs)
+                completed_episode_scores: EnvScoreArray = np.zeros(num_envs)
+                finished: Float[npt.NDArray[np.float64], " num_envs"] = np.zeros(
+                    num_envs
+                )
                 step = 0
                 while not np.all(finished):
                     action_mask = info.get("action_mask", None)

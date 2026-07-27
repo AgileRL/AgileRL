@@ -3,13 +3,17 @@ from collections import deque
 import numpy as np
 import numpy.typing as npt
 import torch
+from jaxtyping import Float, Int, Shaped
 from tensordict import TensorDict
 
 from agilerl.components.segment_tree import MinSegmentTree, SumSegmentTree
+from agilerl.typing import IndexTensor
 from agilerl.utils.algo_utils import narrow_tensor
 
 
-def _read_tensor(transition: TensorDict, key: str) -> torch.Tensor:
+def _read_tensor(
+    transition: TensorDict, key: str
+) -> Shaped[torch.Tensor, "n_transitions ..."]:
     """Read ``key`` from ``transition``; the n-step keys always hold tensors."""
     return narrow_tensor(transition[key])
 
@@ -147,7 +151,7 @@ class ReplayBuffer:
         self._size = min(self._size + _n_transitions, self.max_size)
         self.counter += _n_transitions
 
-    def _sample_indices(self, k: int) -> torch.Tensor:
+    def _sample_indices(self, k: int) -> Int[torch.Tensor, " k"]:
         """Draw ``k`` storage indices in ``[0, size)``.
 
         Small buffers sample **without replacement** via ``torch.randperm`` (no
@@ -158,7 +162,7 @@ class ReplayBuffer:
         :param k: Number of indices to draw.
         :type k: int
         :return: 1-D tensor of ``k`` indices.
-        :rtype: torch.Tensor
+        :rtype: Int[torch.Tensor, " k"]
         """
         if k <= 0:
             return torch.empty(0, dtype=torch.long)
@@ -268,11 +272,11 @@ class MultiStepReplayBuffer(ReplayBuffer):
         super().add(n_step_data)
         return self.n_step_buffer[0]
 
-    def sample_from_indices(self, idxs: torch.Tensor) -> TensorDict:
+    def sample_from_indices(self, idxs: Int[torch.Tensor, "batch ..."]) -> TensorDict:
         """Sample a batch of transitions from the buffer using the provided indices.
 
         :param idxs: Indices of the transitions to sample
-        :type idxs: torch.Tensor
+        :type idxs: Int[torch.Tensor, "batch ..."]
         :return: TensorDict containing sampled experiences
         :rtype: TensorDict
         """
@@ -385,8 +389,12 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         # (priority_alpha is constant across the batch).
         n_transitions = data.shape[0]
         priority_alpha = self.max_priority**self.alpha
-        idxs = (self.tree_ptr + np.arange(n_transitions)) % self.max_size
-        values = np.full(n_transitions, priority_alpha, dtype=np.float64)
+        idxs: Int[npt.NDArray[np.int64], " n_transitions"] = (
+            self.tree_ptr + np.arange(n_transitions)
+        ) % self.max_size
+        values: Float[npt.NDArray[np.float64], " n_transitions"] = np.full(
+            n_transitions, priority_alpha, dtype=np.float64
+        )
         self.sum_tree.update_batch(idxs, values)
         self.min_tree.update_batch(idxs, values)
         self.tree_ptr = (self.tree_ptr + n_transitions) % self.max_size
@@ -447,34 +455,40 @@ class PrioritizedReplayBuffer(ReplayBuffer):
 
         return samples
 
-    def _sample_proportional(self, batch_size: int) -> torch.Tensor:
+    def _sample_proportional(self, batch_size: int) -> IndexTensor:
         """Sample indices based on their priorities.
 
         :param batch_size: Number of samples
         :type batch_size: int
         :return: Sampled indices
-        :rtype: torch.Tensor
+        :rtype: IndexTensor
         """
         # Stratified sampling: one uniform per segment, then a single vectorised
         # descent of the sum-tree for the whole batch (no Python per-sample loop).
         # upperbound_i = segment * (i + u_i),  u_i ~ U[0, 1).
         total_priority = self.sum_tree.sum()
         segment = total_priority / batch_size
-        u = torch.rand(batch_size).numpy()
-        upperbounds = (np.arange(batch_size) + u) * segment
-        indices = self.sum_tree.retrieve_batch(upperbounds)
+        u: Float[npt.NDArray[np.float32], " batch"] = torch.rand(batch_size).numpy()
+        upperbounds: Float[npt.NDArray[np.floating], " batch"] = (
+            np.arange(batch_size) + u
+        ) * segment
+        indices: Int[npt.NDArray[np.intp], " batch"] = self.sum_tree.retrieve_batch(
+            upperbounds
+        )
 
         return torch.as_tensor(indices, dtype=torch.int64)
 
-    def _calculate_weights(self, indices: torch.Tensor, beta: float) -> torch.Tensor:
+    def _calculate_weights(
+        self, indices: IndexTensor, beta: float
+    ) -> Float[torch.Tensor, " batch"]:
         """Calculate importance sampling weights for prioritized replay.
 
         :param indices: Sampled indices
-        :type indices: torch.Tensor
+        :type indices: IndexTensor
         :param beta: Beta parameter for importance sampling
         :type beta: float
         :return: Weights for the sampled transitions
-        :rtype: torch.Tensor
+        :rtype: Float[torch.Tensor, " batch"]
         """
         # Total priority is loop-invariant - compute it once.
         total_priority = self.sum_tree.sum()
@@ -485,25 +499,37 @@ class PrioritizedReplayBuffer(ReplayBuffer):
 
         # Gather the sampled priorities and compute every weight in one
         # vectorised numpy op (no Python per-element loop).
-        idx_np = torch.as_tensor(indices).flatten().cpu().numpy()
-        p_samples = self.sum_tree.get_batch(idx_np) / total_priority
-        weights = (p_samples * self.size) ** -beta / max_weight
+        idx_np: Int[npt.NDArray[np.int64], " batch"] = (
+            torch.as_tensor(indices).flatten().cpu().numpy()
+        )
+        p_samples: Float[npt.NDArray[np.float64], " batch"] = (
+            self.sum_tree.get_batch(idx_np) / total_priority
+        )
+        weights: Float[npt.NDArray[np.float64], " batch"] = (
+            p_samples * self.size
+        ) ** -beta / max_weight
         return torch.as_tensor(weights, dtype=torch.float32, device=self.device)
 
     def update_priorities(
         self,
-        indices: torch.Tensor | npt.NDArray,
-        priorities: torch.Tensor | npt.NDArray,
+        indices: Int[torch.Tensor, "batch ..."]
+        | Int[npt.NDArray[np.integer], "batch ..."],
+        priorities: (
+            Float[torch.Tensor, "batch ..."]
+            | Float[npt.NDArray[np.floating], "batch ..."]
+        ),
     ) -> None:
         """Update priorities of the sampled transitions.
 
         :param indices: Indices of transitions to update
-        :type indices: torch.Tensor | npt.NDArray
+        :type indices: Int[torch.Tensor, "batch ..."] | Int[npt.NDArray[np.integer], "batch ..."]
         :param priorities: New priorities
-        :type priorities: torch.Tensor | npt.NDArray
+        :type priorities: Float[torch.Tensor, "batch ..."] | Float[npt.NDArray[np.floating], "batch ..."]
         """
         # float64 matches the original max(priority.item(), 1e-5) clamp precision.
-        idx_np = torch.as_tensor(indices).flatten().cpu().numpy()
+        idx_np: Int[npt.NDArray[np.integer], " batch"] = (
+            torch.as_tensor(indices).flatten().cpu().numpy()
+        )
         if idx_np.size == 0:
             return
 

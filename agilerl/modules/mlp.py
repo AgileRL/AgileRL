@@ -1,10 +1,16 @@
 from typing import Any
 
+import numpy.typing as npt
 import torch
+from jaxtyping import Float, Shaped
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
-from agilerl.typing import ArrayOrTensor, DeviceType, MutationApplyDict
+from agilerl.typing import DeviceType, MutationApplyDict
 from agilerl.utils.evolvable_networks import create_mlp
+
+VectorInput = (
+    Shaped[npt.NDArray, "*batch num_inputs"] | Shaped[torch.Tensor, "*batch num_inputs"]
+)
 
 
 class EvolvableMLP(EvolvableModule):
@@ -185,14 +191,14 @@ class EvolvableMLP(EvolvableModule):
         output_layer = self.get_output_dense()
         EvolvableModule.apply_gaussian_init(output_layer, std_coeff=output_coeff)
 
-    def forward(self, x: ArrayOrTensor) -> torch.Tensor:
+    def forward(self, x: VectorInput) -> Float[torch.Tensor, "batch num_outputs"]:
         """Return output of neural network.
 
         :param x: Neural network input
-        :type x: torch.Tensor or npt.NDArray
+        :type x: VectorInput
 
         :return: Neural network output
-        :rtype: torch.Tensor
+        :rtype: Float[torch.Tensor, "batch num_outputs"]
         """
         if not isinstance(x, torch.Tensor):
             x = torch.tensor(x, dtype=torch.float32, device=self.device)

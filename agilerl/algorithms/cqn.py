@@ -7,6 +7,7 @@ import numpy.typing as npt
 import torch
 from accelerate import Accelerator
 from gymnasium import spaces
+from jaxtyping import Float
 from tensordict import TensorDict
 from torch import nn, optim
 from torch.nn.utils import clip_grad_norm_
@@ -21,6 +22,8 @@ from agilerl.modules.base import EvolvableModule
 from agilerl.networks.q_networks import QNetwork
 from agilerl.typing import (
     ActionMaskInput,
+    DiscreteActionArray,
+    EnvScoreArray,
     ObservationType,
     ReplayBatch,
     numpy_action_mask,
@@ -200,7 +203,7 @@ class CQN(RLAlgorithm[TensorDict]):
         action_mask: ActionMaskInput = None,
         *args: Any,
         **kwargs: Any,
-    ) -> npt.NDArray:
+    ) -> DiscreteActionArray:
         """Return the next action to take in the environment. Epsilon is the
         probability of taking a random action, used for exploration.
         For greedy behaviour, set epsilon to 0.
@@ -213,7 +216,7 @@ class CQN(RLAlgorithm[TensorDict]):
         :type action_mask: ActionMaskInput
 
         :return: Action to take in the environment
-        :rtype: numpy.ndarray[int]
+        :rtype: Int[npt.NDArray[np.int64], " num_envs"]
         """
         obs = self.preprocess_observation(obs)
 
@@ -230,7 +233,9 @@ class CQN(RLAlgorithm[TensorDict]):
         else:
             self.actor.eval()
             with torch.no_grad():
-                action_values = self.actor(obs).cpu().data.numpy()
+                action_values: Float[npt.NDArray[np.float32], "num_envs action_dim"] = (
+                    self.actor(obs).cpu().data.numpy()
+                )
             self.actor.train()
 
             if action_mask is None:
@@ -335,9 +340,11 @@ class CQN(RLAlgorithm[TensorDict]):
             num_envs = env.num_envs if hasattr(env, "num_envs") else 1
             for _i in range(loop):
                 obs, info = env.reset()
-                scores = np.zeros(num_envs)
-                completed_episode_scores = np.zeros(num_envs)
-                finished = np.zeros(num_envs)
+                scores: EnvScoreArray = np.zeros(num_envs)
+                completed_episode_scores: EnvScoreArray = np.zeros(num_envs)
+                finished: Float[npt.NDArray[np.float64], " num_envs"] = np.zeros(
+                    num_envs
+                )
                 step = 0
                 while not np.all(finished):
                     action_mask = info.get("action_mask", None)

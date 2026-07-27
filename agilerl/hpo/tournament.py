@@ -6,11 +6,16 @@ from typing import Any, TypeVar
 import numpy as np
 import numpy.typing as npt
 from accelerate.utils import broadcast_object_list
+from jaxtyping import Int
 
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.protocols import EvolvableAlgorithmProtocol
+from agilerl.typing import FitnessRow
 
 AgentT = TypeVar("AgentT", bound=EvolvableAlgorithmProtocol)
+
+# The double-argsort rank vector ``_elitism`` produces and ``_tournament`` consumes.
+RankArray = Int[npt.NDArray[np.int64], " pop_size"]
 
 
 class TournamentSelection:
@@ -41,7 +46,7 @@ class TournamentSelection:
         self.language_model = None
 
     @staticmethod
-    def _scalar_fitness(fitness: float | npt.NDArray | dict[str, float]) -> float:
+    def _scalar_fitness(fitness: float | FitnessRow | dict[str, float]) -> float:
         """Reduce a possibly vector-valued fitness to a single scalar for ranking.
 
         When ``sum_scores=False``, multi-agent algorithms store per-sub-agent
@@ -54,31 +59,33 @@ class TournamentSelection:
             return float(np.mean(fitness))
         return float(fitness)
 
-    def _tournament(self, fitness_values: Sequence[float] | npt.NDArray) -> int:
+    def _tournament(self, fitness_values: Sequence[float] | RankArray) -> int:
         """Perform tournament selection given a list of fitness values.
 
         :param fitness_values: List of fitness values
-        :type fitness_values: Sequence[float] | npt.NDArray
+        :type fitness_values: Sequence[float] | RankArray
         :return: Index of the selected winner
         :rtype: int
         """
-        selection = np.random.randint(0, len(fitness_values), size=self.tournament_size)
+        selection: Int[npt.NDArray[np.int64], " tournament_size"] = np.random.randint(
+            0, len(fitness_values), size=self.tournament_size
+        )
         selection_values = [fitness_values[i] for i in selection]
         return int(selection[np.argmax(selection_values)])
 
     def _elitism(
         self,
         population: list[AgentT],
-    ) -> tuple[AgentT, npt.NDArray, int]:
+    ) -> tuple[AgentT, RankArray, int]:
         """Perform elitism selection given a population of agents.
 
         :param population: Population of agents
         :type population: list[AgentT]
         :return: Best performing member of the population, rank array, and max id
-        :rtype: tuple[AgentT, npt.NDArray, int]
+        :rtype: tuple[AgentT, RankArray, int]
         """
         last_fitness = [self._scalar_fitness(indi.fitness[-1]) for indi in population]
-        rank = np.argsort(last_fitness).argsort()
+        rank: RankArray = np.argsort(last_fitness).argsort()
         max_id = max([ind.index for ind in population])
         return population[int(np.argsort(rank)[-1])], rank, max_id
 

@@ -15,6 +15,7 @@ from multiprocessing.sharedctypes import SynchronizedArray
 from typing import Any, Literal, TypeAlias, TypeVar
 
 import numpy as np
+import numpy.typing as npt
 from gymnasium import logger, spaces
 from gymnasium.error import (
     AlreadyPendingCallError,
@@ -22,6 +23,7 @@ from gymnasium.error import (
     NoAsyncCallError,
 )
 from gymnasium.vector.utils import CloudpickleWrapper, clear_mpi_env_vars
+from jaxtyping import Bool, Float, Shaped
 from numpy.typing import ArrayLike
 from pettingzoo import ParallelEnv
 
@@ -44,6 +46,12 @@ SharedMemoryArray: TypeAlias = "SynchronizedArray[Any]"
 SharedMemoryType: TypeAlias = (
     "SharedMemoryArray | tuple[SharedMemoryArray, ...] | dict[str, SharedMemoryArray]"
 )
+# The flat ``np.frombuffer`` view over one agent's ctypes buffer, sized
+# ``num_envs * prod(obs_shape)``; ``reshape_observation`` batches it.
+FlatSharedObsArray = Shaped[npt.NDArray, " num_envs_times_obs_size"]
+# ``get_placeholder_value``'s NaN fill, before the space's dtype is applied by
+# ``write_vector_observation``.
+PlaceholderObsArray = Float[npt.NDArray[np.float64], "*obs_shape"]
 
 
 def reshape_observation(
@@ -643,7 +651,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
                 array[env_num] = value
 
             # Get the array mask and if it doesn't already exist then create a zero bool array
-            array_mask = vector_infos.get(
+            array_mask: Bool[npt.NDArray[np.bool_], " num_envs"] = vector_infos.get(
                 f"_{key}",
                 np.zeros(self.num_envs, dtype=bool),
             )
@@ -790,7 +798,13 @@ def get_placeholder_value(
     agent: str,
     transition_name: str,
     obs_spaces: dict[str, spaces.Space] | None = None,
-) -> NumpyObsType | float | None:
+) -> (
+    dict[str, PlaceholderObsArray]
+    | tuple[PlaceholderObsArray, ...]
+    | PlaceholderObsArray
+    | float
+    | None
+):
     """Obtain a placeholder value to return for associated experience when an
     agent is killed or is inactive for the current step.
 
@@ -802,7 +816,8 @@ def get_placeholder_value(
     :type obs_spaces: dict[str, gymnasium.spaces.Space]
 
     :return: Placeholder value
-    :rtype: Any
+    :rtype: dict[str, PlaceholderObsArray] | tuple[PlaceholderObsArray, ...] |
+        PlaceholderObsArray | float | None
     """
     if transition_name == "reward":
         return np.nan
@@ -878,7 +893,9 @@ def write_vector_observation(
     assert shape is not None  # flat spaces carry a shape
     size = int(np.prod(shape))
     dtype = obs_space.dtype
-    dest = np.frombuffer(memoryview(shared_memory.get_obj()), dtype=dtype)
+    dest: FlatSharedObsArray = np.frombuffer(
+        memoryview(shared_memory.get_obj()), dtype=dtype
+    )
     np.copyto(
         dest[index * size : (index + 1) * size],
         np.asarray(observation, dtype=dtype).flatten(),

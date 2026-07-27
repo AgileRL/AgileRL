@@ -204,6 +204,47 @@ TokenIds = Int[torch.Tensor, "batch seq"]
 IndexTensor = Int[torch.Tensor, " batch"]
 HiddenStateDict = dict[str, Float[torch.Tensor, "num_layers batch hidden_size"]]
 
+# Actions, as the policy emits them and as the algorithms consume them.
+DiscreteActionArray = Int[npt.NDArray[np.int64], " num_envs"]
+ContinuousActionArray = Float[npt.NDArray[np.float32], "num_envs action_dim"]
+PolicyActionArray = Shaped[npt.NDArray, "num_envs ..."]
+ActionBoundTensor = Float[torch.Tensor, " action_dim"]
+SampledAction = Shaped[torch.Tensor, "batch *action_dim"]
+ActionEntropy = Float[torch.Tensor, " batch"]
+# Distribution masks are per action dimension; the LLM algorithms mask per token
+# position instead, which is ``TokenActionMask`` — the two are not interchangeable.
+ActionMaskTensor = Bool[torch.Tensor, "batch action_dim"]
+TokenActionMask = Bool[torch.Tensor, "batch action_seq"]
+
+# Ornstein-Uhlenbeck exploration noise, shared by DDPG and TD3.
+NoiseParamArray = Shaped[npt.NDArray[Any], "vect_noise_dim action_dim"]
+NoiseStateArray = Float[npt.NDArray[np.float64], "vect_noise_dim action_dim"]
+ExplorationNoiseArray = Float[npt.NDArray[np.float32], "vect_noise_dim action_dim"]
+NoiseTensor = Float[torch.Tensor, "vect_noise_dim action_dim"]
+
+# Per-agent minibatch leaves, shared by MADDPG and MATD3.
+PerAgentActionTensor = Float[torch.Tensor, "batch action_dim"]
+PerAgentRewardTensor = Float[torch.Tensor, "batch 1"]
+PerAgentDoneTensor = Shaped[torch.Tensor, "batch 1"]
+StackedActionsTensor = Float[torch.Tensor, "batch total_action_dim"]
+
+# Episode bookkeeping and the fitness rows the tournament ranks on.
+EpisodeScoreMatrix = Float[
+    np.ndarray[tuple[int, int], np.dtype[np.float64]], "num_envs num_agents"
+]
+EpisodeFinishedArray = Float[np.ndarray[tuple[int], np.dtype[np.float64]], " num_envs"]
+FitnessRow = Float[npt.NDArray[np.float64], " num_agents"]
+
+# Bandit posterior over the flattened network parameters.
+PosteriorTensor = Float[torch.Tensor, "numel numel"]
+ParamVector = Float[torch.Tensor, " numel"]
+GradientMatrix = Float[torch.Tensor, "action_dim numel"]
+
+# Encoder output consumed by the network heads.
+LatentTensor = Float[torch.Tensor, "batch latent_dim"]
+# Channels-first image, batched or not.
+ImageTensor = Shaped[torch.Tensor, "... channels height width"]
+
 # ── Array / tensor container aliases ─────────────────────────────────────────
 ArrayOrTensor = npt.NDArray | torch.Tensor
 # Plain dict of tensors (the tensor twin of ``ArrayDict``); distinct from the

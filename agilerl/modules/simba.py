@@ -1,10 +1,16 @@
 from typing import Any
 
+import numpy.typing as npt
 import torch
+from jaxtyping import Float, Shaped
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
-from agilerl.typing import DeviceType, MutationApplyDict, ObservationType
+from agilerl.typing import DeviceType, MutationApplyDict
 from agilerl.utils.evolvable_networks import create_simba
+
+VectorInput = (
+    Shaped[npt.NDArray, "*batch num_inputs"] | Shaped[torch.Tensor, "*batch num_inputs"]
+)
 
 
 class EvolvableSimBa(EvolvableModule):
@@ -101,13 +107,13 @@ class EvolvableSimBa(EvolvableModule):
 
         return net_config
 
-    def forward(self, x: ObservationType) -> torch.Tensor:
+    def forward(self, x: VectorInput) -> Float[torch.Tensor, "batch num_outputs"]:
         """Return output of neural network.
 
         :param x: Neural network input
-        :type x: torch.Tensor
+        :type x: VectorInput
         :return: Neural network output
-        :rtype: torch.Tensor
+        :rtype: Float[torch.Tensor, "batch num_outputs"]
         """
         if not isinstance(x, torch.Tensor):
             x = torch.tensor(x, dtype=torch.float32, device=self.device)

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Literal, overload
 
 import numpy as np
@@ -10,19 +9,35 @@ import numpy.typing as npt
 from gymnasium import Env, spaces
 from gymnasium.vector import VectorEnv
 from gymnasium.vector.utils import batch_space
+from jaxtyping import Num, Shaped
 
 from agilerl.typing import (
     ActionType,
-    ArrayOrTensor,
+    EnvDoneArray,
     InfosDict,
     NumpyObsType,
     PzStepReturn,
 )
-from agilerl.vector.pz_vec_env import PettingZooVecEnv
+from agilerl.vector.pz_vec_env import (
+    PettingZooVecEnv,
+    VecActionArray,
+    VecActionMapping,
+)
 
 if TYPE_CHECKING:
     from gymnasium.core import RenderFrame
     from pettingzoo import ParallelEnv
+
+# A batched observation, leading axis ``num_envs`` (always 1 here), carrying the
+# wrapped env's ``observation_space.dtype``.
+VecObsArray = Shaped[npt.NDArray, "num_envs *obs_shape"]
+# One unbatched observation, carrying the agent's ``observation_space.dtype``.
+SingleObsArray = Shaped[npt.NDArray, "*obs_shape"]
+# Per-env reward row. Integer for an env with integer rewards, float otherwise.
+VecRewardArray = Num[np.ndarray[tuple[int], np.dtype[np.number]], " num_envs"]
+# Per-env terminated/truncated row in the multi-agent path: bool, or float64 when
+# an inactive agent's NaN placeholder upcasts the row.
+VecDoneArray = Shaped[np.ndarray[tuple[int], np.dtype[np.generic]], " num_envs"]
 
 
 class DummyVecEnv(VectorEnv):
@@ -58,7 +73,7 @@ class DummyVecEnv(VectorEnv):
         *,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[npt.NDArray, dict[str, Any]]:
+    ) -> tuple[VecObsArray, dict[str, Any]]:
         """Reset the environment and return batched observation.
 
         :param seed: Random seed for the reset.
@@ -66,15 +81,15 @@ class DummyVecEnv(VectorEnv):
         :param options: Additional options for the reset.
         :type options: dict[str, Any] | None
         :returns: A tuple of ``(obs, info)`` with a leading batch dim on *obs*.
-        :rtype: tuple[npt.NDArray, dict[str, Any]]
+        :rtype: tuple[VecObsArray, dict[str, Any]]
         """
         obs, info = self._env.reset(seed=seed, options=options)
         self._autoreset = False
         return np.expand_dims(obs, axis=0), info
 
     def step(
-        self, actions: npt.NDArray
-    ) -> tuple[npt.NDArray, npt.NDArray, npt.NDArray, npt.NDArray, dict[str, Any]]:
+        self, actions: VecActionArray
+    ) -> tuple[VecObsArray, VecRewardArray, EnvDoneArray, EnvDoneArray, dict[str, Any]]:
         """Take a step in the environment.
 
         If the previous step ended the episode, the environment is reset
@@ -82,10 +97,10 @@ class DummyVecEnv(VectorEnv):
         with zero reward and ``False`` done flags.
 
         :param actions: Batched action array (shape ``(1, ...)``).
-        :type actions: npt.NDArray
+        :type actions: VecActionArray
         :returns: A tuple of ``(obs, reward, terminated, truncated, info)``
             with leading batch dimensions.
-        :rtype: tuple[npt.NDArray, npt.NDArray, npt.NDArray, npt.NDArray, dict[str, Any]]
+        :rtype: tuple[VecObsArray, VecRewardArray, EnvDoneArray, EnvDoneArray, dict[str, Any]]
         """
         if self._autoreset:
             obs, info = self._env.reset()
@@ -139,7 +154,7 @@ def _pz_placeholder(
     agent: str,
     name: Literal["observation"],
     obs_spaces: dict[str, spaces.Space],
-) -> npt.NDArray: ...
+) -> SingleObsArray: ...
 
 
 @overload
@@ -147,14 +162,14 @@ def _pz_placeholder(
     agent: str,
     name: str,
     obs_spaces: dict[str, spaces.Space],
-) -> float | dict[str, Any] | npt.NDArray: ...
+) -> float | dict[str, Any] | SingleObsArray: ...
 
 
 def _pz_placeholder(
     agent: str,
     name: str,
     obs_spaces: dict[str, spaces.Space],
-) -> float | dict[str, Any] | npt.NDArray:
+) -> float | dict[str, Any] | SingleObsArray:
     """Return a NaN/zero placeholder for an inactive PettingZoo agent."""
     if name in ("reward", "terminated", "truncated"):
         return np.nan
@@ -235,7 +250,7 @@ class PzDummyVecEnv(PettingZooVecEnv):
 
     def step(
         self,
-        actions: Mapping[str, ArrayOrTensor],
+        actions: VecActionMapping,
         *args: Any,
         **kwargs: Any,
     ) -> PzStepReturn:
@@ -244,7 +259,7 @@ class PzDummyVecEnv(PettingZooVecEnv):
         :param actions: Dict of batched actions per agent, each with shape
             ``(1, ...)``.  Values may be arrays or tensors (converted via
             ``np.asarray``).  NaN actions are filtered (agent treated as inactive).
-        :type actions: Mapping[str, ArrayOrTensor]
+        :type actions: VecActionMapping
         :returns: ``(obs, rewards, terminated, truncated, info)`` with leading
             batch dimension of 1 on all per-agent arrays.
         :rtype: PzStepReturn
@@ -264,9 +279,9 @@ class PzDummyVecEnv(PettingZooVecEnv):
 
         # Batch all outputs, filling placeholders for inactive agents
         batched_obs: dict[str, NumpyObsType] = {}
-        batched_reward: dict[str, npt.NDArray] = {}
-        batched_terminated: dict[str, npt.NDArray] = {}
-        batched_truncated: dict[str, npt.NDArray] = {}
+        batched_reward: dict[str, VecRewardArray] = {}
+        batched_terminated: dict[str, VecDoneArray] = {}
+        batched_truncated: dict[str, VecDoneArray] = {}
 
         for agent in self.agents:
             if agent in obs:
@@ -330,7 +345,7 @@ class PzDummyVecEnv(PettingZooVecEnv):
         :rtype: PzStepReturn
         """
         if self._pending_actions is not None:
-            actions_dict: dict[str, npt.NDArray] = {}
+            actions_dict: dict[str, VecActionArray] = {}
             for agent in self.agents:
                 vals = [
                     env_actions.get(agent, np.nan)

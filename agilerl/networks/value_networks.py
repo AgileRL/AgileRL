@@ -2,12 +2,15 @@ from dataclasses import asdict
 
 import torch
 from gymnasium import spaces
+from jaxtyping import Float
 
 from agilerl.modules import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.networks.base import EvolvableNetwork, preserve_parameters
-from agilerl.typing import DeviceType, NetConfigType, TorchObsType
+from agilerl.typing import DeviceType, HiddenStateDict, NetConfigType, TorchObsType
+
+StateValue = Float[torch.Tensor, "batch 1"]
 
 
 class ValueNetwork(EvolvableNetwork):
@@ -105,16 +108,16 @@ class ValueNetwork(EvolvableNetwork):
     def forward(
         self,
         x: TorchObsType,
-        hidden_state: dict[str, torch.Tensor] | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        hidden_state: HiddenStateDict | None = None,
+    ) -> StateValue | tuple[StateValue, HiddenStateDict]:
         """Forward pass of the network.
 
         :param x: Input tensor.
         :type x: torch.Tensor, dict[str, torch.Tensor], or list[torch.Tensor]
         :param hidden_state: Hidden states for recurrent networks, defaults to None.
-        :type hidden_state: dict[str, torch.Tensor] | None
+        :type hidden_state: HiddenStateDict | None
         :return: Output tensor, and (for recurrent networks) the next hidden-state dict.
-        :rtype: torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]
+        :rtype: StateValue | tuple[StateValue, HiddenStateDict]
         """
         if self.recurrent:
             latent, next_hidden = self.extract_features(x, hidden_state=hidden_state)

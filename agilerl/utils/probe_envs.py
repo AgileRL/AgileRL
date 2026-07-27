@@ -6,21 +6,30 @@ import numpy as np
 import numpy.typing as npt
 import torch
 from gymnasium import spaces
+from jaxtyping import Float
 from tqdm import trange
 
 from agilerl.components.data import Transition, transition_to_tensordict
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.rollouts import collect_rollouts
+from agilerl.typing import NumArray
+
+ProbeImageObsType = Float[
+    np.ndarray[tuple[int, int, int], np.dtype[np.float64]], "channels height width"
+]
+ProbeDictObsType = dict[str, int | ProbeImageObsType]
+ProbeActionType = int | NumArray
+ProbeContActionType = Float[npt.NDArray[np.float32], " action_dim"]
 
 
 class ProbeEnv(gym.Env[Any, Any]):
     """Base class for probe environments."""
 
-    sample_obs: list[Any]
+    sample_obs: list[NumArray | dict[str, Any]]
     sample_actions: list[Any]
-    q_values: list[Any] | npt.NDArray
-    v_values: list[Any]
-    policy_values: list[Any]
+    q_values: list[Any] | Float[npt.NDArray[np.float64], "num_states num_actions"]
+    v_values: list[list[float] | None]
+    policy_values: list[list[float] | None]
 
 
 class ConstantRewardEnv(ProbeEnv):
@@ -34,7 +43,7 @@ class ConstantRewardEnv(ProbeEnv):
 
     def step(
         self,
-        action: int | npt.NDArray,
+        action: ProbeActionType,
     ) -> tuple[int, float, bool, bool, dict[str, Any]]:
         observation = 0
         reward = 1  # Constant reward of 1
@@ -64,8 +73,8 @@ class ConstantRewardImageEnv(ProbeEnv):
 
     def step(
         self,
-        action: int | npt.NDArray,
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        action: ProbeActionType,
+    ) -> tuple[ProbeImageObsType, float, bool, bool, dict[str, Any]]:
         observation = np.zeros((1, 3, 3))
         reward = 1  # Constant reward of 1
         terminated = True
@@ -77,7 +86,7 @@ class ConstantRewardImageEnv(ProbeEnv):
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[ProbeImageObsType, dict[str, Any]]:
         observation = np.zeros((1, 3, 3))
         info = {}
         return observation, info
@@ -96,8 +105,8 @@ class ConstantRewardDictEnv(ProbeEnv):
 
     def step(
         self,
-        action: int | npt.NDArray,
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        action: ProbeActionType,
+    ) -> tuple[ProbeDictObsType, float, bool, bool, dict[str, Any]]:
         observation = {"discrete": 0, "box": np.zeros((1, 3, 3))}
         reward = 1  # Constant reward of 1
         terminated = True
@@ -109,7 +118,7 @@ class ConstantRewardDictEnv(ProbeEnv):
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[ProbeDictObsType, dict[str, Any]]:
         observation = {"discrete": 0, "box": np.zeros((1, 3, 3))}
         info = {}
         return observation, info
@@ -127,7 +136,7 @@ class ConstantRewardContActionsEnv(ProbeEnv):
 
     def step(
         self,
-        action: int | npt.NDArray,
+        action: ProbeActionType,
     ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
         observation = 0
         reward = 1  # Constant reward of 1
@@ -158,8 +167,8 @@ class ConstantRewardContActionsImageEnv(ProbeEnv):
 
     def step(
         self,
-        action: int | npt.NDArray,
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        action: ProbeActionType,
+    ) -> tuple[ProbeImageObsType, float, bool, bool, dict[str, Any]]:
         observation = np.zeros((1, 3, 3))
         reward = 1  # Constant reward of 1
         terminated = True
@@ -171,7 +180,7 @@ class ConstantRewardContActionsImageEnv(ProbeEnv):
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[ProbeImageObsType, dict[str, Any]]:
         observation = np.zeros((1, 3, 3))
         info = {}
         return observation, info
@@ -191,8 +200,8 @@ class ConstantRewardContActionsDictEnv(ProbeEnv):
 
     def step(
         self,
-        action: int | npt.NDArray,
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        action: ProbeActionType,
+    ) -> tuple[ProbeDictObsType, float, bool, bool, dict[str, Any]]:
         observation = {"discrete": 0, "box": np.zeros((1, 3, 3))}
         reward = 1  # Constant reward of 1
         terminated = True
@@ -204,7 +213,7 @@ class ConstantRewardContActionsDictEnv(ProbeEnv):
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[ProbeDictObsType, dict[str, Any]]:
         observation = {"discrete": 0, "box": np.zeros((1, 3, 3))}
         info = {}
         return observation, info
@@ -221,7 +230,7 @@ class ObsDependentRewardEnv(ProbeEnv):
 
     def step(
         self,
-        action: int | npt.NDArray,
+        action: ProbeActionType,
     ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
         observation = self.last_obs
         reward = -1 if self.last_obs == 0 else 1  # Reward depends on observation
@@ -244,15 +253,15 @@ class ObsDependentRewardImageEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Box(0.0, 1.0, (1, 3, 3))
         self.action_space = spaces.Discrete(1)
-        self.last_obs = np.ones((1, 3, 3))
+        self.last_obs: ProbeImageObsType = np.ones((1, 3, 3))
         self.sample_obs = [np.zeros((1, 1, 3, 3)), np.ones((1, 1, 3, 3))]
         self.q_values = [[-1.0], [1.0]]  # Correct Q values to learn, s x a table
         self.v_values = [[-1.0], [1.0]]  # Correct V values to learn, s table
 
     def step(
         self,
-        action: int | npt.NDArray,
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        action: ProbeActionType,
+    ) -> tuple[ProbeImageObsType, float, bool, bool, dict[str, Any]]:
         observation = self.last_obs
         reward = (
             -1 if np.mean(self.last_obs) == 0.0 else 1
@@ -266,7 +275,7 @@ class ObsDependentRewardImageEnv(ProbeEnv):
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[ProbeImageObsType, dict[str, Any]]:
         self.last_obs = random.choice([np.zeros((1, 3, 3)), np.ones((1, 3, 3))])
         info = {}
         return self.last_obs, info
@@ -278,7 +287,7 @@ class ObsDependentRewardDictEnv(ProbeEnv):
             {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 1.0, (1, 3, 3))},
         )
         self.action_space = spaces.Discrete(1)
-        self.last_obs = {"discrete": 1, "box": np.ones((1, 3, 3))}
+        self.last_obs: ProbeDictObsType = {"discrete": 1, "box": np.ones((1, 3, 3))}
         self.sample_obs = [
             {
                 "discrete": [np.array([[0]]), np.array([[1]])],
@@ -290,8 +299,8 @@ class ObsDependentRewardDictEnv(ProbeEnv):
 
     def step(
         self,
-        action: int | npt.NDArray,
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        action: ProbeActionType,
+    ) -> tuple[ProbeDictObsType, float, bool, bool, dict[str, Any]]:
         observation = {
             "discrete": self.last_obs["discrete"],
             "box": self.last_obs["box"],
@@ -308,7 +317,7 @@ class ObsDependentRewardDictEnv(ProbeEnv):
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[ProbeDictObsType, dict[str, Any]]:
         self.last_obs = {
             "discrete": random.choice([0, 1]),
             "box": random.choice([np.zeros((1, 3, 3)), np.ones((1, 3, 3))]),
@@ -330,7 +339,7 @@ class ObsDependentRewardContActionsEnv(ProbeEnv):
 
     def step(
         self,
-        action: int | npt.NDArray,
+        action: ProbeActionType,
     ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
         observation = self.last_obs
         reward = -1 if self.last_obs == 0 else 1  # Reward depends on observation
@@ -353,7 +362,7 @@ class ObsDependentRewardContActionsImageEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Box(0.0, 1.0, (1, 3, 3))
         self.action_space = spaces.Box(0.0, 1.0, (1,))
-        self.last_obs = np.ones((1, 3, 3))
+        self.last_obs: ProbeImageObsType = np.ones((1, 3, 3))
         self.sample_obs = [np.zeros((1, 1, 3, 3)), np.ones((1, 1, 3, 3))]
         self.sample_actions = [[[1.0]], [[1.0]]]
         self.q_values = [[-1.0], [1.0]]  # Correct Q values to learn, s x a table
@@ -362,8 +371,8 @@ class ObsDependentRewardContActionsImageEnv(ProbeEnv):
 
     def step(
         self,
-        action: int | npt.NDArray,
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        action: ProbeActionType,
+    ) -> tuple[ProbeImageObsType, float, bool, bool, dict[str, Any]]:
         observation = self.last_obs
         reward = (
             -1 if np.mean(self.last_obs) == 0.0 else 1
@@ -377,7 +386,7 @@ class ObsDependentRewardContActionsImageEnv(ProbeEnv):
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[ProbeImageObsType, dict[str, Any]]:
         self.last_obs = random.choice([np.zeros((1, 3, 3)), np.ones((1, 3, 3))])
         info = {}
         return self.last_obs, info
@@ -389,7 +398,7 @@ class ObsDependentRewardContActionsDictEnv(ProbeEnv):
             {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 1.0, (1, 3, 3))},
         )
         self.action_space = spaces.Box(0.0, 1.0, (1,))
-        self.last_obs = {"discrete": 1, "box": np.ones((1, 3, 3))}
+        self.last_obs: ProbeDictObsType = {"discrete": 1, "box": np.ones((1, 3, 3))}
         self.sample_obs = [
             {
                 "discrete": [np.array([[0]]), np.array([[1]])],
@@ -403,8 +412,8 @@ class ObsDependentRewardContActionsDictEnv(ProbeEnv):
 
     def step(
         self,
-        action: int | npt.NDArray,
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        action: ProbeActionType,
+    ) -> tuple[ProbeDictObsType, float, bool, bool, dict[str, Any]]:
         observation = {
             "discrete": self.last_obs["discrete"],
             "box": self.last_obs["box"],
@@ -421,7 +430,7 @@ class ObsDependentRewardContActionsDictEnv(ProbeEnv):
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[ProbeDictObsType, dict[str, Any]]:
         self.last_obs = {
             "discrete": random.choice([0, 1]),
             "box": random.choice([np.zeros((1, 3, 3)), np.ones((1, 3, 3))]),
@@ -441,7 +450,7 @@ class DiscountedRewardEnv(ProbeEnv):
 
     def step(
         self,
-        action: int | npt.NDArray,
+        action: ProbeActionType,
     ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
         observation = 1
         reward = self.last_obs  # Reward depends on observation
@@ -465,15 +474,15 @@ class DiscountedRewardImageEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Box(0.0, 1.0, (1, 3, 3))
         self.action_space = spaces.Discrete(1)
-        self.last_obs = np.zeros((1, 3, 3))
+        self.last_obs: ProbeImageObsType = np.zeros((1, 3, 3))
         self.sample_obs = [np.zeros((1, 1, 3, 3)), np.ones((1, 1, 3, 3))]
         self.q_values = [[0.99], [1.0]]  # Correct Q values to learn, s x a table
         self.v_values = [[0.99], [1.0]]  # Correct V values to learn, s table
 
     def step(
         self,
-        action: int | npt.NDArray,
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        action: ProbeActionType,
+    ) -> tuple[ProbeImageObsType, float, bool, bool, dict[str, Any]]:
         observation = np.ones((1, 3, 3))
         reward = float(np.mean(self.last_obs))  # Reward depends on observation
         terminated = bool(int(np.mean(self.last_obs)))  # Terminate after second step
@@ -486,7 +495,7 @@ class DiscountedRewardImageEnv(ProbeEnv):
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[ProbeImageObsType, dict[str, Any]]:
         self.last_obs = np.zeros((1, 3, 3))
         info = {}
         return self.last_obs, info
@@ -498,7 +507,7 @@ class DiscountedRewardDictEnv(ProbeEnv):
             {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 1.0, (1, 3, 3))},
         )
         self.action_space = spaces.Discrete(1)
-        self.last_obs = {"discrete": 0, "box": np.zeros((1, 3, 3))}
+        self.last_obs: ProbeDictObsType = {"discrete": 0, "box": np.zeros((1, 3, 3))}
         self.sample_obs = [
             {
                 "discrete": [np.array([[0]]), np.array([[1]])],
@@ -510,8 +519,8 @@ class DiscountedRewardDictEnv(ProbeEnv):
 
     def step(
         self,
-        action: int | npt.NDArray,
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        action: ProbeActionType,
+    ) -> tuple[ProbeDictObsType, float, bool, bool, dict[str, Any]]:
         observation = {"discrete": 1, "box": np.ones((1, 3, 3))}
         reward = float(
             np.mean(self.last_obs["box"]) + self.last_obs["discrete"]
@@ -528,7 +537,7 @@ class DiscountedRewardDictEnv(ProbeEnv):
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[ProbeDictObsType, dict[str, Any]]:
         self.last_obs = {"discrete": 0, "box": np.zeros((1, 3, 3))}
         info = {}
         return self.last_obs, info
@@ -547,7 +556,7 @@ class DiscountedRewardContActionsEnv(ProbeEnv):
 
     def step(
         self,
-        action: int | npt.NDArray,
+        action: ProbeActionType,
     ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
         observation = 1
         reward = self.last_obs  # Reward depends on observation
@@ -571,7 +580,7 @@ class DiscountedRewardContActionsImageEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Box(0.0, 1.0, (1, 3, 3))
         self.action_space = spaces.Box(0.0, 1.0, (1,))
-        self.last_obs = np.zeros((1, 3, 3))
+        self.last_obs: ProbeImageObsType = np.zeros((1, 3, 3))
         self.sample_obs = [np.zeros((1, 1, 3, 3)), np.ones((1, 1, 3, 3))]
         self.sample_actions = [[[1.0]], [[1.0]]]
         self.q_values = [[0.99], [1.0]]  # Correct Q values to learn, s x a table
@@ -580,8 +589,8 @@ class DiscountedRewardContActionsImageEnv(ProbeEnv):
 
     def step(
         self,
-        action: int | npt.NDArray,
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        action: ProbeActionType,
+    ) -> tuple[ProbeImageObsType, float, bool, bool, dict[str, Any]]:
         observation = np.ones((1, 3, 3))
         reward = float(np.mean(self.last_obs))  # Reward depends on observation
         terminated = bool(int(np.mean(self.last_obs)))  # Terminate after second step
@@ -594,7 +603,7 @@ class DiscountedRewardContActionsImageEnv(ProbeEnv):
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[ProbeImageObsType, dict[str, Any]]:
         self.last_obs = np.zeros((1, 3, 3))
         info = {}
         return self.last_obs, info
@@ -606,7 +615,7 @@ class DiscountedRewardContActionsDictEnv(ProbeEnv):
             {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 1.0, (1, 3, 3))},
         )
         self.action_space = spaces.Box(0.0, 1.0, (1,))
-        self.last_obs = {"discrete": 0, "box": np.zeros((1, 3, 3))}
+        self.last_obs: ProbeDictObsType = {"discrete": 0, "box": np.zeros((1, 3, 3))}
         self.sample_obs = [
             {"discrete": np.array([[0]]), "box": np.zeros((1, 1, 3, 3))},
             {"discrete": np.array([[1]]), "box": np.ones((1, 1, 3, 3))},
@@ -618,8 +627,8 @@ class DiscountedRewardContActionsDictEnv(ProbeEnv):
 
     def step(
         self,
-        action: int | npt.NDArray,
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        action: ProbeActionType,
+    ) -> tuple[ProbeDictObsType, float, bool, bool, dict[str, Any]]:
         observation = {"discrete": 1, "box": np.ones((1, 3, 3))}
         reward = float(
             np.mean(self.last_obs["box"]) + self.last_obs["discrete"]
@@ -636,7 +645,7 @@ class DiscountedRewardContActionsDictEnv(ProbeEnv):
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[ProbeDictObsType, dict[str, Any]]:
         self.last_obs = {"discrete": 0, "box": np.zeros((1, 3, 3))}
         info = {}
         return self.last_obs, info
@@ -653,7 +662,7 @@ class FixedObsPolicyEnv(ProbeEnv):
 
     def step(
         self,
-        action: int | npt.NDArray,
+        action: ProbeActionType,
     ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
         if isinstance(action, (np.ndarray, list)):
             action = int(np.asarray(action)[0])
@@ -685,8 +694,8 @@ class FixedObsPolicyImageEnv(ProbeEnv):
 
     def step(
         self,
-        action: int | npt.NDArray,
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        action: ProbeActionType,
+    ) -> tuple[ProbeImageObsType, float, bool, bool, dict[str, Any]]:
         observation = np.zeros((1, 3, 3))
         if isinstance(action, (np.ndarray, list)):
             action = int(np.asarray(action)[0])
@@ -700,7 +709,7 @@ class FixedObsPolicyImageEnv(ProbeEnv):
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[ProbeImageObsType, dict[str, Any]]:
         observation = np.zeros((1, 3, 3))
         info = {}
         return observation, info
@@ -719,8 +728,8 @@ class FixedObsPolicyDictEnv(ProbeEnv):
 
     def step(
         self,
-        action: int | npt.NDArray,
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        action: ProbeActionType,
+    ) -> tuple[ProbeDictObsType, float, bool, bool, dict[str, Any]]:
         observation = {"discrete": 0, "box": np.zeros((1, 3, 3))}
         if isinstance(action, (np.ndarray, list)):
             action = int(np.asarray(action)[0])
@@ -734,7 +743,7 @@ class FixedObsPolicyDictEnv(ProbeEnv):
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[ProbeDictObsType, dict[str, Any]]:
         observation = {"discrete": 0, "box": np.zeros((1, 3, 3))}
         info = {}
         return observation, info
@@ -752,7 +761,7 @@ class FixedObsPolicyContActionsEnv(ProbeEnv):
 
     def step(
         self,
-        action: npt.NDArray,
+        action: ProbeContActionType,
     ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
         observation = 0
         reward = -((1 - action[0]) ** 2)  # Reward depends on action
@@ -783,8 +792,8 @@ class FixedObsPolicyContActionsImageEnv(ProbeEnv):
 
     def step(
         self,
-        action: npt.NDArray,
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        action: ProbeContActionType,
+    ) -> tuple[ProbeImageObsType, float, bool, bool, dict[str, Any]]:
         observation = np.zeros((1, 3, 3))
         reward = -((1 - action[0]) ** 2)  # Reward depends on action
         terminated = True
@@ -796,7 +805,7 @@ class FixedObsPolicyContActionsImageEnv(ProbeEnv):
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[ProbeImageObsType, dict[str, Any]]:
         observation = np.zeros((1, 3, 3))
         info = {}
         return observation, info
@@ -816,8 +825,8 @@ class FixedObsPolicyContActionsDictEnv(ProbeEnv):
 
     def step(
         self,
-        action: npt.NDArray,
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        action: ProbeContActionType,
+    ) -> tuple[ProbeDictObsType, float, bool, bool, dict[str, Any]]:
         observation = {"discrete": 0, "box": np.zeros((1, 3, 3))}
         reward = -((1 - action[0]) ** 2)  # Reward depends on action
         terminated = True
@@ -829,7 +838,7 @@ class FixedObsPolicyContActionsDictEnv(ProbeEnv):
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[ProbeDictObsType, dict[str, Any]]:
         observation = {"discrete": 0, "box": np.zeros((1, 3, 3))}
         info = {}
         return observation, info
@@ -849,7 +858,7 @@ class PolicyEnv(ProbeEnv):
 
     def step(
         self,
-        action: int | npt.NDArray,
+        action: ProbeActionType,
     ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
         observation = self.last_obs
         reward = (
@@ -874,7 +883,7 @@ class PolicyImageEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Box(0.0, 1.0, (1, 3, 3))
         self.action_space = spaces.Discrete(2)
-        self.last_obs = np.ones((1, 3, 3))
+        self.last_obs: ProbeImageObsType = np.ones((1, 3, 3))
         self.sample_obs = [np.zeros((1, 1, 3, 3)), np.ones((1, 1, 3, 3))]
         self.q_values = [
             [1.0, -1.0],
@@ -884,8 +893,8 @@ class PolicyImageEnv(ProbeEnv):
 
     def step(
         self,
-        action: int | npt.NDArray,
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        action: ProbeActionType,
+    ) -> tuple[ProbeImageObsType, float, bool, bool, dict[str, Any]]:
         observation = self.last_obs
         reward = (
             1 if action == int(np.mean(self.last_obs)) else -1
@@ -899,7 +908,7 @@ class PolicyImageEnv(ProbeEnv):
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[ProbeImageObsType, dict[str, Any]]:
         self.last_obs = random.choice([np.zeros((1, 3, 3)), np.ones((1, 3, 3))])
         info = {}
         return self.last_obs, info
@@ -911,7 +920,7 @@ class PolicyDictEnv(ProbeEnv):
             {"discrete": spaces.Discrete(2), "box": spaces.Box(0.0, 1.0, (1, 3, 3))},
         )
         self.action_space = spaces.Discrete(2)
-        self.last_obs = {"discrete": 1, "box": np.ones((1, 3, 3))}
+        self.last_obs: ProbeDictObsType = {"discrete": 1, "box": np.ones((1, 3, 3))}
         self.sample_obs = [
             {"discrete": 0, "box": np.zeros((1, 3, 3))},
             {"discrete": 0, "box": np.ones((1, 3, 3))},
@@ -928,8 +937,8 @@ class PolicyDictEnv(ProbeEnv):
 
     def step(
         self,
-        action: int | npt.NDArray,
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        action: ProbeActionType,
+    ) -> tuple[ProbeDictObsType, float, bool, bool, dict[str, Any]]:
         if isinstance(action, (np.ndarray, list)):
             action = int(np.asarray(action)[0])
         observation = {
@@ -951,7 +960,7 @@ class PolicyDictEnv(ProbeEnv):
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[ProbeDictObsType, dict[str, Any]]:
         self.last_obs = {
             "discrete": random.choice([0, 1]),
             "box": random.choice([np.zeros((1, 3, 3)), np.ones((1, 3, 3))]),
@@ -973,7 +982,7 @@ class PolicyContActionsEnv(ProbeEnv):
 
     def step(
         self,
-        action: npt.NDArray,
+        action: ProbeContActionType,
     ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
         observation = self.last_obs
         if self.last_obs:  # last obs = 1, policy should be [0, 1]
@@ -999,7 +1008,7 @@ class PolicyContActionsImageEnvSimple(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Box(0.0, 1.0, (1, 3, 3))
         self.action_space = spaces.Box(0.0, 1.0, (1,))
-        self.last_obs = np.zeros((1, 3, 3))
+        self.last_obs: ProbeImageObsType = np.zeros((1, 3, 3))
         self.sample_obs = [
             np.zeros((1, 1, 3, 3)),
             np.zeros((1, 1, 3, 3)),
@@ -1018,8 +1027,8 @@ class PolicyContActionsImageEnvSimple(ProbeEnv):
 
     def step(
         self,
-        action: npt.NDArray,
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        action: ProbeContActionType,
+    ) -> tuple[ProbeImageObsType, float, bool, bool, dict[str, Any]]:
         observation = self.last_obs
         if int(np.mean(self.last_obs)):  # last obs = 1, policy should be [1]
             reward = -((1 - action[0]) ** 2)
@@ -1034,7 +1043,7 @@ class PolicyContActionsImageEnvSimple(ProbeEnv):
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[ProbeImageObsType, dict[str, Any]]:
         # self.last_obs = random.choice([np.zeros((1, 3, 3)), np.ones((1, 3, 3))])
         if int(np.mean(self.last_obs)):
             self.last_obs = np.zeros((1, 3, 3))
@@ -1049,7 +1058,7 @@ class PolicyContActionsImageEnv(ProbeEnv):
     def __init__(self) -> None:
         self.observation_space = spaces.Box(0.0, 1.0, (1, 3, 3))
         self.action_space = spaces.Box(0.0, 1.0, (2,))
-        self.last_obs = np.zeros((1, 3, 3))
+        self.last_obs: ProbeImageObsType = np.zeros((1, 3, 3))
         self.sample_obs = [np.zeros((1, 1, 3, 3)), np.ones((1, 1, 3, 3))]
         self.sample_actions = [np.array([[1.0, 0.0]]), np.array([[0.0, 1.0]])]
         self.q_values = [[0.0], [0.0]]  # Correct Q values to learn
@@ -1058,8 +1067,8 @@ class PolicyContActionsImageEnv(ProbeEnv):
 
     def step(
         self,
-        action: npt.NDArray,
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        action: ProbeContActionType,
+    ) -> tuple[ProbeImageObsType, float, bool, bool, dict[str, Any]]:
         observation = self.last_obs
         if int(np.mean(self.last_obs)):  # last obs = 1, policy should be [0, 1]
             reward = -((0 - action[0]) ** 2) - (1 - action[1]) ** 2
@@ -1074,7 +1083,7 @@ class PolicyContActionsImageEnv(ProbeEnv):
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[ProbeImageObsType, dict[str, Any]]:
         self.last_obs = random.choice([np.zeros((1, 3, 3)), np.ones((1, 3, 3))])
         info = {}
         return self.last_obs, info
@@ -1086,7 +1095,7 @@ class PolicyContActionsDictEnv(ProbeEnv):
             {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 1.0, (1, 3, 3))},
         )
         self.action_space = spaces.Box(0.0, 1.0, (2,))
-        self.last_obs = {"discrete": 0, "box": np.zeros((1, 3, 3))}
+        self.last_obs: ProbeDictObsType = {"discrete": 0, "box": np.zeros((1, 3, 3))}
         self.sample_obs = [
             {"discrete": np.array([[0]]), "box": np.zeros((1, 1, 3, 3))},
             {"discrete": np.array([[1]]), "box": np.ones((1, 1, 3, 3))},
@@ -1098,8 +1107,8 @@ class PolicyContActionsDictEnv(ProbeEnv):
 
     def step(
         self,
-        action: npt.NDArray,
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        action: ProbeContActionType,
+    ) -> tuple[ProbeDictObsType, float, bool, bool, dict[str, Any]]:
         observation = {
             "discrete": self.last_obs["discrete"],
             "box": self.last_obs["box"],
@@ -1119,7 +1128,7 @@ class PolicyContActionsDictEnv(ProbeEnv):
         self,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[ProbeDictObsType, dict[str, Any]]:
         self.last_obs = {
             "discrete": random.choice([0, 1]),
             "box": random.choice([np.zeros((1, 3, 3)), np.ones((1, 3, 3))]),
