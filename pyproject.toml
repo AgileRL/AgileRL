@@ -186,17 +186,16 @@ exclude = ["agilerl-arena", "agilerl/arena"]
 # directories during discovery).
 
 # The target ty checks against, for every entry point (the pre-commit hook,
-# which CI also runs). The `requires-python` floor, so use of APIs that only
-# exist above it is caught.
+# which CI also runs). The `requires-python` ceiling: only there do some
+# tensordict types resolve concretely instead of degrading to the gradual
+# `Unknown`, which — being assignable to anything — stops them being checked.
 #
-# Note this is the weaker of the two ends: at 3.10 some tensordict types
-# degrade to the gradual `Unknown`, which — being assignable to anything —
-# stops them being checked. Raising it to "3.13" checks those concretely
-# instead, at the cost of the floor check; both ends cannot be covered while
-# the version is set here, because the ty pre-commit hook takes no
-# `--python-version` argument.
+# Both ends cannot be covered from here, because the ty pre-commit hook takes
+# no `--python-version` argument. The ceiling is the end worth keeping: the
+# floor's concern is use of an API newer than 3.10, and that already fails the
+# 3.10 leg of the test matrix at import time.
 [tool.ty.environment]
-python-version = "3.10"
+python-version = "3.13"
 
 [tool.ty.src]
 include = ["agilerl", "agilerl/arena"]
