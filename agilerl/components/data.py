@@ -1,5 +1,4 @@
 import warnings
-from collections import OrderedDict
 from collections.abc import Iterator, Mapping
 from numbers import Number
 from typing import Any, SupportsFloat
@@ -30,22 +29,15 @@ def to_tensordict(
         return data.to(dtype=dtype)
 
     if isinstance(data, tuple):
-        assert all(isinstance(el, (torch.Tensor, np.ndarray, Number)) for el in data), (
-            "Expected all elements of the tuple to be torch.Tensor or np.ndarray."
-        )
-
-        new_data = OrderedDict()
+        td = TensorDict()
         for i, el in enumerate(data):
-            new_data[f"tuple_obs_{i}"] = el
+            td[f"tuple_obs_{i}"] = to_torch_tensor(el, dtype)
 
-        return TensorDict(new_data).to(dtype=dtype)
+        return td
 
     if is_str_keyed_dict(data):
         td = TensorDict()
         for key, value in data.items():
-            assert isinstance(value, (torch.Tensor, np.ndarray, Number)), (
-                "Expected all values of the dict to be torch.Tensor or np.ndarray."
-            )
             td[key] = to_torch_tensor(value, dtype)
 
         return td

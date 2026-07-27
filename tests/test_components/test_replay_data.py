@@ -93,7 +93,7 @@ class TestTransitionPostInit:
         assert "tuple_obs_1" in obs_td
 
     def test_transition_tuple_observation_invalid_element_raises(self):
-        with pytest.raises(AssertionError, match="Expected all elements of the tuple"):
+        with pytest.raises(TypeError):
             Transition(
                 obs=(np.array([1.0]), object()),
                 action=0,
@@ -139,7 +139,7 @@ class TestToTensordict:
         assert td.dtype == torch.float32
 
     def test_to_tensordict_dict_invalid_value_raises(self):
-        with pytest.raises(AssertionError, match="Expected all values of the dict"):
+        with pytest.raises(TypeError):
             to_tensordict({"a": np.array([1.0]), "b": "invalid"})
 
     def test_to_tensordict_tensordict_input_recasts_dtype(self):
