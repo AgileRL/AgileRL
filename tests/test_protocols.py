@@ -52,6 +52,7 @@ from agilerl.protocols import (
     PretrainedConfigProtocol,
     PreTrainedModelProtocol,
 )
+from agilerl.wrappers.agent import RSNorm
 from agilerl.wrappers.learning import BanditEnv
 from tests.helper_functions import (
     generate_dict_or_tuple_space,
@@ -492,32 +493,39 @@ class TestOptimizerConfig:
         _ = MutationRegistryProtocol.networks(reg)
 
 
-class TestNStepAgentProtocol:
-    """The prioritized-replay path must keep working for wrapped agents."""
+class TestNStepAgentAccess:
+    """The prioritized-replay path must keep working for wrapped agents.
 
-    def test_matches_rainbow_and_its_wrapper_but_not_dqn(self):
-        from agilerl.training.train_off_policy import NStepAgent
-        from agilerl.wrappers.agent import RSNorm
+    An agent wrapper is not a ``RainbowDQN`` instance; it proxies attributes
+    through to one. Narrowing that path with a runtime check would exclude it
+    (and from Python 3.12 a ``runtime_checkable`` Protocol check is a static
+    lookup, so it misses the proxy on every supported version).
+    """
 
-        obs = generate_random_box_space(shape=(4,))
-        act = generate_discrete_space(2)
-        rainbow = RainbowDQN(obs, act)
+    def test_wrapper_is_not_a_rainbow_instance(self):
+        rainbow = RainbowDQN(
+            generate_random_box_space(shape=(4,)), generate_discrete_space(2)
+        )
+        assert not isinstance(RSNorm(rainbow), RainbowDQN)
 
-        # A wrapper is not a RainbowDQN instance, but proxies `beta` to one, so
-        # the structural check must still select it for beta annealing.
-        assert isinstance(rainbow, NStepAgent)
-        assert isinstance(RSNorm(rainbow), NStepAgent)
-        assert not isinstance(DQN(obs, act), NStepAgent)
-
-    def test_wrapper_proxies_beta_writes_to_the_wrapped_agent(self):
-        from agilerl.wrappers.agent import RSNorm
+    def test_accessor_passes_wrapped_agents_through(self):
+        from agilerl.training.train_off_policy import _as_n_step_agent
 
         rainbow = RainbowDQN(
             generate_random_box_space(shape=(4,)), generate_discrete_space(2)
         )
         wrapper = RSNorm(rainbow)
+        assert _as_n_step_agent(wrapper) is wrapper
+
+    def test_wrapper_proxies_beta_reads_and_writes(self):
+        rainbow = RainbowDQN(
+            generate_random_box_space(shape=(4,)), generate_discrete_space(2)
+        )
+        wrapper = RSNorm(rainbow)
+        start = rainbow.beta
         wrapper.beta += 0.1
-        assert rainbow.beta == pytest.approx(0.5)
+        assert wrapper.beta == pytest.approx(start + 0.1)
+        assert rainbow.beta == pytest.approx(start + 0.1)
 
 
 class TestAgentWrapperProtocol:

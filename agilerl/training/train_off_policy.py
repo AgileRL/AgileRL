@@ -1,7 +1,7 @@
 import logging
 import warnings
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol
 
 import gymnasium as gym
 import numpy as np
@@ -43,14 +43,13 @@ PopulationType = list[SupportedOffPolicy]
 logger = logging.getLogger(__name__)
 
 
-@runtime_checkable
 class NStepAgent(Protocol):
     """A RainbowDQN-style agent that consumes n-step / prioritized batches.
 
     It is the only off-policy algorithm that anneals ``beta`` and whose
     ``learn`` accepts ``n_experiences``/``per`` and returns the indices and
-    priorities to write back. Narrowing the population's union to this interface
-    resolves the prioritized/n-step path.
+    priorities to write back. Reading the population's union through this
+    interface resolves the prioritized/n-step path.
     """
 
     batch_size: int
@@ -62,6 +61,21 @@ class NStepAgent(Protocol):
         n_experiences: TensorDict | None = None,
         per: bool = False,
     ) -> tuple[float, torch.Tensor | None, npt.NDArray | None]: ...
+
+
+# Reads the RainbowDQN-only members off a population member without a runtime
+# check. An ``isinstance`` here would reject an agent wrapper, which is not a
+# RainbowDQN but proxies these attributes through to one; from Python 3.12 a
+# ``runtime_checkable`` Protocol check is a static lookup, so it misses the
+# proxy as well. The caller has already established the prioritized/n-step path.
+if TYPE_CHECKING:
+
+    def _as_n_step_agent(agent: SupportedOffPolicy) -> NStepAgent: ...
+
+else:
+
+    def _as_n_step_agent(agent: SupportedOffPolicy) -> NStepAgent:
+        return agent
 
 
 def _learn_from_buffer(
@@ -78,17 +92,16 @@ def _learn_from_buffer(
     # Prioritized and n-step replay are the preserve of RainbowDQN: only it
     # anneals `beta`, accepts `n_experiences`/`per` in `learn`, returns indices
     # and priorities to write back, and pairs with a PrioritizedReplayBuffer.
-    # Narrowing to those concrete types resolves the whole block.
     if per:
-        assert isinstance(agent, NStepAgent)
+        n_step_agent = _as_n_step_agent(agent)
         assert isinstance(memory, PrioritizedReplayBuffer)
-        experiences = sample(agent.batch_size, agent.beta)
+        experiences = sample(n_step_agent.batch_size, n_step_agent.beta)
         n_step_experiences = (
             n_step_sampler.sample(experiences["idxs"])
             if n_step_sampler is not None
             else None
         )
-        _loss, idxs, priorities = agent.learn(
+        _loss, idxs, priorities = n_step_agent.learn(
             experiences,
             n_experiences=n_step_experiences,
             per=per,
@@ -102,9 +115,8 @@ def _learn_from_buffer(
             return_idx=n_step_memory is not None,
         )
         if n_step_sampler is not None:
-            assert isinstance(agent, NStepAgent)
             n_step_experiences = n_step_sampler.sample(experiences["idxs"])
-            agent.learn(experiences, n_experiences=n_step_experiences)
+            _as_n_step_agent(agent).learn(experiences, n_experiences=n_step_experiences)
         else:
             agent.learn(experiences)
 
@@ -392,16 +404,15 @@ def train_off_policy(
                 else:
                     memory.add(transition)
 
-                # `beta` is annealed only by RainbowDQN-style agents, the ones
-                # using prioritized replay (`per`). The structural check also
-                # holds for a wrapped agent, whose class is not RainbowDQN but
-                # which proxies `beta` through to it.
-                if per and isinstance(agent, NStepAgent):
+                # `beta` is annealed only under prioritized replay, which is
+                # RainbowDQN's preserve.
+                if per:
                     fraction = min(
                         ((agent.metrics.steps + idx_step + 1) * num_envs / max_steps),
                         1.0,
                     )
-                    agent.beta += fraction * (1.0 - agent.beta)
+                    n_step_agent = _as_n_step_agent(agent)
+                    n_step_agent.beta += fraction * (1.0 - n_step_agent.beta)
 
                 # Learn according to learning frequency
                 # Handle learn_step > num_envs

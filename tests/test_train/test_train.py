@@ -910,8 +910,8 @@ def _instrument_callable_methods(agent, *method_names):
 
 @pytest.fixture
 def mocked_agent_off_policy(env, algo):
-    # Concrete DummyAgentOffPolicy satisfies runtime_checkable `NStepAgent`
-    # (batch_size, beta, learn) under isinstance on all supported CPythons.
+    # DummyAgentOffPolicy provides the `NStepAgent` members (batch_size, beta,
+    # learn) that the prioritized/n-step path reads.
     if algo == RainbowDQN:
         agent = DummyAgentOffPolicy(5, env, 0.4, algo="Rainbow DQN")
         agent.action_dim = 2
