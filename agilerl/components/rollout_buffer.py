@@ -24,14 +24,7 @@ from agilerl.utils.algo_utils import (
 
 
 def _narrow_leaf(value: object) -> torch.Tensor | TensorDict:
-    """Narrow a TensorDict child to the tensor or sub-collection it holds.
-
-    ``TensorDict.get()``/``.items()`` are typed to return ``Tensor |
-    TensorCollection | Unknown``, so consumers that need the concrete stored
-    type must narrow. This is the single seam for that (rather than repeating
-    the check at every call site); the invariant is that a leaf is either a
-    tensor or a nested ``TensorDict``.
-    """
+    """Narrow a TensorDict child to the tensor or sub-collection it holds."""
     if isinstance(value, TensorDict):
         return value
     assert isinstance(value, torch.Tensor), (

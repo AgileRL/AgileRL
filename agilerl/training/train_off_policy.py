@@ -63,11 +63,6 @@ class NStepAgent(Protocol):
     ) -> tuple[float, torch.Tensor | None, npt.NDArray | None]: ...
 
 
-# Reads the RainbowDQN-only members off a population member without a runtime
-# check. An ``isinstance`` here would reject an agent wrapper, which is not a
-# RainbowDQN but proxies these attributes through to one; from Python 3.12 a
-# ``runtime_checkable`` Protocol check is a static lookup, so it misses the
-# proxy as well. The caller has already established the prioritized/n-step path.
 if TYPE_CHECKING:
 
     def _as_n_step_agent(agent: SupportedOffPolicy) -> NStepAgent: ...

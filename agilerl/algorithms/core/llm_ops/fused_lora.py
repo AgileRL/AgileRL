@@ -16,7 +16,7 @@ view of a custom autograd Function that autograd forbids editing in place.
 from __future__ import annotations
 
 import itertools
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from functools import partial
 from typing import Any
 from weakref import WeakKeyDictionary
@@ -59,6 +59,7 @@ def _needs_peft_mixed_forward(layer: LoraLayer, routing: Sequence[str]) -> bool:
 
 def _routed_forward(
     layer: LoraLayer,
+    original_forward: Callable[..., torch.Tensor],
     x: torch.Tensor,
     *forward_args: Any,
     **forward_kwargs: Any,
@@ -75,11 +76,7 @@ def _routed_forward(
     """
     routing = _ROUTING_STATE.get(layer)
     if routing is None:
-        # Routing unset: fall back to the layer's original (class-level)
-        # forward. Every concrete LoRA layer is an nn.Module, so forward is
-        # defined; the isinstance check lets ty resolve it on ``type(layer)``.
-        assert isinstance(layer, nn.Module)
-        return type(layer).forward(layer, x, *forward_args, **forward_kwargs)
+        return original_forward(layer, x, *forward_args, **forward_kwargs)
 
     # Layers that flatten (batch, seq, hidden) -> (batch * seq, hidden) before
     # their linears (OPT's MLP, MoE experts) show seq rows per routed sample.
@@ -200,7 +197,7 @@ def patch_lora_for_fused_forward(model: nn.Module) -> None:
             continue
         layers.append(module)
         if not _is_routed_layer(module):
-            module.forward = partial(_routed_forward, module)
+            module.forward = partial(_routed_forward, module, type(module).forward)
     _store_layer_cache(model, layers)
 
 
