@@ -14,6 +14,15 @@ def _read_tensor(transition: TensorDict, key: str) -> torch.Tensor:
     return narrow_tensor(transition[key])
 
 
+def _read_row(data: TensorDict, index: int) -> TensorDict:
+    """Read one transition row; buffer rows are always TensorDicts."""
+    row = data[index]
+    assert isinstance(row, TensorDict), (
+        f"Expected a TensorDict row, got {type(row).__name__}."
+    )
+    return row
+
+
 class ReplayBuffer:
     """A circular replay buffer for off-policy learning using a TensorDict as storage.
 
@@ -97,9 +106,9 @@ class ReplayBuffer:
         :return: The initialized storage
         :rtype: TensorDict
         """
-        _data = data[0]
-        assert isinstance(_data, TensorDict)
-        self._storage = _data.expand((self.max_size, *_data.shape)).clone()
+        self._storage = (
+            _read_row(data, 0).expand((self.max_size, *data.shape[1:])).clone()
+        )
         self._storage.zero_()
         self.initialized = True
         return self._storage
