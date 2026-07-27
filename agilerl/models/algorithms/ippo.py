@@ -32,7 +32,9 @@ class IPPOSpec(MultiAgentRLAlgorithmSpec):
     action_batch_size: int | None = Field(default=None)
     lr: float = Field(default=0.0001, ge=0.0)
     torch_compiler: str | None = Field(default=None)
-    net_config: StochasticActorSpec | None = Field(default=None)
+    net_config: StochasticActorSpec | dict[str, StochasticActorSpec] | None = Field(
+        default=None
+    )
     actor_networks: ModuleDict | None = Field(default=None)
     critic_networks: ModuleDict | None = Field(default=None)
 

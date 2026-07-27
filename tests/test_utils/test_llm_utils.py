@@ -174,6 +174,41 @@ class TestStitchCompletionAfterWindowedVllmGenerate:
         )
         assert torch.equal(out[0], torch.tensor([[10, 99, 98, 11, 12, 13]]))
 
+    @pytest.mark.parametrize(
+        "initial_prompt_len",
+        [1, torch.tensor(1), [1]],
+        ids=["int", "tensor", "list"],
+    )
+    def test_accepts_scalar_tensor_or_list_initial_prompt_len(self, initial_prompt_len):
+        out = stitch_completion_after_windowed_vllm_generate(
+            completion_ids=[torch.tensor([[10, 11, 12, 13]], dtype=torch.long)],
+            stitch_prefixes=[torch.tensor([[99, 98]], dtype=torch.long)],
+            group_prompts=[{"initial_prompt_len": initial_prompt_len}],
+            group_size=1,
+            prompts=[{}],
+        )
+        assert torch.equal(out[0], torch.tensor([[10, 99, 98, 11, 12, 13]]))
+
+    def test_rejects_empty_initial_prompt_len_list(self):
+        with pytest.raises(ValueError, match="initial_prompt_len list is empty"):
+            stitch_completion_after_windowed_vllm_generate(
+                completion_ids=[torch.tensor([[10, 11]], dtype=torch.long)],
+                stitch_prefixes=[torch.tensor([[99]], dtype=torch.long)],
+                group_prompts=[{"initial_prompt_len": []}],
+                group_size=1,
+                prompts=[{}],
+            )
+
+    def test_requires_initial_prompt_len_when_stitching(self):
+        with pytest.raises(ValueError, match="initial_prompt_len required"):
+            stitch_completion_after_windowed_vllm_generate(
+                completion_ids=[torch.tensor([[10, 11]], dtype=torch.long)],
+                stitch_prefixes=[torch.tensor([[99]], dtype=torch.long)],
+                group_prompts=[{}],
+                group_size=1,
+                prompts=[{}],
+            )
+
     def test_broadcasts_single_stitch_row_across_group_rows(self):
         completion_ids = [torch.tensor([[1, 2, 7], [3, 4, 8]], dtype=torch.long)]
         stitch_prefixes = [torch.tensor([[9, 10]], dtype=torch.long)]
@@ -1051,7 +1086,7 @@ class TestPreferenceGymInit:
 
 
 def test_llm_utils_fallback_types_when_no_llm_dependencies():
-    """Test that llm_utils sets type aliases to Any when HAS_LLM_DEPENDENCIES is False."""
+    """Test that llm_utils sets fallback sentinels when HAS_LLM_DEPENDENCIES is False:"""
     import agilerl.utils as agilerl_utils_pkg
 
     # Remove the module from cache to force reimport
@@ -1063,10 +1098,12 @@ def test_llm_utils_fallback_types_when_no_llm_dependencies():
             # Reimport the module - it will see HAS_LLM_DEPENDENCIES as False
             import agilerl.utils.llm_utils as llm_utils_reloaded
 
-            # Verify the fallback type aliases are set to Any
+            # Verify the fallback sentinels
             assert llm_utils_reloaded.PreTrainedModel is Any
             assert llm_utils_reloaded.Dataset is Any
-            assert llm_utils_reloaded.AutoModelForCausalLM is Any
+            assert llm_utils_reloaded.AutoModelForCausalLM is None
+            assert llm_utils_reloaded.AutoModelForCausalLMWithValueHead is None
+            assert llm_utils_reloaded.BitsAndBytesConfig is None
     finally:
         # Restore original module to avoid affecting other tests. Both the
         # sys.modules entry AND the parent-package attribute have to be
@@ -1607,6 +1644,17 @@ class TestPreparePromptHfGenerateTensorInitialLen:
         assert out["initial_prompt_len"] == 2
         assert isinstance(out["initial_prompt_len"], int)
 
+    def test_list_initial_prompt_len_takes_first(self) -> None:
+        from agilerl.utils.llm_utils import prepare_prompt_hf_generate
+
+        prompt = {
+            "input_ids": torch.tensor([[1, 2, 3, 4]], dtype=torch.long),
+            "attention_mask": torch.tensor([[1, 1, 1, 1]], dtype=torch.long),
+            "initial_prompt_len": [3, 7],
+        }
+        out = prepare_prompt_hf_generate(prompt, torch.device("cpu"))
+        assert out["initial_prompt_len"] == 3
+
 
 class TestGetModelNameOrPathBaseModelBranches:
     """``get_model_name_or_path`` falls through several optional attribute
@@ -1898,6 +1946,14 @@ class TestProjectionNameResolution:
         assert (
             llm_utils_module._projection_names_for_clippable_lora(
                 _PlainLinearModel(), r".*\.q_proj"
+            )
+            is None
+        )
+
+    def test_none_targets_returns_none(self):
+        assert (
+            llm_utils_module._projection_names_for_clippable_lora(
+                _PlainLinearModel(), None
             )
             is None
         )

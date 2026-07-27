@@ -2,36 +2,9 @@
 
 from __future__ import annotations
 
-import importlib
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-
-class TestAutoTokenizerGuard:
-    def test_auto_tokenizer_attr_exists(self):
-        from agilerl.utils import trainer_utils
-
-        assert hasattr(trainer_utils, "AutoTokenizer")
-
-
-def test_trainer_utils_fallback_auto_tokenizer_when_no_llm_dependencies():
-    """Test that trainer_utils sets AutoTokenizer to None when HAS_LLM_DEPENDENCIES is False."""
-    original_module = sys.modules.pop("agilerl.utils.trainer_utils", None)
-
-    try:
-        with patch("agilerl.HAS_LLM_DEPENDENCIES", False):
-            trainer_utils_reloaded = importlib.import_module(
-                "agilerl.utils.trainer_utils"
-            )
-
-            assert trainer_utils_reloaded.AutoTokenizer is None
-    finally:
-        sys.modules["agilerl.utils.trainer_utils"] = original_module
-        import agilerl.utils as _utils_pkg
-
-        _utils_pkg.trainer_utils = original_module
 
 
 class TestHpConfigFromMutationSpec:

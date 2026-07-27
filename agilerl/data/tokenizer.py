@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, overload
 
 
 class Tokenizer(ABC):
@@ -19,16 +19,28 @@ class Tokenizer(ABC):
         self.boa_token_id = boa_token_id
         self.eod_token_id = eod_token_id
 
+    @overload
+    def encode(self, str_: str, **kwargs: Any) -> tuple[list[int], list[int]]: ...
+    @overload
+    def encode(
+        self, str_: list[str], **kwargs: Any
+    ) -> tuple[list[list[int]], list[list[int]]]: ...
     @abstractmethod
     def encode(
         self,
         str_: str | list[str],
-        **kwargs,
+        **kwargs: Any,
     ) -> tuple[list[int] | list[list[int]], list[int] | list[list[int]]]:
         pass
 
+    @overload
+    def decode(self, tokens: list[int], **kwargs: Any) -> str: ...
+    @overload
+    def decode(self, tokens: list[list[int]], **kwargs: Any) -> list[str]: ...
     @abstractmethod
-    def decode(self, tokens: list[int] | list[list[int]], **kwargs) -> str | list[str]:
+    def decode(
+        self, tokens: list[int] | list[list[int]], **kwargs: Any
+    ) -> str | list[str]:
         pass
 
     @abstractmethod
@@ -44,5 +56,5 @@ class Tokenizer(ABC):
         pass
 
     @abstractmethod
-    def get_vocab(self) -> Any:
+    def get_vocab(self) -> dict[str, int] | list[str]:
         pass

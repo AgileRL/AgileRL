@@ -5,6 +5,7 @@ import torch.nn.functional as F
 
 from agilerl.modules.base import EvolvableModule
 from agilerl.modules.mlp import EvolvableMLP
+from agilerl.typing import ArrayOrTensor, DeviceType
 from agilerl.utils.evolvable_networks import create_mlp
 
 
@@ -50,7 +51,7 @@ class DuelingDistributionalMLP(EvolvableMLP):
     :param new_gelu: Use new GELU activation function, defaults to False
     :type new_gelu: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
-    :type device: str, optional
+    :type device: DeviceType, optional
     """
 
     def __init__(
@@ -73,7 +74,7 @@ class DuelingDistributionalMLP(EvolvableMLP):
         min_mlp_nodes: int = 64,
         max_mlp_nodes: int = 500,
         new_gelu: bool = False,
-        device: str = "cpu",
+        device: DeviceType = "cpu",
     ) -> None:
 
         super().__init__(
@@ -126,14 +127,14 @@ class DuelingDistributionalMLP(EvolvableMLP):
 
     def forward(
         self,
-        x: torch.Tensor,
+        x: ArrayOrTensor,
         q: bool = True,
         log: bool = False,
     ) -> torch.Tensor:
         """Forward pass of the network.
 
-        :param obs: Input to the network.
-        :type obs: torch.Tensor, dict[str, torch.Tensor], or list[torch.Tensor]
+        :param x: Input to the network.
+        :type x: ArrayOrTensor
         :param q: Whether to return Q values. Defaults to True.
         :type q: bool
         :param log: Whether to return log probabilities. Defaults to False.
@@ -142,6 +143,9 @@ class DuelingDistributionalMLP(EvolvableMLP):
         :return: Output of the network.
         :rtype: torch.Tensor
         """
+        if not isinstance(x, torch.Tensor):
+            x = torch.tensor(x, dtype=torch.float32, device=self.device)
+
         value: torch.Tensor = self.model(x)
         advantage: torch.Tensor = self.advantage_net(x)
 

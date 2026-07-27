@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import gc
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import numpy as np
+import numpy.typing as npt
 import torch
 import torch.nn.functional as F
 
@@ -19,7 +20,11 @@ if TYPE_CHECKING:
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.protocols import PreTrainedModelProtocol
-from agilerl.typing import ExperiencesType, LLMObsType
+from agilerl.typing import (
+    MultiAgentObservationType,
+    ObservationType,
+    PreferencePrompts,
+)
 from agilerl.utils.algo_utils import get_experiences_samples
 from agilerl.utils.llm_utils import aggregate_metrics_dict
 
@@ -27,7 +32,7 @@ if HAS_LIGER_KERNEL:
     from agilerl.algorithms.core.llm_ops.fused_loss import LigerDPOWithAlpha
 
 
-class DPO(LLMAlgorithm):
+class DPO(LLMAlgorithm[PreferencePrompts]):
     """Direct Preference Optimization (DPO).
 
     Paper: https://arxiv.org/pdf/2305.18290
@@ -218,20 +223,19 @@ class DPO(LLMAlgorithm):
 
     def get_action(
         self,
-        obs: LLMObsType,
+        obs: ObservationType | MultiAgentObservationType,
         *args: Any,
         **kwargs: Any,
-    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-        """Return the action of the agent.
+    ) -> NoReturn:
+        """Not implemented — DPO is an offline preference algorithm.
 
         :param obs: The observation of the agent
-        :type obs: LLMObsType
+        :type obs: ObservationType | MultiAgentObservationType
         :param args: Additional arguments (unused; for base contract compatibility)
         :type args: Any
         :param kwargs: Additional keyword arguments (e.g. training; unused)
         :type kwargs: Any
-        :return: The action of the agent
-        :rtype: tuple[list[torch.Tensor], list[torch.Tensor]]
+        :raises NotImplementedError: Always.
         """
         msg = "DPO is an offline algorithm and therefore does not require completions to be generated."
         raise NotImplementedError(
@@ -240,13 +244,14 @@ class DPO(LLMAlgorithm):
 
     def learn(
         self,
-        experiences: ExperiencesType,
+        experiences: PreferencePrompts,
         training: bool = True,
     ) -> dict[str, float]:
         """Update agent network parameters to learn from preference data.
 
-        :param experiences: Batched chosen_input_ids, rejected_input_ids, chosen_attention_mask, rejected_attention_mask and rewards
-        :type experiences: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+        :param experiences: Batched chosen/rejected input ids and attention masks
+            with prompt lengths, as produced by :class:`~agilerl.llm_envs.PreferenceGym`.
+        :type experiences: PreferencePrompts
         :param training: Whether the agent is training or not
         :type training: bool
         :return: Dict with keys ``loss``, ``chosen_reward``, ``rejected_reward``.
@@ -257,16 +262,10 @@ class DPO(LLMAlgorithm):
         if torch.backends.mps.is_available():
             torch.mps.empty_cache()
         # The following tensors are size [batch_size, max_length]
-        chosen_input_ids: torch.Tensor = experiences["chosen_input_ids"].to(self.device)
-        rejected_input_ids: torch.Tensor = experiences["rejected_input_ids"].to(
-            self.device
-        )
-        chosen_attention_mask: torch.Tensor = experiences["chosen_attention_mask"].to(
-            self.device
-        )
-        rejected_attention_mask: torch.Tensor = experiences[
-            "rejected_attention_mask"
-        ].to(self.device)
+        chosen_input_ids = experiences["chosen_input_ids"].to(self.device)
+        rejected_input_ids = experiences["rejected_input_ids"].to(self.device)
+        chosen_attention_mask = experiences["chosen_attention_mask"].to(self.device)
+        rejected_attention_mask = experiences["rejected_attention_mask"].to(self.device)
         # Check first that all tensors have the same max length before calculating the masks
         assert (
             chosen_input_ids.shape[1]
@@ -276,7 +275,7 @@ class DPO(LLMAlgorithm):
         ), "All tensors must have the same max length"
 
         max_length = chosen_input_ids.shape[1]
-        prompt_lengths: list[int] = experiences["prompt_lengths"]
+        prompt_lengths = experiences["prompt_lengths"]
 
         # Build the response mask on CPU (same device as dataloader tensors).
         prompt_masks = LLMAlgorithm._create_prompt_masks(
@@ -345,8 +344,10 @@ class DPO(LLMAlgorithm):
             key: value / num_samples for key, value in learn_metrics.items()
         }
 
-        # Aggregate metrics across GPUs for both train/test paths.
-        agg = aggregate_metrics_dict(self.accelerator, learn_metrics)
+        # Aggregate metrics across GPUs for both train/test paths. (Fresh dict
+        # display so ty checks the values against the parameter's wider,
+        # invariant dict value union.)
+        agg = aggregate_metrics_dict(self.accelerator, {**learn_metrics})
 
         if training:
             self.metrics.log("loss", agg["loss"])
@@ -361,7 +362,7 @@ class DPO(LLMAlgorithm):
     def _dpo_loss(
         self,
         batch_size: int,
-        minibatch_idxs: np.ndarray,
+        minibatch_idxs: npt.NDArray,
         chosen_input_ids: torch.Tensor,
         chosen_attention_mask: torch.Tensor,
         rejected_input_ids: torch.Tensor,
@@ -371,7 +372,7 @@ class DPO(LLMAlgorithm):
         ref_rejected_log_probs: torch.Tensor | None,
         ref_chosen_log_probs: torch.Tensor | None,
         training: bool,
-    ):
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Calculates the DPO loss.
 
         :param batch_size: Batch size
@@ -428,6 +429,10 @@ class DPO(LLMAlgorithm):
                 batch_chosen_mask,
                 batch_rejected_mask,
             )
+        # Standard (non-Liger) path: ``learn`` precomputed both reference
+        # log-prob tensors, so they are never None here.
+        assert batch_ref_chosen_log_probs is not None
+        assert batch_ref_rejected_log_probs is not None
         batch_rejected_log_probs = self._get_logprobs(
             batch_rejected_input_ids,
             batch_size,
@@ -543,7 +548,7 @@ class DPO(LLMAlgorithm):
         lm_head_weight = lm_head.weight  # (vocab_size, hidden_size)
         lm_head_bias = lm_head.bias
 
-        def _get_hidden(ids, attn_mask):
+        def _get_hidden(ids: torch.Tensor, attn_mask: torch.Tensor) -> torch.Tensor:
             """Run a forward pass and return hidden states fed into the language-model head.
 
             :param ids: Token IDs ``[batch, seq_len]``.
@@ -596,7 +601,7 @@ class DPO(LLMAlgorithm):
         )  # (2B, seq_len, H)
 
         # Build shifted targets; mask prompt/padding tokens with -100
-        def _make_target(ids, mask):
+        def _make_target(ids: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
             t = ids[:, 1:].clone()  # (B, seq_len-1)
             t[~mask.bool()] = -100
             return t
@@ -659,7 +664,7 @@ class DPO(LLMAlgorithm):
         loop: int = 1,
         *args: Any,
         **kwargs: Any,
-    ) -> np.ndarray:
+    ) -> npt.NDArray:
         """Return the fitness (test) score of the agent.
 
         :param env: The environment to be tested in
@@ -667,7 +672,7 @@ class DPO(LLMAlgorithm):
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 1
         :type loop: int, optional
         :return: Mean test score (numpy array)
-        :rtype: np.ndarray
+        :rtype: npt.NDArray
         """
         with env.eval_mode(), torch.no_grad():
             prompts = env.reset()

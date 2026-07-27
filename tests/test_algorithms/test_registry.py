@@ -19,25 +19,12 @@ from agilerl.algorithms.core.registry import (
 from agilerl.modules import EvolvableModule
 
 
-@dataclass
-class MockNetworkGroup:
-    """Mock NetworkGroup for testing purposes."""
+@dataclass(eq=False)
+class MockNetworkGroup(NetworkGroup):
+    """Real NetworkGroup with attribute names pre-resolved."""
 
-    eval_network: str
-    shared_networks: str | list[str] | None = field(default=None)
-    policy: bool = field(default=False)
-
-    def __hash__(self) -> int:
-        return hash((self.eval_network, self.shared_networks, self.policy))
-
-    def __eq__(self, other: object) -> bool:
-        if not isinstance(other, MockNetworkGroup):
-            return False
-        return (
-            self.eval_network == other.eval_network
-            and self.shared_networks == other.shared_networks
-            and self.policy == other.policy
-        )
+    def __post_init__(self) -> None:
+        pass
 
 
 # Mock classes for testing
@@ -331,6 +318,14 @@ class TestHyperparameterConfig:
         assert config1 == config2  # Same parameters, different order
         assert config1 != config3  # Different parameters
 
+    def test_hyperparameter_config_equality_unrelated_object(self):
+        """Test inequality against a non-HyperparameterConfig object."""
+        config = HyperparameterConfig(
+            learning_rate=RLParameter(min=1e-5, max=1e-2, dtype=float)
+        )
+
+        assert config != object()
+
     def test_hyperparameter_config_sample(self):
         """Test sampling from HyperparameterConfig."""
         torch.manual_seed(42)
@@ -444,6 +439,18 @@ class TestOptimizerConfig:
         assert config1 == config2  # Same name and networks
         assert config1 != config3  # Different name
 
+    def test_optimizer_config_equality_unrelated_object(self):
+        """Test inequality against a non-OptimizerConfig object."""
+        config = OptimizerConfig(
+            name="opt1",
+            networks="net1",
+            lr="lr",
+            optimizer_cls=optim.Adam,
+            optimizer_kwargs={},
+        )
+
+        assert config != object()
+
     def test_optimizer_config_get_optimizer_cls(self):
         """Test getting optimizer class from stored configuration."""
         config = OptimizerConfig(
@@ -493,7 +500,7 @@ class TestNetworkGroup:
     def test_make_network_group_function(self):
         """Test the make_network_group helper function."""
         # Create a simple NetworkGroup directly with string names to avoid frame inspection
-        from dataclasses import dataclass, field
+        from dataclasses import dataclass
 
         # Create a simplified NetworkGroup for testing
         @dataclass
@@ -515,7 +522,7 @@ class TestNetworkGroup:
 
     def test_make_network_group_with_list(self):
         """Test make_network_group with list of shared networks."""
-        from dataclasses import dataclass, field
+        from dataclasses import dataclass
 
         @dataclass
         class SimpleNetworkGroup:
@@ -535,7 +542,7 @@ class TestNetworkGroup:
 
     def test_make_network_group_no_shared(self):
         """Test make_network_group with no shared networks."""
-        from dataclasses import dataclass, field
+        from dataclasses import dataclass
 
         @dataclass
         class SimpleNetworkGroup:
@@ -1000,10 +1007,9 @@ class TestMutationRegistry:
             registry.networks()
 
     def test_mutation_registry_eq_with_none(self):
-        """Current __eq__ implementation raises on None."""
+        """__eq__ returns False for non-MutationRegistry operands."""
         registry = MutationRegistry(hp_config=self.hp_config)
-        with pytest.raises(AttributeError):
-            _ = registry.__eq__(None)
+        assert registry.__eq__(None) is False
 
     def test_mutation_registry_eq_different_groups_order(self):
         """Registries with same content but different group order differ."""

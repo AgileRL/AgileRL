@@ -6,7 +6,7 @@ import torch
 from torch import nn
 
 from agilerl.modules.custom_components import NoisyLinear
-from agilerl.wrappers.make_evolvable import MakeEvolvable
+from agilerl.wrappers.make_evolvable import MakeEvolvable, _require
 from tests.helper_functions import assert_state_dicts_equal, unpack_network
 
 # Tiny shapes used for the multi-input Conv3d fixture. Kept large enough that
@@ -241,6 +241,26 @@ class TestMakeEvolvableInit:
             out = evolvable(torch.randn(2, 10))
         assert out.shape == (2, 1)
 
+    def test_make_evolvable_init_layers_output_vanish_rainbow(self, device):
+        network = nn.Sequential(nn.Linear(3, 8), nn.ReLU(), nn.Linear(8, 2))
+        support = torch.linspace(-200, 200, 51).to(device)
+        evolvable = MakeEvolvable(
+            network,
+            torch.randn(1, 3),
+            support=support,
+            rainbow=True,
+            output_vanish=True,
+            device=device,
+        )
+        output_layer = evolvable.value_net[-1]
+        assert isinstance(output_layer, NoisyLinear)
+        assert torch.all(output_layer.weight_mu.data.abs() <= 0.1)
+
+
+def test_require_raises_when_none():
+    with pytest.raises(RuntimeError, match="Value network is not initialized"):
+        _require(None, "Value network")
+
 
 ######### Test forward #########
 class TestMakeEvolvableForward:
@@ -340,6 +360,22 @@ class TestMakeEvolvableForward:
                 )
         output_shape = actual_output.shape
         assert output_shape == expected_result
+
+    # A CNN critic accepts a non-tensor secondary input (numpy array).
+    def test_forward_cnn_numpy_secondary_input(self, two_arg_cnn):
+        input_tensor = torch.randn(*_TWO_ARG_INPUT_SHAPE)
+        secondary_input_tensor = torch.randn(*_TWO_ARG_SECONDARY_SHAPE)
+        evolvable_network = MakeEvolvable(
+            two_arg_cnn,
+            input_tensor,
+            secondary_input_tensor,
+        )
+        with torch.no_grad():
+            output = evolvable_network.forward(
+                input_tensor,
+                secondary_input_tensor.numpy(),
+            )
+        assert output.shape == (1, 2)
 
     # The forward() method can handle different types of input tensors (e.g., numpy array, torch tensor).
     def test_forward_method_with_different_input_types(self, simple_mlp):

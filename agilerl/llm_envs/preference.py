@@ -12,10 +12,10 @@ if TYPE_CHECKING:
     import torch
     from accelerate import Accelerator
     from datasets import Dataset
-    from transformers import AutoTokenizer
+    from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 
-class PreferenceGym(IterablePromptBatchGym):
+class PreferenceGym(IterablePromptBatchGym[PreferencePrompts]):
     """Class to convert HuggingFace preference datasets into Gymnasium style environment.
 
     :param train_dataset: The training dataset.
@@ -23,7 +23,7 @@ class PreferenceGym(IterablePromptBatchGym):
     :param test_dataset: The test dataset.
     :type test_dataset: Dataset
     :param tokenizer: The tokenizer.
-    :type tokenizer: AutoTokenizer
+    :type tokenizer: PreTrainedTokenizerBase
     :param data_batch_size_per_gpu: The batch size per GPU.
     :type data_batch_size_per_gpu: int
     :param accelerator: The accelerator.
@@ -40,7 +40,7 @@ class PreferenceGym(IterablePromptBatchGym):
         self,
         train_dataset: Dataset,
         test_dataset: Dataset,
-        tokenizer: AutoTokenizer,
+        tokenizer: PreTrainedTokenizerBase,
         data_batch_size_per_gpu: int = 8,
         accelerator: Accelerator | None = None,
         max_context_length: int | None = None,
@@ -78,12 +78,12 @@ class PreferenceGym(IterablePromptBatchGym):
 
     def create_collate_fn(
         self,
-        tokenizer: AutoTokenizer,
+        tokenizer: PreTrainedTokenizerBase,
         max_context_length: int | None = None,
-    ) -> Callable[[list[dict[str, Any]]], dict[str, Any]]:
+    ) -> Callable[[list[dict[str, Any]]], PreferencePrompts]:
         """Create a collate function for preference prompts."""
 
-        def collate_fn(batch: list[dict[str, str]]) -> dict[str, str]:
+        def collate_fn(batch: list[dict[str, Any]]) -> PreferencePrompts:
             prompts = [item["prompt"] for item in batch]
             chosen = [item["chosen"] for item in batch]
             rejected = [item["rejected"] for item in batch]
@@ -139,7 +139,7 @@ class PreferenceGym(IterablePromptBatchGym):
                     return_tensors="pt",
                 )
 
-            return {
+            result: PreferencePrompts = {
                 "prompt": prompts,
                 "prompt_lengths": prompt_lengths,
                 "chosen": chosen,
@@ -149,5 +149,6 @@ class PreferenceGym(IterablePromptBatchGym):
                 "rejected_input_ids": rejected_enc["input_ids"],
                 "rejected_attention_mask": rejected_enc["attention_mask"].long(),
             }
+            return result
 
         return collate_fn

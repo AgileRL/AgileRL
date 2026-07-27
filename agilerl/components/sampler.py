@@ -1,4 +1,5 @@
 import warnings
+from collections.abc import Callable
 from typing import Any
 
 import torch
@@ -11,9 +12,7 @@ from agilerl.components import (
     ReplayBuffer,
 )
 from agilerl.components.data import ReplayDataset
-from agilerl.typing import ExperiencesType
-
-BufferType = ReplayBuffer | PrioritizedReplayBuffer | MultiStepReplayBuffer
+from agilerl.components.replay_buffer import BufferType
 
 
 class Sampler:
@@ -28,6 +27,9 @@ class Sampler:
     :raises AssertionError: If neither memory nor (dataset and dataloader) are provided
     """
 
+    # Bound in __init__ to one of the sampling strategies; all return a TensorDict.
+    sample: Callable[..., TensorDict]
+
     @staticmethod
     def tensordict_collate_fn(
         batch: list[TensorDict],
@@ -39,10 +41,10 @@ class Sampler:
         :return: Either a single TensorDict or a list of TensorDicts
         :rtype: TensorDict | list[TensorDict]
         """
-        return TensorDict(
-            {key: torch.stack([b[key] for b in batch]) for key in batch[0].keys()},
-            batch_size=len(batch),
-        )
+        # The buffer yields plain TensorDicts; algorithms apply the typed
+        # TensorClass schema downstream in learn() via from_tensordict.
+        collated: TensorDict = TensorDict.stack(batch)
+        return collated
 
     def __init__(
         self,
@@ -57,18 +59,14 @@ class Sampler:
             "Sampler needs to be initialized with either 'memory' or ('dataset' AND 'dataloader')."
         )
 
-        self.distributed = (
-            dataloader is not None
-            and dataset is not None
-            and isinstance(dataloader, DataLoader)
-        )
         self.per = isinstance(memory, PrioritizedReplayBuffer)
         self.n_step = isinstance(memory, MultiStepReplayBuffer)
         self.memory = memory
         self.dataset = dataset
+        self.distributed = dataset is not None and isinstance(dataloader, DataLoader)
 
         # Process the dataloader
-        if self.distributed:
+        if dataset is not None and isinstance(dataloader, DataLoader):
             # Need to use a custom collate function for TensorDict buffers
             if isinstance(dataset.buffer, ReplayBuffer):
                 self.dataloader = self._replace_dataloader_collate_fn(dataloader)
@@ -115,7 +113,7 @@ class Sampler:
         :rtype: DataLoader
         """
         # Create a simplified set of parameters for the new dataloader
-        params = {
+        params: dict[str, Any] = {
             "dataset": dataloader.dataset,
             "batch_size": dataloader.batch_size,
             "collate_fn": self.tensordict_collate_fn,
@@ -144,7 +142,7 @@ class Sampler:
         self,
         batch_size: int,
         return_idx: bool = False,
-    ) -> ExperiencesType:
+    ) -> TensorDict:
         """Sample a batch of experiences from the standard replay buffer.
 
         :param batch_size: Size of the batch to sample
@@ -154,6 +152,7 @@ class Sampler:
         :return: Sampled batch of experiences
         :rtype: TensorDict
         """
+        assert self.memory is not None, "Standard sampling requires a replay buffer."
         return self.memory.sample(batch_size, return_idx)
 
     def sample_distributed(
@@ -170,10 +169,14 @@ class Sampler:
         :return: Sampled batch of experiences
         :rtype: TensorDict
         """
+        assert self.dataset is not None, "Distributed sampling requires a dataset."
+        assert self.dataloader is not None, (
+            "Distributed sampling requires a dataloader."
+        )
         self.dataset.batch_size = batch_size
         return next(iter(self.dataloader))
 
-    def sample_per(self, batch_size: int, beta: float) -> ExperiencesType:
+    def sample_per(self, batch_size: int, beta: float) -> TensorDict:
         """Sample a batch of experiences from the Prioritized Experience Replay buffer.
 
         :param batch_size: Size of the batch to sample
@@ -183,16 +186,22 @@ class Sampler:
         :return: Sampled batch of experiences, indices, and importance-sampling weights
         :rtype: TensorDict
         """
-        return self.memory.sample(batch_size, beta)
+        assert isinstance(self.memory, PrioritizedReplayBuffer), (
+            "PER sampling requires a PrioritizedReplayBuffer."
+        )
+        return self.memory.sample(batch_size, beta=beta)
 
-    def sample_n_step(self, idxs: Any) -> ExperiencesType:
+    def sample_n_step(self, idxs: torch.Tensor) -> TensorDict:
         """Sample a batch of experiences from the n-step replay buffer.
 
         :param idxs: Indices to sample from
-        :type idxs: Any
+        :type idxs: torch.Tensor
         :return: Sampled batch of experiences
         :rtype: TensorDict
         """
+        assert isinstance(self.memory, MultiStepReplayBuffer), (
+            "N-step sampling requires a MultiStepReplayBuffer."
+        )
         return self.memory.sample_from_indices(idxs)
 
     @classmethod
@@ -200,7 +209,7 @@ class Sampler:
         cls,
         dataset: ReplayDataset,
         batch_size: int | None = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> DataLoader:
         """Create a DataLoader with the appropriate collate function.
 

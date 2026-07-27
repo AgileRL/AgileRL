@@ -47,7 +47,7 @@ def finetune_llm_preference(
     accelerator: Accelerator | None = None,
     max_steps: int | None = None,
     num_epochs: int | None = None,
-) -> list[DPO]:
+) -> tuple[list[DPO], list[float]]:
     """Finetune a population of DPO agents on pairwise preference data.
 
     :param pop: Population of DPO agents to finetune.
@@ -209,6 +209,9 @@ def finetune_llm_preference(
 
         # Tournament selection and mutation
         if tournament and mutation is not None:
+            # evo_steps is guaranteed set here: it is validated as set on entry
+            # when tournament and mutation are enabled.
+            assert evo_steps is not None
             if (i + 1) % evo_steps == 0:
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
@@ -221,7 +224,7 @@ def finetune_llm_preference(
                         accelerator=accelerator,
                         language_model=True,
                         elite_path=elite_path,
-                        save_elite=save_elite,
+                        save_elite=bool(save_elite),
                     ),
                 )
                 if accelerator is not None:
@@ -266,4 +269,6 @@ def finetune_llm_preference(
 
     population.finish()
     pbar.close()
-    return population.agents, population.last_fitnesses
+    # LLM fitnesses are scalar mean rewards; `Population` types them as the wider
+    # scalar-or-per-agent-dict row shared with multi-agent training.
+    return population.agents, population.last_scalar_fitnesses

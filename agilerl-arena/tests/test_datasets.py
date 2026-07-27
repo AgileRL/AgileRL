@@ -6,6 +6,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+
 from agilerl.arena.client import ArenaClient
 from agilerl.arena.exceptions import ArenaFileNotFoundError, ArenaValidationError
 

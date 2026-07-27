@@ -15,9 +15,10 @@ The key protocols include:
 Type aliases are provided for common types used throughout the framework.
 """
 
-from collections.abc import Callable, Generator, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from enum import Enum
 from typing import (
+    TYPE_CHECKING,
     Any,
     Generic,
     Protocol,
@@ -26,14 +27,32 @@ from typing import (
 )
 
 import numpy as np
+import numpy.typing as npt
 import torch
 from accelerate import Accelerator
+from gymnasium import spaces
+from torch._dynamo import OptimizedModule
+from torch.nn import Module
 from torch.optim.optimizer import Optimizer
+from typing_extensions import Self
 
-NumpyObsType = np.ndarray | dict[str, np.ndarray] | tuple[np.ndarray, ...]
+if TYPE_CHECKING:
+    from agilerl.algorithms.core.registry import MutationRegistry
+    from agilerl.typing import MutationApplyDict, ReasoningPrompts, TokenObsStepReturn
+
+NumpyObsType = npt.NDArray | dict[str, npt.NDArray] | tuple[npt.NDArray, ...]
 TorchObsType = torch.Tensor | dict[str, torch.Tensor] | tuple[torch.Tensor, ...]
 ObservationType = NumpyObsType | TorchObsType
 DeviceType = str | torch.device
+
+
+@runtime_checkable
+class NamedCallable(Protocol):
+    """A callable with a ``__name__``: a function, bound method, or class."""
+
+    __name__: str
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any: ...  # noqa: ANN401 -- gradually typed so any callable conforms structurally
 
 
 class MutationType(Enum):
@@ -60,7 +79,7 @@ class MutationMethodProtocol(Protocol):
     _mutation_type: MutationType
     _recreate_kwargs: dict[str, Any]
 
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401 -- mutation methods take and return arbitrary values
         pass
 
 
@@ -70,10 +89,10 @@ class OptimizerLikeClass(Protocol):
 
     def __call__(
         self,
-        params: Any,
+        params: Any,  # noqa: ANN401 -- accepts any optimizer's params/param-groups argument
         lr: float,
         **kwargs: Any,
-    ) -> Optimizer | Any:
+    ) -> Optimizer | Any:  # noqa: ANN401 -- some optimizer-like classes return non-Optimizer handles
         pass
 
 
@@ -100,14 +119,41 @@ class EvolvableModuleProtocol(Protocol):
     reconstruction and optimization purposes.
     """
 
-    init_dict: dict[str, Any]
-    device: DeviceType
-    layer_mutation_methods: list[str]
-    node_mutation_methods: list[str]
-    mutation_methods: list[str]
-    last_mutation_attr: str
-    last_mutation: Callable[[Any], Any]
-    rng: Generator | None
+    # Read-only: implementations expose these as properties, and a mutable
+    # member's invariance would reject every one of them.
+    @property
+    def init_dict(self) -> dict[str, Any]:
+        pass
+
+    @property
+    def layer_mutation_methods(self) -> list[str]:
+        pass
+
+    @property
+    def node_mutation_methods(self) -> list[str]:
+        pass
+
+    @property
+    def mutation_methods(self) -> list[str]:
+        pass
+
+    @property
+    def last_mutation_attr(self) -> str | None:
+        pass
+
+    @property
+    def last_mutation(self) -> "MutationMethodProtocol | None":
+        pass
+
+    @property
+    def rng(self) -> np.random.Generator | None:
+        pass
+
+    # Read-only: implementations narrow this (EvolvableModule exposes `str`),
+    # which a mutable member's invariance would reject.
+    @property
+    def device(self) -> DeviceType:
+        pass
 
     @property
     def activation(self) -> str | None:
@@ -116,13 +162,13 @@ class EvolvableModuleProtocol(Protocol):
     def change_activation(self, activation: str, output: bool) -> None:
         pass
 
-    def forward(self, x: Any) -> Any:
+    def forward(self, x: Any, /) -> Any:  # noqa: ANN401 -- protocol forward must accept and return whatever conforming modules do
         pass
 
-    def parameters(self) -> Generator:
+    def parameters(self) -> Iterator[torch.nn.Parameter]:
         pass
 
-    def to(self, device: DeviceType) -> None:
+    def to(self, device: DeviceType) -> Self:
         pass
 
     def state_dict(self) -> dict[str, Any]:
@@ -140,11 +186,11 @@ class EvolvableModuleProtocol(Protocol):
     def sample_mutation_method(
         self,
         new_layer_prob: float,
-        rng: Generator | None,
+        rng: np.random.Generator | None = None,
     ) -> str:
         pass
 
-    def clone(self) -> "EvolvableModuleProtocol":
+    def clone(self) -> Self:
         pass
 
     def load_state_dict(
@@ -167,24 +213,25 @@ class EvolvableNetworkProtocol(EvolvableModuleProtocol, Protocol):
     def forward_head(
         self,
         latent: torch.Tensor,
+        /,
         *args: Any,
         **kwargs: Any,
     ) -> torch.Tensor:
         pass
 
-    def extract_features(self, x: TorchObsType) -> torch.Tensor:
+    def extract_features(self, x: TorchObsType, /) -> torch.Tensor:
         pass
 
     def build_network_head(self, *args: Any, **kwargs: Any) -> None:
         pass
 
-    def add_latent_node(self, numb_new_nodes: int | None = None) -> dict[str, Any]:
+    def add_latent_node(self, numb_new_nodes: int | None = None) -> "MutationApplyDict":
         pass
 
     def remove_latent_node(
         self,
         numb_new_nodes: int | None = None,
-    ) -> dict[str, Any]:
+    ) -> "MutationApplyDict":
         pass
 
     def recreate_encoder(self) -> None:
@@ -203,11 +250,16 @@ class EvolvableNetworkProtocol(EvolvableModuleProtocol, Protocol):
     ) -> None:
         pass
 
-    def _build_encoder(self, *args: Any, **kwargs: Any) -> None:
+    def _build_encoder(self, *args: Any, **kwargs: Any) -> Module:
         pass
 
 
-T = TypeVar("T", bound=EvolvableModuleProtocol | EvolvableNetworkProtocol)
+# Values may also be plain torch modules or torch.compile wrappers
+# (OptimizedModule), which don't satisfy the evolvable protocols.
+T = TypeVar(
+    "T",
+    bound=Module | OptimizedModule | EvolvableModuleProtocol | EvolvableNetworkProtocol,
+)
 
 
 @runtime_checkable
@@ -218,7 +270,9 @@ class ModuleDictProtocol(Protocol, Generic[T]):
     and aggregates mutation methods across all contained modules.
     """
 
-    device: DeviceType
+    @property
+    def device(self) -> DeviceType:
+        pass
 
     def __getitem__(self, key: str) -> T:
         pass
@@ -232,7 +286,7 @@ class ModuleDictProtocol(Protocol, Generic[T]):
     def items(self) -> Iterable[tuple[str, T]]:
         pass
 
-    def modules(self) -> dict[str, T]:
+    def evolvable_modules(self) -> dict[str, T]:
         pass
 
     def get_mutation_methods(self) -> dict[str, MutationMethodProtocol]:
@@ -339,14 +393,23 @@ class EvolvableAlgorithmProtocol(Protocol):
     """
 
     device: str | torch.device
-    accelerator: Accelerator
-    registry: MutationRegistryProtocol
+    accelerator: Accelerator | None
+    # Imported under TYPE_CHECKING only, to avoid a runtime import cycle.
+    registry: "MutationRegistry"
     mut: str | None
     index: int
-    scores: list[float]
-    fitness: list[float]
-    steps: list[int]
+    # Scalars, or per-sub-agent rows for multi-agent metrics (sum_scores=False).
+    fitness: list[float | npt.NDArray]
+    steps: int
     torch_compiler: str | None
+
+    @property
+    def scores(self) -> list[float | list[float]]:
+        """Per-episode scores (per-group score rows for multi-agent metrics)."""
+        ...
+
+    @scores.setter
+    def scores(self, value: list[float | list[float]]) -> None: ...
 
     def unwrap_models(self) -> None:
         pass
@@ -354,34 +417,28 @@ class EvolvableAlgorithmProtocol(Protocol):
     def wrap_models(self) -> None:
         pass
 
+    @classmethod
     def load(
-        self: type[EvolvableAlgorithm],
+        cls,
         path: str,
-    ) -> EvolvableAlgorithm:
+        device: str | torch.device = "cpu",
+        accelerator: Accelerator | None = None,
+    ) -> Self:
         pass
 
-    def load_checkpoint(
-        self,
-        path: str,
-        device: str,
-        accelerator: Accelerator | None,
-    ) -> None:
+    def load_checkpoint(self, path: str) -> None:
         pass
 
     def save_checkpoint(self, path: str) -> None:
         pass
 
-    def learn(
-        self,
-        experiences: tuple[Iterable[ObservationType], ...],
-        **kwargs,
-    ) -> None:
+    def learn(self, experiences: Any) -> Any:  # noqa: ANN401 -- experience format and loss return vary per algorithm
         pass
 
-    def get_action(self, obs: ObservationType, **kwargs) -> Any:
+    def get_action(self, obs: Any, **kwargs: Any) -> Any:  # noqa: ANN401 -- obs and action types vary across RL/LLM/multi-agent algorithms
         pass
 
-    def test(self, *args: Any, **kwargs: Any) -> np.ndarray:
+    def test(self, env: Any) -> Any:  # noqa: ANN401 -- env type and fitness return vary per algorithm
         pass
 
     def evolvable_attributes(
@@ -390,17 +447,21 @@ class EvolvableAlgorithmProtocol(Protocol):
     ) -> EvolvableAttributeDict:
         pass
 
+    @staticmethod
     def inspect_attributes(
-        self,
+        agent: Any,  # noqa: ANN401 -- accepts any evolvable algorithm or wrapped agent
         input_args_only: bool = False,
     ) -> dict[str, Any]:
         pass
 
     def clone(
         self,
-        index: int | None,
-        wrap: bool,
-    ) -> "EvolvableAlgorithmProtocol":
+        index: int | None = None,
+        wrap: bool = True,
+    ) -> Self:
+        pass
+
+    def clean_up(self) -> None:
         pass
 
     def recompile(self) -> None:
@@ -411,27 +472,33 @@ class EvolvableAlgorithmProtocol(Protocol):
 
 
 # Define a TypeVar for EvolvableAlgorithm that can be used for generic typing
-T_EvolvableAlgorithm = TypeVar("T_EvolvableAlgorithm", bound=EvolvableAlgorithmProtocol)
+EvolvableAlgorithmT = TypeVar("EvolvableAlgorithmT", bound=EvolvableAlgorithmProtocol)
 
 
 @runtime_checkable
-class AgentWrapperProtocol(Protocol, Generic[T_EvolvableAlgorithm]):
+class AgentWrapperProtocol(Protocol, Generic[EvolvableAlgorithmT]):
     """Protocol for wrapper classes that encapsulate evolvable algorithms.
 
     Agent wrappers provide additional functionality around evolvable algorithms
     while maintaining the core interface for action selection and learning.
     """
 
-    agent: T_EvolvableAlgorithm
+    agent: EvolvableAlgorithmT
 
-    def get_action(self, obs: ObservationType, **kwargs) -> Any:
+    def get_action(self, obs: ObservationType, **kwargs: Any) -> Any:  # noqa: ANN401 -- action return type varies per wrapped algorithm
         pass
 
     def learn(
         self,
         experiences: tuple[Iterable[ObservationType], ...],
-        **kwargs,
+        **kwargs: Any,
     ) -> None:
+        pass
+
+    def evolvable_attributes(
+        self,
+        networks_only: bool = False,
+    ) -> EvolvableAttributeDict:
         pass
 
 
@@ -538,10 +605,10 @@ class PreTrainedModelProtocol(Protocol):
     ) -> torch.Tensor:
         pass
 
-    def forward(self, *args: Any, **kwargs: Any) -> Any:
+    def forward(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401 -- model forward output type varies (logits, tuples, ModelOutput)
         pass
 
-    def parameters(self) -> Generator:
+    def parameters(self) -> Iterator[torch.nn.Parameter]:
         pass
 
     def state_dict(self) -> dict[str, Any]:
@@ -583,10 +650,10 @@ class PeftModelProtocol(Protocol):
     ) -> torch.Tensor:
         pass
 
-    def forward(self, *args: Any, **kwargs: Any) -> Any:
+    def forward(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401 -- model forward output type varies (logits, tuples, ModelOutput)
         pass
 
-    def parameters(self) -> Generator:
+    def parameters(self) -> Iterator[torch.nn.Parameter]:
         pass
 
     def state_dict(self) -> dict[str, Any]:
@@ -634,24 +701,23 @@ class BanditEnvProtocol(Protocol):
 
     arms: int
     num_envs: int
-    single_observation_space: Any
-    single_action_space: Any
 
-    def reset(self) -> np.ndarray:
+    @property
+    def single_observation_space(self) -> spaces.Space: ...
+
+    @property
+    def single_action_space(self) -> spaces.Discrete: ...
+
+    def reset(self) -> npt.NDArray:
         pass
 
-    def step(self, k: int) -> tuple[np.ndarray, float]:
+    def step(self, k: int) -> tuple[npt.NDArray, float]:
         pass
 
 
 @runtime_checkable
 class MultiTurnEnv(Protocol):
-    """Protocol for multi-turn LLM environments and AgileRL wrappers.
-
-    Covers both:
-    - raw multi-turn envs / ``FormatRewardWrapper``: text obs + text actions
-    - ``TokenObservationWrapper``: dict obs + token-id tensor actions
-    """
+    """Protocol for text-level multi-turn LLM environments."""
 
     max_turns: int
 
@@ -661,9 +727,32 @@ class MultiTurnEnv(Protocol):
         pass
 
     def step(
-        self, action: str | torch.Tensor, **kwargs: Any
+        self, action: str, **kwargs: Any
     ) -> tuple[str | dict[str, Any], float, bool, bool, dict[str, Any]]:
         pass
 
     def close(self) -> None:
+        pass
+
+
+@runtime_checkable
+class TokenizedMultiTurnEnv(Protocol):
+    """Protocol for token-level multi-turn LLM environments."""
+
+    max_turns: int
+
+    def reset(
+        self, seed: int | None = None
+    ) -> "tuple[ReasoningPrompts, dict[str, Any]]":
+        pass
+
+    def step(self, full_completion_ids: torch.Tensor, /) -> "TokenObsStepReturn":
+        pass
+
+    def close(self) -> None:
+        pass
+
+    def get_episode_data(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         pass

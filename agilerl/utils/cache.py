@@ -38,7 +38,7 @@ class Cache:
         with Path(file_name).open("rb") as f:
             self.cache.update(pkl.load(f))
 
-    def __getitem__(self, key: str) -> Any:
+    def __getitem__(self, key: str) -> Any:  # noqa: ANN401 -- cache stores heterogeneous pickled values
         """Get an item from the cache.
 
         :param key: Key of the item to get.
@@ -50,13 +50,13 @@ class Cache:
         self.cache_hit_rate = (self.cache_hit_rate * 0.99) + 0.01
         return self.cache[key]
 
-    def __setitem__(self, key: str, newvalue: Any) -> None:
+    def __setitem__(self, key: str, newvalue: object) -> None:
         """Set an item in the cache.
 
         :param key: Key of the item to set.
         :type key: str
         :param newvalue: Value to set.
-        :type newvalue: Any
+        :type newvalue: object
         """
         self.cache_hit_rate = self.cache_hit_rate * 0.99
         self.cache[key] = newvalue

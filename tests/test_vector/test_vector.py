@@ -370,6 +370,12 @@ class TestAsyncPettingZooVecEnvInit:
         env.reset()
         env.close()
 
+    def test_get_observations_no_copy(self):
+        env = AsyncPettingZooVecEnv.__new__(AsyncPettingZooVecEnv)
+        env.copy = False
+        env.observations = {"agent_0": np.zeros(2)}
+        assert env.get_observations() is env.observations
+
 
 class TestAsyncPettingZooVecEnvRender:
     @pytest.mark.parametrize(
@@ -1238,10 +1244,7 @@ class TestObservations:
             vec_env.observations.get("speaker_0") == np.ones((1, 3), dtype=np.float32),
         )
         assert vec_env.observations.get("agent") is None
-        assert (
-            str(next(iter(vec_env.observations)))
-            == "('speaker_0', array([[1., 1., 1.]], dtype=float32))"
-        )
+        assert next(iter(vec_env.observations)) == "speaker_0"
         vec_env.close()
 
     def test_observations_image(self):

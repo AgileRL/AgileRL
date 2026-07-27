@@ -45,7 +45,7 @@ class NoisyLinear(nn.Module):
     :param std_init: Standard deviation, defaults to 0.5
     :type std_init: float, optional
     :param device: Device, defaults to "cpu"
-    :type device: str, optional
+    :type device: DeviceType, optional
     """
 
     weight_epsilon: torch.Tensor
@@ -159,7 +159,7 @@ class ResidualBlock(nn.Module):
     :param scale_factor: Expansion factor for the hidden layer.
     :type scale_factor: int, optional (default=4)
     :param device: Device for computation.
-    :type device: str, optional (default="cpu")
+    :type device: DeviceType, optional (default="cpu")
     """
 
     def __init__(
@@ -167,7 +167,7 @@ class ResidualBlock(nn.Module):
         in_channels: int,
         kernel_size: int,
         scale_factor: int = 4,
-        device: str = "cpu",
+        device: DeviceType = "cpu",
     ) -> None:
         super().__init__()
 
@@ -230,7 +230,7 @@ class SimbaResidualBlock(nn.Module):
     :param hidden_size: Hidden size of the residual block
     :type hidden_size: int
     :param scale_factor: Scale factor, defaults to 4
-    :type scale_factor: float
+    :type scale_factor: int
     :param device: Device, defaults to "cpu"
     :type device
     """
@@ -238,7 +238,7 @@ class SimbaResidualBlock(nn.Module):
     def __init__(
         self,
         hidden_size: int,
-        scale_factor: float = 4,
+        scale_factor: int = 4,
         device: DeviceType = "cpu",
     ) -> None:
         super().__init__()

@@ -1,15 +1,18 @@
+from __future__ import annotations
+
 import multiprocessing as mp
 import sys
 import time
 import traceback
 from collections import OrderedDict, defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import suppress
 from copy import deepcopy
 from enum import Enum
 from multiprocessing.connection import Connection
-from multiprocessing.sharedctypes import RawArray
-from typing import Any, TypeAlias, TypeVar, Union
+from multiprocessing.context import BaseContext
+from multiprocessing.sharedctypes import SynchronizedArray
+from typing import Any, Literal, TypeAlias, TypeVar
 
 import numpy as np
 from gymnasium import logger, spaces
@@ -19,26 +22,39 @@ from gymnasium.error import (
     NoAsyncCallError,
 )
 from gymnasium.vector.utils import CloudpickleWrapper, clear_mpi_env_vars
+from numpy.typing import ArrayLike
 from pettingzoo import ParallelEnv
 
-from agilerl.typing import ActionType, GymSpaceType, NumpyObsType, PzStepReturn
+from agilerl.typing import (
+    ActionType,
+    NumpyObsType,
+    PzObservationsType,
+    PzResetReturn,
+    PzStepReturn,
+)
 from agilerl.vector.pz_vec_env import PettingZooVecEnv
 
 AgentID = TypeVar("AgentID")
-ObsType = TypeVar("ObsType")
-PzEnvType = PettingZooVecEnv | ParallelEnv
-SharedMemoryType: TypeAlias = Union[RawArray, tuple[RawArray, ...], dict[str, RawArray]]
+ObsT = TypeVar("ObsT")
+PzSubEnvType = PettingZooVecEnv | ParallelEnv
+# `mp.Array` (used to back the shared observation buffers) returns a
+# lock-wrapped SynchronizedArray; the aliases are quoted because the class is
+# only subscriptable in stubs, not at runtime.
+SharedMemoryArray: TypeAlias = "SynchronizedArray[Any]"
+SharedMemoryType: TypeAlias = (
+    "SharedMemoryArray | tuple[SharedMemoryArray, ...] | dict[str, SharedMemoryArray]"
+)
 
 
 def reshape_observation(
     raw_data: NumpyObsType,
     space: spaces.Space,
     num_envs: int,
-) -> Any:
+) -> Any:  # noqa: ANN401 -- reshaped obs mirrors arbitrarily nested Dict/Tuple spaces (deeper than NumpyObsType expresses)
     """Reshape the raw data to the correct shape for the observation space.
 
     :param raw_data: The raw data to reshape
-    :type raw_data: np.ndarray, dict[str, np.ndarray], tuple[np.ndarray, ...]
+    :type raw_data: npt.NDArray, dict[str, npt.NDArray], tuple[npt.NDArray, ...]
     :param space: The observation space
     :type space: gymnasium.spaces.Space
     :param num_envs: The number of environments
@@ -48,19 +64,22 @@ def reshape_observation(
     :rtype: Any
     """
     if isinstance(space, spaces.Dict):
+        assert not isinstance(raw_data, (np.ndarray, tuple))  # mirrors the space
         result = OrderedDict()
         for key, subspace in space.spaces.items():
             result[key] = reshape_observation(raw_data[key], subspace, num_envs)
 
     elif isinstance(space, spaces.Tuple):
+        assert isinstance(raw_data, tuple)  # mirrors the space
         result = []
         for i, subspace in enumerate(space.spaces):
             result.append(reshape_observation(raw_data[i], subspace, num_envs))
 
         result = tuple(result)
     else:
+        assert not isinstance(raw_data, (dict, tuple))  # mirrors the space
         # Reshape to [num_envs, *shape]
-        shape = space.shape if space.shape != () else (1,)
+        shape = space.shape or (1,)
         reshaped = raw_data.reshape((num_envs, *shape))
         result = reshaped.astype(space.dtype)
 
@@ -88,15 +107,15 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
     """
 
     processes: list[mp.Process]
-    parent_pipes: list[Connection]
+    parent_pipes: list[Connection | None]
     error_queue: mp.Queue
     _state: AsyncState
 
     def __init__(
         self,
-        env_fns: list[Callable[[], PzEnvType]],
+        env_fns: Sequence[Callable[[], PzSubEnvType]],
         copy: bool = True,
-        context: str | None = None,
+        context: Literal["spawn", "fork", "forkserver"] | None = None,
     ) -> None:
         # Core class attributes
         ctx = mp.get_context(context)
@@ -107,13 +126,12 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
             if hasattr(dummy_env, "metadata")
             else dummy_env.unwrapped.metadata
         )
-        render_mode = (
-            dummy_env.render_mode
-            if hasattr(dummy_env, "render_mode")
-            else dummy_env.unwrapped.render_mode
+        render_mode: str | None = getattr(
+            dummy_env,
+            "render_mode",
+            getattr(dummy_env.unwrapped, "render_mode", None),
         )
         possible_agents = dummy_env.possible_agents
-        self.possible_agents = possible_agents
         self.active_agents = None
         self.previous_active = None
         self.copy = copy
@@ -158,7 +176,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
                     name=f"Worker<{type(self).__name__}>-{idx}",
                     args=(
                         idx,
-                        CloudpickleWrapper(env_fn),
+                        CloudpickleWrapper(env_fn),  # ty: ignore[invalid-argument-type]  # gymnasium annotates the wrapped fn as () -> gym.Env; the wrapper just pickles the callable
                         child_pipe,
                         parent_pipe,
                         self._obs_buffer,
@@ -177,13 +195,13 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
     def reset(
         self,
         *,
-        seed: int | None = None,
+        seed: int | list[int] | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[dict[str, NumpyObsType], dict[str, Any]]:
+    ) -> PzResetReturn:
         """Reset all the environments and return two dictionaries of batched observations and infos.
 
-        :param seed: Random seed, defaults to None
-        :type seed: None | int, optional
+        :param seed: Random seed (or one seed per environment), defaults to None
+        :type seed: None | int | list[int], optional
         :param options: Options dictionary
         :type options: dict[str, Any]
         """
@@ -192,25 +210,27 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
 
     def reset_async(
         self,
-        seed: int | None = None,
+        seed: int | list[int] | None = None,
         options: dict[str, Any] | None = None,
     ) -> None:
         """Send calls to the :obj:`reset` methods of the sub-environments.
 
         To get the results of these calls, you may invoke :meth:`reset_wait`.
 
-        :param seed: Random seed, defaults to None
-        :type seed: None | int, optional
+        :param seed: Random seed (or one seed per environment), defaults to None
+        :type seed: None | int | list[int], optional
         :param options: Options dictionary
         :type options: dict[str, Any]
         """
         self._assert_is_running()
         if seed is None:
-            seed = [None for _ in range(self.num_envs)]
+            env_seeds: Sequence[int | None] = [None] * self.num_envs
         elif isinstance(seed, int):
-            seed = [seed + i for i in range(self.num_envs)]
-        assert len(seed) == self.num_envs, (
-            f"If seeds are passed as a list the length must match num_envs={self.num_envs} but got length={len(seed)}."
+            env_seeds = [seed + i for i in range(self.num_envs)]
+        else:
+            env_seeds = seed
+        assert len(env_seeds) == self.num_envs, (
+            f"If seeds are passed as a list the length must match num_envs={self.num_envs} but got length={len(env_seeds)}."
         )
 
         if self._state != AsyncState.DEFAULT:
@@ -219,31 +239,29 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
                 msg,
                 str(self._state.value),
             )
-        for pipe, env_seed in zip(self.parent_pipes, seed, strict=False):
+        for pipe, env_seed in zip(self._active_parent_pipes(), env_seeds, strict=False):
             env_kwargs = {"seed": env_seed, "options": options}
             pipe.send(("reset", env_kwargs))
 
         self._state = AsyncState.WAITING_RESET
 
-    def get_observations(self) -> dict[str, NumpyObsType]:
+    def get_observations(self) -> PzObservationsType:
         """Get the observations from the environments.
 
         :return: Observations from the environments
-        :rtype: dict[str, NumpyObsType]
+        :rtype: PzObservationsType
         """
-        return (
-            {
+        if self.copy:
+            return {
                 agent: deepcopy(self.observations[agent])
                 for agent in self.observations.keys()
             }
-            if self.copy
-            else self.observations
-        )
+        return self.observations
 
     def reset_wait(
         self,
         timeout: float | None = None,
-    ) -> tuple[dict[str, NumpyObsType], dict[str, Any]]:
+    ) -> PzResetReturn:
         """Wait for the calls triggered by :meth:`reset_async` to finish and return the results.
 
         :param timeout: Number of seconds before the call to ``reset_wait`` times out. If `None`, the call to
@@ -251,7 +269,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         :type timeout: int | float | None, optional
 
         :return: Tuple of observations and infos
-        :rtype: tuple[dict[str, NumpyObsType], dict[str, Any]]
+        :rtype: PzResetReturn
         """
         self._assert_is_running()
         if self._state != AsyncState.WAITING_RESET:
@@ -269,7 +287,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
             )
 
         info_data, successes = zip(
-            *[pipe.recv() for pipe in self.parent_pipes], strict=False
+            *[pipe.recv() for pipe in self._active_parent_pipes()], strict=False
         )
         self._raise_if_errors(successes)
 
@@ -285,13 +303,14 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
             infos,
         )
 
-    def step_async(self, actions: list[list[ActionType]]) -> None:
+    def step_async(self, actions: list[dict[str, ActionType]]) -> None:
         """Tell all the environments to start taking a step with the given actions.
         Call step_wait() to get the results of the step.
         You should not call this if a step_async run is already pending.
 
-        :param actions: List of lists of length num_envs, each sub list contains actions for each agent in a given environment
-        :type actions: list[list[int | float | np.ndarray]]
+        :param actions: List of dictionaries of length num_envs, each sub dictionary contains
+            actions for each agent in a given environment
+        :type actions: list[dict[str, int | float | npt.NDArray]]
         """
         self._assert_is_running()
         if self._state != AsyncState.DEFAULT:
@@ -300,7 +319,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
                 msg,
                 str(self._state.value),
             )
-        for pipe, action in zip(self.parent_pipes, actions, strict=False):
+        for pipe, action in zip(self._active_parent_pipes(), actions, strict=False):
             pipe.send(("step", action))
 
         self._state = AsyncState.WAITING_STEP
@@ -312,7 +331,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         :type timeout: int | float | None, optional
 
         :return: Tuple of observations, rewards, dones, and infos
-        :rtype: tuple[dict[str, NumpyObsType], dict[str, np.ndarray], dict[str, np.ndarray], dict[str, Any]]
+        :rtype: PzStepReturn
         """
         self._assert_is_running()
         if self._state != AsyncState.WAITING_STEP:
@@ -334,7 +353,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         )
         successes = []
         infos = {}
-        for env_idx, pipe in enumerate(self.parent_pipes):
+        for env_idx, pipe in enumerate(self._active_parent_pipes()):
             env_step_return, success = pipe.recv()
             successes.append(success)
             if success:
@@ -361,11 +380,11 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
             infos,
         )
 
-    def render(self) -> Any:
+    def render(self) -> tuple[Any, ...]:
         """Return the rendered frames from the parallel environments."""
         return self.call("render")
 
-    def call(self, name: str, *args: Any, **kwargs: Any) -> Any:
+    def call(self, name: str, *args: Any, **kwargs: Any) -> tuple[Any, ...]:
         """Call a method from each parallel environment with args and kwargs.
 
         :param name: Name of the method or property to call
@@ -396,12 +415,12 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
                 str(self._state.value),
             )
 
-        for pipe in self.parent_pipes:
+        for pipe in self._active_parent_pipes():
             pipe.send(("_call", (name, args, kwargs)))
 
         self._state = AsyncState.WAITING_CALL
 
-    def call_wait(self, timeout: float | None = None) -> Any:
+    def call_wait(self, timeout: float | None = None) -> tuple[Any, ...]:
         """Call all parent pipes and waits for the results.
 
         :param timeout: Number of seconds before the call to :meth:`call_wait` times out. If ``None`` (default),
@@ -424,13 +443,13 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
             )
 
         results, successes = zip(
-            *[pipe.recv() for pipe in self.parent_pipes], strict=False
+            *[pipe.recv() for pipe in self._active_parent_pipes()], strict=False
         )
         self._raise_if_errors(successes)
         self._state = AsyncState.DEFAULT
         return results
 
-    def get_attr(self, name: str) -> Any:
+    def get_attr(self, name: str) -> tuple[Any, ...]:
         """Get a property from each parallel environment.
 
         :param name: Name of property to get from each individual environment
@@ -438,7 +457,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         """
         return self.call(name)
 
-    def set_attr(self, name: str, values: Any) -> None:
+    def set_attr(self, name: str, values: object) -> None:
         """Set an attribute of the sub-environments.
 
         :param name: Name of the property to be set in each individual environment.
@@ -467,9 +486,11 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
                 str(self._state.value),
             )
 
-        for pipe, value in zip(self.parent_pipes, values, strict=False):
+        for pipe, value in zip(self._active_parent_pipes(), values, strict=False):
             pipe.send(("_setattr", (name, value)))
-        _, successes = zip(*[pipe.recv() for pipe in self.parent_pipes], strict=False)
+        _, successes = zip(
+            *[pipe.recv() for pipe in self._active_parent_pipes()], strict=False
+        )
         self._raise_if_errors(successes)
 
     def close_extras(
@@ -522,6 +543,14 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
                 process.terminate()
                 process.join(timeout=1.0)
 
+    def _active_parent_pipes(self) -> list[Connection]:
+        """Return the parent pipes, asserting none was shut down after a worker error."""
+        pipes = [pipe for pipe in self.parent_pipes if pipe is not None]
+        assert len(pipes) == len(self.parent_pipes), (
+            "Cannot communicate with workers that were shut down after an error."
+        )
+        return pipes
+
     def _poll_pipe_envs(self, timeout: float | None = None) -> bool:
         self._assert_is_running()
 
@@ -538,7 +567,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
                 return False
         return True
 
-    def _raise_if_errors(self, successes: list[bool]) -> None:
+    def _raise_if_errors(self, successes: Sequence[bool]) -> None:
         if all(successes):
             return
 
@@ -552,7 +581,9 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
             )
             logger.error(f"{trace}")
 
-            self.parent_pipes[index].close()
+            failed_pipe = self.parent_pipes[index]
+            assert failed_pipe is not None
+            failed_pipe.close()
             self.parent_pipes[index] = None
 
             if i == num_errors - 1:
@@ -624,7 +655,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         return vector_infos
 
 
-class Observations:
+class Observations(Mapping[str, NumpyObsType]):
     """Class for storing observations with a dictionary interface.
 
     :param shared_memory: A RawArray that all envs write observations to.
@@ -651,20 +682,32 @@ class Observations:
         for agent, shm in shared_memory.items():
             agent_space = obs_spaces[agent]
             if isinstance(agent_space, spaces.Dict):
-                obs_view = OrderedDict()
-                for key, subspace in agent_space.spaces.items():
-                    obs_view[key] = np.frombuffer(
-                        shm[key].get_obj(),
-                        dtype=subspace.dtype,
+                # The shared memory mirrors the space's structure
+                assert not isinstance(shm, (SynchronizedArray, tuple))
+                obs_view: NumpyObsType = OrderedDict(
+                    (
+                        key,
+                        np.frombuffer(
+                            memoryview(shm[key].get_obj()),
+                            dtype=subspace.dtype,
+                        ),
                     )
-                self.obs_view[agent] = obs_view
+                    for key, subspace in agent_space.spaces.items()
+                )
             elif isinstance(agent_space, spaces.Tuple):
+                assert isinstance(shm, tuple)  # mirrors the space
                 obs_view = tuple(
-                    np.frombuffer(shm[i].get_obj(), dtype=agent_space.spaces[i].dtype)
+                    np.frombuffer(
+                        memoryview(shm[i].get_obj()),
+                        dtype=agent_space.spaces[i].dtype,
+                    )
                     for i in range(len(agent_space.spaces))
                 )
             else:
-                obs_view = np.frombuffer(shm.get_obj(), dtype=agent_space.dtype)
+                assert not isinstance(shm, (dict, tuple))  # mirrors the space
+                obs_view = np.frombuffer(
+                    memoryview(shm.get_obj()), dtype=agent_space.dtype
+                )
 
             self.obs_view[agent] = obs_view
 
@@ -682,42 +725,18 @@ class Observations:
     def __repr__(self) -> str:
         return self.__str__()
 
-    def __contains__(self, key: str) -> bool:
-        return key in self.obs_view
-
     def __len__(self) -> int:
         return len(self.agents)
 
-    def __iterate_kv(self) -> Any:
-        for key in self.obs_view:
-            yield (key, self.__getitem__(key))
-
-    def __iter__(self) -> Any:
-        return self.__iterate_kv()
-
-    def keys(self) -> Any:
-        for k, _ in self.__iterate_kv():
-            yield k
-
-    def values(self) -> Any:
-        for _, v in self.__iterate_kv():
-            yield v
-
-    def items(self) -> Any:
-        return self.__iterate_kv()
-
-    def get(self, key: str) -> np.ndarray | None:
-        try:
-            return self.__getitem__(key)
-        except KeyError:
-            return None
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.obs_view)
 
 
 def _create_memory_array(
     num_envs: int,
     obs_space: spaces.Space,
-    context: Any,
-) -> RawArray:
+    context: BaseContext,
+) -> SharedMemoryArray:
     """Create a shared memory array for a given observation space.
 
     :param num_envs: Number of environments
@@ -727,14 +746,18 @@ def _create_memory_array(
     :param context: Multiprocessing context
     :type context: Any
     """
-    return context.Array(obs_space.dtype.char, num_envs * int(np.prod(obs_space.shape)))
+    dtype = obs_space.dtype
+    shape = obs_space.shape
+    assert dtype is not None  # flat spaces carry a dtype
+    assert shape is not None  # flat spaces carry a shape
+    return context.Array(dtype.char, num_envs * int(np.prod(shape)))
 
 
 def create_shared_memory(
     num_envs: int,
     obs_spaces: dict[str, spaces.Space],
-    context: Any,
-) -> dict[str, RawArray]:
+    context: BaseContext,
+) -> dict[str, SharedMemoryType]:
     """Create shared memory for multi-agent observations.
 
     :param num_envs: Number of environments
@@ -744,7 +767,7 @@ def create_shared_memory(
     :param context: Multiprocessing context
     :type context: Any
     """
-    shared_memory = {}
+    shared_memory: dict[str, SharedMemoryType] = {}
     for agent, obs_space in obs_spaces.items():
         if isinstance(obs_space, spaces.Dict):
             shm = OrderedDict()
@@ -767,7 +790,7 @@ def get_placeholder_value(
     agent: str,
     transition_name: str,
     obs_spaces: dict[str, spaces.Space] | None = None,
-) -> Any:
+) -> NumpyObsType | float | None:
     """Obtain a placeholder value to return for associated experience when an
     agent is killed or is inactive for the current step.
 
@@ -795,26 +818,24 @@ def get_placeholder_value(
 
         agent_space = obs_spaces[agent]
         if isinstance(agent_space, spaces.Dict):
-            # For Dict spaces, create a dictionary of -1 arrays
-            return {k: np.full(v.shape, np.nan) for k, v in agent_space.items()}
+            return {k: np.full(v.shape or (), np.nan) for k, v in agent_space.items()}
         if isinstance(agent_space, spaces.Tuple):
-            # For Tuple spaces, create a tuple of -1 arrays
             return tuple(np.full(s.shape, np.nan) for s in agent_space)
-        # For normal spaces
-        return np.full(agent_space.shape, np.nan)
+        return np.full(agent_space.shape or (), np.nan)
     return None
 
 
 def process_transition(
-    transitions: tuple[dict[str, NumpyObsType], ...],
+    transitions: tuple[dict[str, Any], ...],
     obs_spaces: dict[str, spaces.Space],
     transition_names: list[str],
     agents: list[str],
-) -> list[dict[str, NumpyObsType]]:
+) -> list[dict[str, Any]]:
     """Process transition, adds in placeholder values for killed agents.
 
-    :param transitions: Tuple of environment transition
-    :type transitions: tuple[dict[str, NumpyObsType], ...]
+    :param transitions: Tuple of environment transition (observations, rewards,
+        dones, infos, ... depending on ``transition_names``)
+    :type transitions: tuple[dict[str, Any], ...]
     :param obs_spaces: Observation spaces
     :type obs_spaces: dict[str, gymnasium.spaces.Space]
     :param transition_names: Names associated to transitions
@@ -838,8 +859,8 @@ def process_transition(
 
 def write_vector_observation(
     index: int,
-    observation: np.ndarray,
-    shared_memory: RawArray,
+    observation: ArrayLike,
+    shared_memory: SharedMemoryArray,
     obs_space: spaces.Space,
 ) -> None:
     """Write a vector observation to the shared memory.
@@ -847,15 +868,17 @@ def write_vector_observation(
     :param index: Environment index
     :type index: int
     :param observation: Observation from env.step or env.reset
-    :type observation: np.ndarray
+    :type observation: ArrayLike
     :param shared_memory: Shared memory
-    :type shared_memory: multiprocessing.RawArray
+    :type shared_memory: multiprocessing.sharedctypes.SynchronizedArray
     :param obs_space: Observation space
     :type obs_space: gymnasium.spaces.Space
     """
-    size = int(np.prod(obs_space.shape))
+    shape = obs_space.shape
+    assert shape is not None  # flat spaces carry a shape
+    size = int(np.prod(shape))
     dtype = obs_space.dtype
-    dest = np.frombuffer(shared_memory.get_obj(), dtype=dtype)
+    dest = np.frombuffer(memoryview(shared_memory.get_obj()), dtype=dtype)
     np.copyto(
         dest[index * size : (index + 1) * size],
         np.asarray(observation, dtype=dtype).flatten(),
@@ -864,25 +887,27 @@ def write_vector_observation(
 
 def write_to_shared_memory(
     index: int,
-    observation: dict[str, NumpyObsType],
-    shared_memory: dict[str, RawArray],
-    obs_space: dict[str, GymSpaceType],
+    observation: Mapping[str, Any],
+    shared_memory: Mapping[str, SharedMemoryType],
+    obs_space: Mapping[str, spaces.Space],
 ) -> None:
     """Set the observation for a given environment. Handles Dict and Tuple spaces.
 
     :param index: Environment index
     :type index: int
     :param observation: Observation from env.step or env.reset
-    :type observation: dict[str, np.ndarray]
+    :type observation: Mapping[str, Any]
     :param shared_memory: Shared memory
-    :type shared_memory: dict[str, mp.Array | tuple[mp.Array, ...] | dict[str, mp.Array]]
+    :type shared_memory: Mapping[str, mp.Array | tuple[mp.Array, ...] | dict[str, mp.Array]]
     :param obs_space: Observation space dictionary
-    :type obs_space: dict[str, gymnasium.spaces.Space]
+    :type obs_space: Mapping[str, gymnasium.spaces.Space]
     """
     for agent, agent_shared in shared_memory.items():
         agent_space = obs_space[agent]
         obs = observation[agent]
         if isinstance(agent_space, spaces.Dict):
+            # The shared memory mirrors the space's structure
+            assert not isinstance(agent_shared, (SynchronizedArray, tuple))
             for key, subspace in agent_space.spaces.items():
                 write_vector_observation(
                     index,
@@ -892,6 +917,8 @@ def write_to_shared_memory(
                 )
 
         elif isinstance(agent_space, spaces.Tuple):
+            # The shared memory mirrors the space's structure
+            assert isinstance(agent_shared, tuple)
             for i, subspace in enumerate(agent_space.spaces):
                 write_vector_observation(
                     index,
@@ -900,6 +927,8 @@ def write_to_shared_memory(
                     subspace,
                 )
         else:
+            # The shared memory mirrors the space's structure
+            assert not isinstance(agent_shared, (dict, tuple))
             write_vector_observation(index, obs, agent_shared, agent_space)
 
 
@@ -908,7 +937,7 @@ def _async_worker(
     env_fn: Callable[[], ParallelEnv],
     pipe: Connection,
     parent_pipe: Connection,
-    shared_memory: dict[str, RawArray],
+    shared_memory: dict[str, SharedMemoryType],
     error_queue: mp.Queue,
     agents: list[str],
 ) -> None:

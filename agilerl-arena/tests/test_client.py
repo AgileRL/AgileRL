@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
+
 from agilerl.arena.auth import ArenaOAuth2
 from agilerl.arena.client import ArenaClient, _TokenStore
 from agilerl.arena.exceptions import (

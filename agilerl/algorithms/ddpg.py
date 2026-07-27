@@ -1,11 +1,15 @@
 import copy
 import warnings
+from collections.abc import Sequence
 from typing import Any
 
+import gymnasium as gym
 import numpy as np
+import numpy.typing as npt
 import torch
 from accelerate import Accelerator
 from gymnasium import spaces
+from tensordict import TensorDict
 from torch import nn, optim
 
 from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
@@ -20,10 +24,9 @@ from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.typing import (
-    ExperiencesType,
-    GymEnvType,
     NetConfigType,
     ObservationType,
+    ReplayBatch,
     SupportedObservationSpace,
 )
 from agilerl.utils.algo_utils import (
@@ -37,7 +40,7 @@ from agilerl.utils.evolvable_networks import (
 )
 
 
-class DDPG(RLAlgorithm):
+class DDPG(RLAlgorithm[TensorDict]):
     """Deep Deterministic Policy Gradient (DDPG).
 
     Paper: https://arxiv.org/abs/1509.02971
@@ -49,11 +52,11 @@ class DDPG(RLAlgorithm):
     :param O_U_noise: Use Ornstein Uhlenbeck action noise for exploration. If False, uses Gaussian noise. Defaults to True
     :type O_U_noise: bool, optional
     :param expl_noise: Scale for Ornstein Uhlenbeck action noise, or standard deviation for Gaussian exploration noise, defaults to 0.1
-    :type expl_noise: float | np.ndarray, optional
+    :type expl_noise: float | npt.NDArray, optional
     :param vect_noise_dim: Vectorization dimension of environment for action noise, defaults to 1
     :type vect_noise_dim: int, optional
     :param mean_noise: Mean of exploration noise, defaults to 0.0
-    :type mean_noise: float, optional
+    :type mean_noise: float | npt.NDArray, optional
     :param theta: Rate of mean reversion in Ornstein Uhlenbeck action noise, defaults to 0.15
     :type theta: float, optional
     :param dt: Timestep for Ornstein Uhlenbeck action noise update, defaults to 1e-2
@@ -97,15 +100,17 @@ class DDPG(RLAlgorithm):
     """
 
     action_space: spaces.Box
+    # Box action space, so the network output size is a plain int
+    action_dim: int
 
     def __init__(
         self,
         observation_space: SupportedObservationSpace,
         action_space: spaces.Box,
         O_U_noise: bool = True,
-        expl_noise: float | np.ndarray = 0.1,
+        expl_noise: float | npt.NDArray = 0.1,
         vect_noise_dim: int = 1,
-        mean_noise: float = 0.0,
+        mean_noise: float | npt.NDArray = 0.0,
         theta: float = 0.15,
         dt: float = 1e-2,
         index: int = 0,
@@ -192,12 +197,12 @@ class DDPG(RLAlgorithm):
         self.O_U_noise = O_U_noise
         self.vect_noise_dim = vect_noise_dim
         self.share_encoders = share_encoders
-        self.expl_noise = (
+        self.expl_noise: np.ndarray = (
             expl_noise
             if isinstance(expl_noise, np.ndarray)
             else expl_noise * np.ones((vect_noise_dim, self.action_dim))
         )
-        self.mean_noise = (
+        self.mean_noise: np.ndarray = (
             mean_noise
             if isinstance(mean_noise, np.ndarray)
             else mean_noise * np.ones((vect_noise_dim, self.action_dim))
@@ -353,7 +358,11 @@ class DDPG(RLAlgorithm):
         """Shares the encoder parameters between the actor and critic. Registered as a mutation hook
         when share_encoders=True.
         """
-        if all(isinstance(net, EvolvableNetwork) for net in [self.actor, self.critic]):
+        if (
+            isinstance(self.actor, EvolvableNetwork)
+            and isinstance(self.critic, EvolvableNetwork)
+            and isinstance(self.critic_target, EvolvableNetwork)
+        ):
             try:
                 share_encoder_parameters(self.actor, self.critic, self.critic_target)
             except KeyError as e:
@@ -373,7 +382,7 @@ class DDPG(RLAlgorithm):
         training: bool = True,
         *args: Any,
         **kwargs: Any,
-    ) -> np.ndarray:
+    ) -> npt.NDArray:
         """Return the next action to take in the environment. If training, random noise
         is added to the action to promote exploration.
 
@@ -405,14 +414,14 @@ class DDPG(RLAlgorithm):
         )
         return action.data.numpy()
 
-    def action_noise(self) -> np.ndarray:
+    def action_noise(self) -> npt.NDArray:
         """Create action noise for exploration, either Ornstein Uhlenbeck or from a normal distribution.
 
         :return: Action noise
-        :rtype: np.ndarray
+        :rtype: npt.NDArray
         """
         if self.O_U_noise:
-            noise: np.ndarray = (
+            noise: npt.NDArray = (
                 self.current_noise
                 + self.theta * (self.mean_noise - self.current_noise) * self.dt
                 + self.expl_noise
@@ -421,44 +430,46 @@ class DDPG(RLAlgorithm):
             )
             self.current_noise = noise
         else:
-            noise: np.ndarray = np.random.normal(
+            noise: npt.NDArray = np.random.normal(
                 self.mean_noise,
                 self.expl_noise,
                 size=(self.vect_noise_dim, self.action_dim),
             )
         return noise.astype(np.float32)
 
-    def reset_action_noise(self, indices: np.ndarray) -> None:
+    def reset_action_noise(self, indices: Sequence[int] | npt.NDArray) -> None:
         """Reset action noise.
 
         :param indices: List of indices to reset
-        :type indices: np.ndarray
+        :type indices: Sequence[int] or npt.NDArray
         """
         self.current_noise[indices] = self.mean_noise[indices]
 
     def learn(
         self,
-        experiences: ExperiencesType,
+        experiences: TensorDict,
         noise_clip: float = 0.5,
         policy_noise: float = 0.2,
-    ) -> tuple[float, float]:
+    ) -> tuple[float | None, float]:
         """Update agent network parameters to learn from experiences.
 
-        :param experiences: TensorDict of batched observations, actions, rewards, next_observations, dones.
-        :type experiences: dict[str, torch.Tensor[float]]
+        :param experiences: Batch of observations, actions, rewards, next
+            observations and dones sampled from an off-policy replay buffer.
+        :type experiences: TensorDict
         :param noise_clip: Maximum noise limit to apply to actions, defaults to 0.5
         :type noise_clip: float, optional
         :param policy_noise: Standard deviation of noise applied to policy, defaults to 0.2
         :type policy_noise: float, optional
+        :return: Actor loss (None on steps without a policy update) and critic loss
+        :rtype: tuple[float | None, float]
         """
-        obs = experiences["obs"]
-        actions = experiences["action"]
-        rewards = experiences["reward"]
-        next_obs = experiences["next_obs"]
-        dones = experiences["done"]
+        batch: ReplayBatch = ReplayBatch.from_tensordict(experiences)
+        actions = batch.action
+        rewards = batch.reward
+        dones = batch.done
 
-        obs = self.preprocess_observation(obs)
-        next_obs = self.preprocess_observation(next_obs)
+        obs = self.preprocess_observation(batch.obs)
+        next_obs = self.preprocess_observation(batch.next_obs)
 
         q_value = self.critic(obs, actions)
         with torch.no_grad():
@@ -486,8 +497,8 @@ class DDPG(RLAlgorithm):
 
         self.critic_optimizer.step()
 
-        critic_loss = critic_loss.item()
-        self.metrics.log("critic_loss", critic_loss)
+        critic_loss_value = critic_loss.item()
+        self.metrics.log("critic_loss", critic_loss_value)
 
         # update actor and targets every policy_freq learn steps
         self.learn_counter += 1
@@ -508,12 +519,12 @@ class DDPG(RLAlgorithm):
             self.soft_update(self.actor, self.actor_target)
             self.soft_update(self.critic, self.critic_target)
 
-            actor_loss = actor_loss.item()
-            self.metrics.log("actor_loss", actor_loss)
+            actor_loss_value = actor_loss.item()
+            self.metrics.log("actor_loss", actor_loss_value)
         else:
-            actor_loss = None
+            actor_loss_value = None
 
-        return actor_loss, critic_loss
+        return actor_loss_value, critic_loss_value
 
     def soft_update(self, net: nn.Module, target: nn.Module) -> None:
         """Soft updates target network parameters.
@@ -532,14 +543,14 @@ class DDPG(RLAlgorithm):
 
     def test(
         self,
-        env: GymEnvType,
+        env: gym.vector.VectorEnv,
         max_steps: int | None = None,
         loop: int = 3,
     ) -> float:
         """Return mean test score of agent in environment with epsilon-greedy policy.
 
-        :param env: The environment to be tested in
-        :type env: Gym-style environment
+        :param env: The vectorized environment to be tested in
+        :type env: gym.vector.VectorEnv
         :param max_steps: Maximum number of testing steps, defaults to None
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
@@ -570,6 +581,6 @@ class DDPG(RLAlgorithm):
                             completed_episode_scores[idx] = scores[idx]
                             finished[idx] = 1
                 rewards.append(np.mean(completed_episode_scores))
-        mean_fit = np.mean(rewards)
+        mean_fit = float(np.mean(rewards))
         self.metrics.add_fitness(mean_fit)
         return mean_fit

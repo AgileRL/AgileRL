@@ -1,15 +1,16 @@
 import warnings
-from collections import OrderedDict
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from numbers import Number
+from typing import Any, SupportsFloat
 
 import numpy as np
 import torch
-from tensordict import TensorDict, tensorclass
+from tensordict import TensorClass, TensorDict
 from torch.utils.data import IterableDataset
 
 from agilerl.components import ReplayBuffer
-from agilerl.typing import ArrayOrTensor, MultiAgentObservationType, ObservationType
+from agilerl.typing import ArrayOrTensor, ObservationType
+from agilerl.utils.algo_utils import is_str_keyed_dict
 
 
 def to_tensordict(
@@ -24,35 +25,34 @@ def to_tensordict(
     :type dtype: torch.dtype, optional
     :return: TensorDict, whether the data was a tuple or not.
     """
+    if isinstance(data, TensorDict):
+        return data.to(dtype=dtype)
+
     if isinstance(data, tuple):
-        assert all(isinstance(el, (torch.Tensor, np.ndarray, Number)) for el in data), (
-            "Expected all elements of the tuple to be torch.Tensor or np.ndarray."
-        )
-
-        new_data = OrderedDict()
+        td = TensorDict()
         for i, el in enumerate(data):
-            new_data[f"tuple_obs_{i}"] = el
+            td[f"tuple_obs_{i}"] = to_torch_tensor(el, dtype)
 
-        data = TensorDict(new_data)
+        return td
 
-    elif isinstance(data, dict):
-        assert all(
-            isinstance(el, (torch.Tensor, np.ndarray, Number)) for el in data.values()
-        ), "Expected all values of the dict to be torch.Tensor or np.ndarray."
+    if is_str_keyed_dict(data):
+        td = TensorDict()
+        for key, value in data.items():
+            td[key] = to_torch_tensor(value, dtype)
 
-        data = TensorDict(data)
+        return td
 
-    return data.to(dtype=dtype)
+    msg = f"Cannot convert data of type {type(data)} to a TensorDict."
+    raise TypeError(msg)
 
 
 def to_torch_tensor(
-    data: ArrayOrTensor,
+    data: object,
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
-    """Convert a numpy array or Python number to a torch tensor.
-
-    :param data: Numpy array or Python number.
-    :type data: ArrayOrTensor
+    """Convert a numpy array, torch tensor, Python number, or other array-like
+    :param data: Numpy array, torch tensor, Python number, or other array-like.
+    :type data: object
     :param dtype: Data type of the torch tensor, defaults to torch.float32
     :type dtype: torch.dtype, optional
     :return: Torch tensor.
@@ -65,13 +65,24 @@ def to_torch_tensor(
     return torch.tensor(data, dtype=dtype)
 
 
-@tensorclass
-class Transition:
+def transition_to_tensordict(transition: TensorClass) -> TensorDict:
+    """Return the plain :class:`TensorDict` a tensorclass holds."""
+    td = transition.to_tensordict()
+    assert isinstance(td, TensorDict), (
+        f"Expected a TensorDict from {type(transition).__name__}, "
+        f"got {type(td).__name__}."
+    )
+    return td
+
+
+class Transition(TensorClass):
+    """One environment step staged for a :class:`~agilerl.components.replay_buffer.ReplayBuffer`."""
+
     obs: ObservationType
     action: ArrayOrTensor
     next_obs: ObservationType
-    reward: ArrayOrTensor
-    done: ArrayOrTensor
+    reward: ArrayOrTensor | SupportsFloat
+    done: ArrayOrTensor | SupportsFloat
 
     def __post_init__(self) -> None:
         # Convert observations to TensorDict if they are dicts or tuples
@@ -93,14 +104,14 @@ class Transition:
             self.reward = self.reward.unsqueeze(-1)
 
 
-def _to_agent_td(data: dict) -> TensorDict:
+def _to_agent_td(data: Mapping[str, ObservationType]) -> TensorDict:
     """Convert a per-agent dict to a :class:`TensorDict`.
 
     Each value can be an array/tensor (flat obs) **or** a dict/tuple
     (dict/tuple observation space), in which case it is recursively
     converted via :func:`to_tensordict`.
     """
-    converted = {}
+    converted: dict[Any, Any] = {}
     for agent_id, value in data.items():
         if isinstance(value, (dict, tuple)):
             converted[agent_id] = to_tensordict(value)
@@ -109,11 +120,9 @@ def _to_agent_td(data: dict) -> TensorDict:
     return TensorDict(converted)
 
 
-@tensorclass
-class MultiAgentTransition:
+class MultiAgentTransition(TensorClass):
     """Multi-agent analogue of :class:`Transition`.
 
-    Each field is a ``dict[agent_id, array | dict]`` that is converted to a
     sub-:class:`TensorDict` on construction.  Dict/tuple observation spaces
     are handled automatically.
 
@@ -123,16 +132,14 @@ class MultiAgentTransition:
             obs=obs, action=action, reward=reward,
             next_obs=next_obs, done=done,
         )
-        td = transition.to_tensordict()
-        td.batch_size = [num_envs]
         memory.add(td)
     """
 
-    obs: MultiAgentObservationType
-    action: dict[str, ArrayOrTensor]
-    reward: dict[str, ArrayOrTensor]
-    next_obs: MultiAgentObservationType
-    done: dict[str, ArrayOrTensor]
+    obs: Mapping[str, ObservationType] | TensorDict
+    action: Mapping[str, ArrayOrTensor] | TensorDict
+    reward: Mapping[str, ArrayOrTensor] | TensorDict
+    next_obs: Mapping[str, ObservationType] | TensorDict
+    done: Mapping[str, ArrayOrTensor] | TensorDict
 
     def __post_init__(self) -> None:
         self.obs = _to_agent_td(self.obs)

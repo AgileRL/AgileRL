@@ -10,6 +10,12 @@ class TestReinitSharedNetworksDecorator:
             eval_network = "actor"
             shared_networks: ClassVar[list[str]] = ["target_actor"]
 
+            def eval_network_name(self):
+                return self.eval_network
+
+            def shared_network_names(self):
+                return self.shared_networks
+
         class DummyIndividual:
             mut = "arch"
             torch_compiler = "default"

@@ -3,7 +3,7 @@ from typing import Any
 import torch
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
-from agilerl.typing import ArrayOrTensor
+from agilerl.typing import ArrayOrTensor, DeviceType, MutationApplyDict
 from agilerl.utils.evolvable_networks import create_mlp
 
 
@@ -51,7 +51,7 @@ class EvolvableMLP(EvolvableModule):
     :param new_gelu: Use new GELU activation function, defaults to False
     :type new_gelu: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
-    :type device: str, optional
+    :type device: DeviceType, optional
     :param name: Name of the network, defaults to 'mlp'
     :type name: str, optional
     :param random_seed: Random seed to use for the network. Defaults to None.
@@ -76,7 +76,7 @@ class EvolvableMLP(EvolvableModule):
         noisy: bool = False,
         noise_std: float = 0.5,
         new_gelu: bool = False,
-        device: str = "cpu",
+        device: DeviceType = "cpu",
         name: str = "mlp",
         random_seed: int | None = None,
     ) -> None:
@@ -179,17 +179,17 @@ class EvolvableMLP(EvolvableModule):
         :param output_coeff: Output layer standard deviation coefficient, defaults to 4
         :type output_coeff: float, optional
         """
-        EvolvableModule.init_weights_gaussian(self.model, std_coeff=std_coeff)
+        EvolvableModule.apply_gaussian_init(self.model, std_coeff=std_coeff)
 
         # Output layer is initialised with std_coeff=2
         output_layer = self.get_output_dense()
-        EvolvableModule.init_weights_gaussian(output_layer, std_coeff=output_coeff)
+        EvolvableModule.apply_gaussian_init(output_layer, std_coeff=output_coeff)
 
     def forward(self, x: ArrayOrTensor) -> torch.Tensor:
         """Return output of neural network.
 
         :param x: Neural network input
-        :type x: torch.Tensor or np.ndarray
+        :type x: torch.Tensor or npt.NDArray
 
         :return: Neural network output
         :rtype: torch.Tensor
@@ -225,7 +225,7 @@ class EvolvableMLP(EvolvableModule):
         self.recreate_network()
 
     @mutation(MutationType.LAYER)
-    def add_layer(self) -> dict[str, int] | None:
+    def add_layer(self) -> MutationApplyDict | None:
         """Add a hidden layer to neural network. Falls back on ``add_node()`` if ``max_hidden_layers`` reached.
 
         :return: Dictionary containing the hidden layer and number of new nodes.
@@ -239,7 +239,7 @@ class EvolvableMLP(EvolvableModule):
         return None
 
     @mutation(MutationType.LAYER)
-    def remove_layer(self) -> dict[str, int] | None:
+    def remove_layer(self) -> MutationApplyDict | None:
         """Remove a hidden layer from neural network. Falls back on ``add_node()`` if ``min_hidden_layers`` reached.
 
         :return: Dictionary containing the hidden layer and number of new nodes.
@@ -256,7 +256,7 @@ class EvolvableMLP(EvolvableModule):
         self,
         hidden_layer: int | None = None,
         numb_new_nodes: int | None = None,
-    ) -> dict[str, int]:
+    ) -> MutationApplyDict:
         """Add nodes to hidden layer of neural network.
 
         :param hidden_layer: Depth of hidden layer to add nodes to, defaults to None
@@ -268,7 +268,7 @@ class EvolvableMLP(EvolvableModule):
         :rtype: dict[str, int]
         """
         if hidden_layer is None:
-            hidden_layer = self.rng.integers(0, len(self.hidden_size))
+            hidden_layer = int(self.rng.integers(0, len(self.hidden_size)))
         else:
             hidden_layer = min(hidden_layer, len(self.hidden_size) - 1)
 
@@ -286,7 +286,7 @@ class EvolvableMLP(EvolvableModule):
         self,
         hidden_layer: int | None = None,
         numb_new_nodes: int | None = None,
-    ) -> dict[str, int]:
+    ) -> MutationApplyDict:
         """Remove nodes from hidden layer of neural network.
 
         :param hidden_layer: Depth of hidden layer to remove nodes from, defaults to None
@@ -298,7 +298,7 @@ class EvolvableMLP(EvolvableModule):
         :rtype: dict[str, int]
         """
         if hidden_layer is None:
-            hidden_layer = self.rng.integers(0, len(self.hidden_size))
+            hidden_layer = int(self.rng.integers(0, len(self.hidden_size)))
         else:
             hidden_layer = min(hidden_layer, len(self.hidden_size) - 1)
 

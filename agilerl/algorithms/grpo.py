@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import gc
 import warnings
-from collections.abc import Callable
 from contextlib import nullcontext
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import numpy as np
+import numpy.typing as npt
 import torch
 
 from agilerl import HAS_LIGER_KERNEL, HAS_LLM_DEPENDENCIES
@@ -30,11 +30,11 @@ from agilerl.algorithms.core import ActionResult, LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.llm_envs import ReasoningGym
 from agilerl.protocols import (
-    MultiTurnEnv,
     PeftModelProtocol,
     PreTrainedModelProtocol,
+    TokenizedMultiTurnEnv,
 )
-from agilerl.typing import ExperiencesType, LLMObsType
+from agilerl.typing import LLMObsType, LLMRolloutExperiences
 from agilerl.utils.algo_utils import (
     CosineLRScheduleConfig,
     VLLMConfig,
@@ -48,6 +48,7 @@ from agilerl.utils.llm_packing import (
 from agilerl.utils.llm_utils import (
     aggregate_metrics_dict,
     build_completion_mask,
+    is_reasoning_prompts,
     masked_mean,
     masked_whiten,
     normalize_reasoning_prompt_batch,
@@ -62,7 +63,22 @@ if HAS_LLM_DEPENDENCIES or TYPE_CHECKING:
     from transformers import GenerationConfig
 
 
-class GRPO(LLMAlgorithm):
+class StandardLossFn(Protocol):
+    """Shared signature of the standard (non-Liger) minibatch loss functions."""
+
+    def __call__(
+        self,
+        mask: torch.Tensor,
+        log_probs: torch.Tensor,
+        old_log_probs: torch.Tensor,
+        reference_log_probs: torch.Tensor,
+        advantages: torch.Tensor,
+        turn_ids: torch.Tensor | None = None,
+        sampling_log_probs: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
+
+
+class GRPO(LLMAlgorithm[LLMRolloutExperiences]):
     """Group Relative Policy Optimization (GRPO).
 
     Paper: https://arxiv.org/pdf/2402.03300
@@ -474,18 +490,13 @@ class GRPO(LLMAlgorithm):
                             prompt = prepare_prompt_hf_generate(
                                 prompt_dict, actor_device
                             )
+                            input_ids = prompt["input_ids"]
+                            attention_mask = prompt["attention_mask"]
+                            stitch_ids = prompt["stitch_prefix_ids"]
+                            initial_prompt_len = prompt["initial_prompt_len"]
                             if training and group_size > 1:
-                                prompt["input_ids"] = prompt["input_ids"].repeat(
-                                    group_size,
-                                    1,
-                                )
-                                prompt["attention_mask"] = prompt[
-                                    "attention_mask"
-                                ].repeat(
-                                    group_size,
-                                    1,
-                                )
-                            stitch_ids = prompt.pop("stitch_prefix_ids", None)
+                                input_ids = input_ids.repeat(group_size, 1)
+                                attention_mask = attention_mask.repeat(group_size, 1)
                             if (
                                 stitch_ids is not None
                                 and training
@@ -493,9 +504,9 @@ class GRPO(LLMAlgorithm):
                                 and stitch_ids.shape[0] == 1
                             ):
                                 stitch_ids = stitch_ids.repeat(group_size, 1)
-                            initial_prompt_len = prompt.pop("initial_prompt_len", None)
                             completion_id = self.actor.generate(
-                                **prompt,
+                                input_ids=input_ids,
+                                attention_mask=attention_mask,
                                 generation_config=self.generation_config,
                             )
                             completion_id, full_prompt_len = (
@@ -532,7 +543,7 @@ class GRPO(LLMAlgorithm):
 
     def learn(
         self,
-        experiences: ExperiencesType,
+        experiences: LLMRolloutExperiences,
         turn_ids: torch.Tensor | None = None,
         sampling_logps: list[torch.Tensor | None] | None = None,
     ) -> dict[str, float]:
@@ -543,7 +554,7 @@ class GRPO(LLMAlgorithm):
             rewards, ``rewards`` is ``(batch, max_turns)``; otherwise it is one
             scalar per trajectory (per-turn rewards are summed to the episode
             return).
-        :type experiences: ExperiencesType
+        :type experiences: LLMRolloutExperiences
         :param sampling_logps: Optional per-row flat vLLM sampling logprobs (one
             1-D tensor per trajectory, generated tokens only; concatenated
             across turns for multi-turn) for the sampling-mismatch correction.
@@ -647,10 +658,15 @@ class GRPO(LLMAlgorithm):
         result = {
             metric: value / max(updates, 1) for metric, value in learn_metrics.items()
         }
-        result["completion_length"] = np.mean([x.shape[-1] for x in experiences[0]])
+        completion_list = experiences[0]
+        result["completion_length"] = float(
+            np.mean([x.shape[-1] for x in completion_list])
+        )
 
         # Aggregate across GPUs and report to the metrics tracker (new API).
-        agg = aggregate_metrics_dict(self.accelerator, result)
+        # (Fresh dict display so ty checks the values against the parameter's
+        # wider, invariant dict value union.)
+        agg = aggregate_metrics_dict(self.accelerator, {**result})
         agg["completion_length"] = int(agg["completion_length"])
         for key, value in agg.items():
             self.metrics.log(key, value)
@@ -661,16 +677,16 @@ class GRPO(LLMAlgorithm):
 
     def test(
         self,
-        env: ReasoningGym | MultiTurnEnv,
+        env: ReasoningGym | TokenizedMultiTurnEnv,
         loop: int = 1,
         *args: Any,
         **kwargs: Any,
-    ) -> np.ndarray:
+    ) -> npt.NDArray:
         """Return fitness (test) score of llm on test sub-set.
 
         :param env: Dataset-style ``ReasoningGym`` environment or tokenized
             multi-turn episode environment.
-        :type env: ReasoningGym | MultiTurnEnv
+        :type env: ReasoningGym | TokenizedMultiTurnEnv
         :param loop: Number of outer test iterations over ``reset`` / ``step``.
         :type loop: int
         :return: Concatenated reward tensor from the test loop.
@@ -689,7 +705,7 @@ class GRPO(LLMAlgorithm):
                     prompts = next_prompts
                     rewards.append(reward)
                 reward_tensor = torch.cat(rewards)
-            elif isinstance(env, MultiTurnEnv):
+            elif isinstance(env, TokenizedMultiTurnEnv):
                 all_rewards: list[torch.Tensor] = []
                 for _ in range(loop):
                     prompt_dict, _info = env.reset()
@@ -700,9 +716,11 @@ class GRPO(LLMAlgorithm):
                             training=False,
                         ).completion_ids
                         full = completion_ids[0]
-                        prompt_dict, reward, terminated, truncated, _info = env.step(
-                            full,
-                        )
+                        obs, reward, terminated, truncated, _info = env.step(full)
+                        # ``obs`` is the empty sentinel once the episode ends;
+                        # only live prompts feed the next turn.
+                        if is_reasoning_prompts(obs):
+                            prompt_dict = obs
                         all_rewards.append(
                             torch.tensor(
                                 [float(reward)],
@@ -714,7 +732,7 @@ class GRPO(LLMAlgorithm):
             else:
                 msg = (
                     "env must be a ReasoningGym (or subclass) or "
-                    f"MultiTurnEnv; got {type(env).__name__}"
+                    f"TokenizedMultiTurnEnv; got {type(env).__name__}"
                 )
                 raise TypeError(msg)
         mean_fit = torch.mean(reward_tensor).item()
@@ -903,9 +921,12 @@ class GRPO(LLMAlgorithm):
             max_output_tokens if max_output_tokens is not None else max_model_len
         )
         self.min_output_tokens = min_output_tokens
-        self.max_model_len = (
+        resolved_max_model_len = (
             max_model_len if max_model_len is not None else max_output_tokens
         )
+        # One of the two is non-None (guarded above).
+        assert resolved_max_model_len is not None
+        self.max_model_len = resolved_max_model_len
         validate_llm_context_lengths(self.max_model_len, max_output_tokens)
         self.hf_generate_chunk_size = int(
             1 if hf_generate_chunk_size is None else max(1, hf_generate_chunk_size)
@@ -931,7 +952,7 @@ class GRPO(LLMAlgorithm):
 
     def _prepare_experience_batch(
         self,
-        experiences: ExperiencesType,
+        experiences: LLMRolloutExperiences,
         turn_ids: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Stack and pad the experience batch and move it to the device."""
@@ -958,7 +979,7 @@ class GRPO(LLMAlgorithm):
         completion_ids: torch.Tensor,
         action_masks: torch.Tensor,
         turn_ids: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, np.ndarray]:
+    ) -> tuple[torch.Tensor, npt.NDArray]:
         """Group-relative advantages at the resolved granularity, post-processed.
 
         Post-processing (zero-filter / whiten / clip) is shape-agnostic across
@@ -1220,10 +1241,7 @@ class GRPO(LLMAlgorithm):
 
     def _resolve_standard_loss_fn(
         self,
-    ) -> Callable[
-        [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
-        tuple[torch.Tensor, torch.Tensor],
-    ]:
+    ) -> StandardLossFn:
         """Resolve the active standard (non-Liger) loss function.
 
         Dispatch is on ``loss_type`` (``grpo``/``gspo`` min-clip vs ``cispo``
@@ -1268,7 +1286,7 @@ class GRPO(LLMAlgorithm):
     def _loss(
         self,
         batch_size: int,
-        minibatch_idxs: np.ndarray,
+        minibatch_idxs: npt.NDArray,
         completion_ids: torch.Tensor,
         action_mask: torch.Tensor,
         advantages: torch.Tensor,
@@ -1291,6 +1309,8 @@ class GRPO(LLMAlgorithm):
         ]
         if turn_ids is not None:
             tensors.append(turn_ids)
+        # ``get_experiences_samples`` indexes each input positionally:
+        # Tensor in -> Tensor out, so the tuple mirrors the all-Tensor inputs.
         (
             batch_ids,
             batch_action_mask,
@@ -1696,7 +1716,7 @@ class GRPO(LLMAlgorithm):
         if adv.dim() > 1 and adv.shape[-1] == 1:
             adv = adv.squeeze(-1)  # (B, 1) -> (B,)
         old_log_probs = old_log_probs.to(self.device).contiguous()
-        reference_log_probs = (
+        ref_log_probs: torch.Tensor | None = (
             reference_log_probs.to(self.device).contiguous()
             if self.beta != 0.0
             else None
@@ -1788,8 +1808,8 @@ class GRPO(LLMAlgorithm):
             mask_arg = mask.reshape(n_tokens, 1)
             old_lp_arg = old_log_probs.reshape(n_tokens, 1)
             ref_lp_arg = (
-                reference_log_probs.reshape(n_tokens, 1)
-                if reference_log_probs is not None
+                ref_log_probs.reshape(n_tokens, 1)
+                if ref_log_probs is not None
                 else None
             )
             if sampling_log_probs is not None:
@@ -1813,7 +1833,7 @@ class GRPO(LLMAlgorithm):
             target_ids_arg = target_ids
             mask_arg = mask
             old_lp_arg = old_log_probs
-            ref_lp_arg = reference_log_probs
+            ref_lp_arg = ref_log_probs
             adv_arg = adv
             chunk_size = 1
 
@@ -1839,7 +1859,7 @@ class GRPO(LLMAlgorithm):
             None,
             self.temperature,
             None,
-            reference_log_probs is not None,  # use_ref_model
+            ref_log_probs is not None,  # use_ref_model
             chunk_size,
             vllm_is_ratio_arg,
         )
