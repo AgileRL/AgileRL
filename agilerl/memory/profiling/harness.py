@@ -112,11 +112,20 @@ def measure_point(
     point: SweepPoint,
     device_index: int = 0,
     prompt_len: int | None = None,
+    snapshot_path: str | None = None,
 ) -> tuple[MeasuredPoint, MeasuredPoint]:
     """Run one sweep point and return (generation, training) measurements.
 
     The prompt length defaults to a quarter of ``seq_len`` so completions can
     exercise the remaining context budget.
+
+    ``snapshot_path`` additionally records a torch allocator history over the
+    training phase and dumps it for https://pytorch.org/memory_viz. The sweep
+    validates predicted *totals*; a snapshot is how the per-component split
+    gets checked, because it carries a stack trace per allocation. It cannot
+    replace the NVML measurement — vLLM allocates through CuMem, which the
+    torch allocator never sees — and it is far too heavy for every sweep
+    point, so it is opt-in and used on single configurations.
     """
     import torch
     from peft import LoraConfig
@@ -197,11 +206,17 @@ def measure_point(
         rewards = torch.randn(n_trajectories)
         torch.cuda.reset_peak_memory_stats(device_index)
         reserved_at_entry = int(torch.cuda.memory_reserved(device_index))
+        if snapshot_path:
+            torch.cuda.memory._record_memory_history(max_entries=200_000)
         with NvmlPeakSampler(device_index) as training_sampler:
             agent.learn(
                 (completion_ids, action_masks, rewards),
                 sampling_logps=sampling_logps,
             )
+        if snapshot_path:
+            torch.cuda.memory._dump_snapshot(snapshot_path)
+            torch.cuda.memory._record_memory_history(enabled=None)
+            print(f"wrote allocator snapshot to {snapshot_path}", flush=True)
         torch_allocated = int(torch.cuda.max_memory_allocated(device_index))
         torch_reserved = int(torch.cuda.max_memory_reserved(device_index))
     finally:
@@ -295,6 +310,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Only measure realised weight bytes for --quantization",
     )
+    parser.add_argument(
+        "--snapshot",
+        default=None,
+        help=(
+            "Also dump a torch allocator snapshot of the training phase to "
+            "this path, for pytorch.org/memory_viz. Attributes memory per "
+            "call site; blind to vLLM's CuMem allocations."
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.weights_only:
@@ -313,7 +337,10 @@ def main(argv: list[str] | None = None) -> int:
             gpu_memory_utilization=args.gpu_memory_utilization,
         )
         generation, training = measure_point(
-            args.model, point, device_index=args.device_index
+            args.model,
+            point,
+            device_index=args.device_index,
+            snapshot_path=args.snapshot,
         )
         result = {
             "generation": generation.model_dump(mode="json"),
