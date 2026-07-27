@@ -1,3 +1,7 @@
 # Large test fixtures: treat as generated/binary so they don't bloat diffs,
 # blame, or PR reviews. This is a minified HuggingFace tokenizer used by tests.
 tests/assets/tiny_llm/tokenizer.json linguist-generated=true -diff
+# Calibration fixtures are machine-generated measurement records emitted by
+# `python -m agilerl.memory.profiling.sweep`. They are reviewed as numbers in
+# the sweep summary, not as source diffs.
+agilerl/memory/fixtures/*.json linguist-generated=true -diff

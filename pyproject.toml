@@ -132,6 +132,12 @@ source = ["agilerl", "agilerl-arena/agilerl"]
 parallel = true
 concurrency = ["multiprocessing", "thread"]
 sigterm = true
+omit = [
+    # GPU memory estimation. The profiling half only runs on a GPU box (it
+    # drives vLLM and NVML), and the calculation half is validated against
+    # measured hardware fixtures rather than by line coverage.
+    "agilerl/memory/*",
+]
 
 [tool.coverage.report]
 exclude_lines = [
