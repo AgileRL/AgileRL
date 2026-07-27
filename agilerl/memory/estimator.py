@@ -193,9 +193,20 @@ def estimate_training(
     correction = 0.0
     calibrated = False
     if profile is not None:
-        basis = training_basis(model, knobs)
-        correction = profile.training.fit.correction_bytes(basis)
-        calibrated = profile.training.n_points > 0
+        if profile.measured_on(device):
+            basis = training_basis(model, knobs)
+            correction = profile.training.fit.correction_bytes(basis)
+            calibrated = profile.training.n_points > 0
+        else:
+            # Deliberately unused: a training fit from another device is
+            # measurably worse than no fit at all, so the analytic core is
+            # the better answer here.
+            warnings.append(
+                f"Profile was measured on {profile.device.name if profile.device else 'another device'}, "
+                f"not {device.name or 'this device'}: training constants do "
+                "not transfer across devices, so they are not applied. "
+                "Profile this model on this device for a calibrated number."
+            )
 
     engine_residual = float(colocated_engine_reservation_bytes) if colocated else 0.0
 
@@ -414,9 +425,19 @@ def estimate_generation(
     correction = 0.0
     calibrated = False
     if profile is not None:
+        # Unlike training, generation constants do carry across devices: the
+        # analytic engine model does nearly all the work, so the correction
+        # left over is small and largely device-independent.
         basis = generation_basis(model, knobs)
         correction = profile.generation.fit.correction_bytes(basis)
         calibrated = profile.generation.n_points > 0
+        if not profile.measured_on(device):
+            warnings.append(
+                f"Profile was measured on "
+                f"{profile.device.name if profile.device else 'another device'}: "
+                "generation constants transfer reasonably, but expect a "
+                "wider band than a same-device profile."
+            )
 
     components = (
         _component(

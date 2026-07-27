@@ -23,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from agilerl.memory import formulas
 from agilerl.memory.formulas import resolve_max_num_batched_tokens
 from agilerl.memory.specs import (
+    DeviceSpec,
     GenerationKnobs,
     ModelSpec,
     TrainingKnobs,
@@ -149,6 +150,20 @@ class ModelProfile(BaseModel):
     #: name. Feeds ``WeightVariant.realised_bytes``.
     realised_weight_bytes: dict[str, int] = Field(default_factory=dict)
     measured: tuple[MeasuredPoint, ...] = ()
+
+    def measured_on(self, device: DeviceSpec) -> bool:
+        """Whether this profile was measured on the given device.
+
+        Training constants do not survive a device change — measured on a
+        Qwen2.5-0.5B pair, applying the L4 fit to A100 measurements scored
+        11.6% mean error against 10.7% for no fit at all, i.e. the foreign
+        fit was worse than none. Generation constants do carry (1.5% vs
+        1.8%), because the analytic engine model now does nearly all the
+        work and the correction it leaves is small.
+        """
+        if self.device is None or device.name is None:
+            return True
+        return self.device.name == device.name
 
     @property
     def sleeping_engine_residual_bytes(self) -> int | None:

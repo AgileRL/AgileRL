@@ -3,6 +3,7 @@
 import pytest
 
 from agilerl.memory.calibration import (
+    DeviceFingerprint,
     ModelProfile,
     PhaseCalibration,
     ResidualFit,
@@ -10,10 +11,11 @@ from agilerl.memory.calibration import (
     load_profile,
     save_profile,
 )
-from agilerl.memory.estimator import estimate_training
+from agilerl.memory.estimator import estimate_generation, estimate_training
 from agilerl.memory.profiling.sweep import HOLDOUT_POINTS, corner_plan, fit_residuals
 from agilerl.memory.specs import (
     DeviceSpec,
+    GenerationKnobs,
     GiB,
     ModelSpec,
     TrainingKnobs,
@@ -102,3 +104,53 @@ def test_corner_plan_covers_all_corners():
     # Holdout points sit strictly inside the corner ranges.
     for point in HOLDOUT_POINTS:
         assert 512 < point.seq_len < 4096 or 1 < point.micro_batch < 8
+
+
+def test_training_fit_is_not_applied_across_devices():
+    # Measured: a foreign-device training fit scores worse than no fit at
+    # all, so it must not be applied. Generation constants do transfer.
+    model = ModelSpec(model_id="m", arch=QWEN_05B)
+    profiled_on = DeviceSpec(total_bytes=24 * GiB, name="NVIDIA L4")
+    other = DeviceSpec(total_bytes=40 * GiB, name="NVIDIA A100-SXM4-40GB")
+    profile = ModelProfile(
+        model_id="m",
+        device=DeviceFingerprint(name="NVIDIA L4", total_bytes=24 * GiB),
+        training=PhaseCalibration(
+            fit=ResidualFit(intercept_bytes=2 * GiB), n_points=16
+        ),
+        generation=PhaseCalibration(
+            fit=ResidualFit(intercept_bytes=1 * GiB), n_points=16
+        ),
+    )
+
+    same = estimate_training(model, profiled_on, TrainingKnobs(), profile=profile)
+    assert same.calibrated
+    foreign = estimate_training(model, other, TrainingKnobs(), profile=profile)
+    assert not foreign.calibrated
+    assert any("do not transfer" in w for w in foreign.warnings)
+
+    # The foreign estimate must equal the uncalibrated one, not the L4 fit.
+    uncalibrated = estimate_training(model, other, TrainingKnobs())
+    assert foreign.total_bytes == uncalibrated.total_bytes
+
+    # Generation still applies its fit, with a widened-band warning.
+    gen = estimate_generation(model, other, GenerationKnobs(), profile=profile)
+    assert gen.calibrated
+    assert any("wider band" in w for w in gen.warnings)
+
+
+def test_profile_without_device_applies_anywhere():
+    model = ModelSpec(model_id="m", arch=QWEN_05B)
+    profile = ModelProfile(
+        model_id="m",
+        training=PhaseCalibration(
+            fit=ResidualFit(intercept_bytes=1 * GiB), n_points=16
+        ),
+    )
+    breakdown = estimate_training(
+        model,
+        DeviceSpec(total_bytes=24 * GiB, name="anything"),
+        TrainingKnobs(),
+        profile=profile,
+    )
+    assert breakdown.calibrated

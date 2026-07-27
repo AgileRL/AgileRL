@@ -164,13 +164,63 @@ sweep, so treat them as load-bearing.
 - **flashinfer JIT needs `curand.h`.** On a box without full CUDA toolkit
   headers, set `VLLM_USE_FLASHINFER_SAMPLER=0`.
 
+## What the measurements taught the model
+
+Every correction below came from a sweep disagreeing with the analytic core,
+and each one is a *modelling* fix — verified by checking that it also
+improves models it was not derived from.
+
+- **Generation is bounded by prompt tokens in flight, not by the context
+  budget.** vLLM sizes its KV pool as "budget minus the start-up profiling
+  step", and that step is transient. So a 4096-context engine sits ~1.9 GiB
+  *below* the same engine at 512 context — its larger profiling step bought
+  it a smaller pool. Modelling this (`max_prompt_len`) took generation from
+  12.4% worst-case to 1.7%, and the *uncalibrated* error from 5.5% to 0.7%:
+  the analytic model became right, rather than the fit covering for it.
+- **LoRA adapters are fp32 even on a bf16 base**, because PEFT defaults to
+  `autocast_adapter_dtype=True`. The measured cost of raising rank 8 -> 64 is
+  ~20 bytes per added parameter, which only resolves as 4 (actor) + 4
+  (reference) + 4 (gradient) + 8 (two AdamW moments).
+- **Micro-batches are capped by available trajectories.** Requesting a
+  micro-batch larger than the update has rows costs nothing, so `group_size`
+  bounds the gradient batch.
+
+Two things that did *not* work, recorded so they are not retried:
+
+- **Non-negative least squares for the residual.** "Unmodelled memory can't
+  be negative" sounds principled but is wrong — the analytic core can
+  over-count too, and a negative coefficient is how the fit corrects that.
+  Forcing non-negativity made the generation holdout 8x worse.
+- **Fitting the colocated engine floor.** It was an artifact (see above); the
+  floor does not exist.
+
+## Accuracy
+
+Held-out knob combinations — the accuracy claim, since "will my run fit"
+depends on configurations that were never measured:
+
+| model | device | training | generation |
+|---|---|---|---|
+| Qwen2.5-0.5B-Instruct | L4 | 6.6% | 0.5% |
+| SmolLM2-1.7B-Instruct | L4 | 3.3% | 1.0% |
+
+Holdouts span sequence length, micro-batch, group size, LoRA rank *and*
+`gpu_memory_utilization` (0.30/0.60 against corners fitted at 0.45), so a
+profile is not pinned to the engine budget it was measured under.
+
+The worst single point runs higher (~13% on the smallest Qwen config). The
+residual model is linear in a handful of basis terms while the true residual
+is convex in batch x sequence, so the extreme corners cannot all be fitted at
+once; `WORST_POINT_BAND` exists as a drift alarm rather than an accuracy
+claim.
+
 ## Status
 
-Prototype with one calibrated model. Calculation core + advice + preflight
-CLI + profiling harness implemented and unit-tested (33 CPU-only tests); the
-sweep runs end-to-end on an L4 and the first fixture
-(`fixtures/Qwen__Qwen2.5-0.5B-Instruct.json`) validates inside the target
-band. Next: broaden the curated set (+ nf4 / vision-stripped variants),
-add a re-fit that attributes the engine floor analytically (so the intercept
-drops to true overhead), a cut-down CI drift check, and the two-bar Arena
-widget on this same core.
+Calculation core, advice, preflight CLI, profiling harness and offline refit
+are implemented and tested (41 CPU-only tests, including a fixture
+regression check that replays every stored measurement). Two models are
+calibrated on an L4, with more models and a second device (A100) in
+progress — the pair of devices is what will answer how far constants carry
+across hardware, which is currently assumed rather than measured. Remaining:
+finish the curated set (nf4 and vision-stripped variants), and the two-bar
+Arena widget on this same core.
