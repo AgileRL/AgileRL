@@ -36,21 +36,76 @@ question is two separate peaks against the same capacity, plus a small
 residual for whatever the dormant side leaves behind. No phase modelling, no
 `max()` over interleavings.
 
+## Algorithms
+
+The algorithm decides how many adapters exist, how many carry gradients, and
+how wide the fused no-grad forward is — the last of which multiplies
+activation memory directly, because the pass repeats the batch once per
+consulted adapter.
+
+| algorithm | fused rows | resident adapters | trained |
+|---|---|---|---|
+| SFT | 1 (actor) | 1 | 1 |
+| GRPO / GSPO / CISPO / REINFORCE / DPO | 2 (+ reference) | 2 | 1 |
+| GRPO at `beta=0` | 1 | 2 | 1 |
+| PPO | 3 (+ critic) | 3 | 2 |
+
+PPO's critic is a full LoRA adapter *plus* a `PPOValueHead` of
+`Linear(hidden -> 1)` held in `modules_to_save`, so it costs a third fused
+row, a third resident adapter set, and a second set of gradients and
+optimizer moments.
+
+At `beta=0` the KL term leaves the loss, so the reference row has nothing to
+feed and is skipped. Two caveats the estimate carries as warnings rather
+than assuming away:
+
+- The fused no-grad pass currently builds that row unconditionally, so an
+  unpatched run still pays for it. This models the intended behaviour.
+- The saving often does not move the bar. Activations are
+  `max(gradient pass, no-grad pass)`, and under gradient checkpointing the
+  gradient pass carries a saved hidden state per layer, so it usually
+  dominates — `beta=0` shrinks the no-grad pass without shrinking the peak.
+
+## Attention backend
+
+Which backend runs is a *software* fact, not a device capability, and the
+framework resolves `auto` to FlashAttention-2 only when the `flash_attn`
+package is importable — it is not in the `llm` extra, so a stock install
+gets SDPA.
+
+Measured on Gemma 4 E2B (28 of 35 layers windowed, 8 heads) at seq 4096,
+micro-batch 8, where a materialised score matrix would be 2.15 GiB:
+
+| backend | training peak | generation peak |
+|---|---|---|
+| `sdpa` | 14.78 GiB | 17.52 GiB |
+| `flex_attention` | 15.03 GiB | 17.48 GiB |
+
+SDPA came out *below* FlexAttention, so on torch 2.11 / transformers 5.11 it
+stays O(S) even for a windowed mask, and only `eager` materialises scores.
+Generation is untouched either way — vLLM owns its own attention backend.
+
+The practical reading: the two O(S) backends are within 2% on memory, so
+there is no memory argument for taking on `flash_attn` as a dependency. The
+case for it rests on Hopper-class throughput and nothing measured here.
+
 ## Training bar
 
 | Component | Scales with | Grounding in the framework |
 |---|---|---|
 | Base weights (frozen) | `P x bytes(dtype)`, or realised quantized size | trainer always holds its own full copy; nf4/int8 keep `lm_head` unquantized and upcast norms + `lm_head` to fp32 (`base.py` k-bit prep) |
-| LoRA adapters | `rank`, target scope, x2 with the separate reference adapter | **full FT does not exist** — the framework trains adapters only |
+| LoRA adapters | `rank`, target scope, x2 with the reference adapter, x3 for PPO | **full FT does not exist** — the framework trains adapters only |
 | Gradients + optimizer state | trainable (adapter) params only | plain `torch.optim.AdamW`; DeepSpeed-config optimizer is the only alternative. LoRA-only makes this a rounding error next to the base — the opposite of the classic 16-bytes/param intuition |
-| Activations | `max(grad pass, no-grad logprob pass)` | grad pass: checkpoint boundaries (`rows x S x H x L`) + one block's recompute + the `(rows, S, H)` hidden the fused-logprob autograd saves. No-grad pass: actor+reference(+value) rows fused into one wider forward (`_fused_forward_no_grad`), micro-batched by the same per-GPU cap |
+| Activations | `max(grad pass, no-grad logprob pass)` | grad pass: checkpoint boundaries (`rows x S x H x L`) + one block's recompute + the `(rows, S, H)` hidden the fused-logprob autograd saves. No-grad pass: actor+reference(+critic) rows fused into one wider forward (`_fused_forward_no_grad`), micro-batched by the same per-GPU cap |
 | Logit workspace | `2 x chunk_rows x V x 4` | the fused chunked path (`llm_ops/fused_logprobs.py`) never materialises `B x S x V`; auto-tune caps the tile at 256 MiB |
 | Overhead | intercept | CUDA context, held rollout tensors (MB-scale), allocator slack; absorbed by the calibration intercept |
 
 What is *not* a training memory knob, and worth teaching in the UI:
 
-- **`beta`**: the reference forward runs and the reference adapter exists
-  regardless of beta (KL is always computed as a metric). Memory-neutral.
+- **`beta`, mostly**: it never changes what is resident — the reference
+  adapter is built at init either way — and it only shrinks the *peak* when
+  the no-grad pass is the binding side of the `max()`, which under gradient
+  checkpointing it usually is not. See the Algorithms section.
 - **The reference model**: an adapter copy, not a second base. Turning off
   `use_separate_reference_adapter` saves only adapter-sized bytes and pins
   the reference to the initial policy.
@@ -208,6 +263,12 @@ depends on configurations that were never measured:
 | Qwen2.5-3B-Instruct | A100 | 0.7% | 1.0% |
 | Qwen2.5-7B-Instruct | A100 | 4.3% | 7.4% |
 | SmolLM2-1.7B-Instruct | L4 | 3.3% | 1.0% |
+| Gemma 4 E2B | A100 | 1.9% | 1.0% |
+
+Gemma is the hardest architectural case in the set — MQA (a single KV head),
+`head_dim` 256 against `hidden/heads` of 192, a 262k vocab, and 28 of 35
+layers windowed — so it exercises the geometry paths the Qwen models never
+touch.
 
 Holdouts span sequence length, micro-batch, group size, LoRA rank *and*
 `gpu_memory_utilization` (0.30/0.60 against corners fitted at 0.45), so a
@@ -265,6 +326,6 @@ Known gaps, in rough priority order:
 - MoE is modelled (weights and optimizer on total experts, activations on
   active) and the parameter counts check out against published totals, but
   no MoE model has been measured end to end yet.
-- Quantized (nf4) and vision-stripped variants are supported by the schema
-  and unmeasured in practice.
+- Quantized (nf4) variants are supported by the schema and still unmeasured
+  in practice.
 - The Arena widget itself, on this same core.
