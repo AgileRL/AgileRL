@@ -57,9 +57,6 @@ repos:
       hooks:
           - id: uv-lock
 
-    # agilerl.arena is a namespace portion shipped by agilerl-arena; ty resolves
-    # it through this dev symlink, which is gitignored so fresh clones lack it.
-    # Must run before the ty hook below.
     - repo: local
       hooks:
           - id: arena-symlink
@@ -69,8 +66,6 @@ repos:
             pass_filenames: false
             always_run: true
 
-    # The single home for the ty version: the type-checks CI workflow runs this
-    # same hook rather than invoking ty itself.
     - repo: https://github.com/astral-sh/ty-pre-commit
       rev: v0.0.61
       hooks:

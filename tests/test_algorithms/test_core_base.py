@@ -6214,7 +6214,6 @@ class TestLLMGenerateWithVllmColocateFullPaths:
         agent.vllm_config = vllm_config
         agent.device = "cpu"
 
-        # ``trajectory_input_ids`` supersedes ``input_ids`` when present.
         prompts = [
             {
                 "input_ids": torch.tensor([[1, 2, 3]]),
@@ -6243,7 +6242,6 @@ class TestLLMGenerateWithVllmColocateFullPaths:
                 prompts, group_size=2, temperature=0.9
             )
 
-        # The trajectory, not the bare prompt, was handed to vLLM.
         sent = agent.llm.generate.call_args[0][0]
         assert sent[0]["prompt_token_ids"] == [1, 2, 3, 9, 9]
         assert len(completion_ids) == 1

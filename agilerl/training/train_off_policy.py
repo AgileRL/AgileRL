@@ -64,14 +64,7 @@ class NStepAgent(Protocol):
 
 
 def _is_n_step_agent(agent: SupportedOffPolicy) -> TypeGuard[NStepAgent]:
-    """Whether *agent* exposes the n-step / prioritized interface.
-
-    Tests for the annealed ``beta`` that distinguishes RainbowDQN rather than
-    making ``NStepAgent`` ``runtime_checkable`` and using ``isinstance``: from
-    Python 3.12 that check reads attributes statically, so it does not see the
-    ones an agent wrapper forwards through ``__getattr__`` and rejects wrapped
-    agents.
-    """
+    """Whether *agent* exposes the n-step / prioritized interface."""
     return hasattr(agent, "beta")
 
 
