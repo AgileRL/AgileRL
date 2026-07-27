@@ -1,7 +1,7 @@
 import logging
 import warnings
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 import gymnasium as gym
 import numpy as np
@@ -16,7 +16,11 @@ from agilerl.components import (
     MultiStepReplayBuffer,
     PrioritizedReplayBuffer,
 )
-from agilerl.components.data import ReplayDataset, Transition
+from agilerl.components.data import (
+    ReplayDataset,
+    Transition,
+    transition_to_tensordict,
+)
 from agilerl.components.replay_buffer import BufferType
 from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
@@ -33,16 +37,13 @@ from agilerl.utils.utils import (
 )
 from agilerl.vector import DummyVecEnv
 
-if TYPE_CHECKING:
-    from tensordict import TensorDictBase
-
-
 SupportedOffPolicy = DQN | RainbowDQN | DDPG | TD3
 PopulationType = list[SupportedOffPolicy]
 
 logger = logging.getLogger(__name__)
 
 
+@runtime_checkable
 class NStepAgent(Protocol):
     """A RainbowDQN-style agent that consumes n-step / prioritized batches.
 
@@ -50,6 +51,9 @@ class NStepAgent(Protocol):
     ``learn`` accepts ``n_experiences``/``per`` and returns the indices and
     priorities to write back. Reading the population's union through this
     interface resolves the prioritized/n-step path.
+
+    Runtime-checkable so the narrowing below tests the same structural
+    interface the annotation promises, rather than a nominal class.
     """
 
     batch_size: int
@@ -63,14 +67,12 @@ class NStepAgent(Protocol):
     ) -> tuple[float, torch.Tensor | None, npt.NDArray | None]: ...
 
 
-if TYPE_CHECKING:
-
-    def _as_n_step_agent(agent: SupportedOffPolicy) -> NStepAgent: ...
-
-else:
-
-    def _as_n_step_agent(agent: SupportedOffPolicy) -> NStepAgent:
-        return agent
+def _as_n_step_agent(agent: SupportedOffPolicy) -> NStepAgent:
+    """Read ``agent`` through the n-step / prioritized interface."""
+    assert isinstance(agent, NStepAgent), (
+        f"Prioritized replay needs an n-step agent, got {type(agent).__name__}."
+    )
+    return agent
 
 
 def _learn_from_buffer(
@@ -382,16 +384,17 @@ def train_off_policy(
                 if isinstance(agent, (DDPG, TD3)):
                     action = raw_action
 
-                transition: TensorDictBase = Transition(
-                    obs=obs,
-                    action=action,
-                    reward=reward,
-                    next_obs=next_obs,
-                    done=done,
+                transition = transition_to_tensordict(
+                    Transition(
+                        obs=obs,
+                        action=action,
+                        reward=reward,
+                        next_obs=next_obs,
+                        done=done,
+                    )
                 )
 
-                transition = transition.to_tensordict()
-                transition.batch_size = [num_envs]
+                transition.batch_size = torch.Size([num_envs])
                 if n_step_memory is not None:
                     one_step_transition = n_step_memory.add(transition)
                     if one_step_transition is not None:

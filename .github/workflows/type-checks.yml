@@ -28,6 +28,15 @@ permissions:
 jobs:
     ty:
         runs-on: gha-runner-scale-set
+        strategy:
+            fail-fast: false
+            matrix:
+                # Both ends of `requires-python`. The floor catches use of APIs
+                # that only exist above it; the ceiling is where tensordict's
+                # types resolve concretely instead of degrading to the gradual
+                # `Unknown` — which, being assignable to anything, silently
+                # swallows checks at the floor.
+                python-version: ['3.10', '3.13']
         env:
             UV_CACHE_DIR: /tmp/uv-cache
             UV_PROJECT_ENVIRONMENT: /tmp/agilerl-venv
@@ -36,7 +45,7 @@ jobs:
             - uses: astral-sh/setup-uv@v7
               with:
                   enable-cache: true
-                  python-version: '3.10'
+                  python-version: ${{ matrix.python-version }}
 
             # All extras so every resolvable import (vllm, transformers,
             # agilerl-arena, ...) is visible to the checker.
@@ -48,5 +57,7 @@ jobs:
             - name: Create arena namespace symlink
               run: ln -s ../agilerl-arena/agilerl/arena agilerl/arena
 
+            # `--python-version` overrides the `[tool.ty.environment]` pin in
+            # pyproject.toml, so each leg targets the interpreter it installed.
             - name: Run ty
-              run: uv run ty check agilerl agilerl/arena
+              run: uv run ty check agilerl agilerl/arena --python-version ${{ matrix.python-version }}

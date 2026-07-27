@@ -60,8 +60,12 @@ repos:
     - repo: local
       hooks:
           - id: ty
-            name: ty (static type checking)
-            entry: bash -c '[ -e agilerl/arena ] || ln -s ../agilerl-arena/agilerl/arena agilerl/arena; uv run ty check agilerl agilerl/arena'
+            name: ty (static type checking, 3.10 + 3.13)
+            # Both ends of `requires-python`, matching the CI matrix: the floor
+            # catches use of APIs newer than 3.10, and only the ceiling resolves
+            # tensordict's types concretely rather than as gradual `Unknown`.
+            # Each pass takes ~4s, so the local loop can afford to match CI.
+            entry: bash -c '[ -e agilerl/arena ] || ln -s ../agilerl-arena/agilerl/arena agilerl/arena; status=0; for v in 3.10 3.13; do uv run ty check agilerl agilerl/arena --python-version "$v" || status=1; done; exit $status'
             language: system
             pass_filenames: false
             files: ^(agilerl|agilerl-arena)/.*\.py$|^pyproject\.toml$

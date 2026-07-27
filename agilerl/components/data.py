@@ -2,15 +2,15 @@ import warnings
 from collections import OrderedDict
 from collections.abc import Iterator, Mapping
 from numbers import Number
-from typing import Any
+from typing import Any, SupportsFloat
 
 import numpy as np
 import torch
-from tensordict import TensorDict, tensorclass
+from tensordict import TensorClass, TensorDict
 from torch.utils.data import IterableDataset
 
 from agilerl.components import ReplayBuffer
-from agilerl.typing import ArrayOrTensor, MultiAgentObservationType, ObservationType
+from agilerl.typing import ArrayOrTensor, ObservationType
 
 
 def to_tensordict(
@@ -71,13 +71,34 @@ def to_torch_tensor(
     return torch.tensor(data, dtype=dtype)
 
 
-@tensorclass
-class Transition:
+def transition_to_tensordict(transition: TensorClass) -> TensorDict:
+    """Return the plain :class:`TensorDict` a tensorclass holds.
+
+    ``TensorClass.to_tensordict`` is stubbed as returning ``Self``, but it hands
+    back the ``TensorDict`` of the class's fields — which is what the replay
+    buffers consume.
+    """
+    td = transition.to_tensordict()
+    assert isinstance(td, TensorDict), (
+        f"Expected a TensorDict from {type(transition).__name__}, "
+        f"got {type(td).__name__}."
+    )
+    return td
+
+
+class Transition(TensorClass):
+    """One environment step staged for a :class:`~agilerl.components.replay_buffer.ReplayBuffer`.
+
+    Rewards and terminations arrive either batched (vectorised envs) or as a
+    plain scalar (a single env's ``step`` return); ``__post_init__`` converts
+    every field to a tensor and gives scalars a trailing dimension.
+    """
+
     obs: ObservationType
     action: ArrayOrTensor
     next_obs: ObservationType
-    reward: ArrayOrTensor
-    done: ArrayOrTensor
+    reward: ArrayOrTensor | SupportsFloat
+    done: ArrayOrTensor | SupportsFloat
 
     def __post_init__(self) -> None:
         # Convert observations to TensorDict if they are dicts or tuples
@@ -115,13 +136,15 @@ def _to_agent_td(data: Mapping[str, ObservationType]) -> TensorDict:
     return TensorDict(converted)
 
 
-@tensorclass
-class MultiAgentTransition:
+class MultiAgentTransition(TensorClass):
     """Multi-agent analogue of :class:`Transition`.
 
-    Each field is a ``dict[agent_id, array | dict]`` that is converted to a
+    Each field is a ``Mapping[agent_id, array | dict]`` that is converted to a
     sub-:class:`TensorDict` on construction.  Dict/tuple observation spaces
-    are handled automatically.
+    are handled automatically. The fields are typed as mappings rather than
+    dicts so the vectorised envs' read-only
+    :class:`~agilerl.vector.pz_async_vec_env.Observations` view is accepted
+    alongside a plain per-agent dict.
 
     Usage mirrors single-agent :class:`Transition`::
 
@@ -129,16 +152,16 @@ class MultiAgentTransition:
             obs=obs, action=action, reward=reward,
             next_obs=next_obs, done=done,
         )
-        td = transition.to_tensordict()
-        td.batch_size = [num_envs]
+        td = transition_to_tensordict(transition)
+        td.batch_size = torch.Size([num_envs])
         memory.add(td)
     """
 
-    obs: MultiAgentObservationType | TensorDict
-    action: dict[str, ArrayOrTensor] | TensorDict
-    reward: dict[str, ArrayOrTensor] | TensorDict
-    next_obs: MultiAgentObservationType | TensorDict
-    done: dict[str, ArrayOrTensor] | TensorDict
+    obs: Mapping[str, ObservationType] | TensorDict
+    action: Mapping[str, ArrayOrTensor] | TensorDict
+    reward: Mapping[str, ArrayOrTensor] | TensorDict
+    next_obs: Mapping[str, ObservationType] | TensorDict
+    done: Mapping[str, ArrayOrTensor] | TensorDict
 
     def __post_init__(self) -> None:
         self.obs = _to_agent_td(self.obs)

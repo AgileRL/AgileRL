@@ -42,6 +42,7 @@ from agilerl.typing import (
     ArrayOrTensor,
     BatchDimension,
     BPTTSequenceType,
+    DeviceType,
     InputSizeFromSpace,
     MaybeObsList,
     NetConfigType,
@@ -145,6 +146,33 @@ def is_str_keyed_dict(obj: object) -> TypeGuard[dict[str, object]]:
     invariant so iterating ``.items()`` yields ``str`` keys.
     """
     return isinstance(obj, dict)
+
+
+def narrow_tensor(value: object) -> torch.Tensor:
+    """Narrow a :class:`~tensordict.TensorDict` entry to the tensor it holds.
+
+    A ``TensorDict``'s accessors are typed to return ``Tensor |
+    TensorCollection`` because any entry may be a nested collection. Where the
+    framework knows an entry is a leaf, this states that invariant once —
+    failing with the offending type rather than surfacing as a confusing
+    attribute error further downstream.
+    """
+    assert isinstance(value, torch.Tensor), (
+        f"Expected a tensor entry, got {type(value).__name__}."
+    )
+    return value
+
+
+def to_agent_tensors(per_agent: TensorDict, device: DeviceType) -> TensorMapping:
+    """Move each per-agent leaf of ``per_agent`` onto ``device``.
+
+    A multi-agent batch's per-agent entries for actions, rewards and
+    terminations are always leaves.
+    """
+    return {
+        agent_id: narrow_tensor(agent_tensor).to(device)
+        for agent_id, agent_tensor in per_agent.items()
+    }
 
 
 @overload

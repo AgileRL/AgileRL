@@ -45,6 +45,7 @@ from agilerl.utils.algo_utils import (
     get_vect_dim,
     key_in_nested_dict,
     make_safe_deepcopies,
+    to_agent_tensors,
 )
 from agilerl.vector.pz_vec_env import PettingZooVecEnv
 
@@ -740,28 +741,13 @@ class MATD3(MultiAgentRLAlgorithm[TensorDict]):
         batch: MultiAgentReplayBatch = MultiAgentReplayBatch.from_tensordict(
             experiences
         )
-        states = batch.obs
-        actions = batch.action
-        rewards = batch.reward
-        next_states = batch.next_obs
-        dones = batch.done
-
-        actions = {
-            agent_id: agent_actions.to(self.device)
-            for agent_id, agent_actions in actions.items()
-        }
-        rewards = {
-            agent_id: agent_rewards.to(self.device)
-            for agent_id, agent_rewards in rewards.items()
-        }
-        dones = {
-            agent_id: agent_dones.to(self.device)
-            for agent_id, agent_dones in dones.items()
-        }
+        actions = to_agent_tensors(batch.action, self.device)
+        rewards = to_agent_tensors(batch.reward, self.device)
+        dones = to_agent_tensors(batch.done, self.device)
 
         # Preprocess observations
-        states = self.preprocess_observation(states)
-        next_states = self.preprocess_observation(next_states)
+        states = self.preprocess_observation(batch.obs)
+        next_states = self.preprocess_observation(batch.next_obs)
 
         with torch.no_grad():
             next_actions = [

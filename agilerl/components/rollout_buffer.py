@@ -1,7 +1,7 @@
 import warnings
 from collections import OrderedDict
 from collections.abc import Generator, Sequence
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import Any, TypeGuard, TypeVar
 
 import numpy as np
 import numpy.typing as npt
@@ -20,6 +20,7 @@ from agilerl.utils.algo_utils import (
     get_obs_shape,
     is_str_keyed_dict,
     maybe_add_batch_dim,
+    narrow_tensor,
 )
 
 
@@ -47,19 +48,31 @@ def _require_prepared(value: _T | None) -> _T:
     return value
 
 
-# Typed to return ``TensorDict`` so callers don't narrow the widened
-# ``TensorDict.__getitem__`` return; indexing/slicing a TensorDict with a mask
-# or slice yields a TensorDict at runtime.
-if TYPE_CHECKING:
+def _index_tensordict(td: TensorDict, index: torch.Tensor | slice) -> TensorDict:
+    """Index or slice ``td``, narrowing the widened ``__getitem__`` return.
 
-    def _index_tensordict(
-        td: TensorDict, index: torch.Tensor | slice
-    ) -> TensorDict: ...
+    Indexing a TensorDict with a mask or slice yields a TensorDict; the stub
+    types it as ``Tensor | TensorCollection`` because a string key would not.
+    """
+    view = td[index]
+    assert isinstance(view, TensorDict), (
+        f"Expected a TensorDict view, got {type(view).__name__}."
+    )
+    return view
 
-else:
 
-    def _index_tensordict(td: TensorDict, index: torch.Tensor | slice) -> TensorDict:
-        return td[index]
+def _is_numpy_tree(
+    obj: object,
+) -> TypeGuard[dict[str, npt.NDArray | dict[str, npt.NDArray]]]:
+    """Narrow ``TensorDict.numpy()``'s result to the nested numpy form.
+
+    As with :func:`~agilerl.utils.algo_utils.is_str_keyed_dict`, a bare
+    ``isinstance(obj, dict)`` is not enough here: ``numpy.ndarray`` isn't final,
+    so the checker keeps an ``ndarray & dict`` intersection out of the union
+    ``numpy()`` is stubbed with. A TypeGuard states the shape a ``TensorDict``
+    receiver always produces instead.
+    """
+    return isinstance(obj, dict)
 
 
 class RolloutBuffer:
@@ -495,9 +508,9 @@ class RolloutBuffer:
 
         # Get necessary data from TensorDict as numpy arrays for computation
         # Slicing to buffer_size for all components.
-        rewards_np = self.buffer["rewards"][:buffer_size].cpu().numpy()
-        dones_np = self.buffer["dones"][:buffer_size].cpu().numpy()
-        values_np = self.buffer["values"][:buffer_size].cpu().numpy()
+        rewards_np = narrow_tensor(self.buffer["rewards"])[:buffer_size].cpu().numpy()
+        dones_np = narrow_tensor(self.buffer["dones"])[:buffer_size].cpu().numpy()
+        values_np = narrow_tensor(self.buffer["values"])[:buffer_size].cpu().numpy()
 
         if self.use_gae:
             last_gae_lambda = np.zeros(self.num_envs, dtype=np.float32)
@@ -646,7 +659,11 @@ class RolloutBuffer:
         """
         # TensorDict.numpy() returns the nested {key: ndarray | {sub_key: ndarray}}
         # form directly, moving tensors off-device as it goes.
-        return td.cpu().numpy()
+        converted = td.cpu().numpy()
+        assert _is_numpy_tree(converted), (
+            f"Expected a dict from TensorDict.numpy(), got {type(converted).__name__}."
+        )
+        return converted
 
     @staticmethod
     def _pad_sequences(
