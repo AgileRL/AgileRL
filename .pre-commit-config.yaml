@@ -69,28 +69,12 @@ repos:
             pass_filenames: false
             always_run: true
 
-    # ty is not a project dependency; `uv run --with` overlays the pinned
-    # version onto the synced project environment, which it needs in order to
-    # resolve third-party imports. This entry is the single home for that
-    # version: the type-checks CI workflow runs this same hook.
-    #
-    # Checked at both ends of `requires-python`. The floor catches use of APIs
-    # newer than 3.10; only the ceiling resolves tensordict's types concretely
-    # rather than as the gradual `Unknown`, which — being assignable to
-    # anything — silently swallows checks at the floor. Each pass takes ~4s, so
-    # the local loop can afford to match CI.
-    #
-    # The stock astral-sh/ty-pre-commit hook cannot be used here: it shells out
-    # to `uv check`, which has no passthrough for ty's `--python-version`.
-    - repo: local
+    # The single home for the ty version: the type-checks CI workflow runs this
+    # same hook rather than invoking ty itself.
+    - repo: https://github.com/astral-sh/ty-pre-commit
+      rev: v0.0.61
       hooks:
           - id: ty
-            name: ty (static type checking, 3.10 + 3.13)
-            entry: bash -c 'status=0; for v in 3.10 3.13; do uv run --with ty==0.0.61 ty check agilerl agilerl/arena --python-version "$v" || status=1;
-                done; exit $status'
-            language: system
-            pass_filenames: false
-            files: ^(agilerl|agilerl-arena)/.*\.py$|^pyproject\.toml$
 
     - repo: local
       hooks:

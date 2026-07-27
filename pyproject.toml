@@ -185,11 +185,16 @@ exclude = ["agilerl-arena", "agilerl/arena"]
 # creates it and passes both paths explicitly (ty does not traverse symlinked
 # directories during discovery).
 
-# The default target: the `requires-python` floor, so a bare `ty check` catches
-# use of APIs that only exist above it. It is not sufficient on its own —
-# tensordict's types degrade to the gradual `Unknown` at 3.10 and stop being
-# checked — so the pre-commit ty hook (which CI runs) overrides this with
-# `--python-version` on each pass, covering both 3.10 and 3.13.
+# The target ty checks against, for every entry point (the pre-commit hook,
+# which CI also runs). The `requires-python` floor, so use of APIs that only
+# exist above it is caught.
+#
+# Note this is the weaker of the two ends: at 3.10 some tensordict types
+# degrade to the gradual `Unknown`, which — being assignable to anything —
+# stops them being checked. Raising it to "3.13" checks those concretely
+# instead, at the cost of the floor check; both ends cannot be covered while
+# the version is set here, because the ty pre-commit hook takes no
+# `--python-version` argument.
 [tool.ty.environment]
 python-version = "3.10"
 

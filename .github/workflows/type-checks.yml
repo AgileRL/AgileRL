@@ -48,11 +48,9 @@ jobs:
             - name: Create arena namespace symlink
               run: ln -s ../agilerl-arena/agilerl/arena agilerl/arena
 
-            # Run the hook rather than ty directly, so the pinned ty version
-            # has a single home in .pre-commit-config.yaml. The hook checks
-            # both ends of `requires-python` in one pass, so this job needs no
-            # matrix of its own; the tests workflow already exercises each
-            # interpreter. Running under uv run keeps the synced project
-            # environment visible so ty can resolve third-party imports.
+            # Run the hook rather than ty directly so the version has a single
+            # home: the astral-sh/ty-pre-commit rev in .pre-commit-config.yaml.
+            # Running under uv run keeps the synced project environment visible
+            # so ty can resolve third-party imports.
             - name: Run ty
               run: uv run pre-commit run ty --all-files
