@@ -198,24 +198,62 @@ class ModelProfile(BaseModel):
         return model.model_copy(update={"variants": variants})
 
 
-def profile_path(model_id: str, fixtures_dir: Path | None = None) -> Path:
-    """Canonical fixture path for a model id (slashes become double
-    underscores).
+def _slug(text: str) -> str:
+    return text.replace("/", "__").replace(" ", "-")
+
+
+def profile_path(
+    model_id: str,
+    fixtures_dir: Path | None = None,
+    device_name: str | None = None,
+) -> Path:
+    """Canonical fixture path for a (model, device) pair.
+
+    Calibration is per device, not per model, so the device belongs in the
+    filename — otherwise profiling the same model on a second GPU silently
+    overwrites the first.
     """
     directory = fixtures_dir or FIXTURES_DIR
-    return directory / f"{model_id.replace('/', '__')}.json"
+    stem = _slug(model_id)
+    if device_name:
+        stem = f"{stem}@{_slug(device_name)}"
+    return directory / f"{stem}.json"
+
+
+def _parse_stem(stem: str) -> tuple[str, str | None]:
+    model_part, _, device_part = stem.partition("@")
+    return model_part.replace("__", "/"), (
+        device_part.replace("-", " ") if device_part else None
+    )
 
 
 def load_profile(
-    model_id: str, fixtures_dir: Path | None = None
+    model_id: str,
+    fixtures_dir: Path | None = None,
+    device_name: str | None = None,
 ) -> ModelProfile | None:
-    """Load the checked-in profile for a curated model, or ``None`` when the
-    model has not been profiled.
+    """Load a curated model's profile, preferring one measured on
+    ``device_name``.
+
+    Falls back to any profile for the model when the device has none, since
+    a foreign-device fit still beats no fit on average — the estimator marks
+    it ``other_device`` rather than passing it off as calibrated.
     """
-    path = profile_path(model_id, fixtures_dir)
-    if not path.exists():
+    directory = fixtures_dir or FIXTURES_DIR
+    if not directory.exists():
         return None
-    return ModelProfile.model_validate_json(path.read_text())
+    candidates = [
+        path
+        for path in sorted(directory.glob("*.json"))
+        if _parse_stem(path.stem)[0] == model_id
+    ]
+    if not candidates:
+        return None
+    if device_name:
+        for path in candidates:
+            if _parse_stem(path.stem)[1] == device_name:
+                return ModelProfile.model_validate_json(path.read_text())
+    return ModelProfile.model_validate_json(candidates[0].read_text())
 
 
 def curated_models(fixtures_dir: Path | None = None) -> list[str]:
@@ -225,11 +263,23 @@ def curated_models(fixtures_dir: Path | None = None) -> list[str]:
     directory = fixtures_dir or FIXTURES_DIR
     if not directory.exists():
         return []
-    return sorted(p.stem.replace("__", "/") for p in directory.glob("*.json"))
+    return sorted({_parse_stem(p.stem)[0] for p in directory.glob("*.json")})
+
+
+def curated_profiles(fixtures_dir: Path | None = None) -> list[tuple[str, str | None]]:
+    """Every checked-in (model, device) pair."""
+    directory = fixtures_dir or FIXTURES_DIR
+    if not directory.exists():
+        return []
+    return sorted(_parse_stem(p.stem) for p in directory.glob("*.json"))
 
 
 def save_profile(profile: ModelProfile, fixtures_dir: Path | None = None) -> Path:
-    path = profile_path(profile.model_id, fixtures_dir)
+    path = profile_path(
+        profile.model_id,
+        fixtures_dir,
+        device_name=profile.device.name if profile.device else None,
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(profile.model_dump(mode="json"), indent=2, sort_keys=True) + "\n"

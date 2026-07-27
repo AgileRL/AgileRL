@@ -21,7 +21,7 @@ from pathlib import Path
 from agilerl.memory.calibration import (
     FIXTURES_DIR,
     ModelProfile,
-    curated_models,
+    curated_profiles,
     load_profile,
     save_profile,
 )
@@ -189,14 +189,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     fixtures_dir = Path(args.fixtures_dir) if args.fixtures_dir else FIXTURES_DIR
-    model_ids = [args.model] if args.model else curated_models(fixtures_dir)
-    if not model_ids:
+    pairs = [(args.model, None)] if args.model else curated_profiles(fixtures_dir)
+    if not pairs:
         print(f"No fixtures in {fixtures_dir}", file=sys.stderr)
         return 1
 
     worst = 0.0
-    for model_id in model_ids:
-        profile = load_profile(model_id, fixtures_dir)
+    for model_id, device_name in pairs:
+        profile = load_profile(model_id, fixtures_dir, device_name=device_name)
         if profile is None:
             print(f"{model_id}: no fixture", file=sys.stderr)
             return 1
@@ -205,7 +205,8 @@ def main(argv: list[str] | None = None) -> int:
             save_profile(updated, fixtures_dir)
         errors = prediction_errors(updated)
         raw_errors = prediction_errors(updated, calibrated=False)
-        print(f"{model_id}")
+        label = f"{model_id} @ {device_name}" if device_name else model_id
+        print(label)
         for phase in ("training", "generation"):
             phase_errors = errors.get(phase) or [0.0]
             raw = raw_errors.get(phase) or [0.0]

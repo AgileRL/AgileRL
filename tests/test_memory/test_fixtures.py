@@ -15,7 +15,7 @@ than loosen the band::
 
 import pytest
 
-from agilerl.memory.calibration import curated_models, load_profile
+from agilerl.memory.calibration import curated_profiles, load_profile
 from agilerl.memory.profiling.refit import (
     ACCURACY_BAND,
     MEAN_ACCURACY_BAND,
@@ -23,13 +23,13 @@ from agilerl.memory.profiling.refit import (
     prediction_errors,
 )
 
-CURATED = curated_models()
+CURATED = curated_profiles()
 
 
 @pytest.mark.skipif(not CURATED, reason="No calibration fixtures checked in yet.")
-@pytest.mark.parametrize("model_id", CURATED)
-def test_fixture_predicts_its_own_measurements(model_id):
-    profile = load_profile(model_id)
+@pytest.mark.parametrize(("model_id", "device_name"), CURATED)
+def test_fixture_predicts_its_own_measurements(model_id, device_name):
+    profile = load_profile(model_id, device_name=device_name)
     assert profile is not None
     errors = prediction_errors(profile)
     assert errors, f"{model_id}: fixture carries no replayable measurements"
@@ -51,11 +51,11 @@ def test_fixture_predicts_its_own_measurements(model_id):
 
 
 @pytest.mark.skipif(not CURATED, reason="No calibration fixtures checked in yet.")
-@pytest.mark.parametrize("model_id", CURATED)
-def test_fixture_is_self_describing(model_id):
+@pytest.mark.parametrize(("model_id", "device_name"), CURATED)
+def test_fixture_is_self_describing(model_id, device_name):
     # A fixture has to carry everything the widget and a re-fit need: the
     # geometry, the device it was measured on, and the raw points.
-    profile = load_profile(model_id)
+    profile = load_profile(model_id, device_name=device_name)
     assert profile is not None
     assert profile.model_spec is not None
     assert profile.device is not None
@@ -66,9 +66,9 @@ def test_fixture_is_self_describing(model_id):
 
 
 @pytest.mark.skipif(not CURATED, reason="No calibration fixtures checked in yet.")
-@pytest.mark.parametrize("model_id", CURATED)
-def test_fixture_holdout_within_band(model_id):
-    profile = load_profile(model_id)
+@pytest.mark.parametrize(("model_id", "device_name"), CURATED)
+def test_fixture_holdout_within_band(model_id, device_name):
+    profile = load_profile(model_id, device_name=device_name)
     assert profile is not None
     for phase in ("training", "generation"):
         error = getattr(profile, phase).holdout_max_rel_error
