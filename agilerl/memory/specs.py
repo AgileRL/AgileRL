@@ -41,6 +41,25 @@ LoraTargetScope = Literal["all-linear", "attention-only"]
 DistributedBackend = Literal["none", "deepspeed"]
 
 
+def _sliding_layer_fraction(text_cfg: dict[str, Any]) -> float:
+    """Fraction of layers using windowed attention.
+
+    Hybrid models interleave local and global attention and declare it per
+    layer (Gemma 4 E2B: 28 sliding to 7 full, i.e. 0.8). Only the windowed
+    layers cap their KV growth, so the ratio is a first-order term on the
+    largest inference cost. ``sliding_window_pattern`` is the older integer
+    form: one full-attention layer every N.
+    """
+    layer_types = text_cfg.get("layer_types")
+    if layer_types:
+        windowed = sum(1 for entry in layer_types if "sliding" in str(entry))
+        return windowed / len(layer_types)
+    pattern = text_cfg.get("sliding_window_pattern")
+    if isinstance(pattern, int) and pattern > 1:
+        return (pattern - 1) / pattern
+    return 1.0
+
+
 class ModelArch(BaseModel):
     """Dense (or MoE) decoder-only transformer geometry.
 
@@ -116,6 +135,7 @@ class ModelArch(BaseModel):
                 if text_cfg.get("use_sliding_window", True)
                 else None
             ),
+            sliding_window_layer_fraction=_sliding_layer_fraction(text_cfg),
             attn_bias=bool(
                 text_cfg.get("attention_bias", False) or text_cfg.get("qkv_bias", False)
             ),
@@ -249,6 +269,9 @@ class TrainingKnobs(BaseModel):
     #: ``batch_size`` (matching ``LLMAlgorithm`` behaviour).
     micro_batch_size_per_gpu: int | None = None
     group_size: int = 8
+    #: Completion rows per ``learn`` call (``prompts x group_size``).
+    #: ``None`` assumes one prompt group.
+    trajectories_per_update: int | None = None
     #: Full context budget (prompt + completion), i.e. the worst-case
     #: sequence length for activation and logprob tensors.
     max_model_len: int = 1024
@@ -272,8 +295,28 @@ class TrainingKnobs(BaseModel):
     distributed: DistributedBackend = "none"
 
     @property
+    def trajectories(self) -> int:
+        """Completion rows in one ``learn`` call.
+
+        ``None`` assumes a single prompt group. The framework processes
+        ``prompts x group_size`` rows per update, chunked into micro-batches.
+        """
+        return self.trajectories_per_update or self.group_size
+
+    @property
     def grad_rows(self) -> int:
-        return self.micro_batch_size_per_gpu or self.batch_size
+        """Rows in one gradient micro-batch.
+
+        Capped by the trajectories actually available: the framework uses
+        ``min(num_samples, micro_batch_size_per_gpu)``, so asking for a
+        micro-batch larger than the update has rows does not cost anything.
+        """
+        requested = self.micro_batch_size_per_gpu or self.batch_size
+        return max(min(requested, self.trajectories), 1)
+
+    @property
+    def n_micro_batches(self) -> int:
+        return max(-(-self.trajectories // self.grad_rows), 1)
 
     @property
     def n_adapter_rows(self) -> int:
@@ -310,6 +353,12 @@ class GenerationKnobs(BaseModel):
     gpu_memory_utilization: float = 0.3
     max_num_seqs: int = 8
     max_model_len: int = 1024
+    #: Worst-case prompt length. Prefill is the memory-relevant part of
+    #: generation — decode adds one token per sequence per step — so the
+    #: resident activation peak tracks prompt tokens in flight, not the full
+    #: context budget. ``None`` assumes the worst case (all context is
+    #: prompt).
+    max_prompt_len: int | None = None
     #: ``None`` uses the framework's resolution rule:
     #: ``min(max_num_seqs * max_model_len, max(max_model_len, max_num_seqs * 8192))``.
     max_num_batched_tokens: int | None = None
@@ -335,6 +384,10 @@ class GenerationKnobs(BaseModel):
         if self.concurrent_requests is None:
             return self.max_num_seqs
         return min(self.concurrent_requests, self.max_num_seqs)
+
+    @property
+    def prompt_len(self) -> int:
+        return min(self.max_prompt_len or self.max_model_len, self.max_model_len)
 
     @model_validator(mode="after")
     def _check_utilization(self) -> Self:

@@ -44,6 +44,14 @@ FUSED_CHUNK_ROWS_MAX = 4096
 CUDA_GRAPH_POOL_BYTES = 2 * 1024**3
 #: CUDA context + driver reserve per process that owns the device.
 CUDA_CONTEXT_BYTES = int(0.75 * 1024**3)
+#: Bytes per LoRA parameter as actually stored. PEFT's ``get_peft_model``
+#: defaults to ``autocast_adapter_dtype=True``, keeping adapter weights fp32
+#: even when the base is bf16/fp16 — so gradients and AdamW moments are fp32
+#: too. Measured on an L4: raising rank 8 -> 64 on Qwen2.5-0.5B costs ~20
+#: bytes per added parameter, which only resolves as 4 (actor) + 4
+#: (reference) + 4 (grad) + 8 (two moments) with fp32 adapters.
+ADAPTER_BYTES_PER_PARAM = 4.0
+
 #: What a sleeping (level 1) vLLM engine leaves on the device beyond the CUDA
 #: context: engine structures that survive the sleep. Measured at roughly
 #: 0.2-0.5 GiB on vLLM 0.23; calibration refines it per (model, device).
@@ -309,20 +317,20 @@ def optimizer_bytes_per_trainable_param(
 ) -> float:
     """AdamW state per trainable (LoRA) parameter.
 
-    Plain ``torch.optim.AdamW`` keeps both moments in the parameter dtype;
-    DeepSpeed's fp16/bf16 engines keep fp32 master params plus fp32 moments.
+    Both moments live in the parameter dtype, and LoRA parameters are fp32
+    (see :data:`ADAPTER_BYTES_PER_PARAM`). DeepSpeed keeps an fp32 master
+    copy on top.
     """
+    moments = 2 * ADAPTER_BYTES_PER_PARAM
     if distributed == "deepspeed":
-        return 4.0 + 8.0  # fp32 master + two fp32 moments
-    return 2 * DTYPE_BYTES[weight_dtype]
+        return moments + 4.0
+    return moments
 
 
 def grad_bytes_per_trainable_param(
     weight_dtype: WeightDtype, distributed: str
 ) -> float:
-    """Gradient buffer per trainable parameter (fp32 accumulation under
-    DeepSpeed, parameter dtype otherwise).
+    """Gradient buffer per trainable parameter — fp32, mirroring the fp32
+    adapter parameters it accumulates into.
     """
-    if distributed == "deepspeed":
-        return 4.0
-    return DTYPE_BYTES[weight_dtype]
+    return ADAPTER_BYTES_PER_PARAM

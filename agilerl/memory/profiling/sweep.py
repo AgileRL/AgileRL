@@ -94,8 +94,16 @@ def fit_residuals(
 ) -> ResidualFit:
     """Least-squares fit of ``residual = intercept + sum(slope * term)``.
 
-    Slopes are kept only for terms that actually vary across the sweep;
-    constant columns fold into the intercept.
+    Coefficients are deliberately unconstrained. Constraining them to be
+    non-negative is tempting — "the residual is unmodelled memory" — but it
+    is wrong: the analytic core can over-count as well as under-count, and a
+    negative coefficient is how the fit corrects that. Forcing non-negativity
+    was measured to make the generation holdout 8x worse (0.49% -> 3.73%),
+    because the engine-side model over-predicts and NNLS simply refuses to
+    subtract.
+
+    Slopes are kept only for terms that vary across the sweep; constant
+    columns fold into the intercept.
     """
     import numpy as np
 

@@ -126,3 +126,49 @@ def test_block_recompute_sdpa_path_adds_score_matrix():
         QWEN_05B, 2, 512, 2.0, flash_attention=False
     )
     assert without - with_flash == 2 * QWEN_05B.n_heads * 512 * 512 * 2
+
+
+def test_hybrid_attention_layer_fraction_from_layer_types():
+    # Gemma-4-style hybrid attention: most layers windowed, a few global.
+    arch = ModelArch.from_hf_config(
+        {
+            "num_hidden_layers": 35,
+            "hidden_size": 1536,
+            "intermediate_size": 6144,
+            "num_attention_heads": 8,
+            "num_key_value_heads": 1,
+            "head_dim": 256,
+            "vocab_size": 262144,
+            "tie_word_embeddings": True,
+            "sliding_window": 512,
+            "layer_types": ["sliding_attention"] * 28 + ["full_attention"] * 7,
+        }
+    )
+    assert arch.sliding_window == 512
+    assert arch.sliding_window_layer_fraction == pytest.approx(0.8)
+    # head_dim is taken from the config, not hidden // heads (192 here).
+    assert arch.head_dim == 256
+    assert arch.n_kv_heads == 1  # MQA
+
+    # Only the windowed layers cap KV growth, so long context costs far less
+    # than a fully-global model of the same geometry.
+    windowed = formulas.kv_cache_demand_bytes(arch, "auto", "bf16", 8, 8192)
+    globl = formulas.kv_cache_demand_bytes(
+        arch.model_copy(update={"sliding_window": None}), "auto", "bf16", 8, 8192
+    )
+    assert windowed < globl / 3
+
+
+def test_sliding_window_pattern_integer_form():
+    base = {
+        "num_hidden_layers": 24,
+        "hidden_size": 896,
+        "intermediate_size": 4864,
+        "num_attention_heads": 14,
+        "num_key_value_heads": 2,
+        "vocab_size": 151936,
+        "sliding_window": 4096,
+        "sliding_window_pattern": 6,
+    }
+    arch = ModelArch.from_hf_config(base)
+    assert arch.sliding_window_layer_fraction == pytest.approx(5 / 6)

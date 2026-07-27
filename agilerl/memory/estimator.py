@@ -135,7 +135,7 @@ def estimate_training(
     lora_params = formulas.lora_param_count(
         arch, knobs.lora_rank, knobs.lora_target_scope
     )
-    adapter_bytes_per_param = 4.0 if kbit else act_bytes
+    adapter_bytes_per_param = formulas.ADAPTER_BYTES_PER_PARAM
     value_head_params = arch.hidden_size if knobs.algorithm == "ppo" else 0
     adapters = (
         lora_params * knobs.n_resident_adapters + value_head_params
@@ -335,7 +335,10 @@ def estimate_generation(
         arch, 1, batched_tokens, act_bytes, device.has_flash_attention
     )
     sampler = 2 * knobs.max_num_seqs * arch.vocab_size * 4
-    activation_peak = prefill + sampler
+    # What vLLM's start-up profiling run measures: a full scheduler step of
+    # max_num_batched_tokens. This sizes the KV pool but is *transient* — it
+    # is not resident while the engine serves.
+    profiling_peak = prefill + sampler
 
     graphs = 0 if knobs.enforce_eager else formulas.CUDA_GRAPH_POOL_BYTES
     lora_slots = (
@@ -350,7 +353,7 @@ def estimate_generation(
             "does not support it."
         )
 
-    non_kv = weights + activation_peak + graphs + lora_slots
+    non_kv = weights + profiling_peak + graphs + lora_slots
     if knobs.kv_cache_memory_bytes is not None:
         kv_pool = knobs.kv_cache_memory_bytes
     else:
@@ -377,6 +380,21 @@ def estimate_generation(
             f"exceeds the KV pool ({kv_pool / GiB:.1f} GiB): vLLM will "
             "preempt and recompute — a throughput cliff, not an OOM."
         )
+
+    # Resident peak is not the whole budget. vLLM sizes the KV pool as
+    # "budget minus the profiling peak", and that peak is transient — so what
+    # actually stays on the device is weights + KV + graphs + the activations
+    # of the real workload, which is smaller than the profiled step whenever
+    # max_num_batched_tokens exceeds what the workload submits. Measured on an
+    # L4: a 4096-context engine sits ~1.9 GiB *below* the same engine at 512
+    # context, purely because its larger profiling step bought a smaller pool.
+    runtime_tokens = min(knobs.concurrency * knobs.prompt_len, batched_tokens)
+    runtime_activation = (
+        formulas.block_recompute_bytes(
+            arch, 1, runtime_tokens, act_bytes, device.has_flash_attention
+        )
+        + sampler
+    )
 
     # Trainer state that stays on the GPU while the base is offloaded to CPU
     # for the rollout (optimizer state is created on-device and never moved).
@@ -424,12 +442,17 @@ def estimate_generation(
         _component(
             "activation_peak",
             "Prefill & sampling buffers",
-            activation_peak,
+            runtime_activation,
             detail={
-                "prefill_transients": prefill,
+                "runtime_tokens": runtime_tokens,
                 "sampler_buffers": sampler,
+                "startup_profiling_peak": profiling_peak,
             },
-            note=f"One scheduler step of {batched_tokens} batched tokens.",
+            note=(
+                f"Serving peak over {runtime_tokens} tokens. vLLM's start-up "
+                f"profiling step of {batched_tokens} tokens is larger and "
+                "sizes the KV pool, but is not resident afterwards."
+            ),
         ),
         _component(
             "cuda_graphs",

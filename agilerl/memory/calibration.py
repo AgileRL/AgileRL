@@ -42,6 +42,11 @@ def training_basis(model: ModelSpec, knobs: TrainingKnobs) -> dict[str, float]:
     return {
         "grad_tokens": float(knobs.grad_rows * s),
         "nograd_tokens": float(knobs.grad_rows * knobs.n_adapter_rows * s),
+        # Total rows in the update, not just one micro-batch: the caching
+        # allocator does not hand memory back between micro-batches, so an
+        # update split into several of them peaks higher than one of them.
+        "update_tokens": float(knobs.trajectories * s),
+        "extra_micro_batches": float(knobs.n_micro_batches - 1),
         "seq_len": float(s),
     }
 

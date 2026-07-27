@@ -38,6 +38,9 @@ class SweepPoint:
     group_size: int
     lora_rank: int
     quantization: str = "none"
+    #: Prompts sent per rollout; the update carries ``n_prompts x group_size``
+    #: completion rows.
+    n_prompts: int = 1
     #: Engine budget fraction. A real sweep axis, not a fixed setting: the
     #: colocated training floor is driven by it, so holding out points at
     #: other utilizations is what validates that the floor is modelled
@@ -51,6 +54,7 @@ class SweepPoint:
             "group_size": self.group_size,
             "lora_rank": self.lora_rank,
             "quantization": self.quantization,
+            "n_prompts": self.n_prompts,
             "gpu_memory_utilization": self.gpu_memory_utilization,
         }
 
@@ -65,6 +69,7 @@ class SweepPoint:
             group_size=int(knobs["group_size"]),
             lora_rank=int(knobs["lora_rank"]),
             quantization=str(knobs.get("quantization", "none")),
+            n_prompts=int(knobs.get("n_prompts", 1)),
             gpu_memory_utilization=float(knobs.get("gpu_memory_utilization", 0.45)),
         )
 
@@ -76,18 +81,29 @@ class SweepPoint:
             micro_batch_size_per_gpu=self.micro_batch,
             batch_size=self.micro_batch,
             group_size=self.group_size,
+            # The harness sends one prompt, so the update carries exactly
+            # ``group_size`` completion rows.
+            trajectories_per_update=self.group_size * self.n_prompts,
             max_model_len=self.seq_len,
             lora_rank=self.lora_rank,
             quantization=self.quantization,  # type: ignore[arg-type]
         )
+
+    @property
+    def prompt_len(self) -> int:
+        """Prompt length used for this point, leaving the rest of the context
+        budget for completions.
+        """
+        return max(self.seq_len // 4, 8)
 
     def generation_knobs(self) -> GenerationKnobs:
         return GenerationKnobs(
             gpu_memory_utilization=self.gpu_memory_utilization,
             max_num_seqs=self.group_size,
             max_model_len=self.seq_len,
+            max_prompt_len=self.prompt_len,
             max_lora_rank=self.lora_rank,
-            concurrent_requests=self.group_size,
+            concurrent_requests=self.group_size * self.n_prompts,
         )
 
 
@@ -96,7 +112,6 @@ def measure_point(
     point: SweepPoint,
     device_index: int = 0,
     prompt_len: int | None = None,
-    n_prompts: int = 1,
 ) -> tuple[MeasuredPoint, MeasuredPoint]:
     """Run one sweep point and return (generation, training) measurements.
 
@@ -111,7 +126,7 @@ def measure_point(
     from agilerl.memory.profiling.nvml import NvmlPeakSampler
     from agilerl.utils.algo_utils import VLLMConfig
 
-    prompt_len = prompt_len or max(point.seq_len // 4, 8)
+    prompt_len = prompt_len or point.prompt_len
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     quantization_config = None
@@ -161,7 +176,7 @@ def measure_point(
             "attention_mask": torch.ones_like(prompt_ids),
             "text": tokenizer.decode(prompt_ids[0]),
         }
-        for _ in range(n_prompts)
+        for _ in range(point.n_prompts)
     ]
 
     try:
