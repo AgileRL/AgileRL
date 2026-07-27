@@ -49,11 +49,7 @@ def _require_prepared(value: _T | None) -> _T:
 
 
 def _index_tensordict(td: TensorDict, index: torch.Tensor | slice) -> TensorDict:
-    """Index or slice ``td``, narrowing the widened ``__getitem__`` return.
-
-    Indexing a TensorDict with a mask or slice yields a TensorDict; the stub
-    types it as ``Tensor | TensorCollection`` because a string key would not.
-    """
+    """Index or slice ``td``, narrowing the widened ``__getitem__`` return."""
     view = td[index]
     assert isinstance(view, TensorDict), (
         f"Expected a TensorDict view, got {type(view).__name__}."
@@ -64,14 +60,7 @@ def _index_tensordict(td: TensorDict, index: torch.Tensor | slice) -> TensorDict
 def _is_numpy_tree(
     obj: object,
 ) -> TypeGuard[dict[str, npt.NDArray | dict[str, npt.NDArray]]]:
-    """Narrow ``TensorDict.numpy()``'s result to the nested numpy form.
-
-    As with :func:`~agilerl.utils.algo_utils.is_str_keyed_dict`, a bare
-    ``isinstance(obj, dict)`` is not enough here: ``numpy.ndarray`` isn't final,
-    so the checker keeps an ``ndarray & dict`` intersection out of the union
-    ``numpy()`` is stubbed with. A TypeGuard states the shape a ``TensorDict``
-    receiver always produces instead.
-    """
+    """Narrow ``TensorDict.numpy()``'s result to the nested numpy form."""
     return isinstance(obj, dict)
 
 

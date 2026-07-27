@@ -144,14 +144,7 @@ def is_str_keyed_dict(obj: object) -> TypeGuard[dict[str, object]]:
 
 
 def narrow_tensor(value: object) -> torch.Tensor:
-    """Narrow a :class:`~tensordict.TensorDict` entry to the tensor it holds.
-
-    A ``TensorDict``'s accessors are typed to return ``Tensor |
-    TensorCollection`` because any entry may be a nested collection. Where the
-    framework knows an entry is a leaf, this states that invariant once —
-    failing with the offending type rather than surfacing as a confusing
-    attribute error further downstream.
-    """
+    """Narrow a :class:`~tensordict.TensorDict` entry to the tensor it holds."""
     assert isinstance(value, torch.Tensor), (
         f"Expected a tensor entry, got {type(value).__name__}."
     )

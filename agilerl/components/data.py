@@ -68,12 +68,7 @@ def to_torch_tensor(
 
 
 def transition_to_tensordict(transition: TensorClass) -> TensorDict:
-    """Return the plain :class:`TensorDict` a tensorclass holds.
-
-    ``TensorClass.to_tensordict`` is stubbed as returning ``Self``, but it hands
-    back the ``TensorDict`` of the class's fields — which is what the replay
-    buffers consume.
-    """
+    """Return the plain :class:`TensorDict` a tensorclass holds."""
     td = transition.to_tensordict()
     assert isinstance(td, TensorDict), (
         f"Expected a TensorDict from {type(transition).__name__}, "
@@ -83,12 +78,7 @@ def transition_to_tensordict(transition: TensorClass) -> TensorDict:
 
 
 class Transition(TensorClass):
-    """One environment step staged for a :class:`~agilerl.components.replay_buffer.ReplayBuffer`.
-
-    Rewards and terminations arrive either batched (vectorised envs) or as a
-    plain scalar (a single env's ``step`` return); ``__post_init__`` converts
-    every field to a tensor and gives scalars a trailing dimension.
-    """
+    """One environment step staged for a :class:`~agilerl.components.replay_buffer.ReplayBuffer`."""
 
     obs: ObservationType
     action: ArrayOrTensor
@@ -137,10 +127,7 @@ class MultiAgentTransition(TensorClass):
 
     Each field is a ``Mapping[agent_id, array | dict]`` that is converted to a
     sub-:class:`TensorDict` on construction.  Dict/tuple observation spaces
-    are handled automatically. The fields are typed as mappings rather than
-    dicts so the vectorised envs' read-only
-    :class:`~agilerl.vector.pz_async_vec_env.Observations` view is accepted
-    alongside a plain per-agent dict.
+    are handled automatically.
 
     Usage mirrors single-agent :class:`Transition`::
 
