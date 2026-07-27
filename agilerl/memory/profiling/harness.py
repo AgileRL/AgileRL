@@ -41,6 +41,11 @@ class SweepPoint:
     #: Prompts sent per rollout; the update carries ``n_prompts x group_size``
     #: completion rows.
     n_prompts: int = 1
+    #: Restricts which submodules LoRA wraps. Required for multimodal
+    #: checkpoints: ``all-linear`` otherwise wraps the vision/audio towers
+    #: too, and vLLM refuses the resulting adapter because those module names
+    #: are not in its supported LoRA target set.
+    lora_target_scope: str | None = None
     #: Engine budget fraction. A real sweep axis, not a fixed setting: the
     #: colocated training floor is driven by it, so holding out points at
     #: other utilizations is what validates that the floor is modelled
@@ -55,6 +60,7 @@ class SweepPoint:
             "lora_rank": self.lora_rank,
             "quantization": self.quantization,
             "n_prompts": self.n_prompts,
+            "lora_target_scope": self.lora_target_scope or "",
             "gpu_memory_utilization": self.gpu_memory_utilization,
         }
 
@@ -70,6 +76,7 @@ class SweepPoint:
             lora_rank=int(knobs["lora_rank"]),
             quantization=str(knobs.get("quantization", "none")),
             n_prompts=int(knobs.get("n_prompts", 1)),
+            lora_target_scope=str(knobs.get("lora_target_scope") or "") or None,
             gpu_memory_utilization=float(knobs.get("gpu_memory_utilization", 0.45)),
         )
 
@@ -174,6 +181,7 @@ def measure_point(
             target_modules="all-linear",
             task_type="CAUSAL_LM",
         ),
+        lora_target_scope=point.lora_target_scope,
         quantization_config=quantization_config,
         use_vllm=True,
         vllm_config=VLLMConfig(
@@ -311,6 +319,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--group-size", type=int, required=True)
     parser.add_argument("--lora-rank", type=int, required=True)
     parser.add_argument("--quantization", default="none")
+    parser.add_argument(
+        "--lora-target-scope",
+        default=None,
+        help="Restrict LoRA targeting (e.g. language_model for multimodal)",
+    )
     parser.add_argument("--device-index", type=int, default=0)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.45)
     parser.add_argument(
@@ -342,6 +355,7 @@ def main(argv: list[str] | None = None) -> int:
             group_size=args.group_size,
             lora_rank=args.lora_rank,
             quantization=args.quantization,
+            lora_target_scope=args.lora_target_scope,
             gpu_memory_utilization=args.gpu_memory_utilization,
         )
         generation, training = measure_point(

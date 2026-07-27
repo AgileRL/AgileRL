@@ -256,6 +256,11 @@ def _measure_point_subprocess(
         str(point.lora_rank),
         "--quantization",
         point.quantization,
+        *(
+            ["--lora-target-scope", point.lora_target_scope]
+            if point.lora_target_scope
+            else []
+        ),
         "--device-index",
         str(device_index),
         "--gpu-memory-utilization",
@@ -311,6 +316,7 @@ def run_sweep(
     gpu_memory_utilization: float = 0.45,
     quantizations: tuple[str, ...] = ("none",),
     point_quantization: str = "none",
+    lora_target_scope: str | None = None,
 ) -> ModelProfile:
     """Measure every plan point on the local GPU and build the profile.
 
@@ -355,11 +361,17 @@ def run_sweep(
             point,
             gpu_memory_utilization=gpu_memory_utilization,
             quantization=point_quantization,
+            lora_target_scope=lora_target_scope,
         )
         for point in corner_plan()
     ]
     holdout_plan = [
-        replace(point, quantization=point_quantization) for point in HOLDOUT_POINTS
+        replace(
+            point,
+            quantization=point_quantization,
+            lora_target_scope=lora_target_scope,
+        )
+        for point in HOLDOUT_POINTS
     ]
     skipped: list[str] = []
     for i, point in enumerate(plan + holdout_plan):
@@ -374,9 +386,14 @@ def run_sweep(
                 model_name, point, device_index=device_index
             )
         except subprocess.CalledProcessError as exc:
-            # A corner too large for this device is information, not a
-            # failure: record it and keep the remaining points.
-            print(f"    SKIPPED (exit {exc.returncode}) — likely OOM", flush=True)
+            # Usually a corner too large for this device, which is
+            # information rather than a failure — but not always, so do not
+            # assert a cause. Gemma 4 failed every point for an unrelated
+            # reason (LoRA targeting its audio tower) while claiming OOM.
+            print(
+                f"    SKIPPED (exit {exc.returncode}) — see sweep log for the cause",
+                flush=True,
+            )
             skipped.append(str(point))
             continue
         measured.extend([generation, training])
@@ -443,6 +460,15 @@ def main(argv: list[str] | None = None) -> int:
         choices=["none", "nf4", "int8"],
         help="Trainer quantization used for the swept points themselves",
     )
+    parser.add_argument(
+        "--lora-target-scope",
+        default=None,
+        help=(
+            "Restrict LoRA targeting, e.g. language_model. Required for "
+            "multimodal checkpoints: all-linear otherwise wraps the vision "
+            "and audio towers and vLLM rejects the adapter."
+        ),
+    )
     parser.add_argument("--output-dir", default=None)
     parser.add_argument(
         "--dry-run",
@@ -465,6 +491,7 @@ def main(argv: list[str] | None = None) -> int:
         gpu_memory_utilization=args.gpu_memory_utilization,
         quantizations=tuple(args.quantizations),
         point_quantization=args.point_quantization,
+        lora_target_scope=args.lora_target_scope,
     )
     output_dir = Path(args.output_dir) if args.output_dir else None
     path = save_profile(profile, output_dir)
