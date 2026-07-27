@@ -80,7 +80,7 @@ from agilerl import HAS_DEEPSPEED, HAS_LLM_DEPENDENCIES, HAS_VLLM
 from agilerl.algorithms.core.base import (
     EvolvableAlgorithm,
     LLMAlgorithm,
-    _RegistryMeta,
+    RegistryMeta,
     get_checkpoint_dict,
     get_optimizer_cls,
 )
@@ -347,7 +347,7 @@ class TestDeprecatedMethods:
             match=r"This method is deprecated\. Use get_output_size_from_space instead\.",
         ):
             dim = EvolvableAlgorithm.get_action_dim(action_space)
-        assert dim == (5,)
+        assert dim == 5
 
 
 class TestEvolvableAttributes:
@@ -1082,6 +1082,26 @@ class TestExtractAgentMasksEdgeCases:
         env_acts, _agent_masks = ma_agent.extract_agent_masks(infos)
         assert env_acts is not None
         assert np.isnan(env_acts["agent_0"]).all() or env_acts["agent_0"].size == 1
+
+    def test_extract_agent_masks_tensor_env_defined_action(self, ma_agent):
+        infos = {
+            "agent_0": {"env_defined_actions": torch.tensor([1.0])},
+            "agent_1": {"env_defined_actions": np.array([0.0])},
+        }
+        env_acts, _agent_masks = ma_agent.extract_agent_masks(infos)
+        assert env_acts is not None
+        assert isinstance(env_acts["agent_0"], np.ndarray)
+
+    def test_extract_agent_masks_unsupported_type_treated_as_none(self, ma_agent):
+        # A type that isn't a scalar/array/tensor is discarded rather than
+        # propagated, so it is masked out like an explicit None.
+        infos = {
+            "agent_0": {"env_defined_actions": "not-an-action"},
+            "agent_1": {"env_defined_actions": np.array([1.0])},
+        }
+        env_acts, _agent_masks = ma_agent.extract_agent_masks(infos)
+        assert env_acts is not None
+        assert np.isnan(env_acts["agent_0"]).all()
 
 
 class TestGetGroupIdNonString:
@@ -4401,6 +4421,14 @@ class TestMultiAgentExtractAgentMasksContinuousNan:
 
 
 class TestMultiAgentBuildNetConfigPaths:
+    def test_build_net_config_rejects_non_mapping_encoder_config(self, vector_space):
+        obs = [vector_space, vector_space]
+        act = [spaces.Discrete(2), spaces.Discrete(2)]
+        agent = DummyMARLAlgorithm(obs, act, agent_ids=["agent_0", "agent_1"], index=0)
+        net_config = {"encoder_config": "not-a-config"}
+        with pytest.raises(TypeError, match="must be a dict or NetConfig"):
+            agent.build_net_config(net_config, flatten=False)
+
     def test_build_net_config_none_creates_defaults(self, vector_space):
         obs = [vector_space, vector_space]
         act = [spaces.Discrete(2), spaces.Discrete(2)]
@@ -4944,7 +4972,7 @@ class TestLLMCloneWithoutAccelerator:
                 },
             ),
             patch.object(EvolvableAlgorithm, "copy_attributes", return_value=cloned),
-            patch.object(_RegistryMeta, "__call__", return_value=cloned),
+            patch.object(RegistryMeta, "__call__", return_value=cloned),
             patch.object(LLMAlgorithm, "wrap_models"),
         ):
             result = LLMAlgorithm.clone(agent, index=5, wrap=True)
@@ -4999,7 +5027,7 @@ class TestLLMCloneWithAccelerator:
                 },
             ),
             patch.object(EvolvableAlgorithm, "copy_attributes", return_value=cloned),
-            patch.object(_RegistryMeta, "__call__", return_value=cloned),
+            patch.object(RegistryMeta, "__call__", return_value=cloned),
             patch.object(LLMAlgorithm, "wrap_models"),
         ):
             result = LLMAlgorithm.clone(agent, index=3)
@@ -5049,7 +5077,7 @@ class TestLLMCloneWithDeepSpeed:
                 },
             ),
             patch.object(EvolvableAlgorithm, "copy_attributes", return_value=cloned),
-            patch.object(_RegistryMeta, "__call__", return_value=cloned),
+            patch.object(RegistryMeta, "__call__", return_value=cloned),
             patch.object(LLMAlgorithm, "wrap_models"),
             patch.object(LLMAlgorithm, "_save_distributed_actor"),
             patch.object(LLMAlgorithm, "_load_distributed_actor"),
@@ -5098,7 +5126,7 @@ class TestLLMQuantizedClone:
                 "_clone_actor_network",
                 side_effect=AssertionError("dense clone_llm must not run for quant"),
             ),
-            patch.object(_RegistryMeta, "__call__", side_effect=_fake_ctor),
+            patch.object(RegistryMeta, "__call__", side_effect=_fake_ctor),
         ):
             agent._create_clone_instance()
 
@@ -5303,7 +5331,7 @@ class TestLLMCloneWithVllm:
                 },
             ),
             patch.object(EvolvableAlgorithm, "copy_attributes", return_value=cloned),
-            patch.object(_RegistryMeta, "__call__", return_value=cloned),
+            patch.object(RegistryMeta, "__call__", return_value=cloned),
             patch.object(LLMAlgorithm, "wrap_models"),
         ):
             result = LLMAlgorithm.clone(agent, index=2)
@@ -5366,7 +5394,7 @@ class TestLLMCloneWithVllm:
                 },
             ),
             patch.object(EvolvableAlgorithm, "copy_attributes", return_value=cloned),
-            patch.object(_RegistryMeta, "__call__", return_value=cloned),
+            patch.object(RegistryMeta, "__call__", return_value=cloned),
             patch.object(LLMAlgorithm, "wrap_models"),
         ):
             result = LLMAlgorithm.clone(agent, index=2)
@@ -6166,6 +6194,58 @@ class TestLLMGenerateWithVllmColocateFullPaths:
         assert len(completion_ids) == 2
         assert len(action_masks) == 2
 
+    def test_generate_with_vllm_colocate_uses_trajectory_ids(self):
+        """Multi-turn prompts carry the running trajectory, which vLLM re-reads."""
+        agent = _make_llm_agent()
+        agent.pad_token = "<pad>"
+        agent.pad_token_id = 0
+        agent.max_output_tokens = 20
+        agent.max_model_len = 100
+        agent.repetition_penalty = 1.0
+        agent.temperature = 1.0
+        agent.top_p = 1.0
+        agent.top_k = None
+        agent.min_p = None
+        agent.min_output_tokens = None
+        agent.accelerator = None
+
+        vllm_config = MagicMock()
+        vllm_config.tensor_parallel_size = 1
+        agent.vllm_config = vllm_config
+        agent.device = "cpu"
+
+        prompts = [
+            {
+                "input_ids": torch.tensor([[1, 2, 3]]),
+                "trajectory_input_ids": torch.tensor([[1, 2, 3, 9, 9]]),
+                "text": "hello",
+            },
+        ]
+
+        mock_output = MagicMock()
+        mock_output.outputs = [MagicMock(token_ids=list(range(5)))]
+        agent.llm = MagicMock()
+        agent.llm.generate.return_value = [mock_output, mock_output]
+
+        with (
+            patch(
+                "agilerl.algorithms.core.base.SamplingParams",
+                return_value=MagicMock(),
+                create=True,
+            ),
+            patch(
+                "agilerl.algorithms.core.base.stack_and_pad_experiences",
+                return_value=(torch.zeros(2, 5), None),
+            ),
+        ):
+            completion_ids, _action_masks, _ = agent._generate_with_vllm_colocate(
+                prompts, group_size=2, temperature=0.9
+            )
+
+        sent = agent.llm.generate.call_args[0][0]
+        assert sent[0]["prompt_token_ids"] == [1, 2, 3, 9, 9]
+        assert len(completion_ids) == 1
+
 
 class TestLLMGenerateWithVllmColocateAccelerator:
     """_generate_with_vllm_colocate does not world-barrier before generate."""
@@ -6325,7 +6405,7 @@ class TestLLMCloneBroadcastMultiProcess:
                 },
             ),
             patch.object(EvolvableAlgorithm, "copy_attributes", return_value=cloned),
-            patch.object(_RegistryMeta, "__call__", return_value=cloned),
+            patch.object(RegistryMeta, "__call__", return_value=cloned),
             patch.object(LLMAlgorithm, "wrap_models"),
         ):
             LLMAlgorithm.clone(agent, index=3)
@@ -6925,3 +7005,79 @@ class TestLLMUpdateExistingAdapterTrainability:
 class TestLLMLoadCheckpointLoraConfig:
     def test_load_checkpoint_lora_config_missing(self, tmp_path):
         assert LLMAlgorithm._load_checkpoint_lora_config(str(tmp_path)) is None
+
+
+class TestMultiAgentRLAlgorithmInit:
+    def test_spaces_dict_inputs_are_stored_directly(self):
+        """Passing ``spaces.Dict`` obs/action spaces stores them as-is."""
+        obs_spaces = spaces.Dict(
+            {
+                "agent_0": spaces.Box(0.0, 1.0, (4,)),
+                "agent_1": spaces.Box(0.0, 1.0, (4,)),
+            }
+        )
+        action_spaces = spaces.Dict(
+            {
+                "agent_0": spaces.Discrete(2),
+                "agent_1": spaces.Discrete(2),
+            }
+        )
+        agent = DummyMARLAlgorithm(
+            obs_spaces,
+            action_spaces,
+            agent_ids=["agent_0", "agent_1"],
+            index=0,
+        )
+        assert agent.possible_observation_spaces is obs_spaces
+        assert agent.possible_action_spaces is action_spaces
+        assert agent.agent_ids == ["agent_0", "agent_1"]
+
+
+@_LLM_DEPS_SKIP
+class TestLLMAlgorithmInitQuantizationConfig:
+    def test_quantization_config_merged_into_dict_model_config(self):
+        """A dict ``model_config`` gets ``quantization_config`` merged in."""
+        quantization_config = SimpleNamespace(llm_int8_skip_modules=None)
+        with (
+            patch.object(LLMAlgorithm, "_initialize_actors"),
+            patch.object(LLMAlgorithm, "_configure_vllm"),
+            patch.object(LLMAlgorithm, "wrap_models"),
+            patch.object(EvolvableAlgorithm, "_registry_init"),
+            patch(
+                "agilerl.algorithms.core.base.broadcast_object_list",
+                side_effect=lambda obj_list, from_process=0: list(obj_list),
+            ),
+        ):
+            agent = _StubLLMAlgorithm(
+                index=0,
+                batch_size=4,
+                lr=1e-4,
+                max_grad_norm=0.0,
+                clone=True,
+                calc_position_embeddings=False,
+                seed=42,
+                pad_token_id=0,
+                pad_token="<pad>",
+                use_liger_loss=False,
+                lora_config=MagicMock(),
+                actor_network=_make_mock_peft_actor(),
+                device="cpu",
+                model_config={"trust_remote_code": True},
+                quantization_config=quantization_config,
+            )
+
+        assert agent.model_config["quantization_config"] is quantization_config
+        assert agent.model_config["trust_remote_code"] is True
+        # lm_head is force-skipped so the fused lm_head matmul stays exact.
+        assert quantization_config.llm_int8_skip_modules == ["lm_head"]
+
+
+@_LLM_DEPS_SKIP
+class TestLLMAlgorithmSyncDeepspeedGradientClipping:
+    def test_returns_early_when_no_deepspeed_plugin(self):
+        """No-op when an accelerator is present but has no DeepSpeed plugin."""
+        agent = _make_llm_agent()
+        agent.accelerator = SimpleNamespace(
+            state=SimpleNamespace(deepspeed_plugin=None)
+        )
+        assert agent._sync_deepspeed_gradient_clipping() is None

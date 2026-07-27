@@ -6,6 +6,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 
 import numpy as np
+from typing_extensions import TypeIs
 
 
 def get_nested_mean(metrics: list[dict[str, float]]) -> dict[str, float]:
@@ -147,6 +148,19 @@ class NestedMetricRow(MetricRow):
     children: list[ScalarMetricRow]
 
 
+def _is_nested_values(
+    values: list[float] | list[dict[str, float]],
+) -> TypeIs[list[dict[str, float]]]:
+    """Whether a metric's per-agent values use the nested (multi-agent) layout.
+
+    :param values: Per-agent metric values.
+    :type values: list[float] | list[dict[str, float]]
+    :returns: True if the values are per-agent dicts, False if plain scalars.
+    :rtype: TypeIs[list[dict[str, float]]]
+    """
+    return bool(values) and isinstance(values[0], dict)
+
+
 def build_metric_row(
     name: str,
     values: list[float] | list[dict[str, float]],
@@ -163,7 +177,7 @@ def build_metric_row(
     :returns: A row from per-agent values, auto-detecting scalar vs nested layout.
     :rtype: ScalarMetricRow | NestedMetricRow
     """
-    if values and isinstance(values[0], dict):
+    if _is_nested_values(values):
         children = [
             ScalarMetricRow(
                 name=child_name,

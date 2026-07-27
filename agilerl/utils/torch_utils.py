@@ -4,6 +4,7 @@ from functools import singledispatch
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -12,15 +13,15 @@ from gymnasium import spaces
 
 def map_pytree(
     f: Callable[[np.ndarray | torch.Tensor], Any],
-    item: Any,
-) -> Any:
+    item: object,
+) -> object:
     """Apply a function to all tensors/arrays in a nested data structure.
 
     Recursively traverses nested dictionaries, lists, tuples, and sets,
     applying the given function to any numpy arrays or PyTorch tensors found.
 
     :param f: Function to apply to arrays/tensors
-    :type f: Callable[[np.ndarray | torch.Tensor], Any]
+    :type f: Callable[[npt.NDArray | torch.Tensor], Any]
     :param item: Nested data structure to traverse
     :type item: Any
     :return: Data structure with function applied to all arrays/tensors
@@ -39,7 +40,7 @@ def map_pytree(
     return item
 
 
-def to(item: Any, device: torch.device | str) -> Any:
+def to(item: object, device: torch.device | str) -> object:
     """Move all tensors/arrays in a nested data structure to specified device.
 
     :param item: Nested data structure containing tensors/arrays
@@ -66,7 +67,7 @@ def to_decorator(
     :rtype: Callable
     """
 
-    def new_f(*args: Any, **kwargs: Any) -> Any:
+    def new_f(*args: Any, **kwargs: Any) -> object:
         return to(f(*args, **kwargs), device)
 
     return new_f
@@ -90,7 +91,7 @@ def get_transformer_logs(
     attentions: list[torch.Tensor],
     model: nn.Module,
     attn_mask: torch.Tensor,
-) -> dict[str, tuple[float, int]]:
+) -> dict[str, tuple[float | torch.Tensor, int | torch.Tensor]]:
     """Extract logging information from transformer attention weights.
 
     Computes attention entropy and parameter norm for transformer models,
@@ -102,10 +103,11 @@ def get_transformer_logs(
     :type model: nn.Module
     :param attn_mask: Attention mask tensor
     :type attn_mask: torch.Tensor
-    :return: Dictionary containing attention entropy and parameter norm
-    :rtype: dict[str, tuple[float, int]]
+    :return: Dictionary containing attention entropy and parameter norm; the
+        attention-entropy pair stays as 0-dim tensors derived from ``attn_mask``.
+    :rtype: dict[str, tuple[float | torch.Tensor, int | torch.Tensor]]
     """
-    logs = {}
+    logs: dict[str, tuple[float | torch.Tensor, int | torch.Tensor]] = {}
     n = attn_mask.sum()
     model_attention_entropy = -sum(
         (
@@ -259,14 +261,14 @@ def entropy_continuous(mu: torch.Tensor, log_std: torch.Tensor) -> torch.Tensor:
 
 def sample_multi_discrete(
     logits: torch.Tensor,
-    nvec: Sequence[int],
+    nvec: Sequence[int] | npt.NDArray,
 ) -> torch.Tensor:
     """Sample from independent categoricals for a MultiDiscrete action space.
 
     :param logits: Logits of the distribution.
     :type logits: torch.Tensor
     :param nvec: Number of actions for each discrete action space.
-    :type nvec: Sequence[int]
+    :type nvec: Sequence[int] | npt.NDArray
     :return: Sampled action.
     :rtype: torch.Tensor
     """
@@ -283,7 +285,7 @@ def sample_multi_discrete(
 
 def log_prob_multi_discrete(
     logits: torch.Tensor,
-    nvec: Sequence[int],
+    nvec: Sequence[int] | npt.NDArray,
     action: torch.Tensor,
 ) -> torch.Tensor:
     """Log probability of actions under independent categoricals.
@@ -291,7 +293,7 @@ def log_prob_multi_discrete(
     :param logits: Logits of the distribution.
     :type logits: torch.Tensor
     :param nvec: Number of actions for each discrete action space.
-    :type nvec: Sequence[int]
+    :type nvec: Sequence[int] | npt.NDArray
     :param action: Action.
     :type action: torch.Tensor
     :return: Log probability of the action.
@@ -311,14 +313,14 @@ def log_prob_multi_discrete(
 
 def entropy_multi_discrete(
     logits: torch.Tensor,
-    nvec: Sequence[int],
+    nvec: Sequence[int] | npt.NDArray,
 ) -> torch.Tensor:
     """Entropy of independent categoricals for MultiDiscrete.
 
     :param logits: Logits of the distribution.
     :type logits: torch.Tensor
     :param nvec: Number of actions for each discrete action space.
-    :type nvec: Sequence[int]
+    :type nvec: Sequence[int] | npt.NDArray
     :return: Entropy of the distribution.
     :rtype: torch.Tensor
     """

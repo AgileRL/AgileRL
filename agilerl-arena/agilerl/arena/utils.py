@@ -1,6 +1,7 @@
 import os
 import tarfile
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import BinaryIO
 
@@ -56,7 +57,7 @@ def multipart_text_fields(
     return {key: (None, value) for key, value in fields.items() if value is not None}
 
 
-def _tar_to_tempfile(add_entries) -> BinaryIO:
+def _tar_to_tempfile(add_entries: Callable[[tarfile.TarFile], None]) -> BinaryIO:
     """Write a ``.tar.gz`` to an unlinked temporary file and rewind it.
 
     Spooling to disk instead of memory keeps large artifact uploads from

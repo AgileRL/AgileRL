@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from enum import Enum
 from importlib import import_module
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import gymnasium as gym
 import pandas as pd
-from gymnasium.vector import AsyncVectorEnv, SyncVectorEnv
 from pettingzoo import ParallelEnv
 from pydantic import (
     AliasChoices,
@@ -20,8 +18,11 @@ from pydantic import (
 )
 from typing_extensions import Self
 
+from agilerl.models.env_types import LLMEnvType
 from agilerl.protocols import BanditEnvProtocol
+from agilerl.typing import EnvFactory, WrapperSpec
 from agilerl.utils.env_utils import (
+    GymEnvType,
     apply_wrappers,
     get_reward_fn,
     make_conversation_template,
@@ -32,11 +33,14 @@ from agilerl.vector import AsyncPettingZooVecEnv
 if TYPE_CHECKING:
     from accelerate import Accelerator
     from datasets import Dataset
+    from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
+    from agilerl.llm_envs import TokenObservationWrapper
+    from agilerl.protocols import MultiTurnEnv
     from agilerl.wrappers.llm_envs import PreferenceGym, ReasoningGym, SFTGym
 
 
-def _require_datasets() -> tuple[type[Dataset], Callable[[], Dataset]]:
+def _require_datasets() -> tuple[type[Dataset], Callable[..., Any]]:
     """Import HuggingFace ``datasets`` (provided by the ``agilerl[llm]`` extra)."""
     try:
         from datasets import Dataset, load_dataset
@@ -47,24 +51,6 @@ def _require_datasets() -> tuple[type[Dataset], Callable[[], Dataset]]:
         )
         raise ImportError(msg) from exc
     return Dataset, load_dataset
-
-
-class LLMEnvType(str, Enum):
-    """Type of LLM environment."""
-
-    REASONING = "reasoning"
-    PREFERENCE = "preference"
-    SFT = "sft"
-    MULTITURN = "multiturn"
-
-    def __str__(self) -> str:
-        return str(self.value)
-
-
-GymEnvType = AsyncVectorEnv | SyncVectorEnv
-PzEnvType = ParallelEnv | AsyncPettingZooVecEnv
-EnvFactory = Callable[[], Any]
-WrapperSpec = tuple[Any, dict[str, Any]] | str | Callable[..., Any]
 
 
 class EnvSpec(BaseModel):
@@ -124,10 +110,10 @@ class GymEnvSpec(EnvSpec):
         :param wrappers: Environment wrappers, if custom. Defaults to None.
         :type wrappers: list[tuple[Any, dict[str, Any]] | str] or None
         :returns: Custom environment factory function.
-        :rtype: Callable[[], Any]
+        :rtype: EnvFactory
         """
 
-        def default_make_env() -> Any:
+        def default_make_env() -> gym.Env:
             constructor = resolve_entrypoint_target(entrypoint, path=path)
             if not callable(constructor):
                 msg = f"Entrypoint '{entrypoint}' resolved to non-callable object."
@@ -377,6 +363,10 @@ class LLMEnvSpec(BaseModel):
             return self.env_name
         return self.entrypoint or "multiturn"
 
+    def _seed_kwargs(self) -> dict[str, int]:
+        """Seed kwarg for gym construction; omitted when unset so the gym default applies."""
+        return {} if self.seed is None else {"seed": self.seed}
+
     @model_validator(mode="after")
     def _validate_reasoning_fields(self) -> Self:
         if self.env_type == LLMEnvType.REASONING:
@@ -438,8 +428,12 @@ class LLMEnvSpec(BaseModel):
         :returns: A ``(train_dataset, test_dataset)`` tuple.
         :rtype: tuple[Dataset, Dataset]
         """
+        dataset = self.dataset
+        if dataset is None:
+            msg = "dataset is required to load reasoning/preference/sft data"
+            raise ValueError(msg)
         _, load_dataset = _require_datasets()
-        ds = load_dataset(self.dataset, split="train").shuffle(seed=self.seed)
+        ds = load_dataset(dataset, split="train").shuffle(seed=self.seed)
         if self.columns:
             ds = ds.rename_columns(self.columns)
 
@@ -452,8 +446,12 @@ class LLMEnvSpec(BaseModel):
         :returns: A ``(train_dataset, test_dataset)`` tuple.
         :rtype: tuple[Dataset, Dataset]
         """
+        dataset = self.dataset
+        if dataset is None:
+            msg = "dataset is required to load reasoning/preference/sft data"
+            raise ValueError(msg)
         Dataset, _ = _require_datasets()
-        df = pd.read_parquet(self.dataset)
+        df = pd.read_parquet(dataset)
         if self.columns:
             df = df.rename(columns=self.columns)
 
@@ -467,12 +465,16 @@ class LLMEnvSpec(BaseModel):
         :returns: A ``(train_dataset, test_dataset)`` tuple.
         :rtype: tuple[Dataset, Dataset]
         """
-        if self.dataset.endswith((".parquet", ".pq")):
+        dataset = self.dataset
+        if dataset is None:
+            msg = "dataset is required to load reasoning/preference/sft data"
+            raise ValueError(msg)
+        if dataset.endswith((".parquet", ".pq")):
             return self._load_dataset_file()
         return self._load_dataset_hf()
 
     def make_env(
-        self, tokenizer: Any, accelerator: Accelerator | None = None
+        self, tokenizer: PreTrainedTokenizerBase, accelerator: Accelerator | None = None
     ) -> ReasoningGym | PreferenceGym | SFTGym:
         """Make the environment for the LLM agent.
 
@@ -480,7 +482,7 @@ class LLMEnvSpec(BaseModel):
         instead — the training loop needs a factory, not a single env.
 
         :param tokenizer: The tokenizer.
-        :type tokenizer: Any
+        :type tokenizer: PreTrainedTokenizerBase
         :param accelerator: The accelerator.
         :type accelerator: Accelerator | None
         :return: The reasoning or preference gym environment.
@@ -506,11 +508,11 @@ class LLMEnvSpec(BaseModel):
 
     def make_multiturn_env_factory(
         self,
-        tokenizer: Any,
+        tokenizer: PreTrainedTokenizerBase,
         *,
         max_model_len: int | None = None,
         max_output_tokens: int | None = None,
-    ) -> Callable[[], Any]:
+    ) -> Callable[[], TokenObservationWrapper]:
         """Build a factory that creates wrapped multi-turn env instances.
 
         Each call to the returned factory creates a fresh
@@ -522,7 +524,7 @@ class LLMEnvSpec(BaseModel):
         environment instance and stored back on the spec.
 
         :param tokenizer: The tokenizer (shared across all instances).
-        :type tokenizer: Any
+        :type tokenizer: PreTrainedTokenizerBase
         :param max_model_len: Maximum model context length for sliding-window
             prompt truncation inside the wrapper.
         :type max_model_len: int | None
@@ -535,7 +537,8 @@ class LLMEnvSpec(BaseModel):
 
         if self.env_name is not None:
             try:
-                import gem
+                # gem-llm is an optional runtime dependency, never installed for checks.
+                import gem  # ty: ignore[unresolved-import]
             except ImportError:
                 msg = (
                     f"The 'gem-llm' package is required to use env_name={self.env_name!r}. "
@@ -545,16 +548,22 @@ class LLMEnvSpec(BaseModel):
 
             env_name = self.env_name
 
-            def _make_raw_env() -> Any:
+            def _make_raw_env() -> MultiTurnEnv:
                 return gem.make(env_name)
         else:
+            if self.entrypoint is None:
+                msg = (
+                    "Exactly one of env_name or entrypoint is required "
+                    "for multiturn environments."
+                )
+                raise ValueError(msg)
             constructor = resolve_entrypoint_target(self.entrypoint)
             if not callable(constructor):
                 msg = f"Entrypoint '{self.entrypoint}' resolved to non-callable object."
                 raise TypeError(msg)
             cfg = self.env_config or {}
 
-            def _make_raw_env() -> Any:
+            def _make_raw_env() -> MultiTurnEnv:
                 return constructor(**cfg)
 
         max_turns = self.max_turns
@@ -585,7 +594,7 @@ class LLMEnvSpec(BaseModel):
         self,
         train_dataset: Dataset,
         test_dataset: Dataset,
-        tokenizer: Any,
+        tokenizer: PreTrainedTokenizerBase,
         accelerator: Accelerator | None = None,
     ) -> ReasoningGym:
         """Make the reasoning gym environment.
@@ -595,13 +604,24 @@ class LLMEnvSpec(BaseModel):
         :param test_dataset: The test dataset.
         :type test_dataset: Dataset
         :param tokenizer: The tokenizer.
-        :type tokenizer: Any
+        :type tokenizer: PreTrainedTokenizerBase
         :param accelerator: The accelerator.
         :type accelerator: Accelerator | None
         :return: The reasoning gym environment.
         :rtype: ReasoningGym
         """
         from agilerl.wrappers.llm_envs import ReasoningGym
+
+        if (
+            self.reward_fn_name is None
+            or self.reward_file_path is None
+            or self.prompt_template is None
+        ):
+            msg = (
+                "reward_fn_name, reward_file_path, and prompt_template are "
+                "required for reasoning environments"
+            )
+            raise ValueError(msg)
 
         reward_fn = get_reward_fn(
             reward_fn_name=self.reward_fn_name, file_path=self.reward_file_path
@@ -619,14 +639,14 @@ class LLMEnvSpec(BaseModel):
             accelerator=accelerator,
             max_context_length=self.max_context_length,
             return_raw_completions=self.return_raw_completions,
-            seed=self.seed,
+            **self._seed_kwargs(),
         )
 
     def _make_preference_env(
         self,
         train_dataset: Dataset,
         test_dataset: Dataset,
-        tokenizer: Any,
+        tokenizer: PreTrainedTokenizerBase,
         accelerator: Accelerator | None = None,
     ) -> PreferenceGym:
         """Make the environment for the LLM agent.
@@ -636,7 +656,7 @@ class LLMEnvSpec(BaseModel):
         :param test_dataset: The test dataset.
         :type test_dataset: Dataset
         :param tokenizer: The tokenizer.
-        :type tokenizer: Any
+        :type tokenizer: PreTrainedTokenizerBase
         :param accelerator: The accelerator.
         :type accelerator: Accelerator | None
         :return: The preference gym environment.
@@ -651,14 +671,14 @@ class LLMEnvSpec(BaseModel):
             data_batch_size_per_gpu=self.data_batch_size_per_gpu,
             accelerator=accelerator,
             max_context_length=self.max_context_length,
-            seed=self.seed,
+            **self._seed_kwargs(),
         )
 
     def _make_sft_env(
         self,
         train_dataset: Dataset,
         test_dataset: Dataset,
-        tokenizer: Any,
+        tokenizer: PreTrainedTokenizerBase,
         accelerator: Accelerator | None = None,
     ) -> SFTGym:
         """Make the SFT gym environment.
@@ -668,7 +688,7 @@ class LLMEnvSpec(BaseModel):
         :param test_dataset: The test dataset.
         :type test_dataset: Dataset
         :param tokenizer: The tokenizer.
-        :type tokenizer: Any
+        :type tokenizer: PreTrainedTokenizerBase
         :param accelerator: The accelerator.
         :type accelerator: Accelerator | None
         :return: The SFT gym environment.
@@ -684,7 +704,7 @@ class LLMEnvSpec(BaseModel):
             response_column=self.response_column,
             accelerator=accelerator,
             max_context_length=self.max_context_length,
-            seed=self.seed,
+            **self._seed_kwargs(),
         )
 
 
@@ -848,4 +868,7 @@ class BanditEnvSpec(BaseModel):
             if isinstance(self.targets, str | Path)
             else self.targets
         )
+        if features is None or targets is None:
+            msg = "Both 'features' and 'targets' are required for dataset-mode bandit environments."
+            raise ValueError(msg)
         return BanditEnv(features=features, targets=targets)

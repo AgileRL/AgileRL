@@ -206,48 +206,48 @@ class RL_Dataset(ABC):
             u_terminals,
         ) = zip(*(x.to_tensors(device, self.max_len) for x in items), strict=False)
         tokens = torch.nn.utils.rnn.pad_sequence(
-            tokens,
+            list(tokens),
             batch_first=True,
             padding_value=self.tokenizer.pad_token_id,
         )
         attn_mask = (tokens != self.tokenizer.pad_token_id).float()
         state_idxs = torch.nn.utils.rnn.pad_sequence(
-            state_idxs,
+            list(state_idxs),
             batch_first=True,
             padding_value=0,
         )
         action_idxs = torch.nn.utils.rnn.pad_sequence(
-            action_idxs,
+            list(action_idxs),
             batch_first=True,
             padding_value=0,
         )
         terminals = torch.nn.utils.rnn.pad_sequence(
-            terminals,
+            list(terminals),
             batch_first=True,
             padding_value=1,
         )
         rewards = torch.nn.utils.rnn.pad_sequence(
-            rewards,
+            list(rewards),
             batch_first=True,
             padding_value=0.0,
         )
         u_state_idxs = torch.nn.utils.rnn.pad_sequence(
-            u_state_idxs,
+            list(u_state_idxs),
             batch_first=True,
             padding_value=0,
         )
         u_action_idxs = torch.nn.utils.rnn.pad_sequence(
-            u_action_idxs,
+            list(u_action_idxs),
             batch_first=True,
             padding_value=0,
         )
         u_terminals = torch.nn.utils.rnn.pad_sequence(
-            u_terminals,
+            list(u_terminals),
             batch_first=True,
             padding_value=1,
         )
         u_rewards = torch.nn.utils.rnn.pad_sequence(
-            u_rewards,
+            list(u_rewards),
             batch_first=True,
             padding_value=0.0,
         )

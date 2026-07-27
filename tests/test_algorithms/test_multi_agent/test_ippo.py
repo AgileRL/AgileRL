@@ -2178,7 +2178,9 @@ class TestIPPOPreprocessObservation:
         preprocessed = ippo.preprocess_observation(obs, ["agent", "other_agent"])
         assert "agent" in preprocessed
         assert "other_agent" in preprocessed
-        assert preprocessed["other_agent"] == []
+        # An empty group (no active agents) is present as an empty tensor.
+        assert isinstance(preprocessed["other_agent"], torch.Tensor)
+        assert preprocessed["other_agent"].numel() == 0
 
 
 class TestIPPOAddScores:

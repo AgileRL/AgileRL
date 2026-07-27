@@ -3,11 +3,10 @@ import glob
 import importlib
 import inspect
 import sys
-import types
 from collections import OrderedDict
 from contextlib import contextmanager
 from types import SimpleNamespace
-from typing import Union, get_args, get_origin
+from typing import Any
 from unittest.mock import MagicMock, Mock, patch
 
 import numpy as np
@@ -1127,6 +1126,17 @@ def test_make_safe_deepcopies():
 
 
 class TestIsVectorizedExperiences:
+    def test_tensordict_experiences_use_batch_ndim(self):
+        from tensordict import TensorDict
+
+        # A TensorDict's ndim counts batch dims, so (num_steps, num_envs) is
+        # vectorized while a single leading dim is not.
+        vectorized = TensorDict({"a": torch.ones((10, 4, 5))}, batch_size=[10, 4])
+        assert is_vectorized_experiences(vectorized)
+
+        unvectorized = TensorDict({"a": torch.ones((10, 5))}, batch_size=[10])
+        assert not is_vectorized_experiences(unvectorized)
+
     def test_is_vectorized_experiences(self):
         # Test with a single tensor with batch dimension
         single_tensor = torch.ones((10, 5))
@@ -1583,6 +1593,18 @@ class TestStackExperiences:
         assert stacked[0][1].shape == (2, 2)
         assert isinstance(stacked[0][0], torch.Tensor)
 
+    def test_stack_experiences_tuple_branch_no_torch(self):
+        """stack tuple experiences with to_torch=False stays as ndarrays."""
+        tuple_exps = [
+            (np.ones(3), np.zeros(2)),
+            (np.ones(3) * 0.5, np.ones(2) * 0.5),
+        ]
+        stacked = stack_experiences(tuple_exps, to_torch=False)
+        assert isinstance(stacked[0], tuple)
+        assert isinstance(stacked[0][0], np.ndarray)
+        assert stacked[0][0].shape == (2, 3)
+        assert stacked[0][1].shape == (2, 2)
+
 
 class TestFlattenExperiences:
     def test_flatten_experiences(self):
@@ -1748,7 +1770,7 @@ class TestRemoveNestedFiles:
 
 
 def test_algo_utils_fallback_pretrained_model_type_when_no_llm_dependencies():
-    """Test that algo_utils sets PreTrainedModelType to string union when HAS_LLM_DEPENDENCIES is False."""
+    """Test that algo_utils sets PreTrainedModelType to Any when HAS_LLM_DEPENDENCIES is False."""
     original_module = sys.modules.pop("agilerl.utils.algo_utils", None)
 
     try:
@@ -1757,12 +1779,7 @@ def test_algo_utils_fallback_pretrained_model_type_when_no_llm_dependencies():
             # Reimport the module - it will see HAS_LLM_DEPENDENCIES as False
             algo_utils_reloaded = importlib.import_module("agilerl.utils.algo_utils")
 
-            pt_type = algo_utils_reloaded.PreTrainedModelType
-            assert get_origin(pt_type) in (types.UnionType, Union)
-            args = get_args(pt_type)
-            assert len(args) == 2
-            forward_names = {getattr(a, "__forward_arg__", None) for a in args}
-            assert forward_names == {"PeftModel", "PreTrainedModel"}
+            assert algo_utils_reloaded.PreTrainedModelType is Any
     finally:
         # Restore original module in both sys.modules and the parent package
         # to avoid affecting other tests (importlib.import_module sets the
@@ -1881,6 +1898,17 @@ class TestVectorizeExperiencesByAgent:
         out_tup = algo_utils.vectorize_experiences_by_agent(tup_exp)
         assert isinstance(out_tup, tuple)
         assert len(out_tup) == 2
+
+    def test_vectorize_agent_experiences_flat_returns_tensor(self):
+        exp = {"a0": [1.0, 2.0], "a1": [3.0, 4.0]}
+        result = algo_utils.vectorize_agent_experiences_flat(exp)
+        assert isinstance(result, torch.Tensor)
+
+    def test_vectorize_agent_experiences_flat_rejects_structured(self):
+        """Structured (dict/tuple) experiences vectorize to a container, which"""
+        structured = {"a0": {"obs": [1.0, 2.0]}, "a1": {"obs": [3.0, 4.0]}}
+        with pytest.raises(TypeError, match="flat per-agent scalars"):
+            algo_utils.vectorize_agent_experiences_flat(structured)
 
 
 class TestExperienceToTensors:
@@ -2038,6 +2066,22 @@ def test_get_vect_dim():
     obs_dict = {"a": np.ones((4, 3))}
     space_dict = spaces.Dict({"a": spaces.Box(0, 1, (3,))})
     assert get_vect_dim(obs_dict, space_dict) == 4
+    # Nested Dict (e.g. multi-agent mapping of per-agent Dict observations)
+    nested_obs = {
+        "agent_0": {"vec": np.ones((4, 3)), "img": np.ones((4, 2))},
+        "agent_1": {"vec": np.ones((4, 3)), "img": np.ones((4, 2))},
+    }
+    nested_space = spaces.Dict(
+        {
+            "agent_0": spaces.Dict(
+                {"vec": spaces.Box(0, 1, (3,)), "img": spaces.Box(0, 1, (2,))}
+            ),
+            "agent_1": spaces.Dict(
+                {"vec": spaces.Box(0, 1, (3,)), "img": spaces.Box(0, 1, (2,))}
+            ),
+        }
+    )
+    assert get_vect_dim(nested_obs, nested_space) == 4
     # Tuple
     obs_tup = (np.ones((4, 2)), np.ones((4, 3)))
     space_tup = spaces.Tuple((spaces.Box(0, 1, (2,)), spaces.Box(0, 1, (3,))))
@@ -2102,6 +2146,7 @@ def test_get_output_size_from_space():
     assert get_output_size_from_space(spaces.Dict({"a": spaces.Discrete(3)})) == {
         "a": 3
     }
+    assert get_output_size_from_space({"a": spaces.Discrete(3)}) == {"a": 3}
     assert get_output_size_from_space(spaces.Discrete(4)) == 4
     assert get_output_size_from_space(spaces.Box(0, 1, (2,))) == 2
     assert get_output_size_from_space(spaces.MultiBinary(4)) == 4
@@ -2161,6 +2206,11 @@ class TestGetObsShape:
         with pytest.raises(NotImplementedError, match="not supported"):
             get_obs_shape(spaces.Text(5))
 
+    def test_get_obs_shape_unsupported_leaf_of_dict(self):
+        """Unsupported leaves are rejected from inside a Dict space too."""
+        with pytest.raises(NotImplementedError, match="not supported"):
+            get_obs_shape(spaces.Dict({"a": spaces.Text(5)}))
+
 
 class TestGetNumActions:
     def test_handles_box_discrete_multidiscrete_multibinary(self):
@@ -2196,7 +2246,9 @@ class TestModuleCheckpointDict:
         monkeypatch.setattr(
             algo_utils, "module_checkpoint_single", lambda module, name: sentinel
         )
-        out = algo_utils.module_checkpoint_dict(object(), "actor")
+        out = algo_utils.module_checkpoint_dict(
+            MagicMock(spec=EvolvableModule), "actor"
+        )
         assert out == sentinel
 
 
@@ -2309,6 +2361,11 @@ class TestConcatenateAndReshapeHelpers:
         assert result.dim() <= 2
         assert result.numel() == 4
 
+    def test_reshape_from_space_unsupported_type(self):
+        """TypeError for unsupported tensor type."""
+        with pytest.raises(TypeError, match="Unsupported tensor type"):
+            reshape_from_space([1, 2, 3], spaces.Box(0, 1, (4,)))
+
 
 class TestRenamePeftPrimaryAdapterKeysInStateDict:
     def test_returns_original_state_dict_when_adapter_names_match(self):
@@ -2338,8 +2395,14 @@ class TestCloneLlm:
     def test_clone_llm_peft_path_handles_multiple_adapters_and_state_rename(
         self, monkeypatch
     ):
-        class FakeBaseModel:
+        from peft import LoraConfig
+
+        default_config = LoraConfig(r=1)
+        extra_config = LoraConfig(r=2)
+
+        class FakeBaseModel(torch.nn.Module):
             def __init__(self, config):
+                super().__init__()
                 self.config = config
                 self.added = []
                 self.disabled = False
@@ -2358,7 +2421,7 @@ class TestCloneLlm:
             def __init__(self):
                 self.config = SimpleNamespace()
                 self.model = FakeBaseModel(SimpleNamespace())
-                self.peft_config = {"default": {"r": 1}, "extra": {"r": 2}}
+                self.peft_config = {"default": default_config, "extra": extra_config}
 
             def parameters(self):
                 return [torch.nn.Parameter(torch.tensor([1.0]))]
@@ -2385,13 +2448,14 @@ class TestCloneLlm:
             },
         )
         assert isinstance(cloned, FakeBaseModel)
-        assert ("extra", {"r": 2}) in cloned.added
+        assert ("extra", extra_config) in cloned.added
         assert cloned.disabled is True
         assert "base.actor.weight" in cloned.loaded
 
     def test_clone_llm_pretrained_model_path(self, monkeypatch):
-        class FakeBaseModel:
+        class FakeBaseModel(torch.nn.Module):
             def __init__(self, config):
+                super().__init__()
                 self.config = config
 
             def load_state_dict(self, state_dict, strict=False):

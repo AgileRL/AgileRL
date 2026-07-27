@@ -175,8 +175,8 @@ class FusedLinearLogProbsFunction(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(  # type: ignore[override]
-        ctx: Any,
+    def forward(
+        ctx: Any,  # noqa: ANN401 -- torch autograd context carries arbitrary attrs
         hidden: torch.Tensor,
         lm_head_weight: torch.Tensor,
         lm_head_bias: torch.Tensor | None,
@@ -205,9 +205,11 @@ class FusedLinearLogProbsFunction(torch.autograd.Function):
         return logps
 
     @staticmethod
-    def backward(  # type: ignore[override]
-        ctx: Any, grad_output: torch.Tensor
+    def backward(
+        ctx: Any,  # noqa: ANN401 -- torch autograd context carries arbitrary attrs
+        *grad_outputs: torch.Tensor,
     ) -> tuple[torch.Tensor | None, ...]:
+        (grad_output,) = grad_outputs
         hidden, lm_head_weight, lm_head_bias, target_ids = ctx.saved_tensors
         B, T, H = hidden.shape
         flat_h = hidden.reshape(-1, H)

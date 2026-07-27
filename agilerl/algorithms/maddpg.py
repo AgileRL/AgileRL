@@ -1,13 +1,17 @@
 import copy
 import warnings
 from collections import OrderedDict, defaultdict
+from collections.abc import Mapping
 from dataclasses import asdict
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 import torch
 from accelerate import Accelerator
 from gymnasium import spaces
+from pettingzoo import ParallelEnv
+from tensordict import TensorDict
 from torch import nn, optim
 
 from agilerl.algorithms.core import MultiAgentRLAlgorithm, OptimizerWrapper
@@ -21,13 +25,14 @@ from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks import ContinuousQNetwork, DeterministicActor
 from agilerl.typing import (
     ArrayDict,
-    ExperiencesType,
     InfosDict,
-    MultiAgentModule,
+    MultiAgentReplayBatch,
+    NetConfigType,
     ObservationType,
-    PzEnvType,
-    StandardTensorDict,
+    ProcessInfosReturn,
     SupportedObservationSpace,
+    TensorMapping,
+    TorchObsType,
 )
 from agilerl.utils.algo_utils import (
     apply_env_defined_actions,
@@ -35,15 +40,18 @@ from agilerl.utils.algo_utils import (
     configure_tf32_precision,
     format_shared_critic_encoder,
     get_deepest_head_config,
+    get_num_envs,
     get_vect_dim,
     key_in_nested_dict,
     make_safe_deepcopies,
+    to_agent_tensors,
 )
+from agilerl.vector.pz_vec_env import PettingZooVecEnv
 
 SupportedActionSpace = spaces.Discrete | spaces.Box
 
 
-class MADDPG(MultiAgentRLAlgorithm):
+class MADDPG(MultiAgentRLAlgorithm[TensorDict]):
     """Multi-Agent Deep Deterministic Policy Gradient (MADDPG).
 
     Paper: https://arxiv.org/abs/1706.02275
@@ -89,9 +97,9 @@ class MADDPG(MultiAgentRLAlgorithm):
     :param normalize_images: Normalize image observations, defaults to True
     :type normalize_images: bool, optional
     :param actor_networks: List of custom actor networks, defaults to None
-    :type actor_networks: list[nn.Module], optional
+    :type actor_networks: list[EvolvableModule] | ModuleDict | None, optional
     :param critic_networks: List of custom critic networks, defaults to None
-    :type critic_networks: list[nn.Module], optional
+    :type critic_networks: list[EvolvableModule] | ModuleDict | None, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -104,10 +112,12 @@ class MADDPG(MultiAgentRLAlgorithm):
 
     possible_action_spaces: dict[str, spaces.Box | spaces.Discrete]
 
-    actors: MultiAgentModule[DeterministicActor]
-    actor_targets: MultiAgentModule[DeterministicActor]
-    critics: MultiAgentModule[ContinuousQNetwork]
-    critic_targets: MultiAgentModule[ContinuousQNetwork]
+    # Values are DeterministicActor/ContinuousQNetwork instances; torch.compile
+    # and Accelerator wrappers proxy the same interface at runtime.
+    actors: ModuleDict[DeterministicActor]
+    actor_targets: ModuleDict[DeterministicActor]
+    critics: ModuleDict[ContinuousQNetwork]
+    critic_targets: ModuleDict[ContinuousQNetwork]
 
     def __init__(
         self,
@@ -131,8 +141,8 @@ class MADDPG(MultiAgentRLAlgorithm):
         tau: float = 0.01,
         mut: str | None = None,
         normalize_images: bool = True,
-        actor_networks: MultiAgentModule | None = None,
-        critic_networks: MultiAgentModule | None = None,
+        actor_networks: list[EvolvableModule] | ModuleDict | None = None,
+        critic_networks: list[EvolvableModule] | ModuleDict | None = None,
         device: str = "cpu",
         accelerator: Accelerator | None = None,
         torch_compiler: str | None = None,
@@ -232,9 +242,12 @@ class MADDPG(MultiAgentRLAlgorithm):
                 ), (
                     "actor_networks must be a list of the same length as the number of homogeneous agents"
                 )
+                # A ModuleDict is never a list; the intersection arm ty keeps
+                # open here is unreachable.
+                actor_list = actor_networks
                 actor_networks = ModuleDict(
                     {
-                        network_ids[idx]: actor_networks[idx]
+                        network_ids[idx]: actor_list[idx]
                         for idx in range(len(network_ids))
                     },
                 )
@@ -245,9 +258,11 @@ class MADDPG(MultiAgentRLAlgorithm):
                     "critic_networks must be a list of the same length as the number of homogeneous agents"
                 )
 
+                # Same unreachable ModuleDict-and-list intersection as above.
+                critic_list = critic_networks
                 critic_networks = ModuleDict(
                     {
-                        network_ids[idx]: critic_networks[idx]
+                        network_ids[idx]: critic_list[idx]
                         for idx in range(len(network_ids))
                     },
                 )
@@ -288,14 +303,18 @@ class MADDPG(MultiAgentRLAlgorithm):
                 "critic_networks keys must match grouped agent IDs in observation_space."
             )
 
-            self.actors, self.critics = make_safe_deepcopies(
+            actors_copy, critics_copy = make_safe_deepcopies(
                 actor_networks,
                 critic_networks,
             )
-            self.actor_targets, self.critic_targets = make_safe_deepcopies(
+            actor_targets_copy, critic_targets_copy = make_safe_deepcopies(
                 actor_networks,
                 critic_networks,
             )
+            self.actors = actors_copy
+            self.critics = critics_copy
+            self.actor_targets = actor_targets_copy
+            self.critic_targets = critic_targets_copy
         else:
             agent_configs, encoder_configs = self.build_net_config(
                 net_config,
@@ -340,7 +359,7 @@ class MADDPG(MultiAgentRLAlgorithm):
                 agent_configs,
                 list(self.observation_space.keys()),
             )
-            critic_net_config = {
+            critic_net_config: NetConfigType = {
                 "encoder_config": critic_encoder_config,
                 "head_config": critic_head_config,
                 "latent_dim": latent_dim,
@@ -349,9 +368,15 @@ class MADDPG(MultiAgentRLAlgorithm):
             }
 
             def create_actor(agent_id: str) -> DeterministicActor:
-                actor: DeterministicActor = DeterministicActor(
+                # DeterministicActor handles both Box and Discrete per-agent
+                # action spaces; narrow the base attribute's generic spaces.Space.
+                action_space = self.action_space[agent_id]
+                assert isinstance(action_space, (spaces.Box, spaces.Discrete)), (
+                    "MADDPG actors require Box or Discrete action spaces."
+                )
+                actor = DeterministicActor(
                     self.observation_space[agent_id],
-                    self.action_space[agent_id],
+                    action_space,
                     device=self.device,
                     **copy.deepcopy(agent_configs[agent_id]),
                 )
@@ -455,13 +480,14 @@ class MADDPG(MultiAgentRLAlgorithm):
     def process_infos(
         self,
         infos: InfosDict | None,
-    ) -> tuple[ArrayDict, ArrayDict, ArrayDict]:
+    ) -> ProcessInfosReturn:
         """Process the information, extract env_defined_actions, action_masks and agent_masks.
 
         :param infos: Info dict
-        :type infos: dict[str, dict[...]]
+        :type infos: InfosDict | None
         :return: Tuple of action masks, env_defined_actions and agent masks
-        :rtype: tuple[ArrayDict, ArrayDict, ArrayDict]
+            (the latter two are ``None`` when the info dict defines no actions)
+        :rtype: ProcessInfosReturn
         """
         if infos is None:
             infos = {agent: {} for agent in self.agent_ids}
@@ -472,7 +498,7 @@ class MADDPG(MultiAgentRLAlgorithm):
 
     def get_action(
         self,
-        obs: dict[str, ObservationType],
+        obs: Mapping[str, ObservationType],
         infos: InfosDict | None = None,
         *args: Any,
         **kwargs: Any,
@@ -482,11 +508,11 @@ class MADDPG(MultiAgentRLAlgorithm):
         For epsilon-greedy behaviour, set epsilon to 0.
 
         :param obs: Environment observations: {'agent_0': state_dim_0, ..., 'agent_n': state_dim_n}
-        :type obs: dict[str, numpy.Array]
+        :type obs: Mapping[str, ObservationType]
         :param infos: Information dictionary returned by env.step(actions)
-        :type infos: dict[str, dict[str, ...]]
+        :type infos: InfosDict | None
         :return: Actions for each agent, raw actions for each agent
-        :rtype: tuple[dict[str, np.ndarray], dict[str, np.ndarray]]
+        :rtype: tuple[ArrayDict, ArrayDict]
         """
         assert not key_in_nested_dict(
             obs,
@@ -500,6 +526,7 @@ class MADDPG(MultiAgentRLAlgorithm):
         for agent_id in active_agent_ids:
             network_id = self.get_network_id(agent_id)
             grouped_agents[network_id].append(agent_id)
+            # Environment observations are numpy containers at this boundary.
             agent_batch_sizes[agent_id] = get_vect_dim(
                 obs[agent_id],
                 self.possible_observation_spaces[agent_id],
@@ -511,32 +538,32 @@ class MADDPG(MultiAgentRLAlgorithm):
             group_ids=list(grouped_agents.keys()),
         )
 
-        grouped_actions: dict[str, np.ndarray] = {}
+        grouped_actions: dict[str, npt.NDArray] = {}
         for group_id in grouped_agents:
             actor = self.actors[group_id]
             actor.eval()
             grouped_obs = preprocessed_states[group_id]
             if self.accelerator is not None:
-                with actor.no_sync(), torch.no_grad():
+                with self.accelerator.no_sync(actor), torch.no_grad():
                     actions = actor(grouped_obs)
             else:
                 with torch.no_grad():
                     actions = actor(grouped_obs)
             grouped_actions[group_id] = actions.cpu().numpy()
 
-        action_dict = {}
-        for group_id, actions in grouped_actions.items():
+        tensor_actions: dict[str, torch.Tensor] = {}
+        for group_id, group_actions in grouped_actions.items():
             start = 0
             for agent_id in grouped_agents[group_id]:
                 batch_size = agent_batch_sizes[agent_id]
                 end = start + batch_size
-                action_dict[agent_id] = torch.as_tensor(
-                    actions[start:end],
+                tensor_actions[agent_id] = torch.as_tensor(
+                    group_actions[start:end],
                     device=self.device,
                 )
                 start = end
 
-        for agent_id, actions in action_dict.items():
+        for agent_id, actions in tensor_actions.items():
             actor = self.actors[self.get_network_id(agent_id)]
             actor.train()
             if self.training:
@@ -552,27 +579,33 @@ class MADDPG(MultiAgentRLAlgorithm):
                     torch.as_tensor(max_output, device=actions.device),
                 )
 
-            action_dict[agent_id] = actions.detach().cpu()
+            tensor_actions[agent_id] = actions.detach().cpu()
 
         # Process actions for environment
         processed_action_dict: ArrayDict = OrderedDict()
-        for agent_id in action_dict:
+        action_dict: ArrayDict = OrderedDict()
+        for agent_id in tensor_actions:
             space = self.possible_action_spaces[agent_id]
             network_id = self.get_network_id(agent_id)
             actor = self.actors[network_id]
             if isinstance(space, spaces.Discrete):
-                action = action_dict[agent_id].numpy()
-                mask = (
-                    1 - np.array(action_masks[agent_id])
-                    if action_masks.get(agent_id) is not None
-                    else None
-                )
-                action: np.ndarray = np.ma.array(action, mask=mask)
-                processed_action_dict[agent_id] = action.argmax(axis=-1)
+                action = tensor_actions[agent_id].numpy()
+                mask_value = action_masks.get(agent_id)
+                if mask_value is not None:
+                    # Invert the legality mask (1=legal) into a boolean
+                    # masked-array mask (True=masked out).
+                    masked_action = np.ma.array(
+                        action,
+                        mask=(1 - np.array(mask_value)).astype(bool),
+                    )
+                else:
+                    masked_action = np.ma.array(action)
+                processed_action_dict[agent_id] = masked_action.argmax(axis=-1)
 
                 if (
                     len(processed_action_dict[agent_id].shape) == 1
                     and env_defined_actions
+                    and agent_masks is not None
                 ):
                     env_defined_actions = {
                         agent: action.squeeze(1) if len(action.shape) > 1 else action
@@ -583,18 +616,18 @@ class MADDPG(MultiAgentRLAlgorithm):
                         for agent, mask in agent_masks.items()
                     }
             else:
-                # Rescale actions to action space bounds
-                processed_action_dict[agent_id] = DeterministicActor.rescale_action(
-                    action=action_dict[agent_id],
-                    low=actor.action_low,
-                    high=actor.action_high,
-                    output_activation=actor.output_activation,
+                # Rescale actions to action space bounds; Box action spaces
+                # always define bounds and an output activation.
+                processed_action_dict[agent_id] = actor.rescale_output_action(
+                    tensor_actions[agent_id],
                 ).numpy()
 
-            action_dict[agent_id] = action_dict[agent_id].numpy()
+            action_dict[agent_id] = tensor_actions[agent_id].numpy()
 
         # If using env_defined_actions replace actions
         if env_defined_actions is not None:
+            # extract_agent_masks returns the masks alongside the actions.
+            assert agent_masks is not None
             action_dict = apply_env_defined_actions(
                 list(action_dict.keys()),
                 processed_action_dict,
@@ -645,38 +678,26 @@ class MADDPG(MultiAgentRLAlgorithm):
             for idx in indices:
                 self.current_noise[agent_id][idx, :] = 0
 
-    def learn(self, experiences: ExperiencesType) -> dict[str, tuple[float, float]]:
+    def learn(self, experiences: TensorDict) -> dict[str, tuple[float, float]]:
         """Update agent network parameters from the gathered experiences.
 
-        :param experiences: TensorDict of nested per-agent observations, actions,
-            rewards, next_observations, dones.
+        :param experiences: Nested per-agent batch of observations, actions,
+            rewards, next observations and dones (field -> agent id -> tensor).
         :type experiences: TensorDict
 
         :return: Loss dictionary
-        :rtype: dict[str, torch.Tensor]
+        :rtype: dict[str, tuple[float, float]]
         """
-        states = experiences["obs"]
-        actions = experiences["action"]
-        rewards = experiences["reward"]
-        next_states = experiences["next_obs"]
-        dones = experiences["done"]
-
-        actions = {
-            agent_id: agent_actions.to(self.device)
-            for agent_id, agent_actions in actions.items()
-        }
-        rewards = {
-            agent_id: agent_rewards.to(self.device)
-            for agent_id, agent_rewards in rewards.items()
-        }
-        dones = {
-            agent_id: agent_dones.to(self.device)
-            for agent_id, agent_dones in dones.items()
-        }
+        batch: MultiAgentReplayBatch = MultiAgentReplayBatch.from_tensordict(
+            experiences
+        )
+        actions = to_agent_tensors(batch.action, self.device)
+        rewards = to_agent_tensors(batch.reward, self.device)
+        dones = to_agent_tensors(batch.done, self.device)
 
         # Preprocess observations
-        states = self.preprocess_observation(states)
-        next_states = self.preprocess_observation(next_states)
+        states = self.preprocess_observation(batch.obs)
+        next_states = self.preprocess_observation(batch.next_obs)
 
         # Get next actions
         with torch.no_grad():
@@ -730,11 +751,11 @@ class MADDPG(MultiAgentRLAlgorithm):
         agent_id: str,
         stacked_actions: torch.Tensor,
         stacked_next_actions: torch.Tensor,
-        states: StandardTensorDict,
-        next_states: StandardTensorDict,
-        actions: StandardTensorDict,
-        rewards: StandardTensorDict,
-        dones: StandardTensorDict,
+        states: dict[str, TorchObsType],
+        next_states: dict[str, TorchObsType],
+        actions: TensorMapping,
+        rewards: TensorMapping,
+        dones: TensorMapping,
     ) -> tuple[float, float]:
         """Inner call to each agent for the learning/algo training steps, up until the soft updates.
         Applies all forward/backward props.
@@ -746,9 +767,9 @@ class MADDPG(MultiAgentRLAlgorithm):
         :param stacked_next_actions: Stacked next actions tensor
         :type stacked_next_actions: torch.Tensor
         :param states: Dictionary of current states for each agent
-        :type states: dict[str, torch.Tensor]
+        :type states: dict[str, TorchObsType]
         :param next_states: Dictionary of next states for each agent
-        :type next_states: dict[str, torch.Tensor]
+        :type next_states: dict[str, TorchObsType]
         :param actions: Dictionary of actions for each agent
         :type actions: dict[str, torch.Tensor]
         :param rewards: Dictionary of rewards for each agent
@@ -767,14 +788,14 @@ class MADDPG(MultiAgentRLAlgorithm):
         critic_optimizer = self.critic_optimizers[network_id]
 
         if self.accelerator is not None:
-            with critic.no_sync():
+            with self.accelerator.no_sync(critic):
                 q_value = critic(states, stacked_actions)
         else:
             q_value = critic(states, stacked_actions)
 
         with torch.no_grad():
             if self.accelerator is not None:
-                with critic_target.no_sync():
+                with self.accelerator.no_sync(critic_target):
                     q_value_next_state = critic_target(
                         next_states,
                         stacked_next_actions,
@@ -812,7 +833,7 @@ class MADDPG(MultiAgentRLAlgorithm):
 
         # Get actions from actor
         if self.accelerator is not None:
-            with actor.no_sync():
+            with self.accelerator.no_sync(actor):
                 action = actor(states[agent_id])
         else:
             action = actor(states[agent_id])
@@ -826,7 +847,7 @@ class MADDPG(MultiAgentRLAlgorithm):
             dim=1,
         )
         if self.accelerator is not None:
-            with critic.no_sync():
+            with self.accelerator.no_sync(critic):
                 actor_loss = -critic(states, stacked_detached_actions).mean()
         else:
             actor_loss = -critic(states, stacked_detached_actions).mean()
@@ -839,14 +860,14 @@ class MADDPG(MultiAgentRLAlgorithm):
             actor_loss.backward()
         actor_optimizer.step()
 
-        actor_loss = actor_loss.item()
-        critic_loss = critic_loss.item()
+        actor_loss_value = actor_loss.item()
+        critic_loss_value = critic_loss.item()
 
         # Log metrics
         network_id = self.get_network_id(agent_id)
-        self.metrics.log("actor_loss", actor_loss, network_id)
-        self.metrics.log("critic_loss", critic_loss, network_id)
-        return actor_loss, critic_loss
+        self.metrics.log("actor_loss", actor_loss_value, network_id)
+        self.metrics.log("critic_loss", critic_loss_value, network_id)
+        return actor_loss_value, critic_loss_value
 
     def soft_update(self, net: nn.Module, target: nn.Module) -> None:
         """Soft updates target network.
@@ -865,33 +886,29 @@ class MADDPG(MultiAgentRLAlgorithm):
 
     def test(
         self,
-        env: PzEnvType,
+        env: ParallelEnv | PettingZooVecEnv,
         max_steps: int | None = None,
         loop: int = 3,
         sum_scores: bool = True,
-    ) -> float:
+    ) -> float | npt.NDArray:
         """Return mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
-        :type env: Gym-style environment
+        :type env: ParallelEnv | PettingZooVecEnv
         :param max_steps: Maximum number of testing steps, defaults to None
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
         :type loop: int, optional
         :param sum_scores: Boolean flag to indicate whether to sum sub-agent scores, defaults to True
-        :type sum_scores: book, optional
-        :return: Mean test score
-        :rtype: float
+        :type sum_scores: bool, optional
+        :return: Mean test score, or per-agent scores when ``sum_scores`` is False
+        :rtype: float | npt.NDArray
         """
         self.set_training_mode(False)
         with torch.no_grad():
             rewards = []
-            if hasattr(env, "num_envs"):
-                num_envs = env.num_envs
-                is_vectorised = True
-            else:
-                num_envs = 1
-                is_vectorised = False
+            num_envs = get_num_envs(env)
+            is_vectorised = hasattr(env, "num_envs")
 
             for _i in range(loop):
                 obs, info = env.reset()
@@ -970,7 +987,12 @@ class MADDPG(MultiAgentRLAlgorithm):
 
                 rewards.append(np.mean(completed_episode_scores, axis=0))
 
-        mean_fit = np.mean(rewards, axis=0)
-        mean_fit = mean_fit[0] if sum_scores else mean_fit
-        self.metrics.add_fitness(mean_fit)
-        return mean_fit
+        mean_fit_row = np.mean(rewards, axis=0)
+        if sum_scores:
+            fitness = float(mean_fit_row[0])
+            self.metrics.add_fitness(fitness)
+            return fitness
+
+        # Per-agent fitness rows are stored as-is by BaseMetrics.add_fitness.
+        self.metrics.add_fitness(mean_fit_row)
+        return mean_fit_row

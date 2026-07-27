@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from agilerl.arena.models.algo import (  # noqa: F401
     ARENA_REGISTRY,
-    AlgoSpecT,
+    AlgoSpec,
     LLMAlgorithmSpec,
     MultiAgentRLAlgorithmSpec,
     RLAlgorithmSpec,

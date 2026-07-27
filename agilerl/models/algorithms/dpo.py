@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import Any, ClassVar
 
 from pydantic import Field
 
 from agilerl.models.algo import LLMAlgorithmSpec, register
-
-if TYPE_CHECKING:
-    from agilerl.models.env import LLMEnvType
+from agilerl.models.env_types import LLMEnvType
 
 
 @register()
@@ -19,15 +17,20 @@ class DPOSpec(LLMAlgorithmSpec):
 
     lr: float = Field(default=0.000005)
 
-    env_type: ClassVar[LLMEnvType] = "preference"
+    env_type: ClassVar[LLMEnvType] = LLMEnvType.PREFERENCE
 
     @staticmethod
-    def get_training_fn() -> Callable[..., Any]:
+    def get_training_fn(*, multiturn: bool = False) -> Callable[..., Any]:
         """Get the training function for DPO.
 
+        :param multiturn: Multi-turn training is not supported for DPO.
         :return: Training function
         :rtype: Callable[..., Any]
+        :raises ValueError: If *multiturn* is ``True``.
         """
+        if multiturn:
+            msg = "DPO does not support multi-turn training."
+            raise ValueError(msg)
         from agilerl.training.llm import finetune_llm_preference
 
         return finetune_llm_preference

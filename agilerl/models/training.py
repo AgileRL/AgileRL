@@ -8,14 +8,8 @@ from typing_extensions import Self
 if TYPE_CHECKING:
     import torch
 
-    from agilerl.components.replay_buffer import (
-        MultiStepReplayBuffer,
-        PrioritizedReplayBuffer,
-        ReplayBuffer,
-    )
-    from agilerl.models.algo import AlgoSpecT
-
-    BufferT = ReplayBuffer | MultiStepReplayBuffer | PrioritizedReplayBuffer
+    from agilerl.components.replay_buffer import BufferType
+    from agilerl.models.algo import AlgoSpec
 
 
 class NStepBufferArgs(BaseModel):
@@ -59,16 +53,16 @@ class ReplayBufferSpec(BaseModel):
     per_buffer_args: PerBufferArgs = Field(default_factory=PerBufferArgs)
 
     def init_buffer(
-        self, algo_spec: AlgoSpecT, device: str | torch.device = "cpu"
-    ) -> BufferT:
+        self, algo_spec: AlgoSpec, device: str | torch.device = "cpu"
+    ) -> BufferType:
         """Initialize the replay buffer.
 
         :param algo_spec: Algorithm specification
-        :type algo_spec: AlgoSpecT
+        :type algo_spec: AlgoSpec
         :param device: Device
         :type device: str | torch.device
         :return: Replay buffer
-        :rtype: BufferT
+        :rtype: BufferType
         """
         # Import lazily to avoid heavy dependencies for Arena manifest validation
         from agilerl import AgentType
@@ -116,26 +110,27 @@ class ReplayBufferSpec(BaseModel):
         )
 
     def init_n_step_buffer(
-        self, algo_spec: AlgoSpecT, device: str | torch.device = "cpu"
-    ) -> BufferT | None:
+        self, algo_spec: AlgoSpec, device: str | torch.device = "cpu"
+    ) -> BufferType | None:
         """Initialize the n-step replay buffer for combined PER + n-step setups.
 
         Returns ``None`` unless both ``per_buffer`` and ``n_step_buffer`` are
         ``True``.
 
         :param algo_spec: Algorithm specification.
-        :type algo_spec: AlgoSpecT
+        :type algo_spec: AlgoSpec
         :param device: Device.
         :type device: str | torch.device
         :returns: A :class:`MultiStepReplayBuffer` or ``None``.
-        :rtype: BufferT | None
+        :rtype: BufferType | None
         """
         if not (self.per_buffer and self.n_step_buffer):
             return None
 
         from agilerl.components.replay_buffer import MultiStepReplayBuffer
 
-        if not hasattr(algo_spec, "gamma"):
+        gamma = getattr(algo_spec, "gamma", None)
+        if not isinstance(gamma, (int, float)):
             msg = "Gamma must be specified for N-step buffer"
             raise ValueError(msg)
 
@@ -143,7 +138,7 @@ class ReplayBufferSpec(BaseModel):
             max_size=self.max_size,
             device=device,
             n_step=self.n_step_buffer_args.n_step,
-            gamma=algo_spec.gamma,
+            gamma=gamma,
         )
 
 

@@ -4,6 +4,7 @@ import numpy as np
 import torch
 from accelerate import Accelerator
 from gymnasium import spaces
+from tensordict import TensorDict
 from torch import nn, optim
 
 from agilerl.algorithms.core import OptimizerWrapper, RLAlgorithm
@@ -16,15 +17,17 @@ from agilerl.modules import EvolvableModule
 from agilerl.networks.value_networks import ValueNetwork
 from agilerl.protocols import BanditEnvProtocol
 from agilerl.typing import (
-    ExperiencesType,
+    ActionMaskInput,
+    BanditBatch,
     ObservationType,
     SupportedObservationSpace,
+    numpy_action_mask,
 )
 from agilerl.utils.algo_utils import make_safe_deepcopies
 from agilerl.utils.evolvable_networks import get_default_encoder_config
 
 
-class NeuralUCB(RLAlgorithm):
+class NeuralUCB(RLAlgorithm[TensorDict]):
     """Neural Upper Confidence Bound (UCB).
 
     Paper: https://arxiv.org/abs/1911.04462
@@ -64,6 +67,9 @@ class NeuralUCB(RLAlgorithm):
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """
+
+    # Bandit arms are discrete, so the network output size is a plain int
+    action_dim: int
 
     def __init__(
         self,
@@ -127,7 +133,7 @@ class NeuralUCB(RLAlgorithm):
         self.lr = lr
         self.net_config = net_config
         self.mut = mut
-        self.regret = [0]
+        self.regret: list[float] = [0.0]
         self.actor_network = None
 
         # Default RL hyperparameters to mutate when doing Evo-HPO
@@ -144,7 +150,7 @@ class NeuralUCB(RLAlgorithm):
                     msg,
                 )
 
-            # Need to make deepcopies for target and detached networks
+            # Need to make deepcopies for target and detached networks.
             self.actor = make_safe_deepcopies(actor_network)
         else:
             net_config = {} if net_config is None else net_config
@@ -192,7 +198,12 @@ class NeuralUCB(RLAlgorithm):
 
     def init_params(self) -> None:
         """Initialize the parameters of the network."""
-        self.exp_layer = self.actor.get_output_dense()
+        exp_layer = self.actor.get_output_dense()
+        # EvolvableMLP/MakeEvolvable networks build a final nn.Linear output layer
+        assert isinstance(exp_layer, nn.Linear), (
+            "Bandit actor network must expose an nn.Linear output dense layer."
+        )
+        self.exp_layer: nn.Linear = exp_layer
 
         self.numel = sum(
             w.numel() for w in self.exp_layer.parameters() if w.requires_grad
@@ -205,7 +216,7 @@ class NeuralUCB(RLAlgorithm):
     def get_action(
         self,
         obs: ObservationType,
-        action_mask: np.ndarray | None = None,
+        action_mask: ActionMaskInput = None,
         *args: Any,
         **kwargs: Any,
     ) -> int:
@@ -214,7 +225,7 @@ class NeuralUCB(RLAlgorithm):
         :param obs: State observation, or multiple observations in a batch
         :type obs: numpy.ndarray[float]
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
-        :type action_mask: numpy.ndarray, optional
+        :type action_mask: ActionMaskInput
 
         :return: Action to take in the environment
         :rtype: int
@@ -235,7 +246,7 @@ class NeuralUCB(RLAlgorithm):
                 [
                     w.grad.detach().flatten() / np.sqrt(self.exp_layer.weight.size(0))
                     for w in self.exp_layer.parameters()
-                    if w.requires_grad
+                    if w.requires_grad and w.grad is not None
                 ],
             )
             g[:] = grad_vec
@@ -248,7 +259,7 @@ class NeuralUCB(RLAlgorithm):
                         w.grad.detach().flatten()
                         / np.sqrt(self.exp_layer.weight.size(0))
                         for w in self.exp_layer.parameters()
-                        if w.requires_grad
+                        if w.requires_grad and w.grad is not None
                     ],
                 )
 
@@ -264,7 +275,7 @@ class NeuralUCB(RLAlgorithm):
         if action_mask is None:
             action = np.argmax(action_values)
         else:
-            inv_mask = 1 - action_mask
+            inv_mask = 1 - numpy_action_mask(action_mask)
             masked_action_values = np.ma.array(action_values, mask=inv_mask)
             action = np.argmax(masked_action_values)
 
@@ -274,7 +285,7 @@ class NeuralUCB(RLAlgorithm):
             1 + v.T @ self.sigma_inv @ v
         )
 
-        return action
+        return int(action)
 
     def _greedy_test_action(self, obs: ObservationType) -> int:
         """Greedy arm for evaluation: preprocess obs, no UCB bonus or posterior update."""
@@ -285,17 +296,19 @@ class NeuralUCB(RLAlgorithm):
                 mu_raw = mu_raw.repeat(self.action_dim)
             return int(np.argmax(mu_raw.cpu().numpy()))
 
-    def learn(self, experiences: ExperiencesType) -> float:
+    def learn(self, experiences: TensorDict) -> float:
         """Update agent network parameters to learn from experiences.
 
-        :param experiences: Batched states, rewards in that order.
-        :type experiences: tuple[numpy.ndarray, numpy.ndarray]
+        :param experiences: Batch of contexts (``obs``) and rewards sampled from
+            the bandit replay buffer.
+        :type experiences: TensorDict
 
         :return: Loss value from training step
         :rtype: float
         """
-        states = experiences["obs"]
-        rewards = experiences["reward"]
+        batch: BanditBatch = BanditBatch.from_tensordict(experiences)
+        states = batch.obs
+        rewards = batch.reward
 
         pred_rewards = self.actor(states)
 
@@ -360,6 +373,6 @@ class NeuralUCB(RLAlgorithm):
                     obs, reward = env.step(action)
                     score += reward
                 rewards.append(score)
-        mean_fit = np.mean(rewards)
+        mean_fit = float(np.mean(rewards))
         self.metrics.add_fitness(mean_fit)
         return mean_fit

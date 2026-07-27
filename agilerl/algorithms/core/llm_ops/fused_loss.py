@@ -21,7 +21,10 @@ import time — gate on :data:`agilerl.HAS_LIGER_KERNEL` before importing.
 
 from __future__ import annotations
 
+from typing import Protocol
+
 import torch
+from torch.autograd.function import FunctionCtx
 
 from agilerl import HAS_LIGER_KERNEL
 
@@ -40,6 +43,12 @@ from liger_kernel.chunked_loss.fused_linear_preference import (
 )
 
 from agilerl.utils.llm_utils import calculate_k3_kl
+
+
+class SaveForBackwardCtx(Protocol):
+    """The one autograd-``ctx`` capability these forwards use."""
+
+    def save_for_backward(self, *tensors: torch.Tensor | None) -> None: ...
 
 
 def llm_policy_loss_fn(
@@ -288,30 +297,30 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
     """
 
     @classmethod
-    def forward(
+    def forward(  # ty: ignore[invalid-method-override]  # intentionally diverges from Liger's base
         cls,
-        ctx,
-        _input,
-        weight,
-        selected_token_ids,
-        attention_mask,
-        advantages,
-        bias=None,
-        ref_per_token_logps=None,
-        old_per_token_logps=None,
-        beta=0.0,
-        epsilon_low=0.2,
-        epsilon_high=0.2,
-        temperature=1.0,
-        compiled=False,
-        chunk_size=1,
-        turn_ids=None,
-        full_turn_mask=None,
-        max_turns=None,
-        importance_sampling_level="token",
-        turn_log_ratio_reduction="mean",
-        vllm_is_ratio=None,
-    ):
+        ctx: SaveForBackwardCtx,
+        _input: torch.Tensor,
+        weight: torch.Tensor,
+        selected_token_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        advantages: torch.Tensor,
+        bias: torch.Tensor | None = None,
+        ref_per_token_logps: torch.Tensor | None = None,
+        old_per_token_logps: torch.Tensor | None = None,
+        beta: float = 0.0,
+        epsilon_low: float = 0.2,
+        epsilon_high: float = 0.2,
+        temperature: float = 1.0,
+        compiled: bool = False,
+        chunk_size: int = 1,
+        turn_ids: torch.Tensor | None = None,
+        full_turn_mask: torch.Tensor | None = None,
+        max_turns: int | None = None,
+        importance_sampling_level: str = "token",
+        turn_log_ratio_reduction: str = "mean",
+        vllm_is_ratio: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
         """Chunked forward + backward.
 
         Mirrors the structure of
@@ -327,22 +336,24 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
         grad_weight = torch.zeros_like(weight)
         grad_inputs: list[torch.Tensor] = []
         grad_bias = torch.zeros_like(bias) if bias is not None else None
-        aggregated_metrics: list[torch.Tensor] = []
+        # Scalar metrics accumulate into a zero tensor; non-scalar metrics
+        # (not produced by llm_policy_loss_fn today) collect per-chunk values.
+        aggregated_metrics: list[torch.Tensor | list[torch.Tensor]] = []
 
         full_attention_mask = attention_mask
 
         def _compute_chunk_loss(
-            input_chunk,
-            weight_local,
-            selected_token_ids_chunk,
-            attention_mask_chunk,
-            advantages_chunk,
-            bias_local=None,
-            ref_per_token_logps_chunk=None,
-            old_per_token_logps_chunk=None,
-            turn_ids_chunk=None,
-            vllm_is_ratio_chunk=None,
-        ):
+            input_chunk: torch.Tensor,
+            weight_local: torch.Tensor,
+            selected_token_ids_chunk: torch.Tensor,
+            attention_mask_chunk: torch.Tensor,
+            advantages_chunk: torch.Tensor,
+            bias_local: torch.Tensor | None = None,
+            ref_per_token_logps_chunk: torch.Tensor | None = None,
+            old_per_token_logps_chunk: torch.Tensor | None = None,
+            turn_ids_chunk: torch.Tensor | None = None,
+            vllm_is_ratio_chunk: torch.Tensor | None = None,
+        ) -> tuple[torch.Tensor, list[torch.Tensor]]:
             # Liger 0.8.0 rewrote ``LigerFusedLinearPPOBase.chunk_forward`` into a
             # selective-logp kernel that doesn't compose with the grad_and_value
             # transform below, so inline the numerically identical 0.7.0 math.
@@ -387,15 +398,15 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
             )
 
         def fused_fwd_bwd(
-            input_chunk,
-            selected_token_ids_chunk,
-            attention_mask_chunk,
-            advantages_chunk,
-            ref_per_token_logps_chunk,
-            old_per_token_logps_chunk,
-            turn_ids_chunk,
-            vllm_is_ratio_chunk,
-        ):
+            input_chunk: torch.Tensor,
+            selected_token_ids_chunk: torch.Tensor,
+            attention_mask_chunk: torch.Tensor,
+            advantages_chunk: torch.Tensor,
+            ref_per_token_logps_chunk: torch.Tensor | None,
+            old_per_token_logps_chunk: torch.Tensor | None,
+            turn_ids_chunk: torch.Tensor | None,
+            vllm_is_ratio_chunk: torch.Tensor | None,
+        ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, list[torch.Tensor]]]:
             argnums = (0, 1, 5) if bias is not None else (0, 1)
             return torch.func.grad_and_value(
                 _compute_chunk_loss, argnums=argnums, has_aux=True
@@ -413,25 +424,27 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
             )
 
         if compiled:  # pragma: no cover -- requires torch.compile warmup
-            fused_fwd_bwd = torch.compile(fused_fwd_bwd)
+            fwd_bwd_fn = torch.compile(fused_fwd_bwd)
+        else:
+            fwd_bwd_fn = fused_fwd_bwd
 
         def accumulate_chunk(
-            input_chunk,
-            selected_token_ids_chunk,
-            attention_mask_chunk,
-            advantages_chunk,
-            ref_per_token_logps_chunk,
-            old_per_token_logps_chunk,
-            turn_ids_chunk,
-            vllm_is_ratio_chunk,
-        ):
+            input_chunk: torch.Tensor,
+            selected_token_ids_chunk: torch.Tensor,
+            attention_mask_chunk: torch.Tensor,
+            advantages_chunk: torch.Tensor,
+            ref_per_token_logps_chunk: torch.Tensor | None,
+            old_per_token_logps_chunk: torch.Tensor | None,
+            turn_ids_chunk: torch.Tensor | None,
+            vllm_is_ratio_chunk: torch.Tensor | None,
+        ) -> None:
             (
                 (chunk_grad_input, chunk_grad_weight, *chunk_grad_bias),
                 (
                     chunk_loss,
                     chunk_metrics,
                 ),
-            ) = fused_fwd_bwd(
+            ) = fwd_bwd_fn(
                 input_chunk,
                 selected_token_ids_chunk,
                 attention_mask_chunk,
@@ -451,12 +464,14 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
                     if metric.ndim == 0:
                         aggregated_metrics.append(torch.zeros((), device=metric.device))
                     else:  # pragma: no cover -- llm_policy_loss_fn only returns scalars
-                        aggregated_metrics.append([])  # type: ignore[arg-type]
-            for i, metric in enumerate(chunk_metrics):
-                if metric.ndim == 0:
-                    aggregated_metrics[i].add_(metric)
+                        aggregated_metrics.append([])
+            for metric, agg_metric in zip(
+                chunk_metrics, aggregated_metrics, strict=True
+            ):
+                if isinstance(agg_metric, torch.Tensor):
+                    agg_metric.add_(metric)
                 else:  # pragma: no cover -- llm_policy_loss_fn only returns scalars
-                    aggregated_metrics[i].append(metric)  # type: ignore[union-attr]
+                    agg_metric.append(metric)
 
         chunks = max(1, _input.shape[0] // chunk_size)
         _input_chunks = torch.chunk(_input, chunks=chunks, dim=0)
@@ -498,18 +513,24 @@ class LigerFusedLinearPolicyLossFunction(LigerFusedLinearPPOBase):
             accumulate_chunk(ic, idc, mc, ac, rc, oc, tc, vc)
 
         grad_input = torch.cat(grad_inputs, dim=0)
+        # grad_bias is None when the layer has no bias; save_for_backward
+        # accepts None at runtime, but torch types it as Tensor.
         ctx.save_for_backward(grad_input, grad_weight, grad_bias)
 
         final_metrics: list[torch.Tensor] = []
         for metric in aggregated_metrics:
-            if isinstance(metric, list):  # pragma: no cover -- scalars only
-                final_metrics.append(torch.cat(metric, dim=0))
-            else:
+            if isinstance(metric, torch.Tensor):
                 final_metrics.append(metric)
+            else:  # pragma: no cover -- scalars only
+                final_metrics.append(torch.cat(metric, dim=0))
         return loss_acc, tuple(final_metrics)
 
     @staticmethod
-    def backward(ctx, grad_output, *grad_metrics):
+    def backward(
+        ctx: FunctionCtx,
+        grad_output: torch.Tensor,
+        *grad_metrics: torch.Tensor,
+    ) -> tuple[torch.Tensor | None, ...]:
         grads = LigerFusedLinearPPOBase.backward(ctx, grad_output)
         return (
             *grads[
@@ -729,26 +750,26 @@ class LigerDPOWithAlpha(LigerFusedLinearPreferenceBase):
     )
 
     @classmethod
-    def forward(
+    def forward(  # ty: ignore[invalid-method-override]  # intentionally diverges from Liger's base
         cls,
-        ctx,
-        _input,
-        weight,
-        target,
-        bias=None,
-        ref_input=None,
-        ref_weight=None,
-        ref_bias=None,
-        ignore_index=-100,
-        beta=0.1,
-        alpha=1.0,
-        compute_nll_loss=True,
-        compiled=True,
-        use_ref_model=True,
-        average_log_prob=False,
-        chunk_size=1,
-        loss_type="sigmoid",
-    ):
+        ctx: FunctionCtx,
+        _input: torch.Tensor,
+        weight: torch.Tensor,
+        target: torch.Tensor,
+        bias: torch.Tensor | None = None,
+        ref_input: torch.Tensor | None = None,
+        ref_weight: torch.Tensor | None = None,
+        ref_bias: torch.Tensor | None = None,
+        ignore_index: int = -100,
+        beta: float = 0.1,
+        alpha: float = 1.0,
+        compute_nll_loss: bool = True,
+        compiled: bool = True,
+        use_ref_model: bool = True,
+        average_log_prob: bool = False,
+        chunk_size: int = 1,
+        loss_type: str = "sigmoid",
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
         return LigerFusedLinearPreferenceBase.forward(
             cls=cls,
             ctx=ctx,
@@ -771,6 +792,9 @@ class LigerDPOWithAlpha(LigerFusedLinearPreferenceBase):
         )
 
     @staticmethod
-    def backward(ctx, *grad_output):
+    def backward(
+        ctx: FunctionCtx,
+        *grad_output: torch.Tensor,
+    ) -> tuple[torch.Tensor | None, ...]:
         grads = LigerFusedLinearPreferenceBase.backward(ctx, grad_output)[:4]
         return (*grads, *(None,) * 12)

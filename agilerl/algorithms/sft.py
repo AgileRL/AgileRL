@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import gc
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import numpy as np
+import numpy.typing as npt
 import torch
 
 from agilerl import HAS_LIGER_KERNEL
 from agilerl.algorithms.core.base import LLMAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.protocols import PreTrainedModelProtocol
-from agilerl.typing import ExperiencesType, LLMObsType
+from agilerl.typing import (
+    MultiAgentObservationType,
+    ObservationType,
+    SFTPrompts,
+)
 from agilerl.utils.llm_utils import aggregate_metrics_dict
 
 if TYPE_CHECKING:
@@ -26,7 +31,7 @@ if HAS_LIGER_KERNEL or TYPE_CHECKING:
     )
 
 
-class SFT(LLMAlgorithm):
+class SFT(LLMAlgorithm[SFTPrompts]):
     """Supervised Fine-Tuning (SFT) algorithm.
 
     Trains an LLM via token-level cross-entropy loss computed exclusively on the
@@ -209,10 +214,10 @@ class SFT(LLMAlgorithm):
 
     def get_action(
         self,
-        obs: LLMObsType,
+        obs: ObservationType | MultiAgentObservationType,
         *args: Any,
         **kwargs: Any,
-    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+    ) -> NoReturn:
         """Not implemented — SFT is an offline supervised algorithm.
 
         :raises NotImplementedError: Always.
@@ -222,7 +227,7 @@ class SFT(LLMAlgorithm):
 
     def learn(
         self,
-        experiences: ExperiencesType,
+        experiences: SFTPrompts,
         training: bool = True,
     ) -> dict[str, float]:
         """Update model parameters using cross-entropy loss on response tokens.
@@ -233,7 +238,7 @@ class SFT(LLMAlgorithm):
         :param experiences: Dict with keys ``input_ids`` (prompt + response token
             IDs), ``attention_mask``, and ``prompt_lengths`` (number of prompt
             tokens per sample) as produced by :class:`~agilerl.llm_envs.SFTGym`.
-        :type experiences: ExperiencesType
+        :type experiences: SFTPrompts
         :param training: When ``False`` the backward pass is skipped (eval mode).
         :type training: bool
         :return: ``(loss, perplexity)`` averaged over all samples in
@@ -245,14 +250,14 @@ class SFT(LLMAlgorithm):
         if torch.backends.mps.is_available():
             torch.mps.empty_cache()
 
-        input_ids: torch.Tensor = experiences["input_ids"]
-        attention_mask: torch.Tensor = experiences["attention_mask"]
+        input_ids = experiences["input_ids"]
+        attention_mask = experiences["attention_mask"]
         # Check first that all tensors have the same max length before calculating the masks
         assert input_ids.shape[1] == attention_mask.shape[1], (
             "All tensors must have the same max length"
         )
         max_length = input_ids.shape[1]
-        prompt_lengths: list[int] = experiences["prompt_lengths"]
+        prompt_lengths = experiences["prompt_lengths"]
         # Build the response mask on CPU (same device as dataloader tensors).
         prompt_masks = LLMAlgorithm._create_prompt_masks(
             prompt_lengths, max_length=max_length
@@ -294,11 +299,13 @@ class SFT(LLMAlgorithm):
                 learn_metrics["perplexity"] += float(np.exp(min(loss_val, 100)))
                 num_updates += 1
 
-        learn_metrics = {
+        # ``aggregate_metrics_dict`` takes an invariant dict over the full raw
+        # metric-value union, so annotate the averaged dict to that exact type.
+        averaged_metrics: dict[str, torch.Tensor | npt.NDArray | float] = {
             key: value / max(num_updates, 1) for key, value in learn_metrics.items()
         }
 
-        learn_metrics = aggregate_metrics_dict(self.accelerator, learn_metrics)
+        learn_metrics = aggregate_metrics_dict(self.accelerator, averaged_metrics)
 
         if training:
             self.metrics.log("loss", learn_metrics["loss"])
@@ -375,7 +382,7 @@ class SFT(LLMAlgorithm):
         loop: int = 1,
         *args: Any,
         **kwargs: Any,
-    ) -> np.ndarray:
+    ) -> npt.NDArray:
         """Return the negative mean loss as a fitness score (higher is better).
 
         :param env: SFT environment providing evaluation batches
@@ -383,7 +390,7 @@ class SFT(LLMAlgorithm):
         :param loop: Number of evaluation batches, defaults to 1
         :type loop: int, optional
         :return: Mean negative loss (scalar numpy array)
-        :rtype: np.ndarray
+        :rtype: npt.NDArray
         """
         with env.eval_mode(), torch.no_grad():
             prompts = env.reset()

@@ -8,10 +8,16 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from agilerl.data.language_environment import Language_Observation, interact_environment
+from agilerl.data.language_environment import (
+    Language_Environment,
+    Language_Observation,
+    Policy,
+    interact_environment,
+)
 from agilerl.data.rl_data import DataPoint, RL_Dataset
+from agilerl.data.tokenizer import Tokenizer
 from agilerl.modules.gpt import EvolvableGPT
-from agilerl.typing import NetConfigType
+from agilerl.typing import NetConfigType, PastKeyValues
 from agilerl.utils.sampling_utils import (
     always_terminate,
     map_all_kvs,
@@ -19,6 +25,11 @@ from agilerl.utils.sampling_utils import (
     process_logits,
     update_kvs,
 )
+
+
+def _decode_str(tokenizer: Tokenizer, token_ids: list[int]) -> str:
+    """Decode one flat id sequence to a string."""
+    return tokenizer.decode(token_ids, clean_up_tokenization_spaces=False)
 
 
 class BC_LM(nn.Module):
@@ -33,23 +44,26 @@ class BC_LM(nn.Module):
 
         self.dataset = dataset
         self.device = device
+        # BC_LM's net_config is a flat mapping of EvolvableGPT hyperparameters
+        # (``NetConfigType`` nests sub-configs for other architectures).
+        cfg = net_config
         self.model = EvolvableGPT(
-            n_layer=net_config["n_layer"],
-            vocab_size=net_config["vocab_size"],
-            n_embd=net_config["n_embd"],
-            n_head=net_config["n_head"],
-            dim_feedfwd=net_config["dim_feedfwd"],
-            block_size=net_config["block_size"],
-            dropout=net_config["dropout"],
-            activation=net_config["activation"],
-            layer_norm_eps=net_config["layer_norm_eps"],
-            min_layers=net_config["min_layers"],
-            max_layers=net_config["max_layers"],
-            bias=net_config["bias"],
-            device=self.device,
+            n_layer=cfg["n_layer"],
+            vocab_size=cfg["vocab_size"],
+            n_embd=cfg["n_embd"],
+            n_head=cfg["n_head"],
+            dim_feedfwd=cfg["dim_feedfwd"],
+            block_size=cfg["block_size"],
+            dropout=cfg["dropout"],
+            activation=cfg["activation"],
+            layer_norm_eps=cfg["layer_norm_eps"],
+            min_layers=cfg["min_layers"],
+            max_layers=cfg["max_layers"],
+            bias=cfg["bias"],
+            device=str(self.device),
         )
         self.max_len = self.dataset.max_len
-        self.h_dim = net_config["n_embd"]
+        self.h_dim = cfg["n_embd"]
         self.transition_weight = transition_weight
 
     def forward(
@@ -60,7 +74,7 @@ class BC_LM(nn.Module):
         prefix_attn_mask: torch.Tensor | None = None,
         remove_prefix_position_embs: bool = False,
         **kwargs: Any,
-    ) -> tuple[torch.Tensor, Any]:
+    ) -> tuple[torch.Tensor, PastKeyValues]:
         # tokens - b,t
         # attn_mask - b,t
         # prefix_embs - b,t',d
@@ -70,18 +84,21 @@ class BC_LM(nn.Module):
                 (tokens.shape[0], 0, self.h_dim),
                 device=self.device,
             )
-        set_pos_ids = prefix_attn_mask is not None
         if prefix_attn_mask is not None and attn_mask is not None:
             input_attn_mask = torch.cat((prefix_attn_mask, attn_mask), dim=1)
+            position_ids = torch.cumsum(input_attn_mask, dim=1) - 1
         else:
             input_attn_mask = None
-        position_ids = torch.cumsum(input_attn_mask, dim=1) - 1 if set_pos_ids else None
+            position_ids = None
         if remove_prefix_position_embs:
-            prefix_embs -= self.model.transformer.wpe(
+            assert position_ids is not None, (
+                "remove_prefix_position_embs requires both prefix_attn_mask and attn_mask"
+            )
+            prefix_embs -= self.model.transformer["wpe"](
                 position_ids[:, : prefix_embs.shape[1]],
             )
         input_embeddings = torch.cat(
-            (prefix_embs, self.model.transformer.wte(tokens)),
+            (prefix_embs, self.model.transformer["wte"](tokens)),
             dim=1,
         )
 
@@ -106,7 +123,7 @@ class BC_LM(nn.Module):
                 weights[i],
                 dim=0,
                 index=action_idxs[i, : n[i]],
-                src=torch.full((n[i].item(),), 1.0, device=self.device),
+                src=torch.full((int(n[i].item()),), 1.0, device=self.device),
             )
         return weights
 
@@ -149,7 +166,7 @@ class BC_LM(nn.Module):
 
     def score(
         self,
-        model_args: tuple[torch.Tensor, ...],
+        model_args: tuple[torch.Tensor | None, ...],
         model_kwargs: dict[str, Any],
         temp: float = 1.0,
         top_k: int | None = None,
@@ -185,44 +202,34 @@ class BC_LM(nn.Module):
         temp: float = 1.0,
         top_k: int | None = None,
         top_p: float | None = None,
-    ) -> tuple[torch.Tensor, Any]:
+    ) -> tuple[torch.Tensor, PastKeyValues]:
         prepared_inputs = self.prepare_inputs(items)
         tokens = prepared_inputs["tokens"]
-        scores, model_outputs = self.score(
-            (
-                tokens,
-                None,
-            ),
-            {},
-            temp=temp,
-            top_k=top_k,
-            top_p=top_p,
-        )
-        return scores[:, -1, :], model_outputs.past_key_values
+        logits, past_key_values = self(tokens, None)
+        logits = process_logits(logits, temp=temp, top_k=top_k, top_p=top_p)
+        scores = torch.log(F.softmax(logits, dim=-1))
+        return scores[:, -1, :], past_key_values
 
     def next_score(
         self,
         tokens: torch.Tensor,
-        obs: Any,  # past_key_values
+        obs: object,  # past_key_values, forwarded opaquely to the model
         temp: float = 1.0,
         top_k: int | None = None,
         top_p: float | None = None,
-    ) -> tuple[torch.Tensor, Any]:
-        scores, model_outputs = self.score(
-            (
-                tokens.unsqueeze(1),
-                None,
-            ),
-            {"past_key_values": obs},
-            temp=temp,
-            top_k=top_k,
-            top_p=top_p,
+    ) -> tuple[torch.Tensor, PastKeyValues]:
+        logits, past_key_values = self(
+            tokens.unsqueeze(1),
+            None,
+            past_key_values=obs,
         )
-        return scores.squeeze(1), model_outputs.past_key_values
+        logits = process_logits(logits, temp=temp, top_k=top_k, top_p=top_p)
+        scores = torch.log(F.softmax(logits, dim=-1))
+        return scores.squeeze(1), past_key_values
 
 
-class BC_Policy:
-    def __init__(self, bc_lm: BC_LM, kind: str, **generation_kwargs) -> None:
+class BC_Policy(Policy):
+    def __init__(self, bc_lm: BC_LM, kind: str, **generation_kwargs: Any) -> None:
         super().__init__()
         self.bc_lm = bc_lm
         assert kind in {"sample", "beam"}
@@ -233,7 +240,7 @@ class BC_Policy:
         self,
         tokens: torch.Tensor,
         attn_mask: torch.Tensor,
-        termination_condition: Callable[[np.ndarray], bool],
+        termination_condition: Callable[[str], bool],
         num_generations: int = 1,
         max_generation_len: int | None = None,
         temp: float = 1.0,
@@ -242,7 +249,7 @@ class BC_Policy:
         prefix_embs: torch.Tensor | None = None,
         prefix_attn_mask: torch.Tensor | None = None,
         remove_prefix_position_embs: bool = False,
-    ) -> tuple[list[tuple[list[str], list[list[str]], torch.Tensor]], torch.Tensor]:
+    ) -> tuple[list[tuple[str, list[str]]], torch.Tensor]:
         tokenizer = self.bc_lm.dataset.tokenizer
         max_length = self.bc_lm.dataset.max_len
         if max_length is None:
@@ -254,9 +261,9 @@ class BC_Policy:
         if max_generation_len is None:
             max_generation_len = max_length + 1
         input_strs = [
-            tokenizer.decode(
+            _decode_str(
+                tokenizer,
                 tokens[i, :][: attn_mask[i, :].sum().long()].tolist(),
-                clean_up_tokenization_spaces=False,
             )
             for i in range(len(tokens))
         ]
@@ -291,7 +298,7 @@ class BC_Policy:
         )
         log_probs = torch.full((dialogue_lens.shape[0],), 0.0, device=device)
         termination_mask = torch.full((dialogue_lens.shape[0],), 1, device=device)
-        t = torch.min(dialogue_lens).int()
+        t = int(dialogue_lens.min().item())
         while termination_mask.sum() > 0 and (t + prefix_t) < max_length:
             curr_token = tokens[:, t - 1].unsqueeze(1)
             curr_dialogue_kvs = map_all_kvs(
@@ -336,18 +343,14 @@ class BC_Policy:
                 if tokens[idx, t] == tokenizer.eoa_token_id and t >= dialogue_lens[idx]:
                     termination_mask[idx] *= 1 - int(
                         termination_condition(
-                            tokenizer.decode(
-                                tokens[idx, :].tolist(),
-                                clean_up_tokenization_spaces=False,
-                            ),
+                            _decode_str(tokenizer, tokens[idx, :].tolist()),
                         ),
                     )
             t += 1
             termination_mask *= ((t - dialogue_lens) < max_generation_len).int()
 
         output_strs = [
-            tokenizer.decode(tokens[i, :].tolist(), clean_up_tokenization_spaces=False)
-            for i in range(len(tokens))
+            _decode_str(tokenizer, tokens[i, :].tolist()) for i in range(len(tokens))
         ]
         processed_outputs = []
         for i in range(len(input_strs)):
@@ -381,13 +384,13 @@ class BC_Policy:
         self,
         tokens: torch.Tensor,
         attn_mask: torch.Tensor,
-        termination_condition: Callable[[np.ndarray], bool],
+        termination_condition: Callable[[str], bool],
         beam_width: int = 1,
         max_generation_len: int | None = None,
         prefix_embs: torch.Tensor | None = None,
         prefix_attn_mask: torch.Tensor | None = None,
         remove_prefix_position_embs: bool = False,
-    ) -> tuple[list[tuple[list[str], list[list[str]], torch.Tensor]], torch.Tensor]:
+    ) -> tuple[list[tuple[str, list[str]]], torch.Tensor]:
         tokenizer = self.bc_lm.dataset.tokenizer
         max_length = self.bc_lm.dataset.max_len
         if max_length is None:
@@ -399,9 +402,9 @@ class BC_Policy:
         if max_generation_len is None:
             max_generation_len = max_length + 1
         input_strs = [
-            tokenizer.decode(
+            _decode_str(
+                tokenizer,
                 tokens[i, :][: attn_mask[i, :].sum().long()].tolist(),
-                clean_up_tokenization_spaces=False,
             )
             for i in range(len(tokens))
         ]
@@ -444,7 +447,7 @@ class BC_Policy:
         )
         curr_scores = torch.zeros(bsize, beam_width, device=device)  # (batch, k)
         termination_mask = torch.full((n,), 1, device=device)
-        t = torch.min(dialogue_lens).int()
+        t = int(dialogue_lens.min().item())
         while termination_mask.sum() > 0 and (t + prefix_t) < max_length:
             curr_token = tokens[:, t - 1].unsqueeze(1)
             curr_dialogue_kvs = map_all_kvs(
@@ -485,7 +488,7 @@ class BC_Policy:
                 .reshape(1, bsize, -1)
             )  # (time, batch, k*vocab)
             scores[0, :, vocab_size:] = scores[0, :, vocab_size:].masked_fill_(
-                (t == original_dialogue_lens)
+                (original_dialogue_lens == t)
                 .unsqueeze(1)
                 .repeat(1, scores.shape[2] - vocab_size),
                 float("-inf"),
@@ -534,18 +537,12 @@ class BC_Policy:
                 if tokens[idx, t] == tokenizer.eoa_token_id and t >= dialogue_lens[idx]:
                     termination_mask[idx] *= 1 - int(
                         termination_condition(
-                            tokenizer.decode(
-                                tokens[idx, :].tolist(),
-                                clean_up_tokenization_spaces=False,
-                            ),
+                            _decode_str(tokenizer, tokens[idx, :].tolist()),
                         ),
                     )
             t += 1
             termination_mask *= ((t - dialogue_lens) < max_generation_len).int()
-        output_strs = [
-            tokenizer.decode(tokens[i, :].tolist(), clean_up_tokenization_spaces=False)
-            for i in range(n)
-        ]
+        output_strs = [_decode_str(tokenizer, tokens[i, :].tolist()) for i in range(n)]
         processed_outputs = []
         for i in range(len(input_strs)):
             temp_outputs = []
@@ -572,9 +569,9 @@ class BC_Policy:
     def generate(
         self,
         items: list[DataPoint] | dict[str, torch.Tensor],
-        termination_condition: Callable[[np.ndarray], bool],
+        termination_condition: Callable[[str], bool],
         **kwargs: Any,
-    ) -> tuple[list[tuple[list[str], list[list[str]], torch.Tensor]], torch.Tensor]:
+    ) -> tuple[list[tuple[str, list[str]]], torch.Tensor]:
         prepared_inputs = self.bc_lm.prepare_inputs(items)
         tokens, attn_mask = prepared_inputs["tokens"], prepared_inputs["attn_mask"]
         if self.kind == "beam":
@@ -617,7 +614,7 @@ class BC_Policy:
 class BC_Evaluator:
     def __init__(
         self,
-        env: Any,  # ParallelEnv or similar
+        env: Language_Environment,
         verbose: bool,
         kind: str,
         **generation_kwargs: Any,
@@ -658,11 +655,11 @@ class BC_Evaluator:
         }
 
 
-def to(item: Any, device: torch.device | str) -> Any:
+def to(item: object, device: torch.device | str) -> Any:  # noqa: ANN401 -- return mirrors item's nested structure, but prepare_inputs needs a concrete dict[str, Tensor] that a PyTree return can't satisfy
     return map_pytree(lambda x: torch.tensor(x, device=device), item)
 
 
-def map_pytree(f: Callable[[np.ndarray | torch.Tensor], Any], item: Any) -> Any:
+def map_pytree(f: Callable[[np.ndarray | torch.Tensor], Any], item: object) -> Any:  # noqa: ANN401 -- leaves are transformed by the arbitrary callable f
     if isinstance(item, dict):
         return {k: map_pytree(f, v) for k, v in item.items()}
     if isinstance(item, (list, set, tuple)):

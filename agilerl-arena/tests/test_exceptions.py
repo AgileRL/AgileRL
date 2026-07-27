@@ -6,6 +6,7 @@ import json
 from urllib.parse import urlparse
 
 import pytest
+
 from agilerl.arena.exceptions import (
     ArenaAPIError,
     ArenaAuthError,

@@ -40,7 +40,7 @@ def class_by_name(classes: object, name: str) -> dict[str, Any] | None:
     if len(matches) > 1:
         msg = f"Multiple on-prem classes named {name!r}; resolve duplicates in Arena first."
         raise ArenaAPIError(msg)
-    return matches[0]
+    return {str(k): v for k, v in matches[0].items()}
 
 
 class OnPremApi:

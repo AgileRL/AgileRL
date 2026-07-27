@@ -10,6 +10,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from keycloak.exceptions import KeycloakError
+
 from agilerl.arena.auth import (
     ArenaOAuth2,
     is_oauth_access_token_valid,
@@ -18,7 +20,6 @@ from agilerl.arena.auth import (
     oauth_access_token_expires_at,
 )
 from agilerl.arena.exceptions import ArenaAuthError, ArenaTimeoutError
-from keycloak.exceptions import KeycloakError
 
 
 def _chmod_mode_bits_visible(base_dir: Path) -> bool:

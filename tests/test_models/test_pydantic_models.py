@@ -580,6 +580,7 @@ class TestAlgoSpecClassVars:
     def test_llm_spec_num_epochs_kwarg(self):
         """get_training_kwargs includes num_epochs for LLM."""
         from agilerl.models.algo import LLMAlgorithmSpec
+        from agilerl.models.env import LLMEnvSpec
         from agilerl.models.training import TrainingSpec
 
         spec = LLMAlgorithmSpec.__new__(LLMAlgorithmSpec)
@@ -594,8 +595,7 @@ class TestAlgoSpecClassVars:
         training = TrainingSpec(
             num_epochs=3, checkpoint_steps=100, evaluation_interval=10
         )
-        env_spec = MagicMock()
-        env_spec.max_reward = 1.0
+        env_spec = LLMEnvSpec(env_type="preference", dataset="dummy", max_reward=1.0)
         kwargs = spec.get_training_kwargs(training=training, env_spec=env_spec)
         assert kwargs["num_epochs"] == 3
         assert kwargs["max_reward"] == 1.0
@@ -646,17 +646,14 @@ class TestAlgoSpecClassVars:
     def test_offline_spec_dataset_path(self):
         """get_training_kwargs for offline algo with dataset_path."""
         from agilerl.models.algo import RLAlgorithmSpec, offline
+        from agilerl.models.env import OfflineEnvSpec
 
         @offline()
         class _OffSpec(RLAlgorithmSpec):
             pass
 
         spec = _OffSpec()
-        env_spec = MagicMock()
-        env_spec.name = "test"
-        env_spec.minari_dataset_id = "cart-v0"
-        env_spec.remote = True
-        env_spec.dataset_path = None
+        env_spec = OfflineEnvSpec(name="test", minari_dataset_id="cart-v0", remote=True)
         training = TrainingSpec()
         kwargs = spec.get_training_kwargs(training=training, env_spec=env_spec)
         assert kwargs["minari_dataset_id"] == "cart-v0"
@@ -665,6 +662,7 @@ class TestAlgoSpecClassVars:
     def test_offline_spec_dataset_path_uses_h5py(self, tmp_path):
         """get_training_kwargs opens an offline HDF5 dataset when no Minari id."""
         from agilerl.models.algo import RLAlgorithmSpec, offline
+        from agilerl.models.env import OfflineEnvSpec
 
         @offline()
         class _OffSpec(RLAlgorithmSpec):
@@ -673,10 +671,7 @@ class TestAlgoSpecClassVars:
         dataset_path = tmp_path / "offline.h5"
         dataset_path.write_bytes(b"")
         spec = _OffSpec()
-        env_spec = MagicMock()
-        env_spec.name = "test"
-        env_spec.minari_dataset_id = None
-        env_spec.dataset_path = str(dataset_path)
+        env_spec = OfflineEnvSpec(name="test", dataset_path=str(dataset_path))
         training = TrainingSpec()
         mock_file = MagicMock()
 
@@ -1014,8 +1009,9 @@ class TestManifestFromTrainerSpecsForeignModels:
     """Foreign BaseModel inputs are dumped before manifest validation."""
 
     def test_from_trainer_specs_coerces_foreign_training_model(self):
-        from agilerl.arena.models.env import EnvSpec as ArenaEnvSpec
         from pydantic import BaseModel
+
+        from agilerl.arena.models.env import EnvSpec as ArenaEnvSpec
 
         class ForeignTraining(BaseModel):
             max_steps: int = 300
@@ -1031,7 +1027,6 @@ class TestManifestFromTrainerSpecsForeignModels:
 
     def test_resolve_foreign_arena_algorithm(self):
         from agilerl.arena.models.algorithms.ppo import PPOSpec as ArenaPPOSpec
-
         from agilerl.models.manifest import _resolve_algorithm
 
         resolved = _resolve_algorithm(ArenaPPOSpec(learn_step=48))

@@ -13,6 +13,8 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks import StochasticActor
 from agilerl.population import Population
+from agilerl.typing import InitHyperparams
+from agilerl.utils.algo_utils import get_num_envs
 from agilerl.utils.utils import (
     default_progress_bar,
     init_loggers,
@@ -21,11 +23,11 @@ from agilerl.utils.utils import (
 )
 from agilerl.vector import PzDummyVecEnv
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
+from agilerl.vector.pz_vec_env import PettingZooVecEnv
 
 if TYPE_CHECKING:
     from agilerl.typing import SingleAgentModule
 
-InitDictType = dict[str, Any] | None
 MultiAgentOnPolicyAlgorithms = IPPO
 PopulationType = list[MultiAgentOnPolicyAlgorithms]
 
@@ -38,8 +40,8 @@ def train_multi_agent_on_policy(
     algo: str,
     pop: PopulationType,
     sum_scores: bool = True,
-    init_hp: InitDictType = None,
-    mut_p: InitDictType = None,
+    init_hp: InitHyperparams = None,
+    mut_p: InitHyperparams = None,
     max_steps: int = 50000,
     evo_steps: int = 25,
     eval_steps: int | None = None,
@@ -59,7 +61,7 @@ def train_multi_agent_on_policy(
     accelerator: Accelerator | None = None,
     wandb_api_key: str | None = None,
     wandb_kwargs: dict[str, Any] | None = None,
-) -> tuple[PopulationType, list[float]]:
+) -> tuple[PopulationType, list[float] | list[dict[str, float]]]:
     """Run the general on-policy multi-agent RL training; returns trained population of agents
     and their fitnesses.
 
@@ -149,11 +151,14 @@ def train_multi_agent_on_policy(
             stacklevel=2,
         )
 
-    # Ensure environment has vectorized interface
-    if not hasattr(env, "num_envs"):
-        env = PzDummyVecEnv(env)
+    # Ensure environment has vectorized interface. `PzDummyVecEnv` subclasses
+    # `PettingZooVecEnv`; a raw `ParallelEnv` is wrapped so the loop always drives
+    # the vectorized API.
+    vec_env: PettingZooVecEnv = (
+        env if isinstance(env, AsyncPettingZooVecEnv) else PzDummyVecEnv(env)
+    )
 
-    num_envs = env.num_envs
+    num_envs = get_num_envs(vec_env)
 
     save_path = (
         checkpoint_path.split(".pt")[0]
@@ -205,13 +210,15 @@ def train_multi_agent_on_policy(
             agent.set_training_mode(True)
             agent.init_training_step()
 
-            obs, info = env.reset()
+            obs, info = vec_env.reset()
             scores = (
                 np.zeros((num_envs, 1))
                 if sum_scores
                 else np.zeros((num_envs, len(agent.agent_ids)))
             )
-            completed_episode_scores = []
+            # `sum_scores` fixes the shape of every entry for the whole run: a scalar
+            # per episode when summing, otherwise a per-sub-agent row.
+            completed_episode_scores: list[float | list[float]] = []
             steps = 0
             for _ in range(-(evo_steps // -agent.learn_step)):
                 states = {agent_id: [] for agent_id in agent.agent_ids}
@@ -239,17 +246,26 @@ def train_multi_agent_on_policy(
                             else agent.get_group_id(agent_id)
                         )
                         agent_space = agent.possible_action_spaces[agent_id]
-                        policy = getattr(agent, agent.registry.policy())
+                        policy_name = agent.registry.policy()
+                        assert policy_name is not None, (
+                            "Agent registry does not define a policy network."
+                        )
+                        policy = getattr(agent, policy_name)
                         agent_policy: SingleAgentModule = policy[network_id]
 
                         if compiled_agent:
-                            agent_policy = agent_policy._orig_mod
+                            # `torch.compile` wraps the policy module; `_orig_mod` is
+                            # declared on `OptimizedModule` alone.
+                            agent_policy = agent_policy._orig_mod  # ty: ignore[unresolved-attribute]
 
                         if isinstance(agent_policy, StochasticActor) and isinstance(
                             agent_space,
                             spaces.Box,
                         ):
                             if agent_policy.squash_output:
+                                # ``scale_action`` returns a tensor on the policy
+                                # device; the vectorized env accepts arrays or
+                                # tensors and converts on the way in.
                                 clipped_agent_action = agent_policy.scale_action(
                                     agent_action,
                                 )
@@ -264,8 +280,9 @@ def train_multi_agent_on_policy(
 
                         clipped_action[agent_id] = clipped_agent_action
 
-                    # Act in environment
-                    next_obs, reward, termination, truncation, info = env.step(
+                    # Squashed actions may be tensors; the vectorized env converts
+                    # array/tensor values on the way in.
+                    next_obs, reward, termination, truncation, info = vec_env.step(
                         clipped_action,
                     )
 
@@ -336,17 +353,20 @@ def train_multi_agent_on_policy(
                     next_done,
                 )
 
-                # Learn according to agent's RL algorithm
+                # The rollout is an 8-tuple of per-sub-agent field maps; the cast
+                # asserts that concrete layout for IPPO.learn.
                 agent.learn(experiences)
 
-            agent.add_scores(completed_episode_scores)
+            agent.add_scores(
+                completed_episode_scores,
+            )
             agent.finalize_training_step(steps)
             pbar.update(steps // population.size)
 
         # Evaluate population
         for agent in population.agents:
             agent.test(
-                env,
+                vec_env,
                 max_steps=eval_steps,
                 loop=eval_loop,
                 sum_scores=sum_scores,

@@ -7,9 +7,11 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ClassVar, TypedDict
+from typing import Any, BinaryIO, ClassVar, TypedDict
 
 import httpx
+from typing_extensions import Self
+
 from agilerl.arena.auth import (
     ArenaOAuth2,
     is_oauth_access_token_valid,
@@ -32,6 +34,7 @@ from agilerl.arena.inference.cache import (
 from agilerl.arena.models import TrainingManifest
 from agilerl.arena.output import StreamRichRenderer
 from agilerl.arena.stream import NDJsonStream, StreamEvent
+from agilerl.arena.typing import JSONValue
 from agilerl.arena.utils import (
     discover_env_sidecars,
     extract_filename,
@@ -40,7 +43,6 @@ from agilerl.arena.utils import (
     prepare_env_upload,
     prepare_file_upload,
 )
-from typing_extensions import Self
 
 logger = logging.getLogger(__name__)
 
@@ -327,7 +329,7 @@ class ArenaClient:
         """
         return self._request("GET", "/api/users/current")
 
-    def get_user_credits(self) -> Any:
+    def get_user_credits(self) -> JSONValue:
         """Get the authenticated user's credit information."""
         return self._request("GET", "/api/users/credits")
 
@@ -519,7 +521,7 @@ class ArenaClient:
 
     def delete_environment(
         self, *, name: str, version: str | None = None, confirm: bool = False
-    ) -> Any:
+    ) -> dict[str, Any] | None:
         """Delete an environment version (or all versions if version is None).
 
         :param name: Environment name, as specified in Arena.
@@ -708,8 +710,10 @@ class ArenaClient:
             hf_config=hf_config,
             hf_split=hf_split,
         )
-        files = multipart_text_fields(data)
-        files.update(upload_files)
+        files: dict[str, tuple[None, str] | tuple[str, Any, str]] = {
+            **multipart_text_fields(data),
+            **upload_files,
+        }
         try:
             resp: dict[str, Any] = self._request(
                 "POST",
@@ -782,7 +786,7 @@ class ArenaClient:
         hf_dataset_name: str | None = None,
         hf_config: str | None = None,
         hf_split: str | None = None,
-    ) -> tuple[dict[str, str], dict[str, tuple[str, Any, str]]]:
+    ) -> tuple[dict[str, str | None], dict[str, tuple[str, Any, str]]]:
         """Build multipart form fields for dataset creation."""
         category = ArenaClient._validate_dataset_category(category)
         column_mapping_str = (
@@ -815,7 +819,7 @@ class ArenaClient:
 
     def submit_experiment(
         self,
-        manifest: str | os.PathLike[str] | dict[str, Any],
+        manifest: str | Path | dict[str, Any],
         *,
         resource_id: str | int | None = None,
         num_nodes: int | None = None,
@@ -828,7 +832,7 @@ class ArenaClient:
 
         :param manifest: Training manifest as a YAML/JSON file path, raw YAML
             string, or a pre-parsed dict.
-        :type manifest: str | os.PathLike[str] | dict[str, Any]
+        :type manifest: str | Path | dict[str, Any]
         :param resource_id: Arena cluster type or resource id for the job.
         :type resource_id: str | int | None
         :param num_nodes: The number of nodes to use for training.
@@ -892,7 +896,7 @@ class ArenaClient:
         experiment_name: str | None,
         reward_file: str | os.PathLike[str] | bytes,
         completion: str | None,
-    ) -> dict[str, tuple[None, str] | tuple[str, bytes, str]]:
+    ) -> dict[str, tuple[None, str] | tuple[str, BinaryIO | bytes, str]]:
         """Build multipart form parts for reasoning submit with reward validation."""
         text_fields: dict[str, str | None] = {
             "manifest": json.dumps(manifest),
@@ -902,7 +906,9 @@ class ArenaClient:
             "experiment_name": experiment_name,
             "completion": completion,
         }
-        files = multipart_text_fields(text_fields)
+        files: dict[str, tuple[None, str] | tuple[str, BinaryIO | bytes, str]] = {
+            **multipart_text_fields(text_fields)
+        }
         files["reward_file"] = prepare_file_upload(
             reward_file,
             default_name="reward.py",
@@ -1073,10 +1079,7 @@ class ArenaClient:
         )
         if not (content_type or "").startswith("text/csv"):
             body_preview = payload.decode("utf-8", errors="replace")[:500]
-            raise ArenaAPIError.from_response_body(
-                body_preview,
-                status_code=None,
-            )
+            raise ArenaAPIError.from_response_body(body_preview)
 
         if output_path is None:
             path = Path(f"{experiment_name}_metrics.csv")
@@ -1096,7 +1099,7 @@ class ArenaClient:
         logger.info("Metrics saved to %s", path)
         return path
 
-    def stop_experiment(self, experiment_name: str) -> Any:
+    def stop_experiment(self, experiment_name: str) -> JSONValue:
         """Stop a running experiment in Arena.
 
         :param experiment_name: Experiment name to halt.
@@ -1544,7 +1547,6 @@ class ArenaClient:
         # httpx; fall back to the client default (``request_timeout``).
         request_timeout = timeout if timeout is not None else httpx.USE_CLIENT_DEFAULT
 
-        # Send the request.
         try:
             if stream:
                 request = self._http.build_request(
@@ -1673,7 +1675,7 @@ class ArenaClient:
         *,
         timeout: int | None = None,
         **kwargs: Any,
-    ) -> Any:
+    ) -> Any:  # noqa: ANN401 -- callers return this straight into narrower declared types (e.g. dict[str, Any]); JSONValue would force casts at every call site
         """Send a request and return the parsed JSON body (or text)."""
         resp = self._send(method, path, timeout=timeout, **kwargs)
         content_type: str = resp.headers.get("content-type", "")
@@ -1770,7 +1772,7 @@ class ArenaClient:
 
     def _validate_manifest_invoke(
         self, invoke: ManifestInvoke
-    ) -> tuple[str, str, str, list[dict[str, Any]]]:
+    ) -> tuple[str, str, str, list[ManifestParamSpec]]:
         """Check an invoke descriptor and return ``(path, method, responseKind, params)``.
 
         Guards against unsupported methods/paths so a malformed or untrusted
@@ -1821,7 +1823,7 @@ class ArenaClient:
         self,
         *,
         method: str,
-        params_list: list[dict[str, Any]],
+        params_list: list[ManifestParamSpec],
         parsed_args: Mapping[str, Any],
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         """Split parsed CLI args into ``(query, body)`` per each param's ``in``.
@@ -1877,7 +1879,7 @@ class ArenaClient:
         self,
         invoke: ManifestInvoke,
         parsed_args: Mapping[str, Any],
-    ) -> Any:
+    ) -> Any:  # noqa: ANN401 -- JSON body (heterogeneous) or a binary (bytes, str|None, str|None) tuple; callers destructure the tuple branch, so a union return would force casts
         """Dispatch an on-prem command using already-parsed CLI kwargs.
 
         Returns decoded JSON for ``responseKind == "json"`` invokes, or a
@@ -1920,7 +1922,6 @@ class ArenaClient:
             renderer = StreamRichRenderer(error_cls=error_cls)
             handler = renderer.handle_event
 
-        # Send the request and return an NDJsonStream
         resp = self._send(method, path, stream=True, timeout=timeout, **kwargs)
         return NDJsonStream(
             resp, handler=handler, renderer=renderer, error_cls=error_cls

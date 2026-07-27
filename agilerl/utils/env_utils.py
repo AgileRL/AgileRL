@@ -6,16 +6,22 @@ from collections.abc import Callable
 from importlib import import_module
 from importlib import util as importlib_util
 from pathlib import Path
-from typing import Any
+from types import ModuleType
+from typing import Any, TypeVar
 
+import gymnasium as gym
 from gymnasium.vector import AsyncVectorEnv, SyncVectorEnv
 from pettingzoo import ParallelEnv
 
+from agilerl.typing import WrapperSpec
 from agilerl.vector import AsyncPettingZooVecEnv
 
-WrapperSpec = tuple[Any, dict[str, Any]] | str | Callable[..., Any]
 GymEnvType = AsyncVectorEnv | SyncVectorEnv
 PzEnvType = ParallelEnv | AsyncPettingZooVecEnv
+
+# Single envs, vectorized gym envs, and PettingZoo parallel / vec envs.
+# Wrappers duck-type as the env they wrap, so wrapping preserves EnvT.
+EnvT = TypeVar("EnvT", bound=gym.Env | GymEnvType | PzEnvType)
 
 
 def make_conversation_template(prompt_template: dict[str, str]) -> list[dict[str, str]]:
@@ -35,7 +41,7 @@ def make_conversation_template(prompt_template: dict[str, str]) -> list[dict[str
     ]
 
 
-def get_reward_fn(reward_fn_name: str, file_path: str) -> Callable[[Any], float]:
+def get_reward_fn(reward_fn_name: str, file_path: str) -> Callable[..., float]:
     """Get the reward function for the environment.
 
     :param reward_fn_name: The name of the reward function to get
@@ -61,7 +67,7 @@ def get_reward_fn(reward_fn_name: str, file_path: str) -> Callable[[Any], float]
                 str(abs_file_path),
             )
 
-            if spec is None:
+            if spec is None or spec.loader is None:
                 msg = f"Could not create spec for {abs_file_path}"
                 raise ValueError(msg)
 
@@ -124,7 +130,7 @@ def _parse_entrypoint(entrypoint: str) -> tuple[str, str]:
     return module_ref, target_name
 
 
-def _load_module_from_path(module_ref: str, script_path: Path) -> Any:
+def _load_module_from_path(module_ref: str, script_path: Path) -> ModuleType:
     """Load a module from a file path.
 
     :param module_ref: Module reference.
@@ -146,7 +152,7 @@ def _load_module_from_path(module_ref: str, script_path: Path) -> Any:
     return module
 
 
-def _resolve_module(module_ref: str, path: str | None = None) -> Any:
+def _resolve_module(module_ref: str, path: str | None = None) -> ModuleType:
     """Resolve a module from a module reference and environment path.
 
     :param module_ref: Module reference.
@@ -177,7 +183,7 @@ def _resolve_module(module_ref: str, path: str | None = None) -> Any:
         raise ModuleNotFoundError(msg) from err
 
 
-def resolve_entrypoint_target(entrypoint: str, path: str | None = None) -> Any:
+def resolve_entrypoint_target(entrypoint: str, path: str | None = None) -> Any:  # noqa: ANN401 -- resolves an arbitrary user-defined class/callable via getattr
     """Resolve an entrypoint target from an entrypoint string and environment path.
 
     :param entrypoint: Entrypoint string to resolve.
@@ -197,18 +203,23 @@ def resolve_entrypoint_target(entrypoint: str, path: str | None = None) -> Any:
 
 def _resolve_wrapper(
     wrapper: WrapperSpec, path: str | None = None
-) -> tuple[Any, dict[str, Any]]:
+) -> tuple[Callable[..., Any], dict[str, Any]]:
     """Resolve a wrapper from a wrapper specification and environment path.
 
     :param wrapper: Wrapper specification.
     :type wrapper: WrapperSpec
     :param path: Environment path.
     :type path: str or None
-    :returns: Resolved wrapper and wrapper kwargs.
-    :rtype: tuple[Any, dict[str, Any]]
+    :returns: Resolved wrapper callable and wrapper kwargs.
+    :rtype: tuple[Callable[..., Any], dict[str, Any]]
     """
+    wrapper_kwargs: dict[str, Any]
     if isinstance(wrapper, tuple):
-        wrapper_spec, wrapper_kwargs = wrapper
+        # ``isinstance(tuple)`` cannot exclude the ``Callable`` arm of
+        # ``WrapperSpec``, so it erases the tuple's element types; restate them
+        # through an Any-typed unpack.
+        spec_and_kwargs: Any = wrapper
+        wrapper_spec, wrapper_kwargs = spec_and_kwargs
     else:
         wrapper_spec, wrapper_kwargs = wrapper, {}
 
@@ -234,10 +245,10 @@ def _resolve_wrapper(
 
 
 def apply_wrappers(
-    env: GymEnvType | PzEnvType,
+    env: EnvT,
     wrappers: list[WrapperSpec] | None,
     path: str | None = None,
-) -> GymEnvType | PzEnvType:
+) -> EnvT:
     """Apply environment wrappers to an environment.
 
     :param env: Environment to apply wrappers to.

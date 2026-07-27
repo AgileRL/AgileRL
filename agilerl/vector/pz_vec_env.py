@@ -1,10 +1,17 @@
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 from gymnasium.spaces import Space
 from gymnasium.vector.utils import batch_space
 
-from agilerl.typing import ActionType, PzStepReturn
+from agilerl.typing import (
+    ActionType,
+    ArrayOrTensor,
+    PzResetReturn,
+    PzStepReturn,
+)
 
 
 class PettingZooVecEnv:
@@ -40,6 +47,7 @@ class PettingZooVecEnv:
         self.closed = False
         self.num_envs = num_envs
         self.agents = possible_agents
+        self.possible_agents = possible_agents
         self.num_agents = len(self.agents)
         self._single_observation_spaces = observation_spaces
         self._single_action_spaces = action_spaces
@@ -53,22 +61,22 @@ class PettingZooVecEnv:
         }
 
     @property
-    def action_space(self):
+    def action_space(self) -> Callable[[str], Space]:
         """Return callable to get an agent's action space."""
         return self._get_action_space
 
     @property
-    def observation_space(self):
+    def observation_space(self) -> Callable[[str], Space]:
         """Return callable to get an agent's observation space."""
         return self._get_observation_space
 
     @property
-    def single_action_space(self):
+    def single_action_space(self) -> Callable[[str], Space]:
         """Return callable to get an agent's single action space."""
         return self._get_single_action_space
 
     @property
-    def single_observation_space(self):
+    def single_observation_space(self) -> Callable[[str], Space]:
         """Return callable to get an agent's single observation space."""
         return self._get_single_observation_space
 
@@ -77,7 +85,7 @@ class PettingZooVecEnv:
         *,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+    ) -> PzResetReturn:
         """Reset all the environments and return two dictionaries of batched observations and infos.
 
         :param seed: Random seed, defaults to None
@@ -85,7 +93,7 @@ class PettingZooVecEnv:
         :param options: Options dictionary
         :type options: dict[str, Any]
         :return: Tuple of (observations, infos)
-        :rtype: tuple[dict[str, np.ndarray], dict[str, Any]]
+        :rtype: PzResetReturn
         """
         msg = "Subclasses must implement reset()"
         raise NotImplementedError(msg)
@@ -99,7 +107,7 @@ class PettingZooVecEnv:
 
         :param actions: List of dictionaries of length num_envs, each sub dictionary contains
         actions for each agent in a given environment
-        :type actions: list[dict[str, int | float | np.ndarray]]
+        :type actions: list[dict[str, int | float | npt.NDArray]]
         """
         msg = "Subclasses must implement step_async()"
         raise NotImplementedError(msg)
@@ -115,17 +123,18 @@ class PettingZooVecEnv:
 
     def step(
         self,
-        actions: dict[str, np.ndarray],
+        actions: Mapping[str, ArrayOrTensor],
         *args: Any,
         **kwargs: Any,
     ) -> PzStepReturn:
         """Take an action for each parallel environment.
 
         :param actions: Dictionary of vectorized actions for each agent.
-        :type actions: dict[str, np.ndarray]
+            Values may be arrays or tensors.
+        :type actions: Mapping[str, ArrayOrTensor]
 
         :return: Tuple of observations, rewards, terminated, truncated, infos
-        :rtype: tuple[dict[str, np.ndarray], dict[str, float], dict[str, bool], dict[str, bool], dict[str, Any]]
+        :rtype: PzStepReturn
         """
         passed_actions_list = []
         num_actions = len(next(iter(actions.values())))
@@ -138,8 +147,11 @@ class PettingZooVecEnv:
                 if np.isnan(agent_action).all():
                     continue
 
+                # Scalar actions are numeric (discrete-action envs), so ``int`` is
+                # safe despite np.isscalar's wider TypeIs (which admits complex/str).
+                scalar_action: Any = agent_action
                 agent_action = (
-                    int(agent_action) if np.isscalar(agent_action) else agent_action
+                    int(scalar_action) if np.isscalar(agent_action) else agent_action
                 )
                 env_actions[agent_id] = agent_action
 
@@ -151,7 +163,7 @@ class PettingZooVecEnv:
         self.step_async(passed_actions_list)
         return self.step_wait()
 
-    def render(self) -> Any:
+    def render(self) -> None | npt.NDArray | str | list | tuple[Any, ...]:
         """Return the rendered frames from the parallel environments."""
         msg = f"{self.__str__()} render function is not implemented."
         raise NotImplementedError(
@@ -184,7 +196,7 @@ class PettingZooVecEnv:
         """Return the base environment."""
         return self
 
-    def _get_single_action_space(self, agent: str) -> Any:
+    def _get_single_action_space(self, agent: str) -> Space:
         """Get an agents single action space.
 
         :param agent: Name of agent
@@ -192,7 +204,7 @@ class PettingZooVecEnv:
         """
         return self._single_action_spaces[agent]
 
-    def _get_action_space(self, agent: str) -> Any:
+    def _get_action_space(self, agent: str) -> Space:
         """Get an agents action space.
 
         :param agent: Name of agent
@@ -200,7 +212,7 @@ class PettingZooVecEnv:
         """
         return self._action_spaces[agent]
 
-    def _get_single_observation_space(self, agent: str) -> Any:
+    def _get_single_observation_space(self, agent: str) -> Space:
         """Get an agents single observation space.
 
         :param agent: Name of agent
@@ -208,7 +220,7 @@ class PettingZooVecEnv:
         """
         return self._single_observation_spaces[agent]
 
-    def _get_observation_space(self, agent: str) -> Any:
+    def _get_observation_space(self, agent: str) -> Space:
         """Get an agents observation space.
 
         :param agent: Name of agent

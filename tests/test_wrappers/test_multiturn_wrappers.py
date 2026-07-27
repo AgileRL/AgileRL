@@ -13,6 +13,24 @@ from agilerl.llm_envs import (
     Trajectory,
     TrajectoryBuffer,
 )
+from agilerl.llm_envs.sync_vec_env import _as_prompt
+
+
+class TestAsPrompt:
+    def test_returns_tokenized_prompt_unchanged(self):
+        prompt = {
+            "input_ids": torch.tensor([[1, 2, 3]], dtype=torch.long),
+            "attention_mask": torch.ones((1, 3), dtype=torch.long),
+        }
+        assert _as_prompt(prompt) is prompt
+
+    def test_rejects_str_observation(self):
+        with pytest.raises(TypeError, match="got str"):
+            _as_prompt("a plain text observation")
+
+    def test_rejects_non_prompt_mapping(self):
+        with pytest.raises(TypeError, match="expects ReasoningPrompts"):
+            _as_prompt({"not_a_prompt": 1})
 
 
 class _StubTokenizer:

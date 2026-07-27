@@ -1,26 +1,34 @@
 import logging
 import warnings
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any, Protocol, TypeGuard
 
+import gymnasium as gym
 import numpy as np
+import numpy.typing as npt
 import torch
 from accelerate import Accelerator
+from tensordict import TensorDict
 from torch.utils.data import DataLoader
 
 from agilerl.algorithms import DDPG, DQN, TD3, RainbowDQN
 from agilerl.components import (
     MultiStepReplayBuffer,
     PrioritizedReplayBuffer,
-    ReplayBuffer,
 )
-from agilerl.components.data import ReplayDataset, Transition
+from agilerl.components.data import (
+    ReplayDataset,
+    Transition,
+    transition_to_tensordict,
+)
+from agilerl.components.replay_buffer import BufferType
 from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks.actors import DeterministicActor
 from agilerl.population import Population
-from agilerl.typing import GymEnvType
+from agilerl.typing import InitHyperparams
+from agilerl.utils.algo_utils import get_num_envs
 from agilerl.utils.utils import (
     default_progress_bar,
     init_loggers,
@@ -29,15 +37,37 @@ from agilerl.utils.utils import (
 )
 from agilerl.vector import DummyVecEnv
 
-if TYPE_CHECKING:
-    from tensordict import TensorDictBase
-
-InitDictType = dict[str, Any] | None
 SupportedOffPolicy = DQN | RainbowDQN | DDPG | TD3
 PopulationType = list[SupportedOffPolicy]
-BufferType = ReplayBuffer | PrioritizedReplayBuffer | MultiStepReplayBuffer
 
 logger = logging.getLogger(__name__)
+
+
+class NStepAgent(Protocol):
+    """A RainbowDQN-style agent that consumes n-step / prioritized batches."""
+
+    batch_size: int
+    beta: float
+
+    def learn(
+        self,
+        experiences: TensorDict,
+        n_experiences: TensorDict | None = None,
+        per: bool = False,
+    ) -> tuple[float, torch.Tensor | None, npt.NDArray | None]: ...
+
+
+def _is_n_step_agent(agent: SupportedOffPolicy) -> TypeGuard[NStepAgent]:
+    """Whether *agent* exposes the n-step / prioritized interface."""
+    return hasattr(agent, "beta")
+
+
+def _as_n_step_agent(agent: SupportedOffPolicy) -> NStepAgent:
+    """Read ``agent`` through the n-step / prioritized interface."""
+    assert _is_n_step_agent(agent), (
+        f"Prioritized replay needs an n-step agent, got {type(agent).__name__}."
+    )
+    return agent
 
 
 def _learn_from_buffer(
@@ -49,39 +79,48 @@ def _learn_from_buffer(
     per: bool,
 ) -> None:
     """Execute a single learning step for the agent."""
+    sample = sampler.sample
+
+    # Prioritized and n-step replay are the preserve of RainbowDQN: only it
+    # anneals `beta`, accepts `n_experiences`/`per` in `learn`, returns indices
+    # and priorities to write back, and pairs with a PrioritizedReplayBuffer.
     if per:
-        experiences = sampler.sample(agent.batch_size, agent.beta)
+        n_step_agent = _as_n_step_agent(agent)
+        assert isinstance(memory, PrioritizedReplayBuffer)
+        experiences = sample(n_step_agent.batch_size, n_step_agent.beta)
         n_step_experiences = (
             n_step_sampler.sample(experiences["idxs"])
             if n_step_sampler is not None
             else None
         )
-        _loss, idxs, priorities = agent.learn(
+        _loss, idxs, priorities = n_step_agent.learn(
             experiences,
             n_experiences=n_step_experiences,
             per=per,
         )
+        assert idxs is not None
+        assert priorities is not None
         memory.update_priorities(idxs, priorities)
     else:
-        experiences = sampler.sample(
+        experiences = sample(
             agent.batch_size,
             return_idx=n_step_memory is not None,
         )
         if n_step_sampler is not None:
             n_step_experiences = n_step_sampler.sample(experiences["idxs"])
-            agent.learn(experiences, n_experiences=n_step_experiences)
+            _as_n_step_agent(agent).learn(experiences, n_experiences=n_step_experiences)
         else:
             agent.learn(experiences)
 
 
 def train_off_policy(
-    env: GymEnvType,
+    env: gym.Env | gym.vector.VectorEnv,
     env_name: str,
     algo: str,
     pop: PopulationType,
     memory: BufferType,
-    init_hp: InitDictType = None,
-    mut_p: InitDictType = None,
+    init_hp: InitHyperparams = None,
+    mut_p: InitHyperparams = None,
     max_steps: int = 1000000,
     evo_steps: int = 10000,
     eval_steps: int | None = None,
@@ -216,11 +255,14 @@ def train_off_policy(
             stacklevel=2,
         )
 
-    # Ensure environment has vectorized interface
-    if not hasattr(env, "num_envs"):
-        env = DummyVecEnv(env)
+    # Ensure environment has vectorized interface. `DummyVecEnv` duck-types the
+    # `VectorEnv` API rather than subclassing it, so the cast matches the annotations
+    # of the algorithm methods it is handed to.
+    vec_env: gym.vector.VectorEnv = (
+        env if isinstance(env, gym.vector.VectorEnv) else DummyVecEnv(env)
+    )
 
-    num_envs = env.num_envs
+    num_envs = get_num_envs(vec_env)
 
     save_path = (
         checkpoint_path.split(".pt")[0]
@@ -288,7 +330,7 @@ def train_off_policy(
             agent.set_training_mode(True)
             agent.init_training_step()
 
-            obs, info = env.reset()
+            obs, info = vec_env.reset()
             scores = np.zeros(num_envs)
             completed_episode_scores: list[float] = []
             steps = 0
@@ -318,7 +360,7 @@ def train_off_policy(
                     action = action.cpu().numpy()
 
                 # Act in environment
-                next_obs, reward, done, trunc, info = env.step(action)
+                next_obs, reward, done, trunc, info = vec_env.step(action)
                 scores += np.array(reward)
 
                 reset_noise_indices = []
@@ -337,16 +379,17 @@ def train_off_policy(
                 if isinstance(agent, (DDPG, TD3)):
                     action = raw_action
 
-                transition: TensorDictBase = Transition(
-                    obs=obs,
-                    action=action,
-                    reward=reward,
-                    next_obs=next_obs,
-                    done=done,
+                transition = transition_to_tensordict(
+                    Transition(
+                        obs=obs,
+                        action=action,
+                        reward=reward,
+                        next_obs=next_obs,
+                        done=done,
+                    )
                 )
 
-                transition = transition.to_tensordict()
-                transition.batch_size = [num_envs]
+                transition.batch_size = torch.Size([num_envs])
                 if n_step_memory is not None:
                     one_step_transition = n_step_memory.add(transition)
                     if one_step_transition is not None:
@@ -354,12 +397,15 @@ def train_off_policy(
                 else:
                     memory.add(transition)
 
+                # `beta` is annealed only under prioritized replay, which is
+                # RainbowDQN's preserve.
                 if per:
                     fraction = min(
                         ((agent.metrics.steps + idx_step + 1) * num_envs / max_steps),
                         1.0,
                     )
-                    agent.beta += fraction * (1.0 - agent.beta)
+                    n_step_agent = _as_n_step_agent(agent)
+                    n_step_agent.beta += fraction * (1.0 - n_step_agent.beta)
 
                 # Learn according to learning frequency
                 # Handle learn_step > num_envs
@@ -402,7 +448,7 @@ def train_off_policy(
         # Evaluate population
         for agent in population.agents:
             agent.test(
-                env,
+                vec_env,
                 max_steps=eval_steps,
                 loop=eval_loop,
             )
@@ -415,7 +461,9 @@ def train_off_policy(
             logger.info("Target score has been reached. Stopping training.")
             population.finish()
             pbar.close()
-            return population.agents, population.last_fitnesses
+            # Single-agent fitnesses are scalars; `Population` types them as the
+            # wider scalar-or-per-agent-dict row shared with multi-agent training.
+            return population.agents, population.last_scalar_fitnesses
 
         # Tournament selection and population mutation
         if tournament and mutation is not None:
@@ -445,4 +493,4 @@ def train_off_policy(
 
     population.finish()
     pbar.close()
-    return population.agents, population.last_fitnesses
+    return population.agents, population.last_scalar_fitnesses

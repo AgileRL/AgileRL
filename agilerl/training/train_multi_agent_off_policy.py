@@ -1,20 +1,27 @@
 import logging
 import warnings
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
+import torch
 from accelerate import Accelerator
 from pettingzoo import ParallelEnv
 from torch.utils.data import DataLoader
 
 from agilerl.algorithms import MADDPG, MATD3
-from agilerl.components.data import MultiAgentTransition, ReplayDataset
+from agilerl.components.data import (
+    MultiAgentTransition,
+    ReplayDataset,
+    transition_to_tensordict,
+)
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.population import Population
+from agilerl.typing import InitHyperparams
+from agilerl.utils.algo_utils import get_num_envs
 from agilerl.utils.utils import (
     default_progress_bar,
     init_loggers,
@@ -23,11 +30,8 @@ from agilerl.utils.utils import (
 )
 from agilerl.vector import PzDummyVecEnv
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
+from agilerl.vector.pz_vec_env import PettingZooVecEnv
 
-if TYPE_CHECKING:
-    from tensordict import TensorDictBase
-
-InitDictType = dict[str, Any] | None
 PopulationType = list[MADDPG | MATD3]
 
 logger = logging.getLogger(__name__)
@@ -40,8 +44,8 @@ def train_multi_agent_off_policy(
     pop: PopulationType,
     memory: ReplayBuffer,
     sum_scores: bool = True,
-    init_hp: InitDictType = None,
-    mut_p: InitDictType = None,
+    init_hp: InitHyperparams = None,
+    mut_p: InitHyperparams = None,
     max_steps: int = 50000,
     evo_steps: int = 25,
     eval_steps: int | None = None,
@@ -62,7 +66,7 @@ def train_multi_agent_off_policy(
     accelerator: Accelerator | None = None,
     wandb_api_key: str | None = None,
     wandb_kwargs: dict[str, Any] | None = None,
-) -> tuple[PopulationType, list[float]]:
+) -> tuple[PopulationType, list[float] | list[dict[str, float]]]:
     """Run the general off-policy multi-agent RL training; returns trained
     population of agents and their fitnesses.
 
@@ -127,8 +131,9 @@ def train_multi_agent_off_policy(
     :param wandb_kwargs: Additional kwargs to pass to wandb.init()
     :type wandb_kwargs: dict, optional
 
-    :return: Trained population of agents and their fitnesses
-    :rtype: tuple[list[MADDPG | MATD3], list[float]]
+    :return: Trained population of agents and their fitnesses. Fitnesses are per-agent
+        dictionaries when ``sum_scores`` is False.
+    :rtype: tuple[list[MADDPG | MATD3], list[float] | list[dict[str, float]]]
     """
     assert isinstance(
         algo,
@@ -161,11 +166,14 @@ def train_multi_agent_off_policy(
             stacklevel=2,
         )
 
-    # Ensure environment has vectorized interface
-    if not hasattr(env, "num_envs"):
-        env = PzDummyVecEnv(env)
+    # Ensure environment has vectorized interface. `PzDummyVecEnv` subclasses
+    # `PettingZooVecEnv`; a raw `ParallelEnv` is wrapped so the loop always drives
+    # the vectorized API.
+    vec_env: PettingZooVecEnv = (
+        env if isinstance(env, PettingZooVecEnv) else PzDummyVecEnv(env)
+    )
 
-    num_envs = env.num_envs
+    num_envs = get_num_envs(vec_env)
 
     save_path = (
         checkpoint_path.split(".pt")[0]
@@ -225,13 +233,19 @@ def train_multi_agent_off_policy(
             agent.set_training_mode(True)
             agent.init_training_step()
 
-            obs, info = env.reset()
+            # `Sampler.sample` is typed as returning a bare `TensorDict`; the casts
+            # below assert the nested per-agent batch layout MADDPG/MATD3 consume.
+            sample = sampler.sample
+
+            obs, info = vec_env.reset()
             scores = (
                 np.zeros((num_envs, 1))
                 if sum_scores
                 else np.zeros((num_envs, len(agent.agent_ids)))
             )
-            completed_episode_scores: list[float] | list[list[float]] = []
+            # `sum_scores` fixes the shape of every entry for the whole run: a scalar
+            # per episode when summing, otherwise a per-sub-agent row.
+            completed_episode_scores: list[float | list[float]] = []
             steps = 0
 
             for idx_step in range(evo_steps // num_envs):
@@ -239,7 +253,7 @@ def train_multi_agent_off_policy(
                 action, raw_action = agent.get_action(obs=obs, infos=info)
 
                 # Act in environment
-                next_obs, reward, termination, truncation, info = env.step(action)
+                next_obs, reward, termination, truncation, info = vec_env.step(action)
 
                 # Compute score increment (replace NaNs representing inactive agents with 0)
                 agent_rewards = np.column_stack(
@@ -256,15 +270,16 @@ def train_multi_agent_off_policy(
                 steps += num_envs
 
                 # Make a tensorclass out of the transition for easy adding to the replay buffer
-                transition: TensorDictBase = MultiAgentTransition(
-                    obs=obs,
-                    action=raw_action,
-                    reward=reward,
-                    next_obs=next_obs,
-                    done=termination,
+                transition = transition_to_tensordict(
+                    MultiAgentTransition(
+                        obs=obs,
+                        action=raw_action,
+                        reward=reward,
+                        next_obs=next_obs,
+                        done=termination,
+                    )
                 )
-                transition = transition.to_tensordict()
-                transition.batch_size = [num_envs]
+                transition.batch_size = torch.Size([num_envs])
                 memory.add(transition)
 
                 # Learn according to learning frequency
@@ -275,14 +290,14 @@ def train_multi_agent_off_policy(
                         and len(memory) >= agent.batch_size
                         and memory.counter > learning_delay
                     ):
-                        experiences = sampler.sample(agent.batch_size)
+                        experiences = sample(agent.batch_size)
                         agent.learn(experiences)
 
                 elif (
                     len(memory) >= agent.batch_size and memory.counter > learning_delay
                 ):
                     for _ in range(num_envs // agent.learn_step):
-                        experiences = sampler.sample(agent.batch_size)
+                        experiences = sample(agent.batch_size)
                         agent.learn(experiences)
 
                 obs = next_obs
@@ -327,7 +342,7 @@ def train_multi_agent_off_policy(
         # Evaluate population
         for agent in population.agents:
             agent.test(
-                env,
+                vec_env,
                 max_steps=eval_steps,
                 loop=eval_loop,
                 sum_scores=sum_scores,

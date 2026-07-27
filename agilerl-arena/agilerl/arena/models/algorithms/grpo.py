@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+from pydantic import Field, model_validator
+
 from agilerl.arena.models.algo import LLMAlgorithmSpec, register
 from agilerl.arena.models.env import LLMEnvType
 from agilerl.arena.models.networks import CosineLRScheduleConfig, VLLMConfig
-from pydantic import Field, model_validator
 
 
 @register()
@@ -24,10 +25,10 @@ class GRPOSpec(LLMAlgorithmSpec):
     vllm_config: VLLMConfig | None = Field(default=None)
     use_vllm: bool = Field(default=False)
 
-    env_type: ClassVar[LLMEnvType] = "reasoning"
+    env_type: ClassVar[LLMEnvType] = LLMEnvType.REASONING
 
     @model_validator(mode="after")
-    def _validate_vllm_config(self):
+    def _validate_vllm_config(self) -> GRPOSpec:
         if self.use_vllm and not self.vllm_config:
             msg = "VLLM config is not set, please provide a VLLM config in the algorithm section of the manifest."
             raise ValueError(msg)

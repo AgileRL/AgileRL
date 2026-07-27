@@ -27,7 +27,7 @@ from agilerl.utils.utils import (
 if TYPE_CHECKING or HAS_LLM_DEPENDENCIES:
     from agilerl.algorithms import LLMPPO, LLMREINFORCE
     from agilerl.llm_envs import SyncMultiTurnVecEnv
-    from agilerl.protocols import MultiTurnEnv
+    from agilerl.protocols import TokenizedMultiTurnEnv
     from agilerl.rollouts.on_policy import collect_rollouts_llm
     from agilerl.utils.algo_utils import stack_and_pad_experiences
 
@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 def finetune_llm_multiturn(
     pop: "list[SupportedMultiturn]",
     max_turns: int,
-    env_factory: "Callable[[], MultiTurnEnv]",
+    env_factory: "Callable[[], TokenizedMultiTurnEnv]",
     env_config: dict[str, Any] | None = None,
     init_hp: dict[str, Any] | None = None,
     max_steps: int = 32768,
@@ -59,7 +59,7 @@ def finetune_llm_multiturn(
     max_reward: float | None = None,
     verbose: bool = True,
     accelerator: Accelerator | None = None,
-) -> "list[SupportedMultiturn]":
+) -> "tuple[list[SupportedMultiturn], list[float]]":
     """Finetune a population of agents on a multi-turn environment.
 
     Collects token-level episodes via ``SyncMultiTurnVecEnv`` and
@@ -70,8 +70,9 @@ def finetune_llm_multiturn(
     :type pop: PopulationType
     :param max_turns: Maximum interaction turns per episode.
     :type max_turns: int
-    :param env_factory: Factory returning a fresh multi-turn env for each rollout.
-    :type env_factory: Callable[[], MultiTurnEnv]
+    :param env_factory: Factory returning a fresh tokenized multi-turn env for
+        each rollout.
+    :type env_factory: Callable[[], TokenizedMultiTurnEnv]
     :param env_config: Configuration for the environment factory.
     :type env_config: dict[str, Any], optional
     :param init_hp: Initial hyperparameters.
@@ -178,13 +179,14 @@ def finetune_llm_multiturn(
     max_steps_checkpoint_saved = False
     group_size = getattr(pop[0], "group_size", 1)
     rollout_env = SyncMultiTurnVecEnv(env_factory, batch_size, group_size, env_config)
-    # ``agent.test`` expects a single ``MultiTurnEnv``; ``rollout_env`` is a
-    # ``SyncMultiTurnVecEnv`` wrapping N inner envs whose state is mid-rollout
-    # during training. Build a separate test env so evaluation is isolated.
+    # ``agent.test`` expects a single ``TokenizedMultiTurnEnv``; ``rollout_env``
+    # is a ``SyncMultiTurnVecEnv`` wrapping N inner envs whose state is
+    # mid-rollout during training. Build a separate test env so evaluation is
+    # isolated.
     # NOTE: this means one extra env is held for the run's lifetime. Future
     # refactor could share a subset of the rollout envs (e.g. lease one of the
-    # vec env's inner ``MultiTurnEnv`` instances when no trajectory is active)
-    # to avoid the duplication for heavy env setups.
+    # vec env's inner envs when no trajectory is active) to avoid the
+    # duplication for heavy env setups.
     test_env = env_factory(**(env_config or {}))
     group_seed = np.random.randint(0, 1_000_000)
     wall_deadline = (
@@ -226,12 +228,14 @@ def finetune_llm_multiturn(
                 for reward in all_rewards
             ]
             (turn_ids_padded,) = stack_and_pad_experiences(
-                all_turn_ids, padding_values=[-1]
+                all_turn_ids,
+                padding_values=[-1],
             )
-            (rewards_2d,) = stack_and_pad_experiences(
-                normalized_rewards, padding_values=[0.0]
+            (rewards_stacked,) = stack_and_pad_experiences(
+                normalized_rewards,
+                padding_values=[0.0],
             )
-            rewards_2d = rewards_2d.float()
+            rewards_2d = rewards_stacked.float()
 
             episode_scores = (
                 rewards_2d.sum(dim=1) if rewards_2d.dim() > 1 else rewards_2d
@@ -321,6 +325,8 @@ def finetune_llm_multiturn(
 
         # Tournament selection and mutation
         if tournament and mutation is not None:
+            # `_validate_finetune_args` rejects an unset `evo_steps` here.
+            assert evo_steps is not None
             if (i + 1) % evo_steps == 0:
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
@@ -333,7 +339,7 @@ def finetune_llm_multiturn(
                         accelerator=accelerator,
                         language_model=True,
                         elite_path=elite_path,
-                        save_elite=save_elite,
+                        save_elite=bool(save_elite),
                     ),
                 )
                 if accelerator is not None:
@@ -377,4 +383,6 @@ def finetune_llm_multiturn(
 
     population.finish()
     pbar.close()
-    return population.agents, population.last_fitnesses
+    # LLM fitnesses are scalar mean rewards; `Population` types them as the wider
+    # scalar-or-per-agent-dict row shared with multi-agent training.
+    return population.agents, population.last_scalar_fitnesses

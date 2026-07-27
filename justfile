@@ -46,3 +46,15 @@ build-docs:
 #   just test [no-parallel] [cov] [pytest args...]
 test *args:
     bash scripts/run-tests.sh {{args}}
+
+# ---------------------------------------------------------------------------
+# Type checking
+# ---------------------------------------------------------------------------
+
+# Static type checking with ty (config in pyproject.toml [tool.ty]).
+# Runs the pinned ty pre-commit hook so local type-checking stays identical to
+# CI. The hook creates the agilerl/arena dev symlink (agilerl.arena is a
+# namespace portion shipped by agilerl-arena, which ty resolves through the
+# symlink) and checks both trees.
+typecheck:
+    uv run pre-commit run ty --all-files

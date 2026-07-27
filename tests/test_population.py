@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
+from agilerl.metrics import AgentMetrics, MultiAgentMetrics
 from agilerl.population import MetricsReport, Population, PopulationMetrics
 
 
@@ -65,13 +66,18 @@ def _make_mock_agent(
     agent.index = index
     agent.fitness = fitness if fitness is not None else [1.0]
 
-    metrics = MagicMock()
+    # The collectors dispatch on the concrete metrics class, so the double has
+    # to spec the matching one.
+    metrics = MagicMock(
+        spec=MultiAgentMetrics if agent_ids is not None else AgentMetrics,
+    )
     metrics.scores = scores if scores is not None else [10.0]
     metrics.steps = steps
     metrics.steps_per_second = steps_per_second
     metrics.additional_metrics = additional_metrics or []
     metrics.nonscalar_metrics = nonscalar_metrics or []
-    metrics.agent_ids = agent_ids
+    if agent_ids is not None:
+        metrics.agent_ids = agent_ids
     metrics.get_mean = MagicMock(return_value=0.5)
     metrics.get_histogram = MagicMock(return_value=np.array([1.0, 2.0]))
     metrics.clear = MagicMock()
@@ -439,7 +445,7 @@ class TestPopulationInit:
         from agilerl.algorithms.core.base import MultiAgentRLAlgorithm
 
         agent = MagicMock(spec=MultiAgentRLAlgorithm)
-        agent.metrics = MagicMock()
+        agent.metrics = MagicMock(spec=MultiAgentMetrics)
         agent.metrics.additional_metrics = []
         agent.metrics.nonscalar_metrics = []
         agent.metrics.agent_ids = ["a0", "a1"]
@@ -665,6 +671,17 @@ class TestCollectFitnesses:
         assert result[0]["a0"] == pytest.approx(1.0)
         assert result[0]["a1"] == pytest.approx(2.0)
 
+    def test_nested_with_empty_agent_fills_nan_dict(self):
+        """nested pop where one agent has empty fitness -> nan dict keyed by agent_ids."""
+        a_nested = _make_mock_agent(fitness=[{"a0": 1.0, "a1": 2.0}])
+        a_empty = _make_mock_agent(fitness=[])
+        pop = _make_population([a_nested, a_empty], agent_ids=["a0", "a1"])
+        result = pop._collect_fitnesses()
+        assert result[0] == {"a0": 1.0, "a1": 2.0}
+        assert set(result[1].keys()) == {"a0", "a1"}
+        assert np.isnan(result[1]["a0"])
+        assert np.isnan(result[1]["a1"])
+
 
 class TestCollectScores:
     def test_scalar_scores(self):
@@ -700,6 +717,13 @@ class TestCollectScores:
         assert np.isnan(result[1]["a0"])
         assert np.isnan(result[1]["a1"])
 
+    def test_nested_scores_without_agent_ids_raises(self):
+        """raises when nested scores but no agent_ids configured."""
+        a = _make_mock_agent(scores=[[1.0, 2.0]])
+        pop = _make_population([a], agent_ids=None)
+        with pytest.raises(ValueError, match="without configured agent_ids"):
+            pop._collect_scores()
+
 
 class TestCollectAdditionalMetrics:
     def test_single_agent(self):
@@ -712,7 +736,7 @@ class TestCollectAdditionalMetrics:
 
     def test_multi_agent(self):
         """multi-agent path with agent_ids."""
-        a = _make_mock_agent(additional_metrics=["reward"])
+        a = _make_mock_agent(additional_metrics=["reward"], agent_ids=["a0", "a1"])
         a.metrics.get_mean.side_effect = lambda name, agent_id=None: {
             ("reward", "a0"): 1.0,
             ("reward", "a1"): 2.0,
@@ -743,7 +767,7 @@ class TestCollectNonscalarMetrics:
     def test_multi_agent(self):
         """multi-agent nonscalar metrics."""
         arr = np.array([1.0, 2.0])
-        a = _make_mock_agent(nonscalar_metrics=["hist"])
+        a = _make_mock_agent(nonscalar_metrics=["hist"], agent_ids=["a0", "a1"])
         a.metrics.get_histogram.return_value = arr
 
         pop = _make_population(
