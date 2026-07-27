@@ -111,11 +111,16 @@ def refit(profile: ModelProfile) -> ModelProfile:
     )
 
 
-def prediction_errors(profile: ModelProfile) -> dict[str, list[float]]:
-    """Relative error of the calibrated estimator on every stored point,
-    keyed by phase. The fixture regression check and CI drift check both
-    read this.
+def prediction_errors(
+    profile: ModelProfile, *, calibrated: bool = True
+) -> dict[str, list[float]]:
+    """Relative error of the estimator on every stored point, keyed by phase.
+
+    With ``calibrated=False`` the fitted constants are withheld, measuring
+    the analytic core on its own — i.e. the accuracy a model that has never
+    been profiled would get.
     """
+    from agilerl.memory import formulas
     from agilerl.memory.estimator import estimate_generation, estimate_training
 
     if profile.model_spec is None or profile.device is None:
@@ -128,6 +133,13 @@ def prediction_errors(profile: ModelProfile) -> dict[str, list[float]]:
         int(minor or 0),
         name=profile.device.name,
     )
+    applied = profile if calibrated else None
+    measured_residual = profile.sleeping_engine_residual_bytes
+    residual = (
+        measured_residual
+        if calibrated and measured_residual is not None
+        else formulas.SLEEPING_ENGINE_RESIDUAL_BYTES
+    )
 
     errors: dict[str, list[float]] = {"training": [], "generation": []}
     for measured in profile.measured:
@@ -138,7 +150,8 @@ def prediction_errors(profile: ModelProfile) -> dict[str, list[float]]:
                 device,
                 point.training_knobs(),
                 colocated=True,
-                profile=profile,
+                profile=applied,
+                colocated_engine_reservation_bytes=residual,
             )
         else:
             breakdown = estimate_generation(
@@ -146,7 +159,7 @@ def prediction_errors(profile: ModelProfile) -> dict[str, list[float]]:
                 device,
                 point.generation_knobs(),
                 colocated=True,
-                profile=profile,
+                profile=applied,
             )
         errors[measured.phase].append(
             abs(breakdown.total_bytes - measured.device_peak_bytes)
@@ -184,17 +197,19 @@ def main(argv: list[str] | None = None) -> int:
         if not args.check:
             save_profile(updated, fixtures_dir)
         errors = prediction_errors(updated)
+        raw_errors = prediction_errors(updated, calibrated=False)
         print(f"{model_id}")
         for phase in ("training", "generation"):
             phase_errors = errors.get(phase) or [0.0]
+            raw = raw_errors.get(phase) or [0.0]
             calibration = getattr(updated, phase)
             worst = max(worst, max(phase_errors))
             print(
                 f"  {phase:10s} n={calibration.n_points:2d} "
-                f"all-points max={max(phase_errors):.2%} "
-                f"mean={sum(phase_errors) / len(phase_errors):.2%} "
-                f"holdout_max="
-                f"{(calibration.holdout_max_rel_error or 0):.2%}"
+                f"calibrated max={max(phase_errors):.2%} "
+                f"mean={sum(phase_errors) / len(phase_errors):.2%} | "
+                f"holdout={(calibration.holdout_max_rel_error or 0):.2%} | "
+                f"uncalibrated mean={sum(raw) / len(raw):.2%}"
             )
     if worst > ACCURACY_BAND:
         print(f"\nWorst error {worst:.2%} exceeds the {ACCURACY_BAND:.0%} band.")

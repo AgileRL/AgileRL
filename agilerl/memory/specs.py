@@ -17,6 +17,11 @@ from typing_extensions import Self
 GiB = 1024**3
 MiB = 1024**2
 
+#: Fraction of device memory held back from the fit check. Allocator
+#: fragmentation makes runs fail somewhat below nominal capacity, so a
+#: prediction at 100% of total is not a run that fits.
+FRAGMENTATION_HEADROOM_FRACTION = 0.05
+
 #: Bytes per element for the dtypes the estimator reasons about. Sub-byte
 #: quantization formats (nf4) are handled via bytes-per-param factors in
 #: :mod:`agilerl.memory.formulas`, not through this table.
@@ -193,9 +198,18 @@ class DeviceSpec(BaseModel):
 
     @property
     def usable_bytes(self) -> int:
+        """Capacity the predicted peak is checked against.
+
+        The CUDA context is *not* deducted here: it is already a component on
+        the demand side, matching what NVML reports as device-used memory, so
+        carving it out again would double-count it. What this does reserve is
+        a fragmentation band — the caching allocator fails to serve a request
+        somewhat below nominal capacity, so a run predicted at 100% does not
+        actually fit.
+        """
         if self.available_bytes is not None:
             return self.available_bytes
-        return max(self.total_bytes - int(0.75 * GiB), 0)
+        return int(self.total_bytes * (1.0 - FRAGMENTATION_HEADROOM_FRACTION))
 
     @classmethod
     def from_compute_capability(

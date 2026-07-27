@@ -481,9 +481,14 @@ def estimate_run(config: RunConfig, profile: ModelProfile | None = None) -> RunE
     model = config.model
     if profile is not None:
         model = profile.apply_realised_weights(model)
-    engine_reservation = (
-        formulas.SLEEPING_ENGINE_RESIDUAL_BYTES if config.colocated else 0
-    )
+    engine_reservation = 0
+    if config.colocated:
+        measured = profile.sleeping_engine_residual_bytes if profile else None
+        engine_reservation = (
+            measured
+            if measured is not None
+            else formulas.SLEEPING_ENGINE_RESIDUAL_BYTES
+        )
     training = estimate_training(
         model,
         config.train_device,

@@ -20,6 +20,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from agilerl.memory import formulas
 from agilerl.memory.formulas import resolve_max_num_batched_tokens
 from agilerl.memory.specs import (
     GenerationKnobs,
@@ -143,6 +144,24 @@ class ModelProfile(BaseModel):
     #: name. Feeds ``WeightVariant.realised_bytes``.
     realised_weight_bytes: dict[str, int] = Field(default_factory=dict)
     measured: tuple[MeasuredPoint, ...] = ()
+
+    @property
+    def sleeping_engine_residual_bytes(self) -> int | None:
+        """Measured device memory the sleeping engine leaves behind, net of
+        the CUDA context the estimator already counts under overhead.
+
+        ``None`` when the profile predates the measurement, in which case the
+        estimator falls back to its analytic constant.
+        """
+        baselines = sorted(
+            point.sleeping_baseline_bytes
+            for point in self.measured
+            if point.phase == "training" and point.sleeping_baseline_bytes
+        )
+        if not baselines:
+            return None
+        median = baselines[len(baselines) // 2]
+        return max(median - formulas.CUDA_CONTEXT_BYTES, 0)
 
     def apply_realised_weights(self, model: ModelSpec) -> ModelSpec:
         """Return a copy of ``model`` with profiled realised sizes attached to
