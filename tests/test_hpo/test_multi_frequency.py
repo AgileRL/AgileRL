@@ -735,6 +735,24 @@ class TestMigration:
         assert migrants[0].weights == "E0"
         assert open1 in migrated
 
+    def test_migration_decisions_stop_when_external_pool_is_exhausted(self):
+        # Two open slots but a single external candidate: the first slot consumes it,
+        # then the second finds the pool exhausted and there is no migration
+        strategy = make_strategy(n_subpop=2, population_size=8, ratios=[1, 2])
+        elite = FakeAgent(100, 0, fitness=10.0)
+        open0 = FakeAgent(101, 0, fitness=1.0)
+        open1 = FakeAgent(102, 0, fitness=1.0)
+        external = FakeAgent(200, 1, fitness=5.0)
+
+        decisions = strategy._migration_decisions(
+            subpop=0,
+            winners=[elite],
+            open_for_migration=[open0, open1],
+            external_pool=[external],
+        )
+
+        assert [open_agent for open_agent, *_ in decisions] == [open0]
+
     def test_migration_holds_external_pointer_on_skip(self):
         # A skip (the open agent is already at least as good) must not advance the pointer,
         # so the next open slot is offered the same candidate the skip passed over.

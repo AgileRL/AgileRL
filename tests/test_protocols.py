@@ -679,3 +679,10 @@ class TestSelectionStrategyProtocol:
         assert len(new_population) == strategy.population_size
         assert indices is None or all(isinstance(index, int) for index in indices)
         assert indices is None or set(indices) <= {a.index for a in new_population}
+
+    def test_protocol_default_select_body_executes(self):
+        # Invoking the protocol's own select method for full coverage
+        strategy = _SELECTION_STRATEGIES["tournament"]()
+        population = self._population()
+
+        assert SelectionStrategyProtocol.select(strategy, population) is None

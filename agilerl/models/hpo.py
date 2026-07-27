@@ -240,9 +240,6 @@ def resolve_and_validate_multi_frequency_population(
             f"subpopulations of 3 agents), got {population_size}."
         )
         raise ValueError(msg)
-    if spec.n_subpopulations < 2:
-        msg = f"n_subpopulations must be >= 2, got {spec.n_subpopulations}."
-        raise ValueError(msg)
     if population_size % spec.n_subpopulations != 0:
         msg = (
             f"population_size ({population_size}) must be divisible by "
