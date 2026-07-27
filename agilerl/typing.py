@@ -1,4 +1,18 @@
-"""Shared type aliases, TypedDicts, and batch dataclasses used across AgileRL."""
+"""Shared type aliases, TypedDicts, and batch dataclasses used across AgileRL.
+
+Naming conventions (keep new aliases consistent with these):
+
+* Suffix by kind: a ``*Type`` suffix marks a **type alias** (a name for a union
+  or concrete type set, e.g. ``DeviceType``, ``ObservationType``, ``BufferType``);
+  a bare ``*T`` suffix is reserved for ``TypeVar`` generic parameters (e.g.
+  ``T``, ``ExperiencesT``, ``AgentT``) and is never used for a plain alias.
+* Plain structural aliases may drop the suffix (``ArrayDict``, ``TensorTuple``,
+  ``TensorMapping``) where the shape already reads as a type.
+* Multi-agent aliases use the ``MultiAgent*`` prefix (not ``MARL*``).
+* Observation aliases use the ``*ObsType`` suffix; the two hubs
+  ``ObservationType`` / ``MultiAgentObservationType`` keep the fuller word.
+* Function / tuple return aliases use the ``*Return`` suffix (not ``*ReturnType``).
+"""
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from enum import Enum

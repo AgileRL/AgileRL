@@ -20,16 +20,17 @@ from agilerl.utils.llm_utils import max_prompt_tokens_for_sliding_window
 if TYPE_CHECKING:
     from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
-    # decode is overloaded (ids -> str, batched-ids -> list[str]); this wrapper
-    # decodes a single sequence, so it's typed to return str.
-    def _decode_str(
-        tokenizer: PreTrainedTokenizerBase, ids: list[int], **kwargs: object
-    ) -> str: ...
 
-else:
-
-    def _decode_str(tokenizer: object, ids: list[int], **kwargs: object) -> str:
-        return tokenizer.decode(ids, **kwargs)
+def _decode_str(
+    tokenizer: PreTrainedTokenizerBase,
+    ids: list[int],
+    *,
+    skip_special_tokens: bool = False,
+) -> str:
+    """Decode a single token sequence to text."""
+    text = tokenizer.decode(ids, skip_special_tokens=skip_special_tokens)
+    assert isinstance(text, str), f"Expected decoded text, got {type(text).__name__}."
+    return text
 
 
 class TokenObservationWrapper:
