@@ -46,9 +46,9 @@ def to_tensordict(
             assert isinstance(value, (torch.Tensor, np.ndarray, Number)), (
                 "Expected all values of the dict to be torch.Tensor or np.ndarray."
             )
-            td[key] = torch.as_tensor(value)
+            td[key] = to_torch_tensor(value, dtype)
 
-        return td.to(dtype=dtype)
+        return td
 
     msg = f"Cannot convert data of type {type(data)} to a TensorDict."
     raise TypeError(msg)
