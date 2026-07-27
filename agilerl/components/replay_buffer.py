@@ -1,5 +1,4 @@
 from collections import deque
-from typing import TYPE_CHECKING
 
 import numpy as np
 import numpy.typing as npt
@@ -7,17 +6,12 @@ import torch
 from tensordict import TensorDict
 
 from agilerl.components.segment_tree import MinSegmentTree, SumSegmentTree
+from agilerl.utils.algo_utils import narrow_tensor
 
-# Typed to return ``torch.Tensor`` so callers don't narrow the widened
-# ``TensorDict.__getitem__`` return; the n-step keys always hold tensors.
-if TYPE_CHECKING:
 
-    def _read_tensor(transition: TensorDict, key: str) -> torch.Tensor: ...
-
-else:
-
-    def _read_tensor(transition: TensorDict, key: str) -> torch.Tensor:
-        return transition[key]
+def _read_tensor(transition: TensorDict, key: str) -> torch.Tensor:
+    """Read ``key`` from ``transition``; the n-step keys always hold tensors."""
+    return narrow_tensor(transition[key])
 
 
 class ReplayBuffer:

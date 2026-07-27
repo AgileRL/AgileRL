@@ -8,7 +8,7 @@ import torch
 from gymnasium import spaces
 from tqdm import trange
 
-from agilerl.components.data import Transition
+from agilerl.components.data import Transition, transition_to_tensordict
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.rollouts import collect_rollouts
 
@@ -1152,15 +1152,17 @@ def check_q_learning_with_probe_env(
             state = np.expand_dims(state, 0)
         action = agent.get_action(state, epsilon=1)
         next_state, reward, done, _, _ = env.step(action)
-        transition = Transition(
-            obs=state,
-            action=action,
-            reward=reward,
-            next_obs=next_state,
-            done=done,
-        ).to_tensordict()
+        transition = transition_to_tensordict(
+            Transition(
+                obs=state,
+                action=action,
+                reward=reward,
+                next_obs=next_state,
+                done=done,
+            )
+        )
         transition = transition.unsqueeze(0)
-        transition.batch_size = [1]
+        transition.batch_size = torch.Size([1])
         memory.add(transition)
         state = next_state
         if done:
@@ -1200,15 +1202,17 @@ def check_policy_q_learning_with_probe_env(
         ) + agent.action_space.low
         action = action[0]
         next_state, reward, done, _, _ = env.step(action)
-        transition = Transition(
-            obs=state,
-            action=action,
-            reward=reward,
-            next_obs=next_state,
-            done=done,
-        ).to_tensordict()
+        transition = transition_to_tensordict(
+            Transition(
+                obs=state,
+                action=action,
+                reward=reward,
+                next_obs=next_state,
+                done=done,
+            )
+        )
         transition = transition.unsqueeze(0)
-        transition.batch_size = [1]
+        transition.batch_size = torch.Size([1])
         memory.add(transition)
         state = next_state
         if done:

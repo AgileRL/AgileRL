@@ -4,11 +4,16 @@ from datetime import datetime
 from typing import Any
 
 import gymnasium as gym
+import torch
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
 
 from agilerl.algorithms import CQN
-from agilerl.components.data import ReplayDataset, Transition
+from agilerl.components.data import (
+    ReplayDataset,
+    Transition,
+    transition_to_tensordict,
+)
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
@@ -187,7 +192,7 @@ def train_offline(
             done = bool(dataset["terminals"][i])
 
             # Add transition to memory
-            transition = (
+            transition = transition_to_tensordict(
                 Transition(
                     obs=obs,
                     action=action,
@@ -195,10 +200,8 @@ def train_offline(
                     next_obs=next_obs,
                     done=done,
                 )
-                .to_tensordict()
-                .unsqueeze(0)
-            )
-            transition.batch_size = [1]
+            ).unsqueeze(0)
+            transition.batch_size = torch.Size([1])
             memory.add(transition)
 
         if accelerator is not None:

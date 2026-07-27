@@ -1,5 +1,5 @@
 import random
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -8,11 +8,8 @@ from gymnasium import spaces
 from torch import nn
 from tqdm import trange
 
-from agilerl.components.data import MultiAgentTransition
+from agilerl.components.data import MultiAgentTransition, transition_to_tensordict
 from agilerl.components.replay_buffer import ReplayBuffer
-
-if TYPE_CHECKING:
-    from tensordict import TensorDictBase
 
 
 class ConstantRewardEnv:
@@ -1898,15 +1895,16 @@ def check_policy_q_learning_with_probe_env(
         mem_next_state = {
             agent_id: np.expand_dims(ns, 0) for agent_id, ns in next_state.items()
         }
-        transition: TensorDictBase = MultiAgentTransition(
-            obs=state,
-            action=raw_action,
-            reward=reward,
-            next_obs=mem_next_state,
-            done=done,
+        transition = transition_to_tensordict(
+            MultiAgentTransition(
+                obs=state,
+                action=raw_action,
+                reward=reward,
+                next_obs=mem_next_state,
+                done=done,
+            )
         )
-        transition = transition.to_tensordict()
-        transition.batch_size = [1]
+        transition.batch_size = torch.Size([1])
         memory.add(transition)
         state = next_state
         if done[agent.agent_ids[0]]:

@@ -1,15 +1,20 @@
 import logging
 import warnings
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
+import torch
 from accelerate import Accelerator
 from pettingzoo import ParallelEnv
 from torch.utils.data import DataLoader
 
 from agilerl.algorithms import MADDPG, MATD3
-from agilerl.components.data import MultiAgentTransition, ReplayDataset
+from agilerl.components.data import (
+    MultiAgentTransition,
+    ReplayDataset,
+    transition_to_tensordict,
+)
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
@@ -26,10 +31,6 @@ from agilerl.utils.utils import (
 from agilerl.vector import PzDummyVecEnv
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 from agilerl.vector.pz_vec_env import PettingZooVecEnv
-
-if TYPE_CHECKING:
-    from tensordict import TensorDictBase
-
 
 PopulationType = list[MADDPG | MATD3]
 
@@ -269,15 +270,16 @@ def train_multi_agent_off_policy(
                 steps += num_envs
 
                 # Make a tensorclass out of the transition for easy adding to the replay buffer
-                transition: TensorDictBase = MultiAgentTransition(
-                    obs=obs,
-                    action=raw_action,
-                    reward=reward,
-                    next_obs=next_obs,
-                    done=termination,
+                transition = transition_to_tensordict(
+                    MultiAgentTransition(
+                        obs=obs,
+                        action=raw_action,
+                        reward=reward,
+                        next_obs=next_obs,
+                        done=termination,
+                    )
                 )
-                transition = transition.to_tensordict()
-                transition.batch_size = [num_envs]
+                transition.batch_size = torch.Size([num_envs])
                 memory.add(transition)
 
                 # Learn according to learning frequency

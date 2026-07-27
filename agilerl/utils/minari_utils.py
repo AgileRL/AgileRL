@@ -1,5 +1,4 @@
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import h5py
 import minari
@@ -9,11 +8,8 @@ from minari.storage.datasets_root_dir import get_dataset_path
 from minari.storage.hosting import download_dataset
 from minari.storage.local import load_dataset
 
-from agilerl.components.data import Transition
+from agilerl.components.data import Transition, transition_to_tensordict
 from agilerl.components.replay_buffer import ReplayBuffer
-
-if TYPE_CHECKING:
-    from tensordict import TensorDictBase
 
 
 class MinariDatasetNotFoundError(KeyError):
@@ -116,17 +112,19 @@ def minari_to_agile_buffer(
             terminal = episode.terminations[num_steps]
 
             # Create a TensorDict for the transition
-            transition: TensorDictBase = Transition(
-                obs=torch.tensor(observation),
-                action=torch.tensor(action),
-                reward=torch.tensor(reward),
-                next_obs=torch.tensor(next_observation),
-                done=torch.tensor(terminal),
-            ).to_tensordict()
+            transition = transition_to_tensordict(
+                Transition(
+                    obs=torch.tensor(observation),
+                    action=torch.tensor(action),
+                    reward=torch.tensor(reward),
+                    next_obs=torch.tensor(next_observation),
+                    done=torch.tensor(terminal),
+                )
+            )
 
             # Add the transition to the memory
             transition = transition.unsqueeze(0)
-            transition.batch_size = [1]
+            transition.batch_size = torch.Size([1])
             memory.add(transition)
 
     return memory
