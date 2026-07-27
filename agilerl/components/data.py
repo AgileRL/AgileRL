@@ -11,6 +11,7 @@ from torch.utils.data import IterableDataset
 
 from agilerl.components import ReplayBuffer
 from agilerl.typing import ArrayOrTensor, ObservationType
+from agilerl.utils.algo_utils import is_str_keyed_dict
 
 
 def to_tensordict(
@@ -39,12 +40,15 @@ def to_tensordict(
 
         return TensorDict(new_data).to(dtype=dtype)
 
-    if isinstance(data, dict):
-        assert all(
-            isinstance(el, (torch.Tensor, np.ndarray, Number)) for el in data.values()
-        ), "Expected all values of the dict to be torch.Tensor or np.ndarray."
+    if is_str_keyed_dict(data):
+        td = TensorDict()
+        for key, value in data.items():
+            assert isinstance(value, (torch.Tensor, np.ndarray, Number)), (
+                "Expected all values of the dict to be torch.Tensor or np.ndarray."
+            )
+            td[key] = torch.as_tensor(value)
 
-        return TensorDict(data).to(dtype=dtype)
+        return td.to(dtype=dtype)
 
     msg = f"Cannot convert data of type {type(data)} to a TensorDict."
     raise TypeError(msg)
