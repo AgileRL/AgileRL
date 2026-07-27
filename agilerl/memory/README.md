@@ -202,6 +202,11 @@ depends on configurations that were never measured:
 | model | device | training | generation |
 |---|---|---|---|
 | Qwen2.5-0.5B-Instruct | L4 | 6.6% | 0.5% |
+| Qwen2.5-0.5B-Instruct | A100 | 6.9% | 0.4% |
+| Qwen2.5-1.5B-Instruct | L4 | 2.8% | 0.9% |
+| Qwen2.5-1.5B-Instruct | A100 | 2.7% | 0.4% |
+| Qwen2.5-3B-Instruct | A100 | 0.7% | 1.0% |
+| Qwen2.5-7B-Instruct | A100 | 4.3% | 7.4% |
 | SmolLM2-1.7B-Instruct | L4 | 3.3% | 1.0% |
 
 Holdouts span sequence length, micro-batch, group size, LoRA rank *and*
@@ -214,13 +219,52 @@ is convex in batch x sequence, so the extreme corners cannot all be fitted at
 once; `WORST_POINT_BAND` exists as a drift alarm rather than an accuracy
 claim.
 
+## What the totals do not tell you
+
+The sweep compares one predicted peak against one measured peak, so it
+validates sums, not splits — the bars could each be wrong and cancel. An
+allocator snapshot (`--snapshot`, then
+`python -m agilerl.memory.profiling.snapshot`) attributes the *peak instant*
+per call site. On Qwen2.5-0.5B at seq=4096, micro-batch 8, group 16:
+
+| component | predicted | observed |
+|---|---|---|
+| base weights | 0.92 | 0.95 |
+| gradients + optimizer | 0.05 | 0.03 |
+| activations | 2.55 | 3.49 |
+| adapters (LoRA-path buffers) | 0.03 | 0.59 |
+| logit workspace | 0.50 | 0.00 |
+
+Weights and optimizer state are essentially exact, which localises the
+unexplained superlinear residual at large corners to the activation and
+LoRA-forward path rather than leaving it as a mystery in the intercept. It
+also exposes an over-count: the chunked logit tiles are not live at the peak
+instant, so charging two full tiles adds ~0.5 GiB the run never pays at the
+same time as the activation peak.
+
+Two things make the snapshot awkward, both worth knowing before reaching
+for it: recording must be scoped to the training window (otherwise the peak
+belongs to vLLM's start-up KV allocation), and it must be read from the
+event trace rather than the final block list (by the time `learn` returns,
+every activation has been freed).
+
 ## Status
 
-Calculation core, advice, preflight CLI, profiling harness and offline refit
-are implemented and tested (41 CPU-only tests, including a fixture
-regression check that replays every stored measurement). Two models are
-calibrated on an L4, with more models and a second device (A100) in
-progress — the pair of devices is what will answer how far constants carry
-across hardware, which is currently assumed rather than measured. Remaining:
-finish the curated set (nf4 and vision-stripped variants), and the two-bar
-Arena widget on this same core.
+Calculation core, advice, preflight CLI, profiling harness, offline refit
+and snapshot attribution are implemented and tested (58 CPU-only tests,
+including a fixture regression check that replays every stored
+measurement). Seven (model, device) calibrations span 0.5B to 7B across an
+L4 and an A100.
+
+Known gaps, in rough priority order:
+
+- The logit workspace is over-counted by ~0.5 GiB (see above); correcting it
+  needs a re-fit, which is free thanks to the stored measurements.
+- The activation model under-predicts at large `micro_batch x seq_len`. The
+  snapshot says where it lives; the shape of the term is still open.
+- MoE is modelled (weights and optimizer on total experts, activations on
+  active) and the parameter counts check out against published totals, but
+  no MoE model has been measured end to end yet.
+- Quantized (nf4) and vision-stripped variants are supported by the schema
+  and unmeasured in practice.
+- The Arena widget itself, on this same core.
