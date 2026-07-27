@@ -253,6 +253,42 @@ def resolve_max_num_batched_tokens(
     )
 
 
+def resolve_attn_implementation(
+    requested: str = "auto", flash_attn_installed: bool = False
+) -> str:
+    """Mirror of the framework's backend resolution.
+
+    ``auto`` picks FlashAttention-2 only when the ``flash_attn`` package is
+    importable. It is not part of the ``llm`` extra, so a stock install
+    resolves to SDPA — which matters, because SDPA is the one backend that
+    can still materialise the score matrix.
+    """
+    if requested != "auto":
+        return requested
+    return "flash_attention_2" if flash_attn_installed else "sdpa"
+
+
+def materializes_attention_scores(attn_implementation: str, arch: ModelArch) -> bool:
+    """Whether the backend builds a ``rows x heads x S x S`` score matrix.
+
+    The trap is SDPA: its flash kernel is only chosen when no explicit
+    attention mask is passed. Sliding-window models pass one, so SDPA falls
+    back to the math backend and materialises the full S x S scores and bias
+    — the difference between O(S) and O(S^2) activation memory, and the
+    reason long-context runs on windowed models OOM where dense ones do not.
+
+    FlashAttention-2 and PyTorch's FlexAttention both stay O(S): FlexAttention
+    expresses the window as block sparsity instead of a dense mask, which is
+    why it is the recommended backend for windowed models without the
+    ``flash_attn`` package.
+    """
+    if attn_implementation == "eager":
+        return True
+    if attn_implementation in ("flash_attention_2", "flex_attention"):
+        return False
+    return arch.sliding_window is not None
+
+
 def activation_hidden_bytes(
     arch: ModelArch, rows: int, seq_len: int, act_bytes: float
 ) -> int:

@@ -34,6 +34,9 @@ DTYPE_BYTES: dict[str, float] = {
 }
 
 WeightDtype = Literal["fp32", "bf16", "fp16"]
+AttnImplementation = Literal[
+    "auto", "eager", "sdpa", "flash_attention_2", "flex_attention"
+]
 KVCacheDtype = Literal["auto", "fp8", "int8"]
 QuantizationMethod = Literal["none", "nf4", "int8", "awq", "gptq"]
 Algorithm = Literal["grpo", "gspo", "cispo", "ppo", "reinforce", "dpo", "sft"]
@@ -212,9 +215,16 @@ class DeviceSpec(BaseModel):
     #: fp8 KV cache / fp8 weights need compute capability >= 8.9 (Ada/Hopper).
     supports_fp8: bool = True
     supports_bf16: bool = True
-    #: Without FlashAttention/SDPA-flash the attention forward materialises a
-    #: B*H*S*S score matrix — a different activation formula entirely.
+    #: Whether the device can run flash-style attention kernels at all
+    #: (Ampere and later). Necessary but not sufficient — which backend is
+    #: actually used also depends on the installed packages and the model's
+    #: masking, see :func:`agilerl.memory.formulas.resolve_attn_implementation`.
     has_flash_attention: bool = True
+    #: Whether the ``flash_attn`` package is importable in the target
+    #: environment. Defaults to ``False`` because it is *not* part of the
+    #: ``llm`` extra, so a stock install resolves ``auto`` to SDPA rather
+    #: than FlashAttention-2.
+    flash_attn_installed: bool = False
 
     @property
     def usable_bytes(self) -> int:
@@ -286,6 +296,12 @@ class TrainingKnobs(BaseModel):
     #: Trainer-side base quantization (QLoRA). ``lm_head`` stays unquantized
     #: and norms + lm_head are upcast to fp32 by k-bit preparation.
     quantization: Literal["none", "nf4", "int8"] = "none"
+    #: Attention backend. ``auto`` mirrors the framework's resolution:
+    #: FlashAttention-2 when the ``flash_attn`` package is importable,
+    #: otherwise SDPA. Left explicit because the choice decides whether the
+    #: S x S score matrix is materialised, which dominates long-context
+    #: activation memory.
+    attn_implementation: AttnImplementation = "auto"
     gradient_checkpointing: bool = True
     #: Save backward-saved activations to pinned host RAM instead of GPU.
     activation_offload: bool = False

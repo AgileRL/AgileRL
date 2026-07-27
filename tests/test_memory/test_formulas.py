@@ -172,3 +172,24 @@ def test_sliding_window_pattern_integer_form():
     }
     arch = ModelArch.from_hf_config(base)
     assert arch.sliding_window_layer_fraction == pytest.approx(5 / 6)
+
+
+def test_sdpa_materializes_scores_only_for_windowed_models():
+    # The framework resolves "auto" to SDPA unless flash_attn is installed,
+    # and SDPA only falls back to the math backend (materialising S x S) when
+    # the model passes an explicit mask — which sliding-window models do.
+    dense = QWEN_05B
+    windowed = QWEN_05B.model_copy(update={"sliding_window": 1024})
+
+    assert formulas.resolve_attn_implementation("auto", False) == "sdpa"
+    assert formulas.resolve_attn_implementation("auto", True) == "flash_attention_2"
+    assert formulas.resolve_attn_implementation("flex_attention", True) == (
+        "flex_attention"
+    )
+
+    assert not formulas.materializes_attention_scores("sdpa", dense)
+    assert formulas.materializes_attention_scores("sdpa", windowed)
+    assert formulas.materializes_attention_scores("eager", dense)
+    # Both O(S) paths keep windowed models off the quadratic term.
+    assert not formulas.materializes_attention_scores("flash_attention_2", windowed)
+    assert not formulas.materializes_attention_scores("flex_attention", windowed)

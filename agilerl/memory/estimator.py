@@ -135,6 +135,23 @@ def estimate_training(
     s = knobs.max_model_len
     warnings: list[str] = []
 
+    attn_impl = formulas.resolve_attn_implementation(
+        knobs.attn_implementation, device.flash_attn_installed
+    )
+    # Whether attention builds an S x S matrix depends on the backend and the
+    # model's masking, not on what the device is capable of.
+    flash_like = (
+        device.has_flash_attention
+        and not formulas.materializes_attention_scores(attn_impl, arch)
+    )
+    if not flash_like and arch.sliding_window is not None and attn_impl == "sdpa":
+        warnings.append(
+            "SDPA materialises the full S x S scores for sliding-window "
+            "models because they pass an explicit mask. Install flash_attn "
+            "or set attn_implementation='flex_attention' to keep attention "
+            "O(S) at long context."
+        )
+
     variant = model.variant(trainer_variant)
     kbit = knobs.quantization != "none"
     base = formulas.weight_bytes(
@@ -164,12 +181,12 @@ def estimate_training(
     if knobs.gradient_checkpointing:
         saved = formulas.activation_hidden_bytes(arch, grad_rows, s, act_bytes)
         recompute = formulas.block_recompute_bytes(
-            arch, grad_rows, s, act_bytes, device.has_flash_attention
+            arch, grad_rows, s, act_bytes, flash_like
         )
     else:
         # Without checkpointing every block's intermediates are saved.
         recompute = formulas.block_recompute_bytes(
-            arch, grad_rows, s, act_bytes, device.has_flash_attention
+            arch, grad_rows, s, act_bytes, flash_like
         )
         saved = recompute * arch.n_layers
         warnings.append(
@@ -186,7 +203,7 @@ def estimate_training(
     # by the same per-GPU row cap as the gradient pass.
     nograd_rows = knobs.grad_rows * knobs.n_adapter_rows
     nograd_pass = formulas.nograd_forward_bytes(
-        arch, nograd_rows, s, act_bytes, device.has_flash_attention
+        arch, nograd_rows, s, act_bytes, flash_like
     )
 
     activations = max(grad_pass, nograd_pass)
