@@ -1,7 +1,7 @@
 import logging
 import warnings
 from datetime import datetime
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, TypeGuard
 
 import gymnasium as gym
 import numpy as np
@@ -43,7 +43,6 @@ PopulationType = list[SupportedOffPolicy]
 logger = logging.getLogger(__name__)
 
 
-@runtime_checkable
 class NStepAgent(Protocol):
     """A RainbowDQN-style agent that consumes n-step / prioritized batches.
 
@@ -51,9 +50,6 @@ class NStepAgent(Protocol):
     ``learn`` accepts ``n_experiences``/``per`` and returns the indices and
     priorities to write back. Reading the population's union through this
     interface resolves the prioritized/n-step path.
-
-    Runtime-checkable so the narrowing below tests the same structural
-    interface the annotation promises, rather than a nominal class.
     """
 
     batch_size: int
@@ -67,9 +63,21 @@ class NStepAgent(Protocol):
     ) -> tuple[float, torch.Tensor | None, npt.NDArray | None]: ...
 
 
+def _is_n_step_agent(agent: SupportedOffPolicy) -> TypeGuard[NStepAgent]:
+    """Whether *agent* exposes the n-step / prioritized interface.
+
+    Tests for the annealed ``beta`` that distinguishes RainbowDQN rather than
+    making ``NStepAgent`` ``runtime_checkable`` and using ``isinstance``: from
+    Python 3.12 that check reads attributes statically, so it does not see the
+    ones an agent wrapper forwards through ``__getattr__`` and rejects wrapped
+    agents.
+    """
+    return hasattr(agent, "beta")
+
+
 def _as_n_step_agent(agent: SupportedOffPolicy) -> NStepAgent:
     """Read ``agent`` through the n-step / prioritized interface."""
-    assert isinstance(agent, NStepAgent), (
+    assert _is_n_step_agent(agent), (
         f"Prioritized replay needs an n-step agent, got {type(agent).__name__}."
     )
     return agent
