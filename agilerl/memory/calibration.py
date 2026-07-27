@@ -154,12 +154,12 @@ class ModelProfile(BaseModel):
     def measured_on(self, device: DeviceSpec) -> bool:
         """Whether this profile was measured on the given device.
 
-        Training constants do not survive a device change — measured on a
-        Qwen2.5-0.5B pair, applying the L4 fit to A100 measurements scored
-        11.6% mean error against 10.7% for no fit at all, i.e. the foreign
-        fit was worse than none. Generation constants do carry (1.5% vs
-        1.8%), because the analytic engine model now does nearly all the
-        work and the correction it leaves is small.
+        Cross-device transfer was measured on two L4/A100 model pairs and is
+        unreliable in both directions: on Qwen2.5-1.5B the foreign training
+        fit roughly halved the error (5.4% vs 10.4% unfitted), while on
+        Qwen2.5-0.5B it was slightly worse than none (11.6% vs 10.7%).
+        Applying it is a net win on average, so the estimator does — but
+        reports it as ``other_device`` rather than as a calibrated number.
         """
         if self.device is None or device.name is None:
             return True

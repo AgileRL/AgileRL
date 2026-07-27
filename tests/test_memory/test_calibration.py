@@ -106,9 +106,10 @@ def test_corner_plan_covers_all_corners():
         assert 512 < point.seq_len < 4096 or 1 < point.micro_batch < 8
 
 
-def test_training_fit_is_not_applied_across_devices():
-    # Measured: a foreign-device training fit scores worse than no fit at
-    # all, so it must not be applied. Generation constants do transfer.
+def test_cross_device_fit_is_applied_but_flagged():
+    # Measured on two model pairs, a foreign-device fit helped one
+    # substantially and hurt the other slightly, so it is applied for its
+    # net benefit but never presented as a same-device number.
     model = ModelSpec(model_id="m", arch=QWEN_05B)
     profiled_on = DeviceSpec(total_bytes=24 * GiB, name="NVIDIA L4")
     other = DeviceSpec(total_bytes=40 * GiB, name="NVIDIA A100-SXM4-40GB")
@@ -124,22 +125,24 @@ def test_training_fit_is_not_applied_across_devices():
     )
 
     same = estimate_training(model, profiled_on, TrainingKnobs(), profile=profile)
+    assert same.calibration_source == "same_device"
     assert same.calibrated
+
     foreign = estimate_training(model, other, TrainingKnobs(), profile=profile)
+    assert foreign.calibration_source == "other_device"
     assert not foreign.calibrated
-    assert any("do not transfer" in w for w in foreign.warnings)
+    assert any("wider band" in w for w in foreign.warnings)
 
-    # The foreign estimate must equal the uncalibrated one, not the L4 fit.
+    # The fit IS applied, so the number differs from the bare analytic core.
     uncalibrated = estimate_training(model, other, TrainingKnobs())
-    assert foreign.total_bytes == uncalibrated.total_bytes
+    assert uncalibrated.calibration_source == "none"
+    assert foreign.total_bytes > uncalibrated.total_bytes
 
-    # Generation still applies its fit, with a widened-band warning.
     gen = estimate_generation(model, other, GenerationKnobs(), profile=profile)
-    assert gen.calibrated
-    assert any("wider band" in w for w in gen.warnings)
+    assert gen.calibration_source == "other_device"
 
 
-def test_profile_without_device_applies_anywhere():
+def test_profile_without_device_counts_as_same_device():
     model = ModelSpec(model_id="m", arch=QWEN_05B)
     profile = ModelProfile(
         model_id="m",

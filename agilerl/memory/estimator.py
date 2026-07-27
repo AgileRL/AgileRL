@@ -32,6 +32,7 @@ from agilerl.memory.specs import (
 )
 
 PhaseName = Literal["training", "generation"]
+CalibrationSource = Literal["same_device", "other_device", "none"]
 
 
 class MemoryComponent(BaseModel):
@@ -56,8 +57,16 @@ class PhaseBreakdown(BaseModel):
     components: tuple[MemoryComponent, ...]
     device_total_bytes: int
     device_usable_bytes: int
-    calibrated: bool = False
+    #: Where the fitted constants came from. ``same_device`` is the accuracy
+    #: claim; ``other_device`` means they were measured on different hardware
+    #: and carry a wider, less predictable band; ``none`` is the bare
+    #: analytic core.
+    calibration_source: CalibrationSource = "none"
     warnings: tuple[str, ...] = ()
+
+    @property
+    def calibrated(self) -> bool:
+        return self.calibration_source == "same_device"
 
     @property
     def total_bytes(self) -> int:
@@ -191,21 +200,20 @@ def estimate_training(
     rollout = 6 * knobs.batch_size * knobs.group_size * s * 4
 
     correction = 0.0
-    calibrated = False
-    if profile is not None:
-        if profile.measured_on(device):
-            basis = training_basis(model, knobs)
-            correction = profile.training.fit.correction_bytes(basis)
-            calibrated = profile.training.n_points > 0
-        else:
-            # Deliberately unused: a training fit from another device is
-            # measurably worse than no fit at all, so the analytic core is
-            # the better answer here.
+    source: CalibrationSource = "none"
+    if profile is not None and profile.training.n_points > 0:
+        basis = training_basis(model, knobs)
+        correction = profile.training.fit.correction_bytes(basis)
+        same_device = profile.measured_on(device)
+        source = "same_device" if same_device else "other_device"
+        if not same_device:
             warnings.append(
-                f"Profile was measured on {profile.device.name if profile.device else 'another device'}, "
-                f"not {device.name or 'this device'}: training constants do "
-                "not transfer across devices, so they are not applied. "
-                "Profile this model on this device for a calibrated number."
+                f"Constants were measured on "
+                f"{profile.device.name if profile.device else 'another device'}, "
+                f"not {device.name or 'this device'}. Cross-device transfer is "
+                "unreliable in both directions — measured on two models it "
+                "roughly halved the error on one and slightly worsened it on "
+                "the other — so treat this as an estimate with a wider band."
             )
 
     engine_residual = float(colocated_engine_reservation_bytes) if colocated else 0.0
@@ -296,7 +304,7 @@ def estimate_training(
         ),
     )
 
-    if not calibrated:
+    if source == "none":
         warnings.append(
             "Uncalibrated estimate: no profiled constants for this "
             "(model, device); expect a wider error band."
@@ -307,7 +315,7 @@ def estimate_training(
         components=components,
         device_total_bytes=device.total_bytes,
         device_usable_bytes=device.usable_bytes,
-        calibrated=calibrated,
+        calibration_source=source,
         warnings=tuple(warnings),
     )
 
@@ -423,20 +431,18 @@ def estimate_generation(
         )
 
     correction = 0.0
-    calibrated = False
-    if profile is not None:
-        # Unlike training, generation constants do carry across devices: the
-        # analytic engine model does nearly all the work, so the correction
-        # left over is small and largely device-independent.
+    source: CalibrationSource = "none"
+    if profile is not None and profile.generation.n_points > 0:
         basis = generation_basis(model, knobs)
         correction = profile.generation.fit.correction_bytes(basis)
-        calibrated = profile.generation.n_points > 0
-        if not profile.measured_on(device):
+        same_device = profile.measured_on(device)
+        source = "same_device" if same_device else "other_device"
+        if not same_device:
             warnings.append(
-                f"Profile was measured on "
-                f"{profile.device.name if profile.device else 'another device'}: "
-                "generation constants transfer reasonably, but expect a "
-                "wider band than a same-device profile."
+                f"Constants were measured on "
+                f"{profile.device.name if profile.device else 'another device'}, "
+                f"not {device.name or 'this device'}: expect a wider band "
+                "than a same-device profile."
             )
 
     components = (
@@ -504,7 +510,7 @@ def estimate_generation(
         ),
     )
 
-    if not calibrated:
+    if source == "none":
         warnings.append(
             "Uncalibrated estimate: no profiled constants for this "
             "(model, device); expect a wider error band."
@@ -515,7 +521,7 @@ def estimate_generation(
         components=components,
         device_total_bytes=device.total_bytes,
         device_usable_bytes=device.usable_bytes,
-        calibrated=calibrated,
+        calibration_source=source,
         warnings=tuple(warnings),
     )
 
