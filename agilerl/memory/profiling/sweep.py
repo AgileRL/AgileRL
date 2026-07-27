@@ -25,8 +25,10 @@ import json
 import subprocess
 import sys
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 
+from agilerl.memory import formulas
 from agilerl.memory.calibration import (
     DeviceFingerprint,
     MeasuredPoint,
@@ -54,6 +56,23 @@ HOLDOUT_POINTS: tuple[SweepPoint, ...] = (
     SweepPoint(seq_len=1024, micro_batch=4, group_size=8, lora_rank=16),
     SweepPoint(seq_len=2048, micro_batch=2, group_size=8, lora_rank=32),
     SweepPoint(seq_len=2048, micro_batch=8, group_size=4, lora_rank=16),
+    # Held out at other engine budgets: the corners are all measured at one
+    # utilization, so these check that the utilization-dependent terms are
+    # modelled analytically rather than baked into the fitted constants.
+    SweepPoint(
+        seq_len=1024,
+        micro_batch=4,
+        group_size=8,
+        lora_rank=16,
+        gpu_memory_utilization=0.30,
+    ),
+    SweepPoint(
+        seq_len=1024,
+        micro_batch=4,
+        group_size=8,
+        lora_rank=16,
+        gpu_memory_utilization=0.60,
+    ),
 )
 
 
@@ -103,15 +122,27 @@ def _analytic_bytes(
     device: DeviceSpec,
     point: SweepPoint,
     phase: str,
-    gpu_memory_utilization: float,
 ) -> tuple[int, dict[str, float]]:
+    """Uncalibrated prediction and basis terms for one point.
+
+    The colocated engine reservation is passed analytically so the residual
+    being fitted is genuine unmodelled overhead, not the reservation — which
+    would otherwise pin the fit to one ``gpu_memory_utilization``.
+    """
     if phase == "training":
         knobs = point.training_knobs()
         breakdown = estimate_training(
-            model, device, knobs, colocated=True, profile=None
+            model,
+            device,
+            knobs,
+            colocated=True,
+            profile=None,
+            colocated_engine_reservation_bytes=(
+                formulas.SLEEPING_ENGINE_RESIDUAL_BYTES
+            ),
         )
         return breakdown.total_bytes, training_basis(model, knobs)
-    gen_knobs = point.generation_knobs(gpu_memory_utilization)
+    gen_knobs = point.generation_knobs()
     breakdown = estimate_generation(
         model, device, gen_knobs, colocated=True, profile=None
     )
@@ -124,34 +155,32 @@ def calibrate_phase(
     fit_points: list[tuple[SweepPoint, MeasuredPoint]],
     holdout_points: list[tuple[SweepPoint, MeasuredPoint]],
     phase: str,
-    gpu_memory_utilization: float,
 ) -> PhaseCalibration:
     """Fit one phase's residual model and validate on held-out combinations."""
     basis_rows: list[dict[str, float]] = []
     residuals: list[float] = []
     for point, measured in fit_points:
-        analytic, basis = _analytic_bytes(
-            model, device, point, phase, gpu_memory_utilization
-        )
+        analytic, basis = _analytic_bytes(model, device, point, phase)
         basis_rows.append(basis)
         residuals.append(measured.device_peak_bytes - analytic)
     fit = fit_residuals(basis_rows, residuals)
 
     max_rel_error = None
+    mean_rel_error = None
     if holdout_points:
         errors = []
         for point, measured in holdout_points:
-            analytic, basis = _analytic_bytes(
-                model, device, point, phase, gpu_memory_utilization
-            )
+            analytic, basis = _analytic_bytes(model, device, point, phase)
             predicted = analytic + fit.correction_bytes(basis)
             errors.append(
                 abs(predicted - measured.device_peak_bytes) / measured.device_peak_bytes
             )
         max_rel_error = max(errors)
+        mean_rel_error = sum(errors) / len(errors)
     return PhaseCalibration(
         fit=fit,
         holdout_max_rel_error=max_rel_error,
+        holdout_mean_rel_error=mean_rel_error,
         n_points=len(fit_points),
     )
 
@@ -193,7 +222,6 @@ def _measure_point_subprocess(
     model_name: str,
     point: SweepPoint,
     device_index: int,
-    gpu_memory_utilization: float,
 ) -> tuple[MeasuredPoint, MeasuredPoint]:
     """Measure one point in a fresh subprocess.
 
@@ -223,7 +251,7 @@ def _measure_point_subprocess(
         "--device-index",
         str(device_index),
         "--gpu-memory-utilization",
-        str(gpu_memory_utilization),
+        str(point.gpu_memory_utilization),
     ]
     subprocess.run(cmd, check=True)
     data = json.loads(Path(out_path).read_text())
@@ -274,11 +302,14 @@ def run_sweep(
     device_index: int = 0,
     gpu_memory_utilization: float = 0.45,
     quantizations: tuple[str, ...] = ("none",),
+    point_quantization: str = "none",
 ) -> ModelProfile:
     """Measure every plan point on the local GPU and build the profile.
 
     Each measurement runs in its own subprocess (CuMem is process-global), so
-    this parent process never touches CUDA.
+    this parent process never touches CUDA. A point that fails (OOM on a
+    corner too large for the device) is logged and skipped rather than
+    aborting the sweep.
     """
     from transformers import AutoConfig
 
@@ -311,24 +342,44 @@ def run_sweep(
         "training": [],
         "generation": [],
     }
-    plan = corner_plan()
-    for i, point in enumerate(plan + list(HOLDOUT_POINTS)):
+    plan = [
+        replace(
+            point,
+            gpu_memory_utilization=gpu_memory_utilization,
+            quantization=point_quantization,
+        )
+        for point in corner_plan()
+    ]
+    holdout_plan = [
+        replace(point, quantization=point_quantization) for point in HOLDOUT_POINTS
+    ]
+    skipped: list[str] = []
+    for i, point in enumerate(plan + holdout_plan):
         held_out = i >= len(plan)
         print(
-            f"[{i + 1}/{len(plan) + len(HOLDOUT_POINTS)}] {point}"
+            f"[{i + 1}/{len(plan) + len(holdout_plan)}] {point}"
             f"{' (holdout)' if held_out else ''}",
             flush=True,
         )
-        generation, training = _measure_point_subprocess(
-            model_name,
-            point,
-            device_index=device_index,
-            gpu_memory_utilization=gpu_memory_utilization,
-        )
+        try:
+            generation, training = _measure_point_subprocess(
+                model_name, point, device_index=device_index
+            )
+        except subprocess.CalledProcessError as exc:
+            # A corner too large for this device is information, not a
+            # failure: record it and keep the remaining points.
+            print(f"    SKIPPED (exit {exc.returncode}) — likely OOM", flush=True)
+            skipped.append(str(point))
+            continue
         measured.extend([generation, training])
         target = holdout_pairs if held_out else fit_pairs
         target["generation"].append((point, generation))
         target["training"].append((point, training))
+
+    if skipped:
+        print(f"\n{len(skipped)} point(s) skipped:", flush=True)
+        for entry in skipped:
+            print(f"  - {entry}", flush=True)
 
     total_bytes, capability = _device_identity(device_index)
     device = DeviceSpec.from_compute_capability(
@@ -350,7 +401,6 @@ def run_sweep(
             fit_pairs["training"],
             holdout_pairs["training"],
             "training",
-            gpu_memory_utilization,
         ),
         generation=calibrate_phase(
             model,
@@ -358,7 +408,6 @@ def run_sweep(
             fit_pairs["generation"],
             holdout_pairs["generation"],
             "generation",
-            gpu_memory_utilization,
         ),
         realised_weight_bytes=realised,
         measured=tuple(measured),
@@ -378,6 +427,13 @@ def main(argv: list[str] | None = None) -> int:
         nargs="+",
         default=["none"],
         choices=["none", "nf4", "int8"],
+        help="Weight variants to measure realised sizes for",
+    )
+    parser.add_argument(
+        "--point-quantization",
+        default="none",
+        choices=["none", "nf4", "int8"],
+        help="Trainer quantization used for the swept points themselves",
     )
     parser.add_argument("--output-dir", default=None)
     parser.add_argument(
@@ -400,9 +456,8 @@ def main(argv: list[str] | None = None) -> int:
         device_index=args.device_index,
         gpu_memory_utilization=args.gpu_memory_utilization,
         quantizations=tuple(args.quantizations),
+        point_quantization=args.point_quantization,
     )
-    from pathlib import Path
-
     output_dir = Path(args.output_dir) if args.output_dir else None
     path = save_profile(profile, output_dir)
     print(f"Wrote {path}")

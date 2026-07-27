@@ -88,6 +88,9 @@ class MeasuredPoint(BaseModel):
     #: Raw NVML poll, kept for audit even when ``device_peak_bytes`` is the
     #: torch-corrected value.
     nvml_polled_bytes: int | None = None
+    #: Training phase only: device memory resident with the engine asleep and
+    #: the trainer idle (CUDA context + engine structures).
+    sleeping_baseline_bytes: int | None = None
     torch_max_allocated_bytes: int | None = None
     torch_max_reserved_bytes: int | None = None
     analytic_bytes: int | None = None
@@ -101,6 +104,7 @@ class PhaseCalibration(BaseModel):
     fit: ResidualFit = Field(default_factory=ResidualFit)
     #: Relative error on held-out knob combinations, e.g. 0.08 for 8%.
     holdout_max_rel_error: float | None = None
+    holdout_mean_rel_error: float | None = None
     n_points: int = 0
 
 

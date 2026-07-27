@@ -44,6 +44,10 @@ FUSED_CHUNK_ROWS_MAX = 4096
 CUDA_GRAPH_POOL_BYTES = 2 * 1024**3
 #: CUDA context + driver reserve per process that owns the device.
 CUDA_CONTEXT_BYTES = int(0.75 * 1024**3)
+#: What a sleeping (level 1) vLLM engine leaves on the device beyond the CUDA
+#: context: engine structures that survive the sleep. Measured at roughly
+#: 0.2-0.5 GiB on vLLM 0.23; calibration refines it per (model, device).
+SLEEPING_ENGINE_RESIDUAL_BYTES = int(0.25 * 1024**3)
 
 
 @dataclass(frozen=True)

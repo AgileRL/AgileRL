@@ -112,11 +112,13 @@ def estimate_training(
 ) -> PhaseBreakdown:
     """Peak training-phase memory breakdown on the training device.
 
-    ``colocated_engine_reservation_bytes`` is the device memory the sleeping
-    vLLM engine keeps reserved during training (profiling on vLLM 0.23 shows
-    sleep level 1 does not return its ``gpu_memory_utilization`` reservation
-    to the co-resident trainer). It is used only for the uncalibrated
-    fallback; a loaded profile carries this floor in its fitted intercept.
+    ``colocated_engine_reservation_bytes`` is what the *sleeping* vLLM engine
+    leaves resident on the device while the trainer runs. Measured on vLLM
+    0.23, sleep level 1 releases essentially everything — the engine drops
+    from its full ``gpu_memory_utilization`` footprint to a few hundred MiB of
+    context and engine structures — so this is a small constant, not a
+    utilization-scaled reservation. It is a parameter rather than a fitted
+    term so a profile is not pinned to one utilization.
     """
     arch = model.arch
     counts = formulas.param_counts(arch)
@@ -195,18 +197,7 @@ def estimate_training(
         correction = profile.training.fit.correction_bytes(basis)
         calibrated = profile.training.n_points > 0
 
-    # The colocated sleeping-engine floor lives in the fitted intercept once
-    # calibrated (the fit was made with this component at zero, so route the
-    # correction here for honest attribution); uncalibrated, fall back to the
-    # analytic reservation so a colocated bar does not silently omit it.
-    if colocated:
-        engine_residual = (
-            correction if calibrated else float(colocated_engine_reservation_bytes)
-        )
-        overhead_correction = 0.0
-    else:
-        engine_residual = 0.0
-        overhead_correction = correction
+    engine_residual = float(colocated_engine_reservation_bytes) if colocated else 0.0
 
     components = (
         _component(
@@ -271,13 +262,13 @@ def estimate_training(
         ),
         _component(
             "vllm_residual",
-            "Sleeping engine reservation",
+            "Sleeping engine residual",
             engine_residual,
             note=(
-                "vLLM sleeps (level 1) during training, but on vLLM 0.23 the "
-                "engine keeps its gpu_memory_utilization reservation on the "
-                "device rather than returning it to the trainer — often the "
-                "largest colocated training term."
+                "vLLM sleep level 1 releases its weights and KV pool back to "
+                "the device (measured: full footprint down to a few hundred "
+                "MiB), so the trainer gets the GPU back. Only context and "
+                "engine structures stay resident."
                 if colocated
                 else "Not colocated."
             ),
@@ -285,11 +276,11 @@ def estimate_training(
         _component(
             "overhead",
             "Overhead & calibration",
-            formulas.CUDA_CONTEXT_BYTES + rollout + overhead_correction,
+            formulas.CUDA_CONTEXT_BYTES + rollout + correction,
             detail={
                 "cuda_context": formulas.CUDA_CONTEXT_BYTES,
                 "rollout_tensors": rollout,
-                "calibration_correction": overhead_correction,
+                "calibration_correction": correction,
             },
         ),
     )
@@ -491,9 +482,7 @@ def estimate_run(config: RunConfig, profile: ModelProfile | None = None) -> RunE
     if profile is not None:
         model = profile.apply_realised_weights(model)
     engine_reservation = (
-        int(config.generation.gpu_memory_utilization * config.train_device.total_bytes)
-        if config.colocated
-        else 0
+        formulas.SLEEPING_ENGINE_RESIDUAL_BYTES if config.colocated else 0
     )
     training = estimate_training(
         model,

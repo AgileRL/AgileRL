@@ -22,7 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from agilerl.memory.calibration import MeasuredPoint
@@ -38,6 +38,11 @@ class SweepPoint:
     group_size: int
     lora_rank: int
     quantization: str = "none"
+    #: Engine budget fraction. A real sweep axis, not a fixed setting: the
+    #: colocated training floor is driven by it, so holding out points at
+    #: other utilizations is what validates that the floor is modelled
+    #: analytically rather than absorbed into the fitted intercept.
+    gpu_memory_utilization: float = 0.45
 
     def as_dict(self) -> dict[str, float | int | str | bool]:
         return {
@@ -46,7 +51,25 @@ class SweepPoint:
             "group_size": self.group_size,
             "lora_rank": self.lora_rank,
             "quantization": self.quantization,
+            "gpu_memory_utilization": self.gpu_memory_utilization,
         }
+
+    @classmethod
+    def from_dict(cls, knobs: dict[str, float | int | str | bool]) -> SweepPoint:
+        """Rebuild a point from a stored :class:`MeasuredPoint`'s knobs, so
+        fixtures can be re-fitted offline without re-measuring.
+        """
+        return cls(
+            seq_len=int(knobs["seq_len"]),
+            micro_batch=int(knobs["micro_batch"]),
+            group_size=int(knobs["group_size"]),
+            lora_rank=int(knobs["lora_rank"]),
+            quantization=str(knobs.get("quantization", "none")),
+            gpu_memory_utilization=float(knobs.get("gpu_memory_utilization", 0.45)),
+        )
+
+    def with_utilization(self, gpu_memory_utilization: float) -> SweepPoint:
+        return replace(self, gpu_memory_utilization=gpu_memory_utilization)
 
     def training_knobs(self) -> TrainingKnobs:
         return TrainingKnobs(
@@ -58,9 +81,9 @@ class SweepPoint:
             quantization=self.quantization,  # type: ignore[arg-type]
         )
 
-    def generation_knobs(self, gpu_memory_utilization: float) -> GenerationKnobs:
+    def generation_knobs(self) -> GenerationKnobs:
         return GenerationKnobs(
-            gpu_memory_utilization=gpu_memory_utilization,
+            gpu_memory_utilization=self.gpu_memory_utilization,
             max_num_seqs=self.group_size,
             max_model_len=self.seq_len,
             max_lora_rank=self.lora_rank,
@@ -72,7 +95,6 @@ def measure_point(
     model_name: str,
     point: SweepPoint,
     device_index: int = 0,
-    gpu_memory_utilization: float = 0.45,
     prompt_len: int | None = None,
     n_prompts: int = 1,
 ) -> tuple[MeasuredPoint, MeasuredPoint]:
@@ -121,7 +143,7 @@ def measure_point(
         quantization_config=quantization_config,
         use_vllm=True,
         vllm_config=VLLMConfig(
-            gpu_memory_utilization=gpu_memory_utilization,
+            gpu_memory_utilization=point.gpu_memory_utilization,
             max_num_seqs=point.group_size,
             max_lora_rank=point.lora_rank,
             sleep_mode=True,
@@ -148,6 +170,12 @@ def measure_point(
                 prompts, training=True
             )
 
+        # Sleep the engine *before* opening the training window. ``learn``
+        # sleeps it internally, so a window opened around ``learn`` would
+        # sample the still-awake engine and report the rollout footprint as
+        # the training peak. Idempotent: guarded by the algorithm's awake flag.
+        agent._prepare_vllm_for_training()
+
         # One reward per trajectory row; completions arrive as one
         # (group_size, seq) tensor per prompt.
         n_trajectories = sum(ids.shape[0] for ids in completion_ids)
@@ -170,17 +198,24 @@ def measure_point(
         device_peak_bytes=generation_sampler.peak_bytes,
         nvml_polled_bytes=generation_sampler.peak_bytes,
     )
-    # NVML polling can miss the brief backward spike; torch's exact reserved
-    # high-water mark plus the non-torch resident memory (vLLM sleeping
-    # residual + CUDA context) is a tighter lower bound on the device peak.
-    nontorch_baseline = max(training_sampler.baseline_bytes - reserved_at_entry, 0)
+    # NVML polling can miss the brief backward spike, so correct with torch's
+    # exact high-water mark — but only its *growth* across the window.
+    # Absolute torch stats are unusable here: vLLM's CuMem pages stay on
+    # torch's books after sleep releases them physically (measured: torch
+    # reports ~9 GiB allocated while the device shows ~0.9 GiB), so the
+    # phantom cancels in the delta but not in the absolute.
+    torch_growth = max(torch_reserved - reserved_at_entry, 0)
     training = MeasuredPoint(
         knobs=point.as_dict(),
         phase="training",
         device_peak_bytes=max(
-            training_sampler.peak_bytes, nontorch_baseline + torch_reserved
+            training_sampler.peak_bytes,
+            training_sampler.baseline_bytes + torch_growth,
         ),
         nvml_polled_bytes=training_sampler.peak_bytes,
+        # Device memory the sleeping engine leaves resident (CUDA context +
+        # engine structures) — the floor the trainer builds on.
+        sleeping_baseline_bytes=training_sampler.baseline_bytes,
         torch_max_allocated_bytes=torch_allocated,
         torch_max_reserved_bytes=torch_reserved,
     )
@@ -260,12 +295,10 @@ def main(argv: list[str] | None = None) -> int:
             group_size=args.group_size,
             lora_rank=args.lora_rank,
             quantization=args.quantization,
+            gpu_memory_utilization=args.gpu_memory_utilization,
         )
         generation, training = measure_point(
-            args.model,
-            point,
-            device_index=args.device_index,
-            gpu_memory_utilization=args.gpu_memory_utilization,
+            args.model, point, device_index=args.device_index
         )
         result = {
             "generation": generation.model_dump(mode="json"),

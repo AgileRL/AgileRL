@@ -181,20 +181,27 @@ def test_colocated_run_includes_trainer_residual(model, device):
     assert component(split_estimate.generation, "trainer_residual").bytes_ == 0
 
 
-def test_colocated_training_includes_sleeping_engine_floor(model, device):
-    # Uncalibrated colocated training must not silently omit the vLLM
-    # reservation the sleeping engine keeps on the device.
-    colocated = estimate_run(
-        RunConfig(
-            model=model,
-            train_device=device,
-            generation=GenerationKnobs(gpu_memory_utilization=0.45),
+def test_sleeping_engine_residual_is_small_and_utilization_independent(model, device):
+    # Measured on vLLM 0.23: sleep level 1 hands the engine's weights and KV
+    # pool back to the device, so the trainer does NOT pay the engine's
+    # gpu_memory_utilization budget. The residual is a small constant and
+    # must not scale with utilization, or a profile would be pinned to the
+    # single utilization it was measured at.
+    def residual_at(utilization: float) -> int:
+        estimate = estimate_run(
+            RunConfig(
+                model=model,
+                train_device=device,
+                generation=GenerationKnobs(gpu_memory_utilization=utilization),
+            )
         )
-    )
-    residual = component(colocated.training, "vllm_residual")
-    assert residual.bytes_ == pytest.approx(int(0.45 * device.total_bytes), rel=0.01)
+        return component(estimate.training, "vllm_residual").bytes_
 
-    # A dedicated training device carries no engine reservation.
+    assert residual_at(0.3) == residual_at(0.8)
+    assert residual_at(0.45) < GiB
+    assert residual_at(0.45) < int(0.1 * device.total_bytes)
+
+    # A dedicated training device carries no engine residual at all.
     split = estimate_run(
         RunConfig(
             model=model,

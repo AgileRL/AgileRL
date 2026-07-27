@@ -17,13 +17,24 @@ runtime; per-model calibration ships as one self-contained JSON under
 ## Why two independent bars
 
 Training and generation never hold peak memory simultaneously, even
-colocated on one device: vLLM sleeps (level 1 — base weights to host RAM, KV
-pool freed) during `learn`, and the trainer offloads its base to CPU
-(`use_memory_efficient_params`) before waking vLLM for rollout
-(`LLMAlgorithm._prepare_vllm_for_generation` / `_prepare_vllm_for_training`).
-So the sizing question is two separate peaks against the same capacity, plus
-a small cross-phase residual on each side (what the dormant side leaves
-resident). No phase modelling, no `max()` over interleavings.
+colocated on one device, and **only one base copy is ever GPU-resident**.
+Measured across one rollout+learn cycle (Qwen2.5-1.5B, 3.01 GiB of weights,
+L4, vLLM 0.23):
+
+| stage | device used | trainer base |
+|---|---|---|
+| after construct (engine asleep) | 4.05 GiB | on GPU |
+| after wake (rollout) | 10.26 GiB | **on CPU** |
+| after sleep (training ready) | **0.91 GiB** | on CPU |
+| during `learn` | ~4.8 GiB | back on GPU |
+
+The two sides alternate: vLLM sleep level 1 hands back its weights and KV
+pool (−9.35 GiB at the sleep boundary) and the trainer offloads its base to
+host RAM for the whole rollout (`use_memory_efficient_params`). Each side
+*owns* a base copy, but the idle one lives in host RAM. So the sizing
+question is two separate peaks against the same capacity, plus a small
+residual for whatever the dormant side leaves behind. No phase modelling, no
+`max()` over interleavings.
 
 ## Training bar
 
@@ -105,9 +116,11 @@ another is possible but should be surfaced as lower confidence.
   checkpointing, FlashAttention) are always on, the sweep has no
   optimization on/off axis.
 - Constants drift with framework changes (anything touching the fused
-  kernels, checkpointing, or the vLLM wiring moves them). A cut-down sweep
-  on one small model in CI should assert holdout error stays inside the
-  band.
+  kernels, checkpointing, or the vLLM wiring moves them). Two defences:
+  fixtures keep their raw points so `python -m agilerl.memory.profiling.refit`
+  re-derives the constants against the current core with no GPU, and
+  `tests/test_memory/test_fixtures.py` replays every stored point through the
+  estimator in CI, failing if any drifts outside the band.
 
 ## Porting notes
 
@@ -119,51 +132,37 @@ another is possible but should be surfaced as lower confidence.
   can never disagree with the bars.
 - Fitting (`profiling/sweep.py`) needs numpy; applying a fit does not.
 
-## First calibration finding — the colocated training floor
+## Measuring memory under vLLM is a minefield — read this before touching the harness
 
-Profiling `Qwen/Qwen2.5-0.5B-Instruct` on an L4 (vLLM 0.23, sleep level 1)
-surfaced the single most decision-relevant fact the widget can teach:
-**colocated training does not get the vLLM engine's memory back.** Every
-training point sat on a ~12 GiB device floor for a model whose weights are
-under 1 GiB, flat across all knobs — almost exactly the engine's
-`gpu_memory_utilization` (0.45 × 23 GiB ≈ 10.4 GiB) reservation. Sleep
-level 1 offloads the base to host RAM and frees the KV *contents*, but the
-reservation stays mapped on the device rather than returning to the
-co-resident trainer.
+Getting a trustworthy number here is harder than the arithmetic it feeds.
+Every item below is a bug this harness hit and now guards against; the first
+two produced a confident, self-consistent, **wrong** result for a whole
+sweep, so treat them as load-bearing.
 
-Consequences baked into the estimator:
-
-- The training bar attributes this to a labelled **"Sleeping engine
-  reservation"** segment (usually the dominant colocated-training term), not
-  to overhead. An uncalibrated colocated estimate now includes it
-  analytically (`gpu_memory_utilization × total`) so it never tells a user a
-  run fits when it won't.
-- It means the practical colocated headroom for training is
-  `total − gpu_memory_utilization × total`, i.e. the *same* budget split the
-  generation phase lives under — the two bars are more symmetric than the
-  "training gets the whole GPU back" intuition suggests. Lowering
-  `gpu_memory_utilization` helps *both* phases.
-
-Holdout accuracy on this first profile: training 4.8%, generation 0.37% —
-inside the 10% target band. (One generation *fit* point sits at ~12%, a
-single noisy measurement; the held-out points are the accuracy signal.)
-
-## Profiling gotchas found while running the first sweep
-
-- **One process per point.** vLLM's CuMem allocator (which backs sleep mode)
-  is process-global and permits one engine per process, so `run_sweep`
-  spawns a fresh subprocess per point (`python -m
-  agilerl.memory.profiling.harness`). A single-process loop dies on the
-  second point with "CuMem allocator can only be used for one instance per
-  process".
-- **NVML polling undercounts the training spike.** The 10 ms poll missed the
-  brief backward-pass peak (torch's exact `max_memory_reserved` came in
-  ~0.7 GiB higher). The training calibration target is therefore
-  `max(nvml_poll, non-torch baseline + torch_max_reserved)`; generation
-  stays pure-NVML (vLLM's CuMem is invisible to torch and its allocation is
-  not spiky).
-- **flashinfer JIT needs `curand.h`.** On a box without the full CUDA
-  toolkit headers, set `VLLM_USE_FLASHINFER_SAMPLER=0`.
+- **Absolute `torch.cuda` stats are meaningless under CuMem.** vLLM's sleep
+  allocator releases physical pages that torch still counts. Measured at the
+  same instant with the engine asleep: torch reports **9.33 GiB allocated**
+  while the device shows **0.91 GiB used**. Only the *delta* across a window
+  is meaningful — the phantom is constant, so it cancels in a subtraction and
+  not in an absolute reading. The training peak uses
+  `max(nvml_poll, window_baseline + (torch_max_reserved − torch_reserved_at_entry))`.
+- **`learn()` sleeps the engine itself**, so a measurement window opened
+  around `learn` samples the still-awake engine and reports the *rollout*
+  footprint as the training peak. Sleep explicitly first (idempotent), then
+  open the window. Getting this wrong overstated training by **5×**
+  (12.08 vs 2.34 GiB on a 0.5B).
+- **Two wrong measurements can agree.** The two bugs above both inflated the
+  training figure and landed within a few percent of each other, which read
+  as corroboration. Cross-check any device-level number against a physical
+  sanity bound — a 0.5B model cannot need 12 GiB to train a LoRA adapter.
+- **One process per point.** vLLM's CuMem allocator is process-global and
+  permits one engine per process, so `run_sweep` spawns a fresh subprocess
+  per point. A single-process loop dies on the second point with "CuMem
+  allocator can only be used for one instance per process".
+- **NVML polling can still miss a spike.** The 10 ms poll is a lower bound;
+  the torch-growth term above covers the brief backward peak between samples.
+- **flashinfer JIT needs `curand.h`.** On a box without full CUDA toolkit
+  headers, set `VLLM_USE_FLASHINFER_SAMPLER=0`.
 
 ## Status
 
