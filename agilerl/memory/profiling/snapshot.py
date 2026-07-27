@@ -36,11 +36,15 @@ GIB = 1024**3
 #: Frame markers mapped to estimator component keys, most specific first.
 #: A frame matches if the marker appears in its filename or function name.
 ATTRIBUTION_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # vLLM first: its pool is registered with the torch allocator but is not
+    # trainer memory, and after sleep it is not resident at all. Leaving it
+    # in would swamp every other component.
+    ("vllm_engine", ("vllm", "cumem", "worker.py", "model_runner")),
     ("logits_workspace", ("fused_logprobs", "fused_loss", "logsumexp", "lm_head")),
     ("adapters", ("lora", "peft")),
     ("grads_optimizer", ("optimizer", "adamw", "backward", "accumulate_grad")),
     ("activations", ("checkpoint", "decoder_layer", "attention", "mlp", "forward")),
-    ("base_weights", ("from_pretrained", "load_state_dict", "_load", "to(")),
+    ("base_weights", ("from_pretrained", "load_state_dict", "modeling_", "_load")),
 )
 
 

@@ -135,6 +135,16 @@ def measure_point(
     from agilerl.memory.profiling.nvml import NvmlPeakSampler
     from agilerl.utils.algo_utils import VLLMConfig
 
+    if snapshot_path:
+        # Record from before the model exists: allocations predating the
+        # recording carry no stack, and the weights are allocated during
+        # construction. Keep it cheap — python-only frames and a bounded
+        # entry count. The default (all C++ frames, unbounded) costs many GiB
+        # of host RAM across vLLM init and took a 23 GiB box off the network.
+        torch.cuda.memory._record_memory_history(
+            enabled="all", context="all", stacks="python", max_entries=100_000
+        )
+
     prompt_len = prompt_len or point.prompt_len
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
@@ -206,8 +216,6 @@ def measure_point(
         rewards = torch.randn(n_trajectories)
         torch.cuda.reset_peak_memory_stats(device_index)
         reserved_at_entry = int(torch.cuda.memory_reserved(device_index))
-        if snapshot_path:
-            torch.cuda.memory._record_memory_history(max_entries=200_000)
         with NvmlPeakSampler(device_index) as training_sampler:
             agent.learn(
                 (completion_ids, action_masks, rewards),
