@@ -499,6 +499,39 @@ class TestMutationsApplyArchMutation:
 
 
 class TestMutationsReinitBanditGrads:
+    def test_grown_parameters_extend_the_matrix(self):
+        """A parameter that grows contributes its extra indices to ``to_add``."""
+
+        class DummyActor(EvolvableModule):
+            def __init__(self, out_mod):
+                super().__init__(device="cpu")
+                self.out_mod = out_mod
+
+            def forward(self, x):
+                return x
+
+            def recreate_network(self):
+                pass
+
+            def get_output_dense(self):
+                return self.out_mod
+
+        class DummyBandit:
+            def __init__(self):
+                self.sigma_inv = torch.eye(3)  # old weight 2 + bias 1
+                self.lamb = 2.0
+                self.device = "cpu"
+                self.accelerator = None
+
+        old_layer = torch.nn.Linear(2, 1)  # weight 2 + bias 1 = 3
+        new_layer = torch.nn.Linear(2, 2)  # weight 4 + bias 2 = 6
+
+        bandit = DummyBandit()
+        Mutations(0, 1, 0.5, 0, 0, 0, 0.1, device="cpu")._reinit_bandit_grads(
+            bandit, DummyActor(new_layer), old_layer
+        )
+        assert bandit.sigma_inv.shape[0] == 6
+
     @pytest.mark.gpu
     def test_error_and_matrix_resize_paths(self, device):
         class DummyActor(EvolvableModule):
