@@ -16,7 +16,12 @@ than loosen the band::
 import pytest
 
 from agilerl.memory.calibration import curated_models, load_profile
-from agilerl.memory.profiling.refit import ACCURACY_BAND, prediction_errors
+from agilerl.memory.profiling.refit import (
+    ACCURACY_BAND,
+    MEAN_ACCURACY_BAND,
+    WORST_POINT_BAND,
+    prediction_errors,
+)
 
 CURATED = curated_models()
 
@@ -32,11 +37,16 @@ def test_fixture_predicts_its_own_measurements(model_id):
         if not phase_errors:
             continue
         worst = max(phase_errors)
-        assert worst <= ACCURACY_BAND, (
-            f"{model_id} {phase}: worst error {worst:.1%} exceeds the "
-            f"{ACCURACY_BAND:.0%} band — the analytic core changed under the "
-            f"fitted constants. Re-fit with "
-            f"`python -m agilerl.memory.profiling.refit`."
+        mean = sum(phase_errors) / len(phase_errors)
+        drifted = (
+            f"{model_id} {phase}: the analytic core changed under the fitted "
+            f"constants. Re-fit with `python -m agilerl.memory.profiling.refit`."
+        )
+        assert mean <= MEAN_ACCURACY_BAND, (
+            f"mean error {mean:.1%} exceeds {MEAN_ACCURACY_BAND:.0%}. {drifted}"
+        )
+        assert worst <= WORST_POINT_BAND, (
+            f"worst point {worst:.1%} exceeds {WORST_POINT_BAND:.0%}. {drifted}"
         )
 
 
