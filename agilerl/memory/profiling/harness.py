@@ -46,6 +46,10 @@ class SweepPoint:
     #: too, and vLLM refuses the resulting adapter because those module names
     #: are not in its supported LoRA target set.
     lora_target_scope: str | None = None
+    #: Attention backend forwarded to the model config. ``auto`` leaves the
+    #: framework's own resolution in place (FlashAttention-2 if the package
+    #: is importable, else SDPA), which is what a stock install gets.
+    attn_implementation: str = "auto"
     #: Engine budget fraction. A real sweep axis, not a fixed setting: the
     #: colocated training floor is driven by it, so holding out points at
     #: other utilizations is what validates that the floor is modelled
@@ -61,6 +65,7 @@ class SweepPoint:
             "quantization": self.quantization,
             "n_prompts": self.n_prompts,
             "lora_target_scope": self.lora_target_scope or "",
+            "attn_implementation": self.attn_implementation,
             "gpu_memory_utilization": self.gpu_memory_utilization,
         }
 
@@ -77,6 +82,7 @@ class SweepPoint:
             quantization=str(knobs.get("quantization", "none")),
             n_prompts=int(knobs.get("n_prompts", 1)),
             lora_target_scope=str(knobs.get("lora_target_scope") or "") or None,
+            attn_implementation=str(knobs.get("attn_implementation") or "auto"),
             gpu_memory_utilization=float(knobs.get("gpu_memory_utilization", 0.45)),
         )
 
@@ -94,6 +100,7 @@ class SweepPoint:
             max_model_len=self.seq_len,
             lora_rank=self.lora_rank,
             quantization=self.quantization,  # type: ignore[arg-type]
+            attn_implementation=self.attn_implementation,  # type: ignore[arg-type]
         )
 
     @property
@@ -170,6 +177,11 @@ def measure_point(
         pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
         pad_token=tokenizer.pad_token or tokenizer.eos_token,
         model_name=model_name,
+        model_config=(
+            {"attn_implementation": point.attn_implementation}
+            if point.attn_implementation != "auto"
+            else None
+        ),
         group_size=point.group_size,
         micro_batch_size_per_gpu=point.micro_batch,
         batch_size=point.micro_batch,
@@ -333,6 +345,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--lora-rank", type=int, required=True)
     parser.add_argument("--quantization", default="none")
     parser.add_argument(
+        "--attn-implementation",
+        default="auto",
+        help="auto | eager | sdpa | flash_attention_2 | flex_attention",
+    )
+    parser.add_argument(
         "--lora-target-scope",
         default=None,
         help="Restrict LoRA targeting (e.g. language_model for multimodal)",
@@ -369,6 +386,7 @@ def main(argv: list[str] | None = None) -> int:
             lora_rank=args.lora_rank,
             quantization=args.quantization,
             lora_target_scope=args.lora_target_scope,
+            attn_implementation=args.attn_implementation,
             gpu_memory_utilization=args.gpu_memory_utilization,
         )
         generation, training = measure_point(
