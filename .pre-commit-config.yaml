@@ -57,14 +57,26 @@ repos:
       hooks:
           - id: uv-lock
 
+    # agilerl.arena is a namespace portion shipped by agilerl-arena; ty resolves
+    # it through this dev symlink, which is gitignored so fresh clones lack it.
+    # Must run before the ty hook below.
     - repo: local
       hooks:
-          - id: ty
-            name: ty (static type checking)
-            entry: bash -c '[ -e agilerl/arena ] || ln -s ../agilerl-arena/agilerl/arena agilerl/arena; uv run ty check agilerl agilerl/arena'
+          - id: arena-symlink
+            name: Create the agilerl/arena dev symlink
+            entry: bash -c '[ -e agilerl/arena ] || ln -s ../agilerl-arena/agilerl/arena agilerl/arena'
             language: system
             pass_filenames: false
-            files: ^(agilerl|agilerl-arena)/.*\.py$|^pyproject\.toml$
+            always_run: true
+
+    - repo: https://github.com/astral-sh/ty-pre-commit
+      # Pins the ty version; keep in step with the CI type-checks workflow.
+      rev: v0.0.61
+      hooks:
+          - id: ty
+
+    - repo: local
+      hooks:
           - id: codeql-python
             name: CodeQL Python Security & Quality (manual)
             entry: python .github/codeql/run_codeql.py
