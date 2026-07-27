@@ -12,6 +12,21 @@ Naming conventions (keep new aliases consistent with these):
 * Observation aliases use the ``*ObsType`` suffix; the two hubs
   ``ObservationType`` / ``MultiAgentObservationType`` keep the fuller word.
 * Function / tuple return aliases use the ``*Return`` suffix (not ``*ReturnType``).
+
+Array and tensor annotations use jaxtyping. The axis string documents the shape;
+the *wrapped* type is what ``ty`` actually enforces, so always wrap a
+dtype-parameterized numpy type — bare ``Float[np.ndarray, "b d"]`` erases the
+dtype and checks nothing. ``torch.Tensor`` is not generic, so tensor annotations
+document the contract without enforcing it. Parameters take abstract dtypes
+(``np.floating``, ``np.integer``) so platform int widths still bind; returns name
+the concrete dtype. Single-axis strings keep a leading space (``" num_envs"``) so
+they trip the repo-ignored F722 instead of resolving as an F821 undefined name.
+
+Two places must never receive a jaxtyping annotation, because both fail at
+runtime rather than at type-check time: pydantic model fields (schema generation
+raises), and the dispatched first parameter of a ``functools.singledispatch``
+function (jaxtyping types are not subclasses of what they wrap, so the
+registration silently never matches).
 """
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -34,6 +49,7 @@ import numpy.typing as npt
 import torch
 from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
+from jaxtyping import Bool, Float, Int, Num, Shaped
 from tensordict import TensorClass, TensorDict
 from torch._dynamo import OptimizedModule
 from torch.nn import Module
@@ -162,6 +178,31 @@ SpaceLike = (
 # Per-agent spaces for multi-agent algorithms: an ordered iterable of spaces,
 # a mapping keyed by agent id, or a ``spaces.Dict``.
 MultiAgentSpacesType = Iterable[spaces.Space] | Mapping[str, spaces.Space] | spaces.Dict
+
+# ── jaxtyping array & tensor vocabulary ──────────────────────────────────────
+# Dtype-erased escape hatches for genuinely polymorphic values. These wrap the
+# bare ``npt.NDArray`` rather than ``npt.NDArray[np.generic]``: the latter is not
+# a universal supertype and rejects an array narrowed out of ``object`` by
+# ``isinstance``, which is exactly how the pytree and buffer seams produce one.
+AnyArray = Shaped[npt.NDArray, "..."]
+AnyTensor = Shaped[torch.Tensor, "..."]
+# Numeric-but-any-width, for values that are legitimately int *or* float.
+NumArray = Num[npt.NDArray[np.number], "..."]
+
+# Per-environment vectors produced by the vectorized envs and the rollout loops.
+EnvScoreArray = Float[npt.NDArray[np.float64], " num_envs"]
+EnvDoneArray = Bool[npt.NDArray[np.bool_], " num_envs"]
+# Storage indices. Abstract ``np.integer`` so Windows' int32 default still binds.
+IndexArray = Int[npt.NDArray[np.integer], " batch"]
+
+# Training tensors. Documentation only — ``torch.Tensor`` carries no dtype or
+# shape parameters for ``ty`` to check.
+ScalarLoss = Float[torch.Tensor, ""]
+ActionLogits = Float[torch.Tensor, "batch action_dim"]
+LogProbs = Float[torch.Tensor, " batch"]
+TokenIds = Int[torch.Tensor, "batch seq"]
+IndexTensor = Int[torch.Tensor, " batch"]
+HiddenStateDict = dict[str, Float[torch.Tensor, "num_layers batch hidden_size"]]
 
 # ── Array / tensor container aliases ─────────────────────────────────────────
 ArrayOrTensor = npt.NDArray | torch.Tensor

@@ -26,6 +26,9 @@ dependencies = [
     # of pettingzoo into the separate mpe2 package as of 1.25.
     "pettingzoo>=1.23.1,<1.25",
     "jax[cpu]>=0.4.31",
+    # 0.3.7 is the last release that still resolves on Python 3.10; newer
+    # interpreters resolve forward to the current release.
+    "jaxtyping>=0.3.7",
     "lazy-loader>=0.4",
     "packaging>=20.0",
     "pre-commit>=3.8.0",
@@ -241,6 +244,11 @@ ignore = [
     "DTZ005",        # datetime.now() without tz argument
     "COM812",        # issues with ruff-format
     "PYI024",        # namedtuple issue
+    # jaxtyping axis strings (``Float[NDArray[np.float32], " num_envs"]``) parse
+    # as forward references. Single-axis strings keep a leading space so they
+    # fail as F722 rather than resolving as an F821 undefined name, which stays
+    # enabled to catch genuine ones.
+    "F722",          # syntax error in forward annotation
 ]
 
 [tool.ruff.lint.flake8-annotations]

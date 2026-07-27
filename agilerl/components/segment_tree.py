@@ -3,6 +3,7 @@ from collections.abc import Callable
 
 import numpy as np
 import numpy.typing as npt
+from jaxtyping import Float, Integer
 
 
 class SegmentTree:
@@ -25,7 +26,9 @@ class SegmentTree:
             "capacity must be positive and a power of 2."
         )
         self.capacity = capacity
-        self.tree = np.full(2 * capacity, init_value, dtype=np.float64)
+        self.tree: Float[npt.NDArray[np.float64], " tree_nodes"] = np.full(
+            2 * capacity, init_value, dtype=np.float64
+        )
         self.operation = operation
         # Vectorised counterpart of ``operation`` used by the batch helpers. The
         # only concrete trees are sum (operator.add) and min (builtin ``min``).
@@ -113,23 +116,29 @@ class SegmentTree:
 
         return float(self.tree[self.capacity + idx])
 
-    def get_batch(self, indices: npt.NDArray) -> npt.NDArray:
+    def get_batch(
+        self, indices: Integer[npt.NDArray[np.integer], " batch"]
+    ) -> Float[npt.NDArray[np.float64], " batch"]:
         """Vectorised leaf read for many indices at once.
 
         :param indices: Leaf indices in ``[0, capacity)``.
-        :type indices: npt.NDArray
+        :type indices: Integer[npt.NDArray[np.integer], " batch"]
         :return: Leaf values, one per index.
-        :rtype: npt.NDArray
+        :rtype: Float[npt.NDArray[np.float64], " batch"]
         """
         return self.tree[self.capacity + np.asarray(indices, dtype=np.intp)]
 
-    def update_batch(self, indices: npt.NDArray, values: npt.NDArray) -> None:
+    def update_batch(
+        self,
+        indices: Integer[npt.NDArray[np.integer], " batch"],
+        values: Float[npt.NDArray[np.floating], " batch"],
+    ) -> None:
         """Set many leaf values at once and update their ancestors.
 
         :param indices: Leaf indices in ``[0, capacity)``.
-        :type indices: npt.NDArray
+        :type indices: Integer[npt.NDArray[np.integer], " batch"]
         :param values: New leaf values, one per index.
-        :type values: npt.NDArray
+        :type values: Float[npt.NDArray[np.floating], " batch"]
         """
         indices = np.asarray(indices, dtype=np.intp)
         if indices.size == 0:
@@ -195,13 +204,15 @@ class SumSegmentTree(SegmentTree):
                 idx = right
         return idx - self.capacity
 
-    def retrieve_batch(self, upperbounds: npt.NDArray) -> npt.NDArray:
+    def retrieve_batch(
+        self, upperbounds: Float[npt.NDArray[np.floating], " batch"]
+    ) -> Integer[npt.NDArray[np.intp], " batch"]:
         """Vectorised :meth:`retrieve` for a whole batch of upper bounds.
 
         :param upperbounds: Upper bounds for cumulative sum, one per sample.
-        :type upperbounds: npt.NDArray
+        :type upperbounds: Float[npt.NDArray[np.floating], " batch"]
         :return: Leaf indices in ``[0, capacity)``, one per upper bound.
-        :rtype: npt.NDArray
+        :rtype: Integer[npt.NDArray[np.intp], " batch"]
         """
         ub = np.asarray(upperbounds, dtype=np.float64).copy()
         idx = np.ones(ub.shape, dtype=np.intp)  # start every query at the root
