@@ -103,11 +103,6 @@ class PettingZooAutoResetParallelWrapper(ParallelEnv[AgentID, ObsType, ActionTyp
     def state(self) -> Any:  # noqa: ANN401 -- wrapped env exposes state as either a method or an observations attribute
         """Return the state of the wrapped environment.
 
-        PettingZoo declares ``state`` as a method on ``ParallelEnv``, but many
-        environments (including PettingZoo's own tutorial environments) instead
-        expose it as an attribute holding the latest observations, so whatever
-        the wrapped environment provides is passed through unchanged.
-
         :return: State of the environment
         :rtype: Any
         """

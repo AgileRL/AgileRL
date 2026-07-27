@@ -77,10 +77,7 @@ def _assert_wandb_summary_log(mock_wandb_log: MagicMock) -> None:
 
 
 class DummyEnv(VectorEnv):
-    """Minimal vectorized env double. ``vect`` selects ``num_envs`` (2 vs 1);
-    both modes return batched arrays, so it is a genuine ``VectorEnv`` that the
-    training loop consumes directly (no ``DummyVecEnv`` wrapping).
-    """
+    """Minimal vectorized env double. ``vect`` selects ``num_envs`` (2 vs 1);"""
 
     def __init__(self, state_size, action_size, vect=True, num_envs=2):
         self._single_state_size = tuple(state_size)
@@ -323,12 +320,7 @@ class DummyCompiledPolicy:
 
 
 class DummyMultiEnv(AsyncPettingZooVecEnv):  # pylint: disable=overwritten-inherited-attribute
-    """Mimics a vectorized multi-agent parallel environment with num_envs=1.
-
-    Subclasses AsyncPettingZooVecEnv (without its __init__) so both the
-    on-policy and off-policy training loops consume it directly rather than
-    wrapping it in PzDummyVecEnv.
-    """
+    """Mimics a vectorized multi-agent parallel environment with num_envs=1."""
 
     def __init__(self, state_dims, action_dims):
         self.state_dims = state_dims
@@ -381,12 +373,7 @@ class DummyMultiEnv(AsyncPettingZooVecEnv):  # pylint: disable=overwritten-inher
 
 
 class DummyMultiParallelEnv(ParallelEnv):
-    """Single PettingZoo ParallelEnv double with non-batched dict returns.
-
-    Use as a factory for ``make_multi_agent_vect_envs`` or as an unrecognized
-    raw env that training loops wrap via ``PzDummyVecEnv``. Direct vectorized
-    fixtures continue to use ``DummyMultiEnv``.
-    """
+    """Single PettingZoo ParallelEnv double with non-batched dict returns."""
 
     def __init__(self, state_dims, action_dims):
         self.state_dims = state_dims
@@ -1436,12 +1423,7 @@ def dummy_h5py_data(action_size, state_size):
 
 class TestTrainOffPolicy:
     def test_real_rainbow_takes_the_rainbow_action_branch(self):
-        """The action-selection dispatch is by concrete class.
-
-        The mocked-agent tests stand in for Rainbow but are not ``RainbowDQN``
-        instances, so they fall through to the generic branch; only a real agent
-        exercises the Rainbow path (and its prioritized-replay learn step).
-        """
+        """The action-selection dispatch is by concrete class."""
         import gymnasium as gym
 
         from agilerl.algorithms import RainbowDQN

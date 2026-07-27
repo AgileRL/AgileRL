@@ -1905,9 +1905,7 @@ class TestVectorizeExperiencesByAgent:
         assert isinstance(result, torch.Tensor)
 
     def test_vectorize_agent_experiences_flat_rejects_structured(self):
-        """Structured (dict/tuple) experiences vectorize to a container, which
-        the flat helper rejects rather than returning a non-tensor.
-        """
+        """Structured (dict/tuple) experiences vectorize to a container, which"""
         structured = {"a0": {"obs": [1.0, 2.0]}, "a1": {"obs": [3.0, 4.0]}}
         with pytest.raises(TypeError, match="flat per-agent scalars"):
             algo_utils.vectorize_agent_experiences_flat(structured)

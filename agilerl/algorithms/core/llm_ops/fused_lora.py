@@ -111,11 +111,7 @@ def _routed_forward(
 
 
 def _is_routed_layer(module: LoraLayer) -> bool:
-    """Whether *module* has the fused-routing ``forward`` installed.
-
-    Checks the instance ``forward`` directly (which ``deepcopy`` preserves and
-    rebinds), so a cloned model is still recognised as patched.
-    """
+    """Whether *module* has the fused-routing ``forward`` installed."""
     fwd = module.__dict__.get("forward")
     return isinstance(fwd, partial) and fwd.func is _routed_forward
 

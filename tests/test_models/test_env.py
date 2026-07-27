@@ -1038,13 +1038,7 @@ class TestLLMEnvSpecMultiturn:
 
 
 class TestLLMEnvSpecLoadDataset:
-    """Defensive ``dataset is None`` guards in the private dataset loaders.
-
-    A multiturn spec legitimately carries ``dataset=None``, so calling the
-    loaders on one exercises the guard the reasoning/preference/sft env_types
-    rely on. The None-check precedes any ``datasets`` import, so these run
-    without the optional ``datasets`` dependency installed.
-    """
+    """Defensive ``dataset is None`` guards in the private dataset loaders."""
 
     def _spec_without_dataset(self) -> LLMEnvSpec:
         spec = LLMEnvSpec(env_type=LLMEnvType.MULTITURN, env_name="game:Test-v0")

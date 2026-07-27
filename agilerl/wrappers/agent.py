@@ -267,21 +267,12 @@ def _space_shape(space: spaces.Space) -> tuple[int, ...]:
 def _is_tensor_tuple(
     obs: TorchObsType | MultiAgentTensorObsType,
 ) -> TypeIs[tuple[torch.Tensor, ...]]:
-    """Narrow a tensorised observation to a tuple of tensors.
-
-    A plain ``isinstance(obs, tuple)`` check erases the element type; a
-    :data:`typing.TypeIs` keeps the tensors typed.
-    """
+    """Narrow a tensorised observation to a tuple of tensors."""
     return isinstance(obs, tuple)
 
 
 def _narrow_obs_entry(value: object) -> TorchObsType:
-    """Narrow a raw ``TensorDict`` entry to a tensorised observation.
-
-    ``TensorDict`` reads are stubbed as the wide ``Tensor | TensorCollection`` union;
-    an observation leaf is a tensor or a nested ``TensorDict``. This verifies that
-    with a real check so a wrong assumption fails loudly at the boundary.
-    """
+    """Narrow a raw ``TensorDict`` entry to a tensorised observation."""
     assert isinstance(value, (torch.Tensor, TensorDict)), (
         f"Expected a tensor observation entry, got {type(value).__name__}."
     )
@@ -291,24 +282,14 @@ def _narrow_obs_entry(value: object) -> TorchObsType:
 def _is_marl_obs(
     obs: TorchObsType | MultiAgentTensorObsType,
 ) -> TypeIs[MultiAgentTensorObsType]:
-    """Narrow a tensorised observation to the multi-agent per-agent mapping.
-
-    A plain ``isinstance(obs, dict)`` widens the keys to ``object`` (a ``TensorDict``
-    is dict-ambiguous to the type checker); this ``TypeIs`` keeps the ``str`` keys.
-    """
+    """Narrow a tensorised observation to the multi-agent per-agent mapping."""
     return isinstance(obs, dict)
 
 
 def _is_tensor_mapping(
     obs: TorchObsType | MultiAgentTensorObsType,
 ) -> TypeIs[dict[str, torch.Tensor]]:
-    """Narrow a tensorised observation to a per-key tensor mapping.
-
-    The runtime check is ``isinstance(obs, Mapping)`` so it also matches a
-    :class:`~tensordict.TensorDict` (a ``Mapping`` but not a ``dict``); both are then
-    treated as ``dict[str, torch.Tensor]``, which is exact for the only operation the
-    callers perform on them — string-keyed lookup of tensor leaves.
-    """
+    """Narrow a tensorised observation to a per-key tensor mapping."""
     return isinstance(obs, Mapping)
 
 
@@ -415,23 +396,14 @@ class RSNorm(AgentWrapper[AgentT]):
         )
 
     def _leaf_obs_rms(self) -> RunningStatsType:
-        """Single-agent running statistics.
-
-        The single- and multi-agent statistics containers are structurally
-        indistinguishable to the type checker; this accessor returns the handle the
-        constructor populated for single-agent mode. It is a method rather than a
-        property so reflective attribute walks (e.g. ``inspect.getmembers`` during
-        :meth:`clone`) do not trip the assertion.
-        """
+        """Single-agent running statistics."""
         assert self._single_obs_rms is not None, (
             "single-agent statistics are only available on a single-agent wrapper"
         )
         return self._single_obs_rms
 
     def _agent_obs_rms(self) -> dict[str, RunningStatsType]:
-        """Per-agent running statistics used in multi-agent mode (see
-        :meth:`_leaf_obs_rms`).
-        """
+        """Per-agent running statistics used in multi-agent mode (see"""
         assert self._multi_obs_rms is not None, (
             "per-agent statistics are only available on a multi-agent wrapper"
         )
@@ -632,11 +604,7 @@ class RSNorm(AgentWrapper[AgentT]):
 
 
 def _is_array_dict(obs: NumpyObsType) -> TypeIs[ArrayDict]:
-    """Narrow a numpy observation leaf to a per-key array mapping.
-
-    ``isinstance(obs, dict)`` erases the value type; a :data:`typing.TypeIs` keeps the
-    arrays typed and narrows them out of the negative branch.
-    """
+    """Narrow a numpy observation leaf to a per-key array mapping."""
     return isinstance(obs, dict)
 
 
@@ -648,22 +616,12 @@ def _is_array_tuple(obs: NumpyObsType) -> TypeIs[ArrayTuple]:
 def _is_numpy_obs_mapping(
     obs: MultiAgentObservationType,
 ) -> TypeGuard[dict[str, NumpyObsType]]:
-    """Confirm every per-agent leaf is a numpy observation.
-
-    Async vectorised MARL environments (``AsyncPettingZooVecEnv``) always emit numpy
-    arrays; this verifies that so the NaN-masking in
-    :meth:`AsyncAgentsWrapper.extract_inactive_agents` operates on the array leaves.
-    """
+    """Confirm every per-agent leaf is a numpy observation."""
     return all(isinstance(leaf, (np.ndarray, dict, tuple)) for leaf in obs.values())
 
 
 def _mask_rows(array: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    """Select the rows of ``array`` where ``mask`` is true.
-
-    Also re-types the array: leaves pulled out of a ``dict``/``tuple`` observation are
-    seen by the type checker as ``object``-dtype arrays, which reject a boolean-array
-    key; passing them through this ``np.ndarray`` parameter restores a usable dtype.
-    """
+    """Select the rows of ``array`` where ``mask`` is true."""
     return array[mask]
 
 
@@ -693,9 +651,6 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
         observation dictionary and, if all the values are `np.nan` (as set by
         ``AsyncPettingZooVecEnv``), the agent is considered inactive and removed from
         the observation dictionary.
-
-        Async vectorised environments produce numpy array leaves, so each per-agent
-        observation is a ``np.ndarray`` or a container thereof (:data:`NumpyObsType`).
 
         :param obs: Observation dictionary
         :type obs: dict[str, NumpyObsType]
@@ -758,12 +713,6 @@ class AsyncAgentsWrapper(AgentWrapper[MultiAgentRLAlgorithm]):
 
     def stack_experiences(self, experiences: Any) -> Any:  # noqa: ANN401 -- arbitrarily nested runtime container (per-agent dicts/lists/arrays), preserved as-is
         """Stacks the experiences, preserving the structure of the container.
-
-        Async experiences arrive as arbitrarily nested containers (per-agent dicts of
-        lists of arrays, tuples of such dicts, bare arrays for single fields), so the
-        structure is only known at runtime: each mapping is rebuilt with its stacked
-        values, lists are stacked into a single array, and anything else is passed
-        through. An empty list stacks to ``None``.
 
         :param experiences: Experiences from the environment
         :type experiences: Any

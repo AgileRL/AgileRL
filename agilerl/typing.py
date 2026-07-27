@@ -1,18 +1,4 @@
-"""Shared type aliases, TypedDicts, and batch dataclasses used across AgileRL.
-
-Naming conventions (keep new aliases consistent with these):
-
-* Suffix by kind: a ``*Type`` suffix marks a **type alias** (a name for a union
-  or concrete type set, e.g. ``DeviceType``, ``ObservationType``, ``BufferType``);
-  a bare ``*T`` suffix is reserved for ``TypeVar`` generic parameters (e.g.
-  ``T``, ``ExperiencesT``, ``AgentT``) and is never used for a plain alias.
-* Plain structural aliases may drop the suffix (``ArrayDict``, ``TensorTuple``,
-  ``TensorMapping``) where the shape already reads as a type.
-* Multi-agent aliases use the ``MultiAgent*`` prefix (not ``MARL*``).
-* Observation aliases use the ``*ObsType`` suffix; the two hubs
-  ``ObservationType`` / ``MultiAgentObservationType`` keep the fuller word.
-* Function / tuple return aliases use the ``*Return`` suffix (not ``*ReturnType``).
-"""
+"""Shared type aliases, TypedDicts, and batch dataclasses used across AgileRL."""
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from enum import Enum
@@ -58,12 +44,7 @@ class IsDataclass(Protocol):
 
 # ── TypedDicts: LLM prompts, checkpoint & mutation payloads ──────────────────
 class ReasoningPrompts(TypedDict):
-    """Tokenized reasoning / multi-turn observation prompts.
-
-    ``input_ids`` and ``attention_mask`` are always present. Remaining keys are
-    filled by collate, multi-turn wrappers, or sliding-window truncation as
-    needed.
-    """
+    """Tokenized reasoning / multi-turn observation prompts."""
 
     input_ids: torch.Tensor
     attention_mask: torch.Tensor
@@ -78,13 +59,7 @@ class ReasoningPrompts(TypedDict):
 
 
 class ModelPromptFields(TypedDict, total=False):
-    """Windowed trajectory / stitch fields merged into a policy observation.
-
-    A partial ``ReasoningPrompts`` fragment produced by sliding-window
-    truncation. It deliberately omits ``input_ids`` so the merge keeps the
-    observation's full-trajectory input; the truncated view lives in
-    ``trajectory_input_ids``.
-    """
+    """Windowed trajectory / stitch fields merged into a policy observation."""
 
     trajectory_input_ids: torch.Tensor
     trajectory_attention_mask: torch.Tensor
@@ -324,13 +299,7 @@ ExperiencesT = TypeVar("ExperiencesT")
 
 # ── Replay / rollout batch dataclasses (TensorClass) ─────────────────────────
 class ReplayBatch(TensorClass):
-    """One off-policy sample from a :class:`~agilerl.components.replay_buffer.ReplayBuffer`.
-
-    A :class:`~tensordict.TensorClass`: attribute access (``batch.reward``) resolves
-    statically to its declared type (:class:`torch.Tensor`), while the object wraps a
-    real ``TensorDict`` at runtime. Build one with ``ReplayBatch.from_tensordict`` and
-    bind the result to a ``: ReplayBatch`` annotation so the field types flow through.
-    """
+    """One off-policy sample from a :class:`~agilerl.components.replay_buffer.ReplayBuffer`."""
 
     obs: TorchObsType
     action: torch.Tensor
@@ -340,9 +309,7 @@ class ReplayBatch(TensorClass):
 
 
 class PrioritizedReplayBatch(ReplayBatch):
-    """A :class:`ReplayBatch` plus the priority weights and indices returned by
-    prioritized (or ``return_idx=True``) sampling.
-    """
+    """A :class:`ReplayBatch` plus the priority weights and indices returned by"""
 
     weights: torch.Tensor
     idxs: torch.Tensor
@@ -356,13 +323,7 @@ class BanditBatch(TensorClass):
 
 
 class RolloutMinibatch(TensorClass):
-    """One flattened (non-BPTT) PPO minibatch drawn from the rollout buffer.
-
-    ``action_masks`` is ``None`` when the policy does not use action masking. The
-    buffer stores value predictions under the key ``"values"``, which collides with
-    ``TensorDict.values()``; PPO renames it to ``value_preds`` when it wraps the
-    buffer so it reads back as a plain attribute here.
-    """
+    """One flattened (non-BPTT) PPO minibatch drawn from the rollout buffer."""
 
     observations: TorchObsType
     actions: torch.Tensor
@@ -380,12 +341,7 @@ class RolloutMinibatch(TensorClass):
 
 
 class RolloutSequenceMinibatch(TensorClass):
-    """The padded per-sequence half of a truncated-BPTT PPO minibatch.
-
-    Sequences are padded to a common length; ``pad_mask`` marks the real steps.
-    Initial recurrent hidden states ride along as a non-tensor entry and are read
-    with ``get_non_tensor`` at the call site.
-    """
+    """The padded per-sequence half of a truncated-BPTT PPO minibatch."""
 
     observations: TorchObsType
     actions: torch.Tensor
@@ -394,11 +350,7 @@ class RolloutSequenceMinibatch(TensorClass):
 
 
 class RolloutSequenceTargets(TensorClass):
-    """The unpadded training-target half of a truncated-BPTT PPO minibatch.
-
-    As with :class:`RolloutMinibatch`, the buffer's ``"values"`` key is renamed to
-    ``value_preds`` at wrap time (it collides with ``TensorDict.values()``).
-    """
+    """The unpadded training-target half of a truncated-BPTT PPO minibatch."""
 
     log_probs: torch.Tensor
     advantages: torch.Tensor
@@ -407,13 +359,7 @@ class RolloutSequenceTargets(TensorClass):
 
 
 class MultiAgentReplayBatch(TensorClass):
-    """One multi-agent off-policy sample from the shared replay buffer.
-
-    Each field is a nested per-agent :class:`~tensordict.TensorDict` (agent id ->
-    tensor). Build one from a sampled batch with
-    ``MultiAgentReplayBatch.from_tensordict`` and bind the result to a
-    ``: MultiAgentReplayBatch`` annotation so the fields resolve.
-    """
+    """One multi-agent off-policy sample from the shared replay buffer."""
 
     obs: TensorDict
     action: TensorDict

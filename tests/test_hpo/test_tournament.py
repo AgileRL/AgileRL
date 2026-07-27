@@ -429,11 +429,7 @@ class TestTournamentSelectionSelect:
         assert std_called["value"] is False
 
     def test_llm_without_elitism_rejected(self):
-        """LLM populations require elitism. ``select`` raises ``ValueError``
-        rather than proceeding into a selection pass that cannot resolve an
-        elite. The check depends only on constructor state, so it fails
-        identically on every process.
-        """
+        """LLM populations require elitism. ``select`` raises ``ValueError``"""
         population = [MagicMock()]
 
         tournament_selection = TournamentSelection(3, False, 4)

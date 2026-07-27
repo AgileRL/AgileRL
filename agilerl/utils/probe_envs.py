@@ -14,12 +14,7 @@ from agilerl.rollouts import collect_rollouts
 
 
 class ProbeEnv(gym.Env[Any, Any]):
-    """Base class for probe environments.
-
-    Declares the ground-truth attributes the probe checkers read. Not every
-    probe environment defines all of them (e.g. discrete-action probes have no
-    ``sample_actions``); subclasses set the ones relevant to their check.
-    """
+    """Base class for probe environments."""
 
     sample_obs: list[Any]
     sample_actions: list[Any]

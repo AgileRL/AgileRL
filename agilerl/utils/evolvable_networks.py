@@ -46,13 +46,7 @@ def _size_normalizer(
     dims: Literal[3],
 ) -> Callable[[KernelSizeType], tuple[int, int, int]]: ...
 def _size_normalizer(dims: int) -> Callable[[KernelSizeType], tuple[int, ...]]:
-    """Build a normalizer that coerces an int-or-tuple size to ``dims`` arity.
-
-    torch's stubs demand an exact-arity size tuple per dimensionality; the
-    returned callable produces one. An ``int`` is broadcast across every
-    dimension; a tuple is assumed to already carry the correct arity (enforced
-    upstream by ``_assert_correct_kernel_sizes`` in ``agilerl/modules/cnn.py``).
-    """
+    """Build a normalizer that coerces an int-or-tuple size to ``dims`` arity."""
 
     def normalize(size: KernelSizeType) -> tuple[int, ...]:
         # A tuple already carries per-dimension sizes; anything else (a Python
@@ -101,11 +95,7 @@ def _build_conv(
     padding: KernelSizeType,
     device: DeviceType,
 ) -> nn.Module:
-    """Construct ``conv_cls`` with each size normalized to its expected arity.
-
-    Pairing ``conv_cls`` with ``to_size`` keeps the tuple arity the constructor
-    demands correlated with the normalizer that produces it.
-    """
+    """Construct ``conv_cls`` with each size normalized to its expected arity."""
     return conv_cls(
         in_channels,
         out_channels,
@@ -123,11 +113,7 @@ def _build_pool(
     stride: KernelSizeType,
     padding: KernelSizeType,
 ) -> nn.Module:
-    """Construct ``pool_cls``, preserving scalar sizes when all args are ints.
-
-    torch pooling layers keep an ``int`` ``kernel_size`` in their ``repr`` when
-    constructed with scalars. Tuple sizes are normalized to the constructor arity.
-    """
+    """Construct ``pool_cls``, preserving scalar sizes when all args are ints."""
     if (
         not isinstance(kernel_size, tuple)
         and not isinstance(stride, tuple)
@@ -140,12 +126,7 @@ def _build_pool(
 
 
 def _is_module_dict(model: nn.Module) -> TypeGuard[ModuleDict[nn.Module]]:
-    """Narrow a module to a ``ModuleDict`` whose values are plain ``nn.Module``.
-
-    ``isinstance(model, ModuleDict)`` erases the value-type parameter; this
-    guard restores it, which is sound because a ``ModuleDict``'s nested modules
-    are always ``nn.Module`` by construction.
-    """
+    """Narrow a module to a ``ModuleDict`` whose values are plain ``nn.Module``."""
     return isinstance(model, ModuleDict)
 
 

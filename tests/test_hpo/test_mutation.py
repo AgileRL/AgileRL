@@ -577,9 +577,7 @@ class TestMutationsReinitBanditGrads:
         assert bandit.exp_layer is not None
 
     def test_raises_when_output_layer_is_none(self, device):
-        """_reinit_bandit_grads raises ValueError when the offspring actor has no
-        output layer to reinitialise (get_output_dense returns None).
-        """
+        """_reinit_bandit_grads raises ValueError when the offspring actor has no"""
 
         class NoOutputActor(EvolvableModule):
             def __init__(self):
@@ -610,9 +608,7 @@ class TestMutationsReinitBanditGrads:
 
 class TestMutationsParameterMutation:
     def test_raises_when_no_policy_group(self, device):
-        """parameter_mutation raises MutationError when the individual has no
-        network group registered with policy=True.
-        """
+        """parameter_mutation raises MutationError when the individual has no"""
 
         class NoPolicyRegistry:
             def policy(self, return_group=False):

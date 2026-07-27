@@ -185,13 +185,7 @@ class HuggingFaceGym(ABC, Generic[PromptT, CompletionT]):
         *args: Any,
         **kwargs: Any,
     ) -> Callable[[list[dict[str, Any]]], Mapping[str, Any]]:
-        """Create a collate function for this environment.
-
-        Dataset rows stay ``dict[str, Any]`` (HF feature bags). Subclasses
-        return paradigm-specific TypedDicts (``SFTPrompts``,
-        ``PreferencePrompts``) or an intermediate collate mapping
-        (``ReasoningGym``).
-        """
+        """Create a collate function for this environment."""
 
     def __len__(self) -> int:
         """Return the length of the dataset."""

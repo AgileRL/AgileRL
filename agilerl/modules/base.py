@@ -360,8 +360,6 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         """Recreate the network after a mutation has been applied. If the mutation methods of
         an `EvolvableModule` are only attributed to its nested modules, then the `recreate_network`
         method should be implemented in the nested modules and it is not required on the parent.
-        Overrides may add optional keyword arguments (e.g. ``shrink_params``) that are supplied
-        through the ``@mutation`` decorator's ``recreate_kwargs``.
         """
         if any("." not in method for method in self.mutation_methods):
             msg = (
@@ -517,9 +515,6 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         output_coeff: float = 4,
     ) -> None:
         """Initialise this module's weights using a Gaussian distribution.
-
-        Subclasses with a distinct output layer override this to apply
-        *output_coeff* to that layer.
 
         :param std_coeff: Standard deviation coefficient, defaults to 4
         :type std_coeff: float, optional

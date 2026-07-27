@@ -1086,9 +1086,7 @@ class TestPreferenceGymInit:
 
 
 def test_llm_utils_fallback_types_when_no_llm_dependencies():
-    """Test that llm_utils sets fallback sentinels when HAS_LLM_DEPENDENCIES is False:
-    annotation-only aliases fall back to Any, class sentinels to None.
-    """
+    """Test that llm_utils sets fallback sentinels when HAS_LLM_DEPENDENCIES is False:"""
     import agilerl.utils as agilerl_utils_pkg
 
     # Remove the module from cache to force reimport

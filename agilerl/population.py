@@ -46,9 +46,6 @@ ScalarOrNestedRow = ScalarRow | NestedRow
 def _nested_entries(row: ScalarOrNestedRow) -> NestedRow:
     """Return the per-sub-agent mappings of a metric row.
 
-    A row is homogeneous by construction; the filter recovers the nested layout
-    without asserting it.
-
     :param row: A per-agent metric row.
     :type row: ScalarOrNestedRow
     :returns: The mapping entries of the row.
@@ -657,10 +654,6 @@ class Population(Generic[AgentT]):
 
     def _collect_fitnesses(self) -> ScalarOrNestedRow:
         """Collect the most recent fitness value from each agent.
-
-        Multi-agent algorithms with ``sum_scores=False`` record a per-sub-agent
-        fitness row (an array); everything else records a scalar. Detect which
-        upfront so each branch builds a homogeneous row.
 
         :returns: Fitness values for each individual in population.
         :rtype: ScalarOrNestedRow

@@ -46,11 +46,7 @@ from agilerl.utils.llm_utils import calculate_k3_kl
 
 
 class SaveForBackwardCtx(Protocol):
-    """The one autograd-``ctx`` capability these forwards use.
-
-    ``torch`` types ``FunctionCtx.save_for_backward`` to reject ``None``, but
-    saving ``None`` (here, an absent bias gradient) is valid at runtime.
-    """
+    """The one autograd-``ctx`` capability these forwards use."""
 
     def save_for_backward(self, *tensors: torch.Tensor | None) -> None: ...
 

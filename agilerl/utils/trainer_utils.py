@@ -88,9 +88,6 @@ def get_spaces_from_env(
 ]:
     """Get the observation and action spaces from the environment.
 
-    Returns per-agent space dicts for multi-agent specs and plain spaces for
-    single-agent specs.
-
     :param algo_spec: Algorithm spec.
     :type algo_spec: AlgoSpec
     :param env: Environment.

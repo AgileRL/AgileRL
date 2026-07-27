@@ -167,12 +167,7 @@ class ReasoningGym(HuggingFaceGym[list[ReasoningPrompts], list[torch.Tensor]]):
         self,
         tokenizer: PreTrainedTokenizerBase,
     ) -> Callable[[list[dict[str, Any]]], dict[str, list[str] | list[Any]]]:
-        """Create a collate function that applies the chat template.
-
-        Return keys are ``question``, ``answer``, and ``tokenized_prompts``
-        (list of partial ``ReasoningPrompts``); not a ``ReasoningPrompts``
-        TypedDict itself.
-        """
+        """Create a collate function that applies the chat template."""
 
         def collate_fn(
             batch: list[dict[str, Any]],

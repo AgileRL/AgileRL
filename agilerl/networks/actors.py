@@ -215,10 +215,6 @@ class DeterministicActor(EvolvableNetwork):
     def rescale_output_action(self, action: torch.Tensor) -> torch.Tensor:
         """Rescale a network-output action to this actor's action-space bounds.
 
-        Only valid for continuous (Box) actors, which always define ``action_low``,
-        ``action_high`` and an ``output_activation``; this narrows those attributes
-        (``None`` for Discrete actors) once so callers receive a plain tensor.
-
         :param action: Action as outputted by the network.
         :type action: torch.Tensor
         :return: Action rescaled to the ``[low, high]`` action-space bounds.

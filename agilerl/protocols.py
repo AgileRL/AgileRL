@@ -48,12 +48,7 @@ DeviceType = str | torch.device
 
 @runtime_checkable
 class NamedCallable(Protocol):
-    """A callable with a ``__name__``: a function, bound method, or class.
-
-    ``__call__`` is typed gradually so ordinary classes (e.g.
-    ``torch.optim.Optimizer`` subclasses, whose constructors don't accept
-    arbitrary keyword arguments) still conform structurally.
-    """
+    """A callable with a ``__name__``: a function, bound method, or class."""
 
     __name__: str
 
@@ -722,13 +717,7 @@ class BanditEnvProtocol(Protocol):
 
 @runtime_checkable
 class MultiTurnEnv(Protocol):
-    """Protocol for text-level multi-turn LLM environments.
-
-    Covers raw multi-turn envs (e.g. GEM environments) and text wrappers such
-    as ``FormatRewardWrapper``: text observations and text actions. The
-    token-level surface that ``TokenObservationWrapper`` exposes is described
-    by :class:`TokenizedMultiTurnEnv`.
-    """
+    """Protocol for text-level multi-turn LLM environments."""
 
     max_turns: int
 
@@ -748,14 +737,7 @@ class MultiTurnEnv(Protocol):
 
 @runtime_checkable
 class TokenizedMultiTurnEnv(Protocol):
-    """Protocol for token-level multi-turn LLM environments.
-
-    The surface ``TokenObservationWrapper`` exposes to
-    ``SyncMultiTurnVecEnv`` and the LLM algorithms' ``test`` loops:
-    tokenized ``ReasoningPrompts`` observations, token-id tensor actions,
-    and full-episode tensors for learning. ``step`` returns an empty
-    observation mapping once the episode has ended.
-    """
+    """Protocol for token-level multi-turn LLM environments."""
 
     max_turns: int
 

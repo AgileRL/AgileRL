@@ -142,9 +142,6 @@ def validate_llm_context_lengths(
 def is_reasoning_prompts(obs: Mapping[str, object]) -> TypeGuard[ReasoningPrompts]:
     """Check whether a mapping is a tokenized ``ReasoningPrompts`` observation.
 
-    Distinguishes live prompt observations from the empty mapping that
-    tokenized multi-turn envs return once an episode has ended.
-
     :param obs: An observation mapping returned by a tokenized multi-turn env.
     :type obs: Mapping[str, object]
     :return: ``True`` when the mapping carries prompt tensors.

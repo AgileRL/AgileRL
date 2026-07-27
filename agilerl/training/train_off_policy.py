@@ -44,13 +44,7 @@ logger = logging.getLogger(__name__)
 
 
 class NStepAgent(Protocol):
-    """A RainbowDQN-style agent that consumes n-step / prioritized batches.
-
-    It is the only off-policy algorithm that anneals ``beta`` and whose
-    ``learn`` accepts ``n_experiences``/``per`` and returns the indices and
-    priorities to write back. Reading the population's union through this
-    interface resolves the prioritized/n-step path.
-    """
+    """A RainbowDQN-style agent that consumes n-step / prioritized batches."""
 
     batch_size: int
     beta: float

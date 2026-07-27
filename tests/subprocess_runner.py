@@ -36,18 +36,7 @@ _port_counter = itertools.count()
 
 
 def get_free_port():
-    """Pick a MASTER_PORT that won't collide across xdist workers.
-
-    The bind-to-port-0 / close / reuse dance is TOCTOU-racy: two concurrent
-    subprocess-isolated tests can be handed the same ephemeral port and the
-    loser dies with ``EADDRINUSE`` inside ``init_process_group``. This process
-    inherits ``PYTEST_XDIST_WORKER`` from the spawning worker (``env`` is
-    copied in ``tests.utils``), so carve a disjoint 300-port range per worker
-    and walk it with a per-process counter; the low range also keeps
-    ``MASTER_PORT`` clear of vLLM's ephemeral allocations. Fall back to an
-    OS-assigned port only if the whole range is somehow occupied. Mirrors
-    ``get_free_port`` in ``tests/conftest.py``.
-    """
+    """Pick a MASTER_PORT that won't collide across xdist workers."""
     worker = os.environ.get("PYTEST_XDIST_WORKER", "gw0")
     try:
         worker_num = int(worker.lstrip("gw"))

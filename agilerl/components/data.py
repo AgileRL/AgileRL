@@ -51,8 +51,6 @@ def to_torch_tensor(
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Convert a numpy array, torch tensor, Python number, or other array-like
-    to a torch tensor.
-
     :param data: Numpy array, torch tensor, Python number, or other array-like.
     :type data: object
     :param dtype: Data type of the torch tensor, defaults to torch.float32
@@ -125,7 +123,6 @@ def _to_agent_td(data: Mapping[str, ObservationType]) -> TensorDict:
 class MultiAgentTransition(TensorClass):
     """Multi-agent analogue of :class:`Transition`.
 
-    Each field is a ``Mapping[agent_id, array | dict]`` that is converted to a
     sub-:class:`TensorDict` on construction.  Dict/tuple observation spaces
     are handled automatically.
 
@@ -135,8 +132,6 @@ class MultiAgentTransition(TensorClass):
             obs=obs, action=action, reward=reward,
             next_obs=next_obs, done=done,
         )
-        td = transition_to_tensordict(transition)
-        td.batch_size = torch.Size([num_envs])
         memory.add(td)
     """
 

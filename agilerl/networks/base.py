@@ -33,13 +33,7 @@ ModuleT = TypeVar("ModuleT", bound=nn.Module)
 
 @runtime_checkable
 class SupportsNumOutputs(Protocol):
-    """An encoder that reports its output width via ``num_outputs``.
-
-    All AgileRL evolvable modules (``EvolvableMLP``/``EvolvableLSTM``/...) and
-    :class:`~agilerl.wrappers.make_evolvable.MakeEvolvable` satisfy this, so a
-    pre-built one can be adopted as a network's encoder (its output width
-    becoming the latent dimension) without a forward pass.
-    """
+    """An encoder that reports its output width via ``num_outputs``."""
 
     num_outputs: int
 
@@ -51,9 +45,6 @@ DefaultEncoderType = (
 
 def preserve_parameters(old_net: nn.Module, new_net: ModuleT) -> ModuleT:
     """Copy compatible parameters from ``old_net`` into ``new_net`` and return it.
-
-    Typed wrapper around :meth:`EvolvableModule.preserve_parameters`, which copies
-    parameters in place and returns the (unchanged) new network.
 
     :param old_net: Old neural network to copy parameters from.
     :type old_net: nn.Module
@@ -338,12 +329,6 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
 
     def get_init_dict(self) -> dict[str, Any]:
         """Constructor arguments for the network.
-
-        The ``encoder`` parameter reflects to :attr:`encoder`, the *built*
-        encoder, so a network cloned from this dict would re-adopt it as a
-        pre-built encoder. That is only correct when an encoder was actually
-        injected; otherwise report ``None`` so the clone rebuilds its encoder
-        from ``encoder_cls``/``encoder_config`` as usual.
 
         :return: The dictionary of constructor arguments.
         :rtype: dict[str, Any]

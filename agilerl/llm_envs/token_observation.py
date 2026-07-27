@@ -364,12 +364,7 @@ class TokenObservationWrapper:
         self,
         max_prompt_tokens: int,
     ) -> ModelPromptFields:
-        """Build truncated prompt tensors for model-window operation.
-
-        Returns the trajectory / stitch fields only (no ``input_ids``); callers
-        merge these into a full observation whose ``input_ids`` stays the full
-        trajectory.
-        """
+        """Build truncated prompt tensors for model-window operation."""
         if self.full_ids is None:
             msg = "No prompt: reset() was never called"
             raise RuntimeError(msg)

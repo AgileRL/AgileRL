@@ -18,9 +18,6 @@ if TYPE_CHECKING:
 def _as_prompt(obs: str | Mapping[str, object]) -> ReasoningPrompts:
     """Read a multi-turn observation as a tokenized prompt.
 
-    Runtime validation that a (possibly duck-typed) env really returned a
-    prompt dict. Callers skip done envs (empty sentinel observations).
-
     :param obs: The observation returned by the wrapped environment.
     :type obs: str | Mapping[str, object]
     :returns: The observation as a tokenized prompt.

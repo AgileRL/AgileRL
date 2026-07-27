@@ -131,15 +131,7 @@ _LEAF_SPACE_TYPES = (
 
 
 def is_str_keyed_dict(obj: object) -> TypeGuard[dict[str, object]]:
-    """Narrow a value to a ``str``-keyed dict.
-
-    The framework's dict observations and spaces are always keyed by string. A
-    bare ``isinstance(obj, dict)`` doesn't express that to the type checker: it
-    intersects each union member with ``dict``, and because ``numpy.ndarray``
-    and ``torch.Tensor`` aren't final it keeps ``ndarray & dict`` / ``Tensor &
-    dict`` parts whose keys widen to ``object``. This guard asserts the
-    invariant so iterating ``.items()`` yields ``str`` keys.
-    """
+    """Narrow a value to a ``str``-keyed dict."""
     return isinstance(obj, dict)
 
 
@@ -152,11 +144,7 @@ def narrow_tensor(value: object) -> torch.Tensor:
 
 
 def to_agent_tensors(per_agent: TensorDict, device: DeviceType) -> TensorMapping:
-    """Move each per-agent leaf of ``per_agent`` onto ``device``.
-
-    A multi-agent batch's per-agent entries for actions, rewards and
-    terminations are always leaves.
-    """
+    """Move each per-agent leaf of ``per_agent`` onto ``device``."""
     return {
         agent_id: narrow_tensor(agent_tensor).to(device)
         for agent_id, agent_tensor in per_agent.items()
@@ -348,9 +336,6 @@ def get_hidden_states_shape_from_model(
     `hidden_state_architecture` attribute. If they do, it adds the items to a
     dictionary and returns it. This should make it easier to initialize the
     hidden states of the model.
-
-    Shape entries use the :class:`~agilerl.typing.BatchDimension` sentinel for
-    the batch dimension, which is only known at runtime.
 
     :param model: The model to get the hidden states from.
     :type model: nn.Module
@@ -758,9 +743,6 @@ def make_safe_deepcopies(
     | tuple[EvolvableModuleProtocol | list[EvolvableModuleProtocol], ...]
 ):
     """Make deep copies of EvolvableModule objects and their attributes.
-
-    With a single argument the copy is returned directly; with multiple
-    arguments a tuple of copies (one per argument) is returned.
 
     :param args: EvolvableModuleProtocol or lists of EvolvableModuleProtocol objects to copy.
     :type args: EvolvableModuleProtocol | list[EvolvableModuleProtocol].
@@ -1223,10 +1205,6 @@ def get_vect_dim(
     """Return the number of vectorized environments given an observation and
     its corresponding space.
 
-    ``observation`` may be a single observation or a per-agent mapping (with a
-    matching ``spaces.Dict``), which is treated as a composite Dict observation.
-    Nested Dict/Tuple spaces are unwrapped until a leaf space is reached.
-
     :param observation: Observation
     :type observation: ObservationType
     :param observation_space: Observation space
@@ -1386,9 +1364,6 @@ def preprocess_dict_observation(
 ) -> TensorMapping:
     """Preprocess dictionary observations.
 
-    Sub-observations of a Dict space are leaves (AgileRL does not support
-    nested Dict/Tuple spaces), so the preprocessed values are tensors.
-
     :param observation: Dictionary observation
     :type observation: dict[str, npt.NDArray | torch.Tensor]
     :param observation_space: Dictionary observation space
@@ -1433,9 +1408,6 @@ def preprocess_tuple_observation(
     swap_channels: bool = False,
 ) -> TensorTuple:
     """Preprocess tuple observations.
-
-    Sub-observations of a Tuple space are leaves (AgileRL does not support
-    nested Dict/Tuple spaces), so the preprocessed elements are tensors.
 
     :param observation: Tuple observation
     :type observation: tuple[npt.NDArray | torch.Tensor, ...]
@@ -1847,10 +1819,6 @@ def stack_and_pad_experiences(
     device: str | torch.device | None = None,
 ) -> tuple[torch.Tensor, ...]:
     """Stacks experiences into a single tensor, padding them to the maximum length.
-
-    Every branch stacks or passes through tensors, so the result is always a tuple
-    of tensors; the covariant ``Sequence`` parameter lets callers pass concrete
-    ``list[torch.Tensor]`` batches directly.
 
     :param experiences: Experiences to stack: per-position tensor lists or
         already-stacked tensors.
@@ -2278,10 +2246,6 @@ def vectorize_agent_experiences_flat(
     dim: int = 1,
 ) -> torch.Tensor:
     """Vectorize flat per-agent experiences (log-probs, rewards, dones, values).
-
-    A typed wrapper over :func:`vectorize_experiences_by_agent` for callers that
-    pass per-agent scalars — never structured (dict/tuple) observations — so the
-    result is always a single tensor and callers need no ``isinstance`` narrowing.
 
     :param experiences: Per-agent experiences indexed by agent id.
     :type experiences: dict[str, Any]

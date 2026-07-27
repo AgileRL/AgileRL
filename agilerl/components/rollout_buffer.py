@@ -718,8 +718,6 @@ class RolloutBuffer:
         max_seq_len: int,
     ) -> list[TensorDict]:
         """TensorDict counterpart of :func:`extract_sequences_from_episode` for
-        nested buffer values (hidden states, dict observations).
-
         :param episode: The nested episode to split into sequences.
         :type episode: TensorDict
         :param max_seq_len: The maximum sequence length.
@@ -810,11 +808,6 @@ class RolloutBuffer:
 
     def prepare_sequence_tensors(self, device: str | None = None) -> None:
         """Prepare padded and unpadded TensorDicts with all of the possible sequences in the
-        buffer for the observations, actions, and hidden states. We pad the sequences to the
-        same length to obtain a TensorDict with batch_size [num_sequences, max_sequence_length]
-        for efficient truncated BPTT. The results are stored in ``self.padded_data`` and
-        ``self.unpadded_data``.
-
         :param device: Device to put tensors on, defaults to None (uses self.device).
         :type device: str | None
         """

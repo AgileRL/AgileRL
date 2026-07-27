@@ -215,9 +215,6 @@ class Trainer(ABC):
     def _resolve_env_spec(manifest: TrainingManifest) -> Any:  # noqa: ANN401 -- env spec type is subclass-specific (EnvSpecType locally vs ArenaEnvSpec)
         """Build an environment spec from the parsed manifest.
 
-        Subclasses override this to produce the appropriate spec type, and read
-        the manifest flavour they were validated against (core or Arena).
-
         :param manifest: The validated training manifest.
         :type manifest: TrainingManifest
         :returns: An environment spec.
@@ -584,8 +581,6 @@ class LocalTrainer(Trainer):
     def _make_env(self) -> EnvironmentType | None:
         """Create the environment to train on.
 
-        :returns: The environment to train on, or ``None`` for multi-turn LLM
-            training (which builds environments from a factory instead).
         :rtype: GymEnvType | PzEnvType | LLMEnvType | BanditEnv | None
         """
         if isinstance(self.env_spec, LLMEnvSpec):

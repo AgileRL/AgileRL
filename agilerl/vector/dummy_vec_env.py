@@ -115,9 +115,6 @@ class DummyVecEnv(VectorEnv):
     def render(self) -> tuple[RenderFrame, ...] | None:
         """Render the environment.
 
-        Wraps the single environment's frame in a length-1 tuple to match the
-        :class:`~gymnasium.vector.VectorEnv` render contract.
-
         :returns: Render output from the wrapped environment.
         :rtype: tuple[gymnasium.core.RenderFrame, ...] | None
         """
@@ -158,12 +155,7 @@ def _pz_placeholder(
     name: str,
     obs_spaces: dict[str, spaces.Space],
 ) -> float | dict[str, Any] | npt.NDArray:
-    """Return a NaN/zero placeholder for an inactive PettingZoo agent.
-
-    Mirrors the convention used by :class:`AsyncPettingZooVecEnv`. The
-    ``"observation"`` overload returns the zero obs array so callers can feed it
-    straight to ``np.expand_dims``.
-    """
+    """Return a NaN/zero placeholder for an inactive PettingZoo agent."""
     if name in ("reward", "terminated", "truncated"):
         return np.nan
     if name == "info":

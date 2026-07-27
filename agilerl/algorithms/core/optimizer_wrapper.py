@@ -270,11 +270,7 @@ class OptimizerWrapper:
             )
 
     def _optimizers_by_agent(self) -> dict[str, Optimizer]:
-        """The per-agent optimizer mapping of a multi-agent wrapper.
-
-        Excluding the single-``Optimizer`` case narrows to the mapping without
-        leaving an ``Optimizer & dict`` intersection behind.
-        """
+        """The per-agent optimizer mapping of a multi-agent wrapper."""
         optimizer = self.optimizer
         assert not isinstance(optimizer, Optimizer), (
             "Expected a dictionary of optimizers."

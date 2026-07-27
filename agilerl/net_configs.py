@@ -172,11 +172,7 @@ class LstmNetConfig(NetConfig):
 
 @dataclass
 class MultiInputNetConfig(NetConfig):
-    """Configuration for the EvolvableMultiInput network.
-
-    This configuration class combines settings for the multi-input network,
-    including latent dimension settings and network-specific configurations.
-    """
+    """Configuration for the EvolvableMultiInput network."""
 
     latent_dim: int = 16
     min_latent_dim: int = 8

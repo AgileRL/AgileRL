@@ -494,13 +494,7 @@ class TestOptimizerConfig:
 
 
 class TestNStepAgentAccess:
-    """The prioritized-replay path must keep working for wrapped agents.
-
-    An agent wrapper is not a ``RainbowDQN`` instance; it proxies attributes
-    through to one. Narrowing that path with a runtime check would exclude it
-    (and from Python 3.12 a ``runtime_checkable`` Protocol check is a static
-    lookup, so it misses the proxy on every supported version).
-    """
+    """The prioritized-replay path must keep working for wrapped agents."""
 
     def test_wrapper_is_not_a_rainbow_instance(self):
         rainbow = RainbowDQN(

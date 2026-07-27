@@ -153,9 +153,6 @@ def _is_nested_values(
 ) -> TypeIs[list[dict[str, float]]]:
     """Whether a metric's per-agent values use the nested (multi-agent) layout.
 
-    Inspecting the first element narrows the element type but not the list's, so
-    a ``TypeIs`` restates the layout for both branches at the call site.
-
     :param values: Per-agent metric values.
     :type values: list[float] | list[dict[str, float]]
     :returns: True if the values are per-agent dicts, False if plain scalars.

@@ -26,10 +26,6 @@ _T = TypeVar("_T")
 def _require(value: _T | None, description: str) -> _T:
     """Narrow an optional stream/tensor that an architecture invariant guarantees is set.
 
-    The value/advantage networks and the Rainbow support tensor are only built for the
-    architectures that use them, so within those code paths they are never ``None``.
-    This mirrors the explicit ``RuntimeError`` guards already used in :meth:`forward`.
-
     :param value: The optional value to narrow.
     :param description: Human-readable name used in the error message.
     :return: ``value``, guaranteed non-``None``.
@@ -780,9 +776,6 @@ class MakeEvolvable(EvolvableModule):
 
     def build_networks(self) -> tuple[nn.Module, nn.Module | None, nn.Module | None]:
         """Create and returns the feature, value and advantage nets.
-
-        The value net is only built for convolutional or Rainbow architectures, and the
-        advantage net only for Rainbow architectures.
 
         :return: Tuple of (feature net, value net, advantage net)
         :rtype: tuple[nn.Module, nn.Module | None, nn.Module | None]

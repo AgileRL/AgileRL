@@ -21,11 +21,7 @@ from agilerl.modules import EvolvableModule
 
 @dataclass(eq=False)
 class MockNetworkGroup(NetworkGroup):
-    """Real NetworkGroup with attribute names pre-resolved.
-
-    Tests pass attribute-name strings directly, so the frame-inspection name
-    resolution normally performed by ``NetworkGroup.__post_init__`` is skipped.
-    """
+    """Real NetworkGroup with attribute names pre-resolved."""
 
     def __post_init__(self) -> None:
         pass

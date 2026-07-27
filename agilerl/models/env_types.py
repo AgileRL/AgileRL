@@ -1,8 +1,4 @@
-"""Environment type vocabulary, importable without the heavy env-spec deps.
-
-:mod:`agilerl.models.env` pulls in gymnasium, pandas, and pettingzoo at import
-time, so enums needed by the (eagerly imported) algorithm specs live here.
-"""
+"""Environment type vocabulary, importable without the heavy env-spec deps."""
 
 from __future__ import annotations
 

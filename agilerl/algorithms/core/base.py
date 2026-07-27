@@ -248,12 +248,7 @@ IndividualT = TypeVar(
 
 
 class RegistryMeta(ABCMeta):
-    """Metaclass that runs registry initialization on top of ABC support.
-
-    After an algorithm finishes initializing with its specified network groups
-    and optimizers, this triggers ``_registry_init`` so the networks, optimizers,
-    and mutatable hyperparameters are registered on the instance.
-    """
+    """Metaclass that runs registry initialization on top of ABC support."""
 
     def __call__(
         cls: type[AlgoT],
@@ -493,11 +488,6 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
     ) -> TorchObsType | dict[str, TorchObsType]:
         """Preprocesses observations for forward pass through neural network.
 
-        Each concrete algorithm narrows ``observation`` to the exact shape it
-        consumes (a single observation, or a per-agent mapping) in its override.
-        Multi-agent algorithms return a dictionary of preprocessed observations
-        keyed by agent (or group) ID.
-
         :param observation: Observations of environment
         :type observation: numpy.ndarray[float] or dict[str, numpy.ndarray[float]]
 
@@ -508,12 +498,7 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
 
     @abstractmethod
     def learn(self, experiences: ExperiencesT) -> Any:  # noqa: ANN401 -- return type varies per algorithm (loss dict, tuple, etc.)
-        """Abstract method for learning the algorithm.
-
-        Concrete algorithms bind ``ExperiencesT`` (agilerl/typing.py) to the exact
-        batch their buffer or rollout produces, so each ``learn`` override reads
-        its experiences with precise typing rather than narrowing a broad union.
-        """
+        """Abstract method for learning the algorithm."""
         raise NotImplementedError
 
     @abstractmethod
@@ -524,12 +509,6 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
         **kwargs: Any,
     ) -> ActionType | ActionResult | tuple[Any, ...]:
         """Abstract method for getting an action from the algorithm.
-
-        Concrete algorithms return heterogeneous action payloads: a bare action
-        (off-policy), an ``(action, log_prob, entropy, values, ...)`` tuple
-        (on-policy), a per-agent ``(actions, raw_actions)`` pair (multi-agent),
-        or an :class:`ActionResult` (LLM). The ``tuple[Any, ...]`` arm admits
-        all of the tuple shapes.
 
         :param obs: The observation to get an action for.
         :type obs: ObservationType | MultiAgentObservationType
@@ -544,11 +523,7 @@ class EvolvableAlgorithm(ABC, Generic[ExperiencesT], metaclass=RegistryMeta):
 
     @abstractmethod
     def test(self, *args: Any, **kwargs: Any) -> float | npt.NDArray:
-        """Abstract method for testing the algorithm.
-
-        Single-agent and bandit algorithms return a scalar mean score;
-        multi-agent algorithms may return per-agent scores.
-        """
+        """Abstract method for testing the algorithm."""
         raise NotImplementedError
 
     @staticmethod

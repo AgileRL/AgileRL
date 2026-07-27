@@ -94,9 +94,7 @@ class EvolvableLSTM(EvolvableModule):
     def hidden_state_architecture(
         self,
     ) -> dict[str, tuple[int | type[BatchDimension], ...]]:
-        """Return the hidden state architecture. The batch dimension is represented
-        by the ``BatchDimension`` sentinel since it is only known at runtime.
-        """
+        """Return the hidden state architecture. The batch dimension is represented"""
         # For LSTM, hidden state and cell state have shape (num_layers * num_directions, batch_size, hidden_size)
         # Assuming unidirectional LSTM (num_directions=1) !TODO: SHOULD WE HAVE A DIRECTIONAL LSTM IN THE FUTURE?
         return {
