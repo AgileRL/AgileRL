@@ -81,7 +81,7 @@ class PettingZooAutoResetParallelWrapper(ParallelEnv[AgentID, ObsType, ActionTyp
             obs, infos = self.env.reset()
         return obs, rewards, terminations, truncations, infos
 
-    def render(self) -> None | npt.NDArray | str | list:
+    def render(self) -> npt.NDArray | str | list | None:
         """Render the environment.
 
         :return: Rendered environment

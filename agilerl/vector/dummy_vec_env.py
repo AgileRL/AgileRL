@@ -345,7 +345,7 @@ class PzDummyVecEnv(PettingZooVecEnv):
         msg = "step_async() must be called before step_wait()"
         raise RuntimeError(msg)
 
-    def render(self) -> None | npt.NDArray | str | list:
+    def render(self) -> npt.NDArray | str | list | None:
         """Render the underlying environment.
 
         :returns: Render output from the wrapped environment.
