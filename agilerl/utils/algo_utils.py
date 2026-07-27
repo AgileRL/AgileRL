@@ -44,12 +44,14 @@ from agilerl.typing import (
     BPTTSequenceType,
     DeviceType,
     InputSizeFromSpace,
+    LeafSpace,
     MaybeObsList,
     NetConfigType,
     NumpyObsType,
     ObservationType,
     ObsShape,
     OutputSizeFromSpace,
+    SpaceLike,
     TensorMapping,
     TensorTuple,
     TorchObsType,
@@ -120,18 +122,11 @@ def check_supported_space(observation_space: spaces.Space) -> None:
         )
 
 
-LeafSpace = spaces.Box | spaces.Discrete | spaces.MultiDiscrete | spaces.MultiBinary
 _LEAF_SPACE_TYPES = (
     spaces.Box,
     spaces.Discrete,
     spaces.MultiDiscrete,
     spaces.MultiBinary,
-)
-SpaceLike = (
-    spaces.Space
-    | list[spaces.Space]
-    | tuple[spaces.Space, ...]
-    | dict[str, spaces.Space]
 )
 
 

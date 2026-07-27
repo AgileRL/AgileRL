@@ -161,6 +161,15 @@ SupportedObservationSpace = (
 SupportedActionSpace = (
     spaces.Discrete | spaces.MultiDiscrete | spaces.MultiBinary | spaces.Box
 )
+# A single space, as opposed to the ``Dict``/``Tuple`` containers that nest them.
+LeafSpace = spaces.Box | spaces.Discrete | spaces.MultiDiscrete | spaces.MultiBinary
+# Any space, or one of the containers the framework accepts in place of one.
+SpaceLike = (
+    spaces.Space
+    | list[spaces.Space]
+    | tuple[spaces.Space, ...]
+    | dict[str, spaces.Space]
+)
 # Per-agent spaces for multi-agent algorithms: an ordered iterable of spaces,
 # a mapping keyed by agent id, or a ``spaces.Dict``.
 MultiAgentSpacesType = Iterable[spaces.Space] | Mapping[str, spaces.Space] | spaces.Dict
