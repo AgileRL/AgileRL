@@ -142,7 +142,7 @@ def measure_point(
     device_index: int = 0,
     prompt_len: int | None = None,
     snapshot_path: str | None = None,
-) -> tuple[MeasuredPoint, MeasuredPoint]:
+) -> tuple[MeasuredPoint | None, MeasuredPoint]:
     """Run one sweep point and return (generation, training) measurements.
 
     The prompt length defaults to a quarter of ``seq_len`` so completions can
@@ -165,6 +165,10 @@ def measure_point(
 
     if point.algorithm == "ppo":
         from agilerl.algorithms.ppo_llm import PPO as Algorithm
+    elif point.algorithm == "sft":
+        from agilerl.algorithms.sft import SFT as Algorithm
+    elif point.algorithm == "dpo":
+        from agilerl.algorithms.dpo import DPO as Algorithm
     else:
         from agilerl.algorithms.grpo import GRPO as Algorithm
 
@@ -197,10 +201,22 @@ def measure_point(
         if point.lora_target_modules == "all-linear"
         else [m.strip() for m in point.lora_target_modules.split(",") if m.strip()]
     )
+    # SFT and DPO train from a fixed dataset: they hard-set use_vllm=False and
+    # so have no generation phase to measure at all.
+    rollout_based = point.algorithm in ("grpo", "ppo")
     algorithm_kwargs: dict[str, object] = {}
-    if point.algorithm != "ppo":
-        # PPO has no notion of a completion group; its batch is trajectories.
+    if point.algorithm == "grpo":
+        # Only GRPO groups completions; the others batch trajectories.
         algorithm_kwargs["group_size"] = point.group_size
+    if rollout_based:
+        algorithm_kwargs["use_vllm"] = True
+        algorithm_kwargs["vllm_config"] = VLLMConfig(
+            gpu_memory_utilization=point.gpu_memory_utilization,
+            max_num_seqs=point.group_size,
+            max_lora_rank=point.lora_rank,
+            sleep_mode=True,
+        )
+        algorithm_kwargs["max_output_tokens"] = point.seq_len - prompt_len
 
     agent = Algorithm(
         pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
@@ -214,7 +230,6 @@ def measure_point(
         micro_batch_size_per_gpu=point.micro_batch,
         batch_size=point.micro_batch,
         max_model_len=point.seq_len,
-        max_output_tokens=point.seq_len - prompt_len,
         lora_config=LoraConfig(
             r=point.lora_rank,
             lora_alpha=2 * point.lora_rank,
@@ -223,13 +238,6 @@ def measure_point(
         ),
         lora_target_scope=point.lora_target_scope,
         quantization_config=quantization_config,
-        use_vllm=True,
-        vllm_config=VLLMConfig(
-            gpu_memory_utilization=point.gpu_memory_utilization,
-            max_num_seqs=point.group_size,
-            max_lora_rank=point.lora_rank,
-            sleep_mode=True,
-        ),
         **algorithm_kwargs,
     )
 
@@ -248,21 +256,59 @@ def measure_point(
     ]
 
     try:
-        with NvmlPeakSampler(device_index) as generation_sampler:
-            completion_ids, action_masks, sampling_logps = agent.get_action(
-                prompts, training=True
+        if rollout_based:
+            with NvmlPeakSampler(device_index) as generation_sampler:
+                completion_ids, action_masks, sampling_logps = agent.get_action(
+                    prompts, training=True
+                )
+
+            # Sleep the engine *before* opening the training window. ``learn``
+            # sleeps it internally, so a window opened around ``learn`` would
+            # sample the still-awake engine and report the rollout footprint
+            # as the training peak. Idempotent: guarded by the awake flag.
+            agent._prepare_vllm_for_training()
+
+            # One reward per trajectory row; completions arrive as one
+            # (group_size, seq) tensor per prompt.
+            n_trajectories = sum(ids.shape[0] for ids in completion_ids)
+            experiences = (
+                completion_ids,
+                action_masks,
+                torch.randn(n_trajectories),
             )
+            learn_kwargs = {"sampling_logps": sampling_logps}
+            generation_peak = generation_sampler.peak_bytes
+        else:
+            # SFT and DPO train from a dataset, so there is no rollout to
+            # measure. Synthesise a batch of the right shape: content is
+            # irrelevant to memory, only shapes matter.
+            rows = point.micro_batch
+            ids = torch.randint(
+                low=10,
+                high=tokenizer.vocab_size - 10,
+                size=(rows, point.seq_len),
+                device=agent.device,
+            )
+            mask = torch.ones_like(ids)
+            if point.algorithm == "sft":
+                experiences = {
+                    "input_ids": ids,
+                    "attention_mask": mask,
+                    "prompt_lengths": torch.full((rows,), prompt_len),
+                }
+            else:
+                # DPO scores a chosen and a rejected sequence per row, so its
+                # effective batch is twice the nominal one.
+                experiences = (
+                    ids,
+                    ids.clone(),
+                    mask,
+                    mask.clone(),
+                    torch.randn(rows),
+                )
+            learn_kwargs = {}
+            generation_peak = None
 
-        # Sleep the engine *before* opening the training window. ``learn``
-        # sleeps it internally, so a window opened around ``learn`` would
-        # sample the still-awake engine and report the rollout footprint as
-        # the training peak. Idempotent: guarded by the algorithm's awake flag.
-        agent._prepare_vllm_for_training()
-
-        # One reward per trajectory row; completions arrive as one
-        # (group_size, seq) tensor per prompt.
-        n_trajectories = sum(ids.shape[0] for ids in completion_ids)
-        rewards = torch.randn(n_trajectories)
         torch.cuda.reset_peak_memory_stats(device_index)
         reserved_at_entry = int(torch.cuda.memory_reserved(device_index))
         if snapshot_path:
@@ -279,10 +325,7 @@ def measure_point(
                 clear_history=True,
             )
         with NvmlPeakSampler(device_index) as training_sampler:
-            agent.learn(
-                (completion_ids, action_masks, rewards),
-                sampling_logps=sampling_logps,
-            )
+            agent.learn(experiences, **learn_kwargs)
         if snapshot_path:
             torch.cuda.memory._dump_snapshot(snapshot_path)
             torch.cuda.memory._record_memory_history(enabled=None)
@@ -292,11 +335,15 @@ def measure_point(
     finally:
         agent.clean_up()
 
-    generation = MeasuredPoint(
-        knobs=point.as_dict(),
-        phase="generation",
-        device_peak_bytes=generation_sampler.peak_bytes,
-        nvml_polled_bytes=generation_sampler.peak_bytes,
+    generation = (
+        MeasuredPoint(
+            knobs=point.as_dict(),
+            phase="generation",
+            device_peak_bytes=generation_peak,
+            nvml_polled_bytes=generation_peak,
+        )
+        if generation_peak is not None
+        else None
     )
     # NVML polling can miss the brief backward spike, so correct with torch's
     # exact high-water mark — but only its *growth* across the window.
@@ -413,7 +460,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--group-size", type=int, required=True)
     parser.add_argument("--lora-rank", type=int, required=True)
     parser.add_argument("--quantization", default="none")
-    parser.add_argument("--algorithm", default="grpo", choices=["grpo", "ppo"])
+    parser.add_argument(
+        "--algorithm", default="grpo", choices=["grpo", "ppo", "sft", "dpo"]
+    )
     parser.add_argument(
         "--lora-target-modules",
         default="all-linear",
@@ -473,7 +522,7 @@ def main(argv: list[str] | None = None) -> int:
             snapshot_path=args.snapshot,
         )
         result = {
-            "generation": generation.model_dump(mode="json"),
+            "generation": (generation.model_dump(mode="json") if generation else None),
             "training": training.model_dump(mode="json"),
         }
     Path(args.out).write_text(json.dumps(result))

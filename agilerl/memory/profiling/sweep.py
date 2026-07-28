@@ -230,7 +230,7 @@ def _measure_point_subprocess(
     model_name: str,
     point: SweepPoint,
     device_index: int,
-) -> tuple[MeasuredPoint, MeasuredPoint]:
+) -> tuple[MeasuredPoint | None, MeasuredPoint]:
     """Measure one point in a fresh subprocess.
 
     vLLM's CuMem allocator is process-global and allows one engine per
@@ -274,7 +274,9 @@ def _measure_point_subprocess(
     data = json.loads(Path(out_path).read_text())
     Path(out_path).unlink(missing_ok=True)
     return (
-        MeasuredPoint.model_validate(data["generation"]),
+        MeasuredPoint.model_validate(data["generation"])
+        if data.get("generation")
+        else None,
         MeasuredPoint.model_validate(data["training"]),
     )
 
@@ -428,10 +430,12 @@ def run_sweep(
             )
             skipped.append(str(point))
             continue
-        measured.extend([generation, training])
+        measured.append(training)
         target = holdout_pairs if held_out else fit_pairs
-        target["generation"].append((point, generation))
         target["training"].append((point, training))
+        if generation is not None:
+            measured.append(generation)
+            target["generation"].append((point, generation))
 
     if skipped:
         print(f"\n{len(skipped)} point(s) skipped:", flush=True)
@@ -459,12 +463,17 @@ def run_sweep(
             holdout_pairs["training"],
             "training",
         ),
-        generation=calibrate_phase(
-            model,
-            device,
-            fit_pairs["generation"],
-            holdout_pairs["generation"],
-            "generation",
+        generation=(
+            calibrate_phase(
+                model,
+                device,
+                fit_pairs["generation"],
+                holdout_pairs["generation"],
+                "generation",
+            )
+            # SFT and DPO never generate, so there is no engine phase to fit.
+            if fit_pairs["generation"]
+            else PhaseCalibration()
         ),
         realised_weight_bytes=realised,
         measured=tuple(measured),
