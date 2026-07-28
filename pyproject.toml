@@ -55,7 +55,7 @@ llm = [
     "liger-kernel==0.8.1; sys_platform == 'linux'",
     "peft==0.19.1",
     "transformers==5.14.1",
-    "vllm>=0.23; sys_platform == 'linux'",
+    "vllm>=0.24; sys_platform == 'linux'",
 ]
 arena = [
     "agilerl-arena==0.1.1",
