@@ -98,7 +98,7 @@ def _make_population(agents, **kwargs):
     pop.last_fitnesses = []
     pop.evo_steps = kwargs.get("evo_steps", 0)
     pop.is_multi_agent = kwargs.get("is_multi_agent", False)
-    pop.additional_metric_names = kwargs.get("additional_metric_names", [])
+    # additional_metric_names is a live property over agent.metrics.additional_metrics
     pop.nonscalar_metric_names = kwargs.get("nonscalar_metric_names", [])
     pop.agent_ids = kwargs.get("agent_ids", None)
     return pop
@@ -850,3 +850,72 @@ class TestGatherMetrics:
         )
         metrics = pop._gather_metrics()
         assert metrics.steps == [100]
+
+
+class TestPopulationLiveAdditionalMetricNames:
+    def test_names_logged_after_construction_are_visible(self):
+        """Live property picks up metrics registered after Population construction."""
+        from agilerl.metrics import AgentMetrics
+
+        agent = MagicMock()
+        agent.metrics = AgentMetrics()
+        agent.metrics.register("loss")
+        agent.mut = None
+        agent.index = 0
+        agent.fitness = [1.0]
+        agent.registry = MagicMock()
+        agent.registry.hp_config = None
+
+        # Bypass full Population.__init__ validation with a minimal real agent metrics.
+        pop = Population.__new__(Population)
+        pop._agents = [agent]
+        pop.min_evo_steps = 10
+        pop.accelerator = None
+        pop.loggers = []
+        pop.last_fitnesses = []
+        pop.evo_steps = 0
+        pop.is_multi_agent = False
+        pop.nonscalar_metric_names = []
+        pop.agent_ids = None
+
+        assert pop.additional_metric_names == ["loss"]
+        agent.metrics.log("reward/format", 1.0)
+        assert pop.additional_metric_names == ["loss", "reward/format"]
+
+    def test_union_across_agents(self):
+        a1 = _make_mock_agent(additional_metrics=["loss"])
+        a2 = _make_mock_agent(additional_metrics=["loss", "entropy"])
+        pop = _make_population([a1, a2])
+        assert pop.additional_metric_names == ["loss", "entropy"]
+
+    def test_namespaced_reward_component_distinct_from_builtin(self):
+        """reward/accuracy and accuracy are independent metric keys."""
+        from agilerl.metrics import AgentMetrics
+
+        agent = MagicMock()
+        agent.metrics = AgentMetrics()
+        agent.metrics.log("accuracy", 0.9)
+        agent.metrics.log("reward/accuracy", 0.1)
+        agent.mut = None
+        agent.index = 0
+        agent.fitness = [1.0]
+        agent.registry = MagicMock()
+        agent.registry.hp_config = None
+
+        pop = Population.__new__(Population)
+        pop._agents = [agent]
+        pop.min_evo_steps = 10
+        pop.accelerator = None
+        pop.loggers = []
+        pop.last_fitnesses = []
+        pop.evo_steps = 0
+        pop.is_multi_agent = False
+        pop.nonscalar_metric_names = []
+        pop.agent_ids = None
+
+        collected = pop._collect_additional_metrics()
+        assert collected[0]["accuracy"] == pytest.approx(0.9)
+        assert collected[0]["reward/accuracy"] == pytest.approx(0.1)
+        d = pop._gather_metrics().to_dict()
+        assert d["train/mean_accuracy"] == pytest.approx(0.9)
+        assert d["train/mean_reward/accuracy"] == pytest.approx(0.1)

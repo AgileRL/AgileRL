@@ -481,9 +481,22 @@ class Population(Generic[AgentT]):
         self.is_multi_agent = all(
             isinstance(agent, MultiAgentRLAlgorithm) for agent in self._agents
         )
-        self.additional_metric_names = sample_agent.metrics.additional_metrics
         self.nonscalar_metric_names = sample_agent.metrics.nonscalar_metrics
         self.agent_ids = sample_agent.metrics.agent_ids if self.is_multi_agent else None
+
+    @property
+    def additional_metric_names(self) -> list[str]:
+        """Union of registered additional-metric names across current agents.
+
+        Computed live so metrics first logged after construction (e.g.
+        dynamically-named reward components) are collected deterministically.
+        """
+        names: list[str] = []
+        for agent in self._agents:
+            for name in agent.metrics.additional_metrics:
+                if name not in names:
+                    names.append(name)
+        return names
 
     @property
     def agents(self) -> list[AgentT]:

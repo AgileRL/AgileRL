@@ -6,13 +6,15 @@ steps a batch of them in lock-step, sharing a ``BatchPointer`` dataset cursor.
 
 from __future__ import annotations
 
+import math
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
+import numpy as np
 import torch
 
 from agilerl.protocols import EnvClientProtocol, TextEnvProtocol
@@ -20,6 +22,78 @@ from agilerl.utils.llm_utils import max_prompt_tokens_for_model_len
 
 if TYPE_CHECKING:
     from agilerl.typing import RolloutPrompts
+
+
+class RewardComponent(NamedTuple):
+    """One named, weighted reward piece for :meth:`RolloutEnv.from_dataset`.
+
+    :param name: Metric key; reported as ``train/mean_reward/<name>``.
+    :param fn: ``(completion, answer, question) -> float`` scorer.
+    :param weight: Contribution to the learning reward (default ``1.0``).
+    """
+
+    name: str
+    fn: Callable[[str, Any, Any], float]
+    weight: float = 1.0
+
+
+def _normalize_reward_fn(
+    reward_fn: Callable[[str, Any, Any], float] | list[RewardComponent],
+) -> Callable[[str, Any, Any], float] | list[RewardComponent]:
+    """Validate ``reward_fn`` into a scalar callable or a list of ``RewardComponent``.
+
+    :raises TypeError: Non-callable/non-list ``reward_fn``, a list entry that is not a
+        ``RewardComponent``, a non-callable ``fn``, or a wrong-typed weight.
+    :raises ValueError: Empty list, empty/whitespace name, non-finite weight, or
+        duplicate names.
+    """
+    if callable(reward_fn) and not isinstance(reward_fn, list):
+        return reward_fn
+    if not isinstance(reward_fn, list):
+        msg = (
+            "reward_fn must be a callable (completion, answer, question) -> float "
+            f"or a list[RewardComponent]; got {type(reward_fn).__name__}"
+        )
+        raise TypeError(msg)
+    if not reward_fn:
+        msg = "reward_fn list must contain at least one RewardComponent"
+        raise ValueError(msg)
+
+    normalized: list[RewardComponent] = []
+    seen: set[str] = set()
+    for entry in reward_fn:
+        if not isinstance(entry, RewardComponent):
+            msg = (
+                "each reward_fn list entry must be a RewardComponent(name, fn, "
+                f"weight=1.0); got {type(entry).__name__}"
+            )
+            raise TypeError(msg)
+        name, fn, weight = entry
+        if not isinstance(name, str) or not name.strip():
+            msg = "RewardComponent name must be a non-empty string"
+            raise ValueError(msg)
+        name = name.strip()
+        if not callable(fn):
+            msg = f"RewardComponent '{name}' fn must be callable"
+            raise TypeError(msg)
+        if isinstance(weight, (bool, np.bool_)) or not isinstance(
+            weight, (int, float, np.floating, np.integer)
+        ):
+            msg = (
+                f"RewardComponent '{name}' weight must be a real number; "
+                f"got {type(weight).__name__}"
+            )
+            raise TypeError(msg)
+        weight = float(weight)
+        if not math.isfinite(weight):
+            msg = f"RewardComponent '{name}' weight must be finite; got {weight}"
+            raise ValueError(msg)
+        if name in seen:
+            msg = f"duplicate RewardComponent name: '{name}'"
+            raise ValueError(msg)
+        seen.add(name)
+        normalized.append(RewardComponent(name, fn, weight))
+    return normalized
 
 
 class RolloutEnv:
@@ -154,7 +228,7 @@ class RolloutEnv:
     def from_dataset(
         cls,
         dataset: Any,
-        reward_fn: Callable[[str, Any, Any], float | tuple[float, dict[str, float]]],
+        reward_fn: Callable[[str, Any, Any], float] | list[RewardComponent],
         tokenizer: Any,
         *,
         test_dataset: Any | None = None,
@@ -168,18 +242,29 @@ class RolloutEnv:
         Rows + reward fn are served in-process as a single-turn env (``max_turns`` fixed
         to 1); ``test_dataset`` rows are served under :meth:`eval_mode`.
 
-        :param dataset: Train rows, indexable to mappings with the question/answer keys.
-        :param reward_fn: ``(completion, answer, question) -> float`` scorer, or one
-            that returns ``(total, components)`` where ``components`` is a
-            ``dict[str, float]`` of raw segments. The ``total`` is the learning
-            reward; ``components`` are carried in ``info["reward_components"]`` for
-            per-component train/``mean_<name>`` reporting. A plain ``-> float``
-            return keeps working with no ``reward_components`` key::
+        ``reward_fn`` is one of two shapes::
 
-                def reward_fn(completion, answer, question):
-                    fmt     = 1.0 if is_well_formatted(completion) else 0.0
-                    correct = float(completion.strip() == answer)
-                    return 0.1 * fmt + 1.0 * correct, {"format": fmt, "correctness": correct}
+            # 1. scalar learning signal, no per-component metrics
+            def reward_fn(completion, answer, question) -> float: ...
+
+            # 2. named, weighted pieces -> weighted learning reward + raw metrics
+            reward_fn = [
+                RewardComponent("format", format_reward, weight=0.1),
+                RewardComponent("correctness", correctness_reward),  # weight 1.0
+            ]
+
+        For the list form the learning reward is ``sum(weight_i * fn_i(...))`` while
+        each component's **raw, unweighted** value is reported as
+        ``train/mean_reward/<name>``. Negative weights are allowed; only non-finite
+        weights are rejected. Reward fns should return finite floats.
+
+        A callable that returns ``(total, components)`` is not supported; pass a
+        ``list[RewardComponent]`` for per-component metrics. Component metrics require
+        the list form; a YAML/manifest callable must return a ``float``.
+
+        :param dataset: Train rows, indexable to mappings with the question/answer keys.
+        :param reward_fn: A scalar ``(completion, answer, question) -> float`` callable,
+            or a ``list[RewardComponent]``.
         :param tokenizer: Tokenizer for the token-level loop.
         :param test_dataset: Held-out rows served under eval mode (falls back to ``dataset``).
         :param prompt_builder: Maps a row to the served prompt text; ``None`` serves
@@ -192,6 +277,7 @@ class RolloutEnv:
         if "max_turns" in kwargs:
             msg = "from_dataset builds a single-turn env; max_turns is fixed to 1"
             raise TypeError(msg)
+        reward_fn = _normalize_reward_fn(reward_fn)
         env = _PromptDatasetEnv(
             dataset,
             test_dataset,
@@ -601,7 +687,7 @@ class _PromptDatasetEnv:
         self,
         dataset: Any,
         test_dataset: Any | None,
-        reward_fn: Callable[[str, Any, Any], float | tuple[float, dict[str, float]]],
+        reward_fn: Callable[[str, Any, Any], float] | list[RewardComponent],
         prompt_builder: Callable[[Any], str] | None,
         question_column: str,
         answer_column: str,
@@ -649,16 +735,23 @@ class _PromptDatasetEnv:
 
     def step(self, action: str) -> tuple[str, float, bool, bool, dict[str, Any]]:
         """Score the completion against the current row; always single-turn."""
+        if isinstance(self._reward_fn, list):
+            total = 0.0
+            raw: dict[str, float] = {}
+            for name, fn, weight in self._reward_fn:
+                value = float(fn(action, self._answer, self._question))
+                raw[name] = value
+                total += weight * value
+            return "", total, True, False, {"reward_components": raw}
+
         result = self._reward_fn(action, self._answer, self._question)
         if isinstance(result, tuple):
-            total, components = result
-            return (
-                "",
-                float(total),
-                True,
-                False,
-                {"reward_components": dict(components)},
+            msg = (
+                "reward_fn callable must return a scalar float; returning a tuple "
+                "(e.g. (total, components)) is not supported — pass a "
+                "list[RewardComponent] for per-component metrics"
             )
+            raise TypeError(msg)
         return "", float(result), True, False, {}
 
 

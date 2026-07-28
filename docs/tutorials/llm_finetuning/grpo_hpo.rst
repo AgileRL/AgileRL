@@ -37,7 +37,7 @@ Dependencies
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
     from agilerl.training.llm import train_llm_rollout
-    from agilerl.llm_envs import RolloutEnv
+    from agilerl.llm_envs import RewardComponent, RolloutEnv
     from agilerl.utils.utils import create_population
 
 Defining Hyperparameters
@@ -140,7 +140,9 @@ with reinforcement learning, it becomes an agent through this process.
 We must create a reinforcement learning environment in which our agent can explore possible
 solutions and learn to optimise rewards. AgileRL provides a :class:`RolloutEnv <agilerl.llm_envs.RolloutEnv>`
 class that turns lists of questions and answers into a reinforcement learning, gymnasium-style environment.
-Reasoning is the single-turn case, so we build the environment with ``max_turns=1``.
+Reasoning is the single-turn case, so we build it with
+:meth:`RolloutEnv.from_dataset <agilerl.llm_envs.RolloutEnv.from_dataset>`
+(``max_turns`` is fixed to 1).
 
 So, how does the environment know how to reward an agent for its outputs? Well, we must define a *reward_function*
 that the agent learns to optimise. Following the techniques used in the DeepSeek reasoning `paper <https://arxiv.org/pdf/2501.12948>`_,
@@ -157,76 +159,57 @@ for displaying these behaviours, the agent itself discovers the best way to achi
 
     .. code-block:: python
 
-        def format_reward_func(completions, target, **kwargs):
-            rewards = []
-
-            for completion, gt in zip(completions, target):
-                try:
-                    # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
-                    completion = "<think>" + completion
-                    regex = r"^<think>([^<]*(?:<(?!/?think>)[^<]*)*)<\/think>\n<answer>([\s\S]*?)<\/answer>$"
-                    match = re.search(regex, completion, re.DOTALL)
-                    if match is None or len(match.groups()) != 2:
-                        rewards.append(0.0)
-                    else:
-                        rewards.append(1.0)
-                except Exception:
-                    rewards.append(0.0)
-            return rewards
+        def format_reward_func(completion: str, answer: str, question: str) -> float:
+            try:
+                # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
+                completion = "<think>" + completion
+                regex = r"^<think>([^<]*(?:<(?!/?think>)[^<]*)*)<\/think>\n<answer>([\s\S]*?)<\/answer>$"
+                match = re.search(regex, completion, re.DOTALL)
+                if match is None or len(match.groups()) != 2:
+                    return 0.0
+                return 1.0
+            except Exception:
+                return 0.0
 
 
-        def equation_reward_func(completions, target, nums, **kwargs):
-            rewards = []
+        def equation_reward_func(completion: str, answer: str, question: str) -> float:
+            try:
+                # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
+                completion = "<think>" + completion
+                answer_tags = re.findall(r"<answer>([\s\S]*?)<\/answer>", completion)
 
-            for completion, gt, numbers in zip(completions, target, nums):
-                try:
-                    # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
-                    completion = "<think>" + completion
-                    answer_tags = re.findall(r"<answer>([\s\S]*?)<\/answer>", completion)
+                if len(answer_tags) != 1:
+                    return 0.0
 
-                    if len(answer_tags) != 1:
-                        rewards.append(0.0)
-                        continue
+                equation = answer_tags[0].strip()
+                used_numbers = [int(n) for n in re.findall(r"\d+", equation)]
+                numbers = (
+                    question.flatten().tolist()
+                    if hasattr(question, "flatten")
+                    else list(question)
+                )
 
-                    equation = answer_tags[0].strip()
-                    used_numbers = [int(n) for n in re.findall(r"\d+", equation)]
+                if sorted(used_numbers) != sorted(numbers):
+                    return 0.0
 
-                    if sorted(used_numbers) != sorted(numbers.flatten().tolist()):
-                        rewards.append(0.0)
-                        continue
+                allowed_pattern = r"^[\d+\-*/().\s]+$"
+                if not re.match(allowed_pattern, equation):
+                    return 0.0
 
-                    allowed_pattern = r"^[\d+\-*/().\s]+$"
-                    if not re.match(allowed_pattern, equation):
-                        rewards.append(0.0)
-                        continue
-
-                    result = eval(equation, {"__builtins__": None}, {})
-
-                    if abs(float(result) - float(gt)) < 1e-5:
-                        rewards.append(1.0)
-                    else:
-                        rewards.append(0.0)
-                except Exception:
-                    rewards.append(0.0)
-            return rewards
-
-
-        def combined_rewards(completion, solution, prompt):
-            reward = (
-                equation_reward_func([completion], [solution], [prompt])[0]
-                + format_reward_func([completion], [solution])[0]
-            )
-
-            return reward
+                result = eval(equation, {"__builtins__": None}, {})
+                return 1.0 if abs(float(result) - float(answer)) < 1e-5 else 0.0
+            except Exception:
+                return 0.0
 
 Now we have defined our reward functions, we must also design our prompt. This forms the input given
 to the agent and provides the context necessary to complete the task. This is a task-specific feature,
 and different reasoning problems will require different conversation templates, although they can follow a similar
 format. We define the conversation template as follows (using ``question`` and ``answer`` as placeholders for the question and answer data)
 and then drive a single-turn rollout env over the question and answer
-columns of our dataset with an in-process ``env_factory`` (a prompt dataset is just an
-environment: each rollout runs its own env instance in-process via
-:meth:`RolloutEnv.local <agilerl.llm_envs.RolloutEnv.local>`).
+columns of our dataset with an in-process ``env_factory`` via
+:meth:`RolloutEnv.from_dataset <agilerl.llm_envs.RolloutEnv.from_dataset>`. Reward functions can be passed in two ways: as a plain scalar ``reward_fn`` or as a ``list`` of :class:`~agilerl.llm_envs.RewardComponent`
+which allows you to break down the reward into multiple components for reporting purposes with the learning signal being the weighted sum of the components. All reward functions, whether scalar or list,
+expect the same arguments, namely ``completion``, ``answer``, and ``question`` strings and return a float.
 
 .. collapse:: Build the Single-Turn Rollout Environment
 
@@ -247,55 +230,25 @@ environment: each rollout runs its own env instance in-process via
         # Define accelerators for distributed training
         accelerator = Accelerator()
 
-        def prompt_builder(question: str) -> str:
+        def prompt_builder(row) -> str:
+            question = row["question"]
             parts = [
                 m["content"].format(question=question, answer="")
                 for m in conversation_template
             ]
             return "\n".join(p for p in parts if p)
 
-        # A single-turn rollout environment from the dataset — a prompt dataset is
-        # just an env, driven in-process by RolloutEnv.local.
-        class PromptDataset:
-            """Single-turn dataset env: a question on reset, a score on step."""
-
-            def __init__(self, questions, answers, reward_fn, prompt_builder,
-                         test_questions=None, test_answers=None):
-                self.questions, self.answers = questions, answers
-                self.test_questions, self.test_answers = test_questions, test_answers
-                self.reward_fn, self.prompt_builder = reward_fn, prompt_builder
-                self._cursor, self._split = 0, ""
-
-            @property
-            def dataset_size(self) -> int:
-                return len(self.questions)
-
-            def reset(self, seed=None, *, row_index=None, evaluation=None):
-                if evaluation and self.test_questions is not None:
-                    qs, ans, split = self.test_questions, self.test_answers, "eval"
-                else:
-                    qs, ans, split = self.questions, self.answers, "train"
-                if row_index is None:
-                    if split != self._split:
-                        self._cursor, self._split = 0, split
-                    row_index, self._cursor = self._cursor, self._cursor + 1
-                self._q, self._a = qs[row_index % len(qs)], ans[row_index % len(ans)]
-                return self.prompt_builder(self._q), {}
-
-            def step(self, action):
-                return "", float(self.reward_fn(action, self._a, self._q)), True, False, {}
-
-        env_factory = lambda: RolloutEnv.local(
-            PromptDataset(
-                questions=list(train_dataset["question"]),
-                answers=list(train_dataset["answer"]),
-                reward_fn=combined_rewards,
-                prompt_builder=prompt_builder,
-                test_questions=list(test_dataset["question"]),
-                test_answers=list(test_dataset["answer"]),
-            ),
+        env_factory = lambda: RolloutEnv.from_dataset(
+            train_dataset,
+            [
+                # Learning reward = sum(weight * fn(...)); raw values still reported
+                # as train/mean_reward/<name>.
+                RewardComponent("format", format_reward_func, weight=1.0),
+                RewardComponent("equation", equation_reward_func, weight=1.0),
+            ],
             tokenizer,
-            max_turns=1,
+            test_dataset=test_dataset,
+            prompt_builder=prompt_builder,
             pad_id=tokenizer.pad_token_id,
             apply_chat_template=True,
             max_model_len=1024,

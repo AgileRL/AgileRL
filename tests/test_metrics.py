@@ -417,3 +417,27 @@ class TestNonscalarWindow:
         m.register_histogram("actions")
         m.log_histogram("actions", np.arange(5), "a")
         assert list(m._nonscalar_metrics["actions"]["a"]) == [2, 3, 4]
+
+
+class TestAgentMetricsAutoRegister:
+    def test_log_auto_registers_unknown_name(self):
+        m = AgentMetrics()
+        m.log("format", 1.0)
+        assert "format" in m._additional_metrics
+        assert m.get_mean("format") == pytest.approx(1.0)
+
+    def test_get_mean_unknown_returns_nan(self):
+        m = AgentMetrics()
+        assert math.isnan(m.get_mean("never_registered"))
+
+
+class TestMultiAgentMetricsAutoRegister:
+    def test_log_auto_registers_unknown_name(self):
+        m = MultiAgentMetrics(["a0", "a1"])
+        m.log("format", 0.5, "a0")
+        assert "format" in m._additional_metrics
+        assert m.get_mean("format", "a0") == pytest.approx(0.5)
+
+    def test_get_mean_unknown_returns_nan(self):
+        m = MultiAgentMetrics(["a0"])
+        assert math.isnan(m.get_mean("never_registered", "a0"))

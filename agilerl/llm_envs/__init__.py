@@ -10,6 +10,7 @@ from agilerl.llm_envs.dataset_env import DatasetEnv
 from agilerl.llm_envs.rollout_env import (
     BatchPointer,
     BatchRolloutEnv,
+    RewardComponent,
     RolloutEnv,
 )
 from agilerl.utils.llm_utils import apply_chat_template
@@ -18,6 +19,7 @@ __all__ = [
     "BatchPointer",
     "BatchRolloutEnv",
     "DatasetEnv",
+    "RewardComponent",
     "RolloutEnv",
     "apply_chat_template",
 ]

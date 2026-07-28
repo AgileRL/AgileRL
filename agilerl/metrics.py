@@ -200,7 +200,12 @@ class AgentMetrics(BaseMetrics):
     def log(self, name: str, value: float) -> None:
         """Append a value to the accumulator for a registered metric.
 
-        :param name: Previously registered metric name.
+        Auto-registers ``name`` on first use so dynamically-named metrics (e.g.
+        reward components) need no prior :meth:`register` call. Explicit
+        :meth:`register` remains available for statically-declared metrics and
+        still raises on duplicates.
+
+        :param name: Metric name (registered on first use if unknown).
         :type name: str
         :param value: Scalar metric value.
         :type value: float
@@ -211,6 +216,8 @@ class AgentMetrics(BaseMetrics):
         >>> metrics.log("loss", 0.2)
         >>> metrics.get_mean("loss")
         """
+        if name not in self._additional_metrics:
+            self._init_metric(name)
         self._additional_metrics[name].append(float(value))
 
     def log_histogram(self, name: str, values: np.ndarray) -> None:
@@ -229,12 +236,12 @@ class AgentMetrics(BaseMetrics):
     def get_mean(self, name: str) -> float:
         """Return the mean of accumulated values for a registered metric.
 
-        :param name: Previously registered metric name.
+        :param name: Metric name.
         :type name: str
-        :returns: Mean of accumulated values for the registered metric.
+        :returns: Mean of accumulated values, or ``nan`` if unregistered or empty.
         :rtype: float
         """
-        values = self._additional_metrics[name]
+        values = self._additional_metrics.get(name)
         if not values:
             return float("nan")
 
@@ -318,13 +325,16 @@ class MultiAgentMetrics(BaseMetrics):
     def log(self, name: str, value: float, agent_id: str | None = None) -> None:
         """Append a value to the accumulator for a registered metric and sub-agent.
 
+        Auto-registers ``name`` on first use so dynamically-named metrics need no
+        prior :meth:`register` call.
+
         Example:
         >>> metrics = MultiAgentMetrics(["speaker_0", "speaker_1", "listener_0", "listener_1"])
         >>> metrics.log("loss", 0.1, "speaker_0")
         >>> metrics.log("loss", 0.2, "speaker_0")
         >>> metrics.get_mean("loss", "speaker_0")
 
-        :param name: Previously registered metric name.
+        :param name: Metric name (registered on first use if unknown).
         :type name: str
         :param value: Scalar metric value.
         :type value: float
@@ -334,6 +344,8 @@ class MultiAgentMetrics(BaseMetrics):
         if agent_id is None:
             msg = "agent_id must be provided for multi-agent metrics."
             raise ValueError(msg)
+        if name not in self._additional_metrics:
+            self._init_metric(name)
         self._additional_metrics[name][agent_id].append(float(value))
 
     def log_histogram(
@@ -355,14 +367,15 @@ class MultiAgentMetrics(BaseMetrics):
     def get_mean(self, name: str, agent_id: str) -> float:
         """Return the mean of accumulated values for a registered metric and sub-agent.
 
-        :param name: Previously registered metric name.
+        :param name: Metric name.
         :type name: str
         :param agent_id: Sub-agent identifier.
         :type agent_id: str
-        :returns: Mean of accumulated values for the metric and sub-agent.
+        :returns: Mean of accumulated values, or ``nan`` if unregistered or empty.
         :rtype: float
         """
-        values = self._additional_metrics[name][agent_id]
+        per_agent = self._additional_metrics.get(name)
+        values = per_agent.get(agent_id) if per_agent is not None else None
         if not values:
             return float("nan")
 

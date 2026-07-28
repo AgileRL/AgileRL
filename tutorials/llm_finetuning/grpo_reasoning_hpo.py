@@ -9,7 +9,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.llm import train_llm_rollout
 from agilerl.utils.algo_utils import VLLMConfig
-from agilerl.llm_envs import RolloutEnv
+from agilerl.llm_envs import RewardComponent, RolloutEnv
 from agilerl.utils.utils import create_population
 
 if HAS_LLM_DEPENDENCIES:
@@ -39,64 +39,47 @@ def make_dataset(dataset_name: str) -> tuple[Dataset, Dataset]:
     return train_dataset, test_dataset
 
 
-def format_reward_func(completions, target, **kwargs):
-    rewards = []
-
-    for completion, _gt in zip(completions, target, strict=False):
-        try:
-            # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
-            completion = "<think>" + completion
-            regex = r"^<think>([^<]*(?:<(?!/?think>)[^<]*)*)<\/think>\n<answer>([\s\S]*?)<\/answer>$"
-            match = re.search(regex, completion, re.DOTALL)
-            if match is None or len(match.groups()) != 2:
-                rewards.append(0.0)
-            else:
-                rewards.append(1.0)
-        except Exception:  # noqa: PERF203
-            rewards.append(0.0)
-    return rewards
+def format_reward_func(completion: str, answer: str, question: str) -> float:
+    try:
+        # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
+        completion = "<think>" + completion
+        regex = r"^<think>([^<]*(?:<(?!/?think>)[^<]*)*)<\/think>\n<answer>([\s\S]*?)<\/answer>$"
+        match = re.search(regex, completion, re.DOTALL)
+        if match is None or len(match.groups()) != 2:
+            return 0.0
+        return 1.0
+    except Exception:  # noqa: PERF203
+        return 0.0
 
 
-def equation_reward_func(completions, target, nums, **kwargs):
-    rewards = []
+def equation_reward_func(completion: str, answer: str, question: str) -> float:
+    try:
+        # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
+        completion = "<think>" + completion
+        answer_tags = re.findall(r"<answer>([\s\S]*?)<\/answer>", completion)
 
-    for completion, gt, numbers in zip(completions, target, nums, strict=False):
-        try:
-            # add synthetic <think> as its already part of the prompt and prefilled for the assistant to more easily match the regex
-            completion = "<think>" + completion
-            answer_tags = re.findall(r"<answer>([\s\S]*?)<\/answer>", completion)
+        if len(answer_tags) != 1:
+            return 0.0
 
-            if len(answer_tags) != 1:
-                rewards.append(0.0)
-                continue
+        equation = answer_tags[0].strip()
+        used_numbers = [int(n) for n in re.findall(r"\d+", equation)]
+        numbers = (
+            question.flatten().tolist()
+            if hasattr(question, "flatten")
+            else list(question)
+        )
 
-            equation = answer_tags[0].strip()
-            used_numbers = [int(n) for n in re.findall(r"\d+", equation)]
+        if sorted(used_numbers) != sorted(numbers):
+            return 0.0
 
-            if sorted(used_numbers) != sorted(numbers.flatten().tolist()):
-                rewards.append(0.0)
-                continue
+        allowed_pattern = r"^[\d+\-*/().\s]+$"
+        if not re.match(allowed_pattern, equation):
+            return 0.0
 
-            allowed_pattern = r"^[\d+\-*/().\s]+$"
-            if not re.match(allowed_pattern, equation):
-                rewards.append(0.0)
-                continue
-
-            result = eval(equation, {"__builtins__": None}, {})
-
-            if abs(float(result) - float(gt)) < 1e-5:
-                rewards.append(1.0)
-            else:
-                rewards.append(0.0)
-        except Exception:
-            rewards.append(0.0)
-    return rewards
-
-
-def combined_rewards(completion, solution, prompt):
-    fmt = format_reward_func([completion], [solution])[0]
-    eq = equation_reward_func([completion], [solution], [prompt])[0]
-    return fmt + eq, {"format": fmt, "equation": eq}
+        result = eval(equation, {"__builtins__": None}, {})
+        return 1.0 if abs(float(result) - float(answer)) < 1e-5 else 0.0
+    except Exception:
+        return 0.0
 
 
 def main(init_hp, mut_p):
@@ -130,12 +113,20 @@ def main(init_hp, mut_p):
 
     # Reasoning folds into the single-turn rollout taxonomy: (question, answer)
     # rows + a reward fn, no pre-packaged env needed — ``from_dataset`` bundles
-    # them into one. The BatchRolloutEnv owns the dataset cursor, keeping each
-    # GRPO group's dataset order deterministic and consistent.
+    # them into one. A plain scalar reward_fn yields one learning reward with no
+    # per-component metrics; a list of RewardComponent keeps that single learning
+    # reward (weighted sum) and adds granular train/mean_reward/<name> reporting.
+    # The BatchRolloutEnv owns the dataset cursor, keeping each GRPO group's
+    # dataset order deterministic and consistent.
     def env_factory(evaluation_mode: bool = False):
         env = RolloutEnv.from_dataset(
             train_dataset,
-            combined_rewards,
+            [
+                # Learning reward = sum(weight * fn(...)); raw values still reported
+                # as train/mean_reward/<name>.
+                RewardComponent("format", format_reward_func, weight=1.0),
+                RewardComponent("equation", equation_reward_func, weight=1.0),
+            ],
             tokenizer,
             test_dataset=test_dataset,
             prompt_builder=prompt_builder,

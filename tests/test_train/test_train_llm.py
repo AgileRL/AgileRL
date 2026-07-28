@@ -48,7 +48,6 @@ def _population_init_skip_per_mock_class():
         self.is_multi_agent = all(
             isinstance(agent, MultiAgentRLAlgorithm) for agent in agents
         )
-        self.additional_metric_names = self.sample_agent.metrics.additional_metrics
         self.nonscalar_metric_names = self.sample_agent.metrics.nonscalar_metrics
         self.agent_ids = (
             self.sample_agent.metrics.agent_ids if self.is_multi_agent else None
