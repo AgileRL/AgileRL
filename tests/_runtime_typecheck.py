@@ -1,9 +1,43 @@
 """Runtime checker for the jaxtyping import hook installed in ``tests/conftest.py``."""
 
+import copyreg
 import typing
+import weakref
 
 import jaxtyping
 from beartype import beartype
+
+_JAXTYPING_DECORATOR = jaxtyping._decorator.__file__
+
+
+class _DeadReferent:
+    """Stands in for a jaxtyping wrapper whose weakref did not survive pickling."""
+
+
+_DEAD_REFERENT = _DeadReferent()
+
+
+def _rebuild_jaxtyping_weakref() -> weakref.ReferenceType:
+    """Rebuild a jaxtyping wrapper weakref in a subprocess."""
+    return weakref.ref(_DEAD_REFERENT)
+
+
+def _reduce_weakref(ref: weakref.ReferenceType):
+    """Make jaxtyping's own wrapper weakrefs picklable, and nothing else."""
+    code = getattr(ref(), "__code__", None)
+    if code is None or code.co_filename != _JAXTYPING_DECORATOR:
+        msg = "cannot pickle 'weakref.ReferenceType' object"
+        raise TypeError(msg)
+    return (_rebuild_jaxtyping_weakref, ())
+
+
+# Each wrapper jaxtyping builds closes over a list holding a weakref to itself,
+# consulted only to read ``__no_type_check__`` off the wrapper. cloudpickle
+# serializes closures by value, so any function reached through a wrapped one
+# becomes unpicklable and the async vectorized envs cannot spawn their workers.
+# The substitute referent has no ``__no_type_check__``, which is what the live
+# weakref reports for every ordinary function, so behaviour is unchanged.
+copyreg.pickle(weakref.ReferenceType, _reduce_weakref)
 
 
 def _is_array_hint(hint: object) -> bool:

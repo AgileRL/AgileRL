@@ -6,16 +6,13 @@ import socket
 import sys
 import tempfile
 
-# Opt-in audit of the jaxtyping annotations. Run `AGILERL_TYPE_HOOK=1 pytest ...`
-# and beartype checks every call's dtype, rank, and that a repeated axis name
-# means the same size across arguments -- none of which a static checker can see.
-# Use it after changing array annotations, or periodically to catch drift.
-#
-# Off by default because the hook is instrumentation, not a check: it wraps every
-# function in the listed packages, and those wrappers hold weakrefs that make the
-# env factories unpicklable, so the async vectorized envs fail to spawn workers
-# under cloudpickle. It also costs ~11x on small hot functions, so it must never
-# be live on a training path.
+# Validate the jaxtyping annotations at runtime for the whole test session:
+# beartype checks each call's dtype, rank, and that a repeated axis name means the
+# same size across arguments -- none of which a static checker can see. Installed
+# here rather than in the library because it costs ~11x on small hot functions, so
+# it must never be live on a training path. Must run before agilerl is imported
+# for the hook to instrument it. Set AGILERL_NO_TYPE_HOOK=1 to profile or bisect
+# without it.
 #
 # agilerl.typing and agilerl.components.data are left out because they define the
 # tensordict TensorClass batches. The hook wraps the generated __init__, whose
@@ -24,7 +21,7 @@ import tempfile
 # before the body runs. Neither module loses coverage worth having: typing.py is
 # aliases and class definitions, and data.py's helpers are exercised through the
 # buffers. Any new module defining a TensorClass belongs on that list too.
-if os.environ.get("AGILERL_TYPE_HOOK"):
+if not os.environ.get("AGILERL_NO_TYPE_HOOK"):
     from jaxtyping import install_import_hook
 
     import tests._runtime_typecheck  # noqa: F401 -- binds the attribute the hook resolves by name

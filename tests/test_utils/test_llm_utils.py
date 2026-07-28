@@ -1131,7 +1131,7 @@ class TestCreateLlmAccelerator:
         mock_ctor = MagicMock(return_value=expected_accelerator)
         with (
             patch("torch.cuda.device_count", return_value=1),
-            patch.dict(create_llm_accelerator.__globals__, {"Accelerator": mock_ctor}),
+            patch("agilerl.utils.llm_utils.Accelerator", mock_ctor),
         ):
             result = create_llm_accelerator(deepspeed_plugin=explicit_plugin)
         assert result is expected_accelerator
@@ -1146,7 +1146,7 @@ class TestCreateLlmAccelerator:
         mock_ctor = MagicMock(return_value=launch_accelerator)
         with (
             patch("torch.cuda.device_count", return_value=1),
-            patch.dict(create_llm_accelerator.__globals__, {"Accelerator": mock_ctor}),
+            patch("agilerl.utils.llm_utils.Accelerator", mock_ctor),
         ):
             result = create_llm_accelerator()
         assert result is launch_accelerator
@@ -1160,7 +1160,7 @@ class TestCreateLlmAccelerator:
         mock_ctor = MagicMock(return_value=launch_accelerator)
         with (
             patch("torch.cuda.device_count", return_value=1),
-            patch.dict(create_llm_accelerator.__globals__, {"Accelerator": mock_ctor}),
+            patch("agilerl.utils.llm_utils.Accelerator", mock_ctor),
             pytest.raises(RuntimeError, match="DeepSpeed is required"),
         ):
             create_llm_accelerator()
@@ -1181,7 +1181,7 @@ class TestGetLlmAccelerator:
         base.state.deepspeed_plugin = None
         fresh = MagicMock(spec=Accelerator)
         mock_ctor = MagicMock(return_value=fresh)
-        with patch.dict(get_llm_accelerator.__globals__, {"Accelerator": mock_ctor}):
+        with patch("agilerl.utils.llm_utils.Accelerator", mock_ctor):
             out = get_llm_accelerator(base, idx=1)
         assert out is fresh
         mock_ctor.assert_called_once_with()
@@ -1195,7 +1195,7 @@ class TestGetLlmAccelerator:
         base.state.deepspeed_plugin = plugin
         fresh = MagicMock(spec=Accelerator)
         mock_ctor = MagicMock(return_value=fresh)
-        with patch.dict(get_llm_accelerator.__globals__, {"Accelerator": mock_ctor}):
+        with patch("agilerl.utils.llm_utils.Accelerator", mock_ctor):
             out = get_llm_accelerator(base, idx=2)
         assert out is fresh
         mock_ctor.assert_called_once_with()
